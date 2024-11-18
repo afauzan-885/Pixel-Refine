@@ -1,16 +1,28 @@
-from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QStackedWidget, QWidget, QVBoxLayout, QLabel
 from PyQt6.QtCore import Qt
 
 
-class MainContent(QWidget):
+class MainContent(QStackedWidget):
     def __init__(self):
         super().__init__()
-        self.initUI()
+        self.pages = [
+            "Import Images Page",
+            "Global Alignment Page",
+            "Local Alignment Page",
+            "Stacking Page",
+            "Tone Mapping Page",
+            "Settings Page",
+        ]
 
-    def initUI(self):
+        for page_name in self.pages:
+            self.addWidget(self.create_page(page_name))
+
+    def create_page(self, text):
+        """Create a placeholder page."""
+        page = QWidget()
         layout = QVBoxLayout()
-        label = QLabel("Main Content Area")
+        label = QLabel(f"This is {text}")
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setStyleSheet("font-size: 18px; font-weight: bold;")
         layout.addWidget(label)
-        self.setLayout(layout)
+        page.setLayout(layout)
+        return page
