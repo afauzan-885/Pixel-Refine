@@ -10,6 +10,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(f"Pixel Refine - Version {config.APP_VERSION}") 
         self.setGeometry(100, 100, 1200, 600)
+        self.setMinimumSize(1200, 600)
 
         # Sidebar
         self.sidebar = Sidebar(self.toggle_sidebar, self.switch_page)
@@ -23,6 +24,10 @@ class MainWindow(QMainWindow):
         self.main_layout.addWidget(self.main_content)
         self.main_layout.setStretch(0, 1)  # Sidebar width
         self.main_layout.setStretch(1, 4)  # Main content width
+
+        # Hilangkan margin dan spacing
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
 
         container = QWidget()
         container.setLayout(self.main_layout)

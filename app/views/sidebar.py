@@ -11,12 +11,14 @@ class Sidebar(QWidget):
         self.toggle_callback = toggle_callback
         self.switch_page_callback = switch_page_callback
 
-        self.setStyleSheet("""
+        self.setStyleSheet(
+            """
             QWidget {
                 background-color: #e0e0e0;
                 color: #333;
             }
-        """)
+        """
+        )
 
         # Layout sidebar
         self.sidebar_layout = QVBoxLayout()
@@ -24,7 +26,8 @@ class Sidebar(QWidget):
 
         # Tombol toggle sidebar
         self.toggle_button = QPushButton("☰")
-        self.toggle_button.setStyleSheet("""
+        self.toggle_button.setStyleSheet(
+            """
             QPushButton {
                 background-color: #c8d6e5;
                 border: none;
@@ -35,7 +38,8 @@ class Sidebar(QWidget):
             QPushButton:hover {
                 background-color: #b2bec3;
             }
-        """)
+        """
+        )
         self.toggle_button.clicked.connect(self.toggle_sidebar)
         self.sidebar_layout.addWidget(self.toggle_button)
 
@@ -56,7 +60,9 @@ class Sidebar(QWidget):
         self.sidebar_layout.addStretch()
 
         # Tombol Settings
-        settings_button = self.create_nav_button("Settings", "resources/icon/Setting.svg", len(button_data))
+        settings_button = self.create_nav_button(
+            "Settings", "resources/icon/Setting.svg", len(button_data)
+        )
         self.sidebar_layout.addWidget(settings_button)
         self.nav_buttons.append(settings_button)
 
@@ -68,7 +74,8 @@ class Sidebar(QWidget):
         btn = QPushButton(text)
         btn.setIcon(QIcon(icon_path))
         btn.setCheckable(True)
-        btn.setStyleSheet("""
+        btn.setStyleSheet(
+            """
             QPushButton {
                 qproperty-iconSize: 24px;
                 text-align: left;
@@ -85,7 +92,8 @@ class Sidebar(QWidget):
                 color: white;
                 font-weight: bold;
             }
-        """)
+        """
+        )
         btn.clicked.connect(lambda: self.switch_page_callback(index))
         btn.default_text = text
         return btn
@@ -95,6 +103,8 @@ class Sidebar(QWidget):
         self.sidebar_expanded = not self.sidebar_expanded
         for btn in self.nav_buttons:
             btn.setText(btn.default_text if self.sidebar_expanded else "")
-        self.setFixedWidth(self.expanded_width if self.sidebar_expanded else self.collapsed_width)
+        self.setFixedWidth(
+            self.expanded_width if self.sidebar_expanded else self.collapsed_width
+        )
         self.toggle_button.setText("☰" if self.sidebar_expanded else "←")
         self.toggle_callback()
