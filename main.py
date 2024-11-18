@@ -2,12 +2,13 @@ import sys
 from PyQt6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QWidget
 from app.views.sidebar import Sidebar
 from app.views.main_content import MainContent
+import config
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Aplikasi dengan Sidebar Responsif")
+        self.setWindowTitle(f"Pixel Refine - Version {config.APP_VERSION}") 
         self.setGeometry(100, 100, 1200, 600)
 
         # Sidebar
