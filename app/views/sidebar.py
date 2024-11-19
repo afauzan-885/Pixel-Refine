@@ -47,10 +47,10 @@ class Sidebar(QWidget):
         self.nav_buttons = []
         button_data = [
             ("Import Images", "resources/icon/Import_Images.png"),
-            ("Global Alignment", "resources/icon/G_Alignment.svg"),
-            ("Local Alignment", "resources/icon/L_Alignment.svg"),
-            ("Stacking", "resources/icon/stack_layers.svg"),
-            ("Tone Mapping", "resources/icon/Tone_Mapping.svg"),
+            ("Global Alignment", "resources/icon/G_Alignment.png"),
+            ("Local Alignment", "resources/icon/L_Alignment.png"),
+            ("Stacking", "resources/icon/stack.png"),
+            ("Tone Mapping", "resources/icon/Tone_Mapping.png"),
         ]
         for i, (text, icon_path) in enumerate(button_data):
             btn = self.create_nav_button(text, icon_path, i)
@@ -61,7 +61,7 @@ class Sidebar(QWidget):
 
         # Tombol Settings
         settings_button = self.create_nav_button(
-            "Settings", "resources/icon/Setting.svg", len(button_data)
+            "Settings", "resources/icon/Setting.png", len(button_data)
         )
         self.sidebar_layout.addWidget(settings_button)
         self.nav_buttons.append(settings_button)
