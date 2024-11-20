@@ -52,3 +52,20 @@ class ImagePanel(QVBoxLayout):
         for item in selected_items:
             row = self.image_list.row(item)
             self.image_list.takeItem(row)  # Remove the item
+            
+    def delete_selected_images(self, file_path=None):
+        """Hapus gambar dari tampilan."""
+        selected_items = self.image_list.selectedItems()
+        if not selected_items:
+            return  # Tidak ada gambar yang dipilih
+        
+        if file_path:
+            # Jika file_path diberikan, hapus gambar spesifik
+            for item in self.image_list.findItems(file_path, Qt.MatchFlag.MatchExactly):
+                row = self.image_list.row(item)
+                self.image_list.takeItem(row)
+        else:
+            # Hapus semua gambar yang dipilih
+            for item in selected_items:
+                row = self.image_list.row(item)
+                self.image_list.takeItem(row)

@@ -43,7 +43,7 @@ class MainWindow(QMainWindow):
             btn.setChecked(i == index)
 
     def toggle_sidebar(self):
-        """Handle additional actions when toggling the sidebar."""
+        """Handle additional actions wzhen toggling the sidebar."""
         pass
 
 
