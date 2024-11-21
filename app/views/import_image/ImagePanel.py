@@ -28,6 +28,7 @@ class ImagePanel(QVBoxLayout):
                 border: 1px solid #bbb;
                 border-radius: 5px;
                 background-color: #f0f0f0;
+                text-align: center;
             }
             QProgressBar::chunk {
                 background-color: #3498db;
