@@ -1,0 +1,4 @@
+1.  (CMD) \env\Scripts\activate
+
+
+2. pyinstaller --onefile --add-data "UI;UI" --hidden-import sqlite3 main.py 

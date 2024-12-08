@@ -1,0 +1,6 @@
+# Ignore distribution and build directories
+dist/
+build/
+
+# Ignore virtual environment directories
+venv/
