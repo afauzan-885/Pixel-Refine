@@ -17,7 +17,7 @@ class BaseMultiThreading(QThread):
         self.task_function = task_function  # Fungsi tugas yang akan dijalankan
         self.items = items                  # Daftar item yang akan diproses
         self.batch_size = batch_size        # Ukuran batch
-        self.delay_ms = delay_ms            # Waktu jeda antar batch
+        self.delay_ms = delay_ms            # Waktu jeda antar batchz
 
     def run(self):
         total_items = len(self.items)

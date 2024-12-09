@@ -19,7 +19,8 @@ from .logic.image_preview import (
     display_image,
     handle_image_ready,
     handle_image_error,
-    image_status_info
+    image_status_info,
+    start_image_processing
 )
 from .components.top_bar import TopBar
 from .components.left_panel import LeftPanel
@@ -91,6 +92,9 @@ class BurstDenoisingPage(QWidget):
 
     def update_preview_panel(self, selected_paths):
         update_preview_panel(self, selected_paths)
+   
+    def start_image_processing(self, selected_paths):
+        start_image_processing(self, selected_paths)
         
     def handle_image_ready(self, pixmap):
         handle_image_ready(self, pixmap)

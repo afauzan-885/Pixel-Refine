@@ -1,8 +1,5 @@
-from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QGraphicsPixmapItem, QLabel
-from PyQt6.QtCore import Qt, QEvent
-import rawpy, io
-from PIL import Image
+from PyQt6.QtCore import Qt, QEvent, QTimer
 from .multi_threading import RawImageProcessingThread
 
 
@@ -23,20 +20,34 @@ def handle_image_error(self, error_message):
 def update_preview_panel(self, selected_paths):
     self.preview_scene.clear()  # Hapus semua elemen dari scene sebelumnya
 
+    if hasattr(self, 'raw_thread') and self.raw_thread.isRunning():
+        # Hentikan thread jika masih berjalan
+        self.raw_thread.terminate()
+        self.raw_thread.wait()
+
     if selected_paths:
-        # Tampilkan pesan loading sementara gambar diproses
-        label = QLabel("Processing images, please wait...")
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if len(selected_paths) > 1:
+            # Jika lebih dari satu gambar dipilih, tampilkan pesan
+            label = QLabel("Multiple images selected. Preview disabled.")
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        # Tambahkan label ke scene dengan QGraphicsProxyWidget
-        proxy = self.preview_scene.addWidget(label)
-        self.image_status_info(proxy)  # Pusatkan widget di scene
+            # Tambahkan label ke scene dengan QGraphicsProxyWidget
+            proxy = self.preview_scene.addWidget(label)
+            self.image_status_info(proxy)  # Pusatkan widget di scene
+        else:
+            # Tampilkan pesan loading sementara gambar diproses
+            label = QLabel("Processing images, please wait...")
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        # Mulai thread pemrosesan gambar RAW
-        self.raw_thread = RawImageProcessingThread(selected_paths, batch_size=1, delay_ms=0)
-        self.raw_thread.result_signal.connect(self.handle_image_ready)
-        self.raw_thread.error_signal.connect(self.handle_image_error)
-        self.raw_thread.start()
+            # Tambahkan label ke scene dengan QGraphicsProxyWidget
+            proxy = self.preview_scene.addWidget(label)
+            self.image_status_info(proxy)  # Pusatkan widget di scene
+
+            # Tambahkan jeda waktu 2 detik sebelum memulai proses gambar
+            self.preview_timer = QTimer()
+            self.preview_timer.setSingleShot(True)  # Timer berjalan sekali
+            self.preview_timer.timeout.connect(lambda: self.start_image_processing(selected_paths))
+            self.preview_timer.start(3000) 
     else:
         self.original_pixmap = None
 
@@ -47,6 +58,16 @@ def update_preview_panel(self, selected_paths):
         # Tambahkan label ke scene dengan QGraphicsProxyWidget
         proxy = self.preview_scene.addWidget(label)
         self.image_status_info(proxy)  # Pusatkan widget di scene
+
+        
+def start_image_processing(self, selected_paths):
+    """Mulai proses pemrosesan gambar RAW setelah jeda."""
+    # Mulai thread pemrosesan gambar RAW
+    self.raw_thread = RawImageProcessingThread(selected_paths, batch_size=1, delay_ms=0)
+    self.raw_thread.result_signal.connect(self.handle_image_ready)
+    self.raw_thread.error_signal.connect(self.handle_image_error)
+    self.raw_thread.start()
+
 
 def image_status_info(self, proxy):
     """
