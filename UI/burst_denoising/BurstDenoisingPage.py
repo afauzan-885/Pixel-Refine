@@ -12,7 +12,7 @@ from PyQt6.QtGui import QPainter
 from .logic.image_handler import handle_import_button, handle_delete_button
 
 from .logic.image_preview import (
-    event_filter,
+    handler_zoom,
     update_preview_panel,
     fit_image_to_panel,
     scale_image,
@@ -37,7 +37,7 @@ class BurstDenoisingPage(QWidget):
         self.layout = QVBoxLayout(self)
         self.database_manager = DatabaseManager("image_paths.db")
         self.database_manager.create_database()
-
+        self.is_mouse_in_viewport = False
         # Flag untuk menonaktifkan pembaruan preview
         self.update_preview_enabled = True
 
@@ -129,7 +129,7 @@ class BurstDenoisingPage(QWidget):
         display_image(self, pixmap)
 
     def eventFilter(self, source, event):
-        return event_filter(self, source, event) or super().eventFilter(source, event)
+        return handler_zoom(self, source, event) or super().eventFilter(source, event)
 
     def handle_import_button(self):
         handle_import_button(self)

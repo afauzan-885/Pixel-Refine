@@ -129,7 +129,7 @@ def display_image(self, pixmap):
     self.preview_scene.setSceneRect(self.pixmap_item.boundingRect())
 
 
-def event_filter(self, source, event):
+def handler_zoom(self, source, event):
     """
     Handles mouse wheel events for zoom in/out and dragging.
 

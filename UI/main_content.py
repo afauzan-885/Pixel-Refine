@@ -2,14 +2,14 @@ from PyQt6.QtWidgets import QStackedWidget, QWidget, QVBoxLayout, QLabel
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
 
-# Import Komponen
-from .burst_denoising.BurstDenoisingPage import BurstDenoisingPage
 
+from .burst_denoising.BurstDenoisingPage import BurstDenoisingPage
+from .settings.SettingPage import SettingPage
 
 class Pages:
     BURST_DENOSING = "Burst Denoising"
     TONE_MAPPING = "Tone Mapping"
-    SETTINGS = "Settings"
+    SETTINGS = "Setting"
 
 
 class MainContent(QStackedWidget):
@@ -19,6 +19,7 @@ class MainContent(QStackedWidget):
         # Peta halaman
         self.pages = {
             Pages.BURST_DENOSING: BurstDenoisingPage,
+            Pages.SETTINGS: SettingPage,
         }
 
         # halaman berdasarkan peta halaman

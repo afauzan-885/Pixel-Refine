@@ -1,6 +1,7 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QComboBox
-from PIL import Image
-import io
+from PyQt6.QtCore import Qt
+
+from UI.burst_denoising.algorithm.global_alignment import EEC, ORB, FFT_Phase_Correlation
 
 class LeftPanel(QWidget):
     """Left panel with top and parameter_panel sections."""
@@ -13,21 +14,31 @@ class LeftPanel(QWidget):
         # Preview Panel
         self.preview_panel_widget = QWidget()
         preview_panel_layout = QVBoxLayout(self.preview_panel_widget)
-        preview_panel_label = QLabel("Panel Preview")
+        preview_panel_label = QLabel(" Preview Panel")
         preview_panel_layout.addWidget(preview_panel_label)
         self.preview_panel_widget.setStyleSheet("QWidget { background-color: white; }")
 
-        # parameter_panel Panel
+        # parameter panel Panel
         self.parameter_panel_widget = QWidget()
         parameter_panel_layout = QVBoxLayout(self.parameter_panel_widget)
         parameter_panel_layout.setContentsMargins(10, 10, 0, 0)
 
         # Dropdown 1: Global Alignment
         global_layout = QVBoxLayout()
-        global_label = QLabel("Algoritma Global Alignment")
+        global_label = QLabel("Global Alignment Algorithm")
         global_layout.setContentsMargins(0, 10, 0, 20)
         global_dropdown = QComboBox()
-        global_dropdown.addItems(["Option 1", "Option 2", "Option 3"])  # Add options
+        global_alignment_algorithms = [
+            (EEC.EEC_algorithm_name(), EEC.EEC_algorithm_description()),
+            (FFT_Phase_Correlation.FFT_algorithm_name(), FFT_Phase_Correlation.FFT_algorithm_description()),
+            (ORB.ORB_algorithm_name(), ORB.ORB_algorithm_description()),
+        ]
+
+        for name, tooltip in global_alignment_algorithms:
+            index = global_dropdown.count()
+            global_dropdown.addItem(name)
+            global_dropdown.setItemData(index, tooltip, Qt.ItemDataRole.ToolTipRole)
+
         global_dropdown.setStyleSheet("""
             QComboBox {
                 background-color: #f0f0f0;
@@ -47,7 +58,7 @@ class LeftPanel(QWidget):
 
         # Dropdown 2: Local Alignment
         local_layout = QVBoxLayout()
-        local_label = QLabel("Algoritma Local Alignment")
+        local_label = QLabel("Local Alignment Algorithm")
         local_layout.setContentsMargins(0, 10, 0, 20)
         local_dropdown = QComboBox()
         local_dropdown.addItems(["Option A", "Option B", "Option C"])

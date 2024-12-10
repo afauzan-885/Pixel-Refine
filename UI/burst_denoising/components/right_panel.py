@@ -1,7 +1,6 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QLabel
 from PyQt6.QtCore import Qt
 import sqlite3
-import sys
 
 class RightPanel(QWidget):
     """Right panel containing a list of images."""
@@ -78,7 +77,7 @@ class RightPanel(QWidget):
         if len(selected_paths) > 1:
             if self.parent():
                 if hasattr(self.parent(), "raw_thread") and self.parent().raw_thread.isRunning():
-                    self.parent().raw_thread.stop()  # Hentikan thread
+                    self.parent().raw_thread.stop()
                     self.parent().raw_thread.quit()
 
                 self.parent().pause_preview_update()
@@ -114,4 +113,3 @@ class RightPanel(QWidget):
                     self.image_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
                     return True  # Event handled
         return super().eventFilter(source, event)
-
