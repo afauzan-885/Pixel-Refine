@@ -266,7 +266,7 @@ class BurstDenoisingPage(QWidget):
             QMessageBox.information(self, "Error", "No valid files to import.")
 
     def handle_delete_button(self):
-        selected_paths = self.right_panel.get_selected_image_paths()
+        selected_paths = self.right_panel.get_select_image_list()
         if not selected_paths:
             QMessageBox.information(self, "Error", "No images selected.")
             return

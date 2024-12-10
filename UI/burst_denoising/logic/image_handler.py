@@ -71,7 +71,7 @@ def handle_import_button(self):
             
 def handle_delete_button(self):
         """Function to delete images"""
-        selected_paths = self.right_panel.get_selected_image_paths()
+        selected_paths = self.right_panel.get_select_image_list()
         if not selected_paths:
             QMessageBox.information(self, "Error", "No images selected.")
             return

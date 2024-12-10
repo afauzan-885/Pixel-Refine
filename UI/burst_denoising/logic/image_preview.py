@@ -9,6 +9,7 @@ def handle_image_ready(self, pixmap):
     self.zoom_scale = 1.0
     self.fit_image_to_panel()
 
+
 def handle_image_error(self, error_message):
     """Tangani error selama pemrosesan."""
     self.preview_scene.clear()
@@ -16,38 +17,34 @@ def handle_image_error(self, error_message):
     label.setWordWrap(True)
     label.setAlignment(Qt.AlignmentFlag.AlignCenter)
     self.preview_scene.addWidget(label)
-    
+
+
 def update_preview_panel(self, selected_paths):
+    
     self.preview_scene.clear()  # Hapus semua elemen dari scene sebelumnya
 
-    if hasattr(self, 'raw_thread') and self.raw_thread.isRunning():
+    if hasattr(self, "raw_thread") and self.raw_thread.isRunning():
         # Hentikan thread jika masih berjalan
-        self.raw_thread.terminate()
-        self.raw_thread.wait()
+        self.raw_thread.stop()
+        self.raw_thread.quit
+        return
 
     if selected_paths:
-        if len(selected_paths) > 1:
-            # Jika lebih dari satu gambar dipilih, tampilkan pesan
-            label = QLabel("Multiple images selected. Preview disabled.")
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Tampilkan pesan loading sementara gambar diproses
+        label = QLabel("Processing images, please wait...")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-            # Tambahkan label ke scene dengan QGraphicsProxyWidget
-            proxy = self.preview_scene.addWidget(label)
-            self.image_status_info(proxy)  # Pusatkan widget di scene
-        else:
-            # Tampilkan pesan loading sementara gambar diproses
-            label = QLabel("Processing images, please wait...")
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Tambahkan label ke scene dengan QGraphicsProxyWidget
+        proxy = self.preview_scene.addWidget(label)
+        self.image_status_info(proxy)
 
-            # Tambahkan label ke scene dengan QGraphicsProxyWidget
-            proxy = self.preview_scene.addWidget(label)
-            self.image_status_info(proxy)  # Pusatkan widget di scene
-
-            # Tambahkan jeda waktu 2 detik sebelum memulai proses gambar
-            self.preview_timer = QTimer()
-            self.preview_timer.setSingleShot(True)  # Timer berjalan sekali
-            self.preview_timer.timeout.connect(lambda: self.start_image_processing(selected_paths))
-            self.preview_timer.start(3000) 
+        # Tambahkan jeda waktu 2 detik sebelum memulai proses gambar
+        self.preview_timer = QTimer()
+        self.preview_timer.setSingleShot(True)  # Timer berjalan sekali
+        self.preview_timer.timeout.connect(
+            lambda: self.start_image_processing(selected_paths)
+        )
+        self.preview_timer.start(1000)
     else:
         self.original_pixmap = None
 
@@ -59,7 +56,7 @@ def update_preview_panel(self, selected_paths):
         proxy = self.preview_scene.addWidget(label)
         self.image_status_info(proxy)  # Pusatkan widget di scene
 
-        
+
 def start_image_processing(self, selected_paths):
     """Mulai proses pemrosesan gambar RAW setelah jeda."""
     # Mulai thread pemrosesan gambar RAW
@@ -86,48 +83,52 @@ def image_status_info(self, proxy):
     # Set posisi widget
     proxy.setPos(center_x, center_y)
 
-        
+
 def fit_image_to_panel(self):
-        """Scales the image to fit the preview panel, limiting resolution to optimize performance."""
-        if self.original_pixmap:
-            # Tentukan ukuran tampilan
-            view_size = self.preview_view.size()
+    """Scales the image to fit the preview panel, limiting resolution to optimize performance."""
+    if self.original_pixmap:
+        # Tentukan ukuran tampilan
+        view_size = self.preview_view.size()
 
-            # Batasi ukuran maksimum gambar untuk di-render
-            max_width = view_size.width()
-            max_height = view_size.height()
+        # Batasi ukuran maksimum gambar untuk di-render
+        max_width = view_size.width()
+        max_height = view_size.height()
 
-            # Pastikan gambar tidak melampaui resolusi tampilan
-            scaled_pixmap = self.original_pixmap.scaled(
-                max_width, max_height,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            self.display_image(scaled_pixmap)
+        # Pastikan gambar tidak melampaui resolusi tampilan
+        scaled_pixmap = self.original_pixmap.scaled(
+            max_width,
+            max_height,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.display_image(scaled_pixmap)
+
 
 def scale_image(self):
-        """Scales the image based on the current zoom factor, with a resolution limit."""
-        if self.original_pixmap:
-            # Batasi ukuran maksimum gambar berdasarkan zoom
-            scaled_width = int(self.original_pixmap.width() * self.zoom_scale)
-            scaled_height = int(self.original_pixmap.height() * self.zoom_scale)
+    """Scales the image based on the current zoom factor, with a resolution limit."""
+    if self.original_pixmap:
+        # Batasi ukuran maksimum gambar berdasarkan zoom
+        scaled_width = int(self.original_pixmap.width() * self.zoom_scale)
+        scaled_height = int(self.original_pixmap.height() * self.zoom_scale)
 
-            # Terapkan pembatasan
-            scaled_pixmap = self.original_pixmap.scaled(
-                scaled_width, scaled_height,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            self.display_image(scaled_pixmap)
+        # Terapkan pembatasan
+        scaled_pixmap = self.original_pixmap.scaled(
+            scaled_width,
+            scaled_height,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.display_image(scaled_pixmap)
 
 
 def display_image(self, pixmap):
-        """Displays the given pixmap in the graphics view."""
-        self.preview_scene.clear()
-        self.pixmap_item = QGraphicsPixmapItem(pixmap)
-        self.preview_scene.addItem(self.pixmap_item)
-        self.preview_scene.setSceneRect(self.pixmap_item.boundingRect())
-        
+    """Displays the given pixmap in the graphics view."""
+    self.preview_scene.clear()
+    self.pixmap_item = QGraphicsPixmapItem(pixmap)
+    self.preview_scene.addItem(self.pixmap_item)
+    self.preview_scene.setSceneRect(self.pixmap_item.boundingRect())
+
+
 def event_filter(self, source, event):
     """
     Handles mouse wheel events for zoom in/out and dragging.
@@ -143,16 +144,24 @@ def event_filter(self, source, event):
                 self.zoom_scale *= 1.1
             else:  # Scroll down: Zoom out
                 self.zoom_scale /= 1.1
-                self.zoom_scale = max(0.1, self.zoom_scale)  # Prevent negative or zero scale
+                self.zoom_scale = max(
+                    0.1, self.zoom_scale
+                )  # Prevent negative or zero scale
             self.scale_image()
             return True
 
-        elif event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+        elif (
+            event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
             # Record the start position for dragging
             self.drag_start_pos = event.pos()
             return True
 
-        elif event.type() == QEvent.Type.MouseMove and event.buttons() == Qt.MouseButton.LeftButton:
+        elif (
+            event.type() == QEvent.Type.MouseMove
+            and event.buttons() == Qt.MouseButton.LeftButton
+        ):
             # Drag the view
             if self.drag_start_pos:
                 delta = event.pos() - self.drag_start_pos
@@ -165,7 +174,10 @@ def event_filter(self, source, event):
                 self.drag_start_pos = event.pos()  # Update drag start position
             return True
 
-        elif event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+        elif (
+            event.type() == QEvent.Type.MouseButtonRelease
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
             # Reset the drag start position
             self.drag_start_pos = None
             return True

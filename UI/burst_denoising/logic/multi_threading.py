@@ -17,7 +17,8 @@ class BaseMultiThreading(QThread):
         self.task_function = task_function  # Fungsi tugas yang akan dijalankan
         self.items = items                  # Daftar item yang akan diproses
         self.batch_size = batch_size        # Ukuran batch
-        self.delay_ms = delay_ms            # Waktu jeda antar batchz
+        self.delay_ms = delay_ms            # Waktu jeda antar batch
+        self._is_running = True   
 
     def run(self):
         total_items = len(self.items)
@@ -29,6 +30,8 @@ class BaseMultiThreading(QThread):
             batch = self.items[start_index:end_index]
 
             for i, item in enumerate(batch):
+                if not self._is_running:
+                    break
                 try:
                     # Jalankan fungsi tugas dan ambil hasilnya
                     result = self.task_function(item)
@@ -47,6 +50,9 @@ class BaseMultiThreading(QThread):
 
         self.completion_signal.emit(total_items)
 
+    def stop(self):
+        """Set the running flag to False to stop the thread."""
+        self._is_running = False
 class RawImageProcessingThread(BaseMultiThreading):
     """
     A special multithreading class for processing images of various formats.
