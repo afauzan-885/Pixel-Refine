@@ -1,0 +1,26 @@
+{
+    "language_label": "Langue",
+    "resolution_label": "Résolution de sortie",
+    "format_label": "Format de sortie",
+    
+    "tone_mapping": "Cartographie des tons",
+    "settings": "Paramètres",
+    
+    "under_development": "Le menu {page_name} est en cours de développement",
+    
+    "import_button": "Importer des images",
+    "delete_button": "Supprimer",
+    
+    "preview_panel": "Panneau d'aperçu",
+    "global_alignment_label": "Algorithme d'alignement global",
+    "local_alignment_label": "Algorithme d'alignement local",
+    "stacking_alignment_label": "Algorithme d'empilement",
+    
+    "EEC_algorithm_name": "EEC (Haute précision)",
+    "EEC_algorithm_description": "....",
+    "FFT_algorithm_name": "FFT (Précision Modérée)",
+    "FFT_algorithm_description": "....",
+    
+    "import_image_left": "{value}%, restant ({images_left} images)",
+    "import_complete": "Importation terminée, {successful_images} images importées avec succès."
+}

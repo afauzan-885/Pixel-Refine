@@ -1,5 +1,5 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTabWidget
-from .General.GeneralPage import general_page
+from .General.GeneralSetting import general_page
 from .Perfomance.PerformancePage import performance_page
 from .Advance.AdvancePage import advance_page
 

@@ -1,0 +1,26 @@
+{
+    "language_label": "Bahasa",
+    "resolution_label": "Resolusi Keluaran",
+    "format_label": "Format Keluaran",
+    
+    "tone_mapping": "Pemetaan Nada",
+    "settings": "Tetapan",
+    
+    "under_development": "Menu {page_name} sedang dalam pembangunan",
+    
+    "import_button": "Import Imej",
+    "delete_button": "Padam",
+    
+    "preview_panel": "Panel Pratonton",
+    "global_alignment_label": "Algoritma Penjajaran Global",
+    "local_alignment_label": "Algoritma Penjajaran Tempatan",
+    "stacking_alignment_label": "Algoritma Penumpukan",
+    
+    "EEC_algorithm_name": "EEC (Ketepatan Tinggi)",
+    "EEC_algorithm_description": "....",
+    "FFT_algorithm_name": "FFT (Ketepatan Sederhana)",
+    "FFT_algorithm_description": "....",
+    
+    "import_image_left": "{value}%, baki ({images_left} imej)",
+    "import_complete": "Import selesai, {successful_images} imej berjaya diimport."
+}

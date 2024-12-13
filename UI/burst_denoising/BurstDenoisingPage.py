@@ -37,8 +37,6 @@ class BurstDenoisingPage(QWidget):
         self.layout = QVBoxLayout(self)
         self.database_manager = DatabaseManager("image_paths.db")
         self.database_manager.create_database()
-        self.is_mouse_in_viewport = False
-        # Flag untuk menonaktifkan pembaruan preview
         self.update_preview_enabled = True
 
         # Add TopBar
