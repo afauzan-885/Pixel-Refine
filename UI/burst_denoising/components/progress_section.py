@@ -1,6 +1,10 @@
-from PyQt6.QtWidgets import QWidget, QHBoxLayout, QProgressBar, QPushButton
+from PyQt6.QtWidgets import QWidget, QHBoxLayout, QProgressBar, QPushButton, QFileDialog
+from PyQt6.QtCore import pyqtSignal
 
 class ProgressSection(QWidget):
+    process_clicked  = pyqtSignal()
+    save_as_clicked = pyqtSignal()
+    
     """Progress bar and control buttons."""
     def __init__(self):
         super().__init__()
@@ -25,7 +29,12 @@ class ProgressSection(QWidget):
 
         self.next_button = QPushButton("Next")
         self.process_button = QPushButton("Process")
-
+        self.save_as_button = QPushButton("Save As")
+     
         self.layout.addWidget(self.progress_bar, 4)
         self.layout.addWidget(self.next_button, 1)
         self.layout.addWidget(self.process_button, 1)
+        self.layout.addWidget(self.save_as_button, 1)
+        
+        self.process_button.clicked.connect(self.process_clicked)
+    

@@ -1,6 +1,7 @@
 # Ignore distribution and build directories
 dist/
 build/
+test_algorithm/
 
 # Ignore virtual environment directories
 venv/

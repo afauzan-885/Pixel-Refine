@@ -7,8 +7,13 @@ from PyQt6.QtWidgets import (
     QGraphicsScene,
     QVBoxLayout,
 )
+
+import subprocess
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPainter
+
+from .logic.workflow_process import process_algorithm
 from .logic.image_handler import handle_import_button, handle_delete_button
 
 from .logic.image_preview import (
@@ -35,7 +40,7 @@ class BurstDenoisingPage(QWidget):
     def __init__(self):
         super().__init__()
         self.layout = QVBoxLayout(self)
-        self.database_manager = DatabaseManager("image_paths.db")
+        self.database_manager = DatabaseManager("pixel_refine_database.db")
         self.database_manager.create_database()
         self.update_preview_enabled = True
 
@@ -47,6 +52,7 @@ class BurstDenoisingPage(QWidget):
 
         # Main Content
         self.main_layout = QHBoxLayout()
+        
         self.left_panel = LeftPanel()
         self.right_panel = RightPanel()
         self.right_panel.setParent(self)
@@ -57,6 +63,7 @@ class BurstDenoisingPage(QWidget):
         # Add ProgressSection
         self.progress_section = ProgressSection()
         self.layout.addWidget(self.progress_section)
+        self.progress_section.process_clicked.connect(self.process_algorithm)
 
         # Setup graphics view and scene for preview panel
         self.preview_scene = QGraphicsScene()
@@ -134,7 +141,10 @@ class BurstDenoisingPage(QWidget):
 
     def handle_delete_button(self):
         handle_delete_button(self)
-
+        
+    def process_algorithm(self):
+        process_algorithm(self)
+     
     def update_progress_bar(self, value, images_left):
         """
         Updates the progress bar and displays remaining images.

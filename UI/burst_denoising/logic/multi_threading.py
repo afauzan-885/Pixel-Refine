@@ -101,6 +101,42 @@ class ImageImportThreading(BaseMultiThreading):
     """
     def __init__(self, database_manager, image_paths, batch_size, delay_ms):
         def import_task(image_path):
-            database_manager.save_image(image_path)
+            database_manager.save_image_path(image_path)
         
         super().__init__(import_task, image_paths, batch_size, delay_ms)
+        
+class ImageSaveThreading(BaseMultiThreading):
+    """
+    Multithreading implementation for saving image data into the database.
+    """
+    def __init__(self, database_manager, image_data_list, batch_size=3, delay_ms=50):
+        """
+        Args:
+            database_manager: Instance of the database manager with `save_image_data` method.
+            image_data_list: List of tuples containing (image_id, image_file).
+            batch_size: Number of images processed per batch.
+            delay_ms: Delay between processing batches in milliseconds.
+        """
+        def save_task(image_data):
+            image_id, image_file = image_data
+            database_manager.save_image_data(image_id, image_file)
+        
+        super().__init__(save_task, image_data_list, batch_size, delay_ms)
+
+
+class ImageAlignmentThreading(BaseMultiThreading):
+    """
+    Threading implementation for aligning image pairs using ECC algorithm.
+    """
+    def __init__(self, database_manager, image_pairs, batch_size=1, delay_ms=100):
+        def align_task(image_pair):
+            image_id, path1, path2 = image_pair
+            aligned_data = database_manager.eccAlign(path1, path2)
+            if aligned_data:
+                database_manager.save_image_data(image_id, aligned_data)
+                return (image_id, "Success")
+            else:
+                raise RuntimeError(f"Alignment failed for image pair: {path1}, {path2}")
+        
+        super().__init__(align_task, image_pairs, batch_size, delay_ms)
+

@@ -33,7 +33,7 @@ class RightPanel(QWidget):
 
     def load_image_paths(self):
         """Load image paths from the database and populate the image list."""
-        conn = sqlite3.connect("image_paths.db")
+        conn = sqlite3.connect("pixel_refine_database.db")
         cursor = conn.cursor()
         cursor.execute("SELECT path FROM images")
         image_paths = cursor.fetchall()
