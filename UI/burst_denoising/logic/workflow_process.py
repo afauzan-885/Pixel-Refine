@@ -94,10 +94,10 @@ def process_algorithm(self):
     global_algorithms = {self.left_panel.global_dropdown.itemText(i): os.path.join(base_path, "global_alignment", f"{self.left_panel.global_dropdown.itemText(i).replace(' ', '_').lower()}.py") 
                          for i in range(self.left_panel.global_dropdown.count())}
 
-    local_algorithms = {self.left_panel.local_dropdown.itemText(i): os.path.join(base_path, "local_alignment", f"local_alignment_{self.left_panel.local_dropdown.itemText(i).replace(' ', '_').lower()}.py") 
+    local_algorithms = {self.left_panel.local_dropdown.itemText(i): os.path.join(base_path, "local_alignment", f"{self.left_panel.local_dropdown.itemText(i).replace(' ', '_').lower()}.py") 
                         for i in range(self.left_panel.local_dropdown.count())}
 
-    stacking_methods = {self.left_panel.stacking_dropdown.itemText(i): os.path.join(base_path, "stacking", f"stacking_{self.left_panel.stacking_dropdown.itemText(i).replace(' ', '_').lower()}.py") 
+    stacking_methods = {self.left_panel.stacking_dropdown.itemText(i): os.path.join(base_path, "stacking", f"{self.left_panel.stacking_dropdown.itemText(i).replace(' ', '_').lower()}.py") 
                         for i in range(self.left_panel.stacking_dropdown.count())}
 
     # Process Global Alignment based on dropdown selection

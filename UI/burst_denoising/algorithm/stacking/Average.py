@@ -59,6 +59,28 @@ class AverageAlgorithm:
             conn.commit()
             print(f"Image data saved for image_id: {image_id}")
 
+    def delete_image_data(self, image_id):
+        """
+        Deletes image data (BLOB) from the 'data_images' table.
+        
+        Args:
+            image_id: The ID of the image whose data should be deleted.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            # Menghapus data gambar berdasarkan image_id
+            cursor.execute("DELETE FROM data_images WHERE image_id = ?", (image_id,))
+            
+            # Melakukan commit untuk memastikan perubahan disimpan
+            conn.commit()
+            
+            # Menjalankan VACUUM untuk mengurangi ukuran file database
+            cursor.execute("VACUUM")
+            conn.commit()
+            
+            print(f"Deleted image data for image_id: {image_id} and performed VACUUM to reclaim space.")
+
     def get_image_data(self, image_id):
         """
         Retrieves image data (BLOB) from the database.
@@ -73,23 +95,42 @@ class AverageAlgorithm:
                 print(f"No image data found for image_id: {image_id}")
                 return None
 
+    def is_image_data_empty(self):
+        """
+        Checks if the 'data_images' table is empty.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM data_images")
+            count = cursor.fetchone()[0]
+            return count == 0
+
 
 def main(image_folder, output_path, db_path):
     image_processor = AverageAlgorithm(db_path)
-    
-    # Ambil semua path gambar dari database
-    image_paths = image_processor.get_all_image_paths()
-    
-    if not image_paths:
-        print("Tidak ada gambar ditemukan di database!")
-        return
-    
-    # Muat gambar dari path yang ditemukan
-    images = image_processor.load_images_from_paths(image_paths)
-    
-    if not images:
-        print("Tidak ada gambar berhasil dimuat!")
-        return
+
+    # Cek apakah tabel 'data_images' kosong
+    if image_processor.is_image_data_empty():
+        print("Tidak ada data gambar di database, memuat gambar dari folder...")
+        
+        # Ambil semua path gambar dari folder
+        image_paths = image_processor.get_all_image_paths()
+        
+        if not image_paths:
+            print("Tidak ada gambar ditemukan di folder!")
+            return
+        
+        # Muat gambar dari path yang ditemukan
+        images = image_processor.load_images_from_paths(image_paths)
+        
+        if not images:
+            print("Tidak ada gambar berhasil dimuat!")
+            return
+    else:
+        # Jika ada data gambar, ambil dari database
+        print("Mengambil gambar dari database...")
+        image_paths = image_processor.get_all_image_paths()
+        images = image_processor.load_images_from_paths(image_paths)
     
     # Lakukan penumpukan gambar
     stacked_image = image_processor.stack_images(images)
@@ -97,6 +138,11 @@ def main(image_folder, output_path, db_path):
     # Simpan gambar hasil penumpukan
     image_processor.save_image(stacked_image, output_path)
     print(f"Penumpukan gambar selesai! Hasil disimpan di: {output_path}")
+
+    # Setelah gambar selesai diproses, hapus data gambar dari database
+    for i, image_path in enumerate(image_paths):
+        image_id = f"image_{i}"
+        image_processor.delete_image_data(image_id)
 
 if __name__ == "__main__":
     db_path = "pixel_refine_database.db"
