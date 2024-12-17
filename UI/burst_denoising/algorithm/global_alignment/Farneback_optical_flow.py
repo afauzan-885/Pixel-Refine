@@ -1,11 +1,22 @@
 import cv2
 import numpy as np
-import sqlite3
-
+import sqlite3, os
+import h5py
+import glob
 
 class FarnebackAlgorithm:
-    def __init__(self, db_path):
+    def __init__(self, db_path, debug_folder="database/align/global/debug_images", hdf5_path="database/align/global/aligned_images.h5"):
         self.db_path = db_path
+        self.debug_folder = debug_folder
+        self.hdf5_path = hdf5_path
+
+        # Pastikan folder debug dan HDF5 ada
+        if not os.path.exists(self.debug_folder):
+            os.makedirs(self.debug_folder)
+        hdf5_folder = os.path.dirname(self.hdf5_path)
+        
+        if not os.path.exists(hdf5_folder):
+            os.makedirs(hdf5_folder)
 
     def get_all_image_paths(self):
         """
@@ -27,55 +38,71 @@ class FarnebackAlgorithm:
                 images.append(image)
         return images
 
-    def save_image_data(self, image_id, image_data):
+    def resize_image(self, image, size):
         """
-        Saves image data (as BLOB) in the 'data_images' table in the database.
+        Resizes the image to match the reference image size.
         """
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO data_images (image_id, image_data) VALUES (?, ?)",
-                (image_id, image_data),
-            )
-            conn.commit()
-            print(f"Image data saved for image_id: {image_id}")
+        return cv2.resize(image, (size[1], size[0]), interpolation=cv2.INTER_LINEAR)
 
     def calculate_optical_flow(self, base_image, target_image):
         """
         Calculates the optical flow between two images.
         """
+        print("Menghitung optical flow...")
         base_gray = cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY)
         target_gray = cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY)
-        flow = cv2.calcOpticalFlowFarneback(
-            base_gray,
-            target_gray,
-            None,
-            pyr_scale=0.5,
-            levels=3,
-            winsize=15,
-            iterations=3,
-            poly_n=5,
-            poly_sigma=1.2,
-            flags=0,
-        )
+
+        # Using Farneback Optical Flow
+        flow = cv2.calcOpticalFlowFarneback(base_gray, target_gray, None,
+                                            pyr_scale=0.5, levels=3, winsize=15,
+                                            iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
+        print("Optical flow selesai dihitung.")
         return flow
 
-    def compensate_motion(self, base_image, flow):
+    def compensate_motion(self, base_image, flow, image_id):
         """
         Applies motion compensation (warp) to the image using optical flow.
         """
+        print(f"Melakukan kompensasi gerakan pada gambar {image_id}...")
         h, w = base_image.shape[:2]
         flow_map = np.stack(np.meshgrid(np.arange(w), np.arange(h)), axis=-1)
         warped_map = flow_map + flow
         remap_x, remap_y = cv2.split(warped_map.astype(np.float32))
-        compensated_image = cv2.remap(
-            base_image,
-            remap_x,
-            remap_y,
-            interpolation=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_REFLECT,
-        )
+        compensated_image = cv2.remap(base_image, remap_x, remap_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        
+        print(f"Kompensasi gerakan selesai untuk gambar {image_id}.")
         return compensated_image
+
+    def save_to_hdf5(self, aligned_images):
+        """
+        Saves aligned images to an HDF5 file after all images are processed.
+        """
+        print(f"Menyimpan gambar yang diselaraskan ke HDF5: {self.hdf5_path}")
+        with h5py.File(self.hdf5_path, "w") as h5f:
+            for i, image in enumerate(aligned_images):
+                h5f.create_dataset(f"image_{i}", data=image, compression="gzip")
+                print(f"Gambar ke-{i} disimpan dalam HDF5.")
+        print(f"Semua gambar berhasil disimpan ke HDF5.")
+
+    def save_individual_image(self, image, image_id):
+        """
+        Save individual aligned image to disk.
+        """
+        debug_image_path = os.path.join(self.debug_folder, f"aligned_image_{image_id}.png")
+        cv2.imwrite(debug_image_path, image)
+        print(f"Gambar yang diselaraskan disimpan ke {debug_image_path}.")
+        # Hapus gambar dari memori setelah disimpan
+        del image
+
+    def delete_debug_images(self):
+        """
+        Delete all images in the debug folder to free up space.
+        """
+        print("Menghapus gambar di folder debug...")
+        for image_file in glob.glob(os.path.join(self.debug_folder, "*.png")):
+            os.remove(image_file)
+            print(f"Gambar {image_file} dihapus.")
+        print("Semua gambar debug berhasil dihapus.")
 
 
 def main(db_path):
@@ -87,34 +114,53 @@ def main(db_path):
         print("Tidak ada gambar ditemukan di database.")
         return
 
-    # Muat gambar berdasarkan path yang diambil dari database
-    images = processor.load_images_from_paths(image_paths)
-    if not images:
-        print("Tidak ada gambar berhasil dimuat.")
+    # Muat gambar pertama sebagai referensi
+    base_image = cv2.imread(image_paths[0])
+    if base_image is None:
+        print(f"Gambar referensi tidak dapat dimuat dari {image_paths[0]}.")
         return
 
-    # Gunakan gambar pertama sebagai referensi
-    base_image = images[0]
+    # Ubah ukuran gambar referensi
+    print("Menyesuaikan ukuran gambar referensi...")  
+    images_resized = [processor.resize_image(base_image, base_image.shape[:2])]
 
-    # Simpan gambar referensi (base_image) ke dalam database
-    image_id = "reference_image"  # ID untuk gambar referensi
-    _, encoded_image = cv2.imencode(".jpg", base_image)  # Encoding image as JPEG to store as BLOB
-    image_data = encoded_image.tobytes()  # Convert to bytes for BLOB storage
-    processor.save_image_data(image_id, image_data)
-    print(f"Gambar referensi telah diselaraskan dan disimpan di database.")
+    # Proses gambar dengan optical flow dan kompensasi gerakan satu per satu
+    aligned_images = [base_image]  # Simpan gambar referensi sebagai gambar yang telah diselaraskan
 
-    # Proses gambar dengan optical flow dan kompensasi gerakan
-    for i in range(1, len(images)):
-        flow = processor.calculate_optical_flow(base_image, images[i])
-        compensated_image = processor.compensate_motion(images[i], flow)
+    for i in range(1, len(image_paths)):
+        # Muat gambar satu per satu
+        print(f"Memproses gambar ke-{i + 1} dari {len(image_paths)}...")
+        target_image = cv2.imread(image_paths[i])
+        if target_image is None:
+            print(f"Gambar ke-{i + 1} tidak dapat dimuat dari {image_paths[i]}.")
+            continue
 
-        # Simpan gambar hasil penyelarasan KE DATABASE
-        image_id = f"image_{i}"  # ID gambar berdasarkan urutan
-        _, encoded_image = cv2.imencode(".jpg", compensated_image)  # Encoding image as JPEG to store as BLOB
-        image_data = encoded_image.tobytes()  # Convert to bytes for BLOB storage
-        processor.save_image_data(image_id, image_data)
+        # Ubah ukuran gambar target agar sesuai dengan gambar referensi
+        target_image_resized = processor.resize_image(target_image, base_image.shape[:2])
 
-        print(f"Gambar ke-{i} telah diselaraskan dan disimpan di database.")
+        # Hitung optical flow dan lakukan kompensasi gerakan
+        flow = processor.calculate_optical_flow(base_image, target_image_resized)
+        compensated_image = processor.compensate_motion(target_image_resized, flow, f"image_{i + 1}")
+        
+        # Simpan gambar yang diselaraskan secara terpisah
+        processor.save_individual_image(compensated_image, f"image_{i + 1}")
+
+        # Simpan gambar yang diselaraskan ke dalam list untuk HDF5 setelah semua selesai
+        aligned_images.append(compensated_image)
+
+        # Kosongkan gambar target dari memori untuk mengurangi penggunaan RAM
+        del target_image
+        del target_image_resized
+        del flow
+        del compensated_image
+
+    # Setelah seluruh gambar diselaraskan, simpan ke dalam HDF5
+    processor.save_to_hdf5(aligned_images)
+
+    # Hapus gambar di folder debug setelah semuanya selesai
+    processor.delete_debug_images()
+
+    print("Proses selesai.")
 
 if __name__ == "__main__":
     db_path = "pixel_refine_database.db"  # Path ke database Anda

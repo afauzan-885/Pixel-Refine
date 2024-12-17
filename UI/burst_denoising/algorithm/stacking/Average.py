@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import os
 import sqlite3
+import h5py
 
 class AverageAlgorithm:
     def __init__(self, db_path):
@@ -15,6 +16,26 @@ class AverageAlgorithm:
             cursor = conn.cursor()
             cursor.execute("SELECT path FROM images")
             return [row[0] for row in cursor.fetchall()]
+
+    def load_images_from_hdf5(self, hdf5_path):
+        """
+        Loads images stored in an HDF5 file.
+        """
+        images = []
+        print(f"Membaca gambar dari file HDF5: {hdf5_path}")
+        with h5py.File(hdf5_path, 'r') as h5f:
+            for key in h5f.keys():
+                image = np.array(h5f[key])
+                images.append(image)
+                print(f"Gambar {key} berhasil dimuat.")
+        return images
+
+    def load_images_from_folder(self, folder_path):
+        """
+        Loads images from a specified folder.
+        """
+        image_paths = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(('.png', '.jpg', '.jpeg'))]
+        return self.load_images_from_paths(image_paths)
 
     def load_images_from_paths(self, image_paths):
         """
@@ -44,107 +65,49 @@ class AverageAlgorithm:
         """
         cv2.imwrite(output_path, image)
 
-    def save_image_data(self, image_id, image_file):
-        """
-        Saves image file data as BLOB in the 'data_images' table.
-        """
-        with open(image_file, 'rb') as file:
-            image_data = file.read()
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO data_images (image_id, image_data) VALUES (?, ?)",
-                (image_id, image_data)
-            )
-            conn.commit()
-            print(f"Image data saved for image_id: {image_id}")
 
-    def delete_image_data(self, image_id):
-        """
-        Deletes image data (BLOB) from the 'data_images' table.
-        
-        Args:
-            image_id: The ID of the image whose data should be deleted.
-        """
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            # Menghapus data gambar berdasarkan image_id
-            cursor.execute("DELETE FROM data_images WHERE image_id = ?", (image_id,))
-            
-            # Melakukan commit untuk memastikan perubahan disimpan
-            conn.commit()
-            
-            # Menjalankan VACUUM untuk mengurangi ukuran file database
-            cursor.execute("VACUUM")
-            conn.commit()
-            
-            print(f"Deleted image data for image_id: {image_id} and performed VACUUM to reclaim space.")
-
-    def get_image_data(self, image_id):
-        """
-        Retrieves image data (BLOB) from the database.
-        """
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT image_data FROM data_images WHERE image_id = ?", (image_id,))
-            result = cursor.fetchone()
-            if result:
-                return result[0]
-            else:
-                print(f"No image data found for image_id: {image_id}")
-                return None
-
-    def is_image_data_empty(self):
-        """
-        Checks if the 'data_images' table is empty.
-        """
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM data_images")
-            count = cursor.fetchone()[0]
-            return count == 0
-
-
-def main(image_folder, output_path, db_path):
+def main(db_path, output_path):
     image_processor = AverageAlgorithm(db_path)
 
-    # Cek apakah tabel 'data_images' kosong
-    if image_processor.is_image_data_empty():
-        print("Tidak ada data gambar di database, memuat gambar dari folder...")
-        
-        # Ambil semua path gambar dari folder
-        image_paths = image_processor.get_all_image_paths()
-        
-        if not image_paths:
-            print("Tidak ada gambar ditemukan di folder!")
-            return
-        
-        # Muat gambar dari path yang ditemukan
-        images = image_processor.load_images_from_paths(image_paths)
-        
-        if not images:
-            print("Tidak ada gambar berhasil dimuat!")
-            return
-    else:
-        # Jika ada data gambar, ambil dari database
-        print("Mengambil gambar dari database...")
-        image_paths = image_processor.get_all_image_paths()
-        images = image_processor.load_images_from_paths(image_paths)
-    
-    # Lakukan penumpukan gambar
-    stacked_image = image_processor.stack_images(images)
-    
-    # Simpan gambar hasil penumpukan
-    image_processor.save_image(stacked_image, output_path)
-    print(f"Penumpukan gambar selesai! Hasil disimpan di: {output_path}")
+    # Step 1: Check "database/align/global" folder for HDF5 file
+    global_hdf5_path = "database/align/global/aligned_images.h5"
+    if os.path.exists(global_hdf5_path):
+        print("Data ditemukan di path 'database/align/global'. Memuat data dari HDF5...")
+        images = image_processor.load_images_from_hdf5(global_hdf5_path)
 
-    # Setelah gambar selesai diproses, hapus data gambar dari database
-    for i, image_path in enumerate(image_paths):
-        image_id = f"image_{i}"
-        image_processor.delete_image_data(image_id)
+    # Step 2: Check "database/align/local" folder for HDF5 file
+    elif os.path.exists("database/align/local/aligned_images.h5"):
+        print("Data tidak ditemukan di path 'database/align/global'. Memuat dari 'database/align/local'...")
+        local_hdf5_path = "database/align/local/aligned_images.h5"
+        images = image_processor.load_images_from_hdf5(local_hdf5_path)
+
+    # Step 3: Load from database if no local or global alignment data is found
+    else:
+        print("Tidak ada data di 'database/align/global' atau 'database/align/local'. Memuat data dari database...")
+        image_paths = image_processor.get_all_image_paths()
+        if not image_paths:
+            print("Tidak ada gambar ditemukan di database.")
+            return
+        images = image_processor.load_images_from_paths(image_paths)
+
+        # Save processed images to "database/stack"
+        stack_folder = "database/stack"
+        os.makedirs(stack_folder, exist_ok=True)
+        for i, img in enumerate(images):
+            output_path_stack = os.path.join(stack_folder, f"stack_image_{i}.jpg")
+            image_processor.save_image(img, output_path_stack)
+
+    # Perform image stacking
+    if images:
+        print("Melakukan penumpukan gambar...")
+        stacked_image = image_processor.stack_images(images)
+        image_processor.save_image(stacked_image, output_path)
+        print(f"Penumpukan gambar selesai! Hasil disimpan di: {output_path}")
+    else:
+        print("Tidak ada gambar yang dapat diproses.")
+
 
 if __name__ == "__main__":
     db_path = "pixel_refine_database.db"
-    output_path = "stacked_output.jpg" 
-    main(None, output_path, db_path)
+    output_path = "stacked_output.jpg"
+    main(db_path, output_path)
