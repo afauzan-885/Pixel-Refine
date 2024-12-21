@@ -1,3 +1,4 @@
+import subprocess
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtGui import QPixmap
 import rawpy, io, numpy 
@@ -104,39 +105,30 @@ class ImageImportThreading(BaseMultiThreading):
             database_manager.save_image_path(image_path)
         
         super().__init__(import_task, image_paths, batch_size, delay_ms)
-        
-class ImageSaveThreading(BaseMultiThreading):
+
+class RunningAlgorithmThreading(BaseMultiThreading):
     """
-    Multithreading implementation for saving image data into the database.
+    A specialized multithreading class for running algorithms using subprocess.
     """
-    def __init__(self, database_manager, image_data_list, batch_size=3, delay_ms=50):
+    def __init__(self, algorithm_tasks, batch_size=1, delay_ms=100):
         """
-        Args:
-            database_manager: Instance of the database manager with `save_image_data` method.
-            image_data_list: List of tuples containing (image_id, image_file).
-            batch_size: Number of images processed per batch.
-            delay_ms: Delay between processing batches in milliseconds.
+        Initialize the threading class with algorithm tasks.
+
+        :param algorithm_tasks: A list of tuples (virtualenv_path, script_path, algorithm_name).
+        :param batch_size: Number of tasks to process in one batch.
+        :param delay_ms: Delay between batches in milliseconds.
         """
-        def save_task(image_data):
-            image_id, image_file = image_data
-            database_manager.save_image_data(image_id, image_file)
-        
-        super().__init__(save_task, image_data_list, batch_size, delay_ms)
+        def run_algorithm(task):
+            virtualenv_path, script_path, algorithm_name = task
+            try:
+                print(f"Running {algorithm_name}...")
+                subprocess.run([virtualenv_path, script_path], check=True)
+                return f"{algorithm_name} completed successfully."
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(f"Error running {algorithm_name}: {e}")
+            except FileNotFoundError as e:
+                raise RuntimeError(f"File not found for {algorithm_name}: {e}")
+            except Exception as e:
+                raise RuntimeError(f"Unexpected error for {algorithm_name}: {e}")
 
-
-class ImageAlignmentThreading(BaseMultiThreading):
-    """
-    Threading implementation for aligning image pairs using ECC algorithm.
-    """
-    def __init__(self, database_manager, image_pairs, batch_size=1, delay_ms=100):
-        def align_task(image_pair):
-            image_id, path1, path2 = image_pair
-            aligned_data = database_manager.eccAlign(path1, path2)
-            if aligned_data:
-                database_manager.save_image_data(image_id, aligned_data)
-                return (image_id, "Success")
-            else:
-                raise RuntimeError(f"Alignment failed for image pair: {path1}, {path2}")
-        
-        super().__init__(align_task, image_pairs, batch_size, delay_ms)
-
+        super().__init__(run_algorithm, algorithm_tasks, batch_size, delay_ms)

@@ -1,9 +1,13 @@
 import sqlite3
 import subprocess, os
+import sys
 
-# Tentukan path ke interpreter Python dalam lingkungan virtual Anda
-virtualenv_path = r"venv/Scripts/python.exe"  # Di Windows
+from .multi_threading import RunningAlgorithmThreading
 
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
+
+# virtualenv_path = r"venv/Scripts/python.exe"
 def save_image_data(self, image_id, image_file):
     """
     Saves image file data as BLOB in the 'data_images' table.
@@ -79,42 +83,46 @@ def delete_image_data(self, image_id):
         
         print(f"Deleted image data for image_id: {image_id} and performed VACUUM to reclaim space.")
 
-def process_algorithm(self):
+def process_algorithm(self, virtualenv_path=r"venv/Scripts/python.exe", base_path="UI/burst_denoising/algorithm"):
     """Handle algorithm processing when 'Process' button is clicked."""
-    
+
     # Get selected algorithms and stacking method
     global_algorithm = self.left_panel.global_dropdown.currentText()
     local_algorithm = self.left_panel.local_dropdown.currentText()
     stacking_method = self.left_panel.stacking_dropdown.currentText()
 
-    # Get the stacking method label text
-    stacking_label_text = self.left_panel.stacking_dropdown.currentText()
+    # Validate dropdown selections
+    if global_algorithm == "None" and local_algorithm == "None" and stacking_method == "None":
+        print("All processes are skipped. Please select at least one algorithm..")
+        return
 
-    # Define the base path to the algorithms
-    base_path = os.path.join("UI", "burst_denoising", "algorithm")
-
-    # Dynamically define global, local, and stacking algorithms from dropdown items
-    global_algorithms = {self.left_panel.global_dropdown.itemText(i): os.path.join(base_path, "global_alignment", f"{self.left_panel.global_dropdown.itemText(i).replace(' ', '_').lower()}.py") 
+    # Dynamically define paths for algorithms
+    global_algorithms = {self.left_panel.global_dropdown.itemText(i): os.path.join(base_path, "global_alignment", 
+                           f"{self.left_panel.global_dropdown.itemText(i).replace(' ', '_').lower()}.py") 
                          for i in range(self.left_panel.global_dropdown.count())}
 
-    local_algorithms = {self.left_panel.local_dropdown.itemText(i): os.path.join(base_path, "local_alignment", f"{self.left_panel.local_dropdown.itemText(i).replace(' ', '_').lower()}.py") 
+    local_algorithms = {self.left_panel.local_dropdown.itemText(i): os.path.join(base_path, "local_alignment", 
+                          f"{self.left_panel.local_dropdown.itemText(i).replace(' ', '_').lower()}.py") 
                         for i in range(self.left_panel.local_dropdown.count())}
 
-    stacking_methods = {self.left_panel.stacking_dropdown.itemText(i): os.path.join(base_path, "stacking", f"{self.left_panel.stacking_dropdown.itemText(i).replace(' ', '_').lower()}.py") 
+    stacking_methods = {self.left_panel.stacking_dropdown.itemText(i): os.path.join(base_path, "stacking", 
+                         f"{self.left_panel.stacking_dropdown.itemText(i).replace(' ', '_').lower()}.py") 
                         for i in range(self.left_panel.stacking_dropdown.count())}
 
-    # Process Global Alignment based on dropdown selection
-    if global_algorithm in global_algorithms:
-        print(f"Processing Global Alignment: using {global_algorithm}...")
-        subprocess.run([virtualenv_path, global_algorithms[global_algorithm]])
+    # Prepare tasks for threading
+    algorithm_tasks = []
 
-    # Process Local Alignment based on dropdown selection, only if global alignment was successful
-    if local_algorithm in local_algorithms:
-        print(f"Processing Local Alignment: using {local_algorithm}...")
-        subprocess.run([virtualenv_path, local_algorithms[local_algorithm]])
+    if global_algorithm != "None" and global_algorithm in global_algorithms:
+        algorithm_tasks.append((virtualenv_path, global_algorithms[global_algorithm], f"Global Alignment: {global_algorithm}"))
 
-    # Process Stacking based on dropdown selection, only if local alignment was successful
-    if stacking_method in stacking_methods:
-        formatted_method = stacking_label_text.replace(" ", "_")  # Format method name, replace spaces with underscores
-        print(f"Processing Stacking: using {formatted_method}...")
-        subprocess.run([virtualenv_path, stacking_methods[stacking_method]])
+    if local_algorithm != "None" and local_algorithm in local_algorithms:
+        algorithm_tasks.append((virtualenv_path, local_algorithms[local_algorithm], f"Local Alignment: {local_algorithm}"))
+
+    if stacking_method != "None" and stacking_method in stacking_methods:
+        algorithm_tasks.append((virtualenv_path, stacking_methods[stacking_method], f"Stacking: {stacking_method}"))
+
+    # Run algorithms in a separate thread
+    self.algorithm_thread = RunningAlgorithmThreading(algorithm_tasks)
+
+    # Start the thread
+    self.algorithm_thread.start()

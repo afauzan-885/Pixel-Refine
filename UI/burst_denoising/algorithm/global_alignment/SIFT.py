@@ -5,7 +5,7 @@ import sqlite3, os, h5py, glob, gc
 from multiprocessing import Manager
 from concurrent.futures import ProcessPoolExecutor
 
-class EECAlgorithm:
+class SIFTAlgorithm:
     def __init__(self, db_path, debug_folder="database/align/global/debug_images", hdf5_path="database/align/global/aligned_images.h5", use_gpu=True):
         self.db_path = db_path
         self.debug_folder = debug_folder
@@ -181,7 +181,7 @@ def process_image(processor, base_image_path, target_image_path, image_id, align
 
 
 def main(db_path, use_gpu=True):
-    processor = EECAlgorithm(db_path, use_gpu=use_gpu)
+    processor = SIFTAlgorithm(db_path, use_gpu=use_gpu)
 
     # Ambil path gambar dari database
     image_paths = processor.get_all_image_paths()

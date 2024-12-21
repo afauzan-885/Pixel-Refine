@@ -5,7 +5,7 @@ import sqlite3, os, h5py, glob, gc
 from multiprocessing import Manager
 from concurrent.futures import ProcessPoolExecutor
 
-class EECAlgorithm:
+class AKAZEAlgorithm:
     def __init__(self, db_path, debug_folder="database/align/global/debug_images", hdf5_path="database/align/global/aligned_images.h5", use_gpu=True):
         self.db_path = db_path
         self.debug_folder = debug_folder
@@ -42,21 +42,23 @@ class EECAlgorithm:
 
     def calculate_global_alignment(self, base_image, target_image, warp_mode=cv2.MOTION_EUCLIDEAN):
         """
-        Optimized global alignment using ECC with multiscale approach, GPU or CPU.
+        Optimized global alignment using AKAZE features with pyramid scaling on GPU (OpenCL) or CPU.
         """
-        if self.use_gpu:
-            # Convert base and target images to UMat for GPU processing
-            base_image_umat = cv2.UMat(base_image)
-            target_image_umat = cv2.UMat(target_image)
-        else:
-            base_image_umat = base_image  # Use CPU arrays
-            target_image_umat = target_image
+        print("Mulai deteksi fitur dengan pendekatan multiskala...")
 
         # Convert images to grayscale if not already
-        if len(base_image_umat.get().shape) == 3:  # Use get() to access the image data
-            base_image_umat = cv2.cvtColor(base_image_umat, cv2.COLOR_BGR2GRAY)
-        if len(target_image_umat.get().shape) == 3:  # Use get() to access the image data
-            target_image_umat = cv2.cvtColor(target_image_umat, cv2.COLOR_BGR2GRAY)
+        base_gray = cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY)
+        target_gray = cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY)
+
+        # Check if GPU (OpenCL) is available
+        if cv2.ocl.haveOpenCL() and self.use_gpu:
+            print("Menggunakan GPU (OpenCL) untuk pemrosesan...")
+            base_gray_umat = cv2.UMat(base_gray)  # Convert to UMat for GPU memory (OpenCL)
+            target_gray_umat = cv2.UMat(target_gray)
+        else:
+            print("GPU tidak tersedia, menggunakan CPU untuk pemrosesan...")
+            base_gray_umat = base_gray
+            target_gray_umat = target_gray
 
         # Initialize warp matrix
         warp_matrix = (
@@ -66,27 +68,54 @@ class EECAlgorithm:
         # Multiscale alignment (e.g., 3 levels: 25%, 50%, 100%)
         scales = [0.25, 0.5, 1.0]
         for scale in scales:
-            # Resize images to a lower resolution
-            scaled_base = cv2.resize(base_image_umat, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
-            scaled_target = cv2.resize(target_image_umat, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+            print(f"Memproses pada skala: {scale * 100}%...")
 
-            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 500, 1e-6)
+            # Resize images to the current scale
+            scaled_base = cv2.resize(base_gray_umat, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+            scaled_target = cv2.resize(target_gray_umat, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+
+            # Create AKAZE detector
+            akaze = cv2.AKAZE_create()
+
+            # Detect keypoints and descriptors
+            print("Mendeteksi keypoints dan descriptors...")
+            kp1, des1 = akaze.detectAndCompute(scaled_base, None)
+            kp2, des2 = akaze.detectAndCompute(scaled_target, None)
+
+            # Match descriptors using BFMatcher
+            bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+            print("Mencocokkan descriptors...")
+            matches = bf.match(des1, des2)
+
+            # Sort matches by distance
+            matches = sorted(matches, key=lambda x: x.distance)
+
+            # Extract matching keypoints
+            src_pts = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
+            dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
+
+            # Scale back keypoints to full resolution
+            src_pts /= scale
+            dst_pts /= scale
+
+            # Compute the homography (warp matrix) using RANSAC
             try:
-                _, warp_matrix = cv2.findTransformECC(
-                    scaled_base, scaled_target, warp_matrix, warp_mode, criteria
-                )
+                print("Menghitung homografi pada skala ini...")
+                warp_matrix, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
             except cv2.error as e:
-                print(f"ECC alignment failed at scale {scale}: {e}")
-                break
+                print(f"Gagal menghitung homografi pada skala {scale}: {e}")
+                continue
 
+        print("Deteksi fitur multiskala selesai.")
         return warp_matrix
-
 
     def compensate_global_motion(self, base_image, warp_matrix, warp_mode=cv2.MOTION_EUCLIDEAN):
         """
-        Applies global motion compensation using the warp matrix calculated by ECC using GPU or CPU.
+        Applies global motion compensation using the warp matrix calculated by AKAZE features.
         """
         h, w = base_image.shape[:2]
+        
+        print("Menerapkan kompensasi gerakan dengan warp matrix...")
 
         if self.use_gpu:
             # Convert base image to UMat for OpenCL acceleration (GPU memory)
@@ -95,16 +124,21 @@ class EECAlgorithm:
             base_image_umat = base_image  # Use CPU array
 
         try:
-            # Apply warpAffine or warpPerspective using OpenCL (via UMat)
-            if warp_mode == cv2.MOTION_HOMOGRAPHY:
+            # Check if the warp matrix is a 3x3 matrix (homography)
+            if warp_matrix.shape == (3, 3):
+                # Use warpPerspective for homography (perspective transformation)
                 aligned_image = cv2.warpPerspective(base_image_umat, warp_matrix, (w, h), flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP)
             else:
+                # Use warpAffine for affine transformation (2x3 matrix)
                 aligned_image = cv2.warpAffine(base_image_umat, warp_matrix, (w, h), flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP)
         except cv2.error as e:
             print(f"Motion compensation failed: {e}")
             return None
 
+        print("Kompensasi gerakan berhasil diterapkan.")
         return aligned_image
+
+
 
     def save_individual_image(self, image, image_id):
         """
@@ -137,7 +171,7 @@ class EECAlgorithm:
             print(f"Gambar {image_file} dihapus.")
         print("Semua gambar debug berhasil dihapus.")
 
-def process_image(processor, base_image_path, target_image_path, image_id, aligned_images, scale_factor=1):
+def process_image_alignment(processor, base_image_path, target_image_path, image_id, warp_matrices, save_warp_matrices_dir="warp_matrices"):
     target_image = cv2.imread(target_image_path)
     base_image = cv2.imread(base_image_path)
     
@@ -146,15 +180,42 @@ def process_image(processor, base_image_path, target_image_path, image_id, align
         return f"Image {image_id} gagal diproses."
 
     # Resize both images to a lower resolution
-    low_res_base = cv2.resize(base_image, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_LINEAR)
-    low_res_target = cv2.resize(target_image, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_LINEAR)
+    low_res_base = cv2.resize(base_image, (0, 0), fx=1, fy=1, interpolation=cv2.INTER_LINEAR)
+    low_res_target = cv2.resize(target_image, (0, 0), fx=1, fy=1, interpolation=cv2.INTER_LINEAR)
 
-    # Convert to grayscale for alignment
-    low_res_base_gray = cv2.cvtColor(low_res_base, cv2.COLOR_BGR2GRAY)
-    low_res_target_gray = cv2.cvtColor(low_res_target, cv2.COLOR_BGR2GRAY)
+    # Apply global alignment using AKAZE features
+    warp_matrix = processor.calculate_global_alignment(low_res_base, low_res_target)
 
-    # Calculate alignment warp matrix on low-resolution images
-    warp_matrix = processor.calculate_global_alignment(low_res_base_gray, low_res_target_gray)
+    # Save warp_matrix to disk for future use
+    if not os.path.exists(save_warp_matrices_dir):
+        os.makedirs(save_warp_matrices_dir)
+    
+    warp_matrix_file = os.path.join(save_warp_matrices_dir, f"warp_matrix_{image_id}.npz")
+    np.savez(warp_matrix_file, warp_matrix)  # Save the warp matrix to a .npz file
+
+    # Store warp_matrix path in a list for later use
+    warp_matrices.append(warp_matrix_file)
+
+    # Free memory after processing alignment
+    del target_image
+    del base_image
+    del low_res_base
+    del low_res_target
+    del warp_matrix
+    gc.collect()
+
+    return f"Image {image_id} alignment selesai diproses."
+
+
+def process_image_compensation(processor, target_image_path, warp_matrix_file, image_id, aligned_images):
+    target_image = cv2.imread(target_image_path)
+    
+    if target_image is None:
+        print(f"Gambar tidak dapat dimuat: {target_image_path}")
+        return f"Image {image_id} gagal diproses."
+
+    # Load the previously saved warp matrix
+    warp_matrix = np.load(warp_matrix_file)['arr_0']
 
     # Apply warp matrix to the full-resolution target image
     full_res_compensated_image = processor.compensate_global_motion(target_image, warp_matrix)
@@ -165,23 +226,16 @@ def process_image(processor, base_image_path, target_image_path, image_id, align
     # Add the aligned image to the shared list (convert to numpy array to store)
     aligned_images.append(full_res_compensated_image.get() if isinstance(full_res_compensated_image, cv2.UMat) else full_res_compensated_image)
 
-    # Free memory after processing
+    # Free memory after processing compensation
     del target_image
-    del base_image
-    del low_res_base
-    del low_res_target
-    del warp_matrix
     del full_res_compensated_image
-
-    # Call garbage collection to clean memory
     gc.collect()
 
-    return f"Image {image_id} selesai diproses."
-
+    return f"Image {image_id} compensation selesai diproses."
 
 
 def main(db_path, use_gpu=True):
-    processor = EECAlgorithm(db_path, use_gpu=use_gpu)
+    processor = AKAZEAlgorithm(db_path, use_gpu=use_gpu)
 
     # Ambil path gambar dari database
     image_paths = processor.get_all_image_paths()
@@ -195,28 +249,33 @@ def main(db_path, use_gpu=True):
         print(f"Gambar referensi tidak dapat dimuat dari {base_image_path}.")
         return
 
-    # Muat gambar referensi
-    base_image = cv2.imread(base_image_path)
-    if base_image is None:
-        print(f"Gambar referensi gagal dimuat dari {base_image_path}.")
-        return
-
-    # Simpan gambar referensi ke folder debug
-    processor.save_individual_image(base_image, "reference_image")
-
     # Gunakan Manager untuk membuat list yang dibagikan antar proses
     with Manager() as manager:
-        aligned_images = manager.list([])  # Daftar untuk menyimpan gambar yang diselaraskan
+        aligned_images = manager.list([])
+        warp_matrices = manager.list([])
 
-        # Proses gambar dengan multiprocessing, 3 gambar dalam satu waktu
-        with ProcessPoolExecutor(max_workers=3) as executor:
+        # Step 1: Proses seluruh gambar untuk menghitung global alignment
+        with ProcessPoolExecutor(max_workers=2) as executor:
             futures = []
             for i in range(1, len(image_paths)):
-                print(f"Memproses gambar ke-{i + 1} dari {len(image_paths)}...")
+                print(f"Memproses alignment gambar ke-{i + 1} dari {len(image_paths)}...")
                 target_image_path = image_paths[i]
+                
+                futures.append(executor.submit(process_image_alignment, processor, base_image_path, target_image_path, i + 1, warp_matrices))
+            
+            # Tunggu proses selesai
+            for future in futures:
+                result = future.result()
+                print(result)
 
-                # Submit image processing to the executor
-                futures.append(executor.submit(process_image, processor, base_image_path, target_image_path, i + 1, aligned_images))
+        # Step 2: Setelah alignment selesai, proses compensate global motion
+        with ProcessPoolExecutor(max_workers=10) as executor:
+            futures = []
+            for i, warp_matrix_file in enumerate(warp_matrices):
+                target_image_path = image_paths[i + 1]  # Target images after the base image
+                print(f"Memproses kompensasi gerakan gambar ke-{i + 1}...")
+                
+                futures.append(executor.submit(process_image_compensation, processor, target_image_path, warp_matrix_file, i + 1, aligned_images))
 
             # Tunggu proses selesai
             for future in futures:
@@ -230,6 +289,7 @@ def main(db_path, use_gpu=True):
         processor.delete_debug_images()
 
     print("Proses selesai.")
+
 
 if __name__ == "__main__":
     db_path = "pixel_refine_database.db"  # Path ke database Anda
