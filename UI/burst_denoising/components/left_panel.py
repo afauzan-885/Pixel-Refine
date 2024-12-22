@@ -52,7 +52,7 @@ class LeftPanel(QWidget):
         stacking_label = QLabel("Stacking Method")
         stacking_layout.setContentsMargins(0, 10, 0, 20)
         self.stacking_dropdown = QComboBox()
-        self.stacking_dropdown.addItems(["None", "Average"])
+        self.stacking_dropdown.addItems(["None", "Average", "Median"])
         self.stacking_dropdown.setStyleSheet(self.get_dropdown_style())
         stacking_layout.addWidget(stacking_label)
         stacking_layout.addWidget(self.stacking_dropdown)

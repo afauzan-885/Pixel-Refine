@@ -4,9 +4,9 @@ import os
 import sqlite3
 import h5py
 
-class NonLocalMeansAlgorithm:
+class Median:
     def __init__(self, db_path):
-        self.db_path = db_path
+        self.db_path = db_path 
 
     def get_all_image_paths(self):
         """
@@ -48,15 +48,12 @@ class NonLocalMeansAlgorithm:
                 images.append(image)
         return images
 
-    def stack_images(self, images):
+    def stack_images_median(self, images):
         """
-        Stacks images by averaging them.
+        Stacks images using a median filter approach for motion artifact reduction.
         """
-        stacked_image = np.zeros_like(images[0], dtype=np.float32)
-        for image in images:
-            stacked_image += image.astype(np.float32)
-        stacked_image /= len(images)
-        stacked_image = np.clip(stacked_image, 0, 255).astype(np.uint8)
+        print("Melakukan stacking gambar dengan median filter...")
+        stacked_image = np.median(np.array(images), axis=0).astype(np.uint8)
         return stacked_image
 
     def save_image(self, image, output_path):
@@ -67,7 +64,7 @@ class NonLocalMeansAlgorithm:
 
 
 def main(db_path, output_path):
-    image_processor = NonLocalMeansAlgorithm(db_path)
+    image_processor = Median(db_path)
 
     # Step 1: Check "database/align/global" folder for HDF5 file
     global_hdf5_path = "database/align/global/aligned_images.h5"
@@ -90,17 +87,9 @@ def main(db_path, output_path):
             return
         images = image_processor.load_images_from_paths(image_paths)
 
-        # Save processed images to "database/stack"
-        stack_folder = "database/stack"
-        os.makedirs(stack_folder, exist_ok=True)
-        for i, img in enumerate(images):
-            output_path_stack = os.path.join(stack_folder, f"stack_image_{i}.jpg")
-            image_processor.save_image(img, output_path_stack)
-
-    # Perform image stacking
+    # Perform image stacking (no alignment)
     if images:
-        print("Melakukan penumpukan gambar...")
-        stacked_image = image_processor.stack_images(images)
+        stacked_image = image_processor.stack_images_median(images)
         image_processor.save_image(stacked_image, output_path)
         print(f"Penumpukan gambar selesai! Hasil disimpan di: {output_path}")
     else:
