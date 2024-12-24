@@ -5,7 +5,7 @@ import os
 import sqlite3
 import h5py
 
-class MedianWeighting:
+class SimilarityAlgorithm:
     def __init__(self, db_path):
         self.db_path = db_path
 
@@ -103,7 +103,7 @@ class MedianWeighting:
 
 
 def main(db_path, output_path):
-    image_processor = MedianWeighting(db_path)
+    image_processor = SimilarityAlgorithm(db_path)
 
     # Step 1: Check "database/align/global" folder for HDF5 file
     global_hdf5_path = "database/align/global/aligned_images.h5"
