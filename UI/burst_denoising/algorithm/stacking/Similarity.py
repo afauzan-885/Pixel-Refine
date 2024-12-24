@@ -1,3 +1,4 @@
+import tempfile
 import cv2
 import numpy as np
 import os
@@ -41,80 +42,64 @@ class MedianWeighting:
                 print(f"Peringatan: Gambar {image_path} gagal dimuat.")
         return images
 
-    def apply_mfnr(self, images, tile_size=(64, 64), overlap=0.3, motion_threshold=30.0):
-        print("Melakukan pengurangan noise menggunakan MFNR dengan pendekatan tile berbasis similarity...")
+    def apply_mfnr_with_disk(self, images, tile_size=(64, 64), overlap=0.3, motion_threshold=30.0):
+        print("Melakukan pengurangan noise menggunakan MFNR dengan optimalisasi RAM...")
 
-        images_float = np.array(images, dtype=np.float32)
-        reference_image = images_float[0]
+        # Gambar referensi
+        reference_image = np.array(images[0], dtype=np.float32)
         h, w, _ = reference_image.shape
 
         print(f"Dimensi gambar: {h}x{w}, Ukuran tile: {tile_size}, Overlap: {overlap*100:.1f}%")
 
-        # Hitung overlap dalam piksel
+        # Hitung langkah tile
         tile_step_y = int(tile_size[0] * (1 - overlap))
         tile_step_x = int(tile_size[1] * (1 - overlap))
 
-        print(f"Langkah tile: {tile_step_y} (vertikal), {tile_step_x} (horizontal)")
-
         final_image = np.zeros_like(reference_image)
-        weight_map = np.zeros_like(reference_image[..., 0])
+        weight_map = np.zeros((h, w), dtype=np.float32)
 
-        total_tiles = 0
-        processed_tiles = 0
+        # Proses gambar satu per satu
+        for i, image_path in enumerate(images):
+            print(f"Memproses gambar ke-{i+1}/{len(images)}...")
 
-        # Iterasi melalui tile
-        for y in range(0, h, tile_step_y):
-            for x in range(0, w, tile_step_x):
-                total_tiles += 1
+            # Muat gambar ke dalam memori
+            current_image = np.array(image_path, dtype=np.float32)
 
-        print(f"Jumlah total tile yang akan diproses: {total_tiles}")
+            # Iterasi melalui tile
+            for y in range(0, h, tile_step_y):
+                for x in range(0, w, tile_step_x):
+                    # Batas tile
+                    y_end = min(y + tile_size[0], h)
+                    x_end = min(x + tile_size[1], w)
 
-        for y in range(0, h, tile_step_y):
-            for x in range(0, w, tile_step_x):
-                # Ambil tile referensi
-                y_end = min(y + tile_size[0], h)
-                x_end = min(x + tile_size[1], w)
+                    # Ambil tile referensi dan tile saat ini
+                    ref_tile = reference_image[y:y_end, x:x_end]
+                    current_tile = current_image[y:y_end, x:x_end]
 
-                ref_tile = reference_image[y:y_end, x:x_end]
-
-                accumulated_tile = np.zeros_like(ref_tile)
-                total_weight_tile = np.zeros_like(ref_tile[..., 0])
-
-                # Proses setiap frame pada tile
-                for i, image in enumerate(images_float):
-                    current_tile = image[y:y_end, x:x_end]
-
-                    # Hitung similarity
+                    # Hitung perbedaan dan similarity
                     difference = np.abs(current_tile - ref_tile)
                     similarity = np.exp(-np.sum(difference, axis=-1) / motion_threshold)
                     similarity = np.clip(similarity, 0.01, 1)
 
-                    # Akumulasi tile berbobot
-                    accumulated_tile += current_tile * similarity[..., np.newaxis]
-                    total_weight_tile += similarity
+                    # Akumulasi hasil untuk tile
+                    weight_map[y:y_end, x:x_end] += similarity
+                    final_image[y:y_end, x:x_end] += current_tile * similarity[..., np.newaxis]
 
-                # Normalisasi tile hasil
-                final_tile = accumulated_tile / (total_weight_tile[..., np.newaxis] + 1e-6)
+            print(f"Gambar ke-{i+1}/{len(images)} selesai diproses.")
 
-                # Tempelkan hasil ke posisi tile di gambar akhir
-                final_image[y:y_end, x:x_end] += final_tile
-                weight_map[y:y_end, x:x_end] += 1
-
-                processed_tiles += 1
-                print(f"Tile ke-{processed_tiles}/{total_tiles} (lokasi: y={y}-{y_end}, x={x}-{x_end}) selesai diproses.")
-
-        # Normalisasi gambar akhir untuk area overlap
+        # Normalisasi hasil akhir
         final_image = final_image / (weight_map[..., np.newaxis] + 1e-6)
-
         final_image = np.clip(final_image, 0, 255).astype(np.uint8)
-        print("Pengurangan noise selesai dengan pendekatan tile berbasis similarity.")
+
+        print("Pengurangan noise selesai dengan optimalisasi RAM.")
         return final_image
 
 
 
-    def save_image(self, image, output_path):
-        print(f"Menyimpan gambar ke path: {output_path}")
-        cv2.imwrite(output_path, image)
+    def save_image(self, image, output_path, quality=100):
+        print(f"Menyimpan gambar ke path: {output_path} dengan kualitas {quality}")
+        # Menyimpan gambar dengan kualitas tertentu
+        cv2.imwrite(output_path, image, [cv2.IMWRITE_JPEG_QUALITY, quality])
 
 
 def main(db_path, output_path):
@@ -143,7 +128,7 @@ def main(db_path, output_path):
 
     # Perform image stacking with MFNR
     if images:
-        mfnr_image = image_processor.apply_mfnr(images)
+        mfnr_image = image_processor.apply_mfnr_with_disk(images)
         image_processor.save_image(mfnr_image, output_path)
         print(f"Pengurangan noise MFNR selesai! Hasil disimpan di: {output_path}")
     else:

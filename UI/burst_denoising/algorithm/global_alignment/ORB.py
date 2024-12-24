@@ -289,8 +289,14 @@ def main(db_path, use_gpu=True):
         # Hapus gambar di folder debug setelah semuanya selesai
         processor.delete_debug_images()
 
-    print("Proses selesai.")
+        # Menghapus file warp matrix setelah digunakan
+        print("Menghapus file warp matrix...")
+        for warp_matrix_file in warp_matrices:
+            if os.path.exists(warp_matrix_file):
+                os.remove(warp_matrix_file)
+                print(f"File warp matrix {warp_matrix_file} dihapus.")
 
+    print("Proses selesai.")
 
 if __name__ == "__main__":
     db_path = "pixel_refine_database.db"  # Path ke database Anda
