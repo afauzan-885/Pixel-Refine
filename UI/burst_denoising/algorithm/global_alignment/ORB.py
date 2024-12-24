@@ -40,7 +40,7 @@ class ORBAlgorithm:
             resized_image = cv2.resize(image, (size[1], size[0]), interpolation=cv2.INTER_LINEAR)  # CPU implementation
         return resized_image
 
-    def calculate_global_alignment(self, base_image, target_image, warp_mode=cv2.MOTION_EUCLIDEAN):
+    def calculate_global_alignment(self, base_image, target_image, warp_mode=cv2.MOTION_HOMOGRAPHY):
         """
         Optimized global alignment using ORB (OBF) features with pyramid scaling on GPU (OpenCL) or CPU.
         """
@@ -101,7 +101,7 @@ class ORBAlgorithm:
             # Compute the homography (warp matrix) using RANSAC
             try:
                 print("Menghitung homografi pada skala ini...")
-                warp_matrix, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+                warp_matrix, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 3.0)
             except cv2.error as e:
                 print(f"Gagal menghitung homografi pada skala {scale}: {e}")
                 continue
@@ -110,7 +110,7 @@ class ORBAlgorithm:
         return warp_matrix
 
 
-    def compensate_global_motion(self, base_image, warp_matrix, warp_mode=cv2.MOTION_EUCLIDEAN):
+    def compensate_global_motion(self, base_image, warp_matrix, warp_mode=cv2.MOTION_HOMOGRAPHY):
         """
         Applies global motion compensation using the warp matrix calculated by AKAZE features.
         """
@@ -256,7 +256,7 @@ def main(db_path, use_gpu=True):
         warp_matrices = manager.list([])
 
         # Step 1: Proses seluruh gambar untuk menghitung global alignment
-        with ProcessPoolExecutor(max_workers=3) as executor:
+        with ProcessPoolExecutor(max_workers=4) as executor:
             futures = []
             for i in range(1, len(image_paths)):
                 print(f"Memproses alignment gambar ke-{i + 1} dari {len(image_paths)}...")
@@ -270,7 +270,7 @@ def main(db_path, use_gpu=True):
                 print(result)
 
         # Step 2: Setelah alignment selesai, proses compensate global motion
-        with ProcessPoolExecutor(max_workers=4) as executor:
+        with ProcessPoolExecutor(max_workers=5) as executor:
             futures = []
             for i, warp_matrix_file in enumerate(warp_matrices):
                 target_image_path = image_paths[i + 1]  # Target images after the base image
