@@ -112,9 +112,10 @@ class MedianWeighting:
 
 
 
-    def save_image(self, image, output_path):
-        print(f"Menyimpan gambar ke path: {output_path}")
-        cv2.imwrite(output_path, image)
+    def save_image(self, image, output_path, quality=100):
+        print(f"Menyimpan gambar ke path: {output_path} dengan kualitas {quality}")
+        # Menyimpan gambar dengan kualitas tertentu
+        cv2.imwrite(output_path, image, [cv2.IMWRITE_JPEG_QUALITY, quality])
 
 
 def main(db_path, output_path):
