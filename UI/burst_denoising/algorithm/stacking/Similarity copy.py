@@ -4,7 +4,6 @@ import numpy as np
 import os
 import sqlite3
 import h5py
-from tqdm import tqdm 
 
 class SimilarityAlgorithm:
     def __init__(self, db_path):
@@ -43,14 +42,7 @@ class SimilarityAlgorithm:
                 print(f"Peringatan: Gambar {image_path} gagal dimuat.")
         return images
 
-    def raised_cosine_window(self, tile_size):
-        """Membuat raised cosine window untuk blending."""
-        y = np.hanning(tile_size[0])
-        x = np.hanning(tile_size[1])
-        window = np.outer(y, x)
-        return window
-
-    def similarity_mfnr(self, images, tile_size=(50, 50), overlap=0.3, motion_threshold=15.0):
+    def apply_mfnr_with_disk(self, images, tile_size=(64, 64), overlap=0.3, motion_threshold=30.0):
         print("Melakukan pengurangan noise menggunakan MFNR dengan optimalisasi RAM...")
 
         # Gambar referensi
@@ -63,64 +55,35 @@ class SimilarityAlgorithm:
         tile_step_y = int(tile_size[0] * (1 - overlap))
         tile_step_x = int(tile_size[1] * (1 - overlap))
 
-        # Geser vertikal setengah tinggi tile untuk pola batu bata
-        vertical_offset = tile_size[0] // 2  
-
         final_image = np.zeros_like(reference_image)
         weight_map = np.zeros((h, w), dtype=np.float32)
 
-        # Raised cosine window untuk blending
-        cosine_window = self.raised_cosine_window(tile_size)
-
         # Proses gambar satu per satu
         for i, image_path in enumerate(images):
-            print(f"Memproses gambar {i+1}/{len(images)}...")  # Pesan konsol biasa untuk memberi tahu proses
+            print(f"Memproses gambar ke-{i+1}/{len(images)}...")
 
-            # Muat gambar ke dalam memori (buffer gambar)
+            # Muat gambar ke dalam memori
             current_image = np.array(image_path, dtype=np.float32)
 
-            # Total jumlah tile untuk progress bar internal
-            total_tiles = (h // tile_step_y + 1) * (w // tile_step_x + 1)
+            # Iterasi melalui tile
+            for y in range(0, h, tile_step_y):
+                for x in range(0, w, tile_step_x):
+                    # Batas tile
+                    y_end = min(y + tile_size[0], h)
+                    x_end = min(x + tile_size[1], w)
 
-            with tqdm(total=total_tiles, desc=f"Tile untuk gambar {i+1}", unit="tile") as tile_bar:
-                # Iterasi melalui tile dengan pola batu bata
-                for y in range(0, h, tile_step_y):
-                    # Geser setiap baris ganjil secara horizontal
-                    offset_x = vertical_offset if (y // tile_step_y) % 2 == 1 else 0  
+                    # Ambil tile referensi dan tile saat ini
+                    ref_tile = reference_image[y:y_end, x:x_end]
+                    current_tile = current_image[y:y_end, x:x_end]
 
-                    for x in range(-offset_x, w, tile_step_x):
-                        # Batasi koordinat tile agar tetap dalam batas gambar
-                        y_end = min(y + tile_size[0], h)
-                        x_end = min(x + tile_size[1], w)
-                        x_start = max(x, 0)
+                    # Hitung perbedaan dan similarity
+                    difference = np.abs(current_tile - ref_tile)
+                    similarity = np.exp(-np.sum(difference, axis=-1) / motion_threshold)
+                    similarity = np.clip(similarity, 0.01, 1)
 
-                        # Ukuran aktual tile yang mungkin lebih kecil dari tile_size
-                        tile_height = y_end - y
-                        tile_width = x_end - x_start
-
-                        # Ambil tile referensi dan tile saat ini
-                        ref_tile = reference_image[y:y_end, x_start:x_end]
-                        current_tile = current_image[y:y_end, x_start:x_end]
-
-                        # Raised cosine window untuk tile ini
-                        window = cosine_window[:tile_height, :tile_width]
-
-                        # **Hitung Dz dan Az secara vektorisasi (seluruh tile sekaligus)**
-                        # Az = np.mean(current_tile)
-                        Dz = np.mean(np.abs(current_tile - ref_tile))
-
-                        # Hitung pembobotan berbasis threshold pada tingkat tile
-                        similarity_weight = (
-                            1.0 if Dz < motion_threshold else np.exp(-Dz / motion_threshold)
-                        )
-
-                        # Terapkan raised cosine window dan bobot ke seluruh tile
-                        weighted_tile = current_tile * window[..., np.newaxis] * similarity_weight
-                        weight_map[y:y_end, x_start:x_end] += window * similarity_weight
-                        final_image[y:y_end, x_start:x_end] += weighted_tile
-
-                        # Update progress bar untuk tile
-                        tile_bar.update(1)
+                    # Akumulasi hasil untuk tile
+                    weight_map[y:y_end, x:x_end] += similarity
+                    final_image[y:y_end, x:x_end] += current_tile * similarity[..., np.newaxis]
 
             print(f"Gambar ke-{i+1}/{len(images)} selesai diproses.")
 
@@ -130,7 +93,9 @@ class SimilarityAlgorithm:
 
         print("Pengurangan noise selesai dengan optimalisasi RAM.")
         return final_image
-    
+
+
+
     def save_image(self, image, output_path, quality=100):
         print(f"Menyimpan gambar ke path: {output_path} dengan kualitas {quality}")
         # Menyimpan gambar dengan kualitas tertentu
@@ -163,7 +128,7 @@ def main(db_path, output_path):
 
     # Perform image stacking with MFNR
     if images:
-        mfnr_image = image_processor.similarity_mfnr(images)
+        mfnr_image = image_processor.apply_mfnr_with_disk(images)
         image_processor.save_image(mfnr_image, output_path)
         print(f"Pengurangan noise MFNR selesai! Hasil disimpan di: {output_path}")
     else:
