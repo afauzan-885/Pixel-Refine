@@ -2,13 +2,15 @@ from PyQt6.QtWidgets import QStackedWidget, QWidget, QVBoxLayout, QLabel
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
 
+from UI.settings.General.Language import language_config
 
-from .burst_denoising.BurstDenoisingPage import BurstDenoisingPage
+
+from .enhance_stack.EnhanceStackPage import EnhanceStackPage
 from .settings.SettingPage import SettingPage
 
 class Pages:
-    BURST_DENOSING = "Burst Denoising"
-    TONE_MAPPING = "Tone Mapping"
+    ENHANCE_STACK = "Enhance Stack"
+    HDR_RECONTRUCTION = "HDR Recontruction"
     SETTINGS = "Setting"
 
 
@@ -18,8 +20,8 @@ class MainContent(QStackedWidget):
 
         # Peta halaman
         self.pages = {
-            Pages.BURST_DENOSING: BurstDenoisingPage,
-            Pages.SETTINGS: SettingPage,
+            Pages.ENHANCE_STACK: EnhanceStackPage,
+            # Pages.SETTINGS: SettingPage,
         }
 
         # halaman berdasarkan peta halaman
@@ -64,7 +66,7 @@ class MainContent(QStackedWidget):
             layout.addWidget(icon_label)
 
         # Tambahkan teks
-        label = QLabel(f"{page_name} menu under development")
+        label = QLabel(language_config.UNDER_DEVELOPMENT.format(page_name=page_name))
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         label.setStyleSheet("""
             color: #555555;

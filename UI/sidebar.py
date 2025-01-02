@@ -46,8 +46,8 @@ class Sidebar(QWidget):
         # Tombol navigasi
         self.nav_buttons = []
         button_data = [
-            ("Burst Denoising", "UI/resources/icon/burst_denosing.png"),
-            ("Tone Mapping", "UI/resources/icon/Tone_Mapping.png"),
+            ("Enhance Stack", "UI/resources/icon/enhance_stack.png"),
+            ("HDR Recontruction", "UI/resources/icon/hdr_recontruction.png"),
         ]
         for i, (text, icon_path) in enumerate(button_data):
             btn = self.create_nav_button(text, icon_path, i)

@@ -1,5 +1,7 @@
 from PyQt6.QtWidgets import QGraphicsPixmapItem, QLabel
 from PyQt6.QtCore import Qt, QEvent, QTimer
+
+from UI.settings.General.Language import language_config
 from .multi_threading import RawImageProcessingThread
 
 
@@ -31,7 +33,7 @@ def update_preview_panel(self, selected_paths):
 
     if selected_paths:
         # Tampilkan pesan loading sementara gambar diproses
-        label = QLabel("Processing images, please wait...")
+        label = QLabel(language_config.UPDATE_PREVIEW_PANEL_MESSAGE_LOADING_IMAGE)
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Tambahkan label ke scene dengan QGraphicsProxyWidget
@@ -49,7 +51,7 @@ def update_preview_panel(self, selected_paths):
         self.original_pixmap = None
 
         # Tampilkan pesan bahwa tidak ada gambar yang dipilih
-        label = QLabel("No images selected.")
+        label = QLabel(language_config.UPDATE_PREVIEW_PANEL_MESSAGE_NO_IMAGE_SELECTED)
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Tambahkan label ke scene dengan QGraphicsProxyWidget
@@ -134,7 +136,7 @@ def handler_zoom(self, source, event):
     Handles mouse wheel events for zoom in/out and dragging.
 
     Args:
-        self: Reference to the `BurstDenoisingPage` self.
+        self: Reference to the `EnhanceStackPage` self.
         source: The source widget that triggered the event.
         event: The event to be handled.
     """

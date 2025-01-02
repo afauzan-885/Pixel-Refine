@@ -13,6 +13,8 @@ import subprocess
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPainter
 
+from UI.settings.General.Language import language_config
+
 from .logic.workflow_process import process_algorithm
 from .logic.image_handler import handle_import_button, handle_delete_button
 
@@ -34,7 +36,7 @@ from .components.progress_section import ProgressSection
 from .logic.database_manager import DatabaseManager
 
 
-class BurstDenoisingPage(QWidget):
+class EnhanceStackPage(QWidget):
     """Main Burst Denoising Page with modular components."""
 
     def __init__(self):
@@ -151,7 +153,8 @@ class BurstDenoisingPage(QWidget):
         """
         self.progress_section.progress_bar.setValue(value)
         self.progress_section.progress_bar.setFormat(
-            f"{value}% ({images_left} images left)"
+            language_config.UPDATE_PROGRESS_BAR_STATUS.format(
+                value=value, images_left=images_left)
         )
 
     def on_import_complete(self, successful_images):
@@ -161,8 +164,10 @@ class BurstDenoisingPage(QWidget):
         self.right_panel.load_image_paths()
         QMessageBox.information(
             self,
-            "Import Complete",
-            f"{successful_images} images have been successfully imported.",
+            language_config.ON_IMPORT_COMPLETE_STATUS,
+            language_config.ON_IMPORT_COMPLETE_MESSAGES.format(
+                successful_images=successful_images
+            ),
         )
 
         # Reset progress bar to 0%

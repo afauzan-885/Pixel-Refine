@@ -1,5 +1,7 @@
 from PyQt6.QtWidgets import QWidget, QHBoxLayout, QPushButton
 
+from UI.settings.General.Language import language_config
+
 class TopBar(QWidget):
     """Top bar with Import and Delete buttons."""
     def __init__(self):
@@ -7,7 +9,7 @@ class TopBar(QWidget):
         self.layout = QHBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
 
-        self.import_button = QPushButton("Import Image")
+        self.import_button = QPushButton(language_config.TOPBAR_IMPORT_BUTTON_TEXT)
         self.import_button.setStyleSheet("""
             QPushButton {
                 padding: 8px 16px;
@@ -21,7 +23,7 @@ class TopBar(QWidget):
             }
         """)
 
-        self.delete_button = QPushButton("Delete")
+        self.delete_button = QPushButton(language_config.TOPBAR_DELETE_BUTTON_TEXT)
         self.delete_button.setStyleSheet("""
             QPushButton {
                 padding: 8px 16px;

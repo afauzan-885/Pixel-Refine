@@ -122,6 +122,10 @@ class RunningAlgorithmThreading(BaseMultiThreading):
             virtualenv_path, script_path, algorithm_name = task
             try:
                 print(f"Running {algorithm_name}...")
+                
+                current_index = self.items.index(task)
+                progress = int((current_index / len(self.items)) * 100)
+                self.progress_signal.emit(progress, len(self.items) - current_index)
                 subprocess.run([virtualenv_path, script_path], check=True)
                 return f"{algorithm_name} completed successfully."
             except subprocess.CalledProcessError as e:

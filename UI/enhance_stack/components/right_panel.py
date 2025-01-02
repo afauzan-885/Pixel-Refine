@@ -70,7 +70,7 @@ class RightPanel(QWidget):
                 self.parent().resume_preview_update()
 
     def select_list_preview(self):
-        """Signal to notify selection change to BurstDenoisingPage."""
+        """Signal to notify selection change to EnhanceStackPage."""
         selected_paths = self.get_select_image_list()
 
         # Jika lebih dari satu gambar dipilih, hentikan proses preview sebelumnya dan tampilkan pesan

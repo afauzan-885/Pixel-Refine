@@ -1,1 +1,1 @@
-APP_VERSION = "0.0.6 Alpha"
+APP_VERSION = "0.1.0 Beta"
