@@ -2,6 +2,7 @@ from PyQt6.QtWidgets import QWidget, QHBoxLayout, QProgressBar, QPushButton, QFi
 from PyQt6.QtCore import pyqtSignal
 import os
 from PIL import Image
+import cv2
 
 from UI.settings.General.Language import language_config
 
@@ -63,7 +64,7 @@ class ProgressSection(QWidget):
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Image As",
-            "",
+            os.path.basename(latest_image_path),  # Use the original file name
             "JPEG (*.jpg *.jpeg);;TIFF (*.tif *.tiff);;PNG (*.png)"
         )
 
@@ -72,51 +73,24 @@ class ProgressSection(QWidget):
 
         # Determine the file format from the file extension
         file_extension = os.path.splitext(file_path)[-1].lower()
-        if file_extension in [".jpg", ".jpeg"]:
-            format = "JPEG"
-        elif file_extension in [".tif", ".tiff"]:
-            format = "TIFF"
-        elif file_extension == ".png":
-            format = "PNG"
-        else:
+        if file_extension not in [".jpg", ".jpeg", ".tif", ".tiff", ".png"]:
             QMessageBox.warning(self, "Invalid Format", "Unsupported file format.")
             return
 
         try:
-            # Load the image from the latest path and save it in the chosen format
-            image = Image.open(latest_image_path)
-            image.save(file_path, format)
+            # Load the image with original bit depth using OpenCV
+            image = cv2.imread(latest_image_path, cv2.IMREAD_UNCHANGED)
+            if image is None:
+                QMessageBox.critical(self, "Error", "Failed to load the image.")
+                return
 
-            # Confirm successful save
-            QMessageBox.information(self, "Success", f"Image saved successfully as {file_path}.")
-
-            # Remove the original image file
-            os.remove(latest_image_path)
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to save image: {e}")
-            # Ask the user for the bit depth if the format is TIFF
-            if format == "TIFF":
-                bit_depth, ok = QInputDialog.getItem(
-                    self,
-                    "Select Bit Depth",
-                    "Choose the bit depth for TIFF:",
-                    ["8-bit", "16-bit"],
-                    0,
-                    False
-                )
-                if not ok:
-                    return  # User canceled the bit depth selection
-
-            # Load the image from the latest path and save it in the chosen format
-            image = Image.open(latest_image_path)
-            if format == "TIFF" and bit_depth == "16-bit":
-                image = image.convert("I;16")  # Convert to 16-bit grayscale
-
-            # Use the original file name for saving
-            original_file_name = os.path.basename(latest_image_path)
-            file_path = os.path.join(os.path.dirname(file_path), original_file_name)
-
-            image.save(file_path, format)
+            # Save the image using OpenCV
+            if file_extension in [".jpg", ".jpeg"]:
+                cv2.imwrite(file_path, image, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            elif file_extension in [".tif", ".tiff"]:
+                cv2.imwrite(file_path, image)  # OpenCV saves TIFF with original bit depth by default
+            elif file_extension == ".png":
+                cv2.imwrite(file_path, image, [cv2.IMWRITE_PNG_COMPRESSION, 5])
 
             # Confirm successful save
             QMessageBox.information(self, "Success", f"Image saved successfully as {file_path}.")
