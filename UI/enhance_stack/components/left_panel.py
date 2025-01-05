@@ -44,7 +44,8 @@ class LeftPanel(QWidget):
             ("None", language_config.NONE_ALIGNMENT_DESCRIPTION),
             ("Farneback Optical Flow", language_config.FARNEBACK_DESCRIPTION),
             ("AKAZE", language_config.AKAZE_DESCRIPTION),
-            ("ORB", language_config.ORB_DESCRIPTION)
+            ("ORB", language_config.ORB_DESCRIPTION),
+            ("EEC", language_config.ORB_DESCRIPTION)
         ]
         alignment_items, alignment_tooltips = zip(*alignment_options)
         self.alignment_dropdown, alignment_widget = dropdown_section(

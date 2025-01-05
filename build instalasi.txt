@@ -1,0 +1,1 @@
+python -m nuitka --onefile --include-data-dir=UI=UI --include-data-dir=UI\enhance_stack\algorithm\alignment=UI\enhance_stack\algorithm\alignment --include-data-dir=UI\enhance_stack\algorithm\denoising=UI\enhance_stack\algorithm\denoising --windows-icon-from-ico=UI\resources\image\Logo_Pixel_Refine.png --plugin-enable=pyqt6 --output-filename="Pixel Refine" main.py

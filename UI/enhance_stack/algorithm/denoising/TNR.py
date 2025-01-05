@@ -177,7 +177,7 @@ def main(db_path, output_path):
     image_processor = Median(db_path)
 
     # Step 1: Check "database/align/global" folder for HDF5 file
-    global_hdf5_path = "database/align/global/aligned_images.h5"
+    global_hdf5_path = "database/align/aligned_images.h5"
     if os.path.exists(global_hdf5_path):
         print("Data ditemukan di path 'database/align/global'. Memuat data dari HDF5...")
         images = image_processor.load_images_from_hdf5(global_hdf5_path)

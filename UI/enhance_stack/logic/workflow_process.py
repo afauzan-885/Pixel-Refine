@@ -1,10 +1,15 @@
 import os
+import sys
 
 from UI.settings.General.Language import language_config
 from .multi_threading import RunningAlgorithmThreading
 
 def process_algorithm(self, virtualenv_path=r"venv/Scripts/python.exe", base_path="UI/enhance_stack/algorithm"):
     """Handle algorithm processing when 'Process' button is clicked."""
+
+    # Handle PyInstaller bundling
+    if getattr(sys, 'frozen', False):  # Check if running from a bundled executable
+        base_path = os.path.join(sys._MEIPASS, base_path)  # Adjust base_path to temporary extraction location
 
     # Get selected algorithms and stacking method
     alignment = self.left_panel.alignment_dropdown.currentText()

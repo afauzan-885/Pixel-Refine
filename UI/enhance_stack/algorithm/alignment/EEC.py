@@ -6,7 +6,7 @@ import glob
 import concurrent.futures
 
 class EECAlgorithm:
-    def __init__(self, db_path, use_gpu=False, debug_folder="database/align/global/debug_images", hdf5_path="database/align/global/aligned_images.h5"):
+    def __init__(self, db_path, use_gpu=False, debug_folder="database/align/global/debug_images", hdf5_path="database/align/aligned_images.h5"):
         self.db_path = db_path
         self.use_gpu = use_gpu
         self.debug_folder = debug_folder

@@ -86,7 +86,7 @@ class MedianAlgorithm(QThread):
             image_processor = MedianAlgorithm(db_path)
 
             self.progress_update.emit(0, language_config.RUN_IMAGE_PROCESS_STARTED)
-            global_hdf5_path = "database/align/global/aligned_images.h5"
+            global_hdf5_path = "database/align/aligned_images.h5"
             total_images = 0
             if os.path.exists(global_hdf5_path):
                 with h5py.File(global_hdf5_path, 'r') as h5f:

@@ -54,7 +54,7 @@ class SimilarityAlgorithm(QThread):
         window = np.outer(y, x)
         return window
     
-    def similarity_mfnr(self, images, tile_size=(32, 32), overlap=0.25, motion_threshold=0.035):
+    def similarity_mfnr(self, images, tile_size=(32, 32), overlap=0.20, motion_threshold=0.065, noise_threshold=0.1):
         if not images:
             raise ValueError(language_config.SIMILARITY_MNFR_LOAD_FAILED)
 
@@ -105,8 +105,20 @@ class SimilarityAlgorithm(QThread):
 
                     window = cosine_window[:tile_height, :tile_width]
 
+                    # Temporal Noise Estimation (menggunakan perbedaan antar gambar berturut-turut)
+                    temporal_noise = np.abs(current_tile - reference_image_normalized[y:y_end, x_start:x_end])
+
+                    # Spatial Noise Estimation (menggunakan perbedaan antar piksel dalam tile)
+                    spatial_noise = np.abs(current_tile - np.mean(current_tile))
+
+                    # Noise Mask: Menggabungkan noise temporal dan spasial
+                    noise_mask = np.maximum(temporal_noise, spatial_noise)
+
+                    # Adaptive Noise Thresholding: Menyesuaikan threshold berdasarkan estimasi noise
+                    adaptive_threshold = motion_threshold + noise_threshold * np.mean(noise_mask)
+
                     Dz = np.mean(np.abs(current_tile - ref_tile))
-                    similarity_weight = 1.0 if Dz < motion_threshold else np.exp(-Dz / motion_threshold)
+                    similarity_weight = 1.0 if Dz < adaptive_threshold else np.exp(-Dz / adaptive_threshold)
 
                     weighted_tile = current_tile * window[..., np.newaxis] * similarity_weight
                     weight_map[y:y_end, x_start:x_end] += window * similarity_weight
@@ -138,7 +150,7 @@ class SimilarityAlgorithm(QThread):
             image_processor = SimilarityAlgorithm(db_path)
 
             self.progress_update.emit(0, language_config.RUN_IMAGE_PROCESS_STARTED)
-            global_hdf5_path = "database/align/global/aligned_images.h5"
+            global_hdf5_path = "database/align/aligned_images.h5"
             total_images = 0
             if os.path.exists(global_hdf5_path):
                 with h5py.File(global_hdf5_path, 'r') as h5f:

@@ -1,54 +1,69 @@
+import os
 import sys
-from PyQt6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QWidget
-from UI.sidebar import Sidebar
-from UI.main_content import MainContent
+from PyQt6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QWidget, QMessageBox
+from PyQt6.QtGui import QIcon
+from UI.sidebar import Sidebar  # Pastikan path ini benar
+from UI.main_content import MainContent # Pastikan path ini benar
 import config
 
-
-class MainWindow(QMainWindow):
+class PixelRefineMain(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"Pixel Refine - Version {config.APP_VERSION}") 
-        self.setGeometry(100, 100, 1200, 600)
+
+        # Ikon dan Judul Jendela
+        self.setWindowIcon(QIcon("UI/resources/image/Logo_Pixel_Refine.png")) # Pastikan path ini benar
+        self.setWindowTitle(f"Pixel Refine - Version {config.APP_VERSION}")
         self.setMinimumSize(1200, 600)
 
-        # Sidebar
-        self.sidebar = Sidebar(self.toggle_sidebar, self.switch_page)
+        # Path Folder dan Pembuatan Folder
+        self.database_folder = "database" # Path folder database utama
+        self.align_folder = os.path.join(self.database_folder, "align")
+        self.stack_folder = os.path.join(self.database_folder, "stack")
+        self.create_folders_if_needed()
 
-        # Main Content
+        # Sidebar dan Konten Utama
+        self.sidebar = Sidebar(self.toggle_sidebar, self.switch_page)
         self.main_content = MainContent()
 
-        # Layout utama
+        # Layout Utama
         self.main_layout = QHBoxLayout()
         self.main_layout.addWidget(self.sidebar)
         self.main_layout.addWidget(self.main_content)
-        self.main_layout.setStretch(0, 1)  # Sidebar width
-        self.main_layout.setStretch(1, 4)  # Main content width
-
-        # Hilangkan margin dan spacing
-        self.main_layout.setContentsMargins(0, 0, 0, 0)
-        self.main_layout.setSpacing(0)
+        self.main_layout.setStretch(0, 1)  # Lebar Sidebar
+        self.main_layout.setStretch(1, 4)  # Lebar Konten Utama
+        self.main_layout.setContentsMargins(0, 0, 0, 0) # Hilangkan Margin
+        self.main_layout.setSpacing(0) # Hilangkan Spasi
 
         container = QWidget()
         container.setLayout(self.main_layout)
         self.setCentralWidget(container)
 
-        # Secara otomatis buka halaman pertama
+        # Buka Halaman Pertama Saat Aplikasi Dimulai
         self.switch_page(0)
 
+    def create_folders_if_needed(self):
+        """Memeriksa dan membuat folder jika belum ada."""
+        try:
+            os.makedirs(self.database_folder, exist_ok=True) # Pastikan folder database utama ada
+            os.makedirs(self.align_folder, exist_ok=True)
+            os.makedirs(self.stack_folder, exist_ok=True)
+        except OSError as e:
+            print(f"Error creating folders: {e}")
+            QMessageBox.critical(self, "Error", f"Terjadi kesalahan saat membuat folder: {e}. Aplikasi akan ditutup.")
+            sys.exit(1) # Keluar dari aplikasi dengan kode error
+
     def switch_page(self, index):
-        """Switch pages in the main content."""
+        """Mengganti halaman di konten utama."""
         self.main_content.setCurrentIndex(index)
         for i, btn in enumerate(self.sidebar.nav_buttons):
             btn.setChecked(i == index)
 
     def toggle_sidebar(self):
-        """Handle additional actions when toggling the sidebar."""
+        """Menangani aksi tambahan saat sidebar di-toggle."""
         pass
-
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = MainWindow()
+    window = PixelRefineMain()
     window.show()
     sys.exit(app.exec())
