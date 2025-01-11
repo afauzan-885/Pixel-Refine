@@ -8,14 +8,13 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
-import subprocess
-
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPainter
 
+from UI.enhance_stack.logic.workflow_process import process_algorithm
 from UI.settings.General.Language import language_config
 
-from .logic.workflow_process import process_algorithm
+# from .logic.workflow_process import process_algorithm
 from .logic.image_handler import handle_import_button, handle_delete_button
 
 from .logic.image_preview import (
@@ -99,19 +98,25 @@ class EnhanceStackPage(QWidget):
 
     def update_preview_panel(self, selected_paths):
         update_preview_panel(self, selected_paths)
-   
+        
     def start_image_processing(self, selected_paths):
         start_image_processing(self, selected_paths)
         
+    def image_status_info(self, proxy):
+        image_status_info(self, proxy)
+        
     def handle_image_ready(self, pixmap):
         handle_image_ready(self, pixmap)
-        
+
     def handle_image_error(self, error_message):
         handle_image_error(self, error_message)
     
-    def image_status_info(self, proxy):
-        image_status_info(self, proxy)
-
+    def display_image(self, pixmap):
+        display_image(self, pixmap)
+        
+    def scale_image(self):
+        scale_image(self)
+    
     def pause_preview_update(self):
         """Temporarily disable preview panel updates."""
         self.update_preview_enabled = False
@@ -120,20 +125,15 @@ class EnhanceStackPage(QWidget):
         """Re-enable preview panel updates."""
         self.update_preview_enabled = True
 
-    def fit_image_to_panel(self):
-        fit_image_to_panel(self)
 
     def resizeEvent(self, event):
         """Handles window resizing by adjusting the image size to fit the preview panel.
             This method ensures the image remains scaled according to the new window size."""
         super().resizeEvent(event)
         self.fit_image_to_panel()
-
-    def scale_image(self):
-        scale_image(self)
-
-    def display_image(self, pixmap):
-        display_image(self, pixmap)
+        
+    def fit_image_to_panel(self):
+        fit_image_to_panel(self)
 
     def eventFilter(self, source, event):
         return handler_zoom(self, source, event) or super().eventFilter(source, event)
@@ -143,10 +143,11 @@ class EnhanceStackPage(QWidget):
 
     def handle_delete_button(self):
         handle_delete_button(self)
-        
+
     def process_algorithm(self):
         process_algorithm(self)
-     
+        
+
     def update_progress_bar(self, value, images_left):
         """
         Updates the progress bar and displays remaining images.

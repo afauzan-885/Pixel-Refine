@@ -1,3 +1,4 @@
+import os
 import subprocess
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtGui import QPixmap
@@ -54,7 +55,6 @@ class BaseMultiThreading(QThread):
     def stop(self):
         """Set the running flag to False to stop the thread."""
         self._is_running = False
-        
 class RawImageProcessingThread(BaseMultiThreading):
     """
     A special multithreading class for processing images of various formats.
@@ -108,4 +108,23 @@ class ImageImportThreading(BaseMultiThreading):
         super().__init__(import_task, image_paths, batch_size, delay_ms)
 
 class RunningAlgorithmThreading(BaseMultiThreading):
-    pass
+    def __init__(self, algorithm_tasks, virtualenv_path, base_path, batch_size=1, delay_ms=100):
+        self.virtualenv_path = virtualenv_path
+        self.base_path = base_path
+
+        def run_algorithm(task):
+            virtualenv_path, script_path, algorithm_name = task  # Pastikan unpacking sesuai dengan format tuple
+            try:
+                print(f"Running {algorithm_name}...")
+                subprocess.run([self.virtualenv_path, script_path], check=True)
+                return f"{algorithm_name} completed successfully."
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(f"Error running {algorithm_name}: {e}")
+            except FileNotFoundError as e:
+                raise RuntimeError(f"File not found for {algorithm_name}: {e}")
+            except Exception as e:
+                raise RuntimeError(f"Unexpected error for {algorithm_name}: {e}")
+
+        # Perbaiki list comprehension di sini untuk menangani tuple tiga elemen
+        tasks = [(virtualenv_path, os.path.join(base_path, p), n) for p, n in algorithm_tasks]
+        super().__init__(run_algorithm, tasks, batch_size, delay_ms)

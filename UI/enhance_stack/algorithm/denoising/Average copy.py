@@ -12,7 +12,8 @@ import PyQt6.QtGui as QtGui
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../../')))
 from UI.settings.General.Language import language_config
 
-class SimilarityAlgorithm(QThread):
+
+class AverageAlgorithm(QThread):
     progress_update = pyqtSignal(int, str)
     finished = pyqtSignal()
     error_signal = pyqtSignal(str)
@@ -27,22 +28,13 @@ class SimilarityAlgorithm(QThread):
             cursor.execute("SELECT path FROM images")
             return [row[0] for row in cursor.fetchall()]
 
-    # def load_images_from_hdf5(self, hdf5_path):
-    #     images = []
-    #     with h5py.File(hdf5_path, 'r') as h5f:
-    #         for key in h5f.keys():
-    #             image = np.array(h5f[key])
-    #             images.append(image)
-    #     return images
-    
-    def load_images_from_hdf5_streaming(hdf5_path):
-        """
-        Streaming untuk membaca gambar satu per satu dari file HDF5.
-        """
+    def load_images_from_hdf5(self, hdf5_path):
+        images = []
         with h5py.File(hdf5_path, 'r') as h5f:
             for key in h5f.keys():
-                yield np.array(h5f[key])  # Memuat hanya satu gambar ke memori setiap kali
-
+                image = np.array(h5f[key])
+                images.append(image)
+        return images
 
     def load_images_from_folder(self, folder_path):
         image_paths = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(('.png', '.jpg', '.jpeg'))]
@@ -55,99 +47,27 @@ class SimilarityAlgorithm(QThread):
             if image is not None:
                 images.append(image)
         return images
-    
-    def raised_cosine_window(self, tile_size):
-        """Membuat raised cosine window untuk blending."""
-        y = np.hanning(tile_size[0])
-        x = np.hanning(tile_size[1])
-        window = np.outer(y, x)
-        return window
-    
-    def similarity_mfnr(self, images, tile_size=(32, 32), overlap=0.20, motion_threshold=0.065, noise_threshold=0.1):
-        """
-        Multi-frame Noise Reduction (MFNR) dengan optimasi tile processing dan caching cosine window.
-        """
-        if not images:
-            raise ValueError(language_config.SIMILARITY_MNFR_LOAD_FAILED)
+
+    def stack_average_images(self, images):
+        if len(images) == 0:
+            raise ValueError(language_config.RUN_IMAGE_NOT_FOUND)
 
         dtype = images[0].dtype
-        if dtype != np.uint8 and dtype != np.uint16:
-            raise TypeError(language_config.SIMILARITY_MNFR_BIT_REQUIRED)
-
-        # Ambil gambar referensi
-        reference_image = np.array(images[0], dtype=np.float32)
-        h, w, _ = reference_image.shape
-
-        print(language_config.SIMILARITY_MNFR_TILE_SLICE.format(height=h, width=w, tile_size=tile_size))
-
-        # Langkah tile
-        tile_step_y = int(tile_size[0] * (1 - overlap))
-        tile_step_x = int(tile_size[1] * (1 - overlap))
-        vertical_offset = tile_size[0] // 2
-
-        # Hasil akhir dan peta bobot
-        final_image = np.zeros_like(reference_image, dtype=np.float32)
-        weight_map = np.zeros((h, w), dtype=np.float32)
-
-        # Precompute cosine window untuk caching
-        cosine_window = self.raised_cosine_window(tile_size)
+        stacked_image = np.zeros_like(images[0], dtype=np.float64)
 
         for i, image in enumerate(images):
+            if image is None:
+                continue
+
+            current_image = image.astype(np.float64)
+            stacked_image += current_image
+
             progress = int((i + 1) / len(images) * 100)
-            self.progress_update.emit(progress, language_config.RUN_IMAGE_PROCESSING.format(i=i+1, total_images=len(images)))
-            print(language_config.RUN_IMAGE_PROCESSING.format(i=i+1, total_images=len(images)))
+            self.progress_update.emit(progress, language_config.STACK_AVERAGE_IMAGES_PROCESS.format(current=i+1, total=len(images)))
 
-            current_image = np.array(image, dtype=np.float32)
-            if current_image.shape != reference_image.shape:
-                raise ValueError(language_config.SIMILARITY_MNFR_SIZE_FAILED.format(i=i+1))
-
-            # Normalisasi gambar ke rentang 0-1
-            current_image_normalized = current_image / np.iinfo(dtype).max
-            reference_image_normalized = reference_image / np.iinfo(dtype).max
-
-            # Proses tile satu per satu
-            for y in range(0, h, tile_step_y):
-                offset_x = vertical_offset if (y // tile_step_y) % 2 == 1 else 0
-                for x in range(-offset_x, w, tile_step_x):
-                    # Tentukan batas tile
-                    y_end = min(y + tile_size[0], h)
-                    x_end = min(x + tile_size[1], w)
-                    x_start = max(x, 0)
-
-                    tile_height = y_end - y
-                    tile_width = x_end - x_start
-
-                    # Ambil tile referensi dan saat ini
-                    ref_tile = reference_image_normalized[y:y_end, x_start:x_end]
-                    current_tile = current_image_normalized[y:y_end, x_start:x_end]
-
-                    # Gunakan cosine window yang sudah di-cache
-                    window = cosine_window[:tile_height, :tile_width]
-
-                    # Noise Estimation
-                    temporal_noise = np.abs(current_tile - ref_tile)
-                    spatial_noise = np.abs(current_tile - np.mean(current_tile))
-                    noise_mask = np.maximum(temporal_noise, spatial_noise)
-
-                    # Adaptive Threshold
-                    adaptive_threshold = motion_threshold + noise_threshold * np.mean(noise_mask)
-                    Dz = np.mean(np.abs(current_tile - ref_tile))
-                    similarity_weight = 1.0 if Dz < adaptive_threshold else np.exp(-Dz / adaptive_threshold)
-
-                    # Perbarui final_image dan weight_map
-                    weighted_tile = current_tile * window[..., np.newaxis] * similarity_weight
-                    weight_map[y:y_end, x_start:x_end] += window * similarity_weight
-                    final_image[y:y_end, x_start:x_end] += weighted_tile * np.iinfo(dtype).max  # Denormalisasi
-
-            print(language_config.SIMILARITY_MNFR_PROCESS_SUCCESS.format(i=i+1, count=len(images)))
-
-        # Normalisasi akhir
-        final_image = final_image / (weight_map[..., np.newaxis] + 1e-6)
-        final_image = np.clip(final_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype)
-
-        print(language_config.SIMILARITY_MNFR_PROCESS_FINISHED)
-        return final_image
-
+        stacked_image /= len(images)
+        stacked_image = np.clip(stacked_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype)
+        return stacked_image
 
     def save_image(self, image, output_path):
         cv2.imwrite(output_path, image)
@@ -157,13 +77,13 @@ class SimilarityAlgorithm(QThread):
             db_path = "pixel_refine_database.db"
             image_paths = self.get_all_image_paths()
             if not image_paths:
-                self.progress_update.emit(0, language_config.RUN_IMAGE_NOT_FOUND)
+                self.progress_update.emit(0, language_config.RUN_IMAGE_PROCESS_LOAD_FAILED)
                 self.finished.emit()
                 return
             reference_image_path = image_paths[0]
             reference_image_name = os.path.splitext(os.path.basename(reference_image_path))[0]
-            output_path = f"database/stack/{reference_image_name}_similarity_stack.tiff"
-            image_processor = SimilarityAlgorithm(db_path)
+            output_path = f"database/stack/{reference_image_name}_average_stack.tiff"
+            image_processor = AverageAlgorithm(db_path)
 
             self.progress_update.emit(0, language_config.RUN_IMAGE_PROCESS_STARTED)
             global_hdf5_path = "database/align/aligned_images.h5"
@@ -193,7 +113,7 @@ class SimilarityAlgorithm(QThread):
                     self.progress_update.emit(int((i/total_images)*100), language_config.RUN_IMAGE_PROCESS_LOAD_PROGRESS.format(current=i+1, total=total_images))
 
             if images:
-                stacked_image = self.similarity_mfnr(images)
+                stacked_image = self.stack_average_images(images)
                 image_processor.save_image(stacked_image, output_path)
                 self.progress_update.emit(100, language_config.RUN_IMAGE_PROCESS_STACK_SUCCESS.format(output_path=output_path))
             else:
@@ -206,7 +126,7 @@ class SimilarityAlgorithm(QThread):
 class ProcessWindows(QWidget):
     def __init__(self, db_path):
         super().__init__()
-        self.setWindowTitle(language_config.WINDOW_TITLE_SIMILARITY)
+        self.setWindowTitle(language_config.WINDOW_TITLE_AVERAGE)
         self.setFixedSize(300, 90)
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowTitleHint | Qt.WindowType.WindowCloseButtonHint)
         self.db_path = db_path
@@ -244,7 +164,7 @@ class ProcessWindows(QWidget):
     def start_processing(self):
         self.progress_bar.setValue(0)
         self.label_status.setText(language_config.WINDOW_START_PROCESSING)
-        self.processor_thread = SimilarityAlgorithm(self.db_path)
+        self.processor_thread = AverageAlgorithm(self.db_path)
         self.processor_thread.progress_update.connect(self.update_progress)
         self.processor_thread.error_signal.connect(self.show_error_message)
         self.processor_thread.finished.connect(self.process_finished)

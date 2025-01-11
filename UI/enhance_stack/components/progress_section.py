@@ -1,7 +1,6 @@
 from PyQt6.QtWidgets import QWidget, QHBoxLayout, QProgressBar, QPushButton, QFileDialog, QMessageBox, QInputDialog
 from PyQt6.QtCore import pyqtSignal
 import os
-from PIL import Image
 import cv2
 
 from UI.settings.General.Language import language_config
@@ -34,7 +33,55 @@ class ProgressSection(QWidget):
 
         # self.next_button = QPushButton("Next")
         self.process_button = QPushButton(language_config.PROGRESS_SECTION_PROCESS_BUTTON_TEXT)
+        self.process_button.setStyleSheet("""
+            QPushButton {
+                background-color: qlineargradient(
+                    spread:pad, x1:0, y1:0, x2:1, y2:1, 
+                    stop:0 #B2F2A0, stop:1 #66D966
+                );
+                color: #3C3939;
+                font-weight: bold;
+                border-radius: 10px;
+                font-size: 14px;
+                padding: 4px 8px;
+                border: 1px solid #66D966;
+            }
+            QPushButton:hover {
+                background-color: qlineargradient(
+                    spread:pad, x1:0, y1:0, x2:1, y2:1, 
+                    stop:0 #C7F3B8, stop:1 #82E582
+                );
+            }
+            QPushButton:pressed {
+                background-color: #56B856;
+            }
+        """)
+
         self.save_as_button = QPushButton(language_config.PROGRESS_SECTION_SAVE_BUTTON_TEXT)
+        self.save_as_button.setStyleSheet("""
+            QPushButton {
+                background-color: qlineargradient(
+                    spread:pad, x1:0, y1:0, x2:1, y2:1, 
+                    stop:0 #D3D3D3, stop:1 #A9A9A9
+                );
+                color: #3C3939;
+                border-radius: 10px;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 4px 8px;
+                border: 1px solid #A9A9A9;
+            }
+            QPushButton:hover {
+                background-color: qlineargradient(
+                    spread:pad, x1:0, y1:0, x2:1, y2:1, 
+                    stop:0 #E0E0E0, stop:1 #B8B8B8
+                );
+            }
+            QPushButton:pressed {
+                background-color: #808080;
+            }
+        """)
+
      
         self.layout.addWidget(self.progress_bar, 2)
         # self.layout.addWidget(self.next_button, 1)
@@ -53,7 +100,7 @@ class ProgressSection(QWidget):
         # Get all image files in the folder and sort them by modification time
         image_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
         if not image_files:
-            QMessageBox.warning(self, "No Images", "No images available in the folder.")
+            QMessageBox.warning(self, "No Images", "There are no processed images to save.")
             return
 
         # Sort by modification time (last modified) and pick the latest file

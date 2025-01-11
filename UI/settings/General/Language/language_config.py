@@ -35,9 +35,10 @@ PROCESS_ALGORITHM_PROCESS_SKIPPED = "All processes are skipped. Please select at
 # General message
 LOAD_IMAGES_FROM_PATHS_LOAD_FAILED = "Failed to load image: {image_path}"
 
-SAVE_TO_HDF5_ALIGNED_SAVING = "Saving aligned image to HDF5: {self.hdf5_path}"
-SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING = "The {i}th images is stored in HDF5."
+SAVE_TO_HDF5_ALIGNED_SAVING = "Saving aligned image to HDF5"
+SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING = "Gambar ke-{index} disimpan dalam HDF5."
 SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED = "All images were successfully saved to HDF5."
+RESIZING_IMAGES_PROCESS = "Adjusting image size"
 
 RUN_IMAGE_NOT_FOUND = "No images found in the database."
 RUN_REFERENCE_IMAGE_NOT_FOUND = "Reference image could not be loaded from {image_paths[0]}."
@@ -123,7 +124,8 @@ AKAZE_DESCRIPTION = "This algorithm is quite robust to large differences in rota
                     \nGood enough but not as good as farneback for pixel level."
 ORB_DESCRIPTION = "Fast algorithm but less accurate for significant differences\
                     \n\
-                    \nSuitable for images with minimal differences."
+                    \nSuitable for images with minimal differences.\
+                    \nNOTE: Only supports output 8 BIT images"
 
 # Deskripsi untuk Super Resolution
 SUPER_RESOLUTION_NAME = "Super Resolution Algorithm"
