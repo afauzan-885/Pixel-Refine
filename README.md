@@ -1,4 +1,4 @@
-<p align="center"><img src="UI/resources/image/Logo_Pixel_Refine.png" width="200" alt="Pixel Refine Logo"></a></p>
+<p align="center"><img src="UI/resources/image/Logo_Pixel_Refine.png" width="200" alt="Pixel Refine Logo"></p>
 
 ## Pixel Refine
 
@@ -8,4 +8,54 @@ This application was created to overcome the shortcomings of Google Pixel's buil
 
 The processing in this application is expected to bridge the gap between professional cameras (DSLR or Mirrorless) and the computational photography capabilities experienced by smartphone cameras.
 
-**(This program is still under development and has many shortcomings. Beta release for public testing).**
+## Sample Images
+
+Below are some sample images processed:
+
+<p align="center">
+  <img src="sample/afternoon atmosphere iso40 (1per110).jpg" width="400" alt="Afternoon Atmosphere">
+</p>
+
+<p align="center">
+  <img src="sample/Extreme low light iso 4000 1,3ss.jpg" width="400" alt="Extreme Low Light">
+</p>
+
+<p align="center">
+  <img src="sample/moonlight iso1000 (1per25).jpg" width="400" alt="Moonlight">
+</p>
+
+<p align="center">
+  <img src="sample/traditional market at dawn iso 400 (1per35).jpg" width="400" alt="Traditional Market at Dawn">
+</p>
+
+### (This program is still under development and has many shortcomings. Beta release for public testing)
+
+---
+
+## Algorithms Used
+
+Pixel Refine uses several advanced algorithms for image processing. Here is a list of the algorithms used in the process:
+
+### **1. Alignment**
+- **Farneback Optical Flow**: 
+  - Highly precise at the pixel level and works well in low-light conditions.
+  - Moderately fast and capable of handling local movements within frames.
+  - Weak against significant differences between frames.
+- **AKAZE**: 
+  - A powerful algorithm that excels at handling large differences between images.
+  - Ideal for images with high deformation or significant variations.
+- **ORB (Oriented FAST and Rotated BRIEF)**: 
+  - Extremely fast and suitable for most conditions.
+  - Not as robust when dealing with large differences between images.
+
+### **2. Super Resolution**
+- **Status**: Coming soon.
+
+### **3. Denoising**
+- **Average**: Reduces noise by averaging pixel values over multiple frames.
+- **Median**: Uses the median of pixel values for better noise reduction while preserving edges.
+- **Similarity**: A special algorithm designed to enhance detail while suppressing noise based on pixel similarity to prevent motion artifacts, it is very robust against large movements.
+
+---
+
+If you have any suggestions or questions, feel free to contribute or reach out. This project welcomes collaboration!
