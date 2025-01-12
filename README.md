@@ -10,7 +10,7 @@ The processing in this application is expected to bridge the gap between profess
 
 ## Sample Images
 
-Below are some sample images processed:
+Below are some sample images processed (left: Original, Right: Processed):
 
 <p align="center">
   <img src="sample/afternoon atmosphere iso40 (1per110).jpg" width="400" alt="Afternoon Atmosphere">
@@ -28,9 +28,6 @@ Below are some sample images processed:
   <img src="sample/traditional market at dawn iso 400 (1per35).jpg" width="400" alt="Traditional Market at Dawn">
 </p>
 
-### (This program is still under development and has many shortcomings. Beta release for public testing)
-
----
 
 ## Algorithms Used
 
@@ -56,6 +53,5 @@ Pixel Refine uses several advanced algorithms for image processing. Here is a li
 - **Median**: Uses the median of pixel values for better noise reduction while preserving edges.
 - **Similarity**: A special algorithm designed to enhance detail while suppressing noise based on pixel similarity to prevent motion artifacts, it is very robust against large movements.
 
----
 
-If you have any suggestions or questions, feel free to contribute or reach out. This project welcomes collaboration!
+### (This program is still under development and has many shortcomings. Beta release for public testing)
