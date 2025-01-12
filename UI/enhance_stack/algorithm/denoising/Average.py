@@ -167,11 +167,12 @@ def main(db_path, update_progress=None, stop_requested=None):
                 update_progress(100, language_config.RUN_IMAGE_PROCESS_STACK_SUCCESS.format(output_path=output_path))
         else:
             if update_progress:
-                update_progress(0, language_config.STACK_AVERAGE_IMAGES_FAILED)
+                update_progress(0, language_config.STACK_IMAGES_FAILED)
     except Exception as e:
         error_message = language_config.RUN_ERROR_STATUS.format(error=str(e))
         if update_progress:
             update_progress(0, error_message)
+        print(f"Error encountered: {str(e)}")
 
             
 def running_average(parent=None):

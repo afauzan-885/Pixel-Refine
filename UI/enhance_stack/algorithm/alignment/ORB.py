@@ -75,9 +75,7 @@ class ORBAlgorithm:
         Menghitung keypoints dan deskriptor menggunakan ORB antara dua gambar (8-bit).
         """
         if stop_requested and stop_requested():  # Cek penghentian
-            print("Proses dihentikan sebelum menghitung gerakan global.")
             return None, None
-        print("Menghitung fitur ORB...")
 
         # Konversi gambar asli (16-bit) menjadi 8-bit untuk penyelarasan
         base_image_8bit = cv2.normalize(base_image, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)

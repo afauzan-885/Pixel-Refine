@@ -27,16 +27,19 @@ UPDATE_PROGRESS_BAR_STATUS = "{value}% ({images_left} process)"
 ON_IMPORT_COMPLETE_STATUS = "Import complete"
 ON_IMPORT_COMPLETE_MESSAGES = "{successful_images} images have been successfully imported."
 
-PROCESS_ALGORITHM_PROCESS_SKIPPED = "All processes are skipped. Please select at least one algorithm."
+PROCESS_ALGORITHM_PROCESS_SKIPPED = "No algorithm selected for processing"
 
 # PARAMETER STACKING 
-# Algorithm Alignment
+RUN_PROCESS_STOPPED = "Process stopped"
+NOT_IMAGE_PREVIEW = "No images available"
+MODULE_NOT_IMPLEMENT = "Module not yet implemented."
+NO_ALIGNMENT_PROCESS = "Are you sure you don't want image alignment first?."
 
 # General message
 LOAD_IMAGES_FROM_PATHS_LOAD_FAILED = "Failed to load image: {image_path}"
 
 SAVE_TO_HDF5_ALIGNED_SAVING = "Saving aligned image to HDF5"
-SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING = "Gambar ke-{index} disimpan dalam HDF5."
+SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING = "The {index}th image is stored in HDF5."
 SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED = "All images were successfully saved to HDF5."
 RESIZING_IMAGES_PROCESS = "Adjusting image size"
 
@@ -86,7 +89,7 @@ ALIGN_IMAGES_MATCHING_FAILED = "Insufficient number of matches for image {image_
 
 
 # Algorithm Denoising
-STACK_AVERAGE_IMAGES_FAILED = "No images to process."
+STACK_IMAGES_FAILED = "No images to process."
 STACK_AVERAGE_IMAGES_PROCESS = "Processing image {current}/{total}..."
 
 RUN_IMAGE_PROCESS_STARTED = "Starting process..."
@@ -110,6 +113,7 @@ SIMILARITY_MNFR_TILE_SLICE = "Image dimensions: {height}x{width}, Tile size: {ti
 SIMILARITY_MNFR_SIZE_FAILED = "Image size {i} does not match the reference image."
 SIMILARITY_MNFR_PROCESS_SUCCESS = "Image {i}/{count} processed successfully."
 SIMILARITY_MNFR_PROCESS_FINISHED = "Stacking complete."
+RUN_IMAGE_PROCESS_BATCH_PROGRESS = "Stacking batch to {current} from {total}"
 
 
 # Deskripsi untuk Alignment Algorithm

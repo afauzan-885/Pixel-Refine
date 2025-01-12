@@ -58,7 +58,7 @@ class RightPanel(QWidget):
                 self.parent().pause_preview_update()
 
             # Putuskan sementara sinyal
-            self.image_list.itemSelectionChanged.disconnect(self.select_list_preview)
+            # self.image_list.itemSelectionChanged.disconnect(self.select_list_preview)
 
             for item in select_image_list:
                 self.image_list.takeItem(self.image_list.row(item))

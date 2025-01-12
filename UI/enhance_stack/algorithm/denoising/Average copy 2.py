@@ -124,7 +124,7 @@ def main(db_path, update_progress=None):
 
         reference_image_path = image_paths[0]
         reference_image_name = os.path.splitext(os.path.basename(reference_image_path))[0]
-        output_path = f"database/stack/{reference_image_name}_average_stack.tiff"
+        output_path = f"database/stack/{reference_image_name}_average_stack"
 
         if update_progress:
             update_progress(0, language_config.RUN_IMAGE_PROCESS_STARTED)

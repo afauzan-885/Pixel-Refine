@@ -16,6 +16,9 @@ from UI.enhance_stack.algorithm.alignment.AKAZE import running_akaze
 from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import running_farneback_optical_flow
 from UI.enhance_stack.algorithm.alignment.ORB import running_orb
 from UI.enhance_stack.algorithm.denoising.Average import running_average
+from UI.enhance_stack.algorithm.denoising.Median import running_median
+from UI.enhance_stack.algorithm.denoising.Similarity import running_similarity
+from UI.settings.General.Language import language_config
 
 def get_last_image(path):
         """Mengambil file gambar terakhir dari folder berdasarkan waktu modifikasi"""
@@ -39,7 +42,7 @@ def process_algorithm(self):
 
             # Jika tidak ada algoritma yang dipilih
             if alignment_choice == "None" and denoising_choice == "None" and super_resolution_choice == "None":
-                QMessageBox.warning(self, "Peringatan", "Tidak ada algoritma yang dipilih untuk diproses.")
+                QMessageBox.warning(self, "Caution", language_config.PROCESS_ALGORITHM_PROCESS_SKIPPED)
                 return
 
             # Proses untuk Alignment
@@ -51,8 +54,8 @@ def process_algorithm(self):
                 running_akaze(self)
             elif alignment_choice == "None":
                 if denoising_choice != "None":  # Jika hanya denoising yang dipilih
-                    reply = QMessageBox.question(self, "Konfirmasi", 
-                                                "Yakin tidak ingin menyelaraskan terlebih dahulu?",
+                    reply = QMessageBox.question(self, "Confirm", 
+                                                language_config.NO_ALIGNMENT_PROCESS,
                                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
                                                 QMessageBox.StandardButton.No)
                     if reply == QMessageBox.StandardButton.No:
@@ -65,7 +68,7 @@ def process_algorithm(self):
             if super_resolution_choice == "None":
                 pass  # Tidak ada super resolution yang dipilih
             else:
-                QMessageBox.information(self, "Info", "Modul Super Resolusi belum diimplementasikan.")
+                QMessageBox.information(self, "Info", language_config.MODULE_NOT_IMPLEMENT)
         
             
             if super_resolution_executed:
@@ -74,21 +77,20 @@ def process_algorithm(self):
                     dialog = ImageViewer(latest_image_path, self)  # Menampilkan gambar di ImageViewer
                     dialog.exec()  # Menampilkan dialog secara modal
                 else:
-                    QMessageBox.warning(self, "Peringatan", "Tidak ada gambar yang tersedia di folder stack.")
+                    QMessageBox.warning(self, "Caution", language_config.NOT_IMAGE_PREVIEW)
 
 
             # Proses untuk Denoising
             denoising_executed = False  # Flag untuk melacak apakah denoising dilakukan
             if denoising_choice == "Average":
-                print("Sebelum memanggil running_average")
                 running_average(self)
-                print("Setelah memanggil running_average")
-
                 denoising_executed = True
             elif denoising_choice == "Median":
-                QMessageBox.warning(self, "Peringatan", "Modul Median belum diimplementasikan.")
+                running_median(self)
+                denoising_executed = True
             elif denoising_choice == "Similarity":
-                QMessageBox.warning(self, "Peringatan", "Modul Similarity belum diimplementasikan.")
+               running_similarity(self)
+               denoising_executed = True
             elif denoising_choice == "none":
                 return 
            
@@ -99,9 +101,10 @@ def process_algorithm(self):
                     dialog = ImageViewer(latest_image_path, self)  # Menampilkan gambar di ImageViewer
                     dialog.exec()  # Menampilkan dialog secara modal
                 else:
-                    QMessageBox.warning(self, "Peringatan", "Tidak ada gambar yang tersedia di folder stack.")
+                    QMessageBox.warning(self, "Caution", language_config.NOT_IMAGE_PREVIEW)
         except Exception as e:
-                    QMessageBox.critical(self, "Error", f"Terjadi kesalahan: {e}")
+                    # QMessageBox.critical(self, "Error", f"Terjadi kesalahan: {e}")
+                    QMessageBox.critical(self, "Error", language_config.RUN_ERROR_STATUS.format(error = e))
 
 # Create a dialog for the viewer
 class ImageViewer(QDialog):

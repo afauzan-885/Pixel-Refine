@@ -2,7 +2,7 @@
 dist/
 build/
 test_algorithm/
-pixel_refine_database.db
+/pixel_refine_database.db
 # Ignore virtual environment directories
 venv/
 database/
