@@ -1,4 +1,0 @@
-python -m nuitka --onefile --include-data-dir=UI=UI --windows-icon-from-ico=UI\resources\image\Logo_Pixel_Refine.png --plugin-enable=pyqt6 --output-filename="Pixel Refine" main.py
-
---include-data-files=venv/Scripts/python.exe=Scripts/python.exe
---include-data-files=venv/Scripts/python.exe=Scripts/python.exe
