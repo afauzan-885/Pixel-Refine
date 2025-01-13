@@ -1,4 +1,4 @@
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QLabel
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QLabel, QMenu
 from PyQt6.QtCore import Qt
 import sqlite3
 
@@ -8,6 +8,8 @@ class RightPanel(QWidget):
         super().__init__()
         self.image_list = QListWidget()
         self.preview_active = True  # Default: Preview diizinkan
+        self.preview_pause = False
+        
         self.image_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self.image_list.setStyleSheet("""
             QListWidget {
@@ -27,6 +29,8 @@ class RightPanel(QWidget):
 
         # Emit signal when the selection changes
         self.image_list.itemSelectionChanged.connect(self.select_list_preview)
+        
+        self.image_list.itemDoubleClicked.connect(self.set_to_image_reference)
 
         # Install event filter to capture key presses
         self.image_list.installEventFilter(self)
@@ -45,6 +49,24 @@ class RightPanel(QWidget):
         # Add the image paths to the list widget
         for path in image_paths:
             self.image_list.addItem(path[0])
+            
+    def set_to_image_reference(self, item):
+        """Move the selected item to the top of the list."""
+        row = self.image_list.row(item)
+        if row > 0:
+            self.image_list.takeItem(row)
+            self.image_list.insertItem(0, item)
+            self.image_list.setCurrentItem(item)
+
+    def contextMenuEvent(self, event):
+        """Display a context menu on right-click."""
+        item = self.image_list.itemAt(event.pos())
+        if item:
+            menu = QMenu(self)
+            set_ref_action = menu.addAction("Set as Image Reference")
+            action = menu.exec(self.image_list.mapToGlobal(event.pos()))
+            if action == set_ref_action:
+                self.set_to_image_reference(item)
 
     def get_select_image_list(self):
         select_image_list = self.image_list.selectedItems()
@@ -55,61 +77,74 @@ class RightPanel(QWidget):
 
         if select_image_list:
             if self.parent():
-                self.parent().pause_preview_update()
+                if hasattr(self.parent(), 'single_page_layout'):
+                    self.parent().single_page_layout.pause_preview_update()
 
-            # Putuskan sementara sinyal
-            # self.image_list.itemSelectionChanged.disconnect(self.select_list_preview)
+            # Set pause untuk mengabaikan sinyal
+            self.preview_pause = True
 
             for item in select_image_list:
                 self.image_list.takeItem(self.image_list.row(item))
 
-            # Hubungkan kembali sinyal setelah selesai
-            self.image_list.itemSelectionChanged.connect(self.select_list_preview)
+            # Kembalikan status pause
+            self.preview_pause = False
 
             if self.parent():
-                self.parent().resume_preview_update()
+                if hasattr(self.parent(), 'single_page_layout'):
+                # Update preview panel setelah penghapusan
+                    self.parent().single_page_layout.update_preview_panel(self.get_select_image_list())
+
+                    self.parent().single_page_layout.resume_preview_update()
+
 
     def select_list_preview(self):
         """Signal to notify selection change to EnhanceStackPage."""
+        if self.preview_pause:
+            return  # Abaikan sinyal jika sedang dipause
         selected_paths = self.get_select_image_list()
+
 
         # Jika lebih dari satu gambar dipilih, hentikan proses preview sebelumnya dan tampilkan pesan
         if len(selected_paths) > 1:
             if self.parent():
-                if hasattr(self.parent(), "raw_thread") and self.parent().raw_thread.isRunning():
-                    self.parent().raw_thread.stop()
-                    self.parent().raw_thread.quit()
-
-                self.parent().pause_preview_update()
-                self.parent().preview_scene.clear()
+                if hasattr(self.parent(), 'single_page_layout'):
+                    self.parent().single_page_layout.pause_preview_update()
+                    self.parent().single_page_layout.preview_scene.clear()
 
                 # Nonaktifkan update preview
                 label = QLabel("Multiple images selected. Preview disabled.")
                 label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
                 # Tambahkan pesan ke preview scene
-                proxy = self.parent().preview_scene.addWidget(label)
-                self.parent().image_status_info(proxy)
+                proxy = self.parent().single_page_layout.preview_scene.addWidget(label)
+                self.parent().single_page_layout.image_status_info(proxy)
+            return
 
-            return 
         # Jika hanya satu gambar yang dipilih, update preview panel
         if len(selected_paths) == 1:
-            if self.parent():
-                self.parent().update_preview_panel(selected_paths)
+            if self.parent() and hasattr(self.parent(), 'single_page_layout'):
+                self.parent().single_page_layout.update_preview_panel(selected_paths)
+
 
     def eventFilter(self, source, event):
         """Filter events for specific widgets."""
         if source == self.image_list:
             if event.type() == event.Type.KeyPress:
-                # If CTRL is pressed, enable MultiSelection mode
+                # Jika CTRL ditekan, ubah ke mode MultiSelection
                 if event.key() == Qt.Key.Key_Control:
                     print("CTRL key pressed, enabling MultiSelection")
                     self.image_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
                     return True  # Event handled
+                # Jika tombol Delete ditekan, hapus item yang dipilih
+                elif event.key() == Qt.Key.Key_Delete:
+                    print("Delete key pressed, removing selected items")
+                    self.remove_selected_images()
+                    return True  # Event handled
             elif event.type() == event.Type.KeyRelease:
-                # If CTRL is released, revert to SingleSelection mode
+                # Jika CTRL dilepaskan, ubah kembali ke mode SingleSelection
                 if event.key() == Qt.Key.Key_Control:
                     print("CTRL key released, reverting to SingleSelection")
                     self.image_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
                     return True  # Event handled
         return super().eventFilter(source, event)
+

@@ -45,7 +45,7 @@ class LeftPanel(QWidget):
             ("Farneback Optical Flow", language_config.FARNEBACK_DESCRIPTION),
             ("AKAZE", language_config.AKAZE_DESCRIPTION),
             ("ORB", language_config.ORB_DESCRIPTION),
-            ("EEC", language_config.ORB_DESCRIPTION)
+            # ("EEC", language_config.ORB_DESCRIPTION)
         ]
         alignment_items, alignment_tooltips = zip(*alignment_options)
         self.alignment_dropdown, alignment_widget = dropdown_section(
@@ -80,7 +80,6 @@ class LeftPanel(QWidget):
         self.denoising_dropdown, denoising_widget = dropdown_section(
             
             language_config.DENOISING_NAME,
-            
             denoising_items,
             denoising_tooltips
         )
@@ -104,11 +103,38 @@ class LeftPanel(QWidget):
     def get_dropdown_style(self):
         return """
             QComboBox {
-                background-color: #f0f0f0;
-                border: 1px solid #ccc; /* Menambahkan border */
+                background-color: #F0EEEE;
                 padding: 5px;
                 border-radius: 5px;
                 max-width: 200px;
+            }
+            
+            QComboBox::drop-down {
+            background-color: #ffffff;
+            border-radius: 5px;       
+            border: 1px solid #d1d1d1; 
+            }
+            
+            QComboBox::down-arrow {
+                image: url('UI/resources/icon/menu-options.png');
+                width: 24px;
+                height: 24px;
+            }
+            
+            QComboBox:hover {  
+            background-color: #9EFFE2;
+            }
+            
+            QComboBox QAbstractItemView {
+            background-color: #ffffff;  
+            border: 1px solid #d1d1d1;  
+            selection-background-color: #7B9AC8; 
+            selection-color: white;    
+            padding: 5px;
+            }
+            
+            QComboBox QAbstractItemView::item {
+            margin-bottom: 5px; 
             }
         """
 

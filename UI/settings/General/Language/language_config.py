@@ -128,8 +128,7 @@ AKAZE_DESCRIPTION = "This algorithm is quite robust to large differences in rota
                     \nGood enough but not as good as farneback for pixel level."
 ORB_DESCRIPTION = "Fast algorithm but less accurate for significant differences\
                     \n\
-                    \nSuitable for images with minimal differences.\
-                    \nNOTE: Only supports output 8 BIT images"
+                    \nSuitable for images with minimal differences"
 
 # Deskripsi untuk Super Resolution
 SUPER_RESOLUTION_NAME = "Super Resolution Algorithm"
