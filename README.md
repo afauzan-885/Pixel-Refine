@@ -54,4 +54,4 @@ Pixel Refine uses several advanced algorithms for image processing. Here is a li
 - **Similarity**: A special algorithm designed to enhance detail while suppressing noise based on pixel similarity to prevent motion artifacts, it is very robust against large movements.
 
 
-### (This program is still under development and has many shortcomings. Beta release for public testing)
+**(This program is still under development and has many shortcomings. Beta release for public testing)**
