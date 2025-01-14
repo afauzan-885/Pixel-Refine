@@ -31,8 +31,6 @@ class TopBar(QWidget):
             }
         """
 
-
-
         # Import button
         self.import_button = QPushButton(language_config.TOPBAR_IMPORT_BUTTON_TEXT)
         self.import_button.setStyleSheet("""
@@ -70,7 +68,9 @@ class TopBar(QWidget):
         self.switch_layout.addWidget(self.single_button)
         self.switch_layout.addWidget(self.batch_button)
 
-
+         # Optional: Hide the switch buttons for development purposes
+        self.single_button.setVisible(False)  # Menyembunyikan tombol Single
+        self.batch_button.setVisible(False)   # Menyembunyikan tombol Batch
 
         # Delete button
         self.delete_button = QPushButton(language_config.TOPBAR_DELETE_BUTTON_TEXT)
@@ -89,7 +89,7 @@ class TopBar(QWidget):
 
         # Add widgets to the main layout
         self.layout.addWidget(self.import_button)
-        self.layout.addStretch()  # Push the import button to the left
-        self.layout.addLayout(self.switch_layout)  # Center the switch layout
-        self.layout.addStretch()  # Push the delete button to the right
+        self.layout.addStretch()
+        self.layout.addLayout(self.switch_layout)  # Tambahkan switch layout (tetap tersembunyi)
+        self.layout.addStretch()
         self.layout.addWidget(self.delete_button)

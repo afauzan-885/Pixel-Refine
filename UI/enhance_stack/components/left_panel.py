@@ -23,7 +23,7 @@ class LeftPanel(QWidget):
         parameter_panel_layout = QVBoxLayout(self.parameter_panel_widget)
         parameter_panel_layout.setContentsMargins(10, 10, 0, 0)
 
-        # Fungsi untuk membuat bagian dropdown (untuk mengurangi duplikasi kode)
+        # Fungsi untuk membuat bagian dropdown
         def dropdown_section(label_text, items, tooltips):
             section_layout = QVBoxLayout()
             label = QLabel(label_text)

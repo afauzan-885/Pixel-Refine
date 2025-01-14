@@ -5,9 +5,8 @@ from PyQt6.QtWidgets import (
     QGraphicsScene,
     QVBoxLayout,
     QWidget
-    
 )
-from PyQt6.QtCore import Qt, QObject
+from PyQt6.QtCore import Qt
 
 from UI.enhance_stack.logic.database_manager import DatabaseManager
 from .components.left_panel import LeftPanel
@@ -16,20 +15,17 @@ from .components.progress_section import ProgressSection
 from UI.enhance_stack.logic.workflow_process import process_algorithm
 from UI.settings.General.Language import language_config
 
-# from .logic.workflow_process import process_algorithm
 from .logic.image_handler import handle_import_button, handle_delete_button
-
 from .logic.image_preview import (
-    handler_zoom,
     update_preview_panel,
     fit_image_to_panel,
-    scale_image,
     display_image,
     handle_image_ready,
     handle_image_error,
     image_status_info,
     start_image_processing
 )
+
 class SinglePageLayout(QWidget):
     def __init__(self):
         super().__init__()
@@ -64,11 +60,6 @@ class SinglePageLayout(QWidget):
         self.preview_view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.preview_view.viewport().installEventFilter(self)
 
-        # Zoom-related attributes
-        self.zoom_scale = 1.0
-        self.original_pixmap = None
-        self.drag_start_pos = None
-
         # Initialize managers
         self.multi_thread_import_images = None
 
@@ -93,9 +84,6 @@ class SinglePageLayout(QWidget):
     def display_image(self, pixmap):
         display_image(self, pixmap)
 
-    def scale_image(self):
-        scale_image(self)
-
     def pause_preview_update(self):
         """Temporarily disable preview panel updates."""
         self.update_preview_enabled = False
@@ -113,7 +101,8 @@ class SinglePageLayout(QWidget):
         fit_image_to_panel(self)
 
     def eventFilter(self, source, event):
-        return handler_zoom(self, source, event) or super().eventFilter(source, event)
+        # Remove zoom handling
+        return super().eventFilter(source, event)
 
     def handle_import_button(self):
         handle_import_button(self)
