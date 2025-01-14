@@ -1,6 +1,6 @@
 <p align="center"><img src="UI/resources/image/Logo_Pixel_Refine.png" width="200" alt="Pixel Refine Logo"></p>
 
-## Pixel Refine
+## Introduction
 
 Pixel Refine is designed to create a program inspired by the image processing techniques used in Google Pixel's camera, Raw+ Kandao, Burst.photo, and PhotoAcute 3.
 
@@ -29,7 +29,7 @@ Below are some sample images processed (left: Original, Right: Processed):
 </p>
 
 
-## Algorithms Used
+## Algorithms
 
 Pixel Refine uses several advanced algorithms for image processing. Here is a list of the algorithms used in the process:
 
@@ -46,7 +46,7 @@ Pixel Refine uses several advanced algorithms for image processing. Here is a li
   - Not as robust when dealing with large differences between images.
 
 ### **2. Super Resolution**
-- **Status**: Coming soon.
+- Coming soon.
 
 ### **3. Denoising**
 - **Average**: Reduces noise by averaging pixel values over multiple frames.
