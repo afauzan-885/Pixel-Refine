@@ -84,44 +84,44 @@ class AverageAlgorithm:
                 images.append(image)
         return images
 
-    def stack_average_images(self, images, update_progress=None, stop_requested=None):
+    def stack_average_images(self, images, accumulated_image, total_weights, stop_requested=None):
         if stop_requested and stop_requested():  # Cek penghentian
             print("Proses dihentikan sebelum menghitung gerakan global.")
-            return None, None
-        
+            return accumulated_image, total_weights
+
         if len(images) == 0:
-            raise ValueError(language_config.RUN_IMAGE_NOT_FOUND)
+            raise ValueError("Tidak ada gambar yang ditemukan.")
 
         dtype = images[0].dtype
-        stacked_image = np.zeros_like(images[0], dtype=np.float32)
+        if accumulated_image is None:
+            accumulated_image = np.zeros_like(images[0], dtype=np.float64)
 
         for i, image in enumerate(images):
             if image is None:
                 continue
 
-            current_image = image.astype(np.float32)
-            stacked_image += current_image
+            if stop_requested and stop_requested():  # Cek penghentian
+                print("Proses dihentikan saat menghitung stack.")
+                break
 
-            progress = int((i + 1) / len(images) * 100)
-            message = language_config.STACK_AVERAGE_IMAGES_PROCESS.format(current=i + 1, total=len(images))
-            
-            if update_progress:
-                update_progress(progress, message)
+            current_image = image.astype(np.float64)
+            accumulated_image += current_image
+            total_weights += 1
 
-        stacked_image /= len(images)
-        stacked_image = np.clip(stacked_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype)
-        return stacked_image
+        return accumulated_image, total_weights
+
+
 
     def save_image(self, image, output_path):
         cv2.imwrite(output_path, image)
         
-def main(db_path, update_progress=None, stop_requested=None):
+def main(db_path, update_progress=None, stop_requested=None, batch_size=4):
     try:
         image_processor = AverageAlgorithm(db_path)
         image_paths = image_processor.get_all_image_paths()
         if not image_paths:
             if update_progress:
-                update_progress(0, language_config.RUN_IMAGE_PROCESS_LOAD_FAILED)
+                update_progress(0, "Gagal memuat gambar.")
             return
 
         reference_image_path = image_paths[0]
@@ -129,52 +129,83 @@ def main(db_path, update_progress=None, stop_requested=None):
         output_path = f"database/stack/{reference_image_name}_average_stack.tiff"
 
         if update_progress:
-            update_progress(0, language_config.RUN_IMAGE_PROCESS_STARTED)
+            update_progress(0, "Mulai proses pengolahan gambar.")
 
         global_hdf5_path = "database/align/aligned_images.h5"
-        images = []
+        accumulated_image = None
+        total_weights = 0
+
+        total_images = len(image_paths) if not os.path.exists(global_hdf5_path) else len(h5py.File(global_hdf5_path, 'r').keys())
+        processed_images = 0  # Initialize counter for processed images
 
         if os.path.exists(global_hdf5_path):
             with h5py.File(global_hdf5_path, 'r') as h5f:
-                total_images = len(h5f.keys())
-                for i, key in enumerate(h5f.keys()):
+                total_batches = (total_images + batch_size - 1) // batch_size
+
+                for batch_idx in range(total_batches):
                     if stop_requested and stop_requested():
+                        print("Proses dihentikan oleh pengguna.")
                         break
-                    images.append(np.array(h5f[key]))
-                    progress = int((i / total_images) * 10)
-                    message = language_config.RUN_IMAGE_PROCESS_LOAD_PROGRESS.format(
-                        current=i + 1, total=total_images)
+
+                    batch_keys = list(h5f.keys())[batch_idx * batch_size:(batch_idx + 1) * batch_size]
+                    batch_images = [np.array(h5f[key]) for key in batch_keys]
+
+                    accumulated_image, total_weights = image_processor.stack_average_images(
+                        batch_images, accumulated_image, total_weights, stop_requested
+                    )
+                    
+                    # Update progress per image
+                    for i in range(len(batch_images)):
+                        processed_images += 1
+                        progress = int((processed_images / total_images) * 100)
+                        message = f"Proses gambar {processed_images}/{total_images}..."
+                        if update_progress:
+                            update_progress(progress, message)
+
+        else:
+            total_batches = (total_images + batch_size - 1) // batch_size
+            for batch_idx in range(total_batches):
+                if stop_requested and stop_requested():
+                    print("Proses dihentikan oleh pengguna.")
+                    break
+
+                start_idx = batch_idx * batch_size
+                end_idx = min((batch_idx + 1) * batch_size, total_images)
+                batch_paths = image_paths[start_idx:end_idx]
+
+                batch_images = []
+                for path in batch_paths:
+                    image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+                    if image is not None:
+                        batch_images.append(image)
+
+                accumulated_image, total_weights = image_processor.stack_average_images(
+                    batch_images, accumulated_image, total_weights, update_progress, stop_requested
+                )
+
+                # Update progress per image
+                for i in range(len(batch_images)):
+                    processed_images += 1
+                    progress = int((processed_images / total_images) * 100)
+                    message = f"Proses gambar {processed_images}/{total_images}..."
                     if update_progress:
                         update_progress(progress, message)
-        else:
-            total_images = len(image_paths)
-            for i, path in enumerate(image_paths):
-                if stop_requested and stop_requested():
-                    break
-                image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-                if image is not None:
-                    images.append(image)
-                progress = int((i / total_images) * 100)
-                message = language_config.RUN_IMAGE_PROCESS_LOAD_PROGRESS.format(
-                    current=i + 1, total=total_images)
-                if update_progress:
-                    update_progress(progress, message)
 
-        if images:
-            stacked_image = image_processor.stack_average_images(images, update_progress)
-            image_processor.save_image(stacked_image, output_path)
+        if accumulated_image is not None:
+            final_image = (accumulated_image / total_weights).astype(np.uint16)
+            image_processor.save_image(final_image, output_path)
             if update_progress:
-                update_progress(100, language_config.RUN_IMAGE_PROCESS_STACK_SUCCESS.format(output_path=output_path))
+                update_progress(100, f"Proses selesai, hasil disimpan di {output_path}")
         else:
             if update_progress:
-                update_progress(0, language_config.STACK_IMAGES_FAILED)
+                update_progress(0, "Gagal melakukan stack gambar.")
     except Exception as e:
-        error_message = language_config.RUN_ERROR_STATUS.format(error=str(e))
+        error_message = f"Terjadi kesalahan: {str(e)}"
         if update_progress:
             update_progress(0, error_message)
         print(f"Error encountered: {str(e)}")
 
-            
+
 def running_average(parent=None):
     """
     Menampilkan progress bar dengan gaya kustom dan memanfaatkan thread.

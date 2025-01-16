@@ -68,18 +68,16 @@ class SimilarityAlgorithm:
         image_paths = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(('.png', '.jpg', '.jpeg'))]
         return self.load_images_from_paths(image_paths)
 
-    def load_images_from_paths(self, image_paths, stop_requested=None):
-        """
-        Loads images from a list of image paths.
-        """
+    def load_images_from_hdf5(self, hdf5_path, stop_requested=None):
         images = []
-        for image_path in image_paths:
-            if stop_requested and stop_requested():  # Cek apakah harus berhenti
-                break
-            image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-            if image is not None:
+        with h5py.File(hdf5_path, 'r') as h5f:
+            for key in h5f.keys():
+                if stop_requested and stop_requested():  # Cek apakah harus berhenti
+                    break
+                image = np.array(h5f[key])
                 images.append(image)
         return images
+
     
     def raised_cosine_window(self, tile_size):
         """Membuat raised cosine window untuk blending."""
@@ -88,13 +86,10 @@ class SimilarityAlgorithm:
         window = np.outer(y, x)
         return window
 
-    def similarity_mfnr(self, images, tile_size=(50, 50), overlap=0.20, motion_threshold=0.02, noise_threshold=0.02, update_progress=None, stop_requested=None):
+    def similarity_mfnr(self, images, tile_size=(50, 50), overlap=0.20, motion_threshold=0.05, noise_threshold=0.05, update_progress=None, stop_requested=None):
         """
-        Multi-frame Noise Reduction (MFNR) dengan optimasi tile processing dan vektorisasi, langsung bekerja pada format gambar asli.
+        Multi-frame Noise Reduction (MFNR) dengan pre-computed values untuk reference image.
         """
-        # profiler = cProfile.Profile()
-        # profiler.enable()
-
         if not images:
             raise ValueError(language_config.SIMILARITY_MNFR_LOAD_FAILED)
 
@@ -112,10 +107,30 @@ class SimilarityAlgorithm:
         final_image = np.zeros_like(reference_image, dtype=np.float32)
         weight_map = np.zeros((h, w), dtype=np.float32)
 
-        # Menghitung cosine window hanya sekali
+        # Pre-compute cosine window
         cosine_window = self.raised_cosine_window(tile_size)
 
+        # Normalize reference image once
         reference_image /= np.iinfo(dtype).max
+
+        # Pre-compute per-tile values from reference image
+        precomputed_reference_tiles = {}
+        for y in range(0, h, tile_step_y):
+            offset_x = vertical_offset if (y // tile_step_y) % 2 == 1 else 0
+            for x in range(-offset_x, w, tile_step_x):
+                y_end = min(y + tile_size[0], h)
+                x_end = min(x + tile_size[1], w)
+                x_start = max(x, 0)
+
+                tile_height = y_end - y
+                tile_width = x_end - x_start
+
+                # Extract reference tile
+                ref_tile = reference_image[y:y_end, x_start:x_end]
+                window = cosine_window[:tile_height, :tile_width]
+
+                # Store pre-computed reference tile with window
+                precomputed_reference_tiles[(y, x)] = (ref_tile, window)
 
         for i, image in enumerate(images):
             progress = int((i + 1) / len(images) * 100)
@@ -135,55 +150,40 @@ class SimilarityAlgorithm:
 
             current_image /= np.iinfo(dtype).max
 
-            for y in range(0, h, tile_step_y):
-                offset_x = vertical_offset if (y // tile_step_y) % 2 == 1 else 0
-                for x in range(-offset_x, w, tile_step_x):
-                    y_end = min(y + tile_size[0], h)
-                    x_end = min(x + tile_size[1], w)
-                    x_start = max(x, 0)
+            for (y, x), (ref_tile, window) in precomputed_reference_tiles.items():
+                y_end = min(y + tile_size[0], h)
+                x_end = min(x + tile_size[1], w)
+                x_start = max(x, 0)
 
-                    tile_height = y_end - y
-                    tile_width = x_end - x_start
+                # Extract current tile
+                current_tile = current_image[y:y_end, x_start:x_end]
 
-                    # Mengambil tile dari citra referensi dan citra saat ini
-                    ref_tile = reference_image[y:y_end, x_start:x_end]
-                    current_tile = current_image[y:y_end, x_start:x_end]
+                # Temporal motion
+                temporal_motion = cv2.absdiff(current_tile, ref_tile)
 
-                    # Menggunakan cosine window yang telah dihitung
-                    window = cosine_window[:tile_height, :tile_width]
+                # Spatial noise
+                median_tile = cv2.medianBlur(current_tile.astype(np.float32), ksize=3)
+                spatial_noise = cv2.absdiff(current_tile, median_tile)
 
-                    # Menggunakan cv2.absdiff untuk menghitung temporal noise
-                    temporal_noise = cv2.absdiff(current_tile, ref_tile)
+                # Noise mask and adaptive threshold
+                noise_mask = cv2.max(temporal_motion, spatial_noise)
+                adaptive_threshold = motion_threshold + noise_threshold * cv2.mean(noise_mask)[0]
 
-                    # Menghitung rata-rata nilai menggunakan cv2.mean
-                    mean_value = cv2.mean(current_tile)[0]  # mengambil nilai rata-rata untuk seluruh tile
-                    spatial_noise = cv2.absdiff(current_tile, mean_value)  # menggunakan absdiff untuk spatial noise
+                # Compute Dz and similarity weight
+                Dz = cv2.mean(temporal_motion)[0]
+                similarity_weight = 1.0 if Dz < adaptive_threshold else np.exp(-Dz / adaptive_threshold)
 
-                    # Menggunakan cv2.max() untuk menghitung noise mask
-                    noise_mask = cv2.max(temporal_noise, spatial_noise)
-
-                    # Menghitung adaptive threshold
-                    adaptive_threshold = motion_threshold + noise_threshold * cv2.mean(noise_mask)[0]
-
-                    # Menghitung Dz menggunakan cv2.absdiff dan cv2.mean()
-                    Dz = cv2.mean(temporal_noise)[0]  # rata-rata temporal noise untuk Dz
-
-                    # Menghitung similarity_weight
-                    similarity_weight = 1.0 if Dz < adaptive_threshold else np.exp(-Dz / adaptive_threshold)
-
-                    # Menghitung weighted_tile dan memperbarui final_image dan weight_map
-                    weighted_tile = current_tile * window[..., np.newaxis] * similarity_weight
-                    weight_map[y:y_end, x_start:x_end] += window * similarity_weight
-                    final_image[y:y_end, x_start:x_end] += weighted_tile * np.iinfo(dtype).max
+                # Update final image and weight map
+                weighted_tile = current_tile * window[..., np.newaxis] * similarity_weight
+                weight_map[y:y_end, x_start:x_end] += window * similarity_weight
+                final_image[y:y_end, x_start:x_end] += weighted_tile * np.iinfo(dtype).max
 
         final_image /= (weight_map[..., np.newaxis] + 1e-6)
         final_image = np.clip(final_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype)
 
         print(language_config.SIMILARITY_MNFR_PROCESS_FINISHED)
-
-        # profiler.disable()
-        # profiler.print_stats()
         return final_image
+
 
     def save_image(self, image, output_path):
         cv2.imwrite(output_path, image)
@@ -248,7 +248,7 @@ def main(db_path, update_progress=None, stop_requested=None):
         if update_progress:
             update_progress(0, error_message)
         raise  # Melempar error jika perlu untuk penanganan lebih lanjut
-            
+
 def running_similarity(parent=None):
     """
     Menampilkan progress bar dengan gaya kustom dan memanfaatkan thread.

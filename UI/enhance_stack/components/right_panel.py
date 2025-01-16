@@ -83,17 +83,27 @@ class RightPanel(QWidget):
             # Set pause untuk mengabaikan sinyal
             self.preview_pause = True
 
+            # Hapus entri dari database
+            conn = sqlite3.connect("pixel_refine_database.db")
+            cursor = conn.cursor()
+
             for item in select_image_list:
+                image_path = item.text()
+
+                # Hapus dari database
+                cursor.execute("DELETE FROM images WHERE path = ?", (image_path,))
                 self.image_list.takeItem(self.image_list.row(item))
+
+            conn.commit()
+            conn.close()
 
             # Kembalikan status pause
             self.preview_pause = False
 
             if self.parent():
                 if hasattr(self.parent(), 'single_page_layout'):
-                # Update preview panel setelah penghapusan
+                    # Update preview panel setelah penghapusan
                     self.parent().single_page_layout.update_preview_panel(self.get_select_image_list())
-
                     self.parent().single_page_layout.resume_preview_update()
 
 

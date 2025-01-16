@@ -1,6 +1,7 @@
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QComboBox
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox
 from PyQt6.QtCore import Qt
 from UI.settings.General.Language import language_config
+
 class LeftPanel(QWidget):
     def __init__(self):
         super().__init__()
@@ -20,8 +21,9 @@ class LeftPanel(QWidget):
 
         # Parameter Panel
         self.parameter_panel_widget = QWidget()
-        parameter_panel_layout = QVBoxLayout(self.parameter_panel_widget)
+        parameter_panel_layout = QHBoxLayout(self.parameter_panel_widget)
         parameter_panel_layout.setContentsMargins(10, 10, 0, 0)
+        parameter_panel_layout.setSpacing(20)
 
         # Fungsi untuk membuat bagian dropdown
         def dropdown_section(label_text, items, tooltips):
@@ -38,37 +40,32 @@ class LeftPanel(QWidget):
             section_widget = QWidget()
             section_widget.setLayout(section_layout)
             return dropdown, section_widget
-        
+
         # Alignment Dropdown
         alignment_options = [
             ("None", language_config.NONE_ALIGNMENT_DESCRIPTION),
             ("Farneback Optical Flow", language_config.FARNEBACK_DESCRIPTION),
             ("AKAZE", language_config.AKAZE_DESCRIPTION),
             ("ORB", language_config.ORB_DESCRIPTION),
-            # ("EEC", language_config.ORB_DESCRIPTION)
         ]
         alignment_items, alignment_tooltips = zip(*alignment_options)
         self.alignment_dropdown, alignment_widget = dropdown_section(
-            
             language_config.ALIGNMENT_NAME,
-            
             alignment_items,
             alignment_tooltips
         )
-        
+
         # Super Resolution Dropdown
         super_resolution_items_options = [
             ("None", language_config.NONE_SUPER_RESOLUTION_DESCRIPTION)
         ]
         super_resolution_items, super_resolution_tooltips = zip(*super_resolution_items_options)
         self.super_resolution_dropdown, super_resolution_widget = dropdown_section(
-            
             language_config.SUPER_RESOLUTION_NAME,
-            
             super_resolution_items,
             super_resolution_tooltips
         )
-        
+
         # Denoising Dropdown
         denoising_items_options = [
             ("None", language_config.NONE_DENOISING_DESCRIPTION),
@@ -78,16 +75,26 @@ class LeftPanel(QWidget):
         ]
         denoising_items, denoising_tooltips = zip(*denoising_items_options)
         self.denoising_dropdown, denoising_widget = dropdown_section(
-            
             language_config.DENOISING_NAME,
             denoising_items,
             denoising_tooltips
         )
 
-        # Tambahkan dropdown ke layout parameter panel
-        parameter_panel_layout.addWidget(alignment_widget)
-        parameter_panel_layout.addWidget(super_resolution_widget)
-        parameter_panel_layout.addWidget(denoising_widget)
+        # Panel Kiri: Dropdowns
+        left_panel = QVBoxLayout()
+        left_panel.addWidget(alignment_widget)
+        left_panel.addWidget(super_resolution_widget)
+        left_panel.addWidget(denoising_widget)
+
+        # Panel Kanan: Pengaturan
+        right_panel = QVBoxLayout()
+        right_label = QLabel("Ini adalah bagian pengaturan")
+        right_panel.addWidget(right_label)
+
+        # Tambahkan panel kiri dan kanan ke parameter panel
+        parameter_panel_layout.addLayout(left_panel)
+        parameter_panel_layout.addLayout(right_panel)
+
         self.parameter_panel_widget.setLayout(parameter_panel_layout)
         self.parameter_panel_widget.setStyleSheet("QWidget { background-color: white; }")
 

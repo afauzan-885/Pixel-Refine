@@ -55,7 +55,7 @@ def update_preview_panel(self, selected_paths):
 
         # Tambahkan label ke scene dengan QGraphicsProxyWidget
         proxy = self.preview_scene.addWidget(label)
-        image_status_info(proxy)  # Pusatkan widget di scene
+        self.image_status_info(proxy)  # Pusatkan widget di scene
 
 
 def start_image_processing(self, selected_paths):
