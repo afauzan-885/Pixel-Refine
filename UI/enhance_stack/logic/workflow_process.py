@@ -18,6 +18,7 @@ from UI.enhance_stack.algorithm.alignment.ORB import running_orb
 from UI.enhance_stack.algorithm.denoising.Average import running_average
 from UI.enhance_stack.algorithm.denoising.Median import running_median
 from UI.enhance_stack.algorithm.denoising.Similarity import running_similarity
+from UI.enhance_stack.algorithm.denoising.Weighted_average import running_weighted_average
 from UI.settings.General.Language import language_config
 
 def get_last_image(path):
@@ -87,6 +88,9 @@ def process_algorithm(self):
                 denoising_executed = True
             elif denoising_choice == "Median":
                 running_median(self)
+                denoising_executed = True
+            elif denoising_choice == "Weighted Average":
+                running_weighted_average(self)
                 denoising_executed = True
             elif denoising_choice == "Similarity":
                running_similarity(self)

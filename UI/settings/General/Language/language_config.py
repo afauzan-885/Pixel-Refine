@@ -105,6 +105,7 @@ WINDOW_PROCESS_SUCCESS = "The process has been completed."
 # Average, Median, Similarity Stacking
 WINDOW_TITLE_AVERAGE = "Average Stacking"
 WINDOW_TITLE_MEDIAN = "Median Stacking"
+WINDOW_TITLE_WEIGHTED_AVERGAE = "Weighted Average Stacking"
 
 WINDOW_TITLE_SIMILARITY = "Similarity Stacking"
 SIMILARITY_MNFR_LOAD_FAILED = "No images provided."
@@ -137,7 +138,11 @@ HORNSCHUNCK_DESCRIPTION = "Horn-Schunck method for multi-frame super-resolution.
 
 # Deskripsi untuk Denoising
 DENOISING_NAME = "Denoising Algorithm" 
-NONE_DENOISING_DESCRIPTION = "No noise reduction will be applied."
+NONE_DENOISING_DESCRIPTION = "No noise reduction will be applied."                    
+WEIGHTED_AVERAGE_DESCRIPTION = "The result of the simplification of the similarity stacking method is quite good for small movements\
+                        \n\
+                        \nQuite good at dealing with small movements, but produces image artifacts in larger movements"
+                    
 AVERAGE_DESCRIPTION = "Very fast and effective stacking method for static objects and scenes\
                     \n\
                     \nNot suitable for moving scenes or areas but can be combined with farneback alignment\

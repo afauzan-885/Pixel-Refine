@@ -70,6 +70,7 @@ class LeftPanel(QWidget):
         denoising_items_options = [
             ("None", language_config.NONE_DENOISING_DESCRIPTION),
             ("Average", language_config.AVERAGE_DESCRIPTION),
+            ("Weighted Average", language_config.WEIGHTED_AVERAGE_DESCRIPTION),
             ("Median", language_config.MEDIAN_DESCRIPTION),
             ("Similarity", language_config.SIMILARITY_DESCRIPTION)
         ]
@@ -88,7 +89,8 @@ class LeftPanel(QWidget):
 
         # Panel Kanan: Pengaturan
         right_panel = QVBoxLayout()
-        right_label = QLabel("Ini adalah bagian pengaturan")
+        right_label = QLabel("")
+        # right_label = QLabel("Ini adalah bagian pengaturan")
         right_panel.addWidget(right_label)
 
         # Tambahkan panel kiri dan kanan ke parameter panel

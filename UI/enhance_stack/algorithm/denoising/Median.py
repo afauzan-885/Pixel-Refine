@@ -79,13 +79,6 @@ class MedianAlgorithm:
             if image is not None:
                 images.append(image)
         return images
-    
-    def raised_cosine_window(self, tile_size):
-        """Membuat raised cosine window untuk blending."""
-        y = np.hanning(tile_size[0])
-        x = np.hanning(tile_size[1])
-        window = np.outer(y, x)
-        return window
 
     def stack_median_images(self, images, previous_medians, stop_requested=None):
         if stop_requested and stop_requested():
@@ -96,42 +89,31 @@ class MedianAlgorithm:
             raise ValueError("Tidak ada gambar yang ditemukan.")
 
         dtype = images[0].dtype
-        image_shape = images[0].shape  # Ukuran gambar referensi
 
         if previous_medians is None:
-            previous_medians = []
+            previous_medians = []  # Inisialisasi jika sebelumnya tidak ada median
 
-        if not isinstance(previous_medians, list):
-            previous_medians = list(previous_medians)
+        # Buat fungsi untuk menyesuaikan ukuran gambar
+        target_shape = images[0].shape
+        def resize_image(image):
+            return cv2.resize(image, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_CUBIC)
 
-        for i, image in enumerate(images):
-            if image is None:
-                continue
+        # Resize seluruh gambar agar memiliki ukuran yang sama
+        images_resized = [resize_image(image) for image in images]
 
-            # Resize gambar jika ukurannya berbeda
-            if image.shape != image_shape:
-                print(f"Meresize gambar pada indeks {i} dari ukuran {image.shape} ke {image_shape}.")
-                image = cv2.resize(image, (image_shape[1], image_shape[0]), interpolation=cv2.INTER_AREA)
+        # Stack gambar dan hitung median per piksel
+        stacked_medians = np.median(np.stack(images_resized), axis=0).astype(dtype)
 
-            if stop_requested and stop_requested():
-                print("Proses dihentikan saat menghitung median.")
-                break
+        # Proses clipping menggunakan np.iinfo untuk mendapatkan rentang tipe data yang tepat
+        stacked_medians = np.clip(stacked_medians, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype)
 
-            previous_medians.append(image)
-            
-        # Pastikan semua gambar dalam previous_medians memiliki ukuran yang sama
-        valid_medians = [img for img in previous_medians if img.shape == image_shape]
-        if len(valid_medians) == 0:
-            raise ValueError("Tidak ada gambar yang valid untuk dihitung medians.")
-
-        stacked_medians = np.median(np.stack(valid_medians), axis=0).astype(dtype)
-        return stacked_medians, previous_medians
+        return stacked_medians, images_resized
 
 
     def save_image(self, image, output_path):
         cv2.imwrite(output_path, image)
         
-def main(db_path, update_progress=None, stop_requested=None, batch_size=4):
+def main(db_path, update_progress=None, stop_requested=None, batch_size=3):
     try:
         image_processor = MedianAlgorithm(db_path)
         image_paths = image_processor.get_all_image_paths()
@@ -165,8 +147,9 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4):
                     batch_images = [np.array(h5f[key]) for key in batch_keys]
 
                     accumulated_image, _ = image_processor.stack_median_images(
-                        batch_images, accumulated_image, update_progress, stop_requested
+                        batch_images, accumulated_image, stop_requested
                     )
+
 
                     for i in range(len(batch_images)):
                         processed_images += 1
@@ -191,8 +174,9 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4):
                         batch_images.append(image)
 
                 accumulated_image, _ = image_processor.stack_median_images(
-                    batch_images, accumulated_image, update_progress, stop_requested
+                    batch_images, accumulated_image, stop_requested
                 )
+
 
                 for i in range(len(batch_images)):
                     processed_images += 1

@@ -38,7 +38,7 @@ class ThreadWorker(QThread):
     def stop(self):
         self.stop_requested = True  # Set flag agar thread berhenti
 
-class SimilarityAlgorithm:
+class WeightedAverageAlgorithm:
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
         self.db_path = db_path
         self.hdf5_path = hdf5_path
@@ -77,7 +77,6 @@ class SimilarityAlgorithm:
                 image = np.array(h5f[key])
                 images.append(image)
         return images
-
     
     def raised_cosine_window(self, tile_size):
         """Membuat raised cosine window untuk blending."""
@@ -111,26 +110,27 @@ class SimilarityAlgorithm:
                 precomputed_tiles[(y, x)] = (ref_tile, window)
 
         return precomputed_tiles
-    
-    def computer_motion_metrics(self, current_tile, ref_tile, motion_threshold, noise_threshold):
+
+    def computer_motion_metrics(self, current_tile, ref_tile, motion_threshold):
+        # Hanya perhitungan temporal motion
         temporal_motion = cv2.absdiff(current_tile, ref_tile)
-        median_tile = cv2.medianBlur(current_tile.astype(np.float32), ksize=3)
-        spatial_noise = cv2.absdiff(current_tile, median_tile)
-        
-        noise_mask = cv2.max(temporal_motion, spatial_noise)
-        adaptive_threshold = motion_threshold + noise_threshold * cv2.mean(noise_mask)[0]
 
         Dz = cv2.mean(temporal_motion)[0]
-        similarity_weight = 1.0 if Dz < adaptive_threshold else np.exp(-Dz / adaptive_threshold)
         
-        return similarity_weight, adaptive_threshold
-
+        # Menggunakan fungsi eksponensial untuk memberikan nilai bobot secara halus
+        similarity_weight = np.exp(-Dz / motion_threshold)  # Eksponensial decay berdasarkan perbedaan Dz
+        
+        # Pastikan similarity_weight berada dalam rentang 0 hingga 1
+        similarity_weight = np.clip(similarity_weight, 0.0, 1.0)
+        
+        return similarity_weight
+  
     def update_final_image(self, final_image, weight_map, current_tile, window, similarity_weight, y, x_start, y_end, x_end, dtype):
         weighted_tile = current_tile * window[..., np.newaxis] * similarity_weight
         weight_map[y:y_end, x_start:x_end] += window * similarity_weight
         final_image[y:y_end, x_start:x_end] += weighted_tile * np.iinfo(dtype).max
 
-    def similarity_mfnr(self, images, tile_size=(50, 50), overlap=0.20, motion_threshold=0.05, noise_threshold=0.05, update_progress=None, stop_requested=None):
+    def weighter_average(self, images, tile_size=(128, 128), overlap=0.30, motion_threshold=0.05, update_progress=None, stop_requested=None):
         if not images:
             raise ValueError(language_config.SIMILARITY_MNFR_LOAD_FAILED)
 
@@ -165,7 +165,7 @@ class SimilarityAlgorithm:
                 x_start = max(x, 0)
 
                 current_tile = current_image[y:y_end, x_start:x_end]
-                similarity_weight, _ = self.computer_motion_metrics(current_tile, ref_tile, motion_threshold, noise_threshold)
+                similarity_weight = self.computer_motion_metrics(current_tile, ref_tile, motion_threshold)
                 self.update_final_image(final_image, weight_map, current_tile, window, similarity_weight, y, x_start, y_end, x_end, dtype)
 
         final_image /= (weight_map[..., np.newaxis] + 1e-6)
@@ -173,16 +173,17 @@ class SimilarityAlgorithm:
 
         print(language_config.SIMILARITY_MNFR_PROCESS_FINISHED)
         return final_image
-    
+
     def normalize_image(self, image, dtype):
         return image.astype(np.float32) / np.iinfo(dtype).max
+
 
     def save_image(self, image, output_path):
         cv2.imwrite(output_path, image)
         
-def main(db_path, update_progress=None, stop_requested=None):
+def main(db_path, update_progress=None, stop_requested=None, batch_size=5):
     try:
-        image_processor = SimilarityAlgorithm(db_path)
+        image_processor = WeightedAverageAlgorithm(db_path)
         image_paths = image_processor.get_all_image_paths()
         if not image_paths:
             if update_progress:
@@ -191,63 +192,83 @@ def main(db_path, update_progress=None, stop_requested=None):
 
         reference_image_path = image_paths[0]
         reference_image_name = os.path.splitext(os.path.basename(reference_image_path))[0]
-        output_path = f"database/stack/{reference_image_name}_similarity_stack.tiff"
+        output_path = f"database/stack/{reference_image_name}_similarity_stack.tif"
 
         if update_progress:
             update_progress(0, language_config.RUN_IMAGE_PROCESS_STARTED)
 
         global_hdf5_path = "database/align/aligned_images.h5"
-        images = []
+        processed_batches = []  # Menyimpan hasil sementara dari batch
 
         if os.path.exists(global_hdf5_path):
             with h5py.File(global_hdf5_path, 'r') as h5f:
-                total_images = len(h5f.keys())
-                for i, key in enumerate(h5f.keys()):
+                keys = list(h5f.keys())
+                total_images = len(keys)
+
+                for batch_start in range(0, total_images, batch_size):
                     if stop_requested and stop_requested():
                         break
-                    images.append(np.array(h5f[key]))
-                    progress = int((i / total_images) * 10)
-                    message = language_config.RUN_IMAGE_PROCESS_LOAD_PROGRESS.format(
-                        current=i + 1, total=total_images)
+
+                    batch_keys = keys[batch_start:batch_start + batch_size]
+                    batch_images = [np.array(h5f[key]) for key in batch_keys]
+
+                    # Proses batch
+                    batch_result = image_processor.weighter_average(batch_images, update_progress=update_progress, stop_requested=stop_requested)
+                    processed_batches.append(batch_result)
+
+                    progress = int(((batch_start + len(batch_keys)) / total_images) * 100)
                     if update_progress:
-                        update_progress(progress, message)
+                        update_progress(progress, language_config.RUN_IMAGE_PROCESS_BATCH_PROGRESS.format(
+                            current=batch_start + len(batch_keys), total=total_images
+                        ))
         else:
             total_images = len(image_paths)
-            for i, path in enumerate(image_paths):
+
+            for batch_start in range(0, total_images, batch_size):
                 if stop_requested and stop_requested():
                     break
-                image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-                if image is not None:
-                    images.append(image)
-                progress = int((i / total_images) * 100)
-                message = language_config.RUN_IMAGE_PROCESS_LOAD_PROGRESS.format(
-                    current=i + 1, total=total_images)
-                if update_progress:
-                    update_progress(progress, message)
 
-        if images:
-            # Tidak perlu mendefinisikan tile_size di sini
-            stacked_image = image_processor.similarity_mfnr(images, update_progress=update_progress, stop_requested=stop_requested)
-            image_processor.save_image(stacked_image, output_path)
+                batch_paths = image_paths[batch_start:batch_start + batch_size]
+                batch_images = [cv2.imread(path, cv2.IMREAD_UNCHANGED) for path in batch_paths if cv2.imread(path, cv2.IMREAD_UNCHANGED) is not None]
+
+                # Proses batch
+                batch_result = image_processor.weighter_average(batch_images, update_progress=update_progress, stop_requested=stop_requested)
+                processed_batches.append(batch_result)
+
+                progress = int(((batch_start + len(batch_paths)) / total_images) * 100)
+                if update_progress:
+                    update_progress(progress, language_config.RUN_IMAGE_PROCESS_BATCH_PROGRESS.format(
+                        current=batch_start + len(batch_paths), total=total_images
+                    ))
+
+        if processed_batches:
+            # Proses fine-tuning dari semua hasil batch
+            final_result = image_processor.weighter_average(processed_batches, update_progress=update_progress, stop_requested=stop_requested)
+
+            # Simpan hasil akhir
+            image_processor.save_image(final_result, output_path)
+
             if update_progress:
                 update_progress(100, language_config.RUN_IMAGE_PROCESS_STACK_SUCCESS.format(output_path=output_path))
         else:
             if update_progress:
                 update_progress(0, language_config.STACK_IMAGES_FAILED)
+
     except Exception as error:
         error_message = f"Error encountered: {str(error)}"
         print(error_message)  # Menampilkan error untuk debugging
         if update_progress:
             update_progress(0, error_message)
-        raise  # Melempar error jika perlu untuk penanganan lebih lanjut
+        raise
 
-def running_similarity(parent=None):
+
+def running_weighted_average(parent=None):
     """
     Menampilkan progress bar dengan gaya kustom dan memanfaatkan thread.
     """
     # Membuat dialog progress
     dialog = QDialog(parent)
-    dialog.setWindowTitle(language_config.WINDOW_TITLE_SIMILARITY)
+    dialog.setWindowTitle(language_config.WINDOW_TITLE_WEIGHTED_AVERGAE)
     dialog.setModal(True)
     dialog.setFixedSize(300, 90)
     dialog.setWindowFlags(

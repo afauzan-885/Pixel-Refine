@@ -77,7 +77,6 @@ class SimilarityAlgorithm:
                 image = np.array(h5f[key])
                 images.append(image)
         return images
-
     
     def raised_cosine_window(self, tile_size):
         """Membuat raised cosine window untuk blending."""
@@ -85,36 +84,16 @@ class SimilarityAlgorithm:
         x = np.hanning(tile_size[1])
         window = np.outer(y, x)
         return window
-
-    def similarity_mfnr(self, images, tile_size=(50, 50), overlap=0.20, motion_threshold=0.05, noise_threshold=0.05, update_progress=None, stop_requested=None):
-        """
-        Multi-frame Noise Reduction (MFNR) dengan pre-computed values untuk reference image.
-        """
-        if not images:
-            raise ValueError(language_config.SIMILARITY_MNFR_LOAD_FAILED)
-
-        dtype = images[0].dtype
-        if dtype != np.uint8 and dtype != np.uint16:
-            raise TypeError(language_config.SIMILARITY_MNFR_BIT_REQUIRED)
-
-        reference_image = images[0].astype(np.float32, copy=False)
+    
+    def precompute_reference_tiles(self, reference_image, tile_size, overlap):
         h, w, _ = reference_image.shape
-
         tile_step_y = int(tile_size[0] * (1 - overlap))
         tile_step_x = int(tile_size[1] * (1 - overlap))
         vertical_offset = tile_size[0] // 2
 
-        final_image = np.zeros_like(reference_image, dtype=np.float32)
-        weight_map = np.zeros((h, w), dtype=np.float32)
-
-        # Pre-compute cosine window
+        precomputed_tiles = {}
         cosine_window = self.raised_cosine_window(tile_size)
 
-        # Normalize reference image once
-        reference_image /= np.iinfo(dtype).max
-
-        # Pre-compute per-tile values from reference image
-        precomputed_reference_tiles = {}
         for y in range(0, h, tile_step_y):
             offset_x = vertical_offset if (y // tile_step_y) % 2 == 1 else 0
             for x in range(-offset_x, w, tile_step_x):
@@ -125,70 +104,82 @@ class SimilarityAlgorithm:
                 tile_height = y_end - y
                 tile_width = x_end - x_start
 
-                # Extract reference tile
                 ref_tile = reference_image[y:y_end, x_start:x_end]
                 window = cosine_window[:tile_height, :tile_width]
 
-                # Store pre-computed reference tile with window
-                precomputed_reference_tiles[(y, x)] = (ref_tile, window)
+                precomputed_tiles[(y, x)] = (ref_tile, window)
+
+        return precomputed_tiles
+    
+    def computer_motion_metrics(self, current_tile, ref_tile, motion_threshold, noise_threshold):
+        temporal_motion = cv2.absdiff(current_tile, ref_tile)
+        median_tile = cv2.medianBlur(current_tile.astype(np.float32), ksize=3)
+        spatial_noise = cv2.absdiff(current_tile, median_tile)
+        
+        noise_mask = cv2.max(temporal_motion, spatial_noise)
+        adaptive_threshold = motion_threshold + noise_threshold * cv2.mean(noise_mask)[0]
+
+        Dz = cv2.mean(temporal_motion)[0]
+        similarity_weight = 1.0 if Dz < adaptive_threshold else np.exp(-Dz / adaptive_threshold)
+        
+        return similarity_weight, adaptive_threshold
+
+    def update_final_image(self, final_image, weight_map, current_tile, window, similarity_weight, y, x_start, y_end, x_end, dtype):
+        weighted_tile = current_tile * window[..., np.newaxis] * similarity_weight
+        weight_map[y:y_end, x_start:x_end] += window * similarity_weight
+        final_image[y:y_end, x_start:x_end] += weighted_tile * np.iinfo(dtype).max
+
+    def similarity_mfnr(self, images, tile_size=(50, 50), overlap=0.20, motion_threshold=0.05, noise_threshold=0.05, update_progress=None, stop_requested=None):
+        if not images:
+            raise ValueError(language_config.SIMILARITY_MNFR_LOAD_FAILED)
+
+        dtype = images[0].dtype
+        if dtype not in (np.uint8, np.uint16):
+            raise TypeError(language_config.SIMILARITY_MNFR_BIT_REQUIRED)
+
+        reference_image = self.normalize_image(images[0], dtype)
+        h, w, _ = reference_image.shape
+
+        precomputed_reference_tiles = self.precompute_reference_tiles(reference_image, tile_size, overlap)
+        final_image = np.zeros_like(reference_image, dtype=np.float32)
+        weight_map = np.zeros((h, w), dtype=np.float32)
 
         for i, image in enumerate(images):
-            progress = int((i + 1) / len(images) * 100)
-            message = language_config.RUN_IMAGE_PROCESSING.format(i=i + 1, total_images=len(images))
-            print(message)
-
             if update_progress:
+                progress = int((i + 1) / len(images) * 100)
+                message = language_config.RUN_IMAGE_PROCESSING.format(i=i + 1, total_images=len(images))
                 update_progress(progress, message)
 
             if stop_requested and stop_requested():
                 print("Process stopped by user.")
                 break
 
-            current_image = image.astype(np.float32, copy=False)
+            current_image = self.normalize_image(image, dtype)
             if current_image.shape != reference_image.shape:
                 raise ValueError(language_config.SIMILARITY_MNFR_SIZE_FAILED.format(i=i + 1))
-
-            current_image /= np.iinfo(dtype).max
 
             for (y, x), (ref_tile, window) in precomputed_reference_tiles.items():
                 y_end = min(y + tile_size[0], h)
                 x_end = min(x + tile_size[1], w)
                 x_start = max(x, 0)
 
-                # Extract current tile
                 current_tile = current_image[y:y_end, x_start:x_end]
-
-                # Temporal motion
-                temporal_motion = cv2.absdiff(current_tile, ref_tile)
-
-                # Spatial noise
-                median_tile = cv2.medianBlur(current_tile.astype(np.float32), ksize=3)
-                spatial_noise = cv2.absdiff(current_tile, median_tile)
-
-                # Noise mask and adaptive threshold
-                noise_mask = cv2.max(temporal_motion, spatial_noise)
-                adaptive_threshold = motion_threshold + noise_threshold * cv2.mean(noise_mask)[0]
-
-                # Compute Dz and similarity weight
-                Dz = cv2.mean(temporal_motion)[0]
-                similarity_weight = 1.0 if Dz < adaptive_threshold else np.exp(-Dz / adaptive_threshold)
-
-                # Update final image and weight map
-                weighted_tile = current_tile * window[..., np.newaxis] * similarity_weight
-                weight_map[y:y_end, x_start:x_end] += window * similarity_weight
-                final_image[y:y_end, x_start:x_end] += weighted_tile * np.iinfo(dtype).max
+                similarity_weight, _ = self.computer_motion_metrics(current_tile, ref_tile, motion_threshold, noise_threshold)
+                self.update_final_image(final_image, weight_map, current_tile, window, similarity_weight, y, x_start, y_end, x_end, dtype)
 
         final_image /= (weight_map[..., np.newaxis] + 1e-6)
         final_image = np.clip(final_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype)
 
         print(language_config.SIMILARITY_MNFR_PROCESS_FINISHED)
         return final_image
-
+    
+    def normalize_image(self, image, dtype):
+        return image.astype(np.float32) / np.iinfo(dtype).max
 
     def save_image(self, image, output_path):
         cv2.imwrite(output_path, image)
         
-def main(db_path, update_progress=None, stop_requested=None):
+def main(db_path, update_progress=None, stop_requested=None, batch_size=5):
     try:
         image_processor = SimilarityAlgorithm(db_path)
         image_paths = image_processor.get_all_image_paths()
@@ -199,55 +190,75 @@ def main(db_path, update_progress=None, stop_requested=None):
 
         reference_image_path = image_paths[0]
         reference_image_name = os.path.splitext(os.path.basename(reference_image_path))[0]
-        output_path = f"database/stack/{reference_image_name}_similarity_stack.tiff"
+        output_path = f"database/stack/{reference_image_name}_similarity_stack.tif"
 
         if update_progress:
             update_progress(0, language_config.RUN_IMAGE_PROCESS_STARTED)
 
         global_hdf5_path = "database/align/aligned_images.h5"
-        images = []
+        processed_batches = []  # Menyimpan hasil sementara dari batch
 
         if os.path.exists(global_hdf5_path):
             with h5py.File(global_hdf5_path, 'r') as h5f:
-                total_images = len(h5f.keys())
-                for i, key in enumerate(h5f.keys()):
+                keys = list(h5f.keys())
+                total_images = len(keys)
+
+                for batch_start in range(0, total_images, batch_size):
                     if stop_requested and stop_requested():
                         break
-                    images.append(np.array(h5f[key]))
-                    progress = int((i / total_images) * 10)
-                    message = language_config.RUN_IMAGE_PROCESS_LOAD_PROGRESS.format(
-                        current=i + 1, total=total_images)
+
+                    batch_keys = keys[batch_start:batch_start + batch_size]
+                    batch_images = [np.array(h5f[key]) for key in batch_keys]
+
+                    # Proses batch
+                    batch_result = image_processor.similarity_mfnr(batch_images, update_progress=update_progress, stop_requested=stop_requested)
+                    processed_batches.append(batch_result)
+
+                    progress = int(((batch_start + len(batch_keys)) / total_images) * 100)
                     if update_progress:
-                        update_progress(progress, message)
+                        update_progress(progress, language_config.RUN_IMAGE_PROCESS_BATCH_PROGRESS.format(
+                            current=batch_start + len(batch_keys), total=total_images
+                        ))
         else:
             total_images = len(image_paths)
-            for i, path in enumerate(image_paths):
+
+            for batch_start in range(0, total_images, batch_size):
                 if stop_requested and stop_requested():
                     break
-                image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-                if image is not None:
-                    images.append(image)
-                progress = int((i / total_images) * 100)
-                message = language_config.RUN_IMAGE_PROCESS_LOAD_PROGRESS.format(
-                    current=i + 1, total=total_images)
-                if update_progress:
-                    update_progress(progress, message)
 
-        if images:
-            # Tidak perlu mendefinisikan tile_size di sini
-            stacked_image = image_processor.similarity_mfnr(images, update_progress=update_progress, stop_requested=stop_requested)
-            image_processor.save_image(stacked_image, output_path)
+                batch_paths = image_paths[batch_start:batch_start + batch_size]
+                batch_images = [cv2.imread(path, cv2.IMREAD_UNCHANGED) for path in batch_paths if cv2.imread(path, cv2.IMREAD_UNCHANGED) is not None]
+
+                # Proses batch
+                batch_result = image_processor.similarity_mfnr(batch_images, update_progress=update_progress, stop_requested=stop_requested)
+                processed_batches.append(batch_result)
+
+                progress = int(((batch_start + len(batch_paths)) / total_images) * 100)
+                if update_progress:
+                    update_progress(progress, language_config.RUN_IMAGE_PROCESS_BATCH_PROGRESS.format(
+                        current=batch_start + len(batch_paths), total=total_images
+                    ))
+
+        if processed_batches:
+            # Proses fine-tuning dari semua hasil batch
+            final_result = image_processor.similarity_mfnr(processed_batches, update_progress=update_progress, stop_requested=stop_requested)
+
+            # Simpan hasil akhir
+            image_processor.save_image(final_result, output_path)
+
             if update_progress:
                 update_progress(100, language_config.RUN_IMAGE_PROCESS_STACK_SUCCESS.format(output_path=output_path))
         else:
             if update_progress:
                 update_progress(0, language_config.STACK_IMAGES_FAILED)
+
     except Exception as error:
         error_message = f"Error encountered: {str(error)}"
         print(error_message)  # Menampilkan error untuk debugging
         if update_progress:
             update_progress(0, error_message)
-        raise  # Melempar error jika perlu untuk penanganan lebih lanjut
+        raise
+
 
 def running_similarity(parent=None):
     """
