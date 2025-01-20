@@ -129,7 +129,7 @@ class SimilarityAlgorithm:
         weight_map[y:y_end, x_start:x_end] += window * similarity_weight
         final_image[y:y_end, x_start:x_end] += weighted_tile * np.iinfo(dtype).max
 
-    def similarity_mfnr(self, images, tile_size=(50, 50), overlap=0.20, motion_threshold=0.05, noise_threshold=0.05, update_progress=None, stop_requested=None):
+    def similarity_mfnr(self, images, tile_size=(50, 50), overlap=0.20, motion_threshold=0.05, noise_threshold=0.04, update_progress=None, stop_requested=None):
         if not images:
             raise ValueError(language_config.SIMILARITY_MNFR_LOAD_FAILED)
 
