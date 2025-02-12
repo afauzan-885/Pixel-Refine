@@ -1,3 +1,4 @@
+import json
 import cv2
 import numpy as np
 import sqlite3
@@ -76,39 +77,96 @@ class FarnebackAlgorithm:
         """
         return cv2.resize(image, (size[1], size[0]), interpolation=cv2.INTER_LINEAR)
 
-    def calculate_optical_flow(self, base_image, target_image, stop_requested=None):
+    @staticmethod
+    def load_farneback_config(config_filename=None):
         """
-        Calculates the optical flow between two images.
+        Membaca konfigurasi Farneback Optical Flow dari file JSON.
+        Jika gagal, mengembalikan nilai default.
         """
-        if stop_requested and stop_requested():  # Cek penghentian
-            print("Proses dihentikan sebelum menghitung gerakan global.")
-            return None, None
-        
-        print("Menghitung optical flow...")
-        
-        base_gray = cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY)
-        target_gray = cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY)
+        default_config = {
+            "pyr_scale": 0.5,
+            "levels": 3,
+            "winsize": 15,
+            "iterations": 3,
+            "poly_n": 5,
+            "poly_sigma": 1.2,
+            "flags": 0,
+            "interpolation": "INTER_CUBIC"
+        }
 
-        # Using Farneback Optical Flow
-        flow = cv2.calcOpticalFlowFarneback(base_gray, target_gray, None,
-                                            pyr_scale=0.5, levels=3, winsize=15,
-                                            iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
-        print("Optical flow selesai dihitung.")
-        return flow
+        if config_filename is None:
+            config_filename = os.path.join("database", "setting", "Parameter_Stack_Enhance.json")
 
-    def compensate_motion(self, base_image, flow, stop_requested=None):
-        """
-        Applies motion compensation (warp) to the image using optical flow.
-        """
-        if stop_requested and stop_requested():  # Cek penghentian
-            print("Proses dihentikan sebelum menghitung gerakan global.")
-            return None, None
-        
-        h, w = base_image.shape[:2]
+        try:
+            with open(config_filename, "r") as config_file:
+                params = json.load(config_file)
+            return params.get("Farneback", default_config)
+        except Exception as e:
+            print("Error loading Farneback configuration:", e)
+            return default_config
+
+
+    def calculate_optical_flow(self, base_image, target_image, config_filename=None):
+        device = " GPU" if self.use_gpu else " CPU"
+        print(language_config.CALCULATE_OPTICAL_FLOW_STATUS.format(device=device))
+
+        if self.use_gpu:
+            base_gray = cv2.UMat(cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY))
+            target_gray = cv2.UMat(cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY))
+        else:
+            base_gray = cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY)
+            target_gray = cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY)
+
+        # Muat parameter Farneback Optical Flow dari file konfigurasi
+        fb_config = self.load_farneback_config(config_filename)
+
+        flow = cv2.calcOpticalFlowFarneback(
+            base_gray, 
+            target_gray, 
+            None,
+            pyr_scale=fb_config["pyr_scale"],
+            levels=fb_config["levels"],
+            winsize=fb_config["winsize"],
+            iterations=fb_config["iterations"],
+            poly_n=fb_config["poly_n"],
+            poly_sigma=fb_config["poly_sigma"],
+            flags=fb_config["flags"]
+        )
+
+        print(language_config.CALCULATE_OPTICAL_FLOW_FINISHED)
+        return flow.get() if self.use_gpu else flow
+
+
+    def compensate_motion(self, base_image_16bit, flow, image_id, config_filename=None):
+        print(language_config.COMPENSATE_MOTION_STATUS.format(image_id=image_id))
+        h, w = base_image_16bit.shape[:2]
         flow_map = np.stack(np.meshgrid(np.arange(w), np.arange(h)), axis=-1)
         warped_map = flow_map + flow
         remap_x, remap_y = cv2.split(warped_map.astype(np.float32))
-        compensated_image = cv2.remap(base_image, remap_x, remap_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+
+        if self.use_gpu:
+            base_image_16bit = cv2.UMat(base_image_16bit)
+            remap_x = cv2.UMat(remap_x)
+            remap_y = cv2.UMat(remap_y)
+
+        # Muat konfigurasi Farneback untuk mendapatkan parameter interpolasi
+        fb_config = self.load_farneback_config(config_filename)
+        # Konversi nilai string interpolasi ke flag OpenCV (misalnya, "INTER_AREA")
+        interpolation_str = fb_config.get("interpolation", "INTER_AREA")
+        interp_flag = getattr(cv2, interpolation_str, cv2.INTER_AREA)
+
+        compensated_image = cv2.remap(
+            base_image_16bit, 
+            remap_x, 
+            remap_y, 
+            interpolation=interp_flag, 
+            borderMode=cv2.BORDER_REFLECT
+        )
+
+        if self.use_gpu:
+            compensated_image = compensated_image.get()
+
+        print(language_config.COMPENSATE_MOTION_FINISHED.format(image_id=image_id))
         return compensated_image
 
     def save_to_hdf5(self, h5f, aligned_images, update_progress=None, start_index=0):
@@ -255,7 +313,7 @@ def running_farneback_optical_flow(parent=None):
     worker.finished.connect(finish_handler)
 
     def error_handler(error):
-        QMessageBox.critical(dialog, "Error", f"An error occurred: {error}")
+        QMessageBox.critical(dialog, "Error", language_config.RUN_ERROR_STATUS.format(error=error))
         dialog.close()
         worker.quit()
         worker.wait()
@@ -270,7 +328,9 @@ def running_farneback_optical_flow(parent=None):
         if worker.isRunning():
             # Menampilkan konfirmasi sebelum menutup dialog
             reply = QMessageBox.question(dialog, "Cancel Process",
-                                        "Are you sure you want to cancel the process?",
+                                        
+                                        # message: Are you sure you want to cancel the process?
+                                        language_config.CANCEL_PROCESSING,
                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
                                         QMessageBox.StandardButton.No)
 

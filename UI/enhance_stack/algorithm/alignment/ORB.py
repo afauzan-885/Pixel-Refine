@@ -1,3 +1,4 @@
+import json
 import cv2
 import numpy as np
 import sqlite3
@@ -70,63 +71,90 @@ class ORBAlgorithm:
                 images.append(image)
         return images
 
+    @staticmethod
+    def load_orb_config(config_filename=None):
+        """
+        Membaca konfigurasi ORB dari file JSON. Jika gagal, mengembalikan nilai default.
+        """
+        default_config = {
+            "nfeatures": 1000,
+            "scaleFactor": 1.1,
+            "nlevels": 5,
+            "ransacThreshold": 5.0,
+            "transformation": "homography"
+        }
+
+        if config_filename is None:
+            config_filename = os.path.join("database", "setting", "Parameter_Stack_Enhance.json")
+
+        try:
+            with open(config_filename, "r") as config_file:
+                params = json.load(config_file)
+            return params.get("ORB", default_config)
+        except Exception as e:
+            print("Error loading ORB configuration:", e)
+            return default_config  # Gunakan default jika file tidak ditemukan atau ada error
+
+
     def calculate_global_motion(self, base_image, target_image, stop_requested=None):
         """
-        Menghitung keypoints dan deskriptor menggunakan ORB antara dua gambar (8-bit).
+        Menghitung keypoints dan deskriptor menggunakan ORB antara dua gambar.
         """
-        if stop_requested and stop_requested():  # Cek penghentian
+        if stop_requested and stop_requested():
             return None, None
 
-        # Konversi gambar asli (16-bit) menjadi 8-bit untuk penyelarasan
+        # Baca konfigurasi ORB
+        orb_config = self.load_orb_config()
+
+        # Konversi gambar 16-bit ke 8-bit
         base_image_8bit = cv2.normalize(base_image, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
         target_image_8bit = cv2.normalize(target_image, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
 
-        # Menggunakan ORB untuk mendeteksi keypoints dan deskriptor
-        orb = cv2.ORB_create(nfeatures=1000, scaleFactor=1.1, nlevels=5)
+        # Inisialisasi ORB dengan parameter dari konfigurasi
+        orb = cv2.ORB_create(
+            nfeatures=orb_config["nfeatures"],
+            scaleFactor=orb_config["scaleFactor"],
+            nlevels=orb_config["nlevels"]
+        )
+
         keypoints_base, descriptors_base = orb.detectAndCompute(base_image_8bit, None)
         keypoints_target, descriptors_target = orb.detectAndCompute(target_image_8bit, None)
 
-        # Menggunakan BFMatcher untuk mencocokkan deskriptor
         bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
         matches = bf.match(descriptors_base, descriptors_target)
-
-        # Mengurutkan match berdasarkan jarak
         matches = sorted(matches, key=lambda x: x.distance)
-
-        # Menyaring dan mengembalikan pasangan keypoints yang dicocokkan
         base_points = np.float32([keypoints_base[m.queryIdx].pt for m in matches])
         target_points = np.float32([keypoints_target[m.trainIdx].pt for m in matches])
 
         return base_points, target_points
-    
-    def compensate_motion(self, base_image, base_points, target_points, stop_requested=None, transformation_type='homography'):
+
+
+    def compensate_motion(self, base_image, base_points, target_points, stop_requested=None, transformation_type=None):
         """
-        Menerapkan kompensasi gerakan ke gambar asli menggunakan transformasi yang dihitung dari gambar 8-bit.
+        Menerapkan kompensasi gerakan ke gambar menggunakan transformasi yang dihitung.
         """
-        if stop_requested and stop_requested():  # Cek penghentian
-            print("Proses dihentikan sebelum menghitung gerakan global.")
-            return None, None
-        
+        if stop_requested and stop_requested():
+            return None
+
+        # Baca konfigurasi ORB
+        orb_config = self.load_orb_config()
+        ransac_threshold = orb_config["ransacThreshold"]
+        transformation_type = transformation_type or orb_config["transformation"]
+
         if transformation_type == 'homography':
-            # Hitung matriks homografi menggunakan pasangan keypoints
-            H, mask = cv2.findHomography(target_points, base_points, cv2.RANSAC, 5.0)
-            # Terapkan transformasi ke gambar asli (16-bit)
+            H, mask = cv2.findHomography(target_points, base_points, cv2.RANSAC, ransac_threshold)
             compensated_image = cv2.warpPerspective(base_image, H, (base_image.shape[1], base_image.shape[0]), flags=cv2.INTER_CUBIC)
-            
         elif transformation_type == 'affine':
-            # Hitung matriks affine
-            matrix, mask = cv2.estimateAffine2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=5.0)
+            matrix, mask = cv2.estimateAffine2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=ransac_threshold)
             compensated_image = cv2.warpAffine(base_image, matrix, (base_image.shape[1], base_image.shape[0]), flags=cv2.INTER_CUBIC)
-            
-        elif transformation_type == 'similarity' or transformation_type == 'euclidean':
-            # Hitung matriks similarity atau Euclidean (subset dari similarity)
-            matrix, mask = cv2.estimateAffinePartial2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=5.0)
+        elif transformation_type in ['similarity', 'euclidean']:
+            matrix, mask = cv2.estimateAffinePartial2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=ransac_threshold)
             compensated_image = cv2.warpAffine(base_image, matrix, (base_image.shape[1], base_image.shape[0]), flags=cv2.INTER_CUBIC)
-            
         else:
             raise ValueError("Tipe transformasi tidak dikenali. Pilih dari 'homography', 'affine', 'similarity', atau 'euclidean'.")
-        
+
         return compensated_image
+
 
     def save_to_hdf5(self, h5f, aligned_images, update_progress=None, start_index=0):
         """
@@ -146,8 +174,7 @@ class ORBAlgorithm:
                 update_progress(i + start_index, total_images - 1, progress_message)
 
 
-
-def main(db_path, update_progress=None, batch_size=3, stop_requested=None):
+def main(db_path, update_progress=None, batch_size=5, stop_requested=None):
     processor = ORBAlgorithm(db_path)
 
     # Ambil path gambar dari database
@@ -271,7 +298,7 @@ def running_orb(parent=None):
     worker.finished.connect(finish_handler)
 
     def error_handler(error):
-        QMessageBox.critical(dialog, "Error", f"An error occurred: {error}")
+        QMessageBox.critical(dialog, "Error", language_config.RUN_ERROR_STATUS.format(error=error))
         dialog.close()
         worker.quit()
         worker.wait()
@@ -286,7 +313,9 @@ def running_orb(parent=None):
         if worker.isRunning():
             # Menampilkan konfirmasi sebelum menutup dialog
             reply = QMessageBox.question(dialog, "Cancel Process",
-                                        "Are you sure you want to cancel the process?",
+                                        
+                                        # message: Are you sure you want to cancel the process?
+                                        language_config.CANCEL_PROCESSING,
                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
                                         QMessageBox.StandardButton.No)
 

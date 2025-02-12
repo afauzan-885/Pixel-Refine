@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import sqlite3
 import os
+import json
 from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 from PyQt6.QtCore import Qt
 import h5py
@@ -10,9 +11,9 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from UI.settings.General.Language import language_config
 
 class ThreadWorker(QThread):
-    progress_updated = pyqtSignal(int, str)  # Sinyal untuk memperbarui progress
-    finished = pyqtSignal()  # Sinyal untuk menandakan selesai
-    error_occurred = pyqtSignal(str)  # Sinyal untuk menandakan error
+    progress_updated = pyqtSignal(int, str) 
+    finished = pyqtSignal() 
+    error_occurred = pyqtSignal(str)
 
     def __init__(self, db_path):
         super().__init__()
@@ -70,37 +71,65 @@ class AKAZEAlgorithm:
                 images.append(image)
         return images
     
+    @staticmethod
+    def load_akaze_config(config_filename=None):
+        """
+        Membaca konfigurasi AKAZE dari file JSON. Jika gagal, mengembalikan nilai default.
+        """
+        default_config = {
+            "akaze_threshold": 0.001,
+            "akaze_nOctaves": 4,
+            "akaze_nOctaveLayers": 4,
+            "ratio_threshold": 0.75
+        }
+
+        if config_filename is None:
+            config_filename = os.path.join("database", "setting", "Parameter_Stack_Enhance.json")
+
+        try:
+            with open(config_filename, "r") as config_file:
+                params = json.load(config_file)
+                
+            # Ambil parameter AKAZE jika ada, jika tidak gunakan default_config
+            return params.get("AKAZE", default_config)
+        except Exception as e:
+            print("Error loading AKAZE configuration:", e)
+            return default_config
+    
     def calculate_global_motion(self, base_image, target_image, stop_requested=None):
         """
         Menghitung keypoints dan deskriptor menggunakan AKAZE antara dua gambar.
+        Konfigurasi parameter dimuat dari file JSON.
         """
-        if stop_requested and stop_requested():  # Cek penghentian
+        if stop_requested and stop_requested():
             print("Proses dihentikan sebelum menghitung gerakan global.")
             return None, None
-        print("Menghitung fitur AKAZE...")
 
-        # Menggunakan AKAZE untuk mendeteksi keypoints dan deskriptor
-        akaze = cv2.AKAZE_create()
+        # Muat konfigurasi AKAZE dari file konfigurasi
+        akaze_config = self.load_akaze_config()
+
+        # Membuat AKAZE dengan parameter dari konfigurasi
+        akaze = cv2.AKAZE_create(
+            threshold=akaze_config["akaze_threshold"],
+            nOctaves=akaze_config["akaze_nOctaves"],
+            nOctaveLayers=akaze_config["akaze_nOctaveLayers"]
+        )
 
         keypoints_base, descriptors_base = akaze.detectAndCompute(base_image, None)
         keypoints_target, descriptors_target = akaze.detectAndCompute(target_image, None)
 
-        # Menggunakan BFMatcher dengan KNN dan Rasio Uji
         bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
         matches = bf.knnMatch(descriptors_base, descriptors_target, k=2)
 
         good_matches = []
-        ratio_threshold = 0.75
         for m, n in matches:
-            if m.distance < ratio_threshold * n.distance:
+            if m.distance < akaze_config["ratio_threshold"] * n.distance:
                 good_matches.append(m)
 
-        # Ambil pasangan keypoints yang sesuai
         base_points = np.float32([keypoints_base[m.queryIdx].pt for m in good_matches])
         target_points = np.float32([keypoints_target[m.trainIdx].pt for m in good_matches])
 
         return base_points, target_points
-
 
     def compensate_motion(self, base_image, base_points, target_points, transformation_type='homography'):
         """
@@ -295,7 +324,7 @@ def running_akaze(parent=None):
     worker.finished.connect(finish_handler)
 
     def error_handler(error):
-        QMessageBox.critical(dialog, "Error", f"An error occurred: {error}")
+        QMessageBox.critical(dialog, "Error", language_config.RUN_ERROR_STATUS.format(error=error))
         dialog.close()
         worker.quit()
         worker.wait()
@@ -310,7 +339,9 @@ def running_akaze(parent=None):
         if worker.isRunning():
             # Menampilkan konfirmasi sebelum menutup dialog
             reply = QMessageBox.question(dialog, "Cancel Process",
-                                        "Are you sure you want to cancel the process?",
+                                        
+                                        # message: Are you sure you want to cancel the process?
+                                        language_config.CANCEL_PROCESSING,
                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
                                         QMessageBox.StandardButton.No)
 

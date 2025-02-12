@@ -294,7 +294,7 @@ def running_similarity(parent=None):
     worker.finished.connect(finish_handler)
 
     def error_handler(error):
-        QMessageBox.critical(dialog, "Error", f"An error occurred: {error}")
+        QMessageBox.critical(dialog, "Error", language_config.RUN_ERROR_STATUS.format(error=error))
         dialog.close()
         worker.quit()
         worker.wait()
@@ -309,7 +309,9 @@ def running_similarity(parent=None):
         if worker.isRunning():
             # Menampilkan konfirmasi sebelum menutup dialog
             reply = QMessageBox.question(dialog, "Cancel Process",
-                                        "Are you sure you want to cancel the process?",
+                                        
+                                        # message: Are you sure you want to cancel the process?
+                                        language_config.CANCEL_PROCESSING,
                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
                                         QMessageBox.StandardButton.No)
 

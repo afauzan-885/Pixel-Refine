@@ -130,7 +130,7 @@ class WeightedAverageAlgorithm:
         weight_map[y:y_end, x_start:x_end] += window * similarity_weight
         final_image[y:y_end, x_start:x_end] += weighted_tile * np.iinfo(dtype).max
 
-    def weighter_average(self, images, tile_size=(128, 128), overlap=0.30, motion_threshold=0.05, update_progress=None, stop_requested=None):
+    def weighter_average(self, images, tile_size=(128, 128), overlap=0.35, motion_threshold=0.7, update_progress=None, stop_requested=None):
         if not images:
             raise ValueError(language_config.SIMILARITY_MNFR_LOAD_FAILED)
 
@@ -268,7 +268,7 @@ def running_weighted_average(parent=None):
     """
     # Membuat dialog progress
     dialog = QDialog(parent)
-    dialog.setWindowTitle(language_config.WINDOW_TITLE_WEIGHTED_AVERGAE)
+    dialog.setWindowTitle(language_config.WINDOW_TITLE_WEIGHTED_AVERAGE)
     dialog.setModal(True)
     dialog.setFixedSize(300, 90)
     dialog.setWindowFlags(
@@ -315,7 +315,7 @@ def running_weighted_average(parent=None):
     worker.finished.connect(finish_handler)
 
     def error_handler(error):
-        QMessageBox.critical(dialog, "Error", f"An error occurred: {error}")
+        QMessageBox.critical(dialog, "Error", language_config.RUN_ERROR_STATUS.format(error=error))
         dialog.close()
         worker.quit()
         worker.wait()
@@ -330,7 +330,9 @@ def running_weighted_average(parent=None):
         if worker.isRunning():
             # Menampilkan konfirmasi sebelum menutup dialog
             reply = QMessageBox.question(dialog, "Cancel Process",
-                                        "Are you sure you want to cancel the process?",
+                                        
+                                        # message: Are you sure you want to cancel the process?
+                                        language_config.CANCEL_PROCESSING,
                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
                                         QMessageBox.StandardButton.No)
 

@@ -36,7 +36,7 @@ MODULE_NOT_IMPLEMENT = "Module not yet implemented."
 NO_ALIGNMENT_PROCESS = "Are you sure you don't want image alignment first?."
 
 # General message
-LOAD_IMAGES_FROM_PATHS_LOAD_FAILED = "Failed to load image: {image_path}"
+LOAD_IMAGES_FROM_PATHS_LOAD_FAILED = "Failed to load image"
 
 SAVE_TO_HDF5_ALIGNED_SAVING = "Saving aligned image to HDF5"
 SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING = "The {index}th image is stored in HDF5."
@@ -50,6 +50,8 @@ RUN_IMAGE_PROCESSING = "Processing image {i} of {total_images}..."
 RUN_IMAGE_PROCESSING_FAILED = "Failed to load image {i} from {image_paths[i]}."
 RUN_IMAGE_PROCESSING_SAVING = "The {i}th image is saved in HDF5."
 RUN_IMAGE_PROCESSING_FINISHED = "Process Complete."
+
+CANCEL_PROCESSING = "Are you sure you want to cancel the process?"
 
 RUN_ERROR_STATUS = "An error occurred: {error}"
 RUN_ERROR_MESSAGE = "An error occurred: {error}"
@@ -105,7 +107,7 @@ WINDOW_PROCESS_SUCCESS = "The process has been completed."
 # Average, Median, Similarity Stacking
 WINDOW_TITLE_AVERAGE = "Average Stacking"
 WINDOW_TITLE_MEDIAN = "Median Stacking"
-WINDOW_TITLE_WEIGHTED_AVERGAE = "Weighted Average Stacking"
+WINDOW_TITLE_WEIGHTED_AVERAGE = "Weighted Average Stacking"
 
 WINDOW_TITLE_SIMILARITY = "Similarity Stacking"
 SIMILARITY_MNFR_LOAD_FAILED = "No images provided."
@@ -115,6 +117,11 @@ SIMILARITY_MNFR_SIZE_FAILED = "Image size {i} does not match the reference image
 SIMILARITY_MNFR_PROCESS_SUCCESS = "Image {i}/{count} processed successfully."
 SIMILARITY_MNFR_PROCESS_FINISHED = "Stacking complete."
 RUN_IMAGE_PROCESS_BATCH_PROGRESS = "Stacking batch to {current} from {total}"
+
+
+# Super Resolution
+
+WINDOW_TITLE_INTERPOLATION = "Interpolation Super Resolution"
 
 
 # Deskripsi untuk Alignment Algorithm
@@ -134,7 +141,7 @@ ORB_DESCRIPTION = "Fast algorithm but less accurate for significant differences\
 # Deskripsi untuk Super Resolution
 SUPER_RESOLUTION_NAME = "Super Resolution Algorithm"
 NONE_SUPER_RESOLUTION_DESCRIPTION = "No super-resolution will be applied."
-HORNSCHUNCK_DESCRIPTION = "Horn-Schunck method for multi-frame super-resolution."
+INTERPOLATION_DESCRIPTION = "A simple algorithm to increase resolution by interpolation, adding a little detail."
 
 # Deskripsi untuk Denoising
 DENOISING_NAME = "Denoising Algorithm" 

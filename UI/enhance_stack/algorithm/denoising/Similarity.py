@@ -1,14 +1,15 @@
-import cProfile
 import cv2
 import numpy as np
 import sqlite3
 import os
 from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
+from UI.enhance_stack.algorithm.denoising.extra_similarity.extra_algorithm import precompute_reference_tiles, process_tile_similarity, update_final_image
+from concurrent.futures import ThreadPoolExecutor
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 
 from UI.settings.General.Language import language_config
-
+    
 class ThreadWorker(QThread):
     progress_updated = pyqtSignal(int, str)  # Sinyal untuk memperbarui progress
     finished = pyqtSignal()  # Sinyal untuk menandakan selesai
@@ -56,80 +57,24 @@ class SimilarityAlgorithm:
 
     def load_images_from_hdf5(self, hdf5_path, stop_requested=None):
         images = []
-        with h5py.File(hdf5_path, 'r') as h5f:
-            for key in h5f.keys():
-                if stop_requested and stop_requested():  # Cek apakah harus berhenti
-                    break
-                image = np.array(h5f[key])
-                images.append(image)
-        return images
+        with h5py.File(hdf5_path, 'r', swmr=True, libver='latest') as h5f:
+            keys = list(h5f.keys())  # Ambil semua dataset di HDF5
+            
+            with ThreadPoolExecutor() as executor:
+                futures = {executor.submit(lambda k: np.array(h5f[k]), key): key for key in keys}
 
-    def load_images_from_folder(self, folder_path):
-        image_paths = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(('.png', '.jpg', '.jpeg'))]
-        return self.load_images_from_paths(image_paths)
+                for future in futures:
+                    if stop_requested and stop_requested():  # Cek apakah harus berhenti
+                        break
+                    images.append(future.result())  # Ambil hasil pembacaan
 
-    def load_images_from_hdf5(self, hdf5_path, stop_requested=None):
-        images = []
-        with h5py.File(hdf5_path, 'r') as h5f:
-            for key in h5f.keys():
-                if stop_requested and stop_requested():  # Cek apakah harus berhenti
-                    break
-                image = np.array(h5f[key])
-                images.append(image)
         return images
     
-    def raised_cosine_window(self, tile_size):
-        """Membuat raised cosine window untuk blending."""
-        y = np.hanning(tile_size[0])
-        x = np.hanning(tile_size[1])
-        window = np.outer(y, x)
-        return window
-    
-    def precompute_reference_tiles(self, reference_image, tile_size, overlap):
-        h, w, _ = reference_image.shape
-        tile_step_y = int(tile_size[0] * (1 - overlap))
-        tile_step_x = int(tile_size[1] * (1 - overlap))
-        vertical_offset = tile_size[0] // 2
+    def add_part_with_blending(final_image, weight_map, part, weight_map_part, y_start, y_end, x_start, x_end):
+            final_image[y_start:y_end, x_start:x_end] += part
+            weight_map[y_start:y_end, x_start:x_end] += weight_map_part[..., np.newaxis]
 
-        precomputed_tiles = {}
-        cosine_window = self.raised_cosine_window(tile_size)
-
-        for y in range(0, h, tile_step_y):
-            offset_x = vertical_offset if (y // tile_step_y) % 2 == 1 else 0
-            for x in range(-offset_x, w, tile_step_x):
-                y_end = min(y + tile_size[0], h)
-                x_end = min(x + tile_size[1], w)
-                x_start = max(x, 0)
-
-                tile_height = y_end - y
-                tile_width = x_end - x_start
-
-                ref_tile = reference_image[y:y_end, x_start:x_end]
-                window = cosine_window[:tile_height, :tile_width]
-
-                precomputed_tiles[(y, x)] = (ref_tile, window)
-
-        return precomputed_tiles
-    
-    def computer_motion_metrics(self, current_tile, ref_tile, motion_threshold, noise_threshold):
-        temporal_motion = cv2.absdiff(current_tile, ref_tile)
-        median_tile = cv2.medianBlur(current_tile.astype(np.float32), ksize=3)
-        spatial_noise = cv2.absdiff(current_tile, median_tile)
-        
-        noise_mask = cv2.max(temporal_motion, spatial_noise)
-        adaptive_threshold = motion_threshold + noise_threshold * cv2.mean(noise_mask)[0]
-
-        Dz = cv2.mean(temporal_motion)[0]
-        similarity_weight = 1.0 if Dz < adaptive_threshold else np.exp(-Dz / adaptive_threshold)
-        
-        return similarity_weight, adaptive_threshold
-
-    def update_final_image(self, final_image, weight_map, current_tile, window, similarity_weight, y, x_start, y_end, x_end, dtype):
-        weighted_tile = current_tile * window[..., np.newaxis] * similarity_weight
-        weight_map[y:y_end, x_start:x_end] += window * similarity_weight
-        final_image[y:y_end, x_start:x_end] += weighted_tile * np.iinfo(dtype).max
-
-    def similarity_mfnr(self, images, tile_size=(50, 50), overlap=0.20, motion_threshold=0.05, noise_threshold=0.04, update_progress=None, stop_requested=None):
+    def similarity_mfnr(self, images, tile_size=(50, 50), overlap=0.30, motion_threshold=0.02, update_progress=None, stop_requested=None):
         if not images:
             raise ValueError(language_config.SIMILARITY_MNFR_LOAD_FAILED)
 
@@ -140,9 +85,21 @@ class SimilarityAlgorithm:
         reference_image = self.normalize_image(images[0], dtype)
         h, w, _ = reference_image.shape
 
-        precomputed_reference_tiles = self.precompute_reference_tiles(reference_image, tile_size, overlap)
-        final_image = np.zeros_like(reference_image, dtype=np.float32)
-        weight_map = np.zeros((h, w), dtype=np.float32)
+        overlap_pixels_y = int(tile_size[0] * overlap)
+        overlap_pixels_x = int(tile_size[1] * overlap)
+
+        h_mid = h // 2
+        w_mid = w // 2
+        reference_parts = [
+            reference_image[:h_mid + overlap_pixels_y, :w_mid + overlap_pixels_x],
+            reference_image[:h_mid + overlap_pixels_y, w_mid - overlap_pixels_x:],
+            reference_image[h_mid - overlap_pixels_y:, :w_mid + overlap_pixels_x],
+            reference_image[h_mid - overlap_pixels_y:, w_mid - overlap_pixels_x:]
+        ]
+
+        precomputed_reference_tiles = [precompute_reference_tiles(part, tile_size, overlap) for part in reference_parts]
+        final_image_parts = [np.zeros_like(part, dtype=np.float32) for part in reference_parts]
+        weight_map_parts = [np.zeros(part.shape[:2], dtype=np.float32) for part in reference_parts]
 
         for i, image in enumerate(images):
             if update_progress:
@@ -158,20 +115,35 @@ class SimilarityAlgorithm:
             if current_image.shape != reference_image.shape:
                 raise ValueError(language_config.SIMILARITY_MNFR_SIZE_FAILED.format(i=i + 1))
 
-            for (y, x), (ref_tile, window) in precomputed_reference_tiles.items():
-                y_end = min(y + tile_size[0], h)
-                x_end = min(x + tile_size[1], w)
-                x_start = max(x, 0)
+            current_image_parts = [
+                current_image[:h_mid + overlap_pixels_y, :w_mid + overlap_pixels_x],
+                current_image[:h_mid + overlap_pixels_y, w_mid - overlap_pixels_x:],
+                current_image[h_mid - overlap_pixels_y:, :w_mid + overlap_pixels_x],
+                current_image[h_mid - overlap_pixels_y:, w_mid - overlap_pixels_x:]
+            ]
 
-                current_tile = current_image[y:y_end, x_start:x_end]
-                similarity_weight, _ = self.computer_motion_metrics(current_tile, ref_tile, motion_threshold, noise_threshold)
-                self.update_final_image(final_image, weight_map, current_tile, window, similarity_weight, y, x_start, y_end, x_end, dtype)
+            # Panggil fungsi baru untuk memproses setiap tile
+            process_tile_similarity(current_image_parts, precomputed_reference_tiles, final_image_parts, weight_map_parts,
+                                    tile_size, h, w, h_mid, w_mid, overlap_pixels_y, overlap_pixels_x, motion_threshold, dtype)
 
-        final_image /= (weight_map[..., np.newaxis] + 1e-6)
+        final_image = np.zeros_like(reference_image, dtype=np.float32)
+        weight_map = np.zeros_like(reference_image, dtype=np.float32)
+
+        def add_part_with_blending(final_image, weight_map, part, weight_map_part, y_start, y_end, x_start, x_end):
+            final_image[y_start:y_end, x_start:x_end] += part
+            weight_map[y_start:y_end, x_start:x_end] += weight_map_part[..., np.newaxis]
+
+        add_part_with_blending(final_image, weight_map, final_image_parts[0], weight_map_parts[0], 0, h_mid + overlap_pixels_y, 0, w_mid + overlap_pixels_x)
+        add_part_with_blending(final_image, weight_map, final_image_parts[1], weight_map_parts[1], 0, h_mid + overlap_pixels_y, w_mid - overlap_pixels_x, w)
+        add_part_with_blending(final_image, weight_map, final_image_parts[2], weight_map_parts[2], h_mid - overlap_pixels_y, h, 0, w_mid + overlap_pixels_x)
+        add_part_with_blending(final_image, weight_map, final_image_parts[3], weight_map_parts[3], h_mid - overlap_pixels_y, h, w_mid - overlap_pixels_x, w)
+
+        final_image /= (weight_map + 1e-6)
         final_image = np.clip(final_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype)
 
         print(language_config.SIMILARITY_MNFR_PROCESS_FINISHED)
         return final_image
+
     
     def normalize_image(self, image, dtype):
         return image.astype(np.float32) / np.iinfo(dtype).max
@@ -313,7 +285,7 @@ def running_similarity(parent=None):
     worker.finished.connect(finish_handler)
 
     def error_handler(error):
-        QMessageBox.critical(dialog, "Error", f"An error occurred: {error}")
+        QMessageBox.critical(dialog, "Error", language_config.RUN_ERROR_STATUS.format(error=error))
         dialog.close()
         worker.quit()
         worker.wait()
@@ -328,7 +300,9 @@ def running_similarity(parent=None):
         if worker.isRunning():
             # Menampilkan konfirmasi sebelum menutup dialog
             reply = QMessageBox.question(dialog, "Cancel Process",
-                                        "Are you sure you want to cancel the process?",
+                                        
+                                        # message: Are you sure you want to cancel the process?
+                                        language_config.CANCEL_PROCESSING,
                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
                                         QMessageBox.StandardButton.No)
 

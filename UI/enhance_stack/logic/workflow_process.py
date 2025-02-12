@@ -19,6 +19,7 @@ from UI.enhance_stack.algorithm.denoising.Average import running_average
 from UI.enhance_stack.algorithm.denoising.Median import running_median
 from UI.enhance_stack.algorithm.denoising.Similarity import running_similarity
 from UI.enhance_stack.algorithm.denoising.Weighted_average import running_weighted_average
+from UI.enhance_stack.algorithm.super_resolution.Interpolation import running_interpolation
 from UI.settings.General.Language import language_config
 
 def get_last_image(path):
@@ -66,10 +67,13 @@ def process_algorithm(self):
                 
             super_resolution_executed = False
             # Proses untuk Super Resolution
-            if super_resolution_choice == "None":
-                pass  # Tidak ada super resolution yang dipilih
-            else:
-                QMessageBox.information(self, "Info", language_config.MODULE_NOT_IMPLEMENT)
+            if super_resolution_choice == "Interpolation":
+               running_interpolation(self) 
+            #    super_resolution_executed = True
+            elif super_resolution_choice == "none":
+                return 
+            # else:
+            #     QMessageBox.information(self, "Info", language_config.MODULE_NOT_IMPLEMENT)
         
             
             if super_resolution_executed:
