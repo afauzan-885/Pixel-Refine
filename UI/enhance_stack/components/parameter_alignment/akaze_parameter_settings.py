@@ -23,6 +23,7 @@ def get_akaze_page():
     # Judul halaman
     title_label = QLabel("Pengaturan AKAZE")
     title_label.setFont(bold_font)
+    title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
     layout.addWidget(title_label)
 
     # === Parameter akaze_threshold ===

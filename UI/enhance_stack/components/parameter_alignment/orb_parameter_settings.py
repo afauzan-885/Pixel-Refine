@@ -7,6 +7,7 @@ from PyQt6.QtCore import Qt
 
 # Pastikan Anda mengimpor modul ORB yang diperlukan
 import UI.enhance_stack.algorithm.alignment.ORB
+from UI.settings.General.Language import language_config
 
 def get_orb_page():
     """
@@ -25,19 +26,14 @@ def get_orb_page():
     bold_font.setBold(True)
 
     # Judul halaman
-    title_label = QLabel("Pengaturan ORB")
+    title_label = QLabel(language_config.ORB_PARAMETER_SETTING_LABEL)
     title_label.setFont(bold_font)
+    title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
     layout.addWidget(title_label)
 
     # === Parameter nfeatures ===
-    nfeatures_label = QLabel("Jumlah Fitur (nfeatures)")
-    nfeatures_label.setToolTip(
-        "Deskripsi: Jumlah fitur menentukan berapa banyak fitur yang akan dideteksi dan disimpan.\n"
-        "Efek: Lebih banyak fitur akan meningkatkan kualitas penyelarasan dan ketahanan terhadap variasi, "
-        "tetapi juga akan meningkatkan waktu komputasi.\n"
-        "Rekomendasi: Untuk kebanyakan aplikasi, nilai antara 500 hingga 2000 sudah cukup baik. "
-        "Untuk aplikasi dengan kebutuhan tinggi, bisa mencapai 5000."
-    )
+    nfeatures_label = QLabel(language_config.ORB_NFEATURES_LABEL)
+    nfeatures_label.setToolTip(language_config.ORB_NFEATURES_DESCRIPTION)
     nfeatures_label.setFont(bold_font)
     layout.addWidget(nfeatures_label)
     nfeatures_slider = QSlider(Qt.Orientation.Horizontal)
@@ -56,19 +52,12 @@ def get_orb_page():
     nfeatures_slider.valueChanged.connect(lambda value: nfeatures_value_label.setText(str(value)))
 
     # === Parameter Scale Factor ===
-    scale_factor_label = QLabel("Scale Factor")
-    scale_factor_label.setToolTip(
-        "Scale Factor (Faktor Skala)\n"
-        "Deskripsi: Scale factor adalah rasio pengurangan piramida. "
-        "Ini menentukan seberapa besar gambar akan diperkecil pada setiap level dalam piramida.\n"
-        "Efek: Nilai yang lebih kecil (lebih dekat ke 1.0) berarti lebih banyak level dalam piramida, "
-        "yang meningkatkan waktu komputasi tetapi juga memungkinkan deteksi fitur yang lebih halus. "
-        "Nilai yang lebih besar mempercepat proses tetapi mungkin kehilangan fitur yang lebih kecil.\n"
-        "Rekomendasi: Nilai umum yang digunakan adalah 1.2 hingga 1.5."
-    )
+    scale_factor_label = QLabel(language_config.ORB_SCALEFACTOR_LABEL)
+    scale_factor_label.setToolTip(language_config.ORB_SCALEFACTOR_DESCRIPTION)
     scale_factor_label.setFont(bold_font)
     layout.addWidget(scale_factor_label)
     scale_factor_slider = QSlider(Qt.Orientation.Horizontal)
+    
     # Rentang 1.0 - 2.0: diwakili oleh nilai 10 - 20 (nilai sebenarnya = value/10)
     scale_factor_slider.setMinimum(10)
     scale_factor_slider.setMaximum(20)
@@ -86,12 +75,8 @@ def get_orb_page():
     )
 
     # === Parameter nlevels ===
-    nlevels_label = QLabel("Jumlah Level (nlevels)")
-    nlevels_label.setToolTip(
-        "Deskripsi: Jumlah level menentukan berapa banyak level piramida yang akan digunakan dalam deteksi fitur.\n"
-        "Efek: Nilai yang lebih tinggi memungkinkan deteksi fitur pada berbagai skala, tetapi juga meningkatkan waktu komputasi.\n"
-        "Rekomendasi: Nilai umum yang digunakan adalah antara 4 hingga 8."
-    )
+    nlevels_label = QLabel(language_config.ORB_NLEVELS_LABEL)
+    nlevels_label.setToolTip(language_config.ORB_NLEVELS_DESCRIPTION)
     nlevels_label.setFont(bold_font)
     layout.addWidget(nlevels_label)
     nlevels_slider = QSlider(Qt.Orientation.Horizontal)
@@ -109,16 +94,8 @@ def get_orb_page():
     nlevels_slider.valueChanged.connect(lambda value: nlevels_value_label.setText(str(value)))
 
     # === Parameter Tipe Transformasi ===
-    transformation_label = QLabel("Tipe Transformasi:")
-    transformation_label.setToolTip(
-        "Deskripsi: Jenis transformasi yang digunakan untuk menyelaraskan gambar, seperti homography, affine, similarity, atau euclidean.\n"
-        "Efek:\n"
-        "  - Homography: Mengizinkan transformasi perspektif. Baik untuk penyelarasan gambar dengan perbedaan sudut pandang.\n"
-        "  - Affine: Mengizinkan rotasi, skala, dan translasi, tetapi tidak perspektif. Berguna untuk penyelarasan dengan perubahan bentuk sederhana.\n"
-        "  - Similarity: Hanya mengizinkan rotasi, skala seragam, dan translasi.\n"
-        "  - Euclidean: Hanya mengizinkan rotasi dan translasi.\n"
-        "Rekomendasi: Pemilihan tergantung pada kebutuhan aplikasi spesifik. Homography sering digunakan untuk aplikasi penyelarasan umum."
-    )
+    transformation_label = QLabel(language_config.ORB_TRANSFORMATION_LABEL)
+    transformation_label.setToolTip(language_config.ORB_TRANSFORMATION_DESCRIPTION)
     transformation_label.setFont(bold_font)
     layout.addWidget(transformation_label)
     transformation_combo = QComboBox()
@@ -160,13 +137,8 @@ def get_orb_page():
     layout.addWidget(transformation_combo)
 
     # === Parameter RANSAC Threshold ===
-    ransac_label = QLabel("RANSAC Threshold:")
-    ransac_label.setToolTip(
-        "Deskripsi: Ambang batas untuk algoritma RANSAC yang digunakan untuk mengeliminasi outlier saat menyelaraskan gambar.\n"
-        "Efek: Nilai yang lebih rendah lebih ketat dan lebih baik dalam mengeliminasi outlier tetapi bisa mengabaikan fitur penting."
-        "Nilai yang lebih tinggi lebih toleran terhadap outlier tetapi bisa menyebabkan penyelarasan yang kurang tepat.\n"
-        "Rekomendasi: Nilai umum yang digunakan adalah antara 1 hingga 5."
-    )
+    ransac_label = QLabel(language_config.ORB_RANSAC_LABEL)
+    ransac_label.setToolTip(language_config.ORB_RANSAC_DESCRIPTION)
     ransac_label.setFont(bold_font)
     layout.addWidget(ransac_label)
     ransac_slider = QSlider(Qt.Orientation.Horizontal)
@@ -187,7 +159,7 @@ def get_orb_page():
     )
 
     # Tombol untuk menerapkan pengaturan
-    apply_button = QPushButton("Apply Settings")
+    apply_button = QPushButton(language_config.APPLY_PARAMETER_BUTTON_TEXT)
     apply_button.setStyleSheet("""
         QPushButton {
             background-color: #5cb85c;    

@@ -120,8 +120,153 @@ RUN_IMAGE_PROCESS_BATCH_PROGRESS = "Stacking batch to {current} from {total}"
 
 
 # Super Resolution
-
 WINDOW_TITLE_INTERPOLATION = "Interpolation Super Resolution"
+
+# ------------ Parameter Setting Algorithm --------------------- #
+# ORB Parameters
+ORB_PARAMETER_SETTING_LABEL = "ORB Parameters"
+ORB_NFEATURES_LABEL = "Number of Features"
+ORB_NFEATURES_DESCRIPTION = """The number of features represents the amount of fine detail that can be recognized in an image.
+
+A higher number of features enables the algorithm to identify more details, resulting in more precise image alignment.
+However, detecting more features increases computation time.
+
+Typically, a value between 500 and 1500 is sufficient for most applications.
+For very high accuracy requirements, selecting a value between 2500 to 5000 might improve precision."""
+
+ORB_SCALEFACTOR_LABEL = "Scale Factor"
+ORB_SCALEFACTOR_DESCRIPTION = """Scale factor determines the rate at which the image is downscaled iteratively during processing.
+
+- A value close to 1.0 means the image is downscaled gradually (more steps), allowing for finer detail detection but taking longer.
+- A higher value downsamples the image more rapidly, leading to faster processing but potentially missing some fine details.
+
+Common values range from 1.2 to 1.5."""
+
+ORB_NLEVELS_LABEL = "Number of Levels"
+ORB_NLEVELS_DESCRIPTION = """The number of levels indicates the layers in the image pyramid used for feature detection.
+
+More levels enable the algorithm to capture details at various scales, which is beneficial when images vary in size,
+but increased levels also mean longer processing times.
+
+Typically, a value between 2 and 4 is ideal for most applications."""
+
+ORB_TRANSFORMATION_LABEL = "Transformation Type"
+ORB_TRANSFORMATION_DESCRIPTION = """Transformation Type determines the method used to align images.
+
+Available options include:
+- Homography: Allows perspective transformation, ideal for images taken from different angles.
+- Affine: Permits rotation, scaling, and translation (shifting).
+- Similarity: Only permits rotation, uniform scaling, and translation, preserving the image's aspect ratio.
+- Euclidean: Only permits rotation and translation without scaling, offering the simplest option.
+
+The choice of transformation depends on the differences among the images to be aligned. 
+For most applications, Homography is often selected due to its flexibility in handling perspective differences."""
+
+ORB_RANSAC_LABEL = "RANSAC Threshold"
+ORB_RANSAC_DESCRIPTION = """The RANSAC Threshold determines how stringently the algorithm filters out outliers during image alignment.
+
+- A lower value (e.g., 1-2) enforces stricter filtering, potentially discarding some key features.
+- A higher value (e.g., 4-5) is more tolerant of outliers, allowing more features to be used but possibly reducing alignment precision.
+
+Typically, a value between 1 and 3 is sufficient, depending on the noise level in the data."""
+
+
+# Farneback Optical Flow
+FARNEBACK_PARAMETER_SETTING_LABEL = "Farneback Parameters"
+
+FARNEBACK_PYRAMID_SCALE_LABEL = "Pyramid Scale"
+FARNEBACK_PYRAMID_SCALE_DESCRIPTION = """The Pyramid Scale is the factor by which the image is reduced at each level of the pyramid.
+
+- This value determines how much the image size is decreased from one level to the next.
+  For example, if the value is 0.5, then each level will have half the size of the previous level.
+
+- Smaller values (e.g., between 0.10 and 0.5) produce a larger size difference between levels,
+  which can speed up the computation but may reduce the accuracy in capturing fine motion details.
+
+- Values close to 1.00 produce minimal size changes between levels, allowing for more accurate motion detail capture,
+  but require longer computational time.
+
+Adjust this value according to your needs for a balance between processing speed and motion detection accuracy.
+Recommended value: 0.5.
+"""
+
+FARNEBACK_LEVELS_LABEL = "Levels"
+FARNEBACK_LEVELS_DESCRIPTION = """Levels determine the number of levels in the image pyramid used for optical flow computation.
+
+- More levels allow the algorithm to detect motion at various scales, which is beneficial when the motion in the image is complex or covers a large area.
+- However, increasing the number of levels also increases the computational time.
+
+Typically, a value of 3 is used as a benchmark, but you can set it anywhere from 1 to 10 depending on your application's needs.
+Recommended value: 3.
+"""
+
+FARNEBACK_WIN_SIZE_LABEL = "Window Size"
+FARNEBACK_WIN_SIZE_DESCRIPTION = """Window Size is the size of the pixel region (window) used to compute the optical flow.
+
+- A larger window produces a more stable and smooth result by averaging information over a wider area.
+- However, if the window is too large, it may obscure small motion details.
+
+Choose a value that balances smoothness with sensitivity to fine details.
+Recommended value: 15.
+"""
+
+FARNEBACK_ITERATIONS_LABEL = "Iterations"
+FARNEBACK_ITERATIONS_DESCRIPTION = """Iterations specify how many times the optical flow calculation is refined at each pyramid level.
+
+- More iterations yield a more accurate optical flow result.
+- However, increasing iterations also increases the computational time.
+
+Select a value that improves accuracy without significantly slowing down the process.
+Recommended value: 3.
+"""
+
+FARNEBACK_POLY_N_LABEL = "Polynomial Expansion"
+FARNEBACK_POLY_N_DESCRIPTION = """Polynomial Expansion (poly_n) defines the size of the pixel neighborhood used to estimate motion via polynomial expansion.
+
+- This value determines how much of the surrounding pixel data is used for the calculation.
+- Larger values produce smoother estimates but may reduce sensitivity to small motions.
+
+Commonly used values are typically 5 or 7, depending on the desired level of detail and stability.
+Recommended values: 5 or 7.
+"""
+
+FARNEBACK_POLY_SIGMA_LABEL = "Polynomial Sigma"
+FARNEBACK_POLY_SIGMA_DESCRIPTION = """Polynomial Sigma controls the amount of smoothing applied before performing the polynomial expansion.
+
+- It represents the standard deviation of the Gaussian filter applied to reduce noise in the pixel data.
+- A higher sigma value can help reduce noise, but if set too high, important motion details may be lost.
+
+Adjust this value to reduce noise without sacrificing significant motion details.
+Recommended value: 1.2.
+"""
+
+FARNEBACK_FLAGS_LABEL = "Flags"
+FARNEBACK_FLAGS_DESCRIPTION = """Flags are optional parameters that enable specific options in the Farneback algorithm.
+
+- For example, a common flag is the use of a Gaussian filter for smoothing, which can produce a smoother optical flow.
+- If you are not sure, this parameter is usually left at its default value (0).
+
+Choose the appropriate flag if you wish to optimize the trade-off between processing speed and result quality.
+Recommended value: 0.
+"""
+
+FARNEBACK_INTERPOLATION_LABEL = "Interpolation"
+FARNEBACK_INTERPOLATION_DESCRIPTION = """Interpolation sets the method used to estimate optical flow values between pixels.
+
+- Higher-quality interpolation methods (e.g., linear or cubic) can produce smoother motion transitions.
+- However, more complex methods may also increase computational time.
+
+Choose an interpolation method that balances smoothness and processing efficiency.
+Recommended: Cubic Interpolation.
+"""
+
+
+
+APPLY_PARAMETER_BUTTON_TEXT = "Apply Settings"
+
+# ------------ Parameter Setting Algorithm --------------------- #
+
+
 
 
 # Deskripsi untuk Alignment Algorithm

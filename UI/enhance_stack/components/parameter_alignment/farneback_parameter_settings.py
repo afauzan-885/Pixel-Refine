@@ -3,7 +3,9 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QSlider, QHBoxLayout, 
 from PyQt6.QtGui import QFont
 from PyQt6.QtCore import Qt
 
-from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import FarnebackAlgorithm 
+from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import FarnebackAlgorithm
+from UI.settings.General.Language import language_config 
+
 def get_farneback_optical_flow_page():
     """Buat halaman pengaturan untuk Farneback Optical Flow."""
     # Muat konfigurasi Farneback Optical Flow dari file konfigurasi
@@ -19,15 +21,15 @@ def get_farneback_optical_flow_page():
     bold_font.setBold(True)
 
     # Judul halaman
-    title_label = QLabel("Pengaturan Farneback Optical Flow")
+    title_label = QLabel(language_config.FARNEBACK_PARAMETER_SETTING_LABEL)
     title_label.setFont(bold_font)
+    title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)  # Mengatur teks agar berada di tengah
     layout.addWidget(title_label)
 
+
     # === Parameter pyr_scale ===
-    pyr_scale_label = QLabel("Pyr Scale")
-    pyr_scale_label.setToolTip(
-        "Deskripsi: Rasio pengurangan ukuran pyramid. Nilai tipikal adalah 0.5."
-    )
+    pyr_scale_label = QLabel(language_config.FARNEBACK_PYRAMID_SCALE_LABEL)
+    pyr_scale_label.setToolTip(language_config.FARNEBACK_PYRAMID_SCALE_DESCRIPTION)
     pyr_scale_label.setFont(bold_font)
     layout.addWidget(pyr_scale_label)
 
@@ -48,10 +50,8 @@ def get_farneback_optical_flow_page():
     )
 
     # === Parameter levels ===
-    levels_label = QLabel("Levels")
-    levels_label.setToolTip(
-        "Deskripsi: Jumlah level pyramid. Nilai tipikal adalah 3."
-    )
+    levels_label = QLabel(language_config.FARNEBACK_LEVELS_LABEL)
+    levels_label.setToolTip(language_config.FARNEBACK_LEVELS_DESCRIPTION)
     levels_label.setFont(bold_font)
     layout.addWidget(levels_label)
 
@@ -70,10 +70,8 @@ def get_farneback_optical_flow_page():
     levels_slider.valueChanged.connect(lambda value: levels_value_label.setText(str(value)))
 
     # === Parameter winsize ===
-    winsize_label = QLabel("Win Size")
-    winsize_label.setToolTip(
-        "Deskripsi: Ukuran jendela pencarian optical flow. Nilai tipikal adalah 15."
-    )
+    winsize_label = QLabel(language_config.FARNEBACK_WIN_SIZE_LABEL)
+    winsize_label.setToolTip(language_config.FARNEBACK_WIN_SIZE_DESCRIPTION)
     winsize_label.setFont(bold_font)
     layout.addWidget(winsize_label)
 
@@ -92,10 +90,8 @@ def get_farneback_optical_flow_page():
     winsize_slider.valueChanged.connect(lambda value: winsize_value_label.setText(str(value)))
 
     # === Parameter iterations ===
-    iterations_label = QLabel("Iterations")
-    iterations_label.setToolTip(
-        "Deskripsi: Jumlah iterasi pencarian optical flow. Nilai tipikal adalah 3."
-    )
+    iterations_label = QLabel(language_config.FARNEBACK_ITERATIONS_LABEL)
+    iterations_label.setToolTip(language_config.FARNEBACK_ITERATIONS_DESCRIPTION)
     iterations_label.setFont(bold_font)
     layout.addWidget(iterations_label)
 
@@ -114,10 +110,8 @@ def get_farneback_optical_flow_page():
     iterations_slider.valueChanged.connect(lambda value: iterations_value_label.setText(str(value)))
 
     # === Parameter poly_n ===
-    poly_n_label = QLabel("Poly N")
-    poly_n_label.setToolTip(
-        "Deskripsi: Ukuran tetangga pixel untuk estimasi polinomial. Nilai tipikal adalah 5 atau 7."
-    )
+    poly_n_label = QLabel(language_config.FARNEBACK_POLY_N_LABEL)
+    poly_n_label.setToolTip(language_config.FARNEBACK_POLY_N_DESCRIPTION)
     poly_n_label.setFont(bold_font)
     layout.addWidget(poly_n_label)
 
@@ -136,10 +130,8 @@ def get_farneback_optical_flow_page():
     poly_n_slider.valueChanged.connect(lambda value: poly_n_value_label.setText(str(value)))
 
     # === Parameter poly_sigma ===
-    poly_sigma_label = QLabel("Poly Sigma")
-    poly_sigma_label.setToolTip(
-        "Deskripsi: Standar deviasi untuk Gaussian smoothing. Nilai tipikal adalah 1.2."
-    )
+    poly_sigma_label = QLabel(language_config.FARNEBACK_POLY_SIGMA_LABEL)
+    poly_sigma_label.setToolTip(language_config.FARNEBACK_POLY_SIGMA_DESCRIPTION)
     poly_sigma_label.setFont(bold_font)
     layout.addWidget(poly_sigma_label)
 
@@ -158,10 +150,8 @@ def get_farneback_optical_flow_page():
     poly_sigma_slider.valueChanged.connect(lambda value: poly_sigma_value_label.setText(f"{value/100:.2f}"))
 
     # === Parameter flags ===
-    flags_label = QLabel("Flags")
-    flags_label.setToolTip(
-        "Deskripsi: Flags untuk optical flow Farneback. Nilai tipikal adalah 0."
-    )
+    flags_label = QLabel(language_config.FARNEBACK_FLAGS_LABEL)
+    flags_label.setToolTip(language_config.FARNEBACK_FLAGS_DESCRIPTION)
     flags_label.setFont(bold_font)
     layout.addWidget(flags_label)
 
@@ -180,10 +170,8 @@ def get_farneback_optical_flow_page():
     flags_slider.valueChanged.connect(lambda value: flags_value_label.setText(str(value)))
 
     # === Parameter Interpolation (ComboBox) ===
-    interpolation_label = QLabel("Interpolation")
-    interpolation_label.setToolTip(
-        "Deskripsi: Metode interpolasi untuk remap. Contoh: INTER_AREA, INTER_LINEAR, INTER_CUBIC, INTER_NEAREST."
-    )
+    interpolation_label = QLabel(language_config.FARNEBACK_INTERPOLATION_LABEL)
+    interpolation_label.setToolTip(language_config.FARNEBACK_INTERPOLATION_DESCRIPTION)
     interpolation_label.setFont(bold_font)
     layout.addWidget(interpolation_label)
 
@@ -224,7 +212,7 @@ def get_farneback_optical_flow_page():
     layout.addWidget(interpolation_combo)
 
     # Tombol untuk menerapkan pengaturan
-    apply_button = QPushButton("Apply Settings")
+    apply_button = QPushButton(language_config.APPLY_PARAMETER_BUTTON_TEXT)
     apply_button.setStyleSheet("""
         QPushButton {
             background-color: #5cb85c;
