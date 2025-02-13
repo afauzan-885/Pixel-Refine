@@ -91,7 +91,8 @@ class FarnebackAlgorithm:
             "poly_n": 5,
             "poly_sigma": 1.2,
             "flags": 0,
-            "interpolation": "INTER_CUBIC"
+            "interpolation": "INTER_CUBIC",
+            "use_gpu": False  # Menambahkan parameter use_gpu dengan nilai default False
         }
 
         if config_filename is None:
@@ -107,18 +108,20 @@ class FarnebackAlgorithm:
 
 
     def calculate_optical_flow(self, base_image, target_image, config_filename=None):
-        device = " GPU" if self.use_gpu else " CPU"
+        # Muat parameter Farneback Optical Flow dari file konfigurasi
+        fb_config = self.load_farneback_config(config_filename)
+
+        # Gunakan nilai use_gpu dari konfigurasi
+        use_gpu = fb_config.get("use_gpu", False)
+        device = " GPU" if use_gpu else " CPU"
         print(language_config.CALCULATE_OPTICAL_FLOW_STATUS.format(device=device))
 
-        if self.use_gpu:
+        if use_gpu:
             base_gray = cv2.UMat(cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY))
             target_gray = cv2.UMat(cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY))
         else:
             base_gray = cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY)
             target_gray = cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY)
-
-        # Muat parameter Farneback Optical Flow dari file konfigurasi
-        fb_config = self.load_farneback_config(config_filename)
 
         flow = cv2.calcOpticalFlowFarneback(
             base_gray, 
@@ -134,7 +137,7 @@ class FarnebackAlgorithm:
         )
 
         print(language_config.CALCULATE_OPTICAL_FLOW_FINISHED)
-        return flow.get() if self.use_gpu else flow
+        return flow.get() if use_gpu else flow
 
 
     def compensate_motion(self, base_image_16bit, flow, image_id, config_filename=None):
@@ -144,13 +147,15 @@ class FarnebackAlgorithm:
         warped_map = flow_map + flow
         remap_x, remap_y = cv2.split(warped_map.astype(np.float32))
 
-        if self.use_gpu:
+        # Muat konfigurasi Farneback untuk mendapatkan parameter interpolasi dan use_gpu
+        fb_config = self.load_farneback_config(config_filename)
+        use_gpu = fb_config.get("use_gpu", False)
+
+        if use_gpu:
             base_image_16bit = cv2.UMat(base_image_16bit)
             remap_x = cv2.UMat(remap_x)
             remap_y = cv2.UMat(remap_y)
 
-        # Muat konfigurasi Farneback untuk mendapatkan parameter interpolasi
-        fb_config = self.load_farneback_config(config_filename)
         # Konversi nilai string interpolasi ke flag OpenCV (misalnya, "INTER_AREA")
         interpolation_str = fb_config.get("interpolation", "INTER_AREA")
         interp_flag = getattr(cv2, interpolation_str, cv2.INTER_AREA)
@@ -163,11 +168,12 @@ class FarnebackAlgorithm:
             borderMode=cv2.BORDER_REFLECT
         )
 
-        if self.use_gpu:
+        if use_gpu:
             compensated_image = compensated_image.get()
 
         print(language_config.COMPENSATE_MOTION_FINISHED.format(image_id=image_id))
         return compensated_image
+
 
     def save_to_hdf5(self, h5f, aligned_images, update_progress=None, start_index=0):
         """
@@ -209,7 +215,7 @@ def main(db_path, update_progress=None, batch_size=3, stop_requested=None):
     total_batches = (total_images - 1) // batch_size + 1  # Hitung jumlah batch
 
     # Simpan gambar referensi ke dalam HDF5
-    aligned_images = [base_image]
+    # aligned_images is not used, so the variable is removed
 
     with h5py.File(processor.hdf5_path, "w") as h5f:
         h5f.create_dataset("image_0", data=base_image, compression="gzip")
@@ -240,7 +246,7 @@ def main(db_path, update_progress=None, batch_size=3, stop_requested=None):
 
                 # Hitung flow gerakan dan kompensasi gerakan
                 flow = processor.calculate_optical_flow(base_image, target_image)
-                compensated_image = processor.compensate_motion(target_image, flow)
+                compensated_image = processor.compensate_motion(target_image, flow, image_id=i)
 
                 batch_aligned.append(compensated_image)
 

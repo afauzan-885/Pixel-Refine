@@ -1,4 +1,6 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTabWidget
+
+from UI.settings.General.Language import language_config
 from .General.GeneralSetting import general_page
 from .Perfomance.PerformancePage import performance_page
 from .Advance.AdvancePage import advance_page
@@ -10,9 +12,9 @@ class SettingPage(QWidget):
         self.tab_widget = QTabWidget()
 
         # Add Tabs
-        self.tab_widget.addTab(general_page(), "General")
-        self.tab_widget.addTab(performance_page(), "Performance")
-        self.tab_widget.addTab(advance_page(), "Advanced")
+        self.tab_widget.addTab(general_page(), language_config.SETTING_GENERAL_LABEL)
+        # self.tab_widget.addTab(performance_page(), "Performance")
+        # self.tab_widget.addTab(advance_page(), "Advanced")
 
         self.layout.addWidget(self.tab_widget)
         self.setLayout(self.layout)

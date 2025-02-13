@@ -6,6 +6,7 @@ from PyQt6.QtGui import QFont
 from PyQt6.QtCore import Qt
 
 from UI.enhance_stack.algorithm.alignment.AKAZE import AKAZEAlgorithm
+from UI.settings.General.Language import language_config
 
 def get_akaze_page():
     """Buat halaman pengaturan untuk AKAZE dengan widget untuk mengatur parameter."""
@@ -21,7 +22,7 @@ def get_akaze_page():
     bold_font.setBold(True)
 
     # Judul halaman
-    title_label = QLabel("Pengaturan AKAZE")
+    title_label = QLabel(language_config.AKAZE_PARAMETER_SETTING_LABEL)
     title_label.setFont(bold_font)
     title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
     layout.addWidget(title_label)
@@ -29,11 +30,8 @@ def get_akaze_page():
     # === Parameter akaze_threshold ===
     # Kita gunakan slider dengan representasi integer, misalnya:
     # Rentang slider: 1 - 100, di mana nilai slider / 10000 menghasilkan nilai antara 0.0001 dan 0.01.
-    threshold_label = QLabel("Threshold")
-    threshold_label.setToolTip(
-        "Deskripsi: Nilai threshold untuk mendeteksi fitur AKAZE.\n"
-        "Efek: Nilai yang lebih rendah mendeteksi lebih banyak fitur, tetapi bisa menghasilkan noise."
-    )
+    threshold_label = QLabel(language_config.AKAZE_THRESHOLD_LABEL)
+    threshold_label.setToolTip(language_config.AKAZE_THRESHOLD_DESCRIPTION)
     threshold_label.setFont(bold_font)
     layout.addWidget(threshold_label)
 
@@ -55,11 +53,8 @@ def get_akaze_page():
     )
 
     # === Parameter akaze_nOctaves ===
-    octaves_label = QLabel("Jumlah Octaves (nOctaves)")
-    octaves_label.setToolTip(
-        "Deskripsi: Jumlah octave untuk mendeteksi fitur. "
-        "Nilai lebih tinggi memungkinkan deteksi pada skala yang lebih bervariasi, tetapi memperlambat proses."
-    )
+    octaves_label = QLabel(language_config.AKAZE_OCTAVE_LABEL)
+    octaves_label.setToolTip(language_config.AKAZE_OCTAVE_DESCRIPTION)
     octaves_label.setFont(bold_font)
     layout.addWidget(octaves_label)
 
@@ -78,11 +73,8 @@ def get_akaze_page():
     octaves_slider.valueChanged.connect(lambda value: octaves_value_label.setText(str(value)))
 
     # === Parameter akaze_nOctaveLayers ===
-    layers_label = QLabel("Jumlah Layers per Octave (nOctaveLayers)")
-    layers_label.setToolTip(
-        "Deskripsi: Jumlah layers per octave. "
-        "Nilai lebih tinggi dapat meningkatkan resolusi deteksi fitur tetapi menambah beban komputasi."
-    )
+    layers_label = QLabel(language_config.AKAZE_LAYER_LABEL)
+    layers_label.setToolTip(language_config.AKAZE_LAYER_DESCRIPTION)
     layers_label.setFont(bold_font)
     layout.addWidget(layers_label)
 
@@ -101,11 +93,8 @@ def get_akaze_page():
     layers_slider.valueChanged.connect(lambda value: layers_value_label.setText(str(value)))
 
     # === Parameter ratio_threshold ===
-    ratio_label = QLabel("Ratio Threshold")
-    ratio_label.setToolTip(
-        "Deskripsi: Rasio threshold untuk uji rasio pada pencocokan fitur. "
-        "Nilai yang lebih rendah lebih selektif dalam memilih pasangan fitur yang baik."
-    )
+    ratio_label = QLabel(language_config.AKAZE_RATIO_LABEL)
+    ratio_label.setToolTip(language_config.AKAZE_RATIO_DESCRIPTION)
     ratio_label.setFont(bold_font)
     layout.addWidget(ratio_label)
 
@@ -125,7 +114,7 @@ def get_akaze_page():
     ratio_slider.valueChanged.connect(lambda value: ratio_value_label.setText(f"{value/100:.2f}"))
 
     # Tombol untuk menerapkan pengaturan
-    apply_button = QPushButton("Apply Settings")
+    apply_button = QPushButton(language_config.APPLY_PARAMETER_BUTTON_TEXT)
     apply_button.setStyleSheet("""
         QPushButton {
             background-color: #5cb85c;    

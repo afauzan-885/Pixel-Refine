@@ -21,7 +21,7 @@ class MainContent(QStackedWidget):
         # Peta halaman
         self.pages = {
             Pages.ENHANCE_STACK: EnhanceStackPage,
-            # Pages.SETTINGS: SettingPage,
+            Pages.SETTINGS: SettingPage,
         }
 
         # halaman berdasarkan peta halaman

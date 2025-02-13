@@ -54,7 +54,7 @@ class FarnebackAlgorithm(QThread):
         if self.use_gpu:
             image = cv2.UMat(image)
         resized_image = cv2.resize(image, (size[1], size[0]), interpolation=cv2.INTER_LINEAR)
-        return resized_image.get() if self.use_gpu else resized_imagez
+        return resized_image.get() if self.use_gpu else resized_image
 
     def calculate_optical_flow(self, base_image, target_image):
         device = " GPU" if self.use_gpu else " CPU"

@@ -1,9 +1,12 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel,
                              QStackedWidget, QScrollArea)
+from PyQt6.QtCore import Qt
 
 from UI.enhance_stack.components.parameter_alignment.akaze_parameter_settings import get_akaze_page
 from UI.enhance_stack.components.parameter_alignment.farneback_parameter_settings import get_farneback_optical_flow_page
 from UI.enhance_stack.components.parameter_alignment.orb_parameter_settings import get_orb_page
+from UI.settings.General.Language import language_config
+
 
 class ParameterPages:
     def __init__(self, stacked_widget: QStackedWidget):
@@ -37,10 +40,10 @@ class ParameterPages:
         index_orb = self.stacked_widget.addWidget(orb_page)
         self.setting_pages_map["Farneback Optical Flow"] = index_orb
 
-        # Halaman untuk Average (dari Denoising Dropdown)
-        average_page = self.get_average_page()
-        index_average = self.stacked_widget.addWidget(average_page)
-        self.setting_pages_map["Average"] = index_average
+        # # Halaman untuk Average (dari Denoising Dropdown)
+        # average_page = self.get_average_page()
+        # index_average = self.stacked_widget.addWidget(average_page)
+        # self.setting_pages_map["Average"] = index_average
 
     def wrap_in_scroll_area(self, widget: QWidget) -> QScrollArea:
         """
@@ -79,16 +82,17 @@ class ParameterPages:
         """Buat halaman default yang ditampilkan bila tidak ada pilihan parameter khusus."""
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addWidget(QLabel("Pilih opsi untuk melihat pengaturan"))
+        layout.addWidget(QLabel(language_config.DEFAULT_PARAMETER_SETTING_LABEL))
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         return self.wrap_in_scroll_area(page)
 
-    def get_average_page(self) -> QWidget:
-        """Buat halaman pengaturan untuk Average (Denoising)."""
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.addWidget(QLabel("Pengaturan Average Denoising"))
-        # Tambahkan widget dan logika pengaturan Average di sini
-        return self.wrap_in_scroll_area(page)
+    # def get_average_page(self) -> QWidget:
+    #     """Buat halaman pengaturan untuk Average (Denoising)."""
+    #     page = QWidget()
+    #     layout = QVBoxLayout(page)
+    #     layout.addWidget(QLabel("Pengaturan Average Denoising"))
+    #     # Tambahkan widget dan logika pengaturan Average di sini
+    #     return self.wrap_in_scroll_area(page)
 
     def get_setting_pages_map(self) -> dict:
         """Kembalikan dictionary mapping nama halaman ke indeks QStackedWidget."""

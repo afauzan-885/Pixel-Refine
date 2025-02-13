@@ -79,19 +79,20 @@ def handle_import_button(self):
         QMessageBox.information(self, language_config.HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED)
 
 def handle_delete_button(self):
-        """Function to delete images"""
-        selected_paths = self.right_panel.get_select_image_list()
-        if not selected_paths:
-            QMessageBox.information(self, language_config.HANDLE_DELETE_BUTTON_IMAGE_NO_VALID_SELECTED)
-            return
+    """Function to delete images"""
+    selected_paths = self.right_panel.get_select_image_list()
+    if not selected_paths:
+        title, message = language_config.HANDLE_DELETE_BUTTON_IMAGE_NO_VALID_SELECTED
+        QMessageBox.information(self, title, message)
+        return
 
-        reply = QMessageBox.question(
-            self,
-            "Delete Images",
-            language_config.HANDLE_DELETE_BUTTON_IMAGE_CONFIRM_DELETE.format(count=len(selected_paths)),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            self.database_manager.delete_images(selected_paths)
-            self.right_panel.remove_selected_images()
+    reply = QMessageBox.question(
+        self,
+        "Delete Images",
+        language_config.HANDLE_DELETE_BUTTON_IMAGE_CONFIRM_DELETE.format(count=len(selected_paths)),
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.No
+    )
+    if reply == QMessageBox.StandardButton.Yes:
+        self.database_manager.delete_images(selected_paths)
+        self.right_panel.remove_selected_images()
