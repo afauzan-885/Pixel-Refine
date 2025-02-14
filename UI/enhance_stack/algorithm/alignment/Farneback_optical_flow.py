@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import sqlite3
 import os
+import concurrent.futures
 from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
 
@@ -26,11 +27,10 @@ class ThreadWorker(QThread):
                 progress = int((current / total) * 100)
                 self.progress_updated.emit(progress, message)
 
-            # Fungsi callback untuk mengecek status stop
+            # Callback untuk mengecek apakah proses dihentikan
             def is_stop_requested():
                 return self.stop_requested
 
-            # Jalankan proses ORB dengan callback
             main(self.db_path, update_progress, stop_requested=is_stop_requested)
             self.finished.emit()
         except Exception as e:
@@ -92,7 +92,7 @@ class FarnebackAlgorithm:
             "poly_sigma": 1.2,
             "flags": 0,
             "interpolation": "INTER_CUBIC",
-            "use_gpu": False  # Menambahkan parameter use_gpu dengan nilai default False
+            "use_gpu": False  # Nilai default untuk use_gpu
         }
 
         if config_filename is None:
@@ -106,15 +106,18 @@ class FarnebackAlgorithm:
             print("Error loading Farneback configuration:", e)
             return default_config
 
-
-    def calculate_optical_flow(self, base_image, target_image, config_filename=None):
-        # Muat parameter Farneback Optical Flow dari file konfigurasi
+    def calculate_optical_flow(self, base_image, target_image, config_filename=None, num_blocks=(3, 3), overlap_ratio=0.3):
+        """
+        Menghitung optical flow dengan metode paralel berbasis blok, dengan overlap sebagai persentase dari ukuran blok.
+        
+        Parameter:
+        - num_blocks: tuple (blocks_x, blocks_y) -> Jumlah blok dalam sumbu X dan Y.
+        - overlap_ratio: Persentase overlap relatif terhadap ukuran blok (contoh: 0.3 untuk 30%).
+        """
         fb_config = self.load_farneback_config(config_filename)
-
-        # Gunakan nilai use_gpu dari konfigurasi
         use_gpu = fb_config.get("use_gpu", False)
-        device = " GPU" if use_gpu else " CPU"
-        print(language_config.CALCULATE_OPTICAL_FLOW_STATUS.format(device=device))
+
+        print("Calculating optical flow using" + (" GPU" if use_gpu else " CPU"))
 
         if use_gpu:
             base_gray = cv2.UMat(cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY))
@@ -123,21 +126,64 @@ class FarnebackAlgorithm:
             base_gray = cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY)
             target_gray = cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY)
 
-        flow = cv2.calcOpticalFlowFarneback(
-            base_gray, 
-            target_gray, 
-            None,
-            pyr_scale=fb_config["pyr_scale"],
-            levels=fb_config["levels"],
-            winsize=fb_config["winsize"],
-            iterations=fb_config["iterations"],
-            poly_n=fb_config["poly_n"],
-            poly_sigma=fb_config["poly_sigma"],
-            flags=fb_config["flags"]
-        )
+        h, w = base_gray.get().shape if use_gpu else base_gray.shape
+        blocks_x, blocks_y = num_blocks
+        block_w = w // blocks_x
+        block_h = h // blocks_y
 
-        print(language_config.CALCULATE_OPTICAL_FLOW_FINISHED)
-        return flow.get() if use_gpu else flow
+        flow_full = np.zeros((h, w, 2), dtype=np.float32)
+
+        def compute_block(x, y, bw, bh, overlap_ratio):
+            overlap_x = int(bw * overlap_ratio)
+            overlap_y = int(bh * overlap_ratio)
+
+            roi_x_start = max(0, x - overlap_x)
+            roi_y_start = max(0, y - overlap_y)
+            roi_x_end = min(w, x + bw + overlap_x)
+            roi_y_end = min(h, y + bh + overlap_y)
+
+            if use_gpu:
+                roi_base = base_gray.get()[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+                roi_target = target_gray.get()[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+            else:
+                roi_base = base_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+                roi_target = target_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+
+            flow_roi = cv2.calcOpticalFlowFarneback(
+                roi_base, roi_target, None,
+                pyr_scale=fb_config["pyr_scale"],
+                levels=fb_config["levels"],
+                winsize=fb_config["winsize"],
+                iterations=fb_config["iterations"],
+                poly_n=fb_config["poly_n"],
+                poly_sigma=fb_config["poly_sigma"],
+                flags=fb_config["flags"]
+            )
+
+            offset_x = x - roi_x_start
+            offset_y = y - roi_y_start
+            flow_block = flow_roi[offset_y:offset_y+bh, offset_x:offset_x+bw, :]
+
+            return (x, y, flow_block)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=blocks_x * blocks_y) as executor:
+            futures = []
+            for i in range(blocks_x):
+                for j in range(blocks_y):
+                    x = i * block_w
+                    y = j * block_h
+                    bw = block_w if i < blocks_x - 1 else w - x
+                    bh = block_h if j < blocks_y - 1 else h - y
+                    futures.append(executor.submit(compute_block, x, y, bw, bh, overlap_ratio))
+
+            for future in concurrent.futures.as_completed(futures):
+                x, y, flow_block = future.result()
+                h_block, w_block, _ = flow_block.shape
+                flow_full[y:y+h_block, x:x+w_block, :] = flow_block
+
+        print("Optical flow calculation completed." + (" (GPU enabled)" if use_gpu else " (CPU mode)"))
+        
+        return flow_full
 
 
     def compensate_motion(self, base_image_16bit, flow, image_id, config_filename=None):
@@ -147,7 +193,6 @@ class FarnebackAlgorithm:
         warped_map = flow_map + flow
         remap_x, remap_y = cv2.split(warped_map.astype(np.float32))
 
-        # Muat konfigurasi Farneback untuk mendapatkan parameter interpolasi dan use_gpu
         fb_config = self.load_farneback_config(config_filename)
         use_gpu = fb_config.get("use_gpu", False)
 
@@ -156,7 +201,6 @@ class FarnebackAlgorithm:
             remap_x = cv2.UMat(remap_x)
             remap_y = cv2.UMat(remap_y)
 
-        # Konversi nilai string interpolasi ke flag OpenCV (misalnya, "INTER_AREA")
         interpolation_str = fb_config.get("interpolation", "INTER_AREA")
         interp_flag = getattr(cv2, interpolation_str, cv2.INTER_AREA)
 
@@ -174,27 +218,19 @@ class FarnebackAlgorithm:
         print(language_config.COMPENSATE_MOTION_FINISHED.format(image_id=image_id))
         return compensated_image
 
-
     def save_to_hdf5(self, h5f, aligned_images, update_progress=None, start_index=0):
         """
         Saves aligned images to an open HDF5 file.
         """
         total_images = len(aligned_images) + start_index
         for i, image in enumerate(aligned_images):
-            # Simpan dataset ke dalam file HDF5
             h5f.create_dataset(f"image_{i + start_index}", data=image, compression="gzip")
-            
-            # Buat pesan progres
             progress_message = f"Gambar ke-{i + start_index + 1} disimpan dalam HDF5."
-            print(progress_message)  # Log ke konsol
-            
-            # Perbarui progress bar jika `update_progress` tersedia
+            print(progress_message)
             if update_progress:
                 update_progress(i + start_index, total_images - 1, progress_message)
 
-
-
-def main(db_path, update_progress=None, batch_size=3, stop_requested=None):
+def main(db_path, update_progress=None, batch_size=5, stop_requested=None):
     processor = FarnebackAlgorithm(db_path)
 
     # Ambil path gambar dari database
@@ -210,53 +246,42 @@ def main(db_path, update_progress=None, batch_size=3, stop_requested=None):
         print(language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
         return
 
-    # Total gambar untuk keseluruhan proses
     total_images = len(image_paths)
-    total_batches = (total_images - 1) // batch_size + 1  # Hitung jumlah batch
-
-    # Simpan gambar referensi ke dalam HDF5
-    # aligned_images is not used, so the variable is removed
+    total_batches = (total_images - 1) // batch_size + 1
 
     with h5py.File(processor.hdf5_path, "w") as h5f:
         h5f.create_dataset("image_0", data=base_image, compression="gzip")
 
-        # Mulai pemrosesan batch
         for batch_idx in range(total_batches):
             if stop_requested and stop_requested():
                 break
 
             start_idx = batch_idx * batch_size + 1
             end_idx = min((batch_idx + 1) * batch_size + 1, total_images)
-
-            # Muat batch gambar
             batch_paths = image_paths[start_idx:end_idx]
-            batch_images = processor.load_images_from_paths(batch_paths)
+            batch_images = processor.load_images_from_paths(batch_paths, stop_requested)
             if not batch_images:
                 continue
 
-            # Proses setiap gambar dalam batch
             batch_aligned = []
             for i, target_image in enumerate(batch_images, start=start_idx):
-                if stop_requested and stop_requested():  # Cek penghentian
+                if stop_requested and stop_requested():
                     print("Proses dihentikan oleh pengguna.")
                     break
 
                 info_message = language_config.RUN_IMAGE_PROCESSING.format(i=i, total_images=total_images)
                 print(info_message)
-
-                # Hitung flow gerakan dan kompensasi gerakan
-                flow = processor.calculate_optical_flow(base_image, target_image)
-                compensated_image = processor.compensate_motion(target_image, flow, image_id=i)
-
-                batch_aligned.append(compensated_image)
-
-                # Perbarui progress bar
                 if update_progress:
                     update_progress(i - 1, total_images - 1, info_message)
 
-            # Simpan batch ke HDF5
+                # Menggunakan metode parallel untuk optical flow pada tiap gambar
+                flow = processor.calculate_optical_flow(base_image, target_image)
+                compensated_image = processor.compensate_motion(target_image, flow, image_id=i)
+                batch_aligned.append(compensated_image)
+
             for j, aligned_image in enumerate(batch_aligned):
-                h5f.create_dataset(f"image_{start_idx + j}", data=aligned_image, compression="gzip")
+                if aligned_image is not None:
+                    h5f.create_dataset(f"image_{start_idx + j}", data=aligned_image, compression="gzip")
 
             print(f"Batch {batch_idx + 1}/{total_batches} selesai diproses dan disimpan.")
     
@@ -265,12 +290,10 @@ def main(db_path, update_progress=None, batch_size=3, stop_requested=None):
 
     print("Pemrosesan selesai dan semua gambar telah disimpan ke HDF5.")
 
-
 def running_farneback_optical_flow(parent=None):
     """
     Menampilkan progress bar dengan gaya kustom dan memanfaatkan thread.
     """
-    # Membuat dialog progress
     dialog = QDialog(parent)
     dialog.setWindowTitle(language_config.WINDOW_TITLE_FARNEBACK)
     dialog.setModal(True)
@@ -280,7 +303,6 @@ def running_farneback_optical_flow(parent=None):
         Qt.WindowType.WindowTitleHint | Qt.WindowType.WindowCloseButtonHint
     )
 
-    # Layout untuk progress bar dan label
     layout = QVBoxLayout(dialog)
     label = QLabel(language_config.WINDOW_START_PROCESSING)
     layout.addWidget(label)
@@ -302,10 +324,8 @@ def running_farneback_optical_flow(parent=None):
     """)
     layout.addWidget(progress_bar)
 
-    # Inisialisasi thread worker
     worker = ThreadWorker("pixel_refine_database.db")
 
-    # Menghubungkan signal worker ke fungsi pembaruan UI
     worker.progress_updated.connect(lambda progress, message: (
         progress_bar.setValue(progress),
         label.setText(message)
@@ -313,8 +333,8 @@ def running_farneback_optical_flow(parent=None):
 
     def finish_handler():
         dialog.close()
-        worker.quit()  # Berhenti dari thread
-        worker.wait()  # Tunggu thread selesai
+        worker.quit()
+        worker.wait()
 
     worker.finished.connect(finish_handler)
 
@@ -326,24 +346,18 @@ def running_farneback_optical_flow(parent=None):
 
     worker.error_occurred.connect(error_handler)
 
-    # Mulai worker
     worker.start()
 
-    # Pastikan worker dihentikan jika dialog ditutup
     def on_dialog_close(event):
         if worker.isRunning():
-            # Menampilkan konfirmasi sebelum menutup dialog
             reply = QMessageBox.question(dialog, "Cancel Process",
-                                        
-                                        # message: Are you sure you want to cancel the process?
-                                        language_config.CANCEL_PROCESSING,
-                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
-                                        QMessageBox.StandardButton.No)
-
+                                         language_config.CANCEL_PROCESSING,
+                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                         QMessageBox.StandardButton.No)
             if reply == QMessageBox.StandardButton.Yes:
                 worker.stop()
-                worker.quit() 
-                worker.wait() 
+                worker.quit()
+                worker.wait()
                 event.accept()
             else:
                 event.ignore()
@@ -351,6 +365,7 @@ def running_farneback_optical_flow(parent=None):
     dialog.closeEvent = on_dialog_close
 
     dialog.exec()
+
 if __name__ == "__main__":
     db_path = "pixel_refine_database.db"  # Path ke database Anda
     main(db_path)

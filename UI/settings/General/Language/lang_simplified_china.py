@@ -82,6 +82,9 @@ ALIGN_IMAGES_STATUS_AKAZE = "正在使用 AKAZE 对图像 {image_id} 进行对�
 WINDOW_TITLE_ORB = "ORB 对齐"
 ALIGN_IMAGES_STATUS_ORB = "正在使用 ORB 对图像 {image_id} 进行对齐..."
 
+WINDOW_TITLE_EEC = "EEC 对齐"
+WINDOW_TITLE_STATUS_EEC = "使用 EEC 对齐图像 {image_id}..."
+
 ALIGN_IMAGES_CALCULATE_FAILED = "在图像 {image_id} 中未检测到任何特征。返回原始图像。"
 ALIGN_IMAGES_CALCULATE_FINISHED = "图像 {image_id} 对齐完成。"
 ALIGN_IMAGES_COMPENSATE_FAILED = "无法为图像 {image_id} 计算单应性矩阵。返回原始图像。"
@@ -250,6 +253,41 @@ FARNEBACK_INTERPOLATION_DESCRIPTION = """插值设置了用于估计像素间光
 选择一种在平滑性和处理效率之间取得平衡的插值方法。
 推荐：三次插值。"""
 
+
+#------------------ EEC ------------------#
+EEC_PARAMETER_SETTING_LABEL = "EEC 参数"
+
+EEC_ITERATIONS_LABEL = "迭代次数"
+EEC_ITERATIONS_DESCRIPTION = """迭代次数决定了EEC算法在图像配准过程中执行细化调整的步数。
+
+- 更多的迭代能实现更精确的对齐，但需要更多的计算资源。
+- 较少的迭代可以加快处理速度，但可能会降低配准质量。
+
+推荐：5000次迭代，在精度与性能之间达到平衡。
+"""
+
+EEC_EPS_LABEL = "终止阈值"
+EEC_EPS_DESCRIPTION = """终止阈值设定了各迭代间最小允许改进的幅度，以确保算法能持续优化变换。
+
+- 较小的阈值允许更精细的调整，从而实现更准确的对齐。
+- 然而，过小的阈值会显著增加处理时间。
+- 较大的阈值虽然能加快收敛速度，但可能会降低精度。
+
+推荐：1e-6，以在精度与计算效率之间达到最佳平衡。
+"""
+
+EEC_MOTION_LABEL = "运动类型"
+EEC_MOTION_DESCRIPTION = """运动类型决定了在图像配准过程中使用的变换模型。
+
+- “Affine”（仿射变换）支持旋转、缩放和平移。
+- “Homography”（单应性变换）能够处理透视失真。
+- “Translasi”（平移变换）仅适用于简单的线性位移，不包括旋转和缩放。
+
+推荐：对于大多数任务，选择‘Affine’变换模型。
+"""
+
+
+
 AKAZE_PARAMETER_SETTING_LABEL = "AKAZE 参数"
 
 AKAZE_THRESHOLD_LABEL = "阈值"
@@ -294,6 +332,13 @@ NONE_ALIGNMENT_DESCRIPTION = "不进行任何对齐。"
 FARNEBACK_DESCRIPTION = """该算法适用于需要达到像素级精度和准确度的高级对齐。
 
 但对于显著的旋转和透视差异，其效果较弱。"""
+
+EEC_DESCRIPTION = """该算法旨在高精度地对齐图像。
+该算法采用先进的相关技术来更好地估计转换参数。
+
+可以抵抗光强度的变化和相当高的偏移，但是该算法需要计算时间。
+这可能比光流法更准确，但可能不如光流法准确"""
+
 AKAZE_DESCRIPTION = """该算法对旋转、透视和缩放的较大差异具有较强的鲁棒性。
 
 效果足够好，但在像素级对齐上不如 Farneback。"""

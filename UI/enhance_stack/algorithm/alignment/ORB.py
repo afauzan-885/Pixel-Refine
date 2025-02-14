@@ -174,7 +174,7 @@ class ORBAlgorithm:
                 update_progress(i + start_index, total_images - 1, progress_message)
 
 
-def main(db_path, update_progress=None, batch_size=5, stop_requested=None):
+def main(db_path, update_progress=None, batch_size=6, stop_requested=None):
     processor = ORBAlgorithm(db_path)
 
     # Ambil path gambar dari database

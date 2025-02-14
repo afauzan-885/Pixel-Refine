@@ -13,6 +13,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
 
 from UI.enhance_stack.algorithm.alignment.AKAZE import running_akaze
+from UI.enhance_stack.algorithm.alignment.EEC import running_eec
 from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import running_farneback_optical_flow
 from UI.enhance_stack.algorithm.alignment.ORB import running_orb
 from UI.enhance_stack.algorithm.denoising.Average import running_average
@@ -54,6 +55,8 @@ def process_algorithm(self):
                 running_farneback_optical_flow(self)
             elif alignment_choice == "AKAZE":
                 running_akaze(self)
+            elif alignment_choice == "EEC":
+                running_eec(self)
             elif alignment_choice == "None":
                 if denoising_choice != "None":  # Jika hanya denoising yang dipilih
                     reply = QMessageBox.question(self, "Confirm", 
@@ -63,7 +66,7 @@ def process_algorithm(self):
                     if reply == QMessageBox.StandardButton.No:
                         return  # Jika pengguna memilih 'No', berhenti proses
             else:
-                QMessageBox.warning(self, "Peringatan", "Pilihan algoritma alignment tidak dikenali.")
+                QMessageBox.warning(self, "Warning", "Pilihan algoritma alignment tidak dikenali.")
                 
             super_resolution_executed = False
             # Proses untuk Super Resolution
@@ -109,7 +112,7 @@ def process_algorithm(self):
                     dialog = ImageViewer(latest_image_path, self)  # Menampilkan gambar di ImageViewer
                     dialog.exec()  # Menampilkan dialog secara modal
                 else:
-                    QMessageBox.warning(self, "Caution", language_config.NOT_IMAGE_PREVIEW)
+                    QMessageBox.warning(self, "Warning", language_config.NOT_IMAGE_PREVIEW)
         except Exception as e:
                     # QMessageBox.critical(self, "Error", f"Terjadi kesalahan: {e}")
                     QMessageBox.critical(self, "Error", language_config.RUN_ERROR_STATUS.format(error = e))

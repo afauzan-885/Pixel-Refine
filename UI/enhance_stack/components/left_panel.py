@@ -36,7 +36,6 @@ class LeftPanel(QWidget):
         Inisialisasi Preview Panel dan tambahkan ke parent layout.
         """
         self.preview_panel_widget = QWidget()
-        self.preview_panel_widget.setMinimumHeight(400)
         preview_panel_layout = QVBoxLayout(self.preview_panel_widget)
         preview_panel_label = QLabel("Preview Panel")
         preview_panel_layout.addWidget(preview_panel_label)
@@ -49,6 +48,7 @@ class LeftPanel(QWidget):
         untuk pengaturan di sisi kanan.
         """
         self.parameter_panel_widget = QWidget()
+        self.parameter_panel_widget.setMaximumHeight(270)
         parameter_panel_layout = QHBoxLayout(self.parameter_panel_widget)
         parameter_panel_layout.setContentsMargins(10, 10, 0, 0)
         parameter_panel_layout.setSpacing(20)
@@ -60,12 +60,14 @@ class LeftPanel(QWidget):
             [opt[0] for opt in [
                 ("None", language_config.NONE_ALIGNMENT_DESCRIPTION),
                 ("Farneback Optical Flow", language_config.FARNEBACK_DESCRIPTION),
+                ("EEC", language_config.EEC_DESCRIPTION),
                 ("AKAZE", language_config.AKAZE_DESCRIPTION),
                 ("ORB", language_config.ORB_DESCRIPTION)
             ]],
             [opt[1] for opt in [
                 ("None", language_config.NONE_ALIGNMENT_DESCRIPTION),
                 ("Farneback Optical Flow", language_config.FARNEBACK_DESCRIPTION),
+                ("EEC", language_config.EEC_DESCRIPTION),
                 ("AKAZE", language_config.AKAZE_DESCRIPTION),
                 ("ORB", language_config.ORB_DESCRIPTION)
             ]]

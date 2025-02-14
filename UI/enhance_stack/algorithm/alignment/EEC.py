@@ -1,22 +1,52 @@
 import cv2
 import numpy as np
-import sqlite3, os
-import h5py
-import glob
+import sqlite3
+import os
+import json
 import concurrent.futures
+from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
+from PyQt6.QtCore import Qt
+import h5py
+from PyQt6.QtCore import QThread, pyqtSignal
 
-class EECAlgorithm:
-    def __init__(self, db_path, use_gpu=False, debug_folder="database/align/global/debug_images", hdf5_path="database/align/aligned_images.h5"):
+from UI.settings.General.Language import language_config
+
+class ThreadWorker(QThread):
+    progress_updated = pyqtSignal(int, str) 
+    finished = pyqtSignal() 
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, db_path):
+        super().__init__()
         self.db_path = db_path
-        self.use_gpu = use_gpu
-        self.debug_folder = debug_folder
+        self.stop_requested = False  # Flag untuk menghentikan thread
+
+    def run(self):
+        try:
+            def update_progress(current, total, message):
+                progress = int((current / total) * 100)
+                self.progress_updated.emit(progress, message)
+
+            # Fungsi callback untuk mengecek status stop
+            def is_stop_requested():
+                return self.stop_requested
+
+            # Jalankan proses ORB dengan callback
+            main(self.db_path, update_progress, stop_requested=is_stop_requested)
+            self.finished.emit()
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
+    def stop(self):
+        self.stop_requested = True
+        
+class EECAlgorithm:
+    def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
+        self.db_path = db_path
         self.hdf5_path = hdf5_path
 
-        # Pastikan folder debug dan HDF5 ada
-        if not os.path.exists(self.debug_folder):
-            os.makedirs(self.debug_folder)
+        # Pastikan folder HDF5 ada
         hdf5_folder = os.path.dirname(self.hdf5_path)
-        
         if not os.path.exists(hdf5_folder):
             os.makedirs(hdf5_folder)
 
@@ -29,183 +59,293 @@ class EECAlgorithm:
             cursor.execute("SELECT path FROM images")
             return [row[0] for row in cursor.fetchall()]
 
-    def load_images_from_paths(self, image_paths):
+    def load_images_from_paths(self, image_paths, stop_requested=None):
         """
-        Loads images from a list of image paths, preserving bit depth.
+        Loads images from a list of image paths.
         """
         images = []
         for image_path in image_paths:
+            if stop_requested and stop_requested():
+                break
             image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
             if image is not None:
                 images.append(image)
-            else:
-                print(f"Gagal memuat gambar: {image_path}")
         return images
 
-    def resize_image(self, image, size):
+    @staticmethod
+    def load_eec_config(config_filename=None):
         """
-        Resizes the image to match the reference image size using GPU if enabled.
+        Membaca konfigurasi EEC (berbasis ECC) dari file JSON.
+        Jika gagal, mengembalikan nilai default.
         """
-        if self.use_gpu:
-            # Konversi gambar ke UMat untuk akselerasi GPU
-            image = cv2.UMat(image)
-        resized_image = cv2.resize(image, (size[1], size[0]), interpolation=cv2.INTER_LINEAR)
-        return resized_image.get() if self.use_gpu else resized_image
+        default_config = {
+            "number_of_iterations": 5000,
+            "termination_eps": 1e-6,
+            "motion_type": "affine"  # Pilihan: "affine", "homography", atau "translation"
+        }
 
+        if config_filename is None:
+            config_filename = os.path.join("database", "setting", "Parameter_Stack_Enhance.json")
 
-    def calculate_global_alignment(self, base_image, target_image, warp_mode=cv2.MOTION_AFFINE):
-        """Penyelarasan global menggunakan ECC dengan dukungan 16-bit, multiscale, dan pemrosesan paralel."""
+        try:
+            with open(config_filename, "r") as config_file:
+                params = json.load(config_file)
+            return params.get("EEC", default_config)
+        except Exception as e:
+            print("Error loading EEC configuration:", e)
+            return default_config
 
-        def process_block(base_block, target_block, warp_mode, criteria):
-            warp_matrix = np.eye(2, 3, dtype=np.float32) if warp_mode != cv2.MOTION_HOMOGRAPHY else np.eye(3, 3, dtype=np.float32)
-            scales = [0.5, 0.9]  # Multiscale
-            for scale in scales:
-                scaled_base = cv2.resize(base_block, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
-                scaled_target = cv2.resize(target_block, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
-                try:
-                    _, warp_matrix = cv2.findTransformECC(scaled_target, scaled_base, warp_matrix, warp_mode, criteria)
-                except cv2.error as e:
-                    print(f"ECC alignment failed at scale {scale}: {e}")
-                    break
-            return warp_matrix
+    def calculate_global_motion(self, base_image, target_image, config_filename=None, num_blocks=(3, 3), overlap=20, stop_requested=None):
+        """
+        Menghitung transformasi global dengan metode ECC secara paralel.
+        """
+        if stop_requested and stop_requested():
+            print("Proses dihentikan sebelum menghitung gerakan global (parallel).")
+            return None
 
-        base_gray = cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY) if len(base_image.shape) == 3 else base_image
-        target_gray = cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY) if len(target_image.shape) == 3 else target_image
+        # Ambil konfigurasi EEC dari file atau gunakan default
+        eec_config = self.load_eec_config(config_filename)
 
-        base_gray = base_gray.astype(np.float32)
-        target_gray = target_gray.astype(np.float32)
+        # Mapping dari string ke motionType OpenCV
+        motion_type_mapping = {
+            "affine": cv2.MOTION_AFFINE,
+            "homography": cv2.MOTION_HOMOGRAPHY,
+            "translation": cv2.MOTION_TRANSLATION
+        }
+        motionType = motion_type_mapping.get(eec_config["motion_type"], cv2.MOTION_AFFINE)
 
-        if self.use_gpu:
-            base_gray = cv2.UMat(base_gray)
-            target_gray = cv2.UMat(target_gray)
+        # Konversi gambar ke grayscale
+        base_gray = cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY)
+        target_gray = cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY)
 
-        h, w = base_gray.get().shape if self.use_gpu else base_gray.shape
-        block_size_h = h // 4
-        block_size_w = w // 4
-        overlap_h = int(block_size_h * 0.4)
-        overlap_w = int(block_size_w * 0.4)
+        # Konversi grayscale ke 8-bit
+        base_gray_8bit = cv2.normalize(base_gray, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+        target_gray_8bit = cv2.normalize(target_gray, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
 
-        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 5000, 1e-6)
+        h, w = base_gray_8bit.shape
+        blocks_x, blocks_y = num_blocks
+        block_w, block_h = w // blocks_x, h // blocks_y
 
         warp_matrices = []
 
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = []
-            for i in range(4):
-                for j in range(4):
-                    y_start = max(i * block_size_h - overlap_h, 0)
-                    y_end = min((i + 1) * block_size_h + overlap_h, h)
-                    x_start = max(j * block_size_w - overlap_w, 0)
-                    x_end = min((j + 1) * block_size_w + overlap_w, w)
+        def compute_ecc_block(x, y, bw, bh, overlap):
+            roi_x_start, roi_y_start = max(0, x - overlap), max(0, y - overlap)
+            roi_x_end, roi_y_end = min(w, x + bw + overlap), min(h, y + bh + overlap)
 
-                    base_block = base_gray[y_start:y_end, x_start:x_end]
-                    target_block = target_gray[y_start:y_end, x_start:x_end]
+            roi_base = base_gray_8bit[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+            roi_target = target_gray_8bit[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
 
-                    futures.append(executor.submit(process_block, base_block, target_block, warp_mode, criteria))
+            warp_matrix = np.eye(3, 3, dtype=np.float32) if motionType == cv2.MOTION_HOMOGRAPHY else np.eye(2, 3, dtype=np.float32)
 
+            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
+                        eec_config["number_of_iterations"],
+                        eec_config["termination_eps"])
+            try:
+                _, warp_matrix = cv2.findTransformECC(roi_base, roi_target, warp_matrix, motionType, criteria)
+            except cv2.error as e:
+                print("findTransformECC error:", e)
+                warp_matrix = np.eye(3, 3, dtype=np.float32) if motionType == cv2.MOTION_HOMOGRAPHY else np.eye(2, 3, dtype=np.float32)
+
+            return warp_matrix
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=blocks_x * blocks_y) as executor:
+            futures = [executor.submit(compute_ecc_block, i * block_w, j * block_h, block_w if i < blocks_x - 1 else w - i * block_w, block_h if j < blocks_y - 1 else h - j * block_h, overlap) for i in range(blocks_x) for j in range(blocks_y)]
             for future in concurrent.futures.as_completed(futures):
                 warp_matrices.append(future.result())
 
-        # Combine warp matrices (this is a simplified approach, you may need a more sophisticated method)
-        final_warp_matrix = np.mean(warp_matrices, axis=0)
+        # Hitung rata-rata warp matrix dari semua blok
+        global_warp = np.mean(warp_matrices, axis=0)
 
-        return final_warp_matrix
+        print(language_config.CALCULATE_OPTICAL_FLOW_FINISHED + " (EEC parallel)")
+        return global_warp
 
-    def compensate_global_motion(self, target_image, warp_matrix, warp_mode=cv2.MOTION_AFFINE):
-        h, w = target_image.shape[:2]
+    def compensate_motion(self, base_image, warp_matrix, config_filename=None):
+        """
+        Menerapkan kompensasi gerakan menggunakan warp matrix untuk menyelaraskan gambar.
+        """
+        eec_config = self.load_eec_config(config_filename)
 
-        if warp_matrix is None:
-            print("Matriks warp kosong, tidak dapat melakukan kompensasi.")
-            return None
-        
-        if self.use_gpu:
-            target_image = cv2.UMat(target_image)
+        # Mapping motion_type langsung
+        motion_type_mapping = {
+            "affine": cv2.warpAffine,
+            "euclidean": cv2.warpAffine,
+            "translation": cv2.warpAffine,
+            "homography": cv2.warpPerspective
+        }
+        warp_function = motion_type_mapping.get(eec_config["motion_type"])
 
-        if warp_mode == cv2.MOTION_HOMOGRAPHY:
-            aligned_image = cv2.warpPerspective(target_image, warp_matrix, (w, h), flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP)
+        if warp_function == cv2.warpAffine:
+            compensated_image = warp_function(base_image, warp_matrix, (base_image.shape[1], base_image.shape[0]))
+        elif warp_function == cv2.warpPerspective:
+            compensated_image = warp_function(base_image, warp_matrix, (base_image.shape[1], base_image.shape[0]))
         else:
-            aligned_image = cv2.warpAffine(target_image, warp_matrix, (w, h), flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP)
+            raise ValueError("Tipe transformasi tidak dikenali.")
 
-        return aligned_image.get() if self.use_gpu else aligned_image
+        return compensated_image
 
-    def save_to_hdf5(self, aligned_images):
+    def save_to_hdf5(self, h5f, aligned_images, update_progress=None, start_index=0):
         """
-        Saves aligned images to an HDF5 file after all images are processed.
+        Menyimpan gambar yang telah disejajarkan ke dalam file HDF5.
         """
-        print(f"Menyimpan gambar yang diselaraskan ke HDF5: {self.hdf5_path}")
-        with h5py.File(self.hdf5_path, "w") as h5f:
-            for i, image in enumerate(aligned_images):
-                h5f.create_dataset(f"image_{i}", data=image, compression="gzip")
-                print(f"Gambar ke-{i} disimpan dalam HDF5.")
-        print(f"Semua gambar berhasil disimpan ke HDF5.")
+        total_images = len(aligned_images) + start_index
+        for i, image in enumerate(aligned_images):
+            h5f.create_dataset(f"image_{i + start_index}", data=image, compression="gzip")
+            progress_message = f"Gambar ke-{i + start_index + 1} disimpan dalam HDF5."
+            print(progress_message)
+            if update_progress:
+                update_progress(i + start_index, total_images - 1, progress_message)
 
-    def save_individual_image(self, image, image_id, use_tiff=True):
-        """
-        Save individual aligned image to disk, handling 16-bit images.
-        """
-        if use_tiff:
-            debug_image_path = os.path.join(self.debug_folder, f"aligned_image_{image_id}.tiff")
-            cv2.imwrite(debug_image_path, image)
-        else:
-            debug_image_path = os.path.join(self.debug_folder, f"aligned_image_{image_id}.png")
-            cv2.imwrite(debug_image_path, image)
-        print(f"Gambar yang diselaraskan disimpan ke {debug_image_path} dengan tipe data {image.dtype}.")
-        del image
 
-    def delete_debug_images(self):
-        """
-        Delete all images in the debug folder to free up space.
-        """
-        print("Menghapus gambar di folder debug...")
-        for image_file in glob.glob(os.path.join(self.debug_folder, "*.png")):
-            os.remove(image_file)
-            print(f"Gambar {image_file} dihapus.")
-        print("Semua gambar debug berhasil dihapus.")
+def main(db_path, update_progress=None, batch_size=5, stop_requested=None):
+    processor = EECAlgorithm(db_path)
 
-def main(db_path):
-    use_gpu = False  # Ubah ke False jika ingin menggunakan CPU
-    processor = EECAlgorithm(db_path, use_gpu=use_gpu)
-
+    # Ambil path gambar dari database
     image_paths = processor.get_all_image_paths()
     if not image_paths:
-        print("Tidak ada gambar ditemukan di database.")
+        print(language_config.RUN_IMAGE_NOT_FOUND)
         return
 
-    base_image = cv2.imread(image_paths[0], cv2.IMREAD_UNCHANGED)
+    # Gunakan gambar pertama sebagai referensi
+    base_image_path = image_paths[0]
+    base_image = cv2.imread(base_image_path, cv2.IMREAD_UNCHANGED)
     if base_image is None:
-        print(f"Gambar referensi tidak dapat dimuat dari {image_paths[0]}.")
+        print(language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
         return
 
-    print("Memproses gambar...")
+    total_images = len(image_paths)
+    total_batches = (total_images - 1) // batch_size + 1
+
+    aligned_images = [base_image]
 
     with h5py.File(processor.hdf5_path, "w") as h5f:
-        h5f.create_dataset(f"image_0", data=base_image, compression="gzip")
-        print(f"Gambar ke-0 (referensi) disimpan dalam HDF5.")
+        h5f.create_dataset("image_0", data=base_image, compression="gzip")
 
-        for i in range(1, len(image_paths)):
-            print(f"Memproses gambar ke-{i} dari {len(image_paths)}...")
+        for batch_idx in range(total_batches):
+            if stop_requested and stop_requested():
+                break
 
-            target_image = cv2.imread(image_paths[i], cv2.IMREAD_UNCHANGED)
-            if target_image is None:
-                print(f"Gambar ke-{i} tidak dapat dimuat dari {image_paths[i]}.")
+            start_idx = batch_idx * batch_size + 1
+            end_idx = min((batch_idx + 1) * batch_size + 1, total_images)
+            batch_paths = image_paths[start_idx:end_idx]
+            batch_images = processor.load_images_from_paths(batch_paths, stop_requested)
+            if not batch_images:
                 continue
 
-            warp_matrix = processor.calculate_global_alignment(base_image, target_image)
-            compensated_image = processor.compensate_global_motion(target_image, warp_matrix)
+            batch_aligned = []
+            for i, target_image in enumerate(batch_images, start=start_idx):
+                if stop_requested and stop_requested():
+                    print("Proses dihentikan oleh pengguna.")
+                    break
 
-            if compensated_image is not None: #pengecekan jika kompensasi berhasil
-                h5f.create_dataset(f"image_{i}", data=compensated_image, compression="gzip")
-                print(f"Gambar ke-{i} disimpan dalam HDF5.")
-                processor.save_individual_image(compensated_image, i)
-                del target_image, warp_matrix, compensated_image
+                info_message = language_config.RUN_IMAGE_PROCESSING.format(i=i, total_images=total_images)
+                print(info_message)
+
+                # Hitung transformasi global menggunakan EEC secara paralel
+                warp_matrix = processor.calculate_global_motion(base_image, target_image)
+                # Gunakan jenis transformasi yang sama dengan yang didefinisikan di konfigurasi EEC
+                compensated_image = processor.compensate_motion(target_image, warp_matrix)
+                batch_aligned.append(compensated_image)
+
+                if update_progress:
+                    update_progress(i - 1, total_images - 1, info_message)
+
+            for j, aligned_image in enumerate(batch_aligned):
+                h5f.create_dataset(f"image_{start_idx + j}", data=aligned_image, compression="gzip")
+
+            print(f"Batch {batch_idx + 1}/{total_batches} selesai diproses dan disimpan.")
+
+    if update_progress:
+        update_progress(total_images - 1, total_images - 1, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
+
+    print("Pemrosesan selesai dan semua gambar telah disimpan ke HDF5.")
+
+
+def running_eec(parent=None):
+    """
+    Menampilkan progress bar dengan gaya kustom dan memanfaatkan thread.
+    """
+    # Membuat dialog progress
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(language_config.WINDOW_TITLE_EEC)
+    dialog.setModal(True)
+    dialog.setFixedSize(300, 90)
+    dialog.setWindowFlags(
+        Qt.WindowType.Window | Qt.WindowType.CustomizeWindowHint |
+        Qt.WindowType.WindowTitleHint | Qt.WindowType.WindowCloseButtonHint
+    )
+
+    # Layout untuk progress bar dan label
+    layout = QVBoxLayout(dialog)
+    label = QLabel(language_config.WINDOW_START_PROCESSING)
+    layout.addWidget(label)
+
+    progress_bar = QProgressBar()
+    progress_bar.setRange(0, 100)
+    progress_bar.setValue(0)
+    progress_bar.setStyleSheet("""
+        QProgressBar {
+            border: 1px solid #bbb;
+            border-radius: 5px;
+            background-color: #f0f0f0;
+            text-align: center;
+        }
+        QProgressBar::chunk {
+            background-color: #80C4E9;
+            width: 20px;
+        }
+    """)
+    layout.addWidget(progress_bar)
+
+    # Inisialisasi thread worker
+    worker = ThreadWorker("pixel_refine_database.db")
+
+    # Menghubungkan signal worker ke fungsi pembaruan UI
+    worker.progress_updated.connect(lambda progress, message: (
+        progress_bar.setValue(progress),
+        label.setText(message)
+    ))
+
+    def finish_handler():
+        dialog.close()
+        worker.quit()  # Berhenti dari thread
+        worker.wait()  # Tunggu thread selesai
+
+    worker.finished.connect(finish_handler)
+
+    def error_handler(error):
+        QMessageBox.critical(dialog, "Error", language_config.RUN_ERROR_STATUS.format(error=error))
+        dialog.close()
+        worker.quit()
+        worker.wait()
+
+    worker.error_occurred.connect(error_handler)
+
+    # Mulai worker
+    worker.start()
+
+    # Pastikan worker dihentikan jika dialog ditutup
+    def on_dialog_close(event):
+        if worker.isRunning():
+            # Menampilkan konfirmasi sebelum menutup dialog
+            reply = QMessageBox.question(dialog, "Cancel Process",
+                                        
+                                        # message: Are you sure you want to cancel the process?
+                                        language_config.CANCEL_PROCESSING,
+                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
+                                        QMessageBox.StandardButton.No)
+
+            if reply == QMessageBox.StandardButton.Yes:
+                worker.stop()
+                worker.quit() 
+                worker.wait() 
+                event.accept()
             else:
-                print(f"Gagal melakukan kompensasi gerakan pada gambar ke-{i}")
-                continue
+                event.ignore()
 
+    dialog.closeEvent = on_dialog_close
 
-    processor.delete_debug_images()
-    print("Proses selesai.")
-
+    dialog.exec()
+    
 if __name__ == "__main__":
     db_path = "pixel_refine_database.db"  # Path ke database Anda
     main(db_path)

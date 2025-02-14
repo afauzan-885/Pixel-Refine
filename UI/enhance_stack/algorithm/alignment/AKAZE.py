@@ -3,6 +3,7 @@ import numpy as np
 import sqlite3
 import os
 import json
+import concurrent.futures
 from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 from PyQt6.QtCore import Qt
 import h5py
@@ -64,13 +65,13 @@ class AKAZEAlgorithm:
         """
         images = []
         for image_path in image_paths:
-            if stop_requested and stop_requested():  # Cek apakah harus berhenti
+            if stop_requested and stop_requested():
                 break
             image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
             if image is not None:
                 images.append(image)
         return images
-    
+
     @staticmethod
     def load_akaze_config(config_filename=None):
         """
@@ -89,117 +90,143 @@ class AKAZEAlgorithm:
         try:
             with open(config_filename, "r") as config_file:
                 params = json.load(config_file)
-                
-            # Ambil parameter AKAZE jika ada, jika tidak gunakan default_config
             return params.get("AKAZE", default_config)
         except Exception as e:
             print("Error loading AKAZE configuration:", e)
             return default_config
-    
-    def calculate_global_motion(self, base_image, target_image, stop_requested=None):
+
+    def calculate_global_motion(self, base_image, target_image, config_filename=None, num_blocks=(3, 3), overlap=20, stop_requested=None):
         """
-        Menghitung keypoints dan deskriptor menggunakan AKAZE antara dua gambar.
-        Konfigurasi parameter dimuat dari file JSON.
+        Menghitung keypoints dan deskriptor menggunakan AKAZE dengan membagi gambar menjadi blok-blok secara paralel.
+        
+        Parameter:
+          - num_blocks: tuple (blocks_x, blocks_y) untuk pembagian gambar.
+          - overlap: jumlah piksel overlap di sekeliling tiap blok.
         """
         if stop_requested and stop_requested():
-            print("Proses dihentikan sebelum menghitung gerakan global.")
+            print("Proses dihentikan sebelum menghitung gerakan global (parallel).")
             return None, None
 
-        # Muat konfigurasi AKAZE dari file konfigurasi
-        akaze_config = self.load_akaze_config()
+        akaze_config = self.load_akaze_config(config_filename)
+        # Konversi gambar ke grayscale
+        base_gray = cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY)
+        target_gray = cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY)
 
-        # Membuat AKAZE dengan parameter dari konfigurasi
-        akaze = cv2.AKAZE_create(
-            threshold=akaze_config["akaze_threshold"],
-            nOctaves=akaze_config["akaze_nOctaves"],
-            nOctaveLayers=akaze_config["akaze_nOctaveLayers"]
-        )
+        h, w = base_gray.shape
+        blocks_x, blocks_y = num_blocks
+        block_w = w // blocks_x
+        block_h = h // blocks_y
 
-        keypoints_base, descriptors_base = akaze.detectAndCompute(base_image, None)
-        keypoints_target, descriptors_target = akaze.detectAndCompute(target_image, None)
+        # Himpunan untuk menggabungkan hasil dari tiap blok
+        keypoints_base_all = []
+        descriptors_base_all = None  # akan berupa numpy array
+        keypoints_target_all = []
+        descriptors_target_all = None
+
+        def compute_features_block(x, y, bw, bh, overlap):
+            # Tentukan ROI dengan tambahan overlap
+            roi_x_start = max(0, x - overlap)
+            roi_y_start = max(0, y - overlap)
+            roi_x_end = min(w, x + bw + overlap)
+            roi_y_end = min(h, y + bh + overlap)
+
+            roi_base = base_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+            roi_target = target_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+
+            # Buat instance AKAZE untuk blok ini
+            akaze = cv2.AKAZE_create(
+                threshold=akaze_config["akaze_threshold"],
+                nOctaves=akaze_config["akaze_nOctaves"],
+                nOctaveLayers=akaze_config["akaze_nOctaveLayers"]
+            )
+            kps_base, desc_base = akaze.detectAndCompute(roi_base, None)
+            kps_target, desc_target = akaze.detectAndCompute(roi_target, None)
+
+            # Sesuaikan koordinat keypoints agar sesuai dengan posisi asli pada gambar penuh
+            for kp in kps_base:
+                kp.pt = (kp.pt[0] + roi_x_start, kp.pt[1] + roi_y_start)
+            for kp in kps_target:
+                kp.pt = (kp.pt[0] + roi_x_start, kp.pt[1] + roi_y_start)
+            return kps_base, desc_base, kps_target, desc_target
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=blocks_x * blocks_y) as executor:
+            futures = []
+            for i in range(blocks_x):
+                for j in range(blocks_y):
+                    x = i * block_w
+                    y = j * block_h
+                    bw = block_w if i < blocks_x - 1 else w - x
+                    bh = block_h if j < blocks_y - 1 else h - y
+                    futures.append(executor.submit(compute_features_block, x, y, bw, bh, overlap))
+            for future in concurrent.futures.as_completed(futures):
+                kps_base, desc_base, kps_target, desc_target = future.result()
+                if desc_base is not None and len(kps_base) > 0:
+                    keypoints_base_all.extend(kps_base)
+                    if descriptors_base_all is None:
+                        descriptors_base_all = desc_base
+                    else:
+                        descriptors_base_all = np.vstack([descriptors_base_all, desc_base])
+                if desc_target is not None and len(kps_target) > 0:
+                    keypoints_target_all.extend(kps_target)
+                    if descriptors_target_all is None:
+                        descriptors_target_all = desc_target
+                    else:
+                        descriptors_target_all = np.vstack([descriptors_target_all, desc_target])
+
+        # Lakukan matching menggunakan BFMatcher pada hasil gabungan dari semua blok
+        if descriptors_base_all is None or descriptors_target_all is None:
+            print("Tidak ditemukan deskriptor pada salah satu gambar.")
+            return None, None
 
         bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-        matches = bf.knnMatch(descriptors_base, descriptors_target, k=2)
-
+        matches = bf.knnMatch(descriptors_base_all, descriptors_target_all, k=2)
         good_matches = []
         for m, n in matches:
             if m.distance < akaze_config["ratio_threshold"] * n.distance:
                 good_matches.append(m)
 
-        base_points = np.float32([keypoints_base[m.queryIdx].pt for m in good_matches])
-        target_points = np.float32([keypoints_target[m.trainIdx].pt for m in good_matches])
+        base_points = np.float32([keypoints_base_all[m.queryIdx].pt for m in good_matches])
+        target_points = np.float32([keypoints_target_all[m.trainIdx].pt for m in good_matches])
 
         return base_points, target_points
 
     def compensate_motion(self, base_image, base_points, target_points, transformation_type='homography'):
         """
-        Menerapkan kompensasi gerakan menggunakan berbagai jenis transformasi untuk menyelaraskan gambar.
-        
-        transformation_type:
-            - 'homography'   : Menggunakan homografi (perspektif)
-            - 'affine'       : Menggunakan transformasi affine
-            - 'similarity'   : Menggunakan transformasi similarity
-            - 'euclidean'    : Menggunakan transformasi Euclidean (rotasi dan translasi)
+        Menerapkan kompensasi gerakan menggunakan transformasi untuk menyelaraskan gambar.
+        transformation_type dapat berupa 'homography', 'affine', 'similarity', atau 'euclidean'.
         """
         if transformation_type == 'affine':
-            # Menghitung matriks affine menggunakan pasangan titik yang dicocokkan
             matrix, mask = cv2.estimateAffine2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=5.0)
-            # Menyaring pasangan titik berdasarkan mask
-            valid_points = mask.ravel() == 1
             compensated_image = cv2.warpAffine(base_image, matrix, (base_image.shape[1], base_image.shape[0]))
-            
         elif transformation_type == 'similarity':
-            # Menghitung matriks similarity (translasi, rotasi, skala)
             matrix, mask = cv2.estimateAffinePartial2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=5.0)
-            # Menyaring pasangan titik berdasarkan mask
-            valid_points = mask.ravel() == 1
             compensated_image = cv2.warpAffine(base_image, matrix, (base_image.shape[1], base_image.shape[0]))
-            
         elif transformation_type == 'euclidean':
-            # Menghitung matriks Euclidean (rotasi dan translasi)
             matrix, mask = cv2.estimateAffinePartial2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=5.0)
-            
-            # Jika matriks memiliki skala, maka tidak sesuai dengan Euclidean
-            # Matriks Euclidean hanya dapat mencakup rotasi dan translasi
             if np.linalg.norm(matrix[:2, 0]) != np.linalg.norm(matrix[:2, 1]):
                 raise ValueError("Transformasi ini bukan transformasi Euclidean (terdapat skala).")
-            
-            # Menyaring pasangan titik berdasarkan mask
-            valid_points = mask.ravel() == 1
             compensated_image = cv2.warpAffine(base_image, matrix, (base_image.shape[1], base_image.shape[0]))
-            
         elif transformation_type == 'homography':
-            # Menghitung matriks homografi menggunakan pasangan titik yang dicocokkan
             H, mask = cv2.findHomography(target_points, base_points, cv2.RANSAC, 5.0)
-            # Menyaring pasangan titik berdasarkan mask
-            valid_points = mask.ravel() == 1
             compensated_image = cv2.warpPerspective(base_image, H, (base_image.shape[1], base_image.shape[0]))
-
         else:
-            raise ValueError("Tipe transformasi tidak dikenali. Pilih dari 'homography', 'affine', 'similarity', atau 'euclidean'.")
-        
+            raise ValueError("Tipe transformasi tidak dikenali.")
         return compensated_image
 
     def save_to_hdf5(self, h5f, aligned_images, update_progress=None, start_index=0):
         """
-        Saves aligned images to an open HDF5 file.
+        Menyimpan gambar yang telah disejajarkan ke dalam file HDF5.
         """
         total_images = len(aligned_images) + start_index
         for i, image in enumerate(aligned_images):
-            # Simpan dataset ke dalam file HDF5
             h5f.create_dataset(f"image_{i + start_index}", data=image, compression="gzip")
-            
-            # Buat pesan progres
             progress_message = f"Gambar ke-{i + start_index + 1} disimpan dalam HDF5."
-            print(progress_message)  # Log ke konsol
-            
-            # Perbarui progress bar jika `update_progress` tersedia
+            print(progress_message)
             if update_progress:
                 update_progress(i + start_index, total_images - 1, progress_message)
 
 
-
-def main(db_path, update_progress=None, batch_size=3, stop_requested=None):
+def main(db_path, update_progress=None, batch_size=5, stop_requested=None):
     processor = AKAZEAlgorithm(db_path)
 
     # Ambil path gambar dari database
@@ -215,17 +242,14 @@ def main(db_path, update_progress=None, batch_size=3, stop_requested=None):
         print(language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
         return
 
-    # Total gambar untuk keseluruhan proses
     total_images = len(image_paths)
-    total_batches = (total_images - 1) // batch_size + 1  # Hitung jumlah batch
+    total_batches = (total_images - 1) // batch_size + 1
 
-    # Simpan gambar referensi ke dalam HDF5
     aligned_images = [base_image]
 
     with h5py.File(processor.hdf5_path, "w") as h5f:
         h5f.create_dataset("image_0", data=base_image, compression="gzip")
 
-        # Mulai pemrosesan batch
         for batch_idx in range(total_batches):
             if stop_requested and stop_requested():
                 break
@@ -233,43 +257,37 @@ def main(db_path, update_progress=None, batch_size=3, stop_requested=None):
             start_idx = batch_idx * batch_size + 1
             end_idx = min((batch_idx + 1) * batch_size + 1, total_images)
 
-            # Muat batch gambar
             batch_paths = image_paths[start_idx:end_idx]
-            batch_images = processor.load_images_from_paths(batch_paths)
+            batch_images = processor.load_images_from_paths(batch_paths, stop_requested)
             if not batch_images:
                 continue
 
-            # Proses setiap gambar dalam batch
             batch_aligned = []
             for i, target_image in enumerate(batch_images, start=start_idx):
-                if stop_requested and stop_requested():  # Cek penghentian
+                if stop_requested and stop_requested():
                     print("Proses dihentikan oleh pengguna.")
                     break
 
                 info_message = language_config.RUN_IMAGE_PROCESSING.format(i=i, total_images=total_images)
                 print(info_message)
 
-                # Hitung keypoints dan kompensasi gerakan
-                base_points, target_points = processor.calculate_global_motion(base_image, target_image)
-                compensated_image = processor.compensate_motion(target_image, base_points, target_points)
+                # Gunakan versi paralel untuk menghitung global motion
+                base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
+                compensated_image = processor.compensate_motion(target_image, base_pts, target_pts)
                 batch_aligned.append(compensated_image)
 
-                # Perbarui progress bar
                 if update_progress:
                     update_progress(i - 1, total_images - 1, info_message)
 
-            # Simpan batch ke HDF5
             for j, aligned_image in enumerate(batch_aligned):
                 h5f.create_dataset(f"image_{start_idx + j}", data=aligned_image, compression="gzip")
 
             print(f"Batch {batch_idx + 1}/{total_batches} selesai diproses dan disimpan.")
-    
+
     if update_progress:
         update_progress(total_images - 1, total_images - 1, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
 
     print("Pemrosesan selesai dan semua gambar telah disimpan ke HDF5.")
-
-
 
 def running_akaze(parent=None):
     """

@@ -3,6 +3,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel,
 from PyQt6.QtCore import Qt
 
 from UI.enhance_stack.components.parameter_alignment.akaze_parameter_settings import get_akaze_page
+from UI.enhance_stack.components.parameter_alignment.eec_parameter_settings import get_eec_page
 from UI.enhance_stack.components.parameter_alignment.farneback_parameter_settings import get_farneback_optical_flow_page
 from UI.enhance_stack.components.parameter_alignment.orb_parameter_settings import get_orb_page
 from UI.settings.General.Language import language_config
@@ -29,6 +30,11 @@ class ParameterPages:
         akaze_page = get_akaze_page()
         index_akaze = self.stacked_widget.addWidget(akaze_page)
         self.setting_pages_map["AKAZE"] = index_akaze
+        
+        # Halaman untuk EEC (dari Alignment Dropdown)
+        eec_page = get_eec_page()
+        index_eec = self.stacked_widget.addWidget(eec_page)
+        self.setting_pages_map["EEC"] = index_eec
 
         # Halaman untuk ORB (dari Alignment Dropdown)
         orb_page = get_orb_page()  # Menggunakan fungsi impor dari orb_page.py
@@ -85,14 +91,6 @@ class ParameterPages:
         layout.addWidget(QLabel(language_config.DEFAULT_PARAMETER_SETTING_LABEL))
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         return self.wrap_in_scroll_area(page)
-
-    # def get_average_page(self) -> QWidget:
-    #     """Buat halaman pengaturan untuk Average (Denoising)."""
-    #     page = QWidget()
-    #     layout = QVBoxLayout(page)
-    #     layout.addWidget(QLabel("Pengaturan Average Denoising"))
-    #     # Tambahkan widget dan logika pengaturan Average di sini
-    #     return self.wrap_in_scroll_area(page)
 
     def get_setting_pages_map(self) -> dict:
         """Kembalikan dictionary mapping nama halaman ke indeks QStackedWidget."""

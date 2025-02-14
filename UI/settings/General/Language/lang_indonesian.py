@@ -82,6 +82,9 @@ ALIGN_IMAGES_STATUS_AKAZE = "Menyelaraskan gambar {image_id} menggunakan AKAZE..
 WINDOW_TITLE_ORB = "Penyelarasan ORB"
 ALIGN_IMAGES_STATUS_ORB = "Menyelaraskan gambar {image_id} menggunakan ORB..."
 
+WINDOW_TITLE_EEC = "Penyelarasan EEC"
+WINDOW_TITLE_STATUS_EEC = "Menyelaraskan gambar {image_id} menggunakan EEC..."
+
 ALIGN_IMAGES_CALCULATE_FAILED = "Tidak ada fitur yang terdeteksi pada gambar {image_id}. Mengembalikan gambar asli."
 ALIGN_IMAGES_CALCULATE_FINISHED = "Penyelarasan selesai untuk gambar {image_id}."
 ALIGN_IMAGES_COMPENSATE_FAILED = "Homografi tidak dapat dihitung untuk gambar {image_id}. Mengembalikan gambar asli."
@@ -107,7 +110,7 @@ WINDOW_TITLE_AVERAGE = "Penumpukan Rata-Rata"
 WINDOW_TITLE_MEDIAN = "Penumpukan Median"
 WINDOW_TITLE_WEIGHTED_AVERAGE = "Penumpukan Rata-Rata Tertimbang"
 
-WINDOW_TITLE_SIMILARITY = "Penumpukan Kemiripan"
+WINDOW_TITLE_SIMILARITY = "Penumpukan Similarity"
 SIMILARITY_MNFR_LOAD_FAILED = "Tidak ada gambar yang disediakan."
 SIMILARITY_MNFR_BIT_REQUIRED = "Gambar harus berukuran 8 Bit atau 16 Bit."
 SIMILARITY_MNFR_TILE_SLICE = "Dimensi gambar: {height}x{width}, Ukuran ubin: {tile_size}"
@@ -146,8 +149,8 @@ Nilai umum berkisar antara 1.2 hingga 1.5."""
 ORB_NLEVELS_LABEL = "Jumlah Level"
 ORB_NLEVELS_DESCRIPTION = """Jumlah level menunjukkan lapisan dalam piramida gambar yang digunakan untuk deteksi fitur.
 
-Lebih banyak level memungkinkan algoritma untuk menangkap detail pada berbagai skala, yang berguna ketika ukuran gambar bervariasi,
-tetapi peningkatan level juga berarti waktu pemrosesan yang lebih lama.
+Lebih banyak level memungkinkan algoritma untuk menangkap detail pada berbagai skala
+Berguna ketika ukuran gambar bervariasi, tetapi peningkatan level juga berarti waktu pemrosesan yang lebih lama.
 
 Biasanya, nilai antara 2 hingga 4 sudah ideal untuk sebagian besar aplikasi."""
 
@@ -163,11 +166,12 @@ Opsi yang tersedia meliputi:
 Pilihan transformasi bergantung pada perbedaan antara gambar yang akan diselaraskan.
 Untuk sebagian besar aplikasi, Homografi sering dipilih karena fleksibilitasnya dalam menangani perbedaan perspektif."""
 
-ORB_RANSAC_LABEL = "Ambang RANSAC"
-ORB_RANSAC_DESCRIPTION = """Ambang RANSAC menentukan seberapa ketat algoritma menyaring nilai-nilai pencilan selama penyelarasan gambar.
+ORB_RANSAC_LABEL = "RANSAC Threshold"
+ORB_RANSAC_DESCRIPTION = """RANSAC Threshold menentukan seberapa ketat algoritma menyaring nilai-nilai pencilan selama penyelarasan gambar.
 
 - Nilai yang lebih rendah (misalnya, 1-2) menerapkan penyaringan yang lebih ketat, yang mungkin mengabaikan beberapa fitur kunci.
-- Nilai yang lebih tinggi (misalnya, 4-5) lebih toleran terhadap pencilan, memungkinkan lebih banyak fitur digunakan namun mungkin mengurangi ketepatan penyelarasan.
+- Nilai yang lebih tinggi (misalnya, 4-5) lebih toleran terhadap pencilan, memungkinkan lebih banyak fitur digunakan namun mungkin
+  mengurangi ketepatan penyelarasan.
 
 Biasanya, nilai antara 1 hingga 3 sudah cukup, tergantung pada tingkat kebisingan dalam data."""
 
@@ -193,8 +197,9 @@ Nilai yang direkomendasikan: 0.5.
 FARNEBACK_LEVELS_LABEL = "Level"
 FARNEBACK_LEVELS_DESCRIPTION = """Level menentukan jumlah level dalam piramida gambar yang digunakan untuk perhitungan optical flow.
 
-- Lebih banyak level memungkinkan algoritma mendeteksi gerak pada berbagai skala, yang berguna ketika gerak dalam gambar kompleks atau mencakup area yang luas.
-- Namun, peningkatan jumlah level juga meningkatkan waktu komputasi.
+- Lebih banyak level memungkinkan algoritma mendeteksi gerak pada berbagai skala, yang berguna ketika gerak dalam gambar kompleks
+  atau mencakup area yang luas.
+- Peningkatan jumlah level juga meningkatkan waktu komputasi.
 
 Biasanya, nilai 3 digunakan sebagai patokan, namun Anda dapat mengaturnya antara 1 hingga 10 tergantung kebutuhan aplikasi Anda.
 """
@@ -258,10 +263,45 @@ Pilih metode interpolasi yang seimbang antara kelancaran dan efisiensi pemrosesa
 Direkomendasikan: Interpolasi Kubik.
 """
 
+# ---------------------- EEC --------------------------------- #
+EEC_PARAMETER_SETTING_LABEL = "Parameter EEC"
+
+EEC_ITERATIONS_LABEL = "Jumlah Iterasi"
+EEC_ITERATIONS_DESCRIPTION = """Jumlah iterasi menentukan berapa banyak langkah penyempurnaan yang dilakukan algoritme EEC selama registrasi gambar.
+
+- Lebih banyak iterasi menghasilkan penyelarasan yang lebih akurat, memerlukan lebih banyak komputasi.
+- Lebih sedikit iterasi mempercepat pemrosesan tetapi dapat mengorbankan kualitas registrasi.
+
+Direkomendasikan: 5000 iterasi untuk keseimbangan yang seimbang antara akurasi dan kinerja.
+"""
+
+EEC_EPS_LABEL = "Terminate Epsilon"
+EEC_EPS_DESCRIPTION = """Epsilon terminasi menetapkan ambang batas peningkatan minimum antara iterasi agar algoritme dapat terus menyempurnakan transformasi.
+
+- Epsilon yang lebih kecil memungkinkan penyesuaian yang lebih halus, yang memungkinkan hasil penyelarasan yang lebih tepat.
+- Namun, nilai yang sangat kecil dapat meningkatkan waktu pemrosesan secara signifikan.
+- Nilai yang lebih besar mempercepat konvergensi tetapi dapat mengurangi presisi.
+
+Direkomendasikan: 1e-6 untuk mencapai keseimbangan optimal antara presisi dan efisiensi komputasi.
+"""
+
+EEC_MOTION_LABEL = "Jenis Gerakan"
+EEC_MOTION_DESCRIPTION = """Jenis gerakan menentukan model transformasi yang digunakan selama registrasi.
+
+- 'Affine' mengakomodasi rotasi, penskalaan, dan translasi.
+- 'Homography' menangani distorsi perspektif.
+- 'Translasi' menerapkan pergeseran linier sederhana tanpa rotasi atau penskalaan.
+
+Direkomendasikan: Model gerakan 'Affine' cocok untuk sebagian besar tugas.
+"""
+
+
+# -------------------------- AKAZE -------------------------- #
+
 AKAZE_PARAMETER_SETTING_LABEL = "Parameter AKAZE"
 
-AKAZE_THRESHOLD_LABEL = "Ambang"
-AKAZE_THRESHOLD_DESCRIPTION = """Parameter Ambang menentukan respons minimum detektor yang diperlukan untuk menerima sebuah titik kunci.
+AKAZE_THRESHOLD_LABEL = "Threshold"
+AKAZE_THRESHOLD_DESCRIPTION = """Parameter Threshold menentukan respons minimum detektor yang diperlukan untuk menerima sebuah titik kunci.
 
 Nilai yang lebih rendah memungkinkan lebih banyak titik kunci terdeteksi (termasuk yang lebih lemah atau bising),
 sedangkan nilai yang lebih tinggi membatasi deteksi hanya pada fitur yang paling kuat.
@@ -286,8 +326,8 @@ Jumlah lapisan yang lebih tinggi memberikan resolusi ruang skala yang lebih halu
 Nilai yang direkomendasikan: 4.
 """
 
-AKAZE_RATIO_LABEL = "Ambang Rasio"
-AKAZE_RATIO_DESCRIPTION = """Ambang Rasio digunakan selama proses pencocokan untuk membandingkan jarak antara kecocokan terbaik dengan kecocokan terbaik kedua dari deskriptor titik kunci.
+AKAZE_RATIO_LABEL = "Rasio Threshold"
+AKAZE_RATIO_DESCRIPTION = """Rasio Threshold digunakan selama proses pencocokan untuk membandingkan jarak antara kecocokan terbaik dengan kecocokan terbaik kedua dari deskriptor titik kunci.
 
 Rasio yang lebih rendah (mendekati 0.50) berarti hanya kecocokan yang sangat khas dan tidak ambigu yang diterima, sedangkan rasio yang lebih tinggi (mendekati 1.00) memungkinkan lebih banyak kecocokan namun mungkin menyertakan positif palsu.
 
@@ -305,6 +345,13 @@ NONE_ALIGNMENT_DESCRIPTION = "Tidak akan ada penyelarasan yang diterapkan."
 FARNEBACK_DESCRIPTION = """Algoritma ini cocok untuk penyelarasan tingkat tinggi yang memerlukan ketepatan dan akurasi hingga level piksel.
 
 Namun, sangat lemah terhadap perbedaan rotasi dan perspektif yang signifikan."""
+
+EEC_DESCRIPTION = """Algoritma ini dibuat untuk menyelaraskan gambar dengan tingkat akurasi tinggi.
+Algoritma ini menggunakan teknik korelasi canggih untuk memperkirakan parameter transformasi dengan lebih baik
+
+Tahan terhadap perubahan intesitas cahaya dan pergeseran yang cukup tinggi, namun algoritma ini membutuhkan waktu komputasi
+yang lebih banyak dan mungkin tidak seakurat metode optical flow"""
+
 AKAZE_DESCRIPTION = """Algoritma ini cukup tangguh terhadap perbedaan besar dalam rotasi, perspektif, dan skala.
 
 Cukup baik, tetapi tidak sebaik Farneback untuk level piksel."""
@@ -320,7 +367,7 @@ INTERPOLATION_DESCRIPTION = "Algoritma sederhana untuk meningkatkan resolusi mel
 # Deskripsi untuk Denoising
 DENOISING_NAME = "Algoritma Pengurangan Noise"
 NONE_DENOISING_DESCRIPTION = "Tidak akan ada pengurangan noise yang diterapkan."
-WEIGHTED_AVERAGE_DESCRIPTION = """Hasil dari penyederhanaan metode penumpukan kemiripan cukup baik untuk pergerakan kecil
+WEIGHTED_AVERAGE_DESCRIPTION = """Hasil dari penyederhanaan metode penumpukan similarity cukup baik untuk pergerakan kecil
 
 Cukup baik dalam menangani pergerakan kecil, tetapi menghasilkan artefak gambar pada pergerakan yang lebih besar."""
                         
