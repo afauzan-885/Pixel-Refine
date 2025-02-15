@@ -60,14 +60,12 @@ class LeftPanel(QWidget):
             [opt[0] for opt in [
                 ("None", language_config.NONE_ALIGNMENT_DESCRIPTION),
                 ("Farneback Optical Flow", language_config.FARNEBACK_DESCRIPTION),
-                ("EEC", language_config.EEC_DESCRIPTION),
                 ("AKAZE", language_config.AKAZE_DESCRIPTION),
                 ("ORB", language_config.ORB_DESCRIPTION)
             ]],
             [opt[1] for opt in [
                 ("None", language_config.NONE_ALIGNMENT_DESCRIPTION),
                 ("Farneback Optical Flow", language_config.FARNEBACK_DESCRIPTION),
-                ("EEC", language_config.EEC_DESCRIPTION),
                 ("AKAZE", language_config.AKAZE_DESCRIPTION),
                 ("ORB", language_config.ORB_DESCRIPTION)
             ]]

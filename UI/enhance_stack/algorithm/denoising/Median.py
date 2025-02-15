@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import sqlite3
+import concurrent.futures
 import os
 from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
@@ -80,7 +81,7 @@ class MedianAlgorithm:
                 images.append(image)
         return images
 
-    def stack_median_images(self, images, previous_medians, stop_requested=None):
+    def stack_median_images(self, images, previous_medians, stop_requested=None, num_blocks=(3, 3)):
         if stop_requested and stop_requested():
             print("Proses dihentikan sebelum menghitung stack median.")
             return previous_medians
@@ -88,32 +89,72 @@ class MedianAlgorithm:
         if len(images) == 0:
             raise ValueError("Tidak ada gambar yang ditemukan.")
 
+        # Ambil tipe data dari gambar pertama
         dtype = images[0].dtype
 
-        if previous_medians is None:
-            previous_medians = []  # Inisialisasi jika sebelumnya tidak ada median
-
-        # Buat fungsi untuk menyesuaikan ukuran gambar
+        # Pastikan ukuran gambar konsisten: gunakan ukuran gambar pertama sebagai target.
         target_shape = images[0].shape
+
         def resize_image(image):
             return cv2.resize(image, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_CUBIC)
 
         # Resize seluruh gambar agar memiliki ukuran yang sama
         images_resized = [resize_image(image) for image in images]
 
-        # Stack gambar dan hitung median per piksel
-        stacked_medians = np.median(np.stack(images_resized), axis=0).astype(dtype)
+        # Stack gambar (membuat array dengan dimensi (N, H, W, C) atau (N, H, W) jika grayscale)
+        stacked = np.stack(images_resized, axis=0)
 
-        # Proses clipping menggunakan np.iinfo untuk mendapatkan rentang tipe data yang tepat
-        stacked_medians = np.clip(stacked_medians, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype)
+        # Siapkan array output untuk menyimpan hasil median (gunakan tipe float untuk perhitungan)
+        median_image = np.empty(target_shape, dtype=np.float64)
 
-        return stacked_medians, images_resized
+        H, W = target_shape[:2]
+        blocks_x, blocks_y = num_blocks
+        block_h = H // blocks_x
+        block_w = W // blocks_y
+
+        # Fungsi untuk memproses median pada satu blok
+        def compute_block(i, j):
+            # Hitung rentang baris dan kolom untuk blok ini
+            row_start = i * block_h
+            row_end = H if i == blocks_x - 1 else (i + 1) * block_h
+            col_start = j * block_w
+            col_end = W if j == blocks_y - 1 else (j + 1) * block_w
+
+            # Ambil blok dari stack: hasilnya berbentuk (N, block_h, block_w, ...) atau (N, block_h, block_w)
+            block = stacked[:, row_start:row_end, col_start:col_end]
+            # Hitung median di sepanjang axis=0 (menggabungkan semua gambar)
+            block_median = np.median(block, axis=0)
+            return i, j, block_median
+
+        futures = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=blocks_x * blocks_y) as executor:
+            for i in range(blocks_x):
+                for j in range(blocks_y):
+                    futures.append(executor.submit(compute_block, i, j))
+            # Tempatkan hasil blok ke dalam gambar median
+            for future in concurrent.futures.as_completed(futures):
+                i, j, block_median = future.result()
+                row_start = i * block_h
+                row_end = H if i == blocks_x - 1 else (i + 1) * block_h
+                col_start = j * block_w
+                col_end = W if j == blocks_y - 1 else (j + 1) * block_w
+                median_image[row_start:row_end, col_start:col_end] = block_median
+
+        # Lakukan clipping sesuai rentang tipe data jika tipe data integer
+        if np.issubdtype(dtype, np.integer):
+            median_image = np.clip(median_image, np.iinfo(dtype).min, np.iinfo(dtype).max)
+            median_image = median_image.astype(dtype)
+        else:
+            median_image = median_image.astype(dtype)
+
+        return median_image, images_resized
+
 
 
     def save_image(self, image, output_path):
         cv2.imwrite(output_path, image)
         
-def main(db_path, update_progress=None, stop_requested=None, batch_size=5):
+def main(db_path, update_progress=None, stop_requested=None, batch_size=4):
     try:
         image_processor = MedianAlgorithm(db_path)
         image_paths = image_processor.get_all_image_paths()

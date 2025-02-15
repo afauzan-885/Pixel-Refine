@@ -1,7 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
-from numba import njit
-from multiprocessing import Pool
     
 def raised_cosine_window(tile_size):
         """Membuat raised cosine window untuk blending."""

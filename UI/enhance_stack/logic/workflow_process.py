@@ -13,7 +13,6 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
 
 from UI.enhance_stack.algorithm.alignment.AKAZE import running_akaze
-from UI.enhance_stack.algorithm.alignment.EEC import running_eec
 from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import running_farneback_optical_flow
 from UI.enhance_stack.algorithm.alignment.ORB import running_orb
 from UI.enhance_stack.algorithm.denoising.Average import running_average
@@ -55,8 +54,7 @@ def process_algorithm(self):
                 running_farneback_optical_flow(self)
             elif alignment_choice == "AKAZE":
                 running_akaze(self)
-            elif alignment_choice == "EEC":
-                running_eec(self)
+
             elif alignment_choice == "None":
                 if denoising_choice != "None":  # Jika hanya denoising yang dipilih
                     reply = QMessageBox.question(self, "Confirm", 

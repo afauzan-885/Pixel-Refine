@@ -83,9 +83,6 @@ ALIGN_IMAGES_STATUS_AKAZE = "Aligning images {image_id} using AKAZE..."
 WINDOW_TITLE_ORB = "ORB Alignment"
 ALIGN_IMAGES_STATUS_ORB = "Aligning images {image_id} using ORB..."
 
-WINDOW_TITLE_EEC = "EEC Alignment"
-WINDOW_TITLE_STATUS_EEC = "Aligning images {image_id} using EEC..."
-
 ALIGN_IMAGES_CALCULATE_FAILED = "No features detected in any of the images for {image_id}. Returning original image."
 ALIGN_IMAGES_CALCULATE_FINISHED = "Alignment complete for image {image_id}."
 ALIGN_IMAGES_COMPENSATE_FAILED = "Homography could not be computed for image {image_id}. Returning original image."
@@ -264,40 +261,6 @@ FARNEBACK_INTERPOLATION_DESCRIPTION = """Interpolation sets the method used to e
 Choose an interpolation method that balances smoothness and processing efficiency.
 Recommended: Cubic Interpolation.
 """
-
-
-# ----------------------- EEC ----------------------- #
-EEC_PARAMETER_SETTING_LABEL = "EEC Parameters"
-
-EEC_ITERATIONS_LABEL = "Number of Iterations"
-EEC_ITERATIONS_DESCRIPTION = """The number of iterations determines how many refinement steps the EEC algorithm performs during image registration.
-
-- More iterations result in more accurate alignment, requiring more computation.
-- Fewer iterations speed up processing but may sacrifice registration quality.
-
-Recommended: 5000 iterations for a good balance between accuracy and performance.
-"""
-
-EEC_EPS_LABEL = "Terminate Epsilon"
-EEC_EPS_DESCRIPTION = """The termination epsilon sets the minimum improvement threshold between iterations for the algorithm to continue refining the transformation.
-
-- Smaller epsilons allow for finer adjustments, which allows for more precise alignment results.
-- However, very small values ​​can significantly increase processing time.
-- Larger values ​​speed up convergence but may reduce precision.
-
-Recommended: 1e-6 for an optimal balance between precision and computational efficiency.
-"""
-
-EEC_MOTION_LABEL = "Motion Type"
-EEC_MOTION_DESCRIPTION = """The motion type determines the transformation model used during registration.
-
-- 'Affine' accommodates rotation, scaling, and translation.
-- 'Homography' handles perspective distortion.
-- 'Translation' applies a simple linear shift without rotation or scaling.
-
-Recommended: The 'Affine' motion model is suitable for most tasks.
-"""
-
 # ------------------------AKAZE------------------------ #
 AKAZE_PARAMETER_SETTING_LABEL = "AKAZE Parameters"
 
@@ -350,13 +313,6 @@ FARNEBACK_DESCRIPTION = """This algorithm is suitable for high-level alignment t
 precision and accuracy down to the pixel level.
 
 But very weak against significant rotation and perspective differences"""
-
-EEC_DESCRIPTION = """This algorithm is designed to align images with high accuracy.
-It uses advanced correlation techniques to better estimate transformation parameters
-
-It is robust to light intensity changes and high shifts, but it requires more computation time
-and may not be as accurate as optical flow methods"""
-
 
 AKAZE_DESCRIPTION = """This algorithm is quite robust to large differences in rotation, perspective and scale
 

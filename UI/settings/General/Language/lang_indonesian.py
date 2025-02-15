@@ -82,9 +82,6 @@ ALIGN_IMAGES_STATUS_AKAZE = "Menyelaraskan gambar {image_id} menggunakan AKAZE..
 WINDOW_TITLE_ORB = "Penyelarasan ORB"
 ALIGN_IMAGES_STATUS_ORB = "Menyelaraskan gambar {image_id} menggunakan ORB..."
 
-WINDOW_TITLE_EEC = "Penyelarasan EEC"
-WINDOW_TITLE_STATUS_EEC = "Menyelaraskan gambar {image_id} menggunakan EEC..."
-
 ALIGN_IMAGES_CALCULATE_FAILED = "Tidak ada fitur yang terdeteksi pada gambar {image_id}. Mengembalikan gambar asli."
 ALIGN_IMAGES_CALCULATE_FINISHED = "Penyelarasan selesai untuk gambar {image_id}."
 ALIGN_IMAGES_COMPENSATE_FAILED = "Homografi tidak dapat dihitung untuk gambar {image_id}. Mengembalikan gambar asli."
@@ -263,38 +260,6 @@ Pilih metode interpolasi yang seimbang antara kelancaran dan efisiensi pemrosesa
 Direkomendasikan: Interpolasi Kubik.
 """
 
-# ---------------------- EEC --------------------------------- #
-EEC_PARAMETER_SETTING_LABEL = "Parameter EEC"
-
-EEC_ITERATIONS_LABEL = "Jumlah Iterasi"
-EEC_ITERATIONS_DESCRIPTION = """Jumlah iterasi menentukan berapa banyak langkah penyempurnaan yang dilakukan algoritme EEC selama registrasi gambar.
-
-- Lebih banyak iterasi menghasilkan penyelarasan yang lebih akurat, memerlukan lebih banyak komputasi.
-- Lebih sedikit iterasi mempercepat pemrosesan tetapi dapat mengorbankan kualitas registrasi.
-
-Direkomendasikan: 5000 iterasi untuk keseimbangan yang seimbang antara akurasi dan kinerja.
-"""
-
-EEC_EPS_LABEL = "Terminate Epsilon"
-EEC_EPS_DESCRIPTION = """Epsilon terminasi menetapkan ambang batas peningkatan minimum antara iterasi agar algoritme dapat terus menyempurnakan transformasi.
-
-- Epsilon yang lebih kecil memungkinkan penyesuaian yang lebih halus, yang memungkinkan hasil penyelarasan yang lebih tepat.
-- Namun, nilai yang sangat kecil dapat meningkatkan waktu pemrosesan secara signifikan.
-- Nilai yang lebih besar mempercepat konvergensi tetapi dapat mengurangi presisi.
-
-Direkomendasikan: 1e-6 untuk mencapai keseimbangan optimal antara presisi dan efisiensi komputasi.
-"""
-
-EEC_MOTION_LABEL = "Jenis Gerakan"
-EEC_MOTION_DESCRIPTION = """Jenis gerakan menentukan model transformasi yang digunakan selama registrasi.
-
-- 'Affine' mengakomodasi rotasi, penskalaan, dan translasi.
-- 'Homography' menangani distorsi perspektif.
-- 'Translasi' menerapkan pergeseran linier sederhana tanpa rotasi atau penskalaan.
-
-Direkomendasikan: Model gerakan 'Affine' cocok untuk sebagian besar tugas.
-"""
-
 
 # -------------------------- AKAZE -------------------------- #
 
@@ -345,12 +310,6 @@ NONE_ALIGNMENT_DESCRIPTION = "Tidak akan ada penyelarasan yang diterapkan."
 FARNEBACK_DESCRIPTION = """Algoritma ini cocok untuk penyelarasan tingkat tinggi yang memerlukan ketepatan dan akurasi hingga level piksel.
 
 Namun, sangat lemah terhadap perbedaan rotasi dan perspektif yang signifikan."""
-
-EEC_DESCRIPTION = """Algoritma ini dibuat untuk menyelaraskan gambar dengan tingkat akurasi tinggi.
-Algoritma ini menggunakan teknik korelasi canggih untuk memperkirakan parameter transformasi dengan lebih baik
-
-Tahan terhadap perubahan intesitas cahaya dan pergeseran yang cukup tinggi, namun algoritma ini membutuhkan waktu komputasi
-yang lebih banyak dan mungkin tidak seakurat metode optical flow"""
 
 AKAZE_DESCRIPTION = """Algoritma ini cukup tangguh terhadap perbedaan besar dalam rotasi, perspektif, dan skala.
 

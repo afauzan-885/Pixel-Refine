@@ -82,9 +82,6 @@ ALIGN_IMAGES_STATUS_AKAZE = "Menjajarkan imej {image_id} menggunakan AKAZE..."
 WINDOW_TITLE_ORB = "Penjajaran ORB"
 ALIGN_IMAGES_STATUS_ORB = "Menjajarkan imej {image_id} menggunakan ORB..."
 
-WINDOW_TITLE_EEC = "Penjajaran EEC"
-WINDOW_TITLE_STATUS_EEC = "Menjajarkan imej {image_id} menggunakan EEC..."
-
 ALIGN_IMAGES_CALCULATE_FAILED = "Tiada ciri dikesan dalam sebarang imej untuk {image_id}. Mengembalikan imej asal."
 ALIGN_IMAGES_CALCULATE_FINISHED = "Penjajaran selesai untuk imej {image_id}."
 ALIGN_IMAGES_COMPENSATE_FAILED = "Homografi tidak dapat dikira untuk imej {image_id}. Mengembalikan imej asal."
@@ -243,39 +240,6 @@ Pilih kaedah interpolasi yang seimbang antara kelicinan dan kecekapan pemprosesa
 Disarankan: Interpolasi Kubik."""
 
 
-# --------------- Parameter EEC ----------------- # 
-EEC_PARAMETER_SETTING_LABEL = "Parameter EEC"
-
-EEC_ITERATIONS_LABEL = "Bilangan Lelaran"
-EEC_ITERATIONS_DESCRIPTION = """Bilangan lelaran menentukan bilangan langkah pemurnian yang dilakukan oleh algoritma EEC semasa pendaftaran imej.
-
-- Lebih banyak lelaran menghasilkan penjajaran yang lebih tepat, memerlukan lebih banyak pengiraan.
-- Lebih sedikit lelaran mempercepatkan pemprosesan tetapi mungkin mengorbankan kualiti pendaftaran.
-
-Disyorkan: 5000 lelaran untuk keseimbangan yang baik antara ketepatan dan prestasi.
-"""
-
-EEC_EPS_LABEL = "Tamatkan Epsilon"
-EEC_EPS_DESCRIPTION = """Epsilon penamatan menetapkan ambang peningkatan minimum antara lelaran untuk algoritma terus memperhalusi transformasi.
-
-- Epsilon yang lebih kecil membolehkan pelarasan yang lebih halus, yang membolehkan hasil penjajaran yang lebih tepat.
-- Walau bagaimanapun, nilai yang sangat kecil boleh meningkatkan masa pemprosesan dengan ketara.
-- Nilai yang lebih besar mempercepatkan penumpuan tetapi boleh mengurangkan ketepatan.
-
-Disyorkan: 1e-6 untuk mencapai keseimbangan optimum antara ketepatan dan kecekapan pengiraan.
-"""
-
-EEC_MOTION_LABEL = "Jenis Pergerakan"
-EEC_MOTION_DESCRIPTION = """Jenis gerakan menentukan model transformasi yang digunakan semasa pendaftaran.
-
-- 'Affine' menampung putaran, penskalaan dan terjemahan.
-- 'Homography' mengendalikan herotan perspektif.
-- 'Terjemahan' menggunakan anjakan linear mudah tanpa putaran atau penskalaan.
-
-Disyorkan: Model gerakan 'Affine' sesuai untuk kebanyakan tugas.
-"""
-
-
 # Parameter AKAZE
 AKAZE_PARAMETER_SETTING_LABEL = "Parameter AKAZE"
 AKAZE_THRESHOLD_LABEL = "Threshold"
@@ -318,12 +282,6 @@ FARNEBACK_DESCRIPTION = """Algoritma ini sesuai untuk penjajaran tahap tinggi ya
 ketepatan dan keakuratan hingga ke tahap piksel.
 
 Tetapi sangat lemah terhadap perbezaan pusingan dan perspektif yang signifikan"""
-
-EEC_DESCRIPTION = """Algoritma ini direka bentuk untuk menjajarkan imej dengan tahap ketepatan yang tinggi.
-Algoritma ini menggunakan teknik korelasi lanjutan untuk menganggarkan parameter transformasi dengan lebih baik.
-
-Tahan kepada perubahan dalam keamatan cahaya dan anjakan yang agak tinggi, tetapi algoritma ini memerlukan masa pengiraan.
-yang lebih dan mungkin tidak tepat seperti kaedah aliran optik"""
 
 AKAZE_DESCRIPTION = """Algoritma ini cukup kukuh terhadap perbezaan besar dalam pusingan, perspektif dan skala
 
