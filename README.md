@@ -1,10 +1,10 @@
-<p align="center"><img src="UI/resources/image/Logo_Pixel_Refine.png" width="200" alt="Pixel Refine Logo"></p>
+<p align="center"><img src="UI/resources/image/Logo_Pixel_Refine.png" width="200" alt="Logo Pixel Refine"></p>
 
 ## Introduction
 
-Pixel Refine is designed to create a program inspired by the image processing techniques used in Google Pixel's camera, Raw+ Kandao, Burst.photo, and PhotoAcute 3.
+Pixel Refine is designed to create a program inspired by the image processing techniques used in the Google Pixel camera, Raw+ Kandao, Burst.photo, and PhotoAcute 3.
 
-This application was created to overcome the shortcomings of Google Pixel's built-in camera processing (or Android smartphone cameras), Raw+ Kandao (which is limited to a maximum of 16 images), Burst.photo (which is exclusive to the MacOS ecosystem), and PhotoAcute 3 (a great software that has been discontinued).
+This application is made to overcome the shortcomings of the Google Pixel's native camera processing (or Android smartphone cameras), Raw+ Kandao (which is limited to a maximum of 16 images), Burst.photo (which is exclusive to the MacOS ecosystem), and PhotoAcute 3 (a great software that has been discontinued).
 
 The processing in this application is expected to bridge the gap between professional cameras (DSLR or Mirrorless) and the computational photography capabilities experienced by smartphone cameras.
 
@@ -26,32 +26,32 @@ Below are some sample images processed (left: Original, Right: Processed):
 
 <p align="center">
   <img src="sample/traditional market at dawn iso 400 (1per35).jpg" width="400" alt="Traditional Market at Dawn">
-</p>
-
 
 ## Algorithms
 
 Pixel Refine uses several advanced algorithms for image processing. Here is a list of the algorithms used in the process:
 
 ### **1. Alignment**
-- **Farneback Optical Flow**: 
-  - Highly precise at the pixel level and works well in low-light conditions.
-  - Moderately fast and capable of handling local movements within frames.
+- **Farneback Optical Flow**:
+  - Very precise at the pixel level and works well in low light conditions.
+  - Fairly fast and able to handle local motion within the frame.
   - Weak against significant differences between frames.
-- **AKAZE**: 
-  - A powerful algorithm that excels at handling large differences between images.
+- **AKAZE**:
+  - Advanced algorithm that excels at handling large differences between images.
   - Ideal for images with high deformation or significant variations.
-- **ORB (Oriented FAST and Rotated BRIEF)**: 
-  - Extremely fast and suitable for most conditions.
-  - Not as robust when dealing with large differences between images.
+- **ORB (Oriented FAST and Rotated BRIEF)**:
+  - Very fast and suitable for most conditions.
+  - Not as robust when handling large differences between images.
+- **EEC**:
+  - Robust algorithm for aligning images with significant perspective differences in low light conditions.
+  - Quite computationally heavy to process, a last resort if all other algorithms fail to align the images
 
-### **2. Super Resolution**
-- Coming soon.
+### **2. **Super Resolution**
+- **Interpolation**: Increases image resolution based on interpolation technique, slightly improves image detail.
 
 ### **3. Denoising**
-- **Average**: Reduces noise by averaging pixel values over multiple frames.
-- **Median**: Uses the median of pixel values for better noise reduction while preserving edges.
-- **Similarity**: A special algorithm designed to enhance detail while suppressing noise based on pixel similarity to prevent motion artifacts, it is very robust against large movements.
+- **Average**: Reduces noise by averaging pixel values ​​across multiple frames.
+- **Median**: Uses the median of pixel values ​​for better noise reduction while preserving edges.
+- **Similarity**: Special algorithm designed to enhance detail while suppressing noise based on pixel similarity to prevent motion artifacts, highly robust to large movements.
 
-
-**(This program is still under development and has many shortcomings. Beta release for public testing)**
+**(This program is still under development and has many flaws. Beta release for public testing)**
