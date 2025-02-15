@@ -42,9 +42,6 @@ Pixel Refine uses several advanced algorithms for image processing. Here is a li
 - **ORB (Oriented FAST and Rotated BRIEF)**:
   - Very fast and suitable for most conditions.
   - Not as robust when handling large differences between images.
-- **EEC**:
-  - Robust algorithm for aligning images with significant perspective differences in low light conditions.
-  - Quite computationally heavy to process, a last resort if all other algorithms fail to align the images
 
 ### **2. **Super Resolution**
 - **Interpolation**: Increases image resolution based on interpolation technique, slightly improves image detail.
