@@ -95,90 +95,101 @@ class AKAZEAlgorithm:
             print("Error loading AKAZE configuration:", e)
             return default_config
 
-    def stack_median_images(self, images, previous_medians, stop_requested=None, num_blocks=(3, 3), overlap_percent=0.3):
+    def calculate_global_motion(self, base_image, target_image, config_filename=None, num_blocks=(3, 3), overlap=20, stop_requested=None):
+        """
+        Menghitung keypoints dan deskriptor menggunakan AKAZE dengan membagi gambar menjadi blok-blok secara paralel.
+        
+        Parameter:
+          - num_blocks: tuple (blocks_x, blocks_y) untuk pembagian gambar.
+          - overlap: jumlah piksel overlap di sekeliling tiap blok.
+        """
         if stop_requested and stop_requested():
-            print("Proses dihentikan sebelum menghitung stack median.")
-            return previous_medians
+            print("Proses dihentikan sebelum menghitung gerakan global (parallel).")
+            return None, None
 
-        if len(images) == 0:
-            raise ValueError("Tidak ada gambar yang ditemukan.")
+        akaze_config = self.load_akaze_config(config_filename)
+        # Konversi gambar ke grayscale
+        base_gray = cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY)
+        target_gray = cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY)
 
-        # Ambil tipe data dari gambar pertama
-        dtype = images[0].dtype
-
-        # Pastikan ukuran gambar konsisten: gunakan ukuran gambar pertama sebagai target.
-        target_shape = images[0].shape
-
-        def resize_image(image):
-            return cv2.resize(image, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_CUBIC)
-
-        # Resize seluruh gambar agar memiliki ukuran yang sama
-        images_resized = [resize_image(image) for image in images]
-        # Stack gambar (misalnya membentuk array dengan dimensi (N, H, W, C) atau (N, H, W) jika grayscale)
-        stacked = np.stack(images_resized, axis=0)
-
-        # Siapkan array output untuk menyimpan hasil median (gunakan tipe float untuk perhitungan)
-        median_image = np.empty(target_shape, dtype=np.float64)
-
-        H, W = target_shape[:2]
+        h, w = base_gray.shape
         blocks_x, blocks_y = num_blocks
-        block_h = H // blocks_x
-        block_w = W // blocks_y
+        block_w = w // blocks_x
+        block_h = h // blocks_y
 
-        # Fungsi untuk memproses median pada satu blok dengan overlap
-        def compute_block(i, j):
-            # Definisikan batas blok utama (tanpa overlap)
-            row_start = i * block_h
-            row_end = H if i == blocks_x - 1 else (i + 1) * block_h
-            col_start = j * block_w
-            col_end = W if j == blocks_y - 1 else (j + 1) * block_w
+        # Himpunan untuk menggabungkan hasil dari tiap blok
+        keypoints_base_all = []
+        descriptors_base_all = None  # akan berupa numpy array
+        keypoints_target_all = []
+        descriptors_target_all = None
 
-            # Hitung nilai overlap dalam piksel (30% dari dimensi blok)
-            ovlp_h = int(block_h * overlap_percent)
-            ovlp_w = int(block_w * overlap_percent)
+        def compute_features_block(x, y, bw, bh, overlap):
+            # Tentukan ROI dengan tambahan overlap
+            roi_x_start = max(0, x - overlap)
+            roi_y_start = max(0, y - overlap)
+            roi_x_end = min(w, x + bw + overlap)
+            roi_y_end = min(h, y + bh + overlap)
 
-            # Ekstensi ROI: tambahkan overlap di setiap sisi, pastikan tidak melebihi batas gambar
-            ext_row_start = max(0, row_start - ovlp_h)
-            ext_row_end = min(H, row_end + ovlp_h)
-            ext_col_start = max(0, col_start - ovlp_w)
-            ext_col_end = min(W, col_end + ovlp_w)
+            roi_base = base_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+            roi_target = target_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
 
-            # Ambil blok dari stack dengan ROI yang diperluas
-            block_roi = stacked[:, ext_row_start:ext_row_end, ext_col_start:ext_col_end]
-            # Hitung median pada ROI (axis=0 menggabungkan semua gambar)
-            block_median = np.median(block_roi, axis=0)
-            # Ekstrak bagian pusat yang sesuai dengan blok asli
-            offset_row = row_start - ext_row_start
-            offset_col = col_start - ext_col_start
-            central_block = block_median[offset_row:offset_row + (row_end - row_start),
-                                        offset_col:offset_col + (col_end - col_start)]
-            return i, j, central_block
+            # Buat instance AKAZE untuk blok ini
+            akaze = cv2.AKAZE_create(
+                threshold=akaze_config["akaze_threshold"],
+                nOctaves=akaze_config["akaze_nOctaves"],
+                nOctaveLayers=akaze_config["akaze_nOctaveLayers"]
+            )
+            kps_base, desc_base = akaze.detectAndCompute(roi_base, None)
+            kps_target, desc_target = akaze.detectAndCompute(roi_target, None)
 
-        import concurrent.futures
-        futures = []
+            # Sesuaikan koordinat keypoints agar sesuai dengan posisi asli pada gambar penuh
+            for kp in kps_base:
+                kp.pt = (kp.pt[0] + roi_x_start, kp.pt[1] + roi_y_start)
+            for kp in kps_target:
+                kp.pt = (kp.pt[0] + roi_x_start, kp.pt[1] + roi_y_start)
+            return kps_base, desc_base, kps_target, desc_target
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=blocks_x * blocks_y) as executor:
+            futures = []
             for i in range(blocks_x):
                 for j in range(blocks_y):
-                    futures.append(executor.submit(compute_block, i, j))
-            # Tempatkan hasil blok ke dalam gambar median
+                    x = i * block_w
+                    y = j * block_h
+                    bw = block_w if i < blocks_x - 1 else w - x
+                    bh = block_h if j < blocks_y - 1 else h - y
+                    futures.append(executor.submit(compute_features_block, x, y, bw, bh, overlap))
             for future in concurrent.futures.as_completed(futures):
-                i, j, block_result = future.result()
-                row_start = i * block_h
-                row_end = H if i == blocks_x - 1 else (i + 1) * block_h
-                col_start = j * block_w
-                col_end = W if j == blocks_y - 1 else (j + 1) * block_w
-                median_image[row_start:row_end, col_start:col_end] = block_result
+                kps_base, desc_base, kps_target, desc_target = future.result()
+                if desc_base is not None and len(kps_base) > 0:
+                    keypoints_base_all.extend(kps_base)
+                    if descriptors_base_all is None:
+                        descriptors_base_all = desc_base
+                    else:
+                        descriptors_base_all = np.vstack([descriptors_base_all, desc_base])
+                if desc_target is not None and len(kps_target) > 0:
+                    keypoints_target_all.extend(kps_target)
+                    if descriptors_target_all is None:
+                        descriptors_target_all = desc_target
+                    else:
+                        descriptors_target_all = np.vstack([descriptors_target_all, desc_target])
 
-        # Lakukan clipping sesuai rentang tipe data jika tipe data integer
-        if np.issubdtype(dtype, np.integer):
-            median_image = np.clip(median_image, np.iinfo(dtype).min, np.iinfo(dtype).max)
-            median_image = median_image.astype(dtype)
-        else:
-            median_image = median_image.astype(dtype)
+        # Lakukan matching menggunakan BFMatcher pada hasil gabungan dari semua blok
+        if descriptors_base_all is None or descriptors_target_all is None:
+            print("Tidak ditemukan deskriptor pada salah satu gambar.")
+            return None, None
 
-        return median_image, images_resized
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+        matches = bf.knnMatch(descriptors_base_all, descriptors_target_all, k=2)
+        good_matches = []
+        for m, n in matches:
+            if m.distance < akaze_config["ratio_threshold"] * n.distance:
+                good_matches.append(m)
 
+        base_points = np.float32([keypoints_base_all[m.queryIdx].pt for m in good_matches])
+        target_points = np.float32([keypoints_target_all[m.trainIdx].pt for m in good_matches])
 
+        return base_points, target_points
+        
     def compensate_motion(self, base_image, base_points, target_points, transformation_type='homography'):
         """
         Menerapkan kompensasi gerakan menggunakan transformasi untuk menyelaraskan gambar.

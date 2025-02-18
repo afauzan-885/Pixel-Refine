@@ -39,7 +39,7 @@ class ThreadWorker(QThread):
         self.stop_requested = True  # Set flag agar thread berhenti
 
 class MedianAlgorithm:
-    def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
+    def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5", max_workers=None):
         self.db_path = db_path
         self.hdf5_path = hdf5_path
 
@@ -47,6 +47,9 @@ class MedianAlgorithm:
         hdf5_folder = os.path.dirname(self.hdf5_path)
         if not os.path.exists(hdf5_folder):
             os.makedirs(hdf5_folder)
+
+        # Buat executor sekali saja untuk reuse di setiap pemrosesan
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
 
     def get_all_image_paths(self):
         with sqlite3.connect(self.db_path) as conn:
@@ -65,7 +68,8 @@ class MedianAlgorithm:
         return images
 
     def load_images_from_folder(self, folder_path):
-        image_paths = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(('.png', '.jpg', '.jpeg'))]
+        image_paths = [os.path.join(folder_path, f) for f in os.listdir(folder_path)
+                       if f.endswith(('.png', '.jpg', '.jpeg'))]
         return self.load_images_from_paths(image_paths)
 
     def load_images_from_paths(self, image_paths, stop_requested=None):
@@ -81,87 +85,122 @@ class MedianAlgorithm:
                 images.append(image)
         return images
 
-    def stack_median_images(self, images, previous_medians, stop_requested=None, num_blocks=(3, 3)):
+    def stack_median_images(self, images, previous_medians, stop_requested=None, block_size=64, overlap=0.3):
         if stop_requested and stop_requested():
             print("Proses dihentikan sebelum menghitung stack median.")
             return previous_medians
 
-        if len(images) == 0:
+        if not images:
             raise ValueError("Tidak ada gambar yang ditemukan.")
 
-        # Ambil tipe data dari gambar pertama
         dtype = images[0].dtype
-
-        # Pastikan ukuran gambar konsisten: gunakan ukuran gambar pertama sebagai target.
         target_shape = images[0].shape
 
-        def resize_image(image):
-            return cv2.resize(image, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_CUBIC)
-
-        # Resize seluruh gambar agar memiliki ukuran yang sama
-        images_resized = [resize_image(image) for image in images]
-
-        # Stack gambar (membuat array dengan dimensi (N, H, W, C) atau (N, H, W) jika grayscale)
-        stacked = np.stack(images_resized, axis=0)
-
-        # Siapkan array output untuk menyimpan hasil median (gunakan tipe float untuk perhitungan)
-        median_image = np.empty(target_shape, dtype=np.float64)
-
-        H, W = target_shape[:2]
-        blocks_x, blocks_y = num_blocks
-        block_h = H // blocks_x
-        block_w = W // blocks_y
-
-        # Fungsi untuk memproses median pada satu blok
-        def compute_block(i, j):
-            # Hitung rentang baris dan kolom untuk blok ini
-            row_start = i * block_h
-            row_end = H if i == blocks_x - 1 else (i + 1) * block_h
-            col_start = j * block_w
-            col_end = W if j == blocks_y - 1 else (j + 1) * block_w
-
-            # Ambil blok dari stack: hasilnya berbentuk (N, block_h, block_w, ...) atau (N, block_h, block_w)
-            block = stacked[:, row_start:row_end, col_start:col_end]
-            # Hitung median di sepanjang axis=0 (menggabungkan semua gambar)
-            block_median = np.median(block, axis=0)
-            return i, j, block_median
-
-        futures = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=blocks_x * blocks_y) as executor:
-            for i in range(blocks_x):
-                for j in range(blocks_y):
-                    futures.append(executor.submit(compute_block, i, j))
-            # Tempatkan hasil blok ke dalam gambar median
-            for future in concurrent.futures.as_completed(futures):
-                i, j, block_median = future.result()
-                row_start = i * block_h
-                row_end = H if i == blocks_x - 1 else (i + 1) * block_h
-                col_start = j * block_w
-                col_end = W if j == blocks_y - 1 else (j + 1) * block_w
-                median_image[row_start:row_end, col_start:col_end] = block_median
-
-        # Lakukan clipping sesuai rentang tipe data jika tipe data integer
-        if np.issubdtype(dtype, np.integer):
-            median_image = np.clip(median_image, np.iinfo(dtype).min, np.iinfo(dtype).max)
-            median_image = median_image.astype(dtype)
-        else:
-            median_image = median_image.astype(dtype)
-
+        # Resize gambar agar semua memiliki ukuran yang sama
+        images_resized = self._resize_images(images, target_shape)
+        # Proses median dengan metode blok yang dioptimasi
+        median_image = self._compute_median_image(images_resized, target_shape, block_size, dtype, overlap)
         return median_image, images_resized
 
+    def _resize_images(self, images, target_shape):
+        """
+        Resize seluruh gambar agar memiliki ukuran yang sama dengan target_shape.
+        """
+        resized_images = []
+        for image in images:
+            resized = cv2.resize(image, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_CUBIC)
+            resized_images.append(resized)
+        return resized_images
 
+    def stack_median_images(self, images, previous_medians, stop_requested=None, block_size=64, overlap=0.3):
+        if stop_requested and stop_requested():
+            print("Proses dihentikan sebelum menghitung stack median.")
+            return previous_medians
 
+        if not images:
+            raise ValueError("Tidak ada gambar yang ditemukan.")
+
+        dtype = images[0].dtype
+        target_shape = images[0].shape
+
+        # Resize gambar agar semua memiliki ukuran yang sama
+        images_resized = self._resize_images(images, target_shape)
+        # Proses median dengan metode blok yang dioptimasi
+        median_image = self._compute_median_image(images_resized, target_shape, block_size, dtype, overlap)
+        return median_image, images_resized
+
+    def _resize_images(self, images, target_shape):
+        """
+        Resize seluruh gambar agar memiliki ukuran yang sama dengan target_shape.
+        """
+        resized_images = []
+        for image in images:
+            resized = cv2.resize(image, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_CUBIC)
+            resized_images.append(resized)
+        return resized_images
+
+    def _compute_block_median(self, block_stack):
+        """
+        Menghitung median dari stack blok secara vectorized.
+        """
+        return np.median(block_stack, axis=0)
+
+    def _compute_median_image(self, images, target_shape, block_size, dtype, overlap):
+        H, W = target_shape[:2]
+        accumulator = np.zeros(target_shape, dtype=np.float32)
+        weight_sum = np.zeros(target_shape, dtype=np.float32)
+
+        step = max(int(block_size * (1 - overlap)), 1)
+
+        row_starts = list(range(0, H - block_size + 1, step)) + ([H - block_size] if H % block_size != 0 else [])
+        col_starts = list(range(0, W - block_size + 1, step)) + ([W - block_size] if W % block_size != 0 else [])
+
+        base_hanning = np.outer(np.hanning(block_size), np.hanning(block_size))
+
+        def process_block(row_start, col_start):
+            row_end, col_end = row_start + block_size, col_start + block_size
+            
+            # Gunakan array view untuk menghindari salinan baru
+            blocks = np.stack([im[row_start:row_end, col_start:col_end] for im in images], axis=0)
+
+            # Gunakan fungsi _compute_block_median untuk menghitung median
+            block_median = self._compute_block_median(blocks)
+  
+
+            # Hindari alokasi array baru untuk Hanning window
+            hanning_win = base_hanning
+            if blocks.shape[1:3] != (block_size, block_size):
+                hanning_win = np.outer(np.hanning(row_end - row_start), np.hanning(col_end - col_start))
+
+            if len(target_shape) == 3:
+                hanning_win = hanning_win[..., np.newaxis]
+
+            return row_start, row_end, col_start, col_end, block_median * hanning_win, hanning_win
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = {executor.submit(process_block, r, c): (r, c) for r in row_starts for c in col_starts}
+
+            for future in concurrent.futures.as_completed(futures):
+                row_start, row_end, col_start, col_end, weighted_block, hanning_win = future.result()
+                accumulator[row_start:row_end, col_start:col_end] += weighted_block
+                weight_sum[row_start:row_end, col_start:col_end] += hanning_win
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            median_image = np.true_divide(accumulator, weight_sum)
+            median_image[weight_sum == 0] = 0
+
+        return np.clip(median_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype) if np.issubdtype(dtype, np.integer) else median_image.astype(dtype)
+    
     def save_image(self, image, output_path):
         cv2.imwrite(output_path, image)
-        
+
+
 def main(db_path, update_progress=None, stop_requested=None, batch_size=4):
     try:
         image_processor = MedianAlgorithm(db_path)
         image_paths = image_processor.get_all_image_paths()
         if not image_paths:
             if update_progress:
-                
-                # Messages: Failed to load image
                 update_progress(0, language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
             return
 
@@ -173,11 +212,12 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4):
             update_progress(0, "Mulai proses pengolahan gambar.")
 
         global_hdf5_path = "database/align/aligned_images.h5"
-        accumulated_image = None
-
         total_images = len(image_paths)
         total_batches = (total_images + batch_size - 1) // batch_size
         processed_images = 0
+
+        # List untuk menyimpan hasil median tiap batch
+        batch_medians = []
 
         if os.path.exists(global_hdf5_path):
             with h5py.File(global_hdf5_path, 'r') as h5f:
@@ -189,17 +229,16 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4):
                     batch_keys = list(h5f.keys())[batch_idx * batch_size:(batch_idx + 1) * batch_size]
                     batch_images = [np.array(h5f[key]) for key in batch_keys]
 
-                    accumulated_image, _ = image_processor.stack_median_images(
-                        batch_images, accumulated_image, stop_requested
+                    # Proses median untuk batch ini
+                    batch_median, _ = image_processor.stack_median_images(
+                        batch_images, None, stop_requested
                     )
+                    batch_medians.append(batch_median)
 
-
-                    for i in range(len(batch_images)):
-                        processed_images += 1
-                        progress = int((processed_images / total_images) * 100)
-                        
-                        # Messages: Processing image {processed_images}/{total}...
-                        message = language_config.STACK_AVERAGE_IMAGES_PROCESS.format(current=processed_images, total=total_images)
+                    processed_images += len(batch_images)
+                    progress = int((processed_images / total_images) * 100)
+                    message = language_config.STACK_AVERAGE_IMAGES_PROCESS.format(
+                        current=processed_images, total=total_images)
                     if update_progress:
                         update_progress(progress, message)
         else:
@@ -218,22 +257,30 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4):
                     if image is not None:
                         batch_images.append(image)
 
-                accumulated_image, _ = image_processor.stack_median_images(
-                    batch_images, accumulated_image, stop_requested
+                # Proses median untuk batch ini
+                batch_median, _ = image_processor.stack_median_images(
+                    batch_images, None, stop_requested
                 )
+                batch_medians.append(batch_median)
 
+                processed_images += len(batch_images)
+                progress = int((processed_images / total_images) * 100)
+                message = language_config.STACK_AVERAGE_IMAGES_PROCESS.format(
+                    current=processed_images, total=total_images)
+                if update_progress:
+                    update_progress(progress, message)
 
-                for i in range(len(batch_images)):
-                    processed_images += 1
-                    progress = int((processed_images / total_images) * 100)
-                    # Messages: Processing image {processed_images}/{total}...
-                    message = language_config.STACK_AVERAGE_IMAGES_PROCESS.format(current=processed_images, total=total_images)
-                    if update_progress:
-                        update_progress(progress, message)
+        if batch_medians:
+            # Proses ulang dengan menggabungkan semua median batch
+            final_median, _ = image_processor.stack_median_images(
+                batch_medians, None, stop_requested
+            )
+        else:
+            final_median = None
 
         # Simpan gambar median akhir
-        if accumulated_image is not None:
-            final_image = accumulated_image.astype(np.uint16)
+        if final_median is not None:
+            final_image = final_median.astype(np.uint16)
             image_processor.save_image(final_image, output_path)
             if update_progress:
                 update_progress(100, f"Proses selesai, hasil disimpan di {output_path}")
@@ -242,13 +289,11 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4):
                 update_progress(0, "Gagal melakukan stack median gambar.")
 
     except Exception as e:
-        # messages: An error occurred
         error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(e))
         if update_progress:
             update_progress(0, error_message)
         print(f"Error encountered: {str(e)}")
-
-            
+       
 def running_median(parent=None):
     """
     Menampilkan progress bar dengan gaya kustom dan memanfaatkan thread.

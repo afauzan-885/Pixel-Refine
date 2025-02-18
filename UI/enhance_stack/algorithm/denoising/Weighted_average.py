@@ -2,6 +2,7 @@ import cProfile
 import cv2
 import numpy as np
 import sqlite3
+import concurrent.futures
 import os
 from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
@@ -84,7 +85,7 @@ class WeightedAverageAlgorithm:
         x = np.hanning(tile_size[1])
         window = np.outer(y, x)
         return window
-    
+
     def precompute_reference_tiles(self, reference_image, tile_size, overlap):
         h, w, _ = reference_image.shape
         tile_step_y = int(tile_size[0] * (1 - overlap))
@@ -111,26 +112,23 @@ class WeightedAverageAlgorithm:
 
         return precomputed_tiles
 
-    def computer_motion_metrics(self, current_tile, ref_tile, motion_threshold):
-        # Hanya perhitungan temporal motion
-        temporal_motion = cv2.absdiff(current_tile, ref_tile)
+    def computing_motion_metrics(self, current_tile, ref_tile, motion_threshold):
+        """Hitung similarity weight menggunakan operasi vektorisasi."""
+        # Konversi ke float32 dan hitung perbedaan
+        diff = current_tile.astype(np.float32) - ref_tile.astype(np.float32)
+        # Hitung L2 norm per piksel
+        norm = np.sqrt(np.sum(diff ** 2, axis=-1))
+        norm_median = np.median(norm)
+        mad = np.median(np.abs(norm - norm_median))
+        similarity_weight = np.exp(-mad / motion_threshold)
+        return similarity_weight, motion_threshold
 
-        Dz = cv2.mean(temporal_motion)[0]
-        
-        # Menggunakan fungsi eksponensial untuk memberikan nilai bobot secara halus
-        similarity_weight = np.exp(-Dz / motion_threshold)  # Eksponensial decay berdasarkan perbedaan Dz
-        
-        # Pastikan similarity_weight berada dalam rentang 0 hingga 1
-        similarity_weight = np.clip(similarity_weight, 0.0, 1.0)
-        
-        return similarity_weight
-  
     def update_final_image(self, final_image, weight_map, current_tile, window, similarity_weight, y, x_start, y_end, x_end, dtype):
         weighted_tile = current_tile * window[..., np.newaxis] * similarity_weight
         weight_map[y:y_end, x_start:x_end] += window * similarity_weight
         final_image[y:y_end, x_start:x_end] += weighted_tile * np.iinfo(dtype).max
 
-    def weighter_average(self, images, tile_size=(128, 128), overlap=0.35, motion_threshold=0.7, update_progress=None, stop_requested=None):
+    def weighter_average(self, images, tile_size=(128, 128), overlap=0.35, motion_threshold=0.15, update_progress=None, stop_requested=None):
         if not images:
             raise ValueError(language_config.SIMILARITY_MNFR_LOAD_FAILED)
 
@@ -159,14 +157,30 @@ class WeightedAverageAlgorithm:
             if current_image.shape != reference_image.shape:
                 raise ValueError(language_config.SIMILARITY_MNFR_SIZE_FAILED.format(i=i + 1))
 
-            for (y, x), (ref_tile, window) in precomputed_reference_tiles.items():
-                y_end = min(y + tile_size[0], h)
-                x_end = min(x + tile_size[1], w)
-                x_start = max(x, 0)
+            # Gunakan ThreadPoolExecutor untuk memproses tile secara paralel di tiap gambar
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                def process_tile(tile_key):
+                    y, x = tile_key
+                    ref_tile, window = precomputed_reference_tiles[tile_key]
+                    y_end = min(y + tile_size[0], h)
+                    x_end = min(x + tile_size[1], w)
+                    x_start = max(x, 0)
 
-                current_tile = current_image[y:y_end, x_start:x_end]
-                similarity_weight = self.computer_motion_metrics(current_tile, ref_tile, motion_threshold)
-                self.update_final_image(final_image, weight_map, current_tile, window, similarity_weight, y, x_start, y_end, x_end, dtype)
+                    current_tile = current_image[y:y_end, x_start:x_end]
+                    similarity_weight, _ = self.computing_motion_metrics(current_tile, ref_tile, motion_threshold)
+                    weighted_tile = current_tile * window[..., np.newaxis] * similarity_weight
+                    # Kontribusi tile pada final_image dan weight_map
+                    tile_final = weighted_tile * np.iinfo(dtype).max
+                    tile_weight = window * similarity_weight
+                    return (y, x_start, y_end, x_end, tile_final, tile_weight)
+
+                futures = [executor.submit(process_tile, tile_key) for tile_key in precomputed_reference_tiles.keys()]
+
+                # Kumpulkan dan akumulasi hasil tiap tile secara sequential
+                for future in concurrent.futures.as_completed(futures):
+                    y, x_start, y_end, x_end, tile_final, tile_weight = future.result()
+                    final_image[y:y_end, x_start:x_end] += tile_final
+                    weight_map[y:y_end, x_start:x_end] += tile_weight
 
         final_image /= (weight_map[..., np.newaxis] + 1e-6)
         final_image = np.clip(final_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype)
