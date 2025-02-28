@@ -1,0 +1,11 @@
+python setup.py build_ext --inplace
+
+UI\enhance_stack\algorithm\denoising\extra_similarity
+
+gcc -shared -o accumulate_tiles.dll -O2 -lm -fopenmp -lgomp accumulate_tiles.c
+
+
+
+
+-fopenmp
+libgomp-1.dll

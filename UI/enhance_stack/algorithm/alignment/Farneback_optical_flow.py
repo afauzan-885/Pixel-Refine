@@ -218,18 +218,6 @@ class FarnebackAlgorithm:
         print(language_config.COMPENSATE_MOTION_FINISHED.format(image_id=image_id))
         return compensated_image
 
-    def save_to_hdf5(self, h5f, aligned_images, update_progress=None, start_index=0):
-        """
-        Saves aligned images to an open HDF5 file.
-        """
-        total_images = len(aligned_images) + start_index
-        for i, image in enumerate(aligned_images):
-            h5f.create_dataset(f"image_{i + start_index}", data=image, compression="gzip")
-            progress_message = f"Gambar ke-{i + start_index + 1} disimpan dalam HDF5."
-            print(progress_message)
-            if update_progress:
-                update_progress(i + start_index, total_images - 1, progress_message)
-
 def main(db_path, update_progress=None, batch_size=5, stop_requested=None):
     processor = FarnebackAlgorithm(db_path)
 

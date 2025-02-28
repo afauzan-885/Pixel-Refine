@@ -1,70 +1,62 @@
-import cv2
 import numpy as np
-from functools import lru_cache
-import concurrent.futures
-
-@lru_cache(maxsize=1)
-def raised_cosine_window(tile_size):
-    """Membuat raised cosine window untuk blending."""
-    y = np.hanning(tile_size[0])
-    x = np.hanning(tile_size[1])
-    window = np.outer(y, x)
-    return window
-
-def compute_sliding_window(image, tile_size, stride):
-    """Menggunakan sliding window dengan strided tricks untuk ekstraksi tile."""
-    h, w, _ = image.shape
-    view = np.lib.stride_tricks.sliding_window_view(image, tile_size + (3,))
-    return view[::stride[0], ::stride[1], :, :, :]
-
-def compute_motion_metrics(current_tile, ref_tile, motion_threshold):
-    """Hitung similarity weight menggunakan perhitungan vektorisasi."""
-    diff = current_tile.astype(np.float32) - ref_tile.astype(np.float32)
-    norm = np.linalg.norm(diff, axis=-1)
-    norm_median = np.median(norm)
-    mad = np.median(np.abs(norm - norm_median))
-    return np.exp(-mad / motion_threshold)
-
-def update_final_image(final_image, weight_map, current_tile, window, similarity_weight, y, x, dtype):
-    """Optimalkan pembaruan final_image dan weight_map secara vektorisasi."""
-    weighted_tile = current_tile * window[..., np.newaxis] * similarity_weight
-    np.add.at(weight_map, (slice(y, y + window.shape[0]), slice(x, x + window.shape[1])), window * similarity_weight)
-    np.add.at(final_image, (slice(y, y + window.shape[0]), slice(x, x + window.shape[1])), weighted_tile * np.iinfo(dtype).max)
-
-def process_tiles(current_image, reference_image, tile_size, overlap, motion_threshold, dtype, method='roi'):
-    """Proses perhitungan similarity menggunakan ROI atau strided tricks."""
-    final_image = np.zeros_like(current_image, dtype=np.float32)
-    weight_map = np.zeros(current_image.shape[:2], dtype=np.float32)
-    cosine_window = raised_cosine_window(tile_size)
+from numba import njit, prange
+# Fungsi helper ini hanya digunakan secara internal, jadi kita tidak perlu meng-export-nya.
+@njit(inline='always')
+def compute_motion_metrics(current_tile, ref_tile, motion_threshold, noise_threshold, max_passes=10, epsilon=1e-4):
+    """
+    Menggunakan Mean Squared Error (MSE) dengan multi-pass untuk memperbaiki threshold adaptif.
+    """
+    # Vectorize
+    current_tile_flat = current_tile.ravel()
+    ref_tile_flat = ref_tile.ravel()
     
-    if method == 'roi':
-        # ROI-based tiling
-        tile_positions = generate_tile_coordinates(current_image.shape, tile_size, overlap)
-        precomputed_tiles = precompute_reference_tiles(reference_image, tile_size, overlap)
-    else:
-        # Strided tricks
-        stride = (int(tile_size[0] * (1 - overlap)), int(tile_size[1] * (1 - overlap)))
-        current_tiles = compute_sliding_window(current_image, tile_size, stride)
-        ref_tiles = compute_sliding_window(reference_image, tile_size, stride)
-    
-    def process_batch(y, x, current_tile, ref_tile):
-        similarity_weight = compute_motion_metrics(current_tile, ref_tile, motion_threshold)
-        update_final_image(final_image, weight_map, current_tile, cosine_window, similarity_weight, y, x, dtype)
-    
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = []
-        if method == 'roi':
-            for (y, x), (ref_tile, window) in precomputed_tiles.items():
-                current_tile = current_image[y:y+tile_size[0], x:x+tile_size[1]]
-                futures.append(executor.submit(process_batch, y, x, current_tile, ref_tile))
-        else:
-            for i in range(current_tiles.shape[0]):
-                for j in range(current_tiles.shape[1]):
-                    y, x = i * stride[0], j * stride[1]
-                    futures.append(executor.submit(process_batch, y, x, current_tiles[i, j], ref_tiles[i, j]))
+    # Hitung MSE awal
+    mse_score = np.mean((current_tile_flat - ref_tile_flat) ** 2)
+    dz = mse_score  
+
+    # Inisialisasi threshold adaptif
+    adaptive_threshold = motion_threshold + noise_threshold * dz
+
+    # Multi-pass refinement
+    for _ in range(max_passes):
+        prev_threshold = adaptive_threshold
         
-        for future in concurrent.futures.as_completed(futures):
-            future.result()
-    
-    final_image = np.divide(final_image, weight_map[..., np.newaxis], where=weight_map[..., np.newaxis] != 0)
-    return final_image.astype(dtype)
+        # Perbaikan threshold adaptif berdasarkan perbedaan sebelumnya
+        adaptive_threshold = motion_threshold + noise_threshold * (dz / (1 + dz / adaptive_threshold))
+
+        # Jika perubahan kecil, hentikan iterasi
+        if abs(adaptive_threshold - prev_threshold) < epsilon:
+            break
+
+    # Similarity weight menggunakan threshold akhir
+    similarity_weight = np.exp(-dz / adaptive_threshold)
+
+    return similarity_weight, adaptive_threshold
+
+
+@njit (parallel=True, nogil=True)
+def accumulate_tiles_jit(final_image, weight_map, current_image, reference_image,
+                         base_window, row_starts, col_starts,
+                         tile_h, tile_w, motion_threshold, noise_threshold, scale):
+    h, w, channels = current_image.shape
+    for i in prange(row_starts.shape[0]):  # Gunakan prange untuk paralelisasi
+        r = row_starts[i]
+        for j in range(col_starts.shape[0]):
+            c = col_starts[j]
+            if r + tile_h > h or c + tile_w > w:
+                continue
+            current_tile = current_image[r:r+tile_h, c:c+tile_w, :]
+            ref_tile = reference_image[r:r+tile_h, c:c+tile_w, :]
+            similarity_weight, _ = compute_motion_metrics(current_tile, ref_tile, motion_threshold, noise_threshold)
+            for a in range(tile_h):
+                for b in range(tile_w):
+                    for ch in range(channels):
+                        final_image[r + a, c + b, ch] += current_image[r + a, c + b, ch] * base_window[a, b] * similarity_weight * scale
+                    weight_map[r + a, c + b] += base_window[a, b] * similarity_weight
+
+def accumulate_tiles(final_image, weight_map, current_image, reference_image,
+                     base_window, row_starts, col_starts,
+                     tile_h, tile_w, motion_threshold, noise_threshold, scale):
+    accumulate_tiles_jit(final_image, weight_map, current_image, reference_image,
+                         base_window, row_starts, col_starts,
+                         tile_h, tile_w, motion_threshold, noise_threshold, scale)

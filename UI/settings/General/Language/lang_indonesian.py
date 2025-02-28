@@ -299,6 +299,11 @@ Rasio yang lebih rendah (mendekati 0.50) berarti hanya kecocokan yang sangat kha
 Nilai yang direkomendasikan: 0.80.
 """
 
+KEEP_EDGES_LABEL = "Pertahankan tepi"
+KEEP_EDGES_DESCRIPTION = """Pertahankan tepi memungkinkan algoritma untuk mempertahankan 
+fitur tepi selama proses penyelarasan."""
+
+
 APPLY_PARAMETER_BUTTON_TEXT = "Terapkan Pengaturan"
 
 # ------------ Parameter Setting Algorithm --------------------- #

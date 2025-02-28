@@ -282,6 +282,10 @@ AKAZE_RATIO_DESCRIPTION = """比率阈值在匹配过程中用于比较关键点
 
 推荐值：0.80。"""
 
+KEEP_EDGES_LABEL = "保留边缘"
+KEEP_EDGES_DESCRIPTION = """保留边缘是一种特殊的对齐方法，它保留了图像的边缘特征。"""
+
+
 APPLY_PARAMETER_BUTTON_TEXT = "应用设置"
 
 # ------------ Parameter Setting Algorithm --------------------- #

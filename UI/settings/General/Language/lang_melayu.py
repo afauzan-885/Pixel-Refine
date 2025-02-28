@@ -273,6 +273,11 @@ tetapi mungkin termasuk padanan palsu.
 
 Nilai disarankan: 0.80."""
 
+KEEP_EDGES_LABEL = "Menyimpan Tepi"
+KEEP_EDGES_DESCRIPTION = """Pilihan ini membenarkan penjajaran imej
+untuk menyimpan ciri tepi imej."""
+
+
 APPLY_PARAMETER_BUTTON_TEXT = "Terapkan Tetapan"
 
 # Deskripsi untuk Algoritma Penjajaran

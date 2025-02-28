@@ -7,7 +7,9 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 
-from UI.enhance_stack.algorithm.denoising.extra_similarity.extra_algorithm import accumulate_tiles
+# from UI.enhance_stack.algorithm.denoising.extra_similarity.extra_algorithm import accumulate_tiles
+
+from UI.enhance_stack.algorithm.denoising.extra_similarity import extra_algorithm
 from UI.settings.General.Language import language_config
 
 class ThreadWorker(QThread):
@@ -84,25 +86,12 @@ class SimilarityAlgorithm:
         y = np.hanning(tile_size[0])
         x = np.hanning(tile_size[1])
         window = np.outer(y, x)
-        return window
+        return window.astype(np.float32)
 
-    # def computer_motion_metrics(self, current_tile, ref_tile, motion_threshold, noise_threshold):
-    #     # Versi asli dengan OpenCV (tidak akan dipanggil di dalam fungsi Numba)
-    #     temporal_motion = cv2.absdiff(current_tile, ref_tile)
-    #     median_tile = cv2.medianBlur(current_tile.astype(np.float32), ksize=3)
-    #     spatial_noise = cv2.absdiff(current_tile, median_tile)
-        
-    #     noise_mask = cv2.max(temporal_motion, spatial_noise)
-    #     adaptive_threshold = motion_threshold + noise_threshold * cv2.mean(noise_mask)[0]
 
-    #     Dz = cv2.mean(temporal_motion)[0]
-    #     similarity_weight = 1.0 if Dz < adaptive_threshold else np.exp(-Dz / adaptive_threshold)
-        
-    #     return similarity_weight, adaptive_threshold
-
-    def similarity_mfnr(self, images, tile_size=(16, 16), overlap=0.30,
-                          motion_threshold=0.03, noise_threshold=0.04,
-                          update_progress=None, stop_requested=None):
+    def similarity_mfnr(self, images, tile_size=(12, 12), overlap=0.30,
+                      motion_threshold=0.0025, noise_threshold=0.0025,
+                      update_progress=None, stop_requested=None):
         # Validasi input
         if not images:
             raise ValueError("Gagal memuat gambar referensi.")
@@ -124,12 +113,13 @@ class SimilarityAlgorithm:
         if col_starts[-1] != w - tile_size[1]:
             col_starts.append(w - tile_size[1])
 
-        base_window = self.raised_cosine_window(tile_size)  
+        base_window = self.raised_cosine_window(tile_size)
         
         final_image = np.zeros_like(reference_image, dtype=np.float32)
         weight_map = np.zeros((h, w), dtype=np.float32)
 
-        scale = float(np.iinfo(dtype).max)
+        # Konversi scale ke float32
+        scale = np.float32(np.iinfo(dtype).max)
         num_images = len(images)
         
         for i, image in enumerate(images):
@@ -139,45 +129,40 @@ class SimilarityAlgorithm:
                 update_progress(progress, message)
 
             if stop_requested and stop_requested():
-                # print("Proses dihentikan oleh pengguna.")
                 break
 
-            # Normalisasi gambar saat ini
             current_image = self.normalize_image(image, dtype)
             if current_image.shape != reference_image.shape:
                 raise ValueError(f"Ukuran gambar ke-{i+1} tidak sesuai.")
 
-            # Perlu mengubah row_starts dan col_starts menjadi array numpy agar didukung Numba
-            row_starts_arr = np.array(row_starts, dtype=np.int64)
-            col_starts_arr = np.array(col_starts, dtype=np.int64)
+            row_starts_arr = np.array(row_starts, dtype=np.int32)
+            col_starts_arr = np.array(col_starts, dtype=np.int32)
 
-            # Panggil fungsi Numba untuk proses tiling (versi disederhanakan tanpa OpenCV)
-            accumulate_tiles(final_image, weight_map, current_image, reference_image,
-                             base_window, row_starts_arr, col_starts_arr,
-                             tile_size[0], tile_size[1],
-                             motion_threshold, noise_threshold, scale)
+            # Panggil fungsi AOT yang sudah dikompilasi
+            extra_algorithm.accumulate_tiles(final_image, weight_map, current_image, reference_image,
+                                 base_window, row_starts_arr, col_starts_arr,
+                                 tile_size[0], tile_size[1],
+                                 motion_threshold, noise_threshold, scale)
 
-        # Normalisasi final_image dengan weight_map agar tiap piksel mendapat kontribusi yang sesuai
-        final_image /= (weight_map[..., np.newaxis] + 1e-6)
+
+        final_image /= (weight_map[..., np.newaxis] + 1e-3)
         final_image = np.clip(final_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype)
 
         print("Proses similarity_mfnr selesai.")
         return final_image
 
     def normalize_image(self, image, dtype):
-        # Contoh fungsi normalisasi sederhana
-        image_float = image.astype(np.float32)
+        # Konversi ke float32 dan pastikan array contiguous
+        image_float = np.ascontiguousarray(image.astype(np.float32))
         norm_image = (image_float - image_float.min()) / (image_float.max() - image_float.min() + 1e-6)
-        # Kembalikan dalam format 3 channel (misal, RGB) jika diperlukan
         if len(image.shape) == 2:
             norm_image = np.stack((norm_image,)*3, axis=-1)
-        return norm_image
-
+        return norm_image.astype(np.float32)
 
     def save_image(self, image, output_path):
         cv2.imwrite(output_path, image)
         
-def main(db_path, update_progress=None, stop_requested=None, batch_size=5):
+def main(db_path, update_progress=None, stop_requested=None, batch_size=8):
     try:
         image_processor = SimilarityAlgorithm(db_path)
         image_paths = image_processor.get_all_image_paths()

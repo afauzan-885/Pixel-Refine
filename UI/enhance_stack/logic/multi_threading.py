@@ -1,17 +1,17 @@
-import subprocess
+import cv2
+import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
-from PyQt6.QtGui import QPixmap
-import rawpy, io, numpy 
-from PIL import Image
+from PyQt6.QtGui import QPixmap, QImage
+
 
 class BaseMultiThreading(QThread):
     """
     Base class for multithreading tasks. This class supports batch processing.
     """
-    progress_signal = pyqtSignal(int, int)  # Mengirimkan progres (dalam persen) dan jumlah item tersisa
-    completion_signal = pyqtSignal(int)    # Mengirimkan jumlah total item setelah selesai
-    result_signal = pyqtSignal(object)     # Mengirimkan hasil dari setiap tugas
-    error_signal = pyqtSignal(str)         # Mengirimkan pesan error jika ada
+    progress_signal = pyqtSignal(int, int)  # Mengirim progres (dalam persen) dan jumlah item tersisa
+    completion_signal = pyqtSignal(int)    # Mengirim jumlah total item setelah selesai
+    result_signal = pyqtSignal(object)     # Mengirim hasil dari setiap tugas
+    error_signal = pyqtSignal(str)         # Mengirim pesan error jika ada
 
     def __init__(self, task_function, items, batch_size=3, delay_ms=50):
         super().__init__()
@@ -54,7 +54,8 @@ class BaseMultiThreading(QThread):
     def stop(self):
         """Set the running flag to False to stop the thread."""
         self._is_running = False
-        
+
+
 class RawImageProcessingThread(BaseMultiThreading):
     """
     A special multithreading class for processing images of various formats.
@@ -64,37 +65,39 @@ class RawImageProcessingThread(BaseMultiThreading):
             # Deteksi format berdasarkan ekstensi file
             extension = image_path.split('.')[-1].lower()
 
-            if extension in {"nef", "cr2", "dng", "arw"}:  # Format RAW
-                with rawpy.imread(image_path) as raw:
-                    rgb = raw.postprocess()
+            if extension in {"nef", "cr2", "dng", "arw"}:  # Format RAW (Gunakan OpenCV atau library lain jika perlu)
+                raise RuntimeError(f"RAW format not supported: {image_path}")
+            
             elif extension in {"jpg", "jpeg", "png", "tiff", "tif"}:  # Format non-RAW
-                img = Image.open(image_path)
+                img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
 
-                # Konversi jika gambar 16-bit
-                if img.mode == "I;16":
-                    img = img.point(lambda x: x >> 8)  # Turunkan ke 8-bit untuk tampilan
+                # Konversi jika gambar 16-bit ke 8-bit
+                if img.dtype == np.uint16:
+                    img = (img / 256).astype(np.uint8)
 
-                img = img.convert("RGB")  # Konversi ke RGB
-                rgb = numpy.array(img)  # Konversi ke array untuk keseragaman
+                # Jika format gambar adalah grayscale, ubah ke RGB
+                if len(img.shape) == 2:  # Gambar grayscale
+                    img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+                elif img.shape[2] == 4:  # Gambar dengan Alpha (RGBA)
+                    img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
+                elif img.shape[2] == 3:  # Sudah RGB tetapi dalam format OpenCV (BGR)
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+                # Konversi NumPy array ke format QPixmap
+                height, width, channel = img.shape
+                bytes_per_line = channel * width
+                qimg = QImage(img.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+                pixmap = QPixmap.fromImage(qimg)
+
+                if pixmap.isNull():
+                    raise RuntimeError(f"Failed to load image '{image_path}'. Conversion failed.")
+
+                return pixmap  # Hasil yang diproses akan dikirim melalui sinyal `result_signal`
+
             else:
                 raise RuntimeError(f"Unsupported image format: {image_path}")
 
-            # Konversi RGB array ke QPixmap
-            processed_img = Image.fromarray(rgb)
-            data = io.BytesIO()
-            processed_img.save(data, format="PNG")
-            data.seek(0)
-
-            pixmap = QPixmap()
-            pixmap.loadFromData(data.read(), "PNG")
-
-            if pixmap.isNull():
-                raise RuntimeError(f"Failed to load image '{image_path}'. Conversion failed.")
-
-            return pixmap  # Hasil yang diproses akan dikirim melalui sinyal `result_signal`
-
         super().__init__(process_image, image_paths, batch_size, delay_ms)
-
 
 
 class ImageImportThreading(BaseMultiThreading):
@@ -106,6 +109,3 @@ class ImageImportThreading(BaseMultiThreading):
             database_manager.save_image_path(image_path)
         
         super().__init__(import_task, image_paths, batch_size, delay_ms)
-
-class RunningAlgorithmThreading(BaseMultiThreading):
-    pass

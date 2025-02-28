@@ -298,6 +298,10 @@ but may include false positives.
 
 Recommended value: 0.80."""
 
+KEEP_EDGES_LABEL = "Keep Edges"
+KEEP_EDGES_DESCRIPTION = """The Keep Edges parameter determines whether 
+to preserve the edges of the image during alignment."""
+
 
 APPLY_PARAMETER_BUTTON_TEXT = "Apply Settings"
 

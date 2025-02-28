@@ -81,7 +81,8 @@ class ORBAlgorithm:
             "scaleFactor": 1.1,
             "nlevels": 5,
             "ransacThreshold": 5.0,
-            "transformation": "homography"
+            "transformation": "homography",
+            "keep_edges": True
         }
 
         if config_filename is None:
@@ -129,30 +130,36 @@ class ORBAlgorithm:
         return base_points, target_points
 
 
-    def compensate_motion(self, base_image, base_points, target_points, stop_requested=None, transformation_type=None):
+    def compensate_motion(self, base_image, base_points, target_points, transformation_type='homography', config_filename=None):
         """
-        Menerapkan kompensasi gerakan ke gambar menggunakan transformasi yang dihitung.
+        Menerapkan kompensasi gerakan menggunakan transformasi untuk menyelaraskan gambar.
+        transformation_type dapat berupa 'homography', 'affine', 'similarity', atau 'euclidean'.
         """
-        if stop_requested and stop_requested():
-            return None
+        config = self.load_akaze_config(config_filename)
+        keep_edges = config["keep_edges"]
 
-        # Baca konfigurasi ORB
-        orb_config = self.load_orb_config()
-        ransac_threshold = orb_config["ransacThreshold"]
-        transformation_type = transformation_type or orb_config["transformation"]
+        pad = 50 if keep_edges else 0
+        padded_image = cv2.copyMakeBorder(base_image, pad, pad, pad, pad, cv2.BORDER_REFLECT) if keep_edges else base_image.copy()
 
-        if transformation_type == 'homography':
-            H, mask = cv2.findHomography(target_points, base_points, cv2.RANSAC, ransac_threshold)
-            compensated_image = cv2.warpPerspective(base_image, H, (base_image.shape[1], base_image.shape[0]), flags=cv2.INTER_CUBIC)
-        elif transformation_type == 'affine':
-            matrix, mask = cv2.estimateAffine2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=ransac_threshold)
-            compensated_image = cv2.warpAffine(base_image, matrix, (base_image.shape[1], base_image.shape[0]), flags=cv2.INTER_CUBIC)
-        elif transformation_type in ['similarity', 'euclidean']:
-            matrix, mask = cv2.estimateAffinePartial2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=ransac_threshold)
-            compensated_image = cv2.warpAffine(base_image, matrix, (base_image.shape[1], base_image.shape[0]), flags=cv2.INTER_CUBIC)
+        if transformation_type == 'affine':
+            matrix, mask = cv2.estimateAffine2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=5.0)
+            compensated_padded = cv2.warpAffine(padded_image, matrix, (padded_image.shape[1], padded_image.shape[0]), borderMode=cv2.BORDER_REFLECT)
+        elif transformation_type == 'similarity':
+            matrix, mask = cv2.estimateAffinePartial2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=5.0)
+            compensated_padded = cv2.warpAffine(padded_image, matrix, (padded_image.shape[1], padded_image.shape[0]), borderMode=cv2.BORDER_REFLECT)
+        elif transformation_type == 'euclidean':
+            matrix, mask = cv2.estimateAffinePartial2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=5.0)
+            if np.linalg.norm(matrix[:2, 0]) != np.linalg.norm(matrix[:2, 1]):
+                raise ValueError("Transformasi ini bukan transformasi Euclidean (terdapat skala).")
+            compensated_padded = cv2.warpAffine(padded_image, matrix, (padded_image.shape[1], padded_image.shape[0]), borderMode=cv2.BORDER_REFLECT)
+        elif transformation_type == 'homography':
+            H, mask = cv2.findHomography(target_points, base_points, cv2.RANSAC, 5.0)
+            compensated_padded = cv2.warpPerspective(padded_image, H, (padded_image.shape[1], padded_image.shape[0]), borderMode=cv2.BORDER_REFLECT)
         else:
-            raise ValueError("Tipe transformasi tidak dikenali. Pilih dari 'homography', 'affine', 'similarity', atau 'euclidean'.")
+            raise ValueError("Tipe transformasi tidak dikenali.")
 
+        h, w = base_image.shape[:2]
+        compensated_image = compensated_padded[pad:pad+h, pad:pad+w] if keep_edges else compensated_padded
         return compensated_image
 
 
@@ -174,7 +181,7 @@ class ORBAlgorithm:
                 update_progress(i + start_index, total_images - 1, progress_message)
 
 
-def main(db_path, update_progress=None, batch_size=6, stop_requested=None):
+def main(db_path, update_progress=None, batch_size=12, stop_requested=None):
     processor = ORBAlgorithm(db_path)
 
     # Ambil path gambar dari database

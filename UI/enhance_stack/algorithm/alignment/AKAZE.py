@@ -81,7 +81,8 @@ class AKAZEAlgorithm:
             "akaze_threshold": 0.001,
             "akaze_nOctaves": 4,
             "akaze_nOctaveLayers": 4,
-            "ratio_threshold": 0.75
+            "ratio_threshold": 0.75,
+            "keep_edges": True
         }
 
         if config_filename is None:
@@ -90,10 +91,11 @@ class AKAZEAlgorithm:
         try:
             with open(config_filename, "r") as config_file:
                 params = json.load(config_file)
-            return params.get("AKAZE", default_config)
+            return {**default_config, **params.get("AKAZE", {})}
         except Exception as e:
             print("Error loading AKAZE configuration:", e)
             return default_config
+
 
     def calculate_global_motion(self, base_image, target_image, config_filename=None, num_blocks=(3, 3), overlap=20, stop_requested=None):
         """
@@ -190,40 +192,37 @@ class AKAZEAlgorithm:
 
         return base_points, target_points
         
-    def compensate_motion(self, base_image, base_points, target_points, transformation_type='homography'):
+    def compensate_motion(self, base_image, base_points, target_points, transformation_type='homography', config_filename=None):
         """
         Menerapkan kompensasi gerakan menggunakan transformasi untuk menyelaraskan gambar.
         transformation_type dapat berupa 'homography', 'affine', 'similarity', atau 'euclidean'.
         """
+        akaze_config = self.load_akaze_config(config_filename)
+        keep_edges = akaze_config["keep_edges"]
+
+        pad = 50 if keep_edges else 0
+        padded_image = cv2.copyMakeBorder(base_image, pad, pad, pad, pad, cv2.BORDER_REFLECT) if keep_edges else base_image.copy()
+
         if transformation_type == 'affine':
             matrix, mask = cv2.estimateAffine2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=5.0)
-            compensated_image = cv2.warpAffine(base_image, matrix, (base_image.shape[1], base_image.shape[0]))
+            compensated_padded = cv2.warpAffine(padded_image, matrix, (padded_image.shape[1], padded_image.shape[0]), borderMode=cv2.BORDER_REFLECT)
         elif transformation_type == 'similarity':
             matrix, mask = cv2.estimateAffinePartial2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=5.0)
-            compensated_image = cv2.warpAffine(base_image, matrix, (base_image.shape[1], base_image.shape[0]))
+            compensated_padded = cv2.warpAffine(padded_image, matrix, (padded_image.shape[1], padded_image.shape[0]), borderMode=cv2.BORDER_REFLECT)
         elif transformation_type == 'euclidean':
             matrix, mask = cv2.estimateAffinePartial2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=5.0)
             if np.linalg.norm(matrix[:2, 0]) != np.linalg.norm(matrix[:2, 1]):
                 raise ValueError("Transformasi ini bukan transformasi Euclidean (terdapat skala).")
-            compensated_image = cv2.warpAffine(base_image, matrix, (base_image.shape[1], base_image.shape[0]))
+            compensated_padded = cv2.warpAffine(padded_image, matrix, (padded_image.shape[1], padded_image.shape[0]), borderMode=cv2.BORDER_REFLECT)
         elif transformation_type == 'homography':
             H, mask = cv2.findHomography(target_points, base_points, cv2.RANSAC, 5.0)
-            compensated_image = cv2.warpPerspective(base_image, H, (base_image.shape[1], base_image.shape[0]))
+            compensated_padded = cv2.warpPerspective(padded_image, H, (padded_image.shape[1], padded_image.shape[0]), borderMode=cv2.BORDER_REFLECT)
         else:
             raise ValueError("Tipe transformasi tidak dikenali.")
-        return compensated_image
 
-    def save_to_hdf5(self, h5f, aligned_images, update_progress=None, start_index=0):
-        """
-        Menyimpan gambar yang telah disejajarkan ke dalam file HDF5.
-        """
-        total_images = len(aligned_images) + start_index
-        for i, image in enumerate(aligned_images):
-            h5f.create_dataset(f"image_{i + start_index}", data=image, compression="gzip")
-            progress_message = f"Gambar ke-{i + start_index + 1} disimpan dalam HDF5."
-            print(progress_message)
-            if update_progress:
-                update_progress(i + start_index, total_images - 1, progress_message)
+        h, w = base_image.shape[:2]
+        compensated_image = compensated_padded[pad:pad+h, pad:pad+w] if keep_edges else compensated_padded
+        return compensated_image
 
 
 def main(db_path, update_progress=None, batch_size=5, stop_requested=None):

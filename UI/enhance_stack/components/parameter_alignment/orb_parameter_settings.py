@@ -1,252 +1,136 @@
 import os
 import json
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QSlider,
-                             QHBoxLayout, QPushButton, QScrollArea, QComboBox)
+                             QHBoxLayout, QPushButton, QScrollArea, QToolButton, QComboBox)
 from PyQt6.QtGui import QFont
 from PyQt6.QtCore import Qt
 
-# Pastikan Anda mengimpor modul ORB yang diperlukan
-import UI.enhance_stack.algorithm.alignment.ORB
+from UI.enhance_stack.algorithm.alignment.ORB import ORBAlgorithm
+from UI.resources.stylesheet.stylesheet import APPLY_BUTTON, DROPDOWN_BOX, KEEP_EDGES_BUTTON, SCROLL_AREA, SLIDER_STYLE, SLIDER_VALUE_LABEL
 from UI.settings.General.Language import language_config
 
+def get_default_font(size=10, weight=QFont.Weight.Normal):
+    return QFont("Arial", size, weight)
+
+def load_orb_config():
+    return ORBAlgorithm.load_orb_config()
+
+def save_orb_config(config):
+    config_dir = os.path.join("database", "setting")
+    os.makedirs(config_dir, exist_ok=True)
+    config_filename = os.path.join(config_dir, "Parameter_Stack_Enhance.json")
+    
+    try:
+        if os.path.exists(config_filename):
+            with open(config_filename, "r") as f:
+                all_params = json.load(f)
+        else:
+            all_params = {}
+    except Exception as e:
+        print("Error reading existing config:", e)
+        all_params = {}
+    
+    all_params["ORB"] = config
+    
+    try:
+        with open(config_filename, "w") as f:
+            json.dump(all_params, f, indent=4)
+        print("Settings applied and saved to", config_filename)
+    except Exception as e:
+        print("Error saving ORB settings:", e)
+
+def create_slider(label_text, min_val, max_val, step, initial_value, format_func, tooltip):
+    label = QLabel(label_text)
+    label.setToolTip(tooltip)
+    label.setFont(get_default_font(10, QFont.Weight.Bold))
+    
+    slider = QSlider(Qt.Orientation.Horizontal)
+    slider.setMinimum(min_val)
+    slider.setMaximum(max_val)
+    slider.setValue(initial_value)
+    slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+    slider.setTickInterval(step)
+    slider.setStyleSheet(SLIDER_STYLE)
+    
+    value_label = QLabel(format_func(initial_value))
+    value_label.setStyleSheet(SLIDER_VALUE_LABEL)
+    value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    
+    layout = QHBoxLayout()
+    layout.addWidget(slider)
+    layout.addWidget(value_label)
+    
+    slider.valueChanged.connect(lambda v: value_label.setText(format_func(v)))
+    
+    return label, slider, layout
+
 def get_orb_page():
-    """
-    Buat halaman pengaturan untuk ORB dengan widget untuk mengatur parameter algoritma.
-    Jika file JSON ditemukan, gunakan nilai yang ada; jika tidak, gunakan nilai default.
-    """
+    orb_config = load_orb_config()
+    
     page = QWidget()
     layout = QVBoxLayout(page)
-    layout.setSpacing(10)  # Atur jarak 10 pixel antar widget di layout utama
-
-    # Ambil konfigurasi ORB, gunakan default jika file tidak ditemukan
-    orb_config = UI.enhance_stack.algorithm.alignment.ORB.ORBAlgorithm.load_orb_config()
-
-    # Siapkan font bold untuk semua label parameter
-    bold_font = QFont()
-    bold_font.setBold(True)
-
-    # Judul halaman
+    layout.setSpacing(10)
+    
     title_label = QLabel(language_config.ORB_PARAMETER_SETTING_LABEL)
-    title_label.setFont(bold_font)
+    title_label.setFont(get_default_font(10, QFont.Weight.Bold))
     title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
     layout.addWidget(title_label)
-
-    # === Parameter nfeatures ===
-    nfeatures_label = QLabel(language_config.ORB_NFEATURES_LABEL)
-    nfeatures_label.setToolTip(language_config.ORB_NFEATURES_DESCRIPTION)
-    nfeatures_label.setFont(bold_font)
-    layout.addWidget(nfeatures_label)
-    nfeatures_slider = QSlider(Qt.Orientation.Horizontal)
-    nfeatures_slider.setMinimum(100)
-    nfeatures_slider.setMaximum(5000)
-    nfeatures_slider.setValue(orb_config["nfeatures"])
-    nfeatures_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-    nfeatures_slider.setTickInterval(100)
-    # Layout horizontal untuk slider dan label nilai
-    nfeatures_layout = QHBoxLayout()
-    nfeatures_layout.setSpacing(10)
-    nfeatures_layout.addWidget(nfeatures_slider)
-    nfeatures_value_label = QLabel(str(nfeatures_slider.value()))
-    nfeatures_layout.addWidget(nfeatures_value_label)
-    layout.addLayout(nfeatures_layout)
-    nfeatures_slider.valueChanged.connect(lambda value: nfeatures_value_label.setText(str(value)))
-
-    # === Parameter Scale Factor ===
-    scale_factor_label = QLabel(language_config.ORB_SCALEFACTOR_LABEL)
-    scale_factor_label.setToolTip(language_config.ORB_SCALEFACTOR_DESCRIPTION)
-    scale_factor_label.setFont(bold_font)
-    layout.addWidget(scale_factor_label)
-    scale_factor_slider = QSlider(Qt.Orientation.Horizontal)
     
-    # Rentang 1.0 - 2.0: diwakili oleh nilai 10 - 20 (nilai sebenarnya = value/10)
-    scale_factor_slider.setMinimum(10)
-    scale_factor_slider.setMaximum(20)
-    scale_factor_slider.setValue(int(orb_config["scaleFactor"] * 10))
-    scale_factor_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-    scale_factor_slider.setTickInterval(1)
-    scale_factor_layout = QHBoxLayout()
-    scale_factor_layout.setSpacing(10)
-    scale_factor_layout.addWidget(scale_factor_slider)
-    scale_factor_value_label = QLabel(f"{scale_factor_slider.value()/10:.1f}")
-    scale_factor_layout.addWidget(scale_factor_value_label)
-    layout.addLayout(scale_factor_layout)
-    scale_factor_slider.valueChanged.connect(
-        lambda value: scale_factor_value_label.setText(f"{value/10:.1f}")
-    )
-
-    # === Parameter nlevels ===
-    nlevels_label = QLabel(language_config.ORB_NLEVELS_LABEL)
-    nlevels_label.setToolTip(language_config.ORB_NLEVELS_DESCRIPTION)
-    nlevels_label.setFont(bold_font)
-    layout.addWidget(nlevels_label)
-    nlevels_slider = QSlider(Qt.Orientation.Horizontal)
-    nlevels_slider.setMinimum(1)
-    nlevels_slider.setMaximum(8)
-    nlevels_slider.setValue(orb_config["nlevels"])
-    nlevels_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-    nlevels_slider.setTickInterval(1)
-    nlevels_layout = QHBoxLayout()
-    nlevels_layout.setSpacing(10)
-    nlevels_layout.addWidget(nlevels_slider)
-    nlevels_value_label = QLabel(str(nlevels_slider.value()))
-    nlevels_layout.addWidget(nlevels_value_label)
-    layout.addLayout(nlevels_layout)
-    nlevels_slider.valueChanged.connect(lambda value: nlevels_value_label.setText(str(value)))
-
-    # === Parameter Tipe Transformasi ===
+    params = [
+        (language_config.ORB_NFEATURES_LABEL, 100, 5000, 100, orb_config["nfeatures"], str, language_config.ORB_NFEATURES_DESCRIPTION),
+        (language_config.ORB_SCALEFACTOR_LABEL, 10, 20, 1, int(orb_config["scaleFactor"] * 10), lambda v: f"{v/10:.1f}", language_config.ORB_SCALEFACTOR_DESCRIPTION),
+        (language_config.ORB_NLEVELS_LABEL, 1, 8, 1, orb_config["nlevels"], str, language_config.ORB_NLEVELS_DESCRIPTION),
+        (language_config.ORB_RANSAC_LABEL, 10, 100, 5, int(orb_config["ransacThreshold"] * 10), lambda v: f"{v/10:.1f}", language_config.ORB_RANSAC_DESCRIPTION)
+    ]
+    
+    sliders = {}
+    for label, min_v, max_v, step, init_v, fmt, tip in params:
+        lbl, sld, lay = create_slider(label, min_v, max_v, step, init_v, fmt, tip)
+        layout.addWidget(lbl)
+        layout.addLayout(lay)
+        sliders[label] = sld
+    
     transformation_label = QLabel(language_config.ORB_TRANSFORMATION_LABEL)
     transformation_label.setToolTip(language_config.ORB_TRANSFORMATION_DESCRIPTION)
-    transformation_label.setFont(bold_font)
+    transformation_label.setFont(get_default_font(10, QFont.Weight.Bold))
     layout.addWidget(transformation_label)
+    
     transformation_combo = QComboBox()
     transformation_combo.addItems(["homography", "affine", "similarity", "euclidean"])
     transformation_combo.setCurrentText(orb_config["transformation"])
-    # Terapkan style sheet ke QComboBox
-    combo_style = """
-        QComboBox {
-            background-color: #F0EEEE;
-            padding: 5px;
-            border-radius: 5px;
-            max-width: 200px;
-        }
-        QComboBox::drop-down {
-            background-color: #ffffff;
-            border-radius: 5px;
-            border: 1px solid #d1d1d1;
-        }
-        QComboBox::down-arrow {
-            image: url('UI/resources/icon/menu-options.png');
-            width: 24px;
-            height: 24px;
-        }
-        QComboBox:hover {
-            background-color: #9EFFE2;
-        }
-        QComboBox QAbstractItemView {
-            background-color: #ffffff;
-            border: 1px solid #d1d1d1;
-            selection-background-color: #7B9AC8;
-            selection-color: white;
-            padding: 5px;
-        }
-        QComboBox QAbstractItemView::item {
-            margin-bottom: 5px;
-        }
-    """
-    transformation_combo.setStyleSheet(combo_style)
+    transformation_combo.setStyleSheet(DROPDOWN_BOX)
     layout.addWidget(transformation_combo)
-
-    # === Parameter RANSAC Threshold ===
-    ransac_label = QLabel(language_config.ORB_RANSAC_LABEL)
-    ransac_label.setToolTip(language_config.ORB_RANSAC_DESCRIPTION)
-    ransac_label.setFont(bold_font)
-    layout.addWidget(ransac_label)
-    ransac_slider = QSlider(Qt.Orientation.Horizontal)
-    # Rentang 1.0 - 10.0: diwakili oleh nilai 10 - 100 (nilai sebenarnya = value/10)
-    ransac_slider.setMinimum(10)
-    ransac_slider.setMaximum(100)
-    ransac_slider.setValue(int(orb_config["ransacThreshold"] * 10))
-    ransac_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-    ransac_slider.setTickInterval(5)
-    ransac_layout = QHBoxLayout()
-    ransac_layout.setSpacing(10)
-    ransac_layout.addWidget(ransac_slider)
-    ransac_value_label = QLabel(f"{ransac_slider.value()/10:.1f}")
-    ransac_layout.addWidget(ransac_value_label)
-    layout.addLayout(ransac_layout)
-    ransac_slider.valueChanged.connect(
-        lambda value: ransac_value_label.setText(f"{value/10:.1f}")
-    )
-
-    # Tombol untuk menerapkan pengaturan
+    
+    keep_edges_button = QToolButton()
+    keep_edges_button.setCheckable(True)
+    keep_edges_button.setChecked(orb_config.get("keep_edges", True))
+    keep_edges_button.setText("Keep Edges" if orb_config.get("keep_edges", True) else "Ignore Edges")
+    keep_edges_button.setFont(get_default_font(10, QFont.Weight.Bold))
+    keep_edges_button.setToolTip(language_config.KEEP_EDGES_DESCRIPTION)
+    keep_edges_button.setStyleSheet(KEEP_EDGES_BUTTON)
+    
+    keep_edges_button.toggled.connect(lambda state: keep_edges_button.setText("Keep Edges" if state else "Ignore Edges"))
+    layout.addWidget(keep_edges_button)
+    
     apply_button = QPushButton(language_config.APPLY_PARAMETER_BUTTON_TEXT)
-    apply_button.setStyleSheet("""
-        QPushButton {
-            background-color: #5cb85c;    
-            color: white;                 
-            border: none;
-            border-radius: 5px;           
-            padding: 10px 20px;
-            font-size: 14px;
-            font-weight: bold;
-        }
-        QPushButton:hover {
-            background-color: #4cae4c;    
-        }
-        QPushButton:pressed {
-            background-color: #449d44;
-        }
-    """)
+    apply_button.setStyleSheet(APPLY_BUTTON)
     layout.addWidget(apply_button)
-
-    layout.addWidget(apply_button)
-
+    
     def apply_settings():
-        """
-        Simpan nilai dari widget ke file konfigurasi JSON.
-        Jika file konfigurasi global sudah ada, update bagian 'ORB'.
-        Jika tidak, buat file baru.
-        """
         orb_params = {
-            "nfeatures": nfeatures_slider.value(),
-            "scaleFactor": scale_factor_slider.value() / 10.0,
-            "nlevels": nlevels_slider.value(),
+            "nfeatures": sliders[language_config.ORB_NFEATURES_LABEL].value(),
+            "scaleFactor": sliders[language_config.ORB_SCALEFACTOR_LABEL].value() / 10.0,
+            "nlevels": sliders[language_config.ORB_NLEVELS_LABEL].value(),
             "transformation": transformation_combo.currentText(),
-            "ransacThreshold": ransac_slider.value() / 10.0
+            "ransacThreshold": sliders[language_config.ORB_RANSAC_LABEL].value() / 10.0,
+            "keep_edges": keep_edges_button.isChecked()
         }
-
-        config_dir = os.path.join("database", "setting")
-        if not os.path.exists(config_dir):
-            os.makedirs(config_dir)
-        config_filename = os.path.join(config_dir, "Parameter_Stack_Enhance.json")
-
-        try:
-            if os.path.exists(config_filename):
-                with open(config_filename, "r") as config_file:
-                    all_params = json.load(config_file)
-            else:
-                all_params = {}
-        except Exception as e:
-            print("Error reading existing config:", e)
-            all_params = {}
-
-        all_params["ORB"] = orb_params
-
-        try:
-            with open(config_filename, "w") as config_file:
-                json.dump(all_params, config_file, indent=4)
-            print("Settings applied and saved to", config_filename)
-        except Exception as e:
-            print("Error saving ORB settings:", e)
-
+        save_orb_config(orb_params)
+    
     apply_button.clicked.connect(apply_settings)
-
-    # Bungkus halaman dalam QScrollArea untuk tampilan yang konsisten
+    
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
     scroll.setWidget(page)
-    scroll.setStyleSheet("""
-        QScrollArea {
-            border: none;
-        }
-        QScrollBar:vertical {
-            border: none;
-            background: #F0F0F0;
-            width: 10px;
-            margin: 2px 0 2px 0;
-            border-radius: 5px;
-        }
-        QScrollBar::handle:vertical {
-            background: #A0A0A0;
-            min-height: 20px;
-            border-radius: 5px;
-        }
-        QScrollBar::handle:vertical:hover {
-            background: #808080;
-        }
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-            background: none;
-            border: none;
-        }
-    """)
+    scroll.setStyleSheet(SCROLL_AREA)
     return scroll
