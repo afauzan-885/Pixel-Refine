@@ -239,7 +239,6 @@ def process_with_cropping(processor, base_image, remaining_paths, batch_count, b
     if global_crop_bottom <= global_crop_top or global_crop_right <= global_crop_left:
         print("Crop region global tidak valid. Tidak ada overlap yang cukup.")
         return
-
     # Phase 2: Alignment and saving cropped images
     with h5py.File(processor.hdf5_path, "w", libver="latest") as h5f:
         cropped_base = base_image[global_crop_top:global_crop_bottom, global_crop_left:global_crop_right]
