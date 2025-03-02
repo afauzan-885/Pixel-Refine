@@ -11,6 +11,7 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 import PyQt6.QtGui as QtGui
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../')))
+from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
 
 # from UI.settings.General.Language import language_config
@@ -182,18 +183,7 @@ class ProcessWindows(QWidget):
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        self.progress_bar.setStyleSheet("""
-            QProgressBar {
-                border: 1px solid #bbb;
-                border-radius: 5px;
-                background-color: #f0f0f0;
-                text-align: center;
-            }
-            QProgressBar::chunk {
-                background-color: #80C4E9;
-                width: 20px;
-            }
-        """)
+        self.progress_bar.setStyleSheet(PROGRESS_BAR)
         self.progress_bar.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.label_status = QLabel(language_config.WINDOW_INITIATION, self)

@@ -33,20 +33,24 @@ SLIDER_VALUE_LABEL = """
     }
 """
 
-KEEP_EDGES_BUTTON = """
+TOGGLE_BUTTON = """
     QToolButton {
-        background-color: #50A2D5;
+        background-color: #FF0000; /* Merah untuk state false */
         color: white;
         border-radius: 5px;
         padding: 6px 6px;
     }
     QToolButton:checked {
-        background-color: #428BB8;
+        background-color: #4893C1; /* Biru untuk state true */
     }
-    QToolButton:hover {
-        background-color: #598DAE;
+    QToolButton:hover:!checked {
+        background-color: #FF6666; /* Hover pada state false */
+    }
+    QToolButton:hover:checked {
+        background-color: #2F7AA8; /* Hover pada state true */
     }
 """
+
 
 APPLY_BUTTON = """
     QPushButton {
@@ -98,5 +102,40 @@ DROPDOWN_BOX = """
             }
             QComboBox QAbstractItemView::item {
                 margin-bottom: 5px;
+            }
+        """
+
+BLANK_CONTENT_BACKGROUND = """
+            QWidget {
+                background: qlineargradient(
+                    spread: pad,
+                    x1: 1, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #D3D3D3, 
+                    stop: 0.3 #A9A9A9, 
+                    stop: 0.6 #E6E6E6   
+                );
+                border: none; 
+                padding: 0; 
+            }
+        """
+        
+BLANK_CONTENT_LABEL = """
+            color: #555555;
+            font-size: 22px;
+            font-family: Arial, Helvetica, sans-serif;
+            background: transparent; 
+            margin-top: -200px;
+        """
+        
+PROGRESS_BAR = """
+            QProgressBar {
+                border: 1px solid #bbb;
+                border-radius: 5px;
+                background-color: #f0f0f0;
+                text-align: center;
+            }
+            QProgressBar::chunk {
+                background-color: #80C4E9;
+                width: 20px;
             }
         """

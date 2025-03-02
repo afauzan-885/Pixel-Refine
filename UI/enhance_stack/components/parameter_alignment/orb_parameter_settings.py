@@ -1,12 +1,13 @@
 import os
 import json
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QSlider,
-                             QHBoxLayout, QPushButton, QScrollArea, QToolButton, QComboBox)
+                             QHBoxLayout, QPushButton, QScrollArea,
+                             QToolButton, QComboBox)
 from PyQt6.QtGui import QFont
 from PyQt6.QtCore import Qt
 
 from UI.enhance_stack.algorithm.alignment.ORB import ORBAlgorithm
-from UI.resources.stylesheet.stylesheet import APPLY_BUTTON, DROPDOWN_BOX, KEEP_EDGES_BUTTON, SCROLL_AREA, SLIDER_STYLE, SLIDER_VALUE_LABEL
+from UI.resources.stylesheet.stylesheet import APPLY_BUTTON, DROPDOWN_BOX, TOGGLE_BUTTON, SCROLL_AREA, SLIDER_STYLE, SLIDER_VALUE_LABEL
 from UI.settings.General.Language import language_config
 
 def get_default_font(size=10, weight=QFont.Weight.Normal):
@@ -42,6 +43,7 @@ def save_orb_config(config):
 def create_slider(label_text, min_val, max_val, step, initial_value, format_func, tooltip):
     label = QLabel(label_text)
     label.setToolTip(tooltip)
+    
     label.setFont(get_default_font(10, QFont.Weight.Bold))
     
     slider = QSlider(Qt.Orientation.Horizontal)
@@ -90,27 +92,43 @@ def get_orb_page():
         layout.addLayout(lay)
         sliders[label] = sld
     
-    transformation_label = QLabel(language_config.ORB_TRANSFORMATION_LABEL)
-    transformation_label.setToolTip(language_config.ORB_TRANSFORMATION_DESCRIPTION)
-    transformation_label.setFont(get_default_font(10, QFont.Weight.Bold))
-    layout.addWidget(transformation_label)
+    # Buat layout horizontal untuk menampung kedua toggle button
+    toggles_layout = QHBoxLayout()
     
-    transformation_combo = QComboBox()
-    transformation_combo.addItems(["homography", "affine", "similarity", "euclidean"])
-    transformation_combo.setCurrentText(orb_config["transformation"])
-    transformation_combo.setStyleSheet(DROPDOWN_BOX)
-    layout.addWidget(transformation_combo)
-    
+    # Toggle button untuk keep_edges
     keep_edges_button = QToolButton()
     keep_edges_button.setCheckable(True)
     keep_edges_button.setChecked(orb_config.get("keep_edges", True))
     keep_edges_button.setText("Keep Edges" if orb_config.get("keep_edges", True) else "Ignore Edges")
     keep_edges_button.setFont(get_default_font(10, QFont.Weight.Bold))
     keep_edges_button.setToolTip(language_config.KEEP_EDGES_DESCRIPTION)
-    keep_edges_button.setStyleSheet(KEEP_EDGES_BUTTON)
-    
+    keep_edges_button.setStyleSheet(TOGGLE_BUTTON)
     keep_edges_button.toggled.connect(lambda state: keep_edges_button.setText("Keep Edges" if state else "Ignore Edges"))
-    layout.addWidget(keep_edges_button)
+    
+    toggles_layout.addWidget(keep_edges_button)
+    
+    # Toggle button untuk enable_cropping
+    enable_cropping_button = QToolButton()
+    enable_cropping_button.setCheckable(True)
+    enable_cropping_button.setChecked(orb_config.get("enable_cropping", False))
+    enable_cropping_button.setText("Enable Crop" if orb_config.get("enable_cropping", False) else "Disable Crop")
+    enable_cropping_button.setFont(get_default_font(10, QFont.Weight.Bold))
+    enable_cropping_button.setToolTip("Enable or disable image cropping during processing")
+    enable_cropping_button.setStyleSheet(TOGGLE_BUTTON)
+    
+    # Logika: jika enable_cropping aktif, maka keep_edges disetel ke False dan dinonaktifkan
+    def on_enable_cropping_toggled(state):
+        enable_cropping_button.setText("Enable Crop" if state else "Disable Crop")
+        if state:
+            keep_edges_button.setChecked(False)
+            keep_edges_button.setEnabled(False)
+        else:
+            keep_edges_button.setEnabled(True)
+    enable_cropping_button.toggled.connect(on_enable_cropping_toggled)
+    
+    toggles_layout.addWidget(enable_cropping_button)
+    
+    layout.addLayout(toggles_layout)
     
     apply_button = QPushButton(language_config.APPLY_PARAMETER_BUTTON_TEXT)
     apply_button.setStyleSheet(APPLY_BUTTON)
@@ -121,9 +139,9 @@ def get_orb_page():
             "nfeatures": sliders[language_config.ORB_NFEATURES_LABEL].value(),
             "scaleFactor": sliders[language_config.ORB_SCALEFACTOR_LABEL].value() / 10.0,
             "nlevels": sliders[language_config.ORB_NLEVELS_LABEL].value(),
-            "transformation": transformation_combo.currentText(),
             "ransacThreshold": sliders[language_config.ORB_RANSAC_LABEL].value() / 10.0,
-            "keep_edges": keep_edges_button.isChecked()
+            "keep_edges": keep_edges_button.isChecked(),
+            "enable_cropping": enable_cropping_button.isChecked()  # Simpan nilai enable_cropping
         }
         save_orb_config(orb_params)
     

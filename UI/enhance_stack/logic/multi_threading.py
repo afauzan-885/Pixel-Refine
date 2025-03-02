@@ -109,3 +109,32 @@ class ImageImportThreading(BaseMultiThreading):
             database_manager.save_image_path(image_path)
         
         super().__init__(import_task, image_paths, batch_size, delay_ms)
+        
+class ImageProcessingMultiThreading(QThread):
+    progress_updated = pyqtSignal(int, str)
+    finished = pyqtSignal()
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, worker_function, db_path, parent=None):
+        super().__init__(parent)
+        self.worker_function = worker_function
+        self.db_path = db_path
+        self.stop_requested = False
+
+    def run(self):
+        try:
+            def update_progress(current, total, message):
+                progress = int((current / total) * 100)
+                self.progress_updated.emit(progress, message)
+
+            def is_stop_requested():
+                return self.stop_requested
+
+            # Jalankan fungsi pekerja yang diberikan
+            self.worker_function(self.db_path, update_progress, stop_requested=is_stop_requested)
+            self.finished.emit()
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
+    def stop(self):
+        self.stop_requested = True

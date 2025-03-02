@@ -2,6 +2,7 @@ from PyQt6.QtWidgets import QStackedWidget, QWidget, QVBoxLayout, QLabel
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
 
+from UI.resources.stylesheet.stylesheet import BLANK_CONTENT_BACKGROUND, BLANK_CONTENT_LABEL
 from UI.settings.General.Language import language_config
 
 
@@ -41,20 +42,7 @@ class MainContent(QStackedWidget):
         layout.setContentsMargins(0, 150, 0, 0)
         layout.setSpacing(0)
 
-        # Atur gaya untuk background dengan gradien warna pastel
-        page.setStyleSheet("""
-            QWidget {
-                background: qlineargradient(
-                    spread: pad,
-                    x1: 1, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #D3D3D3, 
-                    stop: 0.3 #A9A9A9, 
-                    stop: 0.6 #E6E6E6   
-                );
-                border: none; 
-                padding: 0; 
-            }
-        """)
+        page.setStyleSheet(BLANK_CONTENT_BACKGROUND)
 
         # Tambahkan ikon
         icon_label = QLabel()
@@ -68,13 +56,7 @@ class MainContent(QStackedWidget):
         # Tambahkan teks
         label = QLabel(language_config.UNDER_DEVELOPMENT.format(page_name=page_name))
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setStyleSheet("""
-            color: #555555;
-            font-size: 22px;
-            font-family: Arial, Helvetica, sans-serif;
-            background: transparent; 
-            margin-top: -200px;
-        """)
+        label.setStyleSheet(BLANK_CONTENT_LABEL)
         layout.addWidget(label)
 
         page.setLayout(layout)

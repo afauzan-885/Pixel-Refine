@@ -33,7 +33,7 @@ class Sidebar(QWidget):
                 border: none;
                 color: #333;
                 font-size: 18px;
-                padding: 10px;
+                padding: 5px;
             }
             QPushButton:hover {
                 background-color: #b2bec3;
@@ -103,5 +103,5 @@ class Sidebar(QWidget):
         self.setFixedWidth(
             self.expanded_width if self.sidebar_expanded else self.collapsed_width
         )
-        self.toggle_button.setText("☰" if self.sidebar_expanded else "←")
+        self.toggle_button.setText("☰" if self.sidebar_expanded else "➡")
         self.toggle_callback()

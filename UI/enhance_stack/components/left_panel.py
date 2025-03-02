@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import (
     QScrollArea
 )
 from PyQt6.QtCore import Qt
+from UI.resources.stylesheet.stylesheet import DROPDOWN_BOX
 from UI.settings.General.Language import language_config
 from UI.enhance_stack.components.parameter_pages import ParameterPages
 
@@ -147,48 +148,12 @@ class LeftPanel(QWidget):
         for item, tooltip in zip(items, tooltips):
             dropdown.addItem(item)
             dropdown.setItemData(dropdown.count() - 1, tooltip, Qt.ItemDataRole.ToolTipRole)
-        dropdown.setStyleSheet(self.get_dropdown_style())
+        dropdown.setStyleSheet(DROPDOWN_BOX)
         section_layout.addWidget(label)
         section_layout.addWidget(dropdown)
         section_widget = QWidget()
         section_widget.setLayout(section_layout)
         return dropdown, section_widget
-
-    def get_dropdown_style(self) -> str:
-        """
-        Mengembalikan style sheet untuk QComboBox.
-        """
-        return """
-            QComboBox {
-                background-color: #F0EEEE;
-                padding: 5px;
-                border-radius: 5px;
-                max-width: 200px;
-            }
-            QComboBox::drop-down {
-                background-color: #ffffff;
-                border-radius: 5px;
-                border: 1px solid #d1d1d1;
-            }
-            QComboBox::down-arrow {
-                image: url('UI/resources/icon/menu-options.png');
-                width: 24px;
-                height: 24px;
-            }
-            QComboBox:hover {
-                background-color: #9EFFE2;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #ffffff;
-                border: 1px solid #d1d1d1;
-                selection-background-color: #7B9AC8;
-                selection-color: white;
-                padding: 5px;
-            }
-            QComboBox QAbstractItemView::item {
-                margin-bottom: 5px;
-            }
-        """
 
     def handle_dropdown_change(self, index: int) -> None:
         """

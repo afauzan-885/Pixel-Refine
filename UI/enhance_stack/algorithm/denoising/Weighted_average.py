@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 
+from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
 
 class ThreadWorker(QThread):
@@ -298,18 +299,7 @@ def running_weighted_average(parent=None):
     progress_bar = QProgressBar()
     progress_bar.setRange(0, 100)
     progress_bar.setValue(0)
-    progress_bar.setStyleSheet("""
-        QProgressBar {
-            border: 1px solid #bbb;
-            border-radius: 5px;
-            background-color: #f0f0f0;
-            text-align: center;
-        }
-        QProgressBar::chunk {
-            background-color: #80C4E9;
-            width: 20px;
-        }
-    """)
+    progress_bar.setStyleSheet(PROGRESS_BAR)
     layout.addWidget(progress_bar)
 
     # Inisialisasi thread worker

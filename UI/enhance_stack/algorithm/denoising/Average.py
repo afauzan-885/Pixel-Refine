@@ -6,40 +6,9 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 
+from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
+from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
-
-class ThreadWorker(QThread):
-    progress_updated = pyqtSignal(int, str)  # Sinyal untuk memperbarui progress
-    finished = pyqtSignal()  # Sinyal untuk menandakan selesai
-    error_occurred = pyqtSignal(str)  # Sinyal untuk menandakan error
-
-    def __init__(self, db_path):
-        super().__init__()
-        self.db_path = db_path
-        self.stop_requested = False  # Flag untuk menghentikan thread
-
-    def run(self):
-        try:
-            def update_progress(progress, message):
-                self.progress_updated.emit(progress, message)
-
-
-            # Fungsi callback untuk mengecek status stop
-            def is_stop_requested():
-                return self.stop_requested
-
-            # Jalankan proses ORB dengan callback
-            main(self.db_path, update_progress, stop_requested=is_stop_requested)
-            self.finished.emit()
-        except Exception as e:
-            print(f"Error terjadi: {str(e)}")  # Menampilkan pesan error di konsol
-            self.error_occurred.emit(str(e))  # Mengirim pesan error melalui sinyal
-
-
-    def stop(self):
-        self.stop_requested = True  # Set flag agar thread berhenti
-
-
 
 class AverageAlgorithm:
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
@@ -212,7 +181,6 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=5):
                     batch_images, accumulated_image, total_weights, reference_image, stop_requested
                 )
 
-
                 # Update progress per image
                 for i in range(len(batch_images)):
                     processed_images += 1
@@ -266,23 +234,11 @@ def running_average(parent=None):
     progress_bar = QProgressBar()
     progress_bar.setRange(0, 100)
     progress_bar.setValue(0)
-    progress_bar.setStyleSheet("""
-        QProgressBar {
-            border: 1px solid #bbb;
-            border-radius: 5px;
-            background-color: #f0f0f0;
-            text-align: center;
-        }
-        QProgressBar::chunk {
-            background-color: #80C4E9;
-            width: 20px;
-        }
-    """)
+    progress_bar.setStyleSheet(PROGRESS_BAR)
     layout.addWidget(progress_bar)
 
     # Inisialisasi thread worker
-    worker = ThreadWorker("pixel_refine_database.db")
-
+    worker = ImageProcessingMultiThreading(main, "pixel_refine_database.db")
     # Menghubungkan signal worker ke fungsi pembaruan UI
     worker.progress_updated.connect(lambda progress, message: (
         progress_bar.setValue(progress),

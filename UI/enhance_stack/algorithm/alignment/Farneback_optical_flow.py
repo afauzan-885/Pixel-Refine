@@ -7,37 +7,11 @@ import concurrent.futures
 from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
 
-from PyQt6.QtCore import QThread, pyqtSignal, Qt
+from PyQt6.QtCore import Qt
 
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import load_images_from_paths
+from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
-
-class ThreadWorker(QThread):
-    progress_updated = pyqtSignal(int, str)  # Sinyal untuk memperbarui progress
-    finished = pyqtSignal()  # Sinyal untuk menandakan selesai
-    error_occurred = pyqtSignal(str)  # Sinyal untuk menandakan error
-
-    def __init__(self, db_path):
-        super().__init__()
-        self.db_path = db_path
-        self.stop_requested = False  # Flag untuk menghentikan thread
-
-    def run(self):
-        try:
-            def update_progress(current, total, message):
-                progress = int((current / total) * 100)
-                self.progress_updated.emit(progress, message)
-
-            # Callback untuk mengecek apakah proses dihentikan
-            def is_stop_requested():
-                return self.stop_requested
-
-            main(self.db_path, update_progress, stop_requested=is_stop_requested)
-            self.finished.emit()
-        except Exception as e:
-            self.error_occurred.emit(str(e))
-
-    def stop(self):
-        self.stop_requested = True  # Set flag agar thread berhenti
 
 class FarnebackAlgorithm:
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
@@ -57,19 +31,6 @@ class FarnebackAlgorithm:
             cursor = conn.cursor()
             cursor.execute("SELECT path FROM images")
             return [row[0] for row in cursor.fetchall()]
-
-    def load_images_from_paths(self, image_paths, stop_requested=None):
-        """
-        Loads images from a list of image paths.
-        """
-        images = []
-        for image_path in image_paths:
-            if stop_requested and stop_requested():  # Cek apakah harus berhenti
-                break
-            image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-            if image is not None:
-                images.append(image)
-        return images
 
     def resize_image(self, image, size):
         """
@@ -185,7 +146,6 @@ class FarnebackAlgorithm:
         
         return flow_full
 
-
     def compensate_motion(self, base_image_16bit, flow, image_id, config_filename=None):
         print(language_config.COMPENSATE_MOTION_STATUS.format(image_id=image_id))
         h, w = base_image_16bit.shape[:2]
@@ -247,7 +207,7 @@ def main(db_path, update_progress=None, batch_size=5, stop_requested=None):
             start_idx = batch_idx * batch_size + 1
             end_idx = min((batch_idx + 1) * batch_size + 1, total_images)
             batch_paths = image_paths[start_idx:end_idx]
-            batch_images = processor.load_images_from_paths(batch_paths, stop_requested)
+            batch_images = load_images_from_paths(batch_paths, stop_requested)
             if not batch_images:
                 continue
 
@@ -312,8 +272,7 @@ def running_farneback_optical_flow(parent=None):
     """)
     layout.addWidget(progress_bar)
 
-    worker = ThreadWorker("pixel_refine_database.db")
-
+    worker = ImageProcessingMultiThreading(main, "pixel_refine_database.db")
     worker.progress_updated.connect(lambda progress, message: (
         progress_bar.setValue(progress),
         label.setText(message)

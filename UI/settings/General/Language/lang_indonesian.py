@@ -184,7 +184,8 @@ FARNEBACK_PYRAMID_SCALE_DESCRIPTION = """Skala Piramida adalah faktor yang menen
 - Nilai yang lebih kecil (misalnya, antara 0.10 dan 0.5) menghasilkan perbedaan ukuran yang lebih besar antar level,
   yang dapat mempercepat komputasi namun mungkin mengurangi ketepatan dalam menangkap detail gerak halus.
 
-- Nilai yang mendekati 1.00 menghasilkan perubahan ukuran yang minimal antar level, memungkinkan penangkapan detail gerak yang lebih akurat,
+- Nilai yang mendekati 1.00 menghasilkan perubahan ukuran yang minimal antar level,
+  memungkinkan penangkapan detail gerak yang lebih akurat,
   namun memerlukan waktu komputasi yang lebih lama.
 
 Sesuaikan nilai ini sesuai kebutuhan Anda untuk mencapai keseimbangan antara kecepatan pemrosesan dan akurasi deteksi gerak.
@@ -286,15 +287,18 @@ Nilai yang direkomendasikan: 4.
 AKAZE_LAYER_LABEL = "Jumlah Lapisan per Oktav"
 AKAZE_LAYER_DESCRIPTION = """Lapisan per Oktav menentukan jumlah sub-level dalam setiap oktav.
 
-Jumlah lapisan yang lebih tinggi memberikan resolusi ruang skala yang lebih halus, yang dapat meningkatkan deteksi fitur pada berbagai skala, namun juga meningkatkan komputasi.
+Jumlah lapisan yang lebih tinggi memberikan resolusi ruang skala yang lebih halus, 
+dapat meningkatkan deteksi fitur pada berbagai skala, namun juga meningkatkan komputasi.
 
 Nilai yang direkomendasikan: 4.
 """
 
 AKAZE_RATIO_LABEL = "Rasio Threshold"
-AKAZE_RATIO_DESCRIPTION = """Rasio Threshold digunakan selama proses pencocokan untuk membandingkan jarak antara kecocokan terbaik dengan kecocokan terbaik kedua dari deskriptor titik kunci.
+AKAZE_RATIO_DESCRIPTION = """Rasio Threshold digunakan selama proses pencocokan untuk membandingkan jarak 
+antara kecocokan terbaik dengan kecocokan terbaik kedua dari deskriptor titik kunci.
 
-Rasio yang lebih rendah (mendekati 0.50) berarti hanya kecocokan yang sangat khas dan tidak ambigu yang diterima, sedangkan rasio yang lebih tinggi (mendekati 1.00) memungkinkan lebih banyak kecocokan namun mungkin menyertakan positif palsu.
+Rasio yang lebih rendah (mendekati 0.50) berarti hanya kecocokan yang sangat khas dan tidak ambigu yang diterima, 
+sedangkan rasio yang lebih tinggi (mendekati 1.00) memungkinkan lebih banyak kecocokan namun mungkin menyertakan positif palsu.
 
 Nilai yang direkomendasikan: 0.80.
 """
