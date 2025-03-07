@@ -7,13 +7,11 @@ import concurrent.futures
 from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 from PyQt6.QtCore import Qt
 import h5py
-from PyQt6.QtCore import QThread, pyqtSignal
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import compute_images_multithreaded, compute_padding, estimate_transformation, process_with_cropping, process_without_cropping, transform_corners
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import compute_global_crop, crop_image, save_to_hdf5
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
-from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
-        
+
 class AKAZEAlgorithm:
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
         self.db_path = db_path
@@ -26,12 +24,25 @@ class AKAZEAlgorithm:
 
     def get_all_image_paths(self):
         """
-        Mengambil semua path gambar yang tersimpan dalam database.
+        Retrieves all image paths stored in the database.
         """
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT path FROM images")
             return [row[0] for row in cursor.fetchall()]
+
+    def load_images_from_paths(self, image_paths, stop_requested=None):
+        """
+        Loads images from a list of image paths.
+        """
+        images = []
+        for image_path in image_paths:
+            if stop_requested and stop_requested():
+                break
+            image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+            if image is not None:
+                images.append(image)
+        return images
 
     @staticmethod
     def load_akaze_config(config_filename=None):
@@ -43,8 +54,9 @@ class AKAZEAlgorithm:
             "akaze_nOctaves": 4,
             "akaze_nOctaveLayers": 4,
             "ratio_threshold": 0.75,
+            "transformation": "affine",
             "keep_edges": True,
-            "enable_cropping": False
+            "enable_cropping": True
         }
 
         if config_filename is None:
@@ -58,133 +70,301 @@ class AKAZEAlgorithm:
             print("Error loading AKAZE configuration:", e)
             return default_config
 
-    def calculate_global_motion(self, base_image, target_image, config_filename=None, 
-                              num_blocks=(3, 3), overlap=20, stop_requested=None):
+
+    def calculate_global_motion(self, base_image, target_image, config_filename=None, num_blocks=(3, 3), overlap=20, stop_requested=None):
         """
-        Menghitung keypoints dan deskriptor menggunakan AKAZE dengan membagi gambar 
-        menjadi blok-blok secara paralel.
+        Menghitung keypoints dan deskriptor menggunakan AKAZE dengan membagi gambar menjadi blok-blok secara paralel.
         
         Parameter:
-        - num_blocks: tuple (blocks_x, blocks_y) untuk pembagian gambar.
-        - overlap: jumlah piksel overlap di sekeliling tiap blok.
+          - num_blocks: tuple (blocks_x, blocks_y) untuk pembagian gambar.
+          - overlap: jumlah piksel overlap di sekeliling tiap blok.
         """
         if stop_requested and stop_requested():
-            print("Proses dihentikan sebelum menghitung gerakan global (parallel AKAZE).")
+            print("Proses dihentikan sebelum menghitung gerakan global (parallel).")
             return None, None
 
-        # Ambil konfigurasi AKAZE
         akaze_config = self.load_akaze_config(config_filename)
-
         # Konversi gambar ke grayscale
         base_gray = cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY)
         target_gray = cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY)
 
-        # Definisikan fungsi extractor untuk AKAZE dengan parameter dari konfigurasi
-        def akaze_extractor(roi):
+        h, w = base_gray.shape
+        blocks_x, blocks_y = num_blocks
+        block_w = w // blocks_x
+        block_h = h // blocks_y
+
+        # Himpunan untuk menggabungkan hasil dari tiap blok
+        keypoints_base_all = []
+        descriptors_base_all = None  # akan berupa numpy array
+        keypoints_target_all = []
+        descriptors_target_all = None
+
+        def compute_features_block(x, y, bw, bh, overlap):
+            # Tentukan ROI dengan tambahan overlap
+            roi_x_start = max(0, x - overlap)
+            roi_y_start = max(0, y - overlap)
+            roi_x_end = min(w, x + bw + overlap)
+            roi_y_end = min(h, y + bh + overlap)
+
+            roi_base = base_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+            roi_target = target_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+
+            # Buat instance AKAZE untuk blok ini
             akaze = cv2.AKAZE_create(
                 threshold=akaze_config["akaze_threshold"],
                 nOctaves=akaze_config["akaze_nOctaves"],
                 nOctaveLayers=akaze_config["akaze_nOctaveLayers"]
             )
-            return akaze.detectAndCompute(roi, None)
+            kps_base, desc_base = akaze.detectAndCompute(roi_base, None)
+            kps_target, desc_target = akaze.detectAndCompute(roi_target, None)
 
-        # Panggil fungsi utilitas multi-threaded untuk ekstraksi fitur
-        kps_base_all, desc_base_all, kps_target_all, desc_target_all = compute_images_multithreaded(
-            base_gray, target_gray, akaze_extractor, num_blocks, overlap
-        )
+            # Sesuaikan koordinat keypoints agar sesuai dengan posisi asli pada gambar penuh
+            for kp in kps_base:
+                kp.pt = (kp.pt[0] + roi_x_start, kp.pt[1] + roi_y_start)
+            for kp in kps_target:
+                kp.pt = (kp.pt[0] + roi_x_start, kp.pt[1] + roi_y_start)
+            return kps_base, desc_base, kps_target, desc_target
 
-        if desc_base_all is None or desc_target_all is None:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=blocks_x * blocks_y) as executor:
+            futures = []
+            for i in range(blocks_x):
+                for j in range(blocks_y):
+                    x = i * block_w
+                    y = j * block_h
+                    bw = block_w if i < blocks_x - 1 else w - x
+                    bh = block_h if j < blocks_y - 1 else h - y
+                    futures.append(executor.submit(compute_features_block, x, y, bw, bh, overlap))
+            for future in concurrent.futures.as_completed(futures):
+                kps_base, desc_base, kps_target, desc_target = future.result()
+                if desc_base is not None and len(kps_base) > 0:
+                    keypoints_base_all.extend(kps_base)
+                    if descriptors_base_all is None:
+                        descriptors_base_all = desc_base
+                    else:
+                        descriptors_base_all = np.vstack([descriptors_base_all, desc_base])
+                if desc_target is not None and len(kps_target) > 0:
+                    keypoints_target_all.extend(kps_target)
+                    if descriptors_target_all is None:
+                        descriptors_target_all = desc_target
+                    else:
+                        descriptors_target_all = np.vstack([descriptors_target_all, desc_target])
+
+        # Lakukan matching menggunakan BFMatcher pada hasil gabungan dari semua blok
+        if descriptors_base_all is None or descriptors_target_all is None:
             print("Tidak ditemukan deskriptor pada salah satu gambar.")
             return None, None
 
-        # Pencocokan menggunakan BFMatcher dengan knnMatch (k=2) dan uji rasio
         bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-        matches = bf.knnMatch(desc_base_all, desc_target_all, k=2)
+        matches = bf.knnMatch(descriptors_base_all, descriptors_target_all, k=2)
         good_matches = []
         for m, n in matches:
             if m.distance < akaze_config["ratio_threshold"] * n.distance:
                 good_matches.append(m)
 
-        base_points = np.float32([kps_base_all[m.queryIdx].pt for m in good_matches])
-        target_points = np.float32([kps_target_all[m.trainIdx].pt for m in good_matches])
+        base_points = np.float32([keypoints_base_all[m.queryIdx].pt for m in good_matches])
+        target_points = np.float32([keypoints_target_all[m.trainIdx].pt for m in good_matches])
 
         return base_points, target_points
-
-
-    def compensate_motion(self, base_image, base_points, target_points,
-                          transformation_type='homography',
-                          config_filename=None, transformation_matrix=None):
+        
+    def compensate_motion(self, base_image, base_points, target_points, config_filename=None):
         """
-        Apply motion compensation to align an image using the specified transformation.
-        Returns the warped image and padding info (pad_top, pad_left, h, w).
-        If a transformation_matrix is provided, transformation estimation is skipped.
+        Menerapkan kompensasi gerakan menggunakan transformasi untuk menyelaraskan gambar.
         """
-        config = self.load_akaze_config(config_filename)
-        keep_edges = config.get("keep_edges", True)
+        config = self.load_orb_config(config_filename)
+        keep_edges = config["keep_edges"]
+        transformation_type = config["transformation"]
+        ransac_threshold = config["ransacThreshold"]
+
         h, w = base_image.shape[:2]
-        corners = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype=np.float32)
 
-        # Estimate or use the provided transformation matrix.
-        if transformation_matrix is None:
-            transformation_matrix, transformed_corners = estimate_transformation(
-                transformation_type, base_points, target_points, corners
-            )
+        # Hitung matriks transformasi
+        if transformation_type == 'affine':
+            matrix, mask = cv2.estimateAffine2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=ransac_threshold)
+        elif transformation_type in ['similarity', 'euclidean']:
+            matrix, mask = cv2.estimateAffinePartial2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=ransac_threshold)
+        elif transformation_type == 'homography':
+            matrix, mask = cv2.findHomography(target_points, base_points, cv2.RANSAC, ransac_threshold)
         else:
-            transformed_corners = transform_corners(transformation_matrix, corners, transformation_type)
+            raise ValueError(language_config.UNRECOGNIZED_TRANSFORMATION)
 
-        # Compute required padding to avoid clipping.
-        pad_top, pad_left, pad_bottom, pad_right = compute_padding(transformed_corners, h, w)
+        # Pastikan matriks valid
+        if matrix is None:
+            raise ValueError(language_config.FAILED_TO_COMPUTE_TRANSFORMATION)
 
-        # Optionally apply padding to keep image edges.
-        padded_image = (cv2.copyMakeBorder(base_image, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_REFLECT)
-                        if keep_edges else base_image.copy())
-        new_width = w + pad_left + pad_right
-        new_height = h + pad_top + pad_bottom
+        # Hitung batas pergeseran (terlepas dari keep_edges)
+        corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(-1, 1, 2)
 
-        # Warp the image using the appropriate method.
-        if transformation_type in ['affine', 'similarity', 'euclidean']:
-            warped = cv2.warpAffine(padded_image, transformation_matrix, (new_width, new_height), borderMode=cv2.BORDER_REFLECT)
+        if transformation_type == 'homography':
+            transformed_corners = cv2.perspectiveTransform(corners, matrix)
         else:
-            warped = cv2.warpPerspective(padded_image, transformation_matrix, (new_width, new_height), borderMode=cv2.BORDER_REFLECT)
+            transformed_corners = cv2.transform(corners, matrix)
 
-        return warped, (pad_top, pad_left, h, w)
+        transformed_corners = transformed_corners.reshape(-1, 2)
+        min_x, min_y = transformed_corners.min(axis=0)
+        max_x, max_y = transformed_corners.max(axis=0)
 
-def main(db_path, update_progress=None, batch_size=7, stop_requested=None):
+        # print(f"Pergerakan batas: min_x={min_x}, min_y={min_y}, max_x={max_x}, max_y={max_y}")
+
+        # Jika keep_edges = False, langsung terapkan transformasi tanpa padding
+        if not keep_edges:
+            if transformation_type == 'homography':
+                compensated_image = cv2.warpPerspective(base_image, matrix, (w, h), borderMode=cv2.BORDER_CONSTANT)
+            else:
+                compensated_image = cv2.warpAffine(base_image, matrix, (w, h), borderMode=cv2.BORDER_CONSTANT)
+            return compensated_image
+
+        # Jika keep_edges = True, tambahkan padding berdasarkan batas pergeseran
+        pad_x = max(0, int(np.ceil(max_x - w)))
+        pad_y = max(0, int(np.ceil(max_y - h)))
+        pad_left = max(0, int(np.ceil(-min_x))) 
+        pad_top = max(0, int(np.ceil(-min_y)))  
+
+        pad = max(pad_x, pad_y, pad_left, pad_top)
+
+        padded_image = cv2.copyMakeBorder(base_image, pad, pad, pad, pad, cv2.BORDER_REFLECT)
+
+        if transformation_type == 'homography':
+            compensated_padded = cv2.warpPerspective(padded_image, matrix, (padded_image.shape[1], padded_image.shape[0]), borderMode=cv2.BORDER_REFLECT)
+        else:
+            compensated_padded = cv2.warpAffine(padded_image, matrix, (padded_image.shape[1], padded_image.shape[0]), borderMode=cv2.BORDER_REFLECT)
+
+        compensated_image = compensated_padded[pad:pad+h, pad:pad+w] if keep_edges else compensated_padded
+
+        return compensated_image
+
+def main(db_path, update_progress=None, batch_size=12, stop_requested=None, config_filename=None):
+    # Buat objek processor dan baca konfigurasi ORB
     processor = AKAZEAlgorithm(db_path)
-    transformation_dir = os.path.join("database", "align", "transformation")
-    os.makedirs(transformation_dir, exist_ok=True)
-
+    config = processor.load_orb_config(config_filename)
+    enable_cropping = config.get("enable_cropping", True)
+    transformation_type = config.get("transformation", "affine")
+    
     image_paths = processor.get_all_image_paths()
     if not image_paths:
-        print("Gambar tidak ditemukan.")
+        print(language_config.RUN_IMAGE_NOT_FOUND)
         return
-
-    # Load dan validasi base image
+    
     base_image_path = image_paths[0]
     base_image = cv2.imread(base_image_path, cv2.IMREAD_UNCHANGED)
     if base_image is None:
-        print("Gagal memuat base image.")
+        print(language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
         return
-
-    h, w = base_image.shape[:2]
-    remaining_paths = image_paths[1:]
+    
     total_images = len(image_paths)
-    batch_count = (len(remaining_paths) - 1) // batch_size + 1
+    total_batches = (total_images - 1) // batch_size + 1
 
-    # Ambil konfigurasi dan ambil nilai enable_cropping dari konfigurasi
-    config = processor.load_akaze_config()
-    enable_cropping = config.get("enable_cropping", False)
-
+    # Total progress mencakup phase 1 (estimasi transformasi) dan phase 2 (aplikasi transformasi & penyimpanan)
+    total_steps = total_images * 2
+    current_step = 0
+    
+    transform_folder = os.path.join("database", "align", "transformasi")
+    os.makedirs(transform_folder, exist_ok=True)
+    
+    # -----------------------
+    # Phase 1: Estimasi transformasi dan simpan ke disk
+    # -----------------------
+    for batch_idx in range(total_batches):
+        if stop_requested and stop_requested():
+            break
+        
+        start_idx = batch_idx * batch_size + 1
+        end_idx = min((batch_idx + 1) * batch_size + 1, total_images)
+        batch_paths = image_paths[start_idx:end_idx]
+        batch_images = processor.load_images_from_paths(batch_paths)
+        if not batch_images:
+            continue
+        
+        for i, target_image in enumerate(batch_images, start=start_idx):
+            if stop_requested and stop_requested():
+                break
+            
+            info_message = language_config.RUN_IMAGE_PROCESSING.format(i=i, total_images=total_images)
+            print(info_message)
+            
+            base_points, target_points = processor.calculate_global_motion(base_image, target_image)
+            if base_points is None or target_points is None:
+                print(language_config.FAIL_COMPENSATE_MOTION_PROCESS.format(i=i))
+                # Tetap naikkan progress walaupun transformasi gagal
+                current_step += 1
+                if update_progress:
+                    update_progress(current_step, total_steps, language_config.FAIL_COMPENSATE_MOTION_PROCESS.format(i))
+                continue
+            
+            transform_file_path = os.path.join(transform_folder, f"transform_{i}.npy")
+            np.save(transform_file_path, (base_points, target_points))
+            
+            current_step += 1
+            if update_progress:
+                update_progress(current_step, total_steps, info_message)
+    
+    # -----------------------
+    # Hitung crop bounds jika diaktifkan
+    crop_bounds = None
     if enable_cropping:
-        process_with_cropping(
-            processor, base_image, remaining_paths, batch_count, batch_size,
-            h, w, transformation_dir, update_progress, total_images, stop_requested
-        )
-    else:
-        process_without_cropping(
-            processor, base_image, remaining_paths, batch_count, batch_size,
-            transformation_dir, update_progress, total_images, stop_requested
-        )
+        h, w = base_image.shape[:2]
+        # Misalnya, fungsi compute_global_crop() mengembalikan (crop_x, crop_y, crop_w, crop_h)
+        crop_bounds = compute_global_crop(transform_folder, total_images, w, h, transformation_type=transformation_type)
+        if crop_bounds is None:
+            print(language_config.FAILED_TO_COMPUTE_CROP)
+            return
+        np.save(os.path.join(transform_folder, "crop.npy"), crop_bounds)
+        # print(f"Crop bounds dihitung: {crop_bounds}")
+    
+    # -----------------------
+    # Phase 2: Terapkan transformasi dan simpan ke HDF5
+    # -----------------------
+    with h5py.File(processor.hdf5_path, "w") as h5f:
+        # Terapkan cropping pada gambar referensi jika diaktifkan
+        if enable_cropping:
+            base_image = crop_image(base_image, crop_bounds)
+        h5f.create_dataset("image_0", data=base_image)
+        
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = []
+            
+            for batch_idx in range(total_batches):
+                if stop_requested and stop_requested():
+                    break
+                
+                start_idx = batch_idx * batch_size + 1
+                end_idx = min((batch_idx + 1) * batch_size + 1, total_images)
+                batch_paths = image_paths[start_idx:end_idx]
+                batch_images = processor.load_images_from_paths(batch_paths)
+                if not batch_images:
+                    continue
+                
+                for i, target_image in enumerate(batch_images, start=start_idx):
+                    if stop_requested and stop_requested():
+                        break
+                    
+                    transform_file_path = os.path.join(transform_folder, f"transform_{i}.npy")
+                    if not os.path.exists(transform_file_path):
+                        print(language_config.FAIL_LOAD_TRANSFORMATION_MATRIX_FILE.format(i))
+                        current_step += 1
+                        if update_progress:
+                            update_progress(current_step, total_steps, language_config.FAIL_LOAD_TRANSFORMATION_MATRIX_FILE.format(i))
+                        continue
+                    
+                    base_points, target_points = np.load(transform_file_path, allow_pickle=True)
+                    compensated_image = processor.compensate_motion(target_image, base_points, target_points)
+                    
+                    if enable_cropping:
+                        compensated_image = crop_image(compensated_image, crop_bounds)
+                    
+                    dataset_name = f"image_{i}"
+                    futures.append(executor.submit(save_to_hdf5, h5f, dataset_name, compensated_image))
+                    
+                    current_step += 1
+                    if update_progress:
+                        update_progress(current_step, total_steps, language_config.PROGRESS_SAVING_CALCULATE_AND_COMPENSATE_MOTION.format(i, total_images))
+            
+            for future in futures:
+                future.result()
+    
+    # if update_progress:
+    #     update_progress(total_steps, total_steps, "Penyimpanan gambar yang telah di-align selesai.")
+    # print("Tahap 2 selesai: Semua gambar telah disimpan ke HDF5.")
 
 def running_akaze(parent=None):
     """
@@ -208,7 +388,18 @@ def running_akaze(parent=None):
     progress_bar = QProgressBar()
     progress_bar.setRange(0, 100)
     progress_bar.setValue(0)
-    progress_bar.setStyleSheet(PROGRESS_BAR)
+    progress_bar.setStyleSheet("""
+        QProgressBar {
+            border: 1px solid #bbb;
+            border-radius: 5px;
+            background-color: #f0f0f0;
+            text-align: center;
+        }
+        QProgressBar::chunk {
+            background-color: #80C4E9;
+            width: 20px;
+        }
+    """)
     layout.addWidget(progress_bar)
 
     # Inisialisasi thread worker

@@ -134,6 +134,7 @@ class ImageProcessingMultiThreading(QThread):
             self.worker_function(self.db_path, update_progress, stop_requested=is_stop_requested)
             self.finished.emit()
         except Exception as e:
+            print(f"Error terjadi: {str(e)}")
             self.error_occurred.emit(str(e))
 
     def stop(self):

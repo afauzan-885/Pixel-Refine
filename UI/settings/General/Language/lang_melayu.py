@@ -1,6 +1,10 @@
 # Kandungan Utama
 UNDER_DEVELOPMENT = "{page_name} menu dalam pembangunan"
 
+# Sidebar
+SETTINGS_SIDEBAR_LABEL= "Tetapan"
+HDR_SIDEBAR_LABEL= "Rekonstruksi HDR"
+
 # Halaman Susun Penambahbaikan
 TOPBAR_IMPORT_BUTTON_TEXT = "Import Imej"
 TOPBAR_DELETE_BUTTON_TEXT = "Padam Imej"
@@ -19,6 +23,8 @@ HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED = "Ralat", "Tiada fail yang sah unt
 HANDLE_DELETE_BUTTON_IMAGE_NO_VALID_SELECTED = "Ralat", "Tiada imej dipilih."
 HANDLE_DELETE_BUTTON_IMAGE_CONFIRM_DELETE = "Adakah anda pasti mahu memadam {count} imej yang dipilih?"
 
+PREVIEW_PANEL_LABEL = "Panel Pratonton"
+
 UPDATE_PREVIEW_PANEL_MESSAGE_LOADING_IMAGE = "Memproses imej, sila tunggu..."
 UPDATE_PREVIEW_PANEL_MESSAGE_NO_IMAGE_SELECTED = "Tiada imej dipilih."
 
@@ -30,7 +36,6 @@ ON_IMPORT_COMPLETE_MESSAGES = "{successful_images} imej telah berjaya diimport."
 PROCESS_ALGORITHM_PROCESS_SKIPPED = "Tiada algoritma dipilih untuk pemprosesan"
 
 # PARAMETER STACKING 
-RUN_PROCESS_STOPPED = "Proses dihentikan"
 NOT_IMAGE_PREVIEW = "Tiada imej tersedia"
 MODULE_NOT_IMPLEMENT = "Modul belum dilaksanakan."
 NO_ALIGNMENT_PROCESS = "Adakah anda pasti tidak mahu penjajaran imej terlebih dahulu?"
@@ -41,7 +46,6 @@ LOAD_IMAGES_FROM_PATHS_LOAD_FAILED = "Gagal memuatkan imej"
 SAVE_TO_HDF5_ALIGNED_SAVING = "Menyimpan imej yang telah dijajarkan ke HDF5"
 SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING = "Imej ke-{index} telah disimpan dalam HDF5."
 SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED = "Semua imej telah berjaya disimpan ke HDF5."
-RESIZING_IMAGES_PROCESS = "Melaraskan saiz imej"
 
 RUN_IMAGE_NOT_FOUND = "Tiada imej ditemui dalam pangkalan data."
 RUN_REFERENCE_IMAGE_NOT_FOUND = "Imej rujukan tidak dapat dimuatkan dari {image_paths[0]}."
@@ -51,16 +55,24 @@ RUN_IMAGE_PROCESSING_FAILED = "Gagal memuatkan imej {i} dari {image_paths[i]}."
 RUN_IMAGE_PROCESSING_SAVING = "Imej ke-{i} telah disimpan dalam HDF5."
 RUN_IMAGE_PROCESSING_FINISHED = "Proses Selesai."
 
+FAIL_CALCULATE_GLOBAL_MOTION_PROCESS = "Pengiraan gerakan tidak dapat dikira untuk imej ke-{}"
+FAIL_COMPENSATE_MOTION_PROCESS = "Anggaran gagal pada imej {}"
+
+UNRECOGNIZED_TRANSFORMATION = "Jenis transformasi tidak dikenali."
+FAILED_TO_COMPUTE_TRANSFORMATION ="Transformasi tidak dapat dikira."
+FAILED_TO_COMPUTE_CROP = "Gagal mengira pemangkasan yang sah. Proses dibatalkan."
+
+FAIL_LOAD_TRANSFORMATION_MATRIX_FILE = "Fail matriks transformasi tidak ditemui untuk imej {}"
+PROGRESS_CALCULATE_AND_COMPENSATE_MOTION_PROCESS ="Jajarkan dan pangkas imej {}/{}"
+PROGRESS_SAVING_CALCULATE_AND_COMPENSATE_MOTION ="Menyimpan imej {}/{}"
+
+FAIL_CROPPING_PROCESS ="Pangkasan tidak sah. Pertindihan tidak mencukupi"
+
 CANCEL_PROCESSING = "Adakah anda pasti mahu membatalkan proses?"
 
 RUN_ERROR_STATUS = "Ralat berlaku: {error}"
 RUN_ERROR_MESSAGE = "Ralat berlaku: {error}"
 
-DELETE_DEBUG_IMAGES_STATUS = "Memadam imej debug..."
-DELETE_DEBUG_IMAGES_ONE_BY_ONE = "Memadam imej debug {image_id} satu per satu..."
-DELETE_DEBUG_IMAGES_FINISHED = "Imej debug telah berjaya dipadam."
-
-WINDOW_INITIATION = "Mula..."
 WINDOW_START_PROCESSING = "Memulakan pemprosesan..."
 WINDOW_PROCESSING_COMPLETE = "Selesai!"
 
@@ -68,40 +80,21 @@ WINDOW_PROCESSING_COMPLETE = "Selesai!"
 # Aliran Optik Farneback
 WINDOW_TITLE_FARNEBACK = "Penjajaran Aliran Optik Farneback"
 
-CALCULATE_OPTICAL_FLOW_STATUS = "Mengira aliran optik menggunakan {device}..."
-CALCULATE_OPTICAL_FLOW_FINISHED = "Pengiraan aliran optik telah selesai."
-
 COMPENSATE_MOTION_STATUS = "Melakukan pampasan pergerakan pada imej {image_id}..."
 COMPENSATE_MOTION_FINISHED = "Pampasan pergerakan selesai untuk imej {image_id}."
 
 
 # AKAZE, ORB
 WINDOW_TITLE_AKAZE = "Penjajaran AKAZE"
-ALIGN_IMAGES_STATUS_AKAZE = "Menjajarkan imej {image_id} menggunakan AKAZE..."
-
 WINDOW_TITLE_ORB = "Penjajaran ORB"
-ALIGN_IMAGES_STATUS_ORB = "Menjajarkan imej {image_id} menggunakan ORB..."
-
-ALIGN_IMAGES_CALCULATE_FAILED = "Tiada ciri dikesan dalam sebarang imej untuk {image_id}. Mengembalikan imej asal."
-ALIGN_IMAGES_CALCULATE_FINISHED = "Penjajaran selesai untuk imej {image_id}."
-ALIGN_IMAGES_COMPENSATE_FAILED = "Homografi tidak dapat dikira untuk imej {image_id}. Mengembalikan imej asal."
-ALIGN_IMAGES_MATCHING_FAILED = "Bilangan padanan tidak mencukupi untuk imej {image_id}. Mengembalikan imej asal."
-
 
 # Algoritma Pengurangan Bising
 STACK_IMAGES_FAILED = "Tiada imej untuk diproses."
-STACK_AVERAGE_IMAGES_PROCESS = "Memproses imej {current}/{total}..."
+STACK_IMAGES_PROCESS = "Memproses imej {current}/{total}..."
 
 RUN_IMAGE_PROCESS_STARTED = "Memulakan proses..."
-RUN_IMAGE_PROCESS_LOAD_HDF5 = "Memuatkan imej dari HDF5..."
-RUN_IMAGE_PROCESS_LOAD_PROGRESS = "Memuatkan imej {current}/{total}..."
-
-RUN_IMAGE_PROCESS_LOAD_PATH = "Mengambil senarai imej dari pangkalan data..."
 RUN_IMAGE_PROCESS_LOAD_FAILED = "Tiada imej ditemui dalam pangkalan data."
 RUN_IMAGE_PROCESS_STACK_SUCCESS = "Penyusunan imej selesai! Hasil disimpan di: {output_path}"
-
-WINDOW_PROCESS_SUCCESS = "Proses telah selesai."
-
 
 # Penyusunan Purata, Median, Persamaan
 WINDOW_TITLE_AVERAGE = "Penyusunan Purata"
@@ -111,10 +104,8 @@ WINDOW_TITLE_WEIGHTED_AVERAGE = "Penyusunan Purata Berwajaran"
 WINDOW_TITLE_SIMILARITY = "Penyusunan Persamaan"
 SIMILARITY_MNFR_LOAD_FAILED = "Tiada imej yang disediakan."
 SIMILARITY_MNFR_BIT_REQUIRED = "Imej mesti 8 Bit atau 16 Bit."
-SIMILARITY_MNFR_TILE_SLICE = "Dimensi imej: {height}x{width}, Saiz jubin: {tile_size}"
-SIMILARITY_MNFR_SIZE_FAILED = "Saiz imej {i} tidak sepadan dengan imej rujukan."
-SIMILARITY_MNFR_PROCESS_SUCCESS = "Imej {i}/{count} diproses dengan jayanya."
 SIMILARITY_MNFR_PROCESS_FINISHED = "Penyusunan selesai."
+SIMILARITY_MNFR_PROCESS = "Menyusun imej {} daripada {}..."
 RUN_IMAGE_PROCESS_BATCH_PROGRESS = "Menyusun batch ke {current} daripada {total}"
 
 
@@ -148,17 +139,27 @@ Lebih banyak tahap membolehkan algoritma menangkap perincian pada pelbagai skala
 tetapi tahap yang meningkat juga bermaksud masa pemprosesan yang lebih lama.
 
 Secara amnya, nilai antara 2 dan 4 adalah ideal untuk kebanyakan aplikasi."""
+
 ORB_TRANSFORMATION_LABEL = "Jenis Transformasi"
-ORB_TRANSFORMATION_DESCRIPTION = """Jenis transformasi menentukan kaedah yang digunakan untuk menjajarkan imej.
+ORB_TRANSFORMATION_DESCRIPTION = """Pilih kaedah untuk menjajarkan imej mengikut keperluan anda:
 
 Pilihan yang tersedia termasuk:
-- Homografi: Membenarkan transformasi perspektif, ideal untuk imej yang diambil dari sudut yang berbeza.
-- Afine: Membenarkan pusingan, pengubahan saiz, dan penterjemahan (pergeseran).
-- Persamaan: Hanya membenarkan pusingan, pengubahan saiz seragam, dan penterjemahan, mengekalkan nisbah aspek imej.
-- Euclidean: Hanya membenarkan pusingan dan penterjemahan tanpa pengubahan saiz, menawarkan pilihan yang paling mudah.
+- HOMOGRAFIK: Sesuai untuk foto dengan perbezaan sudut yang agak melampau (cth.: gambar jadual dari atas vs. sisi).
+ Boleh melaraskan kesan "perspektif".
 
-Pilihan transformasi bergantung pada perbezaan antara imej yang hendak dijajarkan.
-Untuk kebanyakan aplikasi, Homografi sering dipilih kerana fleksibilitinya dalam menangani perbezaan perspektif."""
+- Afine: Boleh diputar, diubah saiz (boleh tidak seragam), dan dialihkan imej.
+ Contoh: membetulkan foto senget yang perlu dibesarkan sebahagiannya.
+
+- Persamaan: Hanya benarkan putaran, zum seragam dan sorot.
+ nisbah aspek kekal dikekalkan.
+
+- Euclidean: Yang paling mudah: hanya putar dan alihkan imej tanpa mengubah saiz.
+ Sesuai untuk membetulkan foto yang sedikit condong.
+
+Cadangan Pemilihan:
+- Untuk kebanyakan kes (terutamanya foto dari sudut yang agak melampau), pilih Homography.
+- Jika imej hanya memerlukan pelarasan kedudukan/putaran yang mudah, Euclidean atau Similarity adalah lebih sesuai.
+- Gunakan Afine hanya jika anda memerlukan pelarasan bentuk yang fleksibel tanpa kesan perspektif."""
 ORB_RANSAC_LABEL = "RANSAC Threshold"
 ORB_RANSAC_DESCRIPTION = """RANSAC Threshold menentukan sejauh mana algoritma menapis outlier semasa penjajaran imej.
 
@@ -230,15 +231,6 @@ FARNEBACK_FLAGS_DESCRIPTION = """Bendera adalah parameter pilihan yang membolehk
 
 Pilih bendera yang sesuai jika anda ingin mengoptimumkan keseimbangan antara kelajuan pemprosesan dan kualiti keputusan.
 Nilai disarankan: 0."""
-FARNEBACK_INTERPOLATION_LABEL = "Interpolasi"
-FARNEBACK_INTERPOLATION_DESCRIPTION = """Interpolasi menetapkan kaedah yang digunakan untuk menganggarkan nilai aliran optik antara piksel.
-
-- Kaedah interpolasi berkualiti tinggi (contohnya, linear atau kubik) boleh menghasilkan peralihan pergerakan yang lebih licin.
-- Walau bagaimanapun, kaedah yang lebih kompleks juga boleh meningkatkan masa pengiraan.
-
-Pilih kaedah interpolasi yang seimbang antara kelicinan dan kecekapan pemprosesan.
-Disarankan: Interpolasi Kubik."""
-
 
 # Parameter AKAZE
 AKAZE_PARAMETER_SETTING_LABEL = "Parameter AKAZE"
@@ -273,9 +265,21 @@ tetapi mungkin termasuk padanan palsu.
 
 Nilai disarankan: 0.80."""
 
-KEEP_EDGES_LABEL = "Menyimpan Tepi"
-KEEP_EDGES_DESCRIPTION = """Pilihan ini membenarkan penjajaran imej
-untuk menyimpan ciri tepi imej."""
+KEEP_EDGES_LABEL = """Kekalkan
+Tepi"""
+IGNORE_EDGE_LABEL= """Abaikan Tepi"""
+
+KEEP_EDGES_DESCRIPTION = """Ciri Kekalkan Tepi membolehkan algoritma untuk menjaga tepi gambar
+tetap utuh semasa proses penyelarasan."""
+
+ENABLE_CROP_LABEL = """Aktifkan
+Pemotongan"""
+DISABLE_CROP_LABEL = """Nyahaktifkan 
+Pemotongan"""
+CROP_DESCRIPTION = """Aktifkan Pemotongan untuk membuang
+sempadan gambar yang tidak digunakan"""
+
+
 
 
 APPLY_PARAMETER_BUTTON_TEXT = "Terapkan Tetapan"
@@ -325,3 +329,4 @@ Image Processing On Line, 11, 142-169. https://doi.org/10.5201/ipol.2021.336"""
 
 SETTING_GENERAL_LABEL = "Umum"
 LANGUAGE_LABEL = "Bahasa"
+LANGUAGE_TYPE = "Inggeris", "Indonesia", "Cina Tradisional", "Melayu"

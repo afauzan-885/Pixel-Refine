@@ -5,11 +5,39 @@ import concurrent.futures
 import os
 from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
-from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
+
+class ThreadWorker(QThread):
+    progress_updated = pyqtSignal(int, str)  # Sinyal untuk memperbarui progress
+    finished = pyqtSignal()  # Sinyal untuk menandakan selesai
+    error_occurred = pyqtSignal(str)  # Sinyal untuk menandakan error
+
+    def __init__(self, db_path):
+        super().__init__()
+        self.db_path = db_path
+        self.stop_requested = False  # Flag untuk menghentikan thread
+
+    def run(self):
+        try:
+            def update_progress(progress, message):
+                self.progress_updated.emit(progress, message)
+
+            # Fungsi callback untuk mengecek status stop
+            def is_stop_requested():
+                return self.stop_requested
+
+            # Panggil main untuk menjalankan proses dengan parameter yang benar
+            main(self.db_path, update_progress=update_progress, stop_requested=is_stop_requested)
+            self.finished.emit()
+        except Exception as e:
+            print(f"Error terjadi: {str(e)}")  # Menampilkan pesan error di konsol
+            self.error_occurred.emit(str(e))  # Mengirim pesan error melalui sinyal
+
+    def stop(self):
+        self.stop_requested = True  # Set flag agar thread berhenti
 
 class MedianAlgorithm:
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5", max_workers=None):
@@ -182,7 +210,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4):
         output_path = f"database/stack/{reference_image_name}_median_stack.tiff"
 
         if update_progress:
-            update_progress(0, "Mulai proses pengolahan gambar.")
+            update_progress(0, language_config.WINDOW_START_PROCESSING)
 
         global_hdf5_path = "database/align/aligned_images.h5"
         total_images = len(image_paths)
@@ -196,7 +224,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4):
             with h5py.File(global_hdf5_path, 'r') as h5f:
                 for batch_idx in range(total_batches):
                     if stop_requested and stop_requested():
-                        print("Proses dihentikan oleh pengguna.")
+                        # print("Proses dihentikan oleh pengguna.")
                         break
 
                     batch_keys = list(h5f.keys())[batch_idx * batch_size:(batch_idx + 1) * batch_size]
@@ -210,14 +238,14 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4):
 
                     processed_images += len(batch_images)
                     progress = int((processed_images / total_images) * 100)
-                    message = language_config.STACK_AVERAGE_IMAGES_PROCESS.format(
+                    message = language_config.STACK_IMAGES_PROCESS.format(
                         current=processed_images, total=total_images)
                     if update_progress:
                         update_progress(progress, message)
         else:
             for batch_idx in range(total_batches):
                 if stop_requested and stop_requested():
-                    print("Proses dihentikan oleh pengguna.")
+                    # print("Proses dihentikan oleh pengguna.")
                     break
 
                 start_idx = batch_idx * batch_size
@@ -238,7 +266,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4):
 
                 processed_images += len(batch_images)
                 progress = int((processed_images / total_images) * 100)
-                message = language_config.STACK_AVERAGE_IMAGES_PROCESS.format(
+                message = language_config.STACK_IMAGES_PROCESS.format(
                     current=processed_images, total=total_images)
                 if update_progress:
                     update_progress(progress, message)
@@ -293,7 +321,7 @@ def running_median(parent=None):
     layout.addWidget(progress_bar)
 
     # Inisialisasi thread worker
-    worker = ImageProcessingMultiThreading(main, "pixel_refine_database.db")
+    worker = ThreadWorker("pixel_refine_database.db")
     # Menghubungkan signal worker ke fungsi pembaruan UI
     worker.progress_updated.connect(lambda progress, message: (
         progress_bar.setValue(progress),

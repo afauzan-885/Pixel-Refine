@@ -30,7 +30,6 @@ ON_IMPORT_COMPLETE_MESSAGES = "{successful_images} images have been successfully
 PROCESS_ALGORITHM_PROCESS_SKIPPED = "No algorithm selected for processing"
 
 # PARAMETER STACKING 
-RUN_PROCESS_STOPPED = "Process stopped"
 NOT_IMAGE_PREVIEW = "No images available"
 MODULE_NOT_IMPLEMENT = "Module not yet implemented."
 NO_ALIGNMENT_PROCESS = "Are you sure you don't want image alignment first?."
@@ -55,10 +54,6 @@ CANCEL_PROCESSING = "Are you sure you want to cancel the process?"
 
 RUN_ERROR_STATUS = "An error occurred: {error}"
 RUN_ERROR_MESSAGE = "An error occurred: {error}"
-
-DELETE_DEBUG_IMAGES_STATUS = "Deleting debug images..."
-DELETE_DEBUG_IMAGES_ONE_BY_ONE = "Deleting debug image {image_id}..."
-DELETE_DEBUG_IMAGES_FINISHED = "Debug images have been successfully deleted."
 
 WINDOW_INITIATION = "Start..."
 WINDOW_START_PROCESSING = "Starting processing..."
@@ -92,7 +87,7 @@ ALIGN_IMAGES_MATCHING_FAILED = "Insufficient number of matches for image {image_
 
 # Algorithm Denoising
 STACK_IMAGES_FAILED = "No images to process."
-STACK_AVERAGE_IMAGES_PROCESS = "Processing image {current}/{total}..."
+STACK_IMAGES_PROCESS = "Processing image {current}/{total}..."
 
 RUN_IMAGE_PROCESS_STARTED = "Starting process..."
 RUN_IMAGE_PROCESS_LOAD_HDF5 = "Loading images from HDF5..."

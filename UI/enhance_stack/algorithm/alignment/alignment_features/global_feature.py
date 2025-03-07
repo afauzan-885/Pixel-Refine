@@ -5,6 +5,9 @@ import cv2
 import h5py
 import numpy as np
 
+from UI.settings.General.Language import language_config
+
+
 # ------------------ Load and Saving Process ------------------- #
 def load_images_from_paths(image_paths, stop_requested=None):
     """
@@ -109,292 +112,131 @@ def compute_images_multithreaded(base_gray, target_gray, extractor_func, num_blo
     return keypoints_base_all, descriptors_base_all, keypoints_target_all, descriptors_target_all
 
 # ---------------- Calculate Global Motion Process ---------------- #
+def compute_global_crop(transform_folder, total_images, w, h, transformation_type='homography'):
+    """
+    Menghitung batas cropping global dengan menggunakan batas pergerakan
+    dari setiap transformasi. Fungsi ini mengembalikan koordinat crop global:
+    (crop_x, crop_y, crop_w, crop_h)
+    """
+    # Inisialisasi dengan nilai ekstrem
+    global_min_x =  float('inf')
+    global_min_y =  float('inf')
+    global_max_x = -float('inf')
+    global_max_y = -float('inf')
 
-
-# ------------------ Compensate Motion Process ------------------- #
-def estimate_transformation(transformation_type, base_points, target_points, corners):
-        """
-        Estimate the transformation matrix and transform the image corners based on the given type.
-        """
-        if transformation_type == 'affine':
-            matrix, _ = cv2.estimateAffine2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=5.0)
-            if matrix is None:
-                raise ValueError("Affine transformation estimation failed.")
-            transformed_corners = cv2.transform(np.array([corners]), matrix)[0]
-            return matrix, transformed_corners
-
-        elif transformation_type in ['similarity', 'euclidean']:
-            matrix, _ = cv2.estimateAffinePartial2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=5.0)
-            if matrix is None:
-                raise ValueError("Similarity/Euclidean transformation estimation failed.")
-            if transformation_type == 'euclidean' and not np.isclose(np.linalg.norm(matrix[:2, 0]), np.linalg.norm(matrix[:2, 1])):
-                raise ValueError("Transformation is not Euclidean (scaling detected).")
-            transformed_corners = cv2.transform(np.array([corners]), matrix)[0]
-            return matrix, transformed_corners
-
-        elif transformation_type == 'homography':
-            H, _ = cv2.findHomography(target_points, base_points, cv2.RANSAC, 5.0)
-            if H is None:
-                raise ValueError("Homography estimation failed.")
-            transformed_corners = cv2.perspectiveTransform(np.array([corners]), H)[0]
-            return H, transformed_corners
-
-        else:
-            raise ValueError("Unknown transformation type.")
-
-def transform_corners(transformation_matrix, corners, transformation_type):
-        """
-        Transform the given corners using the provided transformation matrix.
-        """
-        if transformation_type in ['affine', 'similarity', 'euclidean']:
-            return cv2.transform(np.array([corners]), transformation_matrix)[0]
-        elif transformation_type == 'homography':
-            return cv2.perspectiveTransform(np.array([corners]), transformation_matrix)[0]
-        else:
-            raise ValueError("Unknown transformation type.")
-
-def compute_padding(transformed_corners, h, w):
-        """
-        Compute the padding required so that the transformed image is not clipped.
-        """
-        min_x, min_y = np.min(transformed_corners, axis=0).astype(int)
-        max_x, max_y = np.max(transformed_corners, axis=0).astype(int)
-
-        pad_top = max(0, -min_y)
-        pad_left = max(0, -min_x)
-        pad_bottom = max(0, max_y - h)
-        pad_right = max(0, max_x - w)
-        return pad_top, pad_left, pad_bottom, pad_right
-
-# ------------------ Compensate Motion Process ------------------- #
+    # Koordinat sudut asli gambar referensi
+    corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(-1, 1, 2)
     
-# --------------- Main Process -------------- #
-def process_with_cropping(processor, base_image, remaining_paths, batch_count, batch_size,
-                          h, w, transformation_dir, update_progress, total_images, stop_requested):
-    # Phase 1: Estimate transformations and compute cropping offsets
-    aligned_offsets = [(0, 0)]  # Offset for base_image is (0,0)
-    all_pad_tops = [0]
-    all_pad_lefts = [0]
-    image_index = 1
-
-    total_steps = total_images * 2  # Total langkah (kalkulasi + penyimpanan)
-    current_step = 0  # Inisialisasi progress
-
-    for batch_idx in range(batch_count):
-        if stop_requested and stop_requested():
-            break
-
-        start_idx = batch_idx * batch_size
-        end_idx = min((batch_idx + 1) * batch_size, len(remaining_paths))
-        batch_paths = remaining_paths[start_idx:end_idx]
-        batch_images = load_images_from_paths(batch_paths, stop_requested)
-        if not batch_images:
+    for i in range(1, total_images):  # Mulai dari gambar ke-1 (index 0 adalah referensi)
+        transform_file_path = os.path.join(transform_folder, f"transform_{i}.npy")
+        if not os.path.exists(transform_file_path):
             continue
+        
+        base_points, target_points = np.load(transform_file_path, allow_pickle=True)
+        
+        # Perkirakan matriks transformasi
+        if transformation_type == 'homography':
+            matrix, _ = cv2.findHomography(np.array(base_points), np.array(target_points), 0)
+        else:
+            matrix = cv2.estimateAffine2D(np.array(base_points), np.array(target_points))[0]
+        if matrix is None:
+            continue
+        
+        # Transformasikan sudut gambar
+        if transformation_type == 'homography':
+            transformed_corners = cv2.perspectiveTransform(corners, matrix)
+        else:
+            transformed_corners = cv2.transform(corners, matrix)
+        transformed_corners = transformed_corners.reshape(-1, 2)
+        
+        min_xy = transformed_corners.min(axis=0)
+        max_xy = transformed_corners.max(axis=0)
+        min_x, min_y = min_xy
+        max_x, max_y = max_xy
+        
+        # Update batas global
+        global_min_x = min(global_min_x, min_x)
+        global_min_y = min(global_min_y, min_y)
+        global_max_x = max(global_max_x, max_x)
+        global_max_y = max(global_max_y, max_y)
+    
+    # Hitung crop region berdasarkan batas global dan gambar referensi
+    crop_x = int(max(0, np.ceil(-global_min_x)))   # Offset kiri
+    crop_y = int(max(0, np.ceil(-global_min_y)))   # Offset atas
+    crop_w = w - int(np.ceil(global_max_x - w)) - crop_x  # Lebar area yang tersisa
+    crop_h = h - int(np.ceil(global_max_y - h)) - crop_y  # Tinggi area yang tersisa
 
-        for target_image in batch_images:
-            if stop_requested and stop_requested():
-                print("Proses dihentikan oleh pengguna.")
-                break
-
-            base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
-            if base_pts is None or target_pts is None:
-                print(f"Global motion tidak dapat dihitung untuk gambar ke-{image_index}")
-                image_index += 1
-                continue
-
-            _, (pad_top, pad_left, _, _) = processor.compensate_motion(
-                base_image, base_pts, target_pts, transformation_type='homography'
-            )
-
-            transformation_matrix, _ = estimate_transformation(
-                'homography', base_pts, target_pts, np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype=np.float32)
-            )
-
-            if transformation_matrix is None:
-                print(f"Estimasi homografi gagal untuk gambar ke-{image_index}")
-                image_index += 1
-                continue
-
-            # Simpan matriks transformasi
-            transformation_path = os.path.join(transformation_dir, f"transformation_image_{image_index}.npy")
-            np.save(transformation_path, transformation_matrix)
-
-            aligned_offsets.append((pad_top, pad_left))
-            all_pad_tops.append(pad_top)
-            all_pad_lefts.append(pad_left)
-
-            # Update progress saat menyelaraskan dan cropping
-            current_step += 1
-            if update_progress:
-                update_progress(current_step, total_steps, f"Menyelaraskan dan cropping gambar {image_index}/{total_images}")
-
-            image_index += 1
-
-    # Calculate global crop region
-    global_crop_top = max(all_pad_tops)
-    global_crop_left = max(all_pad_lefts)
-    global_crop_bottom = min(offset[0] + h for offset in aligned_offsets)
-    global_crop_right = min(offset[1] + w for offset in aligned_offsets)
-
-    if global_crop_bottom <= global_crop_top or global_crop_right <= global_crop_left:
+    if crop_w <= 0 or crop_h <= 0:
         print("Crop region global tidak valid. Tidak ada overlap yang cukup.")
-        return
-    # Phase 2: Alignment and saving cropped images
-    with h5py.File(processor.hdf5_path, "w", libver="latest") as h5f:
-        cropped_base = base_image[global_crop_top:global_crop_bottom, global_crop_left:global_crop_right]
-        h5f.create_dataset("image_0", data=cropped_base, compression="lzf")
-        print("Gambar 0 disimpan ke dataset image_0.")
+        return None
 
-        image_index = 1
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            futures = []
-            for batch_idx in range(batch_count):
-                if stop_requested and stop_requested():
-                    break
+    return crop_x, crop_y, crop_w, crop_h
 
-                start_idx = batch_idx * batch_size
-                end_idx = min((batch_idx + 1) * batch_size, len(remaining_paths))
-                batch_paths = remaining_paths[start_idx:end_idx]
-                batch_images = load_images_from_paths(batch_paths, stop_requested)
-                if not batch_images:
-                    continue
+def crop_image(image, crop_bounds):
+    """Melakukan cropping pada gambar sesuai batas crop yang diberikan."""
+    crop_x, crop_y, crop_w, crop_h = crop_bounds
+    return image[crop_y:crop_y+crop_h, crop_x:crop_x+crop_w]
 
-                for target_image in batch_images:
-                    if stop_requested and stop_requested():
-                        print("Proses dihentikan oleh pengguna.")
-                        break
-
-                    transformation_path = os.path.join(transformation_dir, f"transformation_image_{image_index}.npy")
-                    if not os.path.exists(transformation_path):
-                        print(f"File transformation matrix tidak ditemukan untuk gambar ke-{image_index}")
-                        image_index += 1
-                        continue
-
-                    H = np.load(transformation_path)
-                    compensated, _ = processor.compensate_motion(target_image, None, None, transformation_matrix=H)
-                    cropped = compensated[global_crop_top:global_crop_bottom, global_crop_left:global_crop_right]
-                    dataset_name = f"image_{image_index}"
-                    futures.append(executor.submit(save_to_hdf5, h5f, dataset_name, cropped))
-
-                    current_step += 1
-                    if update_progress:
-                        update_progress(current_step, total_steps, f"Menyimpan gambar {image_index}/{total_images}")
-
-                    image_index += 1
-            
-            for future in futures:
-                future.result()
-
-    if update_progress:
-        update_progress(total_steps, total_steps, "Penyimpanan gambar yang telah di-align selesai.")
-    print("Pemrosesan selesai dan semua gambar telah disimpan ke HDF5.")
-
-def process_without_cropping(processor, base_image, remaining_paths, batch_count, batch_size,
-                               transformation_dir, update_progress, total_images, stop_requested):
-    # Phase 1: Estimate transformations
-    image_index = 1
-    total_steps = total_images * 2  # Total langkah (kalkulasi + penyimpanan)
-    current_step = 0  # Inisialisasi progress
-
-    for batch_idx in range(batch_count):
-        if stop_requested and stop_requested():
-            break
-
-        start_idx = batch_idx * batch_size
-        end_idx = min((batch_idx + 1) * batch_size, len(remaining_paths))
-        batch_paths = remaining_paths[start_idx:end_idx]
-        batch_images = load_images_from_paths(batch_paths, stop_requested)
-        if not batch_images:
-            continue
-
-        for target_image in batch_images:
-            if stop_requested and stop_requested():
-                print("Proses dihentikan oleh pengguna.")
-                break
-
-            base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
-            if base_pts is None or target_pts is None:
-                print(f"Global motion tidak dapat dihitung untuk gambar ke-{image_index}")
-                image_index += 1
-                continue
-
-            # Definisikan corners sebagai array float32 dengan bentuk (4,2)
-            corners = np.array([[0, 0],
-                                [base_image.shape[1] - 1, 0],
-                                [base_image.shape[1] - 1, base_image.shape[0] - 1],
-                                [0, base_image.shape[0] - 1]], dtype=np.float32)
-
-            transformation_matrix, _ = estimate_transformation(
-                'homography', base_pts, target_pts, corners
-            )
-
-            if transformation_matrix is None:
-                print(f"Estimasi homografi gagal untuk gambar ke-{image_index}")
-                image_index += 1
-                continue
-
-            # Simpan matriks transformasi
-            transformation_path = os.path.join(transformation_dir, f"transformation_image_{image_index}.npy")
-            np.save(transformation_path, transformation_matrix)
-
-            # Update progress
-            current_step += 1
-            if update_progress:
-                update_progress(current_step, total_steps, f"Menyelaraskan gambar {image_index}/{total_images}")
-
-            image_index += 1
-
-    # Phase 2: Apply transformation and save images without cropping
-    with h5py.File(processor.hdf5_path, "w", libver="latest") as h5f:
-        h5f.create_dataset("image_0", data=base_image, compression="lzf")
-        print("Gambar 0 disimpan ke dataset image_0.")
-
-        image_index = 1
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            futures = []
-            for batch_idx in range(batch_count):
-                if stop_requested and stop_requested():
-                    break
-
-                start_idx = batch_idx * batch_size
-                end_idx = min((batch_idx + 1) * batch_size, len(remaining_paths))
-                batch_paths = remaining_paths[start_idx:end_idx]
-                batch_images = load_images_from_paths(batch_paths, stop_requested)
-                if not batch_images:
-                    continue
-
-                for target_image in batch_images:
-                    if stop_requested and stop_requested():
-                        print("Proses dihentikan oleh pengguna.")
-                        break
-
-                    transformation_path = os.path.join(transformation_dir, f"transformation_image_{image_index}.npy")
-                    if not os.path.exists(transformation_path):
-                        print(f"File transformation matrix tidak ditemukan untuk gambar ke-{image_index}")
-                        image_index += 1
-                        continue
-
-                    H = np.load(transformation_path)
-                    # Langsung terapkan warping tanpa padding
-                    compensated = cv2.warpPerspective(target_image, H, 
-                                                      (target_image.shape[1], target_image.shape[0]))
-
-                    dataset_name = f"image_{image_index}"
-                    futures.append(executor.submit(save_to_hdf5, h5f, dataset_name, compensated))
-
-                    current_step += 1
-                    if update_progress:
-                        update_progress(current_step, total_steps, f"Menyimpan gambar {image_index}/{total_images}")
-
-                    image_index += 1
-            
-            for future in futures:
-                future.result()
-
-    if update_progress:
-        update_progress(total_steps, total_steps, "Penyimpanan gambar yang telah di-align selesai.")
-    print("Pemrosesan selesai dan semua gambar telah disimpan ke HDF5.")
-    
 # ------------------------------ Main Process ---------------------------------- #
 ## ----------------  Feature-based Alignment ---------------- ##
 
+
+## ---------------- Optical Flow-based Alignment ---------------- ##
+def compute_optical_flow_images_multithreaded(base_gray, target_gray, process_func, num_blocks=(3, 3), overlap_ratio=0.3, use_gpu=False):
+    """
+    Membagi gambar menjadi blok-blok dan memprosesnya secara paralel menggunakan fungsi yang diberikan.
+    
+    Parameters:
+      - base_gray: gambar grayscale untuk citra dasar.
+      - target_gray: gambar grayscale untuk citra target.
+      - process_func: fungsi yang menerima ROI gambar dan mengembalikan hasil komputasi.
+      - num_blocks: tuple (blocks_x, blocks_y) untuk pembagian blok.
+      - overlap_ratio: persentase overlap relatif terhadap ukuran blok.
+      - use_gpu: apakah menggunakan UMat untuk OpenCV GPU processing.
+    
+    Mengembalikan:
+      - Matriks hasil komputasi (misalnya optical flow)
+    """
+    h, w = base_gray.shape if not use_gpu else base_gray.get().shape
+    blocks_x, blocks_y = num_blocks
+    block_w = w // blocks_x
+    block_h = h // blocks_y
+    
+    result_full = np.zeros((h, w, 2), dtype=np.float32)
+    
+    def process_block(x, y, bw, bh):
+        overlap_x = int(bw * overlap_ratio)
+        overlap_y = int(bh * overlap_ratio)
+        
+        roi_x_start = max(0, x - overlap_x)
+        roi_y_start = max(0, y - overlap_y)
+        roi_x_end = min(w, x + bw + overlap_x)
+        roi_y_end = min(h, y + bh + overlap_y)
+        
+        if use_gpu:
+            roi_base = base_gray.get()[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+            roi_target = target_gray.get()[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+        else:
+            roi_base = base_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+            roi_target = target_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+        
+        result_block = process_func(roi_base, roi_target)
+        
+        offset_x = x - roi_x_start
+        offset_y = y - roi_y_start
+        h_block, w_block, _ = result_block.shape
+        result_full[y:y+h_block, x:x+w_block, :] = result_block
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=blocks_x * blocks_y) as executor:
+        futures = []
+        for i in range(blocks_x):
+            for j in range(blocks_y):
+                x = i * block_w
+                y = j * block_h
+                bw = block_w if i < blocks_x - 1 else w - x
+                bh = block_h if j < blocks_y - 1 else h - y
+                futures.append(executor.submit(process_block, x, y, bw, bh))
+        
+        concurrent.futures.wait(futures)
+    
+    return result_full

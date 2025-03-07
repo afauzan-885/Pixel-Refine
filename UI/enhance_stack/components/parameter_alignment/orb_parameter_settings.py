@@ -95,15 +95,26 @@ def get_orb_page():
     # Buat layout horizontal untuk menampung kedua toggle button
     toggles_layout = QHBoxLayout()
     
+    transformation_label = QLabel(language_config.ORB_TRANSFORMATION_LABEL)
+    transformation_label.setToolTip(language_config.ORB_TRANSFORMATION_DESCRIPTION)
+    transformation_label.setFont(get_default_font(10, QFont.Weight.Bold))
+    layout.addWidget(transformation_label)
+    
+    transformation_combo = QComboBox()
+    transformation_combo.addItems(["homography", "affine", "similarity", "euclidean"])
+    transformation_combo.setCurrentText(orb_config["transformation"])
+    transformation_combo.setStyleSheet(DROPDOWN_BOX)
+    layout.addWidget(transformation_combo)
+    
     # Toggle button untuk keep_edges
     keep_edges_button = QToolButton()
     keep_edges_button.setCheckable(True)
     keep_edges_button.setChecked(orb_config.get("keep_edges", True))
-    keep_edges_button.setText("Keep Edges" if orb_config.get("keep_edges", True) else "Ignore Edges")
+    keep_edges_button.setText(language_config.KEEP_EDGES_LABEL if orb_config.get("keep_edges", True) else language_config.IGNORE_EDGE_LABEL)
     keep_edges_button.setFont(get_default_font(10, QFont.Weight.Bold))
     keep_edges_button.setToolTip(language_config.KEEP_EDGES_DESCRIPTION)
     keep_edges_button.setStyleSheet(TOGGLE_BUTTON)
-    keep_edges_button.toggled.connect(lambda state: keep_edges_button.setText("Keep Edges" if state else "Ignore Edges"))
+    keep_edges_button.toggled.connect(lambda state: keep_edges_button.setText(language_config.KEEP_EDGES_LABEL if state else language_config.IGNORE_EDGE_LABEL))
     
     toggles_layout.addWidget(keep_edges_button)
     
@@ -111,14 +122,14 @@ def get_orb_page():
     enable_cropping_button = QToolButton()
     enable_cropping_button.setCheckable(True)
     enable_cropping_button.setChecked(orb_config.get("enable_cropping", False))
-    enable_cropping_button.setText("Enable Crop" if orb_config.get("enable_cropping", False) else "Disable Crop")
+    enable_cropping_button.setText(language_config.ENABLE_CROP_LABEL if orb_config.get("enable_cropping", False) else language_config.DISABLE_CROP_LABEL)
     enable_cropping_button.setFont(get_default_font(10, QFont.Weight.Bold))
-    enable_cropping_button.setToolTip("Enable or disable image cropping during processing")
+    enable_cropping_button.setToolTip(language_config.CROP_DESCRIPTION)
     enable_cropping_button.setStyleSheet(TOGGLE_BUTTON)
     
     # Logika: jika enable_cropping aktif, maka keep_edges disetel ke False dan dinonaktifkan
     def on_enable_cropping_toggled(state):
-        enable_cropping_button.setText("Enable Crop" if state else "Disable Crop")
+        enable_cropping_button.setText(language_config.ENABLE_CROP_LABEL if state else language_config.DISABLE_CROP_LABEL)
         if state:
             keep_edges_button.setChecked(False)
             keep_edges_button.setEnabled(False)
@@ -140,6 +151,7 @@ def get_orb_page():
             "scaleFactor": sliders[language_config.ORB_SCALEFACTOR_LABEL].value() / 10.0,
             "nlevels": sliders[language_config.ORB_NLEVELS_LABEL].value(),
             "ransacThreshold": sliders[language_config.ORB_RANSAC_LABEL].value() / 10.0,
+            "transformation": transformation_combo.currentText(),
             "keep_edges": keep_edges_button.isChecked(),
             "enable_cropping": enable_cropping_button.isChecked()  # Simpan nilai enable_cropping
         }

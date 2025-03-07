@@ -1,343 +1,311 @@
 # Main Content
-UNDER_DEVELOPMENT = "{page_name} 菜单正在开发中"
+UNDER_DEVELOPMENT = "功能頁面「{page_name}」開發中，敬請期待"
 
-# Enhance Stack Page
-TOPBAR_IMPORT_BUTTON_TEXT = "导入图像"
-TOPBAR_DELETE_BUTTON_TEXT = "删除图像"
+# Sidebar
+SETTINGS_SIDEBAR_LABEL= "設定"
+HDR_SIDEBAR_LABEL= "HDR 重建"
 
-PROGRESS_SECTION_PROCESS_BUTTON_TEXT = "开始处理"
-PROGRESS_SECTION_SAVE_BUTTON_TEXT = "另存为"
+# Main Content
+TOPBAR_IMPORT_BUTTON_TEXT = "匯入圖片"
+TOPBAR_DELETE_BUTTON_TEXT = "刪除圖片"
 
-HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION = "图像文件 (*.jpg; *.jpeg; *.png; *.bmp; *.tif; *.tiff)"
-HANDLE_IMPORT_BUTTON_IMAGE_PATH = "选择图像"
-HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE = "重复文件"
-HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE_MESSAGE = "{count} 个文件已存在于数据库中，将被跳过。"
-HANDLE_IMPORT_BUTTON_IMAGE_SELECTED = "已选格式"
-HANDLE_IMPORT_BUTTON_IMAGE_DOMINANT = "{count} 个格式为 '{format}' 的文件将被导入。"
-HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED = "错误", "没有有效的文件可导入。"
+PROGRESS_SECTION_PROCESS_BUTTON_TEXT = "開始處理"
+PROGRESS_SECTION_SAVE_BUTTON_TEXT = "另存新檔"
 
-HANDLE_DELETE_BUTTON_IMAGE_NO_VALID_SELECTED = "错误", "未选择任何图像。"
-HANDLE_DELETE_BUTTON_IMAGE_CONFIRM_DELETE = "确定要删除 {count} 个已选图像吗？"
+HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION = "圖片格式 (*.jpg *.jpeg *.png *.bmp *.tif *.tiff)"
+HANDLE_IMPORT_BUTTON_IMAGE_PATH = "選擇圖片"
+HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE = "重複圖片"
+HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE_MESSAGE = "已跳過 {count} 張重複圖片"
+HANDLE_IMPORT_BUTTON_IMAGE_SELECTED = "已選格式"
+HANDLE_IMPORT_BUTTON_IMAGE_DOMINANT = "即將匯入 {count} 張「{format}」格式圖片"
+HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED = "錯誤", "未選擇有效圖片"
 
-UPDATE_PREVIEW_PANEL_MESSAGE_LOADING_IMAGE = "正在处理图像，请稍候..."
-UPDATE_PREVIEW_PANEL_MESSAGE_NO_IMAGE_SELECTED = "未选择任何图像。"
+HANDLE_DELETE_BUTTON_IMAGE_NO_VALID_SELECTED = "錯誤", "未選擇圖片"
+HANDLE_DELETE_BUTTON_IMAGE_CONFIRM_DELETE = "確認刪除選取的 {count} 張圖片？"
 
-UPDATE_PROGRESS_BAR_STATUS = "{value}% （剩余 {images_left} 个处理）"
+PREVIEW_PANEL_LABEL = "預覽面板"
 
-ON_IMPORT_COMPLETE_STATUS = "导入完成"
-ON_IMPORT_COMPLETE_MESSAGES = "{successful_images} 个图像已成功导入。"
+UPDATE_PREVIEW_PANEL_MESSAGE_LOADING_IMAGE = "圖片處理中，請稍候..."
+UPDATE_PREVIEW_PANEL_MESSAGE_NO_IMAGE_SELECTED = "未選取圖片"
 
-PROCESS_ALGORITHM_PROCESS_SKIPPED = "未选择任何处理算法"
+UPDATE_PROGRESS_BAR_STATUS = "已完成 {value}%（剩餘 {images_left} 項）"
+
+ON_IMPORT_COMPLETE_STATUS = "匯入完成"
+ON_IMPORT_COMPLETE_MESSAGES = "成功匯入 {successful_images} 張圖片"
+
+PROCESS_ALGORITHM_PROCESS_SKIPPED = "未選擇處理演算法"
 
 # PARAMETER STACKING 
-RUN_PROCESS_STOPPED = "处理已停止"
-NOT_IMAGE_PREVIEW = "没有可用的图像"
-MODULE_NOT_IMPLEMENT = "模块尚未实现。"
-NO_ALIGNMENT_PROCESS = "确定不先进行图像对齐吗？"
+NOT_IMAGE_PREVIEW = "無預覽圖片"
+MODULE_NOT_IMPLEMENT = "功能模組未實裝"
+NO_ALIGNMENT_PROCESS = "確定不進行影像預對齊處理？"
 
 # General message
-LOAD_IMAGES_FROM_PATHS_LOAD_FAILED = "加载图像失败"
+LOAD_IMAGES_FROM_PATHS_LOAD_FAILED = "圖片載入失敗"
 
-SAVE_TO_HDF5_ALIGNED_SAVING = "正在将对齐的图像保存到 HDF5"
-SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING = "第 {index} 张图像已存储到 HDF5。"
-SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED = "所有图像已成功保存到 HDF5。"
-RESIZING_IMAGES_PROCESS = "调整图像大小"
+SAVE_TO_HDF5_ALIGNED_SAVING = "儲存已對齊圖片"
+SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING = "第 {index} 張圖片已儲存"
+SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED = "所有圖片儲存完成"
 
-RUN_IMAGE_NOT_FOUND = "数据库中未找到图像。"
-RUN_REFERENCE_IMAGE_NOT_FOUND = "无法从 {image_paths[0]} 加载参考图像。"
-RUN_SAVING_REFERENCE_IMAGE = "正在将参考图像保存到 HDF5。"
-RUN_IMAGE_PROCESSING = "正在处理第 {i} 张图像，共 {total_images} 张..."
-RUN_IMAGE_PROCESSING_FAILED = "无法从 {image_paths[i]} 加载第 {i} 张图像。"
-RUN_IMAGE_PROCESSING_SAVING = "第 {i} 张图像已保存到 HDF5。"
-RUN_IMAGE_PROCESSING_FINISHED = "处理完成。"
+RUN_IMAGE_NOT_FOUND = "資料庫中找不到圖片"
+RUN_REFERENCE_IMAGE_NOT_FOUND = "無法從 {image_paths[0]} 載入參考圖"
+RUN_SAVING_REFERENCE_IMAGE = "參考圖儲存中"
+RUN_IMAGE_PROCESSING = "正在處理第 {i} 張（共 {total_images} 張）..."
+RUN_IMAGE_PROCESSING_FAILED = "無法載入第 {i} 張圖片：{image_paths[i]}"
+RUN_IMAGE_PROCESSING_SAVING = "第 {i} 張圖片已儲存"
+RUN_IMAGE_PROCESSING_FINISHED = "處理完成"
 
-CANCEL_PROCESSING = "确定要取消处理吗？"
+FAIL_CALCULATE_GLOBAL_MOTION_PROCESS = "第 {} 張圖片全域運動計算失敗"
+FAIL_COMPENSATE_MOTION_PROCESS = "第 {} 張圖片運動補償失敗"
 
-RUN_ERROR_STATUS = "发生错误：{error}"
-RUN_ERROR_MESSAGE = "发生错误：{error}"
+UNRECOGNIZED_TRANSFORMATION = "无法识别的转换类型。"
+FAILED_TO_COMPUTE_TRANSFORMATION ="无法计算转换。"
+FAILED_TO_COMPUTE_CROP = "无法计算有效裁剪。进程中止。"
 
-DELETE_DEBUG_IMAGES_STATUS = "正在删除调试图像..."
-DELETE_DEBUG_IMAGES_ONE_BY_ONE = "正在删除调试图像 {image_id}..."
-DELETE_DEBUG_IMAGES_FINISHED = "调试图像已成功删除。"
+FAIL_LOAD_TRANSFORMATION_MATRIX_FILE = "第 {} 張圖片轉換矩陣檔案遺失"
+PROGRESS_CALCULATE_AND_COMPENSATE_MOTION_PROCESS ="影像對齊與裁切中（{}/{}）"
+PROGRESS_SAVING_CALCULATE_AND_COMPENSATE_MOTION ="儲存影像中（{}/{}）"
 
-WINDOW_INITIATION = "开始..."
-WINDOW_START_PROCESSING = "开始处理..."
-WINDOW_PROCESSING_COMPLETE = "完成！"
+FAIL_CROPPING_PROCESS ="裁切失敗：重疊區域不足"
 
+CANCEL_PROCESSING = "確定要中止處理程序？"
+
+RUN_ERROR_STATUS = "錯誤發生：{error}"
+RUN_ERROR_MESSAGE = "錯誤訊息：{error}"
+
+WINDOW_START_PROCESSING = "開始處理..."
+WINDOW_PROCESSING_COMPLETE = "處理完成！"
 
 # Farneback Optical Flow
-WINDOW_TITLE_FARNEBACK = "Farneback 光流对齐"
+WINDOW_TITLE_FARNEBACK = "Farneback 光流對齊演算法"
 
-CALCULATE_OPTICAL_FLOW_STATUS = "正在使用 {device} 计算光流..."
-CALCULATE_OPTICAL_FLOW_FINISHED = "光流计算完成。"
-
-COMPENSATE_MOTION_STATUS = "正在对图像 {image_id} 进行运动补偿..."
-COMPENSATE_MOTION_FINISHED = "图像 {image_id} 的运动补偿已完成。"
-
+COMPENSATE_MOTION_STATUS = "正在補償第 {image_id} 張圖片運動..."
+COMPENSATE_MOTION_FINISHED = "第 {image_id} 張圖片運動補償完成"
 
 # AKAZE, ORB
-WINDOW_TITLE_AKAZE = "AKAZE 对齐"
-ALIGN_IMAGES_STATUS_AKAZE = "正在使用 AKAZE 对图像 {image_id} 进行对齐..."
-
-WINDOW_TITLE_ORB = "ORB 对齐"
-ALIGN_IMAGES_STATUS_ORB = "正在使用 ORB 对图像 {image_id} 进行对齐..."
-
-ALIGN_IMAGES_CALCULATE_FAILED = "在图像 {image_id} 中未检测到任何特征。返回原始图像。"
-ALIGN_IMAGES_CALCULATE_FINISHED = "图像 {image_id} 对齐完成。"
-ALIGN_IMAGES_COMPENSATE_FAILED = "无法为图像 {image_id} 计算单应性矩阵。返回原始图像。"
-ALIGN_IMAGES_MATCHING_FAILED = "图像 {image_id} 的匹配数量不足。返回原始图像。"
-
+WINDOW_TITLE_AKAZE = "AKAZE 特徵對齊"
+WINDOW_TITLE_ORB = "ORB 特徵對齊"
 
 # Algorithm Denoising
-STACK_IMAGES_FAILED = "没有可处理的图像。"
-STACK_AVERAGE_IMAGES_PROCESS = "正在处理图像 {current}/{total}..."
+STACK_IMAGES_FAILED = "無可用處理圖片"
+STACK_IMAGES_PROCESS = "處理進度（{current}/{total}）..."
 
-RUN_IMAGE_PROCESS_STARTED = "开始处理..."
-RUN_IMAGE_PROCESS_LOAD_HDF5 = "正在从 HDF5 加载图像..."
-RUN_IMAGE_PROCESS_LOAD_PROGRESS = "正在加载图像 {current}/{total}..."
-
-RUN_IMAGE_PROCESS_LOAD_PATH = "正在从数据库获取图像列表..."
-RUN_IMAGE_PROCESS_LOAD_FAILED = "数据库中未找到图像。"
-RUN_IMAGE_PROCESS_STACK_SUCCESS = "图像堆叠完成！结果已保存至：{output_path}"
-
-WINDOW_PROCESS_SUCCESS = "处理已完成。"
+RUN_IMAGE_PROCESS_STARTED = "程序啟動中..."
+RUN_IMAGE_PROCESS_LOAD_FAILED = "資料庫中找不到圖片"
+RUN_IMAGE_PROCESS_STACK_SUCCESS = "影像堆疊完成！結果已儲存至：{output_path}"
 
 # Average, Median, Similarity Stacking
-WINDOW_TITLE_AVERAGE = "平均堆叠"
-WINDOW_TITLE_MEDIAN = "中值堆叠"
-WINDOW_TITLE_WEIGHTED_AVERAGE = "加权平均堆叠"
+WINDOW_TITLE_AVERAGE = "平均值堆疊"
+WINDOW_TITLE_MEDIAN = "中位數堆疊"
+WINDOW_TITLE_WEIGHTED_AVERAGE = "加權平均堆疊"
 
-WINDOW_TITLE_SIMILARITY = "相似性堆叠"
-SIMILARITY_MNFR_LOAD_FAILED = "未提供图像。"
-SIMILARITY_MNFR_BIT_REQUIRED = "图像必须为 8 位或 16 位。"
-SIMILARITY_MNFR_TILE_SLICE = "图像尺寸：{height}x{width}，图块大小：{tile_size}"
-SIMILARITY_MNFR_SIZE_FAILED = "图像 {i} 的尺寸与参考图像不匹配。"
-SIMILARITY_MNFR_PROCESS_SUCCESS = "图像 {i}/{count} 处理成功。"
-SIMILARITY_MNFR_PROCESS_FINISHED = "堆叠完成。"
-RUN_IMAGE_PROCESS_BATCH_PROGRESS = "批处理堆叠：{current} / {total}"
+WINDOW_TITLE_SIMILARITY = "相似度堆疊"
+SIMILARITY_MNFR_LOAD_FAILED = "未提供輸入圖片"
+SIMILARITY_MNFR_BIT_REQUIRED = "圖片需為 8bit 或 16bit 格式"
+SIMILARITY_MNFR_PROCESS_FINISHED = "堆疊處理完成"
+SIMILARITY_MNFR_PROCESS = "堆疊處理中{}/{}"
+RUN_IMAGE_PROCESS_BATCH_PROGRESS = "批次堆疊進度（{current}/{total}）"
 
 # Super Resolution
-WINDOW_TITLE_INTERPOLATION = "插值超分辨率"
+WINDOW_TITLE_INTERPOLATION = "插值超解析度"
 
 # ------------ Parameter Setting Algorithm --------------------- #
-DEFAULT_PARAMETER_SETTING_LABEL = "选择一个算法以查看参数设置。"
+DEFAULT_PARAMETER_SETTING_LABEL = """請選擇演算法以檢視參數"""
 
 # ORB Parameters
-ORB_PARAMETER_SETTING_LABEL = "ORB 参数"
-ORB_NFEATURES_LABEL = "特征数量"
-ORB_NFEATURES_DESCRIPTION = """特征数量表示图像中可识别的细节数量。
+ORB_PARAMETER_SETTING_LABEL = "ORB 參數設定"
+ORB_NFEATURES_LABEL = "特徵點數量"
+ORB_NFEATURES_DESCRIPTION = """控制演算法可偵測的影像細節特徵數量
 
-更多的特征使算法能够识别更多细节，从而实现更精确的图像对齐。
-然而，检测更多特征会增加计算时间。
+- 數值越高：可識別更多細微特徵，提升對齊精度，但增加運算時間
+- 建議範圍：一般場景 500-1500，高精度需求 2500-5000"""
 
-对于大多数应用，通常 500 到 1500 之间的值就足够了。
-对于要求非常高的精度，可以选择 2500 到 5000 之间的值以提高精度。"""
+ORB_SCALEFACTOR_LABEL = "縮放係數"
+ORB_SCALEFACTOR_DESCRIPTION = """控制影像金字塔的縮放比例層級
 
-ORB_SCALEFACTOR_LABEL = "缩放因子"
-ORB_SCALEFACTOR_DESCRIPTION = """缩放因子决定了图像在处理过程中逐步下采样的速度。
+- 接近 1.0：多層次細微縮放，精度高但速度慢
+- 較大數值：快速縮放層級，運算快但可能遺失細節
+- 建議範圍：1.2-1.5"""
 
-- 接近 1.0 的值意味着图像会被逐步缩小（步骤更多），从而能够检测到更精细的细节，但需要更长时间。
-- 较高的值则会更快速地下采样图像，处理速度更快，但可能会遗漏一些细微的细节。
+ORB_NLEVELS_LABEL = "金字塔層級數"
+ORB_NLEVELS_DESCRIPTION = """設定影像金字塔的層級數量
 
-常用值范围为 1.2 至 1.5。"""
+- 層級越多：可捕捉多尺度特徵，適合尺寸多變的影像
+- 層級越少：運算速度越快
+- 建議值：2-4 層"""
 
-ORB_NLEVELS_LABEL = "层数"
-ORB_NLEVELS_DESCRIPTION = """层数表示用于特征检测的图像金字塔中的层数。
+ORB_TRANSFORMATION_LABEL = "變換類型"
+ORB_TRANSFORMATION_DESCRIPTION = """選擇最適合您需求的影像對齊方式：
 
-更多的层数使算法能够捕捉到不同尺度下的细节，这对于尺寸各异的图像很有帮助，
-但层数增加也意味着处理时间延长。
+可用選項：
+- 【單應變換】HOMOGRAPHI
+  適用拍攝角度差異較大的情況（例如：從上方和側面拍攝的桌子照片）
+  可調整透視效果模擬3D立體感
 
-对于大多数应用，2 到 4 之间的值是理想的。"""
+- 【仿射變換】AFFINE
+  支援旋轉、非等比縮放和平移操作
+  範例：修正傾斜照片並局部放大特定區域
 
-ORB_TRANSFORMATION_LABEL = "变换类型"
-ORB_TRANSFORMATION_DESCRIPTION = """变换类型决定了用于图像对齐的方法。
+- 【相似變換】SIMILARITY
+  僅允許旋轉、等比例縮放和平移
+  保持原始比例不變形（如商標圖案保真）
 
-可选项包括：
-- 单应性（Homography）：允许透视变换，适用于从不同角度拍摄的图像。
-- 仿射（Affine）：允许旋转、缩放和平移（位移）。
-- 相似（Similarity）：只允许旋转、均匀缩放和平移，保持图像的宽高比。
-- 欧式（Euclidean）：只允许旋转和平移，不进行缩放，提供最简单的选项。
+- 【歐式變換】EUCLIDEAN
+  最基礎調整：僅旋轉與平移，不改變尺寸
+  適合微調輕微偏移的照片
 
-选择哪种变换取决于待对齐图像之间的差异。
-对于大多数应用，通常选择单应性，因为它在处理透视差异方面具有灵活性。"""
+選用建議：
+✓ 多數情況推薦單應變換（特別是多角度拍攝素材）
+✓ 簡單的位置/角度修正優先選歐式或相似變換
+✓ 仿射變換僅在需要彈性形變調整時使用"""
 
-ORB_RANSAC_LABEL = "RANSAC 阈值"
-ORB_RANSAC_DESCRIPTION = """RANSAC 阈值决定了算法在图像对齐过程中筛选离群值的严格程度。
+ORB_RANSAC_LABEL = "RANSAC 閾值"
+ORB_RANSAC_DESCRIPTION = """控制特徵匹配的容錯閾值
 
-- 较低的值（例如 1-2）会实施更严格的筛选，可能会丢弃一些关键特征。
-- 较高的值（例如 4-5）则对离群值更宽容，允许使用更多特征，但可能会降低对齐精度。
-
-通常，1 到 3 之间的值就足够了，这取决于数据中的噪声水平。"""
+- 較低值 (1-3)：嚴格過濾異常值，精度高但可能遺失有效特徵
+- 較高值 (4-5)：寬鬆匹配，特徵點多但可能包含誤匹配
+- 建議範圍：1-3（依影像雜訊程度調整）"""
 
 # Farneback Optical Flow
-FARNEBACK_PARAMETER_SETTING_LABEL = "Farneback 参数"
+FARNEBACK_PARAMETER_SETTING_LABEL = "Farneback 參數設定"
 
-FARNEBACK_PYRAMID_SCALE_LABEL = "金字塔比例"
-FARNEBACK_PYRAMID_SCALE_DESCRIPTION = """金字塔比例是指在金字塔的每一层中图像被缩小的比例因子。
+FARNEBACK_PYRAMID_SCALE_LABEL = "金字塔縮放率"
+FARNEBACK_PYRAMID_SCALE_DESCRIPTION = """控制影像金字塔各層級的縮放比例
 
-- 该值决定了图像从一层到下一层缩小的幅度。
-  例如，如果该值为 0.5，则每一层的大小将是上一层的一半。
+- 較小值 (0.1-0.5)：大幅縮減影像尺寸，運算快但精度低
+- 接近 1.0：輕微縮放，精度高但速度慢
+- 建議值：0.5"""
 
-- 较小的值（例如介于 0.10 和 0.5 之间）会导致各层之间的尺寸差异更大，
-  这可以加快计算速度，但可能降低捕捉细微运动细节的准确性。
+FARNEBACK_LEVELS_LABEL = "金字塔層數"
+FARNEBACK_LEVELS_DESCRIPTION = """設定影像金字塔的總層級數
 
-- 接近 1.00 的值会使各层之间的尺寸变化最小，从而更精确地捕捉运动细节，
-  但需要更长的计算时间。
+- 層數越多：可檢測多尺度運動，適用複雜大範圍位移
+- 層數越少：運算速度越快
+- 建議範圍：1-10（預設值 3）"""
 
-根据您的需求调整此值，以在处理速度和运动检测准确性之间取得平衡。
-推荐值：0.5。"""
+FARNEBACK_WIN_SIZE_LABEL = "運算視窗尺寸"
+FARNEBACK_WIN_SIZE_DESCRIPTION = """控制光流計算的局部區域大小
 
-FARNEBACK_LEVELS_LABEL = "层数"
-FARNEBACK_LEVELS_DESCRIPTION = """层数决定了用于光流计算的图像金字塔中的层数。
+- 較大視窗：運動估算穩定，適合全域運動
+- 較小視窗：敏感於局部運動，但易受雜訊影響
+- 建議值：15"""
 
-- 更多层数可以使算法在不同尺度下检测运动，这在图像运动复杂或覆盖范围较大时非常有利。
-- 但是，增加层数也会增加计算时间。
+FARNEBACK_ITERATIONS_LABEL = "迭代次數"
+FARNEBACK_ITERATIONS_DESCRIPTION = """設定每層金字塔的光流計算迭代次數
 
-通常使用 3 作为基准值，但您可以根据应用需求将其设置为 1 到 10 之间的任意值。
-推荐值：3。"""
+- 次數越多：結果越精確，耗時增加
+- 建議值：3"""
 
-FARNEBACK_WIN_SIZE_LABEL = "窗口大小"
-FARNEBACK_WIN_SIZE_DESCRIPTION = """窗口大小是用于计算光流的像素区域（窗口）的尺寸。
+FARNEBACK_POLY_N_LABEL = "多項式展開階數"
+FARNEBACK_POLY_N_DESCRIPTION = """控制像素鄰域的多項式擬合複雜度
 
-- 较大的窗口通过在更宽的区域内平均信息，能产生更稳定、平滑的结果。
-- 然而，如果窗口太大，可能会掩盖细小的运动细节。
+- 數值越大：運動場估算更平滑，細節敏感度降低
+- 常用值：5 或 7"""
 
-选择一个在平滑性和对细节敏感度之间取得平衡的值。
-推荐值：15。"""
+FARNEBACK_POLY_SIGMA_LABEL = "高斯平滑係數"
+FARNEBACK_POLY_SIGMA_DESCRIPTION = """控制前置高斯濾波的強度
 
-FARNEBACK_ITERATIONS_LABEL = "迭代次数"
-FARNEBACK_ITERATIONS_DESCRIPTION = """迭代次数指定了在每个金字塔层上光流计算被细化的次数。
+- 較高值：有效抑制雜訊，但可能模糊運動細節
+- 建議值：1.2"""
 
-- 更多的迭代会产生更准确的光流结果。
-- 然而，增加迭代次数也会增加计算时间。
+FARNEBACK_FLAGS_LABEL = "運算模式標誌"
+FARNEBACK_FLAGS_DESCRIPTION = """特殊計算模式旗標
 
-选择一个在提高准确性的同时不会显著降低处理速度的值。
-推荐值：3。"""
+- 通常保持預設值 0 即可
+- 進階使用者可依需求調整"""
 
-FARNEBACK_POLY_N_LABEL = "多项式展开"
-FARNEBACK_POLY_N_DESCRIPTION = """多项式展开（poly_n）定义了用于通过多项式展开估计运动的像素邻域的大小。
+# AKAZE Parameters
+AKAZE_PARAMETER_SETTING_LABEL = "AKAZE 參數設定"
 
-- 此值决定了计算中使用多少周围的像素数据。
-- 较大的值会产生更平滑的估计，但可能降低对细小运动的敏感度。
+AKAZE_THRESHOLD_LABEL = "特徵閾值"
+AKAZE_THRESHOLD_DESCRIPTION = """控制特徵點檢測靈敏度
 
-常用的值通常为 5 或 7，具体取决于所需的细节和稳定性水平。
-推荐值：5 或 7。"""
+- 較低值：檢測更多特徵點（含雜訊）
+- 較高值：僅保留顯著特徵
+- 建議值：30"""
 
-FARNEBACK_POLY_SIGMA_LABEL = "多项式 Sigma"
-FARNEBACK_POLY_SIGMA_DESCRIPTION = """多项式 Sigma 控制在执行多项式展开之前所应用的平滑程度。
+AKAZE_OCTAVE_LABEL = "尺度空間層級"
+AKAZE_OCTAVE_DESCRIPTION = """設定影像尺度空間的分析層級
 
-- 它代表了用于减少像素数据噪声的高斯滤波器的标准差。
-- 较高的 sigma 值可以帮助降低噪声，但如果设置过高，可能会丢失重要的运动细节。
+- 層級越多：多尺度特徵檢測能力越強
+- 建議值：4"""
 
-调整此值以在降低噪声的同时不牺牲重要的运动细节。
-推荐值：1.2。"""
+AKAZE_LAYER_LABEL = "每層子級數"
+AKAZE_LAYER_DESCRIPTION = """控制每層尺度空間的子層數量
 
-FARNEBACK_FLAGS_LABEL = "标志"
-FARNEBACK_FLAGS_DESCRIPTION = """标志是可选参数，用于启用 Farneback 算法中的特定选项。
+- 子層越多：尺度解析度越高
+- 建議值：4"""
 
-- 例如，一个常用的标志是使用高斯滤波器进行平滑，这可以产生更平滑的光流。
-- 如果不确定，该参数通常保持默认值（0）。
+AKAZE_RATIO_LABEL = "匹配閾值比率"
+AKAZE_RATIO_DESCRIPTION = """控制特徵匹配的嚴格程度
 
-如果您希望在处理速度和结果质量之间取得平衡，请选择适当的标志。
-推荐值：0。"""
+- 較低值 (0.5)：嚴格匹配，錯誤率低
+- 較高值 (0.8)：寬鬆匹配，特徵對應多
+- 建議值：0.8"""
 
-FARNEBACK_INTERPOLATION_LABEL = "插值"
-FARNEBACK_INTERPOLATION_DESCRIPTION = """插值设置了用于估计像素间光流值的方法。
+KEEP_EDGES_LABEL = """保留
+边缘"""
+IGNORE_EDGE_LABEL= """忽略边缘"""
 
-- 高质量的插值方法（例如线性或三次插值）可以产生更平滑的运动过渡。
-- 然而，更复杂的方法也可能增加计算时间。
+KEEP_EDGES_DESCRIPTION = """保留边缘功能允许算法在对齐过程
+中保持图像边缘完整。"""
 
-选择一种在平滑性和处理效率之间取得平衡的插值方法。
-推荐：三次插值。"""
-
-# ---------- AKAZE ------------ #
-AKAZE_PARAMETER_SETTING_LABEL = "AKAZE 参数"
-
-AKAZE_THRESHOLD_LABEL = "阈值"
-AKAZE_THRESHOLD_DESCRIPTION = """阈值参数设定了接受一个关键点所需的最小检测响应。
-
-较低的值允许检测到更多关键点（包括较弱或噪声较大的），
-而较高的值则限制检测仅针对最强的特征。
-
-推荐值：大约 30。"""
-
-AKAZE_OCTAVE_LABEL = "八度数"
-AKAZE_OCTAVE_DESCRIPTION = """该参数指定了尺度空间中的八度数。
-
-每个八度代表原始图像分辨率的一半，使检测器能够捕捉到多尺度的特征。更多的八度数提高了尺度不变性，但也增加了计算时间。
-
-推荐值：4。"""
-
-AKAZE_LAYER_LABEL = "每个八度的层数"
-AKAZE_LAYER_DESCRIPTION = """每个八度的层数定义了每个八度内的子层数量。
-
-更多的层数提供了更细致的尺度空间分辨率，可以改善跨尺度的特征检测，但也会增加计算量。
-
-推荐值：4。"""
-
-AKAZE_RATIO_LABEL = "比率阈值"
-AKAZE_RATIO_DESCRIPTION = """比率阈值在匹配过程中用于比较关键点描述符中最佳匹配与次佳匹配之间的距离。
-
-较低的比率（接近 0.50）意味着只接受非常独特、明确的匹配，而较高的比率（接近 1.00）则允许更多匹配，但可能包含误匹配。
-
-推荐值：0.80。"""
-
-KEEP_EDGES_LABEL = "保留边缘"
-KEEP_EDGES_DESCRIPTION = """保留边缘是一种特殊的对齐方法，它保留了图像的边缘特征。"""
+ENABLE_CROP_LABEL = """启用
+裁剪"""
+DISABLE_CROP_LABEL = """禁用
+裁剪"""
+CROP_DESCRIPTION = """启用裁剪以移除
+未使用的图像边框。"""
 
 
-APPLY_PARAMETER_BUTTON_TEXT = "应用设置"
+
+APPLY_PARAMETER_BUTTON_TEXT = "套用設定"
 
 # ------------ Parameter Setting Algorithm --------------------- #
-
-
 
 
 # Deskripsi untuk Alignment Algorithm
-ALIGNMENT_NAME = "对齐算法"
-NONE_ALIGNMENT_DESCRIPTION = "不进行任何对齐。"
-FARNEBACK_DESCRIPTION = """该算法适用于需要达到像素级精度和准确度的高级对齐。
+ALIGNMENT_NAME = "影像對齊演算法"
+NONE_ALIGNMENT_DESCRIPTION = "不進行影像對齊處理"
+FARNEBACK_DESCRIPTION = """像素級高精度對齊演算法
+優勢：適用精細位移
+限制：對旋轉/透視變形敏感"""
 
-但对于显著的旋转和透视差异，其效果较弱。"""
+AKAZE_DESCRIPTION = """強健特徵對齊演算法
+優勢：耐受旋轉/透視/尺度變化
+限制：精度略低於 Farneback"""
+ORB_DESCRIPTION = """快速特徵對齊演算法
+優勢：運算速度快
+限制：適用輕微位移場景"""
 
+SUPER_RESOLUTION_NAME = "超解析度演算法"
+NONE_SUPER_RESOLUTION_DESCRIPTION = "不進行解析度提升"
+INTERPOLATION_DESCRIPTION = """基礎插值演算法
+優勢：運算快速
+限制：細節增強有限"""
 
+DENOISING_NAME = "降噪演算法"
+NONE_DENOISING_DESCRIPTION = "不進行降噪處理"
+WEIGHTED_AVERAGE_DESCRIPTION = """動態加權平均法
+優勢：處理輕微位移
+限制：大幅移動會產生殘影"""
+                        
+AVERAGE_DESCRIPTION = """快速平均堆疊法
+優勢：靜態場景最佳化
+限制：需配合位移補償使用"""
 
-AKAZE_DESCRIPTION = """该算法对旋转、透视和缩放的较大差异具有较强的鲁棒性。
+MEDIAN_DESCRIPTION = """中位數濾波法
+優勢：有效消除輕微雜訊
+限制：大幅移動會產生瑕疵"""
 
-效果足够好，但在像素级对齐上不如 Farneback。"""
-ORB_DESCRIPTION = """算法速度快，但对于显著差异的情况准确性较低。
-
-适用于差异较小的图像。"""
-
-# Deskripsi untuk Super Resolution
-SUPER_RESOLUTION_NAME = "超分辨率算法"
-NONE_SUPER_RESOLUTION_DESCRIPTION = "不进行超分辨率处理。"
-INTERPOLATION_DESCRIPTION = """一种通过插值提高分辨率的简单算法，能够增加少量细节。"""
-
-# Deskripsi untuk Denoising
-DENOISING_NAME = "去噪算法"
-NONE_DENOISING_DESCRIPTION = "不进行降噪处理。"
-WEIGHTED_AVERAGE_DESCRIPTION = """简化的相似性堆叠方法在处理小幅运动时效果相当不错。
-
-对于小幅运动效果良好，但在较大运动下会产生图像伪影。"""
-
-AVERAGE_DESCRIPTION = """一种非常快速且有效的静态对象和场景堆叠方法。
-
-不适用于运动场景，但可与 Farneback 对齐结合以消除轻微的物体运动。"""
-
-MEDIAN_DESCRIPTION = """堆叠方法快速且有效，对于移动物体也相当不错。
-
-在移除物体运动（最多达 12 帧）方面非常有效，但在此之后运动物体上会出现伪影。"""
-
-SIMILARITY_DESCRIPTION = """一种先进的堆叠算法，在去除物体运动方面非常强大（运动区域无鬼影现象），
-且在高达 90% 的情况下产生极少的伪影。
-
-灵感来源：
-Monod, Antoine, Delon, Julie, & Veit, Thomas. (2021). An Analysis and Implementation of the HDR+ Burst Denoising Method.
-Image Processing On Line, 11, 142-169. https://doi.org/10.5201/ipol.2021.336
-"""
+SIMILARITY_DESCRIPTION = """先進相似度堆疊法
+優勢：85% 無殘影，運動補償優異
+技術來源：
+Monod, Antoine, Delon, Julie, & Veit, Thomas. (2021).
+HDR+ 降噪方法實作與分析
+Image Processing On Line, 11, 142-169. https://doi.org/10.5201/ipol.2021.336""" 
 
 # ------------------ General Settings ------------------ #
-
-SETTING_GENERAL_LABEL = "通用"
-LANGUAGE_LABEL = "语言"
+SETTING_GENERAL_LABEL = "通用設定"
+LANGUAGE_LABEL = "介面語言"
+LANGUAGE_TYPE = "英语", "印尼语", "繁体中文", "马来语"

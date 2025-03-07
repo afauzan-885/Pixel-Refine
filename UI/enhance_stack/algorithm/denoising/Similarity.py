@@ -14,6 +14,35 @@ from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
 
+class ThreadWorker(QThread):
+    progress_updated = pyqtSignal(int, str)  # Sinyal untuk memperbarui progress
+    finished = pyqtSignal()  # Sinyal untuk menandakan selesai
+    error_occurred = pyqtSignal(str)  # Sinyal untuk menandakan error
+
+    def __init__(self, db_path):
+        super().__init__()
+        self.db_path = db_path
+        self.stop_requested = False  # Flag untuk menghentikan thread
+
+    def run(self):
+        try:
+            def update_progress(progress, message):
+                self.progress_updated.emit(progress, message)
+
+            # Fungsi callback untuk mengecek status stop
+            def is_stop_requested():
+                return self.stop_requested
+
+            # Panggil main untuk menjalankan proses dengan parameter yang benar
+            main(self.db_path, update_progress=update_progress, stop_requested=is_stop_requested)
+            self.finished.emit()
+        except Exception as e:
+            print(f"Error terjadi: {str(e)}")  # Menampilkan pesan error di konsol
+            self.error_occurred.emit(str(e))  # Mengirim pesan error melalui sinyal
+
+    def stop(self):
+        self.stop_requested = True  # Set flag agar thread berhenti
+
 class SimilarityAlgorithm:
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
         self.db_path = db_path
@@ -71,7 +100,7 @@ class SimilarityAlgorithm:
 
         dtype = images[0].dtype
         if dtype not in (np.uint8, np.uint16):
-            raise TypeError("Tipe bit gambar harus uint8 atau uint16.")
+            raise TypeError(language_config.SIMILARITY_MNFR_BIT_REQUIRED)
 
         reference_image = self.normalize_image(images[0], dtype)
         h, w, _ = reference_image.shape
@@ -98,7 +127,7 @@ class SimilarityAlgorithm:
         for i, image in enumerate(images):
             if update_progress:
                 progress = int((i + 1) / num_images * 100)
-                message = f"Memproses gambar {i+1} dari {num_images}"
+                message = language_config.SIMILARITY_MNFR_PROCESS.format(i+1, num_images)
                 update_progress(progress, message)
 
             if stop_requested and stop_requested():
@@ -121,7 +150,7 @@ class SimilarityAlgorithm:
         final_image /= (weight_map[..., np.newaxis] + 1e-3)
         final_image = np.clip(final_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype)
 
-        print("Proses similarity_mfnr selesai.")
+        # print("Proses similarity_mfnr selesai.")
         return final_image
 
     def normalize_image(self, image, dtype):
@@ -242,7 +271,7 @@ def running_similarity(parent=None):
     layout.addWidget(progress_bar)
 
     # Inisialisasi thread worker
-    worker = ImageProcessingMultiThreading(main, "pixel_refine_database.db")
+    worker = ThreadWorker("pixel_refine_database.db")
     # Menghubungkan signal worker ke fungsi pembaruan UI
     worker.progress_updated.connect(lambda progress, message: (
         progress_bar.setValue(progress),

@@ -92,17 +92,6 @@ def get_farneback_optical_flow_page():
         layout.addLayout(lay)
         sliders[label] = sld
     
-    interpolation_label = QLabel(language_config.FARNEBACK_INTERPOLATION_LABEL)
-    interpolation_label.setToolTip(language_config.FARNEBACK_INTERPOLATION_DESCRIPTION)
-    interpolation_label.setFont(get_default_font(10, QFont.Weight.Bold))
-    layout.addWidget(interpolation_label)
-    
-    interpolation_combo = QComboBox()
-    interpolation_combo.addItems(["INTER_AREA", "INTER_LINEAR", "INTER_CUBIC", "INTER_NEAREST"])
-    interpolation_combo.setCurrentText(fb_config.get("interpolation", "INTER_AREA"))
-    interpolation_combo.setStyleSheet(DROPDOWN_BOX)
-    layout.addWidget(interpolation_combo)
-    
     apply_button = QPushButton(language_config.APPLY_PARAMETER_BUTTON_TEXT)
     apply_button.setStyleSheet(APPLY_BUTTON)
     layout.addWidget(apply_button)
@@ -115,8 +104,7 @@ def get_farneback_optical_flow_page():
             "iterations": sliders[language_config.FARNEBACK_ITERATIONS_LABEL].value(),
             "poly_n": sliders[language_config.FARNEBACK_POLY_N_LABEL].value(),
             "poly_sigma": sliders[language_config.FARNEBACK_POLY_SIGMA_LABEL].value() / 100.0,
-            "flags": sliders[language_config.FARNEBACK_FLAGS_LABEL].value(),
-            "interpolation": interpolation_combo.currentText()
+            "flags": sliders[language_config.FARNEBACK_FLAGS_LABEL].value()
         }
         save_farneback_config(fb_params)
     

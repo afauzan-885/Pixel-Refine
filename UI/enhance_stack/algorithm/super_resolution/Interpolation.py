@@ -183,7 +183,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=3):
                         progress = int((processed_images / total_images) * 100)
                         
                         # Messages: Processing image {processed_images}/{total}...
-                        message = language_config.STACK_AVERAGE_IMAGES_PROCESS.format(current=processed_images, total=total_images)
+                        message = language_config.STACK_IMAGES_PROCESS.format(current=processed_images, total=total_images)
                         if update_progress:
                             update_progress(progress, message)
 
@@ -217,7 +217,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=3):
                     progress = int((processed_images / total_images) * 100)
                     
                     # Messages: Processing image {processed_images}/{total}...
-                    message = language_config.STACK_AVERAGE_IMAGES_PROCESS.format(current=processed_images, total=total_images)
+                    message = language_config.STACK_IMAGES_PROCESS.format(current=processed_images, total=total_images)
                     if update_progress:
                         update_progress(progress, message)
 

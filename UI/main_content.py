@@ -11,8 +11,8 @@ from .settings.SettingPage import SettingPage
 
 class Pages:
     ENHANCE_STACK = "Enhance Stack"
-    HDR_RECONTRUCTION = "HDR Recontruction"
-    SETTINGS = "Setting"
+    HDR_RECONTRUCTION = language_config.HDR_SIDEBAR_LABEL
+    SETTINGS = language_config.SETTINGS_SIDEBAR_LABEL
 
 
 class MainContent(QStackedWidget):

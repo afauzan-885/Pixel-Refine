@@ -2,7 +2,6 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QComboBox, QStackedWidget,
-    QScrollArea
 )
 from PyQt6.QtCore import Qt
 from UI.resources.stylesheet.stylesheet import DROPDOWN_BOX
@@ -38,7 +37,7 @@ class LeftPanel(QWidget):
         """
         self.preview_panel_widget = QWidget()
         preview_panel_layout = QVBoxLayout(self.preview_panel_widget)
-        preview_panel_label = QLabel("Preview Panel")
+        preview_panel_label = QLabel(language_config.PREVIEW_PANEL_LABEL)
         preview_panel_layout.addWidget(preview_panel_label)
         self.preview_panel_widget.setStyleSheet("QWidget { background-color: white; }")
         parent_layout.addWidget(self.preview_panel_widget)

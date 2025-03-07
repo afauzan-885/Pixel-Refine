@@ -32,11 +32,11 @@ class FarnebackAlgorithm:
             cursor.execute("SELECT path FROM images")
             return [row[0] for row in cursor.fetchall()]
 
-    def resize_image(self, image, size):
-        """
-        Resizes the image to match the reference image size.
-        """
-        return cv2.resize(image, (size[1], size[0]), interpolation=cv2.INTER_LINEAR)
+    # def resize_image(self, image, size):
+    #     """
+    #     Resizes the image to match the reference image size.
+    #     """
+    #     return cv2.resize(image, (size[1], size[0]), interpolation=cv2.INTER_LINEAR)
 
     @staticmethod
     def load_farneback_config(config_filename=None):
@@ -53,7 +53,7 @@ class FarnebackAlgorithm:
             "poly_sigma": 1.2,
             "flags": 0,
             "interpolation": "INTER_CUBIC",
-            "use_gpu": False  # Nilai default untuk use_gpu
+            "use_gpu": False
         }
 
         if config_filename is None:
@@ -67,7 +67,7 @@ class FarnebackAlgorithm:
             print("Error loading Farneback configuration:", e)
             return default_config
 
-    def calculate_optical_flow(self, base_image, target_image, config_filename=None, num_blocks=(3, 3), overlap_ratio=0.3):
+    def calculate_optical_flow(self, base_image, target_image, config_filename=None, num_blocks=(2, 2), overlap_ratio=0.3):
         """
         Menghitung optical flow dengan metode paralel berbasis blok, dengan overlap sebagai persentase dari ukuran blok.
         
@@ -78,7 +78,7 @@ class FarnebackAlgorithm:
         fb_config = self.load_farneback_config(config_filename)
         use_gpu = fb_config.get("use_gpu", False)
 
-        print("Calculating optical flow using" + (" GPU" if use_gpu else " CPU"))
+        # print("Calculating optical flow using" + (" GPU" if use_gpu else " CPU"))
 
         if use_gpu:
             base_gray = cv2.UMat(cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY))
@@ -142,7 +142,7 @@ class FarnebackAlgorithm:
                 h_block, w_block, _ = flow_block.shape
                 flow_full[y:y+h_block, x:x+w_block, :] = flow_block
 
-        print("Optical flow calculation completed." + (" (GPU enabled)" if use_gpu else " (CPU mode)"))
+        # print("Optical flow calculation completed." + (" (GPU enabled)" if use_gpu else " (CPU mode)"))
         
         return flow_full
 
@@ -214,7 +214,7 @@ def main(db_path, update_progress=None, batch_size=5, stop_requested=None):
             batch_aligned = []
             for i, target_image in enumerate(batch_images, start=start_idx):
                 if stop_requested and stop_requested():
-                    print("Proses dihentikan oleh pengguna.")
+                    # print("Proses dihentikan oleh pengguna.")
                     break
 
                 info_message = language_config.RUN_IMAGE_PROCESSING.format(i=i, total_images=total_images)
@@ -229,14 +229,14 @@ def main(db_path, update_progress=None, batch_size=5, stop_requested=None):
 
             for j, aligned_image in enumerate(batch_aligned):
                 if aligned_image is not None:
-                    h5f.create_dataset(f"image_{start_idx + j}", data=aligned_image, compression="gzip")
+                    h5f.create_dataset(f"image_{start_idx + j}", data=aligned_image)
 
-            print(f"Batch {batch_idx + 1}/{total_batches} selesai diproses dan disimpan.")
+            # print(f"Batch {batch_idx + 1}/{total_batches} selesai diproses dan disimpan.")
     
     if update_progress:
         update_progress(total_images - 1, total_images - 1, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
 
-    print("Pemrosesan selesai dan semua gambar telah disimpan ke HDF5.")
+    # print("Pemrosesan selesai dan semua gambar telah disimpan ke HDF5.")
 
 def running_farneback_optical_flow(parent=None):
     """

@@ -1,6 +1,8 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPushButton
 from PyQt6.QtGui import QIcon
 
+from UI.settings.General.Language import language_config
+
 
 class Sidebar(QWidget):
     def __init__(self, toggle_callback, switch_page_callback):
@@ -47,7 +49,7 @@ class Sidebar(QWidget):
         self.nav_buttons = []
         button_data = [
             ("Enhance Stack", "UI/resources/icon/enhance_stack.png"),
-            ("HDR Recontruction", "UI/resources/icon/hdr_recontruction.png"),
+            (language_config.HDR_SIDEBAR_LABEL, "UI/resources/icon/hdr_recontruction.png"),
         ]
         for i, (text, icon_path) in enumerate(button_data):
             btn = self.create_nav_button(text, icon_path, i)
@@ -58,7 +60,7 @@ class Sidebar(QWidget):
 
         # Tombol Settings
         settings_button = self.create_nav_button(
-            "Settings", "UI/resources/icon/setting.png", len(button_data)
+            language_config.SETTINGS_SIDEBAR_LABEL, "UI/resources/icon/setting.png", len(button_data)
         )
         self.sidebar_layout.addWidget(settings_button)
         self.nav_buttons.append(settings_button)
