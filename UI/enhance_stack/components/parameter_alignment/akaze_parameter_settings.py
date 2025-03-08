@@ -84,7 +84,8 @@ def get_akaze_page():
         (language_config.AKAZE_THRESHOLD_LABEL, 1, 100, 1, int(akaze_config["akaze_threshold"] * 10000), lambda v: f"{v/10000:.4f}", language_config.AKAZE_THRESHOLD_DESCRIPTION),
         (language_config.AKAZE_OCTAVE_LABEL, 1, 8, 1, akaze_config["akaze_nOctaves"], str, language_config.AKAZE_OCTAVE_DESCRIPTION),
         (language_config.AKAZE_LAYER_LABEL, 1, 10, 1, akaze_config["akaze_nOctaveLayers"], str, language_config.AKAZE_LAYER_DESCRIPTION),
-        (language_config.AKAZE_RATIO_LABEL, 50, 100, 1, int(akaze_config["ratio_threshold"] * 100), lambda v: f"{v/100:.2f}", language_config.AKAZE_RATIO_DESCRIPTION)
+        (language_config.AKAZE_RATIO_LABEL, 50, 100, 1, int(akaze_config["ratio_threshold"] * 100), lambda v: f"{v/100:.2f}", language_config.AKAZE_RATIO_DESCRIPTION),
+        (language_config.ORB_RANSAC_LABEL, 10, 100, 5, int(akaze_config["ransacThreshold"] * 10), lambda v: f"{v/10:.1f}", language_config.ORB_RANSAC_DESCRIPTION)
     ]
     
     sliders = {}
@@ -152,6 +153,7 @@ def get_akaze_page():
             "akaze_threshold": sliders[language_config.AKAZE_THRESHOLD_LABEL].value() / 10000.0,
             "akaze_nOctaves": sliders[language_config.AKAZE_OCTAVE_LABEL].value(),
             "akaze_nOctaveLayers": sliders[language_config.AKAZE_LAYER_LABEL].value(),
+            "ransacThreshold": sliders[language_config.ORB_RANSAC_LABEL].value() / 10.0,
             "ratio_threshold": sliders[language_config.AKAZE_RATIO_LABEL].value() / 100.0,
             "transformation": transformation_combo.currentText(),
             "keep_edges": keep_edges_button.isChecked(),

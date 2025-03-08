@@ -54,8 +54,9 @@ class AKAZEAlgorithm:
             "akaze_nOctaves": 4,
             "akaze_nOctaveLayers": 4,
             "ratio_threshold": 0.75,
+            "ransacThreshold": 5.0,
             "transformation": "affine",
-            "keep_edges": True,
+            "keep_edges": False,
             "enable_cropping": True
         }
 
@@ -170,7 +171,7 @@ class AKAZEAlgorithm:
         """
         Menerapkan kompensasi gerakan menggunakan transformasi untuk menyelaraskan gambar.
         """
-        config = self.load_orb_config(config_filename)
+        config = self.load_akaze_config(config_filename)
         keep_edges = config["keep_edges"]
         transformation_type = config["transformation"]
         ransac_threshold = config["ransacThreshold"]
@@ -233,9 +234,8 @@ class AKAZEAlgorithm:
         return compensated_image
 
 def main(db_path, update_progress=None, batch_size=12, stop_requested=None, config_filename=None):
-    # Buat objek processor dan baca konfigurasi ORB
     processor = AKAZEAlgorithm(db_path)
-    config = processor.load_orb_config(config_filename)
+    config = processor.load_akaze_config(config_filename)
     enable_cropping = config.get("enable_cropping", True)
     transformation_type = config.get("transformation", "affine")
     

@@ -6,11 +6,7 @@ import os
 from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
-
-# from UI.enhance_stack.algorithm.denoising.extra_similarity.extra_algorithm import accumulate_tiles
-
-from UI.enhance_stack.algorithm.denoising.extra_similarity import extra_algorithm
-from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
+from UI.enhance_stack.algorithm.denoising.extra_similarity.compute_motion_metrics_aot import accumulate_tiles_jit
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
 
@@ -90,13 +86,12 @@ class SimilarityAlgorithm:
         window = np.outer(y, x)
         return window.astype(np.float32)
 
-
-    def similarity_mfnr(self, images, tile_size=(12, 12), overlap=0.30,
-                      motion_threshold=0.0025, noise_threshold=0.0025,
-                      update_progress=None, stop_requested=None):
+    def similarity_mfnr(self, images, tile_size=(16, 16), overlap=0.30,
+                    motion_threshold=0.003, noise_threshold=0.003,
+                    update_progress=None, stop_requested=None):
         # Validasi input
         if not images:
-            raise ValueError("Gagal memuat gambar referensi.")
+            raise ValueError("Failed to load reference image.")
 
         dtype = images[0].dtype
         if dtype not in (np.uint8, np.uint16):
@@ -135,23 +130,23 @@ class SimilarityAlgorithm:
 
             current_image = self.normalize_image(image, dtype)
             if current_image.shape != reference_image.shape:
-                raise ValueError(f"Ukuran gambar ke-{i+1} tidak sesuai.")
+                raise ValueError(f"Image size {i+1} does not match.")
 
             row_starts_arr = np.array(row_starts, dtype=np.int32)
             col_starts_arr = np.array(col_starts, dtype=np.int32)
 
             # Panggil fungsi AOT yang sudah dikompilasi
-            extra_algorithm.accumulate_tiles(final_image, weight_map, current_image, reference_image,
-                                 base_window, row_starts_arr, col_starts_arr,
-                                 tile_size[0], tile_size[1],
-                                 motion_threshold, noise_threshold, scale)
-
+            accumulate_tiles_jit(final_image, weight_map, current_image, reference_image,
+                                                base_window, row_starts_arr, col_starts_arr,
+                                                tile_size[0], tile_size[1],
+                                                motion_threshold, noise_threshold, scale,
+                                                0.8, 200, 1e-3)
 
         final_image /= (weight_map[..., np.newaxis] + 1e-3)
         final_image = np.clip(final_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype)
 
-        # print("Proses similarity_mfnr selesai.")
         return final_image
+
 
     def normalize_image(self, image, dtype):
         # Konversi ke float32 dan pastikan array contiguous

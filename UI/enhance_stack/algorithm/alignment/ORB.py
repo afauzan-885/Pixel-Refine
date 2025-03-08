@@ -55,7 +55,7 @@ class ORBAlgorithm:
             "nlevels": 5,
             "ransacThreshold": 5.0,
             "transformation": "affine",
-            "keep_edges": True,
+            "keep_edges": False,
             "enable_cropping": True
         }
 
