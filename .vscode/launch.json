@@ -8,8 +8,8 @@
       "args": [],
       "stopAtEntry": false,
       "externalConsole": true,
-      "cwd": "e:/APP Developer/Pixel Refine",
-      "program": "e:/APP Developer/Pixel Refine/build/Debug/outDebug",
+      "cwd": "e:/APP Developer/Pixel Refine/mingw64/bin",
+      "program": "e:/APP Developer/Pixel Refine/mingw64/bin/build/Debug/outDebug",
       "MIMode": "gdb",
       "miDebuggerPath": "gdb",
       "setupCommands": [

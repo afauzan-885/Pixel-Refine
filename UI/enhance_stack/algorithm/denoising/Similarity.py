@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from UI.enhance_stack.algorithm.denoising.extra_similarity.compute_motion_metrics_aot import accumulate_tiles_jit
+from UI.enhance_stack.algorithm.denoising.extra_similarity.extra_algorithm import call_accumulate_tiles_compile, load_motionmetrics_library, setup_accumulate_tiles_jit
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
 
@@ -86,20 +87,22 @@ class SimilarityAlgorithm:
         window = np.outer(y, x)
         return window.astype(np.float32)
 
-    def similarity_mfnr(self, images, tile_size=(16, 16), overlap=0.30,
+    def similarity_mfnr(self, images, tile_size=(32, 32), overlap=0.35,
                     motion_threshold=0.003, noise_threshold=0.003,
                     update_progress=None, stop_requested=None):
-        # Validasi input
+    # Validasi input
         if not images:
-            raise ValueError("Failed to load reference image.")
+            raise ValueError("Gagal memuat citra referensi.")
 
         dtype = images[0].dtype
         if dtype not in (np.uint8, np.uint16):
-            raise TypeError(language_config.SIMILARITY_MNFR_BIT_REQUIRED)
+            raise TypeError("Tipe citra harus uint8 atau uint16.")
 
+        # Normalisasi citra referensi
         reference_image = self.normalize_image(images[0], dtype)
-        h, w, _ = reference_image.shape
+        h, w, channels = reference_image.shape
 
+        # Menghitung step berdasarkan overlap dan ukuran tile
         step_y = max(int(tile_size[0] * (1 - overlap)), 1)
         step_x = max(int(tile_size[1] * (1 - overlap)), 1)
 
@@ -118,7 +121,11 @@ class SimilarityAlgorithm:
         # Konversi scale ke float32
         scale = np.float32(np.iinfo(dtype).max)
         num_images = len(images)
-        
+
+        # Muat shared library dan atur prototipe fungsi
+        lib = load_motionmetrics_library()  # Sesuaikan path jika diperlukan
+        setup_accumulate_tiles_jit(lib)
+
         for i, image in enumerate(images):
             if update_progress:
                 progress = int((i + 1) / num_images * 100)
@@ -130,23 +137,30 @@ class SimilarityAlgorithm:
 
             current_image = self.normalize_image(image, dtype)
             if current_image.shape != reference_image.shape:
-                raise ValueError(f"Image size {i+1} does not match.")
+                 raise ValueError(f"Image size {i+1} does not match.")
 
+            # Konversi row dan col starts ke numpy array
             row_starts_arr = np.array(row_starts, dtype=np.int32)
             col_starts_arr = np.array(col_starts, dtype=np.int32)
 
-            # Panggil fungsi AOT yang sudah dikompilasi
-            accumulate_tiles_jit(final_image, weight_map, current_image, reference_image,
-                                                base_window, row_starts_arr, col_starts_arr,
-                                                tile_size[0], tile_size[1],
-                                                motion_threshold, noise_threshold, scale,
-                                                0.8, 200, 1e-3)
+            # Panggil fungsi accumulate_tiles_jit dari shared library C++
+            call_accumulate_tiles_compile(
+                lib,
+                final_image, weight_map,
+                current_image, reference_image,
+                base_window,
+                row_starts_arr, col_starts_arr,
+                tile_size[0], tile_size[1],  # tile_h, tile_w
+                h, w, channels,
+                motion_threshold, noise_threshold, scale,
+                0.8, 50, 1e-3
+            )
 
+        # Normalisasi dan kliping hasil akhir
         final_image /= (weight_map[..., np.newaxis] + 1e-3)
-        final_image = np.clip(final_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype)
+        final_image = np.clip(final_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype, copy=False)
 
         return final_image
-
 
     def normalize_image(self, image, dtype):
         # Konversi ke float32 dan pastikan array contiguous

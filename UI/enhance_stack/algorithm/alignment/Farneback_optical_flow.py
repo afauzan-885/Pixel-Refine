@@ -9,9 +9,10 @@ import h5py
 
 from PyQt6.QtCore import Qt
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import load_images_from_paths
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import load_images_from_paths, save_to_hdf5
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
+from concurrent.futures import ThreadPoolExecutor
 
 class FarnebackAlgorithm:
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
@@ -31,12 +32,6 @@ class FarnebackAlgorithm:
             cursor = conn.cursor()
             cursor.execute("SELECT path FROM images")
             return [row[0] for row in cursor.fetchall()]
-
-    # def resize_image(self, image, size):
-    #     """
-    #     Resizes the image to match the reference image size.
-    #     """
-    #     return cv2.resize(image, (size[1], size[0]), interpolation=cv2.INTER_LINEAR)
 
     @staticmethod
     def load_farneback_config(config_filename=None):
@@ -200,39 +195,42 @@ def main(db_path, update_progress=None, batch_size=5, stop_requested=None):
     with h5py.File(processor.hdf5_path, "w") as h5f:
         h5f.create_dataset("image_0", data=base_image, compression="gzip")
 
-        for batch_idx in range(total_batches):
-            if stop_requested and stop_requested():
-                break
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = []
 
-            start_idx = batch_idx * batch_size + 1
-            end_idx = min((batch_idx + 1) * batch_size + 1, total_images)
-            batch_paths = image_paths[start_idx:end_idx]
-            batch_images = load_images_from_paths(batch_paths, stop_requested)
-            if not batch_images:
-                continue
-
-            batch_aligned = []
-            for i, target_image in enumerate(batch_images, start=start_idx):
+            for batch_idx in range(total_batches):
                 if stop_requested and stop_requested():
-                    # print("Proses dihentikan oleh pengguna.")
                     break
 
-                info_message = language_config.RUN_IMAGE_PROCESSING.format(i=i, total_images=total_images)
-                print(info_message)
-                if update_progress:
-                    update_progress(i - 1, total_images - 1, info_message)
+                start_idx = batch_idx * batch_size + 1
+                end_idx = min((batch_idx + 1) * batch_size + 1, total_images)
+                batch_paths = image_paths[start_idx:end_idx]
+                batch_images = load_images_from_paths(batch_paths, stop_requested)
+                if not batch_images:
+                    continue
 
-                # Menggunakan metode parallel untuk optical flow pada tiap gambar
-                flow = processor.calculate_optical_flow(base_image, target_image)
-                compensated_image = processor.compensate_motion(target_image, flow, image_id=i)
-                batch_aligned.append(compensated_image)
+                for i, target_image in enumerate(batch_images, start=start_idx):
+                    if stop_requested and stop_requested():
+                        break
 
-            for j, aligned_image in enumerate(batch_aligned):
-                if aligned_image is not None:
-                    h5f.create_dataset(f"image_{start_idx + j}", data=aligned_image)
+                    info_message = language_config.RUN_IMAGE_PROCESSING.format(i=i, total_images=total_images)
+                    print(info_message)
+                    if update_progress:
+                        update_progress(i - 1, total_images - 1, info_message)
 
-            # print(f"Batch {batch_idx + 1}/{total_batches} selesai diproses dan disimpan.")
-    
+                    # Menggunakan metode parallel untuk optical flow pada tiap gambar
+                    flow = processor.calculate_optical_flow(base_image, target_image)
+                    compensated_image = processor.compensate_motion(target_image, flow, image_id=i)
+
+                    if compensated_image is not None:
+                        dataset_name = f"image_{i}"
+                        futures.append(executor.submit(save_to_hdf5, h5f, dataset_name, compensated_image))
+
+            for future in futures:
+                future.result()
+
+    if update_progress:
+        update_progress(total_images - 1, total_images - 1, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
     if update_progress:
         update_progress(total_images - 1, total_images - 1, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
 

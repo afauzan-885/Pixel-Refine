@@ -1,12 +1,12 @@
 # aot_module_optimized.py
 from numba.pycc import CC
-from numba import njit, float32, int32
+from numba import njit
 import math
 
 cc = CC("compute_motion_metrics_aot")
 
 @cc.export("compute_motion_metrics", "Tuple((float32, float32))(float32[:,:,:], float32[:,:,:], float32, float32, float32, float32, int32, float32)")
-@njit(inline='always', nogil=True, fastmath=True)
+@njit(inline='always', nogil=True, fastmath=True, nonpython=True, cache=True)
 def compute_motion_metrics(current_tile, ref_tile, prev_threshold, motion_threshold, noise_threshold, alpha, max_passes, epsilon):
     """
     Menggunakan MSE dengan multi-pass dan perbaikan robustness menggunakan estimasi bertahap.
@@ -42,7 +42,7 @@ def compute_motion_metrics(current_tile, ref_tile, prev_threshold, motion_thresh
 
 
 @cc.export("accumulate_tiles_jit", "void(float32[:,:,:], float32[:,:], float32[:,:,:], float32[:,:,:], float32[:,:], int32[:], int32[:], int32, int32, float32, float32, float32, float32, int32, float32)")
-@njit(nogil=True, fastmath=True)
+@njit(nogil=True, fastmath=True, nonpython=True, cache=True)
 def accumulate_tiles_jit(final_image, weight_map, current_image, reference_image,
                          base_window, row_starts, col_starts,
                          tile_h, tile_w, motion_threshold, noise_threshold, scale, alpha, max_passes, epsilon):
