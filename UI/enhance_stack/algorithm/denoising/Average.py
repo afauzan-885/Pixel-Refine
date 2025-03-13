@@ -131,7 +131,7 @@ class AverageAlgorithm:
     def save_image(self, image, output_path):
         cv2.imwrite(output_path, image)
         
-def main(db_path, update_progress=None, stop_requested=None, batch_size=5):
+def main(db_path, update_progress=None, stop_requested=None, batch_size=10):
     try:
         image_processor = AverageAlgorithm(db_path)
         image_paths = image_processor.get_all_image_paths()

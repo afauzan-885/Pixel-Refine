@@ -1,4 +1,3 @@
-import concurrent.futures
 import cv2
 import numpy as np
 import sqlite3
@@ -6,8 +5,8 @@ import os
 from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
-from UI.enhance_stack.algorithm.denoising.extra_similarity.compute_motion_metrics_aot import accumulate_tiles_jit
-from UI.enhance_stack.algorithm.denoising.extra_similarity.extra_algorithm import call_accumulate_tiles_compile, load_motionmetrics_library, setup_accumulate_tiles_jit
+# from UI.enhance_stack.algorithm.denoising.extra_similarity.compute_motion_metrics_aot import accumulate_tiles_jit
+from UI.enhance_stack.algorithm.denoising.extra_similarity.extra_algorithm import call_accumulate_tiles_compile
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
 
@@ -89,8 +88,11 @@ class SimilarityAlgorithm:
 
     def similarity_mfnr(self, images, tile_size=(32, 32), overlap=0.35,
                     motion_threshold=0.003, noise_threshold=0.003,
-                    update_progress=None, stop_requested=None):
-    # Validasi input
+                    update_progress=None, stop_requested=None,
+                    lib_path='UI/enhance_stack/algorithm/denoising/extra_similarity/compute_motion.dll'):
+        """
+        Fungsi untuk menghitung multi-frame noise reduction dengan referensi citra pertama.
+        """
         if not images:
             raise ValueError("Gagal memuat citra referensi.")
 
@@ -114,7 +116,7 @@ class SimilarityAlgorithm:
             col_starts.append(w - tile_size[1])
 
         base_window = self.raised_cosine_window(tile_size)
-        
+
         final_image = np.zeros_like(reference_image, dtype=np.float32)
         weight_map = np.zeros((h, w), dtype=np.float32)
 
@@ -122,14 +124,10 @@ class SimilarityAlgorithm:
         scale = np.float32(np.iinfo(dtype).max)
         num_images = len(images)
 
-        # Muat shared library dan atur prototipe fungsi
-        lib = load_motionmetrics_library()  # Sesuaikan path jika diperlukan
-        setup_accumulate_tiles_jit(lib)
-
         for i, image in enumerate(images):
             if update_progress:
                 progress = int((i + 1) / num_images * 100)
-                message = language_config.SIMILARITY_MNFR_PROCESS.format(i+1, num_images)
+                message = f"Processing image {i+1} of {num_images}"
                 update_progress(progress, message)
 
             if stop_requested and stop_requested():
@@ -137,23 +135,23 @@ class SimilarityAlgorithm:
 
             current_image = self.normalize_image(image, dtype)
             if current_image.shape != reference_image.shape:
-                 raise ValueError(f"Image size {i+1} does not match.")
+                raise ValueError(f"Image size {i+1} does not match.")
 
             # Konversi row dan col starts ke numpy array
             row_starts_arr = np.array(row_starts, dtype=np.int32)
             col_starts_arr = np.array(col_starts, dtype=np.int32)
 
-            # Panggil fungsi accumulate_tiles_jit dari shared library C++
+            # Panggil fungsi dari library C++
             call_accumulate_tiles_compile(
-                lib,
                 final_image, weight_map,
                 current_image, reference_image,
                 base_window,
                 row_starts_arr, col_starts_arr,
-                tile_size[0], tile_size[1],  # tile_h, tile_w
+                tile_size[0], tile_size[1],
                 h, w, channels,
                 motion_threshold, noise_threshold, scale,
-                0.8, 50, 1e-3
+                0.8, 50, 1e-3,
+                lib_path
             )
 
         # Normalisasi dan kliping hasil akhir
@@ -173,7 +171,7 @@ class SimilarityAlgorithm:
     def save_image(self, image, output_path):
         cv2.imwrite(output_path, image)
         
-def main(db_path, update_progress=None, stop_requested=None, batch_size=8):
+def main(db_path, update_progress=None, stop_requested=None, batch_size=10):
     try:
         image_processor = SimilarityAlgorithm(db_path)
         image_paths = image_processor.get_all_image_paths()

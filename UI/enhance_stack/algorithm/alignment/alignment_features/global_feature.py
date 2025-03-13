@@ -10,28 +10,23 @@ from UI.settings.General.Language import language_config
 
 # ------------------ Load and Saving Process ------------------- #
 def load_images_from_paths(image_paths, stop_requested=None):
-    """
-    Memuat gambar dari daftar path gambar menggunakan multithreading untuk mempercepat proses I/O.
-    """
-    
-    def load_image(image_path):
-        if stop_requested and stop_requested():
-            return None
-        image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-        return image if image is not None else None
-    
-    images = []
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = {executor.submit(load_image, path): path for path in image_paths}
+        """
+        Loads images from a list of image paths using multithreading.
+        """
+        num_threads = os.cpu_count() or 4  # Default ke 4 jika os.cpu_count() mengembalikan None
+        images = []
         
-        for future in concurrent.futures.as_completed(futures):
-            if stop_requested and stop_requested():
-                break
-            image = future.result()
-            if image is not None:
-                images.append(image)
-    
-    return images
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = {executor.submit(cv2.imread, path, cv2.IMREAD_UNCHANGED): path for path in image_paths}
+
+            for future in futures:
+                if stop_requested and stop_requested():
+                    break
+                image = future.result()
+                if image is not None:
+                    images.append(image)
+
+        return images
 
 def save_to_hdf5(h5f, dataset_name, cropped):
     h5f.create_dataset(dataset_name, data=cropped, compression="lzf")

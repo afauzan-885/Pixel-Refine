@@ -4,6 +4,7 @@ build/
 test_algorithm/
 pixel_refine_database.db
 build_instalasi.txt
+syarat.txt
 mingw64/
 
 # Ignore virtual environment directories

@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import gc
 import json
 import cv2
 import numpy as np
@@ -8,7 +9,7 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import Qt
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import compute_global_crop, crop_image, save_to_hdf5
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import compute_global_crop, crop_image, load_images_from_paths, save_to_hdf5
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
 
@@ -30,33 +31,20 @@ class ORBAlgorithm:
             cursor = conn.cursor()
             cursor.execute("SELECT path FROM images")
             return [row[0] for row in cursor.fetchall()]
-
-    def load_images_from_paths(self, image_paths, stop_requested=None):
-        """
-        Loads images from a list of image paths.
-        """
-        images = []
-        for image_path in image_paths:
-            if stop_requested and stop_requested():  # Cek apakah harus berhenti
-                break
-            image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-            if image is not None:
-                images.append(image)
-        return images
-
+        
     @staticmethod
     def load_orb_config(config_filename=None):
         """
         Membaca konfigurasi ORB dari file JSON. Jika gagal, mengembalikan nilai default.
         """
         default_config = {
-            "nfeatures": 1000,
+            "nfeatures": 1500,
             "scaleFactor": 1.1,
             "nlevels": 5,
             "ransacThreshold": 5.0,
-            "transformation": "affine",
+            "transformation": "homography",
             "keep_edges": False,
-            "enable_cropping": True
+            "enable_cropping": False
         }
 
         if config_filename is None:
@@ -170,7 +158,6 @@ class ORBAlgorithm:
         return compensated_image
 
 def main(db_path, update_progress=None, batch_size=12, stop_requested=None, config_filename=None):
-    # Buat objek processor dan baca konfigurasi ORB
     processor = ORBAlgorithm(db_path)
     config = processor.load_orb_config(config_filename)
     enable_cropping = config.get("enable_cropping", True)
@@ -207,7 +194,7 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, conf
         start_idx = batch_idx * batch_size + 1
         end_idx = min((batch_idx + 1) * batch_size + 1, total_images)
         batch_paths = image_paths[start_idx:end_idx]
-        batch_images = processor.load_images_from_paths(batch_paths)
+        batch_images = load_images_from_paths(batch_paths)
         if not batch_images:
             continue
         
@@ -233,6 +220,10 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, conf
             current_step += 1
             if update_progress:
                 update_progress(current_step, total_steps, info_message)
+        
+        # Setelah selesai batch Phase 1, kita bisa menghapus variabel batch dan memanggil garbage collector
+        del batch_images, batch_paths
+        gc.collect()
     
     # -----------------------
     # Hitung crop bounds jika diaktifkan
@@ -245,7 +236,6 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, conf
             print(language_config.FAILED_TO_COMPUTE_CROP)
             return
         np.save(os.path.join(transform_folder, "crop.npy"), crop_bounds)
-        # print(f"Crop bounds dihitung: {crop_bounds}")
     
     # -----------------------
     # Phase 2: Terapkan transformasi dan simpan ke HDF5
@@ -256,21 +246,23 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, conf
             base_image = crop_image(base_image, crop_bounds)
         h5f.create_dataset("image_0", data=base_image)
         
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = []
-            
-            for batch_idx in range(total_batches):
-                if stop_requested and stop_requested():
-                    break
-                
-                start_idx = batch_idx * batch_size + 1
-                end_idx = min((batch_idx + 1) * batch_size + 1, total_images)
-                batch_paths = image_paths[start_idx:end_idx]
-                batch_images = processor.load_images_from_paths(batch_paths)
-                if not batch_images:
-                    continue
-                
+        num_threads = os.cpu_count() or 4
+
+        # Memproses setiap batch secara terpisah untuk membantu pembersihan memori
+        for batch_idx in range(total_batches):
+            if stop_requested and stop_requested():
+                break
+
+            start_idx = batch_idx * batch_size + 1
+            end_idx = min((batch_idx + 1) * batch_size + 1, total_images)
+            batch_paths = image_paths[start_idx:end_idx]
+            batch_images = load_images_from_paths(batch_paths)
+            if not batch_images:
+                continue
+
+            # Proses batch dengan ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=num_threads) as executor:
+                futures = []
                 for i, target_image in enumerate(batch_images, start=start_idx):
                     if stop_requested and stop_requested():
                         break
@@ -295,13 +287,16 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, conf
                     current_step += 1
                     if update_progress:
                         update_progress(current_step, total_steps, language_config.PROGRESS_SAVING_CALCULATE_AND_COMPENSATE_MOTION.format(i, total_images))
+                    
+                    # Hapus variabel lokal yang tidak lagi dibutuhkan
+                    del base_points, target_points, compensated_image
+                
+                for future in futures:
+                    future.result()
             
-            for future in futures:
-                future.result()
-    
-    # if update_progress:
-    #     update_progress(total_steps, total_steps, "Penyimpanan gambar yang telah di-align selesai.")
-    # print("Tahap 2 selesai: Semua gambar telah disimpan ke HDF5.")
+            # Setelah batch selesai, hapus variabel yang menyimpan data batch dan panggil garbage collector
+            del batch_images, batch_paths, futures
+            gc.collect()
 
 def running_orb(parent=None):
     """

@@ -312,7 +312,10 @@ Cropping"""
 DISABLE_CROP_LABEL = """Disable 
 Cropping"""
 CROP_DESCRIPTION = """Enable Cropping to remove 
-unused image borders."""
+unused image borders
+
+Note: Sometimes cropping bugs occur (very rare).
+Such as very small images, or errors in cropping images"""
 
 
 APPLY_PARAMETER_BUTTON_TEXT = "Apply Settings"

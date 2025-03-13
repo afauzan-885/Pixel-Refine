@@ -347,7 +347,10 @@ Pemotongan"""
 DISABLE_CROP_LABEL = """Nonaktifkan 
 Pemotongan"""
 CROP_DESCRIPTION = """Aktifkan Pemotongan untuk menghilangkan
-batas gambar yang tidak terpakai"""
+batas gambar yang tidak terpakai
+
+Note: Terkadang terjadi bug pemotongan (sangat jarang). 
+Seperti gambar yang sangat kecil, atau kesalahan dalam memotong gambar """
 
 
 

@@ -277,7 +277,10 @@ Pemotongan"""
 DISABLE_CROP_LABEL = """Nyahaktifkan 
 Pemotongan"""
 CROP_DESCRIPTION = """Aktifkan Pemotongan untuk membuang
-sempadan gambar yang tidak digunakan"""
+sempadan gambar yang tidak digunakan
+
+Nota: Kadangkala pepijat pemangkasan berlaku (sangat jarang berlaku).
+Seperti imej yang sangat kecil, atau ralat dalam memotong imej."""
 
 
 
