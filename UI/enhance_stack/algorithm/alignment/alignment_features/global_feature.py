@@ -1,4 +1,5 @@
 import concurrent.futures 
+import json
 import os
 import concurrent
 import cv2
@@ -28,8 +29,20 @@ def load_images_from_paths(image_paths, stop_requested=None):
 
         return images
 
-def save_to_hdf5(h5f, dataset_name, cropped):
-    h5f.create_dataset(dataset_name, data=cropped, compression="lzf")
+def save_to_hdf5(h5f, dataset_name, cropped, metadata=None):
+    """
+    Menyimpan gambar (array) ke dalam HDF5 dan menyematkan metadata sebagai atribut.
+    
+    Parameter:
+      - h5f: objek file HDF5 yang sudah dibuka
+      - dataset_name: nama dataset yang akan dibuat
+      - cropped: array gambar yang akan disimpan
+      - metadata: dictionary berisi metadata atau EXIF dari gambar (opsional)
+    """
+    dset = h5f.create_dataset(dataset_name, data=cropped)
+    if metadata is not None:
+        # Simpan metadata sebagai atribut (dalam format JSON)
+        dset.attrs['metadata'] = json.dumps(metadata)
 # ------------------ Load and Saving Process ------------------- #
     
 ## ------------------ Feature-based Alignment ------------------- ##

@@ -269,7 +269,7 @@ AKAZE_THRESHOLD_DESCRIPTION = """The Threshold parameter determines how sensitiv
 - Lower values increase the detection of more keypoints, even in images with few features and high noise.
 - Higher values restrict detection to only the strongest features.
 
-Recommended value: 30.
+Recommended value: 0.0010.
 """
 
 AKAZE_OCTAVE_LABEL = "Number of Octaves"
@@ -302,7 +302,8 @@ Recommended value: 0.80.
 
 KEEP_EDGES_LABEL = """Keep
 Edges"""
-IGNORE_EDGE_LABEL = """Ignore Edges"""
+IGNORE_EDGE_LABEL = """Ignore 
+Edges"""
 
 KEEP_EDGES_DESCRIPTION = """The Keep Edges feature allows the algorithm to
 preserve the edges of the image during the alignment process."""
@@ -311,8 +312,7 @@ ENABLE_CROP_LABEL = """Enable
 Cropping"""
 DISABLE_CROP_LABEL = """Disable 
 Cropping"""
-CROP_DESCRIPTION = """Enable Cropping to remove 
-unused image borders
+CROP_DESCRIPTION = """Enable Cropping to remove unused image borders
 
 Note: Sometimes cropping bugs occur (very rare).
 Such as very small images, or errors in cropping images"""

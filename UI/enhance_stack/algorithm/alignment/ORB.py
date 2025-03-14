@@ -1,6 +1,8 @@
 from concurrent.futures import ThreadPoolExecutor
 import gc
+import exifread
 import json
+import subprocess
 import cv2
 import numpy as np
 import sqlite3
@@ -44,7 +46,9 @@ class ORBAlgorithm:
             "ransacThreshold": 5.0,
             "transformation": "homography",
             "keep_edges": False,
-            "enable_cropping": False
+            "enable_cropping": False,
+            "save_align": False,  
+            "command_save_to_hd5f": True 
         }
 
         if config_filename is None:
@@ -53,7 +57,13 @@ class ORBAlgorithm:
         try:
             with open(config_filename, "r") as config_file:
                 params = json.load(config_file)
-            return params.get("ORB", default_config)
+            orb_config = params.get("ORB", default_config)
+
+            # Gunakan nilai dari file JSON, atau default jika tidak tersedia
+            orb_config["save_align"] = params.get("save_align", default_config["save_align"])
+            orb_config["command_save_to_hd5f"] = params.get("command_save_to_hd5f", default_config["command_save_to_hd5f"])
+
+            return orb_config
         except Exception as e:
             print("Error loading ORB configuration:", e)
             return default_config  # Gunakan default jika file tidak ditemukan atau ada error
@@ -156,18 +166,120 @@ class ORBAlgorithm:
         compensated_image = compensated_padded[pad:pad+h, pad:pad+w] if keep_edges else compensated_padded
 
         return compensated_image
+    
+# === Fungsi Ekstraksi Metadata ===
+def extract_exif(image_path):
+    """
+    Mengambil metadata EXIF dari file gambar menggunakan exifread.
+    Mengembalikan dictionary dengan data EXIF dan path file.
+    """
+    with open(image_path, 'rb') as f:
+        tags = exifread.process_file(f, details=False)
+    # Ubah setiap value ke string agar dapat di-serialisasi ke JSON
+    exif_data = {tag: str(value) for tag, value in tags.items()}
+    exif_data["file"] = image_path
+    return exif_data
 
-def main(db_path, update_progress=None, batch_size=12, stop_requested=None, config_filename=None):
+def extract_all_metadata(image_paths, metadata_file="metadata.json"):
+    """
+    Mengekstrak metadata dari seluruh image paths dan menyimpannya ke file JSON.
+    Jika file metadata sudah ada, data baru akan ditambahkan (tidak overwrite).
+    """
+    metadata_list = []
+    for path in image_paths:
+        try:
+            metadata = extract_exif(path)
+            metadata_list.append(metadata)
+        except Exception as e:
+            print(f"Gagal mengekstrak metadata dari {path}: {e}")
+    
+    # Jika file sudah ada, muat data yang sudah tersimpan
+    if os.path.exists(metadata_file):
+        try:
+            with open(metadata_file, "r") as f:
+                existing_data = json.load(f)
+        except Exception as e:
+            print(f"Gagal membaca file metadata: {e}")
+            existing_data = []
+    else:
+        existing_data = []
+    
+    # Tambahkan metadata baru ke data yang sudah ada
+    existing_data.extend(metadata_list)
+    
+    # Simpan kembali ke file JSON dengan penulisan indent agar mudah dibaca
+    with open(metadata_file, "w") as f:
+        json.dump(existing_data, f, indent=4)
+    
+    return existing_data
+
+# === Fungsi Save Align Image yang Dimodifikasi ===
+def save_align_image(image, index, original_path, align_folder=None):
+    """
+    Menyimpan gambar dalam format TIFF ke folder yang ditentukan,
+    kemudian mengembalikan metadata dari file asli ke file hasil menggunakan exiftool.
+    
+    Parameter:
+      - image: gambar yang akan disimpan
+      - index: indeks gambar (untuk referensi jika diperlukan)
+      - original_path: path file asli untuk digunakan sebagai nama file dan sumber metadata
+      - align_folder: folder tujuan penyimpanan
+    """
+    # Gunakan nilai default jika align_folder tidak diberikan
+    if align_folder is None:
+        align_folder = "database/align/align_image"
+    os.makedirs(align_folder, exist_ok=True)
+    
+    # Ambil nama file tanpa ekstensi dari original_path
+    base_name = os.path.splitext(os.path.basename(original_path))[0]
+    # Buat nama file hasil dengan format {base_name}_align.tiff
+    file_path = os.path.join(align_folder, f"{base_name}_align.tiff")
+    
+    # Simpan gambar dengan OpenCV
+    cv2.imwrite(file_path, image)
+    
+    # Gunakan exiftool untuk menyalin metadata dari file asli ke file hasil
+    try:
+        subprocess.run(
+            ["exiftool", "-overwrite_original", "-TagsFromFile", original_path, file_path],
+            check=True
+        )
+        print(f"Metadata berhasil dikembalikan ke {file_path}")
+    except subprocess.CalledProcessError as e:
+        print(f"Error saat mengembalikan metadata ke {file_path}: {e}")
+    
+    return file_path
+
+# === Fungsi Main yang Dimodifikasi ===
+def main(db_path, update_progress=None, batch_size=2, stop_requested=None, 
+         config_filename=None, save_align=None, align_folder=None, command_save_to_hd5f=None):
+    
+    # Inisialisasi processor dan konfigurasi
     processor = ORBAlgorithm(db_path)
     config = processor.load_orb_config(config_filename)
+    
+    if save_align is None:
+        save_align = config.get("save_align", False)
+    
+    if command_save_to_hd5f is None:
+        command_save_to_hd5f = config.get("command_save_to_hd5f", True)
+    
     enable_cropping = config.get("enable_cropping", True)
     transformation_type = config.get("transformation", "affine")
     
+    # Dapatkan semua path gambar
     image_paths = processor.get_all_image_paths()
     if not image_paths:
         print(language_config.RUN_IMAGE_NOT_FOUND)
         return
     
+    # Ekstrak metadata dari seluruh gambar dan simpan ke file JSON
+    metadata_folder = os.path.join("database", "align")
+    os.makedirs(metadata_folder, exist_ok=True)
+    metadata_file = os.path.join(metadata_folder, "metadata.json")
+    extract_all_metadata(image_paths, metadata_file=metadata_file)
+    
+    # Proses gambar pertama sebagai base_image
     base_image_path = image_paths[0]
     base_image = cv2.imread(base_image_path, cv2.IMREAD_UNCHANGED)
     if base_image is None:
@@ -176,17 +288,13 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, conf
     
     total_images = len(image_paths)
     total_batches = (total_images - 1) // batch_size + 1
-
-    # Total progress mencakup phase 1 (estimasi transformasi) dan phase 2 (aplikasi transformasi & penyimpanan)
     total_steps = total_images * 2
     current_step = 0
     
     transform_folder = os.path.join("database", "align", "transformasi")
     os.makedirs(transform_folder, exist_ok=True)
     
-    # -----------------------
-    # Phase 1: Estimasi transformasi dan simpan ke disk
-    # -----------------------
+    # Phase 1: Estimasi transformasi
     for batch_idx in range(total_batches):
         if stop_requested and stop_requested():
             break
@@ -208,7 +316,6 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, conf
             base_points, target_points = processor.calculate_global_motion(base_image, target_image)
             if base_points is None or target_points is None:
                 print(language_config.FAIL_COMPENSATE_MOTION_PROCESS.format(i=i))
-                # Tetap naikkan progress walaupun transformasi gagal
                 current_step += 1
                 if update_progress:
                     update_progress(current_step, total_steps, language_config.FAIL_COMPENSATE_MOTION_PROCESS.format(i))
@@ -221,46 +328,45 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, conf
             if update_progress:
                 update_progress(current_step, total_steps, info_message)
         
-        # Setelah selesai batch Phase 1, kita bisa menghapus variabel batch dan memanggil garbage collector
         del batch_images, batch_paths
         gc.collect()
     
-    # -----------------------
     # Hitung crop bounds jika diaktifkan
     crop_bounds = None
     if enable_cropping:
         h, w = base_image.shape[:2]
-        # Misalnya, fungsi compute_global_crop() mengembalikan (crop_x, crop_y, crop_w, crop_h)
         crop_bounds = compute_global_crop(transform_folder, total_images, w, h, transformation_type=transformation_type)
         if crop_bounds is None:
             print(language_config.FAILED_TO_COMPUTE_CROP)
             return
         np.save(os.path.join(transform_folder, "crop.npy"), crop_bounds)
     
-    # -----------------------
-    # Phase 2: Terapkan transformasi dan simpan ke HDF5
-    # -----------------------
+    # Phase 2: Terapkan transformasi dan simpan ke HDF5 jika diizinkan
     with h5py.File(processor.hdf5_path, "w") as h5f:
-        # Terapkan cropping pada gambar referensi jika diaktifkan
         if enable_cropping:
             base_image = crop_image(base_image, crop_bounds)
-        h5f.create_dataset("image_0", data=base_image)
+        
+        # Simpan referensi gambar ke HDF5 hanya jika command_save_to_hd5f aktif
+        if command_save_to_hd5f:
+            h5f.create_dataset("image_0", data=base_image)
+        
+        if save_align:
+            # Perhatikan pemanggilan: parameter kedua adalah index, ketiga adalah path asli
+            save_align_image(base_image, 0, base_image_path, align_folder)
         
         num_threads = os.cpu_count() or 4
-
-        # Memproses setiap batch secara terpisah untuk membantu pembersihan memori
+        
         for batch_idx in range(total_batches):
             if stop_requested and stop_requested():
                 break
-
+            
             start_idx = batch_idx * batch_size + 1
             end_idx = min((batch_idx + 1) * batch_size + 1, total_images)
             batch_paths = image_paths[start_idx:end_idx]
             batch_images = load_images_from_paths(batch_paths)
             if not batch_images:
                 continue
-
-            # Proses batch dengan ThreadPoolExecutor
+            
             with ThreadPoolExecutor(max_workers=num_threads) as executor:
                 futures = []
                 for i, target_image in enumerate(batch_images, start=start_idx):
@@ -281,22 +387,32 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, conf
                     if enable_cropping:
                         compensated_image = crop_image(compensated_image, crop_bounds)
                     
-                    dataset_name = f"image_{i}"
-                    futures.append(executor.submit(save_to_hdf5, h5f, dataset_name, compensated_image))
+                    if save_align:
+                        # Panggil fungsi save_align_image dengan index dan path asli gambar dari batch
+                        save_align_image(compensated_image, i, batch_paths[i - start_idx], align_folder)
+                    
+                    # Ekstrak metadata untuk gambar yang sedang diproses (dari path asli)
+                    original_path = batch_paths[i - start_idx]
+                    metadata = extract_exif(original_path)
+                    
+                    # Simpan ke HDF5 jika diizinkan, sertakan metadata
+                    if command_save_to_hd5f:
+                        dataset_name = f"image_{i}"
+                        futures.append(executor.submit(save_to_hdf5, h5f, dataset_name, compensated_image, metadata))
                     
                     current_step += 1
                     if update_progress:
-                        update_progress(current_step, total_steps, language_config.PROGRESS_SAVING_CALCULATE_AND_COMPENSATE_MOTION.format(i, total_images))
+                        update_progress(current_step, total_steps,
+                                        language_config.PROGRESS_SAVING_CALCULATE_AND_COMPENSATE_MOTION.format(i, total_images))
                     
-                    # Hapus variabel lokal yang tidak lagi dibutuhkan
                     del base_points, target_points, compensated_image
                 
                 for future in futures:
                     future.result()
             
-            # Setelah batch selesai, hapus variabel yang menyimpan data batch dan panggil garbage collector
             del batch_images, batch_paths, futures
             gc.collect()
+
 
 def running_orb(parent=None):
     """

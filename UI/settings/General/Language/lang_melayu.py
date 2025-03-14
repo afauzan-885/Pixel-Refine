@@ -267,7 +267,8 @@ Nilai disarankan: 0.80."""
 
 KEEP_EDGES_LABEL = """Kekalkan
 Tepi"""
-IGNORE_EDGE_LABEL= """Abaikan Tepi"""
+IGNORE_EDGE_LABEL= """Abaikan 
+Tepi"""
 
 KEEP_EDGES_DESCRIPTION = """Ciri Kekalkan Tepi membolehkan algoritma untuk menjaga tepi gambar
 tetap utuh semasa proses penyelarasan."""

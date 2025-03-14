@@ -291,7 +291,7 @@ untuk mencari sebuah titik kunci (keypoint).
 
 - Nilai yang lebih tinggi hanya membatasi deteksi hanya pada fitur yang paling kuat.
 
-Nilai yang direkomendasikan: 30.
+Nilai yang direkomendasikan: 0.0010.
 """
 
 AKAZE_OCTAVE_LABEL = "Jumlah Oktav"
@@ -337,7 +337,8 @@ Nilai yang direkomendasikan: 0.80.
 
 KEEP_EDGES_LABEL = """Pertahankan
 tepi"""
-IGNORE_EDGE_LABEL= """Abaikan Tepi"""
+IGNORE_EDGE_LABEL= """Abaikan 
+Tepi"""
 
 KEEP_EDGES_DESCRIPTION = """Fitur Pertahankan Tepi memungkinkan algoritma menjaga tepi gambar
 tetap utuh selama proses penyelarasan."""

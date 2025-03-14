@@ -47,7 +47,9 @@ class AKAZEAlgorithm:
             "ransacThreshold": 5.0,
             "transformation": "affine",
             "keep_edges": False,
-            "enable_cropping": True
+            "enable_cropping": True,
+            "save_align": True,  
+            "command_save_to_hd5f": False
         }
 
         if config_filename is None:
@@ -223,9 +225,45 @@ class AKAZEAlgorithm:
 
         return compensated_image
 
-def main(db_path, update_progress=None, batch_size=12, stop_requested=None, config_filename=None):
+def save_align_image(image, original_path, align_folder=None):
+    """
+    Menyimpan gambar dalam format TIFF ke folder yang ditentukan.
+
+    Parameter:
+      - image: gambar yang akan disimpan
+      - index: nomor indeks gambar dalam batch
+      - original_path: path file asli untuk digunakan sebagai nama file
+      - align_folder: folder tujuan penyimpanan (bisa dikonfigurasi)
+    """
+    # Gunakan nilai default jika align_folder tidak diberikan
+    if align_folder is None:
+        align_folder = "database/align/align_image"
+
+    os.makedirs(align_folder, exist_ok=True)
+
+    # Ambil nama file tanpa ekstensi dari original_path
+    base_name = os.path.splitext(os.path.basename(original_path))[0]
+
+    # Buat nama file menggunakan base_name dan index
+    file_path = os.path.join(align_folder, f"{base_name}_align.tiff")
+
+    # Simpan gambar
+    cv2.imwrite(file_path, image)
+
+
+def main(db_path, update_progress=None, batch_size=12, stop_requested=None, 
+         config_filename=None, save_align=None, align_folder=None, command_save_to_hd5f=None):
+
     processor = AKAZEAlgorithm(db_path)
     config = processor.load_akaze_config(config_filename)
+
+    # Gunakan nilai dari konfigurasi jika parameter None
+    if save_align is None:
+        save_align = config.get("save_align", True)
+    
+    if command_save_to_hd5f is None:
+        command_save_to_hd5f = config.get("command_save_to_hd5f", False)
+
     enable_cropping = config.get("enable_cropping", True)
     transformation_type = config.get("transformation", "affine")
     
@@ -243,16 +281,13 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, conf
     total_images = len(image_paths)
     total_batches = (total_images - 1) // batch_size + 1
 
-    # Total progress mencakup phase 1 (estimasi transformasi) dan phase 2 (aplikasi transformasi & penyimpanan)
     total_steps = total_images * 2
     current_step = 0
     
     transform_folder = os.path.join("database", "align", "transformasi")
     os.makedirs(transform_folder, exist_ok=True)
     
-    # -----------------------
-    # Phase 1: Estimasi transformasi dan simpan ke disk
-    # -----------------------
+    # Phase 1: Estimasi transformasi
     for batch_idx in range(total_batches):
         if stop_requested and stop_requested():
             break
@@ -274,7 +309,6 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, conf
             base_points, target_points = processor.calculate_global_motion(base_image, target_image)
             if base_points is None or target_points is None:
                 print(language_config.FAIL_COMPENSATE_MOTION_PROCESS.format(i=i))
-                # Tetap naikkan progress walaupun transformasi gagal
                 current_step += 1
                 if update_progress:
                     update_progress(current_step, total_steps, language_config.FAIL_COMPENSATE_MOTION_PROCESS.format(i))
@@ -287,34 +321,33 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, conf
             if update_progress:
                 update_progress(current_step, total_steps, info_message)
         
-        # Setelah selesai batch Phase 1, kita bisa menghapus variabel batch dan memanggil garbage collector
         del batch_images, batch_paths
         gc.collect()
     
-    # -----------------------
     # Hitung crop bounds jika diaktifkan
     crop_bounds = None
     if enable_cropping:
         h, w = base_image.shape[:2]
-        # Misalnya, fungsi compute_global_crop() mengembalikan (crop_x, crop_y, crop_w, crop_h)
         crop_bounds = compute_global_crop(transform_folder, total_images, w, h, transformation_type=transformation_type)
         if crop_bounds is None:
             print(language_config.FAILED_TO_COMPUTE_CROP)
             return
         np.save(os.path.join(transform_folder, "crop.npy"), crop_bounds)
     
-    # -----------------------
-    # Phase 2: Terapkan transformasi dan simpan ke HDF5
-    # -----------------------
+    # Phase 2: Terapkan transformasi dan simpan ke HDF5 jika diizinkan
     with h5py.File(processor.hdf5_path, "w") as h5f:
-        # Terapkan cropping pada gambar referensi jika diaktifkan
         if enable_cropping:
             base_image = crop_image(base_image, crop_bounds)
-        h5f.create_dataset("image_0", data=base_image)
+        
+        # Simpan referensi gambar ke HDF5 hanya jika command_save_to_hd5f aktif
+        if command_save_to_hd5f:
+            h5f.create_dataset("image_0", data=base_image)
+        
+        if save_align:
+            save_align_image(base_image, 0, base_image_path, align_folder)
         
         num_threads = os.cpu_count() or 4
 
-        # Memproses setiap batch secara terpisah untuk membantu pembersihan memori
         for batch_idx in range(total_batches):
             if stop_requested and stop_requested():
                 break
@@ -326,7 +359,6 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, conf
             if not batch_images:
                 continue
 
-            # Proses batch dengan ThreadPoolExecutor
             with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
                 futures = []
                 for i, target_image in enumerate(batch_images, start=start_idx):
@@ -347,20 +379,23 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, conf
                     if enable_cropping:
                         compensated_image = crop_image(compensated_image, crop_bounds)
                     
-                    dataset_name = f"image_{i}"
-                    futures.append(executor.submit(save_to_hdf5, h5f, dataset_name, compensated_image))
+                    if save_align:
+                        save_align_image(compensated_image, i, batch_paths[i - start_idx], align_folder)
+
+                    # Simpan ke HDF5 hanya jika command_save_to_hd5f aktif
+                    if command_save_to_hd5f:
+                        dataset_name = f"image_{i}"
+                        futures.append(executor.submit(save_to_hdf5, h5f, dataset_name, compensated_image))
                     
                     current_step += 1
                     if update_progress:
                         update_progress(current_step, total_steps, language_config.PROGRESS_SAVING_CALCULATE_AND_COMPENSATE_MOTION.format(i, total_images))
                     
-                    # Hapus variabel lokal yang tidak lagi dibutuhkan
                     del base_points, target_points, compensated_image
                 
                 for future in futures:
                     future.result()
             
-            # Setelah batch selesai, hapus variabel yang menyimpan data batch dan panggil garbage collector
             del batch_images, batch_paths, futures
             gc.collect()
                 

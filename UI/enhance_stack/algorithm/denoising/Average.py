@@ -1,3 +1,4 @@
+import subprocess
 import cv2
 import numpy as np
 import sqlite3
@@ -128,8 +129,31 @@ class AverageAlgorithm:
         final_image = final_image.astype(dtype)
         
         return final_image
-    def save_image(self, image, output_path):
+    
+    def save_image(self, image, output_path, reference_image_path=None):
+        """
+        Menyimpan gambar ke output_path dengan cv2.imwrite, lalu 
+        mengembalikan metadata dari gambar referensi (reference_image_path) ke file yang disimpan.
+        
+        Parameter:
+        - image: array gambar yang akan disimpan
+        - output_path: path file output (misalnya, TIFF)
+        - reference_image_path: path gambar referensi untuk penyalinan metadata
+        """
+        # Simpan gambar menggunakan OpenCV
         cv2.imwrite(output_path, image)
+        
+        # Jika reference_image_path disediakan, gunakan exiftool untuk mengembalikan metadata
+        if reference_image_path is not None and os.path.exists(reference_image_path):
+            try:
+                subprocess.run(
+                    ["exiftool", "-overwrite_original", "-TagsFromFile", reference_image_path, output_path],
+                    check=True
+                )
+                print(f"Metadata berhasil dikembalikan dari {reference_image_path} ke {output_path}")
+            except subprocess.CalledProcessError as e:
+                print(f"Error saat mengembalikan metadata ke {output_path}: {e}")
+        return output_path
         
 def main(db_path, update_progress=None, stop_requested=None, batch_size=10):
     try:
@@ -137,26 +161,29 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10):
         image_paths = image_processor.get_all_image_paths()
         if not image_paths:
             if update_progress:
-                
-                # Messages: Failed to load image
                 update_progress(0, language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
             return
 
-        reference_image_path = image_paths[0]  # Gambar pertama di batch pertama
+        # Gunakan gambar pertama sebagai gambar referensi
+        reference_image_path = image_paths[0]
         reference_image_name = os.path.splitext(os.path.basename(reference_image_path))[0]
         output_path = f"database/stack/{reference_image_name}_average_stack.tif"
 
         if update_progress:
-            
-            # Messages: Starting processing...
             update_progress(0, language_config.RUN_IMAGE_PROCESS_STARTED)
 
         global_hdf5_path = "database/align/aligned_images.h5"
         accumulated_image = None
         total_weights = 0
 
-        total_images = len(image_paths) if not os.path.exists(global_hdf5_path) else len(h5py.File(global_hdf5_path, 'r').keys())
-        processed_images = 0  # Initialize counter for processed images
+        # Jika file HDF5 sudah ada, hitung jumlah gambar dari sana,
+        # jika tidak, gunakan jumlah image_paths
+        if os.path.exists(global_hdf5_path):
+            with h5py.File(global_hdf5_path, 'r') as h5f:
+                total_images = len(list(h5f.keys()))
+        else:
+            total_images = len(image_paths)
+        processed_images = 0  # counter untuk gambar yang diproses
 
         if os.path.exists(global_hdf5_path):
             with h5py.File(global_hdf5_path, 'r') as h5f:
@@ -169,21 +196,20 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10):
                     batch_keys = list(h5f.keys())[batch_idx * batch_size:(batch_idx + 1) * batch_size]
                     batch_images = [np.array(h5f[key]) for key in batch_keys]
 
-                    # Gunakan gambar pertama pada batch pertama sebagai referensi
+                    # Gunakan gambar pertama dari batch pertama sebagai referensi
                     if batch_idx == 0:
                         reference_image = batch_images[0]
-                    
+
                     accumulated_image, total_weights = image_processor.stack_average_images(
                         batch_images, accumulated_image, total_weights, reference_image, stop_requested
                     )
 
-                    # Update progress per image
+                    # Update progress per gambar
                     for i in range(len(batch_images)):
                         processed_images += 1
                         progress = int((processed_images / total_images) * 100)
-                        # Messages: Processing image {processed_images}/{total}...
-                    message = language_config.STACK_IMAGES_PROCESS.format(current=processed_images, total=total_images)
-                    if update_progress:
+                        message = language_config.STACK_IMAGES_PROCESS.format(current=processed_images, total=total_images)
+                        if update_progress:
                             update_progress(progress, message)
 
         else:
@@ -202,7 +228,6 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10):
                     if image is not None:
                         batch_images.append(image)
 
-                # Gunakan gambar pertama pada batch pertama sebagai referensi
                 if batch_idx == 0:
                     reference_image = batch_images[0]
 
@@ -210,12 +235,9 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10):
                     batch_images, accumulated_image, total_weights, reference_image, stop_requested
                 )
 
-                # Update progress per image
                 for i in range(len(batch_images)):
                     processed_images += 1
                     progress = int((processed_images / total_images) * 100)
-                    
-                    # Messages: Processing image {processed_images}/{total}...
                     message = language_config.STACK_IMAGES_PROCESS.format(current=processed_images, total=total_images)
                     if update_progress:
                         update_progress(progress, message)
@@ -223,7 +245,8 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10):
         if accumulated_image is not None:
             try:
                 final_image = image_processor.process_final_image(accumulated_image, total_weights)
-                image_processor.save_image(final_image, output_path)
+                # Saat menyimpan gambar akhir, kembalikan metadata dari gambar referensi
+                image_processor.save_image(final_image, output_path, reference_image_path=reference_image_path)
                 if update_progress:
                     update_progress(100, f"Proses selesai, hasil disimpan di {output_path}")
             except ValueError as e:
@@ -234,8 +257,6 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10):
             if update_progress:
                 update_progress(0, "Gagal melakukan stack gambar.")
     except Exception as e:
-        
-        # messages: An error occurred
         error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(e))
         if update_progress:
             update_progress(0, error_message)

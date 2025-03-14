@@ -222,7 +222,7 @@ AKAZE_THRESHOLD_DESCRIPTION = """控制特徵點檢測靈敏度
 
 - 較低值：檢測更多特徵點（含雜訊）
 - 較高值：僅保留顯著特徵
-- 建議值：30"""
+- 建議值：0.0010"""
 
 AKAZE_OCTAVE_LABEL = "尺度空間層級"
 AKAZE_OCTAVE_DESCRIPTION = """設定影像尺度空間的分析層級
