@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 from PyQt6.QtCore import Qt
 import h5py
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import compute_global_crop, crop_image, load_images_from_paths, save_to_hdf5
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import compute_global_crop, crop_image, extract_all_metadata, extract_exif, load_images_from_paths, save_align_image, save_to_hdf5
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
 
@@ -48,8 +48,8 @@ class AKAZEAlgorithm:
             "transformation": "affine",
             "keep_edges": False,
             "enable_cropping": True,
-            "save_align": True,  
-            "command_save_to_hd5f": False
+            "save_align": False,  
+            "command_save_to_hd5f": True
         }
 
         if config_filename is None:
@@ -62,7 +62,6 @@ class AKAZEAlgorithm:
         except Exception as e:
             print("Error loading AKAZE configuration:", e)
             return default_config
-
 
     def calculate_global_motion(self, base_image, target_image, config_filename=None, num_blocks=(3, 3), overlap=20, stop_requested=None):
         """
@@ -225,53 +224,35 @@ class AKAZEAlgorithm:
 
         return compensated_image
 
-def save_align_image(image, original_path, align_folder=None):
-    """
-    Menyimpan gambar dalam format TIFF ke folder yang ditentukan.
-
-    Parameter:
-      - image: gambar yang akan disimpan
-      - index: nomor indeks gambar dalam batch
-      - original_path: path file asli untuk digunakan sebagai nama file
-      - align_folder: folder tujuan penyimpanan (bisa dikonfigurasi)
-    """
-    # Gunakan nilai default jika align_folder tidak diberikan
-    if align_folder is None:
-        align_folder = "database/align/align_image"
-
-    os.makedirs(align_folder, exist_ok=True)
-
-    # Ambil nama file tanpa ekstensi dari original_path
-    base_name = os.path.splitext(os.path.basename(original_path))[0]
-
-    # Buat nama file menggunakan base_name dan index
-    file_path = os.path.join(align_folder, f"{base_name}_align.tiff")
-
-    # Simpan gambar
-    cv2.imwrite(file_path, image)
-
-
-def main(db_path, update_progress=None, batch_size=12, stop_requested=None, 
+def main(db_path, update_progress=None, batch_size=8, stop_requested=None, 
          config_filename=None, save_align=None, align_folder=None, command_save_to_hd5f=None):
-
+    
+    # Inisialisasi processor dan konfigurasi
     processor = AKAZEAlgorithm(db_path)
     config = processor.load_akaze_config(config_filename)
-
-    # Gunakan nilai dari konfigurasi jika parameter None
+    
     if save_align is None:
-        save_align = config.get("save_align", True)
+        save_align = config.get("save_align", False)
     
     if command_save_to_hd5f is None:
-        command_save_to_hd5f = config.get("command_save_to_hd5f", False)
-
+        command_save_to_hd5f = config.get("command_save_to_hd5f", True)
+    
     enable_cropping = config.get("enable_cropping", True)
     transformation_type = config.get("transformation", "affine")
     
+    # Dapatkan semua path gambar
     image_paths = processor.get_all_image_paths()
     if not image_paths:
         print(language_config.RUN_IMAGE_NOT_FOUND)
         return
     
+    # Ekstrak metadata dari seluruh gambar dan simpan ke file JSON
+    metadata_folder = os.path.join("database", "align")
+    os.makedirs(metadata_folder, exist_ok=True)
+    metadata_file = os.path.join(metadata_folder, "metadata.json")
+    extract_all_metadata(image_paths, metadata_file=metadata_file)
+    
+    # Proses gambar pertama sebagai base_image
     base_image_path = image_paths[0]
     base_image = cv2.imread(base_image_path, cv2.IMREAD_UNCHANGED)
     if base_image is None:
@@ -280,7 +261,6 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None,
     
     total_images = len(image_paths)
     total_batches = (total_images - 1) // batch_size + 1
-
     total_steps = total_images * 2
     current_step = 0
     
@@ -344,21 +324,22 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None,
             h5f.create_dataset("image_0", data=base_image)
         
         if save_align:
+            # Perhatikan pemanggilan: parameter kedua adalah index, ketiga adalah path asli
             save_align_image(base_image, 0, base_image_path, align_folder)
         
         num_threads = os.cpu_count() or 4
-
+        
         for batch_idx in range(total_batches):
             if stop_requested and stop_requested():
                 break
-
+            
             start_idx = batch_idx * batch_size + 1
             end_idx = min((batch_idx + 1) * batch_size + 1, total_images)
             batch_paths = image_paths[start_idx:end_idx]
             batch_images = load_images_from_paths(batch_paths)
             if not batch_images:
                 continue
-
+            
             with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
                 futures = []
                 for i, target_image in enumerate(batch_images, start=start_idx):
@@ -380,16 +361,22 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None,
                         compensated_image = crop_image(compensated_image, crop_bounds)
                     
                     if save_align:
+                        # Panggil fungsi save_align_image dengan index dan path asli gambar dari batch
                         save_align_image(compensated_image, i, batch_paths[i - start_idx], align_folder)
-
-                    # Simpan ke HDF5 hanya jika command_save_to_hd5f aktif
+                    
+                    # Ekstrak metadata untuk gambar yang sedang diproses (dari path asli)
+                    original_path = batch_paths[i - start_idx]
+                    metadata = extract_exif(original_path)
+                    
+                    # Simpan ke HDF5 jika diizinkan, sertakan metadata
                     if command_save_to_hd5f:
                         dataset_name = f"image_{i}"
-                        futures.append(executor.submit(save_to_hdf5, h5f, dataset_name, compensated_image))
+                        futures.append(executor.submit(save_to_hdf5, h5f, dataset_name, compensated_image, metadata))
                     
                     current_step += 1
                     if update_progress:
-                        update_progress(current_step, total_steps, language_config.PROGRESS_SAVING_CALCULATE_AND_COMPENSATE_MOTION.format(i, total_images))
+                        update_progress(current_step, total_steps,
+                                        language_config.PROGRESS_SAVING_CALCULATE_AND_COMPENSATE_MOTION.format(i, total_images))
                     
                     del base_points, target_points, compensated_image
                 

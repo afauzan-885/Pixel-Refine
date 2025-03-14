@@ -335,15 +335,13 @@ antara dua gambar. Tujuannya untuk memastikan bahwa kecocokan yang ditemukan ben
 Nilai yang direkomendasikan: 0.80.
 """
 
-KEEP_EDGES_LABEL = """Pertahankan
-tepi"""
-IGNORE_EDGE_LABEL= """Abaikan 
-Tepi"""
+KEEP_EDGES_LABEL = """Pertahankan tepi"""
+IGNORE_EDGE_LABEL= """Abaikan Tepi"""
 
 KEEP_EDGES_DESCRIPTION = """Fitur Pertahankan Tepi memungkinkan algoritma menjaga tepi gambar
 tetap utuh selama proses penyelarasan."""
 
-ENABLE_CROP_LABEL = """Aktifkan
+ENABLE_CROP_LABEL = """Aktifkan 
 Pemotongan"""
 DISABLE_CROP_LABEL = """Nonaktifkan 
 Pemotongan"""
@@ -353,7 +351,24 @@ batas gambar yang tidak terpakai
 Note: Terkadang terjadi bug pemotongan (sangat jarang). 
 Seperti gambar yang sangat kecil, atau kesalahan dalam memotong gambar """
 
+ACTIVATE_SAVE_ALIGN_IMAGE_TO_FOLDER = "Simpan ke folder"
+DEACTIVATE_SAVE_ALIGN_IMAGE_TO_FOLDER = """Tidak menyimpan
+ke folder"""
 
+SEARCH_SAVE_ALIGN_IMAGE_TO_FOLDER = "Cari.."
+DEFAULT_SAVE_ALIGN_IMAGE_TO_FOLDER = "Folder Bawaan"
+SELECT_SAVE_ALIGN_IMAGE_TO_FOLDER = "Pilih folder"
+
+ACTIVATE_SAVE_ALIGN_TO_PROCESS = """Simpan untuk 
+proses selanjutnya"""
+DEACTIVATE_SAVE_ALIGN_TO_PROCESS = """Tidak menyimpan 
+proses selanjutnya"""
+SAVE_ALIGN_TO_PROCESS_DESCRIPTION = """Menyimpan gambar untuk proses 
+denoising ataupun super resolusi"""
+
+
+SAVE_ALIGN_IMAGE_TO_FOLDER_DESCRIPTION = """Menyimpan gambar hasil penyelarasan ke dalam folder
+Folder default adalah folder dokumen di PC"""
 
 
 APPLY_PARAMETER_BUTTON_TEXT = "Terapkan Pengaturan"

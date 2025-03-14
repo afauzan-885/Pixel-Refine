@@ -300,22 +300,37 @@ AKAZE_RATIO_DESCRIPTION = """The Threshold Ratio is used when matching keypoints
 Recommended value: 0.80.
 """
 
-KEEP_EDGES_LABEL = """Keep
-Edges"""
-IGNORE_EDGE_LABEL = """Ignore 
-Edges"""
+KEEP_EDGES_LABEL = """Keep Edges"""
+IGNORE_EDGE_LABEL = """Ignore Edges"""
 
 KEEP_EDGES_DESCRIPTION = """The Keep Edges feature allows the algorithm to
 preserve the edges of the image during the alignment process."""
 
-ENABLE_CROP_LABEL = """Enable 
-Cropping"""
-DISABLE_CROP_LABEL = """Disable 
-Cropping"""
+ENABLE_CROP_LABEL = """Enable Cropping"""
+DISABLE_CROP_LABEL = """Disable Cropping"""
 CROP_DESCRIPTION = """Enable Cropping to remove unused image borders
 
 Note: Sometimes cropping bugs occur (very rare).
 Such as very small images, or errors in cropping images"""
+
+
+ACTIVATE_SAVE_ALIGN_IMAGE_TO_FOLDER = "Save to Folder"
+DEACTIVATE_SAVE_ALIGN_IMAGE_TO_FOLDER = """Do not save
+to folder"""
+
+SEARCH_SAVE_ALIGN_IMAGE_TO_FOLDER = "Search..."
+DEFAULT_SAVE_ALIGN_IMAGE_TO_FOLDER = "Default Folder"
+SELECT_SAVE_ALIGN_IMAGE_TO_FOLDER = "Select Folder"
+
+ACTIVATE_SAVE_ALIGN_TO_PROCESS = """Save for 
+further processing"""
+DEACTIVATE_SAVE_ALIGN_TO_PROCESS = """Do not save for 
+further processing"""
+SAVE_ALIGN_TO_PROCESS_DESCRIPTION = """Save images for denoising or super-resolution"""
+
+SAVE_ALIGN_IMAGE_TO_FOLDER_DESCRIPTION = """Save aligned images to a folder
+The default folder is the PC's Documents folder"""
+
 
 
 APPLY_PARAMETER_BUTTON_TEXT = "Apply Settings"

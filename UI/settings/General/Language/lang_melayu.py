@@ -265,15 +265,13 @@ tetapi mungkin termasuk padanan palsu.
 
 Nilai disarankan: 0.80."""
 
-KEEP_EDGES_LABEL = """Kekalkan
-Tepi"""
-IGNORE_EDGE_LABEL= """Abaikan 
-Tepi"""
+KEEP_EDGES_LABEL = """Kekalkan Tepi"""
+IGNORE_EDGE_LABEL= """Abaikan Tepi"""
 
 KEEP_EDGES_DESCRIPTION = """Ciri Kekalkan Tepi membolehkan algoritma untuk menjaga tepi gambar
 tetap utuh semasa proses penyelarasan."""
 
-ENABLE_CROP_LABEL = """Aktifkan
+ENABLE_CROP_LABEL = """Aktifkan 
 Pemotongan"""
 DISABLE_CROP_LABEL = """Nyahaktifkan 
 Pemotongan"""
@@ -283,6 +281,23 @@ sempadan gambar yang tidak digunakan
 Nota: Kadangkala pepijat pemangkasan berlaku (sangat jarang berlaku).
 Seperti imej yang sangat kecil, atau ralat dalam memotong imej."""
 
+ACTIVATE_SAVE_ALIGN_IMAGE_TO_FOLDER = "Simpan ke folder"
+DEACTIVATE_SAVE_ALIGN_IMAGE_TO_FOLDER = """Tidak simpan
+ke folder"""
+
+SEARCH_SAVE_ALIGN_IMAGE_TO_FOLDER = "Cari.."
+DEFAULT_SAVE_ALIGN_IMAGE_TO_FOLDER = "Folder Lalai"
+SELECT_SAVE_ALIGN_IMAGE_TO_FOLDER = "Pilih folder"
+
+ACTIVATE_SAVE_ALIGN_TO_PROCESS = """Simpan untuk 
+proses seterusnya"""
+DEACTIVATE_SAVE_ALIGN_TO_PROCESS = """Tidak simpan 
+untuk proses seterusnya"""
+SAVE_ALIGN_TO_PROCESS_DESCRIPTION = """Menyimpan imej untuk proses 
+denoising atau super resolusi"""
+
+SAVE_ALIGN_IMAGE_TO_FOLDER_DESCRIPTION = """Menyimpan imej hasil penyelarasan ke dalam folder
+Folder lalai ialah folder Dokumen di PC"""
 
 
 

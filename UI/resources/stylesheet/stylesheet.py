@@ -39,6 +39,7 @@ TOGGLE_BUTTON = """
         color: white;
         border-radius: 5px;
         padding: 6px 6px;
+        font-size: 12px;
     }
     QToolButton:checked {
         background-color: #4893C1; /* Biru untuk state true */

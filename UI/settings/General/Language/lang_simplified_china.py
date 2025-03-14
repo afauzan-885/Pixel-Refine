@@ -250,15 +250,31 @@ IGNORE_EDGE_LABEL= """忽略边缘"""
 KEEP_EDGES_DESCRIPTION = """保留边缘功能允许算法在对齐过程
 中保持图像边缘完整。"""
 
-ENABLE_CROP_LABEL = """启用
-裁剪"""
-DISABLE_CROP_LABEL = """禁用
-裁剪"""
+ENABLE_CROP_LABEL = """启用 裁剪"""
+DISABLE_CROP_LABEL = """禁用 裁剪"""
 CROP_DESCRIPTION = """启用裁剪以移除
 未使用的图像边框
 
 注意：有时会发生截断错误（非常罕见）
 例如非常小的图像，或者裁剪图像时出现错误。"""
+
+
+ACTIVATE_SAVE_ALIGN_IMAGE_TO_FOLDER = "保存到文件夹"
+DEACTIVATE_SAVE_ALIGN_IMAGE_TO_FOLDER = """不保存到
+文件夹"""
+
+SEARCH_SAVE_ALIGN_IMAGE_TO_FOLDER = "搜索.."
+DEFAULT_SAVE_ALIGN_IMAGE_TO_FOLDER = "默认文件夹"
+SELECT_SAVE_ALIGN_IMAGE_TO_FOLDER = "选择文件夹"
+
+ACTIVATE_SAVE_ALIGN_TO_PROCESS = """保存用于
+后续处理"""
+DEACTIVATE_SAVE_ALIGN_TO_PROCESS = """不保存用于
+后续处理"""
+SAVE_ALIGN_TO_PROCESS_DESCRIPTION = """保存图像以用于去噪或超分辨率处理"""
+
+SAVE_ALIGN_IMAGE_TO_FOLDER_DESCRIPTION = """将对齐后的图像保存到文件夹中
+默认文件夹为PC中的文档文件夹"""
 
 
 

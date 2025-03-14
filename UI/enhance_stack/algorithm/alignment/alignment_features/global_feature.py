@@ -2,14 +2,16 @@ import concurrent.futures
 import json
 import os
 import concurrent
+import subprocess
 import cv2
+import exifread
 import h5py
 import numpy as np
 
 from UI.settings.General.Language import language_config
 
 
-# ------------------ Load and Saving Process ------------------- #
+# ====================== Load and Saving Process ====================== #
 def load_images_from_paths(image_paths, stop_requested=None):
         """
         Loads images from a list of image paths using multithreading.
@@ -29,97 +31,121 @@ def load_images_from_paths(image_paths, stop_requested=None):
 
         return images
 
+
 def save_to_hdf5(h5f, dataset_name, cropped, metadata=None):
     """
-    Menyimpan gambar (array) ke dalam HDF5 dan menyematkan metadata sebagai atribut.
-    
-    Parameter:
-      - h5f: objek file HDF5 yang sudah dibuka
-      - dataset_name: nama dataset yang akan dibuat
-      - cropped: array gambar yang akan disimpan
-      - metadata: dictionary berisi metadata atau EXIF dari gambar (opsional)
+    Save images (array) into HDF5 and embed metadata as attributes.
+
+    Parameters:
+    - h5f: opened HDF5 file object
+    - dataset_name: name of dataset to be created
+    - cropped: array of images to be saved
+    - metadata: dictionary containing metadata or EXIF of images
     """
     dset = h5f.create_dataset(dataset_name, data=cropped)
     if metadata is not None:
         # Simpan metadata sebagai atribut (dalam format JSON)
         dset.attrs['metadata'] = json.dumps(metadata)
-# ------------------ Load and Saving Process ------------------- #
-    
-## ------------------ Feature-based Alignment ------------------- ##
-
-## ---------------- Calculate Global Motion Process ---------------- ##
-# ---------------- Calculate Global Motion Process ---------------- #
-def compute_images_multithreaded(base_gray, target_gray, extractor_func, num_blocks=(2,2), overlap=20):
+        
+        
+def save_align_image(image, index, original_path, align_folder=None, load_config_func=None):
     """
-    Membagi gambar menjadi blok-blok dan mengekstrak fitur secara paralel menggunakan fungsi extractor_func.
-    
-    Parameters:
-      - base_gray: gambar grayscale untuk citra dasar.
-      - target_gray: gambar grayscale untuk citra target.
-      - extractor_func: fungsi yang menerima ROI gambar dan mengembalikan (keypoints, deskriptor).
-      - num_blocks: tuple (blocks_x, blocks_y) untuk pembagian blok.
-      - overlap: jumlah piksel overlap di sekitar tiap blok.
-    
-    Mengembalikan:
-      (keypoints_base_all, descriptors_base_all, keypoints_target_all, descriptors_target_all)
+    Menyimpan gambar dalam format TIFF ke folder yang ditentukan,
+    kemudian mengembalikan metadata dari file asli ke file output menggunakan exiftool
     """
-    h, w = base_gray.shape
-    blocks_x, blocks_y = num_blocks
-    block_w = w // blocks_x
-    block_h = h // blocks_y
+    
+    # Gunakan nilai default dari config jika align_folder tidak diberikan
+    if align_folder is None:
+        if load_config_func is None:
+            raise ValueError("Fungsi konfigurasi harus diberikan jika align_folder tidak diatur.")
+        config = load_config_func()
+        align_folder = config.get("align_folder")
 
-    keypoints_base_all = []
-    descriptors_base_all = None
-    keypoints_target_all = []
-    descriptors_target_all = None
+    os.makedirs(align_folder, exist_ok=True)
+    
+    # Ambil nama file tanpa ekstensi dari original_path
+    base_name = os.path.splitext(os.path.basename(original_path))[0]
+    file_path = os.path.join(align_folder, f"{base_name}_align.tiff")
 
-    def compute_features_block(x, y, bw, bh, overlap):
-        roi_x_start = max(0, x - overlap)
-        roi_y_start = max(0, y - overlap)
-        roi_x_end = min(w, x + bw + overlap)
-        roi_y_end = min(h, y + bh + overlap)
+    # Simpan gambar dengan OpenCV dengan kompresi TIFF minimal
+    cv2.imwrite(file_path, image, [cv2.IMWRITE_TIFF_COMPRESSION, 1])
+    
+    # multithreading untuk menjalankan exiftool
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            future = executor.submit(
+                subprocess.run,
+                ["exiftool", "-overwrite_original", "-TagsFromFile", original_path, file_path],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            # Tunggu hingga proses selesai
+            future.result()
+        print(f"Metadata successfully restored to {file_path}")
+    except Exception as e:
+        print(f"Error restoring metadata to {file_path}: {e}")
+    
+    return file_path
+# ====================== Load and Saving Process ====================== #
 
-        roi_base = base_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
-        roi_target = target_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+# ================ Fungsi Ekstraksi Metadata ====================== #
+def extract_exif(image_path):
+    """
+    Mengambil metadata EXIF dari file gambar menggunakan exifread.
+    Mengembalikan dictionary dengan data EXIF dan path file.
+    """
+    with open(image_path, 'rb') as f:
+        tags = exifread.process_file(f, details=False)
+    # Ubah setiap value ke string agar dapat di-serialisasi ke JSON
+    exif_data = {tag: str(value) for tag, value in tags.items()}
+    exif_data["file"] = image_path
+    return exif_data
 
-        kps_base, desc_base = extractor_func(roi_base)
-        kps_target, desc_target = extractor_func(roi_target)
-
-        # Sesuaikan koordinat keypoints agar sesuai dengan posisi asli di gambar penuh
-        for kp in kps_base:
-            kp.pt = (kp.pt[0] + roi_x_start, kp.pt[1] + roi_y_start)
-        for kp in kps_target:
-            kp.pt = (kp.pt[0] + roi_x_start, kp.pt[1] + roi_y_start)
-        return kps_base, desc_base, kps_target, desc_target
-
-    max_workers = blocks_x * blocks_y
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        futures = []
-        for i in range(blocks_x):
-            for j in range(blocks_y):
-                x = i * block_w
-                y = j * block_h
-                # Untuk blok terakhir, pastikan tidak ada pixel yang tertinggal
-                bw = block_w if i < blocks_x - 1 else w - x
-                bh = block_h if j < blocks_y - 1 else h - y
-                futures.append(executor.submit(compute_features_block, x, y, bw, bh, overlap))
-        for future in concurrent.futures.as_completed(futures):
-            kps_base, desc_base, kps_target, desc_target = future.result()
-            if desc_base is not None and len(kps_base) > 0:
-                keypoints_base_all.extend(kps_base)
-                if descriptors_base_all is None:
-                    descriptors_base_all = desc_base
-                else:
-                    descriptors_base_all = np.vstack([descriptors_base_all, desc_base])
-            if desc_target is not None and len(kps_target) > 0:
-                keypoints_target_all.extend(kps_target)
-                if descriptors_target_all is None:
-                    descriptors_target_all = desc_target
-                else:
-                    descriptors_target_all = np.vstack([descriptors_target_all, desc_target])
-    return keypoints_base_all, descriptors_base_all, keypoints_target_all, descriptors_target_all
+def extract_all_metadata(image_paths, metadata_file="metadata.json"):
+    """
+    Mengekstrak metadata dari seluruh image paths dan menyimpannya ke file JSON.
+    Jika file metadata sudah ada, data baru akan ditambahkan (tidak overwrite).
+    """
+    metadata_list = []
+    for path in image_paths:
+        try:
+            metadata = extract_exif(path)
+            metadata_list.append(metadata)
+        except Exception as e:
+            print(f"Failed to extract metadata from {path}: {e}")
+    
+    # Jika file sudah ada, muat data yang sudah tersimpan
+    if os.path.exists(metadata_file):
+        try:
+            with open(metadata_file, "r") as f:
+                existing_data = json.load(f)
+        except Exception as e:
+            print(f"Failed to read metadata file: {e}")
+            existing_data = []
+    else:
+        existing_data = []
+    
+    # Tambahkan metadata baru ke data yang sudah ada
+    existing_data.extend(metadata_list)
+    
+    # Simpan kembali ke file JSON dengan penulisan indent agar mudah dibaca
+    with open(metadata_file, "w") as f:
+        json.dump(existing_data, f, indent=4)
+    
+    return existing_data
+    
+## ====================== Feature-based Alignment ====================== ##
 
 # ---------------- Calculate Global Motion Process ---------------- #
+# ---------------- Calculate Global Motion Process ---------------- #
+
+
+## ---------------- Compensate Motion Process ---------------- ##
+## ---------------- Compensate Motion Process ---------------- ##
+
+
+## ---------------- Calculate Global Crop Process ---------------- ##
 def compute_global_crop(transform_folder, total_images, w, h, transformation_type='homography'):
     """
     Menghitung batas cropping global dengan menggunakan batas pergerakan
@@ -185,7 +211,9 @@ def crop_image(image, crop_bounds):
     crop_x, crop_y, crop_w, crop_h = crop_bounds
     return image[crop_y:crop_y+crop_h, crop_x:crop_x+crop_w]
 
-# ------------------------------ Main Process ---------------------------------- #
+## ---------------- Calculate Global Crop Process ---------------- ##
+
+# ====================== Main Process ====================== #
 ## ----------------  Feature-based Alignment ---------------- ##
 
 
@@ -201,9 +229,6 @@ def compute_optical_flow_images_multithreaded(base_gray, target_gray, process_fu
       - num_blocks: tuple (blocks_x, blocks_y) untuk pembagian blok.
       - overlap_ratio: persentase overlap relatif terhadap ukuran blok.
       - use_gpu: apakah menggunakan UMat untuk OpenCV GPU processing.
-    
-    Mengembalikan:
-      - Matriks hasil komputasi (misalnya optical flow)
     """
     h, w = base_gray.shape if not use_gpu else base_gray.get().shape
     blocks_x, blocks_y = num_blocks

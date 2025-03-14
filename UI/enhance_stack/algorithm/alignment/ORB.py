@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import Qt
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import compute_global_crop, crop_image, load_images_from_paths, save_to_hdf5
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import compute_global_crop, crop_image, extract_all_metadata, extract_exif, load_images_from_paths, save_align_image, save_to_hdf5
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
 
@@ -47,8 +47,14 @@ class ORBAlgorithm:
             "transformation": "homography",
             "keep_edges": False,
             "enable_cropping": False,
-            "save_align": False,  
-            "command_save_to_hd5f": True 
+            "save_align": True,  
+            "command_save_to_hd5f": False,
+            "align_folder": os.path.join(
+                os.path.expanduser("~"), 
+                "Documents", 
+                "Pixel Refine", 
+                "align_image"
+            )
         }
 
         if config_filename is None:
@@ -138,8 +144,6 @@ class ORBAlgorithm:
         min_x, min_y = transformed_corners.min(axis=0)
         max_x, max_y = transformed_corners.max(axis=0)
 
-        # print(f"Pergerakan batas: min_x={min_x}, min_y={min_y}, max_x={max_x}, max_y={max_y}")
-
         # Jika keep_edges = False, langsung terapkan transformasi tanpa padding
         if not keep_edges:
             if transformation_type == 'homography':
@@ -167,91 +171,7 @@ class ORBAlgorithm:
 
         return compensated_image
     
-# === Fungsi Ekstraksi Metadata ===
-def extract_exif(image_path):
-    """
-    Mengambil metadata EXIF dari file gambar menggunakan exifread.
-    Mengembalikan dictionary dengan data EXIF dan path file.
-    """
-    with open(image_path, 'rb') as f:
-        tags = exifread.process_file(f, details=False)
-    # Ubah setiap value ke string agar dapat di-serialisasi ke JSON
-    exif_data = {tag: str(value) for tag, value in tags.items()}
-    exif_data["file"] = image_path
-    return exif_data
-
-def extract_all_metadata(image_paths, metadata_file="metadata.json"):
-    """
-    Mengekstrak metadata dari seluruh image paths dan menyimpannya ke file JSON.
-    Jika file metadata sudah ada, data baru akan ditambahkan (tidak overwrite).
-    """
-    metadata_list = []
-    for path in image_paths:
-        try:
-            metadata = extract_exif(path)
-            metadata_list.append(metadata)
-        except Exception as e:
-            print(f"Gagal mengekstrak metadata dari {path}: {e}")
-    
-    # Jika file sudah ada, muat data yang sudah tersimpan
-    if os.path.exists(metadata_file):
-        try:
-            with open(metadata_file, "r") as f:
-                existing_data = json.load(f)
-        except Exception as e:
-            print(f"Gagal membaca file metadata: {e}")
-            existing_data = []
-    else:
-        existing_data = []
-    
-    # Tambahkan metadata baru ke data yang sudah ada
-    existing_data.extend(metadata_list)
-    
-    # Simpan kembali ke file JSON dengan penulisan indent agar mudah dibaca
-    with open(metadata_file, "w") as f:
-        json.dump(existing_data, f, indent=4)
-    
-    return existing_data
-
-# === Fungsi Save Align Image yang Dimodifikasi ===
-def save_align_image(image, index, original_path, align_folder=None):
-    """
-    Menyimpan gambar dalam format TIFF ke folder yang ditentukan,
-    kemudian mengembalikan metadata dari file asli ke file hasil menggunakan exiftool.
-    
-    Parameter:
-      - image: gambar yang akan disimpan
-      - index: indeks gambar (untuk referensi jika diperlukan)
-      - original_path: path file asli untuk digunakan sebagai nama file dan sumber metadata
-      - align_folder: folder tujuan penyimpanan
-    """
-    # Gunakan nilai default jika align_folder tidak diberikan
-    if align_folder is None:
-        align_folder = "database/align/align_image"
-    os.makedirs(align_folder, exist_ok=True)
-    
-    # Ambil nama file tanpa ekstensi dari original_path
-    base_name = os.path.splitext(os.path.basename(original_path))[0]
-    # Buat nama file hasil dengan format {base_name}_align.tiff
-    file_path = os.path.join(align_folder, f"{base_name}_align.tiff")
-    
-    # Simpan gambar dengan OpenCV
-    cv2.imwrite(file_path, image)
-    
-    # Gunakan exiftool untuk menyalin metadata dari file asli ke file hasil
-    try:
-        subprocess.run(
-            ["exiftool", "-overwrite_original", "-TagsFromFile", original_path, file_path],
-            check=True
-        )
-        print(f"Metadata berhasil dikembalikan ke {file_path}")
-    except subprocess.CalledProcessError as e:
-        print(f"Error saat mengembalikan metadata ke {file_path}: {e}")
-    
-    return file_path
-
-# === Fungsi Main yang Dimodifikasi ===
-def main(db_path, update_progress=None, batch_size=2, stop_requested=None, 
+def main(db_path, update_progress=None, batch_size=12, stop_requested=None, 
          config_filename=None, save_align=None, align_folder=None, command_save_to_hd5f=None):
     
     # Inisialisasi processor dan konfigurasi
@@ -263,6 +183,9 @@ def main(db_path, update_progress=None, batch_size=2, stop_requested=None,
     
     if command_save_to_hd5f is None:
         command_save_to_hd5f = config.get("command_save_to_hd5f", True)
+    
+    if align_folder is None:
+        align_folder = config.get("align_folder", os.path.join(os.path.expanduser("~"), "Documents", "Pixel Refine", "align_image"))
     
     enable_cropping = config.get("enable_cropping", True)
     transformation_type = config.get("transformation", "affine")
@@ -351,7 +274,6 @@ def main(db_path, update_progress=None, batch_size=2, stop_requested=None,
             h5f.create_dataset("image_0", data=base_image)
         
         if save_align:
-            # Perhatikan pemanggilan: parameter kedua adalah index, ketiga adalah path asli
             save_align_image(base_image, 0, base_image_path, align_folder)
         
         num_threads = os.cpu_count() or 4
@@ -388,7 +310,6 @@ def main(db_path, update_progress=None, batch_size=2, stop_requested=None,
                         compensated_image = crop_image(compensated_image, crop_bounds)
                     
                     if save_align:
-                        # Panggil fungsi save_align_image dengan index dan path asli gambar dari batch
                         save_align_image(compensated_image, i, batch_paths[i - start_idx], align_folder)
                     
                     # Ekstrak metadata untuk gambar yang sedang diproses (dari path asli)
@@ -412,7 +333,6 @@ def main(db_path, update_progress=None, batch_size=2, stop_requested=None,
             
             del batch_images, batch_paths, futures
             gc.collect()
-
 
 def running_orb(parent=None):
     """
