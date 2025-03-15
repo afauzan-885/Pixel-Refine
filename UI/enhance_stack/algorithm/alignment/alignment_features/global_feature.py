@@ -5,7 +5,6 @@ import concurrent
 import subprocess
 import cv2
 import exifread
-import h5py
 import numpy as np
 
 from UI.settings.General.Language import language_config
@@ -69,7 +68,7 @@ def save_to_hdf5(h5f, dataset_name, cropped, metadata=None):
         dset.attrs['metadata'] = json.dumps(metadata)
         
         
-def save_align_image(image, index, original_path, align_folder=None, load_config_func=None):
+def save_align_to_folder(image, index, original_path, align_folder=None, load_config_func=None):
     """
     Menyimpan gambar dalam format TIFF ke folder yang ditentukan,
     kemudian mengembalikan metadata dari file asli ke file output menggunakan exiftool
@@ -103,11 +102,36 @@ def save_align_image(image, index, original_path, align_folder=None, load_config
             )
             # Tunggu hingga proses selesai
             future.result()
-        print(f"Metadata successfully restored to {file_path}")
+        # print(f"Metadata successfully restored to {file_path}")
     except Exception as e:
         print(f"Error restoring metadata to {file_path}: {e}")
     
     return file_path
+
+def save_image(image, output_path, reference_image_path=None):
+        """
+        Menyimpan gambar ke output_path dengan cv2.imwrite, lalu 
+        mengembalikan metadata dari gambar referensi (reference_image_path) ke file yang disimpan.
+        
+        Parameter:
+        - image: array gambar yang akan disimpan
+        - output_path: path file output (misalnya, TIFF)
+        - reference_image_path: path gambar referensi untuk penyalinan metadata
+        """
+        # Simpan gambar menggunakan OpenCV
+        cv2.imwrite(output_path, image)
+        
+        # Jika reference_image_path disediakan, gunakan exiftool untuk mengembalikan metadata
+        if reference_image_path is not None and os.path.exists(reference_image_path):
+            try:
+                subprocess.run(
+                    ["exiftool", "-overwrite_original", "-TagsFromFile", reference_image_path, output_path],
+                    check=True
+                )
+                # print(f"Metadata successfully restored {reference_image_path} to {output_path}")
+            except subprocess.CalledProcessError as e:
+                print(f"Error restoring metadata to {output_path}: {e}")
+        return output_path
 # ====================== Load and Saving Process ====================== #
 
 # ================ Fungsi Ekstraksi Metadata ====================== #
@@ -222,7 +246,7 @@ def compute_global_crop(transform_folder, total_images, w, h, transformation_typ
     crop_h = h - int(np.ceil(global_max_y - h)) - crop_y  # Tinggi area yang tersisa
 
     if crop_w <= 0 or crop_h <= 0:
-        print("Crop region global tidak valid. Tidak ada overlap yang cukup.")
+        print(language_config.FAIL_CROPPING_PROCESS)
         return None
 
     return crop_x, crop_y, crop_w, crop_h

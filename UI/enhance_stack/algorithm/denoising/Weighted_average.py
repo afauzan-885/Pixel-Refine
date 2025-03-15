@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, load_images_from_paths
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, load_images_from_paths, save_image
 from UI.enhance_stack.algorithm.denoising.extra_similarity.extra_algorithm import call_weighted_average_motion
 from UI.settings.General.Language import language_config
 
@@ -168,32 +168,6 @@ class WeightedAverageAlgorithm:
             norm_image = np.stack((norm_image,)*3, axis=-1)
         return norm_image.astype(np.float32)
 
-
-    def save_image(self, image, output_path, reference_image_path=None):
-        """
-        Menyimpan gambar ke output_path dengan cv2.imwrite, lalu 
-        mengembalikan metadata dari gambar referensi (reference_image_path) ke file yang disimpan.
-        
-        Parameter:
-        - image: array gambar yang akan disimpan
-        - output_path: path file output (misalnya, TIFF)
-        - reference_image_path: path gambar referensi untuk penyalinan metadata
-        """
-        # Simpan gambar menggunakan OpenCV
-        cv2.imwrite(output_path, image)
-        
-        # Jika reference_image_path disediakan, gunakan exiftool untuk mengembalikan metadata
-        if reference_image_path is not None and os.path.exists(reference_image_path):
-            try:
-                subprocess.run(
-                    ["exiftool", "-overwrite_original", "-TagsFromFile", reference_image_path, output_path],
-                    check=True
-                )
-                print(f"Metadata berhasil dikembalikan dari {reference_image_path} ke {output_path}")
-            except subprocess.CalledProcessError as e:
-                print(f"Error saat mengembalikan metadata ke {output_path}: {e}")
-        return output_path
-        
 def main(db_path, update_progress=None, stop_requested=None, batch_size=8):
     try:
         image_processor = WeightedAverageAlgorithm(db_path)
@@ -265,7 +239,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=8):
             final_result = image_processor.weighted_average(processed_batches, update_progress=update_progress, stop_requested=stop_requested)
 
             # Simpan hasil akhir
-            image_processor.save_image(final_result, output_path, reference_image_path=reference_image_path)
+            save_image(final_result, output_path, reference_image_path=reference_image_path)
 
             if update_progress:
                 update_progress(100, language_config.RUN_IMAGE_PROCESS_STACK_SUCCESS.format(output_path=output_path))
@@ -273,13 +247,12 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=8):
             if update_progress:
                 update_progress(0, language_config.STACK_IMAGES_FAILED)
 
-    except Exception as error:
-        error_message = f"Error encountered: {str(error)}"
+    except Exception as e:
+        error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(e))
         print(error_message)  # Menampilkan error untuk debugging
         if update_progress:
             update_progress(0, error_message)
         raise
-
 
 def running_weighted_average(parent=None):
     """

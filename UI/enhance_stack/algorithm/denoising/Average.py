@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, load_images_from_paths
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, load_images_from_paths, save_image
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
@@ -72,12 +72,12 @@ class AverageAlgorithm:
         return load_images_from_paths(image_paths)
 
     def stack_average_images(self, images, accumulated_image, total_weights, reference_image, stop_requested=None):
-        if stop_requested and stop_requested():  # Cek penghentian
-            print("Proses dihentikan sebelum menghitung gerakan global.")
+        if stop_requested and stop_requested():  
+            # Cek penghentian
             return accumulated_image, total_weights
 
         if len(images) == 0:
-            raise ValueError("Tidak ada gambar yang ditemukan.")
+            raise ValueError(language_config.RUN_IMAGE_NOT_FOUND)
 
         dtype = images[0].dtype
         if accumulated_image is None:
@@ -88,7 +88,7 @@ class AverageAlgorithm:
                 continue
 
             if stop_requested and stop_requested():  # Cek penghentian
-                print("Proses dihentikan saat menghitung stack.")
+                # print("Proses dihentikan saat menghitung stack.")
                 break
 
             # Gunakan gambar referensi untuk perhitungan
@@ -101,7 +101,7 @@ class AverageAlgorithm:
     
     def process_final_image(self, accumulated_image, total_weights, dtype=np.uint16):
         if accumulated_image is None or total_weights <= 0:
-            raise ValueError("Accumulated image is None atau total weights tidak valid.")
+            raise ValueError(language_config.ERROR_ACCUMULATE_IMAGE)
         
         # Normalisasi
         normalized_image = accumulated_image / total_weights
@@ -117,31 +117,6 @@ class AverageAlgorithm:
         final_image = final_image.astype(dtype)
         
         return final_image
-    
-    def save_image(self, image, output_path, reference_image_path=None):
-        """
-        Menyimpan gambar ke output_path dengan cv2.imwrite, lalu 
-        mengembalikan metadata dari gambar referensi (reference_image_path) ke file yang disimpan.
-        
-        Parameter:
-        - image: array gambar yang akan disimpan
-        - output_path: path file output (misalnya, TIFF)
-        - reference_image_path: path gambar referensi untuk penyalinan metadata
-        """
-        # Simpan gambar menggunakan OpenCV
-        cv2.imwrite(output_path, image)
-        
-        # Jika reference_image_path disediakan, gunakan exiftool untuk mengembalikan metadata
-        if reference_image_path is not None and os.path.exists(reference_image_path):
-            try:
-                subprocess.run(
-                    ["exiftool", "-overwrite_original", "-TagsFromFile", reference_image_path, output_path],
-                    check=True
-                )
-                print(f"Metadata berhasil dikembalikan dari {reference_image_path} ke {output_path}")
-            except subprocess.CalledProcessError as e:
-                print(f"Error saat mengembalikan metadata ke {output_path}: {e}")
-        return output_path
         
 def main(db_path, update_progress=None, stop_requested=None, batch_size=10):
     try:
@@ -239,22 +214,20 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10):
         if accumulated_image is not None:
             try:
                 final_result = image_processor.process_final_image(accumulated_image, total_weights)
-                # Saat menyimpan gambar akhir, kembalikan metadata dari gambar referensi
-                image_processor.save_image(final_result, output_path, reference_image_path=reference_image_path)
-                if update_progress:
-                    update_progress(100, f"Proses selesai, hasil disimpan di {output_path}")
+                
+                save_image(final_result, output_path, reference_image_path=reference_image_path)
+                # if update_progress:
+                #     update_progress(100, f"Proses selesai, hasil disimpan di {output_path}")
             except ValueError as e:
                 if update_progress:
-                    update_progress(0, f"Gagal memproses gambar: {str(e)}")
-                print(f"Error: {str(e)}")
+                    update_progress(0, language_config.RUN_ERROR_MESSAGE.format(error=str(e)))
         else:
             if update_progress:
-                update_progress(0, "Gagal melakukan stack gambar.")
+                update_progress(0, language_config.RUN_STACK_PROCESSING_FAILED)
     except Exception as e:
         error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(e))
         if update_progress:
             update_progress(0, error_message)
-        print(f"Error encountered: {str(e)}")
 
 def running_average(parent=None):
     """

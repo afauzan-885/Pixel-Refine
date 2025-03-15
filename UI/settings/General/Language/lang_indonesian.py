@@ -57,6 +57,11 @@ RUN_IMAGE_PROCESSING_FAILED = "Gagal memuat gambar {i} dari {image_paths[i]}."
 RUN_IMAGE_PROCESSING_SAVING = "Gambar ke-{i} telah disimpan."
 RUN_IMAGE_PROCESSING_FINISHED = "Proses selesai."
 
+## Newwwww
+ERROR_ACCUMULATE_IMAGE = "Accumulated image is None atau total weights tidak valid."
+RUN_STACK_PROCESSING_FAILED = "Gagal melakukan penumpukan gambar"
+
+
 FAIL_CALCULATE_GLOBAL_MOTION_PROCESS = "Kalkulasi gerakan tidak dapat dihitung untuk gambar ke-{}"
 FAIL_COMPENSATE_MOTION_PROCESS = "Estimasi gagal pada gambar ke-{}"
 
@@ -68,7 +73,7 @@ FAIL_LOAD_TRANSFORMATION_MATRIX_FILE = "File transformation matrix tidak ditemuk
 PROGRESS_CALCULATE_AND_COMPENSATE_MOTION_PROCESS ="Menyelaraskan dan crop gambar {}/{}"
 PROGRESS_SAVING_CALCULATE_AND_COMPENSATE_MOTION ="Menyimpan gambar {}/{}"
 
-FAIL_CROPPING_PROCESS ="Crop tidak valid. Overlap tidak cukup"
+FAIL_CROPPING_PROCESS = "Crop tidak valid. Overlap tidak cukup"
 
 CANCEL_PROCESSING = "Apakah Anda yakin ingin membatalkan proses?"
 

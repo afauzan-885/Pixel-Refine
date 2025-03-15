@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import Qt
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import compute_global_crop, crop_image, extract_all_metadata, extract_exif, load_images_from_paths, save_align_image, save_to_hdf5
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import compute_global_crop, crop_image, extract_all_metadata, extract_exif, load_images_from_paths, save_align_to_folder, save_to_hdf5
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
 
@@ -274,7 +274,7 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None,
             h5f.create_dataset("image_0", data=base_image)
         
         if save_align:
-            save_align_image(base_image, 0, base_image_path, align_folder)
+            save_align_to_folder(base_image, 0, base_image_path, align_folder)
         
         num_threads = os.cpu_count() or 4
         
@@ -310,7 +310,7 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None,
                         compensated_image = crop_image(compensated_image, crop_bounds)
                     
                     if save_align:
-                        save_align_image(compensated_image, i, batch_paths[i - start_idx], align_folder)
+                        save_align_to_folder(compensated_image, i, batch_paths[i - start_idx], align_folder)
                     
                     # Ekstrak metadata untuk gambar yang sedang diproses (dari path asli)
                     original_path = batch_paths[i - start_idx]

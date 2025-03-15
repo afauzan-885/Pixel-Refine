@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 # from UI.enhance_stack.algorithm.denoising.extra_similarity.compute_motion_metrics_aot import accumulate_tiles_jit
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata  
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, save_image  
 from UI.enhance_stack.algorithm.denoising.extra_similarity.extra_algorithm import call_similarity_motion
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
@@ -96,11 +96,11 @@ class SimilarityAlgorithm:
         Fungsi untuk menghitung multi-frame noise reduction dengan referensi citra pertama.
         """
         if not images:
-            raise ValueError("Gagal memuat citra referensi.")
+            raise ValueError(language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
 
         dtype = images[0].dtype
         if dtype not in (np.uint8, np.uint16):
-            raise TypeError("Tipe citra harus uint8 atau uint16.")
+            raise TypeError(language_config.SIMILARITY_MNFR_BIT_REQUIRED)
 
         # Normalisasi citra referensi
         reference_image = self.normalize_image(images[0], dtype)
@@ -169,31 +169,6 @@ class SimilarityAlgorithm:
         if len(image.shape) == 2:
             norm_image = np.stack((norm_image,)*3, axis=-1)
         return norm_image.astype(np.float32)
-
-    def save_image(self, image, output_path, reference_image_path=None):
-        """
-        Menyimpan gambar ke output_path dengan cv2.imwrite, lalu 
-        mengembalikan metadata dari gambar referensi (reference_image_path) ke file yang disimpan.
-        
-        Parameter:
-        - image: array gambar yang akan disimpan
-        - output_path: path file output (misalnya, TIFF)
-        - reference_image_path: path gambar referensi untuk penyalinan metadata
-        """
-        # Simpan gambar menggunakan OpenCV
-        cv2.imwrite(output_path, image)
-        
-        # Jika reference_image_path disediakan, gunakan exiftool untuk mengembalikan metadata
-        if reference_image_path is not None and os.path.exists(reference_image_path):
-            try:
-                subprocess.run(
-                    ["exiftool", "-overwrite_original", "-TagsFromFile", reference_image_path, output_path],
-                    check=True
-                )
-                print(f"Metadata berhasil dikembalikan dari {reference_image_path} ke {output_path}")
-            except subprocess.CalledProcessError as e:
-                print(f"Error saat mengembalikan metadata ke {output_path}: {e}")
-        return output_path
         
 def main(db_path, update_progress=None, stop_requested=None, batch_size=10):
     try:
@@ -243,6 +218,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10):
                         ))
         else:
             total_images = len(image_paths)
+            processed_count = 0 
 
             for batch_start in range(0, total_images, batch_size):
                 if stop_requested and stop_requested():
@@ -266,7 +242,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10):
             final_result = image_processor.similarity_mfnr(processed_batches, update_progress=update_progress, stop_requested=stop_requested)
 
             # Simpan hasil akhir
-            image_processor.save_image(final_result, output_path, reference_image_path=reference_image_path)
+            save_image(final_result, output_path, reference_image_path=reference_image_path)
 
             if update_progress:
                 update_progress(100, language_config.RUN_IMAGE_PROCESS_STACK_SUCCESS.format(output_path=output_path))
@@ -274,8 +250,8 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10):
             if update_progress:
                 update_progress(0, language_config.STACK_IMAGES_FAILED)
 
-    except Exception as error:
-        error_message = f"Error encountered: {str(error)}"
+    except Exception as e:
+        error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(e))
         print(error_message)  # Menampilkan error untuk debugging
         if update_progress:
             update_progress(0, error_message)

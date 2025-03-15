@@ -55,6 +55,9 @@ RUN_IMAGE_PROCESSING_FAILED = "Gagal memuatkan imej {i} dari {image_paths[i]}."
 RUN_IMAGE_PROCESSING_SAVING = "Imej ke-{i} telah disimpan dalam HDF5."
 RUN_IMAGE_PROCESSING_FINISHED = "Proses Selesai."
 
+ERROR_ACCUMULATE_IMAGE = "Imej terkumpul Tiada atau jumlah berat tidak sah."
+RUN_STACK_PROCESSING_FAILED = "Gagal menyusun imej"
+
 FAIL_CALCULATE_GLOBAL_MOTION_PROCESS = "Pengiraan gerakan tidak dapat dikira untuk imej ke-{}"
 FAIL_COMPENSATE_MOTION_PROCESS = "Anggaran gagal pada imej {}"
 

@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, save_image
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
 
@@ -194,32 +194,6 @@ class MedianAlgorithm:
 
         return np.clip(median_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype) if np.issubdtype(dtype, np.integer) else median_image.astype(dtype)
     
-    def save_image(self, image, output_path, reference_image_path=None):
-        """
-        Menyimpan gambar ke output_path dengan cv2.imwrite, lalu 
-        mengembalikan metadata dari gambar referensi (reference_image_path) ke file yang disimpan.
-        
-        Parameter:
-        - image: array gambar yang akan disimpan
-        - output_path: path file output (misalnya, TIFF)
-        - reference_image_path: path gambar referensi untuk penyalinan metadata
-        """
-        # Simpan gambar menggunakan OpenCV
-        cv2.imwrite(output_path, image)
-        
-        # Jika reference_image_path disediakan, gunakan exiftool untuk mengembalikan metadata
-        if reference_image_path is not None and os.path.exists(reference_image_path):
-            try:
-                subprocess.run(
-                    ["exiftool", "-overwrite_original", "-TagsFromFile", reference_image_path, output_path],
-                    check=True
-                )
-                print(f"Metadata berhasil dikembalikan dari {reference_image_path} ke {output_path}")
-            except subprocess.CalledProcessError as e:
-                print(f"Error saat mengembalikan metadata ke {output_path}: {e}")
-        return output_path
-
-
 def main(db_path, update_progress=None, stop_requested=None, batch_size=4):
     try:
         image_processor = MedianAlgorithm(db_path)
@@ -312,18 +286,18 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4):
         # Simpan gambar median akhir
         if final_median is not None:
             final_result = final_median.astype(np.uint16)
-            image_processor.save_image(final_result, output_path, reference_image_path=reference_image_path)
-            if update_progress:
-                update_progress(100, f"Proses selesai, hasil disimpan di {output_path}")
+            save_image(final_result, output_path, reference_image_path=reference_image_path)
+            # if update_progress:
+            #     update_progress(100, f"Proses selesai, hasil disimpan di {output_path}")
         else:
             if update_progress:
-                update_progress(0, "Gagal melakukan stack median gambar.")
+                update_progress(0, language_config.RUN_ERROR_MESSAGE.format(error=str(e)))
 
     except Exception as e:
         error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(e))
         if update_progress:
             update_progress(0, error_message)
-        print(f"Error encountered: {str(e)}")
+        print(language_config.RUN_ERROR_MESSAGE.format(error=str(e)))
        
 def running_median(parent=None):
     """

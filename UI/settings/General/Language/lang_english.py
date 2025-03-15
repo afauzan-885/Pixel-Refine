@@ -56,6 +56,9 @@ RUN_IMAGE_PROCESSING_FAILED = "Failed to load image {i} from {image_paths[i]}."
 RUN_IMAGE_PROCESSING_SAVING = "Image number {i} has been saved."
 RUN_IMAGE_PROCESSING_FINISHED = "Process completed."
 
+ERROR_ACCUMULATE_IMAGE = "Accumulated image is None or total weights are invalid."
+RUN_STACK_PROCESSING_FAILED = "Failed to stack images"
+
 FAIL_CALCULATE_GLOBAL_MOTION_PROCESS = "Unable to calculate global motion for image {}"
 FAIL_COMPENSATE_MOTION_PROCESS = "Motion compensation estimation failed for image {}"
 UNRECOGNIZED_TRANSFORMATION = "Transformation type not recognized."
