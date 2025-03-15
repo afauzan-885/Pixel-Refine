@@ -1,3 +1,4 @@
+import subprocess
 import cv2
 import numpy as np
 import sqlite3
@@ -6,7 +7,8 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 # from UI.enhance_stack.algorithm.denoising.extra_similarity.compute_motion_metrics_aot import accumulate_tiles_jit
-from UI.enhance_stack.algorithm.denoising.extra_similarity.extra_algorithm import call_accumulate_tiles_compile
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata  
+from UI.enhance_stack.algorithm.denoising.extra_similarity.extra_algorithm import call_similarity_motion
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
 
@@ -89,7 +91,7 @@ class SimilarityAlgorithm:
     def similarity_mfnr(self, images, tile_size=(32, 32), overlap=0.35,
                     motion_threshold=0.003, noise_threshold=0.003,
                     update_progress=None, stop_requested=None,
-                    lib_path='UI/enhance_stack/algorithm/denoising/extra_similarity/compute_motion.dll'):
+                    lib_path='UI/data/similarity_motion.dll'):
         """
         Fungsi untuk menghitung multi-frame noise reduction dengan referensi citra pertama.
         """
@@ -142,7 +144,7 @@ class SimilarityAlgorithm:
             col_starts_arr = np.array(col_starts, dtype=np.int32)
 
             # Panggil fungsi dari library C++
-            call_accumulate_tiles_compile(
+            call_similarity_motion(
                 final_image, weight_map,
                 current_image, reference_image,
                 base_window,
@@ -168,8 +170,30 @@ class SimilarityAlgorithm:
             norm_image = np.stack((norm_image,)*3, axis=-1)
         return norm_image.astype(np.float32)
 
-    def save_image(self, image, output_path):
+    def save_image(self, image, output_path, reference_image_path=None):
+        """
+        Menyimpan gambar ke output_path dengan cv2.imwrite, lalu 
+        mengembalikan metadata dari gambar referensi (reference_image_path) ke file yang disimpan.
+        
+        Parameter:
+        - image: array gambar yang akan disimpan
+        - output_path: path file output (misalnya, TIFF)
+        - reference_image_path: path gambar referensi untuk penyalinan metadata
+        """
+        # Simpan gambar menggunakan OpenCV
         cv2.imwrite(output_path, image)
+        
+        # Jika reference_image_path disediakan, gunakan exiftool untuk mengembalikan metadata
+        if reference_image_path is not None and os.path.exists(reference_image_path):
+            try:
+                subprocess.run(
+                    ["exiftool", "-overwrite_original", "-TagsFromFile", reference_image_path, output_path],
+                    check=True
+                )
+                print(f"Metadata berhasil dikembalikan dari {reference_image_path} ke {output_path}")
+            except subprocess.CalledProcessError as e:
+                print(f"Error saat mengembalikan metadata ke {output_path}: {e}")
+        return output_path
         
 def main(db_path, update_progress=None, stop_requested=None, batch_size=10):
     try:
@@ -179,6 +203,12 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10):
             if update_progress:
                 update_progress(0, language_config.RUN_IMAGE_PROCESS_LOAD_FAILED)
             return
+        
+        # Ekstrak metadata dari seluruh gambar dan simpan ke file JSON
+        metadata_folder = os.path.join("database", "align")
+        os.makedirs(metadata_folder, exist_ok=True)
+        metadata_file = os.path.join(metadata_folder, "metadata.json")
+        extract_all_metadata(image_paths, metadata_file=metadata_file)
 
         reference_image_path = image_paths[0]
         reference_image_name = os.path.splitext(os.path.basename(reference_image_path))[0]
@@ -236,7 +266,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10):
             final_result = image_processor.similarity_mfnr(processed_batches, update_progress=update_progress, stop_requested=stop_requested)
 
             # Simpan hasil akhir
-            image_processor.save_image(final_result, output_path)
+            image_processor.save_image(final_result, output_path, reference_image_path=reference_image_path)
 
             if update_progress:
                 update_progress(100, language_config.RUN_IMAGE_PROCESS_STACK_SUCCESS.format(output_path=output_path))

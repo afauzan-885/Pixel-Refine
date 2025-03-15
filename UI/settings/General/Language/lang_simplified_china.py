@@ -276,9 +276,14 @@ SAVE_ALIGN_TO_PROCESS_DESCRIPTION = """保存图像以用于去噪或超分辨�
 SAVE_ALIGN_IMAGE_TO_FOLDER_DESCRIPTION = """将对齐后的图像保存到文件夹中
 默认文件夹为PC中的文档文件夹"""
 
-
-
 APPLY_PARAMETER_BUTTON_TEXT = "套用設定"
+
+RESTART_APPLICATION_REQUIRED = "需要重新启动"
+RESTART_APPLICATION_DESCRIPTION = "重新启动以查看更改"
+ACCEPT_RESTART_APPLICATION = "重启"
+REJECT_APPLICATION_DESCRIPTION = "稍后"
+COMMAND_APPLICATION_DESCRIPTION = "重新加载应用程序..."
+
 
 # ------------ Parameter Setting Algorithm --------------------- #
 

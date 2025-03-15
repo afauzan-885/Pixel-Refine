@@ -370,8 +370,13 @@ denoising ataupun super resolusi"""
 SAVE_ALIGN_IMAGE_TO_FOLDER_DESCRIPTION = """Menyimpan gambar hasil penyelarasan ke dalam folder
 Folder default adalah folder dokumen di PC"""
 
-
 APPLY_PARAMETER_BUTTON_TEXT = "Terapkan Pengaturan"
+
+RESTART_APPLICATION_REQUIRED = "Restart Diperlukan"
+RESTART_APPLICATION_DESCRIPTION = "Mulai ulang untuk melihat perubahan"
+ACCEPT_RESTART_APPLICATION = "Mulai Ulang"
+REJECT_APPLICATION_DESCRIPTION = "Nanti saja"
+COMMAND_APPLICATION_DESCRIPTION = "Muat Ulang Aplikasi..."
 
 # ------------ Parameter Setting Algorithm --------------------- #
 

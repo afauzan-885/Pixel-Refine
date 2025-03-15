@@ -331,9 +331,13 @@ SAVE_ALIGN_TO_PROCESS_DESCRIPTION = """Save images for denoising or super-resolu
 SAVE_ALIGN_IMAGE_TO_FOLDER_DESCRIPTION = """Save aligned images to a folder
 The default folder is the PC's Documents folder"""
 
-
-
 APPLY_PARAMETER_BUTTON_TEXT = "Apply Settings"
+
+RESTART_APPLICATION_REQUIRED = "Restart Required"
+RESTART_APPLICATION_DESCRIPTION = "Restart to see changes"
+ACCEPT_RESTART_APPLICATION = "Restart"
+REJECT_APPLICATION_DESCRIPTION = "Later"
+COMMAND_APPLICATION_DESCRIPTION = "Reload Application..."
 
 
 # ------------ Parameter Setting Algorithm --------------------- #

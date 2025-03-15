@@ -9,7 +9,7 @@ import h5py
 
 from PyQt6.QtCore import Qt
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import load_images_from_paths, save_to_hdf5
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, extract_exif, load_images_from_paths, save_to_hdf5
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
 from concurrent.futures import ThreadPoolExecutor
@@ -181,6 +181,12 @@ def main(db_path, update_progress=None, batch_size=5, stop_requested=None):
     if not image_paths:
         print(language_config.RUN_IMAGE_NOT_FOUND)
         return
+    
+    # Ekstrak metadata dari seluruh gambar dan simpan ke file JSON
+    metadata_folder = os.path.join("database", "align")
+    os.makedirs(metadata_folder, exist_ok=True)
+    metadata_file = os.path.join(metadata_folder, "metadata.json")
+    extract_all_metadata(image_paths, metadata_file=metadata_file)
 
     # Gunakan gambar pertama sebagai referensi
     base_image_path = image_paths[0]
@@ -193,11 +199,13 @@ def main(db_path, update_progress=None, batch_size=5, stop_requested=None):
     total_batches = (total_images - 1) // batch_size + 1
 
     with h5py.File(processor.hdf5_path, "w") as h5f:
-        h5f.create_dataset("image_0", data=base_image, compression="gzip")
+        h5f.create_dataset("image_0", data=base_image)
 
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = []
 
+            num_threads = os.cpu_count() or 4
+            
             for batch_idx in range(total_batches):
                 if stop_requested and stop_requested():
                     break
@@ -221,10 +229,14 @@ def main(db_path, update_progress=None, batch_size=5, stop_requested=None):
                     # Menggunakan metode parallel untuk optical flow pada tiap gambar
                     flow = processor.calculate_optical_flow(base_image, target_image)
                     compensated_image = processor.compensate_motion(target_image, flow, image_id=i)
+                    
+                    # Ekstrak metadata untuk gambar yang sedang diproses (dari path asli)
+                    original_path = batch_paths[i - start_idx]
+                    metadata = extract_exif(original_path)
 
                     if compensated_image is not None:
                         dataset_name = f"image_{i}"
-                        futures.append(executor.submit(save_to_hdf5, h5f, dataset_name, compensated_image))
+                        futures.append(executor.submit(save_to_hdf5, h5f, dataset_name, compensated_image, metadata))
 
             for future in futures:
                 future.result()

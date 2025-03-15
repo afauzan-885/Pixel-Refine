@@ -1,4 +1,5 @@
 import cProfile
+import subprocess
 import cv2
 import numpy as np
 import sqlite3
@@ -7,6 +8,8 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, load_images_from_paths
+from UI.enhance_stack.algorithm.denoising.extra_similarity.extra_algorithm import call_weighted_average_motion
 from UI.settings.General.Language import language_config
 
 class ThreadWorker(QThread):
@@ -66,7 +69,7 @@ class WeightedAverageAlgorithm:
 
     def load_images_from_folder(self, folder_path):
         image_paths = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(('.png', '.jpg', '.jpeg'))]
-        return self.load_images_from_paths(image_paths)
+        return load_images_from_paths(image_paths)
 
     def load_images_from_hdf5(self, hdf5_path, stop_requested=None):
         images = []
@@ -85,101 +88,111 @@ class WeightedAverageAlgorithm:
         window = np.outer(y, x)
         return window
     
-    def precompute_reference_tiles(self, reference_image, tile_size, overlap):
-        h, w, _ = reference_image.shape
-        tile_step_y = int(tile_size[0] * (1 - overlap))
-        tile_step_x = int(tile_size[1] * (1 - overlap))
-        vertical_offset = tile_size[0] // 2
-
-        precomputed_tiles = {}
-        cosine_window = self.raised_cosine_window(tile_size)
-
-        for y in range(0, h, tile_step_y):
-            offset_x = vertical_offset if (y // tile_step_y) % 2 == 1 else 0
-            for x in range(-offset_x, w, tile_step_x):
-                y_end = min(y + tile_size[0], h)
-                x_end = min(x + tile_size[1], w)
-                x_start = max(x, 0)
-
-                tile_height = y_end - y
-                tile_width = x_end - x_start
-
-                ref_tile = reference_image[y:y_end, x_start:x_end]
-                window = cosine_window[:tile_height, :tile_width]
-
-                precomputed_tiles[(y, x)] = (ref_tile, window)
-
-        return precomputed_tiles
-
-    def computer_motion_metrics(self, current_tile, ref_tile, motion_threshold):
-        # Hanya perhitungan temporal motion
-        temporal_motion = cv2.absdiff(current_tile, ref_tile)
-
-        Dz = cv2.mean(temporal_motion)[0]
-        
-        # Menggunakan fungsi eksponensial untuk memberikan nilai bobot secara halus
-        similarity_weight = np.exp(-Dz / motion_threshold)
-        
-        # Pastikan similarity_weight berada dalam rentang 0 hingga 1
-        similarity_weight = np.clip(similarity_weight, 0.0, 1.0)
-        
-        return similarity_weight
-  
-    def update_final_image(self, final_image, weight_map, current_tile, window, similarity_weight, y, x_start, y_end, x_end, dtype):
-        weighted_tile = current_tile * window[..., np.newaxis] * similarity_weight
-        weight_map[y:y_end, x_start:x_end] += window * similarity_weight
-        final_image[y:y_end, x_start:x_end] += weighted_tile * np.iinfo(dtype).max
-
-    def weighter_average(self, images, tile_size=(64, 64), overlap=0.3, motion_threshold=0.05, update_progress=None, stop_requested=None):
+    def weighted_average(self, images, tile_size=(64, 64), overlap=0.3,
+                     motion_threshold=0.0001, update_progress=None, stop_requested=None,
+                     lib_path='UI/data/weighted_average_motion.dll'):
+        """
+        Fungsi untuk menghitung multi-frame noise reduction dengan referensi citra pertama.
+        """
         if not images:
-            raise ValueError(language_config.SIMILARITY_MNFR_LOAD_FAILED)
+            raise ValueError("Gagal memuat citra referensi.")
 
         dtype = images[0].dtype
         if dtype not in (np.uint8, np.uint16):
-            raise TypeError(language_config.SIMILARITY_MNFR_BIT_REQUIRED)
+            raise TypeError("Tipe citra harus uint8 atau uint16.")
 
+        # Normalisasi citra referensi
         reference_image = self.normalize_image(images[0], dtype)
-        h, w, _ = reference_image.shape
+        h, w, channels = reference_image.shape
 
-        precomputed_reference_tiles = self.precompute_reference_tiles(reference_image, tile_size, overlap)
+        # Menghitung step berdasarkan overlap dan ukuran tile
+        step_y = max(int(tile_size[0] * (1 - overlap)), 1)
+        step_x = max(int(tile_size[1] * (1 - overlap)), 1)
+
+        row_starts = list(range(0, h - tile_size[0] + 1, step_y))
+        if row_starts[-1] != h - tile_size[0]:
+            row_starts.append(h - tile_size[0])
+        col_starts = list(range(0, w - tile_size[1] + 1, step_x))
+        if col_starts[-1] != w - tile_size[1]:
+            col_starts.append(w - tile_size[1])
+
+        base_window = self.raised_cosine_window(tile_size)
+
         final_image = np.zeros_like(reference_image, dtype=np.float32)
         weight_map = np.zeros((h, w), dtype=np.float32)
 
+        # Konversi scale ke float32
+        scale = np.float32(np.iinfo(dtype).max)
+        num_images = len(images)
+
         for i, image in enumerate(images):
             if update_progress:
-                progress = int((i + 1) / len(images) * 100)
-                message = language_config.RUN_IMAGE_PROCESSING.format(i=i + 1, total_images=len(images))
+                progress = int((i + 1) / num_images * 100)
+                message = f"Processing image {i+1} of {num_images}"
                 update_progress(progress, message)
 
             if stop_requested and stop_requested():
-                print("Process stopped by user.")
                 break
 
             current_image = self.normalize_image(image, dtype)
             if current_image.shape != reference_image.shape:
-                raise ValueError(f"Image {i + 1} does not match the reference image size.")
+                raise ValueError(f"Image size {i+1} does not match.")
 
-            for (y, x), (ref_tile, window) in precomputed_reference_tiles.items():
-                y_end = min(y + tile_size[0], h)
-                x_end = min(x + tile_size[1], w)
-                x_start = max(x, 0)
+            # Konversi row dan col starts ke numpy array
+            row_starts_arr = np.array(row_starts, dtype=np.int32)
+            col_starts_arr = np.array(col_starts, dtype=np.int32)
 
-                current_tile = current_image[y:y_end, x_start:x_end]
-                similarity_weight = self.computer_motion_metrics(current_tile, ref_tile, motion_threshold)
-                self.update_final_image(final_image, weight_map, current_tile, window, similarity_weight, y, x_start, y_end, x_end, dtype)
+            # Panggil fungsi dari library C++ (tanpa noise_threshold)
+            call_weighted_average_motion(
+                final_image, weight_map,
+                current_image, reference_image,
+                base_window,
+                row_starts_arr, col_starts_arr,
+                tile_size[0], tile_size[1],
+                h, w, channels,
+                motion_threshold, scale, 0.8, 50, 1e-3,
+                lib_path
+            )
 
-        final_image /= (weight_map[..., np.newaxis] + 1e-6)
-        final_image = np.clip(final_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype)
+        # Normalisasi dan kliping hasil akhir
+        final_image /= (weight_map[..., np.newaxis] + 1e-3)
+        final_image = np.clip(final_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype, copy=False)
 
-        print(language_config.SIMILARITY_MNFR_PROCESS_FINISHED)
         return final_image
 
     def normalize_image(self, image, dtype):
-        return image.astype(np.float32) / np.iinfo(dtype).max
+        # Konversi ke float32 dan pastikan array contiguous
+        image_float = np.ascontiguousarray(image.astype(np.float32))
+        norm_image = (image_float - image_float.min()) / (image_float.max() - image_float.min() + 1e-6)
+        if len(image.shape) == 2:
+            norm_image = np.stack((norm_image,)*3, axis=-1)
+        return norm_image.astype(np.float32)
 
 
-    def save_image(self, image, output_path):
+    def save_image(self, image, output_path, reference_image_path=None):
+        """
+        Menyimpan gambar ke output_path dengan cv2.imwrite, lalu 
+        mengembalikan metadata dari gambar referensi (reference_image_path) ke file yang disimpan.
+        
+        Parameter:
+        - image: array gambar yang akan disimpan
+        - output_path: path file output (misalnya, TIFF)
+        - reference_image_path: path gambar referensi untuk penyalinan metadata
+        """
+        # Simpan gambar menggunakan OpenCV
         cv2.imwrite(output_path, image)
+        
+        # Jika reference_image_path disediakan, gunakan exiftool untuk mengembalikan metadata
+        if reference_image_path is not None and os.path.exists(reference_image_path):
+            try:
+                subprocess.run(
+                    ["exiftool", "-overwrite_original", "-TagsFromFile", reference_image_path, output_path],
+                    check=True
+                )
+                print(f"Metadata berhasil dikembalikan dari {reference_image_path} ke {output_path}")
+            except subprocess.CalledProcessError as e:
+                print(f"Error saat mengembalikan metadata ke {output_path}: {e}")
+        return output_path
         
 def main(db_path, update_progress=None, stop_requested=None, batch_size=8):
     try:
@@ -189,6 +202,12 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=8):
             if update_progress:
                 update_progress(0, language_config.RUN_IMAGE_PROCESS_LOAD_FAILED)
             return
+        
+        # Ekstrak metadata dari seluruh gambar dan simpan ke file JSON
+        metadata_folder = os.path.join("database", "align")
+        os.makedirs(metadata_folder, exist_ok=True)
+        metadata_file = os.path.join(metadata_folder, "metadata.json")
+        extract_all_metadata(image_paths, metadata_file=metadata_file)
 
         reference_image_path = image_paths[0]
         reference_image_name = os.path.splitext(os.path.basename(reference_image_path))[0]
@@ -213,7 +232,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=8):
                     batch_images = [np.array(h5f[key]) for key in batch_keys]
 
                     # Proses batch
-                    batch_result = image_processor.weighter_average(batch_images, update_progress=update_progress, stop_requested=stop_requested)
+                    batch_result = image_processor.weighted_average(batch_images, update_progress=update_progress, stop_requested=stop_requested)
                     processed_batches.append(batch_result)
 
                     progress = int(((batch_start + len(batch_keys)) / total_images) * 100)
@@ -232,7 +251,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=8):
                 batch_images = [cv2.imread(path, cv2.IMREAD_UNCHANGED) for path in batch_paths if cv2.imread(path, cv2.IMREAD_UNCHANGED) is not None]
 
                 # Proses batch
-                batch_result = image_processor.weighter_average(batch_images, update_progress=update_progress, stop_requested=stop_requested)
+                batch_result = image_processor.weighted_average(batch_images, update_progress=update_progress, stop_requested=stop_requested)
                 processed_batches.append(batch_result)
 
                 progress = int(((batch_start + len(batch_paths)) / total_images) * 100)
@@ -243,10 +262,10 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=8):
 
         if processed_batches:
             # Proses fine-tuning dari semua hasil batch
-            final_result = image_processor.weighter_average(processed_batches, update_progress=update_progress, stop_requested=stop_requested)
+            final_result = image_processor.weighted_average(processed_batches, update_progress=update_progress, stop_requested=stop_requested)
 
             # Simpan hasil akhir
-            image_processor.save_image(final_result, output_path)
+            image_processor.save_image(final_result, output_path, reference_image_path=reference_image_path)
 
             if update_progress:
                 update_progress(100, language_config.RUN_IMAGE_PROCESS_STACK_SUCCESS.format(output_path=output_path))

@@ -50,8 +50,8 @@ class LeftPanel(QWidget):
         self.parameter_panel_widget = QWidget()
         self.parameter_panel_widget.setMaximumHeight(270)
         parameter_panel_layout = QHBoxLayout(self.parameter_panel_widget)
-        parameter_panel_layout.setContentsMargins(10, 10, 0, 0)
-        parameter_panel_layout.setSpacing(20)
+        parameter_panel_layout.setContentsMargins(10, 5, 0, 0)
+        parameter_panel_layout.setSpacing(0)
 
         # Buat dropdown untuk pengaturan parameter
         left_panel = QVBoxLayout()

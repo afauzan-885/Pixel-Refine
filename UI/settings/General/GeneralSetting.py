@@ -1,10 +1,12 @@
 import json
 import os
+import sys
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QComboBox, QFormLayout,
-    QVBoxLayout, QHBoxLayout, QPushButton
+    QVBoxLayout, QHBoxLayout, QPushButton,
+    QMessageBox
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QProcess
 
 from UI.settings.General.Language import language_config
 
@@ -120,14 +122,41 @@ def general_page():
     # Fungsi untuk menyimpan setting ke file JSON
     def save_settings():
         settings = {"language": language_dropdown.currentText()}
-    
+        
         # Pastikan direktori ada sebelum menyimpan
         os.makedirs(SETTINGS_DIR, exist_ok=True)
-    
+        
         with open(SETTINGS_FILE, "w") as f:
             json.dump(settings, f, indent=4)
-    
-        print(f"Settings saved to {SETTINGS_FILE}: {settings}")
+        
+        # print(f"Settings saved to {SETTINGS_FILE}: {settings}")
+
+        # Tampilkan QMessageBox untuk meminta restart
+        msg_box = QMessageBox()
+        msg_box.setWindowTitle(language_config.RESTART_APPLICATION_REQUIRED)
+        msg_box.setText(language_config.RESTART_APPLICATION_DESCRIPTION)
+        msg_box.setIcon(QMessageBox.Icon.Warning)
+
+        # Tambahkan tombol "Restart" dan "Nanti saja"
+        restart_button = msg_box.addButton(language_config.ACCEPT_RESTART_APPLICATION, QMessageBox.ButtonRole.AcceptRole)
+        later_button = msg_box.addButton(language_config.REJECT_APPLICATION_DESCRIPTION, QMessageBox.ButtonRole.RejectRole)
+
+        msg_box.exec()
+
+        # Jika user memilih "Restart"
+        if msg_box.clickedButton() == restart_button:
+            # print("User memilih restart.")
+            restart_application()
+
+    def restart_application():
+        """Fungsi untuk merestart aplikasi menggunakan QProcess."""
+        python = sys.executable
+        args = sys.argv
+
+        print(language_config.COMMAND_APPLICATION_DESCRIPTION)
+        QProcess.startDetached(python, args)
+
+        sys.exit(0)
     
     # Hubungkan tombol Apply dengan fungsi penyimpanan
     apply_button.clicked.connect(save_settings)

@@ -143,7 +143,7 @@ def get_orb_page():
     
     layout.addLayout(toggles_layout)
 
-    # Layout untuk parameter baru
+    # Layout untuk save_align dan command_save_to_hd5f
     extra_params_layout = QHBoxLayout()
 
     # Toggle button untuk save_align
@@ -151,7 +151,7 @@ def get_orb_page():
     save_align_button.setCheckable(True)
     save_align_button.setChecked(orb_config.get("save_align", True))
     save_align_button.setText(language_config.ACTIVATE_SAVE_ALIGN_IMAGE_TO_FOLDER if save_align_button.isChecked()
-                              else language_config.DEACTIVATE_SAVE_ALIGN_IMAGE_TO_FOLDER)
+                            else language_config.DEACTIVATE_SAVE_ALIGN_IMAGE_TO_FOLDER)
     save_align_button.setToolTip(language_config.SAVE_ALIGN_IMAGE_TO_FOLDER_DESCRIPTION)
     save_align_button.setFont(get_default_font(10, QFont.Weight.Bold))
     save_align_button.setStyleSheet(TOGGLE_BUTTON)
@@ -166,43 +166,51 @@ def get_orb_page():
     command_save_to_hd5f_button.setFont(get_default_font(10, QFont.Weight.Bold))
     command_save_to_hd5f_button.setStyleSheet(TOGGLE_BUTTON)
     command_save_to_hd5f_button.toggled.connect(lambda state: command_save_to_hd5f_button.setText(language_config.ACTIVATE_SAVE_ALIGN_TO_PROCESS if command_save_to_hd5f_button.isChecked()
-                                                                                                  else language_config.DEACTIVATE_SAVE_ALIGN_TO_PROCESS))
+                                                                                                else language_config.DEACTIVATE_SAVE_ALIGN_TO_PROCESS))
 
     # Ambil nilai path yang tersimpan dari konfigurasi
-    saved_align_folder = orb_config.get("align_folder", language_config.DEFAULT_SAVE_ALIGN_IMAGE_TO_FOLDER)
+    saved_align_folder = orb_config.get("align_folder", "")
     truncated_folder = (saved_align_folder[:30] + "...") if len(saved_align_folder) > 30 else saved_align_folder
 
     # Dropdown untuk memilih lokasi penyimpanan
     align_folder_dropdown = QComboBox()
     align_folder_dropdown.setStyleSheet(DROPDOWN_BOX)
-    align_folder_dropdown.addItem(language_config.DEFAULT_SAVE_ALIGN_IMAGE_TO_FOLDER)
 
-    # Jika ada path yang tersimpan selain "Default Path", tambahkan ke dropdown
-    if saved_align_folder != language_config.DEFAULT_SAVE_ALIGN_IMAGE_TO_FOLDER:
+    # Jika ada path yang tersimpan, tambahkan ke dropdown
+    if saved_align_folder:
         align_folder_dropdown.addItem(truncated_folder)
 
     align_folder_dropdown.addItem(language_config.SEARCH_SAVE_ALIGN_IMAGE_TO_FOLDER)
     align_folder_dropdown.setCurrentText(truncated_folder)
     align_folder_dropdown.setVisible(save_align_button.isChecked())
-
+    
+    selected_align_folder = orb_config.get("align_folder", "align_image")
     # Fungsi untuk menangani perubahan dropdown
     def on_align_folder_changed(index):
         global selected_align_folder
-        if align_folder_dropdown.currentText() == language_config.SEARCH_SAVE_ALIGN_IMAGE_TO_FOLDER:
+        current_text = align_folder_dropdown.currentText()
+
+        if current_text == language_config.SEARCH_SAVE_ALIGN_IMAGE_TO_FOLDER:
             folder_path = QFileDialog.getExistingDirectory(None, language_config.SELECT_SAVE_ALIGN_IMAGE_TO_FOLDER, "")
+
             if folder_path:
-                selected_align_folder = folder_path  # Simpan path yang dipilih
-                truncated_folder_path = (folder_path[:35] + "...") if len(folder_path) > 40 else folder_path
-                
-                # Pastikan folder belum ada sebelum menambahkannya
-                if truncated_folder_path not in [align_folder_dropdown.itemText(i) for i in range(align_folder_dropdown.count())]:
-                    align_folder_dropdown.insertItem(1, truncated_folder_path)
-                
-                align_folder_dropdown.setCurrentText(truncated_folder_path)  
+                # Tambahkan subfolder align_image
+                selected_align_folder = os.path.join(folder_path, "align_image")
+
+                # Buat folder jika belum ada
+                if not os.path.exists(selected_align_folder):
+                    os.makedirs(selected_align_folder)
+
+                truncated_folder_path = (selected_align_folder[:35] + "...") if len(selected_align_folder) > 40 else selected_align_folder
+
+                align_folder_dropdown.blockSignals(True)  # Mencegah pemanggilan ulang fungsi ini
+                align_folder_dropdown.insertItem(1, truncated_folder_path)
+                align_folder_dropdown.setCurrentText(truncated_folder_path)
+                align_folder_dropdown.blockSignals(False)
             else:
                 align_folder_dropdown.setCurrentIndex(0)
         else:
-            selected_align_folder = align_folder_dropdown.currentText()
+            selected_align_folder = current_text
 
     align_folder_dropdown.currentIndexChanged.connect(on_align_folder_changed)
 
@@ -210,7 +218,7 @@ def get_orb_page():
     def on_save_align_toggled(state):
         save_align_button.setText(language_config.ACTIVATE_SAVE_ALIGN_IMAGE_TO_FOLDER if state else language_config.DEACTIVATE_SAVE_ALIGN_IMAGE_TO_FOLDER)
         align_folder_dropdown.setVisible(state)
-        
+
         if not state:  # Jika Save Align dimatikan
             if not command_save_to_hd5f_button.isChecked():
                 command_save_to_hd5f_button.setChecked(True)
@@ -239,6 +247,7 @@ def get_orb_page():
 
     # Tambahkan layout utama ke layout keseluruhan
     layout.addLayout(extra_params_layout)
+
 
     apply_button = QPushButton(language_config.APPLY_PARAMETER_BUTTON_TEXT)
     apply_button.setStyleSheet(APPLY_BUTTON)

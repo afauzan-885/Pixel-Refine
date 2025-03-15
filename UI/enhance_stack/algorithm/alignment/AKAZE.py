@@ -49,7 +49,13 @@ class AKAZEAlgorithm:
             "keep_edges": False,
             "enable_cropping": True,
             "save_align": False,  
-            "command_save_to_hd5f": True
+            "command_save_to_hd5f": True,
+            "align_folder": os.path.join(
+                os.path.expanduser("~"), 
+                "Documents", 
+                "Pixel Refine", 
+                "align_image"
+            )
         }
 
         if config_filename is None:
@@ -237,6 +243,9 @@ def main(db_path, update_progress=None, batch_size=8, stop_requested=None,
     if command_save_to_hd5f is None:
         command_save_to_hd5f = config.get("command_save_to_hd5f", True)
     
+    if align_folder is None:
+        align_folder = config.get("align_folder", os.path.join(os.path.expanduser("~"), "Documents", "Pixel Refine", "align_image"))
+    
     enable_cropping = config.get("enable_cropping", True)
     transformation_type = config.get("transformation", "affine")
     
@@ -324,7 +333,6 @@ def main(db_path, update_progress=None, batch_size=8, stop_requested=None,
             h5f.create_dataset("image_0", data=base_image)
         
         if save_align:
-            # Perhatikan pemanggilan: parameter kedua adalah index, ketiga adalah path asli
             save_align_image(base_image, 0, base_image_path, align_folder)
         
         num_threads = os.cpu_count() or 4
@@ -361,7 +369,6 @@ def main(db_path, update_progress=None, batch_size=8, stop_requested=None,
                         compensated_image = crop_image(compensated_image, crop_bounds)
                     
                     if save_align:
-                        # Panggil fungsi save_align_image dengan index dan path asli gambar dari batch
                         save_align_image(compensated_image, i, batch_paths[i - start_idx], align_folder)
                     
                     # Ekstrak metadata untuk gambar yang sedang diproses (dari path asli)

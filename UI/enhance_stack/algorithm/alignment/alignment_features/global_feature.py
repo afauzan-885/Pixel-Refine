@@ -34,7 +34,7 @@ def load_images_from_paths(image_paths, stop_requested=None):
 
 def save_to_hdf5(h5f, dataset_name, cropped, metadata=None):
     """
-    Save images (array) into HDF5 and embed metadata as attributes.
+    Save images (array) into HDF5 and embed metadata as attributes using multithreading.
 
     Parameters:
     - h5f: opened HDF5 file object
@@ -42,7 +42,28 @@ def save_to_hdf5(h5f, dataset_name, cropped, metadata=None):
     - cropped: array of images to be saved
     - metadata: dictionary containing metadata or EXIF of images
     """
-    dset = h5f.create_dataset(dataset_name, data=cropped)
+    # Buat dataset dengan bentuk dan tipe yang sesuai
+    dset = h5f.create_dataset(dataset_name, shape=cropped.shape, dtype=cropped.dtype)
+
+    # Fungsi untuk menulis chunk pada dataset
+    def write_chunk(start, end):
+        dset[start:end] = cropped[start:end]
+
+    num_threads = os.cpu_count() or 4
+    total_items = cropped.shape[0]
+    chunk_size = total_items // num_threads if total_items >= num_threads else total_items
+    # Gunakan multithreading untuk menulis dataset secara paralel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+        futures = []
+        start = 0
+        while start < total_items:
+            end = start + chunk_size
+            if end > total_items:
+                end = total_items
+            futures.append(executor.submit(write_chunk, start, end))
+            start = end
+        concurrent.futures.wait(futures)
+
     if metadata is not None:
         # Simpan metadata sebagai atribut (dalam format JSON)
         dset.attrs['metadata'] = json.dumps(metadata)

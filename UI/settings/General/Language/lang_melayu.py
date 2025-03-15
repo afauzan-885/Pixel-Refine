@@ -299,9 +299,13 @@ denoising atau super resolusi"""
 SAVE_ALIGN_IMAGE_TO_FOLDER_DESCRIPTION = """Menyimpan imej hasil penyelarasan ke dalam folder
 Folder lalai ialah folder Dokumen di PC"""
 
-
-
 APPLY_PARAMETER_BUTTON_TEXT = "Terapkan Tetapan"
+
+RESTART_APPLICATION_REQUIRED = "Mulakan Semula Diperlukan"
+RESTART_APPLICATION_DESCRIPTION = "Mulakan semula untuk melihat perubahan"
+ACCEPT_RESTART_APPLICATION = "Mulakan semula"
+REJECT_APPLICATION_DESCRIPTION = "Kemudian"
+COMMAND_APPLICATION_DESCRIPTION = "Muat Semula Aplikasi..."
 
 # Deskripsi untuk Algoritma Penjajaran
 ALIGNMENT_NAME = "Algoritma Penjajaran"

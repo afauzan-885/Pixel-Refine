@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, load_images_from_paths
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
@@ -68,20 +69,7 @@ class AverageAlgorithm:
 
     def load_images_from_folder(self, folder_path):
         image_paths = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(('.png', '.jpg', '.jpeg'))]
-        return self.load_images_from_paths(image_paths)
-
-    def load_images_from_paths(self, image_paths, stop_requested=None):
-        """
-        Loads images from a list of image paths.
-        """
-        images = []
-        for image_path in image_paths:
-            if stop_requested and stop_requested():  # Cek apakah harus berhenti
-                break
-            image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-            if image is not None:
-                images.append(image)
-        return images
+        return load_images_from_paths(image_paths)
 
     def stack_average_images(self, images, accumulated_image, total_weights, reference_image, stop_requested=None):
         if stop_requested and stop_requested():  # Cek penghentian
@@ -163,6 +151,12 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10):
             if update_progress:
                 update_progress(0, language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
             return
+        
+        # Ekstrak metadata dari seluruh gambar dan simpan ke file JSON
+        metadata_folder = os.path.join("database", "align")
+        os.makedirs(metadata_folder, exist_ok=True)
+        metadata_file = os.path.join(metadata_folder, "metadata.json")
+        extract_all_metadata(image_paths, metadata_file=metadata_file)
 
         # Gunakan gambar pertama sebagai gambar referensi
         reference_image_path = image_paths[0]
@@ -244,9 +238,9 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10):
 
         if accumulated_image is not None:
             try:
-                final_image = image_processor.process_final_image(accumulated_image, total_weights)
+                final_result = image_processor.process_final_image(accumulated_image, total_weights)
                 # Saat menyimpan gambar akhir, kembalikan metadata dari gambar referensi
-                image_processor.save_image(final_image, output_path, reference_image_path=reference_image_path)
+                image_processor.save_image(final_result, output_path, reference_image_path=reference_image_path)
                 if update_progress:
                     update_progress(100, f"Proses selesai, hasil disimpan di {output_path}")
             except ValueError as e:
