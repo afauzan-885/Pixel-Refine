@@ -172,16 +172,15 @@ def get_akaze_page():
                                                                                                   else language_config.DEACTIVATE_SAVE_ALIGN_TO_PROCESS))
 
     # Ambil nilai path yang tersimpan dari konfigurasi
-    saved_align_folder = akaze_config.get("align_folder", language_config.DEFAULT_SAVE_ALIGN_IMAGE_TO_FOLDER)
+    saved_align_folder = akaze_config.get("align_folder", "")
     truncated_folder = (saved_align_folder[:30] + "...") if len(saved_align_folder) > 30 else saved_align_folder
 
     # Dropdown untuk memilih lokasi penyimpanan
     align_folder_dropdown = QComboBox()
     align_folder_dropdown.setStyleSheet(DROPDOWN_BOX)
-    align_folder_dropdown.addItem(language_config.DEFAULT_SAVE_ALIGN_IMAGE_TO_FOLDER)
 
     # Jika ada path yang tersimpan selain "Default Path", tambahkan ke dropdown
-    if saved_align_folder != language_config.DEFAULT_SAVE_ALIGN_IMAGE_TO_FOLDER:
+    if saved_align_folder:
         align_folder_dropdown.addItem(truncated_folder)
 
     align_folder_dropdown.addItem(language_config.SEARCH_SAVE_ALIGN_IMAGE_TO_FOLDER)
