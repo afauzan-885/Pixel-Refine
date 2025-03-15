@@ -184,26 +184,22 @@ def get_orb_page():
     align_folder_dropdown.setCurrentText(truncated_folder)
     align_folder_dropdown.setVisible(save_align_button.isChecked())
     
-    selected_align_folder = orb_config.get("align_folder", "align_image")
+    selected_align_folder = orb_config.get("align_folder")
+    save_orb_config(orb_config)
+    
     # Fungsi untuk menangani perubahan dropdown
     def on_align_folder_changed(index):
-        global selected_align_folder
+        nonlocal selected_align_folder
         current_text = align_folder_dropdown.currentText()
-
         if current_text == language_config.SEARCH_SAVE_ALIGN_IMAGE_TO_FOLDER:
             folder_path = QFileDialog.getExistingDirectory(None, language_config.SELECT_SAVE_ALIGN_IMAGE_TO_FOLDER, "")
-
             if folder_path:
                 # Tambahkan subfolder align_image
-                selected_align_folder = os.path.join(folder_path, "align_image")
-
-                # Buat folder jika belum ada
+                selected_align_folder = os.path.join(folder_path, "align_image", "align_image")
                 if not os.path.exists(selected_align_folder):
                     os.makedirs(selected_align_folder)
-
                 truncated_folder_path = (selected_align_folder[:35] + "...") if len(selected_align_folder) > 40 else selected_align_folder
-
-                align_folder_dropdown.blockSignals(True)  # Mencegah pemanggilan ulang fungsi ini
+                align_folder_dropdown.blockSignals(True)
                 align_folder_dropdown.insertItem(1, truncated_folder_path)
                 align_folder_dropdown.setCurrentText(truncated_folder_path)
                 align_folder_dropdown.blockSignals(False)
@@ -211,6 +207,7 @@ def get_orb_page():
                 align_folder_dropdown.setCurrentIndex(0)
         else:
             selected_align_folder = current_text
+
 
     align_folder_dropdown.currentIndexChanged.connect(on_align_folder_changed)
 
@@ -254,6 +251,8 @@ def get_orb_page():
     layout.addWidget(apply_button)
     
     def apply_settings():
+        normalized_path = os.path.normpath(selected_align_folder).replace("\\", "/")
+
         orb_params = {
             "nfeatures": sliders[language_config.ORB_NFEATURES_LABEL].value(),
             "scaleFactor": sliders[language_config.ORB_SCALEFACTOR_LABEL].value() / 10.0,
@@ -264,10 +263,9 @@ def get_orb_page():
             "enable_cropping": enable_cropping_button.isChecked(),
             "save_align": save_align_button.isChecked(),
             "command_save_to_hd5f": command_save_to_hd5f_button.isChecked(),
-            "align_folder": selected_align_folder  # Simpan path folder ke dalam konfigurasi
+            "align_folder": normalized_path  # Simpan path dalam format yang benar
         }
         save_orb_config(orb_params)
-
     
     apply_button.clicked.connect(apply_settings)
     
