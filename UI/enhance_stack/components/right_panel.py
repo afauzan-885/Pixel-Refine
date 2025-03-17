@@ -1,9 +1,10 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QLabel, QMenu
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 import sqlite3
 
 class RightPanel(QWidget):
     """Right panel containing a list of images."""
+    previewImageRequested = pyqtSignal(list)
     def __init__(self):
         super().__init__()
         self.image_list = QListWidget()
@@ -76,65 +77,33 @@ class RightPanel(QWidget):
         select_image_list = self.image_list.selectedItems()
 
         if select_image_list:
-            if self.parent():
-                if hasattr(self.parent(), 'single_page_layout'):
-                    self.parent().single_page_layout.pause_preview_update()
-
-            # Set pause untuk mengabaikan sinyal
-            self.preview_pause = True
-
-            # Hapus entri dari database
+            # Hapus entri dari database dan list widget (tidak lagi mengakses parent)
             conn = sqlite3.connect("pixel_refine_database.db")
             cursor = conn.cursor()
 
             for item in select_image_list:
                 image_path = item.text()
-
-                # Hapus dari database
                 cursor.execute("DELETE FROM images WHERE path = ?", (image_path,))
                 self.image_list.takeItem(self.image_list.row(item))
 
             conn.commit()
             conn.close()
 
-            # Kembalikan status pause
-            self.preview_pause = False
-
-            if self.parent():
-                if hasattr(self.parent(), 'single_page_layout'):
-                    # Update preview panel setelah penghapusan
-                    self.parent().single_page_layout.update_preview_panel(self.get_select_image_list())
-                    self.parent().single_page_layout.resume_preview_update()
-
 
     def select_list_preview(self):
-        """Signal to notify selection change to EnhanceStackPage."""
-        if self.preview_pause:
-            return  # Abaikan sinyal jika sedang dipause
-        selected_paths = self.get_select_image_list()
+            """Emit sinyal ketika hanya satu gambar yang dipilih."""
+            if self.preview_pause:
+                return  # Abaikan sinyal jika sedang dipause
+            selected_paths = self.get_select_image_list()
 
-
-        # Jika lebih dari satu gambar dipilih, hentikan proses preview sebelumnya dan tampilkan pesan
-        if len(selected_paths) > 1:
-            if self.parent():
-                if hasattr(self.parent(), 'single_page_layout'):
-                    self.parent().single_page_layout.pause_preview_update()
-                    self.parent().single_page_layout.preview_scene.clear()
-
-                # Nonaktifkan update preview
-                label = QLabel("Multiple images selected. Preview disabled.")
-                label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-                # Tambahkan pesan ke preview scene
-                proxy = self.parent().single_page_layout.preview_scene.addWidget(label)
-                self.parent().single_page_layout.image_status_info(proxy)
-            return
-
-        # Jika hanya satu gambar yang dipilih, update preview panel
-        if len(selected_paths) == 1:
-            if self.parent() and hasattr(self.parent(), 'single_page_layout'):
-                self.parent().single_page_layout.update_preview_panel(selected_paths)
-
+            # Untuk multiple selection, kamu bisa mengatur logika lain atau mengirim sinyal berbeda
+            if len(selected_paths) == 1:
+                self.previewImageRequested.emit(selected_paths)
+                
+            # Jika multiple images, misalnya tidak perlu preview:
+            elif len(selected_paths) > 1:
+                # Kamu bisa mengirim sinyal kosong atau mengabaikannya
+                pass
 
     def eventFilter(self, source, event):
         """Filter events for specific widgets."""

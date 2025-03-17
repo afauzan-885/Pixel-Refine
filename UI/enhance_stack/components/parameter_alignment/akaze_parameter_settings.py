@@ -188,6 +188,7 @@ def get_akaze_page():
     align_folder_dropdown.setVisible(save_align_button.isChecked())
 
     selected_align_folder = akaze_config.get("align_folder")
+    save_akaze_config(akaze_config)
     
     def on_align_folder_changed(index):
         nonlocal selected_align_folder
@@ -196,7 +197,7 @@ def get_akaze_page():
             folder_path = QFileDialog.getExistingDirectory(None, language_config.SELECT_SAVE_ALIGN_IMAGE_TO_FOLDER, "")
             if folder_path:
                 # Tambahkan subfolder align_image
-                selected_align_folder = os.path.join(folder_path, "align_image", "align_image")
+                selected_align_folder = os.path.join(folder_path, "align_image")
                 if not os.path.exists(selected_align_folder):
                     os.makedirs(selected_align_folder)
                 truncated_folder_path = (selected_align_folder[:35] + "...") if len(selected_align_folder) > 40 else selected_align_folder
@@ -250,6 +251,8 @@ def get_akaze_page():
     layout.addWidget(apply_button)
     
     def apply_settings():
+        normalized_path = os.path.normpath(selected_align_folder).replace("\\", "/")
+        
         akaze_params = {
             "akaze_threshold": sliders[language_config.AKAZE_THRESHOLD_LABEL].value() / 10000.0,
             "akaze_nOctaves": sliders[language_config.AKAZE_OCTAVE_LABEL].value(),
@@ -261,7 +264,7 @@ def get_akaze_page():
             "enable_cropping": enable_cropping_button.isChecked(),
             "save_align": save_align_button.isChecked(),
             "command_save_to_hd5f": command_save_to_hd5f_button.isChecked(),
-            "align_folder": selected_align_folder  # Simpan path folder ke dalam konfigurasi
+            "align_folder": normalized_path  # Simpan path folder ke dalam konfigurasi
         }
         save_akaze_config(akaze_params)
     

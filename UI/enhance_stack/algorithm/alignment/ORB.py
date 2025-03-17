@@ -47,8 +47,8 @@ class ORBAlgorithm:
             "transformation": "homography",
             "keep_edges": False,
             "enable_cropping": False,
-            "save_align": True,  
-            "command_save_to_hd5f": False,
+            "save_align": False,  
+            "command_save_to_hd5f": True,
             "align_folder": os.path.join(
                 os.path.expanduser("~"), 
                 "Documents", 
@@ -63,13 +63,7 @@ class ORBAlgorithm:
         try:
             with open(config_filename, "r") as config_file:
                 params = json.load(config_file)
-            orb_config = params.get("ORB", default_config)
-
-            # Gunakan nilai dari file JSON, atau default jika tidak tersedia
-            orb_config["save_align"] = params.get("save_align", default_config["save_align"])
-            orb_config["command_save_to_hd5f"] = params.get("command_save_to_hd5f", default_config["command_save_to_hd5f"])
-
-            return orb_config
+            return {**default_config, **params.get("ORB", {})}
         except Exception as e:
             print("Error loading ORB configuration:", e)
             return default_config  # Gunakan default jika file tidak ditemukan atau ada error

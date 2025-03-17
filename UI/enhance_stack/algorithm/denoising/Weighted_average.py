@@ -89,7 +89,7 @@ class WeightedAverageAlgorithm:
         return window
     
     def weighted_average(self, images, tile_size=(64, 64), overlap=0.3,
-                     motion_threshold=0.0001, update_progress=None, stop_requested=None,
+                     motion_threshold=0.0007, update_progress=None, stop_requested=None,
                      lib_path='UI/data/weighted_average_motion.dll'):
         """
         Fungsi untuk menghitung multi-frame noise reduction dengan referensi citra pertama.

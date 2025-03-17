@@ -39,14 +39,11 @@ class DatabaseManager:
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         path TEXT NOT NULL
                     )
-                """)
-                print("Table 'images' has been created.")
+                """)            
             else:
                 # Check the number of rows in 'images' table
                 cursor.execute("SELECT COUNT(*) FROM images")
-                image_count = cursor.fetchone()[0]
-                print(f"Number of records in 'images' table: {image_count}")
-
+            
             # Check if 'data_images' table exists
             cursor.execute("""
                 SELECT name FROM sqlite_master WHERE type='table' AND name='data_images';
@@ -67,9 +64,7 @@ class DatabaseManager:
             else:
                 # Check the number of rows in 'data_images' table
                 cursor.execute("SELECT COUNT(*) FROM data_images")
-                data_image_count = cursor.fetchone()[0]
-                print(f"Number of records in 'data_images' table: {data_image_count}")
-
+                
         self.is_table_checked = True
 
 
@@ -83,7 +78,7 @@ class DatabaseManager:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("INSERT INTO images (path) VALUES (?)", (image_path,))
-            conn.commit()  # Explicitly commit the transaction
+            conn.commit()
             print(f"Image path saved: {image_path}")
 
 
@@ -96,7 +91,7 @@ class DatabaseManager:
         """
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.executemany("DELETE FROM images WHERE path = ?", [(path,) for path in image_paths])
+            cursor.executemany("DELETE FROM images WHERE path = ?", ((path,) for path in image_paths))
             conn.commit()
             print(f"Deleted images: {image_paths}")
 

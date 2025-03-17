@@ -195,7 +195,7 @@ def get_orb_page():
             folder_path = QFileDialog.getExistingDirectory(None, language_config.SELECT_SAVE_ALIGN_IMAGE_TO_FOLDER, "")
             if folder_path:
                 # Tambahkan subfolder align_image
-                selected_align_folder = os.path.join(folder_path, "align_image", "align_image")
+                selected_align_folder = os.path.join(folder_path, "align_image")
                 if not os.path.exists(selected_align_folder):
                     os.makedirs(selected_align_folder)
                 truncated_folder_path = (selected_align_folder[:35] + "...") if len(selected_align_folder) > 40 else selected_align_folder

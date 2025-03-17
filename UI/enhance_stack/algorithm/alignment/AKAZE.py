@@ -47,7 +47,7 @@ class AKAZEAlgorithm:
             "ransacThreshold": 5.0,
             "transformation": "affine",
             "keep_edges": False,
-            "enable_cropping": True,
+            "enable_cropping": False,
             "save_align": False,  
             "command_save_to_hd5f": True,
             "align_folder": os.path.join(

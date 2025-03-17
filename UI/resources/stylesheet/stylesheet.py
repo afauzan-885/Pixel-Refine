@@ -140,3 +140,99 @@ PROGRESS_BAR = """
                 width: 20px;
             }
         """
+        
+SWITCH_BUTTON ="""
+            QPushButton {
+                padding: 8px 16px;
+                font-size: 14px;
+                font-weight: bold;
+                background-color: #95a5a6;
+                color: white;
+                border: none;
+            }
+            QPushButton:first-child {
+                border-top-left-radius: 10px;
+                border-bottom-left-radius: 10px;
+            }
+            QPushButton:last-child {
+                border-top-right-radius: 10px;
+                border-bottom-right-radius: 10px;
+            }
+            QPushButton:checked {
+                background-color: #2ecc71; /* Warna untuk tombol yang dipilih */
+                color: black;
+            }
+        """
+
+PROCESS_BUTTON = """
+            QPushButton {
+                background-color: qlineargradient(
+                    spread:pad, x1:0, y1:0, x2:1, y2:1, 
+                    stop:0 #B2F2A0, stop:1 #66D966
+                );
+                color: #3C3939;
+                font-weight: bold;
+                border-radius: 10px;
+                font-size: 14px;
+                padding: 4px 8px;
+                border: 1px solid #66D966;
+            }
+            QPushButton:hover {
+                background-color: qlineargradient(
+                    spread:pad, x1:0, y1:0, x2:1, y2:1, 
+                    stop:0 #C7F3B8, stop:1 #82E582
+                );
+            }
+            QPushButton:pressed {
+                background-color: #56B856;
+            }
+        """
+SAVE_AS_BUTTON = """
+            QPushButton {
+                background-color: qlineargradient(
+                    spread:pad, x1:0, y1:0, x2:1, y2:1, 
+                    stop:0 #D3D3D3, stop:1 #A9A9A9
+                );
+                color: #3C3939;
+                border-radius: 10px;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 4px 8px;
+                border: 1px solid #A9A9A9;
+            }
+            QPushButton:hover {
+                background-color: qlineargradient(
+                    spread:pad, x1:0, y1:0, x2:1, y2:1, 
+                    stop:0 #E0E0E0, stop:1 #B8B8B8
+                );
+            }
+            QPushButton:pressed {
+                background-color: #808080;
+            }
+        """
+        
+DELETE_BUTTON = """
+            QPushButton {
+                padding: 8px 16px;
+                font-size: 14px;
+                background-color: #e74c3c;
+                color: white;
+                border: none;
+            }
+            QPushButton:hover {
+                background-color: #c0392b;
+            }
+        """
+
+IMPORT_BUTTON = """
+            QPushButton {
+                padding: 8px 16px;
+                font-size: 14px;
+                background-color: #3498db;
+                color: white;
+                border: none;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+        """

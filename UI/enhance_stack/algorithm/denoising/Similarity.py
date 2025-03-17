@@ -88,8 +88,8 @@ class SimilarityAlgorithm:
         window = np.outer(y, x)
         return window.astype(np.float32)
 
-    def similarity_mfnr(self, images, tile_size=(32, 32), overlap=0.35,
-                    motion_threshold=0.003, noise_threshold=0.003,
+    def similarity_mfnr(self, images, tile_size=(16, 16), overlap=0.35,
+                    motion_threshold=0.007, noise_threshold=0.005,
                     update_progress=None, stop_requested=None,
                     lib_path='UI/data/similarity_motion.dll'):
         """

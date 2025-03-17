@@ -3,6 +3,7 @@ from PyQt6.QtCore import pyqtSignal
 import os
 import cv2
 
+from UI.resources.stylesheet import stylesheet
 from UI.settings.General.Language import language_config
 
 class ProgressSection(QWidget):
@@ -18,69 +19,14 @@ class ProgressSection(QWidget):
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        self.progress_bar.setStyleSheet("""
-            QProgressBar {
-                border: 1px solid #bbb;
-                border-radius: 5px;
-                background-color: #f0f0f0;
-                text-align: center;
-            }
-            QProgressBar::chunk {
-                background-color: #80C4E9;
-                width: 20px;
-            }
-        """)
+        self.progress_bar.setStyleSheet(stylesheet.PROGRESS_BAR)
 
         # self.next_button = QPushButton("Next")
         self.process_button = QPushButton(language_config.PROGRESS_SECTION_PROCESS_BUTTON_TEXT)
-        self.process_button.setStyleSheet("""
-            QPushButton {
-                background-color: qlineargradient(
-                    spread:pad, x1:0, y1:0, x2:1, y2:1, 
-                    stop:0 #B2F2A0, stop:1 #66D966
-                );
-                color: #3C3939;
-                font-weight: bold;
-                border-radius: 10px;
-                font-size: 14px;
-                padding: 4px 8px;
-                border: 1px solid #66D966;
-            }
-            QPushButton:hover {
-                background-color: qlineargradient(
-                    spread:pad, x1:0, y1:0, x2:1, y2:1, 
-                    stop:0 #C7F3B8, stop:1 #82E582
-                );
-            }
-            QPushButton:pressed {
-                background-color: #56B856;
-            }
-        """)
+        self.process_button.setStyleSheet(stylesheet.PROCESS_BUTTON)
 
         self.save_as_button = QPushButton(language_config.PROGRESS_SECTION_SAVE_BUTTON_TEXT)
-        self.save_as_button.setStyleSheet("""
-            QPushButton {
-                background-color: qlineargradient(
-                    spread:pad, x1:0, y1:0, x2:1, y2:1, 
-                    stop:0 #D3D3D3, stop:1 #A9A9A9
-                );
-                color: #3C3939;
-                border-radius: 10px;
-                font-size: 14px;
-                font-weight: bold;
-                padding: 4px 8px;
-                border: 1px solid #A9A9A9;
-            }
-            QPushButton:hover {
-                background-color: qlineargradient(
-                    spread:pad, x1:0, y1:0, x2:1, y2:1, 
-                    stop:0 #E0E0E0, stop:1 #B8B8B8
-                );
-            }
-            QPushButton:pressed {
-                background-color: #808080;
-            }
-        """)
+        self.save_as_button.setStyleSheet(stylesheet.SAVE_AS_BUTTON)
 
      
         self.layout.addWidget(self.progress_bar, 2)
@@ -92,7 +38,7 @@ class ProgressSection(QWidget):
         self.save_as_button.clicked.connect(self.save_image)
         
     def save_image(self):
-        folder_path = "database/stack"  # Path to the folder containing images
+        folder_path = "database/stack"
         if not os.path.exists(folder_path):
             QMessageBox.warning(self, "Error", "The folder 'database/stack' does not exist.")
             return
