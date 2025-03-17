@@ -1,7 +1,6 @@
 import os
 from PyQt6.QtWidgets import (
     QVBoxLayout,
-    QMessageBox,
     QGraphicsView,
     QGraphicsScene,
     QVBoxLayout,
@@ -11,16 +10,6 @@ from PyQt6.QtWidgets import (
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
-
-from UI.enhance_stack.algorithm.alignment.AKAZE import running_akaze
-from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import running_farneback_optical_flow
-from UI.enhance_stack.algorithm.alignment.ORB import running_orb
-from UI.enhance_stack.algorithm.denoising.Average import running_average
-from UI.enhance_stack.algorithm.denoising.Median import running_median
-from UI.enhance_stack.algorithm.denoising.Similarity import running_similarity
-from UI.enhance_stack.algorithm.denoising.Weighted_average import running_weighted_average
-from UI.enhance_stack.algorithm.super_resolution.Interpolation import running_interpolation
-from UI.settings.General.Language import language_config
 
 def get_last_image(path):
         """Mengambil file gambar terakhir dari folder berdasarkan waktu modifikasi"""
@@ -32,6 +21,7 @@ def get_last_image(path):
         last_file = max(files, key=lambda f: os.path.getmtime(os.path.join(path, f)))
         return os.path.join(path, last_file)
     
+
 # Create a dialog for the viewer
 class ImageViewer(QDialog):
     def __init__(self, image_path, parent=None):

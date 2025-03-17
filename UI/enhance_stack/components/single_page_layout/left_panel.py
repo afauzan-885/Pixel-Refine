@@ -4,9 +4,9 @@ from PyQt6.QtWidgets import (
     QLabel, QComboBox, QStackedWidget,
 )
 from PyQt6.QtCore import Qt
+from UI.enhance_stack.components.single_page_layout.parameter_pages import ParameterPages
 from UI.resources.stylesheet.stylesheet import DROPDOWN_BOX
 from UI.settings.General.Language import language_config
-from UI.enhance_stack.components.parameter_pages import ParameterPages
 
 class LeftPanel(QWidget):
     """

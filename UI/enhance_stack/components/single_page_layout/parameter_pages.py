@@ -2,10 +2,10 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel,
                              QStackedWidget, QScrollArea)
 from PyQt6.QtCore import Qt
 
-from UI.enhance_stack.components.parameter_alignment.akaze_parameter_settings import get_akaze_page
+from UI.enhance_stack.components.single_page_layout.parameter_alignment.akaze_parameter_settings import get_akaze_page
 
-from UI.enhance_stack.components.parameter_alignment.farneback_parameter_settings import get_farneback_optical_flow_page
-from UI.enhance_stack.components.parameter_alignment.orb_parameter_settings import get_orb_page
+from UI.enhance_stack.components.single_page_layout.parameter_alignment.farneback_parameter_settings import get_farneback_optical_flow_page
+from UI.enhance_stack.components.single_page_layout.parameter_alignment.orb_parameter_settings import get_orb_page
 from UI.settings.General.Language import language_config
 
 
