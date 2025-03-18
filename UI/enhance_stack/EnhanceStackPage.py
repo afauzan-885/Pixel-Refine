@@ -31,7 +31,7 @@ class EnhanceStackPage(QWidget):
         self.stacked_widget.addWidget(self.batch_page_layout)
 
         # Set tampilan awal ke SinglePageLayout
-        self.stacked_widget.setCurrentWidget(self.single_page_layout)
+        self.stacked_widget.setCurrentWidget(self.batch_page_layout)
 
         # Connect tombol switch dari TopBar ke metode switch_page
         self.top_bar.single_button.toggled.connect(self.switch_page)
@@ -45,5 +45,13 @@ class EnhanceStackPage(QWidget):
         """Switch halaman berdasarkan tombol yang dipilih."""
         if self.top_bar.single_button.isChecked():
             self.stacked_widget.setCurrentWidget(self.single_page_layout)
+            
+            # Tampilkan tombol import dan delete di mode Single
+            self.top_bar.import_button.setVisible(True)
+            self.top_bar.delete_button.setVisible(True)
         else:
             self.stacked_widget.setCurrentWidget(self.batch_page_layout)
+            
+            # Sembunyikan tombol import dan delete di mode Batch
+            self.top_bar.import_button.setVisible(False)
+            self.top_bar.delete_button.setVisible(False)

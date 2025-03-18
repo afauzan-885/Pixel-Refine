@@ -147,7 +147,7 @@ SWITCH_BUTTON ="""
                 font-size: 14px;
                 font-weight: bold;
                 background-color: #95a5a6;
-                color: white;
+                color: black;
                 border: none;
             }
             QPushButton:first-child {
@@ -159,8 +159,8 @@ SWITCH_BUTTON ="""
                 border-bottom-right-radius: 10px;
             }
             QPushButton:checked {
-                background-color: #2ecc71; /* Warna untuk tombol yang dipilih */
-                color: black;
+                background-color: #2ecc71; 
+                color: white;
             }
         """
 

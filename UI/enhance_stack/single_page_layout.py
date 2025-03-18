@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
     QMessageBox, QVBoxLayout, QWidget,
-    QFileDialog, QGraphicsPixmapItem, QLabel
+    QFileDialog,
 )
 import cv2
 import os
