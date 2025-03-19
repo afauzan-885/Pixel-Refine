@@ -42,12 +42,11 @@ class BatchPageLayout(QWidget):
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_area.setWidget(main_panel)
-        scroll_area.setStyleSheet(SCROLL_AREA)  # Sesuaikan jika perlu
-
+        scroll_area.setStyleSheet(SCROLL_AREA)
         return scroll_area
     
     def refresh_ui(self):
-        # Hapus semua widget yang ada di main_panel_layout
+        # Merefresh UI agar tetap realtime dalam menampilkan data
         while self.main_panel_layout.count():
             item = self.main_panel_layout.takeAt(0)
             widget = item.widget()
@@ -87,22 +86,61 @@ class BatchPageLayout(QWidget):
         add_button.setFixedSize(30, 30)
         add_button.setIcon(QIcon("UI/resources/icon/add-image.png"))
         add_button.setIconSize(QSize(25, 25))
-        add_button.setStyleSheet("background-color: #4CAF50; border-radius: 5px; color: white; font-weight: semi-bold")
+        add_button.setStyleSheet("""
+            QPushButton {
+            background-color: #4CAF50; 
+            border-radius: 5px; 
+            color: white; 
+            font-weight: semi-bold;
+            }
+            QPushButton:hover {
+            background-color: #347A36;
+            }
+        """)
         add_button.setToolTip("Tambah")
 
-        # Tombol "Delete" (dengan ikon)
-        delete_button = QPushButton()
-        delete_button.setFixedSize(30, 30)
-        delete_button.setIcon(QIcon("UI/resources/icon/delete-image.png"))
-        delete_button.setStyleSheet("background-color: #F44336; border-radius: 5px; color: white; font-weight: semi-bold")
-        delete_button.setToolTip("Hapus")
+        # Hubungkan tombol "Tambah" ke fungsi handle_add_image_to_batch
+        add_button.clicked.connect(lambda: self.handle_add_image_to_batch(batch_id, list_layout))
+
         
         # Tombol "Play Preview" (dengan ikon)
         play_preview = QPushButton()
         play_preview.setFixedSize(30, 30)
         play_preview.setIcon(QIcon("UI/resources/icon/play-preview.png"))
-        play_preview.setStyleSheet("background-color: #31CBD1; border-radius: 5px; color: white; font-weight: semi-bold")
-        play_preview.setToolTip("Putar Pratinjau")
+        play_preview.setStyleSheet("""
+                                   
+        QPushButton {
+            background-color: #31CBD1;
+            border-radius: 5px;
+            color: white;
+            font-weight: semi-bold
+            }
+        
+        
+        QPushButton:hover {
+            background-color: #27A1A7;
+            }
+            
+        """)
+        play_preview.setToolTip("Pratinjau")
+
+        delete_button = QPushButton()
+        delete_button.setFixedSize(30, 30)
+        delete_button.setIcon(QIcon("UI/resources/icon/delete-image.png"))
+        delete_button.setStyleSheet("""
+            QPushButton {
+            background-color: #F44336; 
+            border-radius: 5px; 
+            color: white; 
+            font-weight: semi-bold;
+            }
+            QPushButton:hover {
+            background-color: #B9332A;
+            }
+        """)
+        delete_button.setToolTip("Hapus")
+        # Hubungkan tombol delete dengan slot handle_delete_batch
+        delete_button.clicked.connect(lambda: self.handle_delete_batch(batch_id))
 
         button_layout.addWidget(add_button)
         button_layout.addWidget(play_preview)
@@ -164,7 +202,65 @@ class BatchPageLayout(QWidget):
         combined_panel.batch_id = batch_id
 
         return combined_panel
+    
+    def handle_add_image_to_batch(self, batch_id, list_layout):
+        """
+        Menambahkan gambar ke batch yang sudah ada, dengan pengecekan duplikat dalam batch tersebut.
 
+        Args:
+            batch_id (int): ID batch tempat gambar akan ditambahkan.
+            list_layout (QHBoxLayout): Layout yang menampilkan daftar gambar.
+        """
+        if batch_id is None:
+            print("Batch ID tidak valid.")
+            return
+
+        # Ambil daftar image_id yang sudah ada dalam batch ini
+        existing_image_paths = self.database_manager.get_images_by_batch(batch_id)
+
+        # Buka dialog pemilihan file
+        file_dialog = QFileDialog()
+        file_paths, _ = file_dialog.getOpenFileNames(None, "Pilih Gambar", "", language_config.HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION)
+
+        if not file_paths:
+            return  # Jika user tidak memilih gambar, keluar dari fungsi
+
+        # Cek duplikat dalam batch ini
+        duplicates = [path for path in file_paths if path in existing_image_paths]
+        unique_files = [path for path in file_paths if path not in existing_image_paths]
+
+        # Jika ada duplikat, beri peringatan ke user
+        if duplicates:
+            message = f"{len(duplicates)} gambar sudah ada dalam batch ini dan tidak akan ditambahkan lagi."
+            QMessageBox.warning(None, "Gambar Duplikat", message)
+
+        # Simpan hanya gambar yang unik ke database
+        if unique_files:
+            self.database_manager.batch_process_save_image_path(batch_id, unique_files)
+
+            # Tambahkan thumbnail ke list_layout hanya untuk gambar unik
+            for path in unique_files:
+                thumb_label = QLabel()
+                thumb_label.setFixedSize(80, 80)
+                thumb_label.setStyleSheet("background-color: lightgray; border: 1px solid gray;")
+                thumb_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+                thumb_label.setText(path.split("/")[-1])  # Menampilkan nama file
+                list_layout.addWidget(thumb_label)
+
+            print(f"Added {len(unique_files)} new images to batch {batch_id}")
+    
+    def handle_delete_batch(self, batch_id):
+        # Opsional: Tampilkan konfirmasi sebelum menghapus
+        reply = QMessageBox.question(
+            self,
+            "Konfirmasi Hapus",
+            f"Apakah Anda yakin ingin menghapus batch {batch_id}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.database_manager.batch_process_delete_batch(batch_id)
+            # Emit sinyal untuk merefresh UI setelah penghapusan
+            self.data_changed.emit()
 
     def handle_import_button(self):
         """Function to manage images import"""

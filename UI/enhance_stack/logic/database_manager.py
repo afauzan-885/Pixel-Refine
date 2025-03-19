@@ -200,19 +200,30 @@ class DatabaseManager:
     # Fungsi untuk menghapus seluruh batch
     def batch_process_delete_batch(self, batch_id):
         """
-        Deletes an entire batch along with all associated image mappings.
-
+        Deletes an entire batch along with all associated image mappings and images.
+        
         Args:
             batch_id: The ID of the batch to delete.
         """
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
+            # Ambil semua image_id yang terkait dengan batch
+            cursor.execute("SELECT image_id FROM batch_process_image WHERE batch_id = ?", (batch_id,))
+            image_ids = [row[0] for row in cursor.fetchall()]
+            
             # Hapus mapping gambar dari batch
             cursor.execute("DELETE FROM batch_process_image WHERE batch_id = ?", (batch_id,))
+            
             # Hapus batch itu sendiri
             cursor.execute("DELETE FROM batch_process WHERE id = ?", (batch_id,))
+            
+            # Hapus record gambar yang terkait, jika ada
+            if image_ids:
+                cursor.executemany("DELETE FROM images WHERE id = ?", [(image_id,) for image_id in image_ids])
+            
             conn.commit()
-            print(f"Deleted batch ID {batch_id} and all its associated image mappings")
+            print(f"Deleted batch ID along with its associated image mappings and images")
+
 
 
     def get_all_image_paths(self):

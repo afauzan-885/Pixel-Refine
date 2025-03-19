@@ -5,7 +5,6 @@ UNDER_DEVELOPMENT = "Menu {page_name} sedang dalam pengembangan"
 SETTINGS_SIDEBAR_LABEL= "Pengaturan"
 HDR_SIDEBAR_LABEL= "Rekontruksi HDR"
 
-
 # Main Content
 TOPBAR_SINGLE_IMPORT_BUTTON_TEXT = "Impor Gambar"
 TOPBAR_SINGLE_DELETE_BUTTON_TEXT = "Hapus Gambar"
