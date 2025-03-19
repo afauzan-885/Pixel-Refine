@@ -2,8 +2,8 @@
 UNDER_DEVELOPMENT = "{page_name} menu under development"
 
 # Enhance Stack Page
-TOPBAR_IMPORT_BUTTON_TEXT = "Import Image"
-TOPBAR_DELETE_BUTTON_TEXT = "Delete Image"
+TOPBAR_SINGLE_IMPORT_BUTTON_TEXT = "Import Image"
+TOPBAR_SINGLE_DELETE_BUTTON_TEXT = "Delete Image"
 
 PROGRESS_SECTION_PROCESS_BUTTON_TEXT = "Start Process"
 PROGRESS_SECTION_SAVE_BUTTON_TEXT = "Save As"

@@ -10,9 +10,11 @@ class TopBar(QWidget):
         self.layout = QHBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
 
-        # Import button
-        self.import_button = QPushButton(language_config.TOPBAR_IMPORT_BUTTON_TEXT)
-        self.import_button.setStyleSheet(stylesheet.IMPORT_BUTTON)
+        # Import button (Single Page Layout)
+        self.single_page_import_button = QPushButton(language_config.TOPBAR_SINGLE_IMPORT_BUTTON_TEXT)
+        self.batch_page_import_button = QPushButton(language_config.TOPBAR_BATCH_IMPORT_BUTTON_TEXT)
+        self.single_page_import_button.setStyleSheet(stylesheet.IMPORT_BUTTON)
+        self.batch_page_import_button.setStyleSheet(stylesheet.IMPORT_BUTTON)
 
         # Switch buttons (Single/Batch)
         self.single_button = QPushButton("Single")
@@ -41,12 +43,16 @@ class TopBar(QWidget):
         self.batch_button.setVisible(True) 
 
         # Delete button
-        self.delete_button = QPushButton(language_config.TOPBAR_DELETE_BUTTON_TEXT)
-        self.delete_button.setStyleSheet(stylesheet.DELETE_BUTTON)
+        self.single_page_delete_button = QPushButton(language_config.TOPBAR_SINGLE_DELETE_BUTTON_TEXT)
+        self.batch_page_delete_button = QPushButton(language_config.TOPBAR_BATCH_DELETE_BUTTON_TEXT)
+        self.single_page_delete_button.setStyleSheet(stylesheet.DELETE_BUTTON)
+        self.batch_page_delete_button.setStyleSheet(stylesheet.DELETE_BUTTON)
 
         # Add widgets to the main layout
-        self.layout.addWidget(self.import_button)
+        self.layout.addWidget(self.single_page_import_button)
+        self.layout.addWidget(self.batch_page_import_button)
         self.layout.addStretch()
         self.layout.addLayout(self.switch_layout)  # Tambahkan switch layout (tetap tersembunyi)
         self.layout.addStretch()
-        self.layout.addWidget(self.delete_button)
+        self.layout.addWidget(self.single_page_delete_button)
+        self.layout.addWidget(self.batch_page_delete_button)

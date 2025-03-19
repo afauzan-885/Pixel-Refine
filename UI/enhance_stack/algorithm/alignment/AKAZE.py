@@ -32,8 +32,6 @@ class AKAZEAlgorithm:
             cursor.execute("SELECT path FROM images")
             return [row[0] for row in cursor.fetchall()]
 
-
-
     @staticmethod
     def load_akaze_config(config_filename=None):
         """

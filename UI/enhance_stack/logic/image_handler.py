@@ -94,5 +94,5 @@ def handle_delete_button(self):
         QMessageBox.StandardButton.No
     )
     if reply == QMessageBox.StandardButton.Yes:
-        self.database_manager.delete_images(selected_paths)
+        self.database_manager.single_process_delete_path_images(selected_paths)
         self.right_panel.remove_selected_images()

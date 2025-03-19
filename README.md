@@ -16,9 +16,8 @@ This app is expected to bridge the gap between professional cameras (DSLR or Mir
 | **TIFF**                   | ✅ Supported        |
 | **PNG**                    | ✅ Supported        |
 | **DNG**                    | ❌ Not Supported   |
-| **RAW (Nikon, Canon, Sony)** | ❌ Not Supported   |
 
-> Note: Support for other RAW formats may be added in future updates..
+> Note: Support for DNG formats may be added in future updates..
 
 ## Sample Images
 

@@ -72,6 +72,9 @@ SCROLL_AREA = """
     QScrollBar:vertical { background: #F0F0F0; width: 10px; border-radius: 5px; }
     QScrollBar::handle:vertical { background: #A0A0A0; min-height: 20px; border-radius: 5px; }
     QScrollBar::handle:vertical:hover { background: #808080; }
+    QScrollBar:horizontal { background: #F0F0F0; height: 10px; border-radius: 5px; }
+    QScrollBar::handle:horizontal { background: #A0A0A0; min-width: 20px; border-radius: 5px; }
+    QScrollBar::handle:horizontal:hover { background: #808080; }
 """
 
 DROPDOWN_BOX = """
@@ -218,6 +221,7 @@ DELETE_BUTTON = """
                 background-color: #e74c3c;
                 color: white;
                 border: none;
+                border-radius: 5px;
             }
             QPushButton:hover {
                 background-color: #c0392b;
@@ -231,6 +235,7 @@ IMPORT_BUTTON = """
                 background-color: #3498db;
                 color: white;
                 border: none;
+                border-radius: 5px;
             }
             QPushButton:hover {
                 background-color: #2980b9;
