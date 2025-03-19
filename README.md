@@ -10,7 +10,7 @@ This app is expected to bridge the gap between professional cameras (DSLR or Mir
 
 ## Supported Image Formats
 
-| Format Gambar                | Status             |
+| Image Format                | Status             |
 | ---------------------------- | ------------------ |
 | **JPG**                    | ✅ Supported        |
 | **TIFF**                   | ✅ Supported        |
