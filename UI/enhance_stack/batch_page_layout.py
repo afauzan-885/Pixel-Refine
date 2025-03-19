@@ -1,12 +1,44 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy,
                              QSpacerItem, QPushButton, QScrollArea, QMessageBox,
                              QFileDialog, QLabel)
-from PyQt6.QtGui import QIcon
-from PyQt6.QtCore import QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QIcon, QPixmap, QImage
+from functools import partial
+from PyQt6.QtCore import QSize, Qt, pyqtSignal, QThread, QSemaphore
 from UI.enhance_stack.logic.database_manager import DatabaseManager
 from UI.enhance_stack.logic.multi_threading import BatchImageImportThreading
 from UI.resources.stylesheet.stylesheet import SCROLL_AREA
 from UI.settings.General.Language import language_config
+
+semaphore = QSemaphore(5)
+class ThumbnailLoader(QThread):
+    # Sinyal untuk mengirim thumbnail setelah diproses
+    thumbnail_ready = pyqtSignal(QImage, str)
+
+    def __init__(self, image_path, parent=None):
+        super().__init__(parent)
+        self.image_path = image_path
+
+    def run(self):
+        # Ambil izin dari semaphore (akan menunggu jika sudah ada 3 thread berjalan)
+        semaphore.acquire()
+
+        try:
+            # Memuat gambar dengan QImage
+            image = QImage(self.image_path)
+            if image.isNull():
+                return  # Keluar jika gagal memuat
+
+            # Proses scaling gambar
+            scaled_image = image.scaled(
+                80, 80,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            # Emit sinyal ke main thread
+            self.thumbnail_ready.emit(scaled_image, self.image_path)
+        finally:
+            # Kembalikan izin ke semaphore agar thread lain bisa berjalan
+            semaphore.release()
 
 class BatchPageLayout(QWidget):
     data_changed = pyqtSignal()
@@ -18,6 +50,9 @@ class BatchPageLayout(QWidget):
         
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 5, 0, 0)
+
+        # Cache untuk menyimpan thumbnail yang sudah diproses
+        self.thumbnail_cache = {}
 
         # Membuat panel utama
         self.main_panel = self.setup_main_panel()
@@ -68,6 +103,16 @@ class BatchPageLayout(QWidget):
         # Tambahkan spacer agar layout tetap rapi
         spacer = QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
         self.main_panel_layout.addSpacerItem(spacer)
+        
+    def add_thumbnail(self, image: QImage, image_path: str, list_layout: QHBoxLayout):
+        # Konversi QImage ke QPixmap di main thread
+        pixmap = QPixmap.fromImage(image)
+        thumb_label = QLabel()
+        thumb_label.setFixedSize(80, 80)
+        thumb_label.setStyleSheet("background-color: lightgray; border: 1px solid gray;")
+        thumb_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        thumb_label.setPixmap(pixmap)
+        list_layout.addWidget(thumb_label)
 
 
     def setup_combined_panel(self, batch_id=None):
@@ -166,28 +211,29 @@ class BatchPageLayout(QWidget):
         list_panel.setStyleSheet("background-color: #DBDBDB")
         list_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         
-        # Buat layout untuk list_panel
+         # Buat layout untuk list_panel
         list_layout = QHBoxLayout(list_panel)
         list_layout.setContentsMargins(5, 5, 5, 5)
         list_layout.setSpacing(10)
         
-        # Jika batch_id diberikan, ambil data gambar dari database dan tampilkan
+        # List untuk menyimpan thread agar tetap hidup
+        self.thumbnail_threads = getattr(self, 'thumbnail_threads', [])
+        
         if batch_id is not None:
             image_paths = self.database_manager.get_images_by_batch(batch_id)
             for path in image_paths:
-                thumb_label = QLabel()
-                thumb_label.setFixedSize(80, 80)
-                thumb_label.setStyleSheet("background-color: lightgray; border: 1px solid gray;")
-                thumb_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
-                # Misalnya, tampilkan nama file sebagai thumbnail (Anda bisa menggantinya dengan QPixmap)
-                thumb_label.setText(path.split("/")[-1])
-                list_layout.addWidget(thumb_label)
+                # Buat instance worker
+                loader = ThumbnailLoader(path)
+                # Hubungkan sinyal ke slot add_thumbnail
+                loader.thumbnail_ready.connect(lambda img, p, layout=list_layout: self.add_thumbnail(img, p, layout))
+                loader.start()
+                # Simpan referensi worker
+                self.thumbnail_threads.append(loader)
         
-        # Bungkus list_panel dalam QScrollArea agar dapat di-scroll secara horizontal
+        # Bungkus list_panel dalam QScrollArea seperti sebelumnya
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(list_panel)
-        # Jika Anda memiliki stylesheet khusus untuk scroll area, misalnya SCROLL_AREA, aktifkan:
         scroll.setStyleSheet(SCROLL_AREA)
 
         # Bungkus left_layout dalam QWidget
@@ -202,6 +248,7 @@ class BatchPageLayout(QWidget):
         combined_panel.batch_id = batch_id
 
         return combined_panel
+
     
     def handle_add_image_to_batch(self, batch_id, list_layout):
         """
@@ -220,7 +267,7 @@ class BatchPageLayout(QWidget):
 
         # Buka dialog pemilihan file
         file_dialog = QFileDialog()
-        file_paths, _ = file_dialog.getOpenFileNames(None, "Pilih Gambar", "", language_config.HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION)
+        file_paths, _ = file_dialog.getOpenFileNames(None, language_config.HANDLE_IMPORT_BUTTON_IMAGE_PATH, "", language_config.HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION)
 
         if not file_paths:
             return  # Jika user tidak memilih gambar, keluar dari fungsi
@@ -231,23 +278,34 @@ class BatchPageLayout(QWidget):
 
         # Jika ada duplikat, beri peringatan ke user
         if duplicates:
-            message = f"{len(duplicates)} gambar sudah ada dalam batch ini dan tidak akan ditambahkan lagi."
-            QMessageBox.warning(None, "Gambar Duplikat", message)
+            message = language_config.HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE_MESSAGE.format(count=len(duplicates))
+            QMessageBox.warning(None, language_config.HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE, message)
 
         # Simpan hanya gambar yang unik ke database
         if unique_files:
             self.database_manager.batch_process_save_image_path(batch_id, unique_files)
 
-            # Tambahkan thumbnail ke list_layout hanya untuk gambar unik
+            # List untuk menyimpan thread agar tetap hidup
+            self.thumbnail_threads = getattr(self, 'thumbnail_threads', [])
+
+            # Tambahkan thumbnail dengan threading
             for path in unique_files:
-                thumb_label = QLabel()
-                thumb_label.setFixedSize(80, 80)
-                thumb_label.setStyleSheet("background-color: lightgray; border: 1px solid gray;")
-                thumb_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
-                thumb_label.setText(path.split("/")[-1])  # Menampilkan nama file
-                list_layout.addWidget(thumb_label)
+                loader = ThumbnailLoader(path)
+                loader.thumbnail_ready.connect(partial(self.add_thumbnail, list_layout=list_layout))  # Perbaiki lambda capturing
+                loader.start()
+                self.thumbnail_threads.append(loader)  # Simpan referensi agar tidak dihapus GC
 
             print(f"Added {len(unique_files)} new images to batch {batch_id}")
+    
+    def stop_thumbnail_threads(self):
+        """Menghentikan semua thread ThumbnailLoader yang sedang berjalan."""
+        for thread in getattr(self, 'thumbnail_threads', []):
+            if thread.isRunning():
+                thread.thumbnail_ready.disconnect() 
+                thread.quit()  
+                thread.wait()
+        self.thumbnail_threads.clear()
+
     
     def handle_delete_batch(self, batch_id):
         # Opsional: Tampilkan konfirmasi sebelum menghapus
@@ -258,6 +316,7 @@ class BatchPageLayout(QWidget):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if reply == QMessageBox.StandardButton.Yes:
+            self.stop_thumbnail_threads()
             self.database_manager.batch_process_delete_batch(batch_id)
             # Emit sinyal untuk merefresh UI setelah penghapusan
             self.data_changed.emit()
