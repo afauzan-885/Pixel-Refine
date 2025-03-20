@@ -15,42 +15,39 @@ class EnhanceStackPage(QWidget):
         self.database_manager = DatabaseManager("pixel_refine_database.db")
         self.database_manager.create_database()
 
-        # Add TopBar
         self.top_bar = TopBar()
         self.layout.addWidget(self.top_bar)
 
-        # Gunakan QStackedWidget untuk switch antara halaman Single & Batch
         self.stacked_widget = QStackedWidget()
         self.layout.addWidget(self.stacked_widget)
 
-        # Tambahkan SinglePageLayout dan BatchPageLayout ke dalam stacked_widget
         self.single_page_layout = SinglePageLayout()
         self.batch_page_layout = BatchPageLayout()
 
         self.stacked_widget.addWidget(self.single_page_layout)
         self.stacked_widget.addWidget(self.batch_page_layout)
 
-        # Set tampilan awal ke SinglePageLayout
         self.stacked_widget.setCurrentWidget(self.single_page_layout)
 
-        # **Atur visibilitas tombol secara default**
         self.top_bar.single_page_import_button.setVisible(True)
         self.top_bar.single_page_delete_button.setVisible(True)
         self.top_bar.batch_page_import_button.setVisible(False)
         self.top_bar.batch_page_delete_button.setVisible(False)
 
-        # Connect tombol switch dari TopBar ke metode switch_page
         self.top_bar.single_button.toggled.connect(self.switch_page)
         self.top_bar.batch_button.toggled.connect(self.switch_page)
 
-        # Connect buttons directly to SinglePageLayout methods
         self.top_bar.single_page_import_button.clicked.connect(self.single_page_layout.handle_import_button)
         self.top_bar.single_page_delete_button.clicked.connect(self.single_page_layout.handle_delete_button)
-        
+
         self.top_bar.batch_page_import_button.clicked.connect(self.batch_page_layout.handle_import_button)
 
+        # Tambahkan daftar untuk menyimpan thread ThumbnailLoader
+        self.thumbnail_threads = []
+
+        
     def switch_page(self):
-        """Switch halaman berdasarkan tombol yang dipilih."""
+        """Switch halaman dan pause/resume proses thumbnail sesuai mode yang dipilih."""
         if self.top_bar.single_button.isChecked():
             self.stacked_widget.setCurrentWidget(self.single_page_layout)
 
@@ -61,6 +58,10 @@ class EnhanceStackPage(QWidget):
             # Sembunyikan tombol import dan delete di mode Batch
             self.top_bar.batch_page_import_button.setVisible(False)
             self.top_bar.batch_page_delete_button.setVisible(False)
+
+            # **Pause semua proses thumbnail ketika masuk ke mode Single**
+            for loader in self.thumbnail_threads:
+                loader.pause()
         else:
             self.stacked_widget.setCurrentWidget(self.batch_page_layout)
 
@@ -71,3 +72,7 @@ class EnhanceStackPage(QWidget):
             # Tampilkan tombol import dan delete di mode Batch
             self.top_bar.batch_page_import_button.setVisible(True)
             self.top_bar.batch_page_delete_button.setVisible(True)
+
+            # **Lanjutkan semua proses thumbnail ketika masuk ke mode Batch**
+            for loader in self.thumbnail_threads:
+                loader.resume()

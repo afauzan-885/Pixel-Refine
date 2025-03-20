@@ -11,8 +11,10 @@ TOPBAR_SINGLE_DELETE_BUTTON_TEXT = "Hapus Gambar"
 TOPBAR_BATCH_IMPORT_BUTTON_TEXT = "Buat Batch"
 TOPBAR_BATCH_DELETE_BUTTON_TEXT = "Hapus Batch"
 
+BATCH_DELETE_LABEL = "Konfirmasi Hapus Batch", "Apakah Anda yakin ingin menghapus batch {}?"
+
 PROGRESS_SECTION_PROCESS_BUTTON_TEXT = "Mulai Proses"
-PROGRESS_SECTION_SAVE_BUTTON_TEXT = "Simpan Sebagai"
+PROGRESS_SECTION_SAVE_BUTTON_TEXT = "Simpan Sebagai" "Apakah Anda yakin ingin menghapus batch {}?"
 
 HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION = "File Gambar (*.jpg *.jpeg *.png *.bmp *.tif *.tiff)"
 HANDLE_IMPORT_BUTTON_IMAGE_PATH = "Pilih Gambar"

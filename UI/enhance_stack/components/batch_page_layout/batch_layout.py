@@ -1,3 +1,4 @@
+import os
 from PyQt6.QtWidgets import (QLabel, QSpacerItem, QSizePolicy, QWidget, QVBoxLayout, QScrollArea,
                              QHBoxLayout, QPushButton)
 from PyQt6.QtCore import QSize, Qt
@@ -5,7 +6,7 @@ from PyQt6.QtGui import QIcon
 import weakref
 
 from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, create_thumbnail_placeholder, update_thumbnail
-
+from config import CACHE
 
 def setup_main_panel(parent, scroll_area_style):
     """Membuat panel utama dengan layout vertikal agar UI tersusun dari atas."""
@@ -50,6 +51,9 @@ def refresh_ui(database_manager, main_panel_layout, setup_combined_panel):
 def setup_combined_panel(database_manager, batch_id, thumbnail_threads, thumbnail_placeholders,
                          handle_add_image_to_batch, handle_delete_batch, SCROLL_AREA):
     """Membuat panel gabungan yang berisi tombol tambah, tombol delete, parameter_panel, dan list_panel."""
+
+    create_thumbnail = CACHE.get("create_thumbnail", False)  # Ambil nilai dari CACHE
+
     combined_panel = QWidget()
     combined_panel.setMaximumHeight(120)  # Berikan tinggi maksimum agar UI tetap rapi
     combined_panel_layout = QHBoxLayout(combined_panel)
@@ -66,13 +70,13 @@ def setup_combined_panel(database_manager, batch_id, thumbnail_threads, thumbnai
     add_button.setIconSize(QSize(25, 25))
     add_button.setStyleSheet("""
         QPushButton {
-        background-color: #4CAF50; 
-        border-radius: 5px; 
-        color: white; 
-        font-weight: semi-bold;
+            background-color: #4CAF50; 
+            border-radius: 5px; 
+            color: white; 
+            font-weight: semi-bold;
         }
         QPushButton:hover {
-        background-color: #347A36;
+            background-color: #347A36;
         }
     """)
     add_button.setToolTip("Tambah")
@@ -83,14 +87,14 @@ def setup_combined_panel(database_manager, batch_id, thumbnail_threads, thumbnai
     play_preview.setFixedSize(30, 30)
     play_preview.setIcon(QIcon("UI/resources/icon/play-preview.png"))
     play_preview.setStyleSheet("""
-    QPushButton {
-        background-color: #31CBD1;
-        border-radius: 5px;
-        color: white;
-        font-weight: semi-bold
+        QPushButton {
+            background-color: #31CBD1;
+            border-radius: 5px;
+            color: white;
+            font-weight: semi-bold;
         }
-    QPushButton:hover {
-        background-color: #27A1A7;
+        QPushButton:hover {
+            background-color: #27A1A7;
         }
     """)
     play_preview.setToolTip("Pratinjau")
@@ -101,13 +105,13 @@ def setup_combined_panel(database_manager, batch_id, thumbnail_threads, thumbnai
     delete_button.setIcon(QIcon("UI/resources/icon/delete-image.png"))
     delete_button.setStyleSheet("""
         QPushButton {
-        background-color: #F44336; 
-        border-radius: 5px; 
-        color: white; 
-        font-weight: semi-bold;
+            background-color: #F44336; 
+            border-radius: 5px; 
+            color: white; 
+            font-weight: semi-bold;
         }
         QPushButton:hover {
-        background-color: #B9332A;
+            background-color: #B9332A;
         }
     """)
     delete_button.setToolTip("Hapus")
@@ -143,12 +147,36 @@ def setup_combined_panel(database_manager, batch_id, thumbnail_threads, thumbnai
     if batch_id is not None:
         image_paths = database_manager.get_images_by_batch(batch_id)
         for path in image_paths:
-            placeholder = create_thumbnail_placeholder(list_layout, path, thumbnail_placeholders)
-            loader = ThumbnailLoader(path)
-            loader.thumbnail_ready.connect(lambda pixmap, p, ref_layout=weakref.ref(list_layout):
-                                           update_thumbnail(ref_layout, pixmap, p) if ref_layout() else None)
-            loader.start()
-            thumbnail_threads.append(loader)
+            if create_thumbnail:
+                # Jika opsi create_thumbnail True, buat thumbnail seperti biasa
+                placeholder = create_thumbnail_placeholder(list_layout, path, thumbnail_placeholders)
+                loader = ThumbnailLoader(path)
+                loader.thumbnail_ready.connect(lambda pixmap, p, ref_layout=weakref.ref(list_layout):
+                                                 update_thumbnail(ref_layout, pixmap, p) if ref_layout() else None)
+                loader.start()
+                thumbnail_threads.append(loader)
+            else:
+                label = QLabel(os.path.basename(path))
+                label.setFixedSize(80, 80)
+                label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                label.setWordWrap(True)  # Mengaktifkan pemisahan kata jika teks terlalu panjang
+                label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)  # Membuat teks bisa diseleksi
+                label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)  # Memungkinkan ekspansi jika perlu
+
+                # Paksa pemisahan kata pada karakter `_`
+                file_name = os.path.basename(path).replace("_", "\n")  # Ganti "_" dengan baris baru
+                label.setText(file_name)
+
+                label.setStyleSheet("""
+                    background-color: lightgray; 
+                    border: 1px solid gray; 
+                    font-size: 11px; /* Ukuran font lebih kecil agar muat */
+                    color: gray;
+                    padding: 3px;
+                """)
+                list_layout.addWidget(label)
+
+
 
     # Scroll Area untuk list_panel
     scroll = QScrollArea()

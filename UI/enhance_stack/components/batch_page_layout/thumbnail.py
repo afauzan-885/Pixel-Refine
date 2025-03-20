@@ -1,6 +1,6 @@
 import os
 from PyQt6.QtWidgets import QLabel, QHBoxLayout
-from PyQt6.QtGui import QImage, QPixmap, QImageReader, QPixmapCache
+from PyQt6.QtGui import QPixmap, QImageReader, QPixmapCache
 from PyQt6.QtCore import (Qt, QThread, pyqtSignal, QMutex, QWaitCondition,
                           QFile, QSemaphore, QTimer)
 import weakref
@@ -48,7 +48,7 @@ class ThumbnailLoader(QThread):
         # **Cek apakah thumbnail sudah ada di hard disk**
         if QFile.exists(cache_path):
             pixmap = QPixmap(cache_path)
-            QPixmapCache.insert(cache_path, pixmap)  # Cache ke RAM
+            QPixmapCache.insert(cache_path, pixmap)
             self.thumbnail_ready.emit(pixmap, self.image_path)
             return
 
@@ -75,21 +75,6 @@ class ThumbnailLoader(QThread):
             semaphore.release()
 
         self.thumbnail_ready.emit(pixmap, self.image_path)
-
-def clear_batch_cache(database_manager, batch_id, cache_dir):
-    """
-    Menghapus thumbnail yang terkait dengan batch yang dihapus.
-
-    Args:
-        database_manager: Instance database manager untuk mengambil data batch.
-        batch_id (int): ID batch yang akan dihapus.
-        cache_dir (str): Lokasi direktori cache.
-    """
-    image_paths = database_manager.get_images_by_batch(batch_id)
-    for path in image_paths:
-        cache_path = os.path.join(cache_dir, os.path.basename(path) + ".png")
-        if os.path.exists(cache_path):
-            os.remove(cache_path)
 
 def create_thumbnail_placeholder(list_layout: QHBoxLayout, image_path: str, placeholders: weakref.WeakValueDictionary):
     """Menampilkan placeholder loading sebelum thumbnail selesai diproses."""

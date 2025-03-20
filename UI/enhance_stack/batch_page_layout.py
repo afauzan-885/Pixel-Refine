@@ -58,16 +58,21 @@ class BatchPageLayout(QWidget):
     
     # Contoh penggunaan di handle_delete_batch
     def handle_delete_batch(self, batch_id):
+        title, message = language_config.BATCH_DELETE_LABEL 
+        message = message.format(batch_id)
+
         reply = QMessageBox.question(
             self,
-            "Konfirmasi Hapus",
-            f"Apakah Anda yakin ingin menghapus batch {batch_id}?",
+            title,  # Judul dialog
+            message,  # Isi pesan
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
+
         if reply == QMessageBox.StandardButton.Yes:
             self.deleter_thread = BatchDeleteProcess(self.database_manager, batch_id, CACHE_DIR, self.thumbnail_threads)
             self.deleter_thread.batch_deleted.connect(self.data_changed.emit)  # Refresh UI setelah penghapusan selesai
             self.deleter_thread.start()
+
 
     def handle_import_button(self):
         """Function to manage images import"""
