@@ -20,9 +20,9 @@ HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE = "Gambar Duplikat"
 HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE_MESSAGE = "{count} gambar sudah ada di database, akan dilewati."
 HANDLE_IMPORT_BUTTON_IMAGE_SELECTED = "Format Terpilih"
 HANDLE_IMPORT_BUTTON_IMAGE_DOMINANT = "{count} gambar dengan format '{format}' akan diimpor."
-HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED = "Error", "Tidak ada gambar yang valid untuk diimpor."
+HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED = "Gagal", "Tidak ada gambar yang valid untuk diimpor."
 
-HANDLE_DELETE_BUTTON_IMAGE_NO_VALID_SELECTED = "Error", "Tidak ada gambar yang dipilih."
+HANDLE_DELETE_BUTTON_IMAGE_NO_VALID_SELECTED = "Gagal", "Tidak ada gambar yang dipilih."
 HANDLE_DELETE_BUTTON_IMAGE_CONFIRM_DELETE = "Apakah Anda yakin ingin menghapus {count} gambar yang dipilih?"
 
 PREVIEW_PANEL_LABEL = "Panel Pratinjau"
