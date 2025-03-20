@@ -2,8 +2,8 @@ import os
 from PyQt6.QtWidgets import QLabel, QHBoxLayout
 from PyQt6.QtGui import QImage, QPixmap, QImageReader, QPixmapCache
 from PyQt6.QtCore import (Qt, QThread, pyqtSignal, QMutex, QWaitCondition,
-                          QFile, QSemaphore)
-
+                          QFile, QSemaphore, QTimer)
+import weakref
 from config import CACHE_DIR
 semaphore = QSemaphore(1)
 
@@ -91,64 +91,49 @@ def clear_batch_cache(database_manager, batch_id, cache_dir):
         if os.path.exists(cache_path):
             os.remove(cache_path)
 
-def stop_thumbnail(thumbnail_threads):
-    """
-    Menghentikan semua thread ThumbnailLoader yang sedang berjalan.
-
-    Args:
-        thumbnail_threads (list): List thread ThumbnailLoader.
-    """
-    for thread in thumbnail_threads:
-        if thread.isRunning():
-            thread.thumbnail_ready.disconnect() 
-            thread.quit()  
-            thread.wait()
-    thumbnail_threads.clear()
-
-def add_loading_placeholder(list_layout: QHBoxLayout, image_path: str):
-    """
-    Menampilkan placeholder loading sebelum thumbnail selesai diproses.
-
-    Args:
-        list_layout (QHBoxLayout): Layout tempat widget ditambahkan.
-        image_path (str): Path gambar (bisa digunakan untuk logika tambahan jika diperlukan).
-
-    Returns:
-        QLabel: Widget placeholder yang telah dibuat.
-    """
+def create_thumbnail_placeholder(list_layout: QHBoxLayout, image_path: str, placeholders: weakref.WeakValueDictionary):
+    """Menampilkan placeholder loading sebelum thumbnail selesai diproses."""
     placeholder = QLabel("Loading...")
     placeholder.setFixedSize(80, 80)
     placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    placeholder.setStyleSheet(
-        "background-color: lightgray; border: 1px solid gray; font-size: 12px; color: gray;"
-    )
+    placeholder.setStyleSheet("background-color: lightgray; border: 1px solid gray; font-size: 12px; color: gray;")
     list_layout.addWidget(placeholder)
+
+    # Simpan referensi layout agar tidak menyebabkan crash jika dihapus
+    placeholders[image_path] = list_layout  
     return placeholder
 
-def add_thumbnail(list_layout: QHBoxLayout, image: QImage, image_path: str):
-    """
-    Mengganti placeholder dengan thumbnail saat sudah tersedia.
-
-    Args:
-        list_layout (QHBoxLayout): Layout tempat widget ditambahkan.
-        image (QImage): Gambar thumbnail yang sudah diproses.
-        image_path (str): Path gambar yang bersangkutan.
-    """
-    pixmap = QPixmap.fromImage(image)
+def update_thumbnail(ref_layout, pixmap, image_path):
+    """Mengganti placeholder dengan thumbnail saat sudah tersedia."""
+    list_layout = ref_layout() if callable(ref_layout) else ref_layout
     
-    # Cari placeholder yang sesuai (dengan teks "Loading...")
-    thumb_label = None
+    if list_layout is None:
+        return  # Jika layout sudah dihapus, hentikan fungsi agar tidak crash
+
     for i in range(list_layout.count()):
-        widget = list_layout.itemAt(i).widget()
-        if isinstance(widget, QLabel) and widget.text() == "Loading...":
-            thumb_label = widget
+        item = list_layout.itemAt(i)
+        if isinstance(item.widget(), QLabel) and item.widget().text() == "Loading...":
+            thumb_label = item.widget()
             break
-    # Jika placeholder tidak ditemukan, buat widget baru
-    if thumb_label is None:
+    else:
         thumb_label = QLabel()
         list_layout.addWidget(thumb_label)
-    
+
     thumb_label.setPixmap(pixmap)
     thumb_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
     thumb_label.setStyleSheet("background-color: lightgray; border: 1px solid gray;")
     thumb_label.setFixedSize(80, 80)
+
+
+def stop_all_thumbnails(threads):
+    """Menghentikan semua thread ThumbnailLoader yang sedang berjalan dan membersihkan daftar thread."""
+    if not threads:
+        return
+
+    for thread in threads:
+        if thread.isRunning():
+            thread.thumbnail_ready.disconnect()
+            thread.quit()
+
+    # Gunakan QTimer untuk menunggu thread berhenti sebelum membersihkannya
+    QTimer.singleShot(100, lambda: threads.clear())
