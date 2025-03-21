@@ -53,8 +53,13 @@ class LeftPanel(QWidget):
         parameter_panel_layout.setContentsMargins(10, 5, 0, 0)
         parameter_panel_layout.setSpacing(0)
 
-        # Buat dropdown untuk pengaturan parameter
-        left_panel = QVBoxLayout()
+        # Buat widget pembungkus untuk left_panel
+        left_panel_widget = QWidget()
+        # left_panel_widget.setMinimumWidth(250)
+        left_panel_layout = QVBoxLayout(left_panel_widget) 
+        left_panel_layout.setContentsMargins(0, 0, 0, 0) 
+
+        # Dropdown untuk pengaturan parameter
         self.alignment_dropdown, alignment_widget = self.create_dropdown(
             language_config.ALIGNMENT_NAME,
             [opt[0] for opt in [
@@ -70,7 +75,7 @@ class LeftPanel(QWidget):
                 ("ORB", language_config.ORB_DESCRIPTION)
             ]]
         )
-        left_panel.addWidget(alignment_widget)
+        left_panel_layout.addWidget(alignment_widget)
 
         self.super_resolution_dropdown, super_resolution_widget = self.create_dropdown(
             language_config.SUPER_RESOLUTION_NAME,
@@ -83,7 +88,7 @@ class LeftPanel(QWidget):
                 ("Interpolation", language_config.INTERPOLATION_DESCRIPTION)
             ]]
         )
-        left_panel.addWidget(super_resolution_widget)
+        left_panel_layout.addWidget(super_resolution_widget)
 
         self.denoising_dropdown, denoising_widget = self.create_dropdown(
             language_config.DENOISING_NAME,
@@ -102,7 +107,7 @@ class LeftPanel(QWidget):
                 ("Similarity", language_config.SIMILARITY_DESCRIPTION)
             ]]
         )
-        left_panel.addWidget(denoising_widget)
+        left_panel_layout.addWidget(denoising_widget)
 
         # Inisialisasi QStackedWidget untuk panel pengaturan
         self.parameter_stack = QStackedWidget()
@@ -110,12 +115,17 @@ class LeftPanel(QWidget):
         self.setting_pages_map = parameter_pages.get_setting_pages_map()
 
         # Tambahkan parameter_stack langsung ke panel kanan tanpa ScrollArea
-        right_panel = QVBoxLayout()
-        right_panel.addWidget(self.parameter_stack)
+        right_panel_layout = QVBoxLayout()
+        right_panel_layout.addWidget(self.parameter_stack)
 
-        # Tambahkan panel kiri dan kanan dengan stretch factor yang sama
-        parameter_panel_layout.addLayout(left_panel, 1)
-        parameter_panel_layout.addLayout(right_panel, 1)
+        # Widget pembungkus untuk right_panel
+        right_panel_widget = QWidget()
+        right_panel_widget.setLayout(right_panel_layout)
+
+        # Tambahkan left_panel_widget dan right_panel_widget ke dalam layout utama
+        parameter_panel_layout.addWidget(left_panel_widget, 1)
+        parameter_panel_layout.addWidget(right_panel_widget, 2) 
+
         self.parameter_panel_widget.setLayout(parameter_panel_layout)
         self.parameter_panel_widget.setStyleSheet("QWidget { background-color: white; }")
 
@@ -127,6 +137,7 @@ class LeftPanel(QWidget):
         )
         self.denoising_dropdown.currentIndexChanged.connect(self.handle_dropdown_change)
         self.super_resolution_dropdown.currentIndexChanged.connect(self.handle_dropdown_change)
+
 
     def create_dropdown(self, label_text: str, items: list, tooltips: list) -> tuple:
         """

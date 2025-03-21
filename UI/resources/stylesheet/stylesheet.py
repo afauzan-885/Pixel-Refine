@@ -82,7 +82,7 @@ DROPDOWN_BOX = """
                 background-color: #F0EEEE;
                 padding: 5px;
                 border-radius: 5px;
-                max-width: 200px;
+                min-width: 200px;
             }
             QComboBox::drop-down {
                 background-color: #ffffff;
