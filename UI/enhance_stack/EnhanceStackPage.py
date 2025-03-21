@@ -47,7 +47,7 @@ class EnhanceStackPage(QWidget):
 
         
     def switch_page(self):
-        """Switch halaman dan pause/resume proses thumbnail sesuai mode yang dipilih."""
+        """Switch halaman berdasarkan tombol yang dipilih."""
         if self.top_bar.single_button.isChecked():
             self.stacked_widget.setCurrentWidget(self.single_page_layout)
 
@@ -58,10 +58,6 @@ class EnhanceStackPage(QWidget):
             # Sembunyikan tombol import dan delete di mode Batch
             self.top_bar.batch_page_import_button.setVisible(False)
             self.top_bar.batch_page_delete_button.setVisible(False)
-
-            # **Pause semua proses thumbnail ketika masuk ke mode Single**
-            for loader in self.thumbnail_threads:
-                loader.pause()
         else:
             self.stacked_widget.setCurrentWidget(self.batch_page_layout)
 
@@ -72,7 +68,3 @@ class EnhanceStackPage(QWidget):
             # Tampilkan tombol import dan delete di mode Batch
             self.top_bar.batch_page_import_button.setVisible(True)
             self.top_bar.batch_page_delete_button.setVisible(True)
-
-            # **Lanjutkan semua proses thumbnail ketika masuk ke mode Batch**
-            for loader in self.thumbnail_threads:
-                loader.resume()

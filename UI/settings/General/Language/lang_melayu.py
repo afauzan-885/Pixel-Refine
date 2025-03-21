@@ -5,6 +5,17 @@ UNDER_DEVELOPMENT = "{page_name} menu dalam pembangunan"
 SETTINGS_SIDEBAR_LABEL= "Tetapan"
 HDR_SIDEBAR_LABEL= "Rekonstruksi HDR"
 
+TOPBAR_SINGLE_IMPORT_BUTTON_TEXT = "Import Imej"
+TOPBAR_SINGLE_DELETE_BUTTON_TEXT = "Padam Imej"
+TOPBAR_BATCH_IMPORT_BUTTON_TEXT = "Buat Kelompok"
+TOPBAR_BATCH_DELETE_BUTTON_TEXT = "Padam Kelompok"
+
+BATCH_DELETE_LABEL = "Sahkan Padam Kelompok", "Adakah anda pasti mahu memadamkan kelompok {}?"
+LOADING_THUMBNAIL = "Memuatkan...."
+ADD_IMAGE_BUTTON = "Tambah"
+PREVIEW_IMAGE_BUTTON = "Pratonton"
+DELETE_IMAGE_BUTTON = "Padam"
+
 # Halaman Susun Penambahbaikan
 TOPBAR_SINGLE_IMPORT_BUTTON_TEXT = "Import Imej"
 TOPBAR_SINGLE_DELETE_BUTTON_TEXT = "Padam Imej"

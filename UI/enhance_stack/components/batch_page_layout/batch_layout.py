@@ -1,12 +1,13 @@
 import os
 from PyQt6.QtWidgets import (QLabel, QSpacerItem, QSizePolicy, QWidget, QVBoxLayout, QScrollArea,
-                             QHBoxLayout, QPushButton)
+                             QHBoxLayout, QPushButton, QComboBox, QCheckBox)
 from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QIcon
 import weakref
 
 from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, create_thumbnail_placeholder, update_thumbnail
 from config import CACHE
+from UI.settings.General.Language import language_config
 
 def setup_main_panel(parent, scroll_area_style):
     """Membuat panel utama dengan layout vertikal agar UI tersusun dari atas."""
@@ -59,11 +60,10 @@ def setup_combined_panel(database_manager, batch_id, thumbnail_threads, thumbnai
     combined_panel_layout = QHBoxLayout(combined_panel)
     combined_panel_layout.setContentsMargins(0, 0, 0, 0)
 
-    # Layout vertikal untuk tombol Add, Delete, dan Play Preview
     button_layout = QVBoxLayout()
     button_layout.setContentsMargins(0, 0, 0, 0)
 
-    # Tombol "Tambah"
+    # Add button
     add_button = QPushButton()
     add_button.setFixedSize(30, 30)
     add_button.setIcon(QIcon("UI/resources/icon/add-image.png"))
@@ -79,10 +79,10 @@ def setup_combined_panel(database_manager, batch_id, thumbnail_threads, thumbnai
             background-color: #347A36;
         }
     """)
-    add_button.setToolTip("Tambah")
-    add_button.clicked.connect(lambda: handle_add_image_to_batch(batch_id, list_layout))
+    add_button.setToolTip(language_config.ADD_IMAGE_BUTTON)
+    add_button.clicked.connect(lambda: handle_add_image_to_batch(database_manager, thumbnail_threads, batch_id, list_layout))
 
-    # Tombol "Play Preview"
+    # Preview button
     play_preview = QPushButton()
     play_preview.setFixedSize(30, 30)
     play_preview.setIcon(QIcon("UI/resources/icon/play-preview.png"))
@@ -97,9 +97,9 @@ def setup_combined_panel(database_manager, batch_id, thumbnail_threads, thumbnai
             background-color: #27A1A7;
         }
     """)
-    play_preview.setToolTip("Pratinjau")
+    play_preview.setToolTip(language_config.PREVIEW_IMAGE_BUTTON)
 
-    # Tombol "Hapus"
+    # Delete button
     delete_button = QPushButton()
     delete_button.setFixedSize(30, 30)
     delete_button.setIcon(QIcon("UI/resources/icon/delete-image.png"))
@@ -114,7 +114,7 @@ def setup_combined_panel(database_manager, batch_id, thumbnail_threads, thumbnai
             background-color: #B9332A;
         }
     """)
-    delete_button.setToolTip("Hapus")
+    delete_button.setToolTip(language_config.DELETE_IMAGE_BUTTON)
     delete_button.clicked.connect(lambda: handle_delete_batch(batch_id))
 
     button_layout.addWidget(add_button)
@@ -128,9 +128,60 @@ def setup_combined_panel(database_manager, batch_id, thumbnail_threads, thumbnai
     left_layout = QHBoxLayout()
     left_layout.setContentsMargins(0, 0, 0, 0)
 
+    # Parameter Panel dengan dua bagian
     parameter_panel = QWidget()
     parameter_panel.setStyleSheet("background-color: #EBEAEA")
     parameter_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    parameter_layout = QHBoxLayout(parameter_panel)
+    parameter_layout.setContentsMargins(10, 10, 10, 10)
+
+    # Bagian Kiri - Combo Box
+    algorithm_layout = QVBoxLayout()
+    algorithm_layout.setContentsMargins(5, 5, 5, 5)
+    algorithm_layout.setSpacing(5)
+
+    combo_label = QLabel("Pilih Opsi:")
+    combo_label.setStyleSheet("font-weight: bold;")
+
+    combo_box = QComboBox()
+    combo_box.addItems(["Opsi 1", "Opsi 2", "Opsi 3"])
+
+    algorithm_layout.addWidget(combo_label)
+    algorithm_layout.addWidget(combo_box)
+
+    
+    option_widged = QWidget()  # Widget untuk menampung layout checkbox
+    option_layout = QVBoxLayout(option_widged)
+    option_layout.setContentsMargins(5, 5, 5, 5)
+    option_layout.setSpacing(5)
+
+    checkbox_1 = QCheckBox("Aktifkan Fitur A")
+    checkbox_2 = QCheckBox("Gunakan Mode B")
+    checkbox_3 = QCheckBox("Tampilkan Detail")
+    checkbox_4 = QCheckBox("Mode Hemat Daya")
+    checkbox_5 = QCheckBox("Tampilkan Notifikasi")
+    checkbox_6 = QCheckBox("Gunakan Tema Gelap")
+
+    option_layout.addWidget(checkbox_1)
+    option_layout.addWidget(checkbox_2)
+    option_layout.addWidget(checkbox_3)
+    option_layout.addWidget(checkbox_4)
+    option_layout.addWidget(checkbox_5)
+    option_layout.addWidget(checkbox_6)
+    option_layout.addStretch()
+
+    # Tambahkan Scroll Area
+    scroll_option_layout = QScrollArea()
+    scroll_option_layout.setWidgetResizable(True)
+    scroll_option_layout.setWidget(option_widged)
+    scroll_option_layout.setStyleSheet("border: none;")  # Opsional, menghilangkan border
+
+    # Tambahkan ke parameter_layout
+    parameter_layout.addLayout(algorithm_layout, 1)  # Bagian kiri (Combo Box)
+    parameter_layout.addWidget(scroll_option_layout, 1)  # Bagian kanan (Checkbox dengan Scroll)
+
+
 
     left_layout.addWidget(button_widget)
     left_layout.addWidget(parameter_panel, 1)
@@ -179,16 +230,16 @@ def setup_combined_panel(database_manager, batch_id, thumbnail_threads, thumbnai
 
 
     # Scroll Area untuk list_panel
-    scroll = QScrollArea()
-    scroll.setWidgetResizable(True)
-    scroll.setWidget(list_panel)
-    scroll.setStyleSheet(SCROLL_AREA)
+    scroll_list_panel = QScrollArea()
+    scroll_list_panel.setWidgetResizable(True)
+    scroll_list_panel.setWidget(list_panel)
+    scroll_list_panel.setStyleSheet(SCROLL_AREA)
 
     left_widget = QWidget()
     left_widget.setLayout(left_layout)
 
     combined_panel_layout.addWidget(left_widget, 1)
-    combined_panel_layout.addWidget(scroll, 2)
+    combined_panel_layout.addWidget(scroll_list_panel, 2)
 
     combined_panel.batch_id = batch_id
 

@@ -5,6 +5,17 @@ UNDER_DEVELOPMENT = "Menu {page_name} is under development"
 SETTINGS_SIDEBAR_LABEL= "Settings"
 HDR_SIDEBAR_LABEL= "HDR Reconstruction"
 
+TOPBAR_SINGLE_IMPORT_BUTTON_TEXT = "Import Image"
+TOPBAR_SINGLE_DELETE_BUTTON_TEXT = "Delete Image"
+TOPBAR_BATCH_IMPORT_BUTTON_TEXT = "Create Batch"
+TOPBAR_BATCH_DELETE_BUTTON_TEXT = "Delete Batch"
+
+BATCH_DELETE_LABEL = "Confirm Batch Delete", "Are you sure you want to delete batch {}?"
+LOADING_THUMBNAIL = "Loading...."
+ADD_IMAGE_BUTTON = "Add"
+PREVIEW_IMAGE_BUTTON = "Preview"
+DELETE_IMAGE_BUTTON = "Delete"
+
 # Enhance Stack Page
 TOPBAR_SINGLE_IMPORT_BUTTON_TEXT = "Import Image"
 TOPBAR_SINGLE_DELETE_BUTTON_TEXT = "Delete Image"

@@ -5,6 +5,7 @@ from PyQt6.QtCore import (Qt, QThread, pyqtSignal, QMutex, QWaitCondition,
                           QFile, QSemaphore, QTimer)
 import weakref
 from config import CACHE_DIR
+from UI.settings.General.Language import language_config
 semaphore = QSemaphore(1)
 
 class ThumbnailLoader(QThread):
@@ -78,7 +79,7 @@ class ThumbnailLoader(QThread):
 
 def create_thumbnail_placeholder(list_layout: QHBoxLayout, image_path: str, placeholders: weakref.WeakValueDictionary):
     """Menampilkan placeholder loading sebelum thumbnail selesai diproses."""
-    placeholder = QLabel("Loading...")
+    placeholder = QLabel(language_config.LOADING_THUMBNAIL)
     placeholder.setFixedSize(80, 80)
     placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
     placeholder.setStyleSheet("background-color: lightgray; border: 1px solid gray; font-size: 12px; color: gray;")

@@ -1,12 +1,7 @@
 import os
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy,
-                             QSpacerItem, QPushButton, QScrollArea, QMessageBox,
-                             QFileDialog, QLabel)
-from PyQt6.QtGui import QIcon, QPixmap, QImageReader, QPixmapCache
-from functools import partial
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QMessageBox, QFileDialog)
 import weakref
-from PyQt6.QtCore import (QSize, Qt, pyqtSignal, QThread, QSemaphore,
-                          QTimer,)
+from PyQt6.QtCore import (pyqtSignal)
 from UI.enhance_stack.components.batch_page_layout.batch_layout import refresh_ui, setup_combined_panel, setup_main_panel
 from UI.enhance_stack.components.batch_page_layout.image_batch_management import BatchDeleteProcess, handle_add_image_to_batch
 from UI.enhance_stack.components.batch_page_layout.thumbnail import stop_all_thumbnails
@@ -50,11 +45,11 @@ class BatchPageLayout(QWidget):
     def setup_combined_panel(self, batch_id=None):
         """Mendelegasikan pembuatan panel gabungan ke `batch_layout.py`"""
         return setup_combined_panel(
-            self.database_manager, batch_id, 
-            self.thumbnail_threads, self.thumbnail_placeholders, 
-            handle_add_image_to_batch, self.handle_delete_batch, 
-            SCROLL_AREA
+            self.database_manager, batch_id,self.thumbnail_threads, 
+            self.thumbnail_placeholders, handle_add_image_to_batch, 
+            self.handle_delete_batch, SCROLL_AREA
         )
+
     
     # Contoh penggunaan di handle_delete_batch
     def handle_delete_batch(self, batch_id):
