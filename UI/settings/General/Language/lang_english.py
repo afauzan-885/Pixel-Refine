@@ -24,6 +24,10 @@ PARAMETER_BATCH_ALIGNMENT = "Align Image"
 PARAMETER_BATCH_ALIGNMENT_TO_FOLDER = "Save Alignment Result to Folder"
 PARAMETER_BATCH_ALIGNMENT_TO_PROCESS = "Save Alignment Result for Next process"
 
+TITLE_BATCH_ALL_DELETE_BUTTON = "Delete All Batches"
+CONFIRM_BATCH_ALL_DELETE_BUTTON = "Are you sure you want to delete all batch data?"
+NO_DATA_BATCH_ALL_DELETE_BUTTON = "There is no batch data stored."
+
 # Enhance Stack Page
 TOPBAR_SINGLE_IMPORT_BUTTON_TEXT = "Import Image"
 TOPBAR_SINGLE_DELETE_BUTTON_TEXT = "Delete Image"

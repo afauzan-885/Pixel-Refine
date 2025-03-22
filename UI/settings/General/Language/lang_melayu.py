@@ -24,6 +24,10 @@ PARAMETER_BATCH_ALIGNMENT = "Jajarkan Imej"
 PARAMETER_BATCH_ALIGNMENT_TO_FOLDER = "Simpan Hasil Penjajaran ke Folder"
 PARAMETER_BATCH_ALIGNMENT_TO_PROCESS = "Simpan Hasil Penjajaran untuk Proses Seterusnya"
 
+TITLE_BATCH_ALL_DELETE_BUTTON = "Padam Semua Kelompok"
+CONFIRM_BATCH_ALL_DELETE_BUTTON = "Adakah anda pasti mahu memadamkan semua data kelompok?"
+NO_DATA_BATCH_ALL_DELETE_BUTTON = "Tiada data kelompok disimpan."
+
 # Halaman Susun Penambahbaikan
 TOPBAR_SINGLE_IMPORT_BUTTON_TEXT = "Import Imej"
 TOPBAR_SINGLE_DELETE_BUTTON_TEXT = "Padam Imej"

@@ -6,7 +6,6 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy,
                              QFileDialog, QLabel)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, update_thumbnail
-from UI.enhance_stack.logic import database_manager
 from UI.settings.General.Language import language_config
 
 class BatchDeleteProcess(QThread):

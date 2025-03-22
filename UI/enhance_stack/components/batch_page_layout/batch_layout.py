@@ -1,29 +1,29 @@
 import os
+import weakref
 from PyQt6.QtWidgets import (QLabel, QSpacerItem, QSizePolicy, QWidget, QVBoxLayout, QScrollArea,
                              QHBoxLayout, QPushButton, QComboBox, QCheckBox, QLineEdit)
-from PyQt6.QtCore import QSize, Qt
-from PyQt6.QtGui import QIcon
-import weakref
+from PyQt6.QtCore import Qt
 
 from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, create_thumbnail_placeholder, update_thumbnail
-from config import CACHE
-from UI.settings.General.Language import language_config
 
-def setup_main_panel(parent, scroll_area_style):
-    """Membuat panel utama dengan layout vertikal agar UI tersusun dari atas."""
-    main_panel = QWidget(parent)
+def setup_main_panel(layout_instance, scroll_area_style):
+    """Membuat panel utama dengan layout yang diberikan."""
+    main_panel = QWidget()
     main_panel.setStyleSheet("background-color: white;")
-    
-    main_panel_layout = QVBoxLayout(main_panel)
-    main_panel_layout.setContentsMargins(10, 10, 10, 10)
-    main_panel_layout.setSpacing(30)  
-    
+
+    # Menggunakan layout yang diberikan daripada membuat baru
+    layout_instance.setContentsMargins(10, 10, 10, 10)
+    layout_instance.setSpacing(30)
+
+    main_panel.setLayout(layout_instance)
+
     scroll_area = QScrollArea()
     scroll_area.setWidgetResizable(True)
     scroll_area.setWidget(main_panel)
     scroll_area.setStyleSheet(scroll_area_style)
 
-    return scroll_area, main_panel_layout
+    return scroll_area
+
 
 def refresh_ui(database_manager, main_panel_layout, setup_combined_panel):
     """Memperbarui UI dengan daftar batch yang tersedia."""
@@ -37,7 +37,7 @@ def refresh_ui(database_manager, main_panel_layout, setup_combined_panel):
     batch_ids = database_manager.get_all_batch_ids()
 
     if not batch_ids:
-        placeholder = QLabel("Tidak ada batch yang tersedia.")
+        placeholder = QLabel("No batches available.")
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_panel_layout.addWidget(placeholder)
     else:

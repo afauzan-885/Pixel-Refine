@@ -23,7 +23,11 @@ PARAMETER_BATCH_DENOISING = "Denoising"
 PARAMETER_BATCH_SUPER_RESOLUTION = "Super Resolusi"
 PARAMETER_BATCH_ALIGNMENT = "Selaraskan Gambar" 
 PARAMETER_BATCH_ALIGNMENT_TO_FOLDER = "Simpan Hasil Penyelarasan ke dalam Folder" 
-PARAMETER_BATCH_ALIGNMENT_TO_PROCESS = "Simpan Hasil Penyelarasan untuk proses Selanjutnya" 
+PARAMETER_BATCH_ALIGNMENT_TO_PROCESS = "Simpan Hasil Penyelarasan untuk proses Selanjutnya"
+
+TITLE_BATCH_ALL_DELETE_BUTTON = "Hapus Semua Batch"
+CONFIRM_BATCH_ALL_DELETE_BUTTON = "Anda yakin ingin menghapus {} batch?"
+NO_DATA_BATCH_ALL_DELETE_BUTTON = "Tidak ada data batch yang tersimpan."
 
 PROGRESS_SECTION_PROCESS_BUTTON_TEXT = "Mulai Proses"
 PROGRESS_SECTION_SAVE_BUTTON_TEXT = "Simpan Sebagai"
