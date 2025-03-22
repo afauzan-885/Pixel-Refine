@@ -1,5 +1,5 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel,
-                             QStackedWidget, QScrollArea)
+                             QScrollArea)
 from PyQt6.QtCore import Qt
 
 from UI.enhance_stack.components.single_page_layout.parameter_alignment.akaze_parameter_settings import get_akaze_page
@@ -10,7 +10,7 @@ from UI.settings.General.Language import language_config
 
 
 class ParameterPages:
-    def __init__(self, stacked_widget: QStackedWidget):
+    def __init__(self, stacked_widget):
         """
         Inisialisasi dengan QStackedWidget yang akan menampung halaman-halaman parameter.
         Kemudian, panggil metode untuk membuat dan menambahkan halaman.
@@ -46,7 +46,7 @@ class ParameterPages:
         # index_average = self.stacked_widget.addWidget(average_page)
         # self.setting_pages_map["Average"] = index_average
 
-    def wrap_in_scroll_area(self, widget: QWidget) -> QScrollArea:
+    def wrap_in_scroll_area(self, widget):
         """
         Bungkus widget ke dalam QScrollArea dengan tampilan yang lebih modern dan tanpa outline.
         """
@@ -79,7 +79,7 @@ class ParameterPages:
         """)
         return scroll
 
-    def get_default_page(self) -> QWidget:
+    def get_default_page(self):
         """Buat halaman default yang ditampilkan bila tidak ada pilihan parameter khusus."""
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -87,6 +87,6 @@ class ParameterPages:
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         return self.wrap_in_scroll_area(page)
 
-    def get_setting_pages_map(self) -> dict:
+    def get_setting_pages_map(self):
         """Kembalikan dictionary mapping nama halaman ke indeks QStackedWidget."""
         return self.setting_pages_map

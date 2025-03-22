@@ -150,7 +150,7 @@ class SinglePageLayout(QWidget):
             self.database_manager.single_process_delete_path_images(selected_paths)
             self.right_panel.remove_selected_images()
 
-    def process_algorithm(self):
+    def single_process_algorithm(self):
         """
         Fungsi untuk memproses algoritma berdasarkan pilihan dropdown.
         """
@@ -231,7 +231,6 @@ class SinglePageLayout(QWidget):
         except Exception as e:
                     # QMessageBox.critical(self, "Error", f"Terjadi kesalahan: {e}")
                     QMessageBox.critical(self, "Error", language_config.RUN_ERROR_STATUS.format(error = e))
-
 
     def save_image(self):
             """Menyimpan gambar hasil proses ke lokasi yang dipilih oleh pengguna."""

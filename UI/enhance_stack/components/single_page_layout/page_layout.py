@@ -56,5 +56,5 @@ def setup_preview_panel(layout_instance):
 def setup_signals(layout_instance):
     """Menghubungkan tombol dengan fungsinya."""
     layout_instance.process_button.clicked.connect(layout_instance.process_clicked)
-    layout_instance.process_clicked.connect(layout_instance.process_algorithm)
+    layout_instance.process_clicked.connect(layout_instance.single_process_algorithm)
     layout_instance.save_as_button.clicked.connect(layout_instance.save_image)

@@ -37,10 +37,14 @@ class RightPanel(QWidget):
         self.image_list.installEventFilter(self)
 
     def load_image_paths(self):
-        """Load image paths from the database and populate the image list."""
+        """Load image paths from the database based on the single_process_image table."""
         conn = sqlite3.connect("pixel_refine_database.db")
         cursor = conn.cursor()
-        cursor.execute("SELECT path FROM images")
+        cursor.execute("""
+            SELECT images.path
+            FROM images
+            JOIN single_process_image ON single_process_image.image_id_single = images.id
+        """)
         image_paths = cursor.fetchall()
         conn.close()
 
@@ -50,6 +54,7 @@ class RightPanel(QWidget):
         # Add the image paths to the list widget
         for path in image_paths:
             self.image_list.addItem(path[0])
+
             
     def set_to_image_reference(self, item):
         """Move the selected item to the top of the list."""
@@ -77,13 +82,19 @@ class RightPanel(QWidget):
         select_image_list = self.image_list.selectedItems()
 
         if select_image_list:
-            # Hapus entri dari database dan list widget (tidak lagi mengakses parent)
             conn = sqlite3.connect("pixel_refine_database.db")
             cursor = conn.cursor()
 
             for item in select_image_list:
                 image_path = item.text()
-                cursor.execute("DELETE FROM images WHERE path = ?", (image_path,))
+                # Ambil ID gambar dari tabel images
+                cursor.execute("SELECT id FROM images WHERE path = ?", (image_path,))
+                result = cursor.fetchone()
+                if result:
+                    image_id = result[0]
+                    # Hapus entri terkait di single_process_image menggunakan image_id_single
+                    cursor.execute("DELETE FROM single_process_image WHERE image_id_single = ?", (image_id,))
+                # Hapus item dari QListWidget
                 self.image_list.takeItem(self.image_list.row(item))
 
             conn.commit()

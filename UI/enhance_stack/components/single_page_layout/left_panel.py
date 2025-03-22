@@ -14,11 +14,11 @@ class LeftPanel(QWidget):
     memilih parameter dan panel pengaturan dinamis yang berubah sesuai pilihan.
     """
 
-    def __init__(self) -> None:
+    def __init__(self):
         super().__init__()
         self.initUI()
 
-    def initUI(self) -> None:
+    def initUI(self):
         """
         Inisialisasi tampilan panel dengan Preview Panel (70%) dan Parameter Panel (30%).
         """
@@ -31,7 +31,7 @@ class LeftPanel(QWidget):
         
         self.setLayout(layout)
 
-    def init_preview_panel(self, parent_layout: QVBoxLayout) -> None:
+    def init_preview_panel(self, parent_layout):
         """
         Inisialisasi Preview Panel dan tambahkan ke parent layout.
         """
@@ -42,7 +42,7 @@ class LeftPanel(QWidget):
         self.preview_panel_widget.setStyleSheet("QWidget { background-color: white; }")
         parent_layout.addWidget(self.preview_panel_widget)
 
-    def init_parameter_panel(self, parent_layout: QVBoxLayout) -> None:
+    def init_parameter_panel(self, parent_layout):
         """
         Inisialisasi Parameter Panel yang berisi dropdown di sisi kiri dan QStackedWidget
         untuk pengaturan di sisi kanan.
@@ -139,7 +139,7 @@ class LeftPanel(QWidget):
         self.super_resolution_dropdown.currentIndexChanged.connect(self.handle_dropdown_change)
 
 
-    def create_dropdown(self, label_text: str, items: list, tooltips: list) -> tuple:
+    def create_dropdown(self, label_text, items, tooltips):
         """
         Membuat komponen dropdown yang dilengkapi label dan tooltip.
         
@@ -165,7 +165,7 @@ class LeftPanel(QWidget):
         section_widget.setLayout(section_layout)
         return dropdown, section_widget
 
-    def handle_dropdown_change(self, index: int) -> None:
+    def handle_dropdown_change(self, index):
         """
         Tangani perubahan pada dropdown Denoising dan Super Resolution. 
         Jika salah satu diubah (selain 'None'), reset dropdown yang lain.
@@ -180,7 +180,7 @@ class LeftPanel(QWidget):
                 self.denoising_dropdown.setCurrentIndex(0)
             self.update_parameter_panel("super_resolution")
 
-    def update_parameter_panel(self, source: str) -> None:
+    def update_parameter_panel(self, source):
         """
         Perbarui tampilan halaman pengaturan sesuai dengan dropdown yang terakhir diubah.
         

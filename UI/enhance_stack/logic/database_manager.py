@@ -40,7 +40,7 @@ class DatabaseManager:
             else:
                 cursor.execute("SELECT COUNT(*) FROM images")
 
-            # Create single_process_image table
+            # Create single_process_image table with explicit column name image_id_single
             cursor.execute("""
                 SELECT name FROM sqlite_master WHERE type='table' AND name='single_process_image';
             """)
@@ -48,11 +48,11 @@ class DatabaseManager:
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS single_process_image (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        image_id INTEGER NOT NULL,
-                        FOREIGN KEY (image_id) REFERENCES images (id)
+                        image_id_single INTEGER NOT NULL,
+                        FOREIGN KEY (image_id_single) REFERENCES images (id)
                     )
                 """)
-                print("Table 'single_process_image' has been created with 'image_id' column.")
+                print("Table 'single_process_image' has been created with column 'image_id_single'.")
             else:
                 cursor.execute("SELECT COUNT(*) FROM single_process_image")
 
@@ -69,7 +69,7 @@ class DatabaseManager:
                 """)
                 print("Table 'batch_process' has been created.")
             
-            # Create batch_process_image table (menghubungkan batch dengan image)
+            # Create batch_process_image table with explicit column name image_id_batch
             cursor.execute("""
                 SELECT name FROM sqlite_master WHERE type='table' AND name='batch_process_image';
             """)
@@ -78,12 +78,12 @@ class DatabaseManager:
                     CREATE TABLE batch_process_image (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         batch_id INTEGER NOT NULL,
-                        image_id INTEGER NOT NULL,
+                        image_id_batch INTEGER NOT NULL,
                         FOREIGN KEY (batch_id) REFERENCES batch_process(id),
-                        FOREIGN KEY (image_id) REFERENCES images(id)
+                        FOREIGN KEY (image_id_batch) REFERENCES images(id)
                     );
                 """)
-                print("Table 'batch_process_image' has been created.")
+                print("Table 'batch_process_image' has been created with column 'image_id_batch'.")
             else:
                 cursor.execute("SELECT COUNT(*) FROM batch_process_image")
                 
@@ -97,7 +97,7 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute("INSERT INTO images (path) VALUES (?)", (image_path,))
             image_id = cursor.lastrowid  # Ambil ID gambar yang baru disimpan
-            cursor.execute("INSERT INTO single_process_image (image_id) VALUES (?)", (image_id,))
+            cursor.execute("INSERT INTO single_process_image (image_id_single) VALUES (?)", (image_id,))
             conn.commit()
             print(f"Image path saved and linked to single_process_image: {image_path}")
 
@@ -111,7 +111,7 @@ class DatabaseManager:
                 seq=",".join(["?"] * len(image_paths))), image_paths)
             image_ids = [row[0] for row in cursor.fetchall()]
             if image_ids:
-                cursor.executemany("DELETE FROM single_process_image WHERE image_id = ?", 
+                cursor.executemany("DELETE FROM single_process_image WHERE image_id_single = ?", 
                                    ((image_id,) for image_id in image_ids))
                 cursor.executemany("DELETE FROM images WHERE id = ?", 
                                    ((image_id,) for image_id in image_ids))
@@ -146,7 +146,7 @@ class DatabaseManager:
             cursor.execute("""
                 SELECT images.path 
                 FROM images 
-                JOIN batch_process_image ON images.id = batch_process_image.image_id 
+                JOIN batch_process_image ON images.id = batch_process_image.image_id_batch 
                 WHERE batch_process_image.batch_id = ?
             """, (batch_id,))
             return [row[0] for row in cursor.fetchall()]
@@ -159,7 +159,6 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute("SELECT id FROM batch_process")
             return [row[0] for row in cursor.fetchall()]
-
 
     # Fungsi untuk menambahkan gambar ke batch tertentu
     def batch_process_save_image_path(self, batch_id, image_paths):
@@ -176,7 +175,7 @@ class DatabaseManager:
             for image_path in image_paths:
                 cursor.execute("INSERT INTO images (path) VALUES (?)", (image_path,))
                 image_id = cursor.lastrowid
-                cursor.execute("INSERT INTO batch_process_image (batch_id, image_id) VALUES (?, ?)", 
+                cursor.execute("INSERT INTO batch_process_image (batch_id, image_id_batch) VALUES (?, ?)", 
                                (batch_id, image_id))
             conn.commit()
             print(f"Added {len(image_paths)} images to batch with ID {batch_id}")
@@ -192,7 +191,7 @@ class DatabaseManager:
         """
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM batch_process_image WHERE batch_id = ? AND image_id = ?", 
+            cursor.execute("DELETE FROM batch_process_image WHERE batch_id = ? AND image_id_batch = ?", 
                            (batch_id, image_id))
             conn.commit()
             print(f"Deleted image ID {image_id} from batch ID {batch_id}")
@@ -208,7 +207,7 @@ class DatabaseManager:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             # Ambil semua image_id yang terkait dengan batch
-            cursor.execute("SELECT image_id FROM batch_process_image WHERE batch_id = ?", (batch_id,))
+            cursor.execute("SELECT image_id_batch FROM batch_process_image WHERE batch_id = ?", (batch_id,))
             image_ids = [row[0] for row in cursor.fetchall()]
             
             # Hapus mapping gambar dari batch
@@ -224,7 +223,28 @@ class DatabaseManager:
             conn.commit()
             print(f"Deleted batch ID along with its associated image mappings and images")
 
-
+    def delete_all_batches(self):
+        """
+        Deletes all batches along with their associated image mappings and images.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            # Ambil semua image_id dari seluruh batch yang ada
+            cursor.execute("SELECT image_id_batch FROM batch_process_image")
+            image_ids = [row[0] for row in cursor.fetchall()]
+            
+            # Hapus seluruh mapping gambar dari batch_process_image
+            cursor.execute("DELETE FROM batch_process_image")
+            
+            # Hapus seluruh batch dari batch_process
+            cursor.execute("DELETE FROM batch_process")
+            
+            # Hapus seluruh record gambar yang terkait, jika ada
+            if image_ids:
+                cursor.executemany("DELETE FROM images WHERE id = ?", [(image_id,) for image_id in image_ids])
+            
+            conn.commit()
+            print("Deleted all batches and their associated images")
 
     def get_all_image_paths(self):
         """
@@ -236,4 +256,4 @@ class DatabaseManager:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT path FROM images")
-            return [row[0] for row in cursor.fetchall()]    
+            return [row[0] for row in cursor.fetchall()]

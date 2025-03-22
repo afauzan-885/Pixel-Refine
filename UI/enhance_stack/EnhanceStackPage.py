@@ -14,6 +14,8 @@ class EnhanceStackPage(QWidget):
         self.layout = QVBoxLayout(self)
         self.database_manager = DatabaseManager("pixel_refine_database.db")
         self.database_manager.create_database()
+         # Tambahkan daftar untuk menyimpan thread ThumbnailLoader
+        self.thumbnail_threads = []
 
         self.top_bar = TopBar()
         self.layout.addWidget(self.top_bar)
@@ -36,14 +38,16 @@ class EnhanceStackPage(QWidget):
 
         self.top_bar.single_button.toggled.connect(self.switch_page)
         self.top_bar.batch_button.toggled.connect(self.switch_page)
-
+        
+        # Single Delete Execution
         self.top_bar.single_page_import_button.clicked.connect(self.single_page_layout.handle_import_button)
         self.top_bar.single_page_delete_button.clicked.connect(self.single_page_layout.handle_delete_button)
 
-        self.top_bar.batch_page_import_button.clicked.connect(self.batch_page_layout.handle_import_button)
+        # Batch Delete Execution
+        self.top_bar.batch_page_import_button.clicked.connect(self.batch_page_layout.handle_batch_import_button)
+        self.top_bar.batch_page_delete_button.clicked.connect(self.batch_page_layout.handle_delete_all_batches)
 
-        # Tambahkan daftar untuk menyimpan thread ThumbnailLoader
-        self.thumbnail_threads = []
+       
 
         
     def switch_page(self):

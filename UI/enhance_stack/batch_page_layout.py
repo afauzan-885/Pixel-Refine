@@ -1,4 +1,5 @@
 import os
+import sqlite3
 from PyQt6.QtWidgets import (QLabel, QSpacerItem, QSizePolicy, QWidget, QVBoxLayout, QScrollArea,
                              QHBoxLayout, QPushButton, QComboBox, QCheckBox, QLineEdit,
                              QMessageBox, QFileDialog)
@@ -15,6 +16,17 @@ from UI.settings.General.Language import language_config
 from config import CACHE, CACHE_DIR
 
 os.makedirs(CACHE_DIR, exist_ok=True)
+
+class ClickableLabel(QLabel):
+    clicked = pyqtSignal()
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+    def mousePressEvent(self, event):
+        self.clicked.emit()
+        super().mousePressEvent(event)
+
 
 class BatchPageLayout(QWidget):
     data_changed = pyqtSignal()
@@ -123,7 +135,89 @@ class BatchPageLayout(QWidget):
         left_widget = QWidget()
         left_widget.setLayout(left_layout)
         return left_widget
+    
+    def dropdown_box_control(self):
+        """Buat combo box untuk algoritma penyelarasan, super resolusi, dan denoising."""
+        # Combo box untuk algoritma penyelarasan
+        algorithm_alignment = QComboBox()
+        algorithm_alignment.addItems([
+            "Algoritma Penyelarasan 1", 
+            "Algoritma Penyelarasan 2", 
+            "Algoritma Penyelarasan 3"
+        ])
+        algorithm_alignment.setVisible(False)
 
+        # Combo box untuk super resolusi
+        super_res_combo = QComboBox()
+        super_res_combo.addItems([
+            "Super Resolusi Algoritma 1",
+            "Super Resolusi Algoritma 2",
+            "Super Resolusi Algoritma 3"
+        ])
+        super_res_combo.setVisible(False) 
+
+        # Combo box untuk denoising
+        denoising_combox = QComboBox()
+        denoising_combox.addItems([
+            "Denoising Algoritma 1", 
+            "Denoising Algoritma 2", 
+            "Denoising Algoritma 3"
+        ])
+        denoising_combox.setVisible(False) 
+
+        # Hubungkan sinyal currentIndexChanged untuk masing-masing dropdown
+        algorithm_alignment.currentIndexChanged.connect(
+            lambda index: self.execute_algorithm('alignment', algorithm_alignment.currentText())
+        )
+        super_res_combo.currentIndexChanged.connect(
+            lambda index: self.execute_algorithm('super_resolution', super_res_combo.currentText())
+        )
+        denoising_combox.currentIndexChanged.connect(
+            lambda index: self.execute_algorithm('denoising', denoising_combox.currentText())
+        )
+
+        return algorithm_alignment, super_res_combo, denoising_combox
+    
+    def execute_algorithm(self, category: str, selected_algo: str) -> None:
+        """
+        Eksekusi algoritma berdasarkan kategori dan pilihan yang dipilih dari dropdown.
+        
+        Args:
+            category (str): Kategori algoritma ('alignment', 'super_resolution', 'denoising').
+            selected_algo (str): Teks dari algoritma yang dipilih.
+        """
+        if category == 'alignment':
+            if selected_algo == "Algoritma Penyelarasan 1":
+                # Panggil fungsi atau logika untuk algoritma penyelarasan 1
+                print("Menjalankan Algoritma Penyelarasan 1")
+                # self.run_alignment_algo1()
+            elif selected_algo == "Algoritma Penyelarasan 2":
+                print("Menjalankan Algoritma Penyelarasan 2")
+                # self.run_alignment_algo2()
+            elif selected_algo == "Algoritma Penyelarasan 3":
+                print("Menjalankan Algoritma Penyelarasan 3")
+                # self.run_alignment_algo3()
+        elif category == 'super_resolution':
+            if selected_algo == "Super Resolusi Algoritma 1":
+                print("Menjalankan Super Resolusi Algoritma 1")
+                # self.run_super_resolution_algo1()
+            elif selected_algo == "Super Resolusi Algoritma 2":
+                print("Menjalankan Super Resolusi Algoritma 2")
+                # self.run_super_resolution_algo2()
+            elif selected_algo == "Super Resolusi Algoritma 3":
+                print("Menjalankan Super Resolusi Algoritma 3")
+                # self.run_super_resolution_algo3()
+        elif category == 'denoising':
+            if selected_algo == "Denoising Algoritma 1":
+                print("Menjalankan Denoising Algoritma 1")
+                # self.run_denoising_algo1()
+            elif selected_algo == "Denoising Algoritma 2":
+                print("Menjalankan Denoising Algoritma 2")
+                # self.run_denoising_algo2()
+            elif selected_algo == "Denoising Algoritma 3":
+                print("Menjalankan Denoising Algoritma 3")
+                # self.run_denoising_algo3()
+    
     def create_parameter_panel(self):
         """Buat panel parameter yang berisi combo box dan checkbox dengan scroll area."""
         parameter_panel = QWidget()
@@ -138,23 +232,8 @@ class BatchPageLayout(QWidget):
         algorithm_layout.setContentsMargins(5, 5, 5, 5)
         algorithm_layout.setSpacing(5)
 
-        # Dropdown algoritma penyelarasan
-        algorithm_combox = QComboBox()
-        algorithm_combox.addItems([
-            "Algoritma Penyelarasan 1", 
-            "Algoritma Penyelarasan 2", 
-            "Algoritma Penyelarasan 3"
-        ])
-        algorithm_combox.setVisible(False)  # Awalnya disembunyikan
-
-        # Dropdown algoritma denoising/super resolusi
-        denoising_combox = QComboBox()
-        denoising_combox.addItems([
-            "Denoising Algoritma 1", 
-            "Denoising Algoritma 2", 
-            "Denoising Algoritma 3"
-        ])
-        denoising_combox.setVisible(False)  # Awalnya disembunyikan
+        # Panggil fungsi dropdown_box_control untuk membuat combo box
+        algorithm_alignment, super_res_combo, denoising_combox = self.dropdown_box_control()
 
         # Tombol folder output
         folder_button = QPushButton()
@@ -162,7 +241,8 @@ class BatchPageLayout(QWidget):
         folder_button.setVisible(False)  # Awalnya disembunyikan
 
         # Tambahkan ke layout vertikal
-        algorithm_layout.addWidget(algorithm_combox)
+        algorithm_layout.addWidget(algorithm_alignment)
+        algorithm_layout.addWidget(super_res_combo)
         algorithm_layout.addWidget(denoising_combox)
         algorithm_layout.addWidget(folder_button)
 
@@ -190,15 +270,20 @@ class BatchPageLayout(QWidget):
             checkbox_layout.setSpacing(5)
 
             option_checkbox = QCheckBox()
-            option_label = QLabel(text)
+            # Gunakan ClickableLabel sebagai label yang dapat diklik
+            option_label = ClickableLabel(text)
             option_label.setWordWrap(True)
             option_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+            # Hubungkan klik pada label dengan toggle checkbox
+            option_label.clicked.connect(option_checkbox.toggle)
 
             checkbox_layout.addWidget(option_checkbox)
             checkbox_layout.addWidget(option_label, 1)
             option_layout.addWidget(checkbox_widget)
 
             checkboxes[text] = option_checkbox  # Simpan checkbox dalam dictionary
+
 
         option_layout.addStretch()
 
@@ -218,10 +303,13 @@ class BatchPageLayout(QWidget):
             is_superres_checked = checkboxes[language_config.PARAMETER_BATCH_SUPER_RESOLUTION].isChecked()
 
             # Tampilkan dropdown penyelarasan jika "Selaraskan Gambar" dicentang
-            algorithm_combox.setVisible(is_alignment_checked)
+            algorithm_alignment.setVisible(is_alignment_checked)
 
-            # Tampilkan dropdown denoising jika "Denoising" atau "Super Resolusi" dicentang
-            denoising_combox.setVisible(is_denoising_checked or is_superres_checked)
+            # Tampilkan dropdown denoising hanya jika checkbox Denoising dicentang
+            denoising_combox.setVisible(is_denoising_checked)
+
+            # Tampilkan dropdown super resolusi jika checkbox Super Resolusi dicentang
+            super_res_combo.setVisible(is_superres_checked)
 
             # Tampilkan ikon folder jika "Simpan Hasil Penyelarasan ke dalam Folder" dicentang
             folder_button.setVisible(checkboxes[language_config.PARAMETER_BATCH_ALIGNMENT_TO_FOLDER].isChecked())
@@ -238,7 +326,6 @@ class BatchPageLayout(QWidget):
                 checkboxes[language_config.PARAMETER_BATCH_ALIGNMENT_TO_PROCESS].setEnabled(False)
 
             # Logika untuk checkbox ALIGNMENT_TO_FOLDER:
-            # Hanya tersedia (enabled) jika checkbox ALIGNMENT aktif.
             if is_alignment_checked:
                 checkboxes[language_config.PARAMETER_BATCH_ALIGNMENT_TO_FOLDER].setEnabled(True)
             else:
@@ -246,7 +333,6 @@ class BatchPageLayout(QWidget):
                 checkboxes[language_config.PARAMETER_BATCH_ALIGNMENT_TO_FOLDER].setEnabled(False)
 
             # Logika untuk checkbox CROP_EDGE dan KEEP_EDGE:
-            # Hanya aktif jika checkbox ALIGNMENT aktif, jika tidak maka dinonaktifkan.
             if is_alignment_checked:
                 checkboxes[language_config.PARAMETER_BATCH_CROP_EDGE].setEnabled(True)
                 checkboxes[language_config.PARAMETER_BATCH_KEEP_EDGE].setEnabled(True)
@@ -255,7 +341,6 @@ class BatchPageLayout(QWidget):
                 checkboxes[language_config.PARAMETER_BATCH_KEEP_EDGE].setChecked(False)
                 checkboxes[language_config.PARAMETER_BATCH_CROP_EDGE].setEnabled(False)
                 checkboxes[language_config.PARAMETER_BATCH_KEEP_EDGE].setEnabled(False)
-
 
         def toggle_exclusive_checkboxes(state, other_checkbox):
             """
@@ -290,7 +375,6 @@ class BatchPageLayout(QWidget):
 
         return parameter_panel
 
-
     def create_button_widget(self, batch_id, list_layout):
         """Buat widget tombol yang berisi tombol add, preview, dan delete."""
         button_layout = QVBoxLayout()
@@ -317,22 +401,22 @@ class BatchPageLayout(QWidget):
                                                                     batch_id, list_layout))
 
 
-        # Preview button
-        play_preview = QPushButton()
-        play_preview.setFixedSize(30, 30)
-        play_preview.setIcon(QIcon("UI/resources/icon/play-preview.png"))
-        play_preview.setStyleSheet("""
-            QPushButton {
-                background-color: #31CBD1;
-                border-radius: 5px;
-                color: white;
-                font-weight: semi-bold;
-            }
-            QPushButton:hover {
-                background-color: #27A1A7;
-            }
-        """)
-        play_preview.setToolTip(language_config.PREVIEW_IMAGE_BUTTON)
+        # # Preview button
+        # play_preview = QPushButton()
+        # play_preview.setFixedSize(30, 30)
+        # play_preview.setIcon(QIcon("UI/resources/icon/play-preview.png"))
+        # play_preview.setStyleSheet("""
+        #     QPushButton {
+        #         background-color: #31CBD1;
+        #         border-radius: 5px;
+        #         color: white;
+        #         font-weight: semi-bold;
+        #     }
+        #     QPushButton:hover {
+        #         background-color: #27A1A7;
+        #     }
+        # """)
+        # play_preview.setToolTip(language_config.PREVIEW_IMAGE_BUTTON)
 
         # Delete button
         delete_button = QPushButton()
@@ -353,7 +437,7 @@ class BatchPageLayout(QWidget):
         delete_button.clicked.connect(lambda: self.handle_delete_batch(batch_id))
 
         button_layout.addWidget(add_button)
-        button_layout.addWidget(play_preview)
+        # button_layout.addWidget(play_preview)
         button_layout.addWidget(delete_button)
 
         button_widget = QWidget()
@@ -374,11 +458,39 @@ class BatchPageLayout(QWidget):
 
         if reply == QMessageBox.StandardButton.Yes:
             self.deleter_thread = BatchDeleteProcess(self.database_manager, batch_id, CACHE_DIR, self.thumbnail_threads)
-            self.deleter_thread.batch_deleted.connect(self.data_changed.emit)  # Refresh UI setelah penghapusan selesai
-            self.deleter_thread.start()
+            self.deleter_thread.batch_deleted.connect(self.data_changed.emit)
+            self.deleter_thread.start()  # Akan memanggil run() -> individual_batch_delete()
+
+    def handle_delete_all_batches(self):
+        title = "Hapus Semua Batch"
+        
+        # Mengecek apakah ada data dalam batch_process_image
+        conn = sqlite3.connect("pixel_refine_database.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM batch_process_image")
+        batch_count = cursor.fetchone()[0]
+        conn.close()
+
+        if batch_count == 0:
+            QMessageBox.information(self, title, "Tidak ada batch yang tersimpan.", QMessageBox.StandardButton.Ok)
+            return  # Keluar dari fungsi jika tidak ada batch
+        
+        # Jika ada batch, lanjutkan dengan konfirmasi penghapusan
+        message = "Anda yakin ingin menghapus semua batch beserta gambar yang terkait?"
+        reply = QMessageBox.question(
+            self,
+            title,
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            deleter = BatchDeleteProcess(self.database_manager, None, CACHE_DIR, self.thumbnail_threads)
+            deleter.batch_deleted.connect(self.data_changed.emit)
+            deleter.delete_all_batch()  # Jalankan fungsi penghapusan batch
 
 
-    def handle_import_button(self):
+    def handle_batch_import_button(self):
         """Function to manage images import"""
         # Open file dialog and get image paths with filter
         file_dialog_filter = language_config.HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION
