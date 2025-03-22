@@ -41,59 +41,46 @@ class BatchDeleteProcess(QThread):
         for thread in self.thumbnail_threads:
             thread.resume()
 
-def handle_add_image_to_batch(database_manager, thumbnail_threads, batch_id, list_layout):
-        """
-        Menambahkan gambar ke batch yang sudah ada, dengan pengecekan duplikat dalam batch tersebut.
+def handle_add_image_to_batch(batch_page_layout, database_manager, thumbnail_threads, batch_id, list_layout):
+    if batch_id is None:
+        print("Batch ID tidak valid.")
+        return
 
-        Args:
-            database_manager: Instance database_manager untuk akses data.
-            thumbnail_threads (list): List untuk menyimpan thread agar tetap hidup.
-            batch_id (int): ID batch tempat gambar akan ditambahkan.
-            list_layout (QHBoxLayout): Layout yang menampilkan daftar gambar.
-        """
-        if batch_id is None:
-            print("Batch ID tidak valid.")
-            return
+    existing_image_paths = database_manager.get_images_by_batch(batch_id)
 
-        # Ambil daftar image_id yang sudah ada dalam batch ini
-        existing_image_paths = database_manager.get_images_by_batch(batch_id)
+    file_dialog = QFileDialog()
+    file_paths, _ = file_dialog.getOpenFileNames(
+        None,
+        language_config.HANDLE_IMPORT_BUTTON_IMAGE_PATH,
+        "",
+        language_config.HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION
+    )
 
-        # Buka dialog pemilihan file
-        file_dialog = QFileDialog()
-        file_paths, _ = file_dialog.getOpenFileNames(
-            None,
-            language_config.HANDLE_IMPORT_BUTTON_IMAGE_PATH,
-            "",
-            language_config.HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION
-        )
+    if not file_paths:
+        return  
 
-        if not file_paths:
-            return  # Jika user tidak memilih gambar, keluar dari fungsi
+    existing_set = set(existing_image_paths)
+    unique_files = [path for path in file_paths if path not in existing_set]
+    duplicates = list(existing_set.intersection(file_paths))
 
-        # Cek duplikat dalam batch ini
-        existing_set = set(existing_image_paths)
-        unique_files = [path for path in file_paths if path not in existing_set]
-        duplicates = list(existing_set.intersection(file_paths))
+    if duplicates:
+        message = language_config.HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE_MESSAGE.format(count=len(duplicates))
+        QMessageBox.warning(None, language_config.HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE, message)
 
-        # Jika ada duplikat, beri peringatan ke user
-        if duplicates:
-            message = language_config.HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE_MESSAGE.format(count=len(duplicates))
-            QMessageBox.warning(None, language_config.HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE, message)
+    if unique_files:
+        database_manager.batch_process_save_image_path(batch_id, unique_files)
 
-        # Simpan hanya gambar yang unik ke database
-        if unique_files:
-            database_manager.batch_process_save_image_path(batch_id, unique_files)
+        ref_layout = weakref.ref(list_layout)
 
-            # Gunakan weakref agar tidak menyebabkan memory leak
-            ref_layout = weakref.ref(list_layout)
+        for path in unique_files:
+            loader = ThumbnailLoader(path)
+            loader.thumbnail_ready.connect(
+                lambda pixmap, p=path, ref_layout=ref_layout: update_thumbnail(ref_layout, pixmap, p) if ref_layout() else None
+            )
+            loader.start()
+            thumbnail_threads.append(loader)  # Simpan referensi agar tidak dihapus GC
 
-            # Tambahkan thumbnail dengan threading
-            for path in unique_files:
-                loader = ThumbnailLoader(path)
-                loader.thumbnail_ready.connect(
-                    lambda pixmap, p=path, ref_layout=ref_layout: update_thumbnail(ref_layout, pixmap, p) if ref_layout() else None
-                )
-                loader.start()
-                thumbnail_threads.append(loader)  # Simpan referensi agar tidak dihapus GC
+        print(f"Added {len(unique_files)} new images to batch {batch_id}")
 
-            print(f"Added {len(unique_files)} new images to batch {batch_id}")
+        # Emit sinyal data_changed dari BatchPageLayout
+        batch_page_layout.data_changed.emit()
