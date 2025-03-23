@@ -14,7 +14,8 @@ class EnhanceStackPage(QWidget):
         self.layout = QVBoxLayout(self)
         self.database_manager = DatabaseManager("pixel_refine_database.db")
         self.database_manager.create_database()
-         # Tambahkan daftar untuk menyimpan thread ThumbnailLoader
+        
+        # Tambahkan daftar untuk menyimpan thread ThumbnailLoader
         self.thumbnail_threads = []
 
         self.top_bar = TopBar()
@@ -31,25 +32,28 @@ class EnhanceStackPage(QWidget):
 
         self.stacked_widget.setCurrentWidget(self.single_page_layout)
 
+        # Set awal, tampilkan Single Page, sembunyikan Batch Page UI
         self.top_bar.single_page_import_button.setVisible(True)
         self.top_bar.single_page_delete_button.setVisible(True)
-        self.top_bar.batch_page_import_button.setVisible(False)
-        self.top_bar.batch_page_delete_button.setVisible(False)
 
+        for widget in [self.top_bar.batch_page_import_button, self.top_bar.batch_page_delete_button,
+                       self.top_bar.start_process_button, self.top_bar.save_to_button]:
+            widget.setVisible(False)
+
+        # Connect tombol switch
         self.top_bar.single_button.toggled.connect(self.switch_page)
         self.top_bar.batch_button.toggled.connect(self.switch_page)
-        
-        # Single Delete Execution
+
+        # Connect tombol Single Page
         self.top_bar.single_page_import_button.clicked.connect(self.single_page_layout.handle_import_button)
         self.top_bar.single_page_delete_button.clicked.connect(self.single_page_layout.handle_delete_button)
 
-        # Batch Delete Execution
+        # Connect tombol Batch Page
         self.top_bar.batch_page_import_button.clicked.connect(self.batch_page_layout.handle_batch_import_button)
         self.top_bar.batch_page_delete_button.clicked.connect(self.batch_page_layout.handle_delete_all_batches)
+        # self.top_bar.start_process_button.clicked.connect(self.batch_page_layout.handle_start_process)
+        # self.top_bar.save_to_button.clicked.connect(self.batch_page_layout.handle_save_to)
 
-       
-
-        
     def switch_page(self):
         """Switch halaman berdasarkan tombol yang dipilih."""
         if self.top_bar.single_button.isChecked():
@@ -60,8 +64,9 @@ class EnhanceStackPage(QWidget):
             self.top_bar.single_page_delete_button.setVisible(True)
 
             # Sembunyikan tombol import dan delete di mode Batch
-            self.top_bar.batch_page_import_button.setVisible(False)
-            self.top_bar.batch_page_delete_button.setVisible(False)
+            for widget in [self.top_bar.batch_page_import_button, self.top_bar.batch_page_delete_button,
+                           self.top_bar.start_process_button, self.top_bar.save_to_button]:
+                widget.setVisible(False)
         else:
             self.stacked_widget.setCurrentWidget(self.batch_page_layout)
 
@@ -69,6 +74,7 @@ class EnhanceStackPage(QWidget):
             self.top_bar.single_page_import_button.setVisible(False)
             self.top_bar.single_page_delete_button.setVisible(False)
 
-            # Tampilkan tombol import dan delete di mode Batch
-            self.top_bar.batch_page_import_button.setVisible(True)
-            self.top_bar.batch_page_delete_button.setVisible(True)
+            # Tampilkan tombol import, delete, Start Process, dan Save to di mode Batch
+            for widget in [self.top_bar.batch_page_import_button, self.top_bar.batch_page_delete_button,
+                           self.top_bar.start_process_button, self.top_bar.save_to_button]:
+                widget.setVisible(True)

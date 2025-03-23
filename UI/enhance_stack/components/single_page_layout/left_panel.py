@@ -53,9 +53,8 @@ class LeftPanel(QWidget):
         parameter_panel_layout.setContentsMargins(10, 5, 0, 0)
         parameter_panel_layout.setSpacing(0)
 
-        # Buat widget pembungkus untuk left_panel
+        # Buat widget untuk left_panel
         left_panel_widget = QWidget()
-        # left_panel_widget.setMinimumWidth(250)
         left_panel_layout = QVBoxLayout(left_panel_widget) 
         left_panel_layout.setContentsMargins(0, 0, 0, 0) 
 

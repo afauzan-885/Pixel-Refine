@@ -46,7 +46,7 @@ class CombinedPanel(QWidget):
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Panel kanan: Thumbnail List Panel
+        # Panel kanan: Thumbnail List Panel tanpa QScrollArea
         list_panel = QWidget()
         list_panel.setStyleSheet("background-color: #DBDBDB")
         list_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -80,33 +80,29 @@ class CombinedPanel(QWidget):
                     )
                     list_layout.addWidget(label)
         
-        scroll_list_panel = QScrollArea()
-        scroll_list_panel.setWidgetResizable(True)
-        scroll_list_panel.setWidget(list_panel)
-        scroll_list_panel.setStyleSheet(SCROLL_AREA)
-        
         # Buat left widget yang berisi tombol & panel parameter
-        left_widget = self.create_left_widget(list_layout)
-        left_widget.setMinimumWidth(420)
+        parameter_panel_layout = self.create_parameter_panel_layout(list_layout)
+        parameter_panel_layout.setMinimumWidth(420)
         
-        main_layout.addWidget(left_widget, 1)
-        main_layout.addWidget(scroll_list_panel, 2)
+        main_layout.addWidget(parameter_panel_layout, 1)
+        main_layout.addWidget(list_panel, 2)
     
-    def create_left_widget(self, list_layout):
+    def create_parameter_panel_layout(self, list_layout):
         """Buat widget bagian kiri yang menggabungkan tombol dan panel parameter."""
-        button_widget = self.create_button_widget(list_layout)
-        parameter_panel = self.create_parameter_panel()
+        button_widget = self.create_button_parameter(list_layout)
+        algorithm_panel = self.create_parameter_panel()
         
-        left_layout = QHBoxLayout()
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.addWidget(button_widget)
-        left_layout.addWidget(parameter_panel, 1)
+        parameter_panel = QHBoxLayout()
+        parameter_panel.setContentsMargins(0, 0, 0, 0)
+        parameter_panel.addWidget(button_widget)
+        parameter_panel.addWidget(algorithm_panel, 1)
         
-        left_widget = QWidget()
-        left_widget.setLayout(left_layout)
-        return left_widget
+        parameter_panel_layout = QWidget()
+        parameter_panel_layout.setLayout(parameter_panel)
+        
+        return parameter_panel_layout
     
-    def create_button_widget(self, list_layout):
+    def create_button_parameter(self, list_layout):
         """Buat widget tombol yang berisi tombol add dan delete."""
         button_layout = QVBoxLayout()
         button_layout.setContentsMargins(0, 0, 0, 0)
@@ -152,7 +148,7 @@ class CombinedPanel(QWidget):
             }
         """)
         delete_button.setToolTip(language_config.DELETE_IMAGE_BUTTON)
-        delete_button.clicked.connect(lambda: self.parent_widget.handle_delete_batch(self.batch_id))
+        delete_button.clicked.connect(lambda: self.parent_widget.handle_delete_individual_batch(self.batch_id))
         
         button_layout.addWidget(add_button)
         button_layout.addWidget(delete_button)
@@ -163,34 +159,40 @@ class CombinedPanel(QWidget):
     
     def dropdown_box_control(self):
         """Buat combo box untuk algoritma penyelarasan, super resolusi, dan denoising."""
-        # Combo box untuk algoritma penyelarasan
+        # Buat combo box beserta item-nya dalam satu baris
         algorithm_alignment = QComboBox()
-        algorithm_alignment.addItems([
-            "Algoritma Penyelarasan 1", 
-            "Algoritma Penyelarasan 2", 
-            "Algoritma Penyelarasan 3"
-        ])
+        alignment_algorithms = [
+            ("None", language_config.NONE_ALIGNMENT_DESCRIPTION),
+            ("Farneback Optical Flow", language_config.FARNEBACK_DESCRIPTION),
+            ("AKAZE", language_config.AKAZE_DESCRIPTION),
+            ("ORB", language_config.ORB_DESCRIPTION)
+        ]
+        for name, _ in alignment_algorithms:
+            algorithm_alignment.addItem(name)
         algorithm_alignment.setVisible(False)
-        
-        # Combo box untuk super resolusi
+
         super_res_combo = QComboBox()
-        super_res_combo.addItems([
-            "Super Resolusi Algoritma 1",
-            "Super Resolusi Algoritma 2",
-            "Super Resolusi Algoritma 3"
-        ])
+        super_res_algorithms = [
+            ("None", language_config.NONE_SUPER_RESOLUTION_DESCRIPTION),
+            ("Interpolation", language_config.INTERPOLATION_DESCRIPTION)
+        ]
+        for name, _ in super_res_algorithms:
+            super_res_combo.addItem(name)
         super_res_combo.setVisible(False)
-        
-        # Combo box untuk denoising
+
         denoising_combox = QComboBox()
-        denoising_combox.addItems([
-            "Denoising Algoritma 1", 
-            "Denoising Algoritma 2", 
-            "Denoising Algoritma 3"
-        ])
+        denoising_algorithms = [
+            ("None", language_config.NONE_DENOISING_DESCRIPTION),
+            ("Average", language_config.AVERAGE_DESCRIPTION),
+            ("Weighted Average", language_config.WEIGHTED_AVERAGE_DESCRIPTION),
+            ("Median", language_config.MEDIAN_DESCRIPTION),
+            ("Similarity", language_config.SIMILARITY_DESCRIPTION)
+        ]
+        for name, _ in denoising_algorithms:
+            denoising_combox.addItem(name)
         denoising_combox.setVisible(False)
-        
-        # Hubungkan sinyal currentIndexChanged untuk masing-masing dropdown
+
+        # Hubungkan sinyal currentIndexChanged menggunakan lambda untuk execute_algorithm
         algorithm_alignment.currentIndexChanged.connect(
             lambda index: self.execute_algorithm('alignment', algorithm_alignment.currentText())
         )
@@ -200,42 +202,45 @@ class CombinedPanel(QWidget):
         denoising_combox.currentIndexChanged.connect(
             lambda index: self.execute_algorithm('denoising', denoising_combox.currentText())
         )
-        
+
         return algorithm_alignment, super_res_combo, denoising_combox
-    
+
+
     def execute_algorithm(self, category, selected_algo):
-        """
-        Eksekusi algoritma berdasarkan kategori dan pilihan dropdown.
-        """
-        if category == 'alignment':
-            if selected_algo == "Algoritma Penyelarasan 1":
-                print("Menjalankan Algoritma Penyelarasan 1")
-            elif selected_algo == "Algoritma Penyelarasan 2":
-                print("Menjalankan Algoritma Penyelarasan 2")
-            elif selected_algo == "Algoritma Penyelarasan 3":
-                print("Menjalankan Algoritma Penyelarasan 3")
-        elif category == 'super_resolution':
-            if selected_algo == "Super Resolusi Algoritma 1":
-                print("Menjalankan Super Resolusi Algoritma 1")
-            elif selected_algo == "Super Resolusi Algoritma 2":
-                print("Menjalankan Super Resolusi Algoritma 2")
-            elif selected_algo == "Super Resolusi Algoritma 3":
-                print("Menjalankan Super Resolusi Algoritma 3")
-        elif category == 'denoising':
-            if selected_algo == "Denoising Algoritma 1":
-                print("Menjalankan Denoising Algoritma 1")
-            elif selected_algo == "Denoising Algoritma 2":
-                print("Menjalankan Denoising Algoritma 2")
-            elif selected_algo == "Denoising Algoritma 3":
-                print("Menjalankan Denoising Algoritma 3")
+        """Eksekusi algoritma berdasarkan kategori dan pilihan dropdown."""
+        actions = {
+            'alignment': {
+                "None": lambda: print("Tidak menjalankan algoritma penyelarasan"),
+                "Farneback Optical Flow": lambda: print("Menjalankan Farneback Optical Flow"),
+                "AKAZE": lambda: print("Menjalankan AKAZE"),
+                "ORB": lambda: print("Menjalankan ORB")
+            },
+            'super_resolution': {
+                "None": lambda: print("Tidak menjalankan super resolusi"),
+                "Interpolation": lambda: print("Menjalankan Interpolation")
+            },
+            'denoising': {
+                "None": lambda: print("Tidak menjalankan denoising"),
+                "Average": lambda: print("Menjalankan Average"),
+                "Weighted Average": lambda: print("Menjalankan Weighted Average"),
+                "Median": lambda: print("Menjalankan Median"),
+                "Similarity": lambda: print("Menjalankan Similarity")
+            }
+        }
+
+        # Eksekusi fungsi jika ditemukan, jika tidak, tidak ada yang terjadi
+        func = actions.get(category, {}).get(selected_algo)
+        if func:
+            func()
+
     
     def create_parameter_panel(self):
         """Buat panel parameter yang berisi combo box dan checkbox dengan scroll area."""
-        parameter_panel = QWidget()
-        parameter_panel.setStyleSheet("background-color: #EBEAEA")
-        parameter_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        algorithm_panel = QWidget()
+        algorithm_panel.setStyleSheet("background-color: #EBEAEA")
+        algorithm_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         
-        parameter_layout = QHBoxLayout(parameter_panel)
+        parameter_layout = QHBoxLayout(algorithm_panel)
         parameter_layout.setContentsMargins(10, 10, 10, 10)
         
         # Bagian Kiri: Layout untuk combo box dan folder icon
@@ -297,7 +302,6 @@ class CombinedPanel(QWidget):
         scroll_option_layout = QScrollArea()
         scroll_option_layout.setWidgetResizable(True)
         scroll_option_layout.setWidget(option_widget)
-        scroll_option_layout.setStyleSheet("border: none;")
         
         parameter_layout.addLayout(algorithm_layout, 1)
         parameter_layout.addWidget(scroll_option_layout, 1)
@@ -361,5 +365,5 @@ class CombinedPanel(QWidget):
             lambda state: toggle_exclusive_checkboxes(state, checkboxes[language_config.PARAMETER_BATCH_CROP_EDGE])
         )
         
-        return parameter_panel
+        return algorithm_panel
 

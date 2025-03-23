@@ -4,6 +4,7 @@ from PyQt6.QtWidgets import (QLabel, QSpacerItem, QSizePolicy, QWidget, QVBoxLay
                              QHBoxLayout, QPushButton, QComboBox, QCheckBox, QLineEdit)
 from PyQt6.QtCore import Qt
 
+from UI.enhance_stack.components.batch_page_layout.combined_panel import CombinedPanel
 from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, create_thumbnail_placeholder, update_thumbnail
 
 def setup_main_panel(layout_instance, scroll_area_style):
@@ -47,3 +48,4 @@ def refresh_ui(database_manager, main_panel_layout, setup_combined_panel):
 
     spacer = QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
     main_panel_layout.addSpacerItem(spacer)
+    

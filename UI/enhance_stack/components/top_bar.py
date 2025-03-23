@@ -12,9 +12,21 @@ class TopBar(QWidget):
 
         # Import button (Single Page Layout)
         self.single_page_import_button = QPushButton(language_config.TOPBAR_SINGLE_IMPORT_BUTTON_TEXT)
-        self.batch_page_import_button = QPushButton(language_config.TOPBAR_BATCH_IMPORT_BUTTON_TEXT)
         self.single_page_import_button.setStyleSheet(stylesheet.IMPORT_BUTTON)
+        
+        self.batch_page_import_button = QPushButton(language_config.TOPBAR_BATCH_IMPORT_BUTTON_TEXT)
         self.batch_page_import_button.setStyleSheet(stylesheet.IMPORT_BUTTON)
+        
+        # Tombol Delete Batch (dipindahkan ke sebelah kanan tombol Batch Import)
+        self.batch_page_delete_button = QPushButton(language_config.TOPBAR_BATCH_DELETE_BUTTON_TEXT)
+        self.batch_page_delete_button.setStyleSheet(stylesheet.DELETE_BUTTON)
+        
+        # Tombol baru untuk batch (Start Process dan Save to)
+        self.start_process_button = QPushButton("Start Batch")
+        self.start_process_button.setStyleSheet(stylesheet.PROCESS_BUTTON)
+        # Jika perlu, tambahkan style: self.start_process_button.setStyleSheet(stylesheet.START_PROCESS_BUTTON)
+        self.save_to_button = QPushButton("Save to")
+        self.save_to_button.setStyleSheet(stylesheet.SAVE_AS_BUTTON)
 
         # Switch buttons (Single/Batch)
         self.single_button = QPushButton("Single")
@@ -48,11 +60,24 @@ class TopBar(QWidget):
         self.single_page_delete_button.setStyleSheet(stylesheet.DELETE_BUTTON)
         self.batch_page_delete_button.setStyleSheet(stylesheet.DELETE_BUTTON)
 
+        # Layout kiri: untuk batch import dan delete (bersebelahan)
+        self.batch_left_layout = QHBoxLayout()
+        self.batch_left_layout.setSpacing(5)
+        self.batch_left_layout.addWidget(self.batch_page_import_button)
+        self.batch_left_layout.addWidget(self.batch_page_delete_button)
+        
+        # Layout kanan: untuk tombol baru (Start Process dan Save to)
+        self.batch_right_layout = QHBoxLayout()
+        self.batch_right_layout.setSpacing(5)
+        self.batch_right_layout.addWidget(self.save_to_button)
+        self.batch_right_layout.addWidget(self.start_process_button)
+        
+        
         # Add widgets to the main layout
         self.layout.addWidget(self.single_page_import_button)
-        self.layout.addWidget(self.batch_page_import_button)
+        self.layout.addLayout(self.batch_left_layout)
         self.layout.addStretch()
         self.layout.addLayout(self.switch_layout)  # Tambahkan switch layout (tetap tersembunyi)
         self.layout.addStretch()
         self.layout.addWidget(self.single_page_delete_button)
-        self.layout.addWidget(self.batch_page_delete_button)
+        self.layout.addLayout(self.batch_right_layout)

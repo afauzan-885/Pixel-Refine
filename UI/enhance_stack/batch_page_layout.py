@@ -32,13 +32,14 @@ class BatchPageLayout(QWidget):
         self.layout.setContentsMargins(0, 5, 0, 0)
 
         # Gunakan instance layout yang akan diisi oleh setup_main_panel
-        self.main_panel_layout = QVBoxLayout()
-        self.main_panel = setup_main_panel(self.main_panel_layout, SCROLL_AREA)
+        self.main_panel_container = QVBoxLayout()
+        self.main_panel = setup_main_panel(self.main_panel_container, SCROLL_AREA)
 
         self.data_changed.connect(self.refresh_ui)
 
         self.refresh_ui()
         self.layout.addWidget(self.main_panel)
+        
 
     def stop_thumbnail(self):
         """Menghentikan semua thread thumbnail yang sedang berjalan."""
@@ -46,7 +47,7 @@ class BatchPageLayout(QWidget):
 
     def refresh_ui(self):
         """Memperbarui tampilan UI dengan daftar batch yang tersedia."""
-        refresh_ui(self.database_manager, self.main_panel_layout, self.setup_combined_panel)
+        refresh_ui(self.database_manager, self.main_panel_container, self.setup_combined_panel)
     
     def setup_combined_panel(self, batch_id=None):
         """Menggunakan kelas CombinedPanel untuk membuat panel gabungan."""
@@ -55,18 +56,18 @@ class BatchPageLayout(QWidget):
             batch_id,
             self,
             self.thumbnail_threads,
-            self.thumbnail_placeholders
+            self.thumbnail_placeholders,
         )
     
-    # Contoh penggunaan di handle_delete_batch
-    def handle_delete_batch(self, batch_id):
+    # Contoh penggunaan di handle_delete_individual_batch
+    def handle_delete_individual_batch(self, batch_id):
         title, message = language_config.BATCH_DELETE_LABEL 
         message = message.format(batch_id)
 
         reply = QMessageBox.question(
             self,
-            title,  # Judul dialog
-            message,  # Isi pesan
+            title,
+            message,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
 
