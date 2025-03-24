@@ -1,10 +1,19 @@
 import os
 import sqlite3
 from PyQt6.QtWidgets import (QLabel, QSizePolicy, QWidget, QVBoxLayout, QScrollArea,
-                             QHBoxLayout, QPushButton, QComboBox, QCheckBox)
+                             QHBoxLayout, QPushButton, QComboBox, QCheckBox,
+                             QMessageBox, QProgressDialog)
 import weakref
 from PyQt6.QtCore import (pyqtSignal, Qt, QSize)
 from PyQt6.QtGui import QIcon
+from UI.enhance_stack.algorithm.alignment.AKAZE import running_akaze
+from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import running_farneback_optical_flow
+from UI.enhance_stack.algorithm.alignment.ORB import running_orb
+from UI.enhance_stack.algorithm.denoising.Average import running_average
+from UI.enhance_stack.algorithm.denoising.Median import running_median
+from UI.enhance_stack.algorithm.denoising.Similarity import running_similarity
+from UI.enhance_stack.algorithm.denoising.Weighted_average import running_weighted_average
+from UI.enhance_stack.algorithm.super_resolution.Interpolation import running_interpolation
 from UI.enhance_stack.components.batch_page_layout.image_batch_management import handle_add_image_to_batch
 from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, create_thumbnail_placeholder, update_thumbnail
 from UI.resources.stylesheet.stylesheet import SCROLL_AREA
@@ -36,6 +45,14 @@ class CombinedPanel(QWidget):
         self.parent_widget = parent
         self.thumbnail_threads = thumbnail_threads if thumbnail_threads is not None else []
         self.thumbnail_placeholders = thumbnail_placeholders if thumbnail_placeholders is not None else weakref.WeakValueDictionary()
+        
+        # Dictionary untuk menyimpan algoritma yang dipilih
+        self.selected_algorithms = {
+            'alignment': None,
+            'super_resolution': None,
+            'denoising': None
+        }
+        
         self.init_ui()
     
     def init_ui(self):
@@ -132,6 +149,26 @@ class CombinedPanel(QWidget):
             list_layout
         ))
         
+        # Tombol Preview
+        preview_button = QPushButton()
+        preview_button.setFixedSize(30, 30)
+        preview_button.setIcon(QIcon("UI/resources/icon/play-preview.png"))
+        preview_button.setIconSize(QSize(15, 15))
+        preview_button.setStyleSheet("""
+            QPushButton {
+                background-color: #FFA500; 
+                border-radius: 5px; 
+                color: white; 
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #CC8400;
+            }
+        """)
+        
+        preview_button.setToolTip(language_config.PREVIEW_IMAGE_BUTTON)
+        preview_button.clicked.connect(self.process_all_batch) 
+        
         # Tombol Delete
         delete_button = QPushButton()
         delete_button.setFixedSize(30, 30)
@@ -150,7 +187,9 @@ class CombinedPanel(QWidget):
         delete_button.setToolTip(language_config.DELETE_IMAGE_BUTTON)
         delete_button.clicked.connect(lambda: self.parent_widget.handle_delete_individual_batch(self.batch_id))
         
+        # Tambahkan tombol ke layout
         button_layout.addWidget(add_button)
+        button_layout.addWidget(preview_button)  
         button_layout.addWidget(delete_button)
         
         button_widget = QWidget()
@@ -205,35 +244,36 @@ class CombinedPanel(QWidget):
 
         return algorithm_alignment, super_res_combo, denoising_combox
 
-
     def execute_algorithm(self, category, selected_algo):
-        """Eksekusi algoritma berdasarkan kategori dan pilihan dropdown."""
+        """Simpan pilihan algoritma tanpa langsung menjalankannya."""
+        self.selected_algorithms[category] = selected_algo
+        print(f"Algoritma {category} dipilih: {selected_algo}")
+    
+    def process_all_batch(self):
+        """Jalankan semua algoritma yang dipilih."""
         actions = {
             'alignment': {
-                "None": lambda: print("Tidak menjalankan algoritma penyelarasan"),
-                "Farneback Optical Flow": lambda: print("Menjalankan Farneback Optical Flow"),
-                "AKAZE": lambda: print("Menjalankan AKAZE"),
-                "ORB": lambda: print("Menjalankan ORB")
-            },
+                "Farneback Optical Flow": lambda: running_farneback_optical_flow(self, single_process=False, batch_id=self.batch_id),
+                "AKAZE": lambda: running_akaze(self, single_process=False, batch_id=self.batch_id),
+                "ORB": lambda: running_orb(self, single_process=False, batch_id=self.batch_id),
+            }, 
             'super_resolution': {
-                "None": lambda: print("Tidak menjalankan super resolusi"),
-                "Interpolation": lambda: print("Menjalankan Interpolation")
+                "Interpolation": lambda: running_interpolation(self, single_process=False, batch_id=self.batch_id),
             },
             'denoising': {
-                "None": lambda: print("Tidak menjalankan denoising"),
-                "Average": lambda: print("Menjalankan Average"),
-                "Weighted Average": lambda: print("Menjalankan Weighted Average"),
-                "Median": lambda: print("Menjalankan Median"),
-                "Similarity": lambda: print("Menjalankan Similarity")
+                "Average": lambda: running_average(self, single_process=False, batch_id=self.batch_id),
+                "Weighted Average": lambda: running_weighted_average(self, single_process=False, batch_id=self.batch_id),
+                "Median": lambda: running_median(self, single_process=False, batch_id=self.batch_id),
+                "Similarity": lambda: running_similarity(self, single_process=False, batch_id=self.batch_id),
             }
         }
 
-        # Eksekusi fungsi jika ditemukan, jika tidak, tidak ada yang terjadi
-        func = actions.get(category, {}).get(selected_algo)
-        if func:
-            func()
+        for category, algo in self.selected_algorithms.items():
+            if algo and algo in actions.get(category, {}):
+                print(f"Menjalankan {algo} untuk kategori {category}...")
+                actions[category][algo]()  # Jalankan algoritma yang dipilih
 
-    
+            
     def create_parameter_panel(self):
         """Buat panel parameter yang berisi combo box dan checkbox dengan scroll area."""
         algorithm_panel = QWidget()
@@ -278,24 +318,32 @@ class CombinedPanel(QWidget):
             language_config.PARAMETER_BATCH_KEEP_EDGE
         ]
         
+        checkbox_widgets = {}  # Dictionary untuk menyimpan widget checkbox
         for text in checkbox_texts:
             checkbox_widget = QWidget()
             checkbox_layout = QHBoxLayout(checkbox_widget)
             checkbox_layout.setContentsMargins(0, 0, 0, 0)
             checkbox_layout.setSpacing(5)
-            
+
             option_checkbox = QCheckBox()
-            # Gunakan ClickableLabel sebagai label yang dapat diklik
             option_label = ClickableLabel(text)
             option_label.setWordWrap(True)
             option_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             option_label.clicked.connect(option_checkbox.toggle)
-            
+
             checkbox_layout.addWidget(option_checkbox)
             checkbox_layout.addWidget(option_label, 1)
             option_layout.addWidget(checkbox_widget)
-            
+
             checkboxes[text] = option_checkbox
+            checkbox_widgets[text] = checkbox_widget  # Simpan widget dalam dictionary
+
+        # Sembunyikan checkbox yang disebutkan secara default
+        checkbox_widgets[language_config.PARAMETER_BATCH_ALIGNMENT_TO_PROCESS].setVisible(False)
+        checkbox_widgets[language_config.PARAMETER_BATCH_CROP_EDGE].setVisible(False)
+        checkbox_widgets[language_config.PARAMETER_BATCH_ALIGNMENT_TO_FOLDER].setVisible(False)
+        checkbox_widgets[language_config.PARAMETER_BATCH_KEEP_EDGE].setVisible(False)
+
         
         option_layout.addStretch()
         
@@ -366,4 +414,3 @@ class CombinedPanel(QWidget):
         )
         
         return algorithm_panel
-

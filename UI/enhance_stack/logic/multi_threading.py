@@ -131,10 +131,12 @@ class ImageProcessingMultiThreading(QThread):
     finished = pyqtSignal()
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, worker_function, db_path, parent=None):
+    def __init__(self, worker_function, db_path, single_process=True, batch_id=None, parent=None):
         super().__init__(parent)
         self.worker_function = worker_function
         self.db_path = db_path
+        self.single_process = single_process
+        self.batch_id = batch_id
         self.stop_requested = False
 
     def run(self):
@@ -147,7 +149,13 @@ class ImageProcessingMultiThreading(QThread):
                 return self.stop_requested
 
             # Jalankan fungsi pekerja yang diberikan
-            self.worker_function(self.db_path, update_progress, stop_requested=is_stop_requested)
+            self.worker_function(
+                self.db_path, 
+                update_progress=update_progress, 
+                stop_requested=is_stop_requested, 
+                single_process=self.single_process, 
+                batch_id=self.batch_id
+            )
             self.finished.emit()
         except Exception as e:
             print(f"Error terjadi: {str(e)}")

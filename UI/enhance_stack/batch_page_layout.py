@@ -1,20 +1,20 @@
 import os
 import sqlite3
 from PyQt6.QtWidgets import (QLabel, QSpacerItem, QSizePolicy, QWidget, QVBoxLayout, QScrollArea,
-                             QHBoxLayout, QPushButton, QComboBox, QCheckBox, QLineEdit,
+                             QHBoxLayout, QPushButton, QComboBox, QCheckBox, QLineEdit, QProgressDialog,
                              QMessageBox, QFileDialog)
 import weakref
-from PyQt6.QtCore import (pyqtSignal, Qt, QSize)
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import (pyqtSignal, Qt, QTimer)
+from PyQt6.QtGui import QIcon, QFont
 from UI.enhance_stack.components.batch_page_layout.batch_layout import refresh_ui, setup_main_panel
 from UI.enhance_stack.components.batch_page_layout.combined_panel import CombinedPanel
-from UI.enhance_stack.components.batch_page_layout.image_batch_management import BatchDeleteProcess, handle_add_image_to_batch
-from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, create_thumbnail_placeholder, stop_all_thumbnails, update_thumbnail
+from UI.enhance_stack.components.batch_page_layout.image_batch_management import BatchDeleteProcess
+from UI.enhance_stack.components.batch_page_layout.thumbnail import stop_all_thumbnails
 from UI.enhance_stack.logic.database_manager import DatabaseManager
 from UI.enhance_stack.logic.multi_threading import BatchImageImportThreading
 from UI.resources.stylesheet.stylesheet import SCROLL_AREA
 from UI.settings.General.Language import language_config
-from config import CACHE, CACHE_DIR
+from config import  CACHE_DIR
 
 os.makedirs(CACHE_DIR, exist_ok=True)
 
@@ -27,7 +27,11 @@ class BatchPageLayout(QWidget):
         self.thumbnail_placeholders = weakref.WeakValueDictionary()
         self.database_manager = DatabaseManager("pixel_refine_database.db")
         self.database_manager.create_database()
+        
+        self.combined_panel = CombinedPanel(self.database_manager)
 
+        self.batch_panels = []
+        
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 5, 0, 0)
 
@@ -36,7 +40,7 @@ class BatchPageLayout(QWidget):
         self.main_panel = setup_main_panel(self.main_panel_container, SCROLL_AREA)
 
         self.data_changed.connect(self.refresh_ui)
-
+        
         self.refresh_ui()
         self.layout.addWidget(self.main_panel)
         
@@ -50,15 +54,67 @@ class BatchPageLayout(QWidget):
         refresh_ui(self.database_manager, self.main_panel_container, self.setup_combined_panel)
     
     def setup_combined_panel(self, batch_id=None):
-        """Menggunakan kelas CombinedPanel untuk membuat panel gabungan."""
-        return CombinedPanel(
+        """Membuat dan menyimpan panel gabungan untuk batch tertentu."""
+        combined_panel = CombinedPanel(
             self.database_manager,
             batch_id,
             self,
             self.thumbnail_threads,
             self.thumbnail_placeholders,
         )
+        self.batch_panels.append(combined_panel)  # Simpan panel batch ke daftar
+        return combined_panel
     
+    def show_toast(self, message, duration=None):
+        """Menampilkan toast yang tetap aktif selama proses berlangsung"""
+        if hasattr(self, 'toast') and self.toast:  # Hapus toast lama jika ada
+            self.toast.deleteLater()
+
+        self.toast = QLabel(message, self)
+        self.toast.setStyleSheet("""
+            background-color: rgba(0, 0, 0, 180);
+            color: white;
+            padding: 12px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: bold;
+            box-shadow: 0px 4px 8px rgba(0, 0, 0, 0.3);
+        """)
+        self.toast.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.toast.setFont(QFont("Arial", 10))
+        
+        # Set lokasi di bagian bawah tengah UI
+        self.toast.setGeometry(
+            (self.width() - 300) // 2,  # Tengah horizontal
+            self.height() - 60,  # Bawah layar
+            300, 40  # Ukuran toast
+        )
+        
+        self.toast.show()
+
+        # Jika durasi diberikan, otomatis hilang setelah waktu selesai
+        if duration:
+            QTimer.singleShot(duration, self.toast.hide)
+
+        
+    def process_all_batches(self):
+        """Menjalankan semua batch dengan toast yang terus diperbarui"""
+        if not self.batch_panels:
+            self.show_toast("Tidak ada batch untuk diproses!", duration=3000)
+            return
+        
+        total_batches = len(self.batch_panels)
+        self.show_toast(f"Memproses {total_batches} batch...")
+
+        # Proses semua batch & perbarui toast setiap selesai
+        for i, batch_panel in enumerate(self.batch_panels, start=1):
+            batch_panel.process_all_batch()
+            self.show_toast(f"{i}/{total_batches} batch telah diproses...")
+
+        # Setelah selesai, tampilkan pesan akhir
+        self.show_toast("Semua batch telah diproses!", duration=3000)
+
+
     # Contoh penggunaan di handle_delete_individual_batch
     def handle_delete_individual_batch(self, batch_id):
         title, message = language_config.BATCH_DELETE_LABEL 

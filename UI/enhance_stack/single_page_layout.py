@@ -166,11 +166,11 @@ class SinglePageLayout(QWidget):
 
             # Proses untuk Alignment
             if alignment_choice == "ORB":
-                running_orb(self)
+                running_orb(self, single_process=True)
             elif alignment_choice == "Farneback Optical Flow":
-                running_farneback_optical_flow(self)
+                running_farneback_optical_flow(self, single_process=True)
             elif alignment_choice == "AKAZE":
-                running_akaze(self)
+                running_akaze(self, single_process=True)
 
             elif alignment_choice == "None":
                 if denoising_choice != "None":  # Jika hanya denoising yang dipilih
@@ -186,7 +186,7 @@ class SinglePageLayout(QWidget):
             super_resolution_executed = False
             # Proses untuk Super Resolution
             if super_resolution_choice == "Interpolation":
-               running_interpolation(self) 
+               running_interpolation(self, single_process=True) 
             #    super_resolution_executed = True
             elif super_resolution_choice == "none":
                 return 
@@ -206,16 +206,16 @@ class SinglePageLayout(QWidget):
             # Proses untuk Denoising
             denoising_executed = False  # Flag untuk melacak apakah denoising dilakukan
             if denoising_choice == "Average":
-                running_average(self)
+                running_average(self, single_process=True)
                 denoising_executed = True
             elif denoising_choice == "Median":
-                running_median(self)
+                running_median(self, single_process=True)
                 denoising_executed = True
             elif denoising_choice == "Weighted Average":
-                running_weighted_average(self)
+                running_weighted_average(self, single_process=True)
                 denoising_executed = True
             elif denoising_choice == "Similarity":
-               running_similarity(self)
+               running_similarity(self, single_process=True)
                denoising_executed = True
             elif denoising_choice == "none":
                 return 

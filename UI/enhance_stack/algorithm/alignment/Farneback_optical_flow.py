@@ -24,14 +24,27 @@ class FarnebackAlgorithm:
         if not os.path.exists(hdf5_folder):
             os.makedirs(hdf5_folder)
 
-    def get_all_image_paths(self):
-        """
-        Retrieves all image paths stored in the database.
-        """
+    def get_all_image_paths_for_single_process(self):
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT path FROM images")
+            cursor.execute("""
+                SELECT images.path 
+                FROM single_process_image
+                JOIN images ON single_process_image.image_id_single = images.id
+            """)
             return [row[0] for row in cursor.fetchall()]
+        
+    def get_all_image_paths_for_batch_process(self, batch_id):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT images.path 
+                FROM batch_process_image
+                JOIN images ON batch_process_image.image_id_batch = images.id
+                WHERE batch_process_image.batch_id = ?
+            """, (batch_id,))
+            return [row[0] for row in cursor.fetchall()]
+
 
     @staticmethod
     def load_farneback_config(config_filename=None):
@@ -58,6 +71,33 @@ class FarnebackAlgorithm:
             with open(config_filename, "r") as config_file:
                 params = json.load(config_file)
             return params.get("Farneback", default_config)
+        except Exception as e:
+            print("Error loading Farneback configuration:", e)
+            return default_config
+    def load_farneback_config_for_batch(config_filename=None):
+        """
+        Membaca konfigurasi Farneback Optical Flow dari file JSON.
+        Jika gagal, mengembalikan nilai default.
+        """
+        default_config = {
+            "pyr_scale": 0.5,
+            "levels": 3,
+            "winsize": 15,
+            "iterations": 3,
+            "poly_n": 5,
+            "poly_sigma": 1.2,
+            "flags": 0,
+            "interpolation": "INTER_CUBIC",
+            "use_gpu": False
+        }
+
+        if config_filename is None:
+            config_filename = os.path.join("database", "setting", "Parameter_Stack_Enhance.json")
+
+        try:
+            with open(config_filename, "r") as config_file:
+                params = json.load(config_file)
+            return params.get("Farneback_BATCH", default_config)
         except Exception as e:
             print("Error loading Farneback configuration:", e)
             return default_config
@@ -173,13 +213,21 @@ class FarnebackAlgorithm:
         print(language_config.COMPENSATE_MOTION_FINISHED.format(image_id=image_id))
         return compensated_image
 
-def main(db_path, update_progress=None, batch_size=5, stop_requested=None):
+def main(db_path, update_progress=None, batch_size=5, stop_requested=None, single_process=None, 
+         batch_id=None,):
     processor = FarnebackAlgorithm(db_path)
 
-    # Ambil path gambar dari database
-    image_paths = processor.get_all_image_paths()
+    # Dapatkan semua path gambar
+    if single_process:
+        image_paths = processor.get_all_image_paths_for_single_process()
+    else:
+        if batch_id is None:
+            raise ValueError("batch_id harus diberikan untuk batch process")
+        image_paths = processor.get_all_image_paths_for_batch_process(batch_id)
+    
     if not image_paths:
-        print(language_config.RUN_IMAGE_NOT_FOUND)
+        if update_progress:
+            update_progress(0, language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
         return
     
     # Ekstrak metadata dari seluruh gambar dan simpan ke file JSON
@@ -248,7 +296,7 @@ def main(db_path, update_progress=None, batch_size=5, stop_requested=None):
 
     # print("Pemrosesan selesai dan semua gambar telah disimpan ke HDF5.")
 
-def running_farneback_optical_flow(parent=None):
+def running_farneback_optical_flow(parent=None, single_process=None, batch_id=None):
     """
     Menampilkan progress bar dengan gaya kustom dan memanfaatkan thread.
     """
@@ -282,7 +330,7 @@ def running_farneback_optical_flow(parent=None):
     """)
     layout.addWidget(progress_bar)
 
-    worker = ImageProcessingMultiThreading(main, "pixel_refine_database.db")
+    worker = ImageProcessingMultiThreading(main, "pixel_refine_database.db", single_process=single_process, batch_id=batch_id)
     worker.progress_updated.connect(lambda progress, message: (
         progress_bar.setValue(progress),
         label.setText(message)

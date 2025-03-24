@@ -1,6 +1,7 @@
 from PyQt6.QtWidgets import QVBoxLayout, QWidget, QStackedWidget
 
 from UI.enhance_stack.batch_page_layout import BatchPageLayout
+from UI.enhance_stack.components.batch_page_layout.combined_panel import CombinedPanel
 from UI.enhance_stack.single_page_layout import SinglePageLayout
 
 from .components.top_bar import TopBar
@@ -26,6 +27,7 @@ class EnhanceStackPage(QWidget):
 
         self.single_page_layout = SinglePageLayout()
         self.batch_page_layout = BatchPageLayout()
+        self.combined_panel_logic = CombinedPanel(self.database_manager)
 
         self.stacked_widget.addWidget(self.single_page_layout)
         self.stacked_widget.addWidget(self.batch_page_layout)
@@ -37,7 +39,7 @@ class EnhanceStackPage(QWidget):
         self.top_bar.single_page_delete_button.setVisible(True)
 
         for widget in [self.top_bar.batch_page_import_button, self.top_bar.batch_page_delete_button,
-                       self.top_bar.start_process_button, self.top_bar.save_to_button]:
+                       self.top_bar.start_process_batch, self.top_bar.save_batch_to]:
             widget.setVisible(False)
 
         # Connect tombol switch
@@ -51,8 +53,8 @@ class EnhanceStackPage(QWidget):
         # Connect tombol Batch Page
         self.top_bar.batch_page_import_button.clicked.connect(self.batch_page_layout.handle_batch_import_button)
         self.top_bar.batch_page_delete_button.clicked.connect(self.batch_page_layout.handle_delete_all_batches)
-        # self.top_bar.start_process_button.clicked.connect(self.batch_page_layout.handle_start_process)
-        # self.top_bar.save_to_button.clicked.connect(self.batch_page_layout.handle_save_to)
+        self.top_bar.start_process_batch.clicked.connect(self.batch_page_layout.process_all_batches)
+        # self.top_bar.save_batch_to.clicked.connect(self.batch_page_layout.handle_save_to)
 
     def switch_page(self):
         """Switch halaman berdasarkan tombol yang dipilih."""
@@ -65,7 +67,7 @@ class EnhanceStackPage(QWidget):
 
             # Sembunyikan tombol import dan delete di mode Batch
             for widget in [self.top_bar.batch_page_import_button, self.top_bar.batch_page_delete_button,
-                           self.top_bar.start_process_button, self.top_bar.save_to_button]:
+                           self.top_bar.start_process_batch, self.top_bar.save_batch_to]:
                 widget.setVisible(False)
         else:
             self.stacked_widget.setCurrentWidget(self.batch_page_layout)
@@ -76,5 +78,5 @@ class EnhanceStackPage(QWidget):
 
             # Tampilkan tombol import, delete, Start Process, dan Save to di mode Batch
             for widget in [self.top_bar.batch_page_import_button, self.top_bar.batch_page_delete_button,
-                           self.top_bar.start_process_button, self.top_bar.save_to_button]:
+                           self.top_bar.start_process_batch, self.top_bar.save_batch_to]:
                 widget.setVisible(True)

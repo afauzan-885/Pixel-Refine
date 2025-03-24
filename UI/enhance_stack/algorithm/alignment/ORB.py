@@ -25,13 +25,25 @@ class ORBAlgorithm:
         if not os.path.exists(hdf5_folder):
             os.makedirs(hdf5_folder)
 
-    def get_all_image_paths(self):
-        """
-        Retrieves all image paths stored in the database.
-        """
+    def get_all_image_paths_for_single_process(self):
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT path FROM images")
+            cursor.execute("""
+                SELECT images.path 
+                FROM single_process_image
+                JOIN images ON single_process_image.image_id_single = images.id
+            """)
+            return [row[0] for row in cursor.fetchall()]
+        
+    def get_all_image_paths_for_batch_process(self, batch_id):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT images.path 
+                FROM batch_process_image
+                JOIN images ON batch_process_image.image_id_batch = images.id
+                WHERE batch_process_image.batch_id = ?
+            """, (batch_id,))
             return [row[0] for row in cursor.fetchall()]
         
     @staticmethod
@@ -64,6 +76,39 @@ class ORBAlgorithm:
             with open(config_filename, "r") as config_file:
                 params = json.load(config_file)
             return {**default_config, **params.get("ORB", {})}
+        except Exception as e:
+            print("Error loading ORB configuration:", e)
+            return default_config  # Gunakan default jika file tidak ditemukan atau ada error
+        
+    def load_orb_config_for_batch(config_filename=None):
+        """
+        Membaca konfigurasi ORB dari file JSON. Jika gagal, mengembalikan nilai default.
+        """
+        default_config = {
+            "nfeatures": 1500,
+            "scaleFactor": 1.1,
+            "nlevels": 5,
+            "ransacThreshold": 5.0,
+            "transformation": "homography",
+            "keep_edges": True,
+            "enable_cropping": False,
+            "save_align": False,  
+            "command_save_to_hd5f": True,
+            "align_folder": os.path.join(
+                os.path.expanduser("~"), 
+                "Documents", 
+                "Pixel Refine", 
+                "align_image"
+            )
+        }
+
+        if config_filename is None:
+            config_filename = os.path.join("database", "setting", "Parameter_Stack_Enhance.json")
+
+        try:
+            with open(config_filename, "r") as config_file:
+                params = json.load(config_file)
+            return {**default_config, **params.get("ORB_BATCH", {})}
         except Exception as e:
             print("Error loading ORB configuration:", e)
             return default_config  # Gunakan default jika file tidak ditemukan atau ada error
@@ -165,7 +210,7 @@ class ORBAlgorithm:
 
         return compensated_image
     
-def main(db_path, update_progress=None, batch_size=12, stop_requested=None, 
+def main(db_path, update_progress=None, batch_size=12, stop_requested=None, single_process=None, batch_id=None,
          config_filename=None, save_align=None, align_folder=None, command_save_to_hd5f=None):
     
     # Inisialisasi processor dan konfigurasi
@@ -185,9 +230,16 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None,
     transformation_type = config.get("transformation", "affine")
     
     # Dapatkan semua path gambar
-    image_paths = processor.get_all_image_paths()
+    if single_process:
+        image_paths = processor.get_all_image_paths_for_single_process()
+    else:
+        if batch_id is None:
+            raise ValueError("batch_id harus diberikan untuk batch process")
+        image_paths = processor.get_all_image_paths_for_batch_process(batch_id)
+    
     if not image_paths:
-        print(language_config.RUN_IMAGE_NOT_FOUND)
+        if update_progress:
+            update_progress(0, language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
         return
     
     # Ekstrak metadata dari seluruh gambar dan simpan ke file JSON
@@ -328,7 +380,7 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None,
             del batch_images, batch_paths, futures
             gc.collect()
 
-def running_orb(parent=None):
+def running_orb(parent=None, single_process=None, batch_id=None):
     """
     Menampilkan progress bar dengan gaya kustom dan memanfaatkan thread.
     """
@@ -365,7 +417,7 @@ def running_orb(parent=None):
     layout.addWidget(progress_bar)
 
     # Inisialisasi thread worker
-    worker = ImageProcessingMultiThreading(main, "pixel_refine_database.db")
+    worker = ImageProcessingMultiThreading(main, "pixel_refine_database.db", single_process=single_process, batch_id=batch_id)
     # Menghubungkan signal worker ke fungsi pembaruan UI
     worker.progress_updated.connect(lambda progress, message: (
         progress_bar.setValue(progress),

@@ -17,9 +17,11 @@ class ThreadWorker(QThread):
     finished = pyqtSignal()  # Sinyal untuk menandakan selesai
     error_occurred = pyqtSignal(str)  # Sinyal untuk menandakan error
 
-    def __init__(self, db_path):
+    def __init__(self, db_path, single_process=True, batch_id=None):
         super().__init__()
         self.db_path = db_path
+        self.single_process = single_process  # Menentukan apakah proses single atau batch
+        self.batch_id = batch_id  # ID batch jika batch processing
         self.stop_requested = False  # Flag untuk menghentikan thread
 
     def run(self):
@@ -31,8 +33,15 @@ class ThreadWorker(QThread):
             def is_stop_requested():
                 return self.stop_requested
 
-            # Panggil main untuk menjalankan proses dengan parameter yang benar
-            main(self.db_path, update_progress=update_progress, stop_requested=is_stop_requested)
+            # Panggil main dengan parameter yang sesuai
+            main(
+                self.db_path, 
+                update_progress=update_progress, 
+                stop_requested=is_stop_requested, 
+                single_process=self.single_process, 
+                batch_id=self.batch_id
+            )
+            
             self.finished.emit()
         except Exception as e:
             print(f"Error terjadi: {str(e)}")  # Menampilkan pesan error di konsol
@@ -54,10 +63,25 @@ class MedianAlgorithm:
         # Buat executor sekali saja untuk reuse di setiap pemrosesan
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
 
-    def get_all_image_paths(self):
+    def get_all_image_paths_for_single_process(self):
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT path FROM images")
+            cursor.execute("""
+                SELECT images.path 
+                FROM single_process_image
+                JOIN images ON single_process_image.image_id_single = images.id
+            """)
+            return [row[0] for row in cursor.fetchall()]
+        
+    def get_all_image_paths_for_batch_process(self, batch_id):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT images.path 
+                FROM batch_process_image
+                JOIN images ON batch_process_image.image_id_batch = images.id
+                WHERE batch_process_image.batch_id = ?
+            """, (batch_id,))
             return [row[0] for row in cursor.fetchall()]
 
     def load_images_from_hdf5(self, hdf5_path, stop_requested=None):
@@ -194,10 +218,18 @@ class MedianAlgorithm:
 
         return np.clip(median_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype) if np.issubdtype(dtype, np.integer) else median_image.astype(dtype)
     
-def main(db_path, update_progress=None, stop_requested=None, batch_size=4):
+def main(db_path, update_progress=None, stop_requested=None, batch_size=4, single_process=None, batch_id=None):
     try:
         image_processor = MedianAlgorithm(db_path)
-        image_paths = image_processor.get_all_image_paths()
+        
+        # Pilih sumber image_paths
+        if single_process:
+            image_paths = image_processor.get_all_image_paths_for_single_process()
+        else:
+            if batch_id is None:
+                raise ValueError("batch_id harus diberikan untuk batch process")
+            image_paths = image_processor.get_all_image_paths_for_batch_process(batch_id)
+        
         if not image_paths:
             if update_progress:
                 update_progress(0, language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
@@ -299,7 +331,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4):
             update_progress(0, error_message)
         print(language_config.RUN_ERROR_MESSAGE.format(error=str(e)))
        
-def running_median(parent=None):
+def running_median(parent=None, single_process=None, batch_id=None):
     """
     Menampilkan progress bar dengan gaya kustom dan memanfaatkan thread.
     """
@@ -325,7 +357,7 @@ def running_median(parent=None):
     layout.addWidget(progress_bar)
 
     # Inisialisasi thread worker
-    worker = ThreadWorker("pixel_refine_database.db")
+    worker = ThreadWorker("pixel_refine_database.db", single_process=single_process, batch_id=batch_id)
     # Menghubungkan signal worker ke fungsi pembaruan UI
     worker.progress_updated.connect(lambda progress, message: (
         progress_bar.setValue(progress),

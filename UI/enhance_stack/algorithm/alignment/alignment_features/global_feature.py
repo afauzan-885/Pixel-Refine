@@ -2,6 +2,7 @@ import concurrent.futures
 import json
 import os
 import concurrent
+import sqlite3
 import subprocess
 import cv2
 import exifread

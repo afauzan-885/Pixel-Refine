@@ -22,11 +22,11 @@ class TopBar(QWidget):
         self.batch_page_delete_button.setStyleSheet(stylesheet.DELETE_BUTTON)
         
         # Tombol baru untuk batch (Start Process dan Save to)
-        self.start_process_button = QPushButton("Start Batch")
-        self.start_process_button.setStyleSheet(stylesheet.PROCESS_BUTTON)
-        # Jika perlu, tambahkan style: self.start_process_button.setStyleSheet(stylesheet.START_PROCESS_BUTTON)
-        self.save_to_button = QPushButton("Save to")
-        self.save_to_button.setStyleSheet(stylesheet.SAVE_AS_BUTTON)
+        self.start_process_batch = QPushButton("Start Batch")
+        self.start_process_batch.setStyleSheet(stylesheet.PROCESS_BUTTON)
+        # Jika perlu, tambahkan style: self.start_process_batch.setStyleSheet(stylesheet.start_process_batch)
+        self.save_batch_to = QPushButton("Save to")
+        self.save_batch_to.setStyleSheet(stylesheet.SAVE_AS_BUTTON)
 
         # Switch buttons (Single/Batch)
         self.single_button = QPushButton("Single")
@@ -69,8 +69,8 @@ class TopBar(QWidget):
         # Layout kanan: untuk tombol baru (Start Process dan Save to)
         self.batch_right_layout = QHBoxLayout()
         self.batch_right_layout.setSpacing(5)
-        self.batch_right_layout.addWidget(self.save_to_button)
-        self.batch_right_layout.addWidget(self.start_process_button)
+        self.batch_right_layout.addWidget(self.save_batch_to)
+        self.batch_right_layout.addWidget(self.start_process_batch)
         
         
         # Add widgets to the main layout
