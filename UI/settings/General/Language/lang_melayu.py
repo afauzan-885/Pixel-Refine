@@ -7,8 +7,14 @@ HDR_SIDEBAR_LABEL= "Rekonstruksi HDR"
 
 TOPBAR_SINGLE_IMPORT_BUTTON_TEXT = "Import Imej"
 TOPBAR_SINGLE_DELETE_BUTTON_TEXT = "Padam Imej"
+
 TOPBAR_BATCH_IMPORT_BUTTON_TEXT = "Buat Kelompok"
 TOPBAR_BATCH_DELETE_BUTTON_TEXT = "Padam Kelompok"
+
+TOPBAR_BATCH_START_PROCESS_BUTTON_TEXT = "Proses Kelompok"
+TOPBAR_BATCH_SAVE_BUTTON_TEXT = "Simpan Ke"
+
+NO_DATA_BATCH = "Tiada data kelompok disimpan."
 
 BATCH_DELETE_LABEL = "Sahkan Padam Kelompok", "Adakah anda pasti mahu memadamkan kelompok {}?"
 LOADING_THUMBNAIL = "Memuatkan...."
@@ -27,6 +33,18 @@ PARAMETER_BATCH_ALIGNMENT_TO_PROCESS = "Simpan Hasil Penjajaran untuk Proses Set
 TITLE_BATCH_ALL_DELETE_BUTTON = "Padam Semua Kelompok"
 CONFIRM_BATCH_ALL_DELETE_BUTTON = "Adakah anda pasti mahu memadamkan semua data kelompok?"
 NO_DATA_BATCH_ALL_DELETE_BUTTON = "Tiada data kelompok disimpan."
+
+UI_LABEL_BATCH_NO_PROCESS = "Tiada kelompok untuk diproses!"
+UI_LABEL_BATCH_SUCCES = "Semua kelompok telah diproses!"
+UI_LABEL_BATCH_PROCESS = "Memproses {} kelompok..."
+UI_LABEL_BATCH_PROGRESS = "{}/{} kelompok telah diproses..."
+UI_FAILED_TO_SAVE_IMAGE_BATCH = "Gagal menyimpan imej: {}"
+UI_SUCCES_TO_SAVE_IMAGE_BATCH = "Imej berjaya disimpan: {}"
+UI_NO_IMAGE_TO_SAVE_IMAGE_BATCH = "Tiada imej untuk disimpan"
+UI_SYSTEM_FOLDER_WRONG_TO_SAVE_IMAGE_BATCH = "Folder sistem (pangkalan data/stok) tidak wujud"
+
+CONSOL_LOG_RUNNING_ALGORITHM = "Proses {} dipilih, algoritma: {}"
+
 
 # Halaman Susun Penambahbaikan
 TOPBAR_SINGLE_IMPORT_BUTTON_TEXT = "Import Imej"

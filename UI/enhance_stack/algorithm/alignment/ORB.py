@@ -381,6 +381,7 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, sing
             gc.collect()
 
 def running_orb(parent=None, single_process=None, batch_id=None):
+    process_finished = False
     """
     Menampilkan progress bar dengan gaya kustom dan memanfaatkan thread.
     """
@@ -425,6 +426,8 @@ def running_orb(parent=None, single_process=None, batch_id=None):
     ))
 
     def finish_handler():
+        nonlocal process_finished
+        process_finished = True  # set flag ketika proses selesai
         dialog.close()
         worker.quit()  # Berhenti dari thread
         worker.wait()  # Tunggu thread selesai
@@ -439,20 +442,15 @@ def running_orb(parent=None, single_process=None, batch_id=None):
 
     worker.error_occurred.connect(error_handler)
 
-    # Mulai worker
-    worker.start()
-
-    # Pastikan worker dihentikan jika dialog ditutup
     def on_dialog_close(event):
-        if worker.isRunning():
-            # Menampilkan konfirmasi sebelum menutup dialog
+        # Jika proses telah selesai, lewati konfirmasi
+        if process_finished:
+            event.accept()
+        elif worker.isRunning():
             reply = QMessageBox.question(dialog, "Cancel Process",
-                                        
-                                        # message: Are you sure you want to cancel the process?
                                         language_config.CANCEL_PROCESSING,
-                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
+                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                                         QMessageBox.StandardButton.No)
-
             if reply == QMessageBox.StandardButton.Yes:
                 worker.stop()
                 worker.quit() 
@@ -460,9 +458,11 @@ def running_orb(parent=None, single_process=None, batch_id=None):
                 event.accept()
             else:
                 event.ignore()
+        else:
+            event.accept()
 
     dialog.closeEvent = on_dialog_close
-
+    worker.start()
     dialog.exec()
 
 if __name__ == "__main__":

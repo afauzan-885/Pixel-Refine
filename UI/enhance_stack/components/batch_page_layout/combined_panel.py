@@ -16,6 +16,7 @@ from UI.enhance_stack.algorithm.denoising.Weighted_average import running_weight
 from UI.enhance_stack.algorithm.super_resolution.Interpolation import running_interpolation
 from UI.enhance_stack.components.batch_page_layout.image_batch_management import handle_add_image_to_batch
 from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, create_thumbnail_placeholder, update_thumbnail
+from UI.enhance_stack.logic.workflow_process import ImageViewer, get_last_image
 from UI.resources.stylesheet.stylesheet import SCROLL_AREA
 from UI.settings.General.Language import language_config
 from config import CACHE
@@ -101,8 +102,13 @@ class CombinedPanel(QWidget):
         parameter_panel_layout = self.create_parameter_panel_layout(list_layout)
         parameter_panel_layout.setMinimumWidth(420)
         
+        scroll_list_panel = QScrollArea()
+        scroll_list_panel.setWidgetResizable(True)
+        scroll_list_panel.setWidget(list_panel)
+        scroll_list_panel.setStyleSheet(SCROLL_AREA)
+        
         main_layout.addWidget(parameter_panel_layout, 1)
-        main_layout.addWidget(list_panel, 2)
+        main_layout.addWidget(scroll_list_panel, 2)
     
     def create_parameter_panel_layout(self, list_layout):
         """Buat widget bagian kiri yang menggabungkan tombol dan panel parameter."""
@@ -167,7 +173,7 @@ class CombinedPanel(QWidget):
         """)
         
         preview_button.setToolTip(language_config.PREVIEW_IMAGE_BUTTON)
-        preview_button.clicked.connect(self.process_all_batch) 
+        preview_button.clicked.connect(self.process_and_preview) 
         
         # Tombol Delete
         delete_button = QPushButton()
@@ -195,6 +201,21 @@ class CombinedPanel(QWidget):
         button_widget = QWidget()
         button_widget.setLayout(button_layout)
         return button_widget
+    
+    def process_and_preview(self):
+        """Jalankan semua algoritma batch terlebih dahulu, lalu tampilkan preview gambar."""
+        self.process_all_batch()  # Jalankan semua algoritma batch
+        self.handle_preview_button()  # Setelah selesai, tampilkan preview
+    
+    def handle_preview_button(self):
+        """Menampilkan gambar terbaru setelah batch diproses."""
+        latest_image_path = get_last_image("database/stack")
+        if latest_image_path:
+            dialog = ImageViewer(latest_image_path, self)
+            dialog.exec()
+        else:
+            QMessageBox.warning(self, "Caution", language_config.NOT_IMAGE_PREVIEW)
+
     
     def dropdown_box_control(self):
         """Buat combo box untuk algoritma penyelarasan, super resolusi, dan denoising."""
@@ -247,7 +268,7 @@ class CombinedPanel(QWidget):
     def execute_algorithm(self, category, selected_algo):
         """Simpan pilihan algoritma tanpa langsung menjalankannya."""
         self.selected_algorithms[category] = selected_algo
-        print(f"Algoritma {category} dipilih: {selected_algo}")
+        print(language_config.CONSOL_LOG_RUNNING_ALGORITHM.format(category, selected_algo))
     
     def process_all_batch(self):
         """Jalankan semua algoritma yang dipilih."""
@@ -270,7 +291,7 @@ class CombinedPanel(QWidget):
 
         for category, algo in self.selected_algorithms.items():
             if algo and algo in actions.get(category, {}):
-                print(f"Menjalankan {algo} untuk kategori {category}...")
+                # print(f"Menjalankan {algo} untuk kategori {category}...")
                 actions[category][algo]()  # Jalankan algoritma yang dipilih
 
             

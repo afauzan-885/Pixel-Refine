@@ -297,6 +297,7 @@ def main(db_path, update_progress=None, batch_size=5, stop_requested=None, singl
     # print("Pemrosesan selesai dan semua gambar telah disimpan ke HDF5.")
 
 def running_farneback_optical_flow(parent=None, single_process=None, batch_id=None):
+    process_finished = False
     """
     Menampilkan progress bar dengan gaya kustom dan memanfaatkan thread.
     """
@@ -337,9 +338,11 @@ def running_farneback_optical_flow(parent=None, single_process=None, batch_id=No
     ))
 
     def finish_handler():
+        nonlocal process_finished
+        process_finished = True  # set flag ketika proses selesai
         dialog.close()
-        worker.quit()
-        worker.wait()
+        worker.quit()  # Berhenti dari thread
+        worker.wait()  # Tunggu thread selesai
 
     worker.finished.connect(finish_handler)
 
@@ -351,24 +354,27 @@ def running_farneback_optical_flow(parent=None, single_process=None, batch_id=No
 
     worker.error_occurred.connect(error_handler)
 
-    worker.start()
-
     def on_dialog_close(event):
-        if worker.isRunning():
+        # Jika proses telah selesai, lewati konfirmasi
+        if process_finished:
+            event.accept()
+        elif worker.isRunning():
             reply = QMessageBox.question(dialog, "Cancel Process",
-                                         language_config.CANCEL_PROCESSING,
-                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                         QMessageBox.StandardButton.No)
+                                        language_config.CANCEL_PROCESSING,
+                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                        QMessageBox.StandardButton.No)
             if reply == QMessageBox.StandardButton.Yes:
                 worker.stop()
-                worker.quit()
-                worker.wait()
+                worker.quit() 
+                worker.wait() 
                 event.accept()
             else:
                 event.ignore()
+        else:
+            event.accept()
 
     dialog.closeEvent = on_dialog_close
-
+    worker.start()
     dialog.exec()
 
 if __name__ == "__main__":

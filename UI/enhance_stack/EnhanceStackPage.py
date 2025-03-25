@@ -38,8 +38,11 @@ class EnhanceStackPage(QWidget):
         self.top_bar.single_page_import_button.setVisible(True)
         self.top_bar.single_page_delete_button.setVisible(True)
 
+        # for widget in [self.top_bar.batch_page_import_button, self.top_bar.batch_page_delete_button,
+        #                self.top_bar.start_process_batch, self.top_bar.save_batch_to]:
+        #     widget.setVisible(False)
         for widget in [self.top_bar.batch_page_import_button, self.top_bar.batch_page_delete_button,
-                       self.top_bar.start_process_batch, self.top_bar.save_batch_to]:
+                       self.top_bar.start_process_batch]:
             widget.setVisible(False)
 
         # Connect tombol switch
@@ -67,7 +70,7 @@ class EnhanceStackPage(QWidget):
 
             # Sembunyikan tombol import dan delete di mode Batch
             for widget in [self.top_bar.batch_page_import_button, self.top_bar.batch_page_delete_button,
-                           self.top_bar.start_process_batch, self.top_bar.save_batch_to]:
+                        self.top_bar.start_process_batch]:
                 widget.setVisible(False)
         else:
             self.stacked_widget.setCurrentWidget(self.batch_page_layout)
@@ -77,6 +80,9 @@ class EnhanceStackPage(QWidget):
             self.top_bar.single_page_delete_button.setVisible(False)
 
             # Tampilkan tombol import, delete, Start Process, dan Save to di mode Batch
+            # for widget in [self.top_bar.batch_page_import_button, self.top_bar.batch_page_delete_button,
+            #                self.top_bar.start_process_batch, self.top_bar.save_batch_to]:
+            #     widget.setVisible(True)
             for widget in [self.top_bar.batch_page_import_button, self.top_bar.batch_page_delete_button,
-                           self.top_bar.start_process_batch, self.top_bar.save_batch_to]:
+                       self.top_bar.start_process_batch]:
                 widget.setVisible(True)

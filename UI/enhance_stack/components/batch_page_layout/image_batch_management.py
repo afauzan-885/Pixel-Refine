@@ -1,9 +1,7 @@
 from functools import partial
 import os
 import weakref
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy,
-                             QSpacerItem, QPushButton, QScrollArea, QMessageBox,
-                             QFileDialog, QLabel)
+from PyQt6.QtWidgets import (QMessageBox, QFileDialog)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, update_thumbnail
 from UI.settings.General.Language import language_config

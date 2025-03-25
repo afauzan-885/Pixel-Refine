@@ -1,3 +1,4 @@
+import subprocess
 from PyQt6.QtWidgets import (
     QMessageBox, QVBoxLayout, QWidget,
     QFileDialog,
@@ -233,55 +234,76 @@ class SinglePageLayout(QWidget):
                     QMessageBox.critical(self, "Error", language_config.RUN_ERROR_STATUS.format(error = e))
 
     def save_image(self):
-            """Menyimpan gambar hasil proses ke lokasi yang dipilih oleh pengguna."""
-            folder_path = "database/stack"
-            if not os.path.exists(folder_path):
-                QMessageBox.warning(self, "Error", "The folder 'database/stack' does not exist.")
+        """Menyimpan gambar hasil proses ke lokasi yang dipilih oleh pengguna dengan metadata asli."""
+        folder_path = "database/stack"
+
+        if not os.path.exists(folder_path):
+            QMessageBox.warning(self, "Error", language_config.UI_SYSTEM_FOLDER_WRONG_TO_SAVE_IMAGE_BATCH)
+            return
+
+        # Dapatkan daftar gambar yang tersedia di folder
+        image_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
+        
+        if not image_files:
+            QMessageBox.warning(self, "No Images", "There are no processed images to save.")
+            return
+
+        # Ambil gambar terbaru berdasarkan waktu modifikasi
+        image_files.sort(key=os.path.getmtime, reverse=True)
+        latest_image_path = image_files[0]
+
+        # Dialog untuk menyimpan file
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Image As",
+            os.path.basename(latest_image_path),
+            "JPEG (*.jpg *.jpeg);;TIFF (*.tif *.tiff);;PNG (*.png)"
+        )
+
+        if not file_path:
+            return  # User membatalkan penyimpanan
+
+        file_extension = os.path.splitext(file_path)[-1].lower()
+        if file_extension not in [".jpg", ".jpeg", ".tif", ".tiff", ".png"]:
+            QMessageBox.warning(self, "Invalid Format", "Unsupported file format.")
+            return
+
+        try:
+            # Load gambar dengan OpenCV
+            if file_extension in [".tif", ".tiff"]:
+                image = cv2.imread(latest_image_path, cv2.IMREAD_UNCHANGED)  # TIFF disimpan tanpa perubahan
+            else:
+                image = cv2.imread(latest_image_path)
+
+            if image is None:
+                QMessageBox.critical(self, "Error", language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
                 return
 
-            # Mendapatkan file gambar terbaru di dalam folder
-            image_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
-            if not image_files:
-                QMessageBox.warning(self, "No Images", "There are no processed images to save.")
-                return
+            # Simpan gambar berdasarkan format file
+            if file_extension in [".jpg", ".jpeg"]:
+                cv2.imwrite(file_path, image, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            elif file_extension == ".png":
+                cv2.imwrite(file_path, image, [cv2.IMWRITE_PNG_COMPRESSION, 5])
+            elif file_extension in [".tif", ".tiff"]:
+                cv2.imwrite(file_path, image)  # TIFF disimpan langsung tanpa kompresi
 
-            image_files.sort(key=os.path.getmtime, reverse=True)
-            latest_image_path = image_files[0]
+            # Gunakan ExifTool untuk menyalin metadata dari gambar asli ke gambar yang baru disimpan
+            if os.path.exists(latest_image_path):
+                try:
+                    subprocess.run(
+                        ["exiftool", "-overwrite_original", "-TagsFromFile", latest_image_path, file_path],
+                        check=True
+                    )
+                except subprocess.CalledProcessError as e:
+                    print(f"Error restoring metadata to {file_path}: {e}")
 
-            # Dialog penyimpanan file
-            file_path, _ = QFileDialog.getSaveFileName(
-                self, "Save Image As",
-                os.path.basename(latest_image_path),
-                "JPEG (*.jpg *.jpeg);;TIFF (*.tif *.tiff);;PNG (*.png)"
-            )
+            # Hapus gambar asli setelah disimpan
+            os.remove(latest_image_path)
 
-            if not file_path:
-                return  # User membatalkan penyimpanan
+            # Beri notifikasi sukses
+            QMessageBox.information(self, "Success", language_config.UI_SUCCES_TO_SAVE_IMAGE_BATCH.format(file_path))
 
-            file_extension = os.path.splitext(file_path)[-1].lower()
-            if file_extension not in [".jpg", ".jpeg", ".tif", ".tiff", ".png"]:
-                QMessageBox.warning(self, "Invalid Format", "Unsupported file format.")
-                return
-
-            try:
-                # Load gambar dengan OpenCV
-                image = cv2.imread(latest_image_path, cv2.IMREAD_UNCHANGED)
-                if image is None:
-                    QMessageBox.critical(self, "Error", "Failed to load the image.")
-                    return
-
-                # Simpan gambar berdasarkan format file
-                if file_extension in [".jpg", ".jpeg"]:
-                    cv2.imwrite(file_path, image, [cv2.IMWRITE_JPEG_QUALITY, 100])
-                elif file_extension in [".tif", ".tiff"]:
-                    cv2.imwrite(file_path, image)
-                elif file_extension == ".png":
-                    cv2.imwrite(file_path, image, [cv2.IMWRITE_PNG_COMPRESSION, 5])
-
-                QMessageBox.information(self, "Success", f"Image saved successfully as {file_path}.")
-                os.remove(latest_image_path)  # Hapus gambar asli setelah disimpan
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to save image: {e}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", language_config.UI_FAILED_TO_SAVE_IMAGE_BATCH.format(e))
 
     def update_progress_bar(self, value, images_left):
         """Memperbarui progress bar dan menampilkan jumlah gambar yang tersisa."""

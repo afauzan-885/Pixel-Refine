@@ -8,9 +8,14 @@ HDR_SIDEBAR_LABEL= "Rekontruksi HDR"
 # Main Content
 TOPBAR_SINGLE_IMPORT_BUTTON_TEXT = "Impor Gambar"
 TOPBAR_SINGLE_DELETE_BUTTON_TEXT = "Hapus Gambar"
+
 TOPBAR_BATCH_IMPORT_BUTTON_TEXT = "Buat Batch"
 TOPBAR_BATCH_DELETE_BUTTON_TEXT = "Hapus Batch"
 
+TOPBAR_BATCH_START_PROCESS_BUTTON_TEXT = "Proses Batch"
+TOPBAR_BATCH_SAVE_BUTTON_TEXT = "Simpan Ke"
+
+NO_DATA_BATCH = "Tidak ada batch yang tersimpan."
 BATCH_DELETE_LABEL = "Konfirmasi Hapus Batch", "Apakah Anda yakin ingin menghapus batch {}?"
 LOADING_THUMBNAIL = "Memuat...."
 ADD_IMAGE_BUTTON = "Tambah"
@@ -28,6 +33,17 @@ PARAMETER_BATCH_ALIGNMENT_TO_PROCESS = "Simpan Hasil Penyelarasan untuk proses S
 TITLE_BATCH_ALL_DELETE_BUTTON = "Hapus Semua Batch"
 CONFIRM_BATCH_ALL_DELETE_BUTTON = "Anda yakin ingin menghapus {} batch?"
 NO_DATA_BATCH_ALL_DELETE_BUTTON = "Tidak ada data batch yang tersimpan."
+
+UI_LABEL_BATCH_NO_PROCESS = "Tidak ada batch yang diproses!"
+UI_LABEL_BATCH_SUCCES = "Semua batch telah diproses!"
+UI_LABEL_BATCH_PROCESS = "Memproses {} batch..."
+UI_LABEL_BATCH_PROGRESS = "{}/{} batch telah diproses..."
+UI_FAILED_TO_SAVE_IMAGE_BATCH = "Gagal menyimpan gambar: {}"
+UI_SUCCES_TO_SAVE_IMAGE_BATCH = "Gambar berhasil disimpan: {}"
+UI_NO_IMAGE_TO_SAVE_IMAGE_BATCH = "Gambar Tidak ada"
+UI_SYSTEM_FOLDER_WRONG_TO_SAVE_IMAGE_BATCH = "Folder sistem (database/stack) tidak ada"
+
+CONSOL_LOG_RUNNING_ALGORITHM = "Proses {} dipilih, algoritma: {}"
 
 PROGRESS_SECTION_PROCESS_BUTTON_TEXT = "Mulai Proses"
 PROGRESS_SECTION_SAVE_BUTTON_TEXT = "Simpan Sebagai"

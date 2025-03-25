@@ -7,8 +7,14 @@ HDR_SIDEBAR_LABEL= "HDR Reconstruction"
 
 TOPBAR_SINGLE_IMPORT_BUTTON_TEXT = "Import Image"
 TOPBAR_SINGLE_DELETE_BUTTON_TEXT = "Delete Image"
+
 TOPBAR_BATCH_IMPORT_BUTTON_TEXT = "Create Batch"
 TOPBAR_BATCH_DELETE_BUTTON_TEXT = "Delete Batch"
+
+TOPBAR_BATCH_START_PROCESS_BUTTON_TEXT = "Batch Process"
+TOPBAR_BATCH_SAVE_BUTTON_TEXT = "Save To"
+
+NO_DATA_BATCH = "No batch data available."
 
 BATCH_DELETE_LABEL = "Confirm Batch Delete", "Are you sure you want to delete batch {}?"
 LOADING_THUMBNAIL = "Loading...."
@@ -27,6 +33,17 @@ PARAMETER_BATCH_ALIGNMENT_TO_PROCESS = "Save Alignment Result for Next process"
 TITLE_BATCH_ALL_DELETE_BUTTON = "Delete All Batches"
 CONFIRM_BATCH_ALL_DELETE_BUTTON = "Are you sure you want to delete all batch data?"
 NO_DATA_BATCH_ALL_DELETE_BUTTON = "There is no batch data stored."
+
+UI_LABEL_BATCH_NO_PROCESS = "No batches to process!"
+UI_LABEL_BATCH_SUCCES = "All batches have been processed!"
+UI_LABEL_BATCH_PROCESS = "Processing {} batch..."
+UI_LABEL_BATCH_PROGRESS = "{}/{} batches have been processed..."
+UI_FAILED_TO_SAVE_IMAGE_BATCH = "Failed to save image: {}"
+UI_SUCCES_TO_SAVE_IMAGE_BATCH = "Image successfully saved: {}"
+UI_NO_IMAGE_TO_SAVE_IMAGE_BATCH = "Image does not exist"
+UI_SYSTEM_FOLDER_WRONG_TO_SAVE_IMAGE_BATCH = "System folder (database/stack) does not exist"
+
+CONSOL_LOG_RUNNING_ALGORITHM = "Process {} selected, algorithm: {}"
 
 # Enhance Stack Page
 TOPBAR_SINGLE_IMPORT_BUTTON_TEXT = "Import Image"
