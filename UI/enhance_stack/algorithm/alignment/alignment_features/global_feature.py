@@ -88,18 +88,19 @@ def save_align_to_folder(image, index, original_path, align_folder=None, load_co
     base_name = os.path.splitext(os.path.basename(original_path))[0]
     file_path = os.path.join(align_folder, f"{base_name}_align.tiff")
 
-    # Simpan gambar dengan OpenCV dengan kompresi TIFF minimal
-    cv2.imwrite(file_path, image, [cv2.IMWRITE_TIFF_COMPRESSION, 1])
+    # Simpan gambar dengan OpenCV tanpa kompresi
+    cv2.imwrite(file_path, image)
     
     # multithreading untuk menjalankan exiftool
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        num_threads = os.cpu_count() or 4  # Default to 4 if os.cpu_count() returns None
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
             future = executor.submit(
-                subprocess.run,
-                ["exiftool", "-overwrite_original", "-TagsFromFile", original_path, file_path],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+            subprocess.run,
+            ["exiftool", "-overwrite_original", "-TagsFromFile", original_path, file_path],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
             )
             # Tunggu hingga proses selesai
             future.result()

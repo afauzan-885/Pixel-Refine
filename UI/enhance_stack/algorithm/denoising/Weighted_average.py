@@ -112,18 +112,18 @@ class WeightedAverageAlgorithm:
         window = np.outer(y, x)
         return window
     
-    def weighted_average(self, images, tile_size=(64, 64), overlap=0.3,
-                     motion_threshold=0.0007, update_progress=None, stop_requested=None,
+    def weighted_average(self, images, tile_size=(32, 32), overlap=0.3,
+                     motion_threshold=0.0004, update_progress=None, stop_requested=None,
                      lib_path='UI/data/weighted_average_motion.dll'):
         """
         Fungsi untuk menghitung multi-frame noise reduction dengan referensi citra pertama.
         """
         if not images:
-            raise ValueError("Gagal memuat citra referensi.")
+            raise ValueError(language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
 
         dtype = images[0].dtype
         if dtype not in (np.uint8, np.uint16):
-            raise TypeError("Tipe citra harus uint8 atau uint16.")
+            raise TypeError(language_config.SIMILARITY_MNFR_BIT_REQUIRED)
 
         # Normalisasi citra referensi
         reference_image = self.normalize_image(images[0], dtype)
