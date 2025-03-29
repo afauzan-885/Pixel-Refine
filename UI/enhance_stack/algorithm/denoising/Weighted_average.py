@@ -112,7 +112,7 @@ class WeightedAverageAlgorithm:
         window = np.outer(y, x)
         return window
     
-    def weighted_average(self, images, tile_size=(32, 32), overlap=0.3,
+    def weighted_average(self, images, tile_size=(32, 32), overlap=0.50,
                      motion_threshold=0.0004, update_progress=None, stop_requested=None,
                      lib_path='UI/data/weighted_average_motion.dll'):
         """

@@ -5,60 +5,78 @@
 #include <immintrin.h>  // Header untuk SIMD (AVX, SSE)
 
 extern "C" {
-
-// Fungsi compute_motion_metrics
-void compute_motion_metrics(const float* current_tile, const float* reference_tile,
-                            int tile_h, int tile_w, int channels, int row_stride,
-                            float prev_threshold, float motion_threshold, float noise_threshold,
-                            float alpha, int max_passes, float epsilon,
-                            float* similarity_weight, float* adaptive_threshold_out) {
-    int n = tile_h * tile_w * channels;
-    double s = 0.0;
-    double sum_diff = 0.0;
-
-    #pragma omp parallel for simd reduction(+:s, sum_diff) schedule(static)
-    for (int idx = 0; idx < tile_h * tile_w; idx++) {
-        int i = idx / tile_w;
-        int j = idx % tile_w;
-        int base = i * row_stride + j * channels;
-
-        for (int k = 0; k < channels; k += 4) {
-            __m128 current = _mm_loadu_ps(&current_tile[base + k]);
-            __m128 reference = _mm_loadu_ps(&reference_tile[base + k]);
-            __m128 diff = _mm_sub_ps(current, reference);
-            __m128 diff_sq = _mm_mul_ps(diff, diff);
-
-            s += diff_sq[0] + diff_sq[1] + diff_sq[2] + diff_sq[3];
-            sum_diff += diff[0] + diff[1] + diff[2] + diff[3];
-        }
-    }
-
-
-    float mse_score = static_cast<float>(s / n);
-    float mean_diff = static_cast<float>(sum_diff / n);
-    float variance = mse_score - mean_diff * mean_diff;
-    if (variance < 0.0f) 
-        variance = 0.0f;
-    float sigma_noise = std::sqrt(variance);
+    void compute_motion_metrics(const float* current_tile, const float* reference_tile,
+                                int tile_h, int tile_w, int channels, int row_stride,
+                                float prev_threshold, float motion_threshold, float noise_threshold,
+                                float alpha, int max_passes, float epsilon,
+                                float* similarity_weight, float* adaptive_threshold_out) {
+        int n = tile_h * tile_w * channels;
+        double s = 0.0;
+        double sum_diff = 0.0;
+        double s_spatial = 0.0;  // Untuk akumulasi perbedaan spasial
     
-    float dz = mse_score;
-    float dz_norm = dz / (1.0f + sigma_noise);
-    float new_threshold = motion_threshold + noise_threshold * dz_norm;
-    float adaptive_threshold = alpha * prev_threshold + (1.0f - alpha) * new_threshold;
-
-    for (int pass = 0; pass < max_passes; pass++) {
-        float prev_value = adaptive_threshold;
-        adaptive_threshold = alpha * prev_value + (1.0f - alpha) *
-                             (motion_threshold + noise_threshold * (dz / (1.0f + dz / prev_value)));
-        if (std::fabs(adaptive_threshold - prev_value) < epsilon) {
-            break;
+        #pragma omp parallel for simd reduction(+:s, sum_diff, s_spatial) schedule(static)
+        for (int idx = 0; idx < tile_h * tile_w; idx++) {
+            int i = idx / tile_w;
+            int j = idx % tile_w;
+            int base = i * row_stride + j * channels;
+    
+            for (int k = 0; k < channels; k += 4) {
+                // Load current & reference pixel
+                __m128 current = _mm_loadu_ps(&current_tile[base + k]);
+                __m128 reference = _mm_loadu_ps(&reference_tile[base + k]);
+                __m128 diff = _mm_sub_ps(current, reference);
+                __m128 diff_sq = _mm_mul_ps(diff, diff);
+    
+                // Perbedaan langsung
+                s += diff_sq[0] + diff_sq[1] + diff_sq[2] + diff_sq[3];
+                sum_diff += diff[0] + diff[1] + diff[2] + diff[3];
+    
+                // Perbedaan Spasial (Horizontal)
+                if (j < tile_w - 1) {  
+                    __m128 next_pixel = _mm_loadu_ps(&current_tile[base + k + channels]); // Piksel sebelah kanan
+                    __m128 diff_x = _mm_sub_ps(current, next_pixel);
+                    __m128 diff_x_sq = _mm_mul_ps(diff_x, diff_x);
+                    s_spatial += diff_x_sq[0] + diff_x_sq[1] + diff_x_sq[2] + diff_x_sq[3];
+                }
+    
+                // Perbedaan Spasial (Vertikal)
+                if (i < tile_h - 1) {  
+                    __m128 below_pixel = _mm_loadu_ps(&current_tile[base + k + row_stride]); // Piksel di bawah
+                    __m128 diff_y = _mm_sub_ps(current, below_pixel);
+                    __m128 diff_y_sq = _mm_mul_ps(diff_y, diff_y);
+                    s_spatial += diff_y_sq[0] + diff_y_sq[1] + diff_y_sq[2] + diff_y_sq[3];
+                }
+            }
         }
+    
+        // Gabungkan dengan bobot spasial
+        float mse_score = static_cast<float>((s + s_spatial) / (2.0f * n));
+        float mean_diff = static_cast<float>(sum_diff / n);
+        float variance = mse_score - mean_diff * mean_diff;
+        if (variance < 0.0f) 
+            variance = 0.0f;
+        float sigma_noise = std::sqrt(variance);
+        
+        float dz = mse_score;
+        float dz_norm = dz / (1.0f + sigma_noise);
+        float new_threshold = motion_threshold + noise_threshold * dz_norm;
+        float adaptive_threshold = alpha * prev_threshold + (1.0f - alpha) * new_threshold;
+    
+        for (int pass = 0; pass < max_passes; pass++) {
+            float prev_value = adaptive_threshold;
+            adaptive_threshold = alpha * prev_value + (1.0f - alpha) *
+                                 (motion_threshold + noise_threshold * (dz / (1.0f + dz / prev_value)));
+            if (std::fabs(adaptive_threshold - prev_value) < epsilon) {
+                break;
+            }
+        }
+    
+        float sim_weight = std::exp(-dz / (adaptive_threshold + epsilon));
+        *similarity_weight = sim_weight;
+        *adaptive_threshold_out = adaptive_threshold;
     }
-
-    float sim_weight = std::exp(-dz / (adaptive_threshold + epsilon));
-    *similarity_weight = sim_weight;
-    *adaptive_threshold_out = adaptive_threshold;
-}
+    
 
 // Fungsi accumulate_tiles_jit
 void accumulate_tiles_jit(float* final_image, float* weight_map,

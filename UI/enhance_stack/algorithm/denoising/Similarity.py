@@ -112,8 +112,8 @@ class SimilarityAlgorithm:
         window = np.outer(y, x)
         return window.astype(np.float32)
 
-    def similarity_mfnr(self, images, tile_size=(24, 24), overlap=0.30,
-                    motion_threshold=0.003, noise_threshold=0.003,
+    def similarity_mfnr(self, images, tile_size=(24, 24), overlap=0.35,
+                    motion_threshold=0.004, noise_threshold=0.004,
                     update_progress=None, stop_requested=None,
                     lib_path='UI/data/similarity_motion.dll'):
         """
@@ -137,9 +137,16 @@ class SimilarityAlgorithm:
         row_starts = list(range(0, h - tile_size[0] + 1, step_y))
         if row_starts[-1] != h - tile_size[0]:
             row_starts.append(h - tile_size[0])
-        col_starts = list(range(0, w - tile_size[1] + 1, step_x))
-        if col_starts[-1] != w - tile_size[1]:
-            col_starts.append(w - tile_size[1])
+        
+        col_starts_list = []
+        for i, _ in enumerate(row_starts):
+            if i % 2 == 0:
+                col_starts = list(range(0, w - tile_size[1] + 1, step_x))
+            else:
+                col_starts = list(range(tile_size[1] // 2, w - tile_size[1] + 1, step_x))
+            if col_starts[-1] != w - tile_size[1]:
+                col_starts.append(w - tile_size[1])
+            col_starts_list.append(col_starts)
 
         base_window = self.raised_cosine_window(tile_size)
 
@@ -176,12 +183,12 @@ class SimilarityAlgorithm:
                 tile_size[0], tile_size[1],
                 h, w, channels,
                 motion_threshold, noise_threshold, scale,
-                0.8, 50, 1e-3,
+                0.8, 50, 1e-12,
                 lib_path
             )
 
         # Normalisasi dan kliping hasil akhir
-        final_image /= (weight_map[..., np.newaxis] + 1e-3)
+        final_image /= (weight_map[..., np.newaxis] + 1e-12)
         final_image = np.clip(final_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype, copy=False)
 
         return final_image
