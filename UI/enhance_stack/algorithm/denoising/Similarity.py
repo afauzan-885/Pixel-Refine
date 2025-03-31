@@ -1,4 +1,4 @@
-import subprocess
+from functools import lru_cache
 import cv2
 import numpy as np
 import sqlite3
@@ -105,55 +105,47 @@ class SimilarityAlgorithm:
                 images.append(image)
         return images
     
-    def raised_cosine_window(self, tile_size):
-        """Membuat raised cosine window untuk blending."""
-        y = np.hanning(tile_size[0])
-        x = np.hanning(tile_size[1])
-        window = np.outer(y, x)
-        return window.astype(np.float32)
+    @lru_cache(maxsize=None)
+    def gaussian_window(self, tile_size):
+        """Membuat Gaussian 2D window untuk blending."""
+        y, x = np.indices(tile_size)
+        center_y, center_x = (tile_size[0] - 1) / 2, (tile_size[1] - 1) / 2
+        sigma_y, sigma_x = tile_size[0] / 4, tile_size[1] / 4
+        window = np.exp(-(((y - center_y) ** 2) / (2 * sigma_y ** 2) + ((x - center_x) ** 2) / (2 * sigma_x ** 2)))
+        return window.astype(np.float32) / window.max()  # Normalisasi
 
-    def similarity_mfnr(self, images, tile_size=(24, 24), overlap=0.35,
-                    motion_threshold=0.004, noise_threshold=0.004,
-                    update_progress=None, stop_requested=None,
+    def similarity_mfnr(self, images, tile_size=(24, 24), overlap=0.40,
+                    motion_threshold=0.0025, noise_threshold=0.003,
+                    update_progress=None, stop_requested=None, apply_blur= False,
                     lib_path='UI/data/similarity_motion.dll'):
         """
         Fungsi untuk menghitung multi-frame noise reduction dengan referensi citra pertama.
         """
         if not images:
-            raise ValueError(language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
+            raise ValueError("No images provided")
 
         dtype = images[0].dtype
         if dtype not in (np.uint8, np.uint16):
-            raise TypeError(language_config.SIMILARITY_MNFR_BIT_REQUIRED)
+            raise TypeError("Images must be 8-bit or 16-bit")
 
-        # Normalisasi citra referensi
-        reference_image = self.normalize_image(images[0], dtype)
+        reference_image = self.normalize_image(images[0], dtype).astype(np.float32)
         h, w, channels = reference_image.shape
 
-        # Menghitung step berdasarkan overlap dan ukuran tile
         step_y = max(int(tile_size[0] * (1 - overlap)), 1)
         step_x = max(int(tile_size[1] * (1 - overlap)), 1)
 
-        row_starts = list(range(0, h - tile_size[0] + 1, step_y))
+        row_starts = np.arange(0, h - tile_size[0] + 1, step_y)
         if row_starts[-1] != h - tile_size[0]:
-            row_starts.append(h - tile_size[0])
+            row_starts = np.append(row_starts, h - tile_size[0])
         
-        col_starts_list = []
-        for i, _ in enumerate(row_starts):
-            if i % 2 == 0:
-                col_starts = list(range(0, w - tile_size[1] + 1, step_x))
-            else:
-                col_starts = list(range(tile_size[1] // 2, w - tile_size[1] + 1, step_x))
-            if col_starts[-1] != w - tile_size[1]:
-                col_starts.append(w - tile_size[1])
-            col_starts_list.append(col_starts)
+        col_starts = np.arange(0, w - tile_size[1] + 1, step_x)
+        if col_starts[-1] != w - tile_size[1]:
+            col_starts = np.append(col_starts, w - tile_size[1])
 
-        base_window = self.raised_cosine_window(tile_size)
-
+        base_window = self.gaussian_window(tile_size)
         final_image = np.zeros_like(reference_image, dtype=np.float32)
         weight_map = np.zeros((h, w), dtype=np.float32)
 
-        # Konversi scale ke float32
         scale = np.float32(np.iinfo(dtype).max)
         num_images = len(images)
 
@@ -166,15 +158,13 @@ class SimilarityAlgorithm:
             if stop_requested and stop_requested():
                 break
 
-            current_image = self.normalize_image(image, dtype)
+            current_image = self.normalize_image(image, dtype).astype(np.float32)
             if current_image.shape != reference_image.shape:
                 raise ValueError(f"Image size {i+1} does not match.")
 
-            # Konversi row dan col starts ke numpy array
             row_starts_arr = np.array(row_starts, dtype=np.int32)
             col_starts_arr = np.array(col_starts, dtype=np.int32)
 
-            # Panggil fungsi dari library C++
             call_similarity_motion(
                 final_image, weight_map,
                 current_image, reference_image,
@@ -187,9 +177,23 @@ class SimilarityAlgorithm:
                 lib_path
             )
 
-        # Normalisasi dan kliping hasil akhir
         final_image /= (weight_map[..., np.newaxis] + 1e-12)
-        final_image = np.clip(final_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype, copy=False)
+
+        if apply_blur:  # Ubah True/False untuk mengaktifkan proses ini
+            blurred_image = cv2.GaussianBlur(final_image, (3, 3), 0)
+            mask = np.zeros((h, w), dtype=np.float32)
+            # border_width = max(1, int(min(tile_size) / 8))
+            
+            for i, y in enumerate(row_starts):
+                for x in col_starts:
+                    tile = current_image[y:y + tile_size[0], x:x + tile_size[1]]
+                    np.add.at(final_image, (slice(y, y + tile_size[0]), slice(x, x + tile_size[1])), tile * base_window[..., np.newaxis])
+                    np.add.at(weight_map, (slice(y, y + tile_size[0]), slice(x, x + tile_size[1])), base_window)
+            
+            final_image = final_image * (1 - mask[..., np.newaxis]) + blurred_image * (mask[..., np.newaxis])
+
+        if dtype in (np.uint8, np.uint16):
+            final_image = np.clip(final_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype, copy=False)
 
         return final_image
 
