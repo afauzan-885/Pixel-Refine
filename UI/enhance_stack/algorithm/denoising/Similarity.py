@@ -8,7 +8,7 @@ import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 # from UI.enhance_stack.algorithm.denoising.extra_similarity.compute_motion_metrics_aot import accumulate_tiles_jit
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, save_image  
-from UI.enhance_stack.algorithm.denoising.extra_similarity.extra_algorithm import call_similarity_motion
+from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import call_similarity_motion
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
 
@@ -106,27 +106,27 @@ class SimilarityAlgorithm:
         return images
     
     @lru_cache(maxsize=None)
-    def gaussian_window(self, tile_size):
-        """Membuat Gaussian 2D window untuk blending."""
-        y, x = np.indices(tile_size)
-        center_y, center_x = (tile_size[0] - 1) / 2, (tile_size[1] - 1) / 2
-        sigma_y, sigma_x = tile_size[0] / 4, tile_size[1] / 4
-        window = np.exp(-(((y - center_y) ** 2) / (2 * sigma_y ** 2) + ((x - center_x) ** 2) / (2 * sigma_x ** 2)))
-        return window.astype(np.float32) / window.max()  # Normalisasi
+    def gaussian_window(self, size, sigma_factor=0.3):
+        """Membuat jendela Gaussian."""
+        size_y, size_x = size
+        sigma_y = (size_y / 2) * sigma_factor
+        sigma_x = (size_x / 2) * sigma_factor
+        y, x = np.mgrid[-size_y//2 + 1:size_y//2 + 1, -size_x//2 + 1:size_x//2 + 1]
+        g = np.exp(-((x**2 / (2.0 * sigma_x**2)) + (y**2 / (2.0 * sigma_y**2))))
+        return g / g.sum()
 
-    def similarity_mfnr(self, images, tile_size=(24, 24), overlap=0.40,
-                    motion_threshold=0.0025, noise_threshold=0.003,
-                    update_progress=None, stop_requested=None, apply_blur= False,
-                    lib_path='UI/data/similarity_motion.dll'):
+    def similarity_mfnr(self, images, tile_size=(16, 16), overlap=0.4,
+                    motion_threshold=0.13, update_progress=None, stop_requested=None, 
+                    apply_blur= False, lib_path='UI/data/similarity_motion.dll'):
         """
         Fungsi untuk menghitung multi-frame noise reduction dengan referensi citra pertama.
         """
         if not images:
-            raise ValueError("No images provided")
+            raise ValueError(language_config.RUN_IMAGE_NOT_FOUND)
 
         dtype = images[0].dtype
         if dtype not in (np.uint8, np.uint16):
-            raise TypeError("Images must be 8-bit or 16-bit")
+            raise TypeError(language_config.SIMILARITY_MNFR_BIT_REQUIRED)
 
         reference_image = self.normalize_image(images[0], dtype).astype(np.float32)
         h, w, channels = reference_image.shape
@@ -141,8 +141,16 @@ class SimilarityAlgorithm:
         col_starts = np.arange(0, w - tile_size[1] + 1, step_x)
         if col_starts[-1] != w - tile_size[1]:
             col_starts = np.append(col_starts, w - tile_size[1])
+            
+        
+        blend_size = (int(tile_size[0] * 1.5), int(tile_size[1] * 1.5))
+        base_window_large = self.gaussian_window(blend_size)
 
-        base_window = self.gaussian_window(tile_size)
+        # Ambil bagian tengah dari window yang lebih besar agar sesuai dengan ukuran tile
+        start_y = (blend_size[0] - tile_size[0]) // 2
+        start_x = (blend_size[1] - tile_size[1]) // 2
+        base_window = base_window_large[start_y:start_y + tile_size[0], start_x:start_x + tile_size[1]]
+        
         final_image = np.zeros_like(reference_image, dtype=np.float32)
         weight_map = np.zeros((h, w), dtype=np.float32)
 
@@ -168,16 +176,14 @@ class SimilarityAlgorithm:
             call_similarity_motion(
                 final_image, weight_map,
                 current_image, reference_image,
-                base_window,
-                row_starts_arr, col_starts_arr,
-                tile_size[0], tile_size[1],
+                base_window, row_starts_arr, col_starts_arr,
+                tile_size[0], tile_size[1],  # Menggunakan tile_size
                 h, w, channels,
-                motion_threshold, noise_threshold, scale,
-                0.8, 50, 1e-12,
+                motion_threshold, scale, 1e-12,
                 lib_path
             )
 
-        final_image /= (weight_map[..., np.newaxis] + 1e-12)
+        # final_image /= (weight_map[..., np.newaxis] + 1e-12)
 
         if apply_blur:  # Ubah True/False untuk mengaktifkan proses ini
             blurred_image = cv2.GaussianBlur(final_image, (3, 3), 0)

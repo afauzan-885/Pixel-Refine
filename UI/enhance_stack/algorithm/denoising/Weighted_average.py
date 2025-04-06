@@ -9,7 +9,7 @@ import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, load_images_from_paths, save_image
-from UI.enhance_stack.algorithm.denoising.extra_similarity.extra_algorithm import call_weighted_average_motion
+from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import call_weighted_average_motion
 from UI.settings.General.Language import language_config
 
 class ThreadWorker(QThread):
