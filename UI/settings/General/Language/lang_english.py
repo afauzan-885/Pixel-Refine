@@ -427,6 +427,10 @@ Inspired by:
 Monod, Antoine, Delon, Julie, & Veit, Thomas. (2021). An Analysis and Implementation of the HDR+ Burst Denoising Method.
 Image Processing On Line, 11, 142-169. https://doi.org/10.5201/ipol.2021.336
 """
+
+MOTION_FLOW_DESCRIPTION = """Combined with optical flow in calculating object movement,
+noise reduction becomes more intelligent in distinguishing noise and real movement.
+Very robust in complex motion but slower than other methods"""
                         
                         
 # ------------------ General Settings ------------------ #

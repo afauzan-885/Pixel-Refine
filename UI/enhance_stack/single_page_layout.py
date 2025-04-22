@@ -12,6 +12,7 @@ from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import running_
 from UI.enhance_stack.algorithm.alignment.ORB import running_orb
 from UI.enhance_stack.algorithm.denoising.Average import running_average
 from UI.enhance_stack.algorithm.denoising.Median import running_median
+from UI.enhance_stack.algorithm.denoising.Motion_Flow import running_motion_flow
 from UI.enhance_stack.algorithm.denoising.Similarity import running_similarity
 from UI.enhance_stack.algorithm.denoising.Weighted_average import running_weighted_average
 from UI.enhance_stack.algorithm.super_resolution.Interpolation import running_interpolation
@@ -257,7 +258,10 @@ class SinglePageLayout(QWidget):
                 running_weighted_average(self, single_process=True)
                 denoising_executed = True
             elif denoising_choice == "Similarity":
-               running_similarity(self, single_process=True)
+                running_similarity(self, single_process=True)
+                denoising_executed = True
+            elif denoising_choice == "Motion Flow":
+               running_motion_flow(self, single_process=True)
                denoising_executed = True
             elif denoising_choice == "none":
                 return 

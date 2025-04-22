@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 import gc
+import time
 import exifread
 import json
 import subprocess
@@ -114,101 +115,278 @@ class ORBAlgorithm:
             return default_config  # Gunakan default jika file tidak ditemukan atau ada error
 
 
-    def calculate_global_motion(self, base_image, target_image, stop_requested=None):
+    def calculate_global_motion(self, base_image, target_image, config_filename=None, stop_requested=None):
         """
-        Menghitung keypoints dan deskriptor menggunakan ORB antara dua gambar.
+        Menghitung keypoints/deskriptor menggunakan ORB dengan preprocessing CLAHE,
+        dan matching KNN + Ratio Test. Tidak menggunakan paralelisasi blok.
         """
         if stop_requested and stop_requested():
             return None, None
 
-        # Baca konfigurasi ORB
-        orb_config = self.load_orb_config()
+        start_time = time.time()
+        
+        # Baca konfigurasi ORB (termasuk parameter CLAHE & ratio test)
+        orb_config = self.load_orb_config(config_filename)
 
-        # Konversi gambar 16-bit ke 8-bit
-        base_image_8bit = cv2.normalize(base_image, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
-        target_image_8bit = cv2.normalize(target_image, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+        # --- Konversi gambar ke grayscale 8-bit (penting untuk ORB & CLAHE) ---
+        try:
+            if base_image.ndim == 3 and base_image.shape[2] == 3:
+                base_gray_8bit = cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY)
+            elif base_image.ndim == 2:
+                base_gray_8bit = base_image
+            else:
+                raise ValueError("Base image has unsupported channels")
+            # Konversi tipe ke uint8 jika belum
+            if base_gray_8bit.dtype != np.uint8:
+                 # Normalisasi MINMAX adalah cara umum untuk konversi 16bit->8bit
+                 base_gray_8bit = cv2.normalize(base_gray_8bit, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
 
-        # Inisialisasi ORB dengan parameter dari konfigurasi
-        orb = cv2.ORB_create(
-            nfeatures=orb_config["nfeatures"],
-            scaleFactor=orb_config["scaleFactor"],
-            nlevels=orb_config["nlevels"]
-        )
 
-        keypoints_base, descriptors_base = orb.detectAndCompute(base_image_8bit, None)
-        keypoints_target, descriptors_target = orb.detectAndCompute(target_image_8bit, None)
+            if target_image.ndim == 3 and target_image.shape[2] == 3:
+                target_gray_8bit = cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY)
+            elif target_image.ndim == 2:
+                target_gray_8bit = target_image
+            else:
+                 raise ValueError("Target image has unsupported channels")
+            if target_gray_8bit.dtype != np.uint8:
+                 target_gray_8bit = cv2.normalize(target_gray_8bit, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
 
-        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-        matches = bf.match(descriptors_base, descriptors_target)
-        matches = sorted(matches, key=lambda x: x.distance)
-        base_points = np.float32([keypoints_base[m.queryIdx].pt for m in matches])
-        target_points = np.float32([keypoints_target[m.trainIdx].pt for m in matches])
+        except Exception as e:
+            return None, None
+        # -----------------------------------------------------------------
 
-        return base_points, target_points
+        # --- Preprocessing: Terapkan CLAHE ---
+        try:
+            clip_limit = orb_config.get("clahe_clipLimit", 2.0)
+            grid_size = tuple(orb_config.get("clahe_tileGridSize", (8, 8)))
+            clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=grid_size)
+            base_gray_enhanced = clahe.apply(base_gray_8bit)
+            target_gray_enhanced = clahe.apply(target_gray_8bit)
+        except Exception as e:
+            base_gray_enhanced = base_gray_8bit # Fallback
+            target_gray_enhanced = target_gray_8bit
+        # -------------------------------------
+
+        # --- Inisialisasi ORB ---
+        try:
+            orb = cv2.ORB_create(
+                nfeatures=orb_config.get("nfeatures", 1000), # Default lebih tinggi
+                scaleFactor=orb_config.get("scaleFactor", 1.2),
+                nlevels=orb_config.get("nlevels", 8),
+                # Parameter lain bisa ditambahkan jika perlu (edgeThreshold, patchSize, dll)
+                scoreType=cv2.ORB_HARRIS_SCORE # Coba HARRIS score untuk kualitas keypoint lebih baik
+            )
+        except Exception as e:
+            return None, None
+        # ------------------------
+
+        # --- Deteksi dan Komputasi Fitur ---
+        try:
+            keypoints_base, descriptors_base = orb.detectAndCompute(base_gray_enhanced, None)
+            keypoints_target, descriptors_target = orb.detectAndCompute(target_gray_enhanced, None)
+        except Exception as e:
+             return None, None
+        # ---------------------------------
+
+        # --- Matching: KNN + Ratio Test ---
+        base_points = None
+        target_points = None
+        if descriptors_base is not None and descriptors_target is not None and \
+           len(descriptors_base) > 0 and len(descriptors_target) > 0:
+            try:
+                bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False) # crossCheck=False untuk knnMatch
+                # Pastikan k <= jumlah deskriptor target
+                k_val = min(2, len(descriptors_target))
+
+                if k_val < 2:
+                     print("Warning: Less than 2 target descriptors, cannot perform KNN ratio test. Falling back to simple match.")
+                     # Lakukan pencocokan tunggal jika k=1
+                     matches_raw = bf.match(descriptors_base, descriptors_target)
+                     # Anggap semua match ini 'good' dalam kasus ini
+                     good_matches = matches_raw
+                else:
+                    matches_raw = bf.knnMatch(descriptors_base, descriptors_target, k=k_val)
+                    good_matches = []
+                    ratio_thresh = orb_config.get("ratio_threshold", 0.75)
+                    for match_pair in matches_raw:
+                        # Harus selalu cek len karena knnMatch bisa mengembalikan < k hasil dekat batas gambar
+                        if len(match_pair) == 2:
+                            m, n = match_pair
+                            if m.distance < ratio_thresh * n.distance:
+                                good_matches.append(m)
+
+                
+                # --- Ekstrak titik-titik yang cocok ---
+                min_matches_req = orb_config.get("min_matches_for_transform", 10) # Ambil dari config
+                if len(good_matches) >= min_matches_req: # Gunakan threshold dari config
+                    try:
+                        base_points = np.float32([keypoints_base[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+                        target_points = np.float32([keypoints_target[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+                    except IndexError as e:
+                        # Set points ke None jika gagal
+                        base_points = None
+                        target_points = None
+                    except Exception as e:
+                        base_points = None
+                        target_points = None
+                else:
+                    print(f"Not enough good matches found ({len(good_matches)} < {min_matches_req}).")
+                    # points tetap None
+
+            except Exception as e:
+                # Pastikan points None jika error
+                base_points = None
+                target_points = None
+        else:
+            print("Not enough descriptors found in one or both images to perform matching.")
+        # ----------------------------------
+
+        end_time = time.time()
+        print(f"calculate_global_motion finished in {end_time - start_time:.2f} seconds.")
+
+        # Kembalikan None, None jika points tidak berhasil diekstrak
+        if base_points is None or target_points is None:
+            return None, None
+        else:
+            return base_points, target_points
 
     def compensate_motion(self, base_image, base_points, target_points, config_filename=None):
         """
-        Menerapkan kompensasi gerakan menggunakan transformasi untuk menyelaraskan gambar.
+        Menerapkan kompensasi gerakan menggunakan transformasi (dengan USAC_MAGSAC)
+        untuk menyelaraskan gambar.
         """
-        config = self.load_orb_config(config_filename)
-        keep_edges = config["keep_edges"]
-        transformation_type = config["transformation"]
-        ransac_threshold = config["ransacThreshold"]
+        # Pastikan base_points dan target_points tidak None sebelum melanjutkan
+        if base_points is None or target_points is None:
+             # Mungkin kembalikan base_image asli atau raise error?
+             # Mengembalikan None agar pemanggil tahu proses gagal.
+             return None
 
+        config = self.load_orb_config(config_filename) # Gunakan config ORB
+        keep_edges = config.get("keep_edges", False)
+        transformation_type = config.get("transformation", "affine")
+        ransac_threshold = config.get("ransacThreshold", 5.0)
+
+        # --- Cek input shape ---
+        if base_image is None or base_image.ndim < 2:
+             print("Error: Invalid base_image for compensation.")
+             return None
         h, w = base_image.shape[:2]
+        if len(base_points) < 4 or len(target_points) < 4:
+             print(f"Error: Not enough points for transformation ({len(base_points)} base, {len(target_points)} target). Need at least 4.")
+             return None # Tidak bisa estimasi
+        # -----------------------
 
-        # Hitung matriks transformasi
-        if transformation_type == 'affine':
-            matrix, mask = cv2.estimateAffine2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=ransac_threshold)
-        elif transformation_type in ['similarity', 'euclidean']:
-            matrix, mask = cv2.estimateAffinePartial2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=ransac_threshold)
-        elif transformation_type == 'homography':
-            matrix, mask = cv2.findHomography(target_points, base_points, cv2.RANSAC, ransac_threshold)
-        else:
-            raise ValueError(language_config.UNRECOGNIZED_TRANSFORMATION)
-
-        # Pastikan matriks valid
-        if matrix is None:
-            raise ValueError(language_config.FAILED_TO_COMPUTE_TRANSFORMATION)
-
-        # Hitung batas pergeseran (terlepas dari keep_edges)
-        corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(-1, 1, 2)
-
-        if transformation_type == 'homography':
-            transformed_corners = cv2.perspectiveTransform(corners, matrix)
-        else:
-            transformed_corners = cv2.transform(corners, matrix)
-
-        transformed_corners = transformed_corners.reshape(-1, 2)
-        min_x, min_y = transformed_corners.min(axis=0)
-        max_x, max_y = transformed_corners.max(axis=0)
-
-        # Jika keep_edges = False, langsung terapkan transformasi tanpa padding
-        if not keep_edges:
-            if transformation_type == 'homography':
-                compensated_image = cv2.warpPerspective(base_image, matrix, (w, h), borderMode=cv2.BORDER_CONSTANT)
+        # --- Hitung matriks transformasi dengan USAC_MAGSAC ---
+        matrix = None
+        mask = None
+        try:
+            if transformation_type == 'affine':
+                # estimateAffine2D membutuhkan format (N, 2), bukan (N, 1, 2)
+                matrix, mask = cv2.estimateAffine2D(target_points.reshape(-1, 2), base_points.reshape(-1, 2),
+                                                     method=cv2.USAC_MAGSAC, ransacReprojThreshold=ransac_threshold)
+            elif transformation_type in ['similarity', 'euclidean']:
+                # estimateAffinePartial2D juga butuh (N, 2)
+                matrix, mask = cv2.estimateAffinePartial2D(target_points.reshape(-1, 2), base_points.reshape(-1, 2),
+                                                             method=cv2.USAC_MAGSAC, ransacReprojThreshold=ransac_threshold)
+            elif transformation_type == 'homography':
+                # findHomography butuh (N, 1, 2) atau (N, 2) - otomatis handle
+                matrix, mask = cv2.findHomography(target_points, base_points, cv2.USAC_MAGSAC, ransac_threshold)
             else:
-                compensated_image = cv2.warpAffine(base_image, matrix, (w, h), borderMode=cv2.BORDER_CONSTANT)
-            return compensated_image
+                # Gunakan language_config jika tersedia
+                error_msg = getattr(language_config, "UNRECOGNIZED_TRANSFORMATION", "Unrecognized transformation type.")
+                raise ValueError(error_msg)
 
-        # Jika keep_edges = True, tambahkan padding berdasarkan batas pergeseran
-        pad_x = max(0, int(np.ceil(max_x - w)))
-        pad_y = max(0, int(np.ceil(max_y - h)))
-        pad_left = max(0, int(np.ceil(-min_x))) 
-        pad_top = max(0, int(np.ceil(-min_y)))  
+            if matrix is None:
+                # Gunakan language_config jika tersedia
+                 error_msg = getattr(language_config, "FAILED_TO_COMPUTE_TRANSFORMATION", "Failed to compute transformation matrix (returned None).")
+                 print(error_msg) # Print sebagai warning/info
+                 return None # Gagal jika matrix None
 
-        pad = max(pad_x, pad_y, pad_left, pad_top)
+            # Hitung jumlah inlier (opsional, untuk logging)
+            num_inliers = np.sum(mask) if mask is not None else len(base_points) # Asumsikan semua inlier jika mask None
+            
+        except cv2.error as cv_err: # Tangkap error spesifik OpenCV (misal tidak cukup poin)
+             return None
+        except Exception as e:
+             return None
+        # -------------------------------------------------
 
-        padded_image = cv2.copyMakeBorder(base_image, pad, pad, pad, pad, cv2.BORDER_REFLECT)
+        # --- Hitung batas pergeseran (sama) ---
+        corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(-1, 1, 2)
+        try:
+            if transformation_type == 'homography':
+                # Cek matrix adalah 3x3
+                if matrix.shape != (3, 3):
+                     return None
+                transformed_corners = cv2.perspectiveTransform(corners, matrix)
+            else:
+                 # Cek matrix adalah 2x3
+                 if matrix.shape != (2, 3):
+                     return None
+                 transformed_corners = cv2.transform(corners, matrix)
 
-        if transformation_type == 'homography':
-            compensated_padded = cv2.warpPerspective(padded_image, matrix, (padded_image.shape[1], padded_image.shape[0]), borderMode=cv2.BORDER_REFLECT)
-        else:
-            compensated_padded = cv2.warpAffine(padded_image, matrix, (padded_image.shape[1], padded_image.shape[0]), borderMode=cv2.BORDER_REFLECT)
+            if transformed_corners is None: # Cek hasil transform
+                 return None
 
-        compensated_image = compensated_padded[pad:pad+h, pad:pad+w] if keep_edges else compensated_padded
+            transformed_corners = transformed_corners.reshape(-1, 2)
+            min_x, min_y = transformed_corners.min(axis=0)
+            max_x, max_y = transformed_corners.max(axis=0)
+        except Exception as e:
+             return None
+        # ------------------------------------
 
-        return compensated_image
+        # --- Warping ---
+        try:
+            # Jika keep_edges = False, langsung terapkan transformasi tanpa padding
+            if not keep_edges:
+                interpolation_flag = cv2.INTER_CUBIC # Pilihan Anda
+                if transformation_type == 'homography':
+                    compensated_image = cv2.warpPerspective(base_image, matrix, (w, h), flags=interpolation_flag, borderMode=cv2.BORDER_CONSTANT)
+                else:
+                    compensated_image = cv2.warpAffine(base_image, matrix, (w, h), flags=interpolation_flag, borderMode=cv2.BORDER_CONSTANT)
+                return compensated_image
+
+            # Jika keep_edges = True, tambahkan padding berdasarkan batas pergeseran
+            pad_x = max(0, int(np.ceil(max_x - w)))
+            pad_y = max(0, int(np.ceil(max_y - h)))
+            pad_left = max(0, int(np.ceil(-min_x)))
+            pad_top = max(0, int(np.ceil(-min_y)))
+
+            # Tentukan padding maksimum untuk semua sisi agar konsisten
+            pad = max(pad_x, pad_y, pad_left, pad_top)
+            
+            padded_image = cv2.copyMakeBorder(base_image, pad, pad, pad, pad, cv2.BORDER_REFLECT)
+            
+            # Gunakan interpolasi Lanczos4 untuk kualitas terbaik saat keep_edges=True
+            interpolation_flag_padded = cv2.INTER_LANCZOS4 # Pilihan Anda
+
+            target_w_padded = padded_image.shape[1]
+            target_h_padded = padded_image.shape[0]
+
+            if transformation_type == 'homography':
+                compensated_padded = cv2.warpPerspective(padded_image, matrix, (target_w_padded, target_h_padded), flags=interpolation_flag_padded, borderMode=cv2.BORDER_REFLECT)
+            else:
+                compensated_padded = cv2.warpAffine(padded_image, matrix, (target_w_padded, target_h_padded), flags=interpolation_flag_padded, borderMode=cv2.BORDER_REFLECT)
+
+            # Crop kembali ke ukuran asli
+            # Pastikan hasil crop valid
+            if pad + h > compensated_padded.shape[0] or pad + w > compensated_padded.shape[1]:
+                 # Fallback: Kembalikan hasil warp tanpa padding jika crop gagal? Atau None?
+                 # Coba kembalikan warp tanpa padding sebagai fallback
+                 if transformation_type == 'homography':
+                     compensated_image = cv2.warpPerspective(base_image, matrix, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT)
+                 else:
+                     compensated_image = cv2.warpAffine(base_image, matrix, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT)
+                 return compensated_image
+            else:
+                 compensated_image = compensated_padded[pad:pad+h, pad:pad+w]
+                 return compensated_image
+
+        except cv2.error as cv_err:
+             return None
+        except Exception as e:
+             return None
+        # -------------
     
 def main(db_path, update_progress=None, batch_size=12, stop_requested=None, single_process=None, batch_id=None,
          config_filename=None, save_align=None, align_folder=None, command_save_to_hd5f=None):

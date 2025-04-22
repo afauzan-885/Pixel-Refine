@@ -454,11 +454,15 @@ MEDIAN_DESCRIPTION = """Cepat dan efektif untuk penumpukan, cukup baik pada obje
 Sangat efektif dalam menghilangkan pergerakan kecil pada objek, namun artefak muncul pada pergerakan yang lebih besar."""
 
 SIMILARITY_DESCRIPTION = """Algoritma penumpukan canggih, sangat kuat dalam menghilangkan pergerakan objek 
-(tanpa ghosting di area yang bergerak) dan menghasilkan sangat sedikit artefak hingga 85%
+(sangat sedikit ghosting di area yang bergerak) dan menghasilkan sangat sedikit artefak hingga 85%
 
 Terinspirasi oleh:
 Monod, Antoine, Delon, Julie, & Veit, Thomas. (2021). An Analysis and Implementation of the HDR+ Burst Denoising Method.
 Image Processing On Line, 11, 142-169. https://doi.org/10.5201/ipol.2021.336""" 
+
+MOTION_FLOW_DESCRIPTION = """Dikombinasikan dengan optical flow dalam menghitung pergerakan objek,
+pengurangan noise menjadi lebih cerdas dalam membedakan noise dan gerakan nyata. 
+Sangat tangguh pada gerakan yang kompleks namun lebih lambat dibandingkan metode yang lain"""
                         
                         
 # ------------------ General Settings ------------------ #

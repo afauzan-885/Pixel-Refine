@@ -113,10 +113,11 @@ class AKAZEAlgorithm:
             print("Error loading AKAZE configuration:", e)
             return default_config
 
-    def calculate_global_motion(self, base_image, target_image, config_filename=None, num_blocks=(3, 3), overlap=20, stop_requested=None):
+    def calculate_global_motion(self, base_image, target_image, config_filename=None, num_blocks=(4, 4), overlap=20, stop_requested=None):
         """
-        Menghitung keypoints dan deskriptor menggunakan AKAZE dengan membagi gambar menjadi blok-blok secara paralel.
-        
+        Menghitung keypoints dan deskriptor menggunakan AKAZE dengan membagi gambar
+        menjadi blok-blok secara paralel. Instance AKAZE dibuat sekali.
+
         Parameter:
           - num_blocks: tuple (blocks_x, blocks_y) untuk pembagian gambar.
           - overlap: jumlah piksel overlap di sekeliling tiap blok.
@@ -126,85 +127,200 @@ class AKAZEAlgorithm:
             return None, None
 
         akaze_config = self.load_akaze_config(config_filename)
-        # Konversi gambar ke grayscale
-        base_gray = cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY)
-        target_gray = cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY)
+
+        # --- Konversi gambar ke grayscale (sekali) ---
+        try:
+            if base_image.ndim == 3 and base_image.shape[2] == 3:
+                 base_gray = cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY)
+            elif base_image.ndim == 2:
+                 base_gray = base_image # Sudah grayscale
+            else: raise ValueError("Base image has unsupported channels")
+
+            if target_image.ndim == 3 and target_image.shape[2] == 3:
+                 target_gray = cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY)
+            elif target_image.ndim == 2:
+                 target_gray = target_image # Sudah grayscale
+            else: raise ValueError("Target image has unsupported channels")
+        except Exception as e:
+            return None, None
+        # --------------------------------------------
 
         h, w = base_gray.shape
         blocks_x, blocks_y = num_blocks
         block_w = w // blocks_x
         block_h = h // blocks_y
 
-        # Himpunan untuk menggabungkan hasil dari tiap blok
-        keypoints_base_all = []
-        descriptors_base_all = None  # akan berupa numpy array
-        keypoints_target_all = []
-        descriptors_target_all = None
+        # --- Buat instance AKAZE SEKALI di sini ---
+        try:
+            akaze = cv2.AKAZE_create(
+                descriptor_type=cv2.AKAZE_DESCRIPTOR_MLDB, # Default MLDB, bisa eksplisit
+                descriptor_size=0, # Default
+                descriptor_channels=3, # Default
+                threshold=akaze_config.get("akaze_threshold", 0.001), # Gunakan .get dengan default
+                nOctaves=akaze_config.get("akaze_nOctaves", 4),
+                nOctaveLayers=akaze_config.get("akaze_nOctaveLayers", 4),
+                diffusivity=cv2.KAZE_DIFF_PM_G2 # Default
+            )
+        except Exception as e:
+            return None, None
+        # ------------------------------------------
 
-        def compute_features_block(x, y, bw, bh, overlap):
+        keypoints_base_all = []
+        descriptors_base_list = [] # Gunakan list dulu untuk efisiensi
+        keypoints_target_all = []
+        descriptors_target_list = []
+
+        # --- Fungsi worker thread (sekarang menerima instance akaze) ---
+        def compute_features_block(akaze_instance, x, y, bw, bh, overlap):
             # Tentukan ROI dengan tambahan overlap
             roi_x_start = max(0, x - overlap)
             roi_y_start = max(0, y - overlap)
             roi_x_end = min(w, x + bw + overlap)
             roi_y_end = min(h, y + bh + overlap)
 
+            # Pastikan ROI valid sebelum slicing
+            if roi_y_end <= roi_y_start or roi_x_end <= roi_x_start:
+                return [], None, [], None # Kembalikan hasil kosong jika ROI tidak valid
+
             roi_base = base_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
             roi_target = target_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
 
-            # Buat instance AKAZE untuk blok ini
-            akaze = cv2.AKAZE_create(
-                threshold=akaze_config["akaze_threshold"],
-                nOctaves=akaze_config["akaze_nOctaves"],
-                nOctaveLayers=akaze_config["akaze_nOctaveLayers"]
-            )
-            kps_base, desc_base = akaze.detectAndCompute(roi_base, None)
-            kps_target, desc_target = akaze.detectAndCompute(roi_target, None)
+            # Gunakan instance AKAZE yang sama
+            try:
+                kps_base, desc_base = akaze_instance.detectAndCompute(roi_base, None)
+                kps_target, desc_target = akaze_instance.detectAndCompute(roi_target, None)
+            except Exception as e:
+                 # Tangani error jika detectAndCompute gagal di satu blok
+                 return [], None, [], None # Kembalikan hasil kosong
 
-            # Sesuaikan koordinat keypoints agar sesuai dengan posisi asli pada gambar penuh
-            for kp in kps_base:
-                kp.pt = (kp.pt[0] + roi_x_start, kp.pt[1] + roi_y_start)
-            for kp in kps_target:
-                kp.pt = (kp.pt[0] + roi_x_start, kp.pt[1] + roi_y_start)
-            return kps_base, desc_base, kps_target, desc_target
+            # Sesuaikan koordinat keypoints agar sesuai dengan posisi asli
+            # Lakukan ini hanya jika keypoints ditemukan
+            kps_base_adjusted = []
+            if kps_base:
+                for kp in kps_base:
+                    kp.pt = (kp.pt[0] + roi_x_start, kp.pt[1] + roi_y_start)
+                    kps_base_adjusted.append(kp)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=blocks_x * blocks_y) as executor:
-            futures = []
+            kps_target_adjusted = []
+            if kps_target:
+                for kp in kps_target:
+                    kp.pt = (kp.pt[0] + roi_x_start, kp.pt[1] + roi_y_start)
+                    kps_target_adjusted.append(kp)
+
+            return kps_base_adjusted, desc_base, kps_target_adjusted, desc_target
+        # -------------------------------------------------------------
+
+        print(f"Submitting {blocks_x * blocks_y} blocks to ThreadPoolExecutor...")
+        futures = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count()) as executor: # Gunakan os.cpu_count()
             for i in range(blocks_x):
                 for j in range(blocks_y):
+                    if stop_requested and stop_requested(): # Cek di dalam loop juga
+                        # Batalkan future yang belum selesai jika memungkinkan (opsional)
+                        for f in futures: f.cancel()
+                        executor.shutdown(wait=False, cancel_futures=True) # Coba hentikan thread
+                        return None, None
+
                     x = i * block_w
                     y = j * block_h
-                    bw = block_w if i < blocks_x - 1 else w - x
-                    bh = block_h if j < blocks_y - 1 else h - y
-                    futures.append(executor.submit(compute_features_block, x, y, bw, bh, overlap))
-            for future in concurrent.futures.as_completed(futures):
-                kps_base, desc_base, kps_target, desc_target = future.result()
-                if desc_base is not None and len(kps_base) > 0:
-                    keypoints_base_all.extend(kps_base)
-                    if descriptors_base_all is None:
-                        descriptors_base_all = desc_base
-                    else:
-                        descriptors_base_all = np.vstack([descriptors_base_all, desc_base])
-                if desc_target is not None and len(kps_target) > 0:
-                    keypoints_target_all.extend(kps_target)
-                    if descriptors_target_all is None:
-                        descriptors_target_all = desc_target
-                    else:
-                        descriptors_target_all = np.vstack([descriptors_target_all, desc_target])
+                    bw = block_w # Lebar dasar
+                    bh = block_h # Tinggi dasar
+                    # Koreksi ukuran untuk blok di tepi kanan dan bawah
+                    if i == blocks_x - 1: bw = w - x
+                    if j == blocks_y - 1: bh = h - y
 
-        # Lakukan matching menggunakan BFMatcher pada hasil gabungan dari semua blok
-        if descriptors_base_all is None or descriptors_target_all is None:
-            print("Tidak ditemukan deskriptor pada salah satu gambar.")
+                    # Lewatkan instance akaze yang sama
+                    futures.append(executor.submit(compute_features_block, akaze, x, y, bw, bh, overlap))
+
+            processed_count = 0
+            for future in concurrent.futures.as_completed(futures):
+                if stop_requested and stop_requested():
+                     # Batalkan future lain jika memungkinkan
+                    for f in futures: f.cancel()
+                    # Tidak perlu shutdown executor lagi karena sudah di dalam context manager
+                    return None, None
+                try:
+                    kps_base, desc_base, kps_target, desc_target = future.result()
+                    processed_count += 1
+                    # print(f"Processed block {processed_count}/{len(futures)}") # Log progress per blok
+
+                    # --- Gunakan list.append untuk efisiensi ---
+                    if desc_base is not None and len(kps_base) > 0:
+                        keypoints_base_all.extend(kps_base)
+                        descriptors_base_list.append(desc_base)
+                    if desc_target is not None and len(kps_target) > 0:
+                        keypoints_target_all.extend(kps_target)
+                        descriptors_target_list.append(desc_target)
+                    # ------------------------------------------
+                except concurrent.futures.CancelledError:
+                    print("A task was cancelled.") # Handle jika pembatalan berhasil
+                except Exception as exc:
+                    print(f'Block processing generated an exception: {exc}')
+                    # Putuskan apakah akan melanjutkan atau gagal
+
+        print("Block computations finished. Aggregating descriptors...")
+        # --- Gabungkan deskriptor dari list setelah semua selesai ---
+        descriptors_base_all = None
+        if descriptors_base_list:
+            try:
+                descriptors_base_all = np.vstack(descriptors_base_list)
+            except ValueError as e:
+                 return None, None # Gagal jika tidak bisa stack
+
+        descriptors_target_all = None
+        if descriptors_target_list:
+            try:
+                descriptors_target_all = np.vstack(descriptors_target_list)
+            except ValueError as e:
+                 return None, None # Gagal jika tidak bisa stack
+        # ----------------------------------------------------------
+
+        # --- Lakukan matching menggunakan BFMatcher ---
+        if descriptors_base_all is None or descriptors_target_all is None or \
+           len(descriptors_base_all) == 0 or len(descriptors_target_all) == 0: # Tambah cek panjang > 0
             return None, None
 
-        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-        matches = bf.knnMatch(descriptors_base_all, descriptors_target_all, k=2)
-        good_matches = []
-        for m, n in matches:
-            if m.distance < akaze_config["ratio_threshold"] * n.distance:
-                good_matches.append(m)
+        try:
+            bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False) # NORM_HAMMING untuk AKAZE
+            # Pastikan k <= jumlah deskriptor di set target jika jumlahnya < 2
+            k_val = min(2, len(descriptors_target_all))
+            if k_val < 2:
+                 # Lakukan pencocokan tunggal jika k=1
+                 matches_single = bf.match(descriptors_base_all, descriptors_target_all)
+                 # Konversi ke format list[DMatch] agar ratio test bisa dilewati
+                 good_matches = matches_single
+            else:
+                matches = bf.knnMatch(descriptors_base_all, descriptors_target_all, k=k_val)
+                good_matches = []
+                ratio_thresh = akaze_config.get("ratio_threshold", 0.75)
+                for match_pair in matches:
+                    # Pastikan match_pair berisi cukup elemen (k=2)
+                    if len(match_pair) == 2:
+                        m, n = match_pair
+                        if m.distance < ratio_thresh * n.distance:
+                            good_matches.append(m)
+                    # Jika k=1 (misal karena target desc < 2), tidak bisa lakukan ratio test
+                    # Mungkin perlu logika berbeda jika k=1 terjadi, tapi untuk sekarang kita abaikan
 
-        base_points = np.float32([keypoints_base_all[m.queryIdx].pt for m in good_matches])
-        target_points = np.float32([keypoints_target_all[m.trainIdx].pt for m in good_matches])
+        except Exception as e:
+            return None, None
+        # ---------------------------------------------
+
+        # --- Ekstrak titik-titik yang cocok ---
+        if len(good_matches) < 4: # Butuh minimal 4 poin untuk sebagian besar estimasi transformasi
+             return None, None
+
+        try:
+            base_points = np.float32([keypoints_base_all[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2) # Reshape untuk OpenCV
+            target_points = np.float32([keypoints_target_all[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2) # Reshape untuk OpenCV
+            
+        except IndexError as e:
+             # Coba print beberapa indeks untuk debug
+             # for i, m in enumerate(good_matches[:5]): print(f"Match {i}: qIdx={m.queryIdx}, tIdx={m.trainIdx}")
+             return None, None
+        except Exception as e:
+             return None, None
+        # -----------------------------------
 
         return base_points, target_points
         
@@ -250,9 +366,9 @@ class AKAZEAlgorithm:
         # Jika keep_edges = False, langsung terapkan transformasi tanpa padding
         if not keep_edges:
             if transformation_type == 'homography':
-                compensated_image = cv2.warpPerspective(base_image, matrix, (w, h), borderMode=cv2.BORDER_CONSTANT)
+                compensated_image = cv2.warpPerspective(base_image, matrix, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
             else:
-                compensated_image = cv2.warpAffine(base_image, matrix, (w, h), borderMode=cv2.BORDER_CONSTANT)
+                compensated_image = cv2.warpAffine(base_image, matrix, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
             return compensated_image
 
         # Jika keep_edges = True, tambahkan padding berdasarkan batas pergeseran
@@ -266,9 +382,9 @@ class AKAZEAlgorithm:
         padded_image = cv2.copyMakeBorder(base_image, pad, pad, pad, pad, cv2.BORDER_REFLECT)
 
         if transformation_type == 'homography':
-            compensated_padded = cv2.warpPerspective(padded_image, matrix, (padded_image.shape[1], padded_image.shape[0]), borderMode=cv2.BORDER_REFLECT)
+            compensated_padded = cv2.warpPerspective(padded_image, matrix, (padded_image.shape[1], padded_image.shape[0]), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
         else:
-            compensated_padded = cv2.warpAffine(padded_image, matrix, (padded_image.shape[1], padded_image.shape[0]), borderMode=cv2.BORDER_REFLECT)
+            compensated_padded = cv2.warpAffine(padded_image, matrix, (padded_image.shape[1], padded_image.shape[0]), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
 
         compensated_image = compensated_padded[pad:pad+h, pad:pad+w] if keep_edges else compensated_padded
 

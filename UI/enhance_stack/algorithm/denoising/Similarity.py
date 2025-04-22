@@ -1,4 +1,6 @@
+import ctypes
 from functools import lru_cache
+import traceback
 import cv2
 import numpy as np
 import sqlite3
@@ -8,7 +10,7 @@ import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 # from UI.enhance_stack.algorithm.denoising.extra_similarity.compute_motion_metrics_aot import accumulate_tiles_jit
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, save_image  
-from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import call_similarity_motion
+from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import calculate_mad_from_array, call_accumulate_frame_weighted, call_normalize_accumulated
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
 
@@ -54,6 +56,10 @@ class SimilarityAlgorithm:
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
         self.db_path = db_path
         self.hdf5_path = hdf5_path
+        self.low_global_sigma_thresh = 0.043  # Sigma di bawah ini dianggap "bersih"
+        self.high_global_sigma_thresh = 0.28   # Sigma di atas ini dianggap "sangat ber-noise"
+        self.high_max_multiplier = 5.5        # Multiplier maks untuk gambar bersih
+        self.low_max_multiplier = 15.0        # Multiplier maks untuk gambar sangat ber-noise
 
         # Pastikan folder HDF5 ada
         hdf5_folder = os.path.dirname(self.hdf5_path)
@@ -90,6 +96,19 @@ class SimilarityAlgorithm:
                 image = np.array(h5f[key])
                 images.append(image)
         return images
+    
+    def load_images_from_paths(self, image_paths, stop_requested=None):
+        """
+        Loads images from a list of image paths.
+        """
+        images = []
+        for image_path in image_paths:
+            if stop_requested and stop_requested():  # Cek apakah harus berhenti
+                break
+            image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+            if image is not None:
+                images.append(image)
+        return images
 
     def load_images_from_folder(self, folder_path):
         image_paths = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(('.png', '.jpg', '.jpeg'))]
@@ -104,207 +123,624 @@ class SimilarityAlgorithm:
                 image = np.array(h5f[key])
                 images.append(image)
         return images
+
+    def _calculate_dynamic_max_multiplier(self, global_avg_sigma):
+        """Menghitung multiplier maksimum dinamis berdasarkan sigma global."""
+        # Clamp sigma ke rentang yang diketahui untuk interpolasi yang stabil
+        clamped_sigma = max(self.low_global_sigma_thresh, min(global_avg_sigma, self.high_global_sigma_thresh))
+
+        if self.high_global_sigma_thresh <= self.low_global_sigma_thresh:
+             # Hindari pembagian dengan nol jika threshold sama
+             return self.high_max_multiplier # Atau low, tergantung preferensi default
+
+        if clamped_sigma <= self.low_global_sigma_thresh:
+            return self.high_max_multiplier
+        elif clamped_sigma >= self.high_global_sigma_thresh:
+            return self.low_max_multiplier
+        else:
+            factor = (clamped_sigma - self.low_global_sigma_thresh) / (self.high_global_sigma_thresh - self.low_global_sigma_thresh)
+            dynamic_multiplier = self.high_max_multiplier + factor * (self.low_max_multiplier - self.high_max_multiplier)
+
+            # --- PERBAIKAN LOGIKA CLAMPING ---
+            # Tentukan batas bawah dan atas yang sebenarnya dari kedua parameter
+            lower_bound = min(self.low_max_multiplier, self.high_max_multiplier)
+            upper_bound = max(self.low_max_multiplier, self.high_max_multiplier)
+
+            # Clamp nilai dynamic_multiplier agar berada di antara lower_bound dan upper_bound
+            clamped_multiplier = max(lower_bound, min(upper_bound, dynamic_multiplier))
+            return clamped_multiplier
+        
+        # === FUNGSI BARU untuk Skor Noise ===
+    def _calculate_noise_level_score(self, global_avg_sigma):
+        """
+        Menghitung skor tingkat kebersihan gambar (0-100) berdasarkan sigma global.
+        100 = Sangat Bersih (sigma <= low_thresh)
+        0   = Sangat Bising (sigma >= high_thresh)
+        Linear dazwischen.
+        """
+        sigma_low = self.low_global_sigma_thresh
+        sigma_high = self.high_global_sigma_thresh
+
+        if sigma_high <= sigma_low:
+            # Jika threshold tidak valid, kembalikan nilai tengah atau default
+            return 50.0 if global_avg_sigma > sigma_low else 100.0
+
+        if global_avg_sigma <= sigma_low:
+            return 100.0
+        elif global_avg_sigma >= sigma_high:
+            return 0.0
+        else:
+            # Interpolasi linear terbalik: skor turun dari 100 ke 0 saat sigma naik
+            score = 100.0 * (sigma_high - global_avg_sigma) / (sigma_high - sigma_low)
+            # Pastikan skor tetap dalam rentang [0, 100] karena floating point error kecil
+            return max(0.0, min(score, 100.0))
     
     @lru_cache(maxsize=None)
-    def gaussian_window(self, size, sigma_factor=0.3):
-        """Membuat jendela Gaussian."""
-        size_y, size_x = size
-        sigma_y = (size_y / 2) * sigma_factor
-        sigma_x = (size_x / 2) * sigma_factor
-        y, x = np.mgrid[-size_y//2 + 1:size_y//2 + 1, -size_x//2 + 1:size_x//2 + 1]
-        g = np.exp(-((x**2 / (2.0 * sigma_x**2)) + (y**2 / (2.0 * sigma_y**2))))
-        return g / g.sum()
+    def gaussian_window(self, size, sigma_scale=1/6):
+        """Menghasilkan jendela Gaussian 2D [0, 1] float32 C-contiguous."""
+        rows, cols = size
+        if rows <= 0 or cols <= 0:
+            return np.zeros((0, 0), dtype=np.float32) # Handle edge case
+        sigma_y = max(rows * sigma_scale, 1e-6) # Hindari sigma nol
+        sigma_x = max(cols * sigma_scale, 1e-6) # Hindari sigma nol
+        y = np.arange(0, rows, 1, float) - (rows - 1) / 2
+        x = np.arange(0, cols, 1, float) - (cols - 1) / 2
+        # Hindari pembagian dengan nol jika sigma sangat kecil (meskipun sudah dicegah)
+        gaussian_y = np.exp(-y**2 / (2 * sigma_y**2 + 1e-12))
+        gaussian_x = np.exp(-x**2 / (2 * sigma_x**2 + 1e-12))
+        window = np.outer(gaussian_y, gaussian_x)
+        max_val = window.max()
+        if max_val > 1e-6: # Hindari pembagian dengan nol jika window hampir nol
+             window = window / max_val
+        else:
+             window = np.zeros_like(window) # Jika window nol, kembalikan nol
+        # Pastikan tipe dan contiguity
+        return np.ascontiguousarray(window.astype(np.float32))
 
-    def similarity_mfnr(self, images, tile_size=(16, 16), overlap=0.4,
-                    motion_threshold=0.13, update_progress=None, stop_requested=None, 
-                    apply_blur= False, lib_path='UI/data/similarity_motion.dll'):
+    def normalize_image(self, image, dtype):
         """
-        Fungsi untuk menghitung multi-frame noise reduction dengan referensi citra pertama.
+        Normalisasi gambar ke range [0, 1] float32 berdasarkan tipe data asli.
+        Mempertahankan kecerahan relatif antar frame. Menghasilkan C-contiguous array.
         """
-        if not images:
-            raise ValueError(language_config.RUN_IMAGE_NOT_FOUND)
+        # Dapatkan nilai maksimum dari tipe data asli
+        try:
+            scale = np.float32(np.iinfo(dtype).max)
+        except ValueError:
+            # Jika dtype sudah float, skala adalah 1.0 (asumsi input float sudah [0,1])
+            if np.issubdtype(dtype, np.floating):
+                scale = 1.0
+            else:
+                raise TypeError(f"Unsupported dtype for normalization: {dtype}")
 
-        dtype = images[0].dtype
+        # Konversi ke float32 dan pastikan array contiguous
+        image_float = np.ascontiguousarray(image.astype(np.float32))
+
+        # Bagi dengan scale untuk mendapatkan range [0, 1] jika scale > 0
+        if scale > 1e-6:
+            norm_image = image_float / scale
+        else:
+             norm_image = image_float # Jika scale 0 atau negatif, jangan dibagi
+
+        # Handle grayscale jika perlu
+        if image.ndim == 2:
+            norm_image = np.stack((norm_image,) * 3, axis=-1)
+
+        # Pastikan output float32 dan C-contiguous
+        return np.ascontiguousarray(norm_image.astype(np.float32))
+
+    def similarity_mfnr(self, images, tile_size=(16, 16), overlap=0.40,
+                        motion_threshold=0.0025, update_progress=None, stop_requested=None,
+                        lib_path='UI/data/similarity_motion.dll',
+                        save_weight_map_path=None): # Tambahkan parameter opsional
+
+        if not isinstance(images, list) or not images: # Pastikan images adalah list dan tidak kosong
+             raise ValueError("Input 'images' must be a non-empty list.")
+
+        # Validasi tile_size
+        if not (isinstance(tile_size, (tuple, list)) and len(tile_size) == 2 and
+                tile_size[0] > 0 and tile_size[1] > 0):
+            raise ValueError("tile_size must be a tuple or list of two positive integers.")
+        tile_h, tile_w = map(int, tile_size)
+
+        # Ambil properti dari gambar pertama dan validasi tipe
+        try:
+            ref_image = images[0]
+            if not isinstance(ref_image, np.ndarray):
+                 raise TypeError("Images in the list must be NumPy arrays.")
+            h, w = ref_image.shape[:2] # Ambil H, W
+            channels = ref_image.shape[2] if ref_image.ndim == 3 else 1 # Cek channel
+            dtype = ref_image.dtype
+
+            # Paksa channels jadi 3 jika input grayscale untuk konsistensi buffer C++
+            if channels == 1:
+                channels_buffer = 3 # Buffer C++ akan selalu 3 channel
+            elif channels == 3:
+                 channels_buffer = 3
+            # elif channels == 4: # Handle 4 channel jika perlu (misal RGBA)
+            #     channels_buffer = 4 # Sesuaikan tipe C++ jika perlu
+            else:
+                 raise ValueError(f"Unsupported number of channels: {channels}")
+
+        except (AttributeError, IndexError, ValueError, TypeError) as e:
+            raise ValueError(f"Could not get valid shape/dtype/channels from the first image: {e}")
+
         if dtype not in (np.uint8, np.uint16):
-            raise TypeError(language_config.SIMILARITY_MNFR_BIT_REQUIRED)
+             raise TypeError("Input image dtype must be uint8 or uint16.")
 
-        reference_image = self.normalize_image(images[0], dtype).astype(np.float32)
-        h, w, channels = reference_image.shape
+        # --- Parameter MBM ---
+        mbm_block_h = tile_h
+        mbm_block_w = tile_w
+        mbm_search_radius = 16
 
-        step_y = max(int(tile_size[0] * (1 - overlap)), 1)
-        step_x = max(int(tile_size[1] * (1 - overlap)), 1)
+        # --- Load Library C++ & Definisikan Argtypes SEKALI ---
+        if not os.path.exists(lib_path):
+            raise FileNotFoundError(f"Shared library not found: {lib_path}")
+        try:
+            clib = ctypes.CDLL(lib_path)
 
-        row_starts = np.arange(0, h - tile_size[0] + 1, step_y)
-        if row_starts[-1] != h - tile_size[0]:
-            row_starts = np.append(row_starts, h - tile_size[0])
-        
-        col_starts = np.arange(0, w - tile_size[1] + 1, step_x)
-        if col_starts[-1] != w - tile_size[1]:
-            col_starts = np.append(col_starts, w - tile_size[1])
+            # Definisikan argtypes untuk accumulate_frame_weighted_jit
+            clib.accumulate_frame_weighted_jit.argtypes = [
+                np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS, WRITEABLE'), # 1 final_image_sum_ptr (selalu 3 channel)
+                np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS, WRITEABLE'), # 2 weight_map_sum_ptr
+                np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'),           # 3 current_image_ptr (selalu 3 channel)
+                np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'),           # 4 reference_image_ptr (selalu 3 channel)
+                np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),           # 5 base_window_ptr
+                np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),             # 6 row_starts
+                np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),             # 7 col_starts
+                ctypes.c_int, # 8 num_row_starts
+                ctypes.c_int, # 9 num_col_starts
+                ctypes.c_int, # 10 tile_h
+                ctypes.c_int, # 11 tile_w
+                ctypes.c_int, # 12 h
+                ctypes.c_int, # 13 w
+                ctypes.c_int, # 14 channels (jumlah channel buffer C++, yaitu 3)
+                ctypes.c_float, # 15 motion_threshold
+                ctypes.c_int, # 16 mbm_block_h
+                ctypes.c_int, # 17 mbm_block_w
+                ctypes.c_int,  # 18 mbm_search_radius
+                ctypes.c_float 
+            ]
+            clib.accumulate_frame_weighted_jit.restype = None
+
+            # Definisikan argtypes untuk normalize_accumulated_image_jit
+            clib.normalize_accumulated_image_jit.argtypes = [
+                np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS, WRITEABLE'), # 1 final_image_ptr (selalu 3 channel)
+                np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),           # 2 weight_map_sum_ptr
+                ctypes.c_int, # 3 h
+                ctypes.c_int, # 4 w
+                ctypes.c_int  # 5 channels (jumlah channel buffer C++, yaitu 3)
+            ]
+            clib.normalize_accumulated_image_jit.restype = None
             
-        
-        blend_size = (int(tile_size[0] * 1.5), int(tile_size[1] * 1.5))
-        base_window_large = self.gaussian_window(blend_size)
+            # === DEFINISI UNTUK FUNGSI C++ BARU ===
+            clib.estimate_global_noise.argtypes = [
+                np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'), # reference_image_ptr
+                ctypes.c_int, # h
+                ctypes.c_int, # w
+                ctypes.c_int, # channels (input, akan jadi gray di C++)
+                ctypes.c_int, # tile_h
+                ctypes.c_int, # tile_w
+                np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'), # row_starts
+                ctypes.c_int, # num_row_starts
+                np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'), # col_starts
+                ctypes.c_int  # num_col_starts
+            ]
+            clib.estimate_global_noise.restype = ctypes.c_float
+            # === AKHIR DEFINISI BARU ===
 
-        # Ambil bagian tengah dari window yang lebih besar agar sesuai dengan ukuran tile
-        start_y = (blend_size[0] - tile_size[0]) // 2
-        start_x = (blend_size[1] - tile_size[1]) // 2
-        base_window = base_window_large[start_y:start_y + tile_size[0], start_x:start_x + tile_size[1]]
-        
-        final_image = np.zeros_like(reference_image, dtype=np.float32)
-        weight_map = np.zeros((h, w), dtype=np.float32)
+        except OSError as e:
+            raise OSError(f"Error loading shared library {lib_path}: {e}")
+        except AttributeError as e:
+             raise AttributeError(f"Function not found in DLL or error setting argtypes. Did you compile C++ correctly? Error: {e}")
 
-        scale = np.float32(np.iinfo(dtype).max)
+
+         # --- Persiapan Buffer & Variabel (Sama) ---
+        reference_image_float = self.normalize_image(ref_image, dtype)
+        h_ref, w_ref, channels_ref = reference_image_float.shape
+        if channels_ref != channels_buffer: raise RuntimeError("Channel mismatch")
+        final_image_sum = np.ascontiguousarray(np.zeros((h_ref, w_ref, channels_buffer), dtype=np.float32))
+        weight_map_sum = np.ascontiguousarray(np.zeros((h_ref, w_ref), dtype=np.float32))
+
+        # --- Tile Starts & Base Window (Sama) ---
+        step_y = max(int(tile_h * (1 - overlap)), 1); step_x = max(int(tile_w * (1 - overlap)), 1)
+        if h_ref >= tile_h:
+            row_starts = np.arange(0, h_ref - tile_h + 1, step_y)
+            if h_ref > tile_h and (len(row_starts) == 0 or row_starts[-1] != h_ref - tile_h): row_starts = np.append(row_starts, h_ref - tile_h)
+            elif h_ref == tile_h: row_starts = np.array([0])
+        else: row_starts = np.array([0])
+        if w_ref >= tile_w:
+            col_starts = np.arange(0, w_ref - tile_w + 1, step_x)
+            if w_ref > tile_w and (len(col_starts) == 0 or col_starts[-1] != w_ref - tile_w): col_starts = np.append(col_starts, w_ref - tile_w)
+            elif w_ref == tile_w: col_starts = np.array([0])
+        else: col_starts = np.array([0])
+        row_starts = np.ascontiguousarray(np.unique(row_starts).astype(np.int32))
+        col_starts = np.ascontiguousarray(np.unique(col_starts).astype(np.int32))
+        base_window = self.gaussian_window(tile_size)
+
+        # --- HITUNG GLOBAL NOISE (PANGGIL C++), MULTIPLIER, DAN SKOR ---
+        print("Estimating global noise level from reference frame (using C++)...") # Pesan diubah
+        try:
+            global_avg_sigma = clib.estimate_global_noise(
+                reference_image_float, # Pointer dari array NumPy
+                h_ref, w_ref, channels_buffer, # Dimensi & channel buffer (C++ akan handle gray)
+                tile_h, tile_w,
+                row_starts, len(row_starts),
+                col_starts, len(col_starts)
+            )
+        except Exception as e:
+            print(f"!!! ERROR calling C++ estimate_global_noise_cpp: {e}")
+            traceback.print_exc()
+            global_avg_sigma = 0.0 # Fallback jika error
+
+        # Lanjutkan seperti sebelumnya
+        frame_max_multiplier = self._calculate_dynamic_max_multiplier(global_avg_sigma)
+        noise_level_score = self._calculate_noise_level_score(global_avg_sigma)
+        print(f"  Global Avg Sigma Estimate: {global_avg_sigma:.5f}")
+        print(f"  Cleanliness Score (0-100, 100=clean): {noise_level_score:.1f}")
+        print(f"  Calculated Dynamic Max Multiplier: {frame_max_multiplier:.3f}")
+        # --- ------------------------------------------------------- ---
+        # --- ------------------------------------------------------- ---
+
+        # --- Skala Denormalisasi ---
+        scale_value = np.float32(np.iinfo(dtype).max)
+
         num_images = len(images)
+        processed_frames = 0
 
-        for i, image in enumerate(images):
+        # --- Loop Pemrosesan Gambar ---
+        print(f"Starting MFNR process for {num_images} images...")
+        for i, image_orig in enumerate(images):
+            if not isinstance(image_orig, np.ndarray):
+                print(f"Warning: Skipping item at index {i} because it's not a NumPy array.")
+                continue
+
             if update_progress:
-                progress = int((i + 1) / num_images * 100)
-                message = f"Processing image {i+1} of {num_images}"
+                # Hitung progress berdasarkan frame yang *dicoba* diproses
+                progress = int(((i + 1) / num_images) * 99) # Cap di 99% sebelum normalisasi
+                message = f"Accumulating frame {i+1} of {num_images}"
                 update_progress(progress, message)
 
             if stop_requested and stop_requested():
+                print("Stop requested during accumulation.")
                 break
 
-            current_image = self.normalize_image(image, dtype).astype(np.float32)
-            if current_image.shape != reference_image.shape:
-                raise ValueError(f"Image size {i+1} does not match.")
+            # --- Validasi Input Frame ---
+            try:
+                if image_orig.shape[0] != h or image_orig.shape[1] != w:
+                    print(f"Warning: Skipping image {i+1} due to size mismatch ({image_orig.shape[:2]} vs {h}x{w}).")
+                    continue
+                if image_orig.dtype != dtype:
+                    print(f"Warning: Skipping image {i+1} due to dtype mismatch ({image_orig.dtype} vs {dtype}).")
+                    continue
+                # Cek channel asli (sebelum normalisasi)
+                num_channels_orig = image_orig.shape[2] if image_orig.ndim == 3 else 1
+                if num_channels_orig not in (1, channels_buffer): # Hanya izinkan 1 atau 3 channel input
+                     print(f"Warning: Skipping image {i+1} due to unsupported original channels ({num_channels_orig}).")
+                     continue
 
-            row_starts_arr = np.array(row_starts, dtype=np.int32)
-            col_starts_arr = np.array(col_starts, dtype=np.int32)
+            except Exception as e:
+                print(f"Error validating image {i+1}: {e}. Skipping.")
+                continue # Lewati frame bermasalah
 
-            call_similarity_motion(
-                final_image, weight_map,
-                current_image, reference_image,
-                base_window, row_starts_arr, col_starts_arr,
-                tile_size[0], tile_size[1],  # Menggunakan tile_size
-                h, w, channels,
-                motion_threshold, scale, 1e-12,
-                lib_path
-            )
+            # --- Normalisasi Frame Saat Ini (akan jadi 3 channel jika input gray) ---
+            current_image_float = self.normalize_image(image_orig, dtype)
+            if current_image_float.shape[2] != channels_buffer:
+                 print(f"Error: Normalized image {i+1} has unexpected channels ({current_image_float.shape[2]}). Skipping.")
+                 continue
 
-        # final_image /= (weight_map[..., np.newaxis] + 1e-12)
 
-        if apply_blur:  # Ubah True/False untuk mengaktifkan proses ini
-            blurred_image = cv2.GaussianBlur(final_image, (3, 3), 0)
-            mask = np.zeros((h, w), dtype=np.float32)
-            # border_width = max(1, int(min(tile_size) / 8))
-            
-            for i, y in enumerate(row_starts):
-                for x in col_starts:
-                    tile = current_image[y:y + tile_size[0], x:x + tile_size[1]]
-                    np.add.at(final_image, (slice(y, y + tile_size[0]), slice(x, x + tile_size[1])), tile * base_window[..., np.newaxis])
-                    np.add.at(weight_map, (slice(y, y + tile_size[0]), slice(x, x + tile_size[1])), base_window)
-            
-            final_image = final_image * (1 - mask[..., np.newaxis]) + blurred_image * (mask[..., np.newaxis])
+            # --- Panggil Fungsi Akumulasi C++ ---
+            try:
+                call_accumulate_frame_weighted(
+                    clib, final_image_sum, weight_map_sum, # Target (Writable)
+                    current_image_float, reference_image_float, # Input (Read-only)
+                    base_window, row_starts, col_starts, # Params
+                    tile_h, tile_w, h_ref, w_ref, channels_buffer, # Ukuran & Channel Buffer
+                    motion_threshold,
+                    mbm_block_h, mbm_block_w, mbm_search_radius, frame_max_multiplier
+                )
+                processed_frames += 1 # Hanya increment jika pemanggilan berhasil
+            except Exception as e:
+                 print(f"ERROR calling C++ accumulate function for frame {i+1}: {e}")
+                 # Putuskan: Lanjutkan tanpa frame ini atau hentikan?
+                 # continue # Coba lanjutkan tanpa frame ini
+                 raise RuntimeError(f"C++ accumulation failed for frame {i+1}: {e}") # Hentikan
 
-        if dtype in (np.uint8, np.uint16):
-            final_image = np.clip(final_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype, copy=False)
+        # --- Normalisasi FINAL (Setelah Loop) ---
+        if processed_frames > 0:
+            if update_progress: update_progress(99, "Normalizing final image...")
+            print(f"Accumulated {processed_frames} frames. Normalizing...")
 
-        return final_image
+            try:
+                call_normalize_accumulated(clib, final_image_sum, weight_map_sum, h_ref, w_ref, channels_buffer)
+                print("Normalization complete.")
+            except Exception as e:
+                 print(f"ERROR calling C++ normalize function: {e}")
+                 raise RuntimeError(f"C++ normalization failed: {e}")
 
-    def normalize_image(self, image, dtype):
-        # Konversi ke float32 dan pastikan array contiguous
-        image_float = np.ascontiguousarray(image.astype(np.float32))
-        norm_image = (image_float - image_float.min()) / (image_float.max() - image_float.min() + 1e-6)
-        if len(image.shape) == 2:
-            norm_image = np.stack((norm_image,)*3, axis=-1)
-        return norm_image.astype(np.float32)
-        
-def main(db_path, update_progress=None, stop_requested=None, batch_size=10, single_process=None, batch_id=None):
-    try:
-        image_processor = SimilarityAlgorithm(db_path)
-        
-        # Pilih sumber image_paths berdasarkan parameter single_process
-        if single_process:
-            image_paths = image_processor.get_all_image_paths_for_single_process()
+            # --- PENYIMPANAN PETA BOBOT ---
+            if save_weight_map_path:
+                print(f"Generating and saving weight map to {save_weight_map_path}...")
+                try:
+                    # --- Normalisasi Baru: Berdasarkan jumlah frame yang diproses ---
+                    # Ini menunjukkan 'rata-rata' confidence per frame yang berkontribusi
+                    # (sudah termasuk pengaruh base_window)
+                    if processed_frames > 0:
+                         # Bagi dengan jumlah frame untuk mendapatkan bobot rata-rata per piksel
+                         # Nilai maksimum idealnya 1.0 di tengah tile jika confidence selalu 1
+                         normalized_weights = weight_map_sum / float(processed_frames)
+                    else:
+                         normalized_weights = np.zeros_like(weight_map_sum) # Peta hitam jika tidak ada frame
+
+                    # Clamp nilai ke [0, 1] karena pembagian bisa menghasilkan > 1 jika ada overlap tinggi
+                    normalized_weights = np.clip(normalized_weights, 0.0, 1.0)
+
+                    # --- Opsional: Tambahkan Blurring pada Visualisasi ---
+                    # Jika Anda masih melihat artefak visual antar blok MBM (bukan tile)
+                    # atau ingin visualisasi yang lebih mulus secara umum.
+                    apply_vis_blur = False # Set ke False jika tidak ingin blur tambahan
+                    if apply_vis_blur:
+                        # Gunakan kernel yang relatif kecil agar tidak terlalu kabur
+                        vis_blur_kernel_size = 3
+                        # Blur *setelah* normalisasi float
+                        normalized_weights = cv2.GaussianBlur(normalized_weights, (vis_blur_kernel_size, vis_blur_kernel_size), 0)
+                        # Clamp lagi setelah blur
+                        normalized_weights = np.clip(normalized_weights, 0.0, 1.0)
+
+
+                    # Konversi ke uint8 [0, 255]
+                    weight_map_vis = (normalized_weights * 255).astype(np.uint8)
+
+                    # Simpan peta bobot sebagai gambar grayscale
+                    os.makedirs(os.path.dirname(save_weight_map_path), exist_ok=True)
+                    success_save = cv2.imwrite(save_weight_map_path, weight_map_vis)
+                    if success_save:
+                         print("Weight map saved successfully.")
+                    else:
+                         print(f"ERROR: Failed to save weight map to {save_weight_map_path}")
+
+                except Exception as e:
+                    print(f"ERROR: Could not generate or save weight map: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+
+            # --- Denormalisasi, Clipping, Konversi Tipe (di Python) ---
+            final_image_normalized = final_image_sum # Hasil normalisasi dari C++
+            final_image_scaled = final_image_normalized * scale_value
+
+            # Konversi kembali ke tipe data asli (uint8/uint16)
+            # Jika input asli grayscale, kembalikan grayscale
+            if ref_image.ndim == 2 or (ref_image.ndim == 3 and ref_image.shape[2] == 1) :
+                 # Ambil satu channel (misal channel 0) karena C++ memproses 3 channel
+                 # Mungkin lebih baik merata-ratakan 3 channel? (tergantung C++)
+                 # Jika C++ hanya mengisi 3 channel identik untuk input gray, ambil 1 saja cukup.
+                 final_image_scaled_single_channel = final_image_scaled[:, :, 0]
+                 min_val = 0
+                 max_val = np.iinfo(dtype).max
+                 final_image_output = np.clip(final_image_scaled_single_channel, min_val, max_val).astype(dtype, copy=False)
+            elif channels_buffer == 3: # Input asli berwarna
+                 min_val = 0
+                 max_val = np.iinfo(dtype).max
+                 final_image_output = np.clip(final_image_scaled, min_val, max_val).astype(dtype, copy=False)
+            # Tambahkan handler untuk channel lain jika perlu
+
+            if stop_requested and stop_requested() and processed_frames < num_images:
+                 print(f"WARNING: Returning partially processed image after accumulating {processed_frames} frames.")
+
+            if update_progress: update_progress(100, "MFNR process finished.")
+            print("MFNR process finished successfully.")
+            return final_image_output
         else:
+            print("No frames were processed successfully.")
+            if update_progress: update_progress(100, "MFNR process failed: No frames processed.")
+            # Kembalikan gambar hitam dengan dimensi dan tipe yang benar
+            output_shape = (h, w) if ref_image.ndim == 2 else (h, w, ref_image.shape[2])
+            return np.zeros(output_shape, dtype=dtype)
+
+def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
+         single_process=None, batch_id=None, save_final_weight_map=True): # Parameter baru ditambahkan
+    try:
+        print("Initializing SimilarityAlgorithm...")
+        image_processor = SimilarityAlgorithm(db_path)
+        print("Initialization complete.")
+
+        # Tentukan nama dasar untuk file output
+        output_name_base = "" # Inisialisasi
+        image_paths = []      # Inisialisasi
+
+        if single_process:
+            print("Processing mode: Single Process")
+            image_paths = image_processor.get_all_image_paths_for_single_process()
+            if image_paths:
+                 ref_image_name = os.path.splitext(os.path.basename(image_paths[0]))[0]
+                 output_name_base = f"{ref_image_name}_single"
+            else:
+                 output_name_base = "single_process_no_images" # Default jika tidak ada gambar
+        else:
+            print(f"Processing mode: Batch Process (Batch ID: {batch_id})")
             if batch_id is None:
-                raise ValueError("batch_id harus diberikan untuk batch process")
+                raise ValueError("batch_id must be provided for batch process")
             image_paths = image_processor.get_all_image_paths_for_batch_process(batch_id)
-        
+            output_name_base = f"batch_{batch_id}"
+
         if not image_paths:
-            if update_progress:
-                update_progress(0, language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
-            return
-        
-        # Ekstrak metadata dari seluruh gambar dan simpan ke file JSON
+            print("No image paths found for processing.")
+            if update_progress: update_progress(100, "No images found for processing.")
+            return # Keluar jika tidak ada path
+
+        # Tentukan path output utama dan path peta bobot
+        output_folder_stack = "database/stack"
+        os.makedirs(output_folder_stack, exist_ok=True)
+        # Pastikan output_name_base valid untuk nama file
+        output_name_base_safe = "".join(c for c in output_name_base if c.isalnum() or c in ('_', '-')).rstrip()
+        if not output_name_base_safe: output_name_base_safe = "stack_result" # Fallback name
+        output_path = os.path.join(output_folder_stack, f"{output_name_base_safe}_similarity_stack.tif")
+        weight_map_output_path = os.path.join(output_folder_stack, f"{output_name_base_safe}_similarity_weight_map.png")
+        print(f"Output image path: {output_path}")
+        print(f"Weight map path: {weight_map_output_path}")
+
+
+        # --- Ekstraksi Metadata ---
         metadata_folder = os.path.join("database", "align")
         os.makedirs(metadata_folder, exist_ok=True)
         metadata_file = os.path.join(metadata_folder, "metadata.json")
-        extract_all_metadata(image_paths, metadata_file=metadata_file)
+        # Panggil fungsi extract_all_metadata jika sudah didefinisikan
+        if 'extract_all_metadata' in globals():
+            extract_all_metadata(image_paths, metadata_file=metadata_file)
+            print("Metadata extraction called.")
+        else:
+             print("Metadata extraction step skipped (function not defined).")
 
-        reference_image_path = image_paths[0]
-        reference_image_name = os.path.splitext(os.path.basename(reference_image_path))[0]
-        output_path = f"database/stack/{reference_image_name}_similarity_stack.tif"
 
-        if update_progress:
-            update_progress(0, language_config.RUN_IMAGE_PROCESS_STARTED)
+        if update_progress: update_progress(0, language_config.RUN_IMAGE_PROCESS_STARTED)
 
         global_hdf5_path = "database/align/aligned_images.h5"
-        processed_batches = []  # Menyimpan hasil sementara dari batch
+        processed_batches = []
 
+        # --- Logika Batching ---
         if os.path.exists(global_hdf5_path):
+            print(f"Processing images from HDF5: {global_hdf5_path}")
             with h5py.File(global_hdf5_path, 'r') as h5f:
                 keys = list(h5f.keys())
                 total_images = len(keys)
+                print(f"Total images in HDF5: {total_images}")
+                if total_images == 0:
+                     print("HDF5 file is empty. Cannot process.")
+                     if update_progress: update_progress(100, "HDF5 file is empty.")
+                     return
 
                 for batch_start in range(0, total_images, batch_size):
-                    if stop_requested and stop_requested():
-                        break
+                    current_batch_num = (batch_start // batch_size) + 1
+                    total_batches = (total_images + batch_size - 1) // batch_size
+                    print(f"\n--- Processing HDF5 Batch {current_batch_num}/{total_batches} ---")
+                    if stop_requested and stop_requested(): break
 
-                    batch_keys = keys[batch_start:batch_start + batch_size]
-                    batch_images = [np.array(h5f[key]) for key in batch_keys]
+                    batch_keys = keys[batch_start:min(batch_start + batch_size, total_images)]
+                    print(f"Loading {len(batch_keys)} images for batch {current_batch_num}...")
+                    batch_images = []
+                    for key in batch_keys:
+                        try: batch_images.append(np.array(h5f[key]))
+                        except Exception as e: print(f"Error loading key {key}: {e}")
+                    print(f"Loaded {len(batch_images)} images.")
 
-                    # Proses batch
-                    batch_result = image_processor.similarity_mfnr(batch_images, update_progress=update_progress, stop_requested=stop_requested)
-                    processed_batches.append(batch_result)
+                    if not batch_images:
+                        print(f"Skipping empty batch {current_batch_num}.")
+                        continue
 
-                    progress = int(((batch_start + len(batch_keys)) / total_images) * 100)
-                    if update_progress:
-                        update_progress(progress, language_config.RUN_IMAGE_PROCESS_BATCH_PROGRESS.format(
-                            current=batch_start + len(batch_keys), total=total_images
-                        ))
-        else:
+                    print(f"Running similarity_mfnr for batch {current_batch_num}...")
+                    batch_result = image_processor.similarity_mfnr(
+                        batch_images, update_progress=update_progress, stop_requested=stop_requested
+                        # JANGAN sertakan save_weight_map_path di sini
+                    )
+                    if batch_result is not None:
+                         processed_batches.append(batch_result)
+                         print(f"Batch {current_batch_num} processed successfully.")
+                    else: print(f"Batch {current_batch_num} processing failed or returned None.")
+
+                    processed_count_so_far = batch_start + len(batch_keys)
+                    progress = int((processed_count_so_far / total_images) * 90)
+                    if update_progress: update_progress(progress, language_config.RUN_IMAGE_PROCESS_BATCH_PROGRESS.format(current=processed_count_so_far, total=total_images))
+
+        else: # Proses dari path jika HDF5 tidak ada
+            print("HDF5 file not found. Processing images from original paths...")
             total_images = len(image_paths)
-            processed_count = 0 
+            print(f"Total image paths found: {total_images}")
+            if total_images == 0:
+                 print("No image paths to process.")
+                 if update_progress: update_progress(100, "No image paths found.")
+                 return
 
             for batch_start in range(0, total_images, batch_size):
-                if stop_requested and stop_requested():
-                    break
+                current_batch_num = (batch_start // batch_size) + 1
+                total_batches = (total_images + batch_size - 1) // batch_size
+                print(f"\n--- Processing Path Batch {current_batch_num}/{total_batches} ---")
+                if stop_requested and stop_requested(): break
 
-                batch_paths = image_paths[batch_start:batch_start + batch_size]
-                batch_images = [cv2.imread(path, cv2.IMREAD_UNCHANGED) for path in batch_paths if cv2.imread(path, cv2.IMREAD_UNCHANGED) is not None]
+                batch_paths = image_paths[batch_start:min(batch_start + batch_size, total_images)]
+                print(f"Loading {len(batch_paths)} images for batch {current_batch_num}...")
+                batch_images = image_processor.load_images_from_paths(batch_paths, stop_requested)
+                print(f"Loaded {len(batch_images)} images.")
 
-                # Proses batch
-                batch_result = image_processor.similarity_mfnr(batch_images, update_progress=update_progress, stop_requested=stop_requested)
-                processed_batches.append(batch_result)
+                if not batch_images:
+                    print(f"Skipping empty batch {current_batch_num}.")
+                    continue
 
-                progress = int(((batch_start + len(batch_paths)) / total_images) * 100)
-                if update_progress:
-                    update_progress(progress, language_config.RUN_IMAGE_PROCESS_BATCH_PROGRESS.format(
-                        current=batch_start + len(batch_paths), total=total_images
-                    ))
+                print(f"Running similarity_mfnr for batch {current_batch_num}...")
+                batch_result = image_processor.similarity_mfnr(
+                    batch_images, update_progress=update_progress, stop_requested=stop_requested
+                    # JANGAN sertakan save_weight_map_path di sini
+                )
+                if batch_result is not None:
+                    processed_batches.append(batch_result)
+                    print(f"Batch {current_batch_num} processed successfully.")
+                else: print(f"Batch {current_batch_num} processing failed or returned None.")
 
+                processed_count_so_far = batch_start + len(batch_paths)
+                progress = int((processed_count_so_far / total_images) * 90)
+                if update_progress: update_progress(progress, language_config.RUN_IMAGE_PROCESS_BATCH_PROGRESS.format(current=processed_count_so_far, total=total_images))
+
+        # --- Fine-Tuning / Pemrosesan Akhir ---
         if processed_batches:
+            print(f"\n--- Starting Final Fine-Tuning Process on {len(processed_batches)} Batch Results ---")
+            if update_progress: update_progress(95, "Starting final fine-tuning...")
+
+            # Tentukan path argumen untuk peta bobot berdasarkan flag input main
+            final_weight_map_path_arg = weight_map_output_path if save_final_weight_map else None
+
+            if final_weight_map_path_arg:
+                print("Final weight map saving is ENABLED.")
+            else:
+                print("Final weight map saving is DISABLED.")
+
             # Proses fine-tuning dari semua hasil batch
-            final_result = image_processor.similarity_mfnr(processed_batches, update_progress=update_progress, stop_requested=stop_requested)
+            final_result = image_processor.similarity_mfnr(
+                processed_batches, # Gunakan hasil batch sebagai input
+                update_progress=update_progress,
+                stop_requested=stop_requested,
+                save_weight_map_path=final_weight_map_path_arg # <<-- Gunakan argumen kondisional
+            )
 
-            # Simpan hasil akhir
-            save_image(final_result, output_path, reference_image_path=reference_image_path)
+            if final_result is not None:
+                 # Simpan hasil akhir
+                 print(f"Saving final fine-tuned image to {output_path}...")
+                 # Gunakan fungsi save_image Anda atau cv2.imwrite langsung
+                 save_success = save_image(final_result, output_path, reference_image_path=image_paths[0] if image_paths else None)
+                 # save_success = cv2.imwrite(output_path, final_result) # Alternatif
 
+                 if save_success:
+                      print("Final fine-tuned image saved successfully.")
+                      if update_progress: update_progress(100, language_config.RUN_IMAGE_PROCESS_STACK_SUCCESS.format(output_path=output_path))
+                 else:
+                      print(f"ERROR: Failed to save final image to {output_path}")
+                      if update_progress: update_progress(100, "Failed to save final image.")
+            else:
+                print("Final fine-tuning process failed or returned None.")
+                if update_progress: update_progress(100, "Final processing failed.")
+
+        else: # Jika tidak ada batch yang berhasil diproses
+            print("No batches were processed successfully. Cannot perform fine-tuning.")
             if update_progress:
-                update_progress(100, language_config.RUN_IMAGE_PROCESS_STACK_SUCCESS.format(output_path=output_path))
-        else:
-            if update_progress:
-                update_progress(0, language_config.STACK_IMAGES_FAILED)
+                update_progress(100, language_config.STACK_IMAGES_FAILED)
 
-    except Exception as e:
+    except ValueError as ve: # Tangkap ValueError spesifik (misal batch_id hilang)
+         error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(ve))
+         print(f"\n!!! CONFIGURATION ERROR in main function: {error_message} !!!")
+         traceback.print_exc()
+         if update_progress: update_progress(0, error_message)
+
+    except FileNotFoundError as fnf: # Tangkap FileNotFoundError (misal DB atau DLL)
+         error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(fnf))
+         print(f"\n!!! FILE NOT FOUND ERROR in main function: {error_message} !!!")
+         traceback.print_exc()
+         if update_progress: update_progress(0, error_message)
+
+    except Exception as e: # Tangkap semua error lain
         error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(e))
-        print(error_message)  # Menampilkan error untuk debugging
+        print(f"\n!!! UNEXPECTED ERROR in main function: {error_message} !!!")
+        traceback.print_exc() # Print traceback untuk debug
         if update_progress:
-            update_progress(0, error_message)
-        raise
+            update_progress(0, error_message) # Set progress ke 0 dan tampilkan error
 
 
 def running_similarity(parent=None, single_process=None, batch_id=None):

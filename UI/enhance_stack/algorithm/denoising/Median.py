@@ -139,33 +139,6 @@ class MedianAlgorithm:
             resized_images.append(resized)
         return resized_images
 
-    def stack_median_images(self, images, previous_medians, stop_requested=None, block_size=64, overlap=0.3):
-        if stop_requested and stop_requested():
-            print("Proses dihentikan sebelum menghitung stack median.")
-            return previous_medians
-
-        if not images:
-            raise ValueError("Tidak ada gambar yang ditemukan.")
-
-        dtype = images[0].dtype
-        target_shape = images[0].shape
-
-        # Resize gambar agar semua memiliki ukuran yang sama
-        images_resized = self._resize_images(images, target_shape)
-        # Proses median dengan metode blok yang dioptimasi
-        median_image = self._compute_median_image(images_resized, target_shape, block_size, dtype, overlap)
-        return median_image, images_resized
-
-    def _resize_images(self, images, target_shape):
-        """
-        Resize seluruh gambar agar memiliki ukuran yang sama dengan target_shape.
-        """
-        resized_images = []
-        for image in images:
-            resized = cv2.resize(image, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_CUBIC)
-            resized_images.append(resized)
-        return resized_images
-
     def _compute_block_median(self, block_stack):
         """
         Menghitung median dari stack blok secara vectorized.

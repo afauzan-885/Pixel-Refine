@@ -87,7 +87,7 @@ class FarnebackAlgorithm:
             "poly_n": 5,
             "poly_sigma": 1.2,
             "flags": 0,
-            "interpolation": "INTER_CUBIC",
+            "interpolation": "INTER_LANCZOS4",
             "use_gpu": False
         }
 
@@ -197,7 +197,7 @@ class FarnebackAlgorithm:
             remap_y = cv2.UMat(remap_y)
 
         interpolation_str = fb_config.get("interpolation", "INTER_AREA")
-        interp_flag = getattr(cv2, interpolation_str, cv2.INTER_AREA)
+        interp_flag = getattr(cv2, interpolation_str, cv2.INTER_LANCZOS4)
 
         compensated_image = cv2.remap(
             base_image_16bit, 

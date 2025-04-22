@@ -368,7 +368,11 @@ SIMILARITY_DESCRIPTION = """先進相似度堆疊法
 技術來源：
 Monod, Antoine, Delon, Julie, & Veit, Thomas. (2021).
 HDR+ 降噪方法實作與分析
-Image Processing On Line, 11, 142-169. https://doi.org/10.5201/ipol.2021.336""" 
+Image Processing On Line, 11, 142-169. https://doi.org/10.5201/ipol.2021.336"""
+
+MOTION_FLOW_DESCRIPTION = """结合光流计算物体运动，
+降噪功能变得更加智能，可以区分噪音和真实运动。
+对复杂运动非常稳健但比其他方法慢"""
 
 # ------------------ General Settings ------------------ #
 SETTING_GENERAL_LABEL = "通用設定"
