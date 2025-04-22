@@ -386,15 +386,15 @@ MEDIAN_DESCRIPTION = """Penyusunan yang pantas dan berkesan, agak baik untuk obj
 
 Sangat berkesan untuk menghapuskan pergerakan objek sehingga 12 bingkai, tetapi artifak muncul pada objek bergerak selepas itu"""
 SIMILARITY_DESCRIPTION = """Algoritma penyusunan lanjutan, sangat berkuasa dalam menghapuskan pergerakan objek (tiada ghosting di kawasan bergerak)
-dan menghasilkan sangat sedikit artifak sehingga 90%
+dan menghasilkan sangat sedikit artifak sehingga 85%
 
 Diilhamkan oleh:
 Monod, Antoine, Delon, Julie, & Veit, Thomas. (2021). Analisis dan Pelaksanaan Kaedah Pengurangan Bising HDR+ Burst.
 Image Processing On Line, 11, 142-169. https://doi.org/10.5201/ipol.2021.336"""
 
-MOTION_FLOW_DESCRIPTION = """Digabungkan dengan aliran optik dalam mengira pergerakan objek,
-Pengurangan noise menjadi lebih bijak dalam membezakan antara noise dan gerakan sebenar.
-Sangat teguh pada pergerakan yang kompleks tetapi lebih perlahan daripada kaedah lain"""
+SIMILARITY_MOTION_V2_DESCRIPTION= """Similarity V2 adalah hasil pembangunan daripada algoritma similarity v1 dengan beberapa peningkatan yang signifikan. 
+Algoritma ini mampu menghasilkan imej yang lebih bersih walaupun input mengandungi noise yang teruk, berkat keupayaannya yang pintar membezakan antara noise, tekstur, 
+dan pergerakan halus. Ia lebih boleh dipercayai dalam keadaan pencahayaan yang rendah, walaupun prosesnya berjalan lebih perlahan berbanding versi v1."""
                         
 # ------------------ Tetapan Umum ------------------ #
 

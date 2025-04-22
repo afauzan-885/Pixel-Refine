@@ -95,17 +95,15 @@ class LeftPanel(QWidget):
                 ("None", language_config.NONE_DENOISING_DESCRIPTION),
                 ("Average", language_config.AVERAGE_DESCRIPTION),
                 ("Median", language_config.MEDIAN_DESCRIPTION),
-                ("Weighted Average", language_config.WEIGHTED_AVERAGE_DESCRIPTION),
                 ("Similarity", language_config.SIMILARITY_DESCRIPTION),
-                ("Motion Flow", language_config.MOTION_FLOW_DESCRIPTION)
+                ("Similarity V2", language_config.SIMILARITY_MOTION_V2_DESCRIPTION)
             ]],
             [opt[1] for opt in [
                 ("None", language_config.NONE_DENOISING_DESCRIPTION),
                 ("Average", language_config.AVERAGE_DESCRIPTION),
                 ("Median", language_config.MEDIAN_DESCRIPTION),
-                ("Weighted Average", language_config.WEIGHTED_AVERAGE_DESCRIPTION),
                 ("Similarity", language_config.SIMILARITY_DESCRIPTION),
-                ("Motion Flow", language_config.MOTION_FLOW_DESCRIPTION)
+                ("Similarity V2", language_config.SIMILARITY_MOTION_V2_DESCRIPTION)
             ]]
         )
         left_panel_layout.addWidget(denoising_widget)

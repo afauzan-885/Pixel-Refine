@@ -460,9 +460,11 @@ Terinspirasi oleh:
 Monod, Antoine, Delon, Julie, & Veit, Thomas. (2021). An Analysis and Implementation of the HDR+ Burst Denoising Method.
 Image Processing On Line, 11, 142-169. https://doi.org/10.5201/ipol.2021.336""" 
 
-MOTION_FLOW_DESCRIPTION = """Dikombinasikan dengan optical flow dalam menghitung pergerakan objek,
-pengurangan noise menjadi lebih cerdas dalam membedakan noise dan gerakan nyata. 
-Sangat tangguh pada gerakan yang kompleks namun lebih lambat dibandingkan metode yang lain"""
+SIMILARITY_MOTION_V2_DESCRIPTION = """Similarity V2 merupakan hasil pengembangan dari algoritma similarity v1 dengan sejumlah 
+peningkatan signifikan. Algoritma ini mampu menghasilkan gambar yang lebih bersih meskipun input mengandung noise yang parah, berkat kemampuannya 
+secara cerdas membedakan antara noise, tekstur, dan pergerakan halus. Lebih andal dengan pencahayaan minim, namun prosesnya berjalan lebih lambat 
+dibandingkan versi v1."""
+
                         
                         
 # ------------------ General Settings ------------------ #

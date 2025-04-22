@@ -370,9 +370,8 @@ Monod, Antoine, Delon, Julie, & Veit, Thomas. (2021).
 HDR+ 降噪方法實作與分析
 Image Processing On Line, 11, 142-169. https://doi.org/10.5201/ipol.2021.336"""
 
-MOTION_FLOW_DESCRIPTION = """结合光流计算物体运动，
-降噪功能变得更加智能，可以区分噪音和真实运动。
-对复杂运动非常稳健但比其他方法慢"""
+SIMILARITY_MOTION_V2_DESCRIPTION_ZH = """Similarity V2是基于similarity v1算法开发的，并在此基础上实现了多项显著改进。
+该算法能够生成更干净的图像，即便输入图像噪声严重，也能凭借其智能区分噪声、纹理和细微运动的能力达到这一效果。在低照明环境下表现更为出色，但其处理速度较v1版本较慢。"""
 
 # ------------------ General Settings ------------------ #
 SETTING_GENERAL_LABEL = "通用設定"

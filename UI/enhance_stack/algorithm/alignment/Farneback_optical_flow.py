@@ -1,4 +1,5 @@
 import json
+import time
 import cv2
 import numpy as np
 import sqlite3
@@ -61,7 +62,7 @@ class FarnebackAlgorithm:
             "poly_sigma": 1.2,
             "flags": 0,
             "interpolation": "INTER_CUBIC",
-            "use_gpu": False
+            "use_gpu": True
         }
 
         if config_filename is None:
@@ -102,116 +103,284 @@ class FarnebackAlgorithm:
             print("Error loading Farneback configuration:", e)
             return default_config
 
-    def calculate_optical_flow(self, base_image, target_image, config_filename=None, num_blocks=(2, 2), overlap_ratio=0.3):
+    # --- Fungsi Optical Flow (dengan logika CPU/GPU terpisah) ---
+    def calculate_optical_flow(self, base_image, target_image, config_filename=None, stop_requested=None):
         """
-        Menghitung optical flow dengan metode paralel berbasis blok, dengan overlap sebagai persentase dari ukuran blok.
-        
-        Parameter:
-        - num_blocks: tuple (blocks_x, blocks_y) -> Jumlah blok dalam sumbu X dan Y.
-        - overlap_ratio: Persentase overlap relatif terhadap ukuran blok (contoh: 0.3 untuk 30%).
+        Menghitung optical flow Farneback.
+        - Mode GPU: Memproses gambar penuh menggunakan UMat.
+        - Mode CPU: Memproses secara paralel berbasis blok dengan overlap.
         """
+        if stop_requested and stop_requested():
+            print("Proses optical flow dihentikan.")
+            return None
+
+        start_time = time.time()
         fb_config = self.load_farneback_config(config_filename)
-        use_gpu = fb_config.get("use_gpu", False)
+        use_gpu = fb_config.get("use_gpu", False) and cv2.ocl.haveOpenCL()
 
-        # print("Calculating optical flow using" + (" GPU" if use_gpu else " CPU"))
+        print(f"Calculating dense optical flow using Farneback ({'GPU' if use_gpu else 'CPU Parallel Blocks'})...")
 
-        if use_gpu:
-            base_gray = cv2.UMat(cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY))
-            target_gray = cv2.UMat(cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY))
-        else:
-            base_gray = cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY)
-            target_gray = cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY)
+        try:
+            # --- Persiapan Gambar Grayscale (Selalu uint8) ---
+            # (Logika konversi sama seperti sebelumnya)
+            if base_image.ndim == 3: base_gray_8bit = cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY)
+            elif base_image.ndim == 2 and base_image.dtype != np.uint8: base_gray_8bit = cv2.normalize(base_image, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+            elif base_image.ndim == 2 and base_image.dtype == np.uint8: base_gray_8bit = base_image
+            else: raise ValueError("Base image invalid.")
 
-        h, w = base_gray.get().shape if use_gpu else base_gray.shape
-        blocks_x, blocks_y = num_blocks
-        block_w = w // blocks_x
-        block_h = h // blocks_y
+            if target_image.ndim == 3: target_gray_8bit = cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY)
+            elif target_image.ndim == 2 and target_image.dtype != np.uint8: target_gray_8bit = cv2.normalize(target_image, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+            elif target_image.ndim == 2 and target_image.dtype == np.uint8: target_gray_8bit = target_image
+            else: raise ValueError("Target image invalid.")
+            # -------------------------------------------------
 
-        flow_full = np.zeros((h, w, 2), dtype=np.float32)
+            h, w = base_gray_8bit.shape
+            flow_full = None # Inisialisasi
 
-        def compute_block(x, y, bw, bh, overlap_ratio):
-            overlap_x = int(bw * overlap_ratio)
-            overlap_y = int(bh * overlap_ratio)
-
-            roi_x_start = max(0, x - overlap_x)
-            roi_y_start = max(0, y - overlap_y)
-            roi_x_end = min(w, x + bw + overlap_x)
-            roi_y_end = min(h, y + bh + overlap_y)
-
+            # --- === JALUR EKSEKUSI GPU === ---
             if use_gpu:
-                roi_base = base_gray.get()[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
-                roi_target = target_gray.get()[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
-            else:
-                roi_base = base_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
-                roi_target = target_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+                print("GPU Path: Uploading images to UMat...")
+                try:
+                    base_gray_umat = cv2.UMat(base_gray_8bit)
+                    target_gray_umat = cv2.UMat(target_gray_8bit)
+                    print("GPU Path: Running Farneback on UMat...")
+                    flow_umat = cv2.calcOpticalFlowFarneback(
+                        base_gray_umat, target_gray_umat, None,
+                        pyr_scale=fb_config["pyr_scale"], levels=fb_config["levels"],
+                        winsize=fb_config["winsize"], iterations=fb_config["iterations"],
+                        poly_n=fb_config["poly_n"], poly_sigma=fb_config["poly_sigma"],
+                        flags=fb_config["flags"]
+                    )
+                    print("GPU Path: Downloading flow field...")
+                    flow_full = flow_umat.get()
+                except cv2.error as gpu_err:
+                     print(f"GPU Farneback error: {gpu_err}. Will attempt CPU fallback.")
+                     use_gpu = False # Set flag untuk fallback
+                     # Hapus UMat untuk membebaskan memori GPU
+                     try: del base_gray_umat, target_gray_umat, flow_umat
+                     except NameError: pass
+                except Exception as gpu_exc:
+                     print(f"Unexpected GPU error: {gpu_exc}. Will attempt CPU fallback.")
+                     use_gpu = False
+            # --- === AKHIR JALUR GPU === ---
 
-            flow_roi = cv2.calcOpticalFlowFarneback(
-                roi_base, roi_target, None,
-                pyr_scale=fb_config["pyr_scale"],
-                levels=fb_config["levels"],
-                winsize=fb_config["winsize"],
-                iterations=fb_config["iterations"],
-                poly_n=fb_config["poly_n"],
-                poly_sigma=fb_config["poly_sigma"],
-                flags=fb_config["flags"]
-            )
+            # --- === JALUR EKSEKUSI CPU (Paralel Blok atau Fallback GPU) === ---
+            if not use_gpu:
+                print("CPU Path: Using parallel block processing...")
+                # Ambil parameter blok dari config
+                num_blocks = fb_config.get("cpu_num_blocks", (2, 2))
+                overlap_ratio = fb_config.get("cpu_overlap_ratio", 0.3)
+                blocks_x, blocks_y = num_blocks
+                block_w = w // blocks_x
+                block_h = h // blocks_y
 
-            offset_x = x - roi_x_start
-            offset_y = y - roi_y_start
-            flow_block = flow_roi[offset_y:offset_y+bh, offset_x:offset_x+bw, :]
+                # Buat array hasil di CPU
+                flow_full_cpu = np.zeros((h, w, 2), dtype=np.float32)
 
-            return (x, y, flow_block)
+                # Fungsi worker untuk CPU (mirip kode lama Anda)
+                def compute_block_cpu(x, y, bw, bh, overlap_ratio):
+                    overlap_x = int(bw * overlap_ratio)
+                    overlap_y = int(bh * overlap_ratio)
+                    roi_x_start = max(0, x - overlap_x)
+                    roi_y_start = max(0, y - overlap_y)
+                    roi_x_end = min(w, x + bw + overlap_x)
+                    roi_y_end = min(h, y + bh + overlap_y)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=blocks_x * blocks_y) as executor:
-            futures = []
-            for i in range(blocks_x):
-                for j in range(blocks_y):
-                    x = i * block_w
-                    y = j * block_h
-                    bw = block_w if i < blocks_x - 1 else w - x
-                    bh = block_h if j < blocks_y - 1 else h - y
-                    futures.append(executor.submit(compute_block, x, y, bw, bh, overlap_ratio))
+                    if roi_y_end <= roi_y_start or roi_x_end <= roi_x_start: return None
 
-            for future in concurrent.futures.as_completed(futures):
-                x, y, flow_block = future.result()
-                h_block, w_block, _ = flow_block.shape
-                flow_full[y:y+h_block, x:x+w_block, :] = flow_block
+                    # Slicing langsung dari array NumPy CPU
+                    roi_base = base_gray_8bit[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+                    roi_target = target_gray_8bit[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
 
-        # print("Optical flow calculation completed." + (" (GPU enabled)" if use_gpu else " (CPU mode)"))
-        
-        return flow_full
+                    try:
+                        flow_roi = cv2.calcOpticalFlowFarneback(
+                            roi_base, roi_target, None,
+                            pyr_scale=fb_config["pyr_scale"], levels=fb_config["levels"],
+                            winsize=fb_config["winsize"], iterations=fb_config["iterations"],
+                            poly_n=fb_config["poly_n"], poly_sigma=fb_config["poly_sigma"],
+                            flags=fb_config["flags"]
+                        )
+                        # Crop bagian tengah flow_roi yang sesuai dengan blok asli (tanpa overlap)
+                        offset_x = x - roi_x_start
+                        offset_y = y - roi_y_start
+                        # Pastikan dimensi crop valid
+                        if offset_y+bh > flow_roi.shape[0] or offset_x+bw > flow_roi.shape[1]:
+                             print(f"Warning: Crop dimension error for block ({x},{y}). ROI shape {flow_roi.shape}, offset ({offset_x},{offset_y}), block size ({bw},{bh})")
+                             # Ambil bagian yang valid saja
+                             bh_valid = min(bh, flow_roi.shape[0] - offset_y)
+                             bw_valid = min(bw, flow_roi.shape[1] - offset_x)
+                             if bh_valid <= 0 or bw_valid <= 0 : return None # Tidak ada bagian valid
+                             flow_block = flow_roi[offset_y:offset_y+bh_valid, offset_x:offset_x+bw_valid, :]
+                             # Perlu penanganan khusus saat menempatkan kembali ke flow_full_cpu jika ukuran tidak pas
+                             # Untuk sementara, lewati blok ini jika ukuran tidak pas
+                             if flow_block.shape[0] != bh or flow_block.shape[1] != bw:
+                                 print(f"Warning: Skipping block ({x},{y}) due to size mismatch after cropping.")
+                                 return None
+                        else:
+                            flow_block = flow_roi[offset_y:offset_y+bh, offset_x:offset_x+bw, :]
 
-    def compensate_motion(self, base_image_16bit, flow, image_id, config_filename=None):
-        print(language_config.COMPENSATE_MOTION_STATUS.format(image_id=image_id))
-        h, w = base_image_16bit.shape[:2]
-        flow_map = np.stack(np.meshgrid(np.arange(w), np.arange(h)), axis=-1)
-        warped_map = flow_map + flow
-        remap_x, remap_y = cv2.split(warped_map.astype(np.float32))
+                        # Kembalikan posisi (x,y) dan hasil flow untuk blok ini
+                        return (x, y, flow_block)
+                    except cv2.error as cv_err:
+                        print(f"OpenCV error in compute_block_cpu ({x},{y}): {cv_err}")
+                        return None
+                    except Exception as exc:
+                        print(f"Unexpected error in compute_block_cpu ({x},{y}): {exc}")
+                        return None
+                # --- Akhir fungsi worker CPU ---
 
-        fb_config = self.load_farneback_config(config_filename)
-        use_gpu = fb_config.get("use_gpu", False)
+                futures_cpu = []
+                # Gunakan seluruh core yang tersedia pada CPU
+                num_workers = max(1, os.cpu_count())  # Gunakan semua core yang tersedia
+                print(f"CPU Path: Submitting {blocks_x * blocks_y} blocks to ThreadPoolExecutor (max_workers={num_workers})...")
+                with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+                    for i in range(blocks_x):
+                        for j in range(blocks_y):
+                            if stop_requested and stop_requested():
+                                print("CPU Path: Stop requested during task submission.")
+                                for f in futures_cpu: f.cancel()
+                                executor.shutdown(wait=False, cancel_futures=True)
+                                return None # Keluar
 
-        if use_gpu:
-            base_image_16bit = cv2.UMat(base_image_16bit)
-            remap_x = cv2.UMat(remap_x)
-            remap_y = cv2.UMat(remap_y)
+                            x = i * block_w
+                            y = j * block_h
+                            bw = block_w if i < blocks_x - 1 else w - x
+                            bh = block_h if j < blocks_y - 1 else h - y
+                            futures_cpu.append(executor.submit(compute_block_cpu, x, y, bw, bh, overlap_ratio))
 
-        interpolation_str = fb_config.get("interpolation", "INTER_AREA")
-        interp_flag = getattr(cv2, interpolation_str, cv2.INTER_LANCZOS4)
+                    processed_count_cpu = 0
+                    for future in concurrent.futures.as_completed(futures_cpu):
+                        if stop_requested and stop_requested():
+                            print("CPU Path: Stop requested while processing results.")
+                            for f in futures_cpu: f.cancel()
+                            return None # Keluar
 
-        compensated_image = cv2.remap(
-            base_image_16bit, 
-            remap_x, 
-            remap_y, 
-            interpolation=interp_flag, 
-            borderMode=cv2.BORDER_REFLECT
-        )
+                        try:
+                            result_block = future.result()
+                            processed_count_cpu += 1
+                            if result_block: # Jika tidak None
+                                x, y, flow_block = result_block
+                                h_block, w_block, _ = flow_block.shape
+                                # Tempatkan hasil blok ke array penuh
+                                # Pastikan penempatan tidak keluar batas (meskipun sudah ada cek di worker)
+                                y_end = min(y + h_block, h)
+                                x_end = min(x + w_block, w)
+                                flow_full_cpu[y:y_end, x:x_end, :] = flow_block[0:y_end-y, 0:x_end-x, :] # Slicing defensif
+                        except concurrent.futures.CancelledError:
+                             print("CPU Path: A block task was cancelled.")
+                        except Exception as exc:
+                             print(f'CPU Path: Block processing generated an exception: {exc}')
+                # Setelah loop, tetapkan hasil CPU ke variabel utama
+                flow_full = flow_full_cpu
+            # --- === AKHIR JALUR CPU === ---
 
-        if use_gpu:
-            compensated_image = compensated_image.get()
+            end_time = time.time()
+            print(f"Optical flow calculation completed in {end_time - start_time:.2f} seconds.")
+            return flow_full # Kembalikan hasil (dari GPU atau CPU)
 
-        print(language_config.COMPENSATE_MOTION_FINISHED.format(image_id=image_id))
-        return compensated_image
+        except ValueError as ve:
+             print(f"Error preparing images: {ve}")
+             return None
+        except Exception as e:
+             print(f"Unexpected error in calculate_optical_flow: {e}")
+             return None
+
+    # --- Fungsi Kompensasi Gerakan (Sudah Cukup Baik, Sedikit Refinement) ---
+    def compensate_motion(self, base_image_input, flow, image_id=0, config_filename=None): # image_id default
+        """
+        Menerapkan kompensasi gerakan menggunakan cv2.remap berdasarkan flow field.
+        Mendukung input CPU (NumPy) atau GPU (UMat) untuk remap jika diaktifkan.
+        """
+        if flow is None:
+             print(f"Error for image {image_id}: Input flow field is None. Cannot compensate motion.")
+             return None
+        if base_image_input is None:
+             print(f"Error for image {image_id}: Input base_image is None. Cannot compensate motion.")
+             return None
+
+        # Pesan status bisa dipindah ke pemanggil jika perlu
+        # print(language_config.COMPENSATE_MOTION_STATUS.format(image_id=image_id))
+        start_time = time.time()
+
+        try:
+            # Cek shape flow
+            if not (isinstance(flow, np.ndarray) and flow.ndim == 3 and flow.shape[2] == 2):
+                 raise ValueError(f"Invalid flow field shape: {flow.shape}. Expected (h, w, 2).")
+
+            h, w = flow.shape[:2]
+
+            # Cek shape base_image (hanya dimensi, tipe data bisa bervariasi)
+            if base_image_input.shape[0] != h or base_image_input.shape[1] != w:
+                 raise ValueError(f"Base image shape {base_image_input.shape[:2]} mismatch with flow field shape {flow.shape[:2]}.")
+
+            # --- Buat Peta Remap (di CPU, karena flow selalu NumPy) ---
+            # Meshgrid menghasilkan HxW, perlu transpose jika ingin WxH atau perhatikan axis
+            grid_y, grid_x = np.mgrid[0:h, 0:w] # grid_y shape (h, w), grid_x shape (h, w)
+            # Perhitungan map: x_baru = x_lama + flow_x, y_baru = y_lama + flow_y
+            # remap membutuhkan map x dan map y terpisah
+            remap_x = (grid_x + flow[:, :, 0]).astype(np.float32)
+            remap_y = (grid_y + flow[:, :, 1]).astype(np.float32)
+            # -----------------------------------------------------------
+
+            fb_config = self.load_farneback_config(config_filename)
+            use_gpu = fb_config.get("use_gpu", False) and cv2.ocl.haveOpenCL()
+            interpolation_str = fb_config.get("interpolation", "INTER_LINEAR") # Ubah default ke INTER_LINEAR
+            # Ambil flag interpolasi dari cv2, fallback ke INTER_LINEAR jika tidak valid
+            interp_flag = getattr(cv2, interpolation_str, cv2.INTER_LINEAR)
+
+            print(f"Remapping image {image_id} using {'GPU' if use_gpu else 'CPU'} with interpolation {interpolation_str}...")
+
+            # --- Operasi Remap (CPU atau GPU) ---
+            compensated_image = None # Inisialisasi
+            if use_gpu:
+                try:
+                    # Upload data yang diperlukan ke GPU
+                    base_image_umat = cv2.UMat(base_image_input) # Tipe data asli (uint8/uint16) dijaga
+                    remap_x_umat = cv2.UMat(remap_x)
+                    remap_y_umat = cv2.UMat(remap_y)
+
+                    compensated_image_umat = cv2.remap(
+                        base_image_umat,
+                        remap_x_umat,
+                        remap_y_umat,
+                        interpolation=interp_flag,
+                        borderMode=cv2.BORDER_REFLECT # Atau BORDER_CONSTANT?
+                    )
+                    compensated_image = compensated_image_umat.get() # Download hasil
+                except cv2.error as gpu_remap_err:
+                     print(f"OpenCV GPU error during remap: {gpu_remap_err}. Falling back to CPU.")
+                     use_gpu = False # Matikan flag jika remap GPU gagal
+                     del base_image_umat, remap_x_umat, remap_y_umat, compensated_image_umat # Hapus UMat
+                except Exception as gpu_remap_exc:
+                     print(f"Unexpected GPU error during remap: {gpu_remap_exc}. Falling back to CPU.")
+                     use_gpu = False
+
+            # Jalur CPU (atau fallback dari GPU)
+            if not use_gpu:
+                compensated_image = cv2.remap(
+                    base_image_input, # Gunakan input NumPy asli
+                    remap_x,
+                    remap_y,
+                    interpolation=interp_flag,
+                    borderMode=cv2.BORDER_REFLECT # Atau BORDER_CONSTANT?
+                )
+            # ----------------------------------
+
+            end_time = time.time()
+            # Pesan selesai bisa dipindah ke pemanggil
+            # print(language_config.COMPENSATE_MOTION_FINISHED.format(image_id=image_id))
+            print(f"Compensate motion for image {image_id} finished in {end_time - start_time:.2f} seconds.")
+            return compensated_image
+
+        except ValueError as ve:
+            print(f"Error in compensate_motion for image {image_id}: {ve}")
+            return None
+        except cv2.error as cv_err:
+             print(f"OpenCV error during compensate_motion for image {image_id}: {cv_err}")
+             return None
+        except Exception as e:
+            print(f"Unexpected error during compensate_motion for image {image_id}: {e}")
+            return None
 
 def main(db_path, update_progress=None, batch_size=5, stop_requested=None, single_process=None, 
          batch_id=None,):

@@ -9,8 +9,8 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 # from UI.enhance_stack.algorithm.denoising.extra_similarity.compute_motion_metrics_aot import accumulate_tiles_jit
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, save_image  
-from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import calculate_mad_from_array, call_accumulate_frame_weighted, call_normalize_accumulated
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, save_image
+from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityV1MotionInterface
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
 
@@ -56,10 +56,6 @@ class SimilarityAlgorithm:
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
         self.db_path = db_path
         self.hdf5_path = hdf5_path
-        self.low_global_sigma_thresh = 0.043  # Sigma di bawah ini dianggap "bersih"
-        self.high_global_sigma_thresh = 0.28   # Sigma di atas ini dianggap "sangat ber-noise"
-        self.high_max_multiplier = 5.5        # Multiplier maks untuk gambar bersih
-        self.low_max_multiplier = 15.0        # Multiplier maks untuk gambar sangat ber-noise
 
         # Pastikan folder HDF5 ada
         hdf5_folder = os.path.dirname(self.hdf5_path)
@@ -123,57 +119,6 @@ class SimilarityAlgorithm:
                 image = np.array(h5f[key])
                 images.append(image)
         return images
-
-    def _calculate_dynamic_max_multiplier(self, global_avg_sigma):
-        """Menghitung multiplier maksimum dinamis berdasarkan sigma global."""
-        # Clamp sigma ke rentang yang diketahui untuk interpolasi yang stabil
-        clamped_sigma = max(self.low_global_sigma_thresh, min(global_avg_sigma, self.high_global_sigma_thresh))
-
-        if self.high_global_sigma_thresh <= self.low_global_sigma_thresh:
-             # Hindari pembagian dengan nol jika threshold sama
-             return self.high_max_multiplier # Atau low, tergantung preferensi default
-
-        if clamped_sigma <= self.low_global_sigma_thresh:
-            return self.high_max_multiplier
-        elif clamped_sigma >= self.high_global_sigma_thresh:
-            return self.low_max_multiplier
-        else:
-            factor = (clamped_sigma - self.low_global_sigma_thresh) / (self.high_global_sigma_thresh - self.low_global_sigma_thresh)
-            dynamic_multiplier = self.high_max_multiplier + factor * (self.low_max_multiplier - self.high_max_multiplier)
-
-            # --- PERBAIKAN LOGIKA CLAMPING ---
-            # Tentukan batas bawah dan atas yang sebenarnya dari kedua parameter
-            lower_bound = min(self.low_max_multiplier, self.high_max_multiplier)
-            upper_bound = max(self.low_max_multiplier, self.high_max_multiplier)
-
-            # Clamp nilai dynamic_multiplier agar berada di antara lower_bound dan upper_bound
-            clamped_multiplier = max(lower_bound, min(upper_bound, dynamic_multiplier))
-            return clamped_multiplier
-        
-        # === FUNGSI BARU untuk Skor Noise ===
-    def _calculate_noise_level_score(self, global_avg_sigma):
-        """
-        Menghitung skor tingkat kebersihan gambar (0-100) berdasarkan sigma global.
-        100 = Sangat Bersih (sigma <= low_thresh)
-        0   = Sangat Bising (sigma >= high_thresh)
-        Linear dazwischen.
-        """
-        sigma_low = self.low_global_sigma_thresh
-        sigma_high = self.high_global_sigma_thresh
-
-        if sigma_high <= sigma_low:
-            # Jika threshold tidak valid, kembalikan nilai tengah atau default
-            return 50.0 if global_avg_sigma > sigma_low else 100.0
-
-        if global_avg_sigma <= sigma_low:
-            return 100.0
-        elif global_avg_sigma >= sigma_high:
-            return 0.0
-        else:
-            # Interpolasi linear terbalik: skor turun dari 100 ke 0 saat sigma naik
-            score = 100.0 * (sigma_high - global_avg_sigma) / (sigma_high - sigma_low)
-            # Pastikan skor tetap dalam rentang [0, 100] karena floating point error kecil
-            return max(0.0, min(score, 100.0))
     
     @lru_cache(maxsize=None)
     def gaussian_window(self, size, sigma_scale=1/6):
@@ -228,8 +173,8 @@ class SimilarityAlgorithm:
         # Pastikan output float32 dan C-contiguous
         return np.ascontiguousarray(norm_image.astype(np.float32))
 
-    def similarity_mfnr(self, images, tile_size=(16, 16), overlap=0.40,
-                        motion_threshold=0.0025, update_progress=None, stop_requested=None,
+    def similarity_mfnr(self, images, tile_size=(12, 12), overlap=0.50,
+                        motion_threshold=0.030, update_progress=None, stop_requested=None,
                         lib_path='UI/data/similarity_motion.dll',
                         save_weight_map_path=None): # Tambahkan parameter opsional
 
@@ -268,11 +213,20 @@ class SimilarityAlgorithm:
              raise TypeError("Input image dtype must be uint8 or uint16.")
 
         # --- Parameter MBM ---
-        mbm_block_h = tile_h
-        mbm_block_w = tile_w
-        mbm_search_radius = 16
+        mbm_block_h = min(tile_h, 16)
+        mbm_block_w = min(tile_w, 16)
+        mbm_search_radius = 24
+        
+        # --- BUAT INSTANCE INTERFACE C++ ---
+        try:
+            # Ini menggantikan blok pemuatan DLL dan definisi argtypes
+            c_interface = SimilarityV1MotionInterface(lib_path)
+        except (FileNotFoundError, OSError, AttributeError) as e:
+            # Tangani error saat memuat/menginisialisasi interface
+            raise RuntimeError(f"Failed to initialize C++ interface: {e}")
 
         # --- Load Library C++ & Definisikan Argtypes SEKALI ---
+        # ... (kode load clib dan definisi argtypes Anda sebelumnya, pastikan channels_buffer sesuai) ...
         if not os.path.exists(lib_path):
             raise FileNotFoundError(f"Shared library not found: {lib_path}")
         try:
@@ -297,8 +251,7 @@ class SimilarityAlgorithm:
                 ctypes.c_float, # 15 motion_threshold
                 ctypes.c_int, # 16 mbm_block_h
                 ctypes.c_int, # 17 mbm_block_w
-                ctypes.c_int,  # 18 mbm_search_radius
-                ctypes.c_float 
+                ctypes.c_int  # 18 mbm_search_radius
             ]
             clib.accumulate_frame_weighted_jit.restype = None
 
@@ -311,22 +264,6 @@ class SimilarityAlgorithm:
                 ctypes.c_int  # 5 channels (jumlah channel buffer C++, yaitu 3)
             ]
             clib.normalize_accumulated_image_jit.restype = None
-            
-            # === DEFINISI UNTUK FUNGSI C++ BARU ===
-            clib.estimate_global_noise.argtypes = [
-                np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'), # reference_image_ptr
-                ctypes.c_int, # h
-                ctypes.c_int, # w
-                ctypes.c_int, # channels (input, akan jadi gray di C++)
-                ctypes.c_int, # tile_h
-                ctypes.c_int, # tile_w
-                np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'), # row_starts
-                ctypes.c_int, # num_row_starts
-                np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'), # col_starts
-                ctypes.c_int  # num_col_starts
-            ]
-            clib.estimate_global_noise.restype = ctypes.c_float
-            # === AKHIR DEFINISI BARU ===
 
         except OSError as e:
             raise OSError(f"Error loading shared library {lib_path}: {e}")
@@ -334,52 +271,42 @@ class SimilarityAlgorithm:
              raise AttributeError(f"Function not found in DLL or error setting argtypes. Did you compile C++ correctly? Error: {e}")
 
 
-         # --- Persiapan Buffer & Variabel (Sama) ---
+        # --- Persiapan Buffer & Variabel (Pastikan Contiguous) ---
+        # Normalisasi gambar referensi (akan jadi 3 channel jika input gray)
         reference_image_float = self.normalize_image(ref_image, dtype)
-        h_ref, w_ref, channels_ref = reference_image_float.shape
-        if channels_ref != channels_buffer: raise RuntimeError("Channel mismatch")
+        h_ref, w_ref, channels_ref = reference_image_float.shape # Ambil shape setelah normalisasi
+        if channels_ref != channels_buffer: # Double check konsistensi channel
+            raise RuntimeError(f"Internal Error: Normalized reference image channels ({channels_ref}) mismatch buffer channels ({channels_buffer})")
+
+        # Buat buffer sum dengan ukuran H, W, dan channels_buffer (3)
         final_image_sum = np.ascontiguousarray(np.zeros((h_ref, w_ref, channels_buffer), dtype=np.float32))
         weight_map_sum = np.ascontiguousarray(np.zeros((h_ref, w_ref), dtype=np.float32))
 
-        # --- Tile Starts & Base Window (Sama) ---
-        step_y = max(int(tile_h * (1 - overlap)), 1); step_x = max(int(tile_w * (1 - overlap)), 1)
+        # --- Tile Starts & Base Window (Pastikan Contiguous) ---
+        # ... (kode tile starts dan base_window Anda sebelumnya) ...
+        step_y = max(int(tile_h * (1 - overlap)), 1)
+        step_x = max(int(tile_w * (1 - overlap)), 1)
         if h_ref >= tile_h:
             row_starts = np.arange(0, h_ref - tile_h + 1, step_y)
-            if h_ref > tile_h and (len(row_starts) == 0 or row_starts[-1] != h_ref - tile_h): row_starts = np.append(row_starts, h_ref - tile_h)
-            elif h_ref == tile_h: row_starts = np.array([0])
-        else: row_starts = np.array([0])
+            if h_ref > tile_h and (len(row_starts) == 0 or row_starts[-1] != h_ref - tile_h):
+                 row_starts = np.append(row_starts, h_ref - tile_h)
+            elif h_ref == tile_h:
+                 row_starts = np.array([0])
+        else:
+             row_starts = np.array([0])
+
         if w_ref >= tile_w:
             col_starts = np.arange(0, w_ref - tile_w + 1, step_x)
-            if w_ref > tile_w and (len(col_starts) == 0 or col_starts[-1] != w_ref - tile_w): col_starts = np.append(col_starts, w_ref - tile_w)
-            elif w_ref == tile_w: col_starts = np.array([0])
-        else: col_starts = np.array([0])
+            if w_ref > tile_w and (len(col_starts) == 0 or col_starts[-1] != w_ref - tile_w):
+                 col_starts = np.append(col_starts, w_ref - tile_w)
+            elif w_ref == tile_w:
+                 col_starts = np.array([0])
+        else:
+             col_starts = np.array([0])
+
         row_starts = np.ascontiguousarray(np.unique(row_starts).astype(np.int32))
         col_starts = np.ascontiguousarray(np.unique(col_starts).astype(np.int32))
         base_window = self.gaussian_window(tile_size)
-
-        # --- HITUNG GLOBAL NOISE (PANGGIL C++), MULTIPLIER, DAN SKOR ---
-        print("Estimating global noise level from reference frame (using C++)...") # Pesan diubah
-        try:
-            global_avg_sigma = clib.estimate_global_noise(
-                reference_image_float, # Pointer dari array NumPy
-                h_ref, w_ref, channels_buffer, # Dimensi & channel buffer (C++ akan handle gray)
-                tile_h, tile_w,
-                row_starts, len(row_starts),
-                col_starts, len(col_starts)
-            )
-        except Exception as e:
-            print(f"!!! ERROR calling C++ estimate_global_noise_cpp: {e}")
-            traceback.print_exc()
-            global_avg_sigma = 0.0 # Fallback jika error
-
-        # Lanjutkan seperti sebelumnya
-        frame_max_multiplier = self._calculate_dynamic_max_multiplier(global_avg_sigma)
-        noise_level_score = self._calculate_noise_level_score(global_avg_sigma)
-        print(f"  Global Avg Sigma Estimate: {global_avg_sigma:.5f}")
-        print(f"  Cleanliness Score (0-100, 100=clean): {noise_level_score:.1f}")
-        print(f"  Calculated Dynamic Max Multiplier: {frame_max_multiplier:.3f}")
-        # --- ------------------------------------------------------- ---
-        # --- ------------------------------------------------------- ---
 
         # --- Skala Denormalisasi ---
         scale_value = np.float32(np.iinfo(dtype).max)
@@ -431,13 +358,13 @@ class SimilarityAlgorithm:
 
             # --- Panggil Fungsi Akumulasi C++ ---
             try:
-                call_accumulate_frame_weighted(
+                c_interface.call_accumulate_frame_weighted(
                     clib, final_image_sum, weight_map_sum, # Target (Writable)
                     current_image_float, reference_image_float, # Input (Read-only)
                     base_window, row_starts, col_starts, # Params
                     tile_h, tile_w, h_ref, w_ref, channels_buffer, # Ukuran & Channel Buffer
                     motion_threshold,
-                    mbm_block_h, mbm_block_w, mbm_search_radius, frame_max_multiplier
+                    mbm_block_h, mbm_block_w, mbm_search_radius
                 )
                 processed_frames += 1 # Hanya increment jika pemanggilan berhasil
             except Exception as e:
@@ -452,57 +379,32 @@ class SimilarityAlgorithm:
             print(f"Accumulated {processed_frames} frames. Normalizing...")
 
             try:
-                call_normalize_accumulated(clib, final_image_sum, weight_map_sum, h_ref, w_ref, channels_buffer)
+                c_interface.call_normalize_accumulated(clib, final_image_sum, weight_map_sum, h_ref, w_ref, channels_buffer)
                 print("Normalization complete.")
             except Exception as e:
                  print(f"ERROR calling C++ normalize function: {e}")
                  raise RuntimeError(f"C++ normalization failed: {e}")
 
-            # --- PENYIMPANAN PETA BOBOT ---
+            # --- PENYIMPANAN PETA BOBOT (BARU) ---
             if save_weight_map_path:
                 print(f"Generating and saving weight map to {save_weight_map_path}...")
                 try:
-                    # --- Normalisasi Baru: Berdasarkan jumlah frame yang diproses ---
-                    # Ini menunjukkan 'rata-rata' confidence per frame yang berkontribusi
-                    # (sudah termasuk pengaruh base_window)
-                    if processed_frames > 0:
-                         # Bagi dengan jumlah frame untuk mendapatkan bobot rata-rata per piksel
-                         # Nilai maksimum idealnya 1.0 di tengah tile jika confidence selalu 1
-                         normalized_weights = weight_map_sum / float(processed_frames)
+                    # Normalisasi weight_map_sum ke [0, 1] untuk visualisasi
+                    max_weight = np.max(weight_map_sum)
+                    if max_weight > 1e-6: # Hindari pembagian dengan nol
+                        normalized_weights = weight_map_sum / max_weight
                     else:
-                         normalized_weights = np.zeros_like(weight_map_sum) # Peta hitam jika tidak ada frame
-
-                    # Clamp nilai ke [0, 1] karena pembagian bisa menghasilkan > 1 jika ada overlap tinggi
-                    normalized_weights = np.clip(normalized_weights, 0.0, 1.0)
-
-                    # --- Opsional: Tambahkan Blurring pada Visualisasi ---
-                    # Jika Anda masih melihat artefak visual antar blok MBM (bukan tile)
-                    # atau ingin visualisasi yang lebih mulus secara umum.
-                    apply_vis_blur = False # Set ke False jika tidak ingin blur tambahan
-                    if apply_vis_blur:
-                        # Gunakan kernel yang relatif kecil agar tidak terlalu kabur
-                        vis_blur_kernel_size = 3
-                        # Blur *setelah* normalisasi float
-                        normalized_weights = cv2.GaussianBlur(normalized_weights, (vis_blur_kernel_size, vis_blur_kernel_size), 0)
-                        # Clamp lagi setelah blur
-                        normalized_weights = np.clip(normalized_weights, 0.0, 1.0)
-
+                        normalized_weights = np.zeros_like(weight_map_sum) # Peta hitam jika tidak ada bobot
 
                     # Konversi ke uint8 [0, 255]
-                    weight_map_vis = (normalized_weights * 255).astype(np.uint8)
+                    weight_map_vis = (np.clip(normalized_weights, 0, 1) * 255).astype(np.uint8)
 
                     # Simpan peta bobot sebagai gambar grayscale
-                    os.makedirs(os.path.dirname(save_weight_map_path), exist_ok=True)
-                    success_save = cv2.imwrite(save_weight_map_path, weight_map_vis)
-                    if success_save:
-                         print("Weight map saved successfully.")
-                    else:
-                         print(f"ERROR: Failed to save weight map to {save_weight_map_path}")
-
+                    cv2.imwrite(save_weight_map_path, weight_map_vis)
+                    print("Weight map saved successfully.")
                 except Exception as e:
-                    print(f"ERROR: Could not generate or save weight map: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    print(f"ERROR: Could not save weight map: {e}")
+            # --- AKHIR BAGIAN PETA BOBOT ---
 
 
             # --- Denormalisasi, Clipping, Konversi Tipe (di Python) ---
@@ -539,7 +441,7 @@ class SimilarityAlgorithm:
             return np.zeros(output_shape, dtype=dtype)
 
 def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
-         single_process=None, batch_id=None, save_final_weight_map=True): # Parameter baru ditambahkan
+         single_process=None, batch_id=None, save_final_weight_map=False): # Parameter baru ditambahkan
     try:
         print("Initializing SimilarityAlgorithm...")
         image_processor = SimilarityAlgorithm(db_path)

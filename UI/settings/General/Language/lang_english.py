@@ -428,9 +428,10 @@ Monod, Antoine, Delon, Julie, & Veit, Thomas. (2021). An Analysis and Implementa
 Image Processing On Line, 11, 142-169. https://doi.org/10.5201/ipol.2021.336
 """
 
-MOTION_FLOW_DESCRIPTION = """Combined with optical flow in calculating object movement,
-noise reduction becomes more intelligent in distinguishing noise and real movement.
-Very robust in complex motion but slower than other methods"""
+SIMILARITY_MOTION_V2_DESCRIPTION = """Similarity V2 is the result of developing the similarity v1 algorithm with a number 
+of significant improvements. This algorithm is capable of generating cleaner images even when the input contains severe noise, 
+thanks to its intelligent ability to distinguish between noise, texture, and subtle movements. It is more reliable under low lighting conditions, 
+although its processing is slower compared to version v1."""
                         
                         
 # ------------------ General Settings ------------------ #

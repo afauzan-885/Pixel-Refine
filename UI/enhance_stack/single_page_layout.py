@@ -12,8 +12,8 @@ from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import running_
 from UI.enhance_stack.algorithm.alignment.ORB import running_orb
 from UI.enhance_stack.algorithm.denoising.Average import running_average
 from UI.enhance_stack.algorithm.denoising.Median import running_median
-from UI.enhance_stack.algorithm.denoising.Motion_Flow import running_motion_flow
 from UI.enhance_stack.algorithm.denoising.Similarity import running_similarity
+from UI.enhance_stack.algorithm.denoising.Similarity_V2 import running_similarity_v2
 from UI.enhance_stack.algorithm.denoising.Weighted_average import running_weighted_average
 from UI.enhance_stack.algorithm.super_resolution.Interpolation import running_interpolation
 from UI.enhance_stack.components.single_page_layout.image_preview_handler import fit_image_to_panel
@@ -254,14 +254,11 @@ class SinglePageLayout(QWidget):
             elif denoising_choice == "Median":
                 running_median(self, single_process=True)
                 denoising_executed = True
-            elif denoising_choice == "Weighted Average":
-                running_weighted_average(self, single_process=True)
-                denoising_executed = True
             elif denoising_choice == "Similarity":
                 running_similarity(self, single_process=True)
                 denoising_executed = True
-            elif denoising_choice == "Motion Flow":
-               running_motion_flow(self, single_process=True)
+            elif denoising_choice == "Similarity V2":
+               running_similarity_v2(self, single_process=True)
                denoising_executed = True
             elif denoising_choice == "none":
                 return 
