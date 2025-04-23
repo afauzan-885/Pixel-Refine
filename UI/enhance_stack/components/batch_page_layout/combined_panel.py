@@ -13,7 +13,6 @@ from UI.enhance_stack.algorithm.denoising.Average import running_average
 from UI.enhance_stack.algorithm.denoising.Median import running_median
 from UI.enhance_stack.algorithm.denoising.Similarity import running_similarity
 from UI.enhance_stack.algorithm.denoising.Similarity_V2 import running_similarity_v2
-from UI.enhance_stack.algorithm.denoising.Weighted_average import running_weighted_average
 from UI.enhance_stack.algorithm.super_resolution.Interpolation import running_interpolation
 from UI.enhance_stack.components.batch_page_layout.image_batch_management import handle_add_image_to_batch
 from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, create_thumbnail_placeholder, update_thumbnail
