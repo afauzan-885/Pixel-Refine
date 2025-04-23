@@ -123,7 +123,7 @@ class WeightedAverageAlgorithm:
 
         dtype = images[0].dtype
         if dtype not in (np.uint8, np.uint16):
-            raise TypeError(language_config.SIMILARITY_MNFR_BIT_REQUIRED)
+            raise TypeError(language_config.IMAGE_BIT_REQUIRED)
 
         # Normalisasi citra referensi
         reference_image = self.normalize_image(images[0], dtype)

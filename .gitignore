@@ -6,6 +6,7 @@ pixel_refine_database.db
 build_instalasi.txt
 syarat.txt
 mingw64/
+ChangeLog.txt
 
 # Ignore virtual environment directories
 venv/

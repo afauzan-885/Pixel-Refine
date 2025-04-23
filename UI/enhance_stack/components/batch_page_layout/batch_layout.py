@@ -1,6 +1,8 @@
 from PyQt6.QtWidgets import (QLabel, QSpacerItem, QSizePolicy, QWidget,  QScrollArea)
 from PyQt6.QtCore import Qt
 
+from UI.settings.General.Language import language_config
+
 
 def setup_main_panel(layout_instance, scroll_area_style):
     """Membuat panel utama dengan layout yang diberikan."""
@@ -33,7 +35,7 @@ def refresh_ui(database_manager, main_panel_layout, setup_combined_panel):
     batch_ids = database_manager.get_all_batch_ids()
 
     if not batch_ids:
-        placeholder = QLabel("No batches available.")
+        placeholder = QLabel(language_config.UI_NO_BATCH_PROCESS)
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_panel_layout.addWidget(placeholder)
     else:

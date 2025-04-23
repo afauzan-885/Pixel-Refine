@@ -414,7 +414,7 @@ def main(db_path, update_progress=None, batch_size=8, stop_requested=None, singl
         image_paths = processor.get_all_image_paths_for_single_process()
     else:
         if batch_id is None:
-            raise ValueError("batch_id harus diberikan untuk batch process")
+            raise ValueError(language_config.BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS)
         image_paths = processor.get_all_image_paths_for_batch_process(batch_id)
     
     if not image_paths:

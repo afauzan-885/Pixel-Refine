@@ -111,18 +111,19 @@ class ImageImportThreading(BaseMultiThreading):
         
 class BatchImageImportThreading(BaseMultiThreading):
     """
-    Specific multithreading implementation for importing images.
+    Specific multithreading implementation for importing images into a SPECIFIC batch.
     """
-    def __init__(self, database_manager, image_paths, batch_size, delay_ms, batch_name="batch1"):
-        # Buat batch baru terlebih dahulu dan simpan batch_id-nya
-        self.batch_id = database_manager.create_new_batch(batch_name)
-        
+    def __init__(self, database_manager, image_paths, batch_id, batch_size, delay_ms):
+        # Terima batch_id yang sudah ada
+        self.batch_id = batch_id
+        self.database_manager = database_manager # Simpan referensi
+
         # Definisikan tugas untuk setiap gambar
         def import_task(image_path):
-            # Karena fungsi batch_process_save_image_path membutuhkan list,
-            # kita bungkus image_path ke dalam list
-            database_manager.batch_process_save_image_path(self.batch_id, [image_path])
-        
+            # Panggil fungsi save dengan batch_id yang sudah ditentukan
+            # Fungsi ini sekarang menangani satu path dalam list
+            self.database_manager.batch_process_save_image_path(self.batch_id, [image_path])
+
         super().__init__(import_task, image_paths, batch_size, delay_ms)
 
         

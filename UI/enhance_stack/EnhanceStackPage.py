@@ -38,9 +38,6 @@ class EnhanceStackPage(QWidget):
         self.top_bar.single_page_import_button.setVisible(True)
         self.top_bar.single_page_delete_button.setVisible(True)
 
-        # for widget in [self.top_bar.batch_page_import_button, self.top_bar.batch_page_delete_button,
-        #                self.top_bar.start_process_batch, self.top_bar.save_batch_to]:
-        #     widget.setVisible(False)
         for widget in [self.top_bar.batch_page_import_button, self.top_bar.batch_page_delete_button,
                        self.top_bar.start_process_batch]:
             widget.setVisible(False)
@@ -57,8 +54,7 @@ class EnhanceStackPage(QWidget):
         self.top_bar.batch_page_import_button.clicked.connect(self.batch_page_layout.handle_batch_import_button)
         self.top_bar.batch_page_delete_button.clicked.connect(self.batch_page_layout.handle_delete_all_batches)
         self.top_bar.start_process_batch.clicked.connect(self.batch_page_layout.process_all_batches)
-        # self.top_bar.save_batch_to.clicked.connect(self.batch_page_layout.handle_save_to)
-
+        
     def switch_page(self):
         """Switch halaman berdasarkan tombol yang dipilih."""
         if self.top_bar.single_button.isChecked():
@@ -79,10 +75,6 @@ class EnhanceStackPage(QWidget):
             self.top_bar.single_page_import_button.setVisible(False)
             self.top_bar.single_page_delete_button.setVisible(False)
 
-            # Tampilkan tombol import, delete, Start Process, dan Save to di mode Batch
-            # for widget in [self.top_bar.batch_page_import_button, self.top_bar.batch_page_delete_button,
-            #                self.top_bar.start_process_batch, self.top_bar.save_batch_to]:
-            #     widget.setVisible(True)
             for widget in [self.top_bar.batch_page_import_button, self.top_bar.batch_page_delete_button,
                        self.top_bar.start_process_batch]:
                 widget.setVisible(True)

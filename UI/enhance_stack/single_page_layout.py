@@ -71,31 +71,29 @@ class SinglePageLayout(QWidget):
             return None
 
     def handle_import_button(self):
-        """Function to manage images import, including TIFF decompression"""
-        # Open file dialog and get image paths with filter
+        """Function to manage images import for Single Process"""
         file_dialog_filter = language_config.HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION
         image_paths, _ = QFileDialog.getOpenFileNames(self, language_config.HANDLE_IMPORT_BUTTON_IMAGE_PATH, "", file_dialog_filter)
 
         if not image_paths:
             return
 
-        # Mapping ekstensi alternatif ke dalam tiga kategori utama
         SUPPORTED_FORMATS = {
             "jpg": [".jpg", ".jpeg", ".jiff", ".jli"],
             "tiff": [".tif", ".tiff"],
             "png": [".png"],
         }
 
-        # Step 1: Validate duplicate files
-        existing_paths = self.database_manager.get_all_image_paths()
-        duplicates = [path for path in image_paths if path in existing_paths]
+        # Step 1: Validate duplicate files WITHIN SINGLE PROCESS CONTEXT
+        existing_single_paths = self.database_manager.get_single_process_image_paths()
+        duplicates = [path for path in image_paths if path in existing_single_paths]
         unique_files = [path for path in image_paths if path not in duplicates]
 
         if duplicates:
             message = language_config.HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE_MESSAGE.format(count=len(duplicates))
             QMessageBox.warning(self,
                                 language_config.HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE,
-                                message)
+                                message) # Tambahkan konteks jika perlu
 
         # Step 2: Group files berdasarkan format utama yang didukung
         format_groups = {key: [] for key in SUPPORTED_FORMATS.keys()}

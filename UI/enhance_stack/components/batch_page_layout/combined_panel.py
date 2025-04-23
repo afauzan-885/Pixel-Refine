@@ -12,6 +12,7 @@ from UI.enhance_stack.algorithm.alignment.ORB import running_orb
 from UI.enhance_stack.algorithm.denoising.Average import running_average
 from UI.enhance_stack.algorithm.denoising.Median import running_median
 from UI.enhance_stack.algorithm.denoising.Similarity import running_similarity
+from UI.enhance_stack.algorithm.denoising.Similarity_V2 import running_similarity_v2
 from UI.enhance_stack.algorithm.denoising.Weighted_average import running_weighted_average
 from UI.enhance_stack.algorithm.super_resolution.Interpolation import running_interpolation
 from UI.enhance_stack.components.batch_page_layout.image_batch_management import handle_add_image_to_batch
@@ -215,7 +216,6 @@ class CombinedPanel(QWidget):
             dialog.exec()
         else:
             QMessageBox.warning(self, "Caution", language_config.NOT_IMAGE_PREVIEW)
-
     
     def dropdown_box_control(self):
         """Buat combo box untuk algoritma penyelarasan, super resolusi, dan denoising."""
@@ -244,9 +244,9 @@ class CombinedPanel(QWidget):
         denoising_algorithms = [
             ("None", language_config.NONE_DENOISING_DESCRIPTION),
             ("Average", language_config.AVERAGE_DESCRIPTION),
-            ("Weighted Average", language_config.WEIGHTED_AVERAGE_DESCRIPTION),
             ("Median", language_config.MEDIAN_DESCRIPTION),
-            ("Similarity", language_config.SIMILARITY_DESCRIPTION)
+            ("Similarity", language_config.SIMILARITY_DESCRIPTION),
+            ("Similarity V2", language_config.SIMILARITY_MOTION_V2_DESCRIPTION)
         ]
         for name, _ in denoising_algorithms:
             denoising_combox.addItem(name)
@@ -283,9 +283,9 @@ class CombinedPanel(QWidget):
             },
             'denoising': {
                 "Average": lambda: running_average(self, single_process=False, batch_id=self.batch_id),
-                "Weighted Average": lambda: running_weighted_average(self, single_process=False, batch_id=self.batch_id),
                 "Median": lambda: running_median(self, single_process=False, batch_id=self.batch_id),
                 "Similarity": lambda: running_similarity(self, single_process=False, batch_id=self.batch_id),
+                "Similarity V2": lambda: running_similarity_v2(self, single_process=False, batch_id=self.batch_id),
             }
         }
 

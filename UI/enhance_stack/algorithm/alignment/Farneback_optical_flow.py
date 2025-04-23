@@ -111,14 +111,12 @@ class FarnebackAlgorithm:
         - Mode CPU: Memproses secara paralel berbasis blok dengan overlap.
         """
         if stop_requested and stop_requested():
-            print("Proses optical flow dihentikan.")
             return None
 
-        start_time = time.time()
         fb_config = self.load_farneback_config(config_filename)
         use_gpu = fb_config.get("use_gpu", False) and cv2.ocl.haveOpenCL()
 
-        print(f"Calculating dense optical flow using Farneback ({'GPU' if use_gpu else 'CPU Parallel Blocks'})...")
+        print(f"Calculating using ({'GPU' if use_gpu else 'CPU'})...")
 
         try:
             # --- Persiapan Gambar Grayscale (Selalu uint8) ---
@@ -139,11 +137,9 @@ class FarnebackAlgorithm:
 
             # --- === JALUR EKSEKUSI GPU === ---
             if use_gpu:
-                print("GPU Path: Uploading images to UMat...")
                 try:
                     base_gray_umat = cv2.UMat(base_gray_8bit)
                     target_gray_umat = cv2.UMat(target_gray_8bit)
-                    print("GPU Path: Running Farneback on UMat...")
                     flow_umat = cv2.calcOpticalFlowFarneback(
                         base_gray_umat, target_gray_umat, None,
                         pyr_scale=fb_config["pyr_scale"], levels=fb_config["levels"],
@@ -151,25 +147,21 @@ class FarnebackAlgorithm:
                         poly_n=fb_config["poly_n"], poly_sigma=fb_config["poly_sigma"],
                         flags=fb_config["flags"]
                     )
-                    print("GPU Path: Downloading flow field...")
                     flow_full = flow_umat.get()
                 except cv2.error as gpu_err:
-                     print(f"GPU Farneback error: {gpu_err}. Will attempt CPU fallback.")
                      use_gpu = False # Set flag untuk fallback
                      # Hapus UMat untuk membebaskan memori GPU
                      try: del base_gray_umat, target_gray_umat, flow_umat
                      except NameError: pass
                 except Exception as gpu_exc:
-                     print(f"Unexpected GPU error: {gpu_exc}. Will attempt CPU fallback.")
+                     print(language_config.GPU_ERROR_AND_FALLBACK_TO_CPU.format(gpu_exc))
                      use_gpu = False
             # --- === AKHIR JALUR GPU === ---
 
             # --- === JALUR EKSEKUSI CPU (Paralel Blok atau Fallback GPU) === ---
             if not use_gpu:
-                print("CPU Path: Using parallel block processing...")
-                # Ambil parameter blok dari config
-                num_blocks = fb_config.get("cpu_num_blocks", (2, 2))
-                overlap_ratio = fb_config.get("cpu_overlap_ratio", 0.3)
+                num_blocks = fb_config.get((2, 2))
+                overlap_ratio = fb_config.get(0.3)
                 blocks_x, blocks_y = num_blocks
                 block_w = w // blocks_x
                 block_h = h // blocks_y
@@ -205,8 +197,6 @@ class FarnebackAlgorithm:
                         offset_y = y - roi_y_start
                         # Pastikan dimensi crop valid
                         if offset_y+bh > flow_roi.shape[0] or offset_x+bw > flow_roi.shape[1]:
-                             print(f"Warning: Crop dimension error for block ({x},{y}). ROI shape {flow_roi.shape}, offset ({offset_x},{offset_y}), block size ({bw},{bh})")
-                             # Ambil bagian yang valid saja
                              bh_valid = min(bh, flow_roi.shape[0] - offset_y)
                              bw_valid = min(bw, flow_roi.shape[1] - offset_x)
                              if bh_valid <= 0 or bw_valid <= 0 : return None # Tidak ada bagian valid
@@ -214,7 +204,6 @@ class FarnebackAlgorithm:
                              # Perlu penanganan khusus saat menempatkan kembali ke flow_full_cpu jika ukuran tidak pas
                              # Untuk sementara, lewati blok ini jika ukuran tidak pas
                              if flow_block.shape[0] != bh or flow_block.shape[1] != bw:
-                                 print(f"Warning: Skipping block ({x},{y}) due to size mismatch after cropping.")
                                  return None
                         else:
                             flow_block = flow_roi[offset_y:offset_y+bh, offset_x:offset_x+bw, :]
@@ -222,22 +211,18 @@ class FarnebackAlgorithm:
                         # Kembalikan posisi (x,y) dan hasil flow untuk blok ini
                         return (x, y, flow_block)
                     except cv2.error as cv_err:
-                        print(f"OpenCV error in compute_block_cpu ({x},{y}): {cv_err}")
                         return None
                     except Exception as exc:
-                        print(f"Unexpected error in compute_block_cpu ({x},{y}): {exc}")
                         return None
                 # --- Akhir fungsi worker CPU ---
 
                 futures_cpu = []
                 # Gunakan seluruh core yang tersedia pada CPU
                 num_workers = max(1, os.cpu_count())  # Gunakan semua core yang tersedia
-                print(f"CPU Path: Submitting {blocks_x * blocks_y} blocks to ThreadPoolExecutor (max_workers={num_workers})...")
                 with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
                     for i in range(blocks_x):
                         for j in range(blocks_y):
                             if stop_requested and stop_requested():
-                                print("CPU Path: Stop requested during task submission.")
                                 for f in futures_cpu: f.cancel()
                                 executor.shutdown(wait=False, cancel_futures=True)
                                 return None # Keluar
@@ -251,7 +236,6 @@ class FarnebackAlgorithm:
                     processed_count_cpu = 0
                     for future in concurrent.futures.as_completed(futures_cpu):
                         if stop_requested and stop_requested():
-                            print("CPU Path: Stop requested while processing results.")
                             for f in futures_cpu: f.cancel()
                             return None # Keluar
 
@@ -266,21 +250,16 @@ class FarnebackAlgorithm:
                                 y_end = min(y + h_block, h)
                                 x_end = min(x + w_block, w)
                                 flow_full_cpu[y:y_end, x:x_end, :] = flow_block[0:y_end-y, 0:x_end-x, :] # Slicing defensif
-                        except concurrent.futures.CancelledError:
-                             print("CPU Path: A block task was cancelled.")
                         except Exception as exc:
-                             print(f'CPU Path: Block processing generated an exception: {exc}')
-                # Setelah loop, tetapkan hasil CPU ke variabel utama
+                             print(f'Block processing generated an exception: {exc}')
                 flow_full = flow_full_cpu
             # --- === AKHIR JALUR CPU === ---
 
-            end_time = time.time()
-            print(f"Optical flow calculation completed in {end_time - start_time:.2f} seconds.")
-            return flow_full # Kembalikan hasil (dari GPU atau CPU)
-
+            return flow_full
+        
         except ValueError as ve:
-             print(f"Error preparing images: {ve}")
-             return None
+            print(language_config.FAILED_WHILE_PREPARING_IMAGE.format(ve))
+            return None
         except Exception as e:
              print(f"Unexpected error in calculate_optical_flow: {e}")
              return None
@@ -292,31 +271,25 @@ class FarnebackAlgorithm:
         Mendukung input CPU (NumPy) atau GPU (UMat) untuk remap jika diaktifkan.
         """
         if flow is None:
-             print(f"Error for image {image_id}: Input flow field is None. Cannot compensate motion.")
-             return None
+            print(language_config.ERROR_IN_FLOW_FIELD.format(image_id))
+            return None
         if base_image_input is None:
-             print(f"Error for image {image_id}: Input base_image is None. Cannot compensate motion.")
-             return None
+            print(language_config.ERROR_IN_BASE_IMAGE.format(image_id))
+            return None
 
         # Pesan status bisa dipindah ke pemanggil jika perlu
-        # print(language_config.COMPENSATE_MOTION_STATUS.format(image_id=image_id))
-        start_time = time.time()
-
         try:
             # Cek shape flow
             if not (isinstance(flow, np.ndarray) and flow.ndim == 3 and flow.shape[2] == 2):
                  raise ValueError(f"Invalid flow field shape: {flow.shape}. Expected (h, w, 2).")
 
             h, w = flow.shape[:2]
-
             # Cek shape base_image (hanya dimensi, tipe data bisa bervariasi)
             if base_image_input.shape[0] != h or base_image_input.shape[1] != w:
                  raise ValueError(f"Base image shape {base_image_input.shape[:2]} mismatch with flow field shape {flow.shape[:2]}.")
 
             # --- Buat Peta Remap (di CPU, karena flow selalu NumPy) ---
-            # Meshgrid menghasilkan HxW, perlu transpose jika ingin WxH atau perhatikan axis
-            grid_y, grid_x = np.mgrid[0:h, 0:w] # grid_y shape (h, w), grid_x shape (h, w)
-            # Perhitungan map: x_baru = x_lama + flow_x, y_baru = y_lama + flow_y
+            grid_y, grid_x = np.mgrid[0:h, 0:w]
             # remap membutuhkan map x dan map y terpisah
             remap_x = (grid_x + flow[:, :, 0]).astype(np.float32)
             remap_y = (grid_y + flow[:, :, 1]).astype(np.float32)
@@ -327,11 +300,9 @@ class FarnebackAlgorithm:
             interpolation_str = fb_config.get("interpolation", "INTER_LINEAR") # Ubah default ke INTER_LINEAR
             # Ambil flag interpolasi dari cv2, fallback ke INTER_LINEAR jika tidak valid
             interp_flag = getattr(cv2, interpolation_str, cv2.INTER_LINEAR)
-
-            print(f"Remapping image {image_id} using {'GPU' if use_gpu else 'CPU'} with interpolation {interpolation_str}...")
-
+            
             # --- Operasi Remap (CPU atau GPU) ---
-            compensated_image = None # Inisialisasi
+            compensated_image = None
             if use_gpu:
                 try:
                     # Upload data yang diperlukan ke GPU
@@ -348,12 +319,10 @@ class FarnebackAlgorithm:
                     )
                     compensated_image = compensated_image_umat.get() # Download hasil
                 except cv2.error as gpu_remap_err:
-                     print(f"OpenCV GPU error during remap: {gpu_remap_err}. Falling back to CPU.")
-                     use_gpu = False # Matikan flag jika remap GPU gagal
-                     del base_image_umat, remap_x_umat, remap_y_umat, compensated_image_umat # Hapus UMat
+                    use_gpu = False # Matikan flag jika remap GPU gagal
+                    del base_image_umat, remap_x_umat, remap_y_umat, compensated_image_umat # Hapus UMat
                 except Exception as gpu_remap_exc:
-                     print(f"Unexpected GPU error during remap: {gpu_remap_exc}. Falling back to CPU.")
-                     use_gpu = False
+                    use_gpu = False
 
             # Jalur CPU (atau fallback dari GPU)
             if not use_gpu:
@@ -366,20 +335,14 @@ class FarnebackAlgorithm:
                 )
             # ----------------------------------
 
-            end_time = time.time()
             # Pesan selesai bisa dipindah ke pemanggil
-            # print(language_config.COMPENSATE_MOTION_FINISHED.format(image_id=image_id))
-            print(f"Compensate motion for image {image_id} finished in {end_time - start_time:.2f} seconds.")
             return compensated_image
 
         except ValueError as ve:
-            print(f"Error in compensate_motion for image {image_id}: {ve}")
             return None
         except cv2.error as cv_err:
-             print(f"OpenCV error during compensate_motion for image {image_id}: {cv_err}")
-             return None
+            return None
         except Exception as e:
-            print(f"Unexpected error during compensate_motion for image {image_id}: {e}")
             return None
 
 def main(db_path, update_progress=None, batch_size=5, stop_requested=None, single_process=None, 
@@ -462,8 +425,6 @@ def main(db_path, update_progress=None, batch_size=5, stop_requested=None, singl
         update_progress(total_images - 1, total_images - 1, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
     if update_progress:
         update_progress(total_images - 1, total_images - 1, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
-
-    # print("Pemrosesan selesai dan semua gambar telah disimpan ke HDF5.")
 
 def running_farneback_optical_flow(parent=None, single_process=None, batch_id=None):
     process_finished = False

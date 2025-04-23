@@ -123,8 +123,6 @@ class ORBAlgorithm:
         if stop_requested and stop_requested():
             return None, None
 
-        start_time = time.time()
-        
         # Baca konfigurasi ORB (termasuk parameter CLAHE & ratio test)
         orb_config = self.load_orb_config(config_filename)
 
@@ -240,10 +238,6 @@ class ORBAlgorithm:
         else:
             print("Not enough descriptors found in one or both images to perform matching.")
         # ----------------------------------
-
-        end_time = time.time()
-        print(f"calculate_global_motion finished in {end_time - start_time:.2f} seconds.")
-
         # Kembalikan None, None jika points tidak berhasil diekstrak
         if base_points is None or target_points is None:
             return None, None
@@ -293,12 +287,12 @@ class ORBAlgorithm:
                 matrix, mask = cv2.findHomography(target_points, base_points, cv2.USAC_MAGSAC, ransac_threshold)
             else:
                 # Gunakan language_config jika tersedia
-                error_msg = getattr(language_config, "UNRECOGNIZED_TRANSFORMATION", "Unrecognized transformation type.")
+                error_msg = getattr(language_config.UNRECOGNIZED_TRANSFORMATION)
                 raise ValueError(error_msg)
 
             if matrix is None:
                 # Gunakan language_config jika tersedia
-                 error_msg = getattr(language_config, "FAILED_TO_COMPUTE_TRANSFORMATION", "Failed to compute transformation matrix (returned None).")
+                 error_msg = getattr(language_config.FAILED_TO_COMPUTE_TRANSFORMATION)
                  print(error_msg) # Print sebagai warning/info
                  return None # Gagal jika matrix None
 
@@ -412,7 +406,7 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, sing
         image_paths = processor.get_all_image_paths_for_single_process()
     else:
         if batch_id is None:
-            raise ValueError("batch_id harus diberikan untuk batch process")
+            raise ValueError(language_config.BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS)
         image_paths = processor.get_all_image_paths_for_batch_process(batch_id)
     
     if not image_paths:

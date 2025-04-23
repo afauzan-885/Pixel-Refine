@@ -216,10 +216,16 @@ class BatchPageLayout(QWidget):
             "tiff": [".tif", ".tiff"],
             "png": [".png"],
         }
+        
+        target_batch_name = "default_batch" # Ganti dengan logika Anda
+        target_batch_id = self.database_manager.create_new_batch(target_batch_name)
+        if target_batch_id is None:
+            QMessageBox.critical(self, "Error", f"Could not create or find batch '{target_batch_name}'.")
+            return
 
         # Step 1: Validate duplicate files
-        existing_paths = self.database_manager.get_all_image_paths()
-        duplicates = [path for path in image_paths if path in existing_paths]
+        existing_batch_paths = self.database_manager.get_batch_process_image_paths(batch_id=target_batch_id)
+        duplicates = [path for path in image_paths if path in existing_batch_paths]
         unique_files = [path for path in image_paths if path not in duplicates]
 
         if duplicates:
@@ -292,6 +298,7 @@ class BatchPageLayout(QWidget):
             self.multi_thread_import_images = BatchImageImportThreading(
                 self.database_manager,
                 selected_files,
+                batch_id=target_batch_id,
                 batch_size=15,
                 delay_ms=25
             )

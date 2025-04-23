@@ -149,14 +149,63 @@ def general_page():
             restart_application()
 
     def restart_application():
-        """Fungsi untuk merestart aplikasi menggunakan QProcess."""
-        python = sys.executable
-        args = sys.argv
+        """Fungsi untuk merestart aplikasi menggunakan QProcess.
+        
+        Fungsi ini dirancang untuk bekerja baik saat menjalankan skrip .py
+        maupun saat menjalankan aplikasi .exe yang sudah di-build.
+        """
+        try:
+            print(language_config.TRY_RESTART_APPLICATION) # Pesan: Mencoba memulai ulang...
 
-        print(language_config.COMMAND_APPLICATION_DESCRIPTION)
-        QProcess.startDetached(python, args)
+            executable = sys.executable
+            arguments = [] # Akan diisi berdasarkan mode
 
-        sys.exit(0)
+            # Deteksi apakah berjalan sebagai skrip atau paket beku (.exe)
+            # hasattr(sys, 'frozen') umumnya True jika dibuild oleh PyInstaller/cx_Freeze
+            # getattr digunakan untuk default ke False jika atribut tidak ada
+            is_frozen = getattr(sys, 'frozen', False)
+
+            if is_frozen:
+                # Mode .exe: Jalankan .exe itu sendiri dengan argumen asli
+                executable = sys.executable 
+                arguments = sys.argv[1:]
+            else:
+                # Mode .py: Jalankan python.exe dengan skrip dan argumen asli
+                executable = sys.executable 
+                arguments = sys.argv
+
+            # Pastikan path executable absolut
+            executable_abs = os.path.abspath(executable)
+
+            print(f"  Executable: {executable_abs}")
+            print(f"  Arguments: {arguments}")
+
+            # Mulai proses baru yang terpisah
+            started = QProcess.startDetached(executable_abs, arguments)
+
+            if started:
+                print("Restart command issued successfully. Exiting current process.")
+                # Berikan sedikit waktu jika diperlukan (jarang, tapi bisa membantu)
+                # import time
+                # time.sleep(0.1) 
+                sys.exit(0) # Keluar dari aplikasi saat ini
+            else:
+                print(language_config.COMMAND_FAILED_IN_RESTART_APPLICATION) # Pesan: Gagal menjalankan perintah restart.
+                error_msg = QMessageBox()
+                error_msg.setIcon(QMessageBox.Icon.Critical)
+                error_msg.setWindowTitle(language_config.RESTART_FAILED) # Judul: Restart Gagal
+                error_msg.setText(language_config.COMMAND_TO_RESTART_MANUALLY) # Pesan: Tidak dapat memulai ulang otomatis...
+                error_msg.exec()
+
+        except Exception as e:
+            print(f"Error during restart attempt: {e}") # Log error internal
+            # Tampilkan pesan error ke pengguna jika ada exception
+            error_msg = QMessageBox()
+            error_msg.setIcon(QMessageBox.Icon.Critical)
+            error_msg.setWindowTitle(language_config.RESTART_FAILED) # Judul: Restart Gagal
+            # Sesuaikan pesan error ini jika perlu
+            error_msg.setText(f"Terjadi kesalahan saat mencoba memulai ulang:\n{e}\n\nHarap mulai ulang aplikasi secara manual.") 
+            error_msg.exec()
     
     # Hubungkan tombol Apply dengan fungsi penyimpanan
     apply_button.clicked.connect(save_settings)

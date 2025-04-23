@@ -105,12 +105,12 @@ WINDOW_TITLE_MEDIAN = "Median Stacking"
 WINDOW_TITLE_WEIGHTED_AVERAGE = "Weighted Average Stacking"
 
 WINDOW_TITLE_SIMILARITY = "Similarity Stacking"
-SIMILARITY_MNFR_LOAD_FAILED = "No images provided."
-SIMILARITY_MNFR_BIT_REQUIRED = "Images must be 8 Bit or 16 Bit."
+IMAGE_LOAD_FAILED = "No images provided."
+IMAGE_BIT_REQUIRED = "Images must be 8 Bit or 16 Bit."
 SIMILARITY_MNFR_TILE_SLICE = "Image dimensions: {height}x{width}, Tile size: {tile_size}"
 SIMILARITY_MNFR_SIZE_FAILED = "Image size {i} does not match the reference image."
-SIMILARITY_MNFR_PROCESS_SUCCESS = "Image {i}/{count} processed successfully."
-SIMILARITY_MNFR_PROCESS_FINISHED = "Stacking complete."
+IMAGE_PROCESS_IN_PROGRESS_SUCCESS = "Image {i}/{count} processed successfully."
+IMAGE_PROCESS_FINISHED = "Stacking complete."
 RUN_IMAGE_PROCESS_BATCH_PROGRESS = "Stacking batch to {current} from {total}"
 
 

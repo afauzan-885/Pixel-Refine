@@ -184,7 +184,7 @@ class SimilarityAlgorithm:
         # Validasi tile_size
         if not (isinstance(tile_size, (tuple, list)) and len(tile_size) == 2 and
                 tile_size[0] > 0 and tile_size[1] > 0):
-            raise ValueError("tile_size must be a tuple or list of two positive integers.")
+            raise ValueError(language_config.IMAGE_BIT_REQUIRED)
         tile_h, tile_w = map(int, tile_size)
 
         # Ambil properti dari gambar pertama dan validasi tipe
