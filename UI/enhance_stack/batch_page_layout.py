@@ -28,6 +28,9 @@ class BatchPageLayout(QWidget):
         self.database_manager = DatabaseManager("pixel_refine_database.db")
         self.database_manager.create_database()
         
+        self.active_batch_panels = weakref.WeakValueDictionary()
+        self.batch_states = {} # Menyimpan state {batch_id: {param1: value1, ...}}
+        
         self.combined_panel = CombinedPanel(self.database_manager)
 
         self.batch_panels = []
@@ -51,18 +54,45 @@ class BatchPageLayout(QWidget):
 
     def refresh_ui(self):
         """Memperbarui tampilan UI dengan daftar batch yang tersedia."""
-        refresh_ui(self.database_manager, self.main_panel_container, self.setup_combined_panel)
+
+        # --- LANGKAH 3: Simpan state panel yang ada SEBELUM refresh ---
+        # Iterasi melalui panel yang masih ada di WeakValueDictionary
+        current_batch_ids_in_ui = list(self.active_batch_panels.keys())
+        for batch_id in current_batch_ids_in_ui:
+            panel = self.active_batch_panels.get(batch_id)
+            if panel: # Pastikan panel masih ada
+                try:
+                    self.batch_states[batch_id] = panel.get_current_state()
+                    # print(f"Saved state for batch {batch_id}: {self.batch_states[batch_id]}") # Debug
+                except Exception as e:
+                    print(f"Error getting state from panel for batch {batch_id}: {e}")
+        # -----------------------------------------------------------
+
+        # Sekarang panggil fungsi refresh asli (atau implementasi di sini)
+        refresh_ui(
+            self.database_manager,
+            self.main_panel_container,
+            self.setup_combined_panel # Fungsi callback untuk membuat panel baru
+        )
     
     def setup_combined_panel(self, batch_id=None):
         """Membuat dan menyimpan panel gabungan untuk batch tertentu."""
+
+        # --- LANGKAH 4: Ambil state tersimpan ---
+        initial_state = self.batch_states.get(batch_id, {}) # Default ke dict kosong
+        # print(f"Creating panel for batch {batch_id} with initial state: {initial_state}") # Debug
+        # --------------------------------------
+
         combined_panel = CombinedPanel(
             self.database_manager,
             batch_id,
             self,
             self.thumbnail_threads,
             self.thumbnail_placeholders,
+            initial_state=initial_state # <-- Teruskan state awal
         )
-        self.batch_panels.append(combined_panel)  # Simpan panel batch ke daftar
+        # Simpan referensi panel yang baru dibuat
+        self.active_batch_panels[batch_id] = combined_panel
         return combined_panel
     
     def show_toast(self, message, duration=None):
@@ -146,20 +176,26 @@ class BatchPageLayout(QWidget):
 
     # Contoh penggunaan di handle_delete_individual_batch
     def handle_delete_individual_batch(self, batch_id):
-        title, message = language_config.BATCH_DELETE_LABEL 
+        title, message = language_config.BATCH_DELETE_LABEL
         message = message.format(batch_id)
 
         reply = QMessageBox.question(
-            self,
-            title,
-            message,
+            self, title, message,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
 
         if reply == QMessageBox.StandardButton.Yes:
+            # --- LANGKAH 6: Hapus state sebelum memulai delete ---
+            if batch_id in self.batch_states:
+                del self.batch_states[batch_id]
+                print(f"Removed saved state for batch {batch_id}") # Debug
+            # ----------------------------------------------------
+
+            # Jalankan penghapusan di thread terpisah
             self.deleter_thread = BatchDeleteProcess(self.database_manager, batch_id, CACHE_DIR, self.thumbnail_threads)
+            # Hubungkan sinyal SEBELUM memulai thread
             self.deleter_thread.batch_deleted.connect(self.data_changed.emit)
-            self.deleter_thread.start()  # Akan memanggil run() -> individual_batch_delete()
+            self.deleter_thread.start()
 
     def handle_delete_all_batches(self):
         title = language_config.TITLE_BATCH_ALL_DELETE_BUTTON
@@ -199,9 +235,15 @@ class BatchPageLayout(QWidget):
         )
 
         if reply == QMessageBox.StandardButton.Yes:
+            # --- LANGKAH 6: Hapus semua state sebelum memulai delete ---
+            self.batch_states.clear()
+            print("Cleared all saved batch states") # Debug
+
+            # Gunakan instance deleter baru jika perlu atau pastikan state internalnya benar
             deleter = BatchDeleteProcess(self.database_manager, None, CACHE_DIR, self.thumbnail_threads)
+             # Hubungkan sinyal SEBELUM memulai delete
             deleter.batch_deleted.connect(self.data_changed.emit)
-            deleter.delete_all_batch()  # Jalankan fungsi penghapusan batch
+            deleter.delete_all_batch() # Jalankan fungsi penghapusan batch
 
 
     def convert_tiff_to_uncompressed(self, input_path, output_folder):
