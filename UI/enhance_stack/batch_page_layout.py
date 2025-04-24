@@ -163,20 +163,34 @@ class BatchPageLayout(QWidget):
 
     def handle_delete_all_batches(self):
         title = language_config.TITLE_BATCH_ALL_DELETE_BUTTON
-
+        conn = None # Inisialisasi
+        batch_defined_count = 0
+        
         # Mengecek jumlah batch unik dalam batch_process_image
-        conn = sqlite3.connect("pixel_refine_database.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(DISTINCT batch_id) FROM batch_process_image")
-        batch_count = cursor.fetchone()[0]
-        conn.close()
+        try:
+            # Gunakan path database yang konsisten (misalnya dari self.database_manager jika tersedia)
+            # Jika tidak, pastikan path "pixel_refine_database.db" sudah benar
+            db_path = self.database_manager.db_path # Asumsi database_manager punya atribut db_path
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            # Aktifkan foreign keys untuk konsistensi (meskipun tidak wajib untuk SELECT)
+            cursor.execute("PRAGMA foreign_keys = ON;") 
+            cursor.execute("SELECT COUNT(*) FROM batch_process") 
+            batch_defined_count = cursor.fetchone()[0]
+        except Exception as e:
+            print(f"Error checking batch count: {e}")
+            QMessageBox.critical(self, "Database Error", f"Failed to check batch status: {e}")
+            return # Keluar jika tidak bisa cek database
+        finally:
+            if conn:
+                conn.close()
 
-        if batch_count == 0:
+        if batch_defined_count == 0:
             QMessageBox.information(self, title, language_config.NO_DATA_BATCH_ALL_DELETE_BUTTON, QMessageBox.StandardButton.Ok)
-            return  # Keluar dari fungsi jika tidak ada batch
+            return  # Keluar dari fungsi jika tidak ada batch yang terdefinisi
 
         # Jika ada batch, lanjutkan dengan konfirmasi penghapusan
-        message = language_config.CONFIRM_BATCH_ALL_DELETE_BUTTON.format(batch_count)
+        message = language_config.CONFIRM_BATCH_ALL_DELETE_BUTTON.format(batch_defined_count)
         reply = QMessageBox.question(
             self,
             title,
@@ -217,7 +231,32 @@ class BatchPageLayout(QWidget):
             "png": [".png"],
         }
         
-        target_batch_name = "default_batch" # Ganti dengan logika Anda
+        # 1. Dapatkan semua nama batch yang ada
+        existing_batch_names = self.database_manager.get_all_batch_names()
+
+        # 2. Tentukan nomor batch berikutnya
+        next_batch_num = 1
+        prefix = "batch" # Anda bisa ganti prefix jika mau, misal "Sesi"
+
+        max_num_found = 0
+        for name in existing_batch_names:
+            if name.startswith(prefix):
+                # Coba ekstrak nomor dari nama batch
+                try:
+                    num_part = name[len(prefix):] # Ambil bagian setelah prefix
+                    if num_part.isdigit(): # Pastikan itu angka
+                        num = int(num_part)
+                        if num > max_num_found:
+                            max_num_found = num
+                except ValueError:
+                    # Abaikan nama yang tidak sesuai format (misal "batch_lama")
+                    continue
+        
+        # Nomor berikutnya adalah nomor maksimum yang ditemukan + 1
+        next_batch_num = max_num_found + 1
+
+        # 3. Buat nama batch baru
+        target_batch_name = f"{prefix}{next_batch_num}"
         target_batch_id = self.database_manager.create_new_batch(target_batch_name)
         if target_batch_id is None:
             QMessageBox.critical(self, "Error", f"Could not create or find batch '{target_batch_name}'.")

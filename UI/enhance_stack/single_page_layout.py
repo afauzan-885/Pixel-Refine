@@ -14,7 +14,6 @@ from UI.enhance_stack.algorithm.denoising.Average import running_average
 from UI.enhance_stack.algorithm.denoising.Median import running_median
 from UI.enhance_stack.algorithm.denoising.Similarity import running_similarity
 from UI.enhance_stack.algorithm.denoising.Similarity_V2 import running_similarity_v2
-from UI.enhance_stack.algorithm.denoising.Weighted_average import running_weighted_average
 from UI.enhance_stack.algorithm.super_resolution.Interpolation import running_interpolation
 from UI.enhance_stack.components.single_page_layout.image_preview_handler import fit_image_to_panel
 from UI.enhance_stack.components.single_page_layout.page_layout import (setup_main_layout, 
@@ -30,17 +29,16 @@ from UI.settings.General.Language import language_config
 class SinglePageLayout(QWidget):
     process_clicked = pyqtSignal()
 
-    def __init__(self):
+    def __init__(self, database_manager: DatabaseManager):
         super().__init__()
-        self.database_manager = DatabaseManager("pixel_refine_database.db")
-        self.database_manager.create_database()
         self.original_pixmap = None
-
+        self.database_manager = database_manager
+        
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 5, 0, 0)
 
 # ==================== LAYOUT APP ==================== #
-        setup_main_layout(self)
+        setup_main_layout(self, self.database_manager)
         setup_progress_section(self)
         setup_preview_panel(self)
         setup_signals(self)

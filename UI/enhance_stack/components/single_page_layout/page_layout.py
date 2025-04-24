@@ -1,18 +1,19 @@
 from PyQt6.QtWidgets import QHBoxLayout, QProgressBar, QPushButton, QGraphicsScene, QGraphicsView
 from PyQt6.QtCore import Qt
 from UI.enhance_stack.components.single_page_layout.image_preview_handler import update_preview_panel
+from UI.enhance_stack.logic.database_manager import DatabaseManager
 from UI.resources.stylesheet import stylesheet
 from UI.settings.General.Language import language_config 
 from UI.enhance_stack.components.single_page_layout.left_panel import LeftPanel
 from UI.enhance_stack.components.single_page_layout.right_panel import RightPanel
 
 
-def setup_main_layout(layout_instance):
+def setup_main_layout(layout_instance, database_manager: DatabaseManager):
     """Membuat layout utama dengan LeftPanel dan RightPanel."""
     layout_instance.single_page_layout = QHBoxLayout()
 
     layout_instance.left_panel = LeftPanel()
-    layout_instance.right_panel = RightPanel()
+    layout_instance.right_panel = RightPanel(database_manager)
 
     layout_instance.right_panel.previewImageRequested.connect(lambda paths: update_preview_panel(layout_instance, paths))
 

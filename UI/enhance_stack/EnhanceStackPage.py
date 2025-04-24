@@ -10,12 +10,10 @@ from .logic.database_manager import DatabaseManager
 class EnhanceStackPage(QWidget):
     """Main Burst Denoising Page with modular components."""
 
-    def __init__(self):
+    def __init__(self, database_manager: DatabaseManager):
         super().__init__()
         self.layout = QVBoxLayout(self)
-        self.database_manager = DatabaseManager("pixel_refine_database.db")
-        self.database_manager.create_database()
-        
+        self.database_manager = database_manager
         # Tambahkan daftar untuk menyimpan thread ThumbnailLoader
         self.thumbnail_threads = []
 
@@ -25,7 +23,7 @@ class EnhanceStackPage(QWidget):
         self.stacked_widget = QStackedWidget()
         self.layout.addWidget(self.stacked_widget)
 
-        self.single_page_layout = SinglePageLayout()
+        self.single_page_layout = SinglePageLayout(self.database_manager)
         self.batch_page_layout = BatchPageLayout()
         self.combined_panel_logic = CombinedPanel(self.database_manager)
 

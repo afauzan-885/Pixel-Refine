@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import time
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QComboBox, QFormLayout,
     QVBoxLayout, QHBoxLayout, QPushButton,
@@ -177,17 +178,11 @@ def general_page():
             # Pastikan path executable absolut
             executable_abs = os.path.abspath(executable)
 
-            print(f"  Executable: {executable_abs}")
-            print(f"  Arguments: {arguments}")
-
             # Mulai proses baru yang terpisah
             started = QProcess.startDetached(executable_abs, arguments)
 
             if started:
-                print("Restart command issued successfully. Exiting current process.")
-                # Berikan sedikit waktu jika diperlukan (jarang, tapi bisa membantu)
-                # import time
-                # time.sleep(0.1) 
+                time.sleep(0.1) 
                 sys.exit(0) # Keluar dari aplikasi saat ini
             else:
                 print(language_config.COMMAND_FAILED_IN_RESTART_APPLICATION) # Pesan: Gagal menjalankan perintah restart.
@@ -198,13 +193,11 @@ def general_page():
                 error_msg.exec()
 
         except Exception as e:
-            print(f"Error during restart attempt: {e}") # Log error internal
-            # Tampilkan pesan error ke pengguna jika ada exception
             error_msg = QMessageBox()
             error_msg.setIcon(QMessageBox.Icon.Critical)
             error_msg.setWindowTitle(language_config.RESTART_FAILED) # Judul: Restart Gagal
             # Sesuaikan pesan error ini jika perlu
-            error_msg.setText(f"Terjadi kesalahan saat mencoba memulai ulang:\n{e}\n\nHarap mulai ulang aplikasi secara manual.") 
+            error_msg.setText(f"An error occurred while trying to restart:\n{e}\n\Please restart the application manually.") 
             error_msg.exec()
     
     # Hubungkan tombol Apply dengan fungsi penyimpanan

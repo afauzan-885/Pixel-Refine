@@ -2,6 +2,7 @@ import os
 import sys
 from PyQt6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QWidget, QMessageBox
 from PyQt6.QtGui import QIcon
+from UI.enhance_stack.logic.database_manager import DatabaseManager
 from UI.sidebar import Sidebar  # Pastikan path ini benar
 from UI.main_content import MainContent # Pastikan path ini benar
 import config
@@ -10,6 +11,11 @@ from shutil import rmtree
 class PixelRefineMain(QMainWindow):
     def __init__(self):
         super().__init__()
+        
+        db_path = "pixel_refine_database.db" 
+        self.database_manager = DatabaseManager(db_path)
+        self.database_manager.create_database()
+        self.main_content = MainContent(self.database_manager)
 
         # Ikon dan Judul Jendela
         self.setWindowIcon(QIcon("UI/resources/image/Logo_Pixel_Refine.png")) # Pastikan path ini benar
@@ -24,7 +30,7 @@ class PixelRefineMain(QMainWindow):
 
         # Sidebar dan Konten Utama
         self.sidebar = Sidebar(self.toggle_sidebar, self.switch_page)
-        self.main_content = MainContent()
+        self.main_content = MainContent(self.database_manager)
 
         # Layout Utama
         self.main_layout = QHBoxLayout()

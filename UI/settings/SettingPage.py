@@ -1,13 +1,15 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTabWidget
 
+from UI.enhance_stack.logic.database_manager import DatabaseManager
 from UI.settings.General.Language import language_config
 from .General.GeneralSetting import general_page
 from .Perfomance.PerformancePage import performance_page
 from .Advance.AdvancePage import advance_page
 
 class SettingPage(QWidget):
-    def __init__(self):
+    def __init__(self, database_manager: DatabaseManager):
         super().__init__()
+        self.database_manager = database_manager
         self.layout = QVBoxLayout()
         self.tab_widget = QTabWidget()
 

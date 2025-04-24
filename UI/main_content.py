@@ -2,6 +2,7 @@ from PyQt6.QtWidgets import QStackedWidget, QWidget, QVBoxLayout, QLabel
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
 
+from UI.enhance_stack.logic.database_manager import DatabaseManager
 from UI.resources.stylesheet.stylesheet import BLANK_CONTENT_BACKGROUND, BLANK_CONTENT_LABEL
 from UI.settings.General.Language import language_config
 
@@ -16,10 +17,9 @@ class Pages:
 
 
 class MainContent(QStackedWidget):
-    def __init__(self):
-        super().__init__()
-
-        # Peta halaman
+    def __init__(self, database_manager: DatabaseManager, parent=None):
+        super().__init__(parent)
+        self.database_manager = database_manager # Simpan referensi
         self.pages = {
             Pages.ENHANCE_STACK: EnhanceStackPage,
             Pages.SETTINGS: SettingPage,
@@ -30,11 +30,11 @@ class MainContent(QStackedWidget):
             if not page_name.startswith("_"):
                 page_label = getattr(Pages, page_name)
                 page_class = self.pages.get(page_label)
-                self.addWidget(self.Contents_page(page_label, page_class))
+                self.addWidget(self.Contents_page(page_label, page_class, self.database_manager))
 
-    def Contents_page(self, page_name, page_class):
+    def Contents_page(self, page_name, page_class, database_manager: DatabaseManager):
         if page_class:
-            return page_class()
+            return page_class(database_manager)
 
         # Halaman default
         page = QWidget()
