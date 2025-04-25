@@ -63,6 +63,7 @@ NO_DATA_BATCH = "没有已保存的 Batch。"
 UI_LABEL_BATCH_NO_PROCESS = "没有 Batch 被处理！"
 UI_LABEL_BATCH_SUCCES = "所有 Batch 已处理完毕！"
 UI_LABEL_BATCH_PROCESS = "正在处理 {} 个 Batch..."
+UI_LABEL_MOVING_FILES = "正在将 {} 个文件移动到文件夹“{}”。请稍候..."
 UI_LABEL_BATCH_PROGRESS = "已处理 {}/{} 个 Batch..."
 PROCESSING_BATCH = "--- 正在处理 Batch {}/{} (已处理: {}) ---"
 NUMBER_OF_BATCHES_TO_BE_PROCESSED = "待处理的 Batch 数量：{}"
@@ -101,6 +102,10 @@ ERROR_WHILE_RETRIEVING_KEY_FROM_HD5F = "从 HDF5 检索键 {} 时出错：{}"
 # ==============================================================================
 # Import
 HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION = "图像文件 (*.jpg *.jpeg *.png *.bmp *.tif *.tiff)"
+PLACHOLDER_DRAG_AND_DROP_IMPORT_IMAGES = """将图片拖放到此处<br>
+或<br>
+使用“导入图片”按钮"""
+SUPPORTED_IMAGE_EXTENSION = "支持的图片格式"
 HANDLE_IMPORT_BUTTON_IMAGE_PATH = "选择图像"
 HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE = "重复图像"
 HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE_MESSAGE = "数据库中已存在 {count} 张图像，将跳过。"
@@ -112,7 +117,7 @@ ON_IMPORT_COMPLETE_MESSAGES = "已成功导入 {successful_images} 张图像。"
 
 # Delete
 HANDLE_DELETE_BUTTON_IMAGE_NO_VALID_SELECTED = "失败", "未选择图像。" # Tuple for Title, Message
-HANDLE_DELETE_BUTTON_IMAGE_CONFIRM_DELETE = "您确定要删除所选的 {count} 张图像吗？"
+HANDLE_DELETE_BUTTON_IMAGE_CONFIRM_DELETE = "您确定要删除所选的 {} 张图像吗？"
 
 
 # ==============================================================================

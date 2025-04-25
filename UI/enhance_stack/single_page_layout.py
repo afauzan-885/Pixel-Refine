@@ -5,8 +5,8 @@ from PyQt6.QtWidgets import (
 )
 import cv2
 import os
-from PIL import Image
-from PyQt6.QtCore import pyqtSignal
+from PIL import Image, UnidentifiedImageError
+from PyQt6.QtCore import pyqtSignal, pyqtSlot
 from UI.enhance_stack.algorithm.alignment.AKAZE import running_akaze
 from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import running_farneback_optical_flow
 from UI.enhance_stack.algorithm.alignment.ORB import running_orb
@@ -25,6 +25,7 @@ from UI.enhance_stack.logic.database_manager import DatabaseManager
 from UI.enhance_stack.logic.multi_threading import ImageImportThreading
 from UI.enhance_stack.logic.workflow_process import ImageViewer, get_last_image
 from UI.settings.General.Language import language_config
+from config import SUPPORTED_FORMATS
 
 class SinglePageLayout(QWidget):
     process_clicked = pyqtSignal()
@@ -43,6 +44,10 @@ class SinglePageLayout(QWidget):
         setup_preview_panel(self)
         setup_signals(self)
 # ==================== LAYOUT APP ==================== #
+        if hasattr(self, 'right_panel'):
+             self.right_panel.imagesDropped.connect(self.handle_dropped_images)
+        else:
+             print("Warning: right_panel not found.")
         
     def pause_preview_update(self):
         """Temporarily disable preview panel updates."""
@@ -68,106 +73,150 @@ class SinglePageLayout(QWidget):
             print(f"Error converting TIFF: {e}")
             return None
 
+    # === Metode Utama untuk Memulai Impor ===
     def handle_import_button(self):
-        """Function to manage images import for Single Process"""
+        """Membuka dialog file dan memulai proses impor."""
         file_dialog_filter = language_config.HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION
         image_paths, _ = QFileDialog.getOpenFileNames(self, language_config.HANDLE_IMPORT_BUTTON_IMAGE_PATH, "", file_dialog_filter)
 
-        if not image_paths:
+        if image_paths:
+            self._process_and_start_import(image_paths)
+
+    # === Slot untuk Sinyal Drop (Akan Dipanggil Nanti) ===
+    @pyqtSlot(list)
+    def handle_dropped_images(self, image_paths: list):
+        """Menangani file gambar yang di-drop dan memulai proses impor."""
+        if image_paths:
+            self._process_and_start_import(image_paths)
+
+
+    # === Metode Helper Inti untuk Pemrosesan dan Impor ===
+    def _process_and_start_import(self, image_paths: list):
+        """
+        Memvalidasi, memproses (konversi TIFF), menyeleksi, dan
+        memulai impor background untuk daftar path gambar yang diberikan.
+        """
+        if not image_paths: return
+
+        # 1. Validasi Duplikat di DB
+        try:
+            existing_single_paths = self.database_manager.get_single_process_image_paths()
+        except Exception as e:
+            QMessageBox.critical(self, "Database Error", "Could not retrieve existing image paths.")
             return
 
-        SUPPORTED_FORMATS = {
-            "jpg": [".jpg", ".jpeg", ".jiff", ".jli"],
-            "tiff": [".tif", ".tiff"],
-            "png": [".png"],
-        }
-
-        # Step 1: Validate duplicate files WITHIN SINGLE PROCESS CONTEXT
-        existing_single_paths = self.database_manager.get_single_process_image_paths()
         duplicates = [path for path in image_paths if path in existing_single_paths]
         unique_files = [path for path in image_paths if path not in duplicates]
 
         if duplicates:
             message = language_config.HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE_MESSAGE.format(count=len(duplicates))
-            QMessageBox.warning(self,
-                                language_config.HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE,
-                                message) # Tambahkan konteks jika perlu
+            QMessageBox.warning(self, language_config.HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE, message)
 
-        # Step 2: Group files berdasarkan format utama yang didukung
+        if not unique_files:
+             return
+
+        # 2. Buat Group Berdasarkan Format
         format_groups = {key: [] for key in SUPPORTED_FORMATS.keys()}
-
+        valid_files_grouped = False
         for path in unique_files:
             lower_path = path.lower()
             for format_key, extensions in SUPPORTED_FORMATS.items():
                 if any(lower_path.endswith(ext) for ext in extensions):
                     format_groups[format_key].append(path)
-                    break
-
-        # Jika tidak ada file valid sesuai ketiga kategori, tampilkan pesan garis besar
-        if not any(format_groups.values()):
+                    valid_files_grouped = True
+                    break 
+                
+        if not valid_files_grouped:
+            # Jika tidak ada file dengan format yang didukung sama sekali
             QMessageBox.information(self, language_config.HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED)
             return
 
-        # Step 3: Konversi TIFF dengan kompresi ke uncompressed
-        output_folder = "database/align/uncompressed_tiff"  # Folder penyimpanan hasil konversi
-        os.makedirs(output_folder, exist_ok=True)
+        # 3. Konversi TIFF (jika ada)
+        output_folder = "database/align/uncompressed_tiff" # Pertimbangkan jadikan konstanta
+        try:
+            os.makedirs(output_folder, exist_ok=True)
+        except OSError as e:
+            print(f"Error creating TIFF output folder: {e}")
+            QMessageBox.critical(self, "Folder Error", f"Could not create folder for TIFF conversion:\n{e}")
+            return
 
-        uncompressed_tiff_files = []
-        if "tiff" in format_groups:
-            for tiff_path in format_groups["tiff"]:
-                try:
-                    with Image.open(tiff_path) as img:
-                        compression = img.info.get("compression", "None")  # Cek tipe kompresi
-                        if compression.lower() in ["tiff_lzw", "tiff_zip", "packbits"]:  # Jika dikompresi
-                            new_tiff_path = self.convert_tiff_to_uncompressed(tiff_path, output_folder)
-                            if new_tiff_path:
-                                uncompressed_tiff_files.append(new_tiff_path)
-                        else:
-                            uncompressed_tiff_files.append(tiff_path)  # Jika sudah uncompressed, langsung gunakan
-                except Exception as e:
-                    print(f"Skipping invalid TIFF: {tiff_path}, Error: {e}")
+        # Kumpulkan semua path yang siap diimpor
+        files_ready_for_import = []
+        for fmt_key in SUPPORTED_FORMATS:
+            if fmt_key != "tiff":
+                 files_ready_for_import.extend(format_groups.get(fmt_key, []))
 
-            # Update daftar TIFF dengan versi uncompressed
-            format_groups["tiff"] = uncompressed_tiff_files
+        # Proses TIFF
+        tiff_files = format_groups.get("tiff", [])
+        if tiff_files:
+             print(f"Processing {len(tiff_files)} TIFF files...")
+             tiff_errors = []
+             for tiff_path in tiff_files:
+                  processed_tiff_path = tiff_path # Default pakai asli
+                  needs_conversion = False
+                  try:
+                      with Image.open(tiff_path) as img:
+                           compression = img.info.get("compression", "none").lower()
+                           # Cek kompresi yang perlu dikonversi
+                           if compression in ["tiff_lzw", "tiff_zip", "packbits", "jpeg"]:
+                                needs_conversion = True
+                  except (FileNotFoundError, UnidentifiedImageError, Exception) as e:
+                       print(f"  TIFF Error reading info/opening: {os.path.basename(tiff_path)}, Error: {e}")
+                       tiff_errors.append(f"{os.path.basename(tiff_path)} (Read Error)")
+                       continue 
+                   
+                  if needs_conversion:
+                       print(f"  Converting compressed TIFF: {os.path.basename(tiff_path)}")
+                       converted = self.convert_tiff_to_uncompressed(tiff_path, output_folder)
+                       if converted:
+                            processed_tiff_path = converted
+                       else:
+                            print(f"  Skipping TIFF due to conversion error: {os.path.basename(tiff_path)}")
+                            tiff_errors.append(f"{os.path.basename(tiff_path)} (Conversion Failed)")
+                            continue # Skip jika konversi gagal
 
-        # Step 4: Tentukan format dominan (format dengan jumlah file terbanyak)
-        dominant_format = max(format_groups, key=lambda key: len(format_groups[key]))
+                  files_ready_for_import.append(processed_tiff_path) # Tambahkan path TIFF (asli atau konversi)
 
-        # Step 5: Seleksi file berdasarkan prioritas atau dominan format
-        selected_files = []
-        total_unique = sum(len(v) for v in format_groups.values())
-        if len(format_groups[dominant_format]) > total_unique / 2:
-            selected_files = format_groups[dominant_format]
-        else:
-            for key in SUPPORTED_FORMATS.keys():
-                if format_groups[key]:
-                    selected_files = format_groups[key]
-                    break
+             if tiff_errors:
+                  QMessageBox.warning(self, "TIFF Processing Issues", f"Could not process some TIFF files:\n{', '.join(tiff_errors)}")
 
-        # Step 6: Proses file terpilih
-        if selected_files:
-            message = language_config.HANDLE_IMPORT_BUTTON_IMAGE_DOMINANT.format(
-                count=len(selected_files),
-                format=dominant_format)
-            
-            QMessageBox.information(self, language_config.HANDLE_IMPORT_BUTTON_IMAGE_SELECTED, message)
-            
-            # Proses import file
-            self.multi_thread_import_images = ImageImportThreading(
-                self.database_manager,
-                selected_files,
-                batch_size=15,
-                delay_ms=25
-            )
 
-            # Connect signals untuk progress dan completion
-            self.multi_thread_import_images.progress_signal.connect(self.update_progress_bar)
-            self.multi_thread_import_images.completion_signal.connect(self.on_import_complete)
+        # 4. & 5. Seleksi File Akhir (Sekarang berisi semua file valid)
+        selected_files = files_ready_for_import
+        if not selected_files:
+             QMessageBox.information(self, "Import Failed", "No valid files could be prepared for import after processing.")
+             return
 
-            # Mulai thread import
-            self.multi_thread_import_images.start()
-        else:
-            QMessageBox.information(self, language_config.HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED)
+        # 6. Proses Impor di Thread
+        # Pesan 'dominant format' mungkin tidak relevan lagi, gunakan pesan generik
+        # message = language_config.HANDLE_IMPORT_BUTTON_IMAGE_SELECTED.format(count=len(selected_files)) # Gunakan string generik
+        # QMessageBox.information(self, language_config.HANDLE_IMPORT_BUTTON_IMAGE_SELECTED, message)
+        try:
+             self.multi_thread_import_images = ImageImportThreading(
+                 database_manager=self.database_manager,
+                 image_paths=selected_files,
+                 batch_size=15, 
+                 delay_ms=25    
+             )
+
+             # --- Koneksi Sinyal Thread ---
+             # Hubungkan ke slot yang sudah ada di kelas ini
+             if hasattr(self, 'update_progress_bar') and callable(self.update_progress_bar):
+                  self.multi_thread_import_images.progress_signal.connect(self.update_progress_bar)
+             else: print("Warning: Slot 'update_progress_bar' not found.")
+
+             if hasattr(self, 'on_import_complete') and callable(self.on_import_complete):
+                  self.multi_thread_import_images.completion_signal.connect(self.on_import_complete)
+             else: print("Warning: Slot 'on_import_complete' not found.")
+
+             # Tambahkan koneksi untuk error jika ada
+             if hasattr(self.multi_thread_import_images, 'error_signal') and hasattr(self, 'on_import_error'):
+                  self.multi_thread_import_images.error_signal.connect(self.on_import_error)
+
+             # Mulai thread
+             self.multi_thread_import_images.start()
+        except Exception as e:
+            QMessageBox.critical(self, "Threading Error", f"Could not start the import process:\n{e}")
             
 
     def handle_delete_button(self):
@@ -181,7 +230,7 @@ class SinglePageLayout(QWidget):
         reply = QMessageBox.question(
             self,
             "Delete Images",
-            language_config.HANDLE_DELETE_BUTTON_IMAGE_CONFIRM_DELETE.format(count=len(selected_paths)),
+            language_config.HANDLE_DELETE_BUTTON_IMAGE_CONFIRM_DELETE.format(len(selected_paths)),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
@@ -294,6 +343,7 @@ class SinglePageLayout(QWidget):
         file_path, _ = QFileDialog.getSaveFileName(
             self, "Save Image As",
             os.path.basename(latest_image_path),
+            "JPEG (*.jpg *.jpeg);;TIFF (*.tif *.tiff);;PNG (*.png)"
             "JPEG (*.jpg *.jpeg);;TIFF (*.tif *.tiff);;PNG (*.png)"
         )
 

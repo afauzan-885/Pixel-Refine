@@ -3,6 +3,8 @@ import sys
 from PyQt6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QWidget, QMessageBox
 from PyQt6.QtGui import QIcon
 from UI.enhance_stack.logic.database_manager import DatabaseManager
+from UI.resources.animation.animation_manager import StackedWidgetAnimator
+from UI.resources.animation.fade import fade
 from UI.sidebar import Sidebar  # Pastikan path ini benar
 from UI.main_content import MainContent # Pastikan path ini benar
 import config
@@ -16,6 +18,7 @@ class PixelRefineMain(QMainWindow):
         self.database_manager = DatabaseManager(db_path)
         self.database_manager.create_database()
         self.main_content = MainContent(self.database_manager)
+        self.main_content_animator = StackedWidgetAnimator(self)
 
         # Ikon dan Judul Jendela
         self.setWindowIcon(QIcon("UI/resources/image/Logo_Pixel_Refine.png")) # Pastikan path ini benar
@@ -85,11 +88,24 @@ class PixelRefineMain(QMainWindow):
             event.accept()  # Terima event penutupan aplikasi
             
     def switch_page(self, index):
-        """Mengganti halaman di konten utama."""
-        self.main_content.setCurrentIndex(index)
+        """
+        Mengganti halaman di konten utama (MainContent) dengan animasi fade
+        yang dikelola oleh self.main_content_animator.
+        """
+        # Validasi index (opsional tapi bagus)
+        if not (0 <= index < self.main_content.count()):
+            print(f"PixelRefineMain Error: Invalid page index requested: {index}")
+            return
+
+        if index == self.main_content.currentIndex():
+            for i, btn in enumerate(self.sidebar.nav_buttons): btn.setChecked(i == index)
+            return
+
         for i, btn in enumerate(self.sidebar.nav_buttons):
             btn.setChecked(i == index)
-
+        fade(self.main_content_animator, self.main_content, index, duration=250)
+        
+        
     def toggle_sidebar(self):
         """Menangani aksi tambahan saat sidebar di-toggle."""
         pass

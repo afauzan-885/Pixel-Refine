@@ -63,6 +63,7 @@ NO_DATA_BATCH = "Tiada batch yang disimpan."
 UI_LABEL_BATCH_NO_PROCESS = "Tiada batch yang diproses!"
 UI_LABEL_BATCH_SUCCES = "Semua batch telah diproses!"
 UI_LABEL_BATCH_PROCESS = "Memproses {} batch..."
+UI_LABEL_MOVING_FILES = "Memindahkan {} fail ke folder '{}'. Sila tunggu..."
 UI_LABEL_BATCH_PROGRESS = "{}/{} batch telah diproses..."
 PROCESSING_BATCH = "--- Memproses batch {}/{} (Telah diproses: {}) ---"
 NUMBER_OF_BATCHES_TO_BE_PROCESSED = "Jumlah batch yang akan diproses: {}"
@@ -100,6 +101,10 @@ ERROR_WHILE_RETRIEVING_KEY_FROM_HD5F = "Ralat mengambil kunci {} daripada HDF5: 
 # ==============================================================================
 # Import
 HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION = "Fail Imej (*.jpg *.jpeg *.png *.bmp *.tif *.tiff)"
+PLACHOLDER_DRAG_AND_DROP_IMPORT_IMAGES = """Seret & lepas imej di sini<br>
+atau<br>
+Gunakan butang 'Import Imej'"""
+SUPPORTED_IMAGE_EXTENSION = "Format imej yang disokong"
 HANDLE_IMPORT_BUTTON_IMAGE_PATH = "Pilih Imej"
 HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE = "Imej Pendua"
 HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE_MESSAGE = "{count} imej sudah ada dalam pangkalan data, akan dilangkau."
@@ -111,7 +116,7 @@ ON_IMPORT_COMPLETE_MESSAGES = "{successful_images} imej telah berjaya diimport."
 
 # Delete
 HANDLE_DELETE_BUTTON_IMAGE_NO_VALID_SELECTED = "Gagal", "Tiada imej dipilih." # Tuple for Title, Message
-HANDLE_DELETE_BUTTON_IMAGE_CONFIRM_DELETE = "Adakah anda pasti mahu memadam {count} imej yang dipilih?"
+HANDLE_DELETE_BUTTON_IMAGE_CONFIRM_DELETE = "Adakah anda pasti mahu memadam {} imej yang dipilih?"
 
 
 # ==============================================================================

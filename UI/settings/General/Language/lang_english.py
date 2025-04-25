@@ -63,6 +63,7 @@ NO_DATA_BATCH = "No saved batches."
 UI_LABEL_BATCH_NO_PROCESS = "No batches processed!"
 UI_LABEL_BATCH_SUCCES = "All batches have been processed!"
 UI_LABEL_BATCH_PROCESS = "Processing {} batches..."
+UI_LABEL_MOVING_FILES = "Moving {} files to folder '{}'. Please wait..."
 UI_LABEL_BATCH_PROGRESS = "{}/{} batches processed..."
 PROCESSING_BATCH = "--- Processing batch {}/{} (Processed: {}) ---"
 NUMBER_OF_BATCHES_TO_BE_PROCESSED = "Number of batches to be processed: {}"
@@ -100,6 +101,10 @@ ERROR_WHILE_RETRIEVING_KEY_FROM_HD5F = "Error retrieving key {} from HDF5: {}"
 # ==============================================================================
 # Import
 HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION = "Image Files (*.jpg *.jpeg *.png *.bmp *.tif *.tiff)"
+PLACHOLDER_DRAG_AND_DROP_IMPORT_IMAGES = """Drag & drop images here<br>
+or<br>
+Use the 'Import Image' button"""
+SUPPORTED_IMAGE_EXTENSION = "Supported image formats"
 HANDLE_IMPORT_BUTTON_IMAGE_PATH = "Select Images"
 HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE = "Duplicate Images"
 HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE_MESSAGE = "{count} images already exist in the database, will be skipped."
@@ -111,7 +116,7 @@ ON_IMPORT_COMPLETE_MESSAGES = "{successful_images} images were imported successf
 
 # Delete
 HANDLE_DELETE_BUTTON_IMAGE_NO_VALID_SELECTED = "Failed", "No images selected." # Tuple for Title, Message
-HANDLE_DELETE_BUTTON_IMAGE_CONFIRM_DELETE = "Are you sure you want to delete the selected {count} images?"
+HANDLE_DELETE_BUTTON_IMAGE_CONFIRM_DELETE = "Are you sure you want to delete the selected {} images?"
 
 
 # ==============================================================================

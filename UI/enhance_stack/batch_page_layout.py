@@ -1,10 +1,10 @@
 import os
 import shutil
 import sqlite3
-from PyQt6.QtWidgets import (QLabel, QWidget, QVBoxLayout, QMessageBox, QFileDialog)
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QMessageBox, QFileDialog,
+                              QApplication)
 import weakref
-from PyQt6.QtCore import (pyqtSignal, Qt, QTimer)
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import (pyqtSignal)
 from PIL import Image
 from UI.enhance_stack.components.batch_page_layout.batch_layout import refresh_ui, setup_main_panel
 from UI.enhance_stack.components.batch_page_layout.combined_panel import CombinedPanel
@@ -20,6 +20,7 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 
 class BatchPageLayout(QWidget):
     data_changed = pyqtSignal()
+    show_toast_requested = pyqtSignal(str, object, bool)
 
     def __init__(self):
         super().__init__()
@@ -29,11 +30,9 @@ class BatchPageLayout(QWidget):
         self.database_manager.create_database()
         
         self.active_batch_panels = weakref.WeakValueDictionary()
-        self.batch_states = {} # Menyimpan state {batch_id: {param1: value1, ...}}
+        self.batch_states = {}
         
         self.combined_panel = CombinedPanel(self.database_manager)
-
-        self.batch_panels = []
         
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 5, 0, 0)
@@ -55,8 +54,6 @@ class BatchPageLayout(QWidget):
     def refresh_ui(self):
         """Memperbarui tampilan UI dengan daftar batch yang tersedia."""
 
-        # --- LANGKAH 3: Simpan state panel yang ada SEBELUM refresh ---
-        # Iterasi melalui panel yang masih ada di WeakValueDictionary
         current_batch_ids_in_ui = list(self.active_batch_panels.keys())
         for batch_id in current_batch_ids_in_ui:
             panel = self.active_batch_panels.get(batch_id)
@@ -94,84 +91,89 @@ class BatchPageLayout(QWidget):
         # Simpan referensi panel yang baru dibuat
         self.active_batch_panels[batch_id] = combined_panel
         return combined_panel
-    
-    def show_toast(self, message, duration=None):
-        """Menampilkan toast yang tetap aktif selama proses berlangsung"""
-        if hasattr(self, 'toast') and self.toast:  # Hapus toast lama jika ada
-            self.toast.deleteLater()
 
-        self.toast = QLabel(message, self)
-        self.toast.setStyleSheet("""
-            background-color: #858686;
-            color: white;
-            padding: 12px;
-            border-radius: 8px;
-            font-size: 14px;
-            font-weight: bold;
-        """)
-        self.toast.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.toast.setFont(QFont("Arial", 10))
-        
-        # Set lokasi di bagian bawah tengah UI
-        self.toast.setGeometry(
-            (self.width() - 300) // 2,  # Tengah horizontal
-            self.height() - 60,  # Bawah layar
-            300, 40  # Ukuran toast
-        )
-        
-        self.toast.show()
-
-        # Jika durasi diberikan, otomatis hilang setelah waktu selesai
-        if duration:
-            QTimer.singleShot(duration, self.toast.hide)
-    
     def process_all_batches(self):
-        """Menjalankan semua batch dengan toast yang terus diperbarui"""
-        if not self.batch_panels:
-            self.show_toast(language_config.UI_LABEL_BATCH_NO_PROCESS, duration=3000)
+        """Menjalankan semua batch dan MEMINTA toast ditampilkan."""
+        if not self.active_batch_panels:
+            self.show_toast_requested.emit(language_config.UI_LABEL_BATCH_NO_PROCESS, 3000, False)
             return
 
-        # 1. User memilih folder tujuan untuk menyimpan gambar
-        target_folder = QFileDialog.getExistingDirectory(self)
+        target_folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
         if not target_folder:
-            self.show_toast(language_config.UI_LABEL_BATCH_NO_PROCESS, duration=3000)
             return
 
-        total_batches = len(self.batch_panels)
-        self.show_toast(language_config.UI_LABEL_BATCH_PROCESS.format(total_batches))
+        active_panels = list(self.active_batch_panels.values())
+        total_batches = len(active_panels)
 
-        # 2. Mulai proses batch
-        for i, batch_panel in enumerate(self.batch_panels, start=1):
-            batch_panel.process_all_batch()
-            self.show_toast(language_config. UI_LABEL_BATCH_PROGRESS.format(i, total_batches))
+        if total_batches == 0:
+             self.show_toast_requested.emit(language_config.UI_LABEL_BATCH_NO_PROCESS, 3000, False)
+             return
 
-        # 3. Setelah proses batch selesai, pindahkan gambar ke folder tujuan
-        self.save_image(target_folder)
+        # Tampilkan toast AWAL
+        self.show_toast_requested.emit(language_config.UI_LABEL_BATCH_PROCESS.format(total_batches), None, False)
+        QApplication.processEvents() # Import QApplication jika perlu
 
-        # 4. Setelah semua selesai, tampilkan notifikasi
-        self.show_toast(language_config.UI_LABEL_BATCH_SUCCES, duration=3000)
+        # Mulai proses batch
+        print(f"Starting processing for {total_batches} batches...")
+        for i, batch_panel in enumerate(active_panels, start=1):
+            if batch_panel:
+                 print(f"Processing batch {batch_panel.batch_id} ({i}/{total_batches})...")
+                 try:
+                    batch_panel.process_all_batch()
+                    # UPDATE toast progress
+                    self.show_toast_requested.emit(language_config.UI_LABEL_BATCH_PROGRESS.format(i, total_batches), None, True) # is_progress=True
+                    QApplication.processEvents()
+                 except Exception as e:
+                    print(f"Error processing batch {batch_panel.batch_id}: {e}")
+                    QMessageBox.warning(self, "Processing Error", f"An error occurred while processing batch {batch_panel.batch_id}:\n{e}")
+            else:
+                 print(f"Skipping invalid panel reference at index {i-1}")
+
+        # Setelah SEMUA batch selesai, simpan gambar
+        print("All batch processing finished. Saving images...")
+        self.save_image(target_folder) # save_image juga bisa emit sinyal toast jika perlu
+
+        # Notifikasi selesai
+        self.show_toast_requested.emit(language_config.UI_LABEL_BATCH_SUCCES, 5000, False)
 
     def save_image(self, target_folder):
-        """Memindahkan semua gambar dari 'database/stack' ke folder tujuan"""
+        """Memindahkan gambar dan MEMINTA toast ditampilkan."""
         folder_path = "database/stack"
 
         if not os.path.exists(folder_path):
-            QMessageBox.warning(self, "Error", language_config.UI_SYSTEM_FOLDER_WRONG_TO_SAVE_IMAGE_BATCH)
-            return
-
-        image_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
-        
-        if not image_files:
-            QMessageBox.warning(self, "No Images", language_config.UI_NO_IMAGE_TO_SAVE_IMAGE_BATCH)
+            # Panggil QMessageBox atau emit sinyal toast error
+            self.show_toast_requested.emit(language_config.UI_SYSTEM_FOLDER_WRONG_TO_SAVE_IMAGE_BATCH, 4000, False)
             return
 
         try:
-            for image_file in image_files:
-                shutil.move(image_file, os.path.join(target_folder, os.path.basename(image_file)))
-
-            QMessageBox.information(self, "Success", language_config.UI_SUCCES_TO_SAVE_IMAGE_BATCH.format(target_folder))
+            image_files = [f for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
         except Exception as e:
-            QMessageBox.critical(self, "Error", language_config.UI_FAILED_TO_SAVE_IMAGE_BATCH.format(e))
+             self.show_toast_requested.emit(f"Error accessing stack folder: {e}", 4000, False)
+             return
+
+        if not image_files:
+            self.show_toast_requested.emit(language_config.UI_NO_IMAGE_TO_SAVE_IMAGE_BATCH, 4000, False)
+            return
+
+        # Tampilkan toast sebelum memindahkan
+        self.show_toast_requested.emit(language_config.UI_LABEL_MOVING_FILES.format(len(image_files), target_folder), None, True) # Progress
+        QApplication.processEvents()
+
+        move_errors = []
+        for image_file_name in image_files:
+             source_path = os.path.join(folder_path, image_file_name)
+             destination_path = os.path.join(target_folder, image_file_name)
+             try:
+                 shutil.move(source_path, destination_path)
+             except Exception as e:
+                 error_msg = f"Failed to move '{image_file_name}': {e}"
+                 print(error_msg)
+                 move_errors.append(error_msg)
+
+        # Tampilkan hasil akhir (toast success sudah ditampilkan oleh process_all_batches)
+        if move_errors:
+             error_details = "\n".join(move_errors)
+             QMessageBox.critical(self, "Move Error", f"Some files could not be moved:\n{error_details}")
 
 
     # Contoh penggunaan di handle_delete_individual_batch
@@ -188,9 +190,8 @@ class BatchPageLayout(QWidget):
             # --- LANGKAH 6: Hapus state sebelum memulai delete ---
             if batch_id in self.batch_states:
                 del self.batch_states[batch_id]
-                print(f"Removed saved state for batch {batch_id}") # Debug
-            # ----------------------------------------------------
-
+                # print(f"Removed saved state for batch {batch_id}") # Debug
+            
             # Jalankan penghapusan di thread terpisah
             self.deleter_thread = BatchDeleteProcess(self.database_manager, batch_id, CACHE_DIR, self.thumbnail_threads)
             # Hubungkan sinyal SEBELUM memulai thread
@@ -202,30 +203,24 @@ class BatchPageLayout(QWidget):
         conn = None # Inisialisasi
         batch_defined_count = 0
         
-        # Mengecek jumlah batch unik dalam batch_process_image
         try:
-            # Gunakan path database yang konsisten (misalnya dari self.database_manager jika tersedia)
-            # Jika tidak, pastikan path "pixel_refine_database.db" sudah benar
             db_path = self.database_manager.db_path # Asumsi database_manager punya atribut db_path
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
-            # Aktifkan foreign keys untuk konsistensi (meskipun tidak wajib untuk SELECT)
             cursor.execute("PRAGMA foreign_keys = ON;") 
             cursor.execute("SELECT COUNT(*) FROM batch_process") 
             batch_defined_count = cursor.fetchone()[0]
         except Exception as e:
-            print(f"Error checking batch count: {e}")
             QMessageBox.critical(self, "Database Error", f"Failed to check batch status: {e}")
-            return # Keluar jika tidak bisa cek database
+            return 
         finally:
             if conn:
                 conn.close()
 
         if batch_defined_count == 0:
             QMessageBox.information(self, title, language_config.NO_DATA_BATCH_ALL_DELETE_BUTTON, QMessageBox.StandardButton.Ok)
-            return  # Keluar dari fungsi jika tidak ada batch yang terdefinisi
+            return 
 
-        # Jika ada batch, lanjutkan dengan konfirmasi penghapusan
         message = language_config.CONFIRM_BATCH_ALL_DELETE_BUTTON.format(batch_defined_count)
         reply = QMessageBox.question(
             self,
@@ -235,16 +230,11 @@ class BatchPageLayout(QWidget):
         )
 
         if reply == QMessageBox.StandardButton.Yes:
-            # --- LANGKAH 6: Hapus semua state sebelum memulai delete ---
             self.batch_states.clear()
-            print("Cleared all saved batch states") # Debug
-
-            # Gunakan instance deleter baru jika perlu atau pastikan state internalnya benar
+            
             deleter = BatchDeleteProcess(self.database_manager, None, CACHE_DIR, self.thumbnail_threads)
-             # Hubungkan sinyal SEBELUM memulai delete
             deleter.batch_deleted.connect(self.data_changed.emit)
-            deleter.delete_all_batch() # Jalankan fungsi penghapusan batch
-
+            deleter.delete_all_batch() 
 
     def convert_tiff_to_uncompressed(self, input_path, output_folder):
         """Konversi TIFF terkompresi ke TIFF tanpa kompresi"""
@@ -259,7 +249,6 @@ class BatchPageLayout(QWidget):
 
     def handle_batch_import_button(self):
         """Function to manage batch image import with TIFF decompression"""
-        # Open file dialog and get image paths with filter
         file_dialog_filter = language_config.HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION
         image_paths, _ = QFileDialog.getOpenFileNames(self, language_config.HANDLE_IMPORT_BUTTON_IMAGE_PATH, "", file_dialog_filter)
 
@@ -278,20 +267,18 @@ class BatchPageLayout(QWidget):
 
         # 2. Tentukan nomor batch berikutnya
         next_batch_num = 1
-        prefix = "batch" # Anda bisa ganti prefix jika mau, misal "Sesi"
-
+        prefix = "batch" 
+        
         max_num_found = 0
         for name in existing_batch_names:
             if name.startswith(prefix):
-                # Coba ekstrak nomor dari nama batch
                 try:
-                    num_part = name[len(prefix):] # Ambil bagian setelah prefix
-                    if num_part.isdigit(): # Pastikan itu angka
+                    num_part = name[len(prefix):]
+                    if num_part.isdigit(): 
                         num = int(num_part)
                         if num > max_num_found:
                             max_num_found = num
                 except ValueError:
-                    # Abaikan nama yang tidak sesuai format (misal "batch_lama")
                     continue
         
         # Nomor berikutnya adalah nomor maksimum yang ditemukan + 1

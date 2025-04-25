@@ -38,8 +38,9 @@ class DatabaseManager:
         if not os.path.exists(self.db_path):
             print("Checking database...")
             print("Database not found. Creating database...")
-            # Ensure directory exists if db_path includes directories
-            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+            db_dir = os.path.dirname(self.db_path)
+            if db_dir:
+                os.makedirs(db_dir, exist_ok=True)
         else:
             print("Database already exists.")
 

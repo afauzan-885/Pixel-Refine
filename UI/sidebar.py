@@ -1,10 +1,16 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPushButton
 from PyQt6.QtGui import QIcon
-
+from UI.resources.animation.animation_manager import WidthAnimator
 from UI.settings.General.Language import language_config
-
+from PyQt6.QtCore import pyqtSlot, QEasingCurve
 
 class Sidebar(QWidget):
+    
+    EXPANDED_WIDTH = 180
+    COLLAPSED_WIDTH = 70
+    ANIMATION_DURATION = 250
+    ANIMATION_CURVE = QEasingCurve.Type.InOutQuad
+    
     def __init__(self, toggle_callback, switch_page_callback):
         super().__init__()
         self.expanded_width = 180
@@ -12,6 +18,8 @@ class Sidebar(QWidget):
         self.sidebar_expanded = True
         self.toggle_callback = toggle_callback
         self.switch_page_callback = switch_page_callback
+        
+        self.width_animator = WidthAnimator(self) 
 
         self.setStyleSheet(
             """
@@ -93,17 +101,38 @@ class Sidebar(QWidget):
             }
         """
         )
-        btn.clicked.connect(lambda: self.switch_page_callback(index))
-        btn.default_text = text
+         # Gunakan lambda yang benar untuk index
+        btn.clicked.connect(lambda checked=False, idx=index: self._handle_nav_click(idx))
+        btn.setProperty("default_text", text) # Simpan teks asli sebagai properti
         return btn
+    
+    @pyqtSlot(int)
+    def _handle_nav_click(self, index):
+        """Menangani klik tombol navigasi."""
+        for i, btn in enumerate(self.nav_buttons):
+            btn.setChecked(i == index)
+        self.switch_page_callback(index) # Panggil callback dengan index
+
 
     def toggle_sidebar(self):
-        """Toggle the sidebar size."""
-        self.sidebar_expanded = not self.sidebar_expanded
+        """Memulai animasi expand/collapse sidebar menggunakan WidthAnimator."""
+        target_expanded = not self.sidebar_expanded
+        end_width = self.expanded_width if target_expanded else self.collapsed_width
+
+        # Update state internal & tampilan teks/ikon SEGERA
+        self.sidebar_expanded = target_expanded
+        self.toggle_button.setText("☰" if target_expanded else "➡")
         for btn in self.nav_buttons:
-            btn.setText(btn.default_text if self.sidebar_expanded else "")
-        self.setFixedWidth(
-            self.expanded_width if self.sidebar_expanded else self.collapsed_width
-        )
-        self.toggle_button.setText("☰" if self.sidebar_expanded else "➡")
+             default_text = btn.property("default_text")
+             btn.setText(default_text if target_expanded else "")
+
+        # Panggil callback eksternal
         self.toggle_callback()
+
+        # --- Gunakan WidthAnimator ---
+        self.width_animator.animate_width(
+            target_widget=self, # Target adalah sidebar itu sendiri
+            end_width=end_width,
+            duration=self.ANIMATION_DURATION, # Gunakan konstanta
+            curve=self.ANIMATION_CURVE      # Gunakan konstanta
+        )

@@ -241,3 +241,80 @@ IMPORT_BUTTON = """
                 background-color: #2980b9;
             }
         """
+        
+LIST_IMAGE_DATA_SINGLE_MODE = """
+            RightPanel {
+                background-color: transparent;
+                border: none; /* Hapus border default */
+            }
+
+            /* Aturan untuk RightPanel saat TIDAK menerima drop */
+            RightPanel[acceptingDrop="false"] {
+                 border: none; /* Pastikan tidak ada border saat normal */
+            }
+
+            /* Aturan untuk RightPanel SAAT menerima drop */
+            RightPanel[acceptingDrop="true"] {
+                 border: 2px dashed #74b9ff; /* Tambahkan border biru saat drag */
+            }
+            QListWidget#ImageList {
+                background-color: #ffffff;
+                border: 1px solid #dcdcdc;
+                font-size: 14px; padding: 4px; outline: none;
+                alternate-background-color: #f9f9f9; /* Ganti warna asli alternate jika diinginkan */
+            }
+            RightPanel[acceptingDrop="true"] QListWidget#ImageList {
+                background-color: #C0F1E9; /* <<< WARNA TARGET SAAT DRAG */
+                /* Anda mungkin ingin menghapus alternate background saat drag */
+                alternate-background-color: transparent;
+            }
+            /* Gaya default untuk Placeholder Widget */
+            QWidget#PlaceholderWidget {
+                background-color: #ffffff;
+                border: 1px dashed #cccccc;
+                border-radius: 3px;
+            }
+             /* Gaya untuk Placeholder Widget SAAT induknya (RightPanel) menerima drop */
+            RightPanel[acceptingDrop="true"] QWidget#PlaceholderWidget {
+                 background-color: #C0F1E9; /* Samakan background placeholder saat drag */
+                 border: 1px dashed #74b9ff; /* Pertegas border placeholder juga */
+            }
+            QListWidget#ImageList::item {
+                padding: 2px 3px; color: #333333;
+            }
+            QListWidget#ImageList::item:hover {
+                background-color: #C0F1E9;
+            }
+            QListWidget#ImageList::item:selected {
+                background-color: #C5CFD8; color: black;
+            }
+
+            QWidget#PlaceholderWidget {
+                background-color: #ffffff; border: 1px dashed #cccccc;
+                border-radius: 3px;
+            }
+            /* Tambahkan style scrollbar jika perlu */
+            QScrollBar:vertical {
+                border: none; background: #f0f0f0; width: 10px; margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #cccccc; min-height: 20px; border-radius: 5px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                border: none; background: none; height: 0px;
+            }
+            QScrollBar::up-arrow:vertical, QScrollBar::down-arrow:vertical { background: none; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
+
+            QScrollBar:horizontal { /* Style untuk Horizontal Scrollbar jika muncul */
+                border: none; background: #f0f0f0; height: 10px; margin: 0px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #cccccc; min-width: 20px; border-radius: 5px;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                border: none; background: none; width: 0px;
+            }
+            QScrollBar::left-arrow:horizontal, QScrollBar::right-arrow:horizontal { background: none; }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }
+        """
