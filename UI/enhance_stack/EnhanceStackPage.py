@@ -9,8 +9,7 @@ from PyQt6.QtGui import QFont
 # Import Halaman dan Komponen Anda
 from UI.enhance_stack.batch_page_layout import BatchPageLayout
 from UI.enhance_stack.single_page_layout import SinglePageLayout
-from UI.resources.animation.animation_manager import AnimationType, SlideDirection, StackedWidgetAnimator
-from UI.resources.animation.fade import fade
+from UI.resources.animation.animation_manager import SlideDirection, StackedWidgetAnimator
 from UI.resources.animation.slide import slide
 from .components.top_bar import TopBar
 from .logic.database_manager import DatabaseManager
@@ -62,63 +61,74 @@ class EnhanceStackPage(QWidget):
         self.top_bar.right_stack.setCurrentIndex(0)
         
     # --- METODE TOAST (PINDAH KE SINI) ---
-    @pyqtSlot(str, object, bool) # Tentukan tipe argumen slot
+    @pyqtSlot(str, object, bool)
     def show_toast(self, message, duration=None, is_progress_update=False):
         """Menampilkan toast. Jika is_progress_update=True dan toast sudah ada, hanya update teks."""
-        # Hentikan timer lama (selalu aman dilakukan)
+        
         if self.toast_close_timer and self.toast_close_timer.isActive():
             self.toast_close_timer.stop()
             self.toast_close_timer = None
 
-        # Hentikan animasi fade-out lama jika berjalan
-        if self.toast_fade_out_anim and self.toast_fade_out_anim.state() == QPropertyAnimation.State.Running:
-            self.toast_fade_out_anim.stop()
+        # --- PERBAIKAN: Hentikan dan Reset Fade Out Lama ---
+        if self.toast_fade_out_anim:
+             if self.toast_fade_out_anim.state() == QPropertyAnimation.State.Running:
+                 self.toast_fade_out_anim.stop()
+                 # Jangan panggil _on_toast_fade_out_finished di sini
+             # Reset referensi SETELAH stop (atau jika tidak running tapi referensi masih ada)
+             self.toast_fade_out_anim = None
+        # -------------------------------------------------
 
         # --- Logika Pembaruan atau Pembuatan Baru ---
         if is_progress_update and self.toast_label:
-            # --- UPDATE TOAST YANG ADA ---
             if self.toast_fade_in_anim and self.toast_fade_in_anim.state() == QPropertyAnimation.State.Running:
-                self.toast_fade_in_anim.stop(); self.toast_fade_in_anim = None
+                self.toast_fade_in_anim.stop()
+            self.toast_fade_in_anim = None
+
             if self.toast_opacity_effect: self.toast_opacity_effect.setOpacity(1.0)
             else:
                  self.toast_opacity_effect = QGraphicsOpacityEffect(self.toast_label); self.toast_opacity_effect.setOpacity(1.0); self.toast_label.setGraphicsEffect(self.toast_opacity_effect)
 
+            # Update teks, ukuran, posisi
             self.toast_label.setText(message); self.toast_label.adjustSize()
             toast_width = self.toast_label.width() + 40; toast_height = self.toast_label.height()
-            # --- GUNAKAN UKURAN EnhanceStackPage ('self') ---
             parent_width = self.width(); parent_height = self.height()
             self.toast_label.setGeometry( (parent_width - toast_width) // 2, parent_height - toast_height - 20, toast_width, toast_height )
-            # --------------------------------------------
             self.toast_label.raise_(); self.toast_label.show()
-        else:
-            # --- BUAT TOAST BARU ---
-            if self.toast_label:
-                if self.toast_fade_in_anim and self.toast_fade_in_anim.state() == QPropertyAnimation.State.Running: self.toast_fade_in_anim.stop()
-                self.toast_label.deleteLater()
-                self.toast_label = None; self.toast_opacity_effect = None; self.toast_fade_in_anim = None
 
-            # --- Parent adalah 'self' (EnhanceStackPage) ---
+        else:
+            if self.toast_label:
+                if self.toast_fade_in_anim and self.toast_fade_in_anim.state() == QPropertyAnimation.State.Running:
+                    self.toast_fade_in_anim.stop()
+                self.toast_label.deleteLater() 
+
+            # Reset semua referensi sebelum membuat yang baru
+            self.toast_label = None; self.toast_opacity_effect = None;
+            self.toast_fade_in_anim = None; self.toast_fade_out_anim = None;
+            self.toast_close_timer = None 
+
+            # Buat QLabel baru
             self.toast_label = QLabel(message, self)
-            # ---------------------------------------------
             self.toast_label.setStyleSheet(""" background-color: rgba(40, 40, 40, 0.85); color: white; padding: 12px 20px; border-radius: 15px; font-size: 14px; font-weight: bold; """)
             self.toast_label.setAlignment(Qt.AlignmentFlag.AlignCenter); self.toast_label.setFont(QFont("Arial", 10)); self.toast_label.adjustSize()
 
+            # Terapkan Efek Opacity baru
             self.toast_opacity_effect = QGraphicsOpacityEffect(self.toast_label); self.toast_opacity_effect.setOpacity(0.0); self.toast_label.setGraphicsEffect(self.toast_opacity_effect)
 
+            # Set lokasi
             toast_width = self.toast_label.width() + 40; toast_height = self.toast_label.height()
-            # --- GUNAKAN UKURAN EnhanceStackPage ('self') ---
             parent_width = self.width(); parent_height = self.height()
             self.toast_label.setGeometry( (parent_width - toast_width) // 2, parent_height - toast_height - 20, toast_width, toast_height )
-            # --------------------------------------------
 
             self.toast_label.raise_(); self.toast_label.show()
 
-            fade_in_anim = QPropertyAnimation(self.toast_opacity_effect, b"opacity", self) # Parent self
+            # Animasi Fade-In baru
+            fade_in_anim = QPropertyAnimation(self.toast_opacity_effect, b"opacity", self)
             fade_in_anim.setDuration(400); fade_in_anim.setStartValue(0.0); fade_in_anim.setEndValue(1.0); fade_in_anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
             fade_in_anim.finished.connect(self._on_toast_fade_in_finished)
             fade_in_anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
-            self.toast_fade_in_anim = fade_in_anim
+            self.toast_fade_in_anim = fade_in_anim # Simpan referensi
 
+            # Timer untuk fade-out (jika ada durasi)
             if duration:
                 self.toast_close_timer = QTimer(self); self.toast_close_timer.setSingleShot(True); self.toast_close_timer.timeout.connect(self._start_toast_fade_out); self.toast_close_timer.start(duration)
 

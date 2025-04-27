@@ -1,7 +1,7 @@
 import weakref
 from PyQt6.QtWidgets import QStackedWidget, QGraphicsOpacityEffect, QWidget
 from PyQt6.QtCore import (QObject, QPropertyAnimation, QEasingCurve, pyqtSlot,
-                          QParallelAnimationGroup, QPoint, QRect, Qt)
+                          QParallelAnimationGroup, QPoint, QRect, QTimer)
 from enum import Enum, auto
 
 # --- Enum untuk Jenis Animasi (Tetap Sama) ---
@@ -23,11 +23,58 @@ class StackedWidgetAnimator(QObject):
         self._opacity_effects = weakref.WeakValueDictionary()
         self._active_transitions = {} 
         self._transition_data = {}   
+        self._active_fade_outs = {}
+        
+    def transition_out(self, widget: QWidget, duration: int = 300,
+                 curve: QEasingCurve.Type = QEasingCurve.Type.OutQuad, on_finished_callback=None):
+        """
+        Memulai animasi fade-out (opacity 1.0 -> 0.0) pada sebuah widget.
+
+        Args:
+            widget: Widget yang akan dianimasikan.
+            duration: Durasi animasi dalam milidetik.
+            curve: Kurva easing yang akan digunakan.
+            on_finished_callback: Fungsi yang akan dipanggil setelah animasi selesai.
+        """
+        if not widget:
+            if on_finished_callback: QTimer.singleShot(0, on_finished_callback) # Panggil callback segera jika widget null
+            return
+
+        # Hentikan animasi fade-out mandiri sebelumnya jika ada
+        if widget in self._active_fade_outs and \
+           self._active_fade_outs[widget].state() == QPropertyAnimation.State.Running:
+            self._active_fade_outs[widget].stop()
+            
+        # Siapkan efek opacity
+        opacity_effect = widget.graphicsEffect()
+        if not isinstance(opacity_effect, QGraphicsOpacityEffect):
+            opacity_effect = QGraphicsOpacityEffect(widget)
+            widget.setGraphicsEffect(opacity_effect)
+        opacity_effect.setOpacity(1.0)
+
+        # Buat animasi
+        anim = QPropertyAnimation(opacity_effect, b"opacity", self) # Parent animator
+        anim.setDuration(duration)
+        anim.setStartValue(1.0)
+        anim.setEndValue(0.0)
+        anim.setEasingCurve(curve)
+
+        widget_ref = weakref.ref(widget)
+        effect_ref = weakref.ref(opacity_effect)
+        anim.finished.connect(lambda: self._on_standalone_fade_out_finished(widget_ref, effect_ref))
+        if on_finished_callback:
+            # Pastikan callback dipanggil setelah cleanup internal kita mungkin?
+            # Atau panggil saja keduanya saat finished. Biasanya aman.
+            anim.finished.connect(on_finished_callback)
+
+        # Lacak dan mulai animasi
+        self._active_fade_outs[widget] = anim
+        anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
     # =====================================================
     # === Metode Inti (Lebih Fleksibel, bisa tetap ada) ===
     # =====================================================
-    def transition_to(self, stack_widget: QStackedWidget, target,
+    def transition_in(self, stack_widget: QStackedWidget, target,
                         animation_type: AnimationType = AnimationType.FADE,
                         duration_out: int = DEFAULT_DURATION_OUT,
                         duration_in: int = DEFAULT_DURATION_IN,
@@ -89,6 +136,25 @@ class StackedWidgetAnimator(QObject):
     # === Metode Internal (Helper dan Slot) ===
     # =====================================================
 
+    @pyqtSlot(weakref.ref, weakref.ref) # Terima weakref
+    def _on_standalone_fade_out_finished(self, widget_ref, effect_ref):
+        """Slot internal: Membersihkan setelah animasi fade-out mandiri selesai."""
+        widget = widget_ref() if widget_ref else None
+        effect = effect_ref() if effect_ref else None
+        # print(f"Animator: Fade-out finished for widget {widget}") # Debug
+
+        if widget:
+            # Hapus efek grafis HANYA jika efek saat ini adalah yang kita animasikan
+            # dan jika efeknya masih ada
+            if effect and widget.graphicsEffect() == effect:
+                # print(f"Animator: Removing graphics effect from {widget}") # Debug
+                widget.setGraphicsEffect(None)
+            # Hapus dari pelacakan animasi aktif
+            if widget in self._active_fade_outs:
+                del self._active_fade_outs[widget]
+        else:
+             pass 
+    
     def _validate_target(self, stack_widget, target):
         """Validasi target dan kembalikan widget serta indeksnya."""
         target_widget = None; target_index = -1
@@ -140,46 +206,60 @@ class StackedWidgetAnimator(QObject):
         transition_data = self._transition_data.get(stack_widget)
         if not transition_data: print(f"Animator Error: Data lost {stack_widget}"); return
 
-        old_widget = transition_data.get('old_widget') 
+        old_widget = transition_data.get('old_widget')
         target = transition_data['target']
         animation_type = transition_data['type']
 
+        # --- Reset Widget Lama ---
         if old_widget:
             old_effect = old_widget.graphicsEffect()
-            if isinstance(old_effect, QGraphicsOpacityEffect):
-                old_effect.setOpacity(1.0) 
-                
-            if animation_type != AnimationType.FADE:
-                 old_widget.setVisible(False); old_widget.move(0, 0); old_widget.setGeometry(stack_widget.rect()); old_widget.setVisible(True)
+            if isinstance(old_effect, QGraphicsOpacityEffect): old_effect.setOpacity(1.0)
+            if animation_type != AnimationType.FADE: old_widget.setVisible(False); old_widget.move(0, 0); old_widget.setGeometry(stack_widget.rect()); old_widget.setVisible(True)
         
+        # --- Lakukan Switch Widget SEKARANG ---
         new_widget, new_index = self._validate_target(stack_widget, target)
         if new_index != -1:
             stack_widget.setCurrentIndex(new_index)
-            new_widget = stack_widget.widget(new_index) # Re-fetch setelah switch
+            new_widget = stack_widget.widget(new_index)
         else:
-            if stack_widget in self._active_transitions: del self._active_transitions[stack_widget];
-            if stack_widget in self._transition_data: del self._transition_data[stack_widget]; return
+             if stack_widget in self._active_transitions: del self._active_transitions[stack_widget];
+             if stack_widget in self._transition_data: del self._transition_data[stack_widget]; return
         if not new_widget: print(f"Animator Error: New widget invalid {stack_widget}"); return
+        # ------------------------------------
+
+        # --- TUNDA FASE IN SEDIKIT ---
+        QTimer.singleShot(0, lambda sw=stack_widget, nw=new_widget, td=transition_data:
+                              self._start_incoming_animation(sw, nw, td))
         
-        new_effect = new_widget.graphicsEffect()
-        if not isinstance(new_effect, QGraphicsOpacityEffect):
+    def _start_incoming_animation(self, stack_widget: QStackedWidget, new_widget: QWidget, transition_data: dict):
+         """Memulai animasi fase 'in' setelah jeda singkat."""
+         # Cek lagi jika transisi dibatalkan sementara menunggu timer
+         if stack_widget not in self._transition_data or self._transition_data[stack_widget]['target'] != transition_data['target']:
+              print("Animator Info: Transition target changed or cancelled before fade-in started.")
+              return
+
+         animation_type = transition_data['type']
+
+         # Terapkan Efek Opacity ke Widget Baru
+         new_effect = new_widget.graphicsEffect()
+         if not isinstance(new_effect, QGraphicsOpacityEffect):
              new_effect = QGraphicsOpacityEffect(new_widget)
              new_widget.setGraphicsEffect(new_effect)
-        new_effect.setOpacity(0.0) # Mulai transparan
+         new_effect.setOpacity(0.0) 
+         
+         # Buat Grup Animasi In
+         in_group = QParallelAnimationGroup(self)
+         fade_in_anim = QPropertyAnimation(new_effect, b"opacity", in_group)
+         fade_in_anim.setDuration(transition_data['in_duration']); fade_in_anim.setEasingCurve(transition_data['in_curve'])
+         fade_in_anim.setStartValue(0.0); fade_in_anim.setEndValue(1.0)
+         in_group.addAnimation(fade_in_anim)
+         geom_anim_in = self._create_incoming_geometry_animation(new_widget, animation_type, transition_data['in_duration'], transition_data['in_curve'], in_group)
+         if geom_anim_in: in_group.addAnimation(geom_anim_in)
 
-        # 2. Buat Grup Animasi In
-        in_group = QParallelAnimationGroup(self)
-        fade_in_anim = QPropertyAnimation(new_effect, b"opacity", in_group)
-        fade_in_anim.setDuration(transition_data['in_duration']); fade_in_anim.setEasingCurve(transition_data['in_curve'])
-        fade_in_anim.setStartValue(0.0); fade_in_anim.setEndValue(1.0)
-        in_group.addAnimation(fade_in_anim)
-        geom_anim_in = self._create_incoming_geometry_animation(new_widget, animation_type, transition_data['in_duration'], transition_data['in_curve'], in_group)
-        if geom_anim_in: in_group.addAnimation(geom_anim_in)
-
-        # 3. Hubungkan Finished & Mulai
-        in_group.finished.connect(lambda sw=stack_widget: self._on_animation_in_finished(sw))
-        self._active_transitions[stack_widget] = in_group
-        in_group.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+         # Hubungkan Finished & Mulai
+         in_group.finished.connect(lambda sw=stack_widget: self._on_animation_in_finished(sw))
+         self._active_transitions[stack_widget] = in_group
+         in_group.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
     @pyqtSlot(QStackedWidget)
     def _on_animation_in_finished(self, stack_widget: QStackedWidget):
@@ -190,7 +270,7 @@ class StackedWidgetAnimator(QObject):
             if current_widget.pos() != QPoint(0,0): current_widget.move(0,0)
             current_effect = current_widget.graphicsEffect()
             if isinstance(current_effect, QGraphicsOpacityEffect):
-                 current_widget.setGraphicsEffect(None) # Hapus efek!
+                 current_widget.setGraphicsEffect(None) 
                  if current_widget in self._opacity_effects:
                       del self._opacity_effects[current_widget]
 

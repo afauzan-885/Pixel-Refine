@@ -21,7 +21,7 @@ def slide(animator: StackedWidgetAnimator,
     curve_out_slide = QEasingCurve.Type.Linear # Kurva keluar untuk slide
     curve_in_slide = curve                  # Kurva masuk sesuai parameter
 
-    animator.transition_to(stack_widget, target,
+    animator.transition_in(stack_widget, target,
                            animation_type=anim_type,
                            duration_out=duration_out,
                            duration_in=duration_in,

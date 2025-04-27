@@ -1,11 +1,13 @@
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QAbstractItemView, QMenu, QLabel, QStackedLayout, QMessageBox
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QListWidget, QAbstractItemView,
+                             QMenu, QLabel, QStackedLayout, QMessageBox, QListWidgetItem,
+                             )
 from PyQt6.QtCore import Qt, pyqtSignal, QUrl, QEvent # Tambah QUrl, QEvent
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QMouseEvent
 import os
 from UI.enhance_stack.logic.database_manager import DatabaseManager
 from UI.resources.animation.animation_manager import StackedWidgetAnimator
-from UI.resources.animation.fade import fade
-from UI.resources.stylesheet.stylesheet import LIST_IMAGE_DATA_SINGLE_MODE
+from UI.resources.animation.fade import fade_in
+from UI.resources.stylesheet.stylesheet import LIST_IMAGE_DATA_SINGLE_MODE, LIST_IMAGE_DATA_SPECIFIC_ITEM
 from UI.settings.General.Language import language_config
 from config import SUPPORTED_FORMATS
 from UI.settings.General.Language import language_config
@@ -21,7 +23,6 @@ class RightPanel(QWidget):
         self.preview_active = True
         self.preview_pause = False
         self.animator = StackedWidgetAnimator(self)
-        
         self.setAcceptDrops(True)
         
         # --- Setup List Widget ---
@@ -29,10 +30,9 @@ class RightPanel(QWidget):
         self.image_list.setObjectName("ImageList")
         self.image_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.image_list.setDropIndicatorShown(True)
+        self.image_list.setStyleSheet(LIST_IMAGE_DATA_SPECIFIC_ITEM)
         self.image_list.installEventFilter(self)
         
-        # ------------------------------------
-
         # --- Setup Placeholder Widget ---
         self.placeholder_widget = QWidget()
         self.placeholder_widget.setObjectName("PlaceholderWidget")
@@ -42,14 +42,14 @@ class RightPanel(QWidget):
         try:
             format_keys = SUPPORTED_FORMATS.keys()
             supported_formats_text = ", ".join(sorted(list(format_keys)))
-        
         except NameError:
             supported_formats_text = "jpg, png, tiff" 
-        
         except Exception as e:
             print(f"Error processing SUPPORTED_FORMATS keys: {e}") # Pesan error lebih spesifik
             supported_formats_text = "(Gagal memuat format)"
 
+
+        # Buat string HTML (tidak perlu diubah, hanya nilai variabel yang berbeda)
         html_text = f"""
         <p align="center">
             {language_config.PLACHOLDER_DRAG_AND_DROP_IMPORT_IMAGES}<br><br>
@@ -92,17 +92,41 @@ class RightPanel(QWidget):
 
         
     def load_image_paths(self):
-        """Load image paths using DatabaseManager."""
-        image_paths = self.db_manager.get_single_process_image_paths()
-        current_selection = self.get_select_image_list() # Simpan seleksi
+        """
+        Muat path gambar dari DB, tampilkan nama file (RATA TENGAH),
+        simpan path lengkap, dan update placeholder.
+        """
+        print("RightPanel: Loading image paths...")
+        try:
+            full_image_paths = self.db_manager.get_single_process_image_paths()
+        except Exception as e:
+            print(f"Error loading image paths: {e}")
+            full_image_paths = []
+
+        current_selection_paths = self.get_select_image_list() # Ambil path lengkap seleksi lama
+
         self.image_list.clear()
-        self.image_list.addItems(image_paths)
-        # Pulihkan seleksi jika item masih ada (opsional)
-        for i in range(self.image_list.count()):
-            item = self.image_list.item(i)
-            if item.text() in current_selection:
-                item.setSelected(True)
+
+        for full_path in full_image_paths:
+            if not full_path: continue
+            filename = os.path.basename(full_path)
+            item = QListWidgetItem(filename) 
+            item.setData(Qt.ItemDataRole.UserRole, full_path) 
+            item.setToolTip(full_path)
+
+            # --- TAMBAHKAN BARIS INI ---
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter) 
+            # --------------------------
+
+            self.image_list.addItem(item)
+
+            # Pulihkan seleksi jika path lengkap cocok
+            if full_path in current_selection_paths:
+                 item.setSelected(True)
+
+        print(f"RightPanel: Loaded {self.image_list.count()} items.")
         self._update_placeholder_visibility()
+
 
     def _update_placeholder_visibility(self):
         """
@@ -114,7 +138,7 @@ class RightPanel(QWidget):
         current_visible_widget = self.stacked_layout.currentWidget()
 
         if target_widget != current_visible_widget:
-            fade(self.animator, self.stacked_layout, target_widget, duration=500)
+            fade_in(self.animator, self.stacked_layout, target_widget, duration=500)
 
     def add_dropped_images(self, paths):
         """Adds dropped images to the list and database (assuming DB logic elsewhere)."""
@@ -246,30 +270,47 @@ class RightPanel(QWidget):
             if action == set_ref_action:
                 self.set_to_image_reference(item)
             
-    def get_select_image_list(self):
-        """Return a list of paths for the selected items."""
-        select_image_list = self.image_list.selectedItems()
-        return [item.text() for item in select_image_list]
+    def get_select_image_list(self) -> list[str]:
+        """Return a list of FULL paths for the selected items."""
+        selected_paths = []
+        for item in self.image_list.selectedItems():
+            full_path = item.data(Qt.ItemDataRole.UserRole) # Ambil dari UserRole
+            if full_path: # Pastikan data tidak None
+                 selected_paths.append(full_path)
+        return selected_paths
 
     def remove_selected_images(self):
-        """Hapus gambar terpilih dan update visibilitas placeholder/list."""
-        selected_items = self.image_list.selectedItems()
+        """Hapus gambar terpilih dari DB dan list, lalu update placeholder."""
+        selected_items = self.image_list.selectedItems() # Ambil item terpilih
         if not selected_items: return
-        image_paths_to_delete = [item.text() for item in selected_items]
+
+        # Ambil FULL PATH dari data item untuk dihapus dari DB
+        image_paths_to_delete = []
+        rows_to_remove = []
+        for item in selected_items:
+             full_path = item.data(Qt.ItemDataRole.UserRole)
+             if full_path:
+                  image_paths_to_delete.append(full_path)
+                  rows_to_remove.append(self.image_list.row(item)) # Simpan row untuk dihapus dari UI
+
+        if not image_paths_to_delete:
+            print("No valid paths found in selected items to delete.")
+            return
+
         try:
             deleted_count = self.db_manager.single_process_delete_path_images(image_paths_to_delete)
+
             if deleted_count >= 0:
-                 rows = sorted([self.image_list.row(item) for item in selected_items], reverse=True)
-                 items_removed = False
-                 for row in rows:
+                 print(f"Database reported deletion of {deleted_count} links.")
+                 # Hapus item dari UI berdasarkan row (dari bawah ke atas)
+                 items_removed_from_ui = False
+                 for row in sorted(rows_to_remove, reverse=True):
                      if row >= 0:
-                         self.image_list.takeItem(row)
-                         items_removed = True
-                 if items_removed:
-                      print("Items removed from list.")
-                      self._update_placeholder_visibility() # Update HANYA jika ada yg dihapus dari UI
-                 else: 
-                      self._update_placeholder_visibility() 
+                        taken_item = self.image_list.takeItem(row)
+                        del taken_item
+                        items_removed_from_ui = True
+                 if items_removed_from_ui:
+                      self._update_placeholder_visibility() # Update setelah hapus
             else: QMessageBox.warning(self, "Deletion Failed", "Could not remove from DB.")
         except Exception as e: print(f"Error deleting: {e}"); QMessageBox.critical(self, "Error", f"Error during deletion:\n{e}")
 

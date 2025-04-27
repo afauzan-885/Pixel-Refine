@@ -12,7 +12,7 @@ def zoom(animator: StackedWidgetAnimator,
     duration_in = int(duration * 0.6)
     curve = QEasingCurve.Type.InOutCirc # Kurva zoom
 
-    animator.transition_to(stack_widget, target,
+    animator.transition_in(stack_widget, target,
                            animation_type=AnimationType.ZOOM,
                            duration_out=duration_out,
                            duration_in=duration_in,

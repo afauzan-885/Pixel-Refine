@@ -49,7 +49,7 @@ TOPBAR_SINGLE_IMPORT_BUTTON_TEXT = "Import Imej"
 TOPBAR_SINGLE_DELETE_BUTTON_TEXT = "Padam Imej"
 
 # Batch Actions
-TOPBAR_BATCH_IMPORT_BUTTON_TEXT = "Cipta Batch"
+TOPBAR_BATCH_IMPORT_BUTTON_TEXT = "Import Imej"
 TOPBAR_BATCH_DELETE_BUTTON_TEXT = "Padam Batch"
 TOPBAR_BATCH_START_PROCESS_BUTTON_TEXT = "Proses Batch"
 TOPBAR_BATCH_SAVE_BUTTON_TEXT = "Simpan Ke"
@@ -112,7 +112,7 @@ HANDLE_IMPORT_BUTTON_IMAGE_SELECTED = "Format Terpilih"
 HANDLE_IMPORT_BUTTON_IMAGE_DOMINANT = "{count} imej dengan format '{format}' akan diimport."
 HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED = "Gagal", "Tiada imej sah untuk diimport." # Tuple for Title, Message
 ON_IMPORT_COMPLETE_STATUS = "Import selesai"
-ON_IMPORT_COMPLETE_MESSAGES = "{successful_images} imej telah berjaya diimport."
+ON_IMPORT_COMPLETE_MESSAGES = "{} imej telah berjaya diimport."
 
 # Delete
 HANDLE_DELETE_BUTTON_IMAGE_NO_VALID_SELECTED = "Gagal", "Tiada imej dipilih." # Tuple for Title, Message
@@ -130,7 +130,7 @@ UPDATE_PREVIEW_PANEL_MESSAGE_NO_IMAGE_SELECTED = "Tiada imej dipilih."
 # Progress & Status Messages (General)
 # ==============================================================================
 # Progress Bar
-UPDATE_PROGRESS_BAR_STATUS = "{value}% ({images_left} proses berbaki)"
+UPDATE_PROGRESS_BAR_STATUS = "{}% ({} proses berbaki)"
 
 # Buttons in Progress Sections (if generic)
 PROGRESS_SECTION_PROCESS_BUTTON_TEXT = "Mula Proses"

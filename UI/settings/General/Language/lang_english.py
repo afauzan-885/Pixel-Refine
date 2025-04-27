@@ -49,7 +49,7 @@ TOPBAR_SINGLE_IMPORT_BUTTON_TEXT = "Import Image"
 TOPBAR_SINGLE_DELETE_BUTTON_TEXT = "Delete Image"
 
 # Batch Actions
-TOPBAR_BATCH_IMPORT_BUTTON_TEXT = "Create Batch"
+TOPBAR_BATCH_IMPORT_BUTTON_TEXT = "Import Image"
 TOPBAR_BATCH_DELETE_BUTTON_TEXT = "Delete Batch"
 TOPBAR_BATCH_START_PROCESS_BUTTON_TEXT = "Process Batch"
 TOPBAR_BATCH_SAVE_BUTTON_TEXT = "Save To"
@@ -112,7 +112,7 @@ HANDLE_IMPORT_BUTTON_IMAGE_SELECTED = "Selected Format"
 HANDLE_IMPORT_BUTTON_IMAGE_DOMINANT = "{count} images with format '{format}' will be imported."
 HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED = "Failed", "No valid images to import." # Tuple for Title, Message
 ON_IMPORT_COMPLETE_STATUS = "Import complete"
-ON_IMPORT_COMPLETE_MESSAGES = "{successful_images} images were imported successfully."
+ON_IMPORT_COMPLETE_MESSAGES = "{} images were imported successfully."
 
 # Delete
 HANDLE_DELETE_BUTTON_IMAGE_NO_VALID_SELECTED = "Failed", "No images selected." # Tuple for Title, Message
@@ -130,7 +130,7 @@ UPDATE_PREVIEW_PANEL_MESSAGE_NO_IMAGE_SELECTED = "No image selected."
 # Progress & Status Messages (General)
 # ==============================================================================
 # Progress Bar
-UPDATE_PROGRESS_BAR_STATUS = "{value}% ({images_left} processes remaining)"
+UPDATE_PROGRESS_BAR_STATUS = "{}% ({} processes remaining)"
 
 # Buttons in Progress Sections (if generic)
 PROGRESS_SECTION_PROCESS_BUTTON_TEXT = "Start Process"

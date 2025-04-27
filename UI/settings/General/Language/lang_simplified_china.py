@@ -49,7 +49,7 @@ TOPBAR_SINGLE_IMPORT_BUTTON_TEXT = "导入图像"
 TOPBAR_SINGLE_DELETE_BUTTON_TEXT = "删除图像"
 
 # Batch Actions
-TOPBAR_BATCH_IMPORT_BUTTON_TEXT = "创建 Batch"
+TOPBAR_BATCH_IMPORT_BUTTON_TEXT = "导入图像"
 TOPBAR_BATCH_DELETE_BUTTON_TEXT = "删除 Batch"
 TOPBAR_BATCH_START_PROCESS_BUTTON_TEXT = "处理 Batch"
 TOPBAR_BATCH_SAVE_BUTTON_TEXT = "保存到"
@@ -113,7 +113,7 @@ HANDLE_IMPORT_BUTTON_IMAGE_SELECTED = "选定格式"
 HANDLE_IMPORT_BUTTON_IMAGE_DOMINANT = "将导入 {count} 张格式为 '{format}' 的图像。"
 HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED = "失败", "没有有效的图像可导入。" # Tuple for Title, Message
 ON_IMPORT_COMPLETE_STATUS = "导入完成"
-ON_IMPORT_COMPLETE_MESSAGES = "已成功导入 {successful_images} 张图像。"
+ON_IMPORT_COMPLETE_MESSAGES = "已成功导入 {} 张图像。"
 
 # Delete
 HANDLE_DELETE_BUTTON_IMAGE_NO_VALID_SELECTED = "失败", "未选择图像。" # Tuple for Title, Message
@@ -131,7 +131,7 @@ UPDATE_PREVIEW_PANEL_MESSAGE_NO_IMAGE_SELECTED = "未选择图像。"
 # Progress & Status Messages (General)
 # ==============================================================================
 # Progress Bar
-UPDATE_PROGRESS_BAR_STATUS = "{value}% (剩余 {images_left} 个进程)"
+UPDATE_PROGRESS_BAR_STATUS = "{}% (剩余 {} 个进程)"
 
 # Buttons in Progress Sections (if generic)
 PROGRESS_SECTION_PROCESS_BUTTON_TEXT = "开始处理"

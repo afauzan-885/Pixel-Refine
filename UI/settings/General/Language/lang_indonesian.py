@@ -50,7 +50,7 @@ TOPBAR_SINGLE_IMPORT_BUTTON_TEXT = "Impor Gambar"
 TOPBAR_SINGLE_DELETE_BUTTON_TEXT = "Hapus Gambar"
 
 # Batch Actions
-TOPBAR_BATCH_IMPORT_BUTTON_TEXT = "Buat Batch"
+TOPBAR_BATCH_IMPORT_BUTTON_TEXT = "Impor Gambar"
 TOPBAR_BATCH_DELETE_BUTTON_TEXT = "Hapus Batch"
 TOPBAR_BATCH_START_PROCESS_BUTTON_TEXT = "Proses Batch"
 TOPBAR_BATCH_SAVE_BUTTON_TEXT = "Simpan Ke"
@@ -104,7 +104,7 @@ ERROR_WHILE_RETRIEVING_KEY_FROM_HD5F = "Terjadi kesalahan saat mngambil kunci {}
 HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION = "File Gambar (*.jpg *.jpeg *.png *.bmp *.tif *.tiff)"
 PLACHOLDER_DRAG_AND_DROP_IMPORT_IMAGES = """Seret & lepas gambar ke sini<br>
 atau<br>
-Gunakan tombol 'Import Image'"""
+Gunakan tombol 'Import Gambar'"""
 SUPPORTED_IMAGE_EXTENSION = "Format gambar yang didukung"
 HANDLE_IMPORT_BUTTON_IMAGE_PATH = "Pilih Gambar"
 HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE = "Gambar Duplikat"
@@ -113,7 +113,7 @@ HANDLE_IMPORT_BUTTON_IMAGE_SELECTED = "Format Terpilih"
 HANDLE_IMPORT_BUTTON_IMAGE_DOMINANT = "{count} gambar dengan format '{format}' akan diimpor."
 HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED = "Gagal", "Tidak ada gambar yang valid untuk diimpor." # Tuple for Title, Message
 ON_IMPORT_COMPLETE_STATUS = "Impor selesai"
-ON_IMPORT_COMPLETE_MESSAGES = "{successful_images} gambar telah berhasil diimpor."
+ON_IMPORT_COMPLETE_MESSAGES = "{} gambar telah berhasil diimpor."
 
 # Delete
 HANDLE_DELETE_BUTTON_IMAGE_NO_VALID_SELECTED = "Gagal", "Tidak ada gambar yang dipilih." # Tuple for Title, Message
@@ -131,7 +131,7 @@ UPDATE_PREVIEW_PANEL_MESSAGE_NO_IMAGE_SELECTED = "Tidak ada gambar yang dipilih.
 # Progress & Status Messages (General)
 # ==============================================================================
 # Progress Bar
-UPDATE_PROGRESS_BAR_STATUS = "{value}% ({images_left} proses tersisa)"
+UPDATE_PROGRESS_BAR_STATUS = "{}% ({} proses tersisa)"
 
 # Buttons in Progress Sections (if generic)
 PROGRESS_SECTION_PROCESS_BUTTON_TEXT = "Mulai Proses"

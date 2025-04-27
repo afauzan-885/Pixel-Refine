@@ -38,8 +38,8 @@ class BaseMultiThreading(QThread):
                     result = self.task_function(item)
                     self.result_signal.emit(result)  # Kirim hasil ke sinyal
                 except Exception as e:
-                    # Kirim pesan error jika ada kesalahan
                     self.error_signal.emit(str(e))
+                    continue
 
                 global_index = start_index + i + 1
                 progress = int(global_index / total_items * 100)

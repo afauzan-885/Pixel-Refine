@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QWidget, QMe
 from PyQt6.QtGui import QIcon
 from UI.enhance_stack.logic.database_manager import DatabaseManager
 from UI.resources.animation.animation_manager import StackedWidgetAnimator
-from UI.resources.animation.fade import fade
+from UI.resources.animation.fade import fade_in
 from UI.sidebar import Sidebar  # Pastikan path ini benar
 from UI.main_content import MainContent # Pastikan path ini benar
 import config
@@ -103,7 +103,7 @@ class PixelRefineMain(QMainWindow):
 
         for i, btn in enumerate(self.sidebar.nav_buttons):
             btn.setChecked(i == index)
-        fade(self.main_content_animator, self.main_content, index, duration=250)
+        fade_in(self.main_content_animator, self.main_content, index, duration=250)
         
         
     def toggle_sidebar(self):

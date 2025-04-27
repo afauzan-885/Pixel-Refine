@@ -15,12 +15,12 @@ from UI.enhance_stack.algorithm.denoising.Median import running_median
 from UI.enhance_stack.algorithm.denoising.Similarity import running_similarity
 from UI.enhance_stack.algorithm.denoising.Similarity_V2 import running_similarity_v2
 from UI.enhance_stack.algorithm.super_resolution.Interpolation import running_interpolation
-from UI.enhance_stack.components.single_page_layout.image_preview_handler import fit_image_to_panel
 from UI.enhance_stack.components.single_page_layout.page_layout import (setup_main_layout, 
                                                                         setup_preview_panel, 
                                                                         setup_progress_section, 
                                                                         setup_signals)
 
+from UI.enhance_stack.logic.ImagePreviewHandler import ImagePreviewHandler
 from UI.enhance_stack.logic.database_manager import DatabaseManager
 from UI.enhance_stack.logic.multi_threading import ImageImportThreading
 from UI.enhance_stack.logic.workflow_process import ImageViewer, get_last_image
@@ -32,38 +32,62 @@ class SinglePageLayout(QWidget):
 
     def __init__(self, database_manager: DatabaseManager):
         super().__init__()
-        self.original_pixmap = None
         self.database_manager = database_manager
+        self.preview_handler: ImagePreviewHandler | None = None # Tambahkan atribut untuk handler
         
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 5, 0, 0)
 
 # ==================== LAYOUT APP ==================== #
-        setup_main_layout(self, self.database_manager)
-        setup_progress_section(self)
-        setup_preview_panel(self)
-        setup_signals(self)
-# ==================== LAYOUT APP ==================== #
-        if hasattr(self, 'right_panel'):
-             self.right_panel.imagesDropped.connect(self.handle_dropped_images)
+        # Penting: Urutan setup mungkin berpengaruh pada ketersediaan objek
+        setup_main_layout(self, self.database_manager) # Membuat left/right panel
+        setup_progress_section(self)                   # Membuat progress bar/tombol
+        setup_preview_panel(self)                      # Membuat scene/view di left_panel
+
+        # --- Inisialisasi Handler SETELAH scene/view dibuat oleh setup_preview_panel ---
+        if hasattr(self, 'preview_scene') and hasattr(self, 'preview_view'):
+            # Pastikan preview_view adalah tipe Zoomable jika diperlukan
+            if isinstance(getattr(self, 'preview_view', None), QWidget):
+                 self.preview_handler = ImagePreviewHandler(self.preview_scene, self.preview_view, self)
+            else:
+                 print("Error: preview_view is not a valid QWidget for ImagePreviewHandler.")
+                 # Atau tampilkan QMessageBox kritis
         else:
-             print("Warning: right_panel not found.")
+            print("Error: preview_scene or preview_view not found for ImagePreviewHandler.")
+            QMessageBox.critical(self, "Layout Error", "Preview panel components could not be initialized.")
+        # ---------------------------------------------------------------------------
+
+        setup_signals(self) # Menghubungkan sinyal tombol proses/simpan
+
+        # --- Hubungkan Sinyal Preview di SINI ---
+        if self.preview_handler and hasattr(self, 'right_panel'):
+            try:
+                # Hubungkan sinyal dari right_panel ke slot handler
+                self.right_panel.previewImageRequested.connect(self.preview_handler.update_preview)
+                if hasattr(self.right_panel, 'imagesDropped'):
+                     self.right_panel.imagesDropped.connect(self.handle_dropped_images)
+                     
+            except AttributeError as e:
+                 print(f"Error connecting signals: {e}")
+                 QMessageBox.warning(self, "Signal Error", f"Could not connect preview signals: {e}")
+            except TypeError as e:
+                 print(f"Error connecting signals (TypeError): {e}") # Misal jika slot tidak benar
+                 QMessageBox.warning(self, "Signal Error", f"Could not connect preview signals due to type mismatch: {e}")
+        elif not self.preview_handler:
+            print("Warning: preview_handler not initialized, cannot connect preview signals.")
+        else: # preview_handler ada, tapi right_panel tidak
+            print("Warning: right_panel not found, cannot connect preview signals.")
+        # ==================== LAYOUT APP ==================== #
+
+        # self.update_preview_enabled = True # Defaultnya aktif
         
-    def pause_preview_update(self):
-        """Temporarily disable preview panel updates."""
-        self.update_preview_enabled = False
-
-    def resume_preview_update(self):
-        """Re-enable preview panel updates."""
-        self.update_preview_enabled = True
-
     def resizeEvent(self, event):
-        """Handles window resizing by adjusting the image size to fit the preview panel."""
+        """Handles window resizing by calling the handler's resize method."""
         super().resizeEvent(event)
-        fit_image_to_panel(self)
+        if self.preview_handler:
+            self.preview_handler.handle_resize()
         
     def convert_tiff_to_uncompressed(self, input_path, output_folder):
-        """Konversi TIFF terkompresi ke TIFF tanpa kompresi"""
         try:
             with Image.open(input_path) as img:
                 output_path = os.path.join(output_folder, os.path.basename(input_path))
@@ -73,7 +97,6 @@ class SinglePageLayout(QWidget):
             print(f"Error converting TIFF: {e}")
             return None
 
-    # === Metode Utama untuk Memulai Impor ===
     def handle_import_button(self):
         """Membuka dialog file dan memulai proses impor."""
         file_dialog_filter = language_config.HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION
@@ -82,15 +105,12 @@ class SinglePageLayout(QWidget):
         if image_paths:
             self._process_and_start_import(image_paths)
 
-    # === Slot untuk Sinyal Drop (Akan Dipanggil Nanti) ===
     @pyqtSlot(list)
     def handle_dropped_images(self, image_paths: list):
         """Menangani file gambar yang di-drop dan memulai proses impor."""
         if image_paths:
             self._process_and_start_import(image_paths)
 
-
-    # === Metode Helper Inti untuk Pemrosesan dan Impor ===
     def _process_and_start_import(self, image_paths: list):
         """
         Memvalidasi, memproses (konversi TIFF), menyeleksi, dan
@@ -397,7 +417,7 @@ class SinglePageLayout(QWidget):
         """Memperbarui progress bar dan menampilkan jumlah gambar yang tersisa."""
         self.progress_bar.setValue(value)
         self.progress_bar.setFormat(
-            language_config.UPDATE_PROGRESS_BAR_STATUS.format(value=value, images_left=images_left)
+            language_config.UPDATE_PROGRESS_BAR_STATUS.format(value,images_left)
         )
 
     def on_import_complete(self, successful_images):
@@ -406,7 +426,7 @@ class SinglePageLayout(QWidget):
         QMessageBox.information(
             self,
             language_config.ON_IMPORT_COMPLETE_STATUS,
-            language_config.ON_IMPORT_COMPLETE_MESSAGES.format(successful_images=successful_images)
+            language_config.ON_IMPORT_COMPLETE_MESSAGES.format(successful_images)
         )
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("0%")

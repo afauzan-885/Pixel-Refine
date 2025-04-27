@@ -318,3 +318,21 @@ LIST_IMAGE_DATA_SINGLE_MODE = """
             QScrollBar::left-arrow:horizontal, QScrollBar::right-arrow:horizontal { background: none; }
             QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }
         """
+LIST_IMAGE_DATA_SPECIFIC_ITEM = """
+            QListWidget#ImageList::item {
+            border: 1px solid #d0d0d0; /* Warna border item */
+            border-radius: 4px;       /* Sudut sedikit melengkung (opsional) */
+            padding: 2px 4px;         /* Atas/Bawah 5px, Kiri/Kanan 8px */
+            margin: 2px 4px 2px 0px;  /* 2px atas/bawah, 4px kanan, 0px kiri */
+            background-color: transparent;
+            color: #333333;
+            }
+            QListWidget#ImageList::item:hover {
+            background-color: #F0F1F1;             
+            border: 1px solid #BFC0C0;
+            }
+            QListWidget#ImageList::item:selected {
+            background-color: #D0DCE7; /* Warna background saat hover */
+            border: 1px solid #ABAEB0;
+            }
+        """
