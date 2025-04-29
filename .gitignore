@@ -7,7 +7,9 @@ build_instalasi.txt
 syarat.txt
 mingw64/
 ChangeLog.txt
-
+main.build/
+main.dist/
+nuitka-crash-report.xml
 # Ignore virtual environment directories
 venv/
 database/

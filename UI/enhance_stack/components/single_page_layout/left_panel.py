@@ -80,11 +80,11 @@ class LeftPanel(QWidget):
             language_config.SUPER_RESOLUTION_NAME,
             [opt[0] for opt in [
                 ("None", language_config.NONE_SUPER_RESOLUTION_DESCRIPTION),
-                ("Interpolation", language_config.INTERPOLATION_DESCRIPTION)
+                # ("Interpolation", language_config.INTERPOLATION_DESCRIPTION)
             ]],
             [opt[1] for opt in [
                 ("None", language_config.NONE_SUPER_RESOLUTION_DESCRIPTION),
-                ("Interpolation", language_config.INTERPOLATION_DESCRIPTION)
+                # ("Interpolation", language_config.INTERPOLATION_DESCRIPTION)
             ]]
         )
         left_panel_layout.addWidget(super_resolution_widget)
