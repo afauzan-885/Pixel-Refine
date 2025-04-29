@@ -96,7 +96,6 @@ class RightPanel(QWidget):
         Muat path gambar dari DB, tampilkan nama file (RATA TENGAH),
         simpan path lengkap, dan update placeholder.
         """
-        print("RightPanel: Loading image paths...")
         try:
             full_image_paths = self.db_manager.get_single_process_image_paths()
         except Exception as e:
@@ -124,7 +123,6 @@ class RightPanel(QWidget):
             if full_path in current_selection_paths:
                  item.setSelected(True)
 
-        print(f"RightPanel: Loaded {self.image_list.count()} items.")
         self._update_placeholder_visibility()
 
 
@@ -301,8 +299,6 @@ class RightPanel(QWidget):
             deleted_count = self.db_manager.single_process_delete_path_images(image_paths_to_delete)
 
             if deleted_count >= 0:
-                 print(f"Database reported deletion of {deleted_count} links.")
-                 # Hapus item dari UI berdasarkan row (dari bawah ke atas)
                  items_removed_from_ui = False
                  for row in sorted(rows_to_remove, reverse=True):
                      if row >= 0:

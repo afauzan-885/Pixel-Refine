@@ -1,6 +1,6 @@
 from collections import OrderedDict
 from PyQt6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsTextItem
-from PyQt6.QtCore import Qt, QTimer, pyqtSlot, pyqtSignal, QObject, QRectF, QBuffer, QByteArray, QIODevice, QPointF
+from PyQt6.QtCore import Qt, QTimer, pyqtSlot, QObject, QRectF, QBuffer, QByteArray, QIODevice, QPointF
 from PyQt6.QtGui import QPixmap, QImage
 try:
     import psutil
@@ -395,7 +395,7 @@ class ImagePreviewHandler(QObject):
         self._original_pixmap = None
         
         text_item = QGraphicsTextItem()
-        text_item.setHtml(f'<div style="color: grey; text-align: center; font-size: 18px;">{message}</div>')
+        text_item.setHtml(f'<div style="color: transparent; text-align: center; font-size: 18px;">{message}</div>')
         text_item.setFlag(QGraphicsTextItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
         self.preview_scene.addItem(text_item)
         viewport_rect = self.preview_view.viewport().rect()

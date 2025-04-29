@@ -442,9 +442,9 @@ class DatabaseManager:
                     cursor.executemany(sql_delete, ((image_id,) for image_id in image_ids))
                     deleted_count = cursor.rowcount # executemany updates rowcount cumulatively
                     conn.commit()
-                    print(f"Deleted {deleted_count} single process links for provided paths.")
                 else:
-                    print("No matching images found in 'images' table for deletion from single process.")
+                    pass
+                    # print("No matching images found in 'images' table for deletion from single process.")
 
         except sqlite3.Error as e:
             print(f"Error deleting single process links: {e}")

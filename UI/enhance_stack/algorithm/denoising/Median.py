@@ -1,8 +1,10 @@
-import subprocess
+import traceback
 import cv2
 import numpy as np
+import numpy.ma as ma
 import sqlite3
 import concurrent.futures
+from astropy.stats import sigma_clip
 import os
 from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
@@ -11,6 +13,8 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, save_image
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
+
+
 
 class ThreadWorker(QThread):
     progress_updated = pyqtSignal(int, str)  # Sinyal untuk memperbarui progress
@@ -112,197 +116,502 @@ class MedianAlgorithm:
                 images.append(image)
         return images
 
-    def stack_median_images(self, images, previous_medians, stop_requested=None, block_size=64, overlap=0.3):
+    def stack_sigma_clip_images(self, images, stop_requested=None, block_size=64, overlap=0.3,
+                                update_progress=None, total_overall_images=None, images_processed_so_far=0,
+                                sigma_low=3.0, sigma_high=3.0, max_iterations=3): # Parameter baru (low/high sigma)
+        """
+        Menghitung stack gambar dengan metode Sigma Clipping (Rejection) berbasis blok.
+        """
         if stop_requested and stop_requested():
-            print("Proses dihentikan sebelum menghitung stack median.")
-            return previous_medians
+             print(language_config.STACK_SIGMA_CLIP_STOPPED) # Pesan baru
+             return None
 
         if not images:
-            raise ValueError("Tidak ada gambar yang ditemukan.")
+            raise ValueError(language_config.NO_IMAGES_PROCESSED)
+
+        if not isinstance(images[0], np.ndarray):
+             raise TypeError(language_config.IMAGE_DATA_MUST_BE_VALID)
 
         dtype = images[0].dtype
         target_shape = images[0].shape
+        num_images_in_this_call = len(images)
 
-        # Resize gambar agar semua memiliki ukuran yang sama
+        adapted_update_progress = None
+        if update_progress:
+            overall_progress_cap = 98 # Cap tetap sama
+            progress_start_percent = 0
+            progress_range_for_this_call = overall_progress_cap
+
+            if total_overall_images is not None and total_overall_images > 0:
+                progress_start_percent = (images_processed_so_far / total_overall_images) * 100
+                theoretical_end_percent = ((images_processed_so_far + num_images_in_this_call) / total_overall_images) * 100
+                progress_end_percent_for_this_call = min(theoretical_end_percent, overall_progress_cap)
+                progress_range_for_this_call = max(0, progress_end_percent_for_this_call - progress_start_percent)
+
+            # --- MODIFIKASI 1.1: Sesuaikan map_progress ---
+            def map_progress(internal_percent, internal_message="process"):
+                overall_progress = int(progress_start_percent + (internal_percent / 100.0) * progress_range_for_this_call)
+                update_progress(overall_progress, f"{internal_message}")
+
+            adapted_update_progress = map_progress
+        # --------------------------------
+
         images_resized = self._resize_images(images, target_shape)
-        # Proses median dengan metode blok yang dioptimasi
-        median_image = self._compute_median_image(images_resized, target_shape, block_size, dtype, overlap)
-        return median_image, images_resized
+
+        stacked_image = self._compute_sigma_clip_image(
+            images_resized,
+            target_shape,
+            block_size,
+            dtype,
+            overlap,
+            update_progress=adapted_update_progress, # Ini sekarang map_progress(persen, pesan)
+            stop_requested=stop_requested,
+            sigma_low=sigma_low,
+            sigma_high=sigma_high,
+            max_iterations=max_iterations
+        )
+
+        if stacked_image is None:
+             return None
+
+        return stacked_image 
 
     def _resize_images(self, images, target_shape):
-        """
-        Resize seluruh gambar agar memiliki ukuran yang sama dengan target_shape.
-        """
         resized_images = []
-        for image in images:
-            resized = cv2.resize(image, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_CUBIC)
-            resized_images.append(resized)
+        target_size = (target_shape[1], target_shape[0])
+        for i, image in enumerate(images):
+            if image.shape[0:2] == target_shape[0:2]:
+                 resized_images.append(image)
+            else:
+                 resized = cv2.resize(image, target_size, interpolation=cv2.INTER_CUBIC)
+                 resized_images.append(resized)
         return resized_images
 
-    def _compute_block_median(self, block_stack):
+    def _compute_block_sigma_clip(self, block_stack, sigma_low=3.0, sigma_high=3.0, max_iterations=5): # Pastikan max_iterations konsisten
         """
-        Menghitung median dari stack blok secara vectorized.
-        """
-        return np.median(block_stack, axis=0)
+        Menghitung rata-rata stack blok setelah Sigma Clipping (Rejection) menggunakan astropy.
 
-    def _compute_median_image(self, images, target_shape, block_size, dtype, overlap):
+        Args:
+            block_stack (np.ndarray): Tumpukan blok gambar (N, H, W, [C]).
+            sigma_low (float): Faktor sigma bawah untuk clipping.
+            sigma_high (float): Faktor sigma atas untuk clipping.
+            max_iterations (int): Jumlah maksimum iterasi clipping.
+
+        Returns:
+            np.ndarray: Blok gambar hasil rata-rata setelah clipping (H, W, [C]), dtype float32.
+                        Mengembalikan 0 jika semua piksel ditolak.
+        """
+        if block_stack.shape[0] <= 1:
+            return block_stack[0].astype(np.float32) if block_stack.shape[0] == 1 else np.zeros(block_stack.shape[1:], dtype=np.float32)
+
+        clipped_stack = sigma_clip(block_stack.astype(np.float64),
+                                   sigma_lower=sigma_low,
+                                   sigma_upper=sigma_high,
+                                   maxiters=max_iterations,
+                                   cenfunc='median',
+                                   stdfunc='mad_std',
+                                   axis=0,
+                                   masked=True)
+
+        result_mean = ma.mean(clipped_stack, axis=0)
+        result_mean_filled = ma.filled(result_mean, fill_value=0.0)
+
+        return result_mean_filled.astype(np.float32)
+
+    def _compute_sigma_clip_image(self, images, target_shape, block_size, dtype, overlap,
+                                 update_progress=None, stop_requested=None,
+                                 sigma_low=3.0, sigma_high=3.0, max_iterations=3):
+        """
+        Menghitung gambar stack menggunakan metode blok dengan Sigma Clipping (Rejection).
+        """
         H, W = target_shape[:2]
+        num_channels = target_shape[2] if len(target_shape) == 3 else 0
+
         accumulator = np.zeros(target_shape, dtype=np.float32)
-        weight_sum = np.zeros(target_shape, dtype=np.float32)
+        weight_sum = np.zeros(target_shape[:2], dtype=np.float32)
 
         step = max(int(block_size * (1 - overlap)), 1)
 
-        row_starts = list(range(0, H - block_size + 1, step)) + ([H - block_size] if H % block_size != 0 else [])
-        col_starts = list(range(0, W - block_size + 1, step)) + ([W - block_size] if W % block_size != 0 else [])
+        row_starts = list(range(0, H - block_size + 1, step))
+        if H % block_size != 0 and H > block_size :
+             if not row_starts or row_starts[-1] != H - block_size: row_starts.append(H - block_size)
+        elif H <= block_size and not row_starts: row_starts = [0]
+
+        col_starts = list(range(0, W - block_size + 1, step))
+        if W % block_size != 0 and W > block_size :
+             if not col_starts or col_starts[-1] != W - block_size: col_starts.append(W - block_size)
+        elif W <= block_size and not col_starts: col_starts = [0]
+
+        if not row_starts or not col_starts:
+             return np.zeros(target_shape, dtype=dtype)
 
         base_hanning = np.outer(np.hanning(block_size), np.hanning(block_size))
 
-        def process_block(row_start, col_start):
-            row_end, col_end = row_start + block_size, col_start + block_size
-            
-            # Gunakan array view untuk menghindari salinan baru
-            blocks = np.stack([im[row_start:row_end, col_start:col_end] for im in images], axis=0)
+        tasks = []
+        for r in row_starts:
+            for c in col_starts:
+                tasks.append((r, c))
 
-            # Gunakan fungsi _compute_block_median untuk menghitung median
-            block_median = self._compute_block_median(blocks)
-  
+        total_blocks = len(tasks)
+        if total_blocks == 0:
+             return np.zeros(target_shape, dtype=dtype)
 
-            # Hindari alokasi array baru untuk Hanning window
-            hanning_win = base_hanning
-            if blocks.shape[1:3] != (block_size, block_size):
-                hanning_win = np.outer(np.hanning(row_end - row_start), np.hanning(col_end - col_start))
+        blocks_processed_count = 0
+        internal_progress_cap = 98
 
-            if len(target_shape) == 3:
-                hanning_win = hanning_win[..., np.newaxis]
+        # --- MODIFIKASI 3.1: Tambahkan sigma & iterasi ke process_block ---
+        def process_block(row_start, col_start, p_sigma_low, p_sigma_high, p_max_iter): # Terima parameter
+            row_end = min(row_start + block_size, H)
+            col_end = min(col_start + block_size, W)
+            actual_block_h = row_end - row_start
+            actual_block_w = col_end - col_start
 
-            return row_start, row_end, col_start, col_end, block_median * hanning_win, hanning_win
+            if num_channels > 0:
+                blocks = np.stack([im[row_start:row_end, col_start:col_end, :] for im in images], axis=0)
+            else:
+                blocks = np.stack([im[row_start:row_end, col_start:col_end] for im in images], axis=0)
+
+            block_result = self._compute_block_sigma_clip(blocks, p_sigma_low, p_sigma_high, p_max_iter) # Panggil fungsi baru
+
+            if (actual_block_h, actual_block_w) == (block_size, block_size):
+                hanning_win_2d = base_hanning
+            else:
+                hanning_win_2d = np.outer(np.hanning(actual_block_h), np.hanning(actual_block_w))
+            weighted_block_result = block_result * hanning_win_2d[..., np.newaxis if num_channels > 0 else Ellipsis]
+
+            return row_start, row_end, col_start, col_end, weighted_block_result, hanning_win_2d
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = {executor.submit(process_block, r, c): (r, c) for r in row_starts for c in col_starts}
+            future_to_task = {executor.submit(process_block, r, c, sigma_low, sigma_high, max_iterations): (r, c) # Teruskan parameter
+                              for r, c in tasks}
 
-            for future in concurrent.futures.as_completed(futures):
-                row_start, row_end, col_start, col_end, weighted_block, hanning_win = future.result()
-                accumulator[row_start:row_end, col_start:col_end] += weighted_block
-                weight_sum[row_start:row_end, col_start:col_end] += hanning_win
+            for future in concurrent.futures.as_completed(future_to_task):
+                if stop_requested and stop_requested():
+                    for f in future_to_task: f.cancel()
+                    return None
+                task = future_to_task[future]
+                try:
+                    row_start, row_end, col_start, col_end, weighted_block, hanning_win_2d = future.result()
 
-        with np.errstate(divide='ignore', invalid='ignore'):
-            median_image = np.true_divide(accumulator, weight_sum)
-            median_image[weight_sum == 0] = 0
+                    accumulator[row_start:row_end, col_start:col_end] += weighted_block
+                    weight_sum[row_start:row_end, col_start:col_end] += hanning_win_2d
+                    blocks_processed_count += 1
 
-        return np.clip(median_image, np.iinfo(dtype).min, np.iinfo(dtype).max).astype(dtype) if np.issubdtype(dtype, np.integer) else median_image.astype(dtype)
-    
-def main(db_path, update_progress=None, stop_requested=None, batch_size=4, single_process=None, batch_id=None):
+                    if update_progress:
+                        progress_percent = int((blocks_processed_count / total_blocks) * internal_progress_cap)
+                        update_progress(progress_percent)
+
+                except Exception as exc:
+                    print(f"Error processing block {task}: {exc}")
+
+        # --- Finalisasi Gambar (tetap sama) ---
+        if update_progress:
+             update_progress(100, language_config.FINISHING_ANALYSIS)
+
+        final_weight_sum = weight_sum[..., np.newaxis] if num_channels > 0 else weight_sum
+        mask = final_weight_sum > 1e-10
+        stacked_image_float = np.zeros_like(accumulator)
+        np.divide(accumulator, final_weight_sum, out=stacked_image_float, where=mask)
+
+        if np.issubdtype(dtype, np.integer):
+            min_val, max_val = np.iinfo(dtype).min, np.iinfo(dtype).max
+            stacked_image_float = np.nan_to_num(stacked_image_float, nan=0.0, posinf=max_val, neginf=min_val)
+            final_image = np.clip(stacked_image_float, min_val, max_val).astype(dtype)
+        else:
+            stacked_image_float = np.nan_to_num(stacked_image_float, nan=0.0)
+            final_image = stacked_image_float.astype(dtype)
+
+        return final_image
+
+def main(db_path, update_progress=None, stop_requested=None, batch_size=4,
+         single_process=None, batch_id=None, progress_bar=None):
     try:
         image_processor = MedianAlgorithm(db_path)
-        
-        # Pilih sumber image_paths
+
+        output_name_base = ""
+        image_paths = []
+        align_dir = os.path.join("database", "align") # Definisikan path folder alignment
+
         if single_process:
             image_paths = image_processor.get_all_image_paths_for_single_process()
+            if image_paths:
+                 if image_paths[0] and isinstance(image_paths[0], str):
+                      ref_image_name = os.path.splitext(os.path.basename(image_paths[0]))[0]
+                      output_name_base = f"{ref_image_name}"
+                 else:
+                      output_name_base = "single_process_invalid_path"
+            else:
+                 output_name_base = "single_process_no_images"
         else:
             if batch_id is None:
-                raise ValueError("batch_id harus diberikan untuk batch process")
+                raise ValueError(language_config.BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS)
+            else:
+                pass
+
+            # Lanjutkan dengan mendapatkan path gambar untuk batch
             image_paths = image_processor.get_all_image_paths_for_batch_process(batch_id)
-        
+            if image_paths and isinstance(image_paths[0], str):
+                ref_image_name = os.path.splitext(os.path.basename(image_paths[0]))[0]
+                output_name_base = f"{ref_image_name}"
+            else:
+                output_name_base = "batch_no_reference"
+
+           
         if not image_paths:
-            if update_progress:
-                update_progress(0, language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
-            return
+            print(language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
+            if update_progress: update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
+            return # Keluar jika tidak ada gambar
+
+        # --- Setup Path Output ---
+        output_folder_stack = "database/stack"
+        os.makedirs(output_folder_stack, exist_ok=True)
+        output_name_base_safe = "".join(c for c in output_name_base if c.isalnum() or c in ('_', '-')).rstrip()
+        if not output_name_base_safe: output_name_base_safe = "stack_result"
+        output_path = os.path.join(output_folder_stack, f"{output_name_base_safe}_median.tif")
+        print(language_config.OUTPUT_IMAGE_TO_BE_SAVED.format(output_path))
         
-        # Ekstrak metadata dari seluruh gambar dan simpan ke file JSON
-        metadata_folder = os.path.join("database", "align")
-        os.makedirs(metadata_folder, exist_ok=True)
+        # --- Ekstraksi Metadata ---
+        metadata_folder = align_dir 
+        os.makedirs(metadata_folder, exist_ok=True) 
         metadata_file = os.path.join(metadata_folder, "metadata.json")
-        extract_all_metadata(image_paths, metadata_file=metadata_file)
 
-        reference_image_path = image_paths[0]
-        reference_image_name = os.path.splitext(os.path.basename(reference_image_path))[0]
-        output_path = f"database/stack/{reference_image_name}_median_stack.tiff"
-
-        if update_progress:
-            update_progress(0, language_config.WINDOW_START_PROCESSING)
-
-        global_hdf5_path = "database/align/aligned_images.h5"
-        total_images = len(image_paths)
-        total_batches = (total_images + batch_size - 1) // batch_size
-        processed_images = 0
-
-        # List untuk menyimpan hasil median tiap batch
-        batch_medians = []
-
-        if os.path.exists(global_hdf5_path):
-            with h5py.File(global_hdf5_path, 'r') as h5f:
-                for batch_idx in range(total_batches):
-                    if stop_requested and stop_requested():
-                        # print("Proses dihentikan oleh pengguna.")
-                        break
-
-                    batch_keys = list(h5f.keys())[batch_idx * batch_size:(batch_idx + 1) * batch_size]
-                    batch_images = [np.array(h5f[key]) for key in batch_keys]
-
-                    # Proses median untuk batch ini
-                    batch_median, _ = image_processor.stack_median_images(
-                        batch_images, None, stop_requested
-                    )
-                    batch_medians.append(batch_median)
-
-                    processed_images += len(batch_images)
-                    progress = int((processed_images / total_images) * 100)
-                    message = language_config.STACK_IMAGES_PROCESS.format(
-                        current=processed_images, total=total_images)
-                    if update_progress:
-                        update_progress(progress, message)
+        # Panggil ekstraksi metadata hanya jika ada path gambar
+        if image_paths:
+             if 'extract_all_metadata' in globals():
+                  try:
+                       extract_all_metadata(image_paths, metadata_file=metadata_file)
+                  except Exception as e_meta:
+                       traceback.print_exc()     
+             else:
+                  pass
         else:
-            for batch_idx in range(total_batches):
+            pass
+
+        # --- Update progress awal ---
+        if update_progress: update_progress(0, language_config.RUN_IMAGE_PROCESS_STARTED)
+
+        if single_process:
+            global_hdf5_path = os.path.join(align_dir, "aligned_images.h5")
+        else:
+            global_hdf5_path = os.path.join(align_dir, f"aligned_image_batch_{batch_id}.h5")
+        processed_batches_results = []
+        images_processed_count = 0
+        total_images = 0
+
+        # --- Logika Pemrosesan Utama (Batching dari HDF5 atau Path) ---
+        use_hdf5 = os.path.exists(global_hdf5_path)
+
+        if use_hdf5:
+            print(language_config.PROCESSING_IMAGE_FROM_HDF5.format(global_hdf5_path))
+            try:
+                # Dapatkan total gambar dari HDF5 untuk progress
+                with h5py.File(global_hdf5_path, 'r') as h5f_check:
+                    total_images = len(h5f_check.keys())
+                print(language_config.NUMBER_OF_IMAGES_TO_BE_PROCESSED.format(total_images))
+
+                if total_images == 0:
+                    if update_progress: update_progress(100, "File HDF5 is empty.")
+                    return
+
+                total_batches = (total_images + batch_size - 1) // batch_size
+                print(language_config.NUMBER_OF_BATCHES_TO_BE_PROCESSED.format(total_batches))
+
+                with h5py.File(global_hdf5_path, 'r') as h5f:
+                    keys = list(h5f.keys()) # Ambil keys sekali saja
+                    for batch_start in range(0, total_images, batch_size):
+                        current_batch_num = (batch_start // batch_size) + 1
+                        print(f"\n" + language_config.PROCESSING_BATCH.format(current_batch_num, total_batches, batch_start))
+
+                        if stop_requested and stop_requested():
+                            print(language_config.PROCESS_TERMINATED_BY_USER)
+                            break 
+                        
+                        batch_keys = keys[batch_start:min(batch_start + batch_size, total_images)]
+                        print(language_config.LOAD_IMAGE_FROM_HDF5.format(len(batch_keys)))
+                        batch_images = []
+                        keys_loaded_in_batch = 0
+                        for key in batch_keys:
+                            if stop_requested and stop_requested(): break
+                            try:
+                                batch_images.append(np.array(h5f[key]))
+                                keys_loaded_in_batch += 1
+                            except Exception as e:
+                                print(language_config.ERROR_WHILE_RETRIEVING_KEY_FROM_HD5F.format(key, e))
+                        if stop_requested and stop_requested(): break 
+
+                        if not batch_images:
+                            print(language_config.SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED.format(current_batch_num))
+                            continue 
+                        
+                        print(language_config.START_IMAGE_ENHANCEMENT.format(len(batch_images)))
+                        try:
+                             batch_result = image_processor.stack_sigma_clip_images(
+                                 batch_images,
+                                 update_progress=update_progress,
+                                 stop_requested=stop_requested,
+                                 total_overall_images=total_images,
+                                 images_processed_so_far=images_processed_count
+                                
+                             )
+                        except Exception as e_sim_batch:
+                             traceback.print_exc()
+                             batch_result = None 
+                             
+                        if stop_requested and stop_requested():
+                            break
+
+                        if batch_result is not None:
+                             processed_batches_results.append(batch_result)
+                             images_processed_count += len(batch_images)                             
+                        else:
+                            pass
+                            # print(f"Batch {current_batch_num} processing failed or returned None.")
+                         
+            except Exception as e:
+                print(language_config.ERROR_IN_READING_FILE_HDF5.format(e))
+                traceback.print_exc()
+                if update_progress: update_progress(0, language_config.ERROR_IN_READING_FILE_HDF5.format(e))
+                return 
+
+        else: 
+            print(language_config.NO_HDF5_FILE_PROCESSING_FROM_PATH)
+            total_images = len(image_paths)
+            print(language_config.NUMBER_OF_IMAGES_TO_BE_PROCESSED.format(total_images))
+
+            if total_images == 0:
+                print(language_config.NO_IMAGE_PATH_PROCESSED_IMAGE) # Redundan, sudah dicek di atas, tapi aman
+                if update_progress: update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
+                return
+
+            total_batches = (total_images + batch_size - 1) // batch_size
+            print(language_config.NUMBER_OF_BATCHES_TO_BE_PROCESSED.format(total_batches))
+
+            for batch_start in range(0, total_images, batch_size):
+                current_batch_num = (batch_start // batch_size) + 1
+                print(f"\n" + language_config.PROCESSING_BATCH.format(current_batch_num, total_batches, batch_start))
+
                 if stop_requested and stop_requested():
-                    # print("Proses dihentikan oleh pengguna.")
+                    print(language_config.PROCESS_TERMINATED_BY_USER)
                     break
 
-                start_idx = batch_idx * batch_size
-                end_idx = min((batch_idx + 1) * batch_size, total_images)
-                batch_paths = image_paths[start_idx:end_idx]
+                batch_paths = image_paths[batch_start:min(batch_start + batch_size, total_images)]
+                batch_images = image_processor.load_images_from_paths(batch_paths, stop_requested)
+                if stop_requested and stop_requested(): break
 
-                batch_images = []
-                for path in batch_paths:
-                    image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-                    if image is not None:
-                        batch_images.append(image)
+                if not batch_images:
+                    print(language_config.SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED.format(current_batch_num))
+                    continue
 
-                # Proses median untuk batch ini
-                batch_median, _ = image_processor.stack_median_images(
-                    batch_images, None, stop_requested
-                )
-                batch_medians.append(batch_median)
+                print(language_config.START_IMAGE_ENHANCEMENT.format(len(batch_images)))
+                try:
+                    batch_result = image_processor.stack_sigma_clip_images(
+                        batch_images,
+                        update_progress=update_progress,
+                        stop_requested=stop_requested,
+                        total_overall_images=total_images,
+                        images_processed_so_far=images_processed_count
+                    )
+                except Exception as e_sim_batch:
+                      traceback.print_exc()
+                      batch_result = None
 
-                processed_images += len(batch_images)
-                progress = int((processed_images / total_images) * 100)
-                message = language_config.STACK_IMAGES_PROCESS.format(
-                    current=processed_images, total=total_images)
+                if stop_requested and stop_requested():
+                    break
+
+                if batch_result is not None:
+                    processed_batches_results.append(batch_result)
+                    images_processed_count += len(batch_images)
+                else:
+                    print(f"Batch {current_batch_num} processing failed or returned None.")
+
+
+        # --- Fine-Tuning / Pemrosesan Akhir (jika ada hasil batch) ---
+        if stop_requested and stop_requested():
+            pass
+        elif processed_batches_results:
+            num_fine_tuning_inputs = len(processed_batches_results)
+            print(f"\n--- {language_config.STARTING_ENHANCEMENT} ({num_fine_tuning_inputs} batch results) ---")
+
+            fine_tuning_start_progress = 95
+            fine_tuning_end_progress = 99
+
+            def fine_tuning_update_progress(inner_progress, message):
+                mapped_progress = fine_tuning_start_progress + int((inner_progress / 100.0) * (fine_tuning_end_progress - fine_tuning_start_progress))
                 if update_progress:
-                    update_progress(progress, message)
+                    if not (stop_requested and stop_requested()):
+                        update_progress(mapped_progress, language_config.ENHANCEMENT.format(message))
 
-        if batch_medians:
-            # Proses ulang dengan menggabungkan semua median batch
-            final_median, _ = image_processor.stack_median_images(
-                batch_medians, None, stop_requested
-            )
-        else:
-            final_median = None
+            if update_progress: update_progress(fine_tuning_start_progress, language_config.STARTING_ENHANCEMENT)
 
-        # Simpan gambar median akhir
-        if final_median is not None:
-            final_result = final_median.astype(np.uint16)
-            save_image(final_result, output_path, reference_image_path=reference_image_path)
-            # if update_progress:
-            #     update_progress(100, f"Proses selesai, hasil disimpan di {output_path}")
-        else:
+            final_result = None
+            try:
+                 final_result = image_processor.stack_sigma_clip_images(
+                     processed_batches_results,
+                     update_progress=fine_tuning_update_progress,
+                     stop_requested=stop_requested,
+                 )
+            except Exception as e_fine_tune:
+                  traceback.print_exc()
+                  final_result = None 
+
+            if stop_requested and stop_requested():
+                pass
+            
+            elif final_result is not None:
+                 ref_path_for_save = image_paths[0] if image_paths and isinstance(image_paths[0], str) else None
+                 save_success = save_image(final_result, output_path, reference_image_path=ref_path_for_save)
+                 if save_success:
+                    final_message = f"{language_config.IMAGE_PROCESS_FINISHED}: {os.path.basename(output_path)}"
+                    print(final_message)
+                    if update_progress: update_progress(100, final_message)
+                    if not single_process and batch_id is not None:
+                        batch_hdf5_path = os.path.join(align_dir, f"aligned_image_batch_{batch_id}.h5")
+                        if os.path.exists(batch_hdf5_path):
+                            try:
+                                os.remove(batch_hdf5_path)
+                            except Exception as e:
+                                pass
+                        else:
+                            pass
+                 else:
+                      error_msg = language_config.FAILED_TO_SAVE_IMAGE + f": {os.path.basename(output_path)}"
+                      print(error_msg)
+                      if update_progress: update_progress(100, error_msg) # Tetap 100% tapi pesan error
+            else:
+                print(language_config.FAILED_IMAGE_ENHANCEMENT)
+                if update_progress: update_progress(100, language_config.FAILED_IMAGE_ENHANCEMENT) # 100% tapi pesan gagal
+
+        elif not (stop_requested and stop_requested()): # Jika tidak ada hasil batch DAN tidak dibatalkan
+            print(language_config.DATA_FAILED_COMPLETION_CREATED)
             if update_progress:
-                update_progress(0, language_config.RUN_ERROR_MESSAGE.format(error=str(e)))
+                update_progress(100, language_config.DATA_FAILED_COMPLETION_CREATED)
 
-    except Exception as e:
-        error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(e))
-        if update_progress:
+        if stop_requested and stop_requested():
+             if update_progress and progress_bar: update_progress(progress_bar.value(), "Proses dibatalkan.") # Update progress terakhir
+
+
+    except ValueError as ve:
+        error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(ve))
+        traceback.print_exc()
+        if update_progress and not (stop_requested and stop_requested()):
+             update_progress(0, error_message)
+    except FileNotFoundError as fnf:
+        error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(fnf))
+        traceback.print_exc()
+        if update_progress and not (stop_requested and stop_requested()):
+             update_progress(0, error_message)
+    except RuntimeError as rte:
+        error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(rte))
+        traceback.print_exc()
+        if update_progress and not (stop_requested and stop_requested()):
             update_progress(0, error_message)
-        print(language_config.RUN_ERROR_MESSAGE.format(error=str(e)))
+    except Exception as e: 
+        error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(e))
+        traceback.print_exc()
+        if update_progress and not (stop_requested and stop_requested()):
+            update_progress(0, error_message)
+    finally:
+       pass
        
 def running_median(parent=None, single_process=None, batch_id=None):
     process_finished = False

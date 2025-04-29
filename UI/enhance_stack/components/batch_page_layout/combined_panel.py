@@ -217,7 +217,6 @@ class CombinedPanel(QWidget):
         delete_button.setToolTip(language_config.DELETE_IMAGE_BUTTON)
         delete_button.clicked.connect(lambda: self.parent_widget.handle_delete_individual_batch(self.batch_id))
         
-        # Tambahkan tombol ke layout
         button_layout.addWidget(add_button)
         button_layout.addWidget(preview_button)  
         button_layout.addWidget(delete_button)
@@ -228,8 +227,8 @@ class CombinedPanel(QWidget):
     
     def process_and_preview(self):
         """Jalankan semua algoritma batch terlebih dahulu, lalu tampilkan preview gambar."""
-        self.process_all_batch()  # Jalankan semua algoritma batch
-        self.handle_preview_button()  # Setelah selesai, tampilkan preview
+        self.process_all_batch()  
+        self.handle_preview_button()
     
     def handle_preview_button(self):
         """Menampilkan gambar terbaru setelah batch diproses."""
@@ -241,8 +240,6 @@ class CombinedPanel(QWidget):
             QMessageBox.warning(self, "Caution", language_config.NOT_IMAGE_PREVIEW)
     
     def dropdown_box_control(self):
-        """Buat combo box untuk algoritma penyelarasan, super resolusi, dan denoising."""
-        # Buat combo box beserta item-nya dalam satu baris
         algorithm_alignment = QComboBox()
         alignment_algorithms = [
             ("None", language_config.NONE_ALIGNMENT_DESCRIPTION),
@@ -275,19 +272,13 @@ class CombinedPanel(QWidget):
             denoising_combox.addItem(name)
         denoising_combox.setVisible(False)
         
-        # --- Simpan referensi combobox ---
         self.comboboxes['alignment'] = algorithm_alignment
         self.comboboxes['super_resolution'] = super_res_combo
         self.comboboxes['denoising'] = denoising_combox
-        # --------------------------------
-
-        # --- LANGKAH 5: Terapkan state awal ke Combobox ---
+        
         algorithm_alignment.setCurrentText(self.initial_state.get('alignment_algo', "None"))
         super_res_combo.setCurrentText(self.initial_state.get('super_resolution_algo', "None"))
         denoising_combox.setCurrentText(self.initial_state.get('denoising_algo', "None"))
-        # ------------------------------------------------
-
-        # Hubungkan sinyal currentIndexChanged menggunakan lambda untuk execute_algorithm
         algorithm_alignment.currentIndexChanged.connect(
             lambda index: self.execute_algorithm('alignment', algorithm_alignment.currentText())
         )
@@ -303,10 +294,106 @@ class CombinedPanel(QWidget):
     def execute_algorithm(self, category, selected_algo):
         """Simpan pilihan algoritma."""
         self.selected_algorithms[category] = selected_algo
-        # Jika Anda perlu memperbarui state global segera, emit sinyal di sini
-        # self.state_changed.emit(self.batch_id, self.get_current_state()) # Contoh jika pakai sinyal
         print(language_config.CONSOL_LOG_RUNNING_ALGORITHM.format(category, selected_algo))
+        
+    def _handle_denoising_state_changed(self, is_checked):
+        """Logika eksklusif saat state checkbox Denoising berubah."""
+        superres_checkbox = self.checkboxes.get(language_config.PARAMETER_BATCH_SUPER_RESOLUTION)
+        if not superres_checkbox: return
+
+        if is_checked:
+            superres_checkbox.blockSignals(True)
+            superres_checkbox.setChecked(False)
+            superres_checkbox.setEnabled(False)
+            superres_checkbox.blockSignals(False)
+        else:
+            superres_checkbox.setEnabled(True)
     
+    def _handle_superres_state_changed(self, is_checked):
+        """Logika eksklusif saat state checkbox Super Resolution berubah."""
+        denoising_checkbox = self.checkboxes.get(language_config.PARAMETER_BATCH_DENOISING)
+        if not denoising_checkbox: return
+
+        if is_checked:
+            denoising_checkbox.blockSignals(True)
+            denoising_checkbox.setChecked(False)
+            denoising_checkbox.setEnabled(False)
+            denoising_checkbox.blockSignals(False)
+        else: 
+            denoising_checkbox.setEnabled(True)
+        
+    def _trigger_exclusive_handler(self, checkbox_key):
+        """Dipanggil oleh klik label atau toggle checkbox untuk memicu logika eksklusif."""
+        checkbox = self.checkboxes.get(checkbox_key)
+        if not checkbox: return
+
+        is_checked = checkbox.isChecked()
+        
+        if checkbox_key == language_config.PARAMETER_BATCH_DENOISING:
+            self._handle_denoising_state_changed(is_checked)
+        elif checkbox_key == language_config.PARAMETER_BATCH_SUPER_RESOLUTION:
+            self._handle_superres_state_changed(is_checked)
+        elif checkbox_key == language_config.PARAMETER_BATCH_CROP_EDGE:
+             self._handle_crop_keep_edge(is_checked, checkbox_key, language_config.PARAMETER_BATCH_KEEP_EDGE)
+        elif checkbox_key == language_config.PARAMETER_BATCH_KEEP_EDGE:
+             self._handle_crop_keep_edge(is_checked, checkbox_key, language_config.PARAMETER_BATCH_CROP_EDGE)
+
+        self._update_visibility_internal()
+        
+    def _handle_crop_keep_edge(self, is_checked, changed_cb_key, other_cb_key):
+         """Logika eksklusif untuk Crop Edge dan Keep Edge."""
+         changed_cb = self.checkboxes.get(changed_cb_key)
+         other_cb = self.checkboxes.get(other_cb_key)
+         align_cb = self.checkboxes.get(language_config.PARAMETER_BATCH_ALIGNMENT)
+         if not changed_cb or not other_cb or not align_cb: return
+
+         is_alignment_checked = align_cb.isChecked()
+
+         if is_checked:
+             other_cb.blockSignals(True)
+             other_cb.setChecked(False)
+             other_cb.setEnabled(False)
+             other_cb.blockSignals(False)
+         else:
+             other_cb.setEnabled(is_alignment_checked)
+        
+    def _update_visibility_internal(self):
+        """Memperbarui visibilitas/enabled widget berdasarkan state checkbox."""
+        # Dapatkan instance combobox jika belum ada (misal, jika dipanggil sebelum create_parameter_panel selesai)
+        algorithm_alignment = self.comboboxes.get('alignment')
+        super_res_combo = self.comboboxes.get('super_resolution')
+        denoising_combox = self.comboboxes.get('denoising')
+       
+        # Kunci checkbox
+        alignment_key = language_config.PARAMETER_BATCH_ALIGNMENT
+        denoising_key = language_config.PARAMETER_BATCH_DENOISING
+        superres_key = language_config.PARAMETER_BATCH_SUPER_RESOLUTION
+        align_folder_key = language_config.PARAMETER_BATCH_ALIGNMENT_TO_FOLDER
+        crop_edge_key = language_config.PARAMETER_BATCH_CROP_EDGE
+        keep_edge_key = language_config.PARAMETER_BATCH_KEEP_EDGE
+
+        # Dapatkan status checked dengan aman
+        is_alignment_checked = self.checkboxes.get(alignment_key, QCheckBox()).isChecked()
+        is_denoising_checked = self.checkboxes.get(denoising_key, QCheckBox()).isChecked()
+        is_superres_checked = self.checkboxes.get(superres_key, QCheckBox()).isChecked()
+        is_crop_edge_checked = self.checkboxes.get(crop_edge_key, QCheckBox()).isChecked() # Perlu untuk logic enabled keep_edge
+        is_keep_edge_checked = self.checkboxes.get(keep_edge_key, QCheckBox()).isChecked() # Perlu untuk logic enabled crop_edge
+
+
+        # Atur Visibilitas ComboBox/Tombol
+        if algorithm_alignment: algorithm_alignment.setVisible(is_alignment_checked)
+        if denoising_combox: denoising_combox.setVisible(is_denoising_checked)
+        if super_res_combo: super_res_combo.setVisible(is_superres_checked)
+       
+        align_folder_cb = self.checkboxes.get(align_folder_key)
+        if align_folder_cb: align_folder_cb.setEnabled(is_alignment_checked)
+
+        crop_edge_cb = self.checkboxes.get(crop_edge_key)
+        if crop_edge_cb: crop_edge_cb.setEnabled(is_alignment_checked and not is_keep_edge_checked) # Hanya aktif jika align TAPI keep edge F
+
+        keep_edge_cb = self.checkboxes.get(keep_edge_key)
+        if keep_edge_cb: keep_edge_cb.setEnabled(is_alignment_checked and not is_crop_edge_checked) # Hanya aktif jika align TAPI crop edge F
+
     def process_all_batch(self):
         """Jalankan semua algoritma yang dipilih."""
         actions = {
@@ -332,8 +419,7 @@ class CombinedPanel(QWidget):
             
     def create_parameter_panel(self):
         """
-        Buat panel parameter yang berisi combo box dan checkbox dengan scroll area.
-        Fungsi ini juga memulihkan state (checked/selected) dan mengatur visibilitas/enabled awal.
+        Buat panel parameter yang berisi combo box dan checkbox.
         """
         algorithm_panel = QWidget()
         algorithm_panel.setStyleSheet("background-color: #EBEAEA")
@@ -348,37 +434,37 @@ class CombinedPanel(QWidget):
 
         algorithm_alignment, super_res_combo, denoising_combox = self.dropdown_box_control()
 
-        # Tombol folder output (visibilitas awal False, diatur oleh update_visibility)
         folder_button = QPushButton()
-        folder_button.setIcon(QIcon("UI/resources/icon/folder-output.png")) 
-        folder_button.setFixedSize(24, 24)
-        folder_button.setIconSize(QSize(20, 20))
         folder_button.setVisible(False)
-        # folder_button.setToolTip(language_config.OUTPUT_FOLDER_BUTTON_TOOLTIP) # Tambahkan tooltip jika perlu
-        # folder_button.clicked.connect(self.handle_folder_button_click) # Hubungkan ke fungsi jika perlu
 
         algorithm_layout.addWidget(algorithm_alignment)
         algorithm_layout.addWidget(super_res_combo)
         algorithm_layout.addWidget(denoising_combox)
         algorithm_layout.addWidget(folder_button)
-        algorithm_layout.addStretch() # Tambahkan stretch agar tombol folder tidak terlalu jauh
+        algorithm_layout.addStretch()
 
-        # Bagian Kanan: Checkbox dalam scroll area
         option_widget = QWidget()
         option_layout = QVBoxLayout(option_widget)
         option_layout.setContentsMargins(5, 5, 5, 5)
         option_layout.setSpacing(5)
 
-        checkbox_widgets = {} 
+        checkbox_widgets = {}
         checkbox_texts = [
             language_config.PARAMETER_BATCH_ALIGNMENT,
-            language_config.PARAMETER_BATCH_ALIGNMENT_TO_PROCESS,
             language_config.PARAMETER_BATCH_ALIGNMENT_TO_FOLDER,
-            language_config.PARAMETER_BATCH_DENOISING,
-            language_config.PARAMETER_BATCH_SUPER_RESOLUTION,
+            language_config.PARAMETER_BATCH_DENOISING, # Checkbox Denoising
+            language_config.PARAMETER_BATCH_SUPER_RESOLUTION, # Checkbox Super Resolution
             language_config.PARAMETER_BATCH_CROP_EDGE,
             language_config.PARAMETER_BATCH_KEEP_EDGE
         ]
+
+        # Key yang pasti untuk Denoising dan Super Resolution
+        denoising_key = language_config.PARAMETER_BATCH_DENOISING
+        superres_key = language_config.PARAMETER_BATCH_SUPER_RESOLUTION
+        crop_edge_key = language_config.PARAMETER_BATCH_CROP_EDGE
+        keep_edge_key = language_config.PARAMETER_BATCH_KEEP_EDGE
+        alignment_key = language_config.PARAMETER_BATCH_ALIGNMENT
+        align_folder_key = language_config.PARAMETER_BATCH_ALIGNMENT_TO_FOLDER
 
         for text in checkbox_texts:
             checkbox_widget = QWidget()
@@ -387,117 +473,60 @@ class CombinedPanel(QWidget):
             checkbox_layout.setSpacing(5)
 
             option_checkbox = QCheckBox()
-            option_label = ClickableLabel(text)
+            option_label = ClickableLabel(text) 
             option_label.setWordWrap(True)
             option_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            option_label.clicked.connect(option_checkbox.toggle) 
-            
-            # Simpan referensi ke instance variable self.checkboxes
+            option_label.clicked.connect(option_checkbox.toggle)
+
             self.checkboxes[text] = option_checkbox
-            checkbox_widgets[text] = checkbox_widget 
-            
-            # Pulihkan state checked
-            key_for_state = f"checkbox_{text.replace(' ', '_').lower()}" # Kunci konsisten
+            checkbox_widgets[text] = checkbox_widget
+
+            key_for_state = f"checkbox_{text.replace(' ', '_').lower()}"
             initial_checked = self.initial_state.get(key_for_state, False)
             option_checkbox.setChecked(initial_checked)
 
+
+            # --- PERUBAHAN KONEKSI SINYAL ---
+            current_key = text
+            option_label.clicked.connect(lambda key=current_key: self._trigger_exclusive_handler(key))
+
+            # Hubungkan toggle checkbox ke fungsi perantara
+            option_checkbox.toggled.connect(lambda checked, key=current_key: self._trigger_exclusive_handler(key))
+
             checkbox_layout.addWidget(option_checkbox)
-            checkbox_layout.addWidget(option_label, 1) 
+            checkbox_layout.addWidget(option_label, 1)
             option_layout.addWidget(checkbox_widget)
 
-        # Sembunyikan widget checkbox tertentu secara default
-        checkbox_widgets[language_config.PARAMETER_BATCH_ALIGNMENT_TO_PROCESS].setVisible(False)
-        checkbox_widgets[language_config.PARAMETER_BATCH_CROP_EDGE].setVisible(False)
-        checkbox_widgets[language_config.PARAMETER_BATCH_ALIGNMENT_TO_FOLDER].setVisible(False)
-        checkbox_widgets[language_config.PARAMETER_BATCH_KEEP_EDGE].setVisible(False)
+        if crop_edge_key in checkbox_widgets: checkbox_widgets[crop_edge_key].setVisible(False)
+        if keep_edge_key in checkbox_widgets: checkbox_widgets[keep_edge_key].setVisible(False)
+        if align_folder_key in checkbox_widgets: checkbox_widgets[align_folder_key].setVisible(False)
 
-        option_layout.addStretch() # Dorong checkbox ke atas
+        option_layout.addStretch()
 
         scroll_option_layout = QScrollArea()
         scroll_option_layout.setWidgetResizable(True)
         scroll_option_layout.setWidget(option_widget)
-        scroll_option_layout.setStyleSheet("QScrollArea { border: none; background-color: transparent; } QWidget { background-color: transparent; }") # Style agar menyatu
+        scroll_option_layout.setStyleSheet(SCROLL_AREA)
 
 
-        parameter_layout.addLayout(algorithm_layout, 1) 
+        parameter_layout.addLayout(algorithm_layout, 1)
         parameter_layout.addWidget(scroll_option_layout, 1)
 
-        # --- FUNGSI EVENT HANDLER (Nested agar bisa akses variabel lokal & instance) ---
-        def update_visibility():
-            # Akses status checkbox dari self.checkboxes
-            is_alignment_checked = self.checkboxes[language_config.PARAMETER_BATCH_ALIGNMENT].isChecked()
-            is_denoising_checked = self.checkboxes[language_config.PARAMETER_BATCH_DENOISING].isChecked()
-            is_superres_checked = self.checkboxes[language_config.PARAMETER_BATCH_SUPER_RESOLUTION].isChecked()
-            is_align_to_folder_checked = self.checkboxes[language_config.PARAMETER_BATCH_ALIGNMENT_TO_FOLDER].isChecked()
-
-            # Atur visibilitas ComboBox
-            # Akses combobox dari variabel lokal yang didefinisikan di awal fungsi ini
-            algorithm_alignment.setVisible(is_alignment_checked)
-            denoising_combox.setVisible(is_denoising_checked)
-            super_res_combo.setVisible(is_superres_checked)
-            folder_button.setVisible(is_align_to_folder_checked)
-
-            # Atur status enabled checkbox dependen (tanpa mengubah checked status)
-            checkbox_alignment_to_process = self.checkboxes[language_config.PARAMETER_BATCH_ALIGNMENT_TO_PROCESS]
-            checkbox_alignment_to_process.setEnabled(is_alignment_checked and (is_denoising_checked or is_superres_checked))
-
-            checkbox_align_to_folder = self.checkboxes[language_config.PARAMETER_BATCH_ALIGNMENT_TO_FOLDER]
-            checkbox_align_to_folder.setEnabled(is_alignment_checked)
-
-            checkbox_crop_edge = self.checkboxes[language_config.PARAMETER_BATCH_CROP_EDGE]
-            checkbox_keep_edge = self.checkboxes[language_config.PARAMETER_BATCH_KEEP_EDGE]
-            can_edge_options_be_enabled = is_alignment_checked
-            checkbox_crop_edge.setEnabled(can_edge_options_be_enabled)
-            checkbox_keep_edge.setEnabled(can_edge_options_be_enabled)
+        # --- Panggil handler dan visibility sekali di awal ---
+        self._update_visibility_internal()
+        if denoising_key in self.checkboxes:
+             self._trigger_exclusive_handler(denoising_key)
+        if superres_key in self.checkboxes:
+             self._trigger_exclusive_handler(superres_key)
+        if crop_edge_key in self.checkboxes:
+             self._trigger_exclusive_handler(crop_edge_key)
+        if keep_edge_key in self.checkboxes:
+             self._trigger_exclusive_handler(keep_edge_key)
+        # Panggil juga untuk alignment & align_folder jika mereka mempengaruhi enabled state lain
+        if alignment_key in self.checkboxes:
+            self._update_visibility_internal() # Cukup panggil visibility
+        if align_folder_key in self.checkboxes:
+            self._update_visibility_internal() # Cukup panggil visibility
 
 
-        def toggle_exclusive_checkboxes(state, other_checkbox_text, current_checkbox):
-            other_checkbox = self.checkboxes[other_checkbox_text]
-            # Hanya nonaktifkan jika yang ini dicentang
-            if current_checkbox.isChecked(): # Gunakan isChecked()
-                other_checkbox.setEnabled(False)
-                
-            else:
-                is_alignment_checked = self.checkboxes[language_config.PARAMETER_BATCH_ALIGNMENT].isChecked()
-                is_denoising_checked = self.checkboxes[language_config.PARAMETER_BATCH_DENOISING].isChecked()
-                is_superres_checked = self.checkboxes[language_config.PARAMETER_BATCH_SUPER_RESOLUTION].isChecked()
-
-                if other_checkbox_text == language_config.PARAMETER_BATCH_KEEP_EDGE and is_alignment_checked:
-                    other_checkbox.setEnabled(True)
-                elif other_checkbox_text == language_config.PARAMETER_BATCH_CROP_EDGE and is_alignment_checked:
-                    other_checkbox.setEnabled(True)
-                elif other_checkbox_text == language_config.PARAMETER_BATCH_SUPER_RESOLUTION and not is_denoising_checked: # Hanya aktifkan jika Denoising tidak aktif
-                    other_checkbox.setEnabled(True)
-                elif other_checkbox_text == language_config.PARAMETER_BATCH_DENOISING and not is_superres_checked: # Hanya aktifkan jika Super Res tidak aktif
-                    other_checkbox.setEnabled(True)
-
-
-        # --- Hubungkan sinyal stateChanged ---
-        for text, checkbox in self.checkboxes.items():
-            checkbox.stateChanged.connect(update_visibility)
-
-        # Koneksi untuk checkbox eksklusif
-        checkbox_denoising_text = language_config.PARAMETER_BATCH_DENOISING
-        checkbox_superres_text = language_config.PARAMETER_BATCH_SUPER_RESOLUTION
-        checkbox_crop_edge_text = language_config.PARAMETER_BATCH_CROP_EDGE
-        checkbox_keep_edge_text = language_config.PARAMETER_BATCH_KEEP_EDGE
-
-        # Pastikan checkbox ada sebelum menghubungkan sinyalnya
-        if checkbox_denoising_text in self.checkboxes and checkbox_superres_text in self.checkboxes:
-            self.checkboxes[checkbox_denoising_text].stateChanged.connect(
-                lambda state, cb=self.checkboxes[checkbox_denoising_text], other=checkbox_superres_text: toggle_exclusive_checkboxes(state, other, cb)
-            )
-            self.checkboxes[checkbox_superres_text].stateChanged.connect(
-                lambda state, cb=self.checkboxes[checkbox_superres_text], other=checkbox_denoising_text: toggle_exclusive_checkboxes(state, other, cb)
-            )
-        if checkbox_crop_edge_text in self.checkboxes and checkbox_keep_edge_text in self.checkboxes:
-            self.checkboxes[checkbox_crop_edge_text].stateChanged.connect(
-                lambda state, cb=self.checkboxes[checkbox_crop_edge_text], other=checkbox_keep_edge_text: toggle_exclusive_checkboxes(state, other, cb)
-            )
-            self.checkboxes[checkbox_keep_edge_text].stateChanged.connect(
-                lambda state, cb=self.checkboxes[checkbox_keep_edge_text], other=checkbox_crop_edge_text: toggle_exclusive_checkboxes(state, other, cb)
-            )
-    
-        update_visibility()
-    
         return algorithm_panel

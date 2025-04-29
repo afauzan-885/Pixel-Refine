@@ -513,7 +513,7 @@ class BatchPageLayout(QWidget):
                 # -------------------------
 
                 # --- Hubungkan Sinyal Thread ke Slot Agregasi ---
-                import_thread.item_processed.connect(self._handle_item_imported) # Sinyal baru
+                import_thread.result_signal.connect(self._handle_item_imported) # Sinyal baru
                 import_thread.finished.connect(lambda t=import_thread: self._handle_thread_finished(t)) # Sinyal bawaan QThread
                 # Hubungkan error jika perlu
                 if hasattr(import_thread, 'error_signal'):
@@ -586,7 +586,7 @@ class BatchPageLayout(QWidget):
         
         self.show_toast_requested.emit(progress_msg, None, True) 
         
-    @pyqtSlot(str, str)
+    @pyqtSlot(str)
     def on_batch_import_error(self, item_path, error_message):
         self._total_pending_imports -= 1
         if self._total_pending_imports < 0 : self._total_pending_imports = 0

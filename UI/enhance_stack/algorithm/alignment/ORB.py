@@ -404,10 +404,12 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, sing
     # Dapatkan semua path gambar
     if single_process:
         image_paths = processor.get_all_image_paths_for_single_process()
+        processor.hdf5_path = "database/align/aligned_images.h5"
     else:
         if batch_id is None:
             raise ValueError(language_config.BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS)
         image_paths = processor.get_all_image_paths_for_batch_process(batch_id)
+        processor.hdf5_path = f"database/align/aligned_image_batch_{batch_id}.h5"
     
     if not image_paths:
         if update_progress:

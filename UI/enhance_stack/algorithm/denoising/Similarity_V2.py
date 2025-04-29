@@ -348,25 +348,20 @@ class SimilarityAlgorithmV2:
         # --- HITUNG GLOBAL NOISE (PANGGIL C++), MULTIPLIER, DAN SKOR ---
         try:
             global_avg_sigma = clib.estimate_global_noise(
-                reference_image_float, # Pointer dari array NumPy
-                h_ref, w_ref, channels_buffer, # Dimensi & channel buffer (C++ akan handle gray)
+                reference_image_float,
+                h_ref, w_ref, channels_buffer,
                 tile_h, tile_w,
                 row_starts, len(row_starts),
                 col_starts, len(col_starts)
             )
         except Exception as e:
-            # print(f"!!! ERROR calling C++ estimate_global_noise_cpp: {e}")
-            global_avg_sigma = 0.0 # Fallback jika error
-
+            global_avg_sigma = 0.0
+            
         # Lanjutkan seperti sebelumnya
         frame_max_multiplier = self._calculate_dynamic_max_multiplier(global_avg_sigma)
         noise_level_score = self._calculate_noise_level_score(global_avg_sigma)
-        # print(f"  Global Avg Sigma Estimate: {global_avg_sigma:.5f}")
         print(f"  Cleanliness Score (0-100, 100=clean): {noise_level_score:.1f}")
-        # print(f"  Calculated Dynamic Max Multiplier: {frame_max_multiplier:.3f}")
-        # --- ------------------------------------------------------- ---
-        # --- ------------------------------------------------------- ---
-
+       
         # --- Skala Denormalisasi ---
         scale_value = np.float32(np.iinfo(dtype).max)
 
@@ -375,53 +370,39 @@ class SimilarityAlgorithmV2:
         progress_cap_percent = 95
 
         # --- Loop Pemrosesan Gambar ---
-        print(f"Starting MFNR process for {num_images} images...")
+        # print(f"Starting MFNR process for {num_images} images...")
         for i, image_orig in enumerate(images):
             if not isinstance(image_orig, np.ndarray):
-                print(f"Warning: Skipping item at index {i} because it's not a NumPy array.")
+                # print(f"Warning: Skipping item at index {i} because it's not a NumPy array.")
                 continue
 
             if update_progress:
-            # --- Logika Progress Baru ---
                 if total_overall_images is not None and total_overall_images > 0:
-                    # Jika konteks global diberikan (dari loop batch di main)
                     overall_processed_count = images_processed_so_far + i + 1
                     progress = int((overall_processed_count / total_overall_images) * progress_cap_percent)
                     message = language_config.IMAGE_PROCESS_IN_PROGRESS.format(overall_processed_count, total_overall_images)
                 else:
-                    # Jika tidak ada konteks global (misal dipanggil langsung atau fine-tuning)
-                    # Gunakan progress relatif terhadap batch saat ini
                     progress = int(((i + 1) / num_images) * progress_cap_percent) # Cap internal
                     message = language_config.ANALYZING_IMAGE.format(i+1,num_images)
-                # --- Akhir Logika Progress Baru ---
                 update_progress(progress, message)
 
             if stop_requested and stop_requested():
-                print("Stop requested during accumulation.")
                 break
 
-            # --- Validasi Input Frame ---
             try:
                 if image_orig.shape[0] != h or image_orig.shape[1] != w:
-                    # print(f"Warning: Skipping image {i+1} due to size mismatch ({image_orig.shape[:2]} vs {h}x{w}).")
                     continue
                 if image_orig.dtype != dtype:
-                    # print(f"Warning: Skipping image {i+1} due to dtype mismatch ({image_orig.dtype} vs {dtype}).")
                     continue
-                # Cek channel asli (sebelum normalisasi)
                 num_channels_orig = image_orig.shape[2] if image_orig.ndim == 3 else 1
                 if num_channels_orig not in (1, channels_buffer): # Hanya izinkan 1 atau 3 channel input
-                    #  print(f"Warning: Skipping image {i+1} due to unsupported original channels ({num_channels_orig}).")
                      continue
 
             except Exception as e:
-                # print(f"Error validating image {i+1}: {e}. Skipping.")
-                continue # Lewati frame bermasalah
-
-            # --- Normalisasi Frame Saat Ini (akan jadi 3 channel jika input gray) ---
+                continue 
+            
             current_image_float = self.normalize_image(image_orig, dtype)
             if current_image_float.shape[2] != channels_buffer:
-                #  print(f"Error: Normalized image {i+1} has unexpected channels ({current_image_float.shape[2]}). Skipping.")
                  continue
 
 
@@ -498,9 +479,6 @@ class SimilarityAlgorithmV2:
             # Konversi kembali ke tipe data asli (uint8/uint16)
             # Jika input asli grayscale, kembalikan grayscale
             if ref_image.ndim == 2 or (ref_image.ndim == 3 and ref_image.shape[2] == 1) :
-                # Ambil satu channel (misal channel 0) karena C++ memproses 3 channel
-                # Mungkin lebih baik merata-ratakan 3 channel? (tergantung C++)
-                # Jika C++ hanya mengisi 3 channel identik untuk input gray, ambil 1 saja cukup.
                 final_image_scaled_single_channel = final_image_scaled[:, :, 0]
                 min_val = 0
                 max_val = np.iinfo(dtype).max
@@ -509,8 +487,7 @@ class SimilarityAlgorithmV2:
                 min_val = 0
                 max_val = np.iinfo(dtype).max
                 final_image_output = np.clip(final_image_scaled, min_val, max_val).astype(dtype, copy=False)
-            # Tambahkan handler untuk channel lain jika perlu
-
+            
             if stop_requested and stop_requested() and processed_frames < num_images:
                  print(f"WARNING: Returning partially processed image after accumulating {processed_frames} frames.")
             return final_image_output
@@ -519,241 +496,306 @@ class SimilarityAlgorithmV2:
             return np.zeros(output_shape, dtype=dtype)
 
 def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
-         single_process=None, batch_id=None, save_final_weight_map=False):
+         single_process=None, batch_id=None, save_final_weight_map=False, progress_bar=None):
     try:
         image_processor = SimilarityAlgorithmV2(db_path)
-        
+
         output_name_base = ""
         image_paths = []
+        align_dir = os.path.join("database", "align") # Definisikan path folder alignment
 
         if single_process:
             image_paths = image_processor.get_all_image_paths_for_single_process()
             if image_paths:
-                 ref_image_name = os.path.splitext(os.path.basename(image_paths[0]))[0]
-                 output_name_base = f"{ref_image_name}_single"
-            else: output_name_base = "single_process_no_images"
+                if image_paths[0] and isinstance(image_paths[0], str):
+                    ref_image_name = os.path.splitext(os.path.basename(image_paths[0]))[0]
+                    output_name_base = f"{ref_image_name}"
+                else:
+                    output_name_base = "single_process_invalid_path"
+            else:
+                output_name_base = "single_process_no_images"
         else:
             if batch_id is None:
-                # Gunakan konstanta untuk pesan error
                 raise ValueError(language_config.BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS)
-            image_paths = image_processor.get_all_image_paths_for_batch_process(batch_id)
-            output_name_base = f"batch_{batch_id}"
+            else:
+                pass
 
+            # Lanjutkan dengan mendapatkan path gambar untuk batch
+            image_paths = image_processor.get_all_image_paths_for_batch_process(batch_id)
+            if image_paths and isinstance(image_paths[0], str):
+                ref_image_name = os.path.splitext(os.path.basename(image_paths[0]))[0]
+                output_name_base = f"{ref_image_name}"
+            else:
+                output_name_base = "batch_no_reference"
+           
         if not image_paths:
-            # Gunakan konstanta jika path tidak ditemukan
             print(language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
             if update_progress: update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
-            return
+            return # Keluar jika tidak ada gambar
 
-        # Setup path output
+        # --- Setup Path Output ---
         output_folder_stack = "database/stack"
         os.makedirs(output_folder_stack, exist_ok=True)
         output_name_base_safe = "".join(c for c in output_name_base if c.isalnum() or c in ('_', '-')).rstrip()
-        if not output_name_base_safe: output_name_base_safe = "stack_result"
-        output_path = os.path.join(output_folder_stack, f"{output_name_base_safe}_similarity_stack.tif")
+        if not output_name_base_safe: output_name_base_safe = "stack_result" # Fallback name
+        output_path = os.path.join(output_folder_stack, f"{output_name_base_safe}_similarityV2.tif")
         weight_map_output_path = os.path.join(output_folder_stack, f"{output_name_base_safe}_similarity_weight_map.png")
-        # Gunakan konstanta untuk menampilkan path output
         print(language_config.OUTPUT_IMAGE_TO_BE_SAVED.format(output_path))
-        print(language_config.OUTPUT_SAVE_WEIGHT_MAP.format(weight_map_output_path))
+        if save_final_weight_map:
+             print(language_config.OUTPUT_SAVE_WEIGHT_MAP.format(weight_map_output_path))
 
         # --- Ekstraksi Metadata ---
-        # Pesan bisa tetap
-        metadata_folder = os.path.join("database", "align")
-        os.makedirs(metadata_folder, exist_ok=True)
+        metadata_folder = align_dir 
+        os.makedirs(metadata_folder, exist_ok=True) 
         metadata_file = os.path.join(metadata_folder, "metadata.json")
-        if 'extract_all_metadata' in globals():
-            extract_all_metadata(image_paths, metadata_file=metadata_file)
-        else: print("Metadata extraction step skipped (function not defined).")
 
-        # Update progress awal (sudah pakai konstanta)
+        # Panggil ekstraksi metadata hanya jika ada path gambar
+        if image_paths:
+             if 'extract_all_metadata' in globals():
+                  try:
+                       extract_all_metadata(image_paths, metadata_file=metadata_file)
+                      
+                  except Exception as e_meta:
+                       traceback.print_exc()
+                      
+             else:
+                  pass
+        else:
+            pass
+
+        # --- Update progress awal ---
         if update_progress: update_progress(0, language_config.RUN_IMAGE_PROCESS_STARTED)
 
-        global_hdf5_path = "database/align/aligned_images.h5"
+        if single_process:
+            global_hdf5_path = os.path.join(align_dir, "aligned_images.h5")
+        else:
+            global_hdf5_path = os.path.join(align_dir, f"aligned_image_batch_{batch_id}.h5")
         processed_batches_results = []
         images_processed_count = 0
         total_images = 0
 
-        # --- Logika Batching ---
-        if os.path.exists(global_hdf5_path):
-            # Gunakan konstanta
+        # --- Logika Pemrosesan Utama (Batching dari HDF5 atau Path) ---
+        use_hdf5 = os.path.exists(global_hdf5_path)
+
+        if use_hdf5:
             print(language_config.PROCESSING_IMAGE_FROM_HDF5.format(global_hdf5_path))
             try:
+                # Dapatkan total gambar dari HDF5 untuk progress
+                with h5py.File(global_hdf5_path, 'r') as h5f_check:
+                    total_images = len(h5f_check.keys())
+                print(language_config.NUMBER_OF_IMAGES_TO_BE_PROCESSED.format(total_images))
+
+                if total_images == 0:
+                    if update_progress: update_progress(100, "File HDF5 is empty.")
+                    return
+
+                total_batches = (total_images + batch_size - 1) // batch_size
+                print(language_config.NUMBER_OF_BATCHES_TO_BE_PROCESSED.format(total_batches))
+
                 with h5py.File(global_hdf5_path, 'r') as h5f:
-                    keys = list(h5f.keys())
-                    total_images = len(keys)
-                    # Gunakan konstanta
-                    print(language_config.NUMBER_OF_IMAGES_TO_BE_PROCESSED.format(total_images))
-                    if total_images == 0:
-                         if update_progress: update_progress(100, "File is empty.")
-                         return
-
-                    total_batches = (total_images + batch_size - 1) // batch_size
-                    print(language_config.NUMBER_OF_BATCHES_TO_BE_PROCESSED.format(total_batches)) # Info jumlah batch
-
+                    keys = list(h5f.keys()) # Ambil keys sekali saja
                     for batch_start in range(0, total_images, batch_size):
                         current_batch_num = (batch_start // batch_size) + 1
-                        # Gunakan konstanta untuk info batch
                         print(f"\n" + language_config.PROCESSING_BATCH.format(current_batch_num, total_batches, batch_start))
+
                         if stop_requested and stop_requested():
                             print(language_config.PROCESS_TERMINATED_BY_USER)
-                            break
-
+                            break 
+                        
                         batch_keys = keys[batch_start:min(batch_start + batch_size, total_images)]
-                        # Gunakan konstanta untuk pesan loading
                         print(language_config.LOAD_IMAGE_FROM_HDF5.format(len(batch_keys)))
                         batch_images = []
+                        keys_loaded_in_batch = 0
                         for key in batch_keys:
+                            if stop_requested and stop_requested(): break
                             try:
                                 batch_images.append(np.array(h5f[key]))
+                                keys_loaded_in_batch += 1
                             except Exception as e:
-                                # Gunakan konstanta untuk error loading key
                                 print(language_config.ERROR_WHILE_RETRIEVING_KEY_FROM_HD5F.format(key, e))
-                        
-                        if not batch_images:
-                            # Gunakan konstanta untuk skip batch
-                            print(language_config.SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED.format(current_batch_num))
-                            continue
+                        if stop_requested and stop_requested(): break # Cek lagi setelah loop key
 
-                        # Ganti pesan "Running similarity_mfnr..."
+                        if not batch_images:
+                            print(language_config.SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED.format(current_batch_num))
+                            continue 
+                        
                         print(language_config.START_IMAGE_ENHANCEMENT.format(len(batch_images)))
-                        batch_result = image_processor.similarity_mfnr(
-                            batch_images,
-                            update_progress=update_progress,
-                            stop_requested=stop_requested,
-                            total_overall_images=total_images,
-                            images_processed_so_far=images_processed_count
-                            # save_weight_map_path tidak diteruskan di sini
-                        )
-                        num_processed_in_batch = len(batch_images)
+                        try:
+                             batch_result = image_processor.similarity_mfnr(
+                                 batch_images,
+                                 update_progress=update_progress,
+                                 stop_requested=stop_requested,
+                                 total_overall_images=total_images,
+                                 images_processed_so_far=images_processed_count
+                                
+                             )
+                        except Exception as e_sim_batch:
+                             traceback.print_exc()
+                             batch_result = None 
+                             
+                        if stop_requested and stop_requested():
+                            break
 
                         if batch_result is not None:
                              processed_batches_results.append(batch_result)
-                             # Pesan sukses batch bisa tetap sederhana
-                             images_processed_count += num_processed_in_batch
+                             images_processed_count += len(batch_images)                             
                         else:
-                            # Pesan gagal batch bisa tetap sederhana, karena detail error ada di similarity_mfnr
                             print(f"Batch {current_batch_num} processing failed or returned None.")
-
+                         
             except Exception as e:
                 print(language_config.ERROR_IN_READING_FILE_HDF5.format(e))
                 traceback.print_exc()
-                
                 if update_progress: update_progress(0, language_config.ERROR_IN_READING_FILE_HDF5.format(e))
-                return # Hentikan jika HDF5 tidak bisa dibaca
+                return 
 
-        else:
+        else: 
             print(language_config.NO_HDF5_FILE_PROCESSING_FROM_PATH)
             total_images = len(image_paths)
-            
             print(language_config.NUMBER_OF_IMAGES_TO_BE_PROCESSED.format(total_images))
+
             if total_images == 0:
-                
-                print(language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
+                print(language_config.NO_IMAGE_PATH_PROCESSED_IMAGE) # Redundan, sudah dicek di atas, tapi aman
                 if update_progress: update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
                 return
 
             total_batches = (total_images + batch_size - 1) // batch_size
-            print(language_config.NUMBER_OF_BATCHES_TO_BE_PROCESSED.format(total_batches)) # Info jumlah batch
+            print(language_config.NUMBER_OF_BATCHES_TO_BE_PROCESSED.format(total_batches))
 
             for batch_start in range(0, total_images, batch_size):
                 current_batch_num = (batch_start // batch_size) + 1
-                
                 print(f"\n" + language_config.PROCESSING_BATCH.format(current_batch_num, total_batches, batch_start))
+
                 if stop_requested and stop_requested():
                     print(language_config.PROCESS_TERMINATED_BY_USER)
                     break
 
                 batch_paths = image_paths[batch_start:min(batch_start + batch_size, total_images)]
                 batch_images = image_processor.load_images_from_paths(batch_paths, stop_requested)
-                
+                if stop_requested and stop_requested(): break # Cek setelah loading
+
                 if not batch_images:
                     print(language_config.SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED.format(current_batch_num))
                     continue
 
-                # Ganti pesan "Running similarity_mfnr..."
                 print(language_config.START_IMAGE_ENHANCEMENT.format(len(batch_images)))
-                batch_result = image_processor.similarity_mfnr(
-                    batch_images,
-                    update_progress=update_progress,
-                    stop_requested=stop_requested,
-                    total_overall_images=total_images,
-                    images_processed_so_far=images_processed_count
-                )
-                num_processed_in_batch = len(batch_images)
+                try:
+                    batch_result = image_processor.similarity_mfnr(
+                        batch_images,
+                        update_progress=update_progress,
+                        stop_requested=stop_requested,
+                        total_overall_images=total_images,
+                        images_processed_so_far=images_processed_count
+                    )
+                except Exception as e_sim_batch:
+                      traceback.print_exc()
+                      batch_result = None
+
+                if stop_requested and stop_requested():
+                    break
 
                 if batch_result is not None:
                     processed_batches_results.append(batch_result)
-                    images_processed_count += num_processed_in_batch
+                    images_processed_count += len(batch_images)
                 else:
                     print(f"Batch {current_batch_num} processing failed or returned None.")
 
 
-        # --- Fine-Tuning / Pemrosesan Akhir ---
-        if processed_batches_results:
+        # --- Fine-Tuning / Pemrosesan Akhir (jika ada hasil batch) ---
+        if stop_requested and stop_requested():
+            pass
+        elif processed_batches_results:
             num_fine_tuning_inputs = len(processed_batches_results)
-            print(f"\n--- {language_config.STARTING_ENHANCEMENT} ({num_fine_tuning_inputs}) ---")
+            print(f"\n--- {language_config.STARTING_ENHANCEMENT} ({num_fine_tuning_inputs} batch results) ---")
 
             fine_tuning_start_progress = 95
             fine_tuning_end_progress = 99
 
+            # Wrapper untuk progress callback fine-tuning
             def fine_tuning_update_progress(inner_progress, message):
+                # Map progress internal [0, 100] ke rentang [start, end]
                 mapped_progress = fine_tuning_start_progress + int((inner_progress / 100.0) * (fine_tuning_end_progress - fine_tuning_start_progress))
                 if update_progress:
-                    update_progress(mapped_progress, language_config.ENHANCEMENT.format(message))
+                    # Jangan update jika sudah diminta berhenti
+                    if not (stop_requested and stop_requested()):
+                        update_progress(mapped_progress, language_config.ENHANCEMENT.format(message))
 
-            # Update progress sebelum memulai fine-tuning
             if update_progress: update_progress(fine_tuning_start_progress, language_config.STARTING_ENHANCEMENT)
 
             final_weight_map_path_arg = weight_map_output_path if save_final_weight_map else None
-            # Pesan enable/disable bisa tetap
-            if final_weight_map_path_arg: print("Final weight map saving is ENABLED.")
-            else: print("Final weight map saving is DISABLED.")
+            if final_weight_map_path_arg:
+                 print(f"Final weight map saving is ENABLED to: {final_weight_map_path_arg}")
+            else:
+                 print("Final weight map saving is DISABLED.")
 
             # Panggil similarity_mfnr untuk fine-tuning
-            final_result = image_processor.similarity_mfnr(
-                processed_batches_results,
-                update_progress=fine_tuning_update_progress, # Wrapper callback
-                stop_requested=stop_requested,
-                save_weight_map_path=final_weight_map_path_arg,
-                # Konteks global tidak diteruskan di sini
-            )
+            final_result = None
+            try:
+                 final_result = image_processor.similarity_mfnr(
+                     processed_batches_results, # Input adalah hasil dari batch sebelumnya
+                     update_progress=fine_tuning_update_progress, # Wrapper callback
+                     stop_requested=stop_requested,
+                     save_weight_map_path=final_weight_map_path_arg,
+                     
+                 )
+            except Exception as e_fine_tune:
+                  traceback.print_exc()
+                  final_result = None 
 
-            if final_result is not None:
-                save_success = save_image(final_result, output_path, reference_image_path=image_paths[0] if image_paths else None)
-                if save_success:
-                     # Gunakan konstanta untuk progress akhir sukses
-                     if update_progress: update_progress(100, f"{language_config.IMAGE_PROCESS_FINISHED}: {output_path}")
-                else:
-                     # Gunakan konstanta untuk error simpan
-                     print(language_config.FAILED_TO_SAVE_IMAGE + f": {output_path}")
-                     if update_progress: update_progress(100, language_config.FAILED_TO_SAVE_IMAGE)
+            if stop_requested and stop_requested():
+                pass
+            
+            elif final_result is not None:
+                 ref_path_for_save = image_paths[0] if image_paths and isinstance(image_paths[0], str) else None
+                 save_success = save_image(final_result, output_path, reference_image_path=ref_path_for_save)
+                 if save_success:
+                    final_message = f"{language_config.IMAGE_PROCESS_FINISHED}: {os.path.basename(output_path)}"
+                    print(final_message)
+                    if update_progress: update_progress(100, final_message)
+
+                    if not single_process and batch_id is not None:
+                        batch_hdf5_path = os.path.join(align_dir, f"aligned_image_batch_{batch_id}.h5")
+                        if os.path.exists(batch_hdf5_path):
+                            try:
+                                os.remove(batch_hdf5_path)
+                            except Exception as e:
+                                pass
+                        else:
+                            pass
             else:
-                # Gunakan konstanta untuk kegagalan fine-tuning
                 print(language_config.FAILED_IMAGE_ENHANCEMENT)
-                # Update progress gagal fine-tuning
-                if update_progress: update_progress(100, language_config.FAILED_IMAGE_ENHANCEMENT)
+                if update_progress: update_progress(100, language_config.FAILED_IMAGE_ENHANCEMENT) # 100% tapi pesan gagal
 
-        else: # Jika tidak ada batch yang berhasil diproses
-            # Gunakan konstanta yang sesuai
+        elif not (stop_requested and stop_requested()): # Jika tidak ada hasil batch DAN tidak dibatalkan
             print(language_config.DATA_FAILED_COMPLETION_CREATED)
             if update_progress:
                 update_progress(100, language_config.DATA_FAILED_COMPLETION_CREATED)
 
-    # --- Error Handling ---
-    # Pertahankan format error yang sudah ada, karena menyertakan detail exception penting
+        if stop_requested and stop_requested():
+             if update_progress and progress_bar: update_progress(progress_bar.value(), "Proses dibatalkan.") # Update progress terakhir
+
+
     except ValueError as ve:
         error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(ve))
         traceback.print_exc()
-        if update_progress: update_progress(0, error_message)
+        if update_progress and not (stop_requested and stop_requested()):
+             update_progress(0, error_message)
     except FileNotFoundError as fnf:
         error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(fnf))
         traceback.print_exc()
-        if update_progress: update_progress(0, error_message)
-    except Exception as e:
+        if update_progress and not (stop_requested and stop_requested()):
+             update_progress(0, error_message)
+    except RuntimeError as rte:
+        error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(rte))
+        traceback.print_exc()
+        if update_progress and not (stop_requested and stop_requested()):
+            update_progress(0, error_message)
+    except Exception as e: 
         error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(e))
         traceback.print_exc()
-        if update_progress:
+        if update_progress and not (stop_requested and stop_requested()):
             update_progress(0, error_message)
+    finally:
+       pass
 
 
 def running_similarity_v2(parent=None, single_process=None, batch_id=None):
