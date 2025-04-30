@@ -104,7 +104,8 @@ def get_farneback_optical_flow_page():
             "iterations": sliders[language_config.FARNEBACK_ITERATIONS_LABEL].value(),
             "poly_n": sliders[language_config.FARNEBACK_POLY_N_LABEL].value(),
             "poly_sigma": sliders[language_config.FARNEBACK_POLY_SIGMA_LABEL].value() / 100.0,
-            "flags": sliders[language_config.FARNEBACK_FLAGS_LABEL].value()
+            "flags": sliders[language_config.FARNEBACK_FLAGS_LABEL].value(),
+            "use_gpu": True
         }
         save_farneback_config(fb_params)
     
