@@ -1,6 +1,7 @@
 import traceback
 import cv2
 import numpy as np
+import numpy.ma as ma
 import sqlite3
 import concurrent.futures
 import os
@@ -97,7 +98,8 @@ class MedianAlgorithm:
         return images
 
     def load_images_from_folder(self, folder_path):
-        image_paths = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(('.png', '.jpg', '.jpeg','tiff','tif'))]
+        image_paths = [os.path.join(folder_path, f) for f in os.listdir(folder_path)
+                       if f.endswith(('.png', '.jpg', '.jpeg'))]
         return self.load_images_from_paths(image_paths)
 
     def load_images_from_paths(self, image_paths, stop_requested=None):
@@ -106,30 +108,28 @@ class MedianAlgorithm:
         """
         images = []
         for image_path in image_paths:
-            if stop_requested and stop_requested():  
+            if stop_requested and stop_requested():  # Cek apakah harus berhenti
                 break
             image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
             if image is not None:
                 images.append(image)
         return images
 
-    def stack_median_images(self, images, stop_requested=None, block_size=64, overlap=0.3,
-                            update_progress=None, total_overall_images=None, images_processed_so_far=0):
+    def stack_sigma_clip_images(self, images, stop_requested=None, block_size=64, overlap=0.3,
+                                update_progress=None, total_overall_images=None, images_processed_so_far=0,
+                                sigma_low=3.0, sigma_high=3.0, max_iterations=3): # Parameter baru (low/high sigma)
         """
-        Menghitung median stack gambar dengan optimasi blok dan progress update.
+        Menghitung stack gambar dengan metode Sigma Clipping (Rejection) berbasis blok.
         """
         if stop_requested and stop_requested():
+             print(language_config.STACK_SIGMA_CLIP_STOPPED) # Pesan baru
              return None
 
         if not images:
             raise ValueError(language_config.NO_IMAGES_PROCESSED)
 
-        # Validasi input sedikit lebih baik
-        if not isinstance(images, list) or not all(isinstance(img, np.ndarray) for img in images):
+        if not isinstance(images[0], np.ndarray):
              raise TypeError(language_config.IMAGE_DATA_MUST_BE_VALID)
-        if not images: # Dobel cek jika list kosong setelah validasi tipe
-             raise ValueError(language_config.NO_IMAGES_PROCESSED)
-
 
         dtype = images[0].dtype
         target_shape = images[0].shape
@@ -137,7 +137,7 @@ class MedianAlgorithm:
 
         adapted_update_progress = None
         if update_progress:
-            overall_progress_cap = 98
+            overall_progress_cap = 98 # Cap tetap sama
             progress_start_percent = 0
             progress_range_for_this_call = overall_progress_cap
 
@@ -147,27 +147,33 @@ class MedianAlgorithm:
                 progress_end_percent_for_this_call = min(theoretical_end_percent, overall_progress_cap)
                 progress_range_for_this_call = max(0, progress_end_percent_for_this_call - progress_start_percent)
 
-            def map_progress(internal_percent, internal_message="Process"):
+            # --- MODIFIKASI 1.1: Sesuaikan map_progress ---
+            def map_progress(internal_percent, internal_message="process"):
                 overall_progress = int(progress_start_percent + (internal_percent / 100.0) * progress_range_for_this_call)
-                update_progress(overall_progress, internal_message)
-                
+                update_progress(overall_progress, f"{internal_message}")
+
             adapted_update_progress = map_progress
+        # --------------------------------
 
         images_resized = self._resize_images(images, target_shape)
-        median_image = self._compute_median_image(
+
+        stacked_image = self._compute_sigma_clip_image(
             images_resized,
             target_shape,
             block_size,
             dtype,
             overlap,
-            update_progress=adapted_update_progress,
-            stop_requested=stop_requested
+            update_progress=adapted_update_progress, # Ini sekarang map_progress(persen, pesan)
+            stop_requested=stop_requested,
+            sigma_low=sigma_low,
+            sigma_high=sigma_high,
+            max_iterations=max_iterations
         )
 
-        if median_image is None:
+        if stacked_image is None:
              return None
 
-        return median_image
+        return stacked_image 
 
     def _resize_images(self, images, target_shape):
         resized_images = []
@@ -176,36 +182,32 @@ class MedianAlgorithm:
             if image.shape[0:2] == target_shape[0:2]:
                  resized_images.append(image)
             else:
-                 try: # Tambah try-except untuk resize
-                     resized = cv2.resize(image, target_size, interpolation=cv2.INTER_CUBIC)
-                     resized_images.append(resized)
-                 except Exception as e_resize:
-                      continue
+                 resized = cv2.resize(image, target_size, interpolation=cv2.INTER_CUBIC)
+                 resized_images.append(resized)
         return resized_images
 
-    # --- KEMBALIKAN IMPLEMENTASI MEDIAN MURNI ---
-    def _compute_block_median(self, block_stack):
+    def _compute_block_sigma_clip(self, block_stack, sigma_low=3.0, sigma_high=3.0, max_iterations=5):
         """
-        Menghitung median dari stack blok secara vectorized.
+        Menghitung median stack blok menggunakan numpy.
+
         Args:
             block_stack (np.ndarray): Tumpukan blok gambar (N, H, W, [C]).
+
         Returns:
-            np.ndarray: Blok gambar hasil median (H, W, [C]). Tipe data sesuai hasil np.median.
+            np.ndarray: Blok gambar hasil median (H, W, [C]), dtype float32.
         """
         if block_stack.shape[0] == 0:
-            return np.zeros(block_stack.shape[1:], dtype=np.float32) # Kembalikan float agar konsisten
+            return np.zeros(block_stack.shape[1:], dtype=np.float32)
+        elif block_stack.shape[0] == 1:
+            return block_stack[0].astype(np.float32)
+        else:
+            return np.median(block_stack, axis=0).astype(np.float32)
 
-        try:
-            median_result = np.median(block_stack, axis=0)
-            return median_result.astype(np.float32)
-        except Exception as e_median:
-             return np.zeros(block_stack.shape[1:], dtype=np.float32)
-
-
-    def _compute_median_image(self, images, target_shape, block_size, dtype, overlap,
-                                 update_progress=None, stop_requested=None):
+    def _compute_sigma_clip_image(self, images, target_shape, block_size, dtype, overlap,
+                                 update_progress=None, stop_requested=None,
+                                 sigma_low=3.0, sigma_high=3.0, max_iterations=3):
         """
-        Menghitung gambar median menggunakan metode blok.
+        Menghitung gambar stack menggunakan metode blok dengan Sigma Clipping (Rejection).
         """
         H, W = target_shape[:2]
         num_channels = target_shape[2] if len(target_shape) == 3 else 0
@@ -215,7 +217,6 @@ class MedianAlgorithm:
 
         step = max(int(block_size * (1 - overlap)), 1)
 
-        # Logika penentuan row_starts/col_starts tetap sama
         row_starts = list(range(0, H - block_size + 1, step))
         if H % block_size != 0 and H > block_size :
              if not row_starts or row_starts[-1] != H - block_size: row_starts.append(H - block_size)
@@ -227,7 +228,6 @@ class MedianAlgorithm:
         elif W <= block_size and not col_starts: col_starts = [0]
 
         if not row_starts or not col_starts:
-             print("Warning: Image too small for block processing.")
              return np.zeros(target_shape, dtype=dtype)
 
         base_hanning = np.outer(np.hanning(block_size), np.hanning(block_size))
@@ -244,57 +244,34 @@ class MedianAlgorithm:
         blocks_processed_count = 0
         internal_progress_cap = 98
 
-        # --- Hapus parameter sigma/iterasi dari process_block ---
-        def process_block(row_start, col_start): # Hanya perlu row, col
+        # --- MODIFIKASI 3.1: Tambahkan sigma & iterasi ke process_block ---
+        def process_block(row_start, col_start, p_sigma_low, p_sigma_high, p_max_iter): # Terima parameter
             row_end = min(row_start + block_size, H)
             col_end = min(col_start + block_size, W)
             actual_block_h = row_end - row_start
             actual_block_w = col_end - col_start
 
-            # Buat tumpukan blok
-            try:
-                if num_channels > 0:
-                    blocks = np.stack([im[row_start:row_end, col_start:col_end, :] for im in images], axis=0)
-                else:
-                    blocks = np.stack([im[row_start:row_end, col_start:col_end] for im in images], axis=0)
-            except IndexError as e_idx:
-                 print(f"Error stacking block at ({row_start}, {col_start}) - possible shape mismatch: {e_idx}")
-                 # Kembalikan nilai dummy agar tidak crash, tapi ini indikasi masalah
-                 dummy_shape = (actual_block_h, actual_block_w, num_channels) if num_channels else (actual_block_h, actual_block_w)
-                 return row_start, row_end, col_start, col_end, np.zeros(dummy_shape, dtype=np.float32), np.zeros((actual_block_h, actual_block_w), dtype=np.float32)
-            except ValueError as e_val: # Misal jika array kosong distack
-                 print(f"Error stacking block at ({row_start}, {col_start}): {e_val}")
-                 dummy_shape = (actual_block_h, actual_block_w, num_channels) if num_channels else (actual_block_h, actual_block_w)
-                 return row_start, row_end, col_start, col_end, np.zeros(dummy_shape, dtype=np.float32), np.zeros((actual_block_h, actual_block_w), dtype=np.float32)
+            if num_channels > 0:
+                blocks = np.stack([im[row_start:row_end, col_start:col_end, :] for im in images], axis=0)
+            else:
+                blocks = np.stack([im[row_start:row_end, col_start:col_end] for im in images], axis=0)
 
+            block_result = self._compute_block_sigma_clip(blocks, p_sigma_low, p_sigma_high, p_max_iter) # Panggil fungsi baru
 
-            # Panggil _compute_block_median (versi asli)
-            block_result = self._compute_block_median(blocks) # Panggil fungsi median
-
-            # Aplikasi Hanning window (tetap sama)
             if (actual_block_h, actual_block_w) == (block_size, block_size):
                 hanning_win_2d = base_hanning
             else:
                 hanning_win_2d = np.outer(np.hanning(actual_block_h), np.hanning(actual_block_w))
-            # Pastikan block_result adalah float sebelum dikali
-            weighted_block_result = block_result.astype(np.float32) * hanning_win_2d[..., np.newaxis if num_channels > 0 else Ellipsis]
+            weighted_block_result = block_result * hanning_win_2d[..., np.newaxis if num_channels > 0 else Ellipsis]
 
             return row_start, row_end, col_start, col_end, weighted_block_result, hanning_win_2d
 
-        # --- Gunakan executor instance jika ada, jika tidak buat baru ---
-        # Ini lebih baik jika MedianAlgorithm adalah instance tunggal
-        current_executor = self.executor if hasattr(self, 'executor') and self.executor else concurrent.futures.ThreadPoolExecutor()
-
-        # with concurrent.futures.ThreadPoolExecutor() as executor: # Ganti ini
-        with current_executor as executor: # Gunakan executor yang sudah ada atau baru
-            # --- Hapus parameter sigma/iterasi dari submit ---
-            future_to_task = {executor.submit(process_block, r, c): (r, c) # Panggil process_block tanpa params ekstra
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future_to_task = {executor.submit(process_block, r, c, sigma_low, sigma_high, max_iterations): (r, c) # Teruskan parameter
                               for r, c in tasks}
 
             for future in concurrent.futures.as_completed(future_to_task):
                 if stop_requested and stop_requested():
-                    # Jika menggunakan executor instance, JANGAN shutdown di sini
-                    # Cukup batalkan future yang tersisa
                     for f in future_to_task: f.cancel()
                     return None
                 task = future_to_task[future]
@@ -305,36 +282,29 @@ class MedianAlgorithm:
                     weight_sum[row_start:row_end, col_start:col_end] += hanning_win_2d
                     blocks_processed_count += 1
 
-                    # Update Progress
                     if update_progress:
                         progress_percent = int((blocks_processed_count / total_blocks) * internal_progress_cap)
-                        # Kirim pesan yang sesuai untuk median
-                        msg = language_config.MEDIAN_BLOCK_PROGRESS.format(blocks_processed_count, total_blocks)
-                        update_progress(progress_percent, msg) # Kirim pesan
+                        update_progress(progress_percent)
 
                 except Exception as exc:
-                    print(f"Error processing block {task} result: {exc}")
-                    # Lanjutkan ke blok berikutnya jika ada error
+                    print(f"Error processing block {task}: {exc}")
 
         # --- Finalisasi Gambar (tetap sama) ---
         if update_progress:
-             update_progress(100, language_config.FINISHING_ANALYSIS) # Pesan tetap sama
+             update_progress(100, language_config.FINISHING_ANALYSIS)
 
         final_weight_sum = weight_sum[..., np.newaxis] if num_channels > 0 else weight_sum
-        # Pencegahan pembagian dengan nol
         mask = final_weight_sum > 1e-10
-        median_image_float = np.zeros_like(accumulator) # Ganti nama var
-        np.divide(accumulator, final_weight_sum, out=median_image_float, where=mask)
+        stacked_image_float = np.zeros_like(accumulator)
+        np.divide(accumulator, final_weight_sum, out=stacked_image_float, where=mask)
 
-        # Clip dan konversi ke tipe data asli (dtype dari gambar input)
         if np.issubdtype(dtype, np.integer):
             min_val, max_val = np.iinfo(dtype).min, np.iinfo(dtype).max
-            # Pastikan tidak ada NaN/inf sebelum clip/astype
-            median_image_float = np.nan_to_num(median_image_float, nan=0.0, posinf=max_val, neginf=min_val)
-            final_image = np.clip(median_image_float, min_val, max_val).astype(dtype)
-        else: # Jika float
-            median_image_float = np.nan_to_num(median_image_float, nan=0.0)
-            final_image = median_image_float.astype(dtype)
+            stacked_image_float = np.nan_to_num(stacked_image_float, nan=0.0, posinf=max_val, neginf=min_val)
+            final_image = np.clip(stacked_image_float, min_val, max_val).astype(dtype)
+        else:
+            stacked_image_float = np.nan_to_num(stacked_image_float, nan=0.0)
+            final_image = stacked_image_float.astype(dtype)
 
         return final_image
 
@@ -460,7 +430,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4,
                         
                         print(language_config.START_IMAGE_ENHANCEMENT.format(len(batch_images)))
                         try:
-                             batch_result = image_processor.stack_median_images(
+                             batch_result = image_processor.stack_sigma_clip_images(
                                  batch_images,
                                  update_progress=update_progress,
                                  stop_requested=stop_requested,
@@ -519,7 +489,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4,
 
                 print(language_config.START_IMAGE_ENHANCEMENT.format(len(batch_images)))
                 try:
-                    batch_result = image_processor.stack_median_images(
+                    batch_result = image_processor.stack_sigma_clip_images(
                         batch_images,
                         update_progress=update_progress,
                         stop_requested=stop_requested,
@@ -560,7 +530,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4,
 
             final_result = None
             try:
-                 final_result = image_processor.stack_median_images(
+                 final_result = image_processor.stack_sigma_clip_images(
                      processed_batches_results,
                      update_progress=fine_tuning_update_progress,
                      stop_requested=stop_requested,
