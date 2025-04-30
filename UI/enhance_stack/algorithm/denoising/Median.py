@@ -1,10 +1,8 @@
 import traceback
 import cv2
 import numpy as np
-import numpy.ma as ma
 import sqlite3
 import concurrent.futures
-from astropy.stats import sigma_clip
 import os
 from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
