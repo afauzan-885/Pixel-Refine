@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 # from UI.enhance_stack.algorithm.denoising.extra_similarity.compute_motion_metrics_aot import accumulate_tiles_jit
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, save_image
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, get_all_image_paths_for_single_process, save_image
 from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityV1MotionInterface
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
@@ -61,16 +61,6 @@ class SimilarityAlgorithm:
         hdf5_folder = os.path.dirname(self.hdf5_path)
         if not os.path.exists(hdf5_folder):
             os.makedirs(hdf5_folder)
-
-    def get_all_image_paths_for_single_process(self):
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT images.path 
-                FROM single_process_image
-                JOIN images ON single_process_image.image_id_single = images.id
-            """)
-            return [row[0] for row in cursor.fetchall()]
         
     def get_all_image_paths_for_batch_process(self, batch_id):
         with sqlite3.connect(self.db_path) as conn:
@@ -398,7 +388,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
         align_dir = os.path.join("database", "align") # Definisikan path folder alignment
 
         if single_process:
-            image_paths = image_processor.get_all_image_paths_for_single_process()
+            image_paths = get_all_image_paths_for_single_process(db_path)
             if image_paths:
                 if image_paths[0] and isinstance(image_paths[0], str):
                     ref_image_name = os.path.splitext(os.path.basename(image_paths[0]))[0]

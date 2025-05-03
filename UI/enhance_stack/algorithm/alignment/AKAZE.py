@@ -9,9 +9,10 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 from PyQt6.QtCore import Qt
 import h5py
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import compute_global_crop, crop_image, extract_all_metadata, extract_exif, load_images_from_paths, save_align_to_folder, save_to_hdf5
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import compute_global_crop, crop_image, extract_all_metadata, extract_exif, get_all_image_paths_for_single_process, load_images_from_paths, save_align_to_folder, save_to_hdf5
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
+from config import ALGORITHM_PARAMETER_SETTINGS_FILE
 
 class AKAZEAlgorithm:
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
@@ -23,15 +24,7 @@ class AKAZEAlgorithm:
         if not os.path.exists(hdf5_folder):
             os.makedirs(hdf5_folder)
 
-    def get_all_image_paths_for_single_process(self):
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT images.path 
-                FROM single_process_image
-                JOIN images ON single_process_image.image_id_single = images.id
-            """)
-            return [row[0] for row in cursor.fetchall()]
+    
         
     def get_all_image_paths_for_batch_process(self, batch_id):
         with sqlite3.connect(self.db_path) as conn:
@@ -60,25 +53,21 @@ class AKAZEAlgorithm:
             "enable_cropping": False,
             "save_align": False,  
             "command_save_to_hd5f": True,
-            "align_folder": os.path.join(
-                os.path.expanduser("~"), 
-                "Documents", 
-                "Pixel Refine", 
-                "align_image"
-            )
+            "use_multi_core": False,
+            "align_folder": os.path.join(os.path.expanduser("~"), "Documents", "Pixel Refine", "align_image")
         }
 
         if config_filename is None:
-            config_filename = os.path.join("database", "setting", "Parameter_Stack_Enhance.json")
-
+            config_filename = ALGORITHM_PARAMETER_SETTINGS_FILE 
         try:
             with open(config_filename, "r") as config_file:
                 params = json.load(config_file)
-            return {**default_config, **params.get("AKAZE", {})}
+            return params.get("AKAZE", default_config)
         except Exception as e:
-            print("Error loading AKAZE configuration:", e)
             return default_config
         
+        
+    @staticmethod
     def load_akaze_config_for_batch(config_filename=None):
         """
         Membaca konfigurasi AKAZE dari file JSON. Jika gagal, mengembalikan nilai default.
@@ -90,25 +79,21 @@ class AKAZEAlgorithm:
             "ratio_threshold": 0.75,
             "ransacThreshold": 5.0,
             "transformation": "homography",
-            "keep_edges": True,
+            "keep_edges": False,
             "enable_cropping": False,
             "save_align": False,  
             "command_save_to_hd5f": True,
-            "align_folder": os.path.join(
-                os.path.expanduser("~"), 
-                "Documents", 
-                "Pixel Refine", 
-                "align_image"
-            )
+            "use_multi_core": False,
+            "align_folder": os.path.join(os.path.expanduser("~"), "Documents", "Pixel Refine", "align_image")
         }
 
         if config_filename is None:
-            config_filename = os.path.join("database", "setting", "Parameter_Stack_Enhance.json")
+            config_filename = ALGORITHM_PARAMETER_SETTINGS_FILE 
 
         try:
             with open(config_filename, "r") as config_file:
                 params = json.load(config_file)
-            return {**default_config, **params.get("AKAZE_BATCH", {})}
+            return params.get("AKAZE_BATCH", default_config)
         except Exception as e:
             print("Error loading AKAZE configuration:", e)
             return default_config
@@ -123,204 +108,300 @@ class AKAZEAlgorithm:
           - overlap: jumlah piksel overlap di sekeliling tiap blok.
         """
         if stop_requested and stop_requested():
-            print("Proses dihentikan sebelum menghitung gerakan global (parallel).")
             return None, None
 
+        # 1. Baca Konfigurasi
         akaze_config = self.load_akaze_config(config_filename)
+        use_multicore = akaze_config.get("use_multi_core", True) # Ambil flag dari config
 
-        # --- Konversi gambar ke grayscale (sekali) ---
+        # --- 2. Konversi gambar ke grayscale (sekali) ---
         try:
-            if base_image.ndim == 3 and base_image.shape[2] == 3:
-                 base_gray = cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY)
-            elif base_image.ndim == 2:
-                 base_gray = base_image # Sudah grayscale
-            else: raise ValueError("Base image has unsupported channels")
+            def prepare_gray_akaze(img):
+                if img is None: raise ValueError("Input image is None.")
+                if img.ndim == 3 and img.shape[2] == 3: gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                elif img.ndim == 2: gray = img
+                else: raise ValueError(f"Invalid image dimensions/channels: {img.shape}")
+                if gray.dtype != np.uint8:
+                    if gray.dtype == np.float32 or gray.dtype == np.float64:
+                        if gray.max() <= 1.0:
+                             gray_norm = (gray * 255).astype(np.uint8)
+                        else:
+                             gray_norm = gray.astype(np.uint8)
+                    else: 
+                         gray_norm = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+                         gray_norm = gray_norm.astype(np.uint8)
+                    return gray_norm
+                return gray
 
-            if target_image.ndim == 3 and target_image.shape[2] == 3:
-                 target_gray = cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY)
-            elif target_image.ndim == 2:
-                 target_gray = target_image # Sudah grayscale
-            else: raise ValueError("Target image has unsupported channels")
-        except Exception as e:
+            base_gray = prepare_gray_akaze(base_image)
+            target_gray = prepare_gray_akaze(target_image)
+        except ValueError as e:
             return None, None
+        except Exception as e:
+             return None, None
         # --------------------------------------------
 
         h, w = base_gray.shape
         blocks_x, blocks_y = num_blocks
+        if blocks_x <= 0 or blocks_y <= 0:
+            return None, None
         block_w = w // blocks_x
         block_h = h // blocks_y
+        if block_w == 0 or block_h == 0:
+             print(f"Warning: Image size ({w}x{h}) too small for {num_blocks} blocks. Adjusting blocks.")
+             blocks_x = max(1, w)
+             blocks_y = max(1, h)
+             block_w = 1
+             block_h = 1
+             num_blocks = (blocks_x, blocks_y) 
 
-        # --- Buat instance AKAZE SEKALI di sini ---
+        # --- 3. Buat instance AKAZE SEKALI di sini ---
         try:
             akaze = cv2.AKAZE_create(
-                descriptor_type=cv2.AKAZE_DESCRIPTOR_MLDB, # Default MLDB, bisa eksplisit
-                descriptor_size=0, # Default
-                descriptor_channels=3, # Default
-                threshold=akaze_config.get("akaze_threshold", 0.001), # Gunakan .get dengan default
-                nOctaves=akaze_config.get("akaze_nOctaves", 4),
-                nOctaveLayers=akaze_config.get("akaze_nOctaveLayers", 4),
-                diffusivity=cv2.KAZE_DIFF_PM_G2 # Default
+                descriptor_type=cv2.AKAZE_DESCRIPTOR_MLDB,
+                threshold=float(akaze_config.get("akaze_threshold", 0.001)),
+                nOctaves=int(akaze_config.get("akaze_nOctaves", 4)),
+                nOctaveLayers=int(akaze_config.get("akaze_nOctaveLayers", 4)),
+                diffusivity=cv2.KAZE_DIFF_PM_G2
             )
         except Exception as e:
+            print(f"Error creating AKAZE instance: {e}")
             return None, None
-        # ------------------------------------------
-
+     
         keypoints_base_all = []
-        descriptors_base_list = [] # Gunakan list dulu untuk efisiensi
+        descriptors_base_list = []
         keypoints_target_all = []
         descriptors_target_list = []
 
-        # --- Fungsi worker thread (sekarang menerima instance akaze) ---
-        def compute_features_block(akaze_instance, x, y, bw, bh, overlap):
-            # Tentukan ROI dengan tambahan overlap
-            roi_x_start = max(0, x - overlap)
-            roi_y_start = max(0, y - overlap)
-            roi_x_end = min(w, x + bw + overlap)
-            roi_y_end = min(h, y + bh + overlap)
+        total_blocks = blocks_x * blocks_y
 
-            # Pastikan ROI valid sebelum slicing
-            if roi_y_end <= roi_y_start or roi_x_end <= roi_x_start:
-                return [], None, [], None # Kembalikan hasil kosong jika ROI tidak valid
+        def compute_features_block(akaze_instance, img_base, img_target, x, y, bw, bh, overlap_px, img_w, img_h):
+            roi_x_start = max(0, x - overlap_px)
+            roi_y_start = max(0, y - overlap_px)
+            roi_x_end = min(img_w, x + bw + overlap_px)
+            roi_y_end = min(img_h, y + bh + overlap_px)
 
-            roi_base = base_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
-            roi_target = target_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+            if roi_y_end <= roi_y_start or roi_x_end <= roi_x_start: return [], None, [], None
 
-            # Gunakan instance AKAZE yang sama
-            try:
-                kps_base, desc_base = akaze_instance.detectAndCompute(roi_base, None)
-                kps_target, desc_target = akaze_instance.detectAndCompute(roi_target, None)
-            except Exception as e:
-                 # Tangani error jika detectAndCompute gagal di satu blok
-                 return [], None, [], None # Kembalikan hasil kosong
+            roi_base = img_base[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+            roi_target = img_target[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
 
-            # Sesuaikan koordinat keypoints agar sesuai dengan posisi asli
-            # Lakukan ini hanya jika keypoints ditemukan
+            kps_base, desc_base = akaze_instance.detectAndCompute(roi_base, None)
+            kps_target, desc_target = akaze_instance.detectAndCompute(roi_target, None)
+
             kps_base_adjusted = []
             if kps_base:
                 for kp in kps_base:
-                    kp.pt = (kp.pt[0] + roi_x_start, kp.pt[1] + roi_y_start)
-                    kps_base_adjusted.append(kp)
+                    # Hanya proses keypoint jika deskriptornya valid (ada)
+                    # Cek apakah koordinat berada di dalam blok asli (tanpa overlap)
+                    # untuk menghindari duplikasi di batas overlap
+                    orig_kp_x = kp.pt[0] + roi_x_start
+                    orig_kp_y = kp.pt[1] + roi_y_start
+                    if x <= orig_kp_x < x + bw and y <= orig_kp_y < y + bh:
+                        kp.pt = (orig_kp_x, orig_kp_y)
+                        kps_base_adjusted.append(kp)
+                    # Note: Filter overlap ini mungkin mengurangi jumlah keypoint total,
+                    # tapi mencegah satu keypoint dideteksi & ditambahkan berkali-kali
+                    # dari blok-blok yang overlap. Alternatifnya adalah membiarkan duplikasi
+                    # dan melakukan non-maximal suppression *setelah* semua keypoint terkumpul.
+                    # Untuk kesederhanaan, filter di sini dulu.
 
             kps_target_adjusted = []
-            if kps_target:
-                for kp in kps_target:
-                    kp.pt = (kp.pt[0] + roi_x_start, kp.pt[1] + roi_y_start)
-                    kps_target_adjusted.append(kp)
+            # Pastikan desc_target tidak None sebelum mengaksesnya
+            if kps_target and desc_target is not None:
+                for idx, kp in enumerate(kps_target):
+                    orig_kp_x = kp.pt[0] + roi_x_start
+                    orig_kp_y = kp.pt[1] + roi_y_start
+                    if x <= orig_kp_x < x + bw and y <= orig_kp_y < y + bh:
+                         if idx < len(desc_target):
+                            kp.pt = (orig_kp_x, orig_kp_y)
+                            kps_target_adjusted.append(kp)
+                         else: # Jarang terjadi, tapi jaga-jaga
+                            print(f"Warning: Keypoint index {idx} out of bounds for target descriptors (len={len(desc_target)}) in block.")
 
-            return kps_base_adjusted, desc_base, kps_target_adjusted, desc_target
-        # -------------------------------------------------------------
 
-        print(f"Submitting {blocks_x * blocks_y} blocks to ThreadPoolExecutor...")
-        futures = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count()) as executor: # Gunakan os.cpu_count()
+            # Penting: Filter deskriptor agar sesuai dengan keypoint yang sudah difilter
+            valid_desc_indices_base = [i for i, kp in enumerate(kps_base) if kp in kps_base_adjusted] if kps_base else []
+            valid_desc_indices_target = [i for i, kp in enumerate(kps_target) if kp in kps_target_adjusted] if kps_target else []
+
+            final_desc_base = desc_base[valid_desc_indices_base] if desc_base is not None and valid_desc_indices_base else None
+            final_desc_target = desc_target[valid_desc_indices_target] if desc_target is not None and valid_desc_indices_target else None
+
+            # Pastikan jumlah keypoint dan deskriptor cocok setelah filter
+            if final_desc_base is not None and len(kps_base_adjusted) != len(final_desc_base):
+                 print(f"Warning: Mismatch base keypoints ({len(kps_base_adjusted)}) and descriptors ({len(final_desc_base)}) after filtering.")
+              
+            if final_desc_target is not None and len(kps_target_adjusted) != len(final_desc_target):
+                 print(f"Warning: Mismatch target keypoints ({len(kps_target_adjusted)}) and descriptors ({len(final_desc_target)}) after filtering.")
+              
+            return kps_base_adjusted, final_desc_base, kps_target_adjusted, final_desc_target
+
+        # --- 5. Jalankan Deteksi (Paralel atau Sekuensial) ---
+        if use_multicore:
+            print(f"Using Multi-Core AKAZE block processing ({total_blocks} blocks)...")
+            futures = []
+            try:
+                # Gunakan max_workers dari os.cpu_count() atau batasi jika perlu
+                max_workers = os.cpu_count()
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    for i in range(blocks_x):
+                        for j in range(blocks_y):
+                            
+                            if stop_requested and stop_requested():
+                                for f in futures: f.cancel()
+                                executor.shutdown(wait=False, cancel_futures=True)
+                                return None, None # Keluar secepatnya
+
+                            x = i * block_w
+                            y = j * block_h
+                            bw = w - x if i == blocks_x - 1 else block_w
+                            bh = h - y if j == blocks_y - 1 else block_h
+
+                            # Submit tugas ke executor
+                            futures.append(executor.submit(compute_features_block, akaze, base_gray, target_gray, x, y, bw, bh, overlap, w, h))
+
+                    processed_count = 0
+                    for future in concurrent.futures.as_completed(futures):
+                        if stop_requested and stop_requested():
+                             for f in futures: f.cancel()
+                             return None, None
+                        try:
+                            kps_base, desc_base, kps_target, desc_target = future.result()
+                            processed_count += 1
+
+                            # Tambahkan hasil valid ke list
+                            if desc_base is not None and len(kps_base) > 0:
+                                keypoints_base_all.extend(kps_base)
+                                descriptors_base_list.append(desc_base)
+                            if desc_target is not None and len(kps_target) > 0:
+                                keypoints_target_all.extend(kps_target)
+                                descriptors_target_list.append(desc_target)
+
+                        except concurrent.futures.CancelledError:
+                            pass
+                        except Exception as exc:
+                            pass
+            except Exception as e:
+                 print(f"Error during ThreadPool execution: {e}")
+                 return None, None # Gagal jika executor error
+
+        else: # --- Mode Sekuensial ---
+            print(f"Using Single-Core AKAZE block processing ({total_blocks} blocks)...")
+            processed_count = 0
             for i in range(blocks_x):
                 for j in range(blocks_y):
-                    if stop_requested and stop_requested(): # Cek di dalam loop juga
-                        # Batalkan future yang belum selesai jika memungkinkan (opsional)
-                        for f in futures: f.cancel()
-                        executor.shutdown(wait=False, cancel_futures=True) # Coba hentikan thread
-                        return None, None
+                    if stop_requested and stop_requested():
+                        return None, None # Keluar
 
                     x = i * block_w
                     y = j * block_h
-                    bw = block_w # Lebar dasar
-                    bh = block_h # Tinggi dasar
-                    # Koreksi ukuran untuk blok di tepi kanan dan bawah
-                    if i == blocks_x - 1: bw = w - x
-                    if j == blocks_y - 1: bh = h - y
+                    bw = w - x if i == blocks_x - 1 else block_w
+                    bh = h - y if j == blocks_y - 1 else block_h
 
-                    # Lewatkan instance akaze yang sama
-                    futures.append(executor.submit(compute_features_block, akaze, x, y, bw, bh, overlap))
+                    try:
+                        # Panggil fungsi worker secara langsung
+                        kps_base, desc_base, kps_target, desc_target = compute_features_block(
+                            akaze, base_gray, target_gray, x, y, bw, bh, overlap, w, h
+                        )
+                        processed_count += 1
+                        
+                        # Tambahkan hasil valid ke list
+                        if desc_base is not None and len(kps_base) > 0:
+                            keypoints_base_all.extend(kps_base)
+                            descriptors_base_list.append(desc_base)
+                        if desc_target is not None and len(kps_target) > 0:
+                            keypoints_target_all.extend(kps_target)
+                            descriptors_target_list.append(desc_target)
 
-            processed_count = 0
-            for future in concurrent.futures.as_completed(futures):
-                if stop_requested and stop_requested():
-                     # Batalkan future lain jika memungkinkan
-                    for f in futures: f.cancel()
-                    # Tidak perlu shutdown executor lagi karena sudah di dalam context manager
-                    return None, None
-                try:
-                    kps_base, desc_base, kps_target, desc_target = future.result()
-                    processed_count += 1
-                    # print(f"Processed block {processed_count}/{len(futures)}") # Log progress per blok
-
-                    # --- Gunakan list.append untuk efisiensi ---
-                    if desc_base is not None and len(kps_base) > 0:
-                        keypoints_base_all.extend(kps_base)
-                        descriptors_base_list.append(desc_base)
-                    if desc_target is not None and len(kps_target) > 0:
-                        keypoints_target_all.extend(kps_target)
-                        descriptors_target_list.append(desc_target)
-                    # ------------------------------------------
-                except concurrent.futures.CancelledError:
-                    print("A task was cancelled.") # Handle jika pembatalan berhasil
-                except Exception as exc:
-                    print(f'Block processing generated an exception: {exc}')
-                    # Putuskan apakah akan melanjutkan atau gagal
-
-        print("Block computations finished. Aggregating descriptors...")
-        # --- Gabungkan deskriptor dari list setelah semua selesai ---
-        descriptors_base_all = None
-        if descriptors_base_list:
-            try:
-                descriptors_base_all = np.vstack(descriptors_base_list)
-            except ValueError as e:
-                 return None, None # Gagal jika tidak bisa stack
-
-        descriptors_target_all = None
-        if descriptors_target_list:
-            try:
-                descriptors_target_all = np.vstack(descriptors_target_list)
-            except ValueError as e:
-                 return None, None # Gagal jika tidak bisa stack
-        # ----------------------------------------------------------
-
-        # --- Lakukan matching menggunakan BFMatcher ---
-        if descriptors_base_all is None or descriptors_target_all is None or \
-           len(descriptors_base_all) == 0 or len(descriptors_target_all) == 0: # Tambah cek panjang > 0
-            return None, None
+                    except Exception as exc:
+                        pass
+      
+        # --- 6. Gabungkan Deskriptor ---
+        if not descriptors_base_list or not descriptors_target_list:
+             return None, None
 
         try:
-            bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False) # NORM_HAMMING untuk AKAZE
-            # Pastikan k <= jumlah deskriptor di set target jika jumlahnya < 2
-            k_val = min(2, len(descriptors_target_all))
+            descriptors_base_all = np.vstack(descriptors_base_list) if descriptors_base_list else None
+            descriptors_target_all = np.vstack(descriptors_target_list) if descriptors_target_list else None
+        except ValueError as e:
+             return None, None
+
+        # --- 7. Lakukan Matching ---
+        if descriptors_base_all is None or descriptors_target_all is None or \
+           len(keypoints_base_all) == 0 or len(keypoints_target_all) == 0 or \
+           len(descriptors_base_all) == 0 or len(descriptors_target_all) == 0:
+            print("Not enough keypoints or descriptors found for matching.")
+            return None, None
+
+        # Pastikan jumlah keypoint sesuai dengan jumlah deskriptor sebelum matching
+        if len(keypoints_base_all) != len(descriptors_base_all):
+            return None, None
+        if len(keypoints_target_all) != len(descriptors_target_all):
+            return None, None
+
+
+        base_points = None
+        target_points = None
+        try:
+            bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+            k_val = min(2, len(descriptors_target_all), len(descriptors_base_all)) # Juga cek base
+
+            good_matches = []
             if k_val < 2:
-                 # Lakukan pencocokan tunggal jika k=1
-                 matches_single = bf.match(descriptors_base_all, descriptors_target_all)
-                 # Konversi ke format list[DMatch] agar ratio test bisa dilewati
-                 good_matches = matches_single
+                 matches_raw = bf.match(descriptors_base_all, descriptors_target_all)
+                 good_matches = matches_raw
             else:
-                matches = bf.knnMatch(descriptors_base_all, descriptors_target_all, k=k_val)
-                good_matches = []
-                ratio_thresh = akaze_config.get("ratio_threshold", 0.75)
-                for match_pair in matches:
-                    # Pastikan match_pair berisi cukup elemen (k=2)
-                    if len(match_pair) == 2:
+                # Lakukan KNN Match
+                matches_raw = bf.knnMatch(descriptors_base_all, descriptors_target_all, k=k_val)
+
+                # Terapkan Ratio Test Lowe
+                ratio_thresh = float(akaze_config.get("ratio_threshold", 0.75))
+                for match_pair in matches_raw:
+                    if len(match_pair) == k_val:
                         m, n = match_pair
                         if m.distance < ratio_thresh * n.distance:
                             good_matches.append(m)
-                    # Jika k=1 (misal karena target desc < 2), tidak bisa lakukan ratio test
-                    # Mungkin perlu logika berbeda jika k=1 terjadi, tapi untuk sekarang kita abaikan
+                
+            # --- 8. Ekstrak titik-titik yang cocok ---
+            min_matches_req = 4
+            if len(good_matches) >= min_matches_req:
+                try:
+                    base_points_list = []
+                    target_points_list = []
+                    valid_good_matches = []
+                    for m in good_matches:
+                        if m.queryIdx < len(keypoints_base_all) and m.trainIdx < len(keypoints_target_all):
+                            base_points_list.append(keypoints_base_all[m.queryIdx].pt)
+                            target_points_list.append(keypoints_target_all[m.trainIdx].pt)
+                            valid_good_matches.append(m)
+                        else:
+                            pass
 
+                    if len(valid_good_matches) >= min_matches_req:
+                        base_points = np.float32(base_points_list).reshape(-1, 1, 2)
+                        target_points = np.float32(target_points_list).reshape(-1, 1, 2)
+                    else:
+                         print(f"Not enough valid matches remaining ({len(valid_good_matches)} < {min_matches_req}) after index check.")
+
+
+                except IndexError as e: # Seharusnya sudah ditangani oleh cek di atas, tapi jaga-jaga
+                    print(f"Error extracting points (IndexError): {e}. Match indices might be invalid.")
+                    base_points = None; target_points = None
+                except Exception as e:
+                     print(f"Error extracting points: {e}")
+                     base_points = None; target_points = None
+            else:
+                print(f"Not enough good matches found ({len(good_matches)} < {min_matches_req}) to estimate transform.")
+
+
+        except cv2.error as cv_err:
+             print(f"OpenCV Error during matching or point extraction: {cv_err}")
+             base_points = None; target_points = None
         except Exception as e:
-            return None, None
-        # ---------------------------------------------
+            import traceback
+            print(f"Unexpected error during matching/point extraction: {e}\n{traceback.format_exc()}")
+            base_points = None; target_points = None
 
-        # --- Ekstrak titik-titik yang cocok ---
-        if len(good_matches) < 4: # Butuh minimal 4 poin untuk sebagian besar estimasi transformasi
-             return None, None
-
-        try:
-            base_points = np.float32([keypoints_base_all[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2) # Reshape untuk OpenCV
-            target_points = np.float32([keypoints_target_all[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2) # Reshape untuk OpenCV
-            
-        except IndexError as e:
-             # Coba print beberapa indeks untuk debug
-             # for i, m in enumerate(good_matches[:5]): print(f"Match {i}: qIdx={m.queryIdx}, tIdx={m.trainIdx}")
-             return None, None
-        except Exception as e:
-             return None, None
-        # -----------------------------------
 
         return base_points, target_points
         
@@ -337,11 +418,11 @@ class AKAZEAlgorithm:
 
         # Hitung matriks transformasi
         if transformation_type == 'affine':
-            matrix, mask = cv2.estimateAffine2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=ransac_threshold)
+            matrix, mask = cv2.estimateAffine2D(target_points, base_points, method=cv2.USAC_MAGSAC, ransacReprojThreshold=ransac_threshold)
         elif transformation_type in ['similarity', 'euclidean']:
-            matrix, mask = cv2.estimateAffinePartial2D(target_points, base_points, method=cv2.RANSAC, ransacReprojThreshold=ransac_threshold)
+            matrix, mask = cv2.estimateAffinePartial2D(target_points, base_points, method=cv2.USAC_MAGSAC, ransacReprojThreshold=ransac_threshold)
         elif transformation_type == 'homography':
-            matrix, mask = cv2.findHomography(target_points, base_points, cv2.RANSAC, ransac_threshold)
+            matrix, mask = cv2.findHomography(target_points, base_points, cv2.USAC_MAGSAC, ransac_threshold)
         else:
             raise ValueError(language_config.UNRECOGNIZED_TRANSFORMATION)
 
@@ -411,7 +492,7 @@ def main(db_path, update_progress=None, batch_size=8, stop_requested=None, singl
     
     # Dapatkan semua path gambar
     if single_process:
-        image_paths = processor.get_all_image_paths_for_single_process()
+        image_paths = get_all_image_paths_for_single_process(db_path)
         processor.hdf5_path = "database/align/aligned_images.h5"
     else:
         if batch_id is None:

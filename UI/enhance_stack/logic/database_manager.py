@@ -1,3 +1,5 @@
+# database_manager.py
+
 import os
 import sqlite3
 
@@ -14,7 +16,8 @@ class DatabaseManager:
             db_path: The path to the database file.
         """
         self.db_path = db_path
-        # self.is_table_checked = False # Consider removing if create_database is always called early
+        # Pastikan database dan tabel dibuat saat inisialisasi
+        self.create_database()
 
     # --- 1. Initialization & Setup ---
 
@@ -26,52 +29,70 @@ class DatabaseManager:
             return conn
         except sqlite3.Error as e:
             print(f"Database connection error to {self.db_path}: {e}")
-            # Consider raising the exception or returning None based on desired error handling
             raise # Re-raise the exception for calling code to handle
+
+    def _add_column_if_not_exists(self, cursor, table_name, column_name, column_def):
+        """Helper to add a column if it doesn't exist."""
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        columns = [info[1] for info in cursor.fetchall()]
+        if column_name not in columns:
+            print(f"Adding column '{column_name}' to table '{table_name}'...")
+            try:
+                cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
+                print(f"Column '{column_name}' added successfully.")
+            except sqlite3.Error as e:
+                print(f"Error adding column {column_name} to {table_name}: {e}")
+                # Decide if this is critical - maybe raise? For now, just print.
+
 
     def create_database(self):
         """
-        Creates the necessary tables ('images', 'single_process_image',
-        'batch_process', 'batch_process_image') in the database if they
-        don't exist.
+        Creates the necessary tables and ensures the 'is_reference' column exists
+        in 'single_process_image'.
         """
+        db_dir_exists = True
         if not os.path.exists(self.db_path):
-            print("Checking database...")
             print("Database not found. Creating database...")
             db_dir = os.path.dirname(self.db_path)
             if db_dir:
                 os.makedirs(db_dir, exist_ok=True)
-        else:
-            print("Database already exists.")
+            db_dir_exists = False # Database is newly created
+        # else:
+            # print("Database exists. Checking tables...") # Optional: reduce verbosity
 
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
 
-                # Create images table
+                # Create images table (if not exists)
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='images';")
                 if not cursor.fetchone():
                     cursor.execute("""
                         CREATE TABLE images (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            path TEXT NOT NULL UNIQUE -- Ensure image paths are unique in this table
+                            path TEXT NOT NULL UNIQUE
                         )
                     """)
-                    print("Table 'images' has been created.")
+                    print("Table 'images' created.")
 
-                # Create single_process_image table
+                # Create single_process_image table (if not exists)
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='single_process_image';")
                 if not cursor.fetchone():
                     cursor.execute("""
                         CREATE TABLE single_process_image (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
                             image_id_single INTEGER NOT NULL UNIQUE,
+                            is_reference INTEGER NOT NULL DEFAULT 0, -- TAMBAHKAN KOLOM INI
                             FOREIGN KEY (image_id_single) REFERENCES images (id) ON DELETE CASCADE
                         )
                     """)
-                    print("Table 'single_process_image' has been created.")
+                    print("Table 'single_process_image' created with 'is_reference' column.")
+                else:
+                     # Jika tabel sudah ada, pastikan kolom is_reference ada
+                     self._add_column_if_not_exists(cursor, 'single_process_image', 'is_reference', 'INTEGER NOT NULL DEFAULT 0')
 
-                # Create batch_process table
+
+                # --- Create batch tables (unchanged) ---
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='batch_process';")
                 if not cursor.fetchone():
                     cursor.execute("""
@@ -80,9 +101,8 @@ class DatabaseManager:
                             batch_name TEXT NOT NULL UNIQUE
                         );
                     """)
-                    print("Table 'batch_process' has been created.")
+                    print("Table 'batch_process' created.")
 
-                # Create batch_process_image table
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='batch_process_image';")
                 if not cursor.fetchone():
                     cursor.execute("""
@@ -95,10 +115,11 @@ class DatabaseManager:
                             UNIQUE(batch_id, image_id_batch)
                         );
                     """)
-                    print("Table 'batch_process_image' has been created.")
+                    print("Table 'batch_process_image' created.")
+
                 conn.commit() # Commit changes after all table checks/creations
         except sqlite3.Error as e:
-            print(f"Error during database/table creation: {e}")
+            print(f"Error during database/table creation or modification: {e}")
 
 
     # --- 2. Helper Methods (Internal) ---
@@ -113,26 +134,22 @@ class DatabaseManager:
         if result:
             return result[0]  # Return existing image_id
         else:
-            # Ensure path uniqueness is handled (added UNIQUE to images table)
             try:
                 cursor.execute("INSERT INTO images (path) VALUES (?)", (image_path,))
-                return cursor.lastrowid # Return new image_id
+                return cursor.lastrowid
             except sqlite3.IntegrityError:
-                 # Should not happen if check is done first, but handle race conditions
-                 print(f"Race condition or error: Image path '{image_path}' likely already inserted.")
-                 cursor.execute("SELECT id FROM images WHERE path = ?", (image_path,))
-                 result = cursor.fetchone()
-                 if result:
+                print(f"Race condition or error: Image path '{image_path}' likely already inserted.")
+                cursor.execute("SELECT id FROM images WHERE path = ?", (image_path,))
+                result = cursor.fetchone()
+                if result:
                     return result[0]
-                 else:
+                else:
                     # This case indicates a more serious issue
                     raise Exception(f"Could not get or create image ID for {image_path} after integrity error.")
 
 
-    # --- 3. Batch Operations ---
-
-    # --- 3.a Batch Creation & Modification ---
-
+    # --- 3. Batch Operations (Unchanged from your original code) ---
+    # ... (Keep all batch methods: create_new_batch, batch_process_save_image_path, etc.) ...
     def create_new_batch(self, batch_name):
         """
         Creates a new batch entry in the 'batch_process' table.
@@ -187,10 +204,8 @@ class DatabaseManager:
                     try:
                         image_id = self._get_or_create_image_id(cursor, image_path)
 
-                        # Check if already linked to this batch
                         cursor.execute(sql_check, (batch_id, image_id))
                         if cursor.fetchone():
-                            # print(f"Image {image_path} already linked to batch ID {batch_id}. Skipping.")
                             continue
 
                         # Insert the link
@@ -199,24 +214,20 @@ class DatabaseManager:
 
                     except sqlite3.IntegrityError as e:
                         print(f"Skipping duplicate link or integrity error for image {image_path} in batch {batch_id}: {e}")
-                        # No rollback needed here as each insert is separate attempt within loop
-                    except Exception as e: # Catch other potential errors for a single image
+                    except Exception as e:
                         print(f"An unexpected error occurred for image {image_path} in batch {batch_id}: {e}")
-                        # Decide if you want to stop the whole batch or just skip the image
 
                 conn.commit() # Commit all successful insertions at the end
                 if added_count > 0:
                     print(f"Added {added_count} new image links to batch with ID {batch_id}")
                 else:
-                    print(f"No new image links added to batch {batch_id} (all might be duplicates).")
+                    pass
 
         except sqlite3.Error as e:
-             print(f"Database error during batch image save for batch {batch_id}: {e}")
-             return 0 # Indicate failure
+                 print(f"Database error during batch image save for batch {batch_id}: {e}")
+                 return 0 # Indicate failure
 
         return added_count
-
-    # --- 3.b Batch Deletion ---
 
     def batch_process_delete_image(self, batch_id, image_id):
         """
@@ -234,9 +245,7 @@ class DatabaseManager:
                 cursor.execute(sql, (batch_id, image_id))
                 conn.commit()
                 if cursor.rowcount > 0:
-                    print(f"Deleted link for image ID {image_id} from batch ID {batch_id}")
-                else:
-                    print(f"No link found to delete for image ID {image_id} in batch ID {batch_id}")
+                    pass                
         except sqlite3.Error as e:
             print(f"Error deleting image link (Image ID: {image_id}, Batch ID: {batch_id}): {e}")
 
@@ -256,7 +265,7 @@ class DatabaseManager:
                 cursor.execute(sql, (batch_id,))
                 conn.commit()
                 if cursor.rowcount > 0:
-                    print(f"Deleted batch ID {batch_id}. Associated links should be removed by CASCADE.")
+                    pass
                 else:
                     print(f"Batch ID {batch_id} not found for deletion.")
         except sqlite3.Error as e:
@@ -279,8 +288,6 @@ class DatabaseManager:
             print(f"Error deleting all batches: {e}")
 
 
-    # --- 3.c Batch Retrieval ---
-
     def get_all_batch_names(self):
         """
         Returns a list of all batch names from the 'batch_process' table.
@@ -292,7 +299,6 @@ class DatabaseManager:
                 cursor.execute(sql)
                 return [row[0] for row in cursor.fetchall()]
         except sqlite3.Error as e:
-            print(f"Error retrieving batch names: {e}")
             return []
 
     def get_all_batch_ids(self):
@@ -306,7 +312,6 @@ class DatabaseManager:
                 cursor.execute(sql)
                 return [row[0] for row in cursor.fetchall()]
         except sqlite3.Error as e:
-            print(f"Error retrieving batch IDs: {e}")
             return []
 
     def get_images_by_batch(self, batch_id):
@@ -318,7 +323,7 @@ class DatabaseManager:
             FROM images i
             JOIN batch_process_image bpi ON i.id = bpi.image_id_batch
             WHERE bpi.batch_id = ?
-            ORDER BY i.path -- Optional ordering
+            ORDER BY i.id -- Or i.path, or keep order from insertion
         """
         try:
             with self._get_connection() as conn:
@@ -326,7 +331,6 @@ class DatabaseManager:
                 cursor.execute(sql, (batch_id,))
                 return [row[0] for row in cursor.fetchall()]
         except sqlite3.Error as e:
-            print(f"Error retrieving images for batch ID {batch_id}: {e}")
             return []
 
     def get_batch_process_image_paths(self, batch_id=None):
@@ -350,7 +354,7 @@ class DatabaseManager:
                         FROM images i
                         JOIN batch_process_image bpi ON i.id = bpi.image_id_batch
                         WHERE bpi.batch_id = ?
-                        ORDER BY i.path -- Optional
+                        ORDER BY i.id -- Or i.path
                     """
                     cursor.execute(sql, (batch_id,))
                 else:
@@ -363,9 +367,7 @@ class DatabaseManager:
                     cursor.execute(sql)
                 return [row[0] for row in cursor.fetchall()]
         except sqlite3.Error as e:
-            print(f"Error retrieving batch process image paths (Batch ID: {batch_id}): {e}")
             return []
-
 
     # --- 4. Single Process Operations ---
 
@@ -375,6 +377,7 @@ class DatabaseManager:
         """
         Saves an image path for single processing. Ensures the image exists in
         'images' table and links it uniquely in 'single_process_image'.
+        If this is the *first* image added, it becomes the reference by default.
 
         Args:
             image_path: The path of the image to save.
@@ -382,111 +385,252 @@ class DatabaseManager:
         Returns:
             True if the link was newly created, False if it already existed or an error occurred.
         """
-        sql_check = "SELECT 1 FROM single_process_image WHERE image_id_single = ?"
-        sql_insert = "INSERT INTO single_process_image (image_id_single) VALUES (?)"
+        sql_check_link = "SELECT 1 FROM single_process_image WHERE image_id_single = ?"
+        sql_insert_link = "INSERT INTO single_process_image (image_id_single, is_reference) VALUES (?, ?)"
+        sql_count_single = "SELECT COUNT(*) FROM single_process_image"
+
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 try:
                     image_id = self._get_or_create_image_id(cursor, image_path)
+                    if not image_id: # Handle case where image ID couldn't be obtained
+                        raise Exception(f"Failed to get or create image ID for {image_path}")
 
                     # Check if already linked
-                    cursor.execute(sql_check, (image_id,))
+                    cursor.execute(sql_check_link, (image_id,))
                     if cursor.fetchone():
-                        # print(f"Image path already linked in single_process_image: {image_path}")
+                        conn.commit() # Commit image creation if it happened
                         return False
 
+                    # Check if this will be the first image in single process
+                    cursor.execute(sql_count_single)
+                    count = cursor.fetchone()[0]
+                    is_first = (count == 0)
+                    reference_flag = 1 if is_first else 0
+
                     # Insert the link
-                    cursor.execute(sql_insert, (image_id,))
+                    cursor.execute(sql_insert_link, (image_id, reference_flag))
                     conn.commit()
-                    print(f"Image path linked to single_process_image: {image_path}")
+                    if reference_flag:
+                        pass
+                    else:
+                        pass
                     return True
-                except sqlite3.IntegrityError as e: # Handles UNIQUE constraint
-                    print(f"Error linking image {image_path} to single process (likely duplicate): {e}")
+
+                except sqlite3.IntegrityError as e: # Handles UNIQUE constraint on image_id_single
+                    conn.rollback()
+                    return False
+                except Exception as e: # Catch other errors like failing _get_or_create_image_id
                     conn.rollback()
                     return False
         except sqlite3.Error as e:
-            print(f"Database error during single process save for {image_path}: {e}")
             return False
+
+    # --- BARU: Fungsi untuk set gambar referensi ---
+    def set_single_process_reference(self, image_path):
+        """
+        Sets the specified image as the single reference image.
+        Sets 'is_reference = 0' for all others in single_process_image.
+
+        Args:
+            image_path: The path of the image to set as reference.
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        sql_get_id = "SELECT id FROM images WHERE path = ?"
+        sql_reset_all = "UPDATE single_process_image SET is_reference = 0"
+        sql_set_one = "UPDATE single_process_image SET is_reference = 1 WHERE image_id_single = ?"
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                try:
+                    # 1. Dapatkan ID gambar dari path
+                    cursor.execute(sql_get_id, (image_path,))
+                    result = cursor.fetchone()
+                    if not result:
+                        return False
+                    image_id = result[0]
+
+                    # 2. Reset semua referensi (dalam transaksi)
+                    cursor.execute(sql_reset_all)
+
+                    # 3. Set referensi yang baru
+                    cursor.execute(sql_set_one, (image_id,))
+
+                    # Pastikan link untuk image_id ini ada di single_process_image
+                    if cursor.rowcount == 0:
+                        conn.rollback()
+                        return False
+
+                    conn.commit() # Commit jika semua berhasil
+                    return True
+
+                except sqlite3.Error as e:
+                    conn.rollback()
+                    return False
+        except sqlite3.Error as e:
+            return False
+
 
     def single_process_delete_path_images(self, image_paths):
         """
         Deletes links from 'single_process_image' for the given image paths.
         Does not delete the images from the main 'images' table.
+        Checks if the deleted image was the reference and potentially sets a new one.
 
         Args:
             image_paths: A list of image file paths whose links should be removed.
 
         Returns:
-            The number of links successfully deleted.
+            The number of links successfully deleted. Returns -1 on major error.
         """
         deleted_count = 0
         if not image_paths:
             return 0
 
-        # Prepare placeholders for the IN clause
-        placeholders = ",".join(["?"] * len(image_paths))
-        sql_get_ids = f"SELECT id FROM images WHERE path IN ({placeholders})"
-        sql_delete = "DELETE FROM single_process_image WHERE image_id_single = ?"
+        # Dapatkan ID dan status referensi dari path yang akan dihapus
+        placeholders = ','.join('?' for _ in image_paths)
+        sql_get_ids_to_delete = f"""
+            SELECT spi.image_id_single, spi.is_reference
+            FROM single_process_image spi
+            JOIN images i ON spi.image_id_single = i.id
+            WHERE i.path IN ({placeholders})
+        """
+
+        sql_delete_link = "DELETE FROM single_process_image WHERE image_id_single = ?"
+        sql_find_new_ref = "SELECT image_id_single FROM single_process_image ORDER BY id LIMIT 1" # Ambil ID terlama sebagai ref baru
+        sql_set_ref = "UPDATE single_process_image SET is_reference = 1 WHERE image_id_single = ?"
 
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                # Get image IDs for the paths
-                cursor.execute(sql_get_ids, image_paths)
-                image_ids = [row[0] for row in cursor.fetchall()]
+                try:
+                    # Dapatkan ID dan status referensi item yang akan dihapus
+                    cursor.execute(sql_get_ids_to_delete, image_paths)
+                    items_to_delete = cursor.fetchall() # List of (image_id, is_reference)
 
-                if image_ids:
-                    # Delete links one by one or use executemany
-                    # executemany is generally more efficient
-                    cursor.executemany(sql_delete, ((image_id,) for image_id in image_ids))
-                    deleted_count = cursor.rowcount # executemany updates rowcount cumulatively
+                    if not items_to_delete:
+                        print("No matching images found in single_process_image to delete.")
+                        return 0
+
+                    was_ref_deleted = False
+                    ids_to_delete = []
+                    for img_id, is_ref in items_to_delete:
+                        ids_to_delete.append(img_id)
+                        if is_ref == 1:
+                            was_ref_deleted = True
+
+                    # Hapus link dari single_process_image
+                    for img_id in ids_to_delete:
+                        cursor.execute(sql_delete_link, (img_id,))
+                        deleted_count += cursor.rowcount
+
+                    # Jika referensi dihapus dan masih ada item lain, set referensi baru
+                    if was_ref_deleted:
+                        cursor.execute("SELECT COUNT(*) FROM single_process_image")
+                        remaining_count = cursor.fetchone()[0]
+                        if remaining_count > 0:
+                            cursor.execute(sql_find_new_ref)
+                            new_ref_result = cursor.fetchone()
+                            if new_ref_result:
+                                new_ref_id = new_ref_result[0]
+                                cursor.execute(sql_set_ref, (new_ref_id,))
+                                print(f"Previous reference deleted. Set new reference to image ID: {new_ref_id}")
+
                     conn.commit()
-                else:
-                    pass
-                    # print("No matching images found in 'images' table for deletion from single process.")
+                    print(f"Successfully deleted {deleted_count} links from single_process_image.")
+                    return deleted_count
 
+                except sqlite3.Error as e:
+                    print(f"Database error during single process delete: {e}")
+                    conn.rollback()
+                    return -1 # Indicate error
         except sqlite3.Error as e:
-            print(f"Error deleting single process links: {e}")
-
-        return deleted_count
+            print(f"Database connection error during single process delete: {e}")
+            return -1 # Indicate error
 
 
     # --- 4.b Single Process Retrieval ---
     def get_single_process_image_paths(self):
         """
-        Retrieves image paths currently linked in 'single_process_image'.
+        Retrieves all image paths from 'single_process_image', ordered by
+        reference status first, then alphabetically by image path for non-references.
         """
+        # --- PERUBAHAN DI SINI ---
         sql = """
             SELECT i.path
             FROM images i
             JOIN single_process_image spi ON i.id = spi.image_id_single
-            ORDER BY i.path -- Optional
+            ORDER BY
+                spi.is_reference DESC, -- Referensi (is_reference=1) selalu di atas
+                i.path ASC             -- Urutkan sisanya (is_reference=0) berdasarkan nama file
         """
+        # -------------------------
         try:
             with self._get_connection() as conn:
+                # Tidak perlu row_factory di sini karena kita hanya ambil satu kolom (path)
                 cursor = conn.cursor()
                 cursor.execute(sql)
+                # Mengembalikan list of strings (paths)
                 return [row[0] for row in cursor.fetchall()]
         except sqlite3.Error as e:
             print(f"Error retrieving single process image paths: {e}")
             return []
 
-
-    # --- 5. General Image Operations ---
-
-    # --- 5.a General Retrieval ---
-    def get_all_image_paths(self):
+    def get_single_process_reference_image(self):
         """
-        Retrieves ALL unique image paths stored in the 'images' table,
-        regardless of whether they are linked to single or batch processing.
+        Retrieves the path of the current reference image, if any.
+        Returns: Path string or None.
         """
-        sql = "SELECT path FROM images ORDER BY path" # Optional ordering
+        sql = """
+            SELECT i.path
+            FROM images i
+            JOIN single_process_image spi ON i.id = spi.image_id_single
+            WHERE spi.is_reference = 1
+            LIMIT 1
+        """
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(sql)
-                return [row[0] for row in cursor.fetchall()]
+                result = cursor.fetchone()
+                return result[0] if result else None
         except sqlite3.Error as e:
-            print(f"Error retrieving all image paths: {e}")
-            return []
+            print(f"Error retrieving single process reference image: {e}")
+            return None
+
+
+    # --- 5. General Image Operations ---
+
+    def delete_image_path_from_all(self, image_path):
+        """
+        Deletes an image entry from the main 'images' table.
+        Due to CASCADE, this should remove links from 'single_process_image'
+        and 'batch_process_image' as well.
+
+        USE WITH CAUTION: This removes the image record completely.
+
+        Args:
+            image_path: The path of the image to delete entirely.
+
+        Returns:
+            True if deletion successful, False otherwise.
+        """
+        sql = "DELETE FROM images WHERE path = ?"
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(sql, (image_path,))
+                conn.commit()
+                if cursor.rowcount > 0:
+                    print(f"Successfully deleted image '{image_path}' and its associations (via CASCADE).")
+                    return True
+                else:
+                    print(f"Image path '{image_path}' not found in 'images' table for deletion.")
+                    return False
+        except sqlite3.Error as e:
+            print(f"Error deleting image '{image_path}' from database: {e}")
+            return False

@@ -1,8 +1,8 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QListWidget, QAbstractItemView,
                              QMenu, QLabel, QStackedLayout, QMessageBox, QListWidgetItem,
                              )
-from PyQt6.QtCore import Qt, pyqtSignal, QUrl, QEvent # Tambah QUrl, QEvent
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QMouseEvent
+from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QVariant# Tambah QUrl, QEvent
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QColor
 import os
 from UI.enhance_stack.logic.database_manager import DatabaseManager
 from UI.resources.animation.animation_manager import StackedWidgetAnimator
@@ -16,6 +16,7 @@ class RightPanel(QWidget):
     """Right panel containing a list of images."""
     previewImageRequested = pyqtSignal(list)
     imagesDropped = pyqtSignal(list)
+    referenceImageChanged = pyqtSignal(str)
     
     def __init__(self, database_manager: DatabaseManager):
         super().__init__()
@@ -45,11 +46,8 @@ class RightPanel(QWidget):
         except NameError:
             supported_formats_text = "jpg, png, tiff" 
         except Exception as e:
-            print(f"Error processing SUPPORTED_FORMATS keys: {e}") # Pesan error lebih spesifik
-            supported_formats_text = "(Gagal memuat format)"
+            supported_formats_text = "(Failed to load format)"
 
-
-        # Buat string HTML (tidak perlu diubah, hanya nilai variabel yang berbeda)
         html_text = f"""
         <p align="center">
             {language_config.PLACHOLDER_DRAG_AND_DROP_IMPORT_IMAGES}<br><br>
@@ -57,7 +55,6 @@ class RightPanel(QWidget):
             {supported_formats_text}
         </p>
         """
-        # Buat QLabel kosong terlebih dahulu
         self.placeholder_label = QLabel()
         self.placeholder_label.setTextFormat(Qt.TextFormat.RichText)
         self.placeholder_label.setText(html_text)
@@ -93,8 +90,8 @@ class RightPanel(QWidget):
         
     def load_image_paths(self):
         """
-        Muat path gambar dari DB, tampilkan nama file (RATA TENGAH),
-        simpan path lengkap, dan update placeholder.
+        Muat path gambar dari DB (sudah diurutkan oleh DB), tampilkan nama file (RATA TENGAH),
+        simpan path lengkap, pulihkan seleksi, dan update placeholder.
         """
         try:
             full_image_paths = self.db_manager.get_single_process_image_paths()
@@ -102,28 +99,27 @@ class RightPanel(QWidget):
             print(f"Error loading image paths: {e}")
             full_image_paths = []
 
-        current_selection_paths = self.get_select_image_list() # Ambil path lengkap seleksi lama
+        current_selection_paths = self.get_select_image_list()
 
         self.image_list.clear()
 
         for full_path in full_image_paths:
-            if not full_path: continue
-            filename = os.path.basename(full_path)
-            item = QListWidgetItem(filename) 
-            item.setData(Qt.ItemDataRole.UserRole, full_path) 
-            item.setToolTip(full_path)
+            if not full_path or not os.path.exists(full_path):
+                continue
 
-            # --- TAMBAHKAN BARIS INI ---
-            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter) 
-            # --------------------------
+            filename = os.path.basename(full_path)
+            item = QListWidgetItem(filename)
+            item.setData(Qt.ItemDataRole.UserRole, full_path)
+            item.setToolTip(full_path)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
             self.image_list.addItem(item)
 
-            # Pulihkan seleksi jika path lengkap cocok
             if full_path in current_selection_paths:
-                 item.setSelected(True)
-
+                item.setSelected(True)
+                
         self._update_placeholder_visibility()
+        self.image_list.setStyleSheet(LIST_IMAGE_DATA_SPECIFIC_ITEM if self.image_list.count() > 0 else LIST_IMAGE_DATA_SINGLE_MODE)
 
 
     def _update_placeholder_visibility(self):
@@ -155,9 +151,8 @@ class RightPanel(QWidget):
             if has_image:
                 should_accept = True
 
-        # Atur properti berdasarkan validitas drag (GUNAKAN STRING)
         new_state_str = "true" if should_accept else "false"
-        current_state_str = self.property("acceptingDrop") # Properti akan dibaca sebagai string jika diset sebagai string
+        current_state_str = self.property("acceptingDrop")
 
         # Periksa apakah state *perlu* diubah
         if new_state_str != current_state_str:
@@ -171,17 +166,6 @@ class RightPanel(QWidget):
             event.acceptProposedAction()
         else:
             event.ignore()
-
-    def dragLeaveEvent(self, event: QDropEvent): # Tipe event QDropEvent
-        """Dipanggil saat drag keluar."""
-        print("Drag Leave Detected") # DEBUG
-        # Selalu set properti ke "false" saat drag keluar JIKA sebelumnya "true"
-        if self.property("acceptingDrop") == "true":
-            self.setProperty("acceptingDrop", "false") # SET DENGAN STRING
-            self.style().unpolish(self)
-            self.style().polish(self)
-            self.update() # TAMBAHKAN UPDATE
-        super().dragLeaveEvent(event)
 
     def dragMoveEvent(self, event: QDragEnterEvent):
          """Dipanggil saat drag bergerak di atas RightPanel."""
@@ -247,13 +231,25 @@ class RightPanel(QWidget):
         return super().eventFilter(source, event)
     
             
-    def set_to_image_reference(self, item):
-        """Move the selected item to the top of the list."""
-        row = self.image_list.row(item)
-        if row > 0:
-            current_item = self.image_list.takeItem(row)
-            self.image_list.insertItem(0, current_item)
-            self.image_list.setCurrentItem(current_item)
+    def set_to_image_reference(self, item: QListWidgetItem):
+        """
+        Sets the selected item as the reference image in the database
+        and reloads the list.
+        """
+        if not item:
+            return
+
+        full_path = item.data(Qt.ItemDataRole.UserRole)
+        if not full_path or not isinstance(full_path, str):
+            return
+
+        success = self.db_manager.set_single_process_reference(full_path)
+
+        if success:
+            self.load_image_paths()
+            self.referenceImageChanged.emit(full_path)
+        else:
+            QMessageBox.warning(self, "Error", f"Could not set '{os.path.basename(full_path)}' as the reference image.")
 
 
     def contextMenuEvent(self, event):

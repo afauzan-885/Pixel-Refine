@@ -14,10 +14,11 @@ from UI.enhance_stack.algorithm.denoising.Median import running_median
 from UI.enhance_stack.algorithm.denoising.Similarity import running_similarity
 from UI.enhance_stack.algorithm.denoising.Similarity_V2 import running_similarity_v2
 from UI.enhance_stack.algorithm.super_resolution.Interpolation import running_interpolation
+from UI.enhance_stack.components.algorithm_list import get_algorithm_options
 from UI.enhance_stack.components.batch_page_layout.image_batch_management import handle_add_image_to_batch
 from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, create_thumbnail_placeholder, update_thumbnail
 from UI.enhance_stack.logic.workflow_process import ImageViewer, get_last_image
-from UI.resources.stylesheet.stylesheet import SCROLL_AREA
+from UI.resources.stylesheet.stylesheet import DROPDOWN_BOX, SCROLL_AREA, TOGGLE_SWITCH_STYLE
 from UI.settings.General.Language import language_config
 from config import CACHE
 
@@ -240,45 +241,48 @@ class CombinedPanel(QWidget):
             QMessageBox.warning(self, "Caution", language_config.NOT_IMAGE_PREVIEW)
     
     def dropdown_box_control(self):
+        override_style = """
+                        QComboBox {
+                            background-color: white;
+                            min-height: 10px;
+                            min-width: 100px;
+                        }
+                        """
+
+        # --- Alignment Dropdown ---
+        alignment_options = get_algorithm_options("alignment") # Ambil data
         algorithm_alignment = QComboBox()
-        alignment_algorithms = [
-            ("None", language_config.NONE_ALIGNMENT_DESCRIPTION),
-            ("Farneback Optical Flow", language_config.FARNEBACK_DESCRIPTION),
-            ("AKAZE", language_config.AKAZE_DESCRIPTION),
-            ("ORB", language_config.ORB_DESCRIPTION)
-        ]
-        for name, _ in alignment_algorithms:
+        algorithm_alignment.setStyleSheet(DROPDOWN_BOX + override_style)
+        for name, _ in alignment_options:
             algorithm_alignment.addItem(name)
         algorithm_alignment.setVisible(False)
 
+        # --- Super Resolution Dropdown ---
+        super_res_options = get_algorithm_options("super_resolution") # Ambil data
         super_res_combo = QComboBox()
-        super_res_algorithms = [
-            ("None", language_config.NONE_SUPER_RESOLUTION_DESCRIPTION),
-            ("Interpolation", language_config.INTERPOLATION_DESCRIPTION)
-        ]
-        for name, _ in super_res_algorithms:
+        super_res_combo.setStyleSheet(DROPDOWN_BOX + override_style)
+        for name, _ in super_res_options:
             super_res_combo.addItem(name)
         super_res_combo.setVisible(False)
 
+        # --- Denoising Dropdown ---
+        denoising_options = get_algorithm_options("denoising") # Ambil data
         denoising_combox = QComboBox()
-        denoising_algorithms = [
-            ("None", language_config.NONE_DENOISING_DESCRIPTION),
-            ("Average", language_config.AVERAGE_DESCRIPTION),
-            ("Median", language_config.MEDIAN_DESCRIPTION),
-            ("Similarity", language_config.SIMILARITY_DESCRIPTION),
-            ("Similarity V2", language_config.SIMILARITY_MOTION_V2_DESCRIPTION)
-        ]
-        for name, _ in denoising_algorithms:
+        denoising_combox.setStyleSheet(DROPDOWN_BOX + override_style)
+        for name, _ in denoising_options:
             denoising_combox.addItem(name)
         denoising_combox.setVisible(False)
-        
+
+        # --- Simpan comboboxes dan atur state awal ---
         self.comboboxes['alignment'] = algorithm_alignment
         self.comboboxes['super_resolution'] = super_res_combo
         self.comboboxes['denoising'] = denoising_combox
-        
+
         algorithm_alignment.setCurrentText(self.initial_state.get('alignment_algo', "None"))
         super_res_combo.setCurrentText(self.initial_state.get('super_resolution_algo', "None"))
         denoising_combox.setCurrentText(self.initial_state.get('denoising_algo', "None"))
+
+        # --- Hubungkan sinyal ---
         algorithm_alignment.currentIndexChanged.connect(
             lambda index: self.execute_algorithm('alignment', algorithm_alignment.currentText())
         )
@@ -304,7 +308,6 @@ class CombinedPanel(QWidget):
         if is_checked:
             superres_checkbox.blockSignals(True)
             superres_checkbox.setChecked(False)
-            superres_checkbox.setEnabled(False)
             superres_checkbox.blockSignals(False)
         else:
             superres_checkbox.setEnabled(True)
@@ -317,7 +320,6 @@ class CombinedPanel(QWidget):
         if is_checked:
             denoising_checkbox.blockSignals(True)
             denoising_checkbox.setChecked(False)
-            denoising_checkbox.setEnabled(False)
             denoising_checkbox.blockSignals(False)
         else: 
             denoising_checkbox.setEnabled(True)
@@ -395,13 +397,13 @@ class CombinedPanel(QWidget):
         if keep_edge_cb: keep_edge_cb.setEnabled(is_alignment_checked and not is_crop_edge_checked) # Hanya aktif jika align TAPI crop edge F
 
     def process_all_batch(self):
-        """Jalankan semua algoritma yang dipilih."""
+        """Jalankan semua algoritma yang dipilih HANYA JIKA checkbox terkait dicentang."""
         actions = {
             'alignment': {
                 "Farneback Optical Flow": lambda: running_farneback_optical_flow(self, single_process=False, batch_id=self.batch_id),
                 "AKAZE": lambda: running_akaze(self, single_process=False, batch_id=self.batch_id),
                 "ORB": lambda: running_orb(self, single_process=False, batch_id=self.batch_id),
-            }, 
+            },
             'super_resolution': {
                 "Interpolation": lambda: running_interpolation(self, single_process=False, batch_id=self.batch_id),
             },
@@ -413,10 +415,23 @@ class CombinedPanel(QWidget):
             }
         }
 
+        # --- Tambahkan pemetaan dari kategori ke kunci checkbox ---
+        category_to_checkbox_key = {
+            'alignment': language_config.PARAMETER_BATCH_ALIGNMENT,
+            'super_resolution': language_config.PARAMETER_BATCH_SUPER_RESOLUTION,
+            'denoising': language_config.PARAMETER_BATCH_DENOISING
+        }
+        # -------------------------------------------------------
+
         for category, algo in self.selected_algorithms.items():
-            if algo and algo in actions.get(category, {}):
-                actions[category][algo]()
-            
+            if algo and algo != "None" and category in actions and algo in actions[category]:
+                checkbox_key = category_to_checkbox_key.get(category)
+                if checkbox_key:
+                    checkbox = self.checkboxes.get(checkbox_key)
+                    if checkbox and checkbox.isChecked():
+                        print(f"Executing {category} algorithm: {algo} because checkbox is checked.") # Debug log
+                        actions[category][algo]() # Jalankan aksi HANYA jika checkbox 
+    
     def create_parameter_panel(self):
         """
         Buat panel parameter yang berisi combo box dan checkbox.
@@ -473,7 +488,8 @@ class CombinedPanel(QWidget):
             checkbox_layout.setSpacing(5)
 
             option_checkbox = QCheckBox()
-            option_label = ClickableLabel(text) 
+            option_checkbox.setStyleSheet(TOGGLE_SWITCH_STYLE)
+            option_label = ClickableLabel(text)
             option_label.setWordWrap(True)
             option_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             option_label.clicked.connect(option_checkbox.toggle)
@@ -485,11 +501,9 @@ class CombinedPanel(QWidget):
             initial_checked = self.initial_state.get(key_for_state, False)
             option_checkbox.setChecked(initial_checked)
 
-
             # --- PERUBAHAN KONEKSI SINYAL ---
             current_key = text
             option_label.clicked.connect(lambda key=current_key: self._trigger_exclusive_handler(key))
-
             # Hubungkan toggle checkbox ke fungsi perantara
             option_checkbox.toggled.connect(lambda checked, key=current_key: self._trigger_exclusive_handler(key))
 
@@ -507,7 +521,6 @@ class CombinedPanel(QWidget):
         scroll_option_layout.setWidgetResizable(True)
         scroll_option_layout.setWidget(option_widget)
         scroll_option_layout.setStyleSheet(SCROLL_AREA)
-
 
         parameter_layout.addLayout(algorithm_layout, 1)
         parameter_layout.addWidget(scroll_option_layout, 1)

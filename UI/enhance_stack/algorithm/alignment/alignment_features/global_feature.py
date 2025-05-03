@@ -12,6 +12,46 @@ from UI.settings.General.Language import language_config
 
 
 # ====================== Load and Saving Process ====================== #
+def get_all_image_paths_for_single_process(db_path: str)-> list:
+        """
+    Retrieves all image paths for single process from the specified database,
+    ORDERED by reference status first, then alphabetically by image path.
+
+    Args:
+        db_path: The full path to the SQLite database file.
+
+    Returns:
+        A list of image paths in the correct order, or an empty list on error.
+    """
+        try:
+            # Validasi apakah path ada sebelum koneksi
+            if not os.path.isfile(db_path):
+                return []
+
+            with sqlite3.connect(db_path) as conn:
+                cursor = conn.cursor()
+                sql_query = """
+                    SELECT i.path
+                    FROM images i
+                    JOIN single_process_image spi ON i.id = spi.image_id_single
+                    ORDER BY
+                        spi.is_reference DESC, -- Referensi (is_reference=1) selalu di atas
+                        i.path ASC             -- Urutkan sisanya (is_reference=0) berdasarkan nama file
+                """
+                # ------------------------------------
+                cursor.execute(sql_query)
+                image_paths = [row[0] for row in cursor.fetchall()]
+
+                if not image_paths:
+                    # Logika alternatif: misalnya, tambahkan pesan ke log atau abaikan
+                    pass  # Tidak melakukan apa-apa jika tidak ada path yang ditemukan
+                return image_paths
+
+        except sqlite3.Error as e:
+            return [] 
+        except Exception as e:
+            return []
+        
 def load_images_from_paths(image_paths, stop_requested=None):
         """
         Loads images from a list of image paths using multithreading.

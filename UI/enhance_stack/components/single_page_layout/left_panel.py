@@ -4,6 +4,7 @@ from PyQt6.QtWidgets import (
     QLabel, QComboBox, QStackedWidget,
 )
 from PyQt6.QtCore import Qt
+from UI.enhance_stack.components.algorithm_list import get_algorithm_descriptions, get_algorithm_names, get_algorithm_options, get_category_display_name
 from UI.enhance_stack.components.single_page_layout.parameter_pages import ParameterPages
 from UI.resources.stylesheet.stylesheet import DROPDOWN_BOX
 from UI.settings.General.Language import language_config
@@ -53,87 +54,70 @@ class LeftPanel(QWidget):
         parameter_panel_layout.setContentsMargins(10, 5, 0, 0)
         parameter_panel_layout.setSpacing(0)
 
-        # Buat widget untuk left_panel
         left_panel_widget = QWidget()
-        left_panel_layout = QVBoxLayout(left_panel_widget) 
-        left_panel_layout.setContentsMargins(0, 0, 0, 0) 
+        left_panel_layout = QVBoxLayout(left_panel_widget)
+        left_panel_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Dropdown untuk pengaturan parameter
+        # --- Dropdown Alignment ---
+        alignment_names = get_algorithm_names("alignment")
+        alignment_descs = get_algorithm_descriptions("alignment")
+        alignment_display_name = get_category_display_name("alignment")
         self.alignment_dropdown, alignment_widget = self.create_dropdown(
-            language_config.ALIGNMENT_NAME,
-            [opt[0] for opt in [
-                ("None", language_config.NONE_ALIGNMENT_DESCRIPTION),
-                ("Farneback Optical Flow", language_config.FARNEBACK_DESCRIPTION),
-                ("AKAZE", language_config.AKAZE_DESCRIPTION),
-                ("ORB", language_config.ORB_DESCRIPTION)
-            ]],
-            [opt[1] for opt in [
-                ("None", language_config.NONE_ALIGNMENT_DESCRIPTION),
-                ("Farneback Optical Flow", language_config.FARNEBACK_DESCRIPTION),
-                ("AKAZE", language_config.AKAZE_DESCRIPTION),
-                ("ORB", language_config.ORB_DESCRIPTION)
-            ]]
+            alignment_display_name,
+            alignment_names,
+            alignment_descs
         )
         left_panel_layout.addWidget(alignment_widget)
 
+        # --- Dropdown Super Resolution ---
+        super_res_names = get_algorithm_names("super_resolution")
+        super_res_descs = get_algorithm_descriptions("super_resolution")
+        super_res_display_name = get_category_display_name("super_resolution")
+
+        # Buat dropdown dengan semua opsi
         self.super_resolution_dropdown, super_resolution_widget = self.create_dropdown(
-            language_config.SUPER_RESOLUTION_NAME,
-            [opt[0] for opt in [
-                ("None", language_config.NONE_SUPER_RESOLUTION_DESCRIPTION),
-                # ("Interpolation", language_config.INTERPOLATION_DESCRIPTION)
-            ]],
-            [opt[1] for opt in [
-                ("None", language_config.NONE_SUPER_RESOLUTION_DESCRIPTION),
-                # ("Interpolation", language_config.INTERPOLATION_DESCRIPTION)
-            ]]
+            super_res_display_name,
+            super_res_names, # Gunakan list nama yang lengkap
+            super_res_descs  # Gunakan list deskripsi yang lengkap
         )
         left_panel_layout.addWidget(super_resolution_widget)
 
+        # --- Dropdown Denoising ---
+        denoising_names = get_algorithm_names("denoising")
+        denoising_descs = get_algorithm_descriptions("denoising")
+        denoising_display_name = get_category_display_name("denoising")
         self.denoising_dropdown, denoising_widget = self.create_dropdown(
-            language_config.DENOISING_NAME,
-            [opt[0] for opt in [
-                ("None", language_config.NONE_DENOISING_DESCRIPTION),
-                ("Average", language_config.AVERAGE_DESCRIPTION),
-                ("Median", language_config.MEDIAN_DESCRIPTION),
-                ("Similarity", language_config.SIMILARITY_DESCRIPTION),
-                ("Similarity V2", language_config.SIMILARITY_MOTION_V2_DESCRIPTION)
-            ]],
-            [opt[1] for opt in [
-                ("None", language_config.NONE_DENOISING_DESCRIPTION),
-                ("Average", language_config.AVERAGE_DESCRIPTION),
-                ("Median", language_config.MEDIAN_DESCRIPTION),
-                ("Similarity", language_config.SIMILARITY_DESCRIPTION),
-                ("Similarity V2", language_config.SIMILARITY_MOTION_V2_DESCRIPTION)
-            ]]
+            denoising_display_name,
+            denoising_names,
+            denoising_descs
         )
         left_panel_layout.addWidget(denoising_widget)
 
-        # Inisialisasi QStackedWidget untuk panel pengaturan
+        # --- Panel Kanan (Parameter Stack) ---
         self.parameter_stack = QStackedWidget()
         parameter_pages = ParameterPages(self.parameter_stack)
         self.setting_pages_map = parameter_pages.get_setting_pages_map()
 
-        # Tambahkan parameter_stack langsung ke panel kanan tanpa ScrollArea
         right_panel_layout = QVBoxLayout()
         right_panel_layout.addWidget(self.parameter_stack)
-
-        # Widget pembungkus untuk right_panel
         right_panel_widget = QWidget()
         right_panel_widget.setLayout(right_panel_layout)
 
-        # Tambahkan left_panel_widget dan right_panel_widget ke dalam layout utama
+        # --- Gabungkan Panel Kiri dan Kanan ---
         parameter_panel_layout.addWidget(left_panel_widget, 1)
-        parameter_panel_layout.addWidget(right_panel_widget, 2) 
+        parameter_panel_layout.addWidget(right_panel_widget, 2)
 
         self.parameter_panel_widget.setLayout(parameter_panel_layout)
         self.parameter_panel_widget.setStyleSheet("QWidget { background-color: white; }")
 
         parent_layout.addWidget(self.parameter_panel_widget)
 
-        # Hubungkan sinyal dropdown ke fungsi update panel
+        # --- Hubungkan Sinyal ---
+        # Pastikan Anda memiliki metode self.update_parameter_panel dan self.handle_dropdown_change
         self.alignment_dropdown.currentIndexChanged.connect(
-            lambda index: self.update_parameter_panel("alignment")
+            lambda index: self.update_parameter_panel("alignment") # Pastikan key "alignment" cocok
         )
+        # Koneksi untuk denoising dan super-resolution (asumsi handle_dropdown_change bisa menanganinya)
         self.denoising_dropdown.currentIndexChanged.connect(self.handle_dropdown_change)
         self.super_resolution_dropdown.currentIndexChanged.connect(self.handle_dropdown_change)
 

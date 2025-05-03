@@ -223,11 +223,15 @@ class SinglePageLayout(QWidget):
              # Hubungkan ke slot yang sudah ada di kelas ini
              if hasattr(self, 'update_progress_bar') and callable(self.update_progress_bar):
                   self.multi_thread_import_images.progress_signal.connect(self.update_progress_bar)
-             else: print("Warning: Slot 'update_progress_bar' not found.")
+             else: 
+                #  print("Warning: Slot 'update_progress_bar' not found.")
+                pass
 
              if hasattr(self, 'on_import_complete') and callable(self.on_import_complete):
                   self.multi_thread_import_images.completion_signal.connect(self.on_import_complete)
-             else: print("Warning: Slot 'on_import_complete' not found.")
+             else: 
+                #  print("Warning: Slot 'on_import_complete' not found.")
+                pass
 
              # Tambahkan koneksi untuk error jika ada
              if hasattr(self.multi_thread_import_images, 'error_signal') and hasattr(self, 'on_import_error'):
@@ -268,51 +272,51 @@ class SinglePageLayout(QWidget):
             super_resolution_choice = self.left_panel.super_resolution_dropdown.currentText()  # Ambil pilihan super resolution
 
             # Jika tidak ada algoritma yang dipilih
-            if alignment_choice == "None" and denoising_choice == "None" and super_resolution_choice == "None":
+            if  alignment_choice == "No Alignment" and \
+                denoising_choice == "No Denoising" and \
+                super_resolution_choice == "No Super Resolution":
                 QMessageBox.warning(self, "Caution", language_config.PROCESS_ALGORITHM_PROCESS_SKIPPED)
                 return
 
             # Proses untuk Alignment
+            alignment_valid = True
             if alignment_choice == "ORB":
                 running_orb(self, single_process=True)
             elif alignment_choice == "Farneback Optical Flow":
                 running_farneback_optical_flow(self, single_process=True)
             elif alignment_choice == "AKAZE":
                 running_akaze(self, single_process=True)
-
-            elif alignment_choice == "None":
-                if denoising_choice != "None":  # Jika hanya denoising yang dipilih
-                    reply = QMessageBox.question(self, "Confirm", 
-                                                language_config.NO_ALIGNMENT_PROCESS,
-                                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
-                                                QMessageBox.StandardButton.No)
+            elif alignment_choice == "No Alignment":
+                if denoising_choice != "No Denoising" or super_resolution_choice != "No Super Resolution":
+                    reply = QMessageBox.question(self, "Confirm",
+                                            language_config.NO_ALIGNMENT_PROCESS,
+                                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                            QMessageBox.StandardButton.No)
                     if reply == QMessageBox.StandardButton.No:
-                        return  # Jika pengguna memilih 'No', berhenti proses
-            else:
-                QMessageBox.warning(self, "Warning", "Pilihan algoritma alignment tidak dikenali.")
+                        return
+                else:
+                    alignment_valid = False
+                    QMessageBox.warning(self, "Warning", f"The alignment algorithm option '{alignment_choice}' is not recognized.")
+                    return # Hentikan proses karena pilihan alignment tidak valid
                 
             super_resolution_executed = False
-            # Proses untuk Super Resolution
             if super_resolution_choice == "Interpolation":
                running_interpolation(self, single_process=True) 
-            #    super_resolution_executed = True
-            elif super_resolution_choice == "none":
-                return 
-            # else:
-            #     QMessageBox.information(self, "Info", language_config.MODULE_NOT_IMPLEMENT)
-        
+            elif super_resolution_choice == "No Super Resolution":
+                pass 
+           
             
             if super_resolution_executed:
                 latest_image_path = get_last_image("database/stack")
                 if latest_image_path:
-                    dialog = ImageViewer(latest_image_path, self)  # Menampilkan gambar di ImageViewer
-                    dialog.exec()  # Menampilkan dialog secara modal
+                    dialog = ImageViewer(latest_image_path, self) 
+                    dialog.exec() 
                 else:
                     QMessageBox.warning(self, "Caution", language_config.NOT_IMAGE_PREVIEW)
 
 
             # Proses untuk Denoising
-            denoising_executed = False  # Flag untuk melacak apakah denoising dilakukan
+            denoising_executed = False
             if denoising_choice == "Average":
                 running_average(self, single_process=True)
                 denoising_executed = True
@@ -325,8 +329,8 @@ class SinglePageLayout(QWidget):
             elif denoising_choice == "Similarity V2":
                running_similarity_v2(self, single_process=True)
                denoising_executed = True
-            elif denoising_choice == "none":
-                return 
+            elif denoising_choice == "No Denoising":
+                pass 
            
             # Tampilkan hasil hanya jika denoising berhasil dijalankan
             if denoising_executed:

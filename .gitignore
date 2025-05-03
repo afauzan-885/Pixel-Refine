@@ -10,6 +10,8 @@ ChangeLog.txt
 main.build/
 main.dist/
 nuitka-crash-report.xml
+check_db_order_v2.py
+view_images_list.py
 # Ignore virtual environment directories
 venv/
 database/

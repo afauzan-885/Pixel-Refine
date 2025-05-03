@@ -76,13 +76,35 @@ SCROLL_AREA = """
     QScrollBar::handle:horizontal { background: #A0A0A0; min-width: 20px; border-radius: 5px; }
     QScrollBar::handle:horizontal:hover { background: #808080; }
 """
+TOGGLE_SWITCH_STYLE = """
+    QCheckBox {
+        spacing: 8px;
+    }
+    QCheckBox::indicator {
+        width: 10px;
+        height: 10px;
+        border-radius: 10px;
+        border: 1px solid #B6B6B6;
+        background: #ffffff;
+    }
+    QCheckBox::indicator:checked {
+        background-color: #69B1E5;
+        border-color: #69B1E5;
+    }
+    QCheckBox::indicator:unchecked:hover {
+        border-color: #B6B6B6;
+    }
+    QCheckBox::indicator:checked:hover {
+        background-color: #99C5E6;
+    }
+"""
 
 DROPDOWN_BOX = """
             QComboBox {
                 background-color: #F0EEEE;
                 padding: 5px;
                 border-radius: 5px;
-                min-width: 200px;
+                max-width: 200px;
             }
             QComboBox::drop-down {
                 background-color: #ffffff;

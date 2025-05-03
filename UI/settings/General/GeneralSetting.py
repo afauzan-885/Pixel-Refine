@@ -2,208 +2,280 @@ import json
 import os
 import sys
 import time
-from PyQt6.QtWidgets import (
-    QWidget, QLabel, QComboBox, QFormLayout,
-    QVBoxLayout, QHBoxLayout, QPushButton,
-    QMessageBox
-)
-from PyQt6.QtCore import QProcess
-
+from PyQt6.QtWidgets import (QWidget, QLabel, QComboBox, QFormLayout,
+                             QVBoxLayout, QHBoxLayout, QPushButton,
+                             QMessageBox, QCheckBox)
+from PyQt6.QtCore import QProcess, QCoreApplication, Qt
+from UI.resources.stylesheet.stylesheet import APPLY_BUTTON, DROPDOWN_BOX, TOGGLE_SWITCH_STYLE
 from UI.settings.General.Language import language_config
+from config import ALGORITHM_PARAMETER_SETTINGS_FILE, GENERAL_SETTINGS_FILE
 
-# Path untuk menyimpan setting
 SETTINGS_DIR = "database/setting"
 SETTINGS_FILE = os.path.join(SETTINGS_DIR, "app_setting.json")
 
+# --- Fungsi Helper Load Settings (General) ---
+def load_settings():
+    """Memuat pengaturan dari app_setting.json."""
+    defaults = {
+        "language": "English",
+        "gpu_acceleration": False,
+        "multi_core_cpu": True,
+        "enable_thumbnails": False
+    }
+    if not os.path.exists(GENERAL_SETTINGS_FILE):
+        try: os.makedirs(os.path.dirname(GENERAL_SETTINGS_FILE), exist_ok=True)
+        except OSError: pass
+        return defaults
+    try:
+        with open(GENERAL_SETTINGS_FILE, "r") as f:
+            settings = json.load(f)
+        # Pastikan semua kunci default ada
+        for key, value in defaults.items():
+            settings.setdefault(key, value)
+        return settings
+    except (json.JSONDecodeError, IOError):
+        print(f"Warning: Could not read settings file '{GENERAL_SETTINGS_FILE}'. Using defaults.")
+        return defaults
+
+# --- Fungsi Utama Halaman Pengaturan General ---
 def general_page():
     """Creates a general settings tab with QFormLayout and a styled apply button."""
     general_tab = QWidget()
 
-    # Tab background style
     general_tab.setStyleSheet(
         """
-        background-color: #ffffff;
-        border: none;
+        QWidget { background-color: #ffffff; border: none; }
         """
     )
 
-    # Layout utama
+    current_settings = load_settings()
+    initial_language = current_settings.get("language", "English")
+
     main_layout = QVBoxLayout()
     form_layout = QFormLayout()
-    form_layout.setContentsMargins(10, 10, 10, 10)
-    form_layout.setSpacing(10)
+    form_layout.setContentsMargins(15, 15, 15, 15)
+    form_layout.setSpacing(12)
+    form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+    form_layout.setHorizontalSpacing(20)
 
-    # Define the language dropdown and label
-    language_label = QLabel(language_config.LANGUAGE_LABEL)
-
+    # --- Pengaturan Bahasa ---
+    language_label_text = getattr(language_config, 'LANGUAGE_LABEL', "Language:")
+    language_label = QLabel(language_label_text)
     language_dropdown = QComboBox()
-    
-    # Daftar bahasa yang tersedia
     languages = ["English", "Indonesian", "China Traditional", "Melayu"]
-    
-    # Dapatkan bahasa yang tersimpan di file setting (sudah dalam lowercase)
-    current_lang = language_config.LANGUAGE
-    
-    # Cari bahasa yang sesuai dan pindahkan ke posisi pertama
-    selected_lang = next((lang for lang in languages if lang.lower() == current_lang), None)
+    current_lang_lower = initial_language.lower()
+    selected_lang = next((lang for lang in languages if lang.lower() == current_lang_lower), None)
     if selected_lang:
         languages.remove(selected_lang)
         languages.insert(0, selected_lang)
-    
     language_dropdown.addItems(languages)
-    
-    language_dropdown.setStyleSheet(
-        """
-        QComboBox {
-            background-color: #F0EEEE;
-            padding: 5px;
-            border-radius: 5px;
-            max-width: 200px;
-        }
-        QComboBox::drop-down {
-            background-color: #ffffff;
-            border-radius: 5px;
-            border: 1px solid #d1d1d1;
-        }
-        QComboBox::down-arrow {
-            image: url('UI/resources/icon/menu-options.png');
-            width: 24px;
-            height: 24px;
-        }
-        QComboBox:hover {
-            background-color: #9EFFE2;
-        }
-        QComboBox QAbstractItemView {
-            background-color: #ffffff;
-            border: 1px solid #d1d1d1;
-            selection-background-color: #7B9AC8;
-            selection-color: white;
-            padding: 5px;
-        }
-        QComboBox QAbstractItemView::item {
-            margin-bottom: 5px;
-        }
-        """
-    )
-
-    # Tambahkan label dan dropdown ke form layout
+    language_dropdown.setCurrentText(initial_language)
+    language_dropdown.setStyleSheet(DROPDOWN_BOX)
+    language_dropdown.setMinimumWidth(150)
     form_layout.addRow(language_label, language_dropdown)
-    
-    # Tambahkan form_layout ke main_layout
+
+    # --- Checkbox / Toggle Switches ---
+    # Akselerasi GPU
+    gpu_label_text = getattr(language_config, 'GPU_ACCELERATION_LABEL', "Akselerasi GPU")
+    gpu_checkbox = QCheckBox(gpu_label_text)
+    gpu_checkbox.setChecked(current_settings.get("gpu_acceleration", False))
+    gpu_checkbox.setStyleSheet(TOGGLE_SWITCH_STYLE)
+    form_layout.addRow(gpu_checkbox)
+
+    # Akselerasi Multi-Core CPU
+    cpu_label_text = getattr(language_config, 'MULTI_CORE_CPU_LABEL', "Akselerasi Multi-Core CPU")
+    cpu_checkbox = QCheckBox(cpu_label_text)
+    cpu_checkbox.setChecked(current_settings.get("multi_core_cpu", True))
+    cpu_checkbox.setStyleSheet(TOGGLE_SWITCH_STYLE)
+    form_layout.addRow(cpu_checkbox)
+
+    # Aktifkan Thumbnail
+    # thumbnail_label_text = getattr(language_config, 'ENABLE_THUMBNAILS_LABEL', "Thumbnail Proses Batch")
+    # thumbnail_checkbox = QCheckBox(thumbnail_label_text)
+    # thumbnail_checkbox.setChecked(current_settings.get("enable_thumbnails", False))
+    # thumbnail_checkbox.setStyleSheet(TOGGLE_SWITCH_STYLE)
+    # form_layout.addRow(thumbnail_checkbox)
+    # --------------------------------
+
     main_layout.addLayout(form_layout)
-    
-    # Layout horizontal untuk tombol Apply agar berada di pojok kanan bawah
+    main_layout.addStretch()
+
+    # --- Tombol Apply ---
     button_layout = QHBoxLayout()
     button_layout.addStretch()
-    apply_button = QPushButton(language_config.APPLY_PARAMETER_BUTTON_TEXT)
+    apply_button_text = getattr(language_config, 'APPLY_PARAMETER_BUTTON_TEXT', "Apply Settings")
+    apply_button = QPushButton(apply_button_text)
     button_layout.addWidget(apply_button)
     main_layout.addLayout(button_layout)
-    
-    # Mempercantik tombol Apply
-    apply_button.setStyleSheet(
-        """
-        QPushButton {
-            background-color: #5cb85c;    
-            color: white;                 
-            border: none;
-            border-radius: 5px;           
-            padding: 10px 20px;
-            font-size: 14px;
-            font-weight: bold;
-        }
-        QPushButton:hover {
-            background-color: #4cae4c;    
-        }
-        QPushButton:pressed {
-            background-color: #449d44;
-        }
-        """
-    )
-    
-    # Fungsi untuk menyimpan setting ke file JSON
+    main_layout.setContentsMargins(10, 10, 10, 15)
+    apply_button.setStyleSheet(APPLY_BUTTON)
+    apply_button.setMinimumHeight(30)
+    # ------------------
+
     def save_settings():
-        settings = {"language": language_dropdown.currentText()}
-        
-        # Pastikan direktori ada sebelum menyimpan
-        os.makedirs(SETTINGS_DIR, exist_ok=True)
-        
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump(settings, f, indent=4)
-        
-        # print(f"Settings saved to {SETTINGS_FILE}: {settings}")
+        new_language = language_dropdown.currentText()
+        new_gpu_setting = gpu_checkbox.isChecked()
+        new_multicore_setting = cpu_checkbox.isChecked()
+        # new_thumbnail_setting = thumbnail_checkbox.isChecked()
 
-        # Tampilkan QMessageBox untuk meminta restart
-        msg_box = QMessageBox()
-        msg_box.setWindowTitle(language_config.RESTART_APPLICATION_REQUIRED)
-        msg_box.setText(language_config.RESTART_APPLICATION_DESCRIPTION)
-        msg_box.setIcon(QMessageBox.Icon.Warning)
+        settings_to_save_general = {
+            "language": new_language,
+            "gpu_acceleration": new_gpu_setting,
+            "multi_core_cpu": new_multicore_setting,
+            # "enable_thumbnails": new_thumbnail_setting
+        }
 
-        # Tambahkan tombol "Restart" dan "Nanti saja"
-        restart_button = msg_box.addButton(language_config.ACCEPT_RESTART_APPLICATION, QMessageBox.ButtonRole.AcceptRole)
-        later_button = msg_box.addButton(language_config.REJECT_APPLICATION_DESCRIPTION, QMessageBox.ButtonRole.RejectRole)
-
-        msg_box.exec()
-
-        # Jika user memilih "Restart"
-        if msg_box.clickedButton() == restart_button:
-            # print("User memilih restart.")
-            restart_application()
-
-    def restart_application():
-        """Fungsi untuk merestart aplikasi menggunakan QProcess.
-        
-        Fungsi ini dirancang untuk bekerja baik saat menjalankan skrip .py
-        maupun saat menjalankan aplikasi .exe yang sudah di-build.
-        """
+        # 2. Simpan ke app_setting.json (File General)
+        general_save_successful = False
         try:
-            print(language_config.TRY_RESTART_APPLICATION) # Pesan: Mencoba memulai ulang...
+            os.makedirs(os.path.dirname(GENERAL_SETTINGS_FILE), exist_ok=True)
+            with open(GENERAL_SETTINGS_FILE, "w") as f:
+                json.dump(settings_to_save_general, f, indent=4)
+            general_save_successful = True
+        except IOError as e:
+             QMessageBox.critical(general_tab, "Error Saving Settings", f"Could not save general settings to '{GENERAL_SETTINGS_FILE}'.\nError: {e}")
+             return 
+        if general_save_successful:
+            specific_file_needs_writing = False
+            try:
+                # 3. Baca file Parameter_Stack_Enhance.json yang ada
+                all_specific_params = {}
+                if os.path.exists(ALGORITHM_PARAMETER_SETTINGS_FILE):
+                    try:
+                        with open(ALGORITHM_PARAMETER_SETTINGS_FILE, "r") as f_specific:
+                            all_specific_params = json.load(f_specific)
+                    except json.JSONDecodeError as e_json:
+                         QMessageBox.warning(general_tab, "Update Warning", f"General settings saved, but failed to read '{ALGORITHM_PARAMETER_SETTINGS_FILE}' for automatic update due to format error.\nPlease check the file.\nError: {e_json}")
+                         all_specific_params = None
+                    except IOError as e_read:
+                         QMessageBox.warning(general_tab, "Update Warning", f"General settings saved, but failed to read '{ALGORITHM_PARAMETER_SETTINGS_FILE}' for automatic update.\nError: {e_read}")
+                         all_specific_params = None 
+                else:
+                    print(f"Info: Specific settings file '{ALGORITHM_PARAMETER_SETTINGS_FILE}' not found. Will create if updates are needed.")
+                    all_specific_params = {}
 
-            executable = sys.executable
-            arguments = [] # Akan diisi berdasarkan mode
+                # Hanya lanjutkan jika pembacaan berhasil atau file tidak ada (dict kosong dibuat)
+                if all_specific_params is not None:
 
-            # Deteksi apakah berjalan sebagai skrip atau paket beku (.exe)
-            # hasattr(sys, 'frozen') umumnya True jika dibuild oleh PyInstaller/cx_Freeze
-            # getattr digunakan untuk default ke False jika atribut tidak ada
+                    #Faneback
+                    if "Farneback" not in all_specific_params:
+                        all_specific_params["Farneback"] = {}
+                        print(f"Info: Initializing 'Farneback' section in specific settings.")
+                        specific_file_needs_writing = True 
+                        
+                    if isinstance(all_specific_params.get("Farneback"), dict):
+                        if all_specific_params["Farneback"].get("use_gpu") != new_gpu_setting:
+                            all_specific_params["Farneback"]["use_gpu"] = new_gpu_setting
+                            specific_file_needs_writing = True
+                        if all_specific_params["Farneback"].get("use_multi_core") != new_multicore_setting:
+                            all_specific_params["Farneback"]["use_multi_core"] = new_multicore_setting
+                            specific_file_needs_writing = True
+                    else:
+                         pass
+
+                    #ORB 
+                    if "ORB" not in all_specific_params:
+                        all_specific_params["ORB"] = {}
+                        specific_file_needs_writing = True
+                        
+                    if isinstance(all_specific_params.get("ORB"), dict):
+                        if all_specific_params["ORB"].get("use_multi_core") != new_multicore_setting:
+                            all_specific_params["ORB"]["use_multi_core"] = new_multicore_setting
+                            specific_file_needs_writing = True
+                    
+                    
+                    #AKAZE
+                    if "AKAZE" not in all_specific_params:
+                        all_specific_params["AKAZE"] = {}
+                        specific_file_needs_writing = True
+                        
+                    if isinstance(all_specific_params.get("AKAZE"), dict):
+                        if all_specific_params["AKAZE"].get("use_multi_core") != new_multicore_setting:
+                            all_specific_params["AKAZE"]["use_multi_core"] = new_multicore_setting
+                            specific_file_needs_writing = True
+                    else:
+                        pass
+
+                    # --- 5. Tulis kembali HANYA JIKA ADA PERUBAHAN ---
+                    if specific_file_needs_writing:
+                        try:
+                            with open(ALGORITHM_PARAMETER_SETTINGS_FILE, "w") as f_specific_write:
+                                json.dump(all_specific_params, f_specific_write, indent=4)
+                        except IOError as e_write:
+                            QMessageBox.warning(general_tab, "Update Warning", f"General settings saved, but failed to automatically update algorithm settings in '{ALGORITHM_PARAMETER_SETTINGS_FILE}'.\nError: {e_write}")
+                    else:
+                        pass
+
+            except Exception as e_general:
+                 QMessageBox.warning(general_tab, "Update Warning", f"General settings saved, but an unexpected error occurred during automatic update of algorithm settings.\nError: {e_general}")
+        
+        # 6. Cek perubahan bahasa dan tampilkan dialog restart jika perlu
+        language_changed = (new_language.lower() != initial_language.lower())
+        if language_changed:
+            msg_box = QMessageBox(); restart_title = getattr(language_config, 'RESTART_APPLICATION_REQUIRED', "Restart Required")
+            restart_desc = getattr(language_config, 'RESTART_APPLICATION_DESCRIPTION', "Language change requires restart.")
+            accept_text = getattr(language_config, 'ACCEPT_RESTART_APPLICATION', "Restart Now"); reject_text = getattr(language_config, 'REJECT_APPLICATION_DESCRIPTION', "Later")
+            msg_box.setWindowTitle(restart_title); msg_box.setText(restart_desc); msg_box.setIcon(QMessageBox.Icon.Warning)
+            restart_button = msg_box.addButton(accept_text, QMessageBox.ButtonRole.AcceptRole); later_button = msg_box.addButton(reject_text, QMessageBox.ButtonRole.RejectRole)
+            msg_box.exec()
+            if msg_box.clickedButton() == restart_button: restart_application()
+        else:
+             if general_save_successful:
+                 QMessageBox.information(general_tab, "Settings Saved", "Pengaturan berhasil disimpan.")
+            
+    def restart_application():
+        """Fungsi untuk merestart aplikasi menggunakan QProcess."""
+        try:
+            print(language_config.TRY_RESTART_APPLICATION)
+
+            sys_executable_abs = os.path.abspath(sys.executable)
+            try:
+                initial_launch_path = os.path.abspath(sys.argv[0])
+            except Exception:
+                initial_launch_path = sys_executable_abs # Fallback
+            
+            working_dir = os.path.dirname(initial_launch_path)
+
             is_frozen = getattr(sys, 'frozen', False)
+            
+            arguments = []
+            program_to_run = "" 
 
             if is_frozen:
-                # Mode .exe: Jalankan .exe itu sendiri dengan argumen asli
-                executable = sys.executable 
+                program_to_run = initial_launch_path 
                 arguments = sys.argv[1:]
             else:
-                # Mode .py: Jalankan python.exe dengan skrip dan argumen asli
-                executable = sys.executable 
-                arguments = sys.argv
+                program_to_run = sys_executable_abs # Path ke python.exe
+                arguments = [initial_launch_path] + sys.argv[1:] # initial_launch_path adalah main.py
+            
+            if not os.path.exists(program_to_run):
+                raise FileNotFoundError(f"Program to run not found: {program_to_run}")
+            if not is_frozen and not os.path.exists(arguments[0]): # Cek script path di mode dev
+                raise FileNotFoundError(f"Script to run not found: {arguments[0]}")
+            if not os.path.isdir(working_dir):
+                raise NotADirectoryError(f"Working directory is not a valid directory: {working_dir}")
 
-            # Pastikan path executable absolut
-            executable_abs = os.path.abspath(executable)
-
-            # Mulai proses baru yang terpisah
-            started = QProcess.startDetached(executable_abs, arguments)
+            started = QProcess.startDetached(program_to_run, arguments, working_dir)
 
             if started:
-                time.sleep(0.1) 
-                sys.exit(0) # Keluar dari aplikasi saat ini
+                time.sleep(0.2) 
+                QCoreApplication.instance().quit() 
+                QCoreApplication.instance().quit()
             else:
-                print(language_config.COMMAND_FAILED_IN_RESTART_APPLICATION) # Pesan: Gagal menjalankan perintah restart.
+                print(language_config.COMMAND_FAILED_IN_RESTART_APPLICATION)
                 error_msg = QMessageBox()
                 error_msg.setIcon(QMessageBox.Icon.Critical)
-                error_msg.setWindowTitle(language_config.RESTART_FAILED) # Judul: Restart Gagal
-                error_msg.setText(language_config.COMMAND_TO_RESTART_MANUALLY) # Pesan: Tidak dapat memulai ulang otomatis...
+                error_msg.setWindowTitle(language_config.RESTART_FAILED)
+                error_msg.setText(f"{language_config.COMMAND_TO_RESTART_MANUALLY}\n\nFailed command:\nProgram: {program_to_run}\nArgs: {arguments}\nWD: {working_dir}")
                 error_msg.exec()
 
         except Exception as e:
             error_msg = QMessageBox()
             error_msg.setIcon(QMessageBox.Icon.Critical)
-            error_msg.setWindowTitle(language_config.RESTART_FAILED) # Judul: Restart Gagal
-            # Sesuaikan pesan error ini jika perlu
-            error_msg.setText(f"An error occurred while trying to restart:\n{e}\n\Please restart the application manually.") 
+            error_msg.setWindowTitle(language_config.RESTART_FAILED)
+            error_msg.setText(f"An error occurred while trying to restart:\n{e}\n\nPlease restart the application manually.")
             error_msg.exec()
-    
-    # Hubungkan tombol Apply dengan fungsi penyimpanan
     apply_button.clicked.connect(save_settings)
-    
-    # Set the main layout to the tab
     general_tab.setLayout(main_layout)
     
     return general_tab
