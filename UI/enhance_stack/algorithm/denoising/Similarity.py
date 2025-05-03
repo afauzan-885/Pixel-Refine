@@ -12,6 +12,7 @@ from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, get_all_image_paths_for_single_process, save_image
 from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityV1MotionInterface
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
+from UI.settings.General.GeneralSetting import load_general_settings
 from UI.settings.General.Language import language_config
 
 class ThreadWorker(QThread):
@@ -155,13 +156,13 @@ class SimilarityAlgorithm:
 
         return np.ascontiguousarray(norm_image.astype(np.float32))
 
-    def similarity_mfnr(self, images, tile_size=(16, 16), overlap=0.40,
-                        motion_threshold=0.030, update_progress=None, stop_requested=None,
+    def similarity_mfnr(self, images, tile_size, overlap,
+                        motion_threshold, update_progress=None, stop_requested=None,
                         lib_path='UI/data/similarity_motion.dll',
                         save_weight_map_path=None, total_overall_images=None,
                         images_processed_so_far=0):
 
-        if not isinstance(images, list) or not images: # Pastikan images adalah list dan tidak kosong
+        if not isinstance(images, list) or not images:
             raise ValueError(language_config.IMAGE_DATA_MUST_BE_VALID)
 
         if not (isinstance(tile_size, (tuple, list)) and len(tile_size) == 2 and
@@ -381,11 +382,19 @@ class SimilarityAlgorithm:
 def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
          single_process=None, batch_id=None, save_final_weight_map=False, progress_bar=None):
     try:
+        general_settings = load_general_settings()
         image_processor = SimilarityAlgorithm(db_path)
+        
+        sim_tile_size_int = general_settings.get("similarity_tile_size", 16)
+        sim_motion_threshold = general_settings.get("similarity_motion_threshold", 0.030)
+        sim_overlap_percent = general_settings.get("similarity_overlap_percent", 40.0)
+        
+        tile_size_tuple = (sim_tile_size_int, sim_tile_size_int)
+        overlap_ratio = sim_overlap_percent / 100.0
 
         output_name_base = ""
         image_paths = []
-        align_dir = os.path.join("database", "align") # Definisikan path folder alignment
+        align_dir = os.path.join("database", "align")
 
         if single_process:
             image_paths = get_all_image_paths_for_single_process(db_path)
@@ -503,13 +512,15 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
                         
                         print(language_config.START_IMAGE_ENHANCEMENT.format(len(batch_images)))
                         try:
-                             batch_result = image_processor.similarity_mfnr(
-                                 batch_images,
-                                 update_progress=update_progress,
-                                 stop_requested=stop_requested,
-                                 total_overall_images=total_images,
-                                 images_processed_so_far=images_processed_count
-                                
+                            batch_result = image_processor.similarity_mfnr(
+                            batch_images,
+                            tile_size=tile_size_tuple,        
+                            overlap=overlap_ratio,            
+                            motion_threshold=sim_motion_threshold, 
+                            update_progress=update_progress,
+                            stop_requested=stop_requested,
+                            total_overall_images=total_images,
+                            images_processed_so_far=images_processed_count  
                              )
                         except Exception as e_sim_batch:
                              traceback.print_exc()
@@ -563,11 +574,14 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
                 print(language_config.START_IMAGE_ENHANCEMENT.format(len(batch_images)))
                 try:
                     batch_result = image_processor.similarity_mfnr(
-                        batch_images,
-                        update_progress=update_progress,
-                        stop_requested=stop_requested,
-                        total_overall_images=total_images,
-                        images_processed_so_far=images_processed_count
+                    batch_images,
+                    tile_size=tile_size_tuple,        
+                    overlap=overlap_ratio,            
+                    motion_threshold=sim_motion_threshold,
+                    update_progress=update_progress,
+                    stop_requested=stop_requested,
+                    total_overall_images=total_images,
+                    images_processed_so_far=images_processed_count  
                     )
                 except Exception as e_sim_batch:
                       traceback.print_exc()
@@ -604,16 +618,15 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
             final_weight_map_path_arg = weight_map_output_path if save_final_weight_map else None
             if final_weight_map_path_arg:
                  pass
-                #  print(f"Final weight map saving is ENABLED to: {final_weight_map_path_arg}")
             else:
                 pass
-                #  print("Final weight map saving is DISABLED.")
-
-            # Panggil similarity_mfnr untuk fine-tuning
             final_result = None
             try:
                  final_result = image_processor.similarity_mfnr(
                      processed_batches_results,
+                     tile_size=tile_size_tuple,
+                     overlap=overlap_ratio,    
+                     motion_threshold=sim_motion_threshold,
                      update_progress=fine_tuning_update_progress,
                      stop_requested=stop_requested,
                      save_weight_map_path=final_weight_map_path_arg,

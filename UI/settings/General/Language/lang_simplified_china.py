@@ -561,3 +561,22 @@ LANGUAGE_TYPE = "英语", "印尼语", "繁体中文", "马来语"
 GPU_ACCELERATION_LABEL = "GPU 加速"
 MULTI_CORE_CPU = "多核 CPU"
 SETTINGS_SAVED = "设置已保存"
+
+CANT_READ_FILE_SETTINGS = "警告：无法读取设置文件 '{GENERAL_SETTINGS_FILE}'。使用默认值。"
+OVERLAP_DESCRIPTION = """用于减少 tile 伪影（会在移动区域产生块状效果）。
+
+增加 overlap 可以减少这种效果，但会增加计算时间。"""
+OVERLAP_LABEL = "重叠 (overlap)"
+TILE_SIZE_LABEL = "Tile Size (tile 大小)"
+TILE_SIZE_DESCRIPTION = """图块尺寸越小，检测差异时捕获的细节就越多。
+
+然而，这也会增加计算时间并增加检测到错误的可能性。"""
+MOTION_THRESHOLD_DESCRIPTION = """Motion Threshold 用于设置算法在检测 tile 差异时的激进程度。
+
+门槛值越低，算法在检测差异时会越激进或敏感，但这也意味着噪声可能会被视为差异。"""
+MULTI_CORE_CPU_DESCRIPTION = """启用此功能将提高图像处理时的计算速度，但会略微增加 RAM 使用量。
+
+如果计算机的 RAM 非常有限，建议不要启用。"""
+GPU_ACCELERATION_DESCRIPTION = """启用此功能将大幅提升计算速度，因为它在处理过程中使用了 GPU。
+
+注意：GPU 的使用目前仅限于 Farneback 过程，其他算法的实现将随后跟进。"""

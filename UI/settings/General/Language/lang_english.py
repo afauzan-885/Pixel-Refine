@@ -574,3 +574,23 @@ LANGUAGE_TYPE = "English", "Indonesian", "Traditional Chinese", "Malay"
 GPU_ACCELERATION_LABEL = "GPU Acceleration"
 MULTI_CORE_CPU = "Multi-Core CPU"
 SETTINGS_SAVED = "Settings saved successfully."
+
+CANT_READ_FILE_SETTINGS = "Warning: Unable to read the settings file '{GENERAL_SETTINGS_FILE}'. Using default values."
+OVERLAP_DESCRIPTION = """Serves to reduce tile artifacts (which cause blocky effects in moving areas).
+
+Increasing overlap can reduce this effect, but it will also increase computation time."""
+OVERLAP_LABEL = "Overlap %"
+TILE_SIZE_LABEL = "Tile Size (tile)"
+TILE_SIZE_DESCRIPTION = """The smaller the tile size, the more detail is captured when detecting differences.
+
+However, this will also increase computation time and raise the likelihood of detection errors."""
+MOTION_THRESHOLD_DESCRIPTION = """Motion Threshold sets how aggressive the algorithm is in detecting differences within a tile.
+
+The lower the threshold value, the more aggressive or sensitive it becomes in detecting differences; 
+however, this means that noise might also be interpreted as a difference."""
+MULTI_CORE_CPU_DESCRIPTION = """Enabling this will boost computation speed in image processing, though it will slightly increase RAM usage.
+
+If the computer has very limited RAM, it is recommended not to enable it."""
+GPU_ACCELERATION_DESCRIPTION = """Enabling this will significantly boost computation speed, as it utilizes the GPU in its processing.
+
+NOTE: GPU usage is currently limited to the Farneback process only; other algorithms will be implemented later."""

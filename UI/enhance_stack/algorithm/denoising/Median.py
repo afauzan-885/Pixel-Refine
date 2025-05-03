@@ -9,8 +9,9 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import _load_general_settings, extract_all_metadata, get_all_image_paths_for_single_process, save_image
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, get_all_image_paths_for_single_process, save_image
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
+from UI.settings.General.GeneralSetting import load_general_settings
 from UI.settings.General.Language import language_config
 
 class ThreadWorker(QThread):
@@ -78,7 +79,7 @@ class MedianAlgorithm:
         images = []
         with h5py.File(hdf5_path, 'r') as h5f:
             for key in h5f.keys():
-                if stop_requested and stop_requested():  # Cek apakah harus berhenti
+                if stop_requested and stop_requested():
                     break
                 image = np.array(h5f[key])
                 images.append(image)
@@ -95,7 +96,7 @@ class MedianAlgorithm:
         """
         images = []
         for image_path in image_paths:
-            if stop_requested and stop_requested():  # Cek apakah harus berhenti
+            if stop_requested and stop_requested():  
                 break
             image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
             if image is not None:
@@ -124,7 +125,6 @@ class MedianAlgorithm:
         target_shape = images[0].shape
         num_images_in_this_call = len(images)
 
-        # Logika adaptasi progress (tetap sama)
         adapted_update_progress = None
         if update_progress:
             overall_progress_cap = 98
@@ -153,20 +153,18 @@ class MedianAlgorithm:
             sigma_low=sigma_low,
             sigma_high=sigma_high,
             max_iterations=max_iterations,
-            use_multi_core=use_multi_core # Lewatkan parameter
+            use_multi_core=use_multi_core 
         )
 
         if stacked_image is None:
              return None
 
-        # Set progress ke 100% setelah selesai
         if adapted_update_progress:
             adapted_update_progress(100, language_config.ANALYZING_COMPLETE)
 
         return stacked_image
 
     def _resize_images(self, images, target_shape):
-        # Fungsi ini tetap sama
         resized_images = []
         target_size = (target_shape[1], target_shape[0])
         for i, image in enumerate(images):
@@ -177,7 +175,6 @@ class MedianAlgorithm:
                  resized_images.append(resized)
         return resized_images
 
-    # --- MODIFIKASI 5: Implementasi Sigma Clipping Sebenarnya ---
     def _compute_block_sigma_clip(self, block_stack, sigma_low=3.0, sigma_high=3.0, max_iterations=5):
         """
         Menghitung stack blok menggunakan Sigma Clipping (Rejection).
@@ -205,29 +202,26 @@ class MedianAlgorithm:
         # Iterasi Sigma Clipping
         for _ in range(max_iterations):
             valid_blocks = block_stack[current_mask]
-            if valid_blocks.shape[0] < 2: # Butuh minimal 2 untuk statistik
-                break # Berhenti jika terlalu sedikit data valid
+            if valid_blocks.shape[0] < 2: 
+                break 
 
-            # Hitung median dan std dev (atau MAD) dari blok yang valid
             median_block = np.median(valid_blocks, axis=0)
-            # Gunakan std dev untuk kesederhanaan, MAD lebih robust tapi sedikit lebih kompleks
             std_dev_block = np.std(valid_blocks, axis=0)
 
-            # Tentukan batas bawah dan atas
             lower_bound = median_block - sigma_low * std_dev_block
             upper_bound = median_block + sigma_high * std_dev_block
 
             new_mask = np.ones(num_blocks, dtype=bool)
             new_mask[current_mask] = np.all(
                 (block_stack[current_mask] >= lower_bound) & (block_stack[current_mask] <= upper_bound),
-                axis=tuple(range(1, block_stack.ndim)) # Cek semua dimensi kecuali axis=0 (jumlah blok)
+                axis=tuple(range(1, block_stack.ndim)) 
             )
 
             if np.all(new_mask == current_mask):
                 break
 
             current_mask = new_mask
-            clipped_count = num_blocks - np.sum(current_mask) # Hitung yg di-reject
+            clipped_count = num_blocks - np.sum(current_mask) 
 
         final_valid_blocks = block_stack[current_mask]
         if final_valid_blocks.shape[0] == 0:
@@ -237,11 +231,10 @@ class MedianAlgorithm:
             return np.mean(final_valid_blocks, axis=0).astype(np.float32)
 
 
-    # --- MODIFIKASI 2 & 4: Tambahkan use_multi_core & logika kondisional ---
     def _compute_sigma_clip_image(self, images, target_shape, block_size, dtype, overlap,
                                  update_progress=None, stop_requested=None,
                                  sigma_low=3.0, sigma_high=3.0, max_iterations=3,
-                                 use_multi_core=True): # Parameter baru
+                                 use_multi_core=True):
         """
         Menghitung gambar stack menggunakan metode blok dengan Sigma Clipping.
         Mendukung pemrosesan multi-core atau single-core.
@@ -380,7 +373,7 @@ class MedianAlgorithm:
 def main(db_path, update_progress=None, stop_requested=None, batch_size=4,
          single_process=None, batch_id=None, progress_bar=None):
     try:
-        general_settings = _load_general_settings()
+        general_settings = load_general_settings()
         use_multicore_from_settings = general_settings.get('multi_core_cpu', True)
         image_processor = MedianAlgorithm(db_path)
 

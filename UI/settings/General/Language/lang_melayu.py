@@ -573,3 +573,22 @@ LANGUAGE_TYPE = "Inggeris", "Indonesia", "Cina Tradisional", "Melayu"
 GPU_ACCELERATION_LABEL = "Penggunaan GPU"
 MULTI_CORE_CPU = "Penggunaan CPU Multicore"
 SETTINGS_SAVED = "Settings telah disimpan."
+
+CANT_READ_FILE_SETTINGS = "Amaran: Tidak dapat membaca fail tetapan '{GENERAL_SETTINGS_FILE}'. Menggunakan nilai lalai."
+OVERLAP_DESCRIPTION = """Berlaku untuk mengurangkan artifak tile (yang menyebabkan kesan kotak-kotak pada kawasan yang bergerak).
+
+Meningkatkan overlap boleh mengurangkan kesan tersebut, namun akan meningkatkan masa pengiraan."""
+OVERLAP_LABEL = "Overlap %"
+TILE_SIZE_LABEL = "Saiz Tile (tile)"
+TILE_SIZE_DESCRIPTION = """Semakin kecil saiz tile, semakin terperinci dalam mengesan perbezaan.
+
+Walau bagaimanapun, ini juga akan meningkatkan masa pengiraan dan menambah kemungkinan kesalahan dalam pengesanan perbezaan."""
+MOTION_THRESHOLD_DESCRIPTION = """Motion Threshold menetapkan seberapa agresif algoritma dalam mengesan perbezaan dalam sesuatu tile.
+
+Semakin rendah nilai threshold, semakin agresif atau sensitif dalam mengesan perbezaan, namun ini menyebabkan noise turut dianggap sebagai perbezaan."""
+MULTI_CORE_CPU_DESCRIPTION = """Mengaktifkan fungsi ini akan meningkatkan kelajuan pengiraan dalam memproses imej, tetapi ia juga akan menambah sedikit penggunaan RAM.
+
+Jika komputer mempunyai RAM yang sangat terhad, disyorkan untuk tidak mengaktifkannya."""
+GPU_ACCELERATION_DESCRIPTION = """Mengaktifkan fungsi ini akan sangat meningkatkan kelajuan pengiraan kerana ia menggunakan GPU dalam prosesnya.
+
+NOTA: Penggunaan GPU adalah terhad kepada proses Farneback sahaja, algoritma lain akan mendapat implementasi kelak."""

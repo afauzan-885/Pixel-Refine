@@ -1,5 +1,5 @@
 import os
-APP_VERSION = "0.3.8"
+APP_VERSION = "0.3.7"
 
 PYTHON_INTERPRETER = "venv/Scripts/python.exe"
 CACHE_DIR = "database/cache/thumbnails"
