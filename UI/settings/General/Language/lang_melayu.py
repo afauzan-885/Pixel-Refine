@@ -569,4 +569,7 @@ berbanding versi v1."""
 # ==============================================================================
 SETTING_GENERAL_LABEL = "Umum"
 LANGUAGE_LABEL = "Bahasa"
-LANGUAGE_TYPE = "Inggeris", "Indonesia", "Cina Tradisional", "Melayu" # Tuple of available languages
+LANGUAGE_TYPE = "Inggeris", "Indonesia", "Cina Tradisional", "Melayu"
+GPU_ACCELERATION_LABEL = "Penggunaan GPU"
+MULTI_CORE_CPU = "Penggunaan CPU Multicore"
+SETTINGS_SAVED = "Settings telah disimpan."

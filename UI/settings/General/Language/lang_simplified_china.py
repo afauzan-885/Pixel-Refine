@@ -557,4 +557,7 @@ SIMILARITY_MOTION_V2_DESCRIPTION = """Similarity V2 是 Similarity v1 算法经�
 # ==============================================================================
 SETTING_GENERAL_LABEL = "常规"
 LANGUAGE_LABEL = "语言"
-LANGUAGE_TYPE = "英语", "印尼语", "繁体中文", "马来语" # Tuple of available languages
+LANGUAGE_TYPE = "英语", "印尼语", "繁体中文", "马来语"
+GPU_ACCELERATION_LABEL = "GPU 加速"
+MULTI_CORE_CPU = "多核 CPU"
+SETTINGS_SAVED = "设置已保存"

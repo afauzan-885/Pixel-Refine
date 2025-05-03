@@ -29,7 +29,7 @@ def _load_general_settings():
         "multi_core_cpu": True
     }
     if not os.path.exists(GENERAL_SETTINGS_FILE):
-        print(f"Warning: General settings file '{GENERAL_SETTINGS_FILE}' not found. Using defaults for sync.")
+
         return defaults
     try:
         with open(GENERAL_SETTINGS_FILE, "r") as f:

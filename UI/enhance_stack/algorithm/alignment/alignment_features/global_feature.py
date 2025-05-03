@@ -9,6 +9,28 @@ import exifread
 import numpy as np
 
 from UI.settings.General.Language import language_config
+from config import GENERAL_SETTINGS_FILE
+
+def _load_general_settings():
+    """Membaca semua setting relevan dari app_setting.json."""
+    defaults = {
+        "gpu_acceleration": False,
+        "multi_core_cpu": True
+    }
+    # Pastikan GENERAL_SETTINGS_FILE terdefinisi dengan benar
+    if not os.path.exists(GENERAL_SETTINGS_FILE):
+        print(f"Warning: General settings file '{GENERAL_SETTINGS_FILE}' not found. Using defaults.")
+        return defaults
+    try:
+        with open(GENERAL_SETTINGS_FILE, "r") as f:
+            settings = json.load(f)
+        # Pastikan key default ada
+        for key, value in defaults.items():
+            settings.setdefault(key, value)
+        return settings
+    except (json.JSONDecodeError, IOError, KeyError) as e:
+        print(f"Warning: Could not read general settings from '{GENERAL_SETTINGS_FILE}' ({e}). Using defaults.")
+        return defaults
 
 
 # ====================== Load and Saving Process ====================== #

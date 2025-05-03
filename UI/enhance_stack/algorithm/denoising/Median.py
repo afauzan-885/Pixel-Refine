@@ -9,11 +9,9 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, get_all_image_paths_for_single_process, save_image
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import _load_general_settings, extract_all_metadata, get_all_image_paths_for_single_process, save_image
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
-
-
 
 class ThreadWorker(QThread):
     progress_updated = pyqtSignal(int, str)  # Sinyal untuk memperbarui progress
@@ -47,12 +45,11 @@ class ThreadWorker(QThread):
             
             self.finished.emit()
         except Exception as e:
-            print(f"Error terjadi: {str(e)}")  # Menampilkan pesan error di konsol
-            self.error_occurred.emit(str(e))  # Mengirim pesan error melalui sinyal
-
+            self.error_occurred.emit(str(e))
+            
     def stop(self):
-        self.stop_requested = True  # Set flag agar thread berhenti
-
+        self.stop_requested = True  
+        
 class MedianAlgorithm:
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5", max_workers=None):
         self.db_path = db_path
@@ -107,12 +104,14 @@ class MedianAlgorithm:
 
     def stack_sigma_clip_images(self, images, stop_requested=None, block_size=64, overlap=0.3,
                                 update_progress=None, total_overall_images=None, images_processed_so_far=0,
-                                sigma_low=3.0, sigma_high=3.0, max_iterations=3): # Parameter baru (low/high sigma)
+                                sigma_low=3.0, sigma_high=3.0, max_iterations=3,
+                                use_multi_core=True): # Parameter baru
         """
-        Menghitung stack gambar dengan metode Sigma Clipping (Rejection) berbasis blok.
+        Menghitung stack gambar dengan metode Sigma Clipping berbasis blok.
+        Mendukung kontrol penggunaan multi-core.
         """
         if stop_requested and stop_requested():
-             print(language_config.STACK_SIGMA_CLIP_STOPPED) # Pesan baru
+             print(language_config.STACK_SIGMA_CLIP_STOPPED)
              return None
 
         if not images:
@@ -125,47 +124,49 @@ class MedianAlgorithm:
         target_shape = images[0].shape
         num_images_in_this_call = len(images)
 
+        # Logika adaptasi progress (tetap sama)
         adapted_update_progress = None
         if update_progress:
-            overall_progress_cap = 98 # Cap tetap sama
+            overall_progress_cap = 98
             progress_start_percent = 0
             progress_range_for_this_call = overall_progress_cap
-
             if total_overall_images is not None and total_overall_images > 0:
-                progress_start_percent = (images_processed_so_far / total_overall_images) * 100
-                theoretical_end_percent = ((images_processed_so_far + num_images_in_this_call) / total_overall_images) * 100
-                progress_end_percent_for_this_call = min(theoretical_end_percent, overall_progress_cap)
-                progress_range_for_this_call = max(0, progress_end_percent_for_this_call - progress_start_percent)
-
-            # --- MODIFIKASI 1.1: Sesuaikan map_progress ---
+                 progress_start_percent = (images_processed_so_far / total_overall_images) * 100
+                 theoretical_end_percent = ((images_processed_so_far + num_images_in_this_call) / total_overall_images) * 100
+                 progress_end_percent_for_this_call = min(theoretical_end_percent, overall_progress_cap)
+                 progress_range_for_this_call = max(0, progress_end_percent_for_this_call - progress_start_percent)
             def map_progress(internal_percent, internal_message="process"):
-                overall_progress = int(progress_start_percent + (internal_percent / 100.0) * progress_range_for_this_call)
-                update_progress(overall_progress, f"{internal_message}")
-
+                 overall_progress = int(progress_start_percent + (internal_percent / 100.0) * progress_range_for_this_call)
+                 update_progress(overall_progress, f"{internal_message}")
             adapted_update_progress = map_progress
         # --------------------------------
 
         images_resized = self._resize_images(images, target_shape)
-
         stacked_image = self._compute_sigma_clip_image(
             images_resized,
             target_shape,
             block_size,
             dtype,
             overlap,
-            update_progress=adapted_update_progress, # Ini sekarang map_progress(persen, pesan)
+            update_progress=adapted_update_progress,
             stop_requested=stop_requested,
             sigma_low=sigma_low,
             sigma_high=sigma_high,
-            max_iterations=max_iterations
+            max_iterations=max_iterations,
+            use_multi_core=use_multi_core # Lewatkan parameter
         )
 
         if stacked_image is None:
              return None
 
-        return stacked_image 
+        # Set progress ke 100% setelah selesai
+        if adapted_update_progress:
+            adapted_update_progress(100, language_config.ANALYZING_COMPLETE)
+
+        return stacked_image
 
     def _resize_images(self, images, target_shape):
+        # Fungsi ini tetap sama
         resized_images = []
         target_size = (target_shape[1], target_shape[0])
         for i, image in enumerate(images):
@@ -176,28 +177,74 @@ class MedianAlgorithm:
                  resized_images.append(resized)
         return resized_images
 
+    # --- MODIFIKASI 5: Implementasi Sigma Clipping Sebenarnya ---
     def _compute_block_sigma_clip(self, block_stack, sigma_low=3.0, sigma_high=3.0, max_iterations=5):
         """
-        Menghitung median stack blok menggunakan numpy.
+        Menghitung stack blok menggunakan Sigma Clipping (Rejection).
 
         Args:
             block_stack (np.ndarray): Tumpukan blok gambar (N, H, W, [C]).
+            sigma_low (float): Batas bawah sigma untuk penolakan.
+            sigma_high (float): Batas atas sigma untuk penolakan.
+            max_iterations (int): Jumlah iterasi maksimum untuk clipping.
 
         Returns:
-            np.ndarray: Blok gambar hasil median (H, W, [C]), dtype float32.
+            np.ndarray: Blok gambar hasil sigma clipping (H, W, [C]), dtype float32.
         """
-        if block_stack.shape[0] == 0:
-            return np.zeros(block_stack.shape[1:], dtype=np.float32)
-        elif block_stack.shape[0] == 1:
-            return block_stack[0].astype(np.float32)
-        else:
-            return np.median(block_stack, axis=0).astype(np.float32)
+        num_blocks, H, W = block_stack.shape[:3]
+        num_channels = block_stack.shape[3] if block_stack.ndim == 4 else 0
 
+        if num_blocks == 0:
+            return np.zeros(block_stack.shape[1:], dtype=np.float32)
+        elif num_blocks == 1:
+            return block_stack[0].astype(np.float32)
+
+        current_mask = np.ones(num_blocks, dtype=bool)
+        clipped_count = 0
+
+        # Iterasi Sigma Clipping
+        for _ in range(max_iterations):
+            valid_blocks = block_stack[current_mask]
+            if valid_blocks.shape[0] < 2: # Butuh minimal 2 untuk statistik
+                break # Berhenti jika terlalu sedikit data valid
+
+            # Hitung median dan std dev (atau MAD) dari blok yang valid
+            median_block = np.median(valid_blocks, axis=0)
+            # Gunakan std dev untuk kesederhanaan, MAD lebih robust tapi sedikit lebih kompleks
+            std_dev_block = np.std(valid_blocks, axis=0)
+
+            # Tentukan batas bawah dan atas
+            lower_bound = median_block - sigma_low * std_dev_block
+            upper_bound = median_block + sigma_high * std_dev_block
+
+            new_mask = np.ones(num_blocks, dtype=bool)
+            new_mask[current_mask] = np.all(
+                (block_stack[current_mask] >= lower_bound) & (block_stack[current_mask] <= upper_bound),
+                axis=tuple(range(1, block_stack.ndim)) # Cek semua dimensi kecuali axis=0 (jumlah blok)
+            )
+
+            if np.all(new_mask == current_mask):
+                break
+
+            current_mask = new_mask
+            clipped_count = num_blocks - np.sum(current_mask) # Hitung yg di-reject
+
+        final_valid_blocks = block_stack[current_mask]
+        if final_valid_blocks.shape[0] == 0:
+             return np.median(block_stack, axis=0).astype(np.float32)
+        else:
+            # print(f"Sigma Clip: Kept {final_valid_blocks.shape[0]}/{num_blocks} blocks.")
+            return np.mean(final_valid_blocks, axis=0).astype(np.float32)
+
+
+    # --- MODIFIKASI 2 & 4: Tambahkan use_multi_core & logika kondisional ---
     def _compute_sigma_clip_image(self, images, target_shape, block_size, dtype, overlap,
                                  update_progress=None, stop_requested=None,
-                                 sigma_low=3.0, sigma_high=3.0, max_iterations=3):
+                                 sigma_low=3.0, sigma_high=3.0, max_iterations=3,
+                                 use_multi_core=True): # Parameter baru
         """
-        Menghitung gambar stack menggunakan metode blok dengan Sigma Clipping (Rejection).
+        Menghitung gambar stack menggunakan metode blok dengan Sigma Clipping.
+        Mendukung pemrosesan multi-core atau single-core.
         """
         H, W = target_shape[:2]
         num_channels = target_shape[2] if len(target_shape) == 3 else 0
@@ -207,18 +254,16 @@ class MedianAlgorithm:
 
         step = max(int(block_size * (1 - overlap)), 1)
 
+        # Kalkulasi row_starts dan col_starts (tetap sama)
         row_starts = list(range(0, H - block_size + 1, step))
         if H % block_size != 0 and H > block_size :
              if not row_starts or row_starts[-1] != H - block_size: row_starts.append(H - block_size)
         elif H <= block_size and not row_starts: row_starts = [0]
-
         col_starts = list(range(0, W - block_size + 1, step))
         if W % block_size != 0 and W > block_size :
              if not col_starts or col_starts[-1] != W - block_size: col_starts.append(W - block_size)
         elif W <= block_size and not col_starts: col_starts = [0]
-
-        if not row_starts or not col_starts:
-             return np.zeros(target_shape, dtype=dtype)
+        if not row_starts or not col_starts: return np.zeros(target_shape, dtype=dtype)
 
         base_hanning = np.outer(np.hanning(block_size), np.hanning(block_size))
 
@@ -228,25 +273,26 @@ class MedianAlgorithm:
                 tasks.append((r, c))
 
         total_blocks = len(tasks)
-        if total_blocks == 0:
-             return np.zeros(target_shape, dtype=dtype)
+        if total_blocks == 0: return np.zeros(target_shape, dtype=dtype)
 
         blocks_processed_count = 0
-        internal_progress_cap = 98
+        internal_progress_cap = 98 
 
-        # --- MODIFIKASI 3.1: Tambahkan sigma & iterasi ke process_block ---
-        def process_block(row_start, col_start, p_sigma_low, p_sigma_high, p_max_iter): # Terima parameter
+        def process_block(row_start, col_start, p_sigma_low, p_sigma_high, p_max_iter):
             row_end = min(row_start + block_size, H)
             col_end = min(col_start + block_size, W)
             actual_block_h = row_end - row_start
             actual_block_w = col_end - col_start
+
+            if actual_block_h <= 0 or actual_block_w <= 0: # Cek jika blok tidak valid
+                 return row_start, row_end, col_start, col_end, None, None
 
             if num_channels > 0:
                 blocks = np.stack([im[row_start:row_end, col_start:col_end, :] for im in images], axis=0)
             else:
                 blocks = np.stack([im[row_start:row_end, col_start:col_end] for im in images], axis=0)
 
-            block_result = self._compute_block_sigma_clip(blocks, p_sigma_low, p_sigma_high, p_max_iter) # Panggil fungsi baru
+            block_result = self._compute_block_sigma_clip(blocks, p_sigma_low, p_sigma_high, p_max_iter)
 
             if (actual_block_h, actual_block_w) == (block_size, block_size):
                 hanning_win_2d = base_hanning
@@ -256,32 +302,63 @@ class MedianAlgorithm:
 
             return row_start, row_end, col_start, col_end, weighted_block_result, hanning_win_2d
 
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future_to_task = {executor.submit(process_block, r, c, sigma_low, sigma_high, max_iterations): (r, c) # Teruskan parameter
-                              for r, c in tasks}
+        if use_multi_core:
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future_to_task = {executor.submit(process_block, r, c, sigma_low, sigma_high, max_iterations): (r, c)
+                                  for r, c in tasks}
 
-            for future in concurrent.futures.as_completed(future_to_task):
+                for future in concurrent.futures.as_completed(future_to_task):
+                    if stop_requested and stop_requested():
+                        for f in future_to_task: f.cancel()
+                        executor.shutdown(wait=False, cancel_futures=True) # Coba batalkan
+                        return None # Keluar
+                    task = future_to_task[future]
+                    try:
+                        result = future.result()
+                        if result is None or result[4] is None: # Cek jika process_block gagal
+                             continue
+
+                        row_start, row_end, col_start, col_end, weighted_block, hanning_win_2d = result
+
+                        accumulator[row_start:row_end, col_start:col_end] += weighted_block
+                        weight_sum[row_start:row_end, col_start:col_end] += hanning_win_2d
+                        blocks_processed_count += 1
+
+                        if update_progress:
+                            progress_percent = int((blocks_processed_count / total_blocks) * internal_progress_cap)
+                            update_progress(progress_percent)
+
+                    except concurrent.futures.CancelledError:
+                        pass
+                    except Exception as exc:
+                        pass
+        else:
+            for r, c in tasks:
                 if stop_requested and stop_requested():
-                    for f in future_to_task: f.cancel()
-                    return None
-                task = future_to_task[future]
+                    return None 
+                
                 try:
-                    row_start, row_end, col_start, col_end, weighted_block, hanning_win_2d = future.result()
+                    result = process_block(r, c, sigma_low, sigma_high, max_iterations)
+                    if result is None or result[4] is None:
+                         continue
 
+                    row_start, row_end, col_start, col_end, weighted_block, hanning_win_2d = result
+
+                    # Akumulasi hasil
                     accumulator[row_start:row_end, col_start:col_end] += weighted_block
                     weight_sum[row_start:row_end, col_start:col_end] += hanning_win_2d
                     blocks_processed_count += 1
 
+                    # Update progress
                     if update_progress:
                         progress_percent = int((blocks_processed_count / total_blocks) * internal_progress_cap)
                         update_progress(progress_percent)
 
                 except Exception as exc:
-                    print(f"Error processing block {task}: {exc}")
-
-        # --- Finalisasi Gambar (tetap sama) ---
+                    pass
+        
         if update_progress:
-             update_progress(100, language_config.FINISHING_ANALYSIS)
+             update_progress(internal_progress_cap, language_config.FINISHING_ANALYSIS)
 
         final_weight_sum = weight_sum[..., np.newaxis] if num_channels > 0 else weight_sum
         mask = final_weight_sum > 1e-10
@@ -292,20 +369,24 @@ class MedianAlgorithm:
             min_val, max_val = np.iinfo(dtype).min, np.iinfo(dtype).max
             stacked_image_float = np.nan_to_num(stacked_image_float, nan=0.0, posinf=max_val, neginf=min_val)
             final_image = np.clip(stacked_image_float, min_val, max_val).astype(dtype)
-        else:
+        elif np.issubdtype(dtype, np.floating):
             stacked_image_float = np.nan_to_num(stacked_image_float, nan=0.0)
             final_image = stacked_image_float.astype(dtype)
+        else:
+            final_image = stacked_image_float 
 
         return final_image
 
 def main(db_path, update_progress=None, stop_requested=None, batch_size=4,
          single_process=None, batch_id=None, progress_bar=None):
     try:
+        general_settings = _load_general_settings()
+        use_multicore_from_settings = general_settings.get('multi_core_cpu', True)
         image_processor = MedianAlgorithm(db_path)
 
         output_name_base = ""
         image_paths = []
-        align_dir = os.path.join("database", "align") # Definisikan path folder alignment
+        align_dir = os.path.join("database", "align") 
 
         if single_process:
             image_paths = get_all_image_paths_for_single_process(db_path)
@@ -335,9 +416,8 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4,
         if not image_paths:
             print(language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
             if update_progress: update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
-            return # Keluar jika tidak ada gambar
+            return 
 
-        # --- Setup Path Output ---
         output_folder_stack = "database/stack"
         os.makedirs(output_folder_stack, exist_ok=True)
         output_name_base_safe = "".join(c for c in output_name_base if c.isalnum() or c in ('_', '-')).rstrip()
@@ -345,7 +425,6 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4,
         output_path = os.path.join(output_folder_stack, f"{output_name_base_safe}_median.tif")
         print(language_config.OUTPUT_IMAGE_TO_BE_SAVED.format(output_path))
         
-        # --- Ekstraksi Metadata ---
         metadata_folder = align_dir 
         os.makedirs(metadata_folder, exist_ok=True) 
         metadata_file = os.path.join(metadata_folder, "metadata.json")
@@ -425,8 +504,8 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4,
                                  update_progress=update_progress,
                                  stop_requested=stop_requested,
                                  total_overall_images=total_images,
-                                 images_processed_so_far=images_processed_count
-                                
+                                 images_processed_so_far=images_processed_count,
+                                 use_multi_core=use_multicore_from_settings # <-- LEWATKAN DI SINI
                              )
                         except Exception as e_sim_batch:
                              traceback.print_exc()
@@ -484,7 +563,8 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4,
                         update_progress=update_progress,
                         stop_requested=stop_requested,
                         total_overall_images=total_images,
-                        images_processed_so_far=images_processed_count
+                        images_processed_so_far=images_processed_count,
+                        use_multi_core=use_multicore_from_settings # <-- LEWATKAN DI SINI
                     )
                 except Exception as e_sim_batch:
                       traceback.print_exc()
@@ -524,6 +604,9 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4,
                      processed_batches_results,
                      update_progress=fine_tuning_update_progress,
                      stop_requested=stop_requested,
+                     use_multi_core=use_multicore_from_settings, 
+                     total_overall_images=num_fine_tuning_inputs,
+                     images_processed_so_far=0
                  )
             except Exception as e_fine_tune:
                   traceback.print_exc()

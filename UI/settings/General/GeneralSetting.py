@@ -83,7 +83,7 @@ def general_page():
     form_layout.addRow(gpu_checkbox)
 
     # Akselerasi Multi-Core CPU
-    cpu_label_text = getattr(language_config, 'MULTI_CORE_CPU_LABEL', "Akselerasi Multi-Core CPU")
+    cpu_label_text = getattr(language_config, 'MULTI_CORE_CPU', "Akselerasi Multi-Core CPU")
     cpu_checkbox = QCheckBox(cpu_label_text)
     cpu_checkbox.setChecked(current_settings.get("multi_core_cpu", True))
     cpu_checkbox.setStyleSheet(TOGGLE_SWITCH_STYLE)
@@ -160,7 +160,6 @@ def general_page():
                     #Faneback
                     if "Farneback" not in all_specific_params:
                         all_specific_params["Farneback"] = {}
-                        print(f"Info: Initializing 'Farneback' section in specific settings.")
                         specific_file_needs_writing = True 
                         
                     if isinstance(all_specific_params.get("Farneback"), dict):
@@ -221,7 +220,7 @@ def general_page():
             if msg_box.clickedButton() == restart_button: restart_application()
         else:
              if general_save_successful:
-                 QMessageBox.information(general_tab, "Settings Saved", "Pengaturan berhasil disimpan.")
+                 QMessageBox.information(general_tab, "Setting", language_config.SETTINGS_SAVED)
             
     def restart_application():
         """Fungsi untuk merestart aplikasi menggunakan QProcess."""

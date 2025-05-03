@@ -569,4 +569,8 @@ compared to the v1 version."""
 # ==============================================================================
 SETTING_GENERAL_LABEL = "General"
 LANGUAGE_LABEL = "Language"
-LANGUAGE_TYPE = "English", "Indonesian", "Traditional Chinese", "Malay" # Tuple of available languages
+LANGUAGE_TYPE = "English", "Indonesian", "Traditional Chinese", "Malay"
+
+GPU_ACCELERATION_LABEL = "GPU Acceleration"
+MULTI_CORE_CPU = "Multi-Core CPU"
+SETTINGS_SAVED = "Settings saved successfully."
