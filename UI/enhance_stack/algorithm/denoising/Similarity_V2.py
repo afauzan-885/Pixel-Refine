@@ -624,12 +624,12 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
                             batch_images,
                             tile_size=tile_size_tuple,        
                             overlap=overlap_ratio,            
-                            motion_threshold=sim_motion_threshold,
+                            motion_threshold=sim_motion_threshold, 
                             update_progress=update_progress,
                             stop_requested=stop_requested,
                             total_overall_images=total_images,
                             images_processed_so_far=images_processed_count  
-                            )
+                             )
                         except Exception as e_sim_batch:
                              traceback.print_exc()
                              batch_result = None 
@@ -734,16 +734,15 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
             # Panggil similarity_mfnr untuk fine-tuning
             final_result = None
             try:
-                batch_result = image_processor.similarity_mfnr(
-                batch_images,
-                tile_size=tile_size_tuple,        
-                overlap=overlap_ratio,            
-                motion_threshold=sim_motion_threshold,
-                update_progress=update_progress,
-                stop_requested=stop_requested,
-                total_overall_images=total_images,
-                images_processed_so_far=images_processed_count  
-                )
+                 final_result = image_processor.similarity_mfnr(
+                     processed_batches_results,
+                     tile_size=tile_size_tuple,
+                     overlap=overlap_ratio,    
+                     motion_threshold=sim_motion_threshold,
+                     update_progress=fine_tuning_update_progress,
+                     stop_requested=stop_requested,
+                     save_weight_map_path=final_weight_map_path_arg,
+                 )
             except Exception as e_fine_tune:
                   traceback.print_exc()
                   final_result = None 
@@ -820,6 +819,7 @@ def running_similarity_v2(parent=None, single_process=None, batch_id=None):
         Qt.WindowType.WindowTitleHint | Qt.WindowType.WindowCloseButtonHint
     )
 
+    # Layout untuk progress bar dan label
     layout = QVBoxLayout(dialog)
     label = QLabel(language_config.WINDOW_START_PROCESSING)
     layout.addWidget(label)
@@ -830,7 +830,9 @@ def running_similarity_v2(parent=None, single_process=None, batch_id=None):
     progress_bar.setStyleSheet(PROGRESS_BAR)
     layout.addWidget(progress_bar)
 
+    # Inisialisasi thread worker
     worker = ThreadWorker("pixel_refine_database.db", single_process=single_process, batch_id=batch_id)
+    # Menghubungkan signal worker ke fungsi pembaruan UI
     worker.progress_updated.connect(lambda progress, message: (
         progress_bar.setValue(progress),
         label.setText(message)
@@ -838,10 +840,10 @@ def running_similarity_v2(parent=None, single_process=None, batch_id=None):
 
     def finish_handler():
         nonlocal process_finished
-        process_finished = True 
+        process_finished = True  # set flag ketika proses selesai
         dialog.close()
-        worker.quit()  
-        worker.wait()
+        worker.quit()  # Berhenti dari thread
+        worker.wait()  # Tunggu thread selesai
 
     worker.finished.connect(finish_handler)
 
