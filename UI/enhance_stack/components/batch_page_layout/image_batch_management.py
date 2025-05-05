@@ -89,43 +89,98 @@ def handle_add_image_to_batch(batch_page_layout, database_manager, thumbnail_thr
         print("Batch ID tidak valid.")
         return
 
-    existing_image_paths = database_manager.get_images_by_batch(batch_id)
+    # Dapatkan path yang sudah ada di batch ini (untuk cek duplikat nanti)
+    try:
+         existing_image_paths = database_manager.get_images_by_batch(batch_id)
+    except Exception as e:
+         print(f"Error mendapatkan gambar yang ada untuk batch {batch_id}: {e}")
+         QMessageBox.critical(None, "Database Error", "Could not retrieve existing images for the batch.")
+         return
 
-    file_dialog = QFileDialog()
-    file_paths, _ = file_dialog.getOpenFileNames(
-        None,
-        language_config.HANDLE_IMPORT_BUTTON_IMAGE_PATH,
-        "",
-        language_config.HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION
+    # --- PERBAIKAN FILTER DIALOG ---
+    # Buat filter string dari SUPPORTED_FORMATS
+    filter_parts = []
+    all_supported_extensions = []
+    for ext_list in SUPPORTED_FORMATS.values():
+        all_supported_extensions.extend([f"*{ext}" for ext in ext_list])
+    all_filter_str = f"All Supported Images ({' '.join(sorted(list(set(all_supported_extensions))))})"
+    filter_parts.append(all_filter_str)
+    for format_key, extensions in SUPPORTED_FORMATS.items():
+        formatted_extensions = ' '.join([f"*{ext}" for ext in extensions])
+        description = f"{format_key.upper()} Files"
+        filter_parts.append(f"{description} ({formatted_extensions})")
+    filter_parts.append("All Files (*)")
+    file_dialog_filter = ';;'.join(filter_parts)
+    # --- AKHIR PERBAIKAN FILTER ---
+
+    # Gunakan filter yang sudah dibuat
+    file_paths, _ = QFileDialog.getOpenFileNames(
+        None, # Parent bisa None atau widget yang relevan
+        language_config.HANDLE_IMPORT_BUTTON_IMAGE_PATH, # Judul dialog
+        "", # Direktori awal
+        file_dialog_filter # Gunakan filter dari SUPPORTED_FORMATS
     )
 
     if not file_paths:
-        return  
+        return # Keluar jika tidak ada file dipilih
 
+    # --- Validasi Format & Duplikat ---
+    # Filter file yang dipilih HANYA untuk format yang didukung SEBELUM cek duplikat
+    supported_extensions_set = {ext.lower() for fmt_list in SUPPORTED_FORMATS.values() for ext in fmt_list}
+    selected_supported_files = [
+        path for path in file_paths
+        if os.path.splitext(path)[1].lower() in supported_extensions_set
+    ]
+
+    # Beri tahu jika ada file dengan format tidak didukung yang dipilih & dibuang
+    num_unsupported = len(file_paths) - len(selected_supported_files)
+    if num_unsupported > 0:
+        QMessageBox.information(None, "Format Tidak Didukung",
+                                f"{num_unsupported} file dipilih dengan format yang tidak didukung dan akan diabaikan.")
+
+    if not selected_supported_files:
+        print("Tidak ada file dengan format yang didukung yang dipilih.")
+        return # Keluar jika tidak ada file valid tersisa
+
+    # Cek duplikat hanya terhadap file yang formatnya didukung
     existing_set = set(existing_image_paths)
-    unique_files = [path for path in file_paths if path not in existing_set]
-    duplicates = list(existing_set.intersection(file_paths))
+    unique_files = [path for path in selected_supported_files if path not in existing_set]
+    duplicates = list(existing_set.intersection(selected_supported_files))
 
     if duplicates:
         message = language_config.HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE_MESSAGE.format(count=len(duplicates))
         QMessageBox.warning(None, language_config.HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE, message)
 
     if unique_files:
-        database_manager.batch_process_save_image_path(batch_id, unique_files)
+        # Simpan path unik yang baru ke DB
+        try:
+             database_manager.batch_process_save_image_path(batch_id, unique_files)
+        except Exception as e:
+             print(f"Error menyimpan path baru ke batch {batch_id}: {e}")
+             QMessageBox.critical(None, "Database Error", "Could not save new image paths to the batch.")
+             return # Jangan lanjutkan jika gagal simpan DB
 
+        # Proses pembuatan thumbnail (kode ini tampak oke)
         ref_layout = weakref.ref(list_layout)
-
+        newly_added_count = 0
         for path in unique_files:
-            loader = ThumbnailLoader(path)
-            loader.thumbnail_ready.connect(
-                lambda pixmap, p=path, ref_layout=ref_layout: update_thumbnail(ref_layout, pixmap, p) if ref_layout() else None
-            )
-            loader.start()
-            thumbnail_threads.append(loader)  # Simpan referensi agar tidak dihapus GC
+            try:
+                loader = ThumbnailLoader(path) # Asumsikan ThumbnailLoader ada
+                # Pastikan koneksi lambda benar menangkap variabel
+                loader.thumbnail_ready.connect(
+                    lambda pixmap, current_path=path, layout_ref=ref_layout:
+                        update_thumbnail(layout_ref, pixmap, current_path) if layout_ref() else None
+                )
+                loader.start()
+                thumbnail_threads.append(loader)
+                newly_added_count += 1
+            except Exception as e_thumb:
+                 print(f"Error memulai thumbnail loader untuk {path}: {e_thumb}")
+                 # Pertimbangkan untuk memberi tahu pengguna tentang kegagalan thumbnail
 
-        print(f"Added {len(unique_files)} new images to batch {batch_id}")
+        print(f"Added {newly_added_count} new supported images to batch {batch_id}")
 
-        # Emit sinyal data_changed dari BatchPageLayout
+        # Emit sinyal data_changed dari BatchPageLayout jika ada penambahan
         batch_page_layout.data_changed.emit()
 
 # --- Fungsi Baru yang Dipindahkan ---
@@ -195,13 +250,24 @@ def process_and_start_batch_import(batch_page_layout, image_paths: list):
         db_manager.batch_process_delete_batch(target_batch_id)
         return
 
-    files_to_import = []
-    files_to_import.extend(format_groups.get("jpg", []))
-    files_to_import.extend(format_groups.get("png", []))
+    # --- Step 3: Konversi TIFF & Pengumpulan File ---
+    output_folder = "database/align/uncompressed_tiff"
+    try:
+        os.makedirs(output_folder, exist_ok=True)
+    except OSError as e:
+        QMessageBox.critical(batch_page_layout, "Folder Error", f"Could not create folder for TIFF conversion:\n{e}")
+        db_manager.batch_process_delete_batch(target_batch_id)
+        return
 
+    files_to_import = []
+    for fmt_key in SUPPORTED_FORMATS: 
+        if fmt_key != "tiff": 
+            files = format_groups.get(fmt_key, []) 
+            if files:
+                files_to_import.extend(files)
+    
     tiff_files = format_groups.get("tiff", [])
     if tiff_files:
-         print(f"Processing {len(tiff_files)} TIFF files for batch {target_batch_id}...")
          converted_or_original_tiffs = []
          tiff_errors = []
          for tiff_path in tiff_files:
@@ -215,16 +281,14 @@ def process_and_start_batch_import(batch_page_layout, image_paths: list):
                    print(f"  TIFF Error reading info/opening: {os.path.basename(tiff_path)}, Error: {e}"); tiff_errors.append(f"{os.path.basename(tiff_path)} (Read Error)"); continue
 
               if needs_conversion:
-                   print(f"  Converting compressed TIFF: {os.path.basename(tiff_path)}")
-                   # Panggil metode helper (asumsikan ada atau pindahkan juga)
-                   converted = convert_tiff_to_uncompressed_static(tiff_path, output_folder) # Buat versi statis
+                   converted = convert_tiff_to_uncompressed_static(tiff_path, output_folder)
                    if converted: processed_tiff_path = converted
-                   else: print(f"  Skipping TIFF due to conversion error: {os.path.basename(tiff_path)}"); tiff_errors.append(f"{os.path.basename(tiff_path)} (Conversion Failed)"); continue
+                   else:
+                       print(f"  Skipping TIFF due to conversion error: {os.path.basename(tiff_path)}"); tiff_errors.append(f"{os.path.basename(tiff_path)} (Conversion Failed)"); continue
               converted_or_original_tiffs.append(processed_tiff_path)
 
          files_to_import.extend(converted_or_original_tiffs)
-         if tiff_errors: QMessageBox.warning(batch_page_layout, "TIFF Processing Issues", f"Could not process some TIFF files:\n{', '.join(tiff_errors)}") # Gunakan batch_page_layout sbg parent
-    # ---------------------------
+         if tiff_errors: QMessageBox.warning(batch_page_layout, "TIFF Processing Issues", f"Could not process some TIFF files:\n{', '.join(tiff_errors)}")
 
     # --- Step 4 & 5: Seleksi File (Logika Dominan/Prioritas) ---
     selected_files = []
@@ -240,19 +304,15 @@ def process_and_start_batch_import(batch_page_layout, image_paths: list):
         if any(temp_format_groups.values()):
             dominant_format = max(temp_format_groups, key=lambda key: len(temp_format_groups[key]))
             total_to_import = len(files_to_import)
-            # Terapkan logika dominan
             if len(temp_format_groups[dominant_format]) > total_to_import / 2:
                  selected_files = temp_format_groups[dominant_format]
-                 print(f"Selected dominant format '{dominant_format}' with {len(selected_files)} files.")
             else:
                  for key in SUPPORTED_FORMATS.keys():
                       if temp_format_groups[key]:
                           selected_files = temp_format_groups[key]
-                          print(f"Selected first available format '{key}' with {len(selected_files)} files.")
-                          dominant_format = key # Update dominant format untuk pesan
+                          dominant_format = key 
                           break
         else:
-             print("Warning: No valid format groups found after TIFF conversion.")
              selected_files = []
              dominant_format = "N/A"
     else:
@@ -262,11 +322,9 @@ def process_and_start_batch_import(batch_page_layout, image_paths: list):
     if selected_files:
         num_files_this_batch = len(selected_files)
 
-        # Update state di BatchPageLayout
         batch_page_layout._total_pending_imports += num_files_this_batch
         batch_page_layout._update_aggregated_progress_toast() 
 
-        # Mulai impor di background thread
         try:
             import_thread = BatchImageImportThreading(
                 database_manager=db_manager,

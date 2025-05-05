@@ -1,7 +1,14 @@
+from concurrent.futures import ThreadPoolExecutor
+import os
+import time
+import concurrent
 import cv2
 import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtGui import QPixmap, QImage
+import rawpy
+
+from config import SUPPORTED_FORMATS
 
 
 class BaseMultiThreading(QThread):
@@ -54,48 +61,199 @@ class BaseMultiThreading(QThread):
     def stop(self):
         """Set the running flag to False to stop the thread."""
         self._is_running = False
+    
+    
+        
+def _process_image_part(img_part_data):
+    """Memproses bagian gambar (NumPy array). Melakukan konversi warna/tipe jika perlu."""
+    img_part = img_part_data.copy()
 
+    try:
+        if img_part.dtype == np.uint16:
+            img_part = (img_part / 256).astype(np.uint8)
+        elif img_part.dtype != np.uint8:
+             raise ValueError(f"Tipe data kuadran tidak valid: {img_part.dtype}")
+
+        processed_part = img_part # Default jika sudah RGB
+
+        # Konversi warna jika perlu
+        if len(img_part.shape) == 2: # Grayscale
+            processed_part = cv2.cvtColor(img_part, cv2.COLOR_GRAY2RGB)
+        elif img_part.shape[2] == 4: # RGBA
+            processed_part = cv2.cvtColor(img_part, cv2.COLOR_RGBA2RGB)
+
+        # Pastikan output adalah RGB uint8
+        if len(processed_part.shape) != 3 or processed_part.shape[2] != 3 or processed_part.dtype != np.uint8:
+            pass
+            # raise RuntimeError(f"Pemrosesan kuadran gagal menghasilkan RGB uint8: shape={processed_part.shape}, dtype={processed_part.dtype}")
+
+        return processed_part
+
+    except Exception as e:
+        pass
+        raise RuntimeError(f"Failed to process quadrant: {e}")
 
 class RawImageProcessingThread(BaseMultiThreading):
-    """
-    A special multithreading class for processing images of various formats.
-    """
     def __init__(self, image_paths, batch_size=1, delay_ms=100):
+
+        try:
+             total_cores = os.cpu_count()
+             self.num_part_workers = max(1, (total_cores // 2) if total_cores else 2)
+        except NotImplementedError:
+             self.num_part_workers = 2
+        
         def process_image(image_path):
-            # Deteksi format berdasarkan ekstensi file
-            extension = image_path.split('.')[-1].lower()
+            try:
+                filename = os.path.basename(image_path)
+                extension = os.path.splitext(image_path)[1].lower()
+                img_array = None # Hasil array NumPy sebelum dipecah/diproses
+                processed_via_parts = False # Flag apakah pemrosesan paralel bagian dilakukan
 
-            if extension in {"nef", "cr2", "dng", "arw"}:  # Format RAW (Gunakan OpenCV atau library lain jika perlu)
-                raise RuntimeError(f"RAW format not supported: {image_path}")
-            
-            elif extension in {"jpg", "jpeg", "png", "tiff", "tif"}:  # Format non-RAW
-                img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+                if "dng" in SUPPORTED_FORMATS and extension in SUPPORTED_FORMATS["dng"]:
+                    try:
+                        with rawpy.imread(image_path) as raw:
+                            img_array = raw.postprocess(output_bps=8, use_camera_wb=True, no_auto_bright=False, gamma=(2.222, 4.5))
+                            if img_array is None: raise RuntimeError(f"Rawpy postprocessing failed for {filename}")
+                          
+                    except rawpy.LibRawError as e: raise RuntimeError(f"Rawpy Error processing {filename}: {e}")
+                    except FileNotFoundError: raise RuntimeError(f"DNG file not found: {image_path}")
+                    except Exception as e: raise RuntimeError(f"Unexpected DNG processing error {filename}: {e}")
 
-                # Konversi jika gambar 16-bit ke 8-bit
-                if img.dtype == np.uint16:
-                    img = (img / 256).astype(np.uint8)
+                elif any(extension in formats for key, formats in SUPPORTED_FORMATS.items() if key != "dng"):
+                    img_cv = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+                    if img_cv is None: raise RuntimeError(f"OpenCV failed to read image: {filename}")
 
-                # Jika format gambar adalah grayscale, ubah ke RGB
-                if len(img.shape) == 2:  # Gambar grayscale
-                    img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-                elif img.shape[2] == 4:  # Gambar dengan Alpha (RGBA)
-                    img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
-                elif img.shape[2] == 3:  # Sudah RGB tetapi dalam format OpenCV (BGR)
-                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    # Pra-proses tipe data SEBELUM memecah
+                    if img_cv.dtype == np.uint16:
+                        img_array = (img_cv / 256).astype(np.uint8)
+                    elif img_cv.dtype == np.uint8:
+                        img_array = img_cv # Sudah tipe yang benar
+                    else:
+                        raise RuntimeError(f"Unexpected OpenCV dtype ({img_cv.dtype}) for {filename}")
 
-                # Konversi NumPy array ke format QPixmap
-                height, width, channel = img.shape
-                bytes_per_line = channel * width
-                qimg = QImage(img.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
-                pixmap = QPixmap.fromImage(qimg)
+                    # Konversi BGR awal ke RGB jika perlu (dilakukan sebelum pemecahan jika memungkinkan)
+                    if len(img_array.shape) == 3 and img_array.shape[2] == 3:
+                         img_array = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
+                         print(f"  Initial BGR->RGB conversion done for {filename}")
 
-                if pixmap.isNull():
-                    raise RuntimeError(f"Failed to load image '{image_path}'. Conversion failed.")
+                    # Jika inputnya Grayscale atau RGBA, pemecahan akan dilakukan
+                    # karena konversi warna perlu dilakukan per bagian.
+                    if len(img_array.shape) == 2 or img_array.shape[2] == 4:
+                         processed_via_parts = True # Tandai untuk pemrosesan paralel
+                         print(f"  Image {filename} needs per-part color conversion (Grayscale/RGBA). Will attempt parallel processing.")
+                    # Jika sudah RGB 8-bit pada tahap ini, tidak ada gunanya memecah lebih lanjut.
+                    elif len(img_array.shape) == 3 and img_array.shape[2] == 3:
+                         print(f"  Image {filename} is already RGB uint8. Skipping experimental part splitting.")
+                    else:
+                         raise RuntimeError(f"Unhandled image shape after initial processing: {img_array.shape}")
 
-                return pixmap  # Hasil yang diproses akan dikirim melalui sinyal `result_signal`
+                else:
+                    raise RuntimeError(f"Unsupported image format: {filename} (ext: {extension})")
 
-            else:
-                raise RuntimeError(f"Unsupported image format: {image_path}")
+
+                # 2. Pemrosesan Paralel Bagian (JIKA diperlukan dan ditandai)
+                # ============================================================
+                final_img = None
+                if processed_via_parts and img_array is not None:
+                    print(f"  Starting parallel part processing for {filename}...")
+                    h, w = img_array.shape[:2]
+                    # Hindari pemecahan jika gambar terlalu kecil
+                    if h < 10 or w < 10:
+                         print(f"  Image {filename} too small, processing whole.")
+                         # Proses keseluruhan jika terlalu kecil
+                         final_img = _process_image_part(img_array)
+                    else:
+                        # Tentukan titik potong (4 kuadran)
+                        mid_h = h // 2
+                        mid_w = w // 2
+                        parts = [
+                            img_array[0:mid_h, 0:mid_w],      # Top-Left
+                            img_array[0:mid_h, mid_w:w],      # Top-Right
+                            img_array[mid_h:h, 0:mid_w],      # Bottom-Left
+                            img_array[mid_h:h, mid_w:w]       # Bottom-Right
+                        ]
+                        part_indices = [(0, 0), (0, 1), (1, 0), (1, 1)] # Untuk menempatkan kembali
+
+                        processed_parts = {} # Simpan hasil berdasarkan indeks
+
+                        with ThreadPoolExecutor(max_workers=self.num_part_workers) as executor:
+                            # Buat future untuk setiap bagian
+                            future_to_index = {executor.submit(_process_image_part, parts[i]): part_indices[i] for i in range(4)}
+
+                            for future in concurrent.futures.as_completed(future_to_index):
+                                index = future_to_index[future]
+                                try:
+                                    processed_parts[index] = future.result()
+                                except Exception as exc:
+                                    print(f"  Quadrant {index} generated an exception: {exc}")
+                                    # Handle error: bisa raise error utama, atau coba lanjutkan tanpa bagian ini
+                                    raise RuntimeError(f"Error in parallel processing for {filename}, quadrant {index}: {exc}")
+
+                        # Periksa apakah semua bagian berhasil diproses
+                        if len(processed_parts) == 4:
+                            # Tentukan shape output (harus RGB)
+                            out_h = h
+                            out_w = w
+                            out_channels = 3 # Target selalu RGB
+                            out_dtype = np.uint8
+
+                            # Buat array kosong untuk menampung hasil gabungan
+                            stitched_img = np.zeros((out_h, out_w, out_channels), dtype=out_dtype)
+
+                            # Gabungkan kembali bagian-bagian yang sudah diproses
+                            # Pastikan dimensi sesuai
+                            p_tl = processed_parts[(0, 0)]
+                            p_tr = processed_parts[(0, 1)]
+                            p_bl = processed_parts[(1, 0)]
+                            p_br = processed_parts[(1, 1)]
+
+                            stitched_img[0:mid_h, 0:mid_w] = p_tl
+                            stitched_img[0:mid_h, mid_w:w] = p_tr
+                            stitched_img[mid_h:h, 0:mid_w] = p_bl
+                            stitched_img[mid_h:h, mid_w:w] = p_br
+
+                            final_img = stitched_img
+                            print(f"  Parallel part processing finished and stitched for {filename}.")
+                        else:
+                             raise RuntimeError(f"Parallel processing failed for {filename}: not all parts completed successfully.")
+
+                elif img_array is not None:
+                     # Jika tidak diproses via parts, img_array adalah hasil akhir
+                     final_img = img_array
+                else:
+                     # Jika img_array None (error saat baca)
+                     raise RuntimeError(f"Image array is None before final conversion for {filename}")
+
+
+                # 3. Konversi ke QPixmap (dari final_img)
+                # =========================================
+                if final_img is not None:
+                    # Validasi akhir sebelum konversi QPixmap
+                    if len(final_img.shape) != 3 or final_img.shape[2] != 3 or final_img.dtype != np.uint8:
+                         raise RuntimeError(f"Final image data not RGB uint8 for {filename}: shape={final_img.shape}, dtype={final_img.dtype}")
+
+                    height, width, channel = final_img.shape
+                    bytes_per_line = channel * width
+                    qimg = QImage(final_img.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+
+                    qimg_copy = qimg.copy() # Penting!
+                    if qimg_copy.isNull(): raise RuntimeError(f"Failed to copy QImage for {filename}")
+
+                    pixmap = QPixmap.fromImage(qimg_copy)
+                    if pixmap.isNull(): raise RuntimeError(f"Failed to create QPixmap for {filename}")
+
+                    return pixmap
+                else:
+                    raise RuntimeError(f"Final image is None after processing {filename}")
+
+            except RuntimeError as e:
+                print(f"ERROR processing {image_path}: {e}")
+                raise e
+            except Exception as e:
+                import traceback
+                print(f"!!! CRITICAL UNEXPECTED ERROR processing {image_path}: {e}")
+                traceback.print_exc()
+                raise RuntimeError(f"Critical error processing {image_path}")
 
         super().__init__(process_image, image_paths, batch_size, delay_ms)
 

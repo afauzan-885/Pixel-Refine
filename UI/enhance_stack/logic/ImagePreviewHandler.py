@@ -388,14 +388,20 @@ class ImagePreviewHandler(QObject):
 
 
     def _show_status_message(self, message: str):
-        """Menampilkan pesan status menggunakan QGraphicsTextItem."""
-        if not self.preview_scene or not self.preview_view: return
+        """Menampilkan pesan status menggunakan QGraphicsTextItem dengan word wrap jika panjang teks melebihi 50px.
+        Menambahkan kemampuan untuk menyalin teks yang ditampilkan."""
+        if not self.preview_scene or not self.preview_view:
+            return
         self.preview_scene.clear()
         self._pixmap_item = None
         self._original_pixmap = None
-        
+
         text_item = QGraphicsTextItem()
-        text_item.setHtml(f'<div style="color: transparent; text-align: center; font-size: 18px;">{message}</div>')
+        # Tambahkan word wrap dengan membatasi lebar teks
+        max_width = 200
+        wrapped_message = f'<div style="color: Black; text-align: center; font-size: 12px; width: {max_width}px; word-wrap: break-word;">{message}</div>'
+        text_item.setHtml(wrapped_message)
+        text_item.setTextWidth(max_width)  # Atur lebar teks untuk word wrap
         text_item.setFlag(QGraphicsTextItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
         self.preview_scene.addItem(text_item)
         viewport_rect = self.preview_view.viewport().rect()
@@ -404,3 +410,7 @@ class ImagePreviewHandler(QObject):
         item_rect = text_item.boundingRect()
         text_item.setPos(scene_center.x() - item_rect.width() / 2,
                          scene_center.y() - item_rect.height() / 2)
+
+        # Tambahkan kemampuan untuk menyalin teks
+        text_item.setToolTip("Klik kanan untuk menyalin teks")
+        text_item.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)

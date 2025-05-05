@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 # from UI.enhance_stack.algorithm.denoising.extra_similarity.compute_motion_metrics_aot import accumulate_tiles_jit
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, get_all_image_paths_for_single_process, save_image
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, get_all_image_paths_for_single_process, load_images_from_paths, save_image
 from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityV1MotionInterface
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.GeneralSetting import load_general_settings
@@ -563,7 +563,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
                     break
 
                 batch_paths = image_paths[batch_start:min(batch_start + batch_size, total_images)]
-                batch_images = image_processor.load_images_from_paths(batch_paths, stop_requested)
+                batch_images = load_images_from_paths(batch_paths, stop_requested)
                 if stop_requested and stop_requested(): 
                     break
                 

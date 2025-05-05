@@ -443,7 +443,13 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, sing
     
     # Proses gambar pertama sebagai base_image
     base_image_path = image_paths[0]
-    base_image = cv2.imread(base_image_path, cv2.IMREAD_UNCHANGED)
+    loaded_base_list = load_images_from_paths([base_image_path], stop_requested=stop_requested) # Tambahkan argumen lain jika perlu
+
+    if not loaded_base_list:
+        print(language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
+        return
+    else:
+        base_image = loaded_base_list[0]
     if base_image is None:
         print(language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
         return

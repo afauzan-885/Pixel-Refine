@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 # from UI.enhance_stack.algorithm.denoising.extra_similarity.compute_motion_metrics_aot import accumulate_tiles_jit
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, get_all_image_paths_for_single_process, save_image
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, get_all_image_paths_for_single_process, load_images_from_paths, save_image
 from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityV2MotionInterface
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.GeneralSetting import load_general_settings
@@ -671,8 +671,9 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
                     break
 
                 batch_paths = image_paths[batch_start:min(batch_start + batch_size, total_images)]
-                batch_images = image_processor.load_images_from_paths(batch_paths, stop_requested)
-                if stop_requested and stop_requested(): break # Cek setelah loading
+                batch_images = load_images_from_paths(batch_paths, stop_requested)
+                if stop_requested and stop_requested(): 
+                    break
 
                 if not batch_images:
                     print(language_config.SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED.format(current_batch_num))
@@ -769,15 +770,16 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
                             pass
             else:
                 print(language_config.FAILED_IMAGE_ENHANCEMENT)
-                if update_progress: update_progress(100, language_config.FAILED_IMAGE_ENHANCEMENT) # 100% tapi pesan gagal
+                if update_progress: update_progress(100, language_config.FAILED_IMAGE_ENHANCEMENT)
 
-        elif not (stop_requested and stop_requested()): # Jika tidak ada hasil batch DAN tidak dibatalkan
+        elif not (stop_requested and stop_requested()):
             print(language_config.DATA_FAILED_COMPLETION_CREATED)
             if update_progress:
                 update_progress(100, language_config.DATA_FAILED_COMPLETION_CREATED)
 
         if stop_requested and stop_requested():
-             if update_progress and progress_bar: update_progress(progress_bar.value(), "Proses dibatalkan.") # Update progress terakhir
+             if update_progress and progress_bar:
+                 update_progress(progress_bar.value())
 
 
     except ValueError as ve:

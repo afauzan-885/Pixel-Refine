@@ -364,11 +364,32 @@ class BatchPageLayout(QWidget):
     # --- Batch Import ---
     def handle_batch_import_button(self):
         """Membuka dialog file dan memulai proses impor batch."""
-        file_dialog_filter = language_config.HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION
-        image_paths, _ = QFileDialog.getOpenFileNames(self, language_config.HANDLE_IMPORT_BUTTON_IMAGE_PATH, "", file_dialog_filter)
+
+        filter_parts = []
+        all_supported_extensions = []
+        
+        for ext_list in SUPPORTED_FORMATS.values():
+            all_supported_extensions.extend([f"*{ext}" for ext in ext_list])
+        all_filter_str = f"All Supported Images ({' '.join(sorted(list(set(all_supported_extensions))))})"
+        filter_parts.append(all_filter_str)
+        
+        for format_key, extensions in SUPPORTED_FORMATS.items():
+            formatted_extensions = ' '.join([f"*{ext}" for ext in extensions])
+            description = f"{format_key.upper()} Files"
+            filter_parts.append(f"{description} ({formatted_extensions})")
+        
+        filter_parts.append("All Files (*)")
+        
+        file_dialog_filter = ';;'.join(filter_parts)
+        
+        image_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            language_config.HANDLE_IMPORT_BUTTON_IMAGE_PATH, # Judul dialog
+            "", 
+            file_dialog_filter 
+        )
 
         if image_paths:
-            # Panggil fungsi yang sudah dipindahkan, berikan 'self'
             process_and_start_batch_import(self, image_paths)
 
     # --- Helper Methods ---

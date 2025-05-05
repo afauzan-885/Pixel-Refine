@@ -99,8 +99,33 @@ class SinglePageLayout(QWidget):
 
     def handle_import_button(self):
         """Membuka dialog file dan memulai proses impor."""
-        file_dialog_filter = language_config.HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION
-        image_paths, _ = QFileDialog.getOpenFileNames(self, language_config.HANDLE_IMPORT_BUTTON_IMAGE_PATH, "", file_dialog_filter)
+        filter_parts = []
+
+        all_supported_extensions = []
+        for ext_list in SUPPORTED_FORMATS.values():
+            all_supported_extensions.extend([f"*{ext}" for ext in ext_list])
+        all_filter_str = f"All Supported Images ({' '.join(sorted(list(set(all_supported_extensions))))})"
+        filter_parts.append(all_filter_str)
+
+        # 3. Tambahkan filter untuk setiap tipe format secara spesifik
+        for format_key, extensions in SUPPORTED_FORMATS.items():
+            formatted_extensions = ' '.join([f"*{ext}" for ext in extensions])
+            description = f"{format_key.upper()} Files"
+            filter_parts.append(f"{description} ({formatted_extensions})")
+
+        # 4. Tambahkan filter "Semua File" sebagai opsi terakhir
+        filter_parts.append("All Files (*)")
+
+        # 5. Gabungkan semua bagian filter dengan ';;'
+        file_dialog_filter = ';;'.join(filter_parts)
+    
+        # Gunakan filter string yang sudah dibuat
+        image_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            language_config.HANDLE_IMPORT_BUTTON_IMAGE_PATH,
+            "",
+            file_dialog_filter 
+        )
 
         if image_paths:
             self._process_and_start_import(image_paths)
@@ -367,7 +392,6 @@ class SinglePageLayout(QWidget):
         file_path, _ = QFileDialog.getSaveFileName(
             self, "Save Image As",
             os.path.basename(latest_image_path),
-            "JPEG (*.jpg *.jpeg);;TIFF (*.tif *.tiff);;PNG (*.png)"
             "JPEG (*.jpg *.jpeg);;TIFF (*.tif *.tiff);;PNG (*.png)"
         )
 

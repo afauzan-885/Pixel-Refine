@@ -43,8 +43,6 @@ class RightPanel(QWidget):
         try:
             format_keys = SUPPORTED_FORMATS.keys()
             supported_formats_text = ", ".join(sorted(list(format_keys)))
-        except NameError:
-            supported_formats_text = "jpg, png, tiff" 
         except Exception as e:
             supported_formats_text = "(Failed to load format)"
 
@@ -184,20 +182,22 @@ class RightPanel(QWidget):
 
     def dropEvent(self, event: QDropEvent):
         """Dipanggil saat drop terjadi di RightPanel."""
-        # Reset properti visual SEBELUM memproses drop
-        if self.property("acceptingDrop"):
-            self.setProperty("acceptingDrop", False)
+        if self.property("acceptingDrop"): # Gunakan == "true" jika Anda set sebagai string
+            self.setProperty("acceptingDrop", False) # Atau "false"
             self.style().unpolish(self)
             self.style().polish(self)
-
-        # Proses drop jika event diterima
+      
         if event.mimeData().hasUrls():
-            event.acceptProposedAction() # Terima drop
+            event.acceptProposedAction() 
+
+            supported_extensions = {ext.lower() for formats in SUPPORTED_FORMATS.values() for ext in formats}
+
             valid_image_paths = [
                 url.toLocalFile() for url in event.mimeData().urls()
                 if url.isLocalFile() and os.path.isfile(url.toLocalFile()) and
-                   os.path.splitext(url.toLocalFile())[1].lower() in ['.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.webp']
+                   os.path.splitext(url.toLocalFile())[1].lower() in supported_extensions # <-- Gunakan set dari SUPPORTED_FORMATS
             ]
+            
             if valid_image_paths:
                 self.imagesDropped.emit(valid_image_paths)
                 

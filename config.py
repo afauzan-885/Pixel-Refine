@@ -1,5 +1,5 @@
 import os
-APP_VERSION = "0.3.7"
+APP_VERSION = "0.4.0"
 
 PYTHON_INTERPRETER = "venv/Scripts/python.exe"
 CACHE_DIR = "database/cache/thumbnails"
@@ -14,5 +14,6 @@ SUPPORTED_FORMATS = {
         "jpg": [".jpg", ".jpeg", ".jiff", ".jli"],
         "tiff": [".tif", ".tiff"],
         "png": [".png"],
+        "dng":[".dng"],
     }
 

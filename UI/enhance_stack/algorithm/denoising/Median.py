@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, get_all_image_paths_for_single_process, save_image
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, get_all_image_paths_for_single_process, load_images_from_paths, save_image
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.GeneralSetting import load_general_settings
 from UI.settings.General.Language import language_config
@@ -82,24 +82,6 @@ class MedianAlgorithm:
                 if stop_requested and stop_requested():
                     break
                 image = np.array(h5f[key])
-                images.append(image)
-        return images
-
-    def load_images_from_folder(self, folder_path):
-        image_paths = [os.path.join(folder_path, f) for f in os.listdir(folder_path)
-                       if f.endswith(('.png', '.jpg', '.jpeg'))]
-        return self.load_images_from_paths(image_paths)
-
-    def load_images_from_paths(self, image_paths, stop_requested=None):
-        """
-        Loads images from a list of image paths.
-        """
-        images = []
-        for image_path in image_paths:
-            if stop_requested and stop_requested():  
-                break
-            image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-            if image is not None:
                 images.append(image)
         return images
 
@@ -542,7 +524,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4,
                     break
 
                 batch_paths = image_paths[batch_start:min(batch_start + batch_size, total_images)]
-                batch_images = image_processor.load_images_from_paths(batch_paths, stop_requested)
+                batch_images = load_images_from_paths(batch_paths, stop_requested)
                 if stop_requested and stop_requested(): break
 
                 if not batch_images:
