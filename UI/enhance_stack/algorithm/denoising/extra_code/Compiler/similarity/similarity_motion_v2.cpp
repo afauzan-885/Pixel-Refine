@@ -20,7 +20,7 @@ namespace MotionMetricsConfig
     constexpr float GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD = 1e-6f;
 
     // --- Konstanta untuk Pembobotan Gradien ---
-    constexpr float GRADIENT_WEIGHT_FACTOR = 1.4f;
+    constexpr float GRADIENT_WEIGHT_FACTOR = 1.3f;
 
     // Konstanta Adaptasi Noise
     constexpr float NOISE_ADAPTATION_FACTOR = 6.0f;           // Pengaruh noise pada threshold
@@ -29,10 +29,11 @@ namespace MotionMetricsConfig
 
     // --- Konstanta untuk Penanganan Area Gelap dengan Fading ---
     // Batas intensitas untuk *mulai* dianggap gelap dan *sepenuhnya* gelap
-    constexpr float DARK_UPPER_THRESHOLD = 127.5f / 255.0f;
+    // constexpr float DARK_UPPER_THRESHOLD = 127.5f / 255.0f;
+    constexpr float DARK_UPPER_THRESHOLD = 100.0f / 255.0f;
 
     constexpr double SSIM_K1_SENSITIVE = 0.0005; // (Perbedaan Cahaya atau luminance)
-    constexpr double SSIM_K2_SENSITIVE = 0.005; // (Perbedaan Struktur, tekstur, atau pola)
+    constexpr double SSIM_K2_SENSITIVE = 0.0005; // (Perbedaan Struktur, tekstur, atau pola)
 
     // Parameter *maksimum* untuk area yang sepenuhnya gelap
     constexpr float MAX_DARK_AREA_THRESHOLD_BOOST_FACTOR = 1.55f; // Toleransi Confidence terhadap area gelap, 1.5 artinya confidence di naikan sebesar 50%
@@ -498,106 +499,83 @@ extern "C"
         const float *current_image_ptr, const float *reference_image_ptr,
         const float *base_window_ptr, const int *row_starts, const int *col_starts,
         int num_row_starts, int num_col_starts, int tile_h, int tile_w,
-        int h, int w, int channels, /* channels ini buffer C++, biasanya 3 */
-        float motion_threshold,
+        int h, int w, int channels, float motion_threshold,
         int mbm_block_h, int mbm_block_w, int mbm_search_radius,
         float frame_max_adaptive_multiplier)
     {
         using namespace MotionMetricsConfig;
 
-        // --- Validasi Input Awal ---
         if (!final_image_sum_ptr || !weight_map_sum_ptr || !current_image_ptr || !reference_image_ptr || !base_window_ptr ||
-            !row_starts || !col_starts || h <= 0 || w <= 0 || tile_h <= 0 || tile_w <= 0 || channels != 3 || // Paksa 3 channel untuk buffer C++
+            !row_starts || !col_starts || h <= 0 || w <= 0 || tile_h <= 0 || tile_w <= 0 || channels <= 0 ||
             mbm_block_h <= 0 || mbm_block_w <= 0)
         {
-             // std::cerr << "Error: Invalid input pointers or dimensions in accumulate_frame_weighted_jit." << std::endl;
             return;
         }
-        int mat_type_color = CV_32FC(channels); // Float, 3 channel
-        int mat_type_gray_float = CV_32FC1;     // Float, 1 channel
-        int mat_type_gray_uint8 = CV_8UC1;      // Uint8, 1 channel
-
-        // --- Buat Mat Header ---
-        cv::Mat final_image_sum_mat(h, w, mat_type_color, final_image_sum_ptr);
-        cv::Mat weight_map_sum_mat(h, w, mat_type_gray_float, weight_map_sum_ptr);
-        const cv::Mat current_image_mat(h, w, mat_type_color, const_cast<float *>(current_image_ptr));
-        const cv::Mat reference_image_mat(h, w, mat_type_color, const_cast<float *>(reference_image_ptr));
-
-        // === LANGKAH PREPROCESSING GAMBAR (CLAHE) ===
-        // Dilakukan di luar loop parallel
-
-        cv::Mat current_gray_u8;
-        cv::Mat ref_gray_u8;
-        cv::Mat original_ref_gray_f32; // Simpan grayscale float asli untuk estimasi noise
-
-        try {
-             // Proses current_image: float[0,1] -> gray float[0,1] -> gray uint8[0,255]
-             cv::Mat current_gray_f32_temp;
-             if (current_image_mat.channels() == 3) cv::cvtColor(current_image_mat, current_gray_f32_temp, cv::COLOR_BGR2GRAY);
-             else if (current_image_mat.channels() == 1) current_image_mat.copyTo(current_gray_f32_temp); // Jika sudah gray float
-             else { /* handle error channels tidak valid */ return; }
-             if(current_gray_f32_temp.type() != CV_32F) current_gray_f32_temp.convertTo(current_gray_f32_temp, CV_32F);
-             current_gray_f32_temp.convertTo(current_gray_u8, mat_type_gray_uint8, 255.0);
-
-             // Proses reference_image: float[0,1] -> gray float[0,1] (simpan) -> gray uint8[0,255]
-             if (reference_image_mat.channels() == 3) cv::cvtColor(reference_image_mat, original_ref_gray_f32, cv::COLOR_BGR2GRAY);
-             else if (reference_image_mat.channels() == 1) reference_image_mat.copyTo(original_ref_gray_f32);
-             else { /* handle error channels tidak valid */ return; }
-             if(original_ref_gray_f32.type() != CV_32F) original_ref_gray_f32.convertTo(original_ref_gray_f32, CV_32F);
-             original_ref_gray_f32.convertTo(ref_gray_u8, mat_type_gray_uint8, 255.0);
-
-        } catch (const cv::Exception& e) {
-            // std::cerr << "Error during initial grayscale conversion: " << e.what() << std::endl;
-            return;
-        }
-
-        // Buat objek CLAHE (parameter bisa jadi argumen fungsi jika perlu)
-        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
-
-        // Terapkan CLAHE ke gambar uint8
-        cv::Mat enhanced_current_gray_u8;
-        cv::Mat enhanced_ref_gray_u8;
-        try {
-            if (!current_gray_u8.empty()) clahe->apply(current_gray_u8, enhanced_current_gray_u8);
-            else enhanced_current_gray_u8 = current_gray_u8;
-
-            if (!ref_gray_u8.empty()) clahe->apply(ref_gray_u8, enhanced_ref_gray_u8);
-            else enhanced_ref_gray_u8 = ref_gray_u8;
-
-        } catch (const cv::Exception& e) {
-            // std::cerr << "Warning: CLAHE application failed: " << e.what() << ". Using original grayscale." << std::endl;
-            if (enhanced_current_gray_u8.empty()) current_gray_u8.copyTo(enhanced_current_gray_u8);
-            if (enhanced_ref_gray_u8.empty()) ref_gray_u8.copyTo(enhanced_ref_gray_u8);
-        }
-
-        // Konversi hasil CLAHE (uint8) kembali ke float [0,1]
-        cv::Mat enhanced_current_gray_f32;
-        cv::Mat enhanced_ref_gray_f32;
-        try {
-             if (!enhanced_current_gray_u8.empty()) enhanced_current_gray_u8.convertTo(enhanced_current_gray_f32, mat_type_gray_float, 1.0 / 255.0);
-             else enhanced_current_gray_f32 = cv::Mat::zeros(h, w, mat_type_gray_float);
-
-             if (!enhanced_ref_gray_u8.empty()) enhanced_ref_gray_u8.convertTo(enhanced_ref_gray_f32, mat_type_gray_float, 1.0 / 255.0);
-             else enhanced_ref_gray_f32 = cv::Mat::zeros(h, w, mat_type_gray_float);
-
-        } catch (const cv::Exception& e) {
-             // std::cerr << "Error converting enhanced grayscale to float: " << e.what() << std::endl;
-             return;
-        }
-        // === AKHIR PREPROCESSING GAMBAR (CLAHE) ===
-
-
-        // --- Mulai Loop Paralel ---
-        #pragma omp parallel
+        int mat_type = CV_32FC(channels);
+        if (mat_type == 0)
         {
-            // --- Buffer per Thread ---
-            cv::Mat thread_larger_ref_tile_gray_orig; // Untuk noise est. dari gray asli
+            return;
+        }
+
+        cv::Mat final_image_sum_mat(h, w, mat_type, final_image_sum_ptr);
+        cv::Mat weight_map_sum_mat(h, w, CV_32FC1, weight_map_sum_ptr);
+        const cv::Mat current_image_mat(h, w, mat_type, const_cast<float *>(current_image_ptr));
+        const cv::Mat reference_image_mat(h, w, mat_type, const_cast<float *>(reference_image_ptr));
+        // const cv::Mat base_window_tile_mat(tile_h, tile_w, CV_32FC1, const_cast<float *>(base_window_ptr));
+
+        // --- OPTIMASI: Pre-calculate Grayscale Images ---
+        cv::Mat current_image_gray_mat;
+        cv::Mat reference_image_gray_mat;
+
+        // Konversi current_image
+        if (current_image_mat.channels() > 1)
+        {
+            cv::cvtColor(current_image_mat, current_image_gray_mat, cv::COLOR_BGR2GRAY); // Asumsi BGR
+        }
+        else
+        {
+            current_image_gray_mat = current_image_mat; // Langsung assign jika sudah 1 channel
+        }
+        if (current_image_gray_mat.type() != CV_32F)
+        {
+            current_image_gray_mat.convertTo(current_image_gray_mat, CV_32F);
+        }
+
+        // Konversi reference_image
+        if (reference_image_mat.channels() > 1)
+        {
+            cv::cvtColor(reference_image_mat, reference_image_gray_mat, cv::COLOR_BGR2GRAY); // Asumsi BGR
+        }
+        else
+        {
+            reference_image_gray_mat = reference_image_mat; // Langsung assign jika sudah 1 channel
+        }
+        if (reference_image_gray_mat.type() != CV_32F)
+        {
+            reference_image_gray_mat.convertTo(reference_image_gray_mat, CV_32F);
+        }
+
+        // Periksa apakah konversi berhasil (opsional tapi bagus)
+        if (current_image_gray_mat.empty() || reference_image_gray_mat.empty())
+        {
+            // std::cerr << "Grayscale conversion failed." << std::endl;
+            return;
+        }
+        // ----------------------------------------------------
+#pragma omp parallel
+        {
+            // Buffer per Thread (Tetap Sama)
+            // cv::Mat thread_current_block_gray;
+            // cv::Mat thread_ref_block_best_match_gray;
+            // cv::Mat thread_result_ncc; // Tidak dipakai lagi jika SSIM saja
+            // cv::Mat thread_larger_ref_gray_float;
             cv::Mat thread_darkness_map_raw;
             cv::Mat thread_darkness_map_smoothed;
             cv::Mat thread_block_confidences_raw;
             cv::Mat thread_block_confidences_smoothed;
-            // Mat lain jika dibutuhkan oleh find_best_block_match, dll.
-
+            cv::Mat thread_larger_ref_tile;
+            cv::Mat thread_larger_ref_tile_gray;
+            
             #pragma omp for collapse(2) schedule(static)
             for (int i = 0; i < num_row_starts; i++)
             {
@@ -605,118 +583,150 @@ extern "C"
                 {
                     int r = row_starts[i];
                     int c = col_starts[j];
-                    if (r < 0 || c < 0 || (r + tile_h) > h || (c + tile_w) > w) continue;
+                    if (r < 0 || c < 0 || (r + tile_h) > h || (c + tile_w) > w)
+                        continue;
 
                     cv::Rect tile_roi(c, r, tile_w, tile_h);
 
-                    // --- Ambil ROI yang Relevan ---
-                    const cv::Mat current_tile_color = current_image_mat(tile_roi);           // Warna Asli
-                    const cv::Mat current_tile_gray_enhanced = enhanced_current_gray_f32(tile_roi); // Gray Enhanced Float
-                    const cv::Mat reference_tile_gray_enhanced = enhanced_ref_gray_f32(tile_roi); // Gray Enhanced Float
-                    const cv::Mat reference_tile_gray_orig = original_ref_gray_f32(tile_roi);     // Gray Asli Float
-                    const cv::Mat base_window_tile_mat(tile_h, tile_w, mat_type_gray_float, const_cast<float*>(base_window_ptr)); // Base Window
+                    // Ambil ROI dari gambar WARNA untuk akumulasi akhir
+                    const cv::Mat current_tile_color = current_image_mat(tile_roi);
+                    // Ambil ROI dari gambar GRAYSCALE untuk perhitungan
+                    const cv::Mat current_tile_gray = current_image_gray_mat(tile_roi);
+                    const cv::Mat reference_tile_gray = reference_image_gray_mat(tile_roi);
+                    // Buat Mat header untuk base_window per tile
+                    const cv::Mat base_window_tile_mat(tile_h, tile_w, CV_32FC1, const_cast<float*>(base_window_ptr));
 
-                    // --- LANGKAH 1: Estimasi Noise Lokal (Gunakan GRAYSCALE ASLI) ---
+                    // --- LANGKAH 1: Estimasi Noise Lokal (Gunakan reference_image_gray_mat) ---
                     float estimated_noise_sigma = 0.0f;
-                    int larger_tile_factor = 2;
+                    // Gunakan tile referensi grayscale yang lebih besar jika memungkinkan
+                    int larger_tile_factor = 2; // Faktor pembesaran tile untuk noise
                     int larger_r = std::max(0, r - tile_h * (larger_tile_factor - 1) / 2);
                     int larger_c = std::max(0, c - tile_w * (larger_tile_factor - 1) / 2);
                     int larger_h = std::min(h - larger_r, tile_h * larger_tile_factor);
                     int larger_w = std::min(w - larger_c, tile_w * larger_tile_factor);
 
-                    if (larger_h >= 3 && larger_w >= 3) {
+                    if (larger_h >= 3 && larger_w >= 3)
+                    {
                         cv::Rect larger_roi(larger_c, larger_r, larger_w, larger_h);
-                        thread_larger_ref_tile_gray_orig = original_ref_gray_f32(larger_roi); // ROI dari gray asli
-                        if (!thread_larger_ref_tile_gray_orig.empty()) {
-                             estimated_noise_sigma = estimate_tile_noise_sigma_mad_laplacian(thread_larger_ref_tile_gray_orig);
+                        // Ambil ROI langsung dari reference_image_gray_mat
+                        thread_larger_ref_tile_gray = reference_image_gray_mat(larger_roi);
+                        if (!thread_larger_ref_tile_gray.empty()) {
+                             estimated_noise_sigma = estimate_tile_noise_sigma_mad_laplacian(thread_larger_ref_tile_gray);
                         }
-                    } else if (reference_tile_gray_orig.rows >= 3 && reference_tile_gray_orig.cols >= 3) {
-                         if (!reference_tile_gray_orig.empty()) {
-                            estimated_noise_sigma = estimate_tile_noise_sigma_mad_laplacian(reference_tile_gray_orig); // Fallback
+                    }
+                    // Fallback: gunakan tile referensi ukuran normal jika tile besar gagal/tidak valid
+                    else if (reference_tile_gray.rows >= 3 && reference_tile_gray.cols >= 3) {
+                         if (!reference_tile_gray.empty()) {
+                            estimated_noise_sigma = estimate_tile_noise_sigma_mad_laplacian(reference_tile_gray);
                          }
                     }
 
-                    // --- Hitung Threshold Adaptif ---
+                    // LANGKAH 1.B: Hitung & Clamp Threshold Adaptif (Sama)
                     float tile_adaptive_threshold = motion_threshold + NOISE_ADAPTATION_FACTOR * estimated_noise_sigma;
                     tile_adaptive_threshold = std::max(motion_threshold * MIN_ADAPTIVE_THRESHOLD_MULTIPLIER, tile_adaptive_threshold);
                     tile_adaptive_threshold = std::min(motion_threshold * frame_max_adaptive_multiplier, tile_adaptive_threshold);
                     tile_adaptive_threshold = std::max(0.0f, tile_adaptive_threshold);
 
-                    // --- Tahap 2: Darkness & Confidence Maps ---
+                    // Tahap 2 & 3 (Darkness, Confidence, Akumulasi)
                     int num_blocks_h = (mbm_block_h > 0) ? (tile_h + mbm_block_h - 1) / mbm_block_h : 0;
                     int num_blocks_w = (mbm_block_w > 0) ? (tile_w + mbm_block_w - 1) / mbm_block_w : 0;
                     int num_blocks_in_tile = num_blocks_h * num_blocks_w;
 
-                    // 2.A: Darkness Map Raw (Gunakan GRAYSCALE ENHANCED)
-                    thread_darkness_map_raw.create(num_blocks_h, num_blocks_w, mat_type_gray_float);
-                    if (num_blocks_in_tile > 0) {
+                    // 2.A: Darkness Map Raw (Sama)
+                    thread_darkness_map_raw.create(num_blocks_h, num_blocks_w, CV_32F);
+                    if (num_blocks_in_tile > 0)
+                    {
                         for (int bh_idx = 0; bh_idx < num_blocks_h; ++bh_idx) {
                             for (int bw_idx = 0; bw_idx < num_blocks_w; ++bw_idx) {
                                 int block_local_r_start = bh_idx * mbm_block_h;
                                 int block_local_c_start = bw_idx * mbm_block_w;
                                 int current_block_h = std::min(mbm_block_h, tile_h - block_local_r_start);
                                 int current_block_w = std::min(mbm_block_w, tile_w - block_local_c_start);
-                                if (current_block_h <= 0 || current_block_w <= 0) { thread_darkness_map_raw.at<float>(bh_idx, bw_idx)=0.0f; continue; }
 
+                                if (current_block_h <= 0 || current_block_w <= 0) {
+                                    thread_darkness_map_raw.at<float>(bh_idx, bw_idx) = 0.0f; continue;
+                                }
                                 cv::Rect current_block_roi(block_local_c_start, block_local_r_start, current_block_w, current_block_h);
-                                const cv::Mat current_block_gray_enhanced = current_tile_gray_enhanced(current_block_roi); // ROI dari enhanced
 
-                                float avg_intensity = current_block_gray_enhanced.empty() ? 0.0f : static_cast<float>(cv::mean(current_block_gray_enhanced)[0]);
+                                // Ambil ROI dari current_tile_GRAY
+                                const cv::Mat current_block_gray = current_tile_gray(current_block_roi);
+
+                                float avg_intensity = 0.0f;
+                                if (!current_block_gray.empty()) {
+                                    // Langsung hitung mean dari block grayscale
+                                    avg_intensity = static_cast<float>(cv::mean(current_block_gray)[0]);
+                                }
+
+                                // Hitung darkness factor (sama)
                                 float darkness_factor = 0.0f;
                                 if (avg_intensity < DARK_UPPER_THRESHOLD) {
-                                    float norm_intens = avg_intensity / DARK_UPPER_THRESHOLD;
-                                    darkness_factor = 1.0f - norm_intens * norm_intens; // Quadratic fade
+                                    float normalized_intensity_in_dark = avg_intensity / DARK_UPPER_THRESHOLD;
+                                    darkness_factor = 1.0f - normalized_intensity_in_dark * normalized_intensity_in_dark;
                                 }
                                 thread_darkness_map_raw.at<float>(bh_idx, bw_idx) = std::max(0.0f, std::min(1.0f, darkness_factor));
                             }
                         }
                         // 2.B: Smooth Darkness Map
-                        int kernel_sz_dark = (DARKNESS_MAP_BLUR_KERNEL_SIZE > 0 && DARKNESS_MAP_BLUR_KERNEL_SIZE % 2 == 1) ? DARKNESS_MAP_BLUR_KERNEL_SIZE : 1; // Default 1 (no blur)
-                        if (!thread_darkness_map_raw.empty() && kernel_sz_dark >= 3) {
-                             cv::GaussianBlur(thread_darkness_map_raw, thread_darkness_map_smoothed, cv::Size(kernel_sz_dark, kernel_sz_dark), 0);
-                        } else { thread_darkness_map_raw.copyTo(thread_darkness_map_smoothed); }
-                    } else { thread_darkness_map_smoothed.create(0,0, mat_type_gray_float); }
-
+                        int kernel_sz_dark = (DARKNESS_MAP_BLUR_KERNEL_SIZE > 0 && DARKNESS_MAP_BLUR_KERNEL_SIZE % 2 == 1) ? DARKNESS_MAP_BLUR_KERNEL_SIZE : 3;
+                        if (kernel_sz_dark < 3)
+                            kernel_sz_dark = 3;
+                        if (!thread_darkness_map_raw.empty() && kernel_sz_dark > 0)
+                        {
+                            cv::GaussianBlur(thread_darkness_map_raw, thread_darkness_map_smoothed, cv::Size(kernel_sz_dark, kernel_sz_dark), 0);
+                        }
+                        else
+                        {
+                            if (!thread_darkness_map_raw.empty())
+                                thread_darkness_map_raw.copyTo(thread_darkness_map_smoothed);
+                            else
+                                thread_darkness_map_smoothed.create(0, 0, CV_32F);
+                        }
+                    }
+                    else
+                    {
+                        thread_darkness_map_smoothed.create(0, 0, CV_32F);
+                    }
 
                     // 2.C: Confidence Map Raw
-                    thread_block_confidences_raw.create(num_blocks_h, num_blocks_w, mat_type_gray_float);
-                    bool darkness_map_valid = !thread_darkness_map_smoothed.empty() && thread_darkness_map_smoothed.rows == num_blocks_h && thread_darkness_map_smoothed.cols == num_blocks_w;
+                    thread_block_confidences_raw.create(num_blocks_h, num_blocks_w, CV_32F);
+                    bool darkness_map_valid = num_blocks_in_tile > 0 && !thread_darkness_map_smoothed.empty() && thread_darkness_map_smoothed.rows == num_blocks_h && thread_darkness_map_smoothed.cols == num_blocks_w;
 
                     if (num_blocks_in_tile > 0) {
+                        // reference_tile_gray sudah di-ROI di atas
                         for (int bh_idx = 0; bh_idx < num_blocks_h; ++bh_idx) {
                             for (int bw_idx = 0; bw_idx < num_blocks_w; ++bw_idx) {
                                 int block_local_r_start = bh_idx * mbm_block_h; int block_local_c_start = bw_idx * mbm_block_w;
                                 int current_block_h = std::min(mbm_block_h, tile_h - block_local_r_start); int current_block_w = std::min(mbm_block_w, tile_w - block_local_c_start);
-                                if (current_block_h <= 0 || current_block_w <= 0) { thread_block_confidences_raw.at<float>(bh_idx, bw_idx)=0.0f; continue; }
+
+                                if (current_block_h <= 0 || current_block_w <= 0) { thread_block_confidences_raw.at<float>(bh_idx, bw_idx) = 0.0f; continue; }
 
                                 cv::Rect current_block_roi(block_local_c_start, block_local_r_start, current_block_w, current_block_h);
-                                const cv::Mat current_block_gray_enhanced = current_tile_gray_enhanced(current_block_roi); // ROI dari enhanced
+                                // Ambil ROI dari tile GRAYSCALE
+                                const cv::Mat current_block_gray = current_tile_gray(current_block_roi);
 
-                                float smoothed_darkness_factor = darkness_map_valid ? thread_darkness_map_smoothed.at<float>(bh_idx, bw_idx) : 0.0f;
+                                float smoothed_darkness_factor = 0.0f;
+                                if (darkness_map_valid) { smoothed_darkness_factor = thread_darkness_map_smoothed.at<float>(bh_idx, bw_idx); }
 
-                                // --- MBM (Gunakan GRAYSCALE ENHANCED) ---
-                                BlockMatchResult block_result = find_best_block_match(
-                                    current_block_gray_enhanced, reference_tile_gray_enhanced,
-                                    block_local_r_start, block_local_c_start, mbm_search_radius);
+                                // --- MBM menggunakan input GRAYSCALE ---
+                                BlockMatchResult block_result = find_best_block_match(current_block_gray, reference_tile_gray, block_local_r_start, block_local_c_start, mbm_search_radius);
+                                // --- ----------------------------------- ---
 
-                                // --- Fallback MBM (Gunakan GRAYSCALE ENHANCED) ---
+                                // --- Fallback MBM (Gunakan input GRAYSCALE) ---
                                 if (!block_result.success) {
-                                    cv::Rect ref_block_orig_roi(block_local_c_start, block_local_r_start, current_block_w, current_block_h);
-                                     if (ref_block_orig_roi.x >= 0 && ref_block_orig_roi.y >= 0 &&
-                                        ref_block_orig_roi.x + ref_block_orig_roi.width <= tile_w &&
-                                        ref_block_orig_roi.y + ref_block_orig_roi.height <= tile_h)
-                                        {
-                                            const cv::Mat ref_block_orig_gray_enhanced = reference_tile_gray_enhanced(ref_block_orig_roi); // ROI enhanced
-                                            if (!current_block_gray_enhanced.empty() && !ref_block_orig_gray_enhanced.empty()) {
-                                                block_result.min_mad = calculate_block_mad(current_block_gray_enhanced, ref_block_orig_gray_enhanced); // Gunakan enhanced
-                                                block_result.second_min_mad = block_result.min_mad; block_result.matches_found = 1; block_result.success = true; block_result.best_match_r = -1; block_result.best_match_c = -1;
-                                            } else { block_result.success = false; }
+                                     if (block_local_r_start + current_block_h <= tile_h && block_local_c_start + current_block_w <= tile_w) {
+                                        cv::Rect ref_block_orig_roi(block_local_c_start, block_local_r_start, current_block_w, current_block_h);
+                                        const cv::Mat ref_block_orig_gray = reference_tile_gray(ref_block_orig_roi); // Dari tile grayscale
+                                        if (!current_block_gray.empty() && !ref_block_orig_gray.empty()) {
+                                            block_result.min_mad = calculate_block_mad(current_block_gray, ref_block_orig_gray); // Panggil versi grayscale
+                                            block_result.second_min_mad = block_result.min_mad; block_result.matches_found = 1; block_result.success = true; block_result.best_match_r = -1; block_result.best_match_c = -1;
                                         } else { block_result.success = false; }
+                                    } else { block_result.success = false; }
                                 }
+                                // --- --------------------------------------- ---
 
                                 float final_confidence = 0.0f;
                                 if (block_result.success) {
-                                    // Hitung threshold final untuk blok ini
+                                    // Perhitungan threshold adaptif (sama)
                                     float final_threshold_for_block = tile_adaptive_threshold;
                                     if (MAX_DARK_AREA_THRESHOLD_BOOST_FACTOR != 1.0f && smoothed_darkness_factor > 0.0f) {
                                         float threshold_boost = 1.0f + smoothed_darkness_factor * (MAX_DARK_AREA_THRESHOLD_BOOST_FACTOR - 1.0f);
@@ -724,53 +734,72 @@ extern "C"
                                     }
                                     final_threshold_for_block = std::max(0.0f, final_threshold_for_block);
 
-                                    // Hitung MAD confidence
+                                    // Hitung MAD confidence (hasil MBM sudah dari grayscale)
                                     float mad_confidence = calculate_match_confidence(block_result, final_threshold_for_block);
                                     final_confidence = mad_confidence; // Default
 
-                                    // Modulasi dengan SSIM jika di area gelap
-                                    float effective_ssim_weight = std::min(smoothed_darkness_factor * MAX_WEIGHT_IN_DARK, 1.0f);
-                                    if (effective_ssim_weight > CONFIDENCE_EPSILON && block_result.best_match_r >= 0) {
-                                         cv::Rect best_ref_roi(block_result.best_match_c, block_result.best_match_r, current_block_w, current_block_h);
-                                         if (best_ref_roi.x >= 0 && best_ref_roi.y >= 0 &&
-                                             best_ref_roi.x + best_ref_roi.width <= tile_w &&
-                                             best_ref_roi.y + best_ref_roi.height <= tile_h) {
+                                    float effective_ssim_weight = smoothed_darkness_factor * MAX_WEIGHT_IN_DARK;
+                                    effective_ssim_weight = std::min(effective_ssim_weight, 1.0f);
 
-                                             const cv::Mat ref_block_best_match_gray_enhanced = reference_tile_gray_enhanced(best_ref_roi); // ROI enhanced
-                                             if (!current_block_gray_enhanced.empty() && !ref_block_best_match_gray_enhanced.empty()) {
-                                                 try {
-                                                     // Hitung SSIM dengan blok enhanced
-                                                     float ssim_score = calculate_block_ssim(current_block_gray_enhanced, ref_block_best_match_gray_enhanced);
-                                                     float ssim_modulator = (1.0f - effective_ssim_weight) + (effective_ssim_weight * ssim_score);
-                                                     final_confidence = mad_confidence * ssim_modulator;
-                                                 } catch (const cv::Exception &e) { /* Biarkan final_confidence = mad_confidence */ }
-                                             }
-                                         }
-                                     }
-                                    // Terapkan batas bawah confidence di area gelap
+                                    // --- Modulasi SSIM (Gunakan input GRAYSCALE) ---
+                                    if (effective_ssim_weight > CONFIDENCE_EPSILON && block_result.best_match_r >= 0)
+                                    {
+                                        cv::Rect best_ref_roi(block_result.best_match_c, block_result.best_match_r, current_block_w, current_block_h);
+                                        // Boundary check untuk best_ref_roi
+                                        if (best_ref_roi.x >= 0 && best_ref_roi.y >= 0 &&
+                                            best_ref_roi.x + best_ref_roi.width <= tile_w &&
+                                            best_ref_roi.y + best_ref_roi.height <= tile_h)
+                                        {
+                                            // Ambil ROI match terbaik dari tile GRAYSCALE
+                                            const cv::Mat ref_block_best_match_gray = reference_tile_gray(best_ref_roi);
+                                            // current_block_gray sudah ada
+
+                                            if (!current_block_gray.empty() && !ref_block_best_match_gray.empty()) {
+                                                try {
+                                                    // Panggil SSIM dengan blok grayscale
+                                                    float ssim_score = calculate_block_ssim(current_block_gray, ref_block_best_match_gray);
+                                                    float ssim_modulator = (1.0f - effective_ssim_weight) + (effective_ssim_weight * ssim_score);
+                                                    final_confidence = mad_confidence * ssim_modulator;
+                                                } catch (const cv::Exception &e) {
+                                                    // Jika SSIM gagal, final_confidence tetap = mad_confidence
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // --- ------------------------------------ ---
+
+                                    // Terapkan batas bawah confidence (sama)
                                     float effective_min_confidence = smoothed_darkness_factor * MAX_MIN_DARK_CONFIDENCE;
                                     final_confidence = std::max(final_confidence, effective_min_confidence);
-                                } // end if block_result.success
+                                }
 
-                                thread_block_confidences_raw.at<float>(bh_idx, bw_idx) = std::max(0.0f, std::min(1.0f, final_confidence)); // Clamp [0,1]
+                                thread_block_confidences_raw.at<float>(bh_idx, bw_idx) = final_confidence;
                             } // end bw_idx
                         } // end bh_idx
 
-                        // 2.D: Smooth Confidence Map
-                        int kernel_sz_conf = (CONFIDENCE_MAP_BLUR_KERNEL_SIZE > 0 && CONFIDENCE_MAP_BLUR_KERNEL_SIZE % 2 == 1) ? CONFIDENCE_MAP_BLUR_KERNEL_SIZE : 1; // Default 1 (no blur)
+                        // 2.D: Smooth Confidence Map (Sama)
+                        int kernel_sz_conf = (CONFIDENCE_MAP_BLUR_KERNEL_SIZE > 0 && CONFIDENCE_MAP_BLUR_KERNEL_SIZE % 2 == 1) ? CONFIDENCE_MAP_BLUR_KERNEL_SIZE : 3;
+                        if(kernel_sz_conf < 1) kernel_sz_conf = 1;
                         if (!thread_block_confidences_raw.empty() && kernel_sz_conf >= 3) {
                             cv::GaussianBlur(thread_block_confidences_raw, thread_block_confidences_smoothed, cv::Size(kernel_sz_conf, kernel_sz_conf), 0);
-                        } else { thread_block_confidences_raw.copyTo(thread_block_confidences_smoothed); }
-                    } else { thread_block_confidences_smoothed.create(0,0, mat_type_gray_float); }
+                        } else {
+                            thread_block_confidences_raw.copyTo(thread_block_confidences_smoothed);
+                        }
+                    } else {
+                        thread_block_confidences_raw.create(0, 0, CV_32F);
+                        thread_block_confidences_smoothed.create(0, 0, CV_32F);
+                    }
                     // ----------------------------------------------------------
 
-                    // --- Tahap 3: Akumulasi Piksel (Gunakan WARNA ASLI) ---
+                    // --- Tahap 3: Akumulasi (Gunakan current_tile_COLOR) ---
                     bool confidence_map_smoothed_valid = num_blocks_in_tile > 0 && !thread_block_confidences_smoothed.empty() && thread_block_confidences_smoothed.rows == num_blocks_h && thread_block_confidences_smoothed.cols == num_blocks_w;
                     if (confidence_map_smoothed_valid) {
                         for (int y = 0; y < tile_h; ++y) {
-                            const float *current_tile_color_row = current_tile_color.ptr<float>(y); // <-- WARNA ASLI
+                            // Akses row dari tile WARNA
+                            const float *current_tile_color_row = current_tile_color.ptr<float>(y);
                             const float *base_window_row = base_window_tile_mat.ptr<float>(y);
-                            int gy = r + y; if (gy < 0 || gy >= h) continue;
+                            int gy = r + y;
+                            if (gy < 0 || gy >= h) continue;
 
                             float *global_weight_sum_row = weight_map_sum_mat.ptr<float>(gy);
                             float *global_pixel_sum_row = final_image_sum_mat.ptr<float>(gy);
@@ -778,7 +807,9 @@ extern "C"
                             for (int x = 0; x < tile_w; ++x) {
                                 int bh_idx = std::min(y / mbm_block_h, num_blocks_h - 1);
                                 int bw_idx = std::min(x / mbm_block_w, num_blocks_w - 1);
-                                if (bh_idx < 0 || bw_idx < 0) continue; // Safety check
+
+                                // Pastikan indeks blok valid (penting jika num_blocks_h/w bisa 0)
+                                if (bh_idx < 0 || bw_idx < 0) continue;
 
                                 float block_confidence = thread_block_confidences_smoothed.at<float>(bh_idx, bw_idx);
                                 float base_win_val = base_window_row[x];
@@ -787,39 +818,36 @@ extern "C"
                                 if (pixel_weight > GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD) {
                                     int gx = c + x;
                                     if (gx >= 0 && gx < w) {
-                                        // Akumulasi Bobot
+                                        // --- Akumulasi Bobot (Grayscale - Tetap Sama) ---
                                         #pragma omp atomic update
                                         global_weight_sum_row[gx] += pixel_weight;
+                                        // -----------------------------------------------
 
-                                        // Akumulasi Piksel (dari WARNA ASLI)
-                                        int pixel_idx_local = x * channels;
-                                        int pixel_idx_global = gx * channels;
+                                        // --- Akumulasi Piksel (WARNA) ---
+                                        int current_pixel_idx_local = x * channels; // Indeks di tile berwarna
+                                        int current_pixel_idx_global = gx * channels; // Indeks di gambar global berwarna
                                         for (int ch = 0; ch < channels; ++ch) {
-                                            float weighted_pixel_value = current_tile_color_row[pixel_idx_local + ch] * pixel_weight; // <-- WARNA ASLI
+                                            // Ambil nilai dari TILE WARNA
+                                            float weighted_pixel_value = current_tile_color_row[current_pixel_idx_local + ch] * pixel_weight;
                                             #pragma omp atomic update
-                                            global_pixel_sum_row[pixel_idx_global + ch] += weighted_pixel_value;
+                                            global_pixel_sum_row[current_pixel_idx_global + ch] += weighted_pixel_value;
                                         }
+                                        // -------------------------------
                                     }
                                 }
                             } // end x loop
                         } // end y loop
-                    } // end if confidence_map_smoothed_valid
-                    // -----------------------------------------------------------------
+                    }
+                    // -------------------------------------------------------
 
                 } // End col_starts loop (j)
             } // End row_starts loop (i)
         } // End parallel region
     } // End accumulate_frame_weighted_jit
 
-
-    /**
-     * @brief Mengestimasi rata-rata noise sigma global dari gambar referensi
-     *        dengan merata-ratakan estimasi noise dari setiap tile.
-     *        Menggunakan MAD dari filter Laplacian pada gambar grayscale ASLI.
-     */
     float estimate_global_noise(
         const float *reference_image_ptr,
-        int h, int w, int channels, /* channels ini buffer C++, biasanya 3 */
+        int h, int w, int channels,
         int tile_h, int tile_w,
         const int *row_starts, int num_row_starts,
         const int *col_starts, int num_col_starts)
@@ -828,104 +856,166 @@ extern "C"
 
         // --- Validasi Input Dasar ---
         if (!reference_image_ptr || !row_starts || !col_starts || h <= 0 || w <= 0 ||
-            channels <= 0 || tile_h <= 0 || tile_w <= 0 || num_row_starts <= 0 || num_col_starts <= 0) {
-             // std::cerr << "Error: Invalid input to estimate_global_noise." << std::endl;
-            return 0.0f;
-        }
-        int mat_type_color = CV_32FC(channels);
-        int mat_type_gray_float = CV_32FC1;
-        if (mat_type_color == 0) {
-             // std::cerr << "Error: Invalid channel count in estimate_global_noise." << std::endl;
-            return 0.0f;
-        }
-
-        // --- Buat Mat Header & Konversi ke Grayscale Float ASLI ---
-        const cv::Mat reference_image_mat(h, w, mat_type_color, const_cast<float *>(reference_image_ptr));
-        cv::Mat ref_gray_float_orig;
-        try {
-            if (reference_image_mat.channels() == 3) cv::cvtColor(reference_image_mat, ref_gray_float_orig, cv::COLOR_BGR2GRAY);
-            else if (reference_image_mat.channels() == 1) reference_image_mat.copyTo(ref_gray_float_orig);
-            else { /* handle error */ return 0.0f; }
-            if (ref_gray_float_orig.type() != CV_32F) ref_gray_float_orig.convertTo(ref_gray_float_orig, CV_32F);
-        } catch (const cv::Exception& e) {
-            return 0.0f;
-        }
-        if (ref_gray_float_orig.empty()) return 0.0f;
-
-
-        double total_sigma_sum = 0.0;
-        long long valid_tile_count = 0;
-
-        #pragma omp parallel
+            channels <= 0 || tile_h <= 0 || tile_w <= 0 || num_row_starts <= 0 || num_col_starts <= 0)
         {
-            cv::Mat thread_tile_gray_orig;
+            return 0.0f; // Kembalikan 0 jika input tidak valid
+        }
+
+        int mat_type = CV_32FC(channels);
+        if (mat_type == 0)
+        {
+            return 0.0f;
+        } // Tipe tidak valid
+
+        // --- Buat Mat Header untuk Input ---
+        const cv::Mat reference_image_mat(h, w, mat_type, const_cast<float *>(reference_image_ptr));
+        cv::Mat ref_gray_float;
+
+        // --- Konversi ke Grayscale Float ---
+        if (reference_image_mat.channels() > 1)
+        {
+            cv::cvtColor(reference_image_mat, ref_gray_float, cv::COLOR_BGR2GRAY); // Asumsi BGR jika > 1
+            if (ref_gray_float.type() != CV_32F)
+            { // Pastikan float setelah cvtColor
+                ref_gray_float.convertTo(ref_gray_float, CV_32F);
+            }
+        }
+        else
+        {
+            // Jika sudah 1 channel, pastikan tipenya float
+            if (reference_image_mat.type() != CV_32F)
+            {
+                reference_image_mat.convertTo(ref_gray_float, CV_32F);
+            }
+            else
+            {
+                // Tidak perlu copy jika tipe sudah benar
+                ref_gray_float = reference_image_mat;
+            }
+        }
+
+        if (ref_gray_float.empty())
+        {
+            return 0.0f;
+        }
+
+        // --- Variabel untuk Akumulasi Sigma ---
+        double total_sigma_sum = 0.0;
+        long long valid_tile_count = 0; // Gunakan long long untuk jumlah tile yang besar
+
+// --- Paralelisasi Loop Tile ---
+#pragma omp parallel
+        {
+            // Buffer per thread untuk menghindari race condition pada Mat temporary
+            cv::Mat thread_tile;
+            cv::Mat thread_laplacian_output;
             double thread_local_sigma_sum = 0.0;
             long long thread_local_valid_count = 0;
 
-            #pragma omp for collapse(2) schedule(static)
-            for (int i = 0; i < num_row_starts; i++) {
-                for (int j = 0; j < num_col_starts; j++) {
-                    int r = row_starts[i]; int c = col_starts[j];
-                    if (r < 0 || c < 0 || (r + tile_h) > h || (c + tile_w) > w) continue;
+#pragma omp for collapse(2) schedule(static)
+            for (int i = 0; i < num_row_starts; i++)
+            {
+                for (int j = 0; j < num_col_starts; j++)
+                {
+                    int r = row_starts[i];
+                    int c = col_starts[j];
 
+                    // Boundary check dasar untuk ROI
+                    if (r < 0 || c < 0 || (r + tile_h) > h || (c + tile_w) > w)
+                        continue;
+
+                    // --- Ekstrak Tile ROI ---
                     cv::Rect tile_roi(c, r, tile_w, tile_h);
-                    thread_tile_gray_orig = ref_gray_float_orig(tile_roi);
+                    // Ambil ROI dari gambar grayscale (tidak perlu copy jika hanya dibaca)
+                    thread_tile = ref_gray_float(tile_roi);
 
-                    if (thread_tile_gray_orig.rows >= 3 && thread_tile_gray_orig.cols >= 3) {
-                        float estimated_sigma = estimate_tile_noise_sigma_mad_laplacian(thread_tile_gray_orig);
-                        thread_local_sigma_sum += static_cast<double>(estimated_sigma); // Akumulasi hasil thread
-                        thread_local_valid_count++;
+                    // Cek ukuran minimum untuk Laplacian
+                    if (thread_tile.rows < 3 || thread_tile.cols < 3)
+                    {
+                        continue;
                     }
-                }
-            }
-            #pragma omp critical
+
+                    // --- Hitung Laplacian (output ke buffer thread) ---
+                    cv::Laplacian(thread_tile, thread_laplacian_output, CV_32F, 1);
+
+                    // --- Hitung MAD (menggunakan fungsi yang sudah ada) ---
+                    float mad_value = calculate_mad_from_mat(thread_laplacian_output);
+
+                    // --- Konversi ke Sigma ---
+                    float estimated_sigma = mad_value * MAD_TO_SIGMA_FACTOR;
+
+                    // Akumulasi hasil thread lokal
+                    thread_local_sigma_sum += static_cast<double>(std::max(0.0f, estimated_sigma)); // Pastikan non-negatif
+                    thread_local_valid_count++;
+
+                } // end loop j
+            } // end loop i
+
+// --- Reduksi hasil dari setiap thread (Aman untuk dilakukan setelah loop parallel for) ---
+#pragma omp critical
             {
                 total_sigma_sum += thread_local_sigma_sum;
                 valid_tile_count += thread_local_valid_count;
             }
-        } 
+
+        } // End parallel region
 
         // --- Hitung Rata-rata Global ---
-        return (valid_tile_count > 0) ? static_cast<float>(total_sigma_sum / valid_tile_count) : 0.0f;
+        if (valid_tile_count > 0)
+        {
+            return static_cast<float>(total_sigma_sum / valid_tile_count);
+        }
+        else
+        {
+            return 0.0f; // Kembalikan 0 jika tidak ada tile valid yang diproses
+        }
     }
 
-
-    
+    // Fungsi Normalisasi (Tidak Berubah)
     void normalize_accumulated_image_jit(
         float *final_image_ptr,
         const float *weight_map_sum_ptr,
-        int h, int w, int channels) 
+        int h, int w, int channels)
     {
         using namespace MotionMetricsConfig;
 
-       if (!final_image_ptr || !weight_map_sum_ptr || h <= 0 || w <= 0 || channels != 3) {
+        if (!final_image_ptr || !weight_map_sum_ptr || h <= 0 || w <= 0 || channels <= 0)
+        {
             return;
         }
-        int mat_type_color = CV_32FC(channels);
-        int mat_type_gray_float = CV_32FC1;
+        int mat_type = CV_32FC(channels);
+        if (mat_type == 0)
+            return;
 
-        cv::Mat final_image_mat(h, w, mat_type_color, final_image_ptr);
-        const cv::Mat weight_map_sum_mat(h, w, mat_type_gray_float, const_cast<float *>(weight_map_sum_ptr));
+        cv::Mat final_image_mat(h, w, mat_type, final_image_ptr);
+        const cv::Mat weight_map_sum_mat(h, w, CV_32FC1, const_cast<float *>(weight_map_sum_ptr));
 
-        #pragma omp parallel for collapse(2) schedule(static)
-        for (int gy = 0; gy < h; ++gy) {
-            for (int gx = 0; gx < w; ++gx) {
+#pragma omp parallel for collapse(2) schedule(static)
+        for (int gy = 0; gy < h; ++gy)
+        {
+            for (int gx = 0; gx < w; ++gx)
+            {
                 float total_weight = weight_map_sum_mat.at<float>(gy, gx);
                 float *final_pixel_row = final_image_mat.ptr<float>(gy);
                 int pixel_idx = gx * channels;
 
-                if (total_weight > GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD) {
+                if (total_weight > GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD)
+                {
                     float inv_total_weight = 1.0f / total_weight;
-                    final_pixel_row[pixel_idx + 0] *= inv_total_weight; // B
-                    final_pixel_row[pixel_idx + 1] *= inv_total_weight; // G
-                    final_pixel_row[pixel_idx + 2] *= inv_total_weight; // R
-                } else {
-                    final_pixel_row[pixel_idx + 0] = 0.0f;
-                    final_pixel_row[pixel_idx + 1] = 0.0f;
-                    final_pixel_row[pixel_idx + 2] = 0.0f;
+                    for (int ch = 0; ch < channels; ++ch)
+                    {
+                        final_pixel_row[pixel_idx + ch] *= inv_total_weight;
+                    }
                 }
-            } 
-        }
-    }
+                else
+                {
+                    for (int ch = 0; ch < channels; ++ch)
+                    {
+                        final_pixel_row[pixel_idx + ch] = 0.0f;
+                    }
+                }
+            } // gx loop
+        } // gy loop
+    } // End normalize_accumulated_image_jit
 
-}
+} // end extern "C"
