@@ -106,13 +106,15 @@ class RawImageProcessingThread(BaseMultiThreading):
             try:
                 filename = os.path.basename(image_path)
                 extension = os.path.splitext(image_path)[1].lower()
-                img_array = None # Hasil array NumPy sebelum dipecah/diproses
-                processed_via_parts = False # Flag apakah pemrosesan paralel bagian dilakukan
-
-                if "dng" in SUPPORTED_FORMATS and extension in SUPPORTED_FORMATS["dng"]:
+                img_array = None
+                processed_via_parts = False 
+                
+                is_raw = any(extension in formats for key, formats in SUPPORTED_FORMATS.items() if key == "raw")
+                if is_raw:
                     try:
                         with rawpy.imread(image_path) as raw:
-                            img_array = raw.postprocess(output_bps=8, use_camera_wb=True, no_auto_bright=False, gamma=(2.222, 4.5))
+                            img_array = raw.postprocess(output_bps=8, use_camera_wb=True, no_auto_bright=False, gamma=(2.222, 4.5), 
+                                                        highlight_mode=rawpy.HighlightMode.Blend)
                             if img_array is None: raise RuntimeError(f"Rawpy postprocessing failed for {filename}")
                           
                     except rawpy.LibRawError as e: raise RuntimeError(f"Rawpy Error processing {filename}: {e}")

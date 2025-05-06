@@ -11,6 +11,7 @@ import tifffile
 from UI.enhance_stack.algorithm.alignment.AKAZE import running_akaze
 from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import running_farneback_optical_flow
 from UI.enhance_stack.algorithm.alignment.ORB import running_orb
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import save_special_jpg_and_png
 from UI.enhance_stack.algorithm.denoising.Average import running_average
 from UI.enhance_stack.algorithm.denoising.Median import running_median
 from UI.enhance_stack.algorithm.denoising.Similarity import running_similarity
@@ -323,7 +324,7 @@ class SinglePageLayout(QWidget):
                 else:
                     alignment_valid = False
                     QMessageBox.warning(self, "Warning", f"The alignment algorithm option '{alignment_choice}' is not recognized.")
-                    return # Hentikan proses karena pilihan alignment tidak valid
+                    return 
                 
             super_resolution_executed = False
             if super_resolution_choice == "Interpolation":
@@ -358,16 +359,14 @@ class SinglePageLayout(QWidget):
             elif denoising_choice == "No Denoising":
                 pass 
            
-            # Tampilkan hasil hanya jika denoising berhasil dijalankan
             if denoising_executed:
                 latest_image_path = get_last_image("database/stack")
                 if latest_image_path:
-                    dialog = ImageViewer(latest_image_path, self)  # Menampilkan gambar di ImageViewer
-                    dialog.exec()  # Menampilkan dialog secara modal
+                    dialog = ImageViewer(latest_image_path, self)
+                    dialog.exec()  
                 else:
                     QMessageBox.warning(self, "Warning", language_config.NOT_IMAGE_PREVIEW)
         except Exception as e:
-                    # QMessageBox.critical(self, "Error", f"Terjadi kesalahan: {e}")
                     QMessageBox.critical(self, "Error", language_config.RUN_ERROR_STATUS.format(error = e))
 
     def save_image(self):
@@ -393,12 +392,12 @@ class SinglePageLayout(QWidget):
         file_path, _ = QFileDialog.getSaveFileName(
             self, "Save Image As",
             os.path.basename(latest_image_path),
-            "JPEG (*.jpg *.jpeg);;TIFF (*.tif *.tiff);;PNG (*.png)"
+            "TIFF (*.tif *.tiff);;JPEG (*.jpg *.jpeg);;PNG (*.png)"
         )
 
         if not file_path:
-            return  # User membatalkan penyimpanan
-
+            return  
+        
         file_extension = os.path.splitext(file_path)[-1].lower()
         if file_extension not in [".jpg", ".jpeg", ".tif", ".tiff", ".png"]:
             QMessageBox.warning(self, "Invalid Format", "Unsupported file format.")
@@ -406,24 +405,21 @@ class SinglePageLayout(QWidget):
 
         try:
             if file_extension in [".tif", ".tiff"]:
-                image = tifffile.imread(latest_image_path) # tifffile menangani tipe data secara otomatis
+                image = tifffile.imread(latest_image_path)
             else:
-                image = cv2.imread(latest_image_path) # Tetap gunakan cv2 untuk non-TIFF
+                image = cv2.imread(latest_image_path)
 
-            if image is None: # tifffile juga bisa mengembalikan None jika gagal
+            if image is None:
                 QMessageBox.critical(self, "Error", language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
                 return
 
-            # Simpan gambar berdasarkan format file
-            if file_extension in [".jpg", ".jpeg"]:
-                cv2.imwrite(file_path, image, [cv2.IMWRITE_JPEG_QUALITY, 100])
-            elif file_extension == ".png":
-                cv2.imwrite(file_path, image, [cv2.IMWRITE_PNG_COMPRESSION, 5])
+           
+            if file_extension in [".jpg", ".jpeg", ".png"]:
+                save_special_jpg_and_png(latest_image_path, file_path,
+                                quality=100, optimize=True )
             elif file_extension in [".tif", ".tiff"]:
-                # Simpan TIFF menggunakan tifffile
-                tifffile.imwrite(file_path, image, compression='zlib') # Gunakan kompresi 
+                tifffile.imwrite(file_path, image, compression='zlib')
 
-            # Gunakan ExifTool untuk menyalin metadata dari gambar asli ke gambar yang baru disimpan
             if os.path.exists(latest_image_path):
                 try:
                     subprocess.run(

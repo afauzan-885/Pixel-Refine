@@ -155,8 +155,8 @@ class ORBAlgorithm:
 
         # --- 3. Terapkan CLAHE (opsional, tetap sekuensial) ---
         try:
-            clip_limit = orb_config.get("clahe_clipLimit", 2.0)
-            grid_size = tuple(orb_config.get("clahe_tileGridSize", (8, 8))) # Pastikan tuple
+            clip_limit = orb_config.get("clahe_clipLimit", 6.0)
+            grid_size = tuple(orb_config.get("clahe_tileGridSize", (4, 4))) # Pastikan tuple
         
             # Hanya buat dan terapkan jika clip_limit > 0 (atau flag lain jika ada)
             if clip_limit > 0:
@@ -166,15 +166,12 @@ class ORBAlgorithm:
             else:
                 base_gray_enhanced = base_gray_8bit
                 target_gray_enhanced = target_gray_8bit
-                print("Skipped CLAHE.")
         except Exception as e:
-            print(f"Error applying CLAHE, using original grayscale images: {e}")
             base_gray_enhanced = base_gray_8bit
             target_gray_enhanced = target_gray_8bit
 
         # --- 4. Buat instance ORB ---
         try:
-            # Pastikan parameter valid sebelum membuat ORB
             nfeatures = int(orb_config.get("nfeatures", 1000))
             scaleFactor = float(orb_config.get("scaleFactor", 1.2))
             nlevels = int(orb_config.get("nlevels", 8))
@@ -185,8 +182,7 @@ class ORBAlgorithm:
                 nfeatures=nfeatures,
                 scaleFactor=scaleFactor,
                 nlevels=nlevels,
-                # Parameter lain seperti edgeThreshold, patchSize, WTA_K bisa ditambahkan ke config jika perlu
-                scoreType=cv2.ORB_HARRIS_SCORE # Atau cv2.ORB_FAST_SCORE
+                scoreType=cv2.ORB_HARRIS_SCORE 
             )
         except ValueError as e:
              return None, None
@@ -214,51 +210,38 @@ class ORBAlgorithm:
                 keypoints_target, descriptors_target = orb.detectAndCompute(target_gray_enhanced, None)
 
         except Exception as e:
-             print(f"Error during ORB feature detection ({'Multi-Core' if use_multicore else 'Single-Core'}): {e}")
              return None, None 
 
         # --- 6. Matching Fitur (Tetap Sekuensial) ---
         base_points = None
         target_points = None
-        # Cek apakah deteksi menghasilkan deskriptor
         if descriptors_base is not None and descriptors_target is not None and \
            len(descriptors_base) > 0 and len(descriptors_target) > 0:
             try:
-                # Gunakan BFMatcher
-                bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False) # crossCheck=False untuk knnMatch
+                bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
 
-                # Tentukan k untuk KNN, minimal 2 untuk ratio test
                 k_val = 2
-                # Jika salah satu deskriptor kurang dari k, fallback ke match biasa atau skip?
-                # Untuk robust, kita fallback ke match biasa jika k tidak memungkinkan
                 if len(descriptors_base) < k_val or len(descriptors_target) < k_val:
                     print(f"Warning: Not enough descriptors for KNN k={k_val}. Falling back to simple matching.")
                     # Lakukan match biasa (lebih sedikit match tapi lebih aman)
                     matches_raw = bf.match(descriptors_base, descriptors_target)
-                    # Anggap semua match ini "baik" dalam kasus fallback
                     good_matches = matches_raw
                 else:
-                    # Lakukan KNN Match
                     matches_raw = bf.knnMatch(descriptors_base, descriptors_target, k=k_val)
 
                     # Terapkan Ratio Test Lowe
                     good_matches = []
                     ratio_thresh = float(orb_config.get("ratio_threshold", 0.75)) # Ambil dari config
                     for match_pair in matches_raw:
-                        # Pastikan match_pair berisi k=2 elemen
                         if len(match_pair) == k_val:
                             m, n = match_pair
                             if m.distance < ratio_thresh * n.distance:
                                 good_matches.append(m)
-                        # Jika match_pair hanya 1 (jarang terjadi tapi mungkin), bisa diabaikan atau ditambahkan? Abaikan saja.
-
-                print(f"Found {len(good_matches)} good matches after ratio test (or fallback).")
-
+                    
                 # --- 7. Ekstrak titik-titik yang cocok ---
                 min_matches_req = int(orb_config.get("min_matches_for_transform", 10)) # Ambil dari config
                 if len(good_matches) >= min_matches_req:
                     try:
-                        # Ambil point coordinates dari keypoints berdasarkan index di good_matches
                         base_points_list = [keypoints_base[m.queryIdx].pt for m in good_matches]
                         target_points_list = [keypoints_target[m.trainIdx].pt for m in good_matches]
 
@@ -266,20 +249,16 @@ class ORBAlgorithm:
                         base_points = np.float32(base_points_list).reshape(-1, 1, 2)
                         target_points = np.float32(target_points_list).reshape(-1, 1, 2)
                     except IndexError as e:
-                        print(f"Error extracting points (IndexError): {e}. Match indices might be invalid.")
                         base_points = None; target_points = None
                     except Exception as e:
-                         print(f"Error extracting points: {e}")
                          base_points = None; target_points = None
                 else:
                     print(f"Not enough good matches found ({len(good_matches)} < {min_matches_req}) to estimate transform.")
 
             except cv2.error as cv_err:
-                 print(f"OpenCV Error during matching: {cv_err}")
                  base_points = None; target_points = None
             except Exception as e:
                 import traceback
-                print(f"Unexpected error during matching: {e}\n{traceback.format_exc()}")
                 base_points = None; target_points = None
         else:
             print("Not enough descriptors found in one or both images to perform matching.")

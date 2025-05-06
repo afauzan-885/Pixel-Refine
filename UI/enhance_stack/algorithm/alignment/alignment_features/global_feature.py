@@ -2,6 +2,7 @@ import concurrent.futures
 import json
 import os
 import concurrent
+import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -10,6 +11,8 @@ import cv2
 import exifread
 import numpy as np
 import rawpy
+import tifffile
+from PIL import Image, ExifTags
 try:
     import rawpy
     RAWPY_AVAILABLE = True
@@ -76,13 +79,11 @@ def _prepare_image_path(original_path, temp_dir):
 
             try:
                 with rawpy.imread(original_path) as raw:
-                    gamma_setting = (5.0, 12.92)
-                    # gamma_setting = (2.4, 12.92)
-                    exposure_boost = 2.0
-                    rgb = raw.postprocess(use_camera_wb=True, gamma=gamma_setting, no_auto_bright=True, output_bps=16,
-                                          bad_pixels_path=None, use_auto_wb=False, output_color=rawpy.ColorSpace(2),
-                                          chromatic_aberration=None, exp_shift=None, exp_preserve_highlights=1.0,
-                                          no_auto_scale=False, highlight_mode=rawpy.HighlightMode.Blend,)
+                    gamma_setting = (2.5, 15.92)
+                    # gamma_setting = (5.0, 12.92)
+                    rgb = raw.postprocess(use_camera_wb=True, gamma=gamma_setting, output_bps=16,
+                                          bad_pixels_path=None,output_color=rawpy.ColorSpace.sRGB,
+                                          chromatic_aberration=None, highlight_mode=rawpy.HighlightMode.Blend)
 
                 base_name = os.path.basename(original_path)
                 temp_filename = f"{os.path.splitext(base_name)[0]}_{int(time.time_ns())}.tiff"
@@ -111,89 +112,89 @@ def _prepare_image_path(original_path, temp_dir):
         return None 
     
 def load_images_from_paths(image_paths, stop_requested=None):
-    """
-    Memuat gambar dari daftar path gambar menggunakan multithreading.
-    File DNG/RAW diproses (_prepare_image_path), disimpan sebagai TIFF sementara (OpenCV),
-    lalu dimuat bersama file lain menggunakan OpenCV.
-    """
-    num_threads = os.cpu_count() or 4
-    images = []
-    processed_count = 0
-    total_images = len(image_paths)
-    
-    # === PERUBAHAN: Tentukan path target dan buat direktorinya ===
-    target_temp_base_dir = "database"  # Direktori utama
-    target_temp_subdir = "raw_temp_files"  # Subdirektori untuk file sementara
-    persistent_temp_dir = os.path.join(target_temp_base_dir, target_temp_subdir)
-    os.makedirs(persistent_temp_dir, exist_ok=True)  # Pastikan direktori ada
-    
-    with tempfile.TemporaryDirectory(dir=persistent_temp_dir, prefix='imgload_') as temp_dir:
-        prepared_paths_map = {}
-        
-        # --- Tahap 1: Persiapan Path (Proses RAW & Simpan Temp TIFF via OpenCV) ---
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads, thread_name_prefix='prep_worker') as executor:
-            future_to_original_path = {
-                executor.submit(_prepare_image_path, path, temp_dir): path
-                for path in image_paths
-            }
+    temp_dir = tempfile.mkdtemp(prefix="imgproc_")
 
-            completed_prep = 0
-            for future in concurrent.futures.as_completed(future_to_original_path):
-                original_path = future_to_original_path[future]
-                completed_prep += 1
+    try:
+        processed_paths = []
+        raw_extensions = {'.dng', '.cr2', '.nef', '.arw', '.orf', '.rw2', '.pef', '.srw'}
+
+        for path in image_paths:
+            if stop_requested and stop_requested():
+                break
+
+            _, ext = os.path.splitext(path)
+            ext = ext.lower()
+
+            if ext in raw_extensions:
+                new_path = _prepare_image_path(path, temp_dir)
+                if new_path:
+                    processed_paths.append(new_path)
+            else:
+                if os.path.exists(path):
+                    processed_paths.append(path)
+
+        num_threads = os.cpu_count() or 4
+        images = []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+            future_list = [
+                executor.submit(cv2.imread, p, cv2.IMREAD_UNCHANGED)
+                for p in processed_paths
+            ]
+
+            for future in future_list:
                 if stop_requested and stop_requested():
-                    for f in future_to_original_path: f.cancel()
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    return []  # Kembalikan list kosong
-
-                try:
-                    prepared_path_result = future.result()  # Ini path dari cv2.imwrite atau path asli
-                    if prepared_path_result:
-                        prepared_paths_map[original_path] = prepared_path_result
-                    else:
-                        prepared_paths_map[original_path] = None  # Tandai gagal
-
-                except concurrent.futures.CancelledError:
-                    prepared_paths_map[original_path] = None
-                except Exception as exc:
-                    prepared_paths_map[original_path] = None
-
-        # --- Tahap 2: Pemuatan Gambar Aktual dengan cv2.imread dari path yang disiapkan ---
-        paths_to_load_list = [p for p in prepared_paths_map.values() if p is not None]
-        original_paths_for_loading = {v: k for k, v in prepared_paths_map.items() if v is not None}  # Map prepared -> original
-
-        if not paths_to_load_list:
-            return []
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads, thread_name_prefix='load_worker') as executor:
-            future_to_prepared_path_load = {
-                executor.submit(cv2.imread, load_path, cv2.IMREAD_UNCHANGED): load_path
-                for load_path in paths_to_load_list
-            }
-
-            for future in concurrent.futures.as_completed(future_to_prepared_path_load):
-                prepared_path = future_to_prepared_path_load[future]
-                original_path_for_msg = original_paths_for_loading.get(prepared_path, "UNKNOWN")  # Dapatkan path asli untuk pesan
-                processed_count += 1
-
-                if stop_requested and stop_requested():
-                    for f in future_to_prepared_path_load: f.cancel()
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    break  # Keluar dari loop pemuatan
-
-                try:
-                    image = future.result()
-                    if image is None:
-                        print(f"Warning: Failed to load image from '{os.path.basename(prepared_path)}'. Make sure the original file '{os.path.basename(original_path_for_msg)}' is not corrupted or is in a supported format.")
-                    else:
-                        images.append(image)
-
-                except concurrent.futures.CancelledError:
                     break
-                except Exception as exc:
-                    pass
+                img = future.result()
+                if img is not None:
+                    images.append(img)
 
-    return images
+        return images
+
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        
+def save_special_jpg_and_png(
+    src_path: str,
+    dst_path: str,
+    reference_image_path: str = None,
+    quality: int = 95,
+    optimize: bool = True
+    ) -> str:
+    img_np = tifffile.imread(src_path)
+    
+    if img_np.dtype == 'uint16':
+        img_np = (img_np / 256).astype('uint8')
+    
+    img = Image.fromarray(img_np)
+
+    save_kwargs = {
+        'quality': quality,
+        'optimize': optimize,
+        'subsampling': 0
+    }
+
+    ext = os.path.splitext(dst_path)[1].lower()
+    img.save(dst_path, **save_kwargs)
+
+    if reference_image_path and os.path.exists(reference_image_path):
+        try:
+            subprocess.run(
+                [
+                    "exiftool",
+                    "-overwrite_original",
+                    "-TagsFromFile", reference_image_path,
+                    dst_path
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+        except subprocess.CalledProcessError as e:
+            pass
+    
+    return dst_path
+        
 def save_to_hdf5(h5f, dataset_name, cropped, metadata=None):
     """
     Save images (array) into HDF5 and embed metadata as attributes using multithreading.
