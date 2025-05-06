@@ -7,6 +7,7 @@ import cv2
 import os
 from PIL import Image, UnidentifiedImageError
 from PyQt6.QtCore import pyqtSignal, pyqtSlot
+import tifffile
 from UI.enhance_stack.algorithm.alignment.AKAZE import running_akaze
 from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import running_farneback_optical_flow
 from UI.enhance_stack.algorithm.alignment.ORB import running_orb
@@ -404,13 +405,12 @@ class SinglePageLayout(QWidget):
             return
 
         try:
-            # Load gambar dengan OpenCV
             if file_extension in [".tif", ".tiff"]:
-                image = cv2.imread(latest_image_path, cv2.IMREAD_UNCHANGED)  # TIFF disimpan tanpa perubahan
+                image = tifffile.imread(latest_image_path) # tifffile menangani tipe data secara otomatis
             else:
-                image = cv2.imread(latest_image_path)
+                image = cv2.imread(latest_image_path) # Tetap gunakan cv2 untuk non-TIFF
 
-            if image is None:
+            if image is None: # tifffile juga bisa mengembalikan None jika gagal
                 QMessageBox.critical(self, "Error", language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
                 return
 
@@ -420,7 +420,8 @@ class SinglePageLayout(QWidget):
             elif file_extension == ".png":
                 cv2.imwrite(file_path, image, [cv2.IMWRITE_PNG_COMPRESSION, 5])
             elif file_extension in [".tif", ".tiff"]:
-                cv2.imwrite(file_path, image)  # TIFF disimpan langsung tanpa kompresi
+                # Simpan TIFF menggunakan tifffile
+                tifffile.imwrite(file_path, image, compression='zlib') # Gunakan kompresi 
 
             # Gunakan ExifTool untuk menyalin metadata dari gambar asli ke gambar yang baru disimpan
             if os.path.exists(latest_image_path):

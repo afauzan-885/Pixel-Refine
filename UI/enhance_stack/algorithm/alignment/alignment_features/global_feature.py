@@ -10,22 +10,11 @@ import cv2
 import exifread
 import numpy as np
 import rawpy
-import tifffile
 try:
     import rawpy
     RAWPY_AVAILABLE = True
 except ImportError:
     RAWPY_AVAILABLE = False
-
-ENABLE_DEBUG_TIFFFILE_SAVE = True
-
-# --- Impor tifffile ---
-try:
-    import tifffile
-    TIFFFILE_AVAILABLE = True
-except ImportError:
-    TIFFFILE_AVAILABLE = False
-    print("Warning: tifffile library not found. Debug saving with tifffile will be disabled.")
 from UI.settings.General.Language import language_config
 
 # ====================== Load and Saving Process ====================== #
@@ -87,10 +76,13 @@ def _prepare_image_path(original_path, temp_dir):
 
             try:
                 with rawpy.imread(original_path) as raw:
-                    rgb = raw.postprocess(use_camera_wb=True, no_auto_bright=True, output_bps=16,
+                    gamma_setting = (5.0, 12.92)
+                    # gamma_setting = (2.4, 12.92)
+                    exposure_boost = 2.0
+                    rgb = raw.postprocess(use_camera_wb=True, gamma=gamma_setting, no_auto_bright=True, output_bps=16,
                                           bad_pixels_path=None, use_auto_wb=False, output_color=rawpy.ColorSpace(2),
-                                          chromatic_aberration=None, exp_shift=2.5, exp_preserve_highlights=1.0,
-                                          highlight_mode=rawpy.HighlightMode.Reconstruct(3), no_auto_scale=False)
+                                          chromatic_aberration=None, exp_shift=None, exp_preserve_highlights=1.0,
+                                          no_auto_scale=False, highlight_mode=rawpy.HighlightMode.Blend,)
 
                 base_name = os.path.basename(original_path)
                 temp_filename = f"{os.path.splitext(base_name)[0]}_{int(time.time_ns())}.tiff"
@@ -117,6 +109,7 @@ def _prepare_image_path(original_path, temp_dir):
 
     except Exception as e:
         return None 
+    
 def load_images_from_paths(image_paths, stop_requested=None):
     """
     Memuat gambar dari daftar path gambar menggunakan multithreading.
