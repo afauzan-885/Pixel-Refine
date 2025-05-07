@@ -149,10 +149,9 @@ class SimilarityV2MotionInterface:
         self.clib.normalize_accumulated_image_jit(final_image_sum, weight_map_sum, h, w, channels)
 
     def estimate_noise(self, reference_image_float, h_ref, w_ref, channels_buffer,
-                       tile_h, tile_w, row_starts, col_starts):
+                    tile_h, tile_w, row_starts, col_starts):
         """Membungkus pemanggilan estimate_global_noise."""
-        # ASUMSI: Argumen NumPy sudah C-contiguous
-        self.clib.estimate_global_noise(
+        return self.clib.estimate_global_noise( # <--- TAMBAHKAN return
             reference_image_float,
             h_ref, w_ref, channels_buffer,
             tile_h, tile_w,

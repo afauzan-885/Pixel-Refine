@@ -193,7 +193,7 @@ class AKAZEAlgorithm:
 
         return kps_base_adjusted, final_desc_base, kps_target_adjusted, final_desc_target
 
-    def calculate_global_motion(self, base_image, target_image, config_filename=None, num_blocks=(4, 4), overlap=20, stop_requested=None):
+    def calculate_global_motion(self, base_image, target_image, config_filename=None, num_blocks=(3, 3), overlap=20, stop_requested=None):
         """
         Menghitung keypoints dan deskriptor menggunakan AKAZE. Gambar grayscale
         ditingkatkan KONTRASTNYA (menggunakan CLAHE) HANYA untuk deteksi fitur
@@ -354,13 +354,11 @@ class AKAZEAlgorithm:
                             descriptors_target_list.append(desc_target)
 
                     except Exception as exc:
-                        print(f"Error processing block sequentially: {exc}")
                         pass # Lanjut ke blok berikutnya
 
         # --- 6. Gabungkan Deskriptor ---
         # ... (Logika vstack Anda tetap sama) ...
         if not descriptors_base_list or not descriptors_target_list:
-             print("No descriptors found after processing blocks.")
              return None, None
         try:
             # Pastikan list tidak kosong sebelum vstack

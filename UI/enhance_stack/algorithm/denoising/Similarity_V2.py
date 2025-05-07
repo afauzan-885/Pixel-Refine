@@ -487,7 +487,7 @@ class SimilarityAlgorithmV2:
             return np.zeros(output_shape, dtype=dtype)
 
 def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
-         single_process=None, batch_id=None, save_final_weight_map=False, progress_bar=None):
+         single_process=None, batch_id=None, save_final_weight_map=True, progress_bar=None):
     try:
         general_settings = load_general_settings()
         image_processor = SimilarityAlgorithmV2(db_path)
