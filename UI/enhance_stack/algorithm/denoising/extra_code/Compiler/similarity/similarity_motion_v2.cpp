@@ -36,9 +36,12 @@ namespace MotionMetricsConfig
     constexpr int COARSE_ALIGNMENT_SEARCH_MARGIN = 10;
 
     // --- Konstanta untuk Merging Domain Frekuensi ---
-    constexpr float FREQ_MERGE_WIENER_C_FACTOR = 1.85f; 
+    constexpr float FREQ_MERGE_WIENER_C_FACTOR = 2.0f; 
     constexpr bool  APPLY_FREQ_DOMAIN_MERGING = true;  
+    
     constexpr float MBM_MAD_SENSITIVITY = 20.0f;
+    constexpr float MBM_NOISE_MAD_OFFSET_FACTOR = 0.5f;
+    constexpr float MBM_CONFIDENCE_SKIP_DFT_THRESHOLD = 0.8f;
 }
 //=============================================================================
 // Struktur Data Hasil
@@ -539,19 +542,29 @@ extern "C"
                                 thread_current_block_gray, reference_tile_gray_for_mbm,
                                 block_local_r_start, block_local_c_start, mbm_search_radius);
 
-                            // --- Hitung Kepercayaan MBM Dinamis ---
+                            // ===================================================================
+                            // === LOKASI PERHITUNGAN MBM CONFIDENCE ADAPTIF TERHADAP NOISE ===
+                            // ===================================================================
                             float mbm_confidence_score = 0.0f;
                             if (block_result.success) {
-                                // Fungsi eksponensial: confidence = exp(-mad * sensitivitas)
-                                mbm_confidence_score = std::exp(-block_result.min_mad * MBM_MAD_SENSITIVITY);
+                                // Hitung offset MAD yang diharapkan berdasarkan noise tile
+                                float noise_induced_mad_offset = MBM_NOISE_MAD_OFFSET_FACTOR * estimated_noise_sigma;
+
+                                // Hitung MAD "berlebih" di atas offset noise
+                                float excess_mad = std::max(0.0f, block_result.min_mad - noise_induced_mad_offset);
+
+                                // Terapkan fungsi eksponensial pada excess_mad
+                                mbm_confidence_score = std::exp(-excess_mad * MBM_MAD_SENSITIVITY);
+
                                 // Pastikan clamped antara 0 dan 1
                                 mbm_confidence_score = std::max(0.0f, std::min(1.0f, mbm_confidence_score));
                             }
-                            // Jika block_result.success == false, mbm_confidence_score tetap 0.
 
-                            // --- Lakukan DFT Merge jika Diperlukan dan MBM Menemukan Sesuatu ---
+                            // --- Lakukan DFT Merge HANYA jika MBM Cukup Reliable ---
                             float freq_merge_confidence_dft = 0.0f;
-                            if (APPLY_FREQ_DOMAIN_MERGING && block_result.success) { // Kita tetap lakukan DFT jika MBM success, tapi confidence akhirnya dimodulasi
+                            // *** AWAL OPTIMASI 1 ***
+                            if (APPLY_FREQ_DOMAIN_MERGING && block_result.success && mbm_confidence_score >= MBM_CONFIDENCE_SKIP_DFT_THRESHOLD) {
+                            // *** AKHIR OPTIMASI 1 (Kondisi IF diubah) ***
                                 cv::Rect best_ref_block_roi(block_result.best_match_c, block_result.best_match_r, current_block_w_dim, current_block_h_dim);
                                 if (best_ref_block_roi.x >= 0 && best_ref_block_roi.y >= 0 &&
                                     best_ref_block_roi.x + best_ref_block_roi.width <= reference_tile_gray_for_mbm.cols &&
@@ -559,7 +572,8 @@ extern "C"
                                 {
                                     thread_ref_block_from_mbm_gray = reference_tile_gray_for_mbm(best_ref_block_roi);
                                     if (!thread_ref_block_from_mbm_gray.empty()) {
-                                        // ... (Proses DFT, Wiener Filter, IDFT seperti sebelumnya) ...
+                                        // Lakukan DFT merge
+                                        // ... (padding, dft, wiener, idft -> current_block_merged_gray_output_temp, freq_merge_confidence_dft) ...
                                         int optimal_rows = cv::getOptimalDFTSize(current_block_h_dim);
                                         int optimal_cols = cv::getOptimalDFTSize(current_block_w_dim);
                                         cv::copyMakeBorder(thread_current_block_gray, thread_current_padded, 0, optimal_rows - current_block_h_dim, 0, optimal_cols - current_block_w_dim, cv::BORDER_CONSTANT, cv::Scalar::all(0));
@@ -585,35 +599,29 @@ extern "C"
                                             }
                                         }
                                         if (count_freq_weights > 0) freq_merge_confidence_dft = sum_freq_weights / count_freq_weights;
-                                        // ... (IDFT) ...
                                         cv::Mat temp_spatial;
                                         cv::idft(thread_merged_dft, temp_spatial, cv::DFT_SCALE | cv::DFT_REAL_OUTPUT);
-                                        current_block_merged_gray_output_temp = temp_spatial(cv::Rect(0, 0, current_block_w_dim, current_block_h_dim)).clone(); // Update dengan hasil DFT
-                                    } else {
-                                         freq_merge_confidence_dft = 0.0f; // Ref block kosong
-                                    }
-                                } else {
-                                    freq_merge_confidence_dft = 0.0f; // ROI ref tidak valid
-                                }
+                                        current_block_merged_gray_output_temp = temp_spatial(cv::Rect(0, 0, current_block_w_dim, current_block_h_dim)).clone();
+                                    } else { freq_merge_confidence_dft = 0.0f; }
+                                } else { freq_merge_confidence_dft = 0.0f; }
                             } else if (!APPLY_FREQ_DOMAIN_MERGING && block_result.success) {
-                                // Kasus hanya alignment MBM tanpa DFT
-                                freq_merge_confidence_dft = 1.0f; // Anggap confidence penuh pada data original
+                                freq_merge_confidence_dft = 1.0f; // Tidak ada DFT, confidence pada data asli
                                 // current_block_merged_gray_output_temp sudah berisi original
                             }
-                            // Jika MBM gagal (!block_result.success), freq_merge_confidence_dft tetap 0
+                             // Jika MBM gagal atau confidence MBM < threshold, DFT tidak dijalankan,
+                             // freq_merge_confidence_dft = 0, dan output_temp berisi original.
+
 
                             // --- Gabungkan Kepercayaan & Simpan Hasil Blok ---
-                            merged_gray_blocks_for_tile[block_idx_flat] = current_block_merged_gray_output_temp.clone(); // Simpan hasil (merge atau original)
+                            merged_gray_blocks_for_tile[block_idx_flat] = current_block_merged_gray_output_temp.clone();
 
-                            // Kepercayaan gabungan: dimodulasi oleh keandalan MBM
+                            // Kepercayaan gabungan: dimodulasi oleh MBM dan DFT
                             float combined_confidence = mbm_confidence_score * freq_merge_confidence_dft;
-                            // Jika MBM reliable tapi DFT tidak aktif, gunakan confidence MBM
-                            if (mbm_confidence_score > CONFIDENCE_EPSILON && !APPLY_FREQ_DOMAIN_MERGING) {
+                            if (mbm_confidence_score > CONFIDENCE_EPSILON && !APPLY_FREQ_DOMAIN_MERGING && block_result.success) {
                                 combined_confidence = mbm_confidence_score;
                             }
 
-
-                            // --- Hitung Final Raw Confidence (Termasuk Darkness) ---
+                            // --- Hitung Final Raw Confidence ---
                             float final_confidence = combined_confidence;
                             float smoothed_darkness_factor = 0.0f;
                             if (darkness_map_is_usable && bh_idx < thread_darkness_map_smoothed.rows && bw_idx < thread_darkness_map_smoothed.cols) {
@@ -621,8 +629,9 @@ extern "C"
                             }
                             final_confidence = std::max(final_confidence, smoothed_darkness_factor * MAX_MIN_DARK_CONFIDENCE);
                             thread_block_confidences_raw.at<float>(bh_idx, bw_idx) = final_confidence;
-                        }
-                    }
+
+                        } // Akhir loop bw_idx
+                    } // Akhir loop bh_idx
 
                     int kernel_sz_conf = (CONFIDENCE_MAP_BLUR_KERNEL_SIZE >= 1 && CONFIDENCE_MAP_BLUR_KERNEL_SIZE % 2 == 1) ? CONFIDENCE_MAP_BLUR_KERNEL_SIZE : 1;
                     if (!thread_block_confidences_raw.empty() && kernel_sz_conf >=3 && thread_block_confidences_raw.rows > 0 && thread_block_confidences_raw.cols > 0) {
