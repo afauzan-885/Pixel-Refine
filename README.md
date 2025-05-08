@@ -10,14 +10,13 @@ This app is expected to bridge the gap between professional cameras (DSLR or Mir
 
 ## Supported Image Formats
 
-| Image Format                | Status             |
-| ---------------------------- | ------------------ |
-| **JPG**                    | ✅ Supported        |
-| **TIFF**                   | ✅ Supported        |
-| **PNG**                    | ✅ Supported        |
-| **DNG**                    | ❌ Not Supported   |
-
-> Note: Support for DNG formats may be added in future updates..
+| Image Format                    | Status        |
+| ------------------------------- | ------------- |
+| **JPG**                         | ✅ Supported   |
+| **TIFF**                        | ✅ Supported   |
+| **PNG**                         | ✅ Supported   |
+| **RAW (such as DNG, NEF, ARW, CR2, CR3, etc.)**|✅ Supported   |
+> Note: For the RAW process, the resulting image does not yet support DNG Out, this feature will be implemented at a later time.
 
 ## Sample Images
 
@@ -39,28 +38,43 @@ Below are some sample images processed (left: Original, Right: Processed):
   <img src="sample/traditional market at dawn iso 400 (1per35).jpg" width="400" alt="Traditional Market at Dawn">
 </p>
 
+## Screenshots
+
+<p align="center">
+  <img src="sample/Home_Page.png" width="600" alt="Single Mode">
+</p>
+
+<br>
+
+<p align="center">
+  <img src="sample/Batch_Mode_Processing.png" width="600" alt="Batch Mode Processing">
+</p>
+
 ## Algorithms
 
 Following is a list of algorithms used in the process:
 
 ### **1. Alignment**
-- **Farneback Optical Flow**:
-  - Very precise at the pixel level and works well in low light conditions.
-  - Fairly fast and able to handle local motion within the frame.
-  - Weak against significant differences between frames.
-- **AKAZE**:
-  - Advanced algorithm that excels at handling large differences between images.
-  - Ideal for images with high deformation or significant variations.
-- **ORB (Oriented FAST and Rotated BRIEF)**:
-  - Very fast and suitable for most conditions.
-  - Not as robust when handling large differences between images.
+
+* **Farneback Optical Flow**:
+  * Very precise at the pixel level and works well in low light conditions.
+  * Fairly fast and able to handle local motion within the frame.
+  * Weak against significant differences between frames.
+* **AKAZE**:
+  * Advanced algorithm that excels at handling large differences between images.
+  * Ideal for images with high deformation or significant variations.
+* **ORB (Oriented FAST and Rotated BRIEF)**:
+  * Very fast and suitable for most conditions.
+  * Not as robust when handling large differences between images.
 
 ### **2. Super Resolution**
-- **Interpolation**: Increases image resolution based on interpolation technique, slightly improves image detail.
+
+* **Interpolation**: Increases image resolution based on interpolation technique, slightly improves image detail. Note: Temporarily disabled
 
 ### **3. Denoising**
-- **Average**: Reduces noise by averaging pixel values across multiple frames.
-- **Median**: Uses the median of pixel values for better noise reduction while preserving edges.
-- **Similarity**: Special algorithm designed to enhance detail while suppressing noise based on pixel similarity to prevent motion artifacts, highly robust to large movements.
+
+* **Average**: Reduces noise by averaging pixel values across multiple frames.
+* **Median**: Uses the median of pixel values for better noise reduction while preserving edges.
+* **Similarity**: Special algorithm designed to enhance detail while suppressing noise based on pixel similarity to prevent motion artifacts, highly robust to large movements.
 
 **(This program is still under development and has many flaws)**
