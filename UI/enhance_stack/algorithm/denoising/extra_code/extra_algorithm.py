@@ -104,54 +104,79 @@ class SimilarityV2MotionInterface:
             np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),           # 5 base_window_ptr
             np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),             # 6 row_starts
             np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),             # 7 col_starts
-            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, # 8-11 num_row_starts, num_col_starts, tile_h, tile_w
-            ctypes.c_int, ctypes.c_int, ctypes.c_int, # 12-14 h, w, channels_buffer
-            ctypes.c_float, # 15 motion_threshold
-            ctypes.c_int, ctypes.c_int, ctypes.c_int, # 16-18 mbm_block_h, mbm_block_w, mbm_search_radius
-            ctypes.c_float # 19 frame_max_multiplier
+            ctypes.c_int, # 8 num_row_starts
+            ctypes.c_int, # 9 num_col_starts
+            ctypes.c_int, # 10 tile_h
+            ctypes.c_int, # 11 tile_w
+            ctypes.c_int, # 12 h
+            ctypes.c_int, # 13 w
+            ctypes.c_int, # 14 channels (jumlah channel buffer C++, yaitu 3)
+            # ctypes.c_float, # 15 motion_threshold DIHAPUS
+            ctypes.c_int,   # 15 mbm_block_h (urutan berubah)
+            ctypes.c_int,   # 16 mbm_block_w
+            ctypes.c_int,   # 17 mbm_search_radius
+            ctypes.c_float, # 18 frame_max_adaptive_multiplier
+            # --- PARAMETER BARU ---
+            ctypes.c_float, # 19 p_mbm_mad_sensitivity
+            ctypes.c_float, # 20 p_mbm_noise_mad_offset_factor
+            ctypes.c_float, # 21 p_mbm_confidence_skip_dft_threshold
+            ctypes.c_int,   # 22 p_coarse_alignment_search_margin
+            ctypes.c_float  # 23 p_freq_merge_wiener_c_factor
         ]
         self.clib.accumulate_frame_weighted_jit.restype = None
 
-        # Definisikan argtypes untuk normalize_accumulated_image_jit
+        # Definisikan argtypes untuk normalize_accumulated_image_jit (tetap sama)
         self.clib.normalize_accumulated_image_jit.argtypes = [
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS, WRITEABLE'), # 1 final_image_ptr
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),           # 2 weight_map_sum_ptr
-            ctypes.c_int, ctypes.c_int, ctypes.c_int # 3-5 h, w, channels_buffer
+            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS, WRITEABLE'),
+            np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),
+            ctypes.c_int, ctypes.c_int, ctypes.c_int
         ]
         self.clib.normalize_accumulated_image_jit.restype = None
 
-        # Definisikan argtypes untuk estimate_global_noise
+        # Definisikan argtypes untuk estimate_global_noise (tetap sama)
         self.clib.estimate_global_noise.argtypes = [
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'), # reference_image_ptr
-            ctypes.c_int, ctypes.c_int, ctypes.c_int, # h, w, channels_buffer
-            ctypes.c_int, ctypes.c_int, # tile_h, tile_w
-            np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'), ctypes.c_int, # row_starts, num_row_starts
-            np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'), ctypes.c_int  # col_starts, num_col_starts
+            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'),
+            ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int,
+            np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'), ctypes.c_int,
+            np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'), ctypes.c_int
         ]
         self.clib.estimate_global_noise.restype = ctypes.c_float
 
     def accumulate_frame(self, final_image_sum, weight_map_sum, current_image, reference_image,
                          base_window, row_starts, col_starts, tile_h, tile_w, h, w, channels,
-                         motion_threshold, mbm_block_h, mbm_block_w, mbm_search_radius,
-                         frame_max_adaptive_multiplier):
+                         # motion_threshold, # DIHAPUS
+                         mbm_block_h, mbm_block_w, mbm_search_radius,
+                         frame_max_adaptive_multiplier,
+                         # --- PARAMETER BARU ---
+                         mbm_mad_sensitivity,
+                         mbm_noise_mad_offset_factor,
+                         mbm_confidence_skip_dft_threshold,
+                         coarse_alignment_search_margin,
+                         freq_merge_wiener_c_factor
+                         ):
         """Membungkus pemanggilan accumulate_frame_weighted_jit."""
-        # ASUMSI: Argumen NumPy sudah C-contiguous
         self.clib.accumulate_frame_weighted_jit(
             final_image_sum, weight_map_sum, current_image, reference_image, base_window,
             row_starts, col_starts, len(row_starts), len(col_starts),
-            tile_h, tile_w, h, w, channels, motion_threshold, mbm_block_h,
-            mbm_block_w, mbm_search_radius, frame_max_adaptive_multiplier
+            tile_h, tile_w, h, w, channels, # motion_threshold DIHAPUS
+            mbm_block_h, mbm_block_w, mbm_search_radius, frame_max_adaptive_multiplier,
+            # --- PARAMETER BARU DITERUSKAN ---
+            mbm_mad_sensitivity,
+            mbm_noise_mad_offset_factor,
+            mbm_confidence_skip_dft_threshold,
+            coarse_alignment_search_margin,
+            freq_merge_wiener_c_factor
         )
 
     def normalize_accumulated(self, final_image_sum, weight_map_sum, h, w, channels):
         """Membungkus pemanggilan normalize_accumulated_image_jit."""
-        # ASUMSI: Argumen NumPy sudah C-contiguous
         self.clib.normalize_accumulated_image_jit(final_image_sum, weight_map_sum, h, w, channels)
 
     def estimate_noise(self, reference_image_float, h_ref, w_ref, channels_buffer,
                     tile_h, tile_w, row_starts, col_starts):
         """Membungkus pemanggilan estimate_global_noise."""
-        return self.clib.estimate_global_noise( # <--- TAMBAHKAN return
+        return self.clib.estimate_global_noise(
             reference_image_float,
             h_ref, w_ref, channels_buffer,
             tile_h, tile_w,

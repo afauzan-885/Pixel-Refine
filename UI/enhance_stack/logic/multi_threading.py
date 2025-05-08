@@ -136,8 +136,7 @@ class RawImageProcessingThread(BaseMultiThreading):
                     # Konversi BGR awal ke RGB jika perlu (dilakukan sebelum pemecahan jika memungkinkan)
                     if len(img_array.shape) == 3 and img_array.shape[2] == 3:
                          img_array = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
-                         print(f"  Initial BGR->RGB conversion done for {filename}")
-
+                        
                     # Jika inputnya Grayscale atau RGBA, pemecahan akan dilakukan
                     # karena konversi warna perlu dilakukan per bagian.
                     if len(img_array.shape) == 2 or img_array.shape[2] == 4:

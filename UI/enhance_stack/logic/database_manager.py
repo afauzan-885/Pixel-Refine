@@ -513,7 +513,6 @@ class DatabaseManager:
                     items_to_delete = cursor.fetchall() # List of (image_id, is_reference)
 
                     if not items_to_delete:
-                        print("No matching images found in single_process_image to delete.")
                         return 0
 
                     was_ref_deleted = False

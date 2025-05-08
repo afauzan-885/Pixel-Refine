@@ -209,282 +209,219 @@ class SimilarityAlgorithmV2:
         return np.ascontiguousarray(norm_image.astype(np.float32))
 
     def similarity_mfnr(self, images, tile_size, overlap,
-                        motion_threshold=0.0025, update_progress=None, stop_requested=None,
-                        lib_path='UI/data/similarity_motion_v2.dll',
-                        save_weight_map_path=None, total_overall_images=None, images_processed_so_far=0):
+                        mbm_mad_sensitivity=20.0,
+                        mbm_noise_mad_offset_factor=0.5,
+                        mbm_confidence_skip_dft_threshold=0.9,
+                        coarse_alignment_search_margin=12,
+                        freq_merge_wiener_c_factor=2.0,
+                        update_progress=None, stop_requested=None,
+                        lib_path='UI\data\similarity_motion_v2.dll',
+                        save_weight_map_path=None,
+                        total_overall_images=None, images_processed_so_far=0):
 
-        if not isinstance(images, list) or not images: # Pastikan images adalah list dan tidak kosong
-             raise ValueError("Input 'images' must be a non-empty list.")
+        if not isinstance(images, list) or not images:
+           raise ValueError("Input 'images' must be a non-empty list.")
 
-        # Validasi tile_size
-        if not (isinstance(tile_size, (tuple, list)) and len(tile_size) == 2 and
-                tile_size[0] > 0 and tile_size[1] > 0):
+        val_tile_h, val_tile_w = map(int, tile_size)
+        if not (val_tile_h > 0 and val_tile_w > 0):
             raise ValueError("tile_size must be a tuple or list of two positive integers.")
-        tile_h, tile_w = map(int, tile_size)
 
-        # Ambil properti dari gambar pertama dan validasi tipe
         try:
-            ref_image = images[0]
-            if not isinstance(ref_image, np.ndarray):
+            ref_image_orig = images[0]
+            if not isinstance(ref_image_orig, np.ndarray):
                 raise TypeError(language_config.IMAGE_DATA_MUST_BE_VALID)
-            h, w = ref_image.shape[:2]
-            channels = ref_image.shape[2] if ref_image.ndim == 3 else 1
-            dtype = ref_image.dtype
-            
-            if channels == 1: channels_buffer = 3
-            elif channels == 3: channels_buffer = 3
-            else:
-                 raise ValueError(language_config.IMAGE_CHANNEL_DOES_NOT_SUPPORT.format(channels))
 
-        except (AttributeError, IndexError, ValueError, TypeError) as e:
+            h_orig, w_orig = ref_image_orig.shape[:2]
+            # channels_orig: channel gambar input asli (bisa 1 atau 3 atau 4)
+            channels_orig = ref_image_orig.shape[2] if ref_image_orig.ndim == 3 else 1
+            dtype_orig = ref_image_orig.dtype
+
+            # channels_buffer: channel yang digunakan untuk buffer di C++ (selalu 3)
+            channels_buffer_cpp = 3
+
+        except (AttributeError, IndexError, TypeError) as e:
             raise ValueError(language_config.FIRST_IMAGE_CANNOT_BE_OBTAINED.format(e))
 
-        if dtype not in (np.uint8, np.uint16):
-            raise TypeError(language_config.IMAGE_BIT_REQUIRED) # Tambahkan detail
+        if dtype_orig not in (np.uint8, np.uint16):
+            raise TypeError(language_config.IMAGE_BIT_REQUIRED)
 
-        mbm_block_h = tile_h
-        mbm_block_w = tile_w
-        mbm_search_radius = 10
-        
+        # mbm_block_size bisa sama dengan tile_size atau lebih kecil.
+        # Di sini kita set default sama dengan tile_size, bisa dijadikan parameter fungsi jika perlu.
+        mbm_block_h = val_tile_h
+        mbm_block_w = val_tile_w
+        mbm_search_radius = 10 # Ini juga bisa jadi parameter jika diinginkan
+
         try:
             c_interface = SimilarityV2MotionInterface(lib_path)
         except (FileNotFoundError, OSError, AttributeError) as e:
-            raise RuntimeError(f"Failed to initialize C++ interface: {e}")
+           raise RuntimeError(f"Failed to initialize C++ interface: {e}")
 
-        # --- Load Library C++ & Definisikan Argtypes SEKALI ---
-        if not os.path.exists(lib_path):
-            raise FileNotFoundError(language_config.LIBRARY_FILE_NOT_FOUND.format(lib_path))
+        # Normalisasi gambar referensi KE BUFFER 3 CHANNEL FLOAT32
+        # h_ref, w_ref adalah dimensi gambar setelah normalisasi (seharusnya sama dengan h_orig, w_orig)
+        reference_image_float32_3ch = self.normalize_image(ref_image_orig, dtype_orig)
+        h_ref, w_ref, channels_ref_check = reference_image_float32_3ch.shape
+
+        if channels_ref_check != channels_buffer_cpp:
+             raise RuntimeError(language_config.COLOR_CHANNEL_DOES_NOT_MATCH +
+                                f" Expected {channels_buffer_cpp}, got {channels_ref_check} from normalized ref.")
+
+        # Buffer akumulasi selalu float32 dan 3 channel
+        final_image_sum = np.ascontiguousarray(np.zeros((h_ref, w_ref, channels_buffer_cpp), dtype=np.float32))
+        weight_map_sum = np.ascontiguousarray(np.zeros((h_ref, w_ref), dtype=np.float32)) # Weight map selalu 1 channel
+
+        # Tile starts & base window
+        # Penting: tile_h_proc dan tile_w_proc adalah ukuran tile yang akan diproses,
+        # bisa jadi lebih kecil dari val_tile_h/val_tile_w jika gambar lebih kecil dari tile.
+        tile_h_proc = min(val_tile_h, h_ref)
+        tile_w_proc = min(val_tile_w, w_ref)
+
+        step_y = max(int(tile_h_proc * (1 - overlap)), 1)
+        step_x = max(int(tile_w_proc * (1 - overlap)), 1)
+
+        if h_ref > tile_h_proc:
+            row_starts = np.arange(0, h_ref - tile_h_proc + 1, step_y, dtype=np.int32)
+            if not row_starts.size or row_starts[-1] != h_ref - tile_h_proc :
+                row_starts = np.append(row_starts, h_ref - tile_h_proc).astype(np.int32)
+        else: # Gambar lebih kecil atau sama dengan tinggi tile
+            row_starts = np.array([0], dtype=np.int32)
+
+        if w_ref > tile_w_proc:
+            col_starts = np.arange(0, w_ref - tile_w_proc + 1, step_x, dtype=np.int32)
+            if not col_starts.size or col_starts[-1] != w_ref - tile_w_proc:
+                col_starts = np.append(col_starts, w_ref - tile_w_proc).astype(np.int32)
+        else: # Gambar lebih kecil atau sama dengan lebar tile
+            col_starts = np.array([0], dtype=np.int32)
+
+        row_starts = np.ascontiguousarray(np.unique(row_starts))
+        col_starts = np.ascontiguousarray(np.unique(col_starts))
+
+        base_window = self.gaussian_window((tile_h_proc, tile_w_proc))
+
+        # Estimasi noise global
         try:
-            clib = ctypes.CDLL(lib_path)
-
-            # Definisikan argtypes untuk accumulate_frame_weighted_jit
-            clib.accumulate_frame_weighted_jit.argtypes = [
-                np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS, WRITEABLE'), # 1 final_image_sum_ptr (selalu 3 channel)
-                np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS, WRITEABLE'), # 2 weight_map_sum_ptr
-                np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'),           # 3 current_image_ptr (selalu 3 channel)
-                np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'),           # 4 reference_image_ptr (selalu 3 channel)
-                np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),           # 5 base_window_ptr
-                np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),             # 6 row_starts
-                np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),             # 7 col_starts
-                ctypes.c_int, # 8 num_row_starts
-                ctypes.c_int, # 9 num_col_starts
-                ctypes.c_int, # 10 tile_h
-                ctypes.c_int, # 11 tile_w
-                ctypes.c_int, # 12 h
-                ctypes.c_int, # 13 w
-                ctypes.c_int, # 14 channels (jumlah channel buffer C++, yaitu 3)
-                ctypes.c_float, # 15 motion_threshold
-                ctypes.c_int, # 16 mbm_block_h
-                ctypes.c_int, # 17 mbm_block_w
-                ctypes.c_int,  # 18 mbm_search_radius
-                ctypes.c_float 
-            ]
-            clib.accumulate_frame_weighted_jit.restype = None
-
-            # Definisikan argtypes untuk normalize_accumulated_image_jit
-            clib.normalize_accumulated_image_jit.argtypes = [
-                np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS, WRITEABLE'), # 1 final_image_ptr (selalu 3 channel)
-                np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),           # 2 weight_map_sum_ptr
-                ctypes.c_int, # 3 h
-                ctypes.c_int, # 4 w
-                ctypes.c_int  # 5 channels (jumlah channel buffer C++, yaitu 3)
-            ]
-            clib.normalize_accumulated_image_jit.restype = None
-            
-            # === DEFINISI UNTUK FUNGSI C++ BARU ===
-            clib.estimate_global_noise.argtypes = [
-                np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'), # reference_image_ptr
-                ctypes.c_int, # h
-                ctypes.c_int, # w
-                ctypes.c_int, # channels (input, akan jadi gray di C++)
-                ctypes.c_int, # tile_h
-                ctypes.c_int, # tile_w
-                np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'), # row_starts
-                ctypes.c_int, # num_row_starts
-                np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'), # col_starts
-                ctypes.c_int  # num_col_starts
-            ]
-            clib.estimate_global_noise.restype = ctypes.c_float
-            # === AKHIR DEFINISI BARU ===
-
-        except OSError as e:
-            raise OSError(language_config.FAILED_TO_CONFIGURE_LIBRARY.format(lib_path, e))
-        except AttributeError as e:
-             raise AttributeError(f"Function not found in DLL or error setting argtypes. Did you compile C++ correctly? Error: {e}")
-
-
-         # --- Persiapan Buffer & Variabel (Sama) ---
-        reference_image_float = self.normalize_image(ref_image, dtype)
-        h_ref, w_ref, channels_ref = reference_image_float.shape
-        if channels_ref != channels_buffer: raise RuntimeError(language_config.COLOR_CHANNEL_DOES_NOT_MATCH)
-        final_image_sum = np.ascontiguousarray(np.zeros((h_ref, w_ref, channels_buffer), dtype=np.float32))
-        weight_map_sum = np.ascontiguousarray(np.zeros((h_ref, w_ref), dtype=np.float32))
-
-        # --- Tile Starts & Base Window (Sama) ---
-        step_y = max(int(tile_h * (1 - overlap)), 1); step_x = max(int(tile_w * (1 - overlap)), 1)
-        if h_ref >= tile_h:
-            row_starts = np.arange(0, h_ref - tile_h + 1, step_y)
-            if h_ref > tile_h and (len(row_starts) == 0 or row_starts[-1] != h_ref - tile_h): row_starts = np.append(row_starts, h_ref - tile_h)
-            elif h_ref == tile_h: row_starts = np.array([0])
-        else: row_starts = np.array([0])
-        if w_ref >= tile_w:
-            col_starts = np.arange(0, w_ref - tile_w + 1, step_x)
-            if w_ref > tile_w and (len(col_starts) == 0 or col_starts[-1] != w_ref - tile_w): col_starts = np.append(col_starts, w_ref - tile_w)
-            elif w_ref == tile_w: col_starts = np.array([0])
-        else: col_starts = np.array([0])
-        row_starts = np.ascontiguousarray(np.unique(row_starts).astype(np.int32))
-        col_starts = np.ascontiguousarray(np.unique(col_starts).astype(np.int32))
-        base_window = self.gaussian_window(tile_size)
-
-        # --- HITUNG GLOBAL NOISE (PANGGIL C++), MULTIPLIER, DAN SKOR ---
-        try:
-            global_avg_sigma = clib.estimate_global_noise(
-                reference_image_float,
-                h_ref, w_ref, channels_buffer,
-                tile_h, tile_w,
-                row_starts, len(row_starts),
-                col_starts, len(col_starts)
+            global_avg_sigma = c_interface.estimate_noise(
+                reference_image_float32_3ch, h_ref, w_ref, channels_buffer_cpp,
+                tile_h_proc, tile_w_proc,
+                row_starts, col_starts # c_interface akan ambil len() dari ini
             )
         except Exception as e:
-            global_avg_sigma = 0.0
+            global_avg_sigma = 0.03 
             
-        # Lanjutkan seperti sebelumnya
         frame_max_multiplier = self._calculate_dynamic_max_multiplier(global_avg_sigma)
         noise_level_score = self._calculate_noise_level_score(global_avg_sigma)
         print(f"  Cleanliness Score (0-100, 100=clean): {noise_level_score:.1f}")
-       
-        # --- Skala Denormalisasi ---
-        scale_value = np.float32(np.iinfo(dtype).max)
 
-        num_images = len(images)
-        processed_frames = 0
-        progress_cap_percent = 95
+        scale_value = np.float32(np.iinfo(dtype_orig).max)
+        num_images_total = len(images)
+        processed_frames_count = 0
+        progress_cap_percent = 95 # Untuk UI agar tidak langsung 100% sebelum normalisasi
 
-        # --- Loop Pemrosesan Gambar ---
-        # print(f"Starting MFNR process for {num_images} images...")
-        for i, image_orig in enumerate(images):
-            if not isinstance(image_orig, np.ndarray):
-                # print(f"Warning: Skipping item at index {i} because it's not a NumPy array.")
+        # Loop pemrosesan gambar
+        for i, current_image_orig in enumerate(images):
+            if not isinstance(current_image_orig, np.ndarray):
                 continue
 
             if update_progress:
+                current_progress_val = 0
                 if total_overall_images is not None and total_overall_images > 0:
                     overall_processed_count = images_processed_so_far + i + 1
-                    progress = int((overall_processed_count / total_overall_images) * progress_cap_percent)
-                    message = language_config.IMAGE_PROCESS_IN_PROGRESS.format(overall_processed_count, total_overall_images)
+                    current_progress_val = int((overall_processed_count / total_overall_images) * progress_cap_percent)
+                    progress_message = language_config.IMAGE_PROCESS_IN_PROGRESS.format(overall_processed_count, total_overall_images)
                 else:
-                    progress = int(((i + 1) / num_images) * progress_cap_percent) # Cap internal
-                    message = language_config.ANALYZING_IMAGE.format(i+1,num_images)
-                update_progress(progress, message)
+                    current_progress_val = int(((i + 1) / num_images_total) * progress_cap_percent)
+                    progress_message = language_config.ANALYZING_IMAGE.format(i + 1, num_images_total)
+                update_progress(current_progress_val, progress_message)
 
             if stop_requested and stop_requested():
                 break
 
+            # Validasi gambar saat ini
             try:
-                if image_orig.shape[0] != h or image_orig.shape[1] != w:
+                if current_image_orig.shape[0] != h_orig or current_image_orig.shape[1] != w_orig:
                     continue
-                if image_orig.dtype != dtype:
+                if current_image_orig.dtype != dtype_orig:
                     continue
-                num_channels_orig = image_orig.shape[2] if image_orig.ndim == 3 else 1
-                if num_channels_orig not in (1, channels_buffer): # Hanya izinkan 1 atau 3 channel input
-                     continue
-
             except Exception as e:
-                continue 
-            
-            current_image_float = self.normalize_image(image_orig, dtype)
-            if current_image_float.shape[2] != channels_buffer:
-                 continue
+                continue
 
+            current_image_float32_3ch = self.normalize_image(current_image_orig, dtype_orig)
+            if current_image_float32_3ch.shape[2] != channels_buffer_cpp:
+                continue
 
-            # --- Panggil Fungsi Akumulasi C++ ---
+            # Panggil fungsi akumulasi C++
             try:
                 c_interface.accumulate_frame(
-                    final_image_sum, weight_map_sum, # Target (Writable)
-                    current_image_float, reference_image_float, # Input (Read-only)
-                    base_window, row_starts, col_starts, # Params
-                    tile_h, tile_w, h_ref, w_ref, channels_buffer, # Ukuran & Channel Buffer
-                    motion_threshold,
-                    mbm_block_h, mbm_block_w, mbm_search_radius, frame_max_multiplier
+                    final_image_sum, weight_map_sum,
+                    current_image_float32_3ch, reference_image_float32_3ch,
+                    base_window, row_starts, col_starts,
+                    tile_h_proc, tile_w_proc, h_ref, w_ref, channels_buffer_cpp,
+                    mbm_block_h, mbm_block_w, mbm_search_radius, # mbm params
+                    frame_max_multiplier, # adaptive multiplier
+                    # Parameter baru yang dipindahkan dari C++
+                    mbm_mad_sensitivity, mbm_noise_mad_offset_factor,
+                    mbm_confidence_skip_dft_threshold, coarse_alignment_search_margin,
+                    freq_merge_wiener_c_factor
                 )
-                processed_frames += 1 # Hanya increment jika pemanggilan berhasil
+                processed_frames_count += 1
+            except RuntimeError as e: # Tangkap error spesifik jika ada
+               pass
             except Exception as e:
-                #  print(f"ERROR calling C++ accumulate function for frame {i+1}: {e}")
-                # Putuskan: Lanjutkan tanpa frame ini atau hentikan?
-                raise RuntimeError(f"C++ accumulation failed for frame {i+1}: {e}") # Hentikan
+                pass
+        if processed_frames_count == 0:
+            if channels_orig == 1 and ref_image_orig.ndim == 2: # input asli grayscale
+                 return ref_image_orig.astype(dtype_orig, copy=False)
+            elif channels_orig == 3 and ref_image_orig.ndim == 3: # input asli berwarna
+                 return ref_image_orig.astype(dtype_orig, copy=False)
+            else: # Fallback jika format aneh
+                 output_shape = (h_orig, w_orig) if channels_orig == 1 else (h_orig, w_orig, channels_orig)
+                 return np.zeros(output_shape, dtype=dtype_orig)
 
-        # --- Normalisasi FINAL (Setelah Loop) ---
-        if processed_frames > 0:
+
+        # Normalisasi FINAL (setelah semua frame diproses)
+        try:
+            c_interface.normalize_accumulated(final_image_sum, weight_map_sum, h_ref, w_ref, channels_buffer_cpp)
+        except Exception as e:
+            raise RuntimeError(language_config.NORMALIZATION_FAILED.format(e))
+
+        # Penyimpanan Peta Bobot (opsional)
+        if save_weight_map_path:
+            print(language_config.OUTPUT_SAVE_WEIGHT_MAP.format(save_weight_map_path))
             try:
-                c_interface.normalize_accumulated(final_image_sum, weight_map_sum, h_ref, w_ref, channels_buffer)
-                print("Normalization complete.")
+                # Normalisasi bobot untuk visualisasi (rata-rata per frame yang berkontribusi)
+                if processed_frames_count > 0:
+                    normalized_weights_vis = weight_map_sum / float(processed_frames_count)
+                else:
+                    normalized_weights_vis = np.zeros_like(weight_map_sum)
+
+                normalized_weights_vis = np.clip(normalized_weights_vis, 0.0, 1.0)
+                weight_map_to_save = (normalized_weights_vis * 255).astype(np.uint8)
+
+                # Buat direktori jika belum ada
+                os.makedirs(os.path.dirname(save_weight_map_path), exist_ok=True)
+                success_save = cv2.imwrite(save_weight_map_path, weight_map_to_save)
+                if success_save:
+                    print(language_config.SAVING_WEIGHT_MAP)
+                else:
+                    print(language_config.FAILED_TO_SAVE_WEIGHT_MAP_TO_PATH.format(save_weight_map_path))
             except Exception as e:
-                 raise RuntimeError(language_config.NORMALIZATION_FAILED.format(e))
+                traceback.print_exc()
 
-            # --- PENYIMPANAN PETA BOBOT ---
-            if save_weight_map_path:
-                print(language_config.OUTPUT_SAVE_WEIGHT_MAP.format(save_weight_map_path))
-                try:
-                    # --- Normalisasi: Berdasarkan jumlah frame yang diproses ---
-                    # Ini menunjukkan 'rata-rata' confidence per frame yang berkontribusi
-                    # (sudah termasuk pengaruh base_window)
-                    if processed_frames > 0:
-                         # Bagi dengan jumlah frame untuk mendapatkan bobot rata-rata per piksel
-                         # Nilai maksimum idealnya 1.0 di tengah tile jika confidence selalu 1
-                         normalized_weights = weight_map_sum / float(processed_frames)
-                    else:
-                         normalized_weights = np.zeros_like(weight_map_sum) # Peta hitam jika tidak ada frame
+        final_image_scaled = final_image_sum * scale_value
 
-                    # Clamp nilai ke [0, 1] karena pembagian bisa menghasilkan > 1 jika ada overlap tinggi
-                    normalized_weights = np.clip(normalized_weights, 0.0, 1.0)
-
-                    # --- Opsional: Tambahkan Blurring pada Visualisasi ---
-                    # Jika Anda masih melihat artefak visual antar blok MBM (bukan tile)
-                    # atau ingin visualisasi yang lebih mulus secara umum.
-                    apply_vis_blur = False
-                    if apply_vis_blur:
-                        vis_blur_kernel_size = 3
-                        normalized_weights = cv2.GaussianBlur(normalized_weights, (vis_blur_kernel_size, vis_blur_kernel_size), 0)
-                        normalized_weights = np.clip(normalized_weights, 0.0, 1.0)
-
-
-                    # Konversi ke uint8 [0, 255]
-                    weight_map_vis = (normalized_weights * 255).astype(np.uint8)
-
-                    # Simpan peta bobot sebagai gambar grayscale
-                    os.makedirs(os.path.dirname(save_weight_map_path), exist_ok=True)
-                    success_save = cv2.imwrite(save_weight_map_path, weight_map_vis)
-                    if success_save:
-                         print(language_config.SAVING_WEIGHT_MAP)
-                    else:
-                         print(language_config.FAILED_TO_SAVE_WEIGHT_MAP_TO_PATH.format(save_weight_map_path))
-
-                except Exception as e:
-                    traceback.print_exc()
-
-
-            # --- Denormalisasi, Clipping, Konversi Tipe (di Python) ---
-            final_image_normalized = final_image_sum
-            final_image_scaled = final_image_normalized * scale_value
-
-            # Konversi kembali ke tipe data asli (uint8/uint16)
-            # Jika input asli grayscale, kembalikan grayscale
-            if ref_image.ndim == 2 or (ref_image.ndim == 3 and ref_image.shape[2] == 1) :
-                final_image_scaled_single_channel = final_image_scaled[:, :, 0]
-                min_val = 0
-                max_val = np.iinfo(dtype).max
-                final_image_output = np.clip(final_image_scaled_single_channel, min_val, max_val).astype(dtype, copy=False)
-            elif channels_buffer == 3: # Input asli berwarna
-                min_val = 0
-                max_val = np.iinfo(dtype).max
-                final_image_output = np.clip(final_image_scaled, min_val, max_val).astype(dtype, copy=False)
-            
-            if stop_requested and stop_requested() and processed_frames < num_images:
-                 print(f"WARNING: Returning partially processed image after accumulating {processed_frames} frames.")
-            return final_image_output
+        final_image_output = None
+        if channels_orig == 1:
+            final_image_gray_float = final_image_scaled[:, :, 0]
+            final_image_output = np.clip(final_image_gray_float, 0, np.iinfo(dtype_orig).max).astype(dtype_orig, copy=False)
+        elif channels_orig == 3: 
+            final_image_output = np.clip(final_image_scaled, 0, np.iinfo(dtype_orig).max).astype(dtype_orig, copy=False)
+        elif channels_orig == 4:
+            final_image_output = np.clip(final_image_scaled, 0, np.iinfo(dtype_orig).max).astype(dtype_orig, copy=False)
         else:
-            output_shape = (h, w) if ref_image.ndim == 2 else (h, w, ref_image.shape[2])
-            return np.zeros(output_shape, dtype=dtype)
+            pass
+
+        if stop_requested and stop_requested() and processed_frames_count < num_images_total:
+            pass
+        return final_image_output
 
 def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
          single_process=None, batch_id=None, save_final_weight_map=True, progress_bar=None):
@@ -624,7 +561,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
                             batch_images,
                             tile_size=tile_size_tuple,        
                             overlap=overlap_ratio,            
-                            motion_threshold=sim_motion_threshold, 
+                            # motion_threshold=sim_motion_threshold, 
                             update_progress=update_progress,
                             stop_requested=stop_requested,
                             total_overall_images=total_images,
@@ -685,7 +622,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
                     batch_images,
                     tile_size=tile_size_tuple,        
                     overlap=overlap_ratio,            
-                    motion_threshold=sim_motion_threshold,
+                    # motion_threshold=sim_motion_threshold,
                     update_progress=update_progress,
                     stop_requested=stop_requested,
                     total_overall_images=total_images,
@@ -739,7 +676,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
                      processed_batches_results,
                      tile_size=tile_size_tuple,
                      overlap=overlap_ratio,    
-                     motion_threshold=sim_motion_threshold,
+                    #  motion_threshold=sim_motion_threshold,
                      update_progress=fine_tuning_update_progress,
                      stop_requested=stop_requested,
                      save_weight_map_path=final_weight_map_path_arg,

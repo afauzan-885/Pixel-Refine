@@ -20,7 +20,7 @@ namespace MotionMetricsConfig
     constexpr float GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD = 1e-6f;
 
     // --- Konstanta untuk Pembobotan Gradien ---
-    constexpr float GRADIENT_WEIGHT_FACTOR = 1.3f;
+    constexpr float GRADIENT_WEIGHT_FACTOR = 1.3f; // Ini masih bisa di C++ jika tidak perlu diubah dari Python
 
     // Konstanta Adaptasi Noise
     constexpr float NOISE_ADAPTATION_FACTOR = 6.0f;
@@ -29,19 +29,13 @@ namespace MotionMetricsConfig
 
     // --- Konstanta untuk Penanganan Area Gelap dengan Fading ---
     constexpr float DARK_UPPER_THRESHOLD = 127.0f / 255.0f;
- 
     constexpr float MAX_MIN_DARK_CONFIDENCE = 1e-3f;
     constexpr int DARKNESS_MAP_BLUR_KERNEL_SIZE = 1;
     constexpr int CONFIDENCE_MAP_BLUR_KERNEL_SIZE = 3;
-    constexpr int COARSE_ALIGNMENT_SEARCH_MARGIN = 12;
-
-    // --- Konstanta untuk Merging Domain Frekuensi ---
-    constexpr float FREQ_MERGE_WIENER_C_FACTOR = 2.0f; 
-    constexpr bool  APPLY_FREQ_DOMAIN_MERGING = true;  
     
-    constexpr float MBM_MAD_SENSITIVITY = 20.0f;
-    constexpr float MBM_NOISE_MAD_OFFSET_FACTOR = 0.5f;
-    constexpr float MBM_CONFIDENCE_SKIP_DFT_THRESHOLD = 0.9f;
+    // --- Konstanta untuk Merging Domain Frekuensi ---
+    constexpr bool  APPLY_FREQ_DOMAIN_MERGING = true;
+
 }
 //=============================================================================
 // Struktur Data Hasil
@@ -295,11 +289,16 @@ extern "C"
         const float *base_window_ptr, const int *row_starts, const int *col_starts,
         int num_row_starts, int num_col_starts, int tile_h, int tile_w,
         int h_img, int w_img, int channels_input,
-        float motion_threshold, 
         int mbm_block_h, int mbm_block_w, int mbm_search_radius,
-        float frame_max_adaptive_multiplier) 
+        float frame_max_adaptive_multiplier,
+        float p_mbm_mad_sensitivity,
+        float p_mbm_noise_mad_offset_factor,
+        float p_mbm_confidence_skip_dft_threshold,
+        int p_coarse_alignment_search_margin,
+        float p_freq_merge_wiener_c_factor
+        )
     {
-        using namespace MotionMetricsConfig;
+        using namespace MotionMetricsConfig; // namespace masih bisa digunakan untuk konstanta yang tersisa
 
         if (!final_image_sum_ptr || !weight_map_sum_ptr || !current_image_ptr || !reference_image_ptr || !base_window_ptr ||
             !row_starts || !col_starts || h_img <= 0 || w_img <= 0 || tile_h <= 0 || tile_w <= 0 || channels_input <= 0 ||
@@ -316,6 +315,7 @@ extern "C"
         const cv::Mat current_image_mat_input(h_img, w_img, CV_32FC(channels_input), const_cast<float *>(current_image_ptr));
         const cv::Mat reference_image_mat_input(h_img, w_img, CV_32FC(channels_input), const_cast<float *>(reference_image_ptr));
 
+        // ... (konversi ke gray tetap sama) ...
         cv::Mat current_image_gray_mat;
         cv::Mat reference_image_gray_mat;
 
@@ -338,8 +338,10 @@ extern "C"
         }
         if (current_image_gray_mat.empty() || reference_image_gray_mat.empty()) return;
 
+
 #pragma omp parallel
         {
+            // ... (deklarasi variabel thread tetap sama) ...
             cv::Mat thread_darkness_map_raw, thread_darkness_map_smoothed;
             cv::Mat thread_block_confidences_raw, thread_block_confidences_smoothed;
             cv::Mat thread_larger_ref_tile_gray, thread_reference_search_area;
@@ -347,14 +349,15 @@ extern "C"
             cv::Mat thread_current_block_gray;
             cv::Mat thread_ref_block_from_mbm_gray; 
             cv::Mat thread_current_block_gray_for_darkness;
-            // cv::Mat thread_block_to_accumulate_gray; // Tidak lagi jadi satu variabel tunggal, diganti vector di bawah
 
             cv::Mat thread_current_padded, thread_ref_padded;
             cv::Mat thread_current_dft, thread_ref_dft, thread_merged_dft;
 
+
             #pragma omp for collapse(2) schedule(guided)
             for (int i = 0; i < num_row_starts; i++) { // Loop Tile i
                 for (int j = 0; j < num_col_starts; j++) { // Loop Tile j
+                    // ... (setup tile ROI tetap sama) ...
                     int r_tile_start = row_starts[i];
                     int c_tile_start = col_starts[j];
 
@@ -371,13 +374,14 @@ extern "C"
                     int aligned_ref_r_global = r_tile_start; 
                     int aligned_ref_c_global = c_tile_start;
 
-                    if (!current_tile_gray_master.empty() && current_tile_gray_master.rows > 0 && current_tile_gray_master.cols > 0 && COARSE_ALIGNMENT_SEARCH_MARGIN >= 0) {
-                        int search_margin = COARSE_ALIGNMENT_SEARCH_MARGIN;
+                    // --- Coarse Alignment menggunakan p_coarse_alignment_search_margin ---
+                    if (!current_tile_gray_master.empty() && current_tile_gray_master.rows > 0 && current_tile_gray_master.cols > 0 && p_coarse_alignment_search_margin >= 0) {
+                        int search_margin = p_coarse_alignment_search_margin; // Menggunakan parameter
                         int ref_search_r_start = std::max(0, r_tile_start - search_margin);
                         int ref_search_c_start = std::max(0, c_tile_start - search_margin);
                         int ref_search_h = std::min(h_img - ref_search_r_start, tile_h + 2 * search_margin);
                         int ref_search_w = std::min(w_img - ref_search_c_start, tile_w + 2 * search_margin);
-
+                        // ... (sisa logika coarse alignment) ...
                         if (ref_search_h >= tile_h && ref_search_w >= tile_w && ref_search_h > 0 && ref_search_w > 0) {
                             cv::Rect search_area_roi(ref_search_c_start, ref_search_r_start, ref_search_w, ref_search_h);
                             if (search_area_roi.x >= 0 && search_area_roi.y >= 0 && 
@@ -413,7 +417,7 @@ extern "C"
                             }
                         }
                     }
-                    
+                    // ... (estimasi noise sigma tetap sama) ...
                     float estimated_noise_sigma = 0.0f;
                     int larger_tile_factor = 2;
                     int noise_est_base_r = aligned_ref_r_global; 
@@ -438,7 +442,8 @@ extern "C"
                              estimated_noise_sigma = estimate_tile_noise_sigma_mad_laplacian(reference_tile_gray_for_mbm);
                         }
                     }
-                    
+
+                    // ... (darkness map tetap sama) ...
                     int num_blocks_h = (mbm_block_h > 0 && tile_h > 0) ? (tile_h + mbm_block_h - 1) / mbm_block_h : (tile_h > 0 ? 1 : 0);
                     int num_blocks_w = (mbm_block_w > 0 && tile_w > 0) ? (tile_w + mbm_block_w - 1) / mbm_block_w : (tile_w > 0 ? 1 : 0);
                     if (num_blocks_h == 0 || num_blocks_w == 0) continue;
@@ -481,47 +486,41 @@ extern "C"
                         thread_darkness_map_smoothed.setTo(cv::Scalar(0.0f));
                     }
 
+
                     thread_block_confidences_raw.create(num_blocks_h, num_blocks_w, CV_32F);
                     thread_block_confidences_raw.setTo(cv::Scalar(0.0f));
                     bool darkness_map_is_usable = !thread_darkness_map_smoothed.empty() &&
                                               thread_darkness_map_smoothed.rows == num_blocks_h &&
                                               thread_darkness_map_smoothed.cols == num_blocks_w;
-
                     std::vector<cv::Mat> merged_gray_blocks_for_tile(num_blocks_h * num_blocks_w);
 
                     for (int bh_idx = 0; bh_idx < num_blocks_h; ++bh_idx) {
                         for (int bw_idx = 0; bw_idx < num_blocks_w; ++bw_idx) {
+                            // ... (setup blok tetap sama) ...
                             int block_idx_flat = bh_idx * num_blocks_w + bw_idx;
                             int block_local_r_start = bh_idx * actual_mbm_block_h;
                             int block_local_c_start = bw_idx * actual_mbm_block_w;
                             int current_block_h_dim = std::min(actual_mbm_block_h, tile_h - block_local_r_start);
                             int current_block_w_dim = std::min(actual_mbm_block_w, tile_w - block_local_c_start);
 
-                            cv::Mat current_block_merged_gray_output_temp; // Hasil DFT/original untuk blok ini
-
+                            cv::Mat current_block_merged_gray_output_temp; 
                             if (current_block_h_dim <= 0 || current_block_w_dim <= 0) {
                                 thread_block_confidences_raw.at<float>(bh_idx, bw_idx) = 0.0f;
-                                // Inisialisasi placeholder jika perlu
                                 if(merged_gray_blocks_for_tile[block_idx_flat].empty() && actual_mbm_block_h > 0 && actual_mbm_block_w >0) {
                                      merged_gray_blocks_for_tile[block_idx_flat] = cv::Mat::zeros(1, 1, CV_32FC1);
                                 }
                                 continue;
                             }
-                            // Inisialisasi output temp dengan ukuran yang benar
                             current_block_merged_gray_output_temp.create(current_block_h_dim, current_block_w_dim, CV_32FC1);
-
                             cv::Rect current_block_roi_local(block_local_c_start, block_local_r_start, current_block_w_dim, current_block_h_dim);
-
-                            // --- Ambil blok saat ini (selalu diperlukan) ---
                              if (!(current_block_roi_local.x + current_block_roi_local.width <= current_tile_gray_master.cols &&
                                    current_block_roi_local.y + current_block_roi_local.height <= current_tile_gray_master.rows)) {
                                  thread_block_confidences_raw.at<float>(bh_idx, bw_idx) = 0.0f;
-                                 // Jika ROI tidak valid, isi dengan data original (meskipun mungkin sebagian) atau nol
                                  try { current_tile_gray_master(current_block_roi_local).copyTo(merged_gray_blocks_for_tile[block_idx_flat]);} catch(...){ merged_gray_blocks_for_tile[block_idx_flat] = cv::Mat::zeros(current_block_h_dim, current_block_w_dim, CV_32FC1);}
                                  continue;
                              }
                              thread_current_block_gray = current_tile_gray_master(current_block_roi_local);
-                             thread_current_block_gray.copyTo(current_block_merged_gray_output_temp); // Default: gunakan original
+                             thread_current_block_gray.copyTo(current_block_merged_gray_output_temp); 
 
                              if (thread_current_block_gray.empty() || reference_tile_gray_for_mbm.empty()) {
                                   thread_block_confidences_raw.at<float>(bh_idx, bw_idx) = 0.0f;
@@ -529,34 +528,22 @@ extern "C"
                                   continue;
                              }
 
-                            // --- Lakukan MBM ---
                             BlockMatchResult block_result = find_best_block_match(
                                 thread_current_block_gray, reference_tile_gray_for_mbm,
                                 block_local_r_start, block_local_c_start, mbm_search_radius);
 
-                            // ===================================================================
-                            // === LOKASI PERHITUNGAN MBM CONFIDENCE ADAPTIF TERHADAP NOISE ===
-                            // ===================================================================
                             float mbm_confidence_score = 0.0f;
                             if (block_result.success) {
-                                // Hitung offset MAD yang diharapkan berdasarkan noise tile
-                                float noise_induced_mad_offset = MBM_NOISE_MAD_OFFSET_FACTOR * estimated_noise_sigma;
-
-                                // Hitung MAD "berlebih" di atas offset noise
+                                // --- Menggunakan parameter dari Python ---
+                                float noise_induced_mad_offset = p_mbm_noise_mad_offset_factor * estimated_noise_sigma;
                                 float excess_mad = std::max(0.0f, block_result.min_mad - noise_induced_mad_offset);
-
-                                // Terapkan fungsi eksponensial pada excess_mad
-                                mbm_confidence_score = std::exp(-excess_mad * MBM_MAD_SENSITIVITY);
-
-                                // Pastikan clamped antara 0 dan 1
+                                mbm_confidence_score = std::exp(-excess_mad * p_mbm_mad_sensitivity);
                                 mbm_confidence_score = std::max(0.0f, std::min(1.0f, mbm_confidence_score));
                             }
 
-                            // --- Lakukan DFT Merge HANYA jika MBM Cukup Reliable ---
                             float freq_merge_confidence_dft = 0.0f;
-                            // *** AWAL OPTIMASI 1 ***
-                            if (APPLY_FREQ_DOMAIN_MERGING && block_result.success && mbm_confidence_score >= MBM_CONFIDENCE_SKIP_DFT_THRESHOLD) {
-                            // *** AKHIR OPTIMASI 1 (Kondisi IF diubah) ***
+                            // --- Menggunakan parameter dari Python ---
+                            if (APPLY_FREQ_DOMAIN_MERGING && block_result.success && mbm_confidence_score >= p_mbm_confidence_skip_dft_threshold) {
                                 cv::Rect best_ref_block_roi(block_result.best_match_c, block_result.best_match_r, current_block_w_dim, current_block_h_dim);
                                 if (best_ref_block_roi.x >= 0 && best_ref_block_roi.y >= 0 &&
                                     best_ref_block_roi.x + best_ref_block_roi.width <= reference_tile_gray_for_mbm.cols &&
@@ -564,8 +551,6 @@ extern "C"
                                 {
                                     thread_ref_block_from_mbm_gray = reference_tile_gray_for_mbm(best_ref_block_roi);
                                     if (!thread_ref_block_from_mbm_gray.empty()) {
-                                        // Lakukan DFT merge
-                                        // ... (padding, dft, wiener, idft -> current_block_merged_gray_output_temp, freq_merge_confidence_dft) ...
                                         int optimal_rows = cv::getOptimalDFTSize(current_block_h_dim);
                                         int optimal_cols = cv::getOptimalDFTSize(current_block_w_dim);
                                         cv::copyMakeBorder(thread_current_block_gray, thread_current_padded, 0, optimal_rows - current_block_h_dim, 0, optimal_cols - current_block_w_dim, cv::BORDER_CONSTANT, cv::Scalar::all(0));
@@ -583,7 +568,8 @@ extern "C"
                                                 const cv::Vec2f& coeff_ref = thread_ref_dft.at<cv::Vec2f>(r_f, c_f);
                                                 cv::Vec2f diff_coeff = coeff_ref - coeff_curr;
                                                 float mag_sq_diff = diff_coeff[0]*diff_coeff[0] + diff_coeff[1]*diff_coeff[1];
-                                                float noise_floor_freq = FREQ_MERGE_WIENER_C_FACTOR * sigma_sq_dft_eff_block;
+                                                // --- Menggunakan parameter dari Python ---
+                                                float noise_floor_freq = p_freq_merge_wiener_c_factor * sigma_sq_dft_eff_block;
                                                 float weight_curr_freq = noise_floor_freq / (mag_sq_diff + noise_floor_freq + STABILITY_EPSILON);
                                                 weight_curr_freq = std::max(0.0f, std::min(1.0f, weight_curr_freq));
                                                 thread_merged_dft.at<cv::Vec2f>(r_f, c_f) = coeff_ref * (1.0f - weight_curr_freq) + coeff_curr * weight_curr_freq;
@@ -597,23 +583,15 @@ extern "C"
                                     } else { freq_merge_confidence_dft = 0.0f; }
                                 } else { freq_merge_confidence_dft = 0.0f; }
                             } else if (!APPLY_FREQ_DOMAIN_MERGING && block_result.success) {
-                                freq_merge_confidence_dft = 1.0f; // Tidak ada DFT, confidence pada data asli
-                                // current_block_merged_gray_output_temp sudah berisi original
+                                freq_merge_confidence_dft = 1.0f; 
                             }
-                             // Jika MBM gagal atau confidence MBM < threshold, DFT tidak dijalankan,
-                             // freq_merge_confidence_dft = 0, dan output_temp berisi original.
-
-
-                            // --- Gabungkan Kepercayaan & Simpan Hasil Blok ---
+                            
                             merged_gray_blocks_for_tile[block_idx_flat] = current_block_merged_gray_output_temp.clone();
-
-                            // Kepercayaan gabungan: dimodulasi oleh MBM dan DFT
                             float combined_confidence = mbm_confidence_score * freq_merge_confidence_dft;
                             if (mbm_confidence_score > CONFIDENCE_EPSILON && !APPLY_FREQ_DOMAIN_MERGING && block_result.success) {
                                 combined_confidence = mbm_confidence_score;
                             }
 
-                            // --- Hitung Final Raw Confidence ---
                             float final_confidence = combined_confidence;
                             float smoothed_darkness_factor = 0.0f;
                             if (darkness_map_is_usable && bh_idx < thread_darkness_map_smoothed.rows && bw_idx < thread_darkness_map_smoothed.cols) {
@@ -625,6 +603,7 @@ extern "C"
                         } // Akhir loop bw_idx
                     } // Akhir loop bh_idx
 
+                    // ... (sisa fungsi accumulate_frame_weighted_jit hingga akhir, termasuk normalisasi pixel, tetap sama) ...
                     int kernel_sz_conf = (CONFIDENCE_MAP_BLUR_KERNEL_SIZE >= 1 && CONFIDENCE_MAP_BLUR_KERNEL_SIZE % 2 == 1) ? CONFIDENCE_MAP_BLUR_KERNEL_SIZE : 1;
                     if (!thread_block_confidences_raw.empty() && kernel_sz_conf >=3 && thread_block_confidences_raw.rows > 0 && thread_block_confidences_raw.cols > 0) {
                         cv::GaussianBlur(thread_block_confidences_raw, thread_block_confidences_smoothed, cv::Size(kernel_sz_conf, kernel_sz_conf), 0);
@@ -674,7 +653,6 @@ extern "C"
                                         
                                         int flat_block_index = bh_idx_pixel * num_blocks_w + bw_idx_pixel;
                                         if (flat_block_index >= merged_gray_blocks_for_tile.size() || merged_gray_blocks_for_tile[flat_block_index].empty()) {
-                                            // Harusnya tidak terjadi jika inisialisasi merged_gray_blocks_for_tile benar
                                             continue; 
                                         }
                                         const cv::Mat& active_merged_gray_block = merged_gray_blocks_for_tile[flat_block_index];
@@ -692,9 +670,6 @@ extern "C"
                                                 
                                                 float gray_merged_val = active_merged_gray_block.at<float>(y_in_block_pixel, x_in_block_pixel);
                                                 float gray_orig_val = current_block_gray_orig_pixel.at<float>(y_in_block_pixel, x_in_block_pixel);
-
-                                                // Ini adalah bagian kode original Anda TANPA clipping dan TANPA blending per piksel
-                                                // (Blending sudah implisit dalam pixel_weight yang menggunakan block_confidence)
                                                 for (int ch = 0; ch < channels_cpp; ++ch) {
                                                     float color_val_orig = 0.0f;
                                                     if (channels_cpp == 1) { 
@@ -719,7 +694,7 @@ extern "C"
                         }
                     }
                 } 
-            } 
+            }
         } 
     }
 
