@@ -30,11 +30,11 @@ def load_general_settings():
         
         # --- Similarity V2 ---
         "similarity_v2_tile_size": 16,
-        "similarity_v2_overlap_percent": 40.0,
-        "similarity_v2_mbm_noise_mad_offset_factor": 0.5,
-        "similarity_v2_mbm_mad_sensitivity": 20.0,
-        "similarity_v2_mbm_confidence_skip_dft_threshold": 0.9,
-        "similarity_v2_freq_merge_wiener_c_factor": 2.0,
+        "similarity_v2_overlap_percent": 38.0,
+        "similarity_v2_mbm_noise_mad_offset_factor": 0.65,
+        "similarity_v2_mbm_mad_sensitivity": 18.8,
+        "similarity_v2_mbm_confidence_skip_dft_threshold": 0.78,
+        "similarity_v2_freq_merge_wiener_c_factor": 2.1,
         "similarity_v2_coarse_alignment_search_margin": 12
         # -------------
     }
@@ -279,7 +279,7 @@ def _create_similarity_v2_group(current_settings):
     overlap_label.setToolTip(getattr(language_config, 'OVERLAP_DESCRIPTION', ''))
     overlap_slider = QSlider(Qt.Orientation.Horizontal)
     overlap_slider.setMinimum(0); overlap_slider.setMaximum(90)
-    initial_overlap_percent = current_settings.get("similarity_v2_overlap_percent", 40.0)
+    initial_overlap_percent = current_settings.get("similarity_v2_overlap_percent", 38.0)
     overlap_slider.setValue(int(initial_overlap_percent))
     overlap_slider.setStyleSheet(TOGGLE_SWITCH_STYLE.replace("QCheckBox", "QSlider"))
     overlap_input = QLineEdit(f"{int(initial_overlap_percent)}")
@@ -321,7 +321,7 @@ def _create_similarity_v2_group(current_settings):
     noise_mad_slider_min, noise_mad_slider_max = 0, 200 # 0.00 to 2.00
     noise_mad_multiplier = 100.0
     noise_mad_slider.setMinimum(noise_mad_slider_min); noise_mad_slider.setMaximum(noise_mad_slider_max)
-    initial_noise_mad = current_settings.get("similarity_v2_mbm_noise_mad_offset_factor", 0.5)
+    initial_noise_mad = current_settings.get("similarity_v2_mbm_noise_mad_offset_factor", 0.65)
     noise_mad_slider.setValue(int(round(initial_noise_mad * noise_mad_multiplier)))
     noise_mad_slider.setStyleSheet(TOGGLE_SWITCH_STYLE.replace("QCheckBox", "QSlider"))
 
@@ -371,7 +371,7 @@ def _create_similarity_v2_group(current_settings):
     mad_sens_slider_min, mad_sens_slider_max = 10, 500
     mad_sens_multiplier = 10.0
     mad_sens_slider.setMinimum(mad_sens_slider_min); mad_sens_slider.setMaximum(mad_sens_slider_max)
-    initial_mad_sens = current_settings.get("similarity_v2_mbm_mad_sensitivity", 20.0)
+    initial_mad_sens = current_settings.get("similarity_v2_mbm_mad_sensitivity", 18.8)
     mad_sens_slider.setValue(int(round(initial_mad_sens * mad_sens_multiplier)))
     mad_sens_slider.setStyleSheet(TOGGLE_SWITCH_STYLE.replace("QCheckBox", "QSlider"))
 
@@ -424,7 +424,7 @@ def _create_similarity_v2_group(current_settings):
     conf_skip_slider.setMinimum(conf_skip_slider_min)
     conf_skip_slider.setMaximum(conf_skip_slider_max)
 
-    initial_conf_skip = current_settings.get("similarity_v2_mbm_confidence_skip_dft_threshold", 0.9) # Sesuaikan default jika perlu
+    initial_conf_skip = current_settings.get("similarity_v2_mbm_confidence_skip_dft_threshold", 0.78) # Sesuaikan default jika perlu
     initial_conf_skip_clamped = max(0.1, min(initial_conf_skip, 30.0))
 
     conf_skip_slider.setValue(int(round(initial_conf_skip_clamped * conf_skip_multiplier)))
@@ -489,7 +489,7 @@ def _create_similarity_v2_group(current_settings):
     wiener_c_slider_min, wiener_c_slider_max = 10, 100 # 1.0 to 10.0
     wiener_c_multiplier = 10.0
     wiener_c_slider.setMinimum(wiener_c_slider_min); wiener_c_slider.setMaximum(wiener_c_slider_max)
-    initial_wiener_c = current_settings.get("similarity_v2_freq_merge_wiener_c_factor", 2.0)
+    initial_wiener_c = current_settings.get("similarity_v2_freq_merge_wiener_c_factor", 2.1)
     wiener_c_slider.setValue(int(round(initial_wiener_c * wiener_c_multiplier)))
     wiener_c_slider.setStyleSheet(TOGGLE_SWITCH_STYLE.replace("QCheckBox", "QSlider"))
 
