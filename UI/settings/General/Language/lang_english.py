@@ -594,3 +594,38 @@ If the computer has very limited RAM, it is recommended not to enable it."""
 GPU_ACCELERATION_DESCRIPTION = """Enabling this will significantly boost computation speed, as it utilizes the GPU in its processing.
 
 NOTE: GPU usage is currently limited to the Farneback process only; other algorithms will be implemented later."""
+
+NOISE_MAD_OFFSET_LABEL = "MAD Noise Factor"
+NOISE_MAD_OFFSET_DESCRIPTION = """How sensitive the MAD detection is when handling high-noise images.
+
+Higher values allow greater tolerance toward noise (i.e., less sensitivity in high-noise areas),
+but they may lead to ghosting effects in those regions when motion occurs.
+"""
+
+MAD_SENSITIVITY_LABEL = "MAD Sensitivity"
+MAD_SENSITIVITY_DESCRIPTION = """Determines how sensitive MAD is to differences within an image.
+
+Higher values increase sensitivity to subtle differences, but may also raise the chance of misdetections
+if the input image contains high noise.
+"""
+
+CONF_SKIP_DFT_LABEL = "Confidence to Skip DFT Process"
+CONF_SKIP_DFT_DESCRIPTION = """The threshold used to bypass the DFT process when the MBM process is handling it well.
+
+A higher value causes more processing to be carried out by MAD. Note that MAD is a coarse detection method:
+it is sensitive to noise and low-contrast areas, but its advantage lies in lower computational demands.
+"""
+
+WIENER_C_FACTOR_LABEL = "Wiener C Factor"
+WIENER_C_FACTOR_DESCRIPTION = """Determines how sensitive the DCT Wiener computation is in detecting differences in an image.
+
+Lower values make it more sensitive to subtle movements, although this may increase noise
+since noise itself can trigger false movements. The Wiener C Factor works in tandem with MAD Sensitivity.
+"""
+
+COARSE_MARGIN_LABEL = "Coarse Align Margin"
+COARSE_MARGIN_DESCRIPTION = """The margin window used for alignment at the tile level.
+
+It improves accuracy down to the tile level, enhancing stacking precision.
+However, it can significantly impact performance if the search area is too large.
+"""

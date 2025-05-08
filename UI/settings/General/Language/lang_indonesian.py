@@ -597,3 +597,35 @@ Jika Komputer memiliki RAM yang sangat terbatas, disarankan untuk tidak mencenta
 GPU_ACCELERATION_DESCRIPTION = """Mengaktifkan akan sangat meningkatkan kecepatan komputasi, karena menggunakan GPU dalam prosesnya. 
 
 CATATAN: Penggunaan GPU hanya terbatas pada proses Farneback saja, algoritma lain akan menyusul implementasinya"""
+
+NOISE_MAD_OFFSET_LABEL = "MAD Noise Factor"
+NOISE_MAD_OFFSET_DESCRIPTION = """Seberapa sensitifnya deteksi MAD dalam menangani gambar dengan noise tinggi
+
+Nilai yang lebih tinggi menyebabkan toleransi terhadap noise (tidak terlalu sensitif di area dengan noise yang tinggi),
+namun akan menyebabkan ghosting pada area tersebut jika terjadi gerakan."""
+
+MAD_SENSITIVITY_LABEL = "MAD Sensitivity"
+MAD_SENSITIVITY_DESCRIPTION = """Seberapa sensitifnya MAD dalam menangani perbedaan pada sebuah gambar
+
+Nilai yang lebih tinggi akan lebih sensitif terhadap perbedaan halus, namun meningkatkan kesalahan deteksi 
+jika gambar input memiliki noise yang tinggi"""
+
+CONF_SKIP_DFT_LABEL = """Kepercayaan melewati
+Proses DFT"""
+CONF_SKIP_DFT_DESCRIPTION = """Threshold untuk melewati DFT jika proses MBM sudah menangani dengan baik
+
+Semakin tinggi nilainya, maka semakin banyak prosesnya akan dilakukan oleh MAD. Namun MAD adalah deteksi kasar
+ia sensitif terhadap noise dan area kontras rendah, namun keuntungan dengan banyaknya proses MAD adalah komputasi 
+yang lebih ringan"""
+
+WIENER_C_FACTOR_LABEL = "Wiener C Factor"
+WIENER_C_FACTOR_DESCRIPTION = """Seberapa sensitifnya perhitungan DCT Wiener dalam mendeteksi perbedaan dalam sebuah gambar
+
+Semakin rendah nilainya, maka semakin sensitifnya dalam mendeteksi pergerakan halus, namun hal ini berdampak dengan peningkatan noise
+karena noise sendiri menyebabkan pergerakan palsu. Nilai Wiener C Factor bekerja sama dengan MAD Sensitivity"""
+
+COARSE_MARGIN_LABEL = "Coarse Align Margin"
+COARSE_MARGIN_DESCRIPTION = """Jendela Margin untuk penyelarasan di level tile
+
+Efeknya untuk meningkatkan akurasi hingga level tile, meningkatkan akurasi stacking.
+Akan cukup berdampak pada performa jika area pencarian terlalu luas."""

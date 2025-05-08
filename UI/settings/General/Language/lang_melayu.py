@@ -38,7 +38,7 @@ COMMAND_TO_RESTART_MANUALLY = "Tidak dapat memulakan semula aplikasi secara auto
 # Sidebar UI
 # ==============================================================================
 SETTINGS_SIDEBAR_LABEL= "Tetapan"
-HDR_SIDEBAR_LABEL= "Pembinaan Semula HDR"
+HDR_SIDEBAR_LABEL= "Recontruction HDR"
 
 
 # ==============================================================================
@@ -592,3 +592,40 @@ Jika komputer mempunyai RAM yang sangat terhad, disyorkan untuk tidak mengaktifk
 GPU_ACCELERATION_DESCRIPTION = """Mengaktifkan fungsi ini akan sangat meningkatkan kelajuan pengiraan kerana ia menggunakan GPU dalam prosesnya.
 
 NOTA: Penggunaan GPU adalah terhad kepada proses Farneback sahaja, algoritma lain akan mendapat implementasi kelak."""
+
+NOISE_MAD_OFFSET_LABEL = "Faktor Noise MAD"
+NOISE_MAD_OFFSET_DESCRIPTION = """Menentukan seberapa sensitif pengesanan MAD dalam mengendalikan imej dengan noise tinggi.
+
+Nilai yang lebih tinggi membolehkan toleransi yang lebih besar terhadap noise (iaitu, kurang sensitif dalam kawasan dengan noise tinggi),
+tetapi boleh menyebabkan kesan ghosting di kawasan tersebut apabila berlaku pergerakan.
+"""
+
+MAD_SENSITIVITY_LABEL = "Sensitiviti MAD"
+MAD_SENSITIVITY_DESCRIPTION = """Menentukan sensitiviti MAD dalam mengesan perbezaan dalam imej.
+
+Nilai yang lebih tinggi meningkatkan sensitiviti terhadap perbezaan halus, tetapi juga boleh meningkatkan kemungkinan kesilapan
+jika imej input mengandungi noise yang tinggi.
+"""
+
+CONF_SKIP_DFT_LABEL = """Kepercayaan untuk
+Melangkau Proses DFT"""
+CONF_SKIP_DFT_DESCRIPTION = """Ambang untuk melangkau proses DFT sekiranya proses MBM telah mengendalikan dengan baik.
+
+Nilai yang lebih tinggi bermaksud lebih banyak proses akan dijalankan oleh MAD. Walaupun begitu, MAD adalah kaedah pengesanan kasar
+yang sensitif terhadap noise dan kawasan dengan kontras rendah, tetapi kelebihannya adalah pengiraan yang lebih ringan.
+"""
+
+WIENER_C_FACTOR_LABEL = "Faktor Wiener C"
+WIENER_C_FACTOR_DESCRIPTION = """Menentukan seberapa sensitif pengiraan DCT Wiener dalam mengesan perbezaan dalam imej.
+
+Nilai yang lebih rendah menjadikannya lebih sensitif terhadap pergerakan halus, walaupun ini juga boleh meningkatkan noise
+kerana noise itu sendiri boleh mencetuskan pergerakan palsu. Faktor Wiener C berfungsi bersama dengan Sensitiviti MAD.
+"""
+
+COARSE_MARGIN_LABEL = "Margin Penjajaran Kasar"
+COARSE_MARGIN_DESCRIPTION = """Tetingkap margin untuk penjajaran pada tahap tile.
+
+Ia meningkatkan ketepatan sehingga ke peringkat tile, sekaligus mempertingkatkan keakuratan stacking.
+Prestasi mungkin terjejas jika kawasan carian terlalu luas.
+"""
+

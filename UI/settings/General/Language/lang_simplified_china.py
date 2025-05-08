@@ -580,3 +580,38 @@ MULTI_CORE_CPU_DESCRIPTION = """启用此功能将提高图像处理时的计算
 GPU_ACCELERATION_DESCRIPTION = """启用此功能将大幅提升计算速度，因为它在处理过程中使用了 GPU。
 
 注意：GPU 的使用目前仅限于 Farneback 过程，其他算法的实现将随后跟进。"""
+
+NOISE_MAD_OFFSET_LABEL = "MAD 噪声因子"
+NOISE_MAD_OFFSET_DESCRIPTION = """MAD检测在处理高噪声图像时的敏感程度。
+
+较高的数值可以容忍更多的噪声（即在高噪声区域不那么敏感），
+但在发生运动时可能会在该区域产生重影现象。
+"""
+
+MAD_SENSITIVITY_LABEL = "MAD 灵敏度"
+MAD_SENSITIVITY_DESCRIPTION = """衡量MAD在检测图像差异时的敏感度。
+
+较高的数值会使其对细微差别更为敏感，但如果输入图像噪声较高，则可能增加误检的风险。
+"""
+
+CONF_SKIP_DFT_LABEL = "跳过 DFT 过程的置信度"
+CONF_SKIP_DFT_DESCRIPTION = """用于在MBM过程已妥善处理时跳过DFT过程的阈值。
+
+数值越高，MAD承担的处理工作越多。但需要注意的是，MAD作为一种粗略的检测方法，
+对噪声和低对比度区域较为敏感，其优势在于计算量较低。
+"""
+
+WIENER_C_FACTOR_LABEL = "Wiener C 因子"
+WIENER_C_FACTOR_DESCRIPTION = """衡量DCT Wiener计算在检测图像差异时的敏感度。
+
+数值越低，对细微运动的检测就越敏感，但这也可能引起更多噪声，
+因为噪声本身可能产生伪运动。Wiener C因子与MAD灵敏度协同工作。
+"""
+
+COARSE_MARGIN_LABEL = "粗略对齐边界"
+COARSE_MARGIN_DESCRIPTION = """用于在tile级别对齐时设置的边界窗口。
+
+该参数可以提高至tile级别的对齐精度，从而提升堆叠的准确性。
+如果搜索区域过大，则可能对性能造成显著影响。
+"""
+
