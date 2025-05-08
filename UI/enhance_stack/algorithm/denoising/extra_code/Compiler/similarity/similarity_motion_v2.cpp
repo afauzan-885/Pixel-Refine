@@ -20,7 +20,7 @@ namespace MotionMetricsConfig
     constexpr float GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD = 1e-6f;
 
     // --- Konstanta untuk Pembobotan Gradien ---
-    constexpr float GRADIENT_WEIGHT_FACTOR = 1.5f; // Masih dipakai oleh find_best_block_match
+    constexpr float GRADIENT_WEIGHT_FACTOR = 1.3f;
 
     // Konstanta Adaptasi Noise
     constexpr float NOISE_ADAPTATION_FACTOR = 6.0f;
@@ -33,7 +33,7 @@ namespace MotionMetricsConfig
     constexpr float MAX_MIN_DARK_CONFIDENCE = 1e-3f;
     constexpr int DARKNESS_MAP_BLUR_KERNEL_SIZE = 1;
     constexpr int CONFIDENCE_MAP_BLUR_KERNEL_SIZE = 3;
-    constexpr int COARSE_ALIGNMENT_SEARCH_MARGIN = 10;
+    constexpr int COARSE_ALIGNMENT_SEARCH_MARGIN = 12;
 
     // --- Konstanta untuk Merging Domain Frekuensi ---
     constexpr float FREQ_MERGE_WIENER_C_FACTOR = 2.0f; 
@@ -41,7 +41,7 @@ namespace MotionMetricsConfig
     
     constexpr float MBM_MAD_SENSITIVITY = 20.0f;
     constexpr float MBM_NOISE_MAD_OFFSET_FACTOR = 0.5f;
-    constexpr float MBM_CONFIDENCE_SKIP_DFT_THRESHOLD = 0.8f;
+    constexpr float MBM_CONFIDENCE_SKIP_DFT_THRESHOLD = 0.9f;
 }
 //=============================================================================
 // Struktur Data Hasil
@@ -58,13 +58,9 @@ struct BlockMatchResult
 };
 
 //=============================================================================
-// Fungsi Helper Dasar (Yang Masih Dipakai)
+// Fungsi Helper Dasar
 //=============================================================================
-// calculate_block_mad, calculate_mad_stddev, calculate_gradient_weighted_mad,
-// find_best_block_match, estimate_tile_noise_sigma_mad_laplacian, calculate_mad_from_mat
-// (Fungsi calculate_match_confidence dan calculate_block_ssim bisa dihapus jika tidak dipakai lagi)
 
-// (Definisi fungsi-fungsi helper yang masih dipakai diletakkan di sini)
 inline float calculate_block_mad(const cv::Mat &block1_color, const cv::Mat &block2_color)
 {
     CV_Assert(block1_color.size() == block2_color.size());
@@ -198,18 +194,14 @@ BlockMatchResult find_best_block_match(
                 ref_block_gray,
                 grad_mag_current,
                 GRADIENT_WEIGHT_FACTOR);
-            // Tidak perlu menyimpan all_mads jika hanya untuk alignment
-            // result.all_mads.push_back(current_metric_score); 
             result.matches_found++;
             
             if (current_metric_score < result.min_mad)
             {
-                // second_min_mad tidak lagi terlalu penting jika hanya untuk alignment
-                // result.second_min_mad = result.min_mad; 
                 result.min_mad = current_metric_score;
                 result.best_match_r = search_r; 
                 result.best_match_c = search_c;
-                result.success = true; // Set success di sini, saat match pertama ditemukan
+                result.success = true;
             }
         }
     }
@@ -294,7 +286,7 @@ float estimate_tile_noise_sigma_mad_laplacian(const cv::Mat &tile_gray_float)
 }
 
 
-// Fungsi Akumulasi Tile (Tingkat Atas) - DIMODIFIKASI
+// Fungsi Akumulasi Tile (Tingkat Atas)
 extern "C"
 {
     void accumulate_frame_weighted_jit(
@@ -360,7 +352,7 @@ extern "C"
             cv::Mat thread_current_padded, thread_ref_padded;
             cv::Mat thread_current_dft, thread_ref_dft, thread_merged_dft;
 
-            #pragma omp for collapse(2) schedule(static)
+            #pragma omp for collapse(2) schedule(guided)
             for (int i = 0; i < num_row_starts; i++) { // Loop Tile i
                 for (int j = 0; j < num_col_starts; j++) { // Loop Tile j
                     int r_tile_start = row_starts[i];
@@ -731,7 +723,7 @@ extern "C"
         } 
     }
 
-    float estimate_global_noise(
+    [[nodiscard]] float estimate_global_noise(
         const float *reference_image_ptr,
         int h, int w, int channels,
         int tile_h, int tile_w,
@@ -740,43 +732,38 @@ extern "C"
     {
         using namespace MotionMetricsConfig;
 
-        // --- Validasi Input Dasar ---
         if (!reference_image_ptr || !row_starts || !col_starts || h <= 0 || w <= 0 ||
             channels <= 0 || tile_h <= 0 || tile_w <= 0 || num_row_starts <= 0 || num_col_starts <= 0)
         {
-            return 0.0f; // Kembalikan 0 jika input tidak valid
+            return 0.0f; 
         }
 
         int mat_type = CV_32FC(channels);
         if (mat_type == 0)
         {
             return 0.0f;
-        } // Tipe tidak valid
+        }
 
-        // --- Buat Mat Header untuk Input ---
         const cv::Mat reference_image_mat(h, w, mat_type, const_cast<float *>(reference_image_ptr));
         cv::Mat ref_gray_float;
 
-        // --- Konversi ke Grayscale Float ---
         if (reference_image_mat.channels() > 1)
         {
-            cv::cvtColor(reference_image_mat, ref_gray_float, cv::COLOR_BGR2GRAY); // Asumsi BGR jika > 1
+            cv::cvtColor(reference_image_mat, ref_gray_float, cv::COLOR_BGR2GRAY); 
             if (ref_gray_float.type() != CV_32F)
-            { // Pastikan float setelah cvtColor
+            { 
                 ref_gray_float.convertTo(ref_gray_float, CV_32F);
             }
         }
         else
         {
-            // Jika sudah 1 channel, pastikan tipenya float
             if (reference_image_mat.type() != CV_32F)
             {
                 reference_image_mat.convertTo(ref_gray_float, CV_32F);
             }
             else
             {
-                // Tidak perlu copy jika tipe sudah benar
-                ref_gray_float = reference_image_mat;
+                ref_gray_float = reference_image_mat; // No copy if already correct type
             }
         }
 
@@ -785,20 +772,19 @@ extern "C"
             return 0.0f;
         }
 
-        // --- Variabel untuk Akumulasi Sigma ---
         double total_sigma_sum = 0.0;
-        long long valid_tile_count = 0; // Gunakan long long untuk jumlah tile yang besar
+        long long valid_tile_count = 0; 
 
-// --- Paralelisasi Loop Tile ---
+// MODIFIKASI LANGKAH 1: Pertimbangkan `guided` atau `dynamic`
 #pragma omp parallel
         {
-            // Buffer per thread untuk menghindari race condition pada Mat temporary
             cv::Mat thread_tile;
             cv::Mat thread_laplacian_output;
             double thread_local_sigma_sum = 0.0;
             long long thread_local_valid_count = 0;
 
-#pragma omp for collapse(2) schedule(static)
+// MODIFIKASI LANGKAH 1: Mengubah schedule
+#pragma omp for collapse(2) schedule(guided) reduction(+:total_sigma_sum, valid_tile_count) // Tambah reduction
             for (int i = 0; i < num_row_starts; i++)
             {
                 for (int j = 0; j < num_col_starts; j++)
@@ -806,54 +792,36 @@ extern "C"
                     int r = row_starts[i];
                     int c = col_starts[j];
 
-                    // Boundary check dasar untuk ROI
                     if (r < 0 || c < 0 || (r + tile_h) > h || (c + tile_w) > w)
                         continue;
 
-                    // --- Ekstrak Tile ROI ---
                     cv::Rect tile_roi(c, r, tile_w, tile_h);
-                    // Ambil ROI dari gambar grayscale (tidak perlu copy jika hanya dibaca)
-                    thread_tile = ref_gray_float(tile_roi);
+                    thread_tile = ref_gray_float(tile_roi); // ROI, no deep copy needed
 
-                    // Cek ukuran minimum untuk Laplacian
                     if (thread_tile.rows < 3 || thread_tile.cols < 3)
                     {
                         continue;
                     }
+                    
+                    // Panggil fungsi estimasi noise yang sudah ada dan dioptimasi
+                    float estimated_sigma = estimate_tile_noise_sigma_mad_laplacian(thread_tile);
+                    
+                    total_sigma_sum += static_cast<double>(estimated_sigma);
+                    valid_tile_count++;
 
-                    // --- Hitung Laplacian (output ke buffer thread) ---
-                    cv::Laplacian(thread_tile, thread_laplacian_output, CV_32F, 1);
 
-                    // --- Hitung MAD (menggunakan fungsi yang sudah ada) ---
-                    float mad_value = calculate_mad_from_mat(thread_laplacian_output);
+                } 
+            } 
+           
+        } 
 
-                    // --- Konversi ke Sigma ---
-                    float estimated_sigma = mad_value * MAD_TO_SIGMA_FACTOR;
-
-                    // Akumulasi hasil thread lokal
-                    thread_local_sigma_sum += static_cast<double>(std::max(0.0f, estimated_sigma)); // Pastikan non-negatif
-                    thread_local_valid_count++;
-
-                } // end loop j
-            } // end loop i
-
-// --- Reduksi hasil dari setiap thread (Aman untuk dilakukan setelah loop parallel for) ---
-#pragma omp critical
-            {
-                total_sigma_sum += thread_local_sigma_sum;
-                valid_tile_count += thread_local_valid_count;
-            }
-
-        } // End parallel region
-
-        // --- Hitung Rata-rata Global ---
         if (valid_tile_count > 0)
         {
             return static_cast<float>(total_sigma_sum / valid_tile_count);
         }
         else
         {
-            return 0.0f; // Kembalikan 0 jika tidak ada tile valid yang diproses
+            return 0.0f; 
         }
     }
 

@@ -244,7 +244,7 @@ class SimilarityAlgorithmV2:
 
         mbm_block_h = tile_h
         mbm_block_w = tile_w
-        mbm_search_radius = 16
+        mbm_search_radius = 10
         
         try:
             c_interface = SimilarityV2MotionInterface(lib_path)
