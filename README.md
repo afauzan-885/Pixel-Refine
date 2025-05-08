@@ -40,15 +40,11 @@ Below are some sample images processed (left: Original, Right: Processed):
 
 ## Screenshots
 
-UI pixel Refine:
-
 <p align="center">
   <img src="sample/Home_Page.png" width="600" alt="Single Mode">
 </p>
 
-<p align="center">
-  <img src="sample/Batch_mode.png" width="600" alt="Batch Mode">
-</p>
+<br>
 
 <p align="center">
   <img src="sample/Batch_Mode_Processing.png" width="600" alt="Batch Mode Processing">
@@ -82,4 +78,3 @@ Following is a list of algorithms used in the process:
 * **Similarity**: Special algorithm designed to enhance detail while suppressing noise based on pixel similarity to prevent motion artifacts, highly robust to large movements.
 
 **(This program is still under development and has many flaws)**
-```
