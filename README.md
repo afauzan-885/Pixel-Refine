@@ -31,10 +31,6 @@ Below are some sample images processed (left: Original, Right: Processed):
 </p>
 
 <p align="center">
-  <img src="sample/moonlight iso1000 (1per25).jpg" width="400" alt="Moonlight">
-</p>
-
-<p align="center">
   <img src="sample/traditional market at dawn iso 400 (1per35).jpg" width="400" alt="Traditional Market at Dawn">
 </p>
 
