@@ -7,6 +7,10 @@
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/core/utility.hpp>
+#include "align_phase_correlation.hpp"
+#include "frequency_merging.hpp"
+#include "tile_noise_estimation.hpp"
+#include "block_matching.hpp"
 
 //=============================================================================
 // Konstanta dan Konfigurasi
@@ -16,15 +20,15 @@ namespace MotionMetricsConfig
     // Konstanta Dasar
     constexpr float STABILITY_EPSILON = 1e-6f;
     constexpr float CONFIDENCE_EPSILON = 1e-6f;
-    constexpr float CONFIDENCE_SCALE_FACTOR = 1.0f;
+    // constexpr float CONFIDENCE_SCALE_FACTOR = 1.0f; // Tampaknya tidak digunakan
     constexpr float GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD = 1e-6f;
 
     // --- Konstanta untuk Pembobotan Gradien ---
-    constexpr float GRADIENT_WEIGHT_FACTOR = 1.3f; // Ini masih bisa di C++ jika tidak perlu diubah dari Python
+    constexpr float GRADIENT_WEIGHT_FACTOR = 1.3f;
 
     // Konstanta Adaptasi Noise
-    constexpr float NOISE_ADAPTATION_FACTOR = 6.0f;
-    constexpr float MIN_ADAPTIVE_THRESHOLD_MULTIPLIER = 1.0f;
+    // constexpr float NOISE_ADAPTATION_FACTOR = 6.0f; // Tampaknya tidak digunakan
+    // constexpr float MIN_ADAPTIVE_THRESHOLD_MULTIPLIER = 1.0f; // Tampaknya tidak digunakan
     constexpr float MAD_TO_SIGMA_FACTOR = 1.4826f;
 
     // --- Konstanta untuk Penanganan Area Gelap dengan Fading ---
@@ -32,253 +36,10 @@ namespace MotionMetricsConfig
     constexpr float MAX_MIN_DARK_CONFIDENCE = 1e-3f;
     constexpr int DARKNESS_MAP_BLUR_KERNEL_SIZE = 1;
     constexpr int CONFIDENCE_MAP_BLUR_KERNEL_SIZE = 3;
-    
+
     // --- Konstanta untuk Merging Domain Frekuensi ---
     constexpr bool  APPLY_FREQ_DOMAIN_MERGING = true;
-
 }
-//=============================================================================
-// Struktur Data Hasil
-//=============================================================================
-struct BlockMatchResult
-{
-    float min_mad = std::numeric_limits<float>::max();
-    float second_min_mad = std::numeric_limits<float>::max();
-    std::vector<float> all_mads;
-    int matches_found = 0;
-    bool success = false;
-    int best_match_r = -1;
-    int best_match_c = -1;
-};
-
-//=============================================================================
-// Fungsi Helper Dasar
-//=============================================================================
-
-inline float calculate_block_mad(const cv::Mat &block1_color, const cv::Mat &block2_color)
-{
-    CV_Assert(block1_color.size() == block2_color.size());
-
-    if (block1_color.empty() || block2_color.empty())
-    {
-        return std::numeric_limits<float>::max();
-    }
-
-    cv::Mat block1_gray, block2_gray;
-    if (block1_color.channels() > 1)
-        cv::cvtColor(block1_color, block1_gray, cv::COLOR_BGR2GRAY);
-    else
-        block1_gray = block1_color;
-    if (block2_color.channels() > 1)
-        cv::cvtColor(block2_color, block2_gray, cv::COLOR_BGR2GRAY);
-    else
-        block2_gray = block2_color;
-
-    if (block1_gray.type() != CV_32F)
-        block1_gray.convertTo(block1_gray, CV_32F);
-    if (block2_gray.type() != CV_32F)
-        block2_gray.convertTo(block2_gray, CV_32F);
-
-    if (block1_gray.empty() || block2_gray.empty())
-    {
-        return std::numeric_limits<float>::max();
-    } 
-
-    cv::Mat diff;
-    cv::absdiff(block1_gray, block2_gray, diff); 
-
-    cv::Scalar total_sad_scalar = cv::sum(diff);
-    double total_sad = total_sad_scalar.val[0]; 
-
-    float num_elements = static_cast<float>(block1_gray.total());
-
-    if (num_elements <= 0)
-    {
-        return 0.0f;
-    }
-    return static_cast<float>(total_sad / num_elements);
-}
-
-inline float calculate_gradient_weighted_mad(
-    const cv::Mat &block1_gray,    
-    const cv::Mat &block2_gray,    
-    const cv::Mat &grad_mag_block1, 
-    float gradient_weight_factor)
-{
-    using namespace MotionMetricsConfig;
-    CV_Assert(block1_gray.size() == block2_gray.size());
-    CV_Assert(block1_gray.type() == CV_32FC1 && block2_gray.type() == CV_32FC1);
-    CV_Assert(grad_mag_block1.size() == block1_gray.size() && grad_mag_block1.type() == CV_32FC1);
-
-    if (block1_gray.empty() || block2_gray.empty())
-    { 
-        return std::numeric_limits<float>::max();
-    }
-
-    double weighted_sad_sum = 0.0;
-    double total_weight_sum = 0.0;
-
-    for (int row = 0; row < block1_gray.rows; ++row)
-    {
-        const float *p1_row = block1_gray.ptr<float>(row);
-        const float *p2_row = block2_gray.ptr<float>(row);
-        const float *mag_row = grad_mag_block1.ptr<float>(row);
-
-        for (int col = 0; col < block1_gray.cols; ++col)
-        {
-            float magnitude = mag_row[col];
-            float weight = 1.0f + gradient_weight_factor * magnitude;
-            total_weight_sum += weight;
-            float diff = std::abs(p1_row[col] - p2_row[col]);
-            weighted_sad_sum += diff * weight;
-        }
-    }
-    double denominator = total_weight_sum + STABILITY_EPSILON;
-
-    if (denominator <= STABILITY_EPSILON)
-    {
-        return calculate_block_mad(block1_gray, block2_gray);
-    }
-    return static_cast<float>(weighted_sad_sum / denominator);
-}
-
-BlockMatchResult find_best_block_match(
-    const cv::Mat &current_block_gray,      
-    const cv::Mat &reference_tile_for_mbm_gray, 
-    int block_r_start_in_tile, int block_c_start_in_tile, 
-    int search_radius)
-{
-    using namespace MotionMetricsConfig;
-    BlockMatchResult result;
-
-    int tile_h_ref = reference_tile_for_mbm_gray.rows; 
-    int tile_w_ref = reference_tile_for_mbm_gray.cols;
-    int current_block_h = current_block_gray.rows;
-    int current_block_w = current_block_gray.cols;
-
-    CV_Assert(current_block_gray.type() == CV_32FC1 && reference_tile_for_mbm_gray.type() == CV_32FC1);
-    CV_Assert(tile_h_ref >= current_block_h && tile_w_ref >= current_block_w);
-
-    cv::Mat grad_x, grad_y, grad_mag_current;
-    if (!current_block_gray.empty() && current_block_gray.rows >= 3 && current_block_gray.cols >= 3)
-    {
-        cv::Scharr(current_block_gray, grad_x, CV_32F, 1, 0);
-        cv::Scharr(current_block_gray, grad_y, CV_32F, 0, 1);
-        cv::magnitude(grad_x, grad_y, grad_mag_current);
-    }
-    else
-    {
-        grad_mag_current = cv::Mat::zeros(current_block_gray.size(), CV_32FC1);
-    }
-
-    int search_r_start_abs = std::max(0, block_r_start_in_tile - search_radius);
-    int search_c_start_abs = std::max(0, block_c_start_in_tile - search_radius);
-    int search_r_end_abs = std::min(tile_h_ref - current_block_h, block_r_start_in_tile + search_radius);
-    int search_c_end_abs = std::min(tile_w_ref - current_block_w, block_c_start_in_tile + search_radius);
-
-    for (int search_r = search_r_start_abs; search_r <= search_r_end_abs; ++search_r)
-    {
-        for (int search_c = search_c_start_abs; search_c <= search_c_end_abs; ++search_c)
-        {
-            cv::Rect ref_block_roi(search_c, search_r, current_block_w, current_block_h);
-            const cv::Mat ref_block_gray = reference_tile_for_mbm_gray(ref_block_roi);
-
-            float current_metric_score = calculate_gradient_weighted_mad(
-                current_block_gray,
-                ref_block_gray,
-                grad_mag_current,
-                GRADIENT_WEIGHT_FACTOR);
-            result.matches_found++;
-            
-            if (current_metric_score < result.min_mad)
-            {
-                result.min_mad = current_metric_score;
-                result.best_match_r = search_r; 
-                result.best_match_c = search_c;
-                result.success = true;
-            }
-        }
-    }
-    return result;
-}
-
-float calculate_mad_from_mat(const cv::Mat &data_mat)
-{
-    CV_Assert(data_mat.type() == CV_32FC1);
-    if (data_mat.empty()) return 0.0f;
-
-    std::vector<float> data_vec;
-    data_vec.reserve(data_mat.total());
-    if (data_mat.isContinuous())
-    {
-        const float *ptr = data_mat.ptr<float>(0);
-        data_vec.assign(ptr, ptr + data_mat.total());
-    }
-    else
-    {
-        for (int r_idx = 0; r_idx < data_mat.rows; ++r_idx)
-        {
-            const float *ptr_row = data_mat.ptr<float>(r_idx);
-            data_vec.insert(data_vec.end(), ptr_row, ptr_row + data_mat.cols);
-        }
-    }
-
-    size_t n = data_vec.size();
-    if (n <= 1) return 0.0f;
-
-    std::vector<float> original_data_copy = data_vec; 
-
-    std::vector<float>::iterator median_it = data_vec.begin() + n / 2;
-    std::nth_element(data_vec.begin(), median_it, data_vec.end());
-    float median_val = *median_it;
-    if (n % 2 == 0)
-    {
-        std::vector<float>::iterator median_it_prev = data_vec.begin() + (n / 2 - 1);
-        std::nth_element(data_vec.begin(), median_it_prev, median_it); 
-        median_val = (median_val + *median_it_prev) / 2.0f;
-    }
-
-    std::vector<float> abs_deviations;
-    abs_deviations.reserve(n);
-    for (float val : original_data_copy) { 
-        abs_deviations.push_back(std::abs(val - median_val));
-    }
-
-    size_t n_dev = abs_deviations.size();
-    if (n_dev == 0) return 0.0f;
-
-    std::vector<float>::iterator mad_it = abs_deviations.begin() + n_dev / 2;
-    std::nth_element(abs_deviations.begin(), mad_it, abs_deviations.end());
-    float mad_val = *mad_it;
-
-    if (n_dev % 2 == 0)
-    {
-        std::vector<float>::iterator mad_it_prev = abs_deviations.begin() + (n_dev / 2 - 1);
-        std::nth_element(abs_deviations.begin(), mad_it_prev, mad_it);
-        mad_val = (mad_val + *mad_it_prev) / 2.0f;
-    }
-    return mad_val;
-}
-
-float estimate_tile_noise_sigma_mad_laplacian(const cv::Mat &tile_gray_float)
-{
-    using namespace MotionMetricsConfig;
-    if (tile_gray_float.empty() || tile_gray_float.channels() != 1 || tile_gray_float.type() != CV_32F)
-    {
-        return 0.0f;
-    }
-    if (tile_gray_float.rows < 3 || tile_gray_float.cols < 3)
-    {
-        return 0.0f;
-    }
-
-    cv::Mat laplacian_output;
-    cv::Laplacian(tile_gray_float, laplacian_output, CV_32F, 1);
-    float mad_value = calculate_mad_from_mat(laplacian_output);
-    float estimated_sigma = mad_value * MAD_TO_SIGMA_FACTOR;
-    return std::max(0.0f, estimated_sigma);
-}
-
 
 // Fungsi Akumulasi Tile (Tingkat Atas)
 extern "C"
@@ -298,7 +59,7 @@ extern "C"
         float p_freq_merge_wiener_c_factor
         )
     {
-        using namespace MotionMetricsConfig; // namespace masih bisa digunakan untuk konstanta yang tersisa
+        using namespace MotionMetricsConfig;
 
         if (!final_image_sum_ptr || !weight_map_sum_ptr || !current_image_ptr || !reference_image_ptr || !base_window_ptr ||
             !row_starts || !col_starts || h_img <= 0 || w_img <= 0 || tile_h <= 0 || tile_w <= 0 || channels_input <= 0 ||
@@ -341,7 +102,7 @@ extern "C"
 
 #pragma omp parallel
         {
-            // ... (deklarasi variabel thread tetap sama) ...
+        
             cv::Mat thread_darkness_map_raw, thread_darkness_map_smoothed;
             cv::Mat thread_block_confidences_raw, thread_block_confidences_smoothed;
             cv::Mat thread_larger_ref_tile_gray, thread_reference_search_area;
@@ -354,10 +115,9 @@ extern "C"
             cv::Mat thread_current_dft, thread_ref_dft, thread_merged_dft;
 
 
-            #pragma omp for collapse(2) schedule(guided)
-            for (int i = 0; i < num_row_starts; i++) { // Loop Tile i
-                for (int j = 0; j < num_col_starts; j++) { // Loop Tile j
-                    // ... (setup tile ROI tetap sama) ...
+            #pragma omp for collapse(2) schedule(static)
+            for (int i = 0; i < num_row_starts; i++) { 
+                for (int j = 0; j < num_col_starts; j++) { 
                     int r_tile_start = row_starts[i];
                     int c_tile_start = col_starts[j];
 
@@ -370,52 +130,70 @@ extern "C"
                     const cv::Mat reference_tile_gray_master_orig = reference_image_gray_mat(tile_roi_orig);
                     const cv::Mat base_window_tile_mat(tile_h, tile_w, CV_32FC1, const_cast<float*>(base_window_ptr));
 
-                    cv::Mat reference_tile_gray_for_mbm = reference_tile_gray_master_orig.clone(); 
+                    cv::Mat reference_tile_gray_for_mbm; // Akan diisi
                     int aligned_ref_r_global = r_tile_start; 
                     int aligned_ref_c_global = c_tile_start;
 
-                    // --- Coarse Alignment menggunakan p_coarse_alignment_search_margin ---
-                    if (!current_tile_gray_master.empty() && current_tile_gray_master.rows > 0 && current_tile_gray_master.cols > 0 && p_coarse_alignment_search_margin >= 0) {
-                        int search_margin = p_coarse_alignment_search_margin; // Menggunakan parameter
-                        int ref_search_r_start = std::max(0, r_tile_start - search_margin);
-                        int ref_search_c_start = std::max(0, c_tile_start - search_margin);
-                        int ref_search_h = std::min(h_img - ref_search_r_start, tile_h + 2 * search_margin);
-                        int ref_search_w = std::min(w_img - ref_search_c_start, tile_w + 2 * search_margin);
-                        // ... (sisa logika coarse alignment) ...
-                        if (ref_search_h >= tile_h && ref_search_w >= tile_w && ref_search_h > 0 && ref_search_w > 0) {
-                            cv::Rect search_area_roi(ref_search_c_start, ref_search_r_start, ref_search_w, ref_search_h);
-                            if (search_area_roi.x >= 0 && search_area_roi.y >= 0 && 
-                                search_area_roi.x + search_area_roi.width <= reference_image_gray_mat.cols &&
-                                search_area_roi.y + search_area_roi.height <= reference_image_gray_mat.rows) {
-                                thread_reference_search_area = reference_image_gray_mat(search_area_roi);
-                                if (!thread_reference_search_area.empty()) { 
-                                    try {
-                                        cv::Mat pc_src = current_tile_gray_master;
-                                        cv::Mat pc_ref = thread_reference_search_area;
-                                        if(pc_src.type() != CV_32F) pc_src.convertTo(pc_src, CV_32F);
-                                        if(pc_ref.type() != CV_32F) pc_ref.convertTo(pc_ref, CV_32F);
+                    // --- Kontrol untuk menonaktifkan alignment ---
+                    bool perform_coarse_alignment = false; // Ganti ke 'false' untuk menonaktifkan
+                                                          // Atau bisa dijadikan parameter fungsi/konfigurasi
+                                                          // jika ingin dikontrol dari luar.
 
-                                        cv::Point2d shift = cv::phaseCorrelate(pc_ref, pc_src);
-                                        aligned_ref_r_global = ref_search_r_start + static_cast<int>(std::round(shift.y));
-                                        aligned_ref_c_global = ref_search_c_start + static_cast<int>(std::round(shift.x));
-                                        
-                                        if (aligned_ref_r_global >= 0 && aligned_ref_c_global >= 0 &&
-                                            aligned_ref_r_global + tile_h <= h_img &&
-                                            aligned_ref_c_global + tile_w <= w_img) {
-                                            reference_tile_gray_for_mbm = reference_image_gray_mat(cv::Rect(aligned_ref_c_global, aligned_ref_r_global, tile_w, tile_h)).clone();
-                                        } else { 
-                                            aligned_ref_r_global = r_tile_start;
-                                            aligned_ref_c_global = c_tile_start;
-                                            reference_tile_gray_for_mbm = reference_tile_gray_master_orig.clone();
-                                        }
-                                    } catch (const cv::Exception& ) { 
-                                        aligned_ref_r_global = r_tile_start;
-                                        aligned_ref_c_global = c_tile_start;
-                                        reference_tile_gray_for_mbm = reference_tile_gray_master_orig.clone();
-                                    }
+                    if (perform_coarse_alignment && !current_tile_gray_master.empty() && p_coarse_alignment_search_margin >= 0) {
+                        MotionAlignment::CoarseAlignmentResult alignment_result =
+                            MotionAlignment::align_tile_phase_correlation(
+                                current_tile_gray_master,
+                                reference_image_gray_mat,
+                                r_tile_start, c_tile_start,
+                                tile_h, tile_w,
+                                h_img, w_img,
+                                p_coarse_alignment_search_margin
+                            );
+                        
+                        if (alignment_result.success && !alignment_result.aligned_reference_tile_gray.empty()) {
+                            reference_tile_gray_for_mbm = alignment_result.aligned_reference_tile_gray;
+                            aligned_ref_r_global = alignment_result.aligned_ref_r_global;
+                            aligned_ref_c_global = alignment_result.aligned_ref_c_global;
+                        } else {
+                            // Fallback jika alignment gagal
+                            if (alignment_result.aligned_reference_tile_gray.empty()){
+                                try {
+                                   reference_tile_gray_for_mbm = reference_image_gray_mat(cv::Rect(c_tile_start, r_tile_start, tile_w, tile_h)).clone();
+                                } catch(const cv::Exception&) {
+                                    reference_tile_gray_for_mbm = cv::Mat();
+                                }
+                            } else {
+                                reference_tile_gray_for_mbm = alignment_result.aligned_reference_tile_gray;
+                            }
+                            // Jika fallback pun gagal atau alignment tidak sukses, reset posisi
+                            if (reference_tile_gray_for_mbm.empty() || !alignment_result.success) {
+                                aligned_ref_r_global = r_tile_start;
+                                aligned_ref_c_global = c_tile_start;
+                                // Pastikan reference_tile_gray_for_mbm diisi dengan tile original jika kosong
+                                if (reference_tile_gray_for_mbm.empty()) {
+                                     try {
+                                        reference_tile_gray_for_mbm = reference_image_gray_mat(cv::Rect(c_tile_start, r_tile_start, tile_w, tile_h)).clone();
+                                     } catch(const cv::Exception&) { /* biarkan kosong jika ini juga gagal */ }
                                 }
                             }
                         }
+                    } else { 
+                        // Alignment dinonaktifkan atau tidak memenuhi syarat, gunakan tile referensi original
+                        try {
+                            reference_tile_gray_for_mbm = reference_image_gray_mat(cv::Rect(c_tile_start, r_tile_start, tile_w, tile_h)).clone();
+                        } catch (const cv::Exception&) {
+                            reference_tile_gray_for_mbm = cv::Mat();
+                        }
+                        // Posisi global tetap r_tile_start, c_tile_start
+                        aligned_ref_r_global = r_tile_start;
+                        aligned_ref_c_global = c_tile_start;
+                    }
+
+                    if (reference_tile_gray_for_mbm.empty()) {
+                        // Jika setelah semua usaha tile referensi masih kosong, kita tidak bisa melanjutkan untuk tile ini
+                        // Mungkin set block_confidences ke nol dan lanjutkan ke akumulasi, atau skip tile.
+                        // Untuk amannya, skip tile jika tidak ada referensi.
+                        continue;
                     }
                     // ... (estimasi noise sigma tetap sama) ...
                     float estimated_noise_sigma = 0.0f;
@@ -434,12 +212,18 @@ extern "C"
                              larger_roi_noise.y + larger_roi_noise.height <= reference_image_gray_mat.rows) {
                             thread_larger_ref_tile_gray = reference_image_gray_mat(larger_roi_noise);
                             if (!thread_larger_ref_tile_gray.empty()) {
-                                estimated_noise_sigma = estimate_tile_noise_sigma_mad_laplacian(thread_larger_ref_tile_gray);
+                                estimated_noise_sigma = NoiseEstimation::estimate_tile_noise_sigma_mad_laplacian( // <--- PERBAIKAN
+                                                        thread_larger_ref_tile_gray,
+                                                        MAD_TO_SIGMA_FACTOR // Menggunakan konstanta dari MotionMetricsConfig
+                                                    );
                             }
                         }
                     } else if (reference_tile_gray_for_mbm.rows >= 3 && reference_tile_gray_for_mbm.cols >= 3) {
                         if (!reference_tile_gray_for_mbm.empty()) {
-                             estimated_noise_sigma = estimate_tile_noise_sigma_mad_laplacian(reference_tile_gray_for_mbm);
+                             NoiseEstimation::estimate_tile_noise_sigma_mad_laplacian( // <--- PERBAIKAN
+                                                        reference_tile_gray_for_mbm,
+                                                        MAD_TO_SIGMA_FACTOR // Menggunakan konstanta dari MotionMetricsConfig
+                                                    );
                         }
                     }
 
@@ -496,7 +280,6 @@ extern "C"
 
                     for (int bh_idx = 0; bh_idx < num_blocks_h; ++bh_idx) {
                         for (int bw_idx = 0; bw_idx < num_blocks_w; ++bw_idx) {
-                            // ... (setup blok tetap sama) ...
                             int block_idx_flat = bh_idx * num_blocks_w + bw_idx;
                             int block_local_r_start = bh_idx * actual_mbm_block_h;
                             int block_local_c_start = bw_idx * actual_mbm_block_w;
@@ -528,13 +311,15 @@ extern "C"
                                   continue;
                              }
 
-                            BlockMatchResult block_result = find_best_block_match(
-                                thread_current_block_gray, reference_tile_gray_for_mbm,
-                                block_local_r_start, block_local_c_start, mbm_search_radius);
+                            MotionMatching::BlockMatchResult block_result =
+                                MotionMatching::find_best_block_match_mad(
+                                    thread_current_block_gray, reference_tile_gray_for_mbm,
+                                    block_local_r_start, block_local_c_start, mbm_search_radius,
+                                    GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON
+                                );
 
                             float mbm_confidence_score = 0.0f;
                             if (block_result.success) {
-                                // --- Menggunakan parameter dari Python ---
                                 float noise_induced_mad_offset = p_mbm_noise_mad_offset_factor * estimated_noise_sigma;
                                 float excess_mad = std::max(0.0f, block_result.min_mad - noise_induced_mad_offset);
                                 mbm_confidence_score = std::exp(-excess_mad * p_mbm_mad_sensitivity);
@@ -542,7 +327,6 @@ extern "C"
                             }
 
                             float freq_merge_confidence_dft = 0.0f;
-                            // --- Menggunakan parameter dari Python ---
                             if (APPLY_FREQ_DOMAIN_MERGING && block_result.success && mbm_confidence_score >= p_mbm_confidence_skip_dft_threshold) {
                                 cv::Rect best_ref_block_roi(block_result.best_match_c, block_result.best_match_r, current_block_w_dim, current_block_h_dim);
                                 if (best_ref_block_roi.x >= 0 && best_ref_block_roi.y >= 0 &&
@@ -550,40 +334,28 @@ extern "C"
                                     best_ref_block_roi.y + best_ref_block_roi.height <= reference_tile_gray_for_mbm.rows)
                                 {
                                     thread_ref_block_from_mbm_gray = reference_tile_gray_for_mbm(best_ref_block_roi);
-                                    if (!thread_ref_block_from_mbm_gray.empty()) {
-                                        int optimal_rows = cv::getOptimalDFTSize(current_block_h_dim);
-                                        int optimal_cols = cv::getOptimalDFTSize(current_block_w_dim);
-                                        cv::copyMakeBorder(thread_current_block_gray, thread_current_padded, 0, optimal_rows - current_block_h_dim, 0, optimal_cols - current_block_w_dim, cv::BORDER_CONSTANT, cv::Scalar::all(0));
-                                        cv::copyMakeBorder(thread_ref_block_from_mbm_gray, thread_ref_padded, 0, optimal_rows - current_block_h_dim, 0, optimal_cols - current_block_w_dim, cv::BORDER_CONSTANT, cv::Scalar::all(0));
-                                        cv::dft(thread_current_padded, thread_current_dft, cv::DFT_COMPLEX_OUTPUT);
-                                        cv::dft(thread_ref_padded, thread_ref_dft, cv::DFT_COMPLEX_OUTPUT);
-                                        float sigma_sq_spatial_block = estimated_noise_sigma * estimated_noise_sigma;
-                                        float sigma_sq_dft_eff_block = sigma_sq_spatial_block * static_cast<float>(optimal_rows * optimal_cols);
-                                        if (sigma_sq_dft_eff_block < STABILITY_EPSILON) sigma_sq_dft_eff_block = STABILITY_EPSILON;
-                                        thread_merged_dft.create(thread_current_dft.size(), thread_current_dft.type());
-                                        float sum_freq_weights = 0.0f; int count_freq_weights = 0;
-                                        for (int r_f = 0; r_f < thread_current_dft.rows; ++r_f) {
-                                            for (int c_f = 0; c_f < thread_current_dft.cols; ++c_f) {
-                                                const cv::Vec2f& coeff_curr = thread_current_dft.at<cv::Vec2f>(r_f, c_f);
-                                                const cv::Vec2f& coeff_ref = thread_ref_dft.at<cv::Vec2f>(r_f, c_f);
-                                                cv::Vec2f diff_coeff = coeff_ref - coeff_curr;
-                                                float mag_sq_diff = diff_coeff[0]*diff_coeff[0] + diff_coeff[1]*diff_coeff[1];
-                                                // --- Menggunakan parameter dari Python ---
-                                                float noise_floor_freq = p_freq_merge_wiener_c_factor * sigma_sq_dft_eff_block;
-                                                float weight_curr_freq = noise_floor_freq / (mag_sq_diff + noise_floor_freq + STABILITY_EPSILON);
-                                                weight_curr_freq = std::max(0.0f, std::min(1.0f, weight_curr_freq));
-                                                thread_merged_dft.at<cv::Vec2f>(r_f, c_f) = coeff_ref * (1.0f - weight_curr_freq) + coeff_curr * weight_curr_freq;
-                                                sum_freq_weights += weight_curr_freq; count_freq_weights++;
-                                            }
-                                        }
-                                        if (count_freq_weights > 0) freq_merge_confidence_dft = sum_freq_weights / count_freq_weights;
-                                        cv::Mat temp_spatial;
-                                        cv::idft(thread_merged_dft, temp_spatial, cv::DFT_SCALE | cv::DFT_REAL_OUTPUT);
-                                        current_block_merged_gray_output_temp = temp_spatial(cv::Rect(0, 0, current_block_w_dim, current_block_h_dim)).clone();
-                                    } else { freq_merge_confidence_dft = 0.0f; }
-                                } else { freq_merge_confidence_dft = 0.0f; }
+                                    MotionMerging::FrequencyMergeResult merge_result =
+                                        MotionMerging::merge_blocks_frequency_domain(
+                                            thread_current_block_gray,
+                                            thread_ref_block_from_mbm_gray,
+                                            estimated_noise_sigma,
+                                            p_freq_merge_wiener_c_factor,
+                                            STABILITY_EPSILON
+                                        );
+
+                                    if (merge_result.success && !merge_result.merged_block_gray.empty()) {
+                                        current_block_merged_gray_output_temp = merge_result.merged_block_gray;
+                                        freq_merge_confidence_dft = merge_result.merge_confidence;
+                                    } else {
+                                        freq_merge_confidence_dft = 0.0f;
+                                    }
+                                } else {
+                                    freq_merge_confidence_dft = 0.0f;
+                                }
                             } else if (!APPLY_FREQ_DOMAIN_MERGING && block_result.success) {
-                                freq_merge_confidence_dft = 1.0f; 
+                                freq_merge_confidence_dft = 1.0f;
+                            } else {
+                                freq_merge_confidence_dft = 0.0f;
                             }
                             
                             merged_gray_blocks_for_tile[block_idx_flat] = current_block_merged_gray_output_temp.clone();
@@ -600,10 +372,9 @@ extern "C"
                             final_confidence = std::max(final_confidence, smoothed_darkness_factor * MAX_MIN_DARK_CONFIDENCE);
                             thread_block_confidences_raw.at<float>(bh_idx, bw_idx) = final_confidence;
 
-                        } // Akhir loop bw_idx
-                    } // Akhir loop bh_idx
+                        }
+                    } 
 
-                    // ... (sisa fungsi accumulate_frame_weighted_jit hingga akhir, termasuk normalisasi pixel, tetap sama) ...
                     int kernel_sz_conf = (CONFIDENCE_MAP_BLUR_KERNEL_SIZE >= 1 && CONFIDENCE_MAP_BLUR_KERNEL_SIZE % 2 == 1) ? CONFIDENCE_MAP_BLUR_KERNEL_SIZE : 1;
                     if (!thread_block_confidences_raw.empty() && kernel_sz_conf >=3 && thread_block_confidences_raw.rows > 0 && thread_block_confidences_raw.cols > 0) {
                         cv::GaussianBlur(thread_block_confidences_raw, thread_block_confidences_smoothed, cv::Size(kernel_sz_conf, kernel_sz_conf), 0);
@@ -710,60 +481,38 @@ extern "C"
         if (!reference_image_ptr || !row_starts || !col_starts || h <= 0 || w <= 0 ||
             channels <= 0 || tile_h <= 0 || tile_w <= 0 || num_row_starts <= 0 || num_col_starts <= 0)
         {
-            return 0.0f; 
+            return 0.0f;
         }
 
         int mat_type = CV_32FC(channels);
-        if (mat_type == 0)
-        {
-            return 0.0f;
-        }
+        if (mat_type == 0 && channels > 0) return 0.0f;
 
         const cv::Mat reference_image_mat(h, w, mat_type, const_cast<float *>(reference_image_ptr));
         cv::Mat ref_gray_float;
 
-        if (reference_image_mat.channels() > 1)
-        {
-            cv::cvtColor(reference_image_mat, ref_gray_float, cv::COLOR_BGR2GRAY); 
-            if (ref_gray_float.type() != CV_32F)
-            { 
-                ref_gray_float.convertTo(ref_gray_float, CV_32F);
-            }
+        if (reference_image_mat.channels() > 1) {
+            cv::cvtColor(reference_image_mat, ref_gray_float, cv::COLOR_BGR2GRAY);
+        } else {
+            reference_image_mat.copyTo(ref_gray_float);
         }
-        else
-        {
-            if (reference_image_mat.type() != CV_32F)
-            {
-                reference_image_mat.convertTo(ref_gray_float, CV_32F);
-            }
-            else
-            {
-                ref_gray_float = reference_image_mat; // No copy if already correct type
-            }
+        if (ref_gray_float.type() != CV_32F) {
+            ref_gray_float.convertTo(ref_gray_float, CV_32F);
         }
 
-        if (ref_gray_float.empty())
-        {
+        if (ref_gray_float.empty()) {
             return 0.0f;
         }
 
         double total_sigma_sum = 0.0;
-        long long valid_tile_count = 0; 
+        long long valid_tile_count = 0;
 
-// MODIFIKASI LANGKAH 1: Pertimbangkan `guided` atau `dynamic`
-#pragma omp parallel
+        #pragma omp parallel
         {
             cv::Mat thread_tile;
-            cv::Mat thread_laplacian_output;
-            double thread_local_sigma_sum = 0.0;
-            long long thread_local_valid_count = 0;
 
-// MODIFIKASI LANGKAH 1: Mengubah schedule
-#pragma omp for collapse(2) schedule(guided) reduction(+:total_sigma_sum, valid_tile_count) // Tambah reduction
-            for (int i = 0; i < num_row_starts; i++)
-            {
-                for (int j = 0; j < num_col_starts; j++)
-                {
+            #pragma omp for collapse(2) schedule(static) reduction(+:total_sigma_sum, valid_tile_count)
+            for (int i = 0; i < num_row_starts; i++) {
+                for (int j = 0; j < num_col_starts; j++) {
                     int r = row_starts[i];
                     int c = col_starts[j];
 
@@ -771,36 +520,32 @@ extern "C"
                         continue;
 
                     cv::Rect tile_roi(c, r, tile_w, tile_h);
-                    thread_tile = ref_gray_float(tile_roi); // ROI, no deep copy needed
+                    thread_tile = ref_gray_float(tile_roi);
 
-                    if (thread_tile.rows < 3 || thread_tile.cols < 3)
-                    {
+                    if (thread_tile.rows < 3 || thread_tile.cols < 3) {
                         continue;
                     }
-                    
-                    // Panggil fungsi estimasi noise yang sudah ada dan dioptimasi
-                    float estimated_sigma = estimate_tile_noise_sigma_mad_laplacian(thread_tile);
-                    
-                    total_sigma_sum += static_cast<double>(estimated_sigma);
-                    valid_tile_count++;
 
+                    float estimated_sigma_tile = NoiseEstimation::estimate_tile_noise_sigma_mad_laplacian(
+                                                    thread_tile,
+                                                    MAD_TO_SIGMA_FACTOR
+                                                );
 
-                } 
-            } 
-           
-        } 
-
-        if (valid_tile_count > 0)
-        {
-            return static_cast<float>(total_sigma_sum / valid_tile_count);
+                    if (estimated_sigma_tile > 0) {
+                        total_sigma_sum += static_cast<double>(estimated_sigma_tile);
+                        valid_tile_count++;
+                    }
+                }
+            }
         }
-        else
-        {
-            return 0.0f; 
+
+        if (valid_tile_count > 0) {
+            return static_cast<float>(total_sigma_sum / valid_tile_count);
+        } else {
+            return 0.0f;
         }
     }
 
-    // Fungsi Normalisasi (Tidak Berubah)
     void normalize_accumulated_image_jit(
         float *final_image_ptr,
         const float *weight_map_sum_ptr,
@@ -808,42 +553,33 @@ extern "C"
     {
         using namespace MotionMetricsConfig;
 
-        if (!final_image_ptr || !weight_map_sum_ptr || h <= 0 || w <= 0 || channels <= 0)
-        {
+        if (!final_image_ptr || !weight_map_sum_ptr || h <= 0 || w <= 0 || channels <= 0) {
             return;
         }
         int mat_type = CV_32FC(channels);
-        if (mat_type == 0)
-            return;
+        if (mat_type == 0 && channels > 0) return;
 
         cv::Mat final_image_mat(h, w, mat_type, final_image_ptr);
         const cv::Mat weight_map_sum_mat(h, w, CV_32FC1, const_cast<float *>(weight_map_sum_ptr));
 
-#pragma omp parallel for collapse(2) schedule(static)
-        for (int gy = 0; gy < h; ++gy)
-        {
-            for (int gx = 0; gx < w; ++gx)
-            {
+        #pragma omp parallel for collapse(2) schedule(static)
+        for (int gy = 0; gy < h; ++gy) {
+            for (int gx = 0; gx < w; ++gx) {
                 float total_weight = weight_map_sum_mat.at<float>(gy, gx);
                 float *final_pixel_row = final_image_mat.ptr<float>(gy);
-                int pixel_idx = gx * channels;
+                int pixel_idx_base = gx * channels;
 
-                if (total_weight > GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD)
-                {
+                if (total_weight > GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD) {
                     float inv_total_weight = 1.0f / total_weight;
-                    for (int ch = 0; ch < channels; ++ch)
-                    {
-                        final_pixel_row[pixel_idx + ch] *= inv_total_weight;
+                    for (int ch = 0; ch < channels; ++ch) {
+                        final_pixel_row[pixel_idx_base + ch] *= inv_total_weight;
+                    }
+                } else {
+                    for (int ch = 0; ch < channels; ++ch) {
+                        final_pixel_row[pixel_idx_base + ch] = 0.0f;
                     }
                 }
-                else
-                {
-                    for (int ch = 0; ch < channels; ++ch)
-                    {
-                        final_pixel_row[pixel_idx + ch] = 0.0f;
-                    }
-                }
-            } 
+            }
         }
-    } 
+    }
 }
