@@ -38,6 +38,16 @@ Below are some sample images processed (left: Original, Right: Processed):
   <img src="sample/night_in_the_suburbs.jpg" width="400" alt="Night In the Suburbs">
 </p>
 
+<p>
+*Image taken with Samsung S9 Plus
+<p>
+**All images were taken with HDR Bracketing (HDR Burst)    
+</p>
+<p>
+***Color and contrast with Luminar Neo application  
+</p>
+</p>
+
 ## Screenshots
 
 <p align="center">
