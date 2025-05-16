@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 from PyQt6.QtWidgets import (
     QMessageBox, QVBoxLayout, QWidget,
@@ -373,74 +374,109 @@ class SinglePageLayout(QWidget):
                     QMessageBox.critical(self, "Error", language_config.RUN_ERROR_STATUS.format(error = e))
 
     def save_image(self):
-        """Menyimpan gambar hasil proses ke lokasi yang dipilih oleh pengguna dengan metadata asli."""
+        """Menyimpan gambar hasil proses ke lokasi yang dipilih pengguna.
+        Untuk TIFF, file akan disalin/dipindahkan. Untuk format lain, akan dikonversi.
+        Metadata asli dari gambar sumber akan coba diterapkan."""
         folder_path = "database/stack"
 
         if not os.path.exists(folder_path):
             QMessageBox.warning(self, "Error", language_config.UI_SYSTEM_FOLDER_WRONG_TO_SAVE_IMAGE_BATCH)
             return
 
-        # Dapatkan daftar gambar yang tersedia di folder
         image_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
         
         if not image_files:
             QMessageBox.warning(self, "No Images", "There are no processed images to save.")
             return
 
-        # Ambil gambar terbaru berdasarkan waktu modifikasi
         image_files.sort(key=os.path.getmtime, reverse=True)
-        latest_image_path = image_files[0]
+        latest_image_path = image_files[0] # Ini adalah path sumber
 
-        # Dialog untuk menyimpan file
+        default_save_filename = os.path.basename(latest_image_path)
         file_path, _ = QFileDialog.getSaveFileName(
             self, "Save Image As",
-            os.path.basename(latest_image_path),
+            default_save_filename, # Gunakan nama file asli sebagai default
             "TIFF (*.tif *.tiff);;JPEG (*.jpg *.jpeg);;PNG (*.png)"
         )
 
         if not file_path:
-            return  
+            return  # Pengguna membatalkan dialog
+
+        # Tentukan ekstensi file tujuan berdasarkan pilihan pengguna
+        chosen_file_extension = os.path.splitext(file_path)[-1].lower()
         
-        file_extension = os.path.splitext(file_path)[-1].lower()
-        if file_extension not in [".jpg", ".jpeg", ".tif", ".tiff", ".png"]:
-            QMessageBox.warning(self, "Invalid Format", "Unsupported file format.")
-            return
-
-        try:
-            if file_extension in [".tif", ".tiff"]:
-                image = tifffile.imread(latest_image_path)
+        # Validasi format tujuan
+        supported_save_formats = [".tif", ".tiff", ".jpg", ".jpeg", ".png"]
+        if chosen_file_extension not in supported_save_formats:
+            if not chosen_file_extension and "TIFF (*.tif *.tiff)" in file_path: # Heuristik sederhana
+                 file_path += ".tif"
+                 chosen_file_extension = ".tif"
+            elif not chosen_file_extension and "JPEG (*.jpg *.jpeg)" in file_path:
+                 file_path += ".jpg"
+                 chosen_file_extension = ".jpg"
+            elif not chosen_file_extension and "PNG (*.png)" in file_path:
+                 file_path += ".png"
+                 chosen_file_extension = ".png"
             else:
-                image = cv2.imread(latest_image_path)
-
-            if image is None:
-                QMessageBox.critical(self, "Error", language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
+                QMessageBox.warning(self, "Invalid Format", "Unsupported file format or no valid extension provided.")
                 return
 
-           
-            if file_extension in [".jpg", ".jpeg", ".png"]:
+        try:
+            if chosen_file_extension in [".tif", ".tiff"]:
+                if os.path.abspath(latest_image_path) == os.path.abspath(file_path):
+                    QMessageBox.information(self, "Info", "Source and destination are the same. No action taken.")
+                  
+                else:
+                    shutil.copy2(latest_image_path, file_path)
+            else: 
+                source_image_data = cv2.imread(latest_image_path) # cv2 bisa membaca banyak format, termasuk TIFF
+                if source_image_data is None:
+                    try:
+                        source_image_data = tifffile.imread(latest_image_path)
+                    except Exception as tif_read_error:
+                        QMessageBox.critical(self, "Error", f"{language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED}\nCould not read source: {tif_read_error}")
+                        return
+
+                if source_image_data is None: # Cek lagi setelah fallback
+                    QMessageBox.critical(self, "Error", language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
+                    return
+                
                 save_special_jpg_and_png(latest_image_path, file_path,
-                                quality=100, optimize=True )
-            elif file_extension in [".tif", ".tiff"]:
-                tifffile.imwrite(file_path, image)
+                                         quality=100, optimize=True)
+                print(f"Image converted from {latest_image_path} and saved to {file_path}")
+
+                # Setelah konversi ke JPG/PNG, metadata dari latest_image_path (sumber asli) perlu diterapkan
+                if os.path.exists(latest_image_path) and os.path.exists(file_path):
+                    try:
+                        subprocess.run(
+                            ["exiftool", "-overwrite_original", "-TagsFromFile", latest_image_path, file_path],
+                            check=True, capture_output=True, text=True
+                        )
+                        print(f"Metadata restored from {latest_image_path} to {file_path}")
+                    except subprocess.CalledProcessError as e:
+                        print(f"Error restoring metadata to {file_path} after conversion: {e.stderr}")
+                    except FileNotFoundError:
+                        print("Exiftool not found. Metadata not restored.")
+
 
             if os.path.exists(latest_image_path):
                 try:
-                    subprocess.run(
-                        ["exiftool", "-overwrite_original", "-TagsFromFile", latest_image_path, file_path],
-                        check=True
-                    )
-                except subprocess.CalledProcessError as e:
-                    print(f"Error restoring metadata to {file_path}: {e}")
+                    os.remove(latest_image_path)
+                except OSError as e:
+                    QMessageBox.warning(self, "Cleanup Error", f"Could not remove the temporary processed file:\n{latest_image_path}\n\nError: {e}")
 
-            # Hapus gambar asli setelah disimpan
-            os.remove(latest_image_path)
 
-            # Beri notifikasi sukses
             QMessageBox.information(self, "Success", language_config.UI_SUCCES_TO_SAVE_IMAGE_BATCH.format(file_path))
 
+        except FileNotFoundError:
+            QMessageBox.critical(self, "Error", "Exiftool not found. Please ensure it is installed and in your system's PATH.")
         except Exception as e:
-            QMessageBox.critical(self, "Error", language_config.UI_FAILED_TO_SAVE_IMAGE_BATCH.format(e))
-
+            error_message = str(e)
+            if isinstance(e, subprocess.CalledProcessError):
+                error_message = f"Exiftool error: {e.stderr}"
+            
+            QMessageBox.critical(self, "Error", language_config.UI_FAILED_TO_SAVE_IMAGE_BATCH.format(error_message))
+            
     def update_progress_bar(self, value, images_left):
         """Memperbarui progress bar dan menampilkan jumlah gambar yang tersisa."""
         self.progress_bar.setValue(value)
