@@ -1008,7 +1008,7 @@ def general_page():
             
             working_dir = os.path.dirname(initial_launch_path)
 
-            is_frozen = getattr(sys, 'frozen', False)
+            is_frozen = getattr(sys, 'frozen', True)
             
             arguments = []
             program_to_run = "" 
