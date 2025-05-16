@@ -23,15 +23,19 @@ This app is expected to bridge the gap between professional cameras (DSLR or Mir
 Below are some sample images processed (left: Original, Right: Processed):
 
 <p align="center">
-  <img src="sample/afternoon atmosphere iso40 (1per110).jpg" width="400" alt="Afternoon Atmosphere">
+  <img src="sample/evening_in_the_city.jpg" width="400" alt="Evening in the city">
 </p>
 
 <p align="center">
-  <img src="sample/Extreme low light iso 4000 1,3ss.jpg" width="400" alt="Extreme Low Light">
+  <img src="sample/evening_on_the_riverbank.jpg" width="400" alt="Evening on the River Bank">
 </p>
 
 <p align="center">
-  <img src="sample/traditional market at dawn iso 400 (1per35).jpg" width="400" alt="Traditional Market at Dawn">
+  <img src="sample/morning_sunshine.jpg" width="400" alt="Morning Sunshine">
+</p>
+
+<p align="center">
+  <img src="sample/night_in_the_suburbs.jpg" width="400" alt="Night In the Suburbs">
 </p>
 
 ## Screenshots
