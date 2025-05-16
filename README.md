@@ -21,6 +21,7 @@ This app is expected to bridge the gap between professional cameras (DSLR or Mir
 ## Sample Images
 
 Below are some sample images processed (left: Original, Right: Processed):
+Taken with Samsung S9 Plus
 
 <p align="center">
   <img src="sample/evening_in_the_city.jpg" width="400" alt="Evening in the city">
