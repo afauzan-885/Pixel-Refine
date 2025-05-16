@@ -25,7 +25,8 @@ def load_general_settings():
         "enable_thumbnails": False,
         # Similarity V1
         "similarity_tile_size": 16,
-        "similarity_motion_threshold": 0.030,
+        "similarity_motion_sensitivity": 60.0,
+        "similarity_noise_mad_offset_factor": 0.4, 
         "similarity_overlap_percent": 40.0,
         
         # --- Similarity V2 ---
@@ -109,6 +110,7 @@ def _create_similarity_v1_group(current_settings):
     similarity_form_layout.setHorizontalSpacing(15)
 
     similarity_widgets = {}
+    c_locale = QLocale(QLocale.Language.C, QLocale.Country.AnyCountry)
 
     # a. Tile Size (Tetap ComboBox)
     tile_size_label_text = getattr(language_config, 'TILE_SIZE_LABEL', "Tile Size:")
@@ -117,67 +119,123 @@ def _create_similarity_v1_group(current_settings):
     tile_size_combo = QComboBox()
     tile_options_int = [8, 10, 12, 16, 20, 24, 32, 48, 64, 128, 256]
     tile_size_combo.addItems([str(size) for size in tile_options_int])
-    initial_tile_size_int = current_settings.get("similarity_tile_size", 32)
+    initial_tile_size_int = current_settings.get("similarity_tile_size", 16) # Key tetap sama
     tile_size_combo.setCurrentText(str(initial_tile_size_int))
     tile_size_combo.setStyleSheet(DROPDOWN_BOX)
     tile_size_combo.setMinimumWidth(100)
     similarity_form_layout.addRow(tile_size_label, tile_size_combo)
     similarity_widgets['tile_combo'] = tile_size_combo
 
-    # b. Motion Threshold (Slider + QLineEdit)
-    motion_thresh_label_text = getattr(language_config, 'MOTION_THRESHOLD_LABEL', "Motion Threshold:")
-    motion_thresh_label = QLabel(motion_thresh_label_text)
-    motion_thresh_label.setToolTip(getattr(language_config, 'MOTION_THRESHOLD_DESCRIPTION', ''))
-    motion_thresh_slider = QSlider(Qt.Orientation.Horizontal)
-    motion_thresh_slider.setMinimum(1); motion_thresh_slider.setMaximum(100)
-    motion_thresh_multiplier = 1000.0
-    initial_motion_thresh = current_settings.get("similarity_motion_threshold", 0.030)
-    motion_thresh_slider.setValue(int(initial_motion_thresh * motion_thresh_multiplier))
-    motion_thresh_slider.setStyleSheet(TOGGLE_SWITCH_STYLE.replace("QCheckBox", "QSlider"))
+    motion_sens_label_text = getattr(language_config, 'MOTION_THRESHOLD_LABEL', "Motion Sensitivity") # Label bisa disesuaikan jika mau
+    motion_sens_label = QLabel(motion_sens_label_text)
+    motion_sens_label.setToolTip(getattr(language_config, 'MOTION_THRESHOLD_DESCRIPTION', 'Controls sensitivity to motion. Higher values are more sensitive.')) # Tooltip bisa diupdate
 
-    motion_thresh_input = QLineEdit(f"{initial_motion_thresh:.3f}")
-    motion_thresh_input.setFixedWidth(60)
-    motion_thresh_input.setAlignment(Qt.AlignmentFlag.AlignRight)
+    motion_sens_slider = QSlider(Qt.Orientation.Horizontal)
+    motion_sens_slider_min_v1, motion_sens_slider_max_v1 = 10, 1000 # Contoh: 1.0 sampai 50.0
+    motion_sens_multiplier_v1 = 10.0
+    motion_sens_slider.setMinimum(motion_sens_slider_min_v1)
+    motion_sens_slider.setMaximum(motion_sens_slider_max_v1)
+    # Gunakan key baru "similarity_motion_sensitivity"
+    initial_motion_sens_v1 = current_settings.get("similarity_motion_sensitivity", 60.0) # Default baru
+    motion_sens_slider.setValue(int(round(initial_motion_sens_v1 * motion_sens_multiplier_v1)))
+    motion_sens_slider.setStyleSheet(TOGGLE_SWITCH_STYLE.replace("QCheckBox", "QSlider"))
 
-    c_locale = QLocale(QLocale.Language.C, QLocale.Country.AnyCountry) 
-    motion_thresh_input.setLocale(c_locale)
- 
- 
-    motion_thresh_validator = QDoubleValidator(0.001, 0.1000, 5, motion_thresh_input)
-    motion_thresh_validator.setNotation(QDoubleValidator.Notation.StandardNotation)
-    motion_thresh_input.setValidator(motion_thresh_validator)
+    motion_sens_input = QLineEdit(f"{initial_motion_sens_v1:.1f}") # Format 1 desimal
+    motion_sens_input.setFixedWidth(60) # Sesuaikan lebar jika perlu
+    motion_sens_input.setAlignment(Qt.AlignmentFlag.AlignRight)
+    motion_sens_input.setLocale(c_locale)
+    
+    motion_sens_validator_v1 = QDoubleValidator(0.1, 100.0, 1, motion_sens_input) # Sesuaikan range dan presisi
+    motion_sens_validator_v1.setNotation(QDoubleValidator.Notation.StandardNotation)
+    motion_sens_input.setValidator(motion_sens_validator_v1)
 
-    motion_thresh_layout = QHBoxLayout()
-    motion_thresh_layout.addWidget(motion_thresh_slider)
-    motion_thresh_layout.addWidget(motion_thresh_input)
-    similarity_form_layout.addRow(motion_thresh_label, motion_thresh_layout)
-    similarity_widgets['motion_slider'] = motion_thresh_slider
-    similarity_widgets['motion_input'] = motion_thresh_input
+    motion_sens_layout = QHBoxLayout()
+    motion_sens_layout.addWidget(motion_sens_slider)
+    motion_sens_layout.addWidget(motion_sens_input)
+    similarity_form_layout.addRow(motion_sens_label, motion_sens_layout)
+    similarity_widgets['motion_sensitivity_slider'] = motion_sens_slider # Nama widget diubah
+    similarity_widgets['motion_sensitivity_input'] = motion_sens_input  # Nama widget diubah
 
-    motion_thresh_slider.valueChanged.connect(
-        lambda value, inp=motion_thresh_input, m=motion_thresh_multiplier: inp.setText(f"{value / m:.3f}")
+    motion_sens_slider.valueChanged.connect(
+        lambda value, inp=motion_sens_input, m=motion_sens_multiplier_v1, loc=c_locale:
+            inp.setText(loc.toString(value / m, 'f', 1)) # Format 1 desimal
     )
 
-    def update_motion_slider():
-        current_locale = motion_thresh_input.locale()
+    def update_motion_sensitivity_slider_v1():
+        current_locale = motion_sens_input.locale()
         try:
-            value_float, ok = current_locale.toDouble(motion_thresh_input.text()) # Gunakan locale
+            value_float, ok = current_locale.toDouble(motion_sens_input.text())
             if not ok: raise ValueError("Conversion failed")
+            value_float = max(0.1, min(value_float, 100.0)) # Clamp ke range validator
+            slider_value = int(round(value_float * motion_sens_multiplier_v1))
+            slider_value = max(motion_sens_slider_min_v1, min(slider_value, motion_sens_slider_max_v1)) # Clamp ke range slider
 
-            value_float = max(0.001, min(value_float, 0.1000))
-            slider_value = int(round(value_float * motion_thresh_multiplier)) # Rounding bisa membantu
-
-            motion_thresh_slider.blockSignals(True)
-            motion_thresh_slider.setValue(slider_value)
-            motion_thresh_slider.blockSignals(False)
-
-            motion_thresh_input.setText(current_locale.toString(value_float, 'f', 4))
-
+            motion_sens_slider.blockSignals(True)
+            motion_sens_slider.setValue(slider_value)
+            motion_sens_slider.blockSignals(False)
+            motion_sens_input.setText(current_locale.toString(value_float, 'f', 1)) # Format 1 desimal
         except ValueError:
-            current_slider_val = motion_thresh_slider.value()
-            motion_thresh_input.setText(current_locale.toString(current_slider_val / motion_thresh_multiplier, 'f', 3))
+            current_slider_val = motion_sens_slider.value()
+            motion_sens_input.setText(current_locale.toString(current_slider_val / motion_sens_multiplier_v1, 'f', 1))
+    motion_sens_input.editingFinished.connect(update_motion_sensitivity_slider_v1)
 
-    motion_thresh_input.editingFinished.connect(update_motion_slider)
+
+    # c. Noise MAD Offset Factor (BARU untuk V1)
+    noise_mad_v1_label_text = getattr(language_config, 'NOISE_MAD_OFFSET_LABEL_V1', "Noise Offset Factor (V1):") # Label baru
+    noise_mad_v1_label = QLabel(noise_mad_v1_label_text)
+    noise_mad_v1_label.setToolTip(getattr(language_config, 'NOISE_MAD_OFFSET_DESCRIPTION_V1', 'Factor for noise MAD offset')) # Tooltip baru
+
+    noise_mad_v1_slider = QSlider(Qt.Orientation.Horizontal)
+    
+    noise_mad_slider_min_v1, noise_mad_slider_max_v1 = 10, 100 
+    noise_mad_multiplier_v1 = 100.0
+    noise_mad_v1_slider.setMinimum(noise_mad_slider_min_v1)
+    noise_mad_v1_slider.setMaximum(noise_mad_slider_max_v1)
+    
+    initial_noise_mad_v1 = current_settings.get("similarity_noise_mad_offset_factor", 0.4) # Default baru
+    noise_mad_v1_slider.setValue(int(round(initial_noise_mad_v1 * noise_mad_multiplier_v1)))
+    noise_mad_v1_slider.setStyleSheet(TOGGLE_SWITCH_STYLE.replace("QCheckBox", "QSlider"))
+
+    noise_mad_v1_input = QLineEdit(f"{initial_noise_mad_v1:.2f}") # 2 desimal
+    noise_mad_v1_input.setFixedWidth(50)
+    noise_mad_v1_input.setAlignment(Qt.AlignmentFlag.AlignRight)
+    noise_mad_v1_input.setLocale(c_locale)
+    
+    noise_mad_validator_v1 = QDoubleValidator(0.1, 10.0, 2, noise_mad_v1_input) # Sesuaikan range dan presisi
+    noise_mad_validator_v1.setNotation(QDoubleValidator.Notation.StandardNotation)
+    noise_mad_v1_input.setValidator(noise_mad_validator_v1)
+
+    noise_mad_v1_layout = QHBoxLayout()
+    noise_mad_v1_layout.addWidget(noise_mad_v1_slider)
+    noise_mad_v1_layout.addWidget(noise_mad_v1_input)
+    similarity_form_layout.addRow(noise_mad_v1_label, noise_mad_v1_layout)
+    similarity_widgets['noise_mad_offset_slider'] = noise_mad_v1_slider # Nama widget baru
+    similarity_widgets['noise_mad_offset_input'] = noise_mad_v1_input  # Nama widget baru
+
+    noise_mad_v1_slider.valueChanged.connect(
+        lambda value, inp=noise_mad_v1_input, m=noise_mad_multiplier_v1, loc=c_locale:
+            inp.setText(loc.toString(value / m, 'f', 2)) # Format 2 desimal
+    )
+
+    def update_noise_mad_offset_slider_v1():
+        current_locale = noise_mad_v1_input.locale()
+        try:
+            value_float, ok = current_locale.toDouble(noise_mad_v1_input.text())
+            if not ok: raise ValueError("Conversion failed")
+            value_float = max(0.0, min(value_float, 5.0))
+            slider_value = int(round(value_float * noise_mad_multiplier_v1))
+            slider_value = max(noise_mad_slider_min_v1, min(slider_value, noise_mad_slider_max_v1)) # Clamp ke range slider
+
+            noise_mad_v1_slider.blockSignals(True)
+            noise_mad_v1_slider.setValue(slider_value)
+            noise_mad_v1_slider.blockSignals(False)
+            noise_mad_v1_input.setText(current_locale.toString(value_float, 'f', 2))
+        except ValueError:
+            current_slider_val = noise_mad_v1_slider.value()
+            noise_mad_v1_input.setText(current_locale.toString(current_slider_val / noise_mad_multiplier_v1, 'f', 2))
+    
+   
+    noise_mad_v1_input.editingFinished.connect(update_noise_mad_offset_slider_v1) # <--- GUNAKAN NAMA YANG SUDAH DIPERBAIKI
 
     overlap_label_text = getattr(language_config, 'OVERLAP_LABEL', "Overlap %:")
     overlap_label = QLabel(overlap_label_text)
@@ -216,32 +274,57 @@ def _create_similarity_v1_group(current_settings):
     )
 
     # 2. Input -> Slider
-    def update_overlap_slider():
+    def update_overlap_slider_v1():
         try:
             value_int = int(overlap_input.text())
-            # Clamp nilai int ke range valid (0 - 90)
             value_int = max(0, min(value_int, 90))
 
-            # Set slider (cegah sinyal balik)
             overlap_slider.blockSignals(True)
             overlap_slider.setValue(value_int)
             overlap_slider.blockSignals(False)
 
-            # Set ulang teks input untuk konsistensi (hapus leading zero dll)
             overlap_input.setText(f"{value_int}")
 
         except ValueError:
-            # Jika input tidak valid, reset input ke nilai slider saat ini
             current_slider_val = overlap_slider.value()
             overlap_input.setText(f"{current_slider_val}")
 
-    overlap_input.editingFinished.connect(update_overlap_slider)
-    # ----------------------------------------
+    overlap_input.editingFinished.connect(update_overlap_slider_v1)
 
-    # Set layout untuk GroupBox
+
+    # --- TAMBAHKAN TOMBOL RESET UNTUK V1 ---
+    reset_button_v1_text = getattr(language_config, 'RESET_TO_DEFAULTS_BUTTON_TEXT', "Reset Defaults") # Label bisa disesuaikan
+    reset_button_v1 = QPushButton(reset_button_v1_text)
+    reset_button_v1.setStyleSheet(APPLY_BUTTON) # Gunakan style yang sama atau beda
+    reset_button_v1.setMinimumHeight(30)
+    similarity_form_layout.addRow(reset_button_v1) # Tambahkan ke layout
+    similarity_widgets['reset_button_v1'] = reset_button_v1 # Simpan referensi
+
+    def reset_defaults_v1():
+        """Mengembalikan widget Similarity V1 ke nilai default."""
+        defaults_v1 = load_general_settings() 
+        
+        # Tile Size V1
+        tile_size_combo.setCurrentText(str(defaults_v1.get("similarity_tile_size", 16)))
+
+        # Motion Sensitivity V1
+        default_motion_sens_v1 = defaults_v1.get("similarity_motion_sensitivity", 60.0)
+        motion_sens_slider.setValue(int(round(default_motion_sens_v1 * motion_sens_multiplier_v1)))
+        motion_sens_input.setText(c_locale.toString(default_motion_sens_v1, 'f', 1))
+
+        # Noise MAD Offset Factor V1
+        default_noise_mad_v1 = defaults_v1.get("similarity_noise_mad_offset_factor", 0.4)
+        noise_mad_v1_slider.setValue(int(round(default_noise_mad_v1 * noise_mad_multiplier_v1)))
+        noise_mad_v1_input.setText(c_locale.toString(default_noise_mad_v1, 'f', 2))
+
+        # Overlap V1
+        default_overlap_v1 = defaults_v1.get("similarity_overlap_percent", 40.0)
+        overlap_slider.setValue(int(default_overlap_v1))
+        overlap_input.setText(str(int(default_overlap_v1)))
+
+    reset_button_v1.clicked.connect(reset_defaults_v1)
+
     similarity_group_box.setLayout(similarity_form_layout)
-
-    # Kembalikan group box DAN dictionary widget inputnya
     return similarity_group_box, similarity_widgets
 
 def _create_similarity_v2_group(current_settings):
@@ -658,16 +741,12 @@ def general_page():
     similarity_groups_layout = QHBoxLayout()
     similarity_group_box_v1, similarity_widgets_v1 = _create_similarity_v1_group(current_settings)
     tile_size_combo_v1 = similarity_widgets_v1['tile_combo']
-    motion_thresh_slider_v1 = similarity_widgets_v1['motion_slider'] # V1 slider used for saving
-    # motion_thresh_input_v1 = similarity_widgets_v1['motion_input'] # V1 input
-    overlap_slider_v1 = similarity_widgets_v1['overlap_slider'] # V1 slider used for saving
-    # overlap_input_v1 = similarity_widgets_v1['overlap_input']   # V1 input
+    motion_sensitivity_slider_v1 = similarity_widgets_v1['motion_sensitivity_slider'] # Key yang benar
+    overlap_slider_v1 = similarity_widgets_v1['overlap_slider']
     similarity_groups_layout.addWidget(similarity_group_box_v1)
 
     similarity_group_box_v2, similarity_widgets_v2 = _create_similarity_v2_group(current_settings)
     tile_size_combo_v2 = similarity_widgets_v2['tile_combo']
-    # motion_thresh_slider_v2 = similarity_widgets_v2['motion_slider'] # V2 slider
-    # overlap_slider_v2 = similarity_widgets_v2['overlap_slider']     # V2 slider
     similarity_groups_layout.addWidget(similarity_group_box_v2)
 
     similarity_groups_layout.addStretch()
@@ -688,9 +767,39 @@ def general_page():
             QMessageBox.warning(general_tab, "Invalid Input", "Invalid Tile Size for V1.")
             return
 
-        motion_thresh_multiplier_v1 = 1000.0 # Sesuai V1
-        new_motion_threshold_v1 = motion_thresh_slider_v1.value() / motion_thresh_multiplier_v1
-        new_overlap_percent_v1 = float(overlap_slider_v1.value())
+        c_locale_save = QLocale(QLocale.Language.C, QLocale.Country.AnyCountry)
+
+        # Ambil nilai dari QLineEdit untuk V1 Motion Sensitivity
+        motion_sens_input_v1 = similarity_widgets_v1['motion_sensitivity_input']
+        try:
+            v1_motion_sens_text = motion_sens_input_v1.text()
+            new_motion_sensitivity_v1, ok_ms_v1 = c_locale_save.toDouble(v1_motion_sens_text)
+            if not ok_ms_v1: raise ValueError(f"Invalid Motion Sensitivity V1: {v1_motion_sens_text}")
+            new_motion_sensitivity_v1 = max(0.1, min(new_motion_sensitivity_v1, 100.0)) # Clamp sesuai validator
+        except ValueError as e_val:
+            QMessageBox.warning(general_tab, "Invalid Input", f"Error in V1 parameter: {e_val}. Settings not saved.")
+            return
+
+        # Ambil nilai dari QLineEdit untuk V1 Noise MAD Offset Factor
+        noise_mad_offset_input_v1 = similarity_widgets_v1['noise_mad_offset_input']
+        try:
+            v1_noise_mad_offset_text = noise_mad_offset_input_v1.text()
+            new_noise_mad_offset_v1, ok_nm_v1 = c_locale_save.toDouble(v1_noise_mad_offset_text)
+            if not ok_nm_v1: raise ValueError(f"Invalid Noise MAD Offset V1: {v1_noise_mad_offset_text}")
+            new_noise_mad_offset_v1 = max(0.0, min(new_noise_mad_offset_v1, 5.0)) # Clamp sesuai validator
+        except ValueError as e_val:
+            QMessageBox.warning(general_tab, "Invalid Input", f"Error in V1 parameter: {e_val}. Settings not saved.")
+            return
+
+        # Overlap V1 (dari input)
+        overlap_input_v1 = similarity_widgets_v1['overlap_input']
+        try:
+            v1_overlap_text = overlap_input_v1.text()
+            new_overlap_percent_v1 = float(v1_overlap_text) # atau int() jika selalu integer
+            new_overlap_percent_v1 = max(0.0, min(new_overlap_percent_v1, 90.0)) # Clamp
+        except ValueError:
+            QMessageBox.warning(general_tab, "Invalid Input", f"Invalid Overlap V1: '{v1_overlap_text}'.")
+            return
 
         try:
             new_tile_size_int_v2 = int(tile_size_combo_v2.currentText())
@@ -757,7 +866,8 @@ def general_page():
             "multi_core_cpu": new_multicore_setting,
             # V1
             "similarity_tile_size": new_tile_size_int_v1,
-            "similarity_motion_threshold": new_motion_threshold_v1,
+            "similarity_motion_sensitivity": new_motion_sensitivity_v1,
+            "similarity_noise_mad_offset_factor": new_noise_mad_offset_v1, 
             "similarity_overlap_percent": new_overlap_percent_v1,
             # V2
             "similarity_v2_tile_size": new_tile_size_int_v2,
@@ -809,19 +919,32 @@ def general_page():
                                   all_specific_params[key]["use_gpu"] = new_gpu_setting; specific_file_needs_writing = True
                     
                     # --- Update Similarity V1 ---
-                    similarity_section_key_v1 = "Similarity"
-                    tile_size_key_v1 = "tileGridSize"
-                    motion_thresh_key_v1 = "motionThreshold"
-                    overlap_key_v1 = "overlapRatio"
+                similarity_section_key_v1 = "Similarity"
+                tile_size_key_v1 = "tileGridSize"
+                # motion_thresh_key_v1 = "motionThreshold" # Key lama, akan diganti
+                motion_sensitivity_key_v1 = "motionSensitivity" # Key baru untuk ALGORITHM_PARAMETER_SETTINGS_FILE
+                noise_offset_key_v1 = "noiseMadOffsetFactor"   # Key baru untuk ALGORITHM_PARAMETER_SETTINGS_FILE
+                overlap_key_v1 = "overlapRatio"
 
-                    if similarity_section_key_v1 not in all_specific_params: all_specific_params[similarity_section_key_v1] = {}; specific_file_needs_writing = True
-                    if isinstance(all_specific_params.get(similarity_section_key_v1), dict):
-                        params_v1 = all_specific_params[similarity_section_key_v1]
-                        list_v1 = [new_tile_size_int_v1, new_tile_size_int_v1]
-                        if params_v1.get(tile_size_key_v1) != list_v1: params_v1[tile_size_key_v1] = list_v1; specific_file_needs_writing = True
-                        if abs(params_v1.get(motion_thresh_key_v1, -1.0) - new_motion_threshold_v1) > 1e-6: params_v1[motion_thresh_key_v1] = new_motion_threshold_v1; specific_file_needs_writing = True
-                        ratio_v1 = new_overlap_percent_v1 / 100.0
-                        if abs(params_v1.get(overlap_key_v1, -1.0) - ratio_v1) > 1e-6: params_v1[overlap_key_v1] = ratio_v1; specific_file_needs_writing = True
+                if similarity_section_key_v1 not in all_specific_params: all_specific_params[similarity_section_key_v1] = {}; specific_file_needs_writing = True
+                if isinstance(all_specific_params.get(similarity_section_key_v1), dict):
+                    params_v1 = all_specific_params[similarity_section_key_v1]
+                    list_v1 = [new_tile_size_int_v1, new_tile_size_int_v1]
+                    if params_v1.get(tile_size_key_v1) != list_v1: params_v1[tile_size_key_v1] = list_v1; specific_file_needs_writing = True
+                    
+                    # Propagasi parameter V1 yang baru
+                    if abs(params_v1.get(motion_sensitivity_key_v1, -1.0) - new_motion_sensitivity_v1) > 1e-7: # presisi float
+                        params_v1[motion_sensitivity_key_v1] = new_motion_sensitivity_v1; specific_file_needs_writing = True
+                    if abs(params_v1.get(noise_offset_key_v1, -1.0) - new_noise_mad_offset_v1) > 1e-7: # presisi float
+                        params_v1[noise_offset_key_v1] = new_noise_mad_offset_v1; specific_file_needs_writing = True
+                    
+                    # Hapus key lama motionThreshold jika ada
+                    if "motionThreshold" in params_v1:
+                        del params_v1["motionThreshold"]
+                        specific_file_needs_writing = True
+
+                    ratio_v1 = new_overlap_percent_v1 / 100.0
+                    if abs(params_v1.get(overlap_key_v1, -1.0) - ratio_v1) > 1e-7: params_v1[overlap_key_v1] = ratio_v1; specific_file_needs_writing = True
 
 
                     # --- Similarity V2 ---

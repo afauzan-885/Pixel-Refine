@@ -21,7 +21,7 @@ class SimilarityV1MotionInterface:
 
     def _define_argtypes(self):
         """Mendefinisikan argtypes untuk semua fungsi C++ yang digunakan."""
-        # Definisikan argtypes untuk accumulate_frame_weighted_jit
+      
         self.clib.accumulate_frame_weighted_jit.argtypes = [
             np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS, WRITEABLE'), # 1 final_image_sum_ptr
             np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS, WRITEABLE'), # 2 weight_map_sum_ptr
@@ -30,15 +30,21 @@ class SimilarityV1MotionInterface:
             np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),           # 5 base_window_ptr
             np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),             # 6 row_starts
             np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),             # 7 col_starts
-            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, # 8-11 num_row_starts, num_col_starts, tile_h, tile_w
-            ctypes.c_int, ctypes.c_int, ctypes.c_int, # 12-14 h, w, channels_buffer
-            ctypes.c_float, # 15 motion_threshold
-            ctypes.c_int, ctypes.c_int, ctypes.c_int, # 16-18 mbm_block_h, mbm_block_w, mbm_search_radius
-            ctypes.c_float # 19 frame_max_multiplier
+            ctypes.c_int, # 8 num_row_starts
+            ctypes.c_int, # 9 num_col_starts
+            ctypes.c_int, # 10 tile_h
+            ctypes.c_int, # 11 tile_w
+            ctypes.c_int, # 12 h
+            ctypes.c_int, # 13 w
+            ctypes.c_int, # 14 channels (jumlah channel buffer C++, yaitu 3)
+            ctypes.c_int, # 15 mbm_block_h (indeks bergeser jika motion_threshold dihapus)
+            ctypes.c_int, # 16 mbm_block_w
+            ctypes.c_int, # 17 mbm_search_radius
+            ctypes.c_float, # 18 p_motion_sensitivity
+            ctypes.c_float  # 19 p_noise_offset_factor
         ]
         self.clib.accumulate_frame_weighted_jit.restype = None
-
-        # Definisikan argtypes untuk normalize_accumulated_image_jit
+        
         self.clib.normalize_accumulated_image_jit.argtypes = [
             np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS, WRITEABLE'), # 1 final_image_ptr
             np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),           # 2 weight_map_sum_ptr
@@ -47,22 +53,17 @@ class SimilarityV1MotionInterface:
         self.clib.normalize_accumulated_image_jit.restype = None
 
     def call_accumulate_frame_weighted(self, lib, final_image_sum, weight_map_sum, current_image, reference_image,
-                                   base_window, row_starts, col_starts,
-                                   tile_h, tile_w, h, w, channels,
-                                   motion_threshold,
-                                   mbm_block_h, mbm_block_w, mbm_search_radius):
-        """
-        Membungkus pemanggilan accumulate_frame_weighted_jit.
-        ASUMSI: Semua argumen NumPy sudah C-contiguous.
-        ASUMSI: argtypes sudah didefinisikan pada objek 'lib'.
-        """
-        # Langsung panggil fungsi C dengan argumen yang sudah disiapkan
+                               base_window, row_starts, col_starts,
+                               tile_h, tile_w, h, w, channels,
+                               mbm_block_h, mbm_block_w, mbm_search_radius,
+                               motion_sensitivity, noise_offset_factor
+                               ):
         lib.accumulate_frame_weighted_jit(
             final_image_sum, weight_map_sum, current_image, reference_image, base_window,
             row_starts, col_starts, len(row_starts), len(col_starts),
             tile_h, tile_w, h, w, channels,
-            motion_threshold,
-            mbm_block_h, mbm_block_w, mbm_search_radius
+            mbm_block_h, mbm_block_w, mbm_search_radius,
+            motion_sensitivity, noise_offset_factor
         )
 
     def call_normalize_accumulated(self, lib, final_image_sum, weight_map_sum, h, w, channels):

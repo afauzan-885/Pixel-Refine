@@ -8,7 +8,6 @@ import os
 from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
-# from UI.enhance_stack.algorithm.denoising.extra_similarity.compute_motion_metrics_aot import accumulate_tiles_jit
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, get_all_image_paths_for_single_process, load_images_from_paths, save_image
 from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityV1MotionInterface
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
@@ -16,27 +15,25 @@ from UI.settings.General.GeneralSetting import load_general_settings
 from UI.settings.General.Language import language_config
 
 class ThreadWorker(QThread):
-    progress_updated = pyqtSignal(int, str)  # Sinyal untuk memperbarui progress
-    finished = pyqtSignal()  # Sinyal untuk menandakan selesai
-    error_occurred = pyqtSignal(str)  # Sinyal untuk menandakan error
+    progress_updated = pyqtSignal(int, str)  
+    finished = pyqtSignal()  
+    error_occurred = pyqtSignal(str)
 
     def __init__(self, db_path, single_process=True, batch_id=None):
         super().__init__()
         self.db_path = db_path
-        self.single_process = single_process  # Menentukan apakah proses single atau batch
-        self.batch_id = batch_id  # ID batch jika batch processing
-        self.stop_requested = False  # Flag untuk menghentikan thread
+        self.single_process = single_process  
+        self.batch_id = batch_id  
+        self.stop_requested = False  
 
     def run(self):
         try:
             def update_progress(progress, message):
                 self.progress_updated.emit(progress, message)
 
-            # Fungsi callback untuk mengecek status stop
             def is_stop_requested():
                 return self.stop_requested
 
-            # Panggil main dengan parameter yang sesuai
             main(
                 self.db_path, 
                 update_progress=update_progress, 
@@ -47,11 +44,11 @@ class ThreadWorker(QThread):
             
             self.finished.emit()
         except Exception as e:
-            print(f"Error terjadi: {str(e)}")  # Menampilkan pesan error di konsol
-            self.error_occurred.emit(str(e))  # Mengirim pesan error melalui sinyal
+            print(f"Error: {str(e)}")  
+            self.error_occurred.emit(str(e))  
 
     def stop(self):
-        self.stop_requested = True  # Set flag agar thread berhenti
+        self.stop_requested = True  
 
 class SimilarityAlgorithm:
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
@@ -157,7 +154,7 @@ class SimilarityAlgorithm:
         return np.ascontiguousarray(norm_image.astype(np.float32))
 
     def similarity_mfnr(self, images, tile_size, overlap,
-                        motion_threshold, update_progress=None, stop_requested=None,
+                        motion_sensitivity,noise_offset_factor, update_progress=None, stop_requested=None,
                         lib_path='UI/data/similarity_motion.dll',
                         save_weight_map_path=None, total_overall_images=None,
                         images_processed_so_far=0):
@@ -307,15 +304,17 @@ class SimilarityAlgorithm:
 
             # --- Panggil Fungsi Akumulasi C++ ---
             try:
-                c_interface.call_accumulate_frame_weighted(
-                    clib, final_image_sum, weight_map_sum, # Target (Writable)
-                    current_image_float, reference_image_float, # Input (Read-only)
-                    base_window, row_starts, col_starts, # Params
-                    tile_h, tile_w, h_ref, w_ref, channels_buffer, # Ukuran & Channel Buffer
-                    motion_threshold,
-                    mbm_block_h, mbm_block_w, mbm_search_radius
+                c_interface.call_accumulate_frame_weighted( 
+                    c_interface.clib,
+                    final_image_sum, weight_map_sum,
+                    current_image_float, reference_image_float,
+                    base_window, row_starts, col_starts,
+                    tile_h, tile_w, h_ref, w_ref, channels_buffer,
+                    mbm_block_h, mbm_block_w, mbm_search_radius,
+                    motion_sensitivity, 
+                    noise_offset_factor
                 )
-                processed_frames += 1 # Hanya increment jika pemanggilan berhasil
+                processed_frames += 1 
             except Exception as e:
                 raise RuntimeError(f"C++ accumulation failed for frame {i+1}: {e}") # Hentikan
 
@@ -386,7 +385,8 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
         image_processor = SimilarityAlgorithm(db_path)
         
         sim_tile_size_int = general_settings.get("similarity_tile_size", 16)
-        sim_motion_threshold = general_settings.get("similarity_motion_threshold", 0.030)
+        sim_motion_sensitivity = general_settings.get("similarity_motion_sensitivity", 60.0)
+        sim_noise_offset_factor = general_settings.get("similarity_noise_offset_factor", 0.4)
         sim_overlap_percent = general_settings.get("similarity_overlap_percent", 40.0)
         
         tile_size_tuple = (sim_tile_size_int, sim_tile_size_int)
@@ -514,14 +514,16 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
                         try:
                             batch_result = image_processor.similarity_mfnr(
                             batch_images,
-                            tile_size=tile_size_tuple,        
-                            overlap=overlap_ratio,            
-                            motion_threshold=sim_motion_threshold, 
+                            tile_size=tile_size_tuple,
+                            overlap=overlap_ratio,
+                            # motion_threshold=sim_motion_threshold, # Dihapus
                             update_progress=update_progress,
                             stop_requested=stop_requested,
                             total_overall_images=total_images,
-                            images_processed_so_far=images_processed_count  
-                             )
+                            images_processed_so_far=images_processed_count,
+                            motion_sensitivity=sim_motion_sensitivity, # Teruskan nilai dari settings
+                            noise_offset_factor=sim_noise_offset_factor # Teruskan nilai dari settings
+                        )
                         except Exception as e_sim_batch:
                              traceback.print_exc()
                              batch_result = None 
@@ -575,14 +577,16 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
                 try:
                     batch_result = image_processor.similarity_mfnr(
                     batch_images,
-                    tile_size=tile_size_tuple,        
-                    overlap=overlap_ratio,            
-                    motion_threshold=sim_motion_threshold,
+                    tile_size=tile_size_tuple,
+                    overlap=overlap_ratio,
+                    # motion_threshold=sim_motion_threshold, # Dihapus
                     update_progress=update_progress,
                     stop_requested=stop_requested,
                     total_overall_images=total_images,
-                    images_processed_so_far=images_processed_count  
-                    )
+                    images_processed_so_far=images_processed_count,
+                    motion_sensitivity=sim_motion_sensitivity, # Teruskan nilai dari settings
+                    noise_offset_factor=sim_noise_offset_factor # Teruskan nilai dari settings
+                )
                 except Exception as e_sim_batch:
                       traceback.print_exc()
                       batch_result = None
@@ -626,7 +630,8 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
                      processed_batches_results,
                      tile_size=tile_size_tuple,
                      overlap=overlap_ratio,    
-                     motion_threshold=sim_motion_threshold,
+                     motion_sensitivity=sim_motion_sensitivity, 
+                     noise_offset_factor=sim_noise_offset_factor,
                      update_progress=fine_tuning_update_progress,
                      stop_requested=stop_requested,
                      save_weight_map_path=final_weight_map_path_arg,

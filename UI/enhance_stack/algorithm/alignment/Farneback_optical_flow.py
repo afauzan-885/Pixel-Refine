@@ -138,7 +138,7 @@ class FarnebackAlgorithm:
                 except Exception as gpu_exc: use_gpu = False # Fallback
 
             if not use_gpu:
-                num_blocks_config = fb_config.get("cpu_num_blocks", [2, 2])
+                num_blocks_config = fb_config.get("cpu_num_blocks", [30, 23])
                 overlap_ratio = fb_config.get("cpu_overlap_ratio", 0.3)
                 if isinstance(num_blocks_config, (list, tuple)) and len(num_blocks_config) == 2: blocks_x, blocks_y = num_blocks_config
                 else: blocks_x, blocks_y = 2, 2

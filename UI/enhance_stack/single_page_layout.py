@@ -12,6 +12,7 @@ from UI.enhance_stack.algorithm.alignment.AKAZE import running_akaze
 from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import running_farneback_optical_flow
 from UI.enhance_stack.algorithm.alignment.ORB import running_orb
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import save_special_jpg_and_png
+from UI.enhance_stack.algorithm.alignment.tile_align import running_tile_align
 from UI.enhance_stack.algorithm.denoising.Average import running_average
 from UI.enhance_stack.algorithm.denoising.Median import running_median
 from UI.enhance_stack.algorithm.denoising.Similarity import running_similarity
@@ -313,6 +314,8 @@ class SinglePageLayout(QWidget):
                 running_farneback_optical_flow(self, single_process=True)
             elif alignment_choice == "AKAZE":
                 running_akaze(self, single_process=True)
+            elif alignment_choice == "Tile Align":
+                running_tile_align(self, single_process=True)
             elif alignment_choice == "No Alignment":
                 if denoising_choice != "No Denoising" or super_resolution_choice != "No Super Resolution":
                     reply = QMessageBox.question(self, "Confirm",
@@ -418,7 +421,7 @@ class SinglePageLayout(QWidget):
                 save_special_jpg_and_png(latest_image_path, file_path,
                                 quality=100, optimize=True )
             elif file_extension in [".tif", ".tiff"]:
-                tifffile.imwrite(file_path, image, compression='zlib')
+                tifffile.imwrite(file_path, image)
 
             if os.path.exists(latest_image_path):
                 try:

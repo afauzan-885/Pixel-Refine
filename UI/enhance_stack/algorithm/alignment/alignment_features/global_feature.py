@@ -112,7 +112,7 @@ def _prepare_image_path(original_path, temp_dir):
         return None 
     
 def load_images_from_paths(image_paths, stop_requested=None):
-    temp_dir = os.path.join("database", f"imgproc_{int(time.time_ns())}")
+    temp_dir = os.path.join("database", "align", f"imgproc_{int(time.time_ns())}")
     os.makedirs(temp_dir, exist_ok=True)
 
     try:

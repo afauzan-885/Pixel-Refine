@@ -106,34 +106,25 @@ class AKAZEAlgorithm:
         else:
             raise ValueError(f"Invalid image dimensions/channels: {img.shape}")
 
-        # Normalisasi ke uint8 jika perlu (penting untuk CLAHE dan AKAZE)
         if gray.dtype != np.uint8:
             max_val = np.max(gray)
             if gray.dtype == np.float32 or gray.dtype == np.float64:
-                 # Jika rentang sudah 0-1 (umum untuk float), skala ke 0-255
                  if max_val <= 1.0 and np.min(gray) >= 0:
                      gray_norm = (gray * 255.0).astype(np.uint8)
-                 # Jika rentang float > 1, coba normalisasi atau konversi langsung
-                 # Normalisasi MINMAX mungkin mengubah kontras asli, jadi hati-hati
-                 # Mungkin lebih baik konversi langsung jika datanya uint16/int16
                  else:
-                     # Jika mungkin int16/uint16, coba scaling hati-hati
                      if gray.dtype == np.uint16:
                          gray_norm = (gray / 256.0).astype(np.uint8) # Asumsi 16-bit ke 8-bit
                      elif gray.dtype == np.int16:
                           gray_norm = ((gray / 256.0) + 128).astype(np.uint8) # Perkiraan kasar
-                     else: # Fallback ke normalisasi jika tidak yakin
+                     else:
                          gray_norm = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
             elif gray.dtype == np.uint16:
-                 # Konversi umum uint16 ke uint8
                  gray_norm = (gray / 256.0).astype(np.uint8)
-            else: # Tipe lain yang tidak umum, coba normalisasi
+            else:
                  gray_norm = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
             return gray_norm
         return gray
 
-    # Fungsi compute_features_block Anda (dengan modifikasi kecil)
-    # Sekarang menerima gambar grayscale *yang sudah ditingkatkan*
     def compute_features_block(self, akaze_instance, enhanced_gray_base, enhanced_gray_target, x, y, bw, bh, overlap_px, img_w, img_h):
         roi_x_start = max(0, x - overlap_px)
         roi_y_start = max(0, y - overlap_px)
@@ -142,31 +133,26 @@ class AKAZEAlgorithm:
 
         if roi_y_end <= roi_y_start or roi_x_end <= roi_x_start: return [], None, [], None
 
-        # Gunakan ROI dari gambar yang *sudah ditingkatkan*
         roi_base_enhanced = enhanced_gray_base[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
         roi_target_enhanced = enhanced_gray_target[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
 
-        # Deteksi pada ROI yang ditingkatkan
         kps_base, desc_base = akaze_instance.detectAndCompute(roi_base_enhanced, None)
         kps_target, desc_target = akaze_instance.detectAndCompute(roi_target_enhanced, None)
 
-        # Penyesuaian koordinat dan filtering tetap sama, karena koordinat
-        # mengacu pada gambar asli (bukan yang di-enhance secara spasial)
         kps_base_adjusted = []
-        valid_desc_indices_base = [] # Kumpulkan indeks deskriptor valid
+        valid_desc_indices_base = []
         if kps_base and desc_base is not None:
             for idx, kp in enumerate(kps_base):
                 orig_kp_x = kp.pt[0] + roi_x_start
                 orig_kp_y = kp.pt[1] + roi_y_start
                 if x <= orig_kp_x < x + bw and y <= orig_kp_y < y + bh:
-                    # Pastikan indeks deskriptor valid sebelum menambahkan
                     if idx < len(desc_base):
                         kp.pt = (orig_kp_x, orig_kp_y)
                         kps_base_adjusted.append(kp)
-                        valid_desc_indices_base.append(idx) # Simpan indeks yang valid
-
+                        valid_desc_indices_base.append(idx) 
+        
         kps_target_adjusted = []
-        valid_desc_indices_target = [] # Kumpulkan indeks deskriptor valid
+        valid_desc_indices_target = [] 
         if kps_target and desc_target is not None:
             for idx, kp in enumerate(kps_target):
                 orig_kp_x = kp.pt[0] + roi_x_start
@@ -177,20 +163,16 @@ class AKAZEAlgorithm:
                         kps_target_adjusted.append(kp)
                         valid_desc_indices_target.append(idx) # Simpan indeks yang valid
 
-        # Filter deskriptor berdasarkan indeks yang valid
         final_desc_base = desc_base[valid_desc_indices_base] if desc_base is not None and valid_desc_indices_base else None
         final_desc_target = desc_target[valid_desc_indices_target] if desc_target is not None and valid_desc_indices_target else None
 
         # Validasi akhir (opsional tapi bagus)
         if final_desc_base is not None and len(kps_base_adjusted) != len(final_desc_base):
              print(f"Warning: Mismatch base keypoints ({len(kps_base_adjusted)}) vs descriptors ({len(final_desc_base)}) after filtering.")
-             # Mungkin perlu mengembalikan None jika terjadi mismatch fatal
-             # return [], None, kps_target_adjusted, final_desc_target # Atau handle lain
-
+             
         if final_desc_target is not None and len(kps_target_adjusted) != len(final_desc_target):
              print(f"Warning: Mismatch target keypoints ({len(kps_target_adjusted)}) vs descriptors ({len(final_desc_target)}) after filtering.")
-             # return kps_base_adjusted, final_desc_base, [], None # Atau handle lain
-
+             
         return kps_base_adjusted, final_desc_base, kps_target_adjusted, final_desc_target
 
     def calculate_global_motion(self, base_image, target_image, config_filename=None, num_blocks=(3, 3), overlap=20, stop_requested=None):
@@ -214,31 +196,21 @@ class AKAZEAlgorithm:
             base_gray = self.prepare_gray_akaze(base_image)
             target_gray = self.prepare_gray_akaze(target_image)
         except ValueError as e:
-            print(f"Error preparing grayscale images: {e}")
             return None, None
         except Exception as e:
-             print(f"Unexpected error preparing grayscale: {e}")
              return None, None
 
         # --- 3. TINGKATKAN Kontras Grayscale HANYA untuk Deteksi ---
         try:
-            # Buat objek CLAHE (parameter bisa disesuaikan)
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            # Terapkan CLAHE ke gambar grayscale
             enhanced_base_gray = clahe.apply(base_gray)
             enhanced_target_gray = clahe.apply(target_gray)
-            # CATATAN: base_gray dan target_gray ASLI tetap ada jika diperlukan
-            #         tetapi deteksi fitur akan menggunakan versi enhanced.
         except Exception as e:
-            print(f"Error applying CLAHE enhancement: {e}. Using original grayscale.")
-            # Fallback ke grayscale asli jika CLAHE gagal
             enhanced_base_gray = base_gray
             enhanced_target_gray = target_gray
-        # -------------------------------------------------------
-
-        h, w = base_gray.shape # Dimensi tetap sama
+       
+        h, w = base_gray.shape 
         blocks_x, blocks_y = num_blocks
-        # ... (logika perhitungan block_w, block_h Anda tetap sama) ...
         if blocks_x <= 0 or blocks_y <= 0: blocks_x, blocks_y = 1, 1
         block_w = w // blocks_x if blocks_x > 0 else w
         block_h = h // blocks_y if blocks_y > 0 else h
@@ -256,7 +228,6 @@ class AKAZEAlgorithm:
                 diffusivity=cv2.KAZE_DIFF_PM_G2 # Default yang bagus
             )
         except Exception as e:
-            print(f"Error creating AKAZE instance: {e}")
             return None, None
 
         keypoints_base_all = []
