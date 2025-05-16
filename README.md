@@ -21,7 +21,6 @@ This app is expected to bridge the gap between professional cameras (DSLR or Mir
 ## Sample Images
 
 Below are some sample images processed (left: Original, Right: Processed):
-Taken with Samsung S9 Plus
 
 <p align="center">
   <img src="sample/evening_in_the_city.jpg" width="400" alt="Evening in the city">
@@ -37,6 +36,16 @@ Taken with Samsung S9 Plus
 
 <p align="center">
   <img src="sample/night_in_the_suburbs.jpg" width="400" alt="Night In the Suburbs">
+</p>
+
+<p>
+*Image taken with Samsung S9 Plus
+<p>
+**All images were taken with HDR Bracketing (HDR Burst)    
+</p>
+<p>
+***Color and contrast with Luminar Neo application  
+</p>
 </p>
 
 ## Screenshots
