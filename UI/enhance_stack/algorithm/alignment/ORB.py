@@ -1,10 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 import gc
-import time
-import concurrent
-import exifread
 import json
-import subprocess
 import cv2
 import numpy as np
 import sqlite3
@@ -381,24 +377,30 @@ class ORBAlgorithm:
         except Exception as e:
              return None
     
-def main(db_path, update_progress=None, batch_size=12, stop_requested=None, single_process=None, batch_id=None,
-         config_filename=None, save_align=None, align_folder=None, command_save_to_hd5f=None):
-    
+def main(db_path,
+         update_progress=None,
+         batch_size=8,
+         stop_requested=None,
+         single_process=None,
+         batch_id=None,
+         config_filename=None,
+         save_align=None,
+         align_folder=None,
+         command_save_to_hd5f=None):
+
+    # Inisialisasi processor dan konfigurasi
     processor = ORBAlgorithm(db_path)
     config = processor.load_orb_config(config_filename)
-    
-    if save_align is None:
-        save_align = config.get("save_align", False)
-    
-    if command_save_to_hd5f is None:
-        command_save_to_hd5f = config.get("command_save_to_hd5f", True)
-    
-    if align_folder is None:
-        align_folder = config.get("align_folder", os.path.join(os.path.expanduser("~"), "Documents", "Pixel Refine", "align_image"))
-    
+
+    save_align = save_align if save_align is not None else config.get("save_align", False)
+    command_save_to_hd5f = command_save_to_hd5f if command_save_to_hd5f is not None else config.get("command_save_to_hd5f", True)
+    align_folder = align_folder if align_folder is not None else config.get(
+        "align_folder",
+        os.path.join(os.path.expanduser("~"), "Documents", "Pixel Refine", "align_image")
+    )
     enable_cropping = config.get("enable_cropping", True)
     transformation_type = config.get("transformation", "affine")
-    
+
     # Dapatkan semua path gambar
     if single_process:
         image_paths = get_all_image_paths_for_single_process(db_path)
@@ -408,58 +410,94 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, sing
             raise ValueError(language_config.BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS)
         image_paths = processor.get_all_image_paths_for_batch_process(batch_id)
         processor.hdf5_path = f"database/align/aligned_image_batch_{batch_id}.h5"
-    
+
     if not image_paths:
         if update_progress:
             update_progress(0, language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
         return
-    
+
     # Ekstrak metadata dari seluruh gambar dan simpan ke file JSON
     metadata_folder = os.path.join("database", "align")
     os.makedirs(metadata_folder, exist_ok=True)
     metadata_file = os.path.join(metadata_folder, "metadata.json")
     extract_all_metadata(image_paths, metadata_file=metadata_file)
-    
-    # Proses gambar pertama sebagai base_image
+
+    # —––––– SCAN UKURAN & SETUP KONDISIONAL RESIZE –––––—
+    dims = []
+    for p in image_paths:
+        img = cv2.imread(p, cv2.IMREAD_UNCHANGED)
+        if img is not None:
+            dims.append(img.shape[:2])   
+    if not dims:
+        raise RuntimeError("Failed to read image dimensions for normalization")
+
+    all_same = all(d == dims[0] for d in dims)
+    if not all_same:
+        min_h = min(h for h, w in dims)
+        min_w = min(w for h, w in dims)
+        do_resize = True
+
+        areas = [h * w for (h, w) in dims]
+        idx_min = areas.index(min(areas))
+        image_paths[0], image_paths[idx_min] = image_paths[idx_min], image_paths[0]
+       
+    else:
+        do_resize = False
+
+    # Muat base image seperti biasa
     base_image_path = image_paths[0]
-    loaded_base_list = load_images_from_paths([base_image_path], stop_requested=stop_requested) # Tambahkan argumen lain jika perlu
+    loaded_base_list = load_images_from_paths(
+        [base_image_path],
+        stop_requested=stop_requested
+    )
 
     if not loaded_base_list:
         print(language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
         return
-    else:
-        base_image = loaded_base_list[0]
-    if base_image is None:
-        print(language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
-        return
-    
+    base_image = loaded_base_list[0]
+
+    # Terapkan resize pada base image jika diperlukan
+    if do_resize:
+        base_image = cv2.resize(
+            base_image,
+            (min_w, min_h),
+            interpolation=cv2.INTER_LINEAR
+        )
+
     total_images = len(image_paths)
     total_batches = (total_images - 1) // batch_size + 1
     total_steps = total_images * 2
     current_step = 0
-    
+
     transform_folder = os.path.join("database", "align", "transformasi")
     os.makedirs(transform_folder, exist_ok=True)
-    
+
     # Phase 1: Estimasi transformasi
     for batch_idx in range(total_batches):
         if stop_requested and stop_requested():
             break
-        
+
         start_idx = batch_idx * batch_size + 1
         end_idx = min((batch_idx + 1) * batch_size + 1, total_images)
         batch_paths = image_paths[start_idx:end_idx]
         batch_images = load_images_from_paths(batch_paths)
         if not batch_images:
             continue
-        
+
+        # Jika perlu, resize setiap target_image agar sama dimensi dengan base_image
+        if do_resize:
+            batch_images = [
+                cv2.resize(img, (min_w, min_h), interpolation=cv2.INTER_LINEAR)
+                for img in batch_images
+            ]
+
         for i, target_image in enumerate(batch_images, start=start_idx):
             if stop_requested and stop_requested():
                 break
-            
+
             info_message = language_config.RUN_IMAGE_PROCESSING.format(i=i, total_images=total_images)
             print(info_message)
-            
+
             base_points, target_points = processor.calculate_global_motion(base_image, target_image)
             if base_points is None or target_points is None:
                 print(language_config.FAIL_COMPENSATE_MOTION_PROCESS.format(i=i))
@@ -467,17 +505,17 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, sing
                 if update_progress:
                     update_progress(current_step, total_steps, language_config.FAIL_COMPENSATE_MOTION_PROCESS.format(i))
                 continue
-            
+
             transform_file_path = os.path.join(transform_folder, f"transform_{i}.npy")
             np.save(transform_file_path, (base_points, target_points))
-            
+
             current_step += 1
             if update_progress:
                 update_progress(current_step, total_steps, info_message)
-        
+
         del batch_images, batch_paths
         gc.collect()
-    
+
     # Hitung crop bounds jika diaktifkan
     crop_bounds = None
     if enable_cropping:
@@ -487,38 +525,47 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, sing
             print(language_config.FAILED_TO_COMPUTE_CROP)
             return
         np.save(os.path.join(transform_folder, "crop.npy"), crop_bounds)
-    
+
     # Phase 2: Terapkan transformasi dan simpan ke HDF5 jika diizinkan
     with h5py.File(processor.hdf5_path, "w") as h5f:
         if enable_cropping:
             base_image = crop_image(base_image, crop_bounds)
-        
-        # Simpan referensi gambar ke HDF5 hanya jika command_save_to_hd5f aktif
+
         if command_save_to_hd5f:
             h5f.create_dataset("image_0", data=base_image)
-        
+
         if save_align:
             save_align_to_folder(base_image, 0, base_image_path, align_folder)
-        
+
         num_threads = os.cpu_count() or 4
-        
+
         for batch_idx in range(total_batches):
             if stop_requested and stop_requested():
                 break
-            
+
             start_idx = batch_idx * batch_size + 1
             end_idx = min((batch_idx + 1) * batch_size + 1, total_images)
             batch_paths = image_paths[start_idx:end_idx]
-            batch_images = load_images_from_paths(batch_paths)
+            batch_images = load_images_from_paths(batch_paths, stop_requested)
+            if stop_requested and stop_requested():
+                break
+
             if not batch_images:
                 continue
-            
+
+            # Resize kembali jika diperlukan
+            if do_resize:
+                batch_images = [
+                    cv2.resize(img, (min_w, min_h), interpolation=cv2.INTER_LINEAR)
+                    for img in batch_images
+                ]
+
             with ThreadPoolExecutor(max_workers=num_threads) as executor:
                 futures = []
                 for i, target_image in enumerate(batch_images, start=start_idx):
                     if stop_requested and stop_requested():
                         break
-                    
+
                     transform_file_path = os.path.join(transform_folder, f"transform_{i}.npy")
                     if not os.path.exists(transform_file_path):
                         print(language_config.FAIL_LOAD_TRANSFORMATION_MATRIX_FILE.format(i))
@@ -526,38 +573,33 @@ def main(db_path, update_progress=None, batch_size=12, stop_requested=None, sing
                         if update_progress:
                             update_progress(current_step, total_steps, language_config.FAIL_LOAD_TRANSFORMATION_MATRIX_FILE.format(i))
                         continue
-                    
+
                     base_points, target_points = np.load(transform_file_path, allow_pickle=True)
                     compensated_image = processor.compensate_motion(target_image, base_points, target_points)
-                    
+
                     if enable_cropping:
                         compensated_image = crop_image(compensated_image, crop_bounds)
-                    
+
                     if save_align:
                         save_align_to_folder(compensated_image, i, batch_paths[i - start_idx], align_folder)
-                    
-                    # Ekstrak metadata untuk gambar yang sedang diproses (dari path asli)
-                    original_path = batch_paths[i - start_idx]
-                    metadata = extract_exif(original_path)
-                    
-                    # Simpan ke HDF5 jika diizinkan, sertakan metadata
+
+                    metadata = extract_exif(batch_paths[i - start_idx])
                     if command_save_to_hd5f:
-                        dataset_name = f"image_{i}"
-                        futures.append(executor.submit(save_to_hdf5, h5f, dataset_name, compensated_image, metadata))
-                    
+                        futures.append(executor.submit(save_to_hdf5, h5f, f"image_{i}", compensated_image, metadata))
+
                     current_step += 1
                     if update_progress:
                         update_progress(current_step, total_steps,
                                         language_config.PROGRESS_SAVING_CALCULATE_AND_COMPENSATE_MOTION.format(i, total_images))
-                    
+
                     del base_points, target_points, compensated_image
-                
-                for future in futures:
-                    future.result()
-            
+
+                for f in futures:
+                    f.result()
+
             del batch_images, batch_paths, futures
             gc.collect()
-
+ 
 def running_orb(parent=None, single_process=None, batch_id=None):
     process_finished = False
     """
