@@ -8,11 +8,10 @@
 namespace MotionMatching {
 namespace Internal {
 
-// Fungsi baru yang dioptimalkan untuk menggunakan workspace
 static float calculate_plain_mad_32f_optimized(
     const cv::Mat &block1_gray,
     const cv::Mat &block2_gray,
-    cv::Mat &diff_workspace) // Menerima workspace
+    cv::Mat &diff_workspace)
 {
     CV_Assert(block1_gray.size() == block2_gray.size() &&
               block1_gray.type() == CV_32FC1 && block2_gray.type() == CV_32FC1 &&
@@ -20,7 +19,7 @@ static float calculate_plain_mad_32f_optimized(
 
     if (block1_gray.empty()) return std::numeric_limits<float>::max();
 
-    cv::absdiff(block1_gray, block2_gray, diff_workspace); // Menggunakan workspace
+    cv::absdiff(block1_gray, block2_gray, diff_workspace);
     cv::Scalar total_sad_scalar = cv::sum(diff_workspace);
     double total_sad = total_sad_scalar.val[0];
     float num_elements = static_cast<float>(block1_gray.total());
@@ -29,12 +28,11 @@ static float calculate_plain_mad_32f_optimized(
     return static_cast<float>(total_sad / num_elements);
 }
 
-// Fungsi asli, dipertahankan untuk fallback atau jika tidak ada workspace
 static float calculate_plain_mad_32f(const cv::Mat &block1_gray, const cv::Mat &block2_gray) {
     CV_Assert(block1_gray.size() == block2_gray.size() && block1_gray.type() == CV_32FC1 && block2_gray.type() == CV_32FC1);
     if (block1_gray.empty()) return std::numeric_limits<float>::max();
 
-    cv::Mat diff; // Alokasi lokal
+    cv::Mat diff;
     cv::absdiff(block1_gray, block2_gray, diff);
     cv::Scalar total_sad_scalar = cv::sum(diff);
     double total_sad = total_sad_scalar.val[0];
@@ -54,7 +52,7 @@ static float calculate_gradient_weighted_mad_internal(
     CV_Assert(block1_gray.size() == block2_gray.size() && grad_mag_block1.size() == block1_gray.size());
     CV_Assert(block1_gray.type() == CV_32FC1 && block2_gray.type() == CV_32FC1 && grad_mag_block1.type() == CV_32FC1);
 
-    if (block1_gray.empty()) { // Cek block1_gray.empty() sudah cukup
+    if (block1_gray.empty()) {
         return std::numeric_limits<float>::max();
     }
 
@@ -63,7 +61,6 @@ static float calculate_gradient_weighted_mad_internal(
     const int rows = block1_gray.rows;
     const int cols = block1_gray.cols;
 
-   #pragma omp parallel for reduction(+:weighted_sad_sum, total_weight_sum) schedule(static)
     for (int row = 0; row < rows; ++row) {
         const float *p1_row = block1_gray.ptr<float>(row);
         const float *p2_row = block2_gray.ptr<float>(row);
@@ -73,7 +70,7 @@ static float calculate_gradient_weighted_mad_internal(
             float magnitude = mag_row[col];
             float weight = 1.0f + grad_weight_factor * magnitude;
             total_weight_sum += weight;
-            float diff_val = std::abs(p1_row[col] - p2_row[col]); // ganti nama variabel agar tidak bentrok jika ada 'diff' cv::Mat
+            float diff_val = std::abs(p1_row[col] - p2_row[col]);
             weighted_sad_sum += diff_val * weight;
         }
     }
@@ -81,13 +78,12 @@ static float calculate_gradient_weighted_mad_internal(
     double denominator = total_weight_sum + stab_epsilon;
 
     if (denominator <= stab_epsilon) {
-        // Menggunakan versi standar calculate_plain_mad_32f untuk fallback ini
         return calculate_plain_mad_32f(block1_gray, block2_gray);
     }
     return static_cast<float>(weighted_sad_sum / denominator);
 }
 
-} // namespace Internal
+}
 
 BlockMatchResult find_best_block_match_mad(
     const cv::Mat &current_block_gray,
@@ -96,7 +92,9 @@ BlockMatchResult find_best_block_match_mad(
     int block_c_start_in_ref_tile,
     int search_radius,
     float gradient_weight_factor,
-    float stability_epsilon)
+    float stability_epsilon,
+    MBMBuffers& buffers
+)
 {
     BlockMatchResult result;
 
@@ -120,17 +118,26 @@ BlockMatchResult find_best_block_match_mad(
     bool use_plain_mad_path = (std::abs(gradient_weight_factor) < stability_epsilon) ||
                               (current_block_h < 3 || current_block_w < 3);
 
-    cv::Mat grad_mag_current;
-    cv::Mat diff_workspace; // Dideklarasikan di sini
+    cv::Mat grad_mag_current_for_block; 
+    cv::Mat diff_workspace_for_block;   
 
     if (use_plain_mad_path) {
-        diff_workspace.create(current_block_gray.size(), CV_32FC1);
+        CV_Assert(buffers.diff_workspace.rows >= current_block_h && buffers.diff_workspace.cols >= current_block_w);
+        diff_workspace_for_block = buffers.diff_workspace(cv::Rect(0, 0, current_block_w, current_block_h));
     } else {
-        cv::Mat grad_x, grad_y;
-        cv::Scharr(current_block_gray, grad_x, CV_32F, 1, 0, 1, 0, cv::BORDER_REPLICATE);
-        cv::Scharr(current_block_gray, grad_y, CV_32F, 0, 1, 1, 0, cv::BORDER_REPLICATE);
-        cv::magnitude(grad_x, grad_y, grad_mag_current);
+        CV_Assert(buffers.grad_x.rows >= current_block_h && buffers.grad_x.cols >= current_block_w);
+        CV_Assert(buffers.grad_y.rows >= current_block_h && buffers.grad_y.cols >= current_block_w);
+        CV_Assert(buffers.grad_mag_current.rows >= current_block_h && buffers.grad_mag_current.cols >= current_block_w);
+
+        cv::Mat grad_x_for_block = buffers.grad_x(cv::Rect(0, 0, current_block_w, current_block_h));
+        cv::Mat grad_y_for_block = buffers.grad_y(cv::Rect(0, 0, current_block_w, current_block_h));
+        grad_mag_current_for_block = buffers.grad_mag_current(cv::Rect(0, 0, current_block_w, current_block_h));
+
+        cv::Scharr(current_block_gray, grad_x_for_block, CV_32F, 1, 0, 1, 0, cv::BORDER_REPLICATE);
+        cv::Scharr(current_block_gray, grad_y_for_block, CV_32F, 0, 1, 1, 0, cv::BORDER_REPLICATE);
+        cv::magnitude(grad_x_for_block, grad_y_for_block, grad_mag_current_for_block);
     }
+   
 
     int search_center_r = block_r_start_in_ref_tile;
     int search_center_c = block_c_start_in_ref_tile;
@@ -151,17 +158,16 @@ BlockMatchResult find_best_block_match_mad(
 
             float current_metric_score;
             if (use_plain_mad_path) {
-                // ***** KESALAHAN ADA DI SINI, GUNAKAN VERSI _OPTIMIZED *****
-                current_metric_score = Internal::calculate_plain_mad_32f_optimized( // <--- PERBAIKAN
+                current_metric_score = Internal::calculate_plain_mad_32f_optimized(
                     current_block_gray,
                     ref_block_candidate_gray,
-                    diff_workspace // Sekarang argumennya cocok
+                    diff_workspace_for_block 
                 );
             } else {
                 current_metric_score = Internal::calculate_gradient_weighted_mad_internal(
                     current_block_gray,
                     ref_block_candidate_gray,
-                    grad_mag_current,
+                    grad_mag_current_for_block,
                     gradient_weight_factor,
                     stability_epsilon
                 );
@@ -182,4 +188,4 @@ BlockMatchResult find_best_block_match_mad(
     return result;
 }
 
-} // namespace MotionMatching
+}

@@ -7,6 +7,13 @@
 
 namespace MotionMatching {
 
+struct MBMBuffers {
+    cv::Mat diff_workspace;   // Untuk calculate_plain_mad_32f_optimized
+    cv::Mat grad_x;           // Untuk Scharr
+    cv::Mat grad_y;           // Untuk Scharr
+    cv::Mat grad_mag_current; // Untuk magnitude
+};
+
 struct BlockMatchResult
 {
     float min_mad = std::numeric_limits<float>::max();
@@ -24,8 +31,9 @@ BlockMatchResult find_best_block_match_mad(
     int block_c_start_in_ref_tile,
     int search_radius,
     float gradient_weight_factor,
-    float stability_epsilon
+    float stability_epsilon,
+    MBMBuffers& buffers 
 );
 
-}
-#endif 
+} 
+#endif

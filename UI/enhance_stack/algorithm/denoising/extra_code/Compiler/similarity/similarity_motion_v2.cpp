@@ -121,7 +121,6 @@ extern "C"
 
             std::vector<cv::Mat> merged_gray_blocks_for_tile_th;
 
-            // === TAMBAHKAN BUFFER DFT DI SINI ===
             MotionMerging::DFTBuffers dft_buffers_th;
             int max_block_h_for_dft = (mbm_block_h > 0) ? mbm_block_h : tile_h;
             int max_block_w_for_dft = (mbm_block_w > 0) ? mbm_block_w : tile_w;
@@ -145,7 +144,17 @@ extern "C"
                     dft_buffers_th.temp_spatial_merged.create(max_optimal_rows, max_optimal_cols, CV_32FC1); // Real output
                 }
             }
+            MotionMatching::MBMBuffers mbm_buffers_th;
+            int mbm_alloc_h = max_block_h_for_dft;
+            int mbm_alloc_w = max_block_w_for_dft;
 
+            if (mbm_alloc_h > 0 && mbm_alloc_w > 0) {
+                mbm_buffers_th.diff_workspace.create(mbm_alloc_h, mbm_alloc_w, CV_32FC1);
+                mbm_buffers_th.grad_x.create(mbm_alloc_h, mbm_alloc_w, CV_32F);
+                mbm_buffers_th.grad_y.create(mbm_alloc_h, mbm_alloc_w, CV_32F);
+                mbm_buffers_th.grad_mag_current.create(mbm_alloc_h, mbm_alloc_w, CV_32FC1);
+            }
+           
 
             #pragma omp for collapse(2) schedule(static)
             for (int i_tile_row = 0; i_tile_row < num_row_starts; i_tile_row++) {
@@ -319,9 +328,10 @@ extern "C"
 
                             MotionMatching::BlockMatchResult block_result =
                                 MotionMatching::find_best_block_match_mad(
-                                    current_block_gray_th, reference_tile_gray_for_mbm_th, 
+                                    current_block_gray_th, reference_tile_gray_for_mbm_th,
                                     block_local_r_start, block_local_c_start, mbm_search_radius,
-                                    GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON
+                                    GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON,
+                                    mbm_buffers_th
                                 );
 
                             float mbm_confidence_score = 0.0f;
