@@ -340,7 +340,8 @@ def main(db_path, update_progress=None, batch_size=5, stop_requested=None, singl
     # —––––– SCAN UKURAN & TENTUKAN CONDITIONAL RESIZE –––––—
     dims = []
     for p in image_paths:
-        img = cv2.imread(p, cv2.IMREAD_UNCHANGED)
+        loaded_images = load_images_from_paths([p])
+        img = loaded_images[0] if loaded_images else None
         if img is not None:
             dims.append(img.shape[:2])  # (h, w)
     if not dims:

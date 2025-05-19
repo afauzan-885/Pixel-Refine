@@ -45,11 +45,11 @@ extern "C"
         int num_row_starts, int num_col_starts, int tile_h, int tile_w,
         int h_img, int w_img, int channels_input,
         int mbm_block_h, int mbm_block_w, int mbm_search_radius,
-        float frame_max_adaptive_multiplier, // Tidak digunakan di kode yang diberikan, tapi ada di signature
+        float frame_max_adaptive_multiplier,
         float p_mbm_mad_sensitivity,
         float p_mbm_noise_mad_offset_factor,
         float p_mbm_confidence_skip_dft_threshold,
-        int p_coarse_alignment_search_margin, // Tidak digunakan di kode yang diberikan
+        int p_coarse_alignment_search_margin,
         float p_freq_merge_wiener_c_factor
         )
     {
@@ -57,12 +57,11 @@ extern "C"
 
         if (!final_image_sum_ptr || !weight_map_sum_ptr || !current_image_ptr || !reference_image_ptr || !base_window_ptr ||
             !row_starts || !col_starts || h_img <= 0 || w_img <= 0 || tile_h <= 0 || tile_w <= 0 || channels_input <= 0 ||
-            (mbm_block_h <=0 && tile_h > 0 && mbm_block_w >0) || // Perbaiki kondisi mbm_block
-            (mbm_block_w <=0 && tile_w > 0 && mbm_block_h >0) ) { // jika salah satu mbm_block <=0 tapi tile > 0, itu masalah jika yang lain >0
+            (mbm_block_h <=0 && tile_h > 0 && mbm_block_w >0) || 
+            (mbm_block_w <=0 && tile_w > 0 && mbm_block_h >0) ) { 
             return;
         }
-        // Jika mbm_block_h dan mbm_block_w keduanya <=0, maka num_blocks akan menjadi 1 (seluruh tile adalah satu blok)
-
+       
         int channels_cpp = channels_input;
         int mat_type_color = CV_32FC(channels_cpp);
         if (mat_type_color == 0 && channels_cpp > 0) return;
@@ -74,18 +73,18 @@ extern "C"
         const cv::Mat reference_image_mat_input_const(h_img, w_img, CV_32FC(channels_input), const_cast<float *>(reference_image_ptr));
 
         // --- OPTIMASI: Konversi Grayscale Sekali di Awal ---
-        cv::Mat current_image_gray_full_data, reference_image_gray_full_data; // Penampung data jika konversi diperlukan
-        cv::Mat current_image_gray_full, reference_image_gray_full;           // Mat yang akan digunakan (bisa jadi view atau data baru)
+        cv::Mat current_image_gray_full_data, reference_image_gray_full_data; 
+        cv::Mat current_image_gray_full, reference_image_gray_full;  
 
         if (current_image_mat_input_const.channels() > 1) {
             cv::cvtColor(current_image_mat_input_const, current_image_gray_full_data, cv::COLOR_BGR2GRAY);
-            if (current_image_gray_full_data.type() != CV_32F) { // Setelah cvtColor, biasanya CV_8U
+            if (current_image_gray_full_data.type() != CV_32F) {
                 current_image_gray_full_data.convertTo(current_image_gray_full_data, CV_32F);
             }
             current_image_gray_full = current_image_gray_full_data;
-        } else { // Sudah single channel
+        } else {
             if (current_image_mat_input_const.type() == CV_32FC1) {
-                current_image_gray_full = current_image_mat_input_const; // Berbagi data, tidak ada copy
+                current_image_gray_full = current_image_mat_input_const; 
             } else {
                 current_image_mat_input_const.convertTo(current_image_gray_full_data, CV_32F);
                 current_image_gray_full = current_image_gray_full_data;
@@ -98,7 +97,7 @@ extern "C"
                 reference_image_gray_full_data.convertTo(reference_image_gray_full_data, CV_32F);
             }
             reference_image_gray_full = reference_image_gray_full_data;
-        } else { // Sudah single channel
+        } else {
             if (reference_image_mat_input_const.type() == CV_32FC1) {
                 reference_image_gray_full = reference_image_mat_input_const; // Berbagi data
             } else {
@@ -108,23 +107,44 @@ extern "C"
         }
 
         if (current_image_gray_full.empty() || reference_image_gray_full.empty()) {
-            // std::cerr << "Grayscale conversion failed or input empty." << std::endl;
             return;
         }
         CV_Assert(current_image_gray_full.type() == CV_32FC1 && reference_image_gray_full.type() == CV_32FC1);
-        // --- END OPTIMASI Konversi Grayscale ---
-
+     
 
 #pragma omp parallel
         {
             // --- OPTIMASI: Deklarasi buffer per-thread di luar loop tile ---
             cv::Mat darkness_map_raw_th, darkness_map_smoothed_th;
             cv::Mat block_confidences_raw_th, block_confidences_smoothed_th;
-            
-            // Buffer untuk estimasi noise
-            cv::Mat larger_ref_tile_gray_th;
+            cv::Mat noise_estimation_source_th; 
 
             std::vector<cv::Mat> merged_gray_blocks_for_tile_th;
+
+            // === TAMBAHKAN BUFFER DFT DI SINI ===
+            MotionMerging::DFTBuffers dft_buffers_th;
+            int max_block_h_for_dft = (mbm_block_h > 0) ? mbm_block_h : tile_h;
+            int max_block_w_for_dft = (mbm_block_w > 0) ? mbm_block_w : tile_w;
+            if (tile_h < max_block_h_for_dft && tile_h > 0) max_block_h_for_dft = tile_h;
+            if (tile_w < max_block_w_for_dft && tile_w > 0) max_block_w_for_dft = tile_w;
+
+
+            if (max_block_h_for_dft > 0 && max_block_w_for_dft > 0) {
+                int max_optimal_rows = cv::getOptimalDFTSize(max_block_h_for_dft);
+                int max_optimal_cols = cv::getOptimalDFTSize(max_block_w_for_dft);
+                max_optimal_rows = std::max(max_optimal_rows, max_block_h_for_dft);
+                max_optimal_cols = std::max(max_optimal_cols, max_block_w_for_dft);
+
+
+                if (max_optimal_rows > 0 && max_optimal_cols > 0) {
+                    dft_buffers_th.current_padded.create(max_optimal_rows, max_optimal_cols, CV_32FC1);
+                    dft_buffers_th.ref_padded.create(max_optimal_rows, max_optimal_cols, CV_32FC1);
+                    dft_buffers_th.current_dft.create(max_optimal_rows, max_optimal_cols, CV_32FC2); // DFT complex output
+                    dft_buffers_th.ref_dft.create(max_optimal_rows, max_optimal_cols, CV_32FC2);
+                    dft_buffers_th.merged_dft.create(max_optimal_rows, max_optimal_cols, CV_32FC2);
+                    dft_buffers_th.temp_spatial_merged.create(max_optimal_rows, max_optimal_cols, CV_32FC1); // Real output
+                }
+            }
 
 
             #pragma omp for collapse(2) schedule(static)
@@ -138,7 +158,6 @@ extern "C"
 
                     cv::Rect tile_roi_orig(c_tile_start, r_tile_start, tile_w, tile_h);
                     
-                    // Ambil ROI dari gambar input warna dan grayscale yang sudah dikonversi
                     const cv::Mat current_tile_color_th = current_image_mat_input_const(tile_roi_orig);
                     const cv::Mat current_tile_gray_master_th = current_image_gray_full(tile_roi_orig);
                     const cv::Mat reference_tile_gray_for_mbm_th = reference_image_gray_full(tile_roi_orig); // ROI untuk MBM
@@ -290,9 +309,9 @@ extern "C"
                             }
 
                             const cv::Mat current_block_gray_th = current_tile_gray_master_th(current_block_roi_local);
-                            current_block_gray_th.copyTo(current_block_merged_gray_output_th); // Default output adalah current block
+                            current_block_gray_th.copyTo(current_block_merged_gray_output_th); 
 
-                            if (current_block_gray_th.empty()) { // reference_tile_gray_for_mbm_th sudah dicek tidak kosong di awal tile
+                            if (current_block_gray_th.empty()) { 
                                  block_confidences_raw_th.at<float>(bh_idx, bw_idx) = 0.0f;
                                  if(block_idx_flat < merged_gray_blocks_for_tile_th.size()) merged_gray_blocks_for_tile_th[block_idx_flat] = current_block_merged_gray_output_th.clone();
                                  continue;
@@ -300,7 +319,7 @@ extern "C"
 
                             MotionMatching::BlockMatchResult block_result =
                                 MotionMatching::find_best_block_match_mad(
-                                    current_block_gray_th, reference_tile_gray_for_mbm_th, // Menggunakan ROI, bukan clone
+                                    current_block_gray_th, reference_tile_gray_for_mbm_th, 
                                     block_local_r_start, block_local_c_start, mbm_search_radius,
                                     GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON
                                 );
@@ -327,11 +346,12 @@ extern "C"
                                     
                                     MotionMerging::FrequencyMergeResult merge_result =
                                         MotionMerging::merge_blocks_frequency_domain(
-                                            current_block_gray_th, 
+                                            current_block_gray_th,
                                             ref_block_from_mbm_gray_th,
                                             estimated_noise_sigma_tile,
                                             p_freq_merge_wiener_c_factor,
-                                            STABILITY_EPSILON
+                                            STABILITY_EPSILON,
+                                            dft_buffers_th
                                         );
 
                                     if (merge_result.success && !merge_result.merged_block_gray.empty()) {
@@ -447,18 +467,21 @@ extern "C"
                                     float gray_orig_val_pixel = current_block_gray_orig_pixel_th.at<float>(y_in_block_pixel, x_in_block_pixel);
                                     
                                     float ratio_gray = (gray_orig_val_pixel > STABILITY_EPSILON) ? (gray_merged_val_pixel / gray_orig_val_pixel) : 1.0f;
-                                    ratio_gray = std::max(0.0f, std::min(ratio_gray, 2.0f)); 
+                                    ratio_gray = std::max(0.0f, std::min(ratio_gray, 2.0f));
+
+                                    float ratio_deviation = ratio_gray - 1.0f;
+                                    float adjusted_ratio_gray = 1.0f + (ratio_deviation * block_confidence_pixel_val);
 
                                     for (int ch = 0; ch < channels_cpp; ++ch) {
                                         float color_val_orig_pixel;
-                                        if (channels_cpp == 1) { 
+                                        if (channels_cpp == 1) {
                                             color_val_orig_pixel = current_block_color_orig_pixel_th.at<float>(y_in_block_pixel, x_in_block_pixel);
-                                        } else { 
+                                        } else {
                                             color_val_orig_pixel = current_block_color_orig_pixel_th.ptr<const float>(y_in_block_pixel)[x_in_block_pixel * channels_cpp + ch];
                                         }
 
-                                        float final_color_val_pixel = color_val_orig_pixel * ratio_gray;
-                                        final_color_val_pixel = std::max(0.0f, std::min(1.0f, final_color_val_pixel)); 
+                                        float final_color_val_pixel = color_val_orig_pixel * adjusted_ratio_gray;
+                                        final_color_val_pixel = std::max(0.0f, std::min(1.0f, final_color_val_pixel)); // Pastikan dalam rentang [0,1]
 
                                         float weighted_pixel_color_value = final_color_val_pixel * pixel_accum_weight;
                                         #pragma omp atomic update

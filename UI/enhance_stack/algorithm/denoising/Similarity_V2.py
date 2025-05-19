@@ -232,11 +232,9 @@ class SimilarityAlgorithmV2:
                 raise TypeError(language_config.IMAGE_DATA_MUST_BE_VALID)
 
             h_orig, w_orig = ref_image_orig.shape[:2]
-            # channels_orig: channel gambar input asli (bisa 1 atau 3 atau 4)
             channels_orig = ref_image_orig.shape[2] if ref_image_orig.ndim == 3 else 1
             dtype_orig = ref_image_orig.dtype
 
-            # channels_buffer: channel yang digunakan untuk buffer di C++ (selalu 3)
             channels_buffer_cpp = 3
 
         except (AttributeError, IndexError, TypeError) as e:
@@ -245,19 +243,15 @@ class SimilarityAlgorithmV2:
         if dtype_orig not in (np.uint8, np.uint16):
             raise TypeError(language_config.IMAGE_BIT_REQUIRED)
 
-        # mbm_block_size bisa sama dengan tile_size atau lebih kecil.
-        # Di sini kita set default sama dengan tile_size, bisa dijadikan parameter fungsi jika perlu.
         mbm_block_h = val_tile_h
         mbm_block_w = val_tile_w
-        mbm_search_radius = 10 # Ini juga bisa jadi parameter jika diinginkan
-
+        mbm_search_radius = 0 
+        
         try:
             c_interface = SimilarityV2MotionInterface(lib_path)
         except (FileNotFoundError, OSError, AttributeError) as e:
            raise RuntimeError(f"Failed to initialize C++ interface: {e}")
 
-        # Normalisasi gambar referensi KE BUFFER 3 CHANNEL FLOAT32
-        # h_ref, w_ref adalah dimensi gambar setelah normalisasi (seharusnya sama dengan h_orig, w_orig)
         reference_image_float32_3ch = self.normalize_image(ref_image_orig, dtype_orig)
         h_ref, w_ref, channels_ref_check = reference_image_float32_3ch.shape
 
@@ -265,13 +259,9 @@ class SimilarityAlgorithmV2:
              raise RuntimeError(language_config.COLOR_CHANNEL_DOES_NOT_MATCH +
                                 f" Expected {channels_buffer_cpp}, got {channels_ref_check} from normalized ref.")
 
-        # Buffer akumulasi selalu float32 dan 3 channel
         final_image_sum = np.ascontiguousarray(np.zeros((h_ref, w_ref, channels_buffer_cpp), dtype=np.float32))
         weight_map_sum = np.ascontiguousarray(np.zeros((h_ref, w_ref), dtype=np.float32)) # Weight map selalu 1 channel
 
-        # Tile starts & base window
-        # Penting: tile_h_proc dan tile_w_proc adalah ukuran tile yang akan diproses,
-        # bisa jadi lebih kecil dari val_tile_h/val_tile_w jika gambar lebih kecil dari tile.
         tile_h_proc = min(val_tile_h, h_ref)
         tile_w_proc = min(val_tile_w, w_ref)
 
@@ -282,14 +272,14 @@ class SimilarityAlgorithmV2:
             row_starts = np.arange(0, h_ref - tile_h_proc + 1, step_y, dtype=np.int32)
             if not row_starts.size or row_starts[-1] != h_ref - tile_h_proc :
                 row_starts = np.append(row_starts, h_ref - tile_h_proc).astype(np.int32)
-        else: # Gambar lebih kecil atau sama dengan tinggi tile
+        else: 
             row_starts = np.array([0], dtype=np.int32)
 
         if w_ref > tile_w_proc:
             col_starts = np.arange(0, w_ref - tile_w_proc + 1, step_x, dtype=np.int32)
             if not col_starts.size or col_starts[-1] != w_ref - tile_w_proc:
                 col_starts = np.append(col_starts, w_ref - tile_w_proc).astype(np.int32)
-        else: # Gambar lebih kecil atau sama dengan lebar tile
+        else:
             col_starts = np.array([0], dtype=np.int32)
 
         row_starts = np.ascontiguousarray(np.unique(row_starts))
@@ -297,12 +287,11 @@ class SimilarityAlgorithmV2:
 
         base_window = self.gaussian_window((tile_h_proc, tile_w_proc))
 
-        # Estimasi noise global
         try:
             global_avg_sigma = c_interface.estimate_noise(
                 reference_image_float32_3ch, h_ref, w_ref, channels_buffer_cpp,
                 tile_h_proc, tile_w_proc,
-                row_starts, col_starts # c_interface akan ambil len() dari ini
+                row_starts, col_starts 
             )
         except Exception as e:
             global_avg_sigma = 0.03 
@@ -314,9 +303,8 @@ class SimilarityAlgorithmV2:
         scale_value = np.float32(np.iinfo(dtype_orig).max)
         num_images_total = len(images)
         processed_frames_count = 0
-        progress_cap_percent = 95 # Untuk UI agar tidak langsung 100% sebelum normalisasi
-
-        # Loop pemrosesan gambar
+        progress_cap_percent = 95 
+        
         for i, current_image_orig in enumerate(images):
             if not isinstance(current_image_orig, np.ndarray):
                 continue
@@ -335,7 +323,6 @@ class SimilarityAlgorithmV2:
             if stop_requested and stop_requested():
                 break
 
-            # Validasi gambar saat ini
             try:
                 if current_image_orig.shape[0] != h_orig or current_image_orig.shape[1] != w_orig:
                     continue
@@ -348,22 +335,20 @@ class SimilarityAlgorithmV2:
             if current_image_float32_3ch.shape[2] != channels_buffer_cpp:
                 continue
 
-            # Panggil fungsi akumulasi C++
             try:
                 c_interface.accumulate_frame(
                     final_image_sum, weight_map_sum,
                     current_image_float32_3ch, reference_image_float32_3ch,
                     base_window, row_starts, col_starts,
                     tile_h_proc, tile_w_proc, h_ref, w_ref, channels_buffer_cpp,
-                    mbm_block_h, mbm_block_w, mbm_search_radius, # mbm params
-                    frame_max_multiplier, # adaptive multiplier
-                    # Parameter baru yang dipindahkan dari C++
+                    mbm_block_h, mbm_block_w, mbm_search_radius, 
+                    frame_max_multiplier, 
                     mbm_mad_sensitivity, mbm_noise_mad_offset_factor,
                     mbm_confidence_skip_dft_threshold, coarse_alignment_search_margin,
                     freq_merge_wiener_c_factor
                 )
                 processed_frames_count += 1
-            except RuntimeError as e: # Tangkap error spesifik jika ada
+            except RuntimeError as e: 
                pass
             except Exception as e:
                 pass
@@ -372,22 +357,19 @@ class SimilarityAlgorithmV2:
                  return ref_image_orig.astype(dtype_orig, copy=False)
             elif channels_orig == 3 and ref_image_orig.ndim == 3: # input asli berwarna
                  return ref_image_orig.astype(dtype_orig, copy=False)
-            else: # Fallback jika format aneh
+            else:
                  output_shape = (h_orig, w_orig) if channels_orig == 1 else (h_orig, w_orig, channels_orig)
                  return np.zeros(output_shape, dtype=dtype_orig)
 
 
-        # Normalisasi FINAL (setelah semua frame diproses)
         try:
             c_interface.normalize_accumulated(final_image_sum, weight_map_sum, h_ref, w_ref, channels_buffer_cpp)
         except Exception as e:
             raise RuntimeError(language_config.NORMALIZATION_FAILED.format(e))
 
-        # Penyimpanan Peta Bobot (opsional)
         if save_weight_map_path:
             print(language_config.OUTPUT_SAVE_WEIGHT_MAP.format(save_weight_map_path))
             try:
-                # Normalisasi bobot untuk visualisasi (rata-rata per frame yang berkontribusi)
                 if processed_frames_count > 0:
                     normalized_weights_vis = weight_map_sum / float(processed_frames_count)
                 else:
@@ -396,7 +378,6 @@ class SimilarityAlgorithmV2:
                 normalized_weights_vis = np.clip(normalized_weights_vis, 0.0, 1.0)
                 weight_map_to_save = (normalized_weights_vis * 255).astype(np.uint8)
 
-                # Buat direktori jika belum ada
                 os.makedirs(os.path.dirname(save_weight_map_path), exist_ok=True)
                 success_save = cv2.imwrite(save_weight_map_path, weight_map_to_save)
                 if success_save:

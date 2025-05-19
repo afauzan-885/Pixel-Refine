@@ -425,7 +425,8 @@ def main(db_path,
     # —––––– SCAN UKURAN & SETUP KONDISIONAL RESIZE –––––—
     dims = []
     for p in image_paths:
-        img = cv2.imread(p, cv2.IMREAD_UNCHANGED)
+        loaded_images = load_images_from_paths([p])
+        img = loaded_images[0] if loaded_images else None
         if img is not None:
             dims.append(img.shape[:2])   
     if not dims:
