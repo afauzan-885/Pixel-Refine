@@ -9,7 +9,8 @@
 #include <opencv2/imgproc.hpp>
 #include <opencv2/core/utility.hpp>
 #include "block_matching.hpp"
-#include "tile_noise_estimation.hpp" // Tambahkan ini
+#include "tile_noise_estimation.hpp"
+#include "spatial_merging.hpp"
 
 //=============================================================================
 // Konstanta dan Konfigurasi
@@ -20,53 +21,7 @@ namespace MotionMetricsConfig {
     constexpr float GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD = 1e-6f;
     constexpr float GRADIENT_WEIGHT_FACTOR = 1.3f;
     constexpr float MAD_TO_SIGMA_FACTOR = 1.4826f; 
-
-    constexpr float DEFAULT_MBM_MAD_SENSITIVITY = 60.0f; 
-    constexpr float DEFAULT_MBM_NOISE_MAD_OFFSET_FACTOR = 0.4f; 
 }
-
-// Modifikasi calculate_match_confidence
-static float calculate_match_confidence(
-    const MotionMatching::BlockMatchResult& result,
-    float estimated_noise_sigma, // Parameter baru
-    float p_mbm_mad_sensitivity,
-    float p_mbm_noise_mad_offset_factor)
-{
-    using namespace MotionMetricsConfig;
-    float match_confidence = 0.0f;
-
-    if (!result.success || result.matches_found <= 0) {
-        return 0.0f;
-    }
-
-    // 1. Hitung "Excess MAD"
-     float noise_induced_mad_offset = p_mbm_noise_mad_offset_factor * estimated_noise_sigma;
-    float excess_mad = std::max(0.0f, result.min_mad - noise_induced_mad_offset);
-
-    // 2. Confidence berdasarkan kualitas absolut (Excess MAD)
-    float absolute_quality_confidence = std::exp(-excess_mad * p_mbm_mad_sensitivity);
-    absolute_quality_confidence = std::max(0.0f, std::min(1.0f, absolute_quality_confidence));
-
-    if (result.matches_found == 1) {
-        match_confidence = std::min(0.75f, absolute_quality_confidence); 
-    } else {
-         float ratio_confidence = 1.0f; 
-        if (result.second_min_mad < std::numeric_limits<float>::max() && result.second_min_mad > CONFIDENCE_EPSILON) {
-            float excess_second_min_mad = std::max(0.0f, result.second_min_mad - noise_induced_mad_offset);
-            float ratio = 1.0f;
-            if (excess_second_min_mad > STABILITY_EPSILON) {
-                 ratio = excess_mad / excess_second_min_mad;
-            } else if (excess_mad < CONFIDENCE_EPSILON) { 
-                 ratio = 0.0f; 
-            } 
-
-            ratio_confidence = std::max(0.0f, 1.0f - ratio); // Semakin kecil rasio, semakin baik (mendekati 1)
-        }
-        match_confidence = absolute_quality_confidence * ratio_confidence;
-    }
-    return std::max(0.0f, std::min(1.0f, match_confidence));
-}
-
 
 extern "C"
 {

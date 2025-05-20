@@ -28,8 +28,6 @@ namespace MotionMetricsConfig
     constexpr float MAD_TO_SIGMA_FACTOR = 1.4826f;
 
     constexpr float DARK_UPPER_THRESHOLD = 127.0f / 255.0f;
-    constexpr float MAX_MIN_DARK_CONFIDENCE = 1e-3f;
-    constexpr int DARKNESS_MAP_BLUR_KERNEL_SIZE = 1;
     constexpr int CONFIDENCE_MAP_BLUR_KERNEL_SIZE = 3;
 
     // --- Konstanta untuk Merging Domain Frekuensi ---
@@ -219,54 +217,6 @@ extern "C"
 
                     if (num_blocks_h_tile == 0 || num_blocks_w_tile == 0) continue;
 
-                    
-                    if (darkness_map_raw_th.rows != num_blocks_h_tile || darkness_map_raw_th.cols != num_blocks_w_tile || darkness_map_raw_th.type() != CV_32F) {
-                        darkness_map_raw_th.create(num_blocks_h_tile, num_blocks_w_tile, CV_32F);
-                    }
-                    darkness_map_raw_th.setTo(cv::Scalar(0.0f));
-
-                   
-                    for (int bh_idx = 0; bh_idx < num_blocks_h_tile; ++bh_idx) {
-                        for (int bw_idx = 0; bw_idx < num_blocks_w_tile; ++bw_idx) {
-                            int block_local_r_start = bh_idx * actual_mbm_block_h_tile;
-                            int block_local_c_start = bw_idx * actual_mbm_block_w_tile;
-                            int current_block_h_dim = std::min(actual_mbm_block_h_tile, tile_h - block_local_r_start);
-                            int current_block_w_dim = std::min(actual_mbm_block_w_tile, tile_w - block_local_c_start);
-                            if (current_block_h_dim <= 0 || current_block_w_dim <= 0) continue;
-
-                            cv::Rect current_block_roi_local(block_local_c_start, block_local_r_start, current_block_w_dim, current_block_h_dim);
-                           
-                            if (current_block_roi_local.x >= 0 && current_block_roi_local.y >= 0 &&
-                                current_block_roi_local.x + current_block_roi_local.width <= current_tile_gray_master_th.cols &&
-                                current_block_roi_local.y + current_block_roi_local.height <= current_tile_gray_master_th.rows)
-                            {
-                                const cv::Mat current_block_gray_for_darkness_th = current_tile_gray_master_th(current_block_roi_local);
-                                if (!current_block_gray_for_darkness_th.empty()) {
-                                    float avg_intensity = static_cast<float>(cv::mean(current_block_gray_for_darkness_th)[0]);
-                                    float darkness_factor = 0.0f;
-                                    if (avg_intensity < DARK_UPPER_THRESHOLD) {
-                                        float norm_intens = avg_intensity / DARK_UPPER_THRESHOLD;
-                                        darkness_factor = 1.0f - norm_intens * norm_intens;
-                                    }
-                                    darkness_map_raw_th.at<float>(bh_idx, bw_idx) = std::max(0.0f, std::min(1.0f, darkness_factor));
-                                } 
-                            } 
-                        }
-                    }
-                    
-                    int kernel_sz_dark_tile = (DARKNESS_MAP_BLUR_KERNEL_SIZE >= 1 && DARKNESS_MAP_BLUR_KERNEL_SIZE % 2 == 1) ? DARKNESS_MAP_BLUR_KERNEL_SIZE : 1;
-                    if (!darkness_map_raw_th.empty() && kernel_sz_dark_tile >=3 ) { 
-                        cv::GaussianBlur(darkness_map_raw_th, darkness_map_smoothed_th, cv::Size(kernel_sz_dark_tile, kernel_sz_dark_tile), 0);
-                    } else if (!darkness_map_raw_th.empty()) {
-                        darkness_map_raw_th.copyTo(darkness_map_smoothed_th);
-                    } else {
-                        if(darkness_map_smoothed_th.rows != num_blocks_h_tile || darkness_map_smoothed_th.cols != num_blocks_w_tile || darkness_map_smoothed_th.type() != CV_32F) {
-                           darkness_map_smoothed_th.create(num_blocks_h_tile, num_blocks_w_tile, CV_32F);
-                        }
-                        darkness_map_smoothed_th.setTo(cv::Scalar(0.0f));
-                    }
-                   
-
                    
                     if (block_confidences_raw_th.rows != num_blocks_h_tile || block_confidences_raw_th.cols != num_blocks_w_tile || block_confidences_raw_th.type() != CV_32F) {
                         block_confidences_raw_th.create(num_blocks_h_tile, num_blocks_w_tile, CV_32F);
@@ -388,15 +338,6 @@ extern "C"
                             }
 
                             float final_block_confidence = combined_confidence;
-                            float smoothed_darkness_factor_block = 0.0f;
-                            if (darkness_map_is_usable_tile && bh_idx < darkness_map_smoothed_th.rows && bw_idx < darkness_map_smoothed_th.cols) {
-                                smoothed_darkness_factor_block = darkness_map_smoothed_th.at<float>(bh_idx, bw_idx);
-                            }
-                           if (mbm_confidence_score > CONFIDENCE_EPSILON) {
-                               final_block_confidence = std::max(final_block_confidence, smoothed_darkness_factor_block * MAX_MIN_DARK_CONFIDENCE);
-                            } else { 
-                               final_block_confidence = std::min(final_block_confidence, smoothed_darkness_factor_block * MAX_MIN_DARK_CONFIDENCE);
-                            }
                             block_confidences_raw_th.at<float>(bh_idx, bw_idx) = std::max(0.0f, std::min(1.0f, final_block_confidence));
                         }
                     } 

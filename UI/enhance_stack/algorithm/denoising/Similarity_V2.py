@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 # from UI.enhance_stack.algorithm.denoising.extra_similarity.compute_motion_metrics_aot import accumulate_tiles_jit
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, get_all_image_paths_for_single_process, load_images_from_paths, save_image
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, gaussian_window, get_all_image_paths_for_single_process, load_images_from_paths, normalize_image, save_image
 from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityV2MotionInterface
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.GeneralSetting import load_general_settings
@@ -156,57 +156,9 @@ class SimilarityAlgorithmV2:
         elif global_avg_sigma >= sigma_high:
             return 0.0
         else:
-            # Interpolasi linear terbalik: skor turun dari 100 ke 0 saat sigma naik
             score = 100.0 * (sigma_high - global_avg_sigma) / (sigma_high - sigma_low)
-            # Pastikan skor tetap dalam rentang [0, 100] karena floating point error kecil
             return max(0.0, min(score, 100.0))
     
-    @lru_cache(maxsize=None)
-    def gaussian_window(self, size, sigma_scale=1/6):
-        """Menghasilkan jendela Gaussian 2D [0, 1] float32 C-contiguous."""
-        rows, cols = size
-        if rows <= 0 or cols <= 0:
-            return np.zeros((0, 0), dtype=np.float32) # Handle edge case
-        sigma_y = max(rows * sigma_scale, 1e-6) # Hindari sigma nol
-        sigma_x = max(cols * sigma_scale, 1e-6) # Hindari sigma nol
-        y = np.arange(0, rows, 1, float) - (rows - 1) / 2
-        x = np.arange(0, cols, 1, float) - (cols - 1) / 2
-        
-        gaussian_y = np.exp(-y**2 / (2 * sigma_y**2 + 1e-12))
-        gaussian_x = np.exp(-x**2 / (2 * sigma_x**2 + 1e-12))
-        window = np.outer(gaussian_y, gaussian_x)
-        max_val = window.max()
-        if max_val > 1e-6: 
-             window = window / max_val
-        else:
-            window = np.zeros_like(window)
-        
-        return np.ascontiguousarray(window.astype(np.float32))
-
-    def normalize_image(self, image, dtype):
-        """
-        Normalisasi gambar ke range [0, 1] float32 berdasarkan tipe data asli.
-        Mempertahankan kecerahan relatif antar frame. Menghasilkan C-contiguous array.
-        """
-        try:
-            scale = np.float32(np.iinfo(dtype).max)
-        except ValueError:
-            if np.issubdtype(dtype, np.floating):
-                scale = 1.0
-            else:
-                raise TypeError(language_config.DATA_TYPE_NOT_SUPPORTED.format(dtype))
-
-        image_float = np.ascontiguousarray(image.astype(np.float32))
-
-        if scale > 1e-6:
-            norm_image = image_float / scale
-        else:
-            norm_image = image_float
-              
-        if image.ndim == 2:
-            norm_image = np.stack((norm_image,) * 3, axis=-1)
-
-        return np.ascontiguousarray(norm_image.astype(np.float32))
 
     def similarity_mfnr(self, images, tile_size, overlap,
                         mbm_mad_sensitivity=20.0,
@@ -215,7 +167,7 @@ class SimilarityAlgorithmV2:
                         coarse_alignment_search_margin=12,
                         freq_merge_wiener_c_factor=2.0,
                         update_progress=None, stop_requested=None,
-                        lib_path='UI\data\similarity_motion_v2.dll',
+                        lib_path='UI/data/similarity_motion_v2.dll',
                         save_weight_map_path=None,
                         total_overall_images=None, images_processed_so_far=0):
 
@@ -252,7 +204,7 @@ class SimilarityAlgorithmV2:
         except (FileNotFoundError, OSError, AttributeError) as e:
            raise RuntimeError(f"Failed to initialize C++ interface: {e}")
 
-        reference_image_float32_3ch = self.normalize_image(ref_image_orig, dtype_orig)
+        reference_image_float32_3ch = normalize_image(ref_image_orig, dtype_orig)
         h_ref, w_ref, channels_ref_check = reference_image_float32_3ch.shape
 
         if channels_ref_check != channels_buffer_cpp:
@@ -285,7 +237,7 @@ class SimilarityAlgorithmV2:
         row_starts = np.ascontiguousarray(np.unique(row_starts))
         col_starts = np.ascontiguousarray(np.unique(col_starts))
 
-        base_window = self.gaussian_window((tile_h_proc, tile_w_proc))
+        base_window = gaussian_window((tile_h_proc, tile_w_proc))
 
         try:
             global_avg_sigma = c_interface.estimate_noise(
@@ -331,7 +283,7 @@ class SimilarityAlgorithmV2:
             except Exception as e:
                 continue
 
-            current_image_float32_3ch = self.normalize_image(current_image_orig, dtype_orig)
+            current_image_float32_3ch = normalize_image(current_image_orig, dtype_orig)
             if current_image_float32_3ch.shape[2] != channels_buffer_cpp:
                 continue
 
@@ -407,22 +359,17 @@ class SimilarityAlgorithmV2:
 def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
          single_process=None, batch_id=None, save_final_weight_map=False, progress_bar=None):
     try:
-        general_settings = load_general_settings()
+        general_settings, _= load_general_settings()
         image_processor = SimilarityAlgorithmV2(db_path) # db_path digunakan di sini
 
-        # Parameter V2 yang sudah ada
         sim_tile_size_int = general_settings.get("similarity_v2_tile_size", 16)
-        sim_motion_threshold = general_settings.get("similarity_v2_motion_threshold", 0.030) # Saat ini di-komen di pemanggilan mfnr
         sim_overlap_percent = general_settings.get("similarity_v2_overlap_percent", 40.0)
-
-        # NEW: Tangkap parameter V2 tambahan
         sim_v2_mbm_noise_mad_offset_factor = general_settings.get("similarity_v2_mbm_noise_mad_offset_factor", 0.5)
         sim_v2_mbm_mad_sensitivity = general_settings.get("similarity_v2_mbm_mad_sensitivity", 20.0)
         sim_v2_mbm_confidence_skip_dft_threshold = general_settings.get("similarity_v2_mbm_confidence_skip_dft_threshold", 0.9)
         sim_v2_freq_merge_wiener_c_factor = general_settings.get("similarity_v2_freq_merge_wiener_c_factor", 2.0)
         sim_v2_coarse_alignment_search_margin = general_settings.get("similarity_v2_coarse_alignment_search_margin", 12)
-        # ---
-
+       
         tile_size_tuple = (sim_tile_size_int, sim_tile_size_int)
         overlap_ratio = sim_overlap_percent / 100.0
 

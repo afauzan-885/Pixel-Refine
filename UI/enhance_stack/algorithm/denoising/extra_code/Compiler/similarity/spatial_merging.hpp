@@ -1,25 +1,21 @@
-#ifndef SPATIAL_MERGING_HPP 
+// spatial_merging.hpp
+#ifndef SPATIAL_MERGING_HPP
 #define SPATIAL_MERGING_HPP
 
-#include <opencv2/core.hpp>
+#include "block_matching.hpp" 
+#include <cmath>               
+#include <limits>             
 
-namespace MotionMerging { // Namespace tetap sama
+namespace MotionMatching { 
 
-struct SpatialMergeResult { // Struct tetap sama
-    cv::Mat merged_block_gray;
-    float merge_confidence = 0.0f;
-    bool success = false;
-};
-
-// Nama fungsi tetap sama untuk kompatibilitas dengan pemanggil
-SpatialMergeResult spatial_merge_block(
-    const cv::Mat& current_block_gray,
-    const cv::Mat& reference_block_gray,
-    float estimated_noise_sigma_for_block,
-    float wiener_c_factor,
-    float stability_epsilon
+// Deklarasi fungsi
+float calculate_match_confidence( 
+    const MotionMatching::BlockMatchResult& result,
+    float estimated_noise_sigma,
+    float p_mbm_mad_sensitivity, 
+    float p_mbm_noise_mad_offset_factor 
 );
 
-} // namespace MotionMerging
+}
 
-#endif // SPATIAL_MERGING_HPP
+#endif

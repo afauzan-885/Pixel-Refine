@@ -4,8 +4,6 @@
 #include <cmath>
 #include <algorithm>
 #include <iostream>
-// #include <omp.h> // Dihapus karena nested parallelism dihilangkan
-
 namespace MotionMerging {
 
 FrequencyMergeResult merge_blocks_frequency_domain(
@@ -14,22 +12,18 @@ FrequencyMergeResult merge_blocks_frequency_domain(
     float estimated_noise_sigma_for_block,
     float wiener_c_factor,
     float stability_epsilon,
-    DFTBuffers& buffers // Menggunakan buffer yang dilewatkan
+    DFTBuffers& buffers 
 )
 {
     FrequencyMergeResult result;
     result.success = false;
-    // TIDAK ADA copyTo awal ke result.merged_block_gray
-
+ 
     if (current_block_gray.empty() && reference_block_gray.empty()) {
-        result.merged_block_gray = cv::Mat(); // Atau biarkan kosong
+        result.merged_block_gray = cv::Mat();
         return result;
     }
     if (current_block_gray.empty()) {
-        // Tidak bisa menggunakan buffer di sini karena ukuran mungkin tidak cocok
-        // dan ini adalah jalur fallback.
         reference_block_gray.copyTo(result.merged_block_gray);
-        // result.success tetap false, ini adalah kondisi fallback, bukan merge sukses
         return result;
     }
     if (reference_block_gray.empty()) {
@@ -51,39 +45,21 @@ FrequencyMergeResult merge_blocks_frequency_domain(
         return result;
     }
 
-    // Tidak ada copyTo default ke result.merged_block_gray lagi di sini
-
+ 
     int optimal_rows = cv::getOptimalDFTSize(block_h);
     int optimal_cols = cv::getOptimalDFTSize(block_w);
 
-    optimal_rows = std::max(optimal_rows, block_h); // Pastikan tidak lebih kecil
-    optimal_cols = std::max(optimal_cols, block_w); // Pastikan tidak lebih kecil
+    optimal_rows = std::max(optimal_rows, block_h); 
+    optimal_cols = std::max(optimal_cols, block_w); 
 
-
-    // Gunakan buffer yang dilewatkan. Re-create jika ukurannya tidak sesuai.
-    // Ini adalah trade-off; idealnya, pemanggil sudah memastikan ukuran buffer cukup.
-    // Jika ukuran blok bervariasi, maka .create() diperlukan.
-    // Jika ukuran blok tetap, alokasi awal di pemanggil sudah cukup.
-    // Untuk kesederhanaan awal, kita asumsikan pemanggil menyiapkan buffer dengan ukuran maksimal
-    // atau kita menggunakan .create() yang akan re-alokasi jika perlu.
-    // Untuk performa terbaik, pemanggil harus mengelola ukuran buffer agar .create() jarang re-alokasi.
     try {
-        // Pengecekan dan pembuatan buffer jika perlu (jika ukurannya bisa bervariasi)
-        // atau asumsikan buffer sudah dialokasikan dengan benar oleh pemanggil.
-        // Untuk contoh ini, kita akan membiarkan .create() untuk fleksibilitas,
-        // tapi idealnya ini dioptimalkan lebih lanjut.
-
-        // Padding
-        // Cek apakah buffer cukup, jika tidak, create.
         if (buffers.current_padded.rows < optimal_rows || buffers.current_padded.cols < optimal_cols || buffers.current_padded.type() != current_block_gray.type()) {
             buffers.current_padded.create(optimal_rows, optimal_cols, current_block_gray.type());
         }
         cv::Mat current_padded_roi = buffers.current_padded(cv::Rect(0, 0, optimal_cols, optimal_rows)); // ROI untuk operasi
-        current_padded_roi.setTo(cv::Scalar::all(0)); // Nolkan dulu area padding
+        current_padded_roi.setTo(cv::Scalar::all(0)); 
         cv::copyMakeBorder(current_block_gray, current_padded_roi, 0, optimal_rows - block_h, 0, optimal_cols - block_w, cv::BORDER_CONSTANT, cv::Scalar::all(0));
-        // (optimasi lebih lanjut: salin current_block_gray ke pojok kiri atas, sisanya sudah nol)
-        // current_block_gray.copyTo(current_padded_roi(cv::Rect(0,0,block_w,block_h)));
-
+      
 
         if (buffers.ref_padded.rows < optimal_rows || buffers.ref_padded.cols < optimal_cols || buffers.ref_padded.type() != reference_block_gray.type()) {
             buffers.ref_padded.create(optimal_rows, optimal_cols, reference_block_gray.type());
@@ -91,11 +67,9 @@ FrequencyMergeResult merge_blocks_frequency_domain(
         cv::Mat ref_padded_roi = buffers.ref_padded(cv::Rect(0, 0, optimal_cols, optimal_rows));
         ref_padded_roi.setTo(cv::Scalar::all(0));
         cv::copyMakeBorder(reference_block_gray, ref_padded_roi, 0, optimal_rows - block_h, 0, optimal_cols - block_w, cv::BORDER_CONSTANT, cv::Scalar::all(0));
-        // reference_block_gray.copyTo(ref_padded_roi(cv::Rect(0,0,block_w,block_h)));
-
+        
         // DFT
-        // Pastikan buffer DFT memiliki ukuran dan tipe yang tepat
-        int dft_type = CV_32FC2; // DFT_COMPLEX_OUTPUT menghasilkan 2 channel float
+        int dft_type = CV_32FC2;
         if (buffers.current_dft.rows != optimal_rows || buffers.current_dft.cols != optimal_cols || buffers.current_dft.type() != dft_type) {
             buffers.current_dft.create(optimal_rows, optimal_cols, dft_type);
         }
@@ -108,7 +82,7 @@ FrequencyMergeResult merge_blocks_frequency_domain(
 
 
         if (buffers.current_dft.empty() || buffers.ref_dft.empty() || buffers.current_dft.size() != buffers.ref_dft.size()) {
-            current_block_gray.copyTo(result.merged_block_gray); // Fallback
+            current_block_gray.copyTo(result.merged_block_gray);
             return result;
         }
 
@@ -117,8 +91,7 @@ FrequencyMergeResult merge_blocks_frequency_domain(
         }
 
     } catch (const cv::Exception& e) {
-        // std::cerr << "DFT_merging exception during DFT prep: " << e.what() << std::endl;
-        current_block_gray.copyTo(result.merged_block_gray); // Fallback
+        current_block_gray.copyTo(result.merged_block_gray); 
         return result;
     }
 
@@ -136,7 +109,7 @@ FrequencyMergeResult merge_blocks_frequency_domain(
     float sum_freq_weights = 0.0f;
     int count_freq_weights = 0;
 
-    // HAPUS #pragma omp parallel for dari sini
+    #pragma omp parallel for reduction(+:sum_freq_weights, count_freq_weights) collapse(2)
     for (int r_f = 0; r_f < buffers.current_dft.rows; ++r_f) {
         const cv::Vec2f* p_curr_dft_row = buffers.current_dft.ptr<const cv::Vec2f>(r_f);
         const cv::Vec2f* p_ref_dft_row = buffers.ref_dft.ptr<const cv::Vec2f>(r_f);
@@ -165,7 +138,7 @@ FrequencyMergeResult merge_blocks_frequency_domain(
             float weight_denominator = mag_sq_diff + const_noise_floor_freq_part + stability_epsilon;
             float weight_curr_freq;
 
-            if (weight_denominator < stability_epsilon) { // stability_epsilon sangat kecil
+            if (weight_denominator < stability_epsilon) {
                 weight_curr_freq = 1.0f;
             } else {
                 weight_curr_freq = const_noise_floor_freq_part / weight_denominator;
@@ -173,7 +146,7 @@ FrequencyMergeResult merge_blocks_frequency_domain(
 
             weight_curr_freq = std::max(0.0f, std::min(1.0f, weight_curr_freq));
 
-            if (std::isnan(weight_curr_freq)) { // Seharusnya jarang terjadi sekarang
+            if (std::isnan(weight_curr_freq)) { 
                 weight_curr_freq = 1.0f;
             }
 

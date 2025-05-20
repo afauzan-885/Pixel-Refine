@@ -58,9 +58,7 @@ class AKAZEAlgorithm:
             "tile_sizes_w_h_overlap": [
                 (256, 256, 0.25),
                 (128, 128, 0.25),
-                # (82, 82, 0.25),
-                # (64, 64, 0.25),
-                # (32, 32, 0.25),
+
             ],
             "skip_warp_shift_threshold": 1.4,
             "skip_warp_response_threshold": 1.7, 

@@ -1,24 +1,75 @@
 import concurrent.futures 
+from functools import lru_cache
 import json
 import os
 import concurrent
 import shutil
 import sqlite3
 import subprocess
-import tempfile
 import time
 import cv2
 import exifread
 import numpy as np
 import rawpy
 import tifffile
-from PIL import Image, ExifTags
+from PIL import Image
 try:
     import rawpy
     RAWPY_AVAILABLE = True
 except ImportError:
     RAWPY_AVAILABLE = False
 from UI.settings.General.Language import language_config
+
+# ====================== Preprocessing ====================== #
+@lru_cache(maxsize=None)
+def gaussian_window(size, sigma_scale=1/6): 
+        """Menghasilkan jendela Gaussian 2D [0, 1] float32 C-contiguous."""
+        rows, cols = size
+        if rows <= 0 or cols <= 0:
+            return np.zeros((0, 0), dtype=np.float32)
+        sigma_y = max(rows * sigma_scale, 1e-6)
+        sigma_x = max(cols * sigma_scale, 1e-6)
+        y = np.arange(0, rows, 1, float) - (rows - 1) / 2
+        x = np.arange(0, cols, 1, float) - (cols - 1) / 2
+        gaussian_y = np.exp(-y**2 / (2 * sigma_y**2 + 1e-12))
+        gaussian_x = np.exp(-x**2 / (2 * sigma_x**2 + 1e-12))
+        window = np.outer(gaussian_y, gaussian_x)
+        max_val = window.max()
+        if max_val > 1e-6:
+             window = window / max_val
+        else:
+             window = np.zeros_like(window)
+        return np.ascontiguousarray(window.astype(np.float32))
+
+    
+def normalize_image(image, dtype): 
+        """
+        Normalisasi gambar ke range [0, 1] float32 berdasarkan tipe data asli.
+        Mempertahankan kecerahan relatif antar frame. Menghasilkan C-contiguous array.
+        """
+        try:
+            scale = np.float32(np.iinfo(dtype).max)
+        except ValueError:
+            if np.issubdtype(dtype, np.floating):
+                scale = 1.0
+            else:
+                msg = language_config.DATA_TYPE_NOT_SUPPORTED.format(dtype) if hasattr(language_config, 'DATA_TYPE_NOT_SUPPORTED') else f"Data type not supported for normalization: {dtype}"
+                raise TypeError(msg)
+
+
+        image_float = np.ascontiguousarray(image.astype(np.float32))
+
+        if scale > 1e-6: 
+            norm_image = image_float / scale
+        else:
+             norm_image = image_float 
+
+        if image.ndim == 2: 
+            norm_image = np.stack((norm_image,) * 3, axis=-1)
+       
+        return np.ascontiguousarray(norm_image.astype(np.float32)) 
+
+# ====================== End Preprocessing ====================== #
 
 # ====================== Load and Saving Process ====================== #
 def get_all_image_paths_for_single_process(db_path: str)-> list:
@@ -33,7 +84,6 @@ def get_all_image_paths_for_single_process(db_path: str)-> list:
         A list of image paths in the correct order, or an empty list on error.
     """
         try:
-            # Validasi apakah path ada sebelum koneksi
             if not os.path.isfile(db_path):
                 return []
 
@@ -47,7 +97,6 @@ def get_all_image_paths_for_single_process(db_path: str)-> list:
                         spi.is_reference DESC, -- Referensi (is_reference=1) selalu di atas
                         i.path ASC             -- Urutkan sisanya (is_reference=0) berdasarkan nama file
                 """
-                # ------------------------------------
                 cursor.execute(sql_query)
                 image_paths = [row[0] for row in cursor.fetchall()]
 
@@ -79,8 +128,7 @@ def _prepare_image_path(original_path, temp_dir):
 
             try:
                 with rawpy.imread(original_path) as raw:
-                    gamma_setting = (2.5, 15.92)
-                    # gamma_setting = (5.0, 12.92)
+                    gamma_setting = (2.5, 15.92) # Natural Gamma
                     rgb = raw.postprocess(use_camera_wb=True, gamma=gamma_setting, output_bps=16,
                                           bad_pixels_path=None,output_color=rawpy.ColorSpace.sRGB,
                                           chromatic_aberration=None, highlight_mode=rawpy.HighlightMode.Blend)
@@ -112,49 +160,77 @@ def _prepare_image_path(original_path, temp_dir):
         return None 
     
 def load_images_from_paths(image_paths, stop_requested=None):
-    temp_dir = os.path.join("database", "align", f"imgproc_{int(time.time_ns())}")
+    session_id = f"imgproc_{os.getpid()}_{int(time.time_ns())}"
+    temp_dir = os.path.join("database", "align", session_id)
     os.makedirs(temp_dir, exist_ok=True)
+    
+    processed_paths_futures = []
+    non_raw_paths = []
+    raw_extensions = {'.dng', '.cr2', '.nef', '.arw', '.orf', '.rw2', '.pef', '.srw'}
+    num_threads = os.cpu_count() or 4 
 
     try:
-        processed_paths = []
-        raw_extensions = {'.dng', '.cr2', '.nef', '.arw', '.orf', '.rw2', '.pef', '.srw'}
-
-        for path in image_paths:
-            if stop_requested and stop_requested():
-                break
-
-            _, ext = os.path.splitext(path)
-            ext = ext.lower()
-
-            if ext in raw_extensions:
-                new_path = _prepare_image_path(path, temp_dir)
-                if new_path:
-                    processed_paths.append(new_path)
-            else:
-                if os.path.exists(path):
-                    processed_paths.append(path)
-
-        num_threads = os.cpu_count() or 4
-        images = []
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
-            future_list = [
-                executor.submit(cv2.imread, p, cv2.IMREAD_UNCHANGED)
-                for p in processed_paths
-            ]
-
-            for future in future_list:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor_prepare:
+            for path in image_paths:
                 if stop_requested and stop_requested():
                     break
-                img = future.result()
-                if img is not None:
-                    images.append(img)
 
+                _, ext = os.path.splitext(path)
+                ext = ext.lower()
+
+                if ext in raw_extensions:
+                    future = executor_prepare.submit(_prepare_image_path, path, temp_dir)
+                    processed_paths_futures.append(future)
+                else:
+                    if os.path.exists(path):
+                        non_raw_paths.append(path) 
+                    else:
+                        pass
+
+            temp_processed_raw_paths = []
+            for future in concurrent.futures.as_completed(processed_paths_futures):
+                if stop_requested and stop_requested():
+                    break
+                try:
+                    result_path = future.result() # Bisa None jika gagal
+                    if result_path:
+                        temp_processed_raw_paths.append(result_path)
+                except Exception as e:
+                    print(f"Error saat mengambil hasil future _prepare_image_path: {e}")
+            
+            if stop_requested and stop_requested(): # Cek lagi sebelum lanjut
+                return []
+
+
+        all_paths_to_load = temp_processed_raw_paths + non_raw_paths
+       
+
+        images = []
+        if not all_paths_to_load:
+            return images
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor_load:
+            future_to_path = {executor_load.submit(cv2.imread, p, cv2.IMREAD_UNCHANGED): p for p in all_paths_to_load}
+
+            for future in concurrent.futures.as_completed(future_to_path):
+                if stop_requested and stop_requested():
+                    break
+                
+                original_input_path = future_to_path[future]
+                try:
+                    img = future.result()
+                    if img is not None:
+                        images.append(img)
+                    else:
+                      pass
+                except Exception as e:
+                    print(f"Error saat memuat gambar {original_input_path}: {e}")
+        
         return images
 
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
-        
+                
 def save_special_jpg_and_png(
     src_path: str,
     dst_path: str,

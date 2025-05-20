@@ -1,14 +1,13 @@
-// block_matching.cpp
 #include "block_matching.hpp"
 #include <opencv2/imgproc.hpp>
 #include <algorithm>
 #include <cmath>
-#include <limits> // Pastikan ini ada
+#include <limits>
 
 namespace MotionMatching {
 namespace Internal {
 
-static float calculate_plain_mad_32f_optimized(
+static float calculate_plain_mad_32f(
     const cv::Mat &block1_gray,
     const cv::Mat &block2_gray,
     cv::Mat &diff_workspace)
@@ -40,7 +39,6 @@ static float calculate_plain_mad_32f(const cv::Mat &block1_gray, const cv::Mat &
     if (num_elements <= 0) return std::numeric_limits<float>::max();
     return static_cast<float>(total_sad / num_elements);
 }
-
 
 static float calculate_gradient_weighted_mad_internal(
     const cv::Mat &block1_gray,
@@ -158,7 +156,7 @@ BlockMatchResult find_best_block_match_mad(
 
             float current_metric_score;
             if (use_plain_mad_path) {
-                current_metric_score = Internal::calculate_plain_mad_32f_optimized(
+                current_metric_score = Internal::calculate_plain_mad_32f(
                     current_block_gray,
                     ref_block_candidate_gray,
                     diff_workspace_for_block 

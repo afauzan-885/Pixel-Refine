@@ -8,7 +8,7 @@ import os
 from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, get_all_image_paths_for_single_process, load_images_from_paths, save_image
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, gaussian_window, get_all_image_paths_for_single_process, load_images_from_paths, normalize_image, save_image
 from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityV1MotionInterface
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.GeneralSetting import load_general_settings
@@ -107,51 +107,6 @@ class SimilarityAlgorithm:
                 image = np.array(h5f[key])
                 images.append(image)
         return images
-    
-    @lru_cache(maxsize=None)
-    def gaussian_window(self, size, sigma_scale=1/6):
-        """Menghasilkan jendela Gaussian 2D [0, 1] float32 C-contiguous."""
-        rows, cols = size
-        if rows <= 0 or cols <= 0:
-            return np.zeros((0, 0), dtype=np.float32) 
-        sigma_y = max(rows * sigma_scale, 1e-6) 
-        sigma_x = max(cols * sigma_scale, 1e-6) 
-        y = np.arange(0, rows, 1, float) - (rows - 1) / 2
-        x = np.arange(0, cols, 1, float) - (cols - 1) / 2
-        gaussian_y = np.exp(-y**2 / (2 * sigma_y**2 + 1e-12))
-        gaussian_x = np.exp(-x**2 / (2 * sigma_x**2 + 1e-12))
-        window = np.outer(gaussian_y, gaussian_x)
-        max_val = window.max()
-        if max_val > 1e-6: 
-             window = window / max_val
-        else:
-             window = np.zeros_like(window)
-        return np.ascontiguousarray(window.astype(np.float32))
-
-    def normalize_image(self, image, dtype):
-        """
-        Normalisasi gambar ke range [0, 1] float32 berdasarkan tipe data asli.
-        Mempertahankan kecerahan relatif antar frame. Menghasilkan C-contiguous array.
-        """
-        try:
-            scale = np.float32(np.iinfo(dtype).max)
-        except ValueError:
-            if np.issubdtype(dtype, np.floating):
-                scale = 1.0
-            else:
-                raise TypeError(language_config.DATA_TYPE_NOT_SUPPORTED.format(dtype))
-
-        image_float = np.ascontiguousarray(image.astype(np.float32))
-
-        if scale > 1e-6:
-            norm_image = image_float / scale
-        else:
-             norm_image = image_float 
-             
-        if image.ndim == 2:
-            norm_image = np.stack((norm_image,) * 3, axis=-1)
-
-        return np.ascontiguousarray(norm_image.astype(np.float32))
 
     def similarity_mfnr(self, images, tile_size, overlap,
                         motion_sensitivity,noise_offset_factor, update_progress=None, stop_requested=None,
@@ -188,7 +143,7 @@ class SimilarityAlgorithm:
 
         mbm_block_h = tile_h
         mbm_block_w = tile_w
-        mbm_search_radius = 16
+        mbm_search_radius = 0
         
         try:
             c_interface = SimilarityV1MotionInterface(lib_path)
@@ -199,37 +154,6 @@ class SimilarityAlgorithm:
             raise FileNotFoundError(f"Shared library not found: {lib_path}")
         try:
             clib = ctypes.CDLL(lib_path)
-
-            clib.accumulate_frame_weighted_jit.argtypes = [
-                np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS, WRITEABLE'), # 1 final_image_sum_ptr (selalu 3 channel)
-                np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS, WRITEABLE'), # 2 weight_map_sum_ptr
-                np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'),           # 3 current_image_ptr (selalu 3 channel)
-                np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'),           # 4 reference_image_ptr (selalu 3 channel)
-                np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),           # 5 base_window_ptr
-                np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),             # 6 row_starts
-                np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),             # 7 col_starts
-                ctypes.c_int, # 8 num_row_starts
-                ctypes.c_int, # 9 num_col_starts
-                ctypes.c_int, # 10 tile_h
-                ctypes.c_int, # 11 tile_w
-                ctypes.c_int, # 12 h
-                ctypes.c_int, # 13 w
-                ctypes.c_int, # 14 channels (jumlah channel buffer C++, yaitu 3)
-                ctypes.c_float, # 15 motion_threshold
-                ctypes.c_int, # 16 mbm_block_h
-                ctypes.c_int, # 17 mbm_block_w
-                ctypes.c_int  # 18 mbm_search_radius
-            ]
-            clib.accumulate_frame_weighted_jit.restype = None
-
-            clib.normalize_accumulated_image_jit.argtypes = [
-                np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS, WRITEABLE'), # 1 final_image_ptr (selalu 3 channel)
-                np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),           # 2 weight_map_sum_ptr
-                ctypes.c_int, # 3 h
-                ctypes.c_int, # 4 w
-                ctypes.c_int  # 5 channels (jumlah channel buffer C++, yaitu 3)
-            ]
-            clib.normalize_accumulated_image_jit.restype = None
           
         except OSError as e:
             raise OSError(language_config.FAILED_TO_CONFIGURE_LIBRARY.format(lib_path, e))
@@ -237,7 +161,7 @@ class SimilarityAlgorithm:
              raise AttributeError(f"Function not found in DLL or error setting argtypes. Did you compile C++ correctly? Error: {e}")
 
          # --- Persiapan Buffer & Variabel (Sama) ---
-        reference_image_float = self.normalize_image(ref_image, dtype)
+        reference_image_float = normalize_image(ref_image, dtype)
         h_ref, w_ref, channels_ref = reference_image_float.shape
         if channels_ref != channels_buffer: raise RuntimeError(language_config.COLOR_CHANNEL_DOES_NOT_MATCH)
         final_image_sum = np.ascontiguousarray(np.zeros((h_ref, w_ref, channels_buffer), dtype=np.float32))
@@ -257,7 +181,7 @@ class SimilarityAlgorithm:
         else: col_starts = np.array([0])
         row_starts = np.ascontiguousarray(np.unique(row_starts).astype(np.int32))
         col_starts = np.ascontiguousarray(np.unique(col_starts).astype(np.int32))
-        base_window = self.gaussian_window(tile_size)
+        base_window = gaussian_window(tile_size)
             
         # --- Skala Denormalisasi ---
         scale_value = np.float32(np.iinfo(dtype).max)
@@ -297,7 +221,7 @@ class SimilarityAlgorithm:
             except Exception as e:
                 continue 
             
-            current_image_float = self.normalize_image(image_orig, dtype)
+            current_image_float = normalize_image(image_orig, dtype)
             if current_image_float.shape[2] != channels_buffer:
                  continue
 
@@ -320,7 +244,7 @@ class SimilarityAlgorithm:
 
         if processed_frames > 0:
             try:
-                c_interface.call_normalize_accumulated(clib, final_image_sum, weight_map_sum, h_ref, w_ref, channels_buffer)
+                c_interface.call_normalize_accumulated(c_interface.clib, final_image_sum, weight_map_sum, h_ref, w_ref, channels_buffer)
                 print("Normalization complete.")
             except Exception as e:
                  raise RuntimeError(language_config.NORMALIZATION_FAILED.format(e))
@@ -381,13 +305,13 @@ class SimilarityAlgorithm:
 def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
          single_process=None, batch_id=None, save_final_weight_map=False, progress_bar=None):
     try:
-        general_settings = load_general_settings()
+        general_settings, _ = load_general_settings()
         image_processor = SimilarityAlgorithm(db_path)
         
-        sim_tile_size_int = general_settings.get("similarity_tile_size", 16)
-        sim_motion_sensitivity = general_settings.get("similarity_motion_sensitivity", 60.0)
-        sim_noise_offset_factor = general_settings.get("similarity_noise_offset_factor", 0.4)
-        sim_overlap_percent = general_settings.get("similarity_overlap_percent", 40.0)
+        sim_tile_size_int = general_settings.get("similarity_tile_size")
+        sim_motion_sensitivity = general_settings.get("similarity_motion_sensitivity")
+        sim_noise_offset_factor = general_settings.get("similarity_noise_mad_offset_factor")
+        sim_overlap_percent = general_settings.get("similarity_overlap_percent")
         
         tile_size_tuple = (sim_tile_size_int, sim_tile_size_int)
         overlap_ratio = sim_overlap_percent / 100.0
