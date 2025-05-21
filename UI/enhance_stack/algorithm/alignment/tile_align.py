@@ -1,3 +1,4 @@
+from functools import lru_cache
 import gc
 import math
 import cv2
@@ -15,7 +16,7 @@ from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE
 
-class AKAZEAlgorithm:
+class TILEAlgorithm:
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
         self.db_path = db_path
         self.hdf5_path = hdf5_path
@@ -39,33 +40,16 @@ class AKAZEAlgorithm:
             return [row[0] for row in cursor.fetchall()]
 
     @staticmethod
-    def load_akaze_config(config_filename=None):
+    def load_tile_config(config_filename=None):
         """
         Membaca konfigurasi AKAZE dari file JSON. Jika gagal, mengembalikan nilai default.
         """
         default_config = {
-            "akaze_threshold": 0.001,
-            "akaze_nOctaves": 4,
-            "akaze_nOctaveLayers": 4,
-            "ratio_threshold": 0.75,
-            "ransacThreshold": 5.0,
-            "transformation": "homography",
-            "keep_edges": False,
-            "enable_cropping": False,
-            "save_align": False,
-            "command_save_to_hd5f": True,
+            "tile_size_w": 80,
+            "tile_size_h": 80,
+            "overlap_percent": 0.30, 
+            "num_pyramid_levels_coarse_to_fine": 3, 
             "use_multi_core": True,
-            "tile_sizes_w_h_overlap": [
-                (256, 256, 0.25),
-                (128, 128, 0.25),
-
-            ],
-            "skip_warp_shift_threshold": 1.4,
-            "skip_warp_response_threshold": 1.7, 
-            "fallback_tile_size_w": 128, 
-            "fallback_tile_size_h": 128,
-            "overlap_percent": 0.25,  
-            "use_multi_core_tile_processing": True,
             "align_folder": os.path.join(os.path.expanduser("~"), "Documents", "Pixel Refine", "align_image")
         }
 
@@ -79,31 +63,16 @@ class AKAZEAlgorithm:
             return default_config
             
     @staticmethod
-    def load_akaze_config_for_batch(config_filename=None):
+    def load_tile_config_for_batch(config_filename=None):
         """
         Membaca konfigurasi AKAZE dari file JSON. Jika gagal, mengembalikan nilai default.
         """
         default_config = {
-            "akaze_threshold": 0.001,
-            "akaze_nOctaves": 4,
-            "akaze_nOctaveLayers": 4,
-            "ratio_threshold": 0.75,
-            "ransacThreshold": 5.0,
-            "transformation": "homography",
-            "keep_edges": False,
-            "enable_cropping": False,
-            "save_align": False,
-            "command_save_to_hd5f": True,
-            "use_multi_core": False,
-            "tile_sizes_w_h_overlap": [ # Default multi-scale, dari besar ke kecil
-                (512, 512, 0.25),
-                (256, 256, 0.25),
-                (128, 128, 0.25)
-            ],
-            "fallback_tile_size_w": 256, # Fallback jika tile_sizes_w_h_overlap tidak ada/kosong
-            "fallback_tile_size_h": 256,
-            "overlap_percent": 0.25,  # GANTI overlap_px menjadi overlap_percent (misal 25%)
-            "use_multi_core_tile_processing": True,
+            "tile_size_w": 32,
+            "tile_size_h": 32,
+            "overlap_percent": 0.25,
+            "num_pyramid_levels_coarse_to_fine": 4, 
+            "use_multi_core": True,
             "align_folder": os.path.join(os.path.expanduser("~"), "Documents", "Pixel Refine", "align_image")
         }
 
@@ -118,9 +87,8 @@ class AKAZEAlgorithm:
             print("Error loading AKAZE configuration:", e)
             return default_config
         
-    def prepare_gray_akaze(self, img):
+    def prepare_gray_image(self, img):
         if img is None: raise ValueError("Input image is None.")
-        # Pastikan gambar adalah contiguous array, terutama setelah slicing atau warping
         if not img.flags['C_CONTIGUOUS']:
             img = np.ascontiguousarray(img)
 
@@ -128,154 +96,319 @@ class AKAZEAlgorithm:
             if img.shape[2] == 3: gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             elif img.shape[2] == 4: gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
             else: raise ValueError(f"Unsupported number of channels for 3D image: {img.shape[2]}")
-        elif img.ndim == 2: gray = img.copy() # Salin agar tidak mengubah asli jika sudah grayscale
+        elif img.ndim == 2: gray = img.copy() 
         else:
             raise ValueError(f"Invalid image dimensions: {img.shape}")
 
         if gray.dtype != np.uint8:
             if gray.dtype in [np.float32, np.float64]:
-                # Jika float, asumsikan rentang 0-1 atau 0-255
                 max_val = np.max(gray)
-                if max_val <= 1.0 and np.min(gray) >=0.0 : # Asumsi 0-1
+                if max_val <= 1.0 and np.min(gray) >=0.0 : 
                      gray_norm = (gray * 255.0).astype(np.uint8)
-                elif max_val <=255.0 and np.min(gray) >=0.0: # Asumsi sudah 0-255 tapi float
+                elif max_val <=255.0 and np.min(gray) >=0.0: 
                      gray_norm = gray.astype(np.uint8)
-                else: # Normalisasi umum jika rentang tidak diketahui
+                else: 
                     gray_norm = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
             elif gray.dtype == np.uint16:
-                gray_norm = (gray / 256.0).astype(np.uint8) # Konversi uint16 ke uint8
-            else: # Tipe lain, coba normalisasi umum
+                gray_norm = (gray / 256.0).astype(np.uint8) 
+            else: 
                 gray_norm = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
             return gray_norm
         return gray
-
+    
+    @lru_cache(maxsize=128)
     def _create_hanning_window_2d(self, h, w):
-        if h <= 0 or w <= 0: # Handle kasus tile sangat kecil atau invalid
-            return np.ones((max(1,h), max(1,w)), dtype=np.float32) # Kembalikan array 1 jika ukuran tidak valid
+        if h <= 0 or w <= 0: 
+            return np.ones((max(1,h), max(1,w)), dtype=np.float32) 
         hann_h = np.hanning(h) if h > 1 else np.array([1.0])
         hann_w = np.hanning(w) if w > 1 else np.array([1.0])
         hann_2d = np.outer(hann_h, hann_w)
         return hann_2d
+    
+    def _build_gaussian_pyramid(self, image_gray, num_levels=4):
+        pyramid = [image_gray]
+        for _ in range(1, num_levels):
+            image_gray = cv2.pyrDown(image_gray)
+            pyramid.append(image_gray)
+        return pyramid[::-1]
+    
+    def _compute_tile_displacements_multiscale(self, base_gray_full_res, target_gray_full_res, config, num_levels=4):
+        base_gray_uint8 = base_gray_full_res
+        if base_gray_full_res.dtype != np.uint8:
+            base_gray_uint8 = cv2.normalize(base_gray_full_res, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        
+        target_gray_uint8 = target_gray_full_res
+        if target_gray_full_res.dtype != np.uint8:
+            target_gray_uint8 = cv2.normalize(target_gray_full_res, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+        base_pyr = self._build_gaussian_pyramid(base_gray_uint8, num_levels)
+        target_pyr = self._build_gaussian_pyramid(target_gray_uint8, num_levels)
+        
+        if not base_pyr or not target_pyr or len(base_pyr) != len(target_pyr):
+            print("Warning: Could not build consistent pyramids. Skipping multiscale displacement computation.")
+            return {}
+
+        actual_num_levels = len(base_pyr)
+        tile_w_orig = config["tile_size_w"]
+        tile_h_orig = config["tile_size_h"]
+        overlap_percent = config["overlap_percent"]
+        
+        use_multi_core = config.get("use_multi_core", True) 
+
+        current_level_displacement_field = {} 
+
+        for level_idx in range(actual_num_levels):
+            base_level_img = base_pyr[level_idx]
+            target_level_img = target_pyr[level_idx]
+            
+            scale_to_original = (2**(actual_num_levels - 1 - level_idx))
+            current_tile_w = max(16, int(round(tile_w_orig / scale_to_original)))
+            current_tile_h = max(16, int(round(tile_h_orig / scale_to_original)))
+            current_overlap_px_w = int(round(current_tile_w * overlap_percent))
+            current_overlap_px_h = int(round(current_tile_h * overlap_percent))
+            current_overlap_px_w = min(current_overlap_px_w, current_tile_w - 1)
+            current_overlap_px_h = min(current_overlap_px_h, current_tile_h - 1)
+
+            img_h_level, img_w_level = base_level_img.shape[:2]
+
+            if img_h_level < current_tile_h // 2 or img_w_level < current_tile_w // 2:
+                propagated_field = {}
+                if level_idx > 0:
+                    for key, (prev_dx, prev_dy) in current_level_displacement_field.items():
+                        propagated_field[key] = (prev_dx * 2.0, prev_dy * 2.0)
+                current_level_displacement_field = propagated_field
+                continue
+
+            step_w_level = max(1, current_tile_w - current_overlap_px_w)
+            step_h_level = max(1, current_tile_h - current_overlap_px_h)
+            num_tiles_x_level = max(1, math.ceil(img_w_level / step_w_level)) if img_w_level > current_tile_w else 1
+            num_tiles_y_level = max(1, math.ceil(img_h_level / step_h_level)) if img_h_level > current_tile_h else 1
+            
+            tile_params_for_level = []
+            for i in range(num_tiles_x_level):
+                for j in range(num_tiles_y_level):
+                    tile_key = (i, j)
+                    init_dx_level, init_dy_level = 0.0, 0.0
+                    if level_idx > 0:
+                        prev_dx, prev_dy = current_level_displacement_field.get(tile_key, (0.0, 0.0))
+                        init_dx_level, init_dy_level = prev_dx * 2.0, prev_dy * 2.0
+                    
+                    tile_params_for_level.append((
+                        i, j,
+                        base_level_img, target_level_img, None,
+                        current_tile_w, current_tile_h,
+                        current_overlap_px_w, current_overlap_px_h,
+                        img_h_level, img_w_level,
+                        None, 
+                        config, 
+                        init_dx_level, init_dy_level,
+                        True  
+                    ))
+            
+            level_results_matrices = {}
+            
+            if use_multi_core and len(tile_params_for_level) > 1:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+                    future_to_tile_key = {
+                        executor.submit(self._process_single_tile, *params): (params[0], params[1]) 
+                        for params in tile_params_for_level
+                    }
+                    for future in concurrent.futures.as_completed(future_to_tile_key):
+                        tile_key_processed = future_to_tile_key[future]
+                        try:
+                            _, _, M_level = future.result() # Kita hanya butuh matriks M
+                            level_results_matrices[tile_key_processed] = M_level
+                        except Exception as exc:
+                            print(f"  Tile {tile_key_processed} (level {level_idx}) estimation error: {exc}")
+                            level_results_matrices[tile_key_processed] = None # Tandai gagal
+            else: # Proses sekuensial
+                for params in tile_params_for_level:
+                    tile_key_processed = (params[0], params[1])
+                    try:
+                        _, _, M_level = self._process_single_tile(*params)
+                        level_results_matrices[tile_key_processed] = M_level
+                    except Exception as exc:
+                        print(f"  Tile {tile_key_processed} (level {level_idx}) estimation error: {exc}")
+                        level_results_matrices[tile_key_processed] = None
+
+            # Bentuk next_level_displacement_field dari hasil
+            next_level_displacement_field_temp = {}
+            for i in range(num_tiles_x_level):
+                for j in range(num_tiles_y_level):
+                    tile_key = (i,j)
+                    M_level = level_results_matrices.get(tile_key)
+
+                    init_dx_fallback, init_dy_fallback = 0.0, 0.0
+                    if level_idx > 0: # Dapatkan init_dx, init_dy lagi untuk fallback
+                        prev_dx, prev_dy = current_level_displacement_field.get(tile_key, (0.0, 0.0))
+                        init_dx_fallback, init_dy_fallback = prev_dx * 2.0, prev_dy * 2.0
+                    
+                    current_dx_total, current_dy_total = init_dx_fallback, init_dy_fallback # Default ke nilai propagasi
+                    if M_level is not None:
+                        current_dx_total = -M_level[0, 2] 
+                        current_dy_total = -M_level[1, 2]
+                    
+                    next_level_displacement_field_temp[tile_key] = (current_dx_total, current_dy_total)
+
+            current_level_displacement_field = next_level_displacement_field_temp
+        
+        # current_level_displacement_field sekarang berisi hasil dari level piramida terhalus
+        return current_level_displacement_field
+
 
     def _process_single_tile(self, tile_idx_i, tile_idx_j,
                              base_gray_enhanced, target_gray_enhanced, target_image_to_warp,
                              tile_w, tile_h,
                              overlap_px_w, overlap_px_h,
                              img_h, img_w,
-                             akaze_detector,
-                             local_align_config): # local_align_config sekarang akan berisi parameter skip_warp
+                             akaze_detector, 
+                             local_align_config,
+                             init_dx=0.0, init_dy=0.0, # TAMBAHKAN PARAMETER INI
+                             is_for_displacement_estimation_only=False): # Flag baru
 
-        # ... (Perhitungan koordinat tile dan ekstraksi tile_target_content_to_warp sama) ...
         x_coord_grid = tile_idx_i * (tile_w - overlap_px_w)
         y_coord_grid = tile_idx_j * (tile_h - overlap_px_h)
         current_tile_global_x_start = max(0, int(x_coord_grid))
         current_tile_global_y_start = max(0, int(y_coord_grid))
         current_tile_global_x_end = min(img_w, current_tile_global_x_start + tile_w)
         current_tile_global_y_end = min(img_h, current_tile_global_y_start + tile_h)
+        
         current_tile_processing_w = current_tile_global_x_end - current_tile_global_x_start
         current_tile_processing_h = current_tile_global_y_end - current_tile_global_y_start
-        tile_target_content_to_warp = target_image_to_warp[current_tile_global_y_start:current_tile_global_y_end,
-                                                           current_tile_global_x_start:current_tile_global_x_end]
-
-        # ... (Logika skip awal jika tile terlalu kecil, sama) ...
-        if current_tile_processing_w <= max(1, overlap_px_w // 2) or \
-           current_tile_processing_h <= max(1, overlap_px_h // 2) or \
-           current_tile_processing_w < 16 or current_tile_processing_h < 16:
-            if tile_target_content_to_warp.size == 0: return None, None, None
-            hanning_win_skip = self._create_hanning_window_2d(tile_target_content_to_warp.shape[0], tile_target_content_to_warp.shape[1])
-            if tile_target_content_to_warp.ndim == 3: hanning_win_skip = np.stack([hanning_win_skip]*tile_target_content_to_warp.shape[2], axis=-1)
-            windowed_tile_skip = (tile_target_content_to_warp.astype(np.float32) * hanning_win_skip)
-            return windowed_tile_skip, (current_tile_global_y_start, current_tile_global_x_start), np.float32([[1,0,0],[0,1,0]])
-
-        # ... (Ekstraksi tile_base_for_phase dan tile_target_for_phase sama) ...
-        tile_base_for_phase = base_gray_enhanced[current_tile_global_y_start:current_tile_global_y_end,
-                                                 current_tile_global_x_start:current_tile_global_x_end].astype(np.float32)
-        tile_target_for_phase = target_gray_enhanced[current_tile_global_y_start:current_tile_global_y_end,
-                                                     current_tile_global_x_start:current_tile_global_x_end].astype(np.float32)
         
-        # ... (Pengecekan ukuran tile sama) ...
-        if tile_base_for_phase.size == 0 or tile_target_for_phase.size == 0 or tile_target_content_to_warp.size == 0 or \
-           tile_base_for_phase.shape != tile_target_for_phase.shape:
-            if tile_target_content_to_warp.size > 0:
-                # ... (logika skip jika tile target masih ada) ...
-                hanning_win_skip = self._create_hanning_window_2d(tile_target_content_to_warp.shape[0], tile_target_content_to_warp.shape[1])
-                if tile_target_content_to_warp.ndim == 3: hanning_win_skip = np.stack([hanning_win_skip]*tile_target_content_to_warp.shape[2], axis=-1)
-                windowed_tile_skip = (tile_target_content_to_warp.astype(np.float32) * hanning_win_skip)
-                return windowed_tile_skip, (current_tile_global_y_start, current_tile_global_x_start), np.float32([[1,0,0],[0,1,0]])
+        if current_tile_processing_w <= 0 or current_tile_processing_h <=0:
             return None, None, None
 
+        tile_target_content_to_warp_current = None
+        if not is_for_displacement_estimation_only and target_image_to_warp is not None:
+            tile_target_content_to_warp_current = target_image_to_warp[
+                current_tile_global_y_start:current_tile_global_y_end,
+                current_tile_global_x_start:current_tile_global_x_end
+            ]
+            if tile_target_content_to_warp_current.size == 0: # jika hasil slice kosong
+                 return None, None, None
+        elif is_for_displacement_estimation_only and target_image_to_warp is None:
+            if current_tile_processing_w < 16 or current_tile_processing_h < 16:
+                M_init_guess = np.float32([[1, 0, -init_dx], [0, 1, -init_dy]])
+                return None, (current_tile_global_y_start, current_tile_global_x_start), M_init_guess
 
-        M_local = np.float32([[1, 0, 0], [0, 1, 0]]) # Default ke matriks identitas
-        perform_warp = True # Flag untuk menentukan apakah warp perlu dilakukan
 
-        # Ambil parameter skip dari konfigurasi
-        skip_warp_enabled = local_align_config.get("skip_warp_enabled", True)
-        cfg_skip_shift = local_align_config.get("skip_warp_shift_threshold", 0.5)
-        cfg_skip_response = local_align_config.get("skip_warp_response_threshold", 0.8)
+        if not is_for_displacement_estimation_only and \
+           (current_tile_processing_w <= max(1, overlap_px_w // 2) or \
+            current_tile_processing_h <= max(1, overlap_px_h // 2) or \
+            current_tile_processing_w < 16 or current_tile_processing_h < 16):
+            if tile_target_content_to_warp_current is None or tile_target_content_to_warp_current.size == 0: return None, None, None
+            hanning_win_skip = self._create_hanning_window_2d(tile_target_content_to_warp_current.shape[0], tile_target_content_to_warp_current.shape[1])
+            if tile_target_content_to_warp_current.ndim == 3: hanning_win_skip = np.stack([hanning_win_skip]*tile_target_content_to_warp_current.shape[2], axis=-1)
+            windowed_tile_skip = (tile_target_content_to_warp_current.astype(np.float32) * hanning_win_skip)
+            
+            # Jika ada init_dx/dy, gunakan itu. Jika tidak, identitas.
+            M_final = np.float32([[1, 0, -init_dx], [0, 1, -init_dy]]) if (init_dx !=0 or init_dy !=0) else np.float32([[1,0,0],[0,1,0]])
+            if tile_target_content_to_warp_current is not None and (init_dx !=0 or init_dy !=0):
+                 try:
+                    output_size_warp_skip = (tile_target_content_to_warp_current.shape[1], tile_target_content_to_warp_current.shape[0])
+                    warped_content_skip = cv2.warpAffine(np.ascontiguousarray(tile_target_content_to_warp_current), M_final,
+                                                            output_size_warp_skip, flags=cv2.INTER_AREA,
+                                                            borderMode=cv2.BORDER_REFLECT_101)
+                    windowed_tile_skip = (warped_content_skip.astype(np.float32) * hanning_win_skip)
+                 except: pass # Abaikan error warp, gunakan tile asli
 
-        dx, dy, response_val = None, None, 0.0
+            return windowed_tile_skip, (current_tile_global_y_start, current_tile_global_x_start), M_final
+
+        # Ekstrak tile untuk phase correlation
+        tile_base_for_phase = base_gray_enhanced[
+            current_tile_global_y_start:current_tile_global_y_end,
+            current_tile_global_x_start:current_tile_global_x_end
+        ].astype(np.float32)
+        
+        # Penting: Ambil tile target DARI target_gray_enhanced yang BELUM di-warp
+        tile_target_for_phase_original = target_gray_enhanced[
+            current_tile_global_y_start:current_tile_global_y_end,
+            current_tile_global_x_start:current_tile_global_x_end
+        ].astype(np.float32)
+
+        if tile_base_for_phase.size == 0 or tile_target_for_phase_original.size == 0 or \
+           tile_base_for_phase.shape != tile_target_for_phase_original.shape:
+            # Handle jika salah satu tile kosong atau ukurannya tidak cocok
+            if not is_for_displacement_estimation_only and tile_target_content_to_warp_current is not None and tile_target_content_to_warp_current.size > 0:
+                hanning_win_skip = self._create_hanning_window_2d(tile_target_content_to_warp_current.shape[0], tile_target_content_to_warp_current.shape[1])
+                if tile_target_content_to_warp_current.ndim == 3: hanning_win_skip = np.stack([hanning_win_skip]*tile_target_content_to_warp_current.shape[2], axis=-1)
+                windowed_tile_skip = (tile_target_content_to_warp_current.astype(np.float32) * hanning_win_skip)
+                M_fallback = np.float32([[1, 0, -init_dx], [0, 1, -init_dy]]) if (init_dx !=0 or init_dy !=0) else np.float32([[1,0,0],[0,1,0]])
+                return windowed_tile_skip, (current_tile_global_y_start, current_tile_global_x_start), M_fallback
+            elif is_for_displacement_estimation_only: # Untuk estimasi, kembalikan M dari init_dx, init_dy
+                M_init_guess = np.float32([[1, 0, -init_dx], [0, 1, -init_dy]])
+                return None, (current_tile_global_y_start, current_tile_global_x_start), M_init_guess
+            return None, None, None
+
+        # --- MODIFIKASI: Pre-warp tile target untuk phase correlation jika ada init_dx/dy ---
+        tile_target_for_phase_to_correlate = tile_target_for_phase_original
+        if init_dx != 0.0 or init_dy != 0.0:
+            try:
+                M_guess = np.float32([[1, 0, -init_dx], [0, 1, -init_dy]])
+                # Warp tile target yang akan digunakan untuk phase correlation
+                tile_target_for_phase_to_correlate = cv2.warpAffine(
+                    tile_target_for_phase_original, # Warp tile yang sudah diekstrak
+                    M_guess,
+                    (tile_target_for_phase_original.shape[1], tile_target_for_phase_original.shape[0]),
+                    flags=cv2.INTER_LINEAR, # Linear lebih cepat untuk ini
+                    borderMode=cv2.BORDER_REFLECT_101 # atau cv2.BORDER_CONSTANT
+                )
+            except Exception as e:
+                tile_target_for_phase_to_correlate = tile_target_for_phase_original
+        # --- AKHIR MODIFIKASI PRE-WARP ---
+
+        M_total_for_final_warp = np.float32([[1, 0, -init_dx], [0, 1, -init_dy]]) # Default ke init_dx, init_dy
+        perform_final_warp = (init_dx != 0.0 or init_dy != 0.0) # Warp jika ada init_dx/dy
+
+        refined_dx, refined_dy = 0.0, 0.0
 
         try:
             tile_base_for_phase_cont = np.ascontiguousarray(tile_base_for_phase)
-            tile_target_for_phase_cont = np.ascontiguousarray(tile_target_for_phase)
-            shift, response = cv2.phaseCorrelate(tile_base_for_phase_cont, tile_target_for_phase_cont)
+            tile_target_for_phase_cont = np.ascontiguousarray(tile_target_for_phase_to_correlate)
 
-            if shift is not None and shift[0] is not None and shift[1] is not None:
-                dx, dy = shift[0], shift[1]
-                response_val = response if response is not None else 0.0
-
-                if skip_warp_enabled:
-                    magnitude_shift = np.sqrt(dx**2 + dy**2)
-                    if magnitude_shift < cfg_skip_shift and response_val > cfg_skip_response:
-                        # Pergeseran kecil DAN respons tinggi, maka skip warp
-                        perform_warp = False
-                        # M_local sudah identitas
-                        # print(f"  Tile ({tile_idx_i},{tile_idx_j}) - Skipping warp: shift={magnitude_shift:.2f}, resp={response_val:.2f}")
-                    else:
-                        # Perlu warp, hitung M_local
-                        M_local = np.float32([[1, 0, -dx], [0, 1, -dy]])
-                else:
-                    # Skip warp tidak diaktifkan, selalu hitung M_local jika shift valid
-                    M_local = np.float32([[1, 0, -dx], [0, 1, -dy]])
+            if tile_base_for_phase_cont.shape[0] < 8 or tile_base_for_phase_cont.shape[1] < 8 or \
+               tile_target_for_phase_cont.shape[0] < 8 or tile_target_for_phase_cont.shape[1] < 8:
+                pass
             else:
-                # phaseCorrelate gagal mengembalikan shift yang valid
-                # print(f"Warning: phaseCorrelate returned None for shift in tile ({tile_idx_i},{tile_idx_j}). Using identity M_local.")
-                perform_warp = False # Tidak ada info pergeseran, jadi jangan warp (atau M_local identitas sudah cukup)
-        
+                shift, response = cv2.phaseCorrelate(tile_base_for_phase_cont, tile_target_for_phase_cont)
+
+                if shift is not None and shift[0] is not None and shift[1] is not None:
+                    refined_dx, refined_dy = shift[0], shift[1]
+                    
+                    total_dx = init_dx + refined_dx
+                    total_dy = init_dy + refined_dy
+                    M_total_for_final_warp = np.float32([[1, 0, -total_dx], [0, 1, -total_dy]])
+                    perform_final_warp = True 
+           
         except cv2.error as e:
-            # print(f"cv2.error in phaseCorrelate for tile ({tile_idx_i},{tile_idx_j}): {e}. Using identity M_local.")
-            perform_warp = False # Error, jangan warp
+            pass
         except Exception as e_gen:
-            # print(f"General error in phaseCorrelate for tile ({tile_idx_i},{tile_idx_j}): {e_gen}. Using identity M_local.")
-            perform_warp = False # Error, jangan warp
+            pass
 
+        if is_for_displacement_estimation_only:
+            return None, (current_tile_global_y_start, current_tile_global_x_start), M_total_for_final_warp
 
+        warped_tile_target_content = tile_target_content_to_warp_current.copy() # Mulai dengan konten asli
         output_size_warp = (tile_base_for_phase.shape[1], tile_base_for_phase.shape[0])
-        
-        if perform_warp:
+
+        if perform_final_warp and tile_target_content_to_warp_current is not None:
             try:
-                tile_target_content_to_warp_cont = np.ascontiguousarray(tile_target_content_to_warp)
-                warped_tile_target_content = cv2.warpAffine(tile_target_content_to_warp_cont, M_local,
-                                                            output_size_warp, flags=cv2.INTER_AREA, # Atau INTER_LINEAR
+                tile_target_content_to_warp_cont = np.ascontiguousarray(tile_target_content_to_warp_current)
+                warped_tile_target_content = cv2.warpAffine(tile_target_content_to_warp_cont, M_total_for_final_warp,
+                                                            output_size_warp, flags=cv2.INTER_AREA,
                                                             borderMode=cv2.BORDER_REFLECT_101)
             except cv2.error as e:
-                # print(f"cv2.error in warpAffine for tile ({tile_idx_i},{tile_idx_j}): {e}. Using original tile content.")
-                warped_tile_target_content = tile_target_content_to_warp.copy() # Fallback ke original
+                # print(f"cv2.error in final warpAffine for tile ({tile_idx_i},{tile_idx_j}): {e}. Using original tile content.")
+                warped_tile_target_content = tile_target_content_to_warp_current.copy()
             except Exception as e_gen:
-                # print(f"General error in warpAffine for tile ({tile_idx_i},{tile_idx_j}): {e_gen}. Using original tile content.")
-                warped_tile_target_content = tile_target_content_to_warp.copy() # Fallback ke original
-        else:
-            # Jika tidak perlu warp (karena skip atau error di phaseCorrelate),
-            # warped_tile_target_content adalah konten asli tile target. M_local adalah identitas.
-            warped_tile_target_content = tile_target_content_to_warp.copy()
-
-
+                # print(f"General error in final warpAffine for tile ({tile_idx_i},{tile_idx_j}): {e_gen}. Using original tile content.")
+                warped_tile_target_content = tile_target_content_to_warp_current.copy()
+        
         if warped_tile_target_content is None or warped_tile_target_content.size == 0:
-            # Fallback jika warped_tile_target_content masih None atau kosong
-            if tile_target_content_to_warp.size > 0:
-                # print(f"Warning: warped_tile_target_content is None/empty, reverting to original for windowing.")
-                warped_tile_target_content = tile_target_content_to_warp.copy()
-            else: # Jika tile asli juga kosong, tidak ada yang bisa dilakukan
+            if tile_target_content_to_warp_current is not None and tile_target_content_to_warp_current.size > 0:
+                warped_tile_target_content = tile_target_content_to_warp_current.copy()
+            else: # Seharusnya tidak terjadi jika tile_target_content_to_warp_current sudah dicek
                  return None, None, None
 
         hanning_win = self._create_hanning_window_2d(warped_tile_target_content.shape[0], warped_tile_target_content.shape[1])
@@ -283,33 +416,28 @@ class AKAZEAlgorithm:
             hanning_win = np.stack([hanning_win] * warped_tile_target_content.shape[2], axis=-1)
 
         windowed_tile = (warped_tile_target_content.astype(np.float32) * hanning_win)
-        return windowed_tile, (current_tile_global_y_start, current_tile_global_x_start), M_local
-
-    # --- FUNGSI align_local DIUBAH MENJADI align_local_multiscale ---
-    def align_local_multiscale(self, base_image_orig, target_image_orig, config_to_use):
+        return windowed_tile, (current_tile_global_y_start, current_tile_global_x_start), M_total_for_final_warp
+    
+    def align_local(self, base_image_orig, target_image_orig, config_to_use):
         if base_image_orig is None or target_image_orig is None:
-            print("Error: Base or target image is None in align_local_multiscale.")
             return None, None
 
-        # Dapatkan konfigurasi tile dari config_to_use
-        tile_configs = config_to_use.get("tile_sizes_w_h_overlap", [])
-        if not tile_configs: # Fallback jika tidak ada atau kosong
-            fb_w = config_to_use.get("fallback_tile_size_w", 256)
-            fb_h = config_to_use.get("fallback_tile_size_h", 256)
-            fb_ov = config_to_use.get("fallback_overlap_percent", 0.25)
-            tile_configs = [(fb_w, fb_h, fb_ov)]
-            print(f"Warning: 'tile_sizes_w_h_overlap' not found or empty in config. Using fallback: {tile_configs}")
+        tile_w = config_to_use.get("tile_size_w")
+        tile_h = config_to_use.get("tile_size_h")
+        overlap_percent = config_to_use.get("overlap_percent")
+        num_pyr_levels = config_to_use.get("num_pyramid_levels_coarse_to_fine", 4) # Ambil dari config atau default 4
 
-        use_multicore_tiles = bool(config_to_use.get("use_multi_core_tile_processing", True))
-        dummy_akaze_detector = None # Masih placeholder
+        if tile_w is None or tile_h is None or overlap_percent is None:
+            return target_image_orig.copy(), {}
+        
+        use_multicore_tiles = bool(config_to_use.get("use_multi_core", True))
+        dummy_akaze_detector = None 
 
         current_target_image_to_align = target_image_orig.copy()
-        all_final_local_matrices = {} # Untuk menyimpan matriks dari skala terkecil
-
+        all_final_local_matrices = {}
         img_h_orig, img_w_orig = base_image_orig.shape[:2]
 
-        # Persiapkan base_gray sekali saja karena tidak berubah antar skala
-        base_gray_prepared = self.prepare_gray_akaze(base_image_orig)
+        base_gray_prepared = self.prepare_gray_image(base_image_orig)
         try:
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
             base_gray_enhanced_const = clahe.apply(base_gray_prepared)
@@ -317,216 +445,180 @@ class AKAZEAlgorithm:
             print(f"Error applying CLAHE to base image: {e}. Using original gray.")
             base_gray_enhanced_const = base_gray_prepared
 
-        final_aligned_image = None # Inisialisasi
+        target_gray_current_scale_prepared = self.prepare_gray_image(current_target_image_to_align)
+        try:
+            target_gray_enhanced_current_scale = clahe.apply(target_gray_current_scale_prepared)
+        except Exception as e:
+            print(f"  Error applying CLAHE to target image: {e}. Using original gray.")
+            target_gray_enhanced_current_scale = target_gray_current_scale_prepared
 
-        # Loop dari tile terbesar ke terkecil (coarse-to-fine)
-        for scale_idx, (tile_w, tile_h, overlap_percent) in enumerate(tile_configs):
-            print(f"\nProcessing Scale {scale_idx+1}/{len(tile_configs)}: Tile Size {tile_w}x{tile_h}, Overlap {overlap_percent*100:.1f}%")
+        # --- PEMANGGILAN FUNGSI COARSE-TO-FINE ---
+        print(f"  Starting coarse-to-fine displacement estimation with {num_pyr_levels} levels...")
+        displacement_field = self._compute_tile_displacements_multiscale(
+            base_gray_enhanced_const,
+            target_gray_enhanced_current_scale,
+            config_to_use,
+            num_levels=num_pyr_levels
+        )
+        print(f"  Coarse-to-fine estimation finished. Found {len(displacement_field)} initial displacements.")
+        # --- AKHIR PEMANGGILAN COARSE-TO-FINE ---
 
-            if not (0 <= overlap_percent < 1.0):
-                overlap_percent = np.clip(overlap_percent, 0.01, 0.9)
-                print(f"  Adjusted overlap_percent to {overlap_percent*100:.1f}%")
+        if not (0 <= overlap_percent < 1.0):
+            overlap_percent = np.clip(overlap_percent, 0.01, 0.9)
 
-            overlap_px_w = int(tile_w * overlap_percent)
-            overlap_px_h = int(tile_h * overlap_percent)
-            if overlap_px_w >= tile_w : overlap_px_w = max(0, tile_w -1)
-            if overlap_px_h >= tile_h : overlap_px_h = max(0, tile_h -1)
-            overlap_px_w = max(0, overlap_px_w) # Pastikan tidak negatif
-            overlap_px_h = max(0, overlap_px_h) # Pastikan tidak negatif
+        overlap_px_w = int(tile_w * overlap_percent)
+        overlap_px_h = int(tile_h * overlap_percent)
+        if overlap_px_w >= tile_w : overlap_px_w = max(0, tile_w -1)
+        if overlap_px_h >= tile_h : overlap_px_h = max(0, tile_h -1)
+        overlap_px_w = max(0, overlap_px_w)
+        overlap_px_h = max(0, overlap_px_h)
 
+        num_channels_current = current_target_image_to_align.shape[2] if current_target_image_to_align.ndim == 3 else 1
+        if num_channels_current > 1:
+            aligned_target_stitched_float_scale = np.zeros((img_h_orig, img_w_orig, num_channels_current), dtype=np.float32)
+        else:
+            aligned_target_stitched_float_scale = np.zeros((img_h_orig, img_w_orig), dtype=np.float32)
+        weight_sum_map_scale = np.zeros((img_h_orig, img_w_orig), dtype=np.float32)
 
-            # Persiapkan target_gray untuk skala saat ini (dari current_target_image_to_align)
-            target_gray_current_scale_prepared = self.prepare_gray_akaze(current_target_image_to_align)
-            try:
-                target_gray_enhanced_current_scale = clahe.apply(target_gray_current_scale_prepared)
-            except Exception as e:
-                print(f"  Error applying CLAHE to target image at current scale: {e}. Using original gray.")
-                target_gray_enhanced_current_scale = target_gray_current_scale_prepared
+        step_w = tile_w - overlap_px_w
+        step_h = tile_h - overlap_px_h
+        if step_w <= 0 : step_w = 1
+        if step_h <= 0 : step_h = 1
 
-            # Ukuran gambar (img_h, img_w) tetap mengacu pada ukuran original
-            # Jumlah channel untuk stitching dari current_target_image_to_align
-            num_channels_current = current_target_image_to_align.shape[2] if current_target_image_to_align.ndim == 3 else 1
-
-            # Inisialisasi buffer untuk stitching pada skala ini
-            # Ukuran buffer harus sesuai dengan dimensi gambar asli
-            if num_channels_current > 1:
-                aligned_target_stitched_float_scale = np.zeros((img_h_orig, img_w_orig, num_channels_current), dtype=np.float32)
-            else:
-                aligned_target_stitched_float_scale = np.zeros((img_h_orig, img_w_orig), dtype=np.float32)
-            weight_sum_map_scale = np.zeros((img_h_orig, img_w_orig), dtype=np.float32)
-
-            step_w = tile_w - overlap_px_w
-            step_h = tile_h - overlap_px_h
-            if step_w <= 0 : step_w = 1
-            if step_h <= 0 : step_h = 1
-
-            # Jumlah tile berdasarkan dimensi gambar asli
-            num_tiles_x = math.ceil(img_w_orig / step_w) if img_w_orig > tile_w else 1
-            num_tiles_y = math.ceil(img_h_orig / step_h) if img_h_orig > tile_h else 1
-            if img_w_orig <= tile_w: num_tiles_x = 1 # Kasus gambar lebih kecil dari tile
-            if img_h_orig <= tile_h: num_tiles_y = 1 # Kasus gambar lebih kecil dari tile
-
-            print(f"  Num tiles (x,y): ({num_tiles_x}, {num_tiles_y}), Step (w,h): ({step_w}, {step_h})")
-            print(f"  Tile (w,h): ({tile_w}, {tile_h}), Overlap_px (w,h): ({overlap_px_w}, {overlap_px_h})")
+        num_tiles_x = math.ceil(img_w_orig / step_w) if img_w_orig > tile_w else 1
+        num_tiles_y = math.ceil(img_h_orig / step_h) if img_h_orig > tile_h else 1
+        if img_w_orig <= tile_w: num_tiles_x = 1
+        if img_h_orig <= tile_h: num_tiles_y = 1
 
 
-            tile_params_list_scale = []
-            for i in range(num_tiles_x):
-                for j in range(num_tiles_y):
-                    tile_params_list_scale.append((
-                        i, j,
-                        base_gray_enhanced_const, # Base selalu sama
-                        target_gray_enhanced_current_scale, # Target gray dari skala ini
-                        current_target_image_to_align, # Gambar warna/asli yang akan di-warp
-                        tile_w, tile_h, overlap_px_w, overlap_px_h,
-                        img_h_orig, img_w_orig, # Gunakan dimensi original untuk bounds
-                        dummy_akaze_detector,
-                        config_to_use
-                    ))
-            if not tile_params_list_scale:
-                print("  Warning: No tiles to process for this scale. Skipping scale.")
-                if scale_idx == len(tile_configs) -1: # Jika ini skala terakhir dan tidak ada tile
-                    final_aligned_image = current_target_image_to_align.copy() # Gunakan hasil dari skala sebelumnya
-                continue
+        tile_params_list_scale = []
+        for i in range(num_tiles_x):
+            for j in range(num_tiles_y):
+                init_dx_full_res, init_dy_full_res = displacement_field.get((i, j), (0.0, 0.0))
+                
+                tile_params_list_scale.append((
+                    i, j,
+                    base_gray_enhanced_const,
+                    target_gray_enhanced_current_scale,
+                    current_target_image_to_align,
+                    tile_w, tile_h, overlap_px_w, overlap_px_h,
+                    img_h_orig, img_w_orig,
+                    dummy_akaze_detector,
+                    config_to_use,
+                    init_dx_full_res, 
+                    init_dy_full_res  
+                ))
+        
+        if not tile_params_list_scale:
+            return current_target_image_to_align.copy(), {}
 
-
-            results_scale = []
-            if use_multicore_tiles and len(tile_params_list_scale) > 1:
-                # print(f"  Using ThreadPoolExecutor with {os.cpu_count()} workers for {len(tile_params_list_scale)} tiles.")
-                with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-                    future_to_tile = {executor.submit(self._process_single_tile, *params): params for params in tile_params_list_scale}
-                    for future_idx, future in enumerate(concurrent.futures.as_completed(future_to_tile)):
-                        # print(f"    Processing future {future_idx+1}/{len(tile_params_list_scale)}")
-                        try:
-                            result_tile = future.result()
-                            if result_tile and result_tile[0] is not None: results_scale.append(result_tile)
-                        except Exception as exc:
-                            params_failed = future_to_tile[future]
-                            print(f"  Tile ({params_failed[0]},{params_failed[1]}) processing (scale {tile_w}x{tile_h}) generated an exception: {exc}")
-            else:
-                # print(f"  Processing {len(tile_params_list_scale)} tiles sequentially.")
-                for idx, params_set in enumerate(tile_params_list_scale):
-                    # print(f"    Processing tile {idx+1}/{len(tile_params_list_scale)}")
+        results_scale = []
+        if use_multicore_tiles and len(tile_params_list_scale) > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+                future_to_tile = {
+                    executor.submit(
+                        self._process_single_tile, 
+                        p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], # params
+                        p[13] # init_dx
+                    ): p for p in tile_params_list_scale
+                }
+                for future in concurrent.futures.as_completed(future_to_tile):
                     try:
-                        result_tile = self._process_single_tile(*params_set)
+                        result_tile = future.result()
                         if result_tile and result_tile[0] is not None: results_scale.append(result_tile)
                     except Exception as exc:
-                        print(f"  Tile {params_set[0]},{params_set[1]} (scale {tile_w}x{tile_h}) generated an exception: {exc}")
+                        params_failed = future_to_tile[future]
+                        print(f"  Tile ({params_failed[0]},{params_failed[1]}) processing generated an exception: {exc}")
+        else:
+            for params_set in tile_params_list_scale:
+                try:
+                    result_tile = self._process_single_tile(*params_set) # params_set sudah berisi init_dx, init_dy
+                    if result_tile and result_tile[0] is not None: results_scale.append(result_tile)
+                except Exception as exc:
+                    print(f"  Tile ({params_set[0]},{params_set[1]}) generated an exception: {exc}")
+        
+        if not results_scale:
+            return current_target_image_to_align.copy(), {}
 
-            if not results_scale:
-                print("  Warning: No valid results from tile processing at this scale. Using previous scale's result.")
-                # Jika ini skala terakhir dan tidak ada hasil, maka final_aligned_image akan tetap dari skala sebelumnya atau original target
-                if scale_idx == len(tile_configs) -1 :
-                     if final_aligned_image is None: # Jika ini juga skala pertama
-                         final_aligned_image = current_target_image_to_align.copy()
-                # else: # Jika bukan skala terakhir, current_target_image_to_align tidak berubah, lanjut ke skala berikutnya
+        for windowed_tile_float, (y_start_global, x_start_global), M_loc in results_scale:
+            if windowed_tile_float is None: continue
+
+            h_tile_processed, w_tile_processed = windowed_tile_float.shape[:2]
+            y_end_global = min(y_start_global + h_tile_processed, img_h_orig)
+            x_end_global = min(x_start_global + w_tile_processed, img_w_orig)
+            actual_h_to_place = y_end_global - y_start_global
+            actual_w_to_place = x_end_global - x_start_global
+
+            if actual_h_to_place <= 0 or actual_w_to_place <= 0: continue
+
+            current_tile_data_to_place = windowed_tile_float[:actual_h_to_place, :actual_w_to_place]
+            target_roi_buffer = aligned_target_stitched_float_scale[y_start_global:y_end_global, x_start_global:x_end_global]
+            
+            if target_roi_buffer.shape[:2] != current_tile_data_to_place.shape[:2]:
                 continue
 
-
-            # Stitching untuk skala saat ini
-            temp_local_matrices_scale = {}
-            for windowed_tile_float, (y_start_global, x_start_global), M_loc in results_scale:
-                if windowed_tile_float is None: continue
-
-                h_tile_processed, w_tile_processed = windowed_tile_float.shape[:2]
-
-                # Pastikan ROI tidak keluar batas dari buffer stitching
-                y_end_global = min(y_start_global + h_tile_processed, img_h_orig)
-                x_end_global = min(x_start_global + w_tile_processed, img_w_orig)
-
-                actual_h_to_place = y_end_global - y_start_global
-                actual_w_to_place = x_end_global - x_start_global
-
-                if actual_h_to_place <= 0 or actual_w_to_place <= 0: continue
-
-                current_tile_data_to_place = windowed_tile_float[:actual_h_to_place, :actual_w_to_place]
-                target_roi_buffer = aligned_target_stitched_float_scale[y_start_global:y_end_global, x_start_global:x_end_global]
-
-                if target_roi_buffer.shape[:2] != current_tile_data_to_place.shape[:2]:
-                    # print(f"  Warning: Shape mismatch during stitching. ROI: {target_roi_buffer.shape}, Tile: {current_tile_data_to_place.shape}. Skipping tile.")
-                    # Ini bisa terjadi jika tile diproses dengan ukuran berbeda dari yang diharapkan di buffer
-                    # Misalnya, jika tile di tepi dan warped_tile_target_content memiliki ukuran berbeda
-                    # Coba resize current_tile_data_to_place agar sesuai jika memungkinkan, atau skip.
-                    # Untuk sekarang, kita skip agar tidak error.
-                    continue
-
-                # Logika penanganan channel yang sudah ada
-                if num_channels_current > 1:
-                    if target_roi_buffer.ndim == 3 and current_tile_data_to_place.ndim == 3 and target_roi_buffer.shape[2] == current_tile_data_to_place.shape[2]:
-                        target_roi_buffer += current_tile_data_to_place
-                    else:
-                        # print(f"  Warning: Channel/dim mismatch for color image. ROI: {target_roi_buffer.shape}, Tile: {current_tile_data_to_place.shape}")
-                        continue
-                elif num_channels_current == 1:
-                    # Memastikan current_tile_data_to_place juga 2D jika target_roi_buffer adalah 2D
-                    if current_tile_data_to_place.ndim == 3 and current_tile_data_to_place.shape[2] == 1:
-                        current_tile_data_to_place = np.squeeze(current_tile_data_to_place, axis=2)
-
-                    if target_roi_buffer.ndim == 2 and current_tile_data_to_place.ndim == 2:
-                        target_roi_buffer += current_tile_data_to_place
-                    # (kasus lain dari kode asli Anda bisa ditambahkan jika relevan untuk grayscale)
-                    else:
-                        # print(f"  Warning: Channel/dim mismatch for grayscale image. ROI: {target_roi_buffer.shape}, Tile: {current_tile_data_to_place.shape}")
-                        continue
-
-                hanning_for_weight = self._create_hanning_window_2d(current_tile_data_to_place.shape[0], current_tile_data_to_place.shape[1])
-                weight_sum_map_scale[y_start_global:y_end_global, x_start_global:x_end_global] += hanning_for_weight
-
-                if M_loc is not None:
-                    grid_idx_x = (x_start_global // step_w) if step_w > 0 else 0
-                    grid_idx_y = (y_start_global // step_h) if step_h > 0 else 0
-                    temp_local_matrices_scale[(grid_idx_x, grid_idx_y)] = M_loc
-                    if scale_idx == len(tile_configs) - 1: # Jika ini skala terkecil/terakhir
-                        all_final_local_matrices[(grid_idx_x, grid_idx_y)] = M_loc
-
-            # Normalisasi hasil stitching untuk skala ini
             if num_channels_current > 1:
-                weight_sum_map_3d_scale = np.stack([weight_sum_map_scale] * num_channels_current, axis=-1)
-                denominator_scale = np.where(weight_sum_map_3d_scale < 1e-6, 1.0, weight_sum_map_3d_scale)
-            else: # num_channels_current == 1
-                # Pastikan weight_sum_map_scale dan aligned_target_stitched_float_scale keduanya 2D atau broadcast-compatible
-                if aligned_target_stitched_float_scale.ndim == 3 and num_channels_current == 1: # Jika hasil stitching masih 3D (misal, (H,W,1))
-                    aligned_target_stitched_float_scale = np.squeeze(aligned_target_stitched_float_scale, axis=2)
-                denominator_scale = np.where(weight_sum_map_scale < 1e-6, 1.0, weight_sum_map_scale)
+                if target_roi_buffer.ndim == 3 and current_tile_data_to_place.ndim == 3 and target_roi_buffer.shape[2] == current_tile_data_to_place.shape[2]:
+                    target_roi_buffer += current_tile_data_to_place
+                else:
+                    continue 
+                
+            elif num_channels_current == 1:
+                _current_tile_data_to_place = current_tile_data_to_place
+                if _current_tile_data_to_place.ndim == 3 and _current_tile_data_to_place.shape[2] == 1:
+                    _current_tile_data_to_place = np.squeeze(_current_tile_data_to_place, axis=2)
+                
+                _target_roi_buffer = target_roi_buffer
+                if _target_roi_buffer.ndim ==3 and _target_roi_buffer.shape[2] == 1:
+                    _target_roi_buffer = np.squeeze(_target_roi_buffer, axis=2)
 
-            # Hindari division by zero jika denominator_scale ada yang nol (meskipun np.where sudah menangani)
-            denominator_scale[denominator_scale == 0] = 1.0
-            intermediate_aligned_float_scale = aligned_target_stitched_float_scale / denominator_scale
-
-            # Update current_target_image_to_align untuk iterasi skala berikutnya atau sebagai hasil akhir
-            # Penting: Konversi kembali ke tipe data asli dari target_image_orig
-            if target_image_orig.dtype == np.uint8:
-                current_target_image_to_align = np.clip(intermediate_aligned_float_scale, 0, 255).astype(np.uint8)
-            elif target_image_orig.dtype == np.uint16:
-                current_target_image_to_align = np.clip(intermediate_aligned_float_scale, 0, 65535).astype(np.uint16)
-            elif target_image_orig.dtype in [np.float32, np.float64]:
-                finfo = np.finfo(target_image_orig.dtype)
-                current_target_image_to_align = np.clip(intermediate_aligned_float_scale, finfo.min, finfo.max).astype(target_image_orig.dtype)
-            else: # Tipe data lain
-                current_target_image_to_align = intermediate_aligned_float_scale.astype(target_image_orig.dtype)
-
-            print(f"  Finished scale {scale_idx+1}. Target image updated for next scale or as final result.")
-
-            if scale_idx == len(tile_configs) - 1: # Jika ini adalah skala terakhir
-                final_aligned_image = current_target_image_to_align.copy() # Hasil akhir
-
-        # Jika loop tile_configs tidak pernah berjalan (misal tile_configs kosong dan fallback juga gagal)
-        if final_aligned_image is None:
-            print("Warning: Multi-scale processing did not complete. Returning original target image.")
-            return target_image_orig.copy(), {}
+                if _target_roi_buffer.ndim == 2 and _current_tile_data_to_place.ndim == 2:
+                    _target_roi_buffer += _current_tile_data_to_place
+                else: continue # print("Channel/dim mismatch 1D")
 
 
+            hanning_for_weight = self._create_hanning_window_2d(current_tile_data_to_place.shape[0], current_tile_data_to_place.shape[1])
+            weight_sum_map_scale[y_start_global:y_end_global, x_start_global:x_end_global] += hanning_for_weight
+
+            if M_loc is not None:
+                grid_idx_x = int(round(x_start_global / step_w)) if step_w > 0 else 0
+                grid_idx_y = int(round(y_start_global / step_h)) if step_h > 0 else 0
+                all_final_local_matrices[(grid_idx_x, grid_idx_y)] = M_loc
+
+        if num_channels_current > 1:
+            weight_sum_map_3d_scale = np.stack([weight_sum_map_scale] * num_channels_current, axis=-1)
+            denominator_scale = np.where(weight_sum_map_3d_scale < 1e-6, 1.0, weight_sum_map_3d_scale)
+        else:
+            if aligned_target_stitched_float_scale.ndim == 3 and num_channels_current == 1:
+                aligned_target_stitched_float_scale = np.squeeze(aligned_target_stitched_float_scale, axis=2)
+            denominator_scale = np.where(weight_sum_map_scale < 1e-6, 1.0, weight_sum_map_scale)
+
+        denominator_scale[denominator_scale == 0] = 1.0 # Hindari pembagian dengan nol
+        intermediate_aligned_float_scale = aligned_target_stitched_float_scale / denominator_scale
+
+        final_aligned_image = None
+        if target_image_orig.dtype == np.uint8:
+            final_aligned_image = np.clip(intermediate_aligned_float_scale, 0, 255).astype(np.uint8)
+        elif target_image_orig.dtype == np.uint16:
+            final_aligned_image = np.clip(intermediate_aligned_float_scale, 0, 65535).astype(np.uint16)
+        elif target_image_orig.dtype in [np.float32, np.float64]:
+            finfo = np.finfo(target_image_orig.dtype)
+            final_aligned_image = np.clip(intermediate_aligned_float_scale, finfo.min, finfo.max).astype(target_image_orig.dtype)
+        else:
+            final_aligned_image = intermediate_aligned_float_scale.astype(target_image_orig.dtype)
+
+        print(f"  Finished full-resolution alignment. Final image generated.")
         return final_aligned_image, all_final_local_matrices
     
-def main(db_path, update_progress=None, batch_size=8, stop_requested=None, single_process=None, batch_id=None,
+def main(db_path, update_progress=None, batch_size=20, stop_requested=None, single_process=None, batch_id=None,
          config_filename=None, save_align_flag_arg=None, align_folder_path_arg=None, command_save_to_hd5f_flag_arg=None):
 
-    processor = AKAZEAlgorithm(db_path=db_path) # Berikan db_path ke konstruktor jika diperlukan
+    processor = TILEAlgorithm(db_path=db_path)
 
     if single_process or batch_id is None:
-        current_config = processor.load_akaze_config(config_filename)
+        current_config = processor.load_tile_config(config_filename)
     else:
-        current_config = processor.load_akaze_config_for_batch(config_filename)
+        current_config = processor.load_tile_config_for_batch(config_filename)
 
     save_align = save_align_flag_arg if save_align_flag_arg is not None else current_config.get("save_align", False)
     command_save_to_hd5f = command_save_to_hd5f_flag_arg if command_save_to_hd5f_flag_arg is not None else current_config.get("command_save_to_hd5f", True)
@@ -633,7 +725,7 @@ def main(db_path, update_progress=None, batch_size=8, stop_requested=None, singl
                     compensated_image = None # Inisialisasi
                     try:
                         # --- PANGGIL FUNGSI MULTI-SKALA ---
-                        compensated_image, _ = processor.align_local_multiscale(base_image_orig, target_image_orig, current_config)
+                        compensated_image, _ = processor.align_local(base_image_orig, target_image_orig, current_config)
 
                         if compensated_image is None:
                             fail_msg = f"Failed local multi-scale alignment for image {current_original_path} (index {dataset_image_index})."
@@ -668,12 +760,9 @@ def main(db_path, update_progress=None, batch_size=8, stop_requested=None, singl
                 gc.collect()
 
     except Exception as e:
-        print(f"Main error occurred (HDF5 or other): {e}")
-        # traceback.print_exc() # Untuk debug lebih detail
         if update_progress: update_progress(current_step, total_steps, f"Main error: {e}")
 
     if update_progress: update_progress(total_steps, total_steps, "Local multi-scale alignment process completed.")
-    print("All local multi-scale alignment processes completed.")
                    
 def running_tile_align(parent=None, single_process=None, batch_id=None):
     process_finished = False
@@ -682,7 +771,7 @@ def running_tile_align(parent=None, single_process=None, batch_id=None):
     """
     # Membuat dialog progress
     dialog = QDialog(parent)
-    dialog.setWindowTitle(language_config.WINDOW_TITLE_AKAZE)
+    dialog.setWindowTitle("Tile Alignment")
     dialog.setModal(True)
     dialog.setFixedSize(300, 90)
     dialog.setWindowFlags(

@@ -307,11 +307,10 @@ class AKAZEAlgorithm:
                     current_bh = max(1, current_bh)
 
                     try:
-                        # Panggil dengan gambar yang sudah DITINGKATKAN
                         kps_base, desc_base, kps_target, desc_target = self.compute_features_block(
                             akaze,
-                            enhanced_base_gray, # <-- Gunakan Enhanced
-                            enhanced_target_gray, # <-- Gunakan Enhanced
+                            enhanced_base_gray, 
+                            enhanced_target_gray,
                             x, y, current_bw, current_bh,
                             overlap, w, h
                         )
@@ -328,7 +327,6 @@ class AKAZEAlgorithm:
                         pass # Lanjut ke blok berikutnya
 
         # --- 6. Gabungkan Deskriptor ---
-        # ... (Logika vstack Anda tetap sama) ...
         if not descriptors_base_list or not descriptors_target_list:
              return None, None
         try:
@@ -349,7 +347,6 @@ class AKAZEAlgorithm:
              return None, None
 
         # --- 7. Lakukan Matching (menggunakan deskriptor dari gambar enhanced) ---
-        # ... (Logika BFMatcher, knnMatch, ratio test Anda tetap sama) ...
         if descriptors_base_all.shape[0] == 0 or descriptors_target_all.shape[0] == 0:
              print("No descriptors available for matching.")
              return None, None
@@ -439,9 +436,6 @@ class AKAZEAlgorithm:
         h, w = target_image.shape[:2] # Gunakan dimensi gambar TARGET yang akan di-warp
 
         # --- Hitung matriks transformasi ---
-        # Perhatikan: Kita memetakan dari target ke base.
-        # estimateAffine2D(src, dst) -> src=target_points, dst=base_points
-        # findHomography(src, dst) -> src=target_points, dst=base_points
         matrix = None
         mask = None
 

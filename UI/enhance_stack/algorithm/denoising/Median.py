@@ -355,7 +355,7 @@ class MedianAlgorithm:
 def main(db_path, update_progress=None, stop_requested=None, batch_size=4,
          single_process=None, batch_id=None, progress_bar=None):
     try:
-        general_settings = load_general_settings()
+        general_settings, _ = load_general_settings()
         use_multicore_from_settings = general_settings.get('multi_core_cpu', True)
         image_processor = MedianAlgorithm(db_path)
 

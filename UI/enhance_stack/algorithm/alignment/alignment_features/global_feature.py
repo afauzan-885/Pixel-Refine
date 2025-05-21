@@ -21,7 +21,7 @@ except ImportError:
 from UI.settings.General.Language import language_config
 
 # ====================== Preprocessing ====================== #
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=3200)
 def gaussian_window(size, sigma_scale=1/6): 
         """Menghasilkan jendela Gaussian 2D [0, 1] float32 C-contiguous."""
         rows, cols = size
