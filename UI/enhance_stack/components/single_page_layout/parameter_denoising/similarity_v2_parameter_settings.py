@@ -195,7 +195,7 @@ def get_similarity_v2_settings_page():
     # 5. MBM Confidence Skip DFT Threshold V2
     conf_skip_label_text = getattr(language_config, 'CONF_SKIP_DFT_LABEL', "Conf. Skip DFT Thresh:")
     initial_val = sim_v2_config.get("similarity_v2_mbm_confidence_skip_dft_threshold", 0.78)
-    multiplier = 100.0; slider_min, slider_max = 1, 100; validator = QDoubleValidator(0.01, 1.0, 2) # Range 0.01 - 1.00
+    multiplier = 100.0; slider_min, slider_max = 1, 200; validator = QDoubleValidator(0.01, 2.0, 2) # Range 0.01 - 1.00
     validator.setNotation(QDoubleValidator.Notation.StandardNotation)
     slider_cs, input_cs = create_slider_with_input(
         conf_skip_label_text, 0,0, int(round(initial_val * multiplier)), c_locale.toString(initial_val, 'f', 2),

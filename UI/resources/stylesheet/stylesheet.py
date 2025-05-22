@@ -375,3 +375,41 @@ LIST_IMAGE_DATA_SPECIFIC_ITEM = """
             border: 1px solid #ABAEB0;
             }
         """
+
+SWITCH_BUTTON_DEFAULT_STYLE = """
+    QPushButton {
+        background-color: #E1E1E1;
+        color: black;
+        border: 1px solid #A6A6A6;
+        border-radius: 5px;
+        padding: 2px; 
+        min-height: 10px; 
+        min-width: 40px; 
+        font-weight: ligth; 
+    }
+    QPushButton:hover {
+        background-color: #D5D5D5;
+    }
+    QPushButton:pressed {
+        background-color: #C0C0C0;
+    }
+"""
+
+# Style untuk tombol switch yang aktif
+SWITCH_BUTTON_ACTIVE_STYLE = """
+    QPushButton {
+        background-color: #0078D7; 
+        color: white;
+        border: 1px solid #005A9E;
+        border-radius: 5px;
+        padding: 2px 5px;  
+        min-height: 20px;  
+        font-weight: bold;
+    }
+    QPushButton:hover {
+        background-color: #005A9E;
+    }
+    QPushButton:pressed {
+        background-color: #004C8A;
+    }
+"""
