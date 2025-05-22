@@ -6,6 +6,8 @@ from UI.enhance_stack.components.single_page_layout.parameter_alignment.akaze_pa
 
 from UI.enhance_stack.components.single_page_layout.parameter_alignment.farneback_parameter_settings import get_farneback_optical_flow_page
 from UI.enhance_stack.components.single_page_layout.parameter_alignment.orb_parameter_settings import get_orb_page
+from UI.enhance_stack.components.single_page_layout.parameter_denoising.similarity_v1_parameter_settings import get_similarity_v1_settings_page
+from UI.enhance_stack.components.single_page_layout.parameter_denoising.similarity_v2_parameter_settings import get_similarity_v2_settings_page
 from UI.settings.General.Language import language_config
 
 
@@ -26,25 +28,26 @@ class ParameterPages:
         default_index = self.stacked_widget.addWidget(default_page)
         self.setting_pages_map["default"] = default_index
 
-        # Halaman untuk AKAZE (dari Alignment Dropdown)
         akaze_page = get_akaze_page()
         index_akaze = self.stacked_widget.addWidget(akaze_page)
         self.setting_pages_map["AKAZE"] = index_akaze
 
-        # Halaman untuk ORB (dari Alignment Dropdown)
-        orb_page = get_orb_page()  # Menggunakan fungsi impor dari orb_page.py
+        orb_page = get_orb_page()
         index_orb = self.stacked_widget.addWidget(orb_page)
         self.setting_pages_map["ORB"] = index_orb
         
-        # Halaman untuk ORB (dari Alignment Dropdown)
-        orb_page = get_farneback_optical_flow_page()  # Menggunakan fungsi impor dari orb_page.py
-        index_orb = self.stacked_widget.addWidget(orb_page)
-        self.setting_pages_map["Farneback Optical Flow"] = index_orb
+        farneback_page = get_farneback_optical_flow_page()  
+        index_farneback = self.stacked_widget.addWidget(farneback_page)
+        self.setting_pages_map["Farneback Optical Flow"] = index_farneback
 
         # # Halaman untuk Average (dari Denoising Dropdown)
-        # average_page = self.get_average_page()
-        # index_average = self.stacked_widget.addWidget(average_page)
-        # self.setting_pages_map["Average"] = index_average
+        similarity_v1_page = get_similarity_v1_settings_page()
+        index_similarity_v1 = self.stacked_widget.addWidget(similarity_v1_page)
+        self.setting_pages_map["Similarity"] = index_similarity_v1
+        
+        similarity_v2_page = get_similarity_v2_settings_page()
+        index_similarity_v2 = self.stacked_widget.addWidget(similarity_v2_page)
+        self.setting_pages_map["Similarity V2"] = index_similarity_v2
 
     def wrap_in_scroll_area(self, widget):
         """

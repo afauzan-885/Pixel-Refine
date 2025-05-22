@@ -10,8 +10,8 @@ import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, gaussian_window, get_all_image_paths_for_single_process, load_images_from_paths, normalize_image, save_image
 from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityV1MotionInterface
+from UI.enhance_stack.components.single_page_layout.parameter_denoising.similarity_v1_parameter_settings import  load_similarity_v1_config
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
-from UI.settings.General.GeneralSetting import load_general_settings
 from UI.settings.General.Language import language_config
 
 class ThreadWorker(QThread):
@@ -305,13 +305,13 @@ class SimilarityAlgorithm:
 def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
          single_process=None, batch_id=None, save_final_weight_map=False, progress_bar=None):
     try:
-        general_settings, _ = load_general_settings()
+        general_settings = load_similarity_v1_config()
         image_processor = SimilarityAlgorithm(db_path)
         
-        sim_tile_size_int = general_settings.get("similarity_tile_size")
-        sim_motion_sensitivity = general_settings.get("similarity_motion_sensitivity")
-        sim_noise_offset_factor = general_settings.get("similarity_noise_mad_offset_factor")
-        sim_overlap_percent = general_settings.get("similarity_overlap_percent")
+        sim_tile_size_int = general_settings.get("similarity_V1_tile_size")
+        sim_motion_sensitivity = general_settings.get("similarity_V1_motion_sensitivity")
+        sim_noise_offset_factor = general_settings.get("similarity_V1_noise_mad_offset_factor")
+        sim_overlap_percent = general_settings.get("similarity_V1_overlap_percent")
         
         tile_size_tuple = (sim_tile_size_int, sim_tile_size_int)
         overlap_ratio = sim_overlap_percent / 100.0

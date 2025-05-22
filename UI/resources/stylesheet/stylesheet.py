@@ -33,6 +33,23 @@ SLIDER_VALUE_LABEL = """
     }
 """
 
+VALUE_EDIT_LABEL = """
+    QLineEdit {
+        background-color: #E0E0E0;
+        border-radius: 4px;
+        padding: 3px 8px;
+        font-weight: bold;
+        font-size: 11px;
+        color: #333;
+        min-width: 40px;
+        text-align: center;
+    }
+    QLineEdit:focus {
+        border-color: #0078d7;
+        background-color: #f0f8ff;
+    }
+"""
+
 TOGGLE_BUTTON = """
     QToolButton {
         background-color: #FF0000; /* Merah untuk state false */

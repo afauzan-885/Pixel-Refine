@@ -6,7 +6,7 @@ from PyQt6.QtGui import QFont
 from PyQt6.QtCore import Qt
 
 from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import FarnebackAlgorithm
-from UI.resources.stylesheet.stylesheet import  SCROLL_AREA, SLIDER_STYLE
+from UI.resources.stylesheet.stylesheet import  SCROLL_AREA, SLIDER_STYLE, SLIDER_VALUE_LABEL
 from UI.settings.General.Language import language_config
 from config import CONFIG_DIR, ALGORITHM_PARAMETER_SETTINGS_FILE, GENERAL_SETTINGS_FILE
 
@@ -68,6 +68,7 @@ def create_slider(label_text, min_val, max_val, step, initial_value, format_func
     slider.setStyleSheet(SLIDER_STYLE)
 
     value_label = QLabel(format_func(initial_value))
+    value_label.setStyleSheet(SLIDER_VALUE_LABEL)
     value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
     layout = QHBoxLayout()

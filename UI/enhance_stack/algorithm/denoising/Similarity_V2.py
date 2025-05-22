@@ -11,6 +11,7 @@ from PyQt6.QtCore import QThread, pyqtSignal, Qt
 # from UI.enhance_stack.algorithm.denoising.extra_similarity.compute_motion_metrics_aot import accumulate_tiles_jit
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, gaussian_window, get_all_image_paths_for_single_process, load_images_from_paths, normalize_image, save_image
 from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityV2MotionInterface
+from UI.enhance_stack.components.single_page_layout.parameter_denoising.similarity_v2_parameter_settings import load_similarity_v2_config
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.GeneralSetting import load_general_settings
 from UI.settings.General.Language import language_config
@@ -359,9 +360,9 @@ class SimilarityAlgorithmV2:
 def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
          single_process=None, batch_id=None, save_final_weight_map=False, progress_bar=None):
     try:
-        general_settings, _= load_general_settings()
-        image_processor = SimilarityAlgorithmV2(db_path) # db_path digunakan di sini
-
+        general_settings= load_similarity_v2_config()
+        image_processor = SimilarityAlgorithmV2(db_path)
+        
         sim_tile_size_int = general_settings.get("similarity_v2_tile_size", 16)
         sim_overlap_percent = general_settings.get("similarity_v2_overlap_percent", 40.0)
         sim_v2_mbm_noise_mad_offset_factor = general_settings.get("similarity_v2_mbm_noise_mad_offset_factor", 0.5)
