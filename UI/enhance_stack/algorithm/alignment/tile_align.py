@@ -45,8 +45,8 @@ class TILEAlgorithm:
         Membaca konfigurasi AKAZE dari file JSON. Jika gagal, mengembalikan nilai default.
         """
         default_config = {
-            "tile_size_w": 80,
-            "tile_size_h": 80,
+            "tile_size_w": 48,
+            "tile_size_h": 48,
             "overlap_percent": 0.30, 
             "num_pyramid_levels_coarse_to_fine": 3, 
             "use_multi_core": True,
@@ -68,9 +68,9 @@ class TILEAlgorithm:
         Membaca konfigurasi AKAZE dari file JSON. Jika gagal, mengembalikan nilai default.
         """
         default_config = {
-            "tile_size_w": 32,
-            "tile_size_h": 32,
-            "overlap_percent": 0.25,
+            "tile_size_w": 128,
+            "tile_size_h": 128,
+            "overlap_percent": 0.30,
             "num_pyramid_levels_coarse_to_fine": 4, 
             "use_multi_core": True,
             "align_folder": os.path.join(os.path.expanduser("~"), "Documents", "Pixel Refine", "align_image")
@@ -133,45 +133,39 @@ class TILEAlgorithm:
         return pyramid[::-1]
     
     def _compute_tile_displacements_multiscale(self, base_gray_full_res, target_gray_full_res, config, num_levels=4):
-        base_gray_uint8 = base_gray_full_res
-        if base_gray_full_res.dtype != np.uint8:
-            base_gray_uint8 = cv2.normalize(base_gray_full_res, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-        
-        target_gray_uint8 = target_gray_full_res
-        if target_gray_full_res.dtype != np.uint8:
-            target_gray_uint8 = cv2.normalize(target_gray_full_res, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        base_gray_uint8 = self.prepare_gray_image(base_gray_full_res)
+        target_gray_uint8 = self.prepare_gray_image(target_gray_full_res)
 
         base_pyr = self._build_gaussian_pyramid(base_gray_uint8, num_levels)
         target_pyr = self._build_gaussian_pyramid(target_gray_uint8, num_levels)
-        
+
         if not base_pyr or not target_pyr or len(base_pyr) != len(target_pyr):
             print("Warning: Could not build consistent pyramids. Skipping multiscale displacement computation.")
-            return {}
+            return {}, {}
 
         actual_num_levels = len(base_pyr)
         tile_w_orig = config["tile_size_w"]
         tile_h_orig = config["tile_size_h"]
         overlap_percent = config["overlap_percent"]
-        
-        use_multi_core = config.get("use_multi_core", True) 
+        use_multi_core = config.get("use_multi_core", True)
 
-        current_level_displacement_field = {} 
+        current_level_displacement_field = {}
+        final_response_map = {}
 
         for level_idx in range(actual_num_levels):
             base_level_img = base_pyr[level_idx]
             target_level_img = target_pyr[level_idx]
-            
+
             scale_to_original = (2**(actual_num_levels - 1 - level_idx))
             current_tile_w = max(16, int(round(tile_w_orig / scale_to_original)))
             current_tile_h = max(16, int(round(tile_h_orig / scale_to_original)))
-            current_overlap_px_w = int(round(current_tile_w * overlap_percent))
-            current_overlap_px_h = int(round(current_tile_h * overlap_percent))
-            current_overlap_px_w = min(current_overlap_px_w, current_tile_w - 1)
-            current_overlap_px_h = min(current_overlap_px_h, current_tile_h - 1)
+            current_overlap_px_w = min(int(round(current_tile_w * overlap_percent)), current_tile_w - 1)
+            current_overlap_px_h = min(int(round(current_tile_h * overlap_percent)), current_tile_h - 1)
 
             img_h_level, img_w_level = base_level_img.shape[:2]
 
             if img_h_level < current_tile_h // 2 or img_w_level < current_tile_w // 2:
+                # propagate from previous level
                 propagated_field = {}
                 if level_idx > 0:
                     for key, (prev_dx, prev_dy) in current_level_displacement_field.items():
@@ -181,9 +175,9 @@ class TILEAlgorithm:
 
             step_w_level = max(1, current_tile_w - current_overlap_px_w)
             step_h_level = max(1, current_tile_h - current_overlap_px_h)
-            num_tiles_x_level = max(1, math.ceil(img_w_level / step_w_level)) if img_w_level > current_tile_w else 1
-            num_tiles_y_level = max(1, math.ceil(img_h_level / step_h_level)) if img_h_level > current_tile_h else 1
-            
+            num_tiles_x_level = max(1, math.ceil(img_w_level / step_w_level))
+            num_tiles_y_level = max(1, math.ceil(img_h_level / step_h_level))
+
             tile_params_for_level = []
             for i in range(num_tiles_x_level):
                 for j in range(num_tiles_y_level):
@@ -192,79 +186,106 @@ class TILEAlgorithm:
                     if level_idx > 0:
                         prev_dx, prev_dy = current_level_displacement_field.get(tile_key, (0.0, 0.0))
                         init_dx_level, init_dy_level = prev_dx * 2.0, prev_dy * 2.0
-                    
+
                     tile_params_for_level.append((
                         i, j,
                         base_level_img, target_level_img, None,
                         current_tile_w, current_tile_h,
                         current_overlap_px_w, current_overlap_px_h,
                         img_h_level, img_w_level,
-                        None, 
-                        config, 
+                        None,
+                        config,
                         init_dx_level, init_dy_level,
-                        True  
+                        True  # is_for_displacement_estimation_only
                     ))
-            
+
             level_results_matrices = {}
-            
+            response_map_level = {}
+
             if use_multi_core and len(tile_params_for_level) > 1:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
                     future_to_tile_key = {
-                        executor.submit(self._process_single_tile, *params): (params[0], params[1]) 
+                        executor.submit(self._process_single_tile, *params): (params[0], params[1])
                         for params in tile_params_for_level
                     }
                     for future in concurrent.futures.as_completed(future_to_tile_key):
                         tile_key_processed = future_to_tile_key[future]
                         try:
-                            _, _, M_level = future.result() # Kita hanya butuh matriks M
+                            _, _, M_level, response_val = future.result()  # ⬅️ Perbaikan: 4 nilai
                             level_results_matrices[tile_key_processed] = M_level
+                            response_map_level[tile_key_processed] = response_val
                         except Exception as exc:
                             print(f"  Tile {tile_key_processed} (level {level_idx}) estimation error: {exc}")
-                            level_results_matrices[tile_key_processed] = None # Tandai gagal
-            else: # Proses sekuensial
+                            level_results_matrices[tile_key_processed] = None
+                            response_map_level[tile_key_processed] = 0.0
+            else:
                 for params in tile_params_for_level:
                     tile_key_processed = (params[0], params[1])
                     try:
-                        _, _, M_level = self._process_single_tile(*params)
+                        _, _, M_level, response_val = self._process_single_tile(*params)  # ⬅️ Perbaikan: 4 nilai
                         level_results_matrices[tile_key_processed] = M_level
+                        response_map_level[tile_key_processed] = response_val
                     except Exception as exc:
                         print(f"  Tile {tile_key_processed} (level {level_idx}) estimation error: {exc}")
                         level_results_matrices[tile_key_processed] = None
+                        response_map_level[tile_key_processed] = 0.0
 
-            # Bentuk next_level_displacement_field dari hasil
             next_level_displacement_field_temp = {}
             for i in range(num_tiles_x_level):
                 for j in range(num_tiles_y_level):
-                    tile_key = (i,j)
+                    tile_key = (i, j)
                     M_level = level_results_matrices.get(tile_key)
-
                     init_dx_fallback, init_dy_fallback = 0.0, 0.0
-                    if level_idx > 0: # Dapatkan init_dx, init_dy lagi untuk fallback
+                    if level_idx > 0:
                         prev_dx, prev_dy = current_level_displacement_field.get(tile_key, (0.0, 0.0))
                         init_dx_fallback, init_dy_fallback = prev_dx * 2.0, prev_dy * 2.0
-                    
-                    current_dx_total, current_dy_total = init_dx_fallback, init_dy_fallback # Default ke nilai propagasi
+
+                    current_dx_total, current_dy_total = init_dx_fallback, init_dy_fallback
                     if M_level is not None:
-                        current_dx_total = -M_level[0, 2] 
+                        current_dx_total = -M_level[0, 2]
                         current_dy_total = -M_level[1, 2]
-                    
+
                     next_level_displacement_field_temp[tile_key] = (current_dx_total, current_dy_total)
 
             current_level_displacement_field = next_level_displacement_field_temp
-        
-        # current_level_displacement_field sekarang berisi hasil dari level piramida terhalus
-        return current_level_displacement_field
+
+            # Simpan response map dari level terhalus (paling akhir)
+            if level_idx == actual_num_levels - 1:
+                final_response_map = response_map_level
+
+        return current_level_displacement_field, final_response_map
+
+
+    def refine_bad_tiles_from_neighbors(self, displacement_field, response_map, response_thresh=0.03):
+        refined_field = displacement_field.copy()
+
+        for (i, j), resp in response_map.items():
+            if resp >= response_thresh:
+                continue
+
+            neighbor_shifts = []
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                neighbor = (i + dx, j + dy)
+                if neighbor in displacement_field and response_map.get(neighbor, 0.0) >= response_thresh:
+                    neighbor_shifts.append(displacement_field[neighbor])
+
+            if neighbor_shifts:
+                mean_dx = sum(d[0] for d in neighbor_shifts) / len(neighbor_shifts)
+                mean_dy = sum(d[1] for d in neighbor_shifts) / len(neighbor_shifts)
+                refined_field[(i, j)] = (mean_dx, mean_dy)
+
+        return refined_field
 
 
     def _process_single_tile(self, tile_idx_i, tile_idx_j,
-                             base_gray_enhanced, target_gray_enhanced, target_image_to_warp,
-                             tile_w, tile_h,
-                             overlap_px_w, overlap_px_h,
-                             img_h, img_w,
-                             akaze_detector, 
-                             local_align_config,
-                             init_dx=0.0, init_dy=0.0, # TAMBAHKAN PARAMETER INI
-                             is_for_displacement_estimation_only=False): # Flag baru
+                         base_gray_enhanced, target_gray_enhanced, target_image_to_warp,
+                         tile_w, tile_h,
+                         overlap_px_w, overlap_px_h,
+                         img_h, img_w,
+                         akaze_detector,
+                         local_align_config,
+                         init_dx=0.0, init_dy=0.0,
+                         is_for_displacement_estimation_only=False):
 
         x_coord_grid = tile_idx_i * (tile_w - overlap_px_w)
         y_coord_grid = tile_idx_j * (tile_h - overlap_px_h)
@@ -272,12 +293,12 @@ class TILEAlgorithm:
         current_tile_global_y_start = max(0, int(y_coord_grid))
         current_tile_global_x_end = min(img_w, current_tile_global_x_start + tile_w)
         current_tile_global_y_end = min(img_h, current_tile_global_y_start + tile_h)
-        
+
         current_tile_processing_w = current_tile_global_x_end - current_tile_global_x_start
         current_tile_processing_h = current_tile_global_y_end - current_tile_global_y_start
-        
-        if current_tile_processing_w <= 0 or current_tile_processing_h <=0:
-            return None, None, None
+
+        if current_tile_processing_w <= 0 or current_tile_processing_h <= 0:
+            return None, None, None, 0.0
 
         tile_target_content_to_warp_current = None
         if not is_for_displacement_estimation_only and target_image_to_warp is not None:
@@ -285,139 +306,107 @@ class TILEAlgorithm:
                 current_tile_global_y_start:current_tile_global_y_end,
                 current_tile_global_x_start:current_tile_global_x_end
             ]
-            if tile_target_content_to_warp_current.size == 0: # jika hasil slice kosong
-                 return None, None, None
+            if tile_target_content_to_warp_current.size == 0:
+                return None, None, None, 0.0
         elif is_for_displacement_estimation_only and target_image_to_warp is None:
             if current_tile_processing_w < 16 or current_tile_processing_h < 16:
                 M_init_guess = np.float32([[1, 0, -init_dx], [0, 1, -init_dy]])
-                return None, (current_tile_global_y_start, current_tile_global_x_start), M_init_guess
-
+                return None, (current_tile_global_y_start, current_tile_global_x_start), M_init_guess, 0.0
 
         if not is_for_displacement_estimation_only and \
-           (current_tile_processing_w <= max(1, overlap_px_w // 2) or \
-            current_tile_processing_h <= max(1, overlap_px_h // 2) or \
+        (current_tile_processing_w <= max(1, overlap_px_w // 2) or
+            current_tile_processing_h <= max(1, overlap_px_h // 2) or
             current_tile_processing_w < 16 or current_tile_processing_h < 16):
-            if tile_target_content_to_warp_current is None or tile_target_content_to_warp_current.size == 0: return None, None, None
+            if tile_target_content_to_warp_current is None or tile_target_content_to_warp_current.size == 0:
+                return None, None, None, 0.0
+
             hanning_win_skip = self._create_hanning_window_2d(tile_target_content_to_warp_current.shape[0], tile_target_content_to_warp_current.shape[1])
-            if tile_target_content_to_warp_current.ndim == 3: hanning_win_skip = np.stack([hanning_win_skip]*tile_target_content_to_warp_current.shape[2], axis=-1)
+            if tile_target_content_to_warp_current.ndim == 3:
+                hanning_win_skip = np.stack([hanning_win_skip]*tile_target_content_to_warp_current.shape[2], axis=-1)
             windowed_tile_skip = (tile_target_content_to_warp_current.astype(np.float32) * hanning_win_skip)
-            
-            # Jika ada init_dx/dy, gunakan itu. Jika tidak, identitas.
-            M_final = np.float32([[1, 0, -init_dx], [0, 1, -init_dy]]) if (init_dx !=0 or init_dy !=0) else np.float32([[1,0,0],[0,1,0]])
-            if tile_target_content_to_warp_current is not None and (init_dx !=0 or init_dy !=0):
-                 try:
-                    output_size_warp_skip = (tile_target_content_to_warp_current.shape[1], tile_target_content_to_warp_current.shape[0])
-                    warped_content_skip = cv2.warpAffine(np.ascontiguousarray(tile_target_content_to_warp_current), M_final,
-                                                            output_size_warp_skip, flags=cv2.INTER_AREA,
-                                                            borderMode=cv2.BORDER_REFLECT_101)
-                    windowed_tile_skip = (warped_content_skip.astype(np.float32) * hanning_win_skip)
-                 except: pass # Abaikan error warp, gunakan tile asli
 
-            return windowed_tile_skip, (current_tile_global_y_start, current_tile_global_x_start), M_final
+            M_final = np.float32([[1, 0, -init_dx], [0, 1, -init_dy]]) if (init_dx != 0 or init_dy != 0) else np.float32([[1, 0, 0], [0, 1, 0]])
+            try:
+                if init_dx != 0 or init_dy != 0:
+                    output_size = (tile_target_content_to_warp_current.shape[1], tile_target_content_to_warp_current.shape[0])
+                    warped = cv2.warpPerspective(np.ascontiguousarray(tile_target_content_to_warp_current), M_final,
+                                            output_size, flags=cv2.INTER_AREA, borderMode=cv2.BORDER_REFLECT_101)
+                    windowed_tile_skip = (warped.astype(np.float32) * hanning_win_skip)
+            except:
+                pass
 
-        # Ekstrak tile untuk phase correlation
-        tile_base_for_phase = base_gray_enhanced[
-            current_tile_global_y_start:current_tile_global_y_end,
-            current_tile_global_x_start:current_tile_global_x_end
-        ].astype(np.float32)
-        
-        # Penting: Ambil tile target DARI target_gray_enhanced yang BELUM di-warp
-        tile_target_for_phase_original = target_gray_enhanced[
+            return windowed_tile_skip, (current_tile_global_y_start, current_tile_global_x_start), M_final, 0.0
+
+        tile_base = base_gray_enhanced[
             current_tile_global_y_start:current_tile_global_y_end,
             current_tile_global_x_start:current_tile_global_x_end
         ].astype(np.float32)
 
-        if tile_base_for_phase.size == 0 or tile_target_for_phase_original.size == 0 or \
-           tile_base_for_phase.shape != tile_target_for_phase_original.shape:
-            # Handle jika salah satu tile kosong atau ukurannya tidak cocok
-            if not is_for_displacement_estimation_only and tile_target_content_to_warp_current is not None and tile_target_content_to_warp_current.size > 0:
-                hanning_win_skip = self._create_hanning_window_2d(tile_target_content_to_warp_current.shape[0], tile_target_content_to_warp_current.shape[1])
-                if tile_target_content_to_warp_current.ndim == 3: hanning_win_skip = np.stack([hanning_win_skip]*tile_target_content_to_warp_current.shape[2], axis=-1)
-                windowed_tile_skip = (tile_target_content_to_warp_current.astype(np.float32) * hanning_win_skip)
-                M_fallback = np.float32([[1, 0, -init_dx], [0, 1, -init_dy]]) if (init_dx !=0 or init_dy !=0) else np.float32([[1,0,0],[0,1,0]])
-                return windowed_tile_skip, (current_tile_global_y_start, current_tile_global_x_start), M_fallback
-            elif is_for_displacement_estimation_only: # Untuk estimasi, kembalikan M dari init_dx, init_dy
-                M_init_guess = np.float32([[1, 0, -init_dx], [0, 1, -init_dy]])
-                return None, (current_tile_global_y_start, current_tile_global_x_start), M_init_guess
-            return None, None, None
+        tile_target_original = target_gray_enhanced[
+            current_tile_global_y_start:current_tile_global_y_end,
+            current_tile_global_x_start:current_tile_global_x_end
+        ].astype(np.float32)
 
-        # --- MODIFIKASI: Pre-warp tile target untuk phase correlation jika ada init_dx/dy ---
-        tile_target_for_phase_to_correlate = tile_target_for_phase_original
+        if tile_base.size == 0 or tile_target_original.size == 0 or tile_base.shape != tile_target_original.shape:
+            M_fallback = np.float32([[1, 0, -init_dx], [0, 1, -init_dy]])
+            if not is_for_displacement_estimation_only:
+                if tile_target_content_to_warp_current is not None and tile_target_content_to_warp_current.size > 0:
+                    hanning_win = self._create_hanning_window_2d(tile_target_content_to_warp_current.shape[0], tile_target_content_to_warp_current.shape[1])
+                    if tile_target_content_to_warp_current.ndim == 3:
+                        hanning_win = np.stack([hanning_win]*tile_target_content_to_warp_current.shape[2], axis=-1)
+                    windowed = (tile_target_content_to_warp_current.astype(np.float32) * hanning_win)
+                    return windowed, (current_tile_global_y_start, current_tile_global_x_start), M_fallback, 0.0
+            else:
+                return None, (current_tile_global_y_start, current_tile_global_x_start), M_fallback, 0.0
+
+            return None, None, None, 0.0
+
+        # Pre-warp untuk phase correlation
+        tile_target = tile_target_original
         if init_dx != 0.0 or init_dy != 0.0:
             try:
                 M_guess = np.float32([[1, 0, -init_dx], [0, 1, -init_dy]])
-                # Warp tile target yang akan digunakan untuk phase correlation
-                tile_target_for_phase_to_correlate = cv2.warpAffine(
-                    tile_target_for_phase_original, # Warp tile yang sudah diekstrak
-                    M_guess,
-                    (tile_target_for_phase_original.shape[1], tile_target_for_phase_original.shape[0]),
-                    flags=cv2.INTER_LINEAR, # Linear lebih cepat untuk ini
-                    borderMode=cv2.BORDER_REFLECT_101 # atau cv2.BORDER_CONSTANT
-                )
-            except Exception as e:
-                tile_target_for_phase_to_correlate = tile_target_for_phase_original
-        # --- AKHIR MODIFIKASI PRE-WARP ---
-
-        M_total_for_final_warp = np.float32([[1, 0, -init_dx], [0, 1, -init_dy]]) # Default ke init_dx, init_dy
-        perform_final_warp = (init_dx != 0.0 or init_dy != 0.0) # Warp jika ada init_dx/dy
+                tile_target = cv2.warpAffine(tile_target_original, M_guess, (tile_target_original.shape[1], tile_target_original.shape[0]),
+                                            flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+            except:
+                tile_target = tile_target_original
 
         refined_dx, refined_dy = 0.0, 0.0
-
+        response = 0.0
         try:
-            tile_base_for_phase_cont = np.ascontiguousarray(tile_base_for_phase)
-            tile_target_for_phase_cont = np.ascontiguousarray(tile_target_for_phase_to_correlate)
-
-            if tile_base_for_phase_cont.shape[0] < 8 or tile_base_for_phase_cont.shape[1] < 8 or \
-               tile_target_for_phase_cont.shape[0] < 8 or tile_target_for_phase_cont.shape[1] < 8:
-                pass
-            else:
-                shift, response = cv2.phaseCorrelate(tile_base_for_phase_cont, tile_target_for_phase_cont)
-
+            if tile_base.shape[0] >= 8 and tile_base.shape[1] >= 8:
+                shift, response = cv2.phaseCorrelate(np.ascontiguousarray(tile_base), np.ascontiguousarray(tile_target))
                 if shift is not None and shift[0] is not None and shift[1] is not None:
                     refined_dx, refined_dy = shift[0], shift[1]
-                    
-                    total_dx = init_dx + refined_dx
-                    total_dy = init_dy + refined_dy
-                    M_total_for_final_warp = np.float32([[1, 0, -total_dx], [0, 1, -total_dy]])
-                    perform_final_warp = True 
-           
-        except cv2.error as e:
-            pass
-        except Exception as e_gen:
-            pass
+        except:
+            response = 0.0
+
+        total_dx = init_dx + refined_dx
+        total_dy = init_dy + refined_dy
+        M_total = np.float32([[1, 0, -total_dx], [0, 1, -total_dy]])
 
         if is_for_displacement_estimation_only:
-            return None, (current_tile_global_y_start, current_tile_global_x_start), M_total_for_final_warp
+            return None, (current_tile_global_y_start, current_tile_global_x_start), M_total, response
 
-        warped_tile_target_content = tile_target_content_to_warp_current.copy() # Mulai dengan konten asli
-        output_size_warp = (tile_base_for_phase.shape[1], tile_base_for_phase.shape[0])
+        warped_tile = tile_target_content_to_warp_current.copy()
+        try:
+            if tile_target_content_to_warp_current is not None:
+                warped_tile = cv2.warpAffine(np.ascontiguousarray(tile_target_content_to_warp_current), M_total,
+                                            (tile_base.shape[1], tile_base.shape[0]),
+                                            flags=cv2.INTER_AREA, borderMode=cv2.BORDER_REFLECT_101)
+        except:
+            warped_tile = tile_target_content_to_warp_current.copy()
 
-        if perform_final_warp and tile_target_content_to_warp_current is not None:
-            try:
-                tile_target_content_to_warp_cont = np.ascontiguousarray(tile_target_content_to_warp_current)
-                warped_tile_target_content = cv2.warpAffine(tile_target_content_to_warp_cont, M_total_for_final_warp,
-                                                            output_size_warp, flags=cv2.INTER_AREA,
-                                                            borderMode=cv2.BORDER_REFLECT_101)
-            except cv2.error as e:
-                # print(f"cv2.error in final warpAffine for tile ({tile_idx_i},{tile_idx_j}): {e}. Using original tile content.")
-                warped_tile_target_content = tile_target_content_to_warp_current.copy()
-            except Exception as e_gen:
-                # print(f"General error in final warpAffine for tile ({tile_idx_i},{tile_idx_j}): {e_gen}. Using original tile content.")
-                warped_tile_target_content = tile_target_content_to_warp_current.copy()
-        
-        if warped_tile_target_content is None or warped_tile_target_content.size == 0:
-            if tile_target_content_to_warp_current is not None and tile_target_content_to_warp_current.size > 0:
-                warped_tile_target_content = tile_target_content_to_warp_current.copy()
-            else: # Seharusnya tidak terjadi jika tile_target_content_to_warp_current sudah dicek
-                 return None, None, None
+        if warped_tile is None or warped_tile.size == 0:
+            return None, None, None, 0.0
 
-        hanning_win = self._create_hanning_window_2d(warped_tile_target_content.shape[0], warped_tile_target_content.shape[1])
-        if warped_tile_target_content.ndim == 3:
-            hanning_win = np.stack([hanning_win] * warped_tile_target_content.shape[2], axis=-1)
+        hanning_win = self._create_hanning_window_2d(warped_tile.shape[0], warped_tile.shape[1])
+        if warped_tile.ndim == 3:
+            hanning_win = np.stack([hanning_win] * warped_tile.shape[2], axis=-1)
 
-        windowed_tile = (warped_tile_target_content.astype(np.float32) * hanning_win)
-        return windowed_tile, (current_tile_global_y_start, current_tile_global_x_start), M_total_for_final_warp
-    
+        windowed_tile = warped_tile.astype(np.float32) * hanning_win
+        return windowed_tile, (current_tile_global_y_start, current_tile_global_x_start), M_total, response
+
     def align_local(self, base_image_orig, target_image_orig, config_to_use):
         if base_image_orig is None or target_image_orig is None:
             return None, None
@@ -425,13 +414,13 @@ class TILEAlgorithm:
         tile_w = config_to_use.get("tile_size_w")
         tile_h = config_to_use.get("tile_size_h")
         overlap_percent = config_to_use.get("overlap_percent")
-        num_pyr_levels = config_to_use.get("num_pyramid_levels_coarse_to_fine", 4) # Ambil dari config atau default 4
+        num_pyr_levels = config_to_use.get("num_pyramid_levels_coarse_to_fine", 4)
 
         if tile_w is None or tile_h is None or overlap_percent is None:
             return target_image_orig.copy(), {}
-        
+
         use_multicore_tiles = bool(config_to_use.get("use_multi_core", True))
-        dummy_akaze_detector = None 
+        dummy_akaze_detector = None
 
         current_target_image_to_align = target_image_orig.copy()
         all_final_local_matrices = {}
@@ -439,173 +428,135 @@ class TILEAlgorithm:
 
         base_gray_prepared = self.prepare_gray_image(base_image_orig)
         try:
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
             base_gray_enhanced_const = clahe.apply(base_gray_prepared)
         except Exception as e:
             print(f"Error applying CLAHE to base image: {e}. Using original gray.")
             base_gray_enhanced_const = base_gray_prepared
 
-        target_gray_current_scale_prepared = self.prepare_gray_image(current_target_image_to_align)
+        target_gray_prepared = self.prepare_gray_image(current_target_image_to_align)
         try:
-            target_gray_enhanced_current_scale = clahe.apply(target_gray_current_scale_prepared)
+            target_gray_enhanced = clahe.apply(target_gray_prepared)
         except Exception as e:
-            print(f"  Error applying CLAHE to target image: {e}. Using original gray.")
-            target_gray_enhanced_current_scale = target_gray_current_scale_prepared
+            print(f"Error applying CLAHE to target image: {e}. Using original gray.")
+            target_gray_enhanced = target_gray_prepared
 
-        # --- PEMANGGILAN FUNGSI COARSE-TO-FINE ---
+        # --- Coarse-to-fine displacement estimation ---
         print(f"  Starting coarse-to-fine displacement estimation with {num_pyr_levels} levels...")
-        displacement_field = self._compute_tile_displacements_multiscale(
-            base_gray_enhanced_const,
-            target_gray_enhanced_current_scale,
-            config_to_use,
-            num_levels=num_pyr_levels
-        )
-        print(f"  Coarse-to-fine estimation finished. Found {len(displacement_field)} initial displacements.")
-        # --- AKHIR PEMANGGILAN COARSE-TO-FINE ---
+        displacement_field, response_map = self._compute_tile_displacements_multiscale(
+            base_gray_enhanced_const, target_gray_enhanced, config_to_use, num_levels=num_pyr_levels)
+        print("  Refining low-confidence tiles using neighboring displacements...")
+        displacement_field = self.refine_bad_tiles_from_neighbors(displacement_field, response_map)
 
         if not (0 <= overlap_percent < 1.0):
             overlap_percent = np.clip(overlap_percent, 0.01, 0.9)
 
         overlap_px_w = int(tile_w * overlap_percent)
         overlap_px_h = int(tile_h * overlap_percent)
-        if overlap_px_w >= tile_w : overlap_px_w = max(0, tile_w -1)
-        if overlap_px_h >= tile_h : overlap_px_h = max(0, tile_h -1)
-        overlap_px_w = max(0, overlap_px_w)
-        overlap_px_h = max(0, overlap_px_h)
+        overlap_px_w = min(overlap_px_w, tile_w - 1)
+        overlap_px_h = min(overlap_px_h, tile_h - 1)
 
-        num_channels_current = current_target_image_to_align.shape[2] if current_target_image_to_align.ndim == 3 else 1
-        if num_channels_current > 1:
-            aligned_target_stitched_float_scale = np.zeros((img_h_orig, img_w_orig, num_channels_current), dtype=np.float32)
-        else:
-            aligned_target_stitched_float_scale = np.zeros((img_h_orig, img_w_orig), dtype=np.float32)
-        weight_sum_map_scale = np.zeros((img_h_orig, img_w_orig), dtype=np.float32)
+        num_channels = current_target_image_to_align.shape[2] if current_target_image_to_align.ndim == 3 else 1
+        aligned_image_float = np.zeros((img_h_orig, img_w_orig, num_channels), dtype=np.float32) \
+                            if num_channels > 1 else np.zeros((img_h_orig, img_w_orig), dtype=np.float32)
+        weight_map = np.zeros((img_h_orig, img_w_orig), dtype=np.float32)
 
         step_w = tile_w - overlap_px_w
         step_h = tile_h - overlap_px_h
-        if step_w <= 0 : step_w = 1
-        if step_h <= 0 : step_h = 1
+        num_tiles_x = max(1, math.ceil(img_w_orig / step_w))
+        num_tiles_y = max(1, math.ceil(img_h_orig / step_h))
 
-        num_tiles_x = math.ceil(img_w_orig / step_w) if img_w_orig > tile_w else 1
-        num_tiles_y = math.ceil(img_h_orig / step_h) if img_h_orig > tile_h else 1
-        if img_w_orig <= tile_w: num_tiles_x = 1
-        if img_h_orig <= tile_h: num_tiles_y = 1
-
-
-        tile_params_list_scale = []
+        tile_params = []
         for i in range(num_tiles_x):
             for j in range(num_tiles_y):
-                init_dx_full_res, init_dy_full_res = displacement_field.get((i, j), (0.0, 0.0))
-                
-                tile_params_list_scale.append((
+                init_dx, init_dy = displacement_field.get((i, j), (0.0, 0.0))
+                tile_params.append((
                     i, j,
                     base_gray_enhanced_const,
-                    target_gray_enhanced_current_scale,
+                    target_gray_enhanced,
                     current_target_image_to_align,
-                    tile_w, tile_h, overlap_px_w, overlap_px_h,
+                    tile_w, tile_h,
+                    overlap_px_w, overlap_px_h,
                     img_h_orig, img_w_orig,
                     dummy_akaze_detector,
                     config_to_use,
-                    init_dx_full_res, 
-                    init_dy_full_res  
+                    init_dx, init_dy,
+                    False  # is_for_displacement_estimation_only
                 ))
-        
-        if not tile_params_list_scale:
-            return current_target_image_to_align.copy(), {}
 
-        results_scale = []
-        if use_multicore_tiles and len(tile_params_list_scale) > 1:
+        results = []
+        if use_multicore_tiles and len(tile_params) > 1:
             with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-                future_to_tile = {
-                    executor.submit(
-                        self._process_single_tile, 
-                        p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], # params
-                        p[13] # init_dx
-                    ): p for p in tile_params_list_scale
+                futures = {
+                    executor.submit(self._process_single_tile, *params): (params[0], params[1])
+                    for params in tile_params
                 }
-                for future in concurrent.futures.as_completed(future_to_tile):
+                for future in concurrent.futures.as_completed(futures):
                     try:
-                        result_tile = future.result()
-                        if result_tile and result_tile[0] is not None: results_scale.append(result_tile)
+                        win_tile, coord, M_loc, _ = future.result()
+                        if win_tile is not None:
+                            results.append((win_tile, coord, M_loc))
                     except Exception as exc:
-                        params_failed = future_to_tile[future]
-                        print(f"  Tile ({params_failed[0]},{params_failed[1]}) processing generated an exception: {exc}")
+                        i, j = futures[future]
+                        print(f"  Tile ({i},{j}) processing exception: {exc}")
         else:
-            for params_set in tile_params_list_scale:
+            for params in tile_params:
                 try:
-                    result_tile = self._process_single_tile(*params_set) # params_set sudah berisi init_dx, init_dy
-                    if result_tile and result_tile[0] is not None: results_scale.append(result_tile)
+                    win_tile, coord, M_loc, _ = self._process_single_tile(*params)
+                    if win_tile is not None:
+                        results.append((win_tile, coord, M_loc))
                 except Exception as exc:
-                    print(f"  Tile ({params_set[0]},{params_set[1]}) generated an exception: {exc}")
-        
-        if not results_scale:
+                    print(f"  Tile ({params[0]},{params[1]}) processing exception: {exc}")
+
+        if not results:
             return current_target_image_to_align.copy(), {}
 
-        for windowed_tile_float, (y_start_global, x_start_global), M_loc in results_scale:
-            if windowed_tile_float is None: continue
-
-            h_tile_processed, w_tile_processed = windowed_tile_float.shape[:2]
-            y_end_global = min(y_start_global + h_tile_processed, img_h_orig)
-            x_end_global = min(x_start_global + w_tile_processed, img_w_orig)
-            actual_h_to_place = y_end_global - y_start_global
-            actual_w_to_place = x_end_global - x_start_global
-
-            if actual_h_to_place <= 0 or actual_w_to_place <= 0: continue
-
-            current_tile_data_to_place = windowed_tile_float[:actual_h_to_place, :actual_w_to_place]
-            target_roi_buffer = aligned_target_stitched_float_scale[y_start_global:y_end_global, x_start_global:x_end_global]
-            
-            if target_roi_buffer.shape[:2] != current_tile_data_to_place.shape[:2]:
+        for win_tile, (y0, x0), M_loc in results:
+            h, w = win_tile.shape[:2]
+            y1, x1 = min(y0 + h, img_h_orig), min(x0 + w, img_w_orig)
+            actual_h, actual_w = y1 - y0, x1 - x0
+            if actual_h <= 0 or actual_w <= 0:
                 continue
 
-            if num_channels_current > 1:
-                if target_roi_buffer.ndim == 3 and current_tile_data_to_place.ndim == 3 and target_roi_buffer.shape[2] == current_tile_data_to_place.shape[2]:
-                    target_roi_buffer += current_tile_data_to_place
-                else:
-                    continue 
-                
-            elif num_channels_current == 1:
-                _current_tile_data_to_place = current_tile_data_to_place
-                if _current_tile_data_to_place.ndim == 3 and _current_tile_data_to_place.shape[2] == 1:
-                    _current_tile_data_to_place = np.squeeze(_current_tile_data_to_place, axis=2)
-                
-                _target_roi_buffer = target_roi_buffer
-                if _target_roi_buffer.ndim ==3 and _target_roi_buffer.shape[2] == 1:
-                    _target_roi_buffer = np.squeeze(_target_roi_buffer, axis=2)
+            win_crop = win_tile[:actual_h, :actual_w]
+            target_crop = aligned_image_float[y0:y1, x0:x1]
 
-                if _target_roi_buffer.ndim == 2 and _current_tile_data_to_place.ndim == 2:
-                    _target_roi_buffer += _current_tile_data_to_place
-                else: continue # print("Channel/dim mismatch 1D")
+            if num_channels > 1:
+                if win_crop.shape == target_crop.shape:
+                    target_crop += win_crop
+            else:
+                if win_crop.ndim == 3:
+                    win_crop = np.squeeze(win_crop, axis=2)
+                if target_crop.ndim == 3:
+                    target_crop = np.squeeze(target_crop, axis=2)
+                if win_crop.shape == target_crop.shape:
+                    target_crop += win_crop
 
-
-            hanning_for_weight = self._create_hanning_window_2d(current_tile_data_to_place.shape[0], current_tile_data_to_place.shape[1])
-            weight_sum_map_scale[y_start_global:y_end_global, x_start_global:x_end_global] += hanning_for_weight
+            hanning_win = self._create_hanning_window_2d(actual_h, actual_w)
+            weight_map[y0:y1, x0:x1] += hanning_win
 
             if M_loc is not None:
-                grid_idx_x = int(round(x_start_global / step_w)) if step_w > 0 else 0
-                grid_idx_y = int(round(y_start_global / step_h)) if step_h > 0 else 0
-                all_final_local_matrices[(grid_idx_x, grid_idx_y)] = M_loc
+                gx = int(round(x0 / step_w)) if step_w > 0 else 0
+                gy = int(round(y0 / step_h)) if step_h > 0 else 0
+                all_final_local_matrices[(gx, gy)] = M_loc
 
-        if num_channels_current > 1:
-            weight_sum_map_3d_scale = np.stack([weight_sum_map_scale] * num_channels_current, axis=-1)
-            denominator_scale = np.where(weight_sum_map_3d_scale < 1e-6, 1.0, weight_sum_map_3d_scale)
+        if num_channels > 1:
+            weight_map_3d = np.stack([weight_map] * num_channels, axis=-1)
+            denom = np.where(weight_map_3d < 1e-6, 1.0, weight_map_3d)
         else:
-            if aligned_target_stitched_float_scale.ndim == 3 and num_channels_current == 1:
-                aligned_target_stitched_float_scale = np.squeeze(aligned_target_stitched_float_scale, axis=2)
-            denominator_scale = np.where(weight_sum_map_scale < 1e-6, 1.0, weight_sum_map_scale)
+            denom = np.where(weight_map < 1e-6, 1.0, weight_map)
 
-        denominator_scale[denominator_scale == 0] = 1.0 # Hindari pembagian dengan nol
-        intermediate_aligned_float_scale = aligned_target_stitched_float_scale / denominator_scale
+        aligned_image_float /= denom
 
-        final_aligned_image = None
         if target_image_orig.dtype == np.uint8:
-            final_aligned_image = np.clip(intermediate_aligned_float_scale, 0, 255).astype(np.uint8)
+            final_aligned_image = np.clip(aligned_image_float, 0, 255).astype(np.uint8)
         elif target_image_orig.dtype == np.uint16:
-            final_aligned_image = np.clip(intermediate_aligned_float_scale, 0, 65535).astype(np.uint16)
+            final_aligned_image = np.clip(aligned_image_float, 0, 65535).astype(np.uint16)
         elif target_image_orig.dtype in [np.float32, np.float64]:
-            finfo = np.finfo(target_image_orig.dtype)
-            final_aligned_image = np.clip(intermediate_aligned_float_scale, finfo.min, finfo.max).astype(target_image_orig.dtype)
+            info = np.finfo(target_image_orig.dtype)
+            final_aligned_image = np.clip(aligned_image_float, info.min, info.max).astype(target_image_orig.dtype)
         else:
-            final_aligned_image = intermediate_aligned_float_scale.astype(target_image_orig.dtype)
+            final_aligned_image = aligned_image_float.astype(target_image_orig.dtype)
 
         print(f"  Finished full-resolution alignment. Final image generated.")
         return final_aligned_image, all_final_local_matrices
