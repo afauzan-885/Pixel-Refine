@@ -76,7 +76,7 @@ APPLY_BUTTON = """
         color: white;
         border: none;
         border-radius: 5px;
-        padding: 10px 20px;
+        padding: 2px 10px;
         font-size: 14px;
         font-weight: bold;
     }
@@ -359,10 +359,10 @@ LIST_IMAGE_DATA_SINGLE_MODE = """
         """
 LIST_IMAGE_DATA_SPECIFIC_ITEM = """
             QListWidget#ImageList::item {
-            border: 1px solid #d0d0d0; /* Warna border item */
-            border-radius: 4px;       /* Sudut sedikit melengkung (opsional) */
-            padding: 2px 4px;         /* Atas/Bawah 5px, Kiri/Kanan 8px */
-            margin: 2px 4px 2px 0px;  /* 2px atas/bawah, 4px kanan, 0px kiri */
+            border: 1px solid #d0d0d0;
+            border-radius: 4px;       
+            padding: 2px 4px;         
+            margin: 2px 4px 2px 0px;  
             background-color: transparent;
             color: #333333;
             }
@@ -380,9 +380,8 @@ SWITCH_BUTTON_DEFAULT_STYLE = """
     QPushButton {
         background-color: #E1E1E1;
         color: black;
-        border: 1px solid #A6A6A6;
         border-radius: 5px;
-        padding: 2px; 
+        padding: 2px 5px;
         min-height: 10px; 
         min-width: 40px; 
         font-weight: ligth; 
@@ -395,7 +394,6 @@ SWITCH_BUTTON_DEFAULT_STYLE = """
     }
 """
 
-# Style untuk tombol switch yang aktif
 SWITCH_BUTTON_ACTIVE_STYLE = """
     QPushButton {
         background-color: #0078D7; 

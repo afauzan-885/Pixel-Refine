@@ -119,7 +119,8 @@ def get_similarity_v2_settings_page():
 
     page_widget = QWidget()
     main_layout = QVBoxLayout(page_widget)
-    main_layout.setSpacing(15); main_layout.setContentsMargins(15,15,15,15)
+    main_layout.setSpacing(0)
+    main_layout.setContentsMargins(10,10,10,10)
 
     title_label = QLabel(getattr(language_config, 'SIMILARITY_V2_GROUP_TITLE', "Similarity V2 Parameters"))
     title_label.setFont(get_default_font(10, QFont.Weight.Bold))
@@ -145,7 +146,7 @@ def get_similarity_v2_settings_page():
     tile_size_combo.addItems([str(size) for size in tile_options_int])
     initial_tile_size_int = sim_v2_config.get("similarity_v2_tile_size", 32)
     tile_size_combo.setCurrentText(str(initial_tile_size_int))
-    tile_size_combo.setStyleSheet(DROPDOWN_BOX + "QComboBox { padding: 4px 6px; min-height: 20px; }")
+    tile_size_combo.setStyleSheet(DROPDOWN_BOX)
     tile_size_combo.setMinimumWidth(100)
     form_layout.addRow(tile_size_label, tile_size_combo)
     widgets['tile_combo'] = tile_size_combo
@@ -220,7 +221,6 @@ def get_similarity_v2_settings_page():
     widgets['wiener_c_slider'] = slider_wc
     widgets['wiener_c_input'] = input_wc
 
-
     # --- Koneksi dua arah untuk semua slider & input V2 ---
     def setup_slider_input_connections_v2(slider, line_edit, multiplier, min_actual, max_actual, locale_obj, format_digits, is_float=True, slider_min_val_raw=None, slider_max_val_raw=None):
         slider.valueChanged.connect(
@@ -270,6 +270,7 @@ def get_similarity_v2_settings_page():
     reset_button.clicked.connect(reset_similarity_v2_defaults)
     reset_button_layout = QHBoxLayout()
     reset_button_layout.addStretch()
+    reset_button_layout.setContentsMargins(0, 10, 0, 0)
     reset_button_layout.addWidget(reset_button)
     main_layout.addLayout(reset_button_layout)
 

@@ -96,7 +96,7 @@ class LeftPanel(QWidget):
 
         self.parameter_switch_buttons_map = {
             self.btn_show_alignment_params: "alignment",
-            self.btn_show_super_res_params: "super_resolution",
+            # self.btn_show_super_res_params: "super_resolution",
             self.btn_show_denoising_params: "denoising"
         }
         
@@ -115,7 +115,7 @@ class LeftPanel(QWidget):
         self.switch_button_group.buttonClicked.connect(self.on_switch_button_clicked)
 
         switch_button_panel_layout.addWidget(self.btn_show_alignment_params)
-        switch_button_panel_layout.addWidget(self.btn_show_super_res_params)
+        # switch_button_panel_layout.addWidget(self.btn_show_super_res_params)
         switch_button_panel_layout.addWidget(self.btn_show_denoising_params)
         switch_button_panel_layout.addStretch()
 
@@ -160,8 +160,8 @@ class LeftPanel(QWidget):
         target_button = None
         if source_category == "alignment":
             target_button = self.btn_show_alignment_params
-        elif source_category == "super_resolution":
-            target_button = self.btn_show_super_res_params
+        # elif source_category == "super_resolution":
+        #     target_button = self.btn_show_super_res_params
         elif source_category == "denoising":
             target_button = self.btn_show_denoising_params
 
@@ -223,4 +223,4 @@ class LeftPanel(QWidget):
         if chosen_text in self.setting_pages_map and not is_none_selection:
             self.parameter_stack.setCurrentIndex(self.setting_pages_map[chosen_text])
         else:
-            self.parameter_stack.setCurrentIndex(self.setting_pages_map.get("default", 0)) # Fallback ke index 0 jika "default" tidak ada
+            self.parameter_stack.setCurrentIndex(self.setting_pages_map.get("default", 0))

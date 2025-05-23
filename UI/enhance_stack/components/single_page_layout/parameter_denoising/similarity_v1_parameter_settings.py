@@ -112,8 +112,8 @@ def get_similarity_v1_settings_page():
 
     page_widget = QWidget()
     main_layout = QVBoxLayout(page_widget)
-    main_layout.setSpacing(15) # Sedikit lebih banyak spasi antar grup
-    main_layout.setContentsMargins(15,15,15,15)
+    main_layout.setSpacing(0) # Sedikit lebih banyak spasi antar grup
+    main_layout.setContentsMargins(10,10,10,10)
 
 
     title_label = QLabel(getattr(language_config, 'SIMILARITY_V1_GROUP_TITLE', "Similarity V1 Parameters"))
@@ -263,7 +263,8 @@ def get_similarity_v1_settings_page():
     reset_button.clicked.connect(reset_similarity_v1_defaults)
     
     reset_button_layout = QHBoxLayout()
-    reset_button_layout.addStretch() 
+    reset_button_layout.addStretch()
+    reset_button_layout.setContentsMargins(0, 10, 0, 0)
     reset_button_layout.addWidget(reset_button)
     main_layout.addLayout(reset_button_layout)
 
