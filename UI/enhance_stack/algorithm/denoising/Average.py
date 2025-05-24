@@ -7,7 +7,7 @@ import os
 from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, get_all_image_paths_for_single_process, load_images_from_paths, save_image
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, get_all_image_paths_for_single_process, load_images_from_paths, resize_all_with_padding, save_image
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
 
@@ -353,11 +353,14 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
 
                 batch_paths = image_paths[batch_start:min(batch_start + batch_size, total_images)]
                 batch_images = load_images_from_paths(batch_paths, stop_requested)
-                if stop_requested and stop_requested(): break # Cek setelah loading
+                if stop_requested and stop_requested(): break  # Cek setelah loading
 
                 if not batch_images:
                     print(language_config.SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED.format(current_batch_num))
                     continue
+
+                # Tambahkan resize dengan padding di sini
+                batch_images, new_size = resize_all_with_padding(batch_images, method="median")
 
                 print(language_config.START_IMAGE_ENHANCEMENT.format(len(batch_images)))
                 try:

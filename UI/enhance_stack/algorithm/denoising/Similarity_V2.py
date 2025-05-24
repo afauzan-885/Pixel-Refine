@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 # from UI.enhance_stack.algorithm.denoising.extra_similarity.compute_motion_metrics_aot import accumulate_tiles_jit
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, gaussian_window, get_all_image_paths_for_single_process, load_images_from_paths, normalize_image, save_image
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, gaussian_window, get_all_image_paths_for_single_process, load_images_from_paths, normalize_image, resize_all_with_padding, save_image
 from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityV2MotionInterface
 from UI.enhance_stack.components.single_page_layout.parameter_denoising.similarity_v2_parameter_settings import load_similarity_v2_config
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
@@ -476,7 +476,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
                         if not batch_images:
                             print(language_config.SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED.format(current_batch_num))
                             continue 
-                        
+                        batch_images, new_size = resize_all_with_padding(batch_images, method="median")
                         print(language_config.START_IMAGE_ENHANCEMENT.format(len(batch_images)))
                         try:
                             batch_result = image_processor.similarity_mfnr(
@@ -537,7 +537,8 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
                 batch_images = load_images_from_paths(batch_paths, stop_requested)
                 if stop_requested and stop_requested(): 
                     break
-
+                batch_images, new_size = resize_all_with_padding(batch_images, method="median")
+                        
                 if not batch_images:
                     print(language_config.SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED.format(current_batch_num))
                     continue
