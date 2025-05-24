@@ -88,23 +88,6 @@ class SimilarityAlgorithmV2:
                 image = np.array(h5f[key])
                 images.append(image)
         return images
-    
-    def load_images_from_paths(self, image_paths, stop_requested=None):
-        """
-        Loads images from a list of image paths.
-        """
-        images = []
-        for image_path in image_paths:
-            if stop_requested and stop_requested():  # Cek apakah harus berhenti
-                break
-            image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-            if image is not None:
-                images.append(image)
-        return images
-
-    def load_images_from_folder(self, folder_path):
-        image_paths = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(('.png', '.jpg', '.jpeg'))]
-        return self.load_images_from_paths(image_paths)
 
     def load_images_from_hdf5(self, hdf5_path, stop_requested=None):
         images = []

@@ -85,16 +85,15 @@ class MedianAlgorithm:
                 images.append(image)
         return images
 
-    def stack_sigma_clip_images(self, images, stop_requested=None, block_size=64, overlap=0.3,
+    def stack_sigma_clip_images(self, images, stop_requested=None, block_size=256, overlap=0.3,
                                 update_progress=None, total_overall_images=None, images_processed_so_far=0,
                                 sigma_low=3.0, sigma_high=3.0, max_iterations=3,
-                                use_multi_core=True): # Parameter baru
+                                use_multi_core=True):
         """
         Menghitung stack gambar dengan metode Sigma Clipping berbasis blok.
         Mendukung kontrol penggunaan multi-core.
         """
         if stop_requested and stop_requested():
-             print(language_config.STACK_SIGMA_CLIP_STOPPED)
              return None
 
         if not images:
@@ -524,7 +523,8 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=4,
                     break
 
                 batch_paths = image_paths[batch_start:min(batch_start + batch_size, total_images)]
-                batch_images = load_images_from_paths(batch_paths, stop_requested)
+                batch_images, _, _, _, _ = load_images_from_paths(batch_paths, stop_requested)
+
                 if stop_requested and stop_requested(): break
 
                 if not batch_images:

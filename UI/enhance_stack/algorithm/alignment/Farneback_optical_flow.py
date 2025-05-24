@@ -1,3 +1,4 @@
+import gc
 import json
 import time
 import cv2
@@ -10,7 +11,7 @@ import h5py
 
 from PyQt6.QtCore import Qt
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, extract_exif, get_all_image_paths_for_single_process, load_images_from_paths, save_to_hdf5
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, extract_exif, get_all_image_paths_for_single_process, load_images_from_paths, resize_all_with_padding,  save_to_hdf5
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
 from concurrent.futures import ThreadPoolExecutor
@@ -331,54 +332,29 @@ def main(db_path, update_progress=None, batch_size=5, stop_requested=None, singl
             update_progress(0, language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
         return
 
-    # 2) Ekstrak metadata ke JSON
+    # 2) Ekstrak metadata seluruh gambar
     metadata_folder = os.path.join("database", "align")
     os.makedirs(metadata_folder, exist_ok=True)
     metadata_file = os.path.join(metadata_folder, "metadata.json")
     extract_all_metadata(image_paths, metadata_file=metadata_file)
 
-    # —––––– SCAN UKURAN & TENTUKAN CONDITIONAL RESIZE –––––—
-    dims = []
-    for p in image_paths:
-        loaded_images = load_images_from_paths([p])
-        img = loaded_images[0] if loaded_images else None
-        if img is not None:
-            dims.append(img.shape[:2])  # (h, w)
-    if not dims:
-        raise RuntimeError("Failed to read image dimensions for normalization")
+    # 3) Load semua gambar
+    all_loaded_images = load_images_from_paths(image_paths, stop_requested=stop_requested)
+    if not all_loaded_images:
+        raise RuntimeError("Gagal memuat gambar dari path.")
 
-    all_same = all(d == dims[0] for d in dims)
-    if not all_same:
-        # hitung target ukuran
-        min_h = min(h for h, w in dims)
-        min_w = min(w for h, w in dims)
-        do_resize = True
+    # 4) Resize semua gambar (hanya jika diperlukan)
+    resized_images, (target_h, target_w) = resize_all_with_padding(all_loaded_images, method="median", verbose=True)
 
-        # cari gambar dengan area terkecil & jadikan base
-        areas = [h * w for (h, w) in dims]
-        idx_min = areas.index(min(areas))
-        image_paths[0], image_paths[idx_min] = image_paths[idx_min], image_paths[0]
-    else:
-        do_resize = False
-    
-    # 3) Muat & (jika perlu) resize base image
-    base_image_path = image_paths[0]
-    loaded_base = load_images_from_paths([base_image_path], stop_requested=stop_requested)
-    if not loaded_base:
-        print(language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
-        return
-    base_image = loaded_base[0]
-    if do_resize:
-        base_image = cv2.resize(base_image, (min_w, min_h), interpolation=cv2.INTER_LINEAR)
-
-    total_images = len(image_paths)
+    base_image = resized_images[0]
+    total_images = len(resized_images)
     total_batches = (total_images - 1) // batch_size + 1
 
-    # 4) Tulis base_image ke HDF5
+    # 5) Tulis base_image ke HDF5
     with h5py.File(processor.hdf5_path, "w") as h5f:
         h5f.create_dataset("image_0", data=base_image)
 
-        # 5) Proses batch dengan ThreadPoolExecutor
+        # 6) Proses batch dengan ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = []
             for batch_idx in range(total_batches):
@@ -387,48 +363,33 @@ def main(db_path, update_progress=None, batch_size=5, stop_requested=None, singl
 
                 start_idx = batch_idx * batch_size + 1
                 end_idx   = min((batch_idx + 1) * batch_size + 1, total_images)
-                batch_paths = image_paths[start_idx:end_idx]
-                batch_images = load_images_from_paths(batch_paths, stop_requested)
-                if not batch_images:
-                    continue
-
-                # resize tiap target jika perlu
-                if do_resize:
-                    batch_images = [
-                        cv2.resize(img, (min_w, min_h), interpolation=cv2.INTER_LINEAR)
-                        for img in batch_images
-                    ]
+                batch_images = resized_images[start_idx:end_idx]
+                batch_paths  = image_paths[start_idx:end_idx]
 
                 for i, target_image in enumerate(batch_images, start=start_idx):
                     if stop_requested and stop_requested():
                         break
 
-                    # progress update
                     info_message = language_config.RUN_IMAGE_PROCESSING.format(i=i, total_images=total_images)
                     print(info_message)
                     if update_progress:
                         update_progress(i - 1, total_images - 1, info_message)
 
-                    # hitung optical flow & kompensasi
                     flow = processor.calculate_optical_flow(base_image, target_image)
                     compensated = processor.compensate_motion(target_image, flow, image_id=i)
 
-                    # ekstrak metadata
                     metadata = extract_exif(batch_paths[i - start_idx])
 
-                    # simpan ke HDF5 via thread
                     if compensated is not None:
                         name = f"image_{i}"
                         futures.append(executor.submit(save_to_hdf5, h5f, name, compensated, metadata))
 
-            # tunggu semua selesai
             for f in futures:
                 f.result()
 
-    # 6) Final progress
     if update_progress:
         update_progress(total_images - 1, total_images - 1, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
-        
+       
 def running_farneback_optical_flow(parent=None, single_process=None, batch_id=None):
     process_finished = False
     """

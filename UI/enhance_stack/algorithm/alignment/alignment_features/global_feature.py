@@ -230,6 +230,62 @@ def load_images_from_paths(image_paths, stop_requested=None):
 
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def resize_all_with_padding(images, method="median", verbose=False):
+    """
+    Resize + pad all images to the same size using letterbox strategy.
+    `method` determines the target size: 'min', 'max', or 'median'.
+    """
+    if not images:
+        raise ValueError("Image list is empty")
+
+    dims = [img.shape[:2] for img in images if img is not None]
+    if not dims:
+        raise ValueError("No valid image dimensions found")
+
+    if all(d == dims[0] for d in dims):
+        if verbose:
+            print("All images already have same dimensions. Skipping resize.")
+        return images, dims[0]  # return as-is
+
+    if method == "min":
+        target_h = min(h for h, w in dims)
+        target_w = min(w for h, w in dims)
+    elif method == "max":
+        target_h = max(h for h, w in dims)
+        target_w = max(w for h, w in dims)
+    elif method == "median":
+        h_list = sorted(h for h, w in dims)
+        w_list = sorted(w for h, w in dims)
+        mid = len(h_list) // 2
+        target_h = h_list[mid]
+        target_w = w_list[mid]
+    else:
+        raise ValueError("Unsupported resize method. Use 'min', 'max', or 'median'.")
+
+    if verbose:
+        print(f"Resizing all images to {target_w}x{target_h} using method: {method}")
+
+    resized = [resize_with_padding(img, (target_h, target_w)) for img in images]
+    return resized, (target_h, target_w)
+
+
+def resize_with_padding(img, target_size, pad_color=(0, 0, 0)):
+    h, w = img.shape[:2]
+    target_h, target_w = target_size
+    scale = min(target_w / w, target_h / h)
+    new_w, new_h = int(w * scale), int(h * scale)
+    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+    delta_w = target_w - new_w
+    delta_h = target_h - new_h
+    top, bottom = delta_h // 2, delta_h - delta_h // 2
+    left, right = delta_w // 2, delta_w - delta_w // 2
+
+    padded = cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=pad_color)
+    return padded
+
                 
 def save_special_jpg_and_png(
     src_path: str,
