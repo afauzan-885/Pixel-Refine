@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 import h5py
 from PyQt6.QtCore import Qt
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import compute_global_crop, crop_image, extract_all_metadata, extract_exif, get_all_image_paths_for_single_process, load_images_from_paths, resize_all_with_padding, save_align_to_folder, save_to_hdf5
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import compute_global_crop, crop_image, extract_all_metadata, extract_exif, get_all_image_paths_for_single_process, load_images_from_paths, process_and_crop, resize_all_with_padding, resize_with_padding, save_align_to_folder, save_to_hdf5
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE
@@ -398,8 +398,10 @@ def main(db_path,
         "align_folder",
         os.path.join(os.path.expanduser("~"), "Documents", "Pixel Refine", "align_image")
     )
+    enable_cropping = config.get("enable_cropping", False)
+    keep_edges = config.get("keep_edges", False)
+    transformation_type = config.get("transformation", "affine")
 
-    # 1) Ambil daftar image_paths & set hdf5_path
     if single_process:
         image_paths = get_all_image_paths_for_single_process(db_path)
         processor.hdf5_path = "database/align/aligned_images.h5"
@@ -414,74 +416,143 @@ def main(db_path,
             update_progress(0, language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
         return
 
-    # 2) Ekstrak metadata seluruh gambar
-    metadata_folder = os.path.join("database", "align")
-    os.makedirs(metadata_folder, exist_ok=True)
-    metadata_file = os.path.join(metadata_folder, "metadata.json")
-    extract_all_metadata(image_paths, metadata_file=metadata_file)
+    os.makedirs(os.path.dirname(processor.hdf5_path), exist_ok=True)
+    os.makedirs(align_folder, exist_ok=True)
 
-    # 3) Load semua gambar
-    all_loaded_images = load_images_from_paths(image_paths, stop_requested=stop_requested)
-    if not all_loaded_images:
-        raise RuntimeError("Gagal memuat gambar dari path.")
+    extract_all_metadata(image_paths, metadata_file=os.path.join("database", "align", "metadata.json"))
 
-    # 4) Resize + Padding seluruh gambar (letterbox style)
-    resized_images, (target_h, target_w) = resize_all_with_padding(all_loaded_images, method="median", verbose=True)
+    total_images = len(image_paths)
 
-    base_image = resized_images[0]
-    total_images = len(resized_images)
-    total_batches = (total_images - 1) // batch_size + 1
+    base_img_list = load_images_from_paths([image_paths[0]], stop_requested=stop_requested)
+    if not base_img_list or base_img_list[0] is None:
+        raise RuntimeError("Base image gagal dimuat.")
+    base_image_raw = base_img_list[0]
+    base_resized_list, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="custom")
+    base_image = base_resized_list[0]
 
-    # 5) Simpan base_image
     with h5py.File(processor.hdf5_path, "w") as h5f:
         if command_save_to_hd5f:
             h5f.create_dataset("image_0", data=base_image)
         if save_align:
             save_align_to_folder(base_image, 0, image_paths[0], align_folder)
 
-        # 6) Proses batch dengan ThreadPoolExecutor
-        with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as executor:
+    total_batches = (total_images - 1) // batch_size + 1
+
+    if enable_cropping and not keep_edges:
+        # === Tahap 1: Hitung & Simpan Transformasi ===
+        all_transforms = []
+        for batch_idx in range(total_batches):
+            if stop_requested and stop_requested():
+                break
+
+            start_idx = batch_idx * batch_size + 1
+            end_idx = min((batch_idx + 1) * batch_size + 1, total_images)
+            batch_paths = image_paths[start_idx:end_idx]
+            batch_images = load_images_from_paths(batch_paths, stop_requested=stop_requested)
+            if not batch_images:
+                continue
+
+            resized_images = [resize_with_padding(img, (target_h, target_w)) for img in batch_images]
+            for i, (target_image, path) in enumerate(zip(resized_images, batch_paths), start=start_idx):
+                if stop_requested and stop_requested():
+                    break
+                if update_progress:
+                    update_progress(i, total_images * 3, f"[1/3] Hitung transformasi {i}/{total_images}")
+                base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
+                if base_pts is not None and target_pts is not None:
+                    all_transforms.append((i, path, base_pts, target_pts))
+
+        # === Tahap 2: Hitung Global Crop ===
+        h, w = base_image.shape[:2]
+        crop_bounds = compute_global_crop([(i, b, t) for i, _, b, t in all_transforms], total_images, w, h, transformation_type=transformation_type)
+        if crop_bounds is None:
+            print(language_config.FAILED_TO_COMPUTE_CROP)
+            return
+
+        # Simpan ulang gambar basis dengan cropping
+        base_image_cropped = crop_image(base_image, crop_bounds)
+        with h5py.File(processor.hdf5_path, "a") as h5f:
+            if command_save_to_hd5f:
+                del h5f["image_0"]
+                h5f.create_dataset("image_0", data=base_image_cropped)
+            if save_align:
+                save_align_to_folder(base_image_cropped, 0, image_paths[0], align_folder)
+
+        # === Tahap 3: Proses & Simpan Gambar secara Paralel ===
+        with h5py.File(processor.hdf5_path, "a") as h5f, ThreadPoolExecutor(max_workers=4) as executor:
             futures = []
+            for idx, (i, path, base_pts, target_pts) in enumerate(all_transforms):
+                if stop_requested and stop_requested():
+                    break
+                img_list = load_images_from_paths([path], stop_requested=stop_requested)
+                if not img_list or img_list[0] is None:
+                    continue
+                img_resized = resize_with_padding(img_list[0], (target_h, target_w))
+                future = executor.submit(process_and_crop, processor, img_resized, base_pts, target_pts, crop_bounds)
+                futures.append((i, future, path))
+
+            for i, future, path in futures:
+                if stop_requested and stop_requested():
+                    break
+                compensated = future.result()
+                if compensated is None:
+                    continue
+                if save_align:
+                    save_align_to_folder(compensated, i, path, align_folder)
+                if command_save_to_hd5f:
+                    save_to_hdf5(h5f, f"image_{i}", compensated, extract_exif(path))
+                if update_progress:
+                    update_progress(total_images + i, total_images * 3,
+                                    f"[2/3] Simpan dan kompensasi gambar {i} dari {total_images - 1}")
+
+        if update_progress:
+            update_progress(total_images * 3, total_images * 3, "[3/3] Proses selesai")
+
+    else:
+        # Tanpa cropping, tetap seperti sebelumnya: langsung paralel
+        with h5py.File(processor.hdf5_path, "a") as h5f:
             for batch_idx in range(total_batches):
                 if stop_requested and stop_requested():
                     break
 
                 start_idx = batch_idx * batch_size + 1
-                end_idx   = min((batch_idx + 1) * batch_size + 1, total_images)
-                batch_images = resized_images[start_idx:end_idx]
-                batch_paths  = image_paths[start_idx:end_idx]
+                end_idx = min((batch_idx + 1) * batch_size + 1, total_images)
+                batch_paths = image_paths[start_idx:end_idx]
+                batch_images = load_images_from_paths(batch_paths, stop_requested=stop_requested)
+                if not batch_images:
+                    continue
 
-                for i, target_image in enumerate(batch_images, start=start_idx):
-                    if stop_requested and stop_requested():
-                        break
+                resized_images = [resize_with_padding(img, (target_h, target_w)) for img in batch_images]
 
-                    info_message = language_config.RUN_IMAGE_PROCESSING.format(i=i, total_images=total_images)
-                    print(info_message)
-                    if update_progress:
-                        update_progress(i - 1, total_images - 1, info_message)
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    futures = []
+                    for i, (target_image, path) in enumerate(zip(resized_images, batch_paths), start=start_idx):
+                        if stop_requested and stop_requested():
+                            break
 
-                    # AKAZE: hitung transformasi berdasarkan keypoints dan kompensasi
-                    base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
-                    if base_pts is None or target_pts is None:
-                        print(language_config.FAIL_COMPENSATE_MOTION_PROCESS.format(i=i))
-                        continue
+                        if update_progress:
+                            update_progress(i, total_images, language_config.RUN_IMAGE_PROCESSING.format(i=i, total_images=total_images))
+                        base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
+                        if base_pts is None or target_pts is None:
+                            continue
+                        future = executor.submit(processor.compensate_motion, target_image, base_pts, target_pts)
+                        futures.append((i, future, path))
 
-                    compensated = processor.compensate_motion(target_image, base_pts, target_pts)
-                    metadata = extract_exif(batch_paths[i - start_idx])
-
-                    if compensated is not None:
+                    for i, future, path in futures:
+                        if stop_requested and stop_requested():
+                            break
+                        compensated = future.result()
+                        if compensated is None:
+                            continue
                         if save_align:
-                            save_align_to_folder(compensated, i, batch_paths[i - start_idx], align_folder)
+                            save_align_to_folder(compensated, i, path, align_folder)
                         if command_save_to_hd5f:
-                            name = f"image_{i}"
-                            futures.append(executor.submit(save_to_hdf5, h5f, name, compensated, metadata))
+                            save_to_hdf5(h5f, f"image_{i}", compensated, extract_exif(path))
 
-            for f in futures:
-                f.result()
-
-    if update_progress:
-        update_progress(total_images - 1, total_images - 1, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
-  
+        if update_progress:
+            update_progress(total_images, total_images, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
+    
+             
 def running_orb(parent=None, single_process=None, batch_id=None):
     process_finished = False
     """

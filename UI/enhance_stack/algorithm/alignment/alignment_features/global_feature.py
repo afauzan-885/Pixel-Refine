@@ -478,70 +478,58 @@ def extract_all_metadata(image_paths, metadata_file="metadata.json"):
     
     return existing_data
     
-## ====================== Feature-based Alignment ====================== ##
-
-# ---------------- Calculate Global Motion Process ---------------- #
-# ---------------- Calculate Global Motion Process ---------------- #
-
-
-## ---------------- Compensate Motion Process ---------------- ##
-## ---------------- Compensate Motion Process ---------------- ##
-
-
 ## ---------------- Calculate Global Crop Process ---------------- ##
-def compute_global_crop(transform_folder, total_images, w, h, transformation_type='homography'):
-    """
-    Menghitung batas cropping global dengan menggunakan batas pergerakan
-    dari setiap transformasi. Fungsi ini mengembalikan koordinat crop global:
-    (crop_x, crop_y, crop_w, crop_h)
-    """
-    # Inisialisasi dengan nilai ekstrem
-    global_min_x =  float('inf')
-    global_min_y =  float('inf')
+from concurrent.futures import ThreadPoolExecutor
+
+def compute_transform_bounds(transform, w, h, transformation_type):
+    i, base_points, target_points = transform
+    corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(-1, 1, 2)
+
+    if transformation_type == 'homography':
+        matrix, _ = cv2.findHomography(np.array(base_points), np.array(target_points), 0)
+    else:
+        matrix = cv2.estimateAffine2D(np.array(base_points), np.array(target_points))[0]
+
+    if matrix is None:
+        return None
+
+    if transformation_type == 'homography':
+        transformed_corners = cv2.perspectiveTransform(corners, matrix)
+    else:
+        transformed_corners = cv2.transform(corners, matrix)
+
+    transformed_corners = transformed_corners.reshape(-1, 2)
+    min_xy = transformed_corners.min(axis=0)
+    max_xy = transformed_corners.max(axis=0)
+    return min_xy, max_xy
+
+def compute_global_crop(all_transforms, total_images, w, h, transformation_type='homography'):
+    global_min_x = float('inf')
+    global_min_y = float('inf')
     global_max_x = -float('inf')
     global_max_y = -float('inf')
 
-    # Koordinat sudut asli gambar referensi
-    corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(-1, 1, 2)
-    
-    for i in range(1, total_images):  # Mulai dari gambar ke-1 (index 0 adalah referensi)
-        transform_file_path = os.path.join(transform_folder, f"transform_{i}.npy")
-        if not os.path.exists(transform_file_path):
-            continue
-        
-        base_points, target_points = np.load(transform_file_path, allow_pickle=True)
-        
-        # Perkirakan matriks transformasi
-        if transformation_type == 'homography':
-            matrix, _ = cv2.findHomography(np.array(base_points), np.array(target_points), 0)
-        else:
-            matrix = cv2.estimateAffine2D(np.array(base_points), np.array(target_points))[0]
-        if matrix is None:
-            continue
-        
-        # Transformasikan sudut gambar
-        if transformation_type == 'homography':
-            transformed_corners = cv2.perspectiveTransform(corners, matrix)
-        else:
-            transformed_corners = cv2.transform(corners, matrix)
-        transformed_corners = transformed_corners.reshape(-1, 2)
-        
-        min_xy = transformed_corners.min(axis=0)
-        max_xy = transformed_corners.max(axis=0)
-        min_x, min_y = min_xy
-        max_x, max_y = max_xy
-        
-        # Update batas global
-        global_min_x = min(global_min_x, min_x)
-        global_min_y = min(global_min_y, min_y)
-        global_max_x = max(global_max_x, max_x)
-        global_max_y = max(global_max_y, max_y)
-    
-    # Hitung crop region berdasarkan batas global dan gambar referensi
-    crop_x = int(max(0, np.ceil(-global_min_x)))   # Offset kiri
-    crop_y = int(max(0, np.ceil(-global_min_y)))   # Offset atas
-    crop_w = w - int(np.ceil(global_max_x - w)) - crop_x  # Lebar area yang tersisa
-    crop_h = h - int(np.ceil(global_max_y - h)) - crop_y  # Tinggi area yang tersisa
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(compute_transform_bounds, transform, w, h, transformation_type)
+                   for transform in all_transforms]
+
+        for future in futures:
+            result = future.result()
+            if result is None:
+                continue
+            min_xy, max_xy = result
+            min_x, min_y = min_xy
+            max_x, max_y = max_xy
+
+            global_min_x = min(global_min_x, min_x)
+            global_min_y = min(global_min_y, min_y)
+            global_max_x = max(global_max_x, max_x)
+            global_max_y = max(global_max_y, max_y)
+
+    crop_x = int(max(0, np.ceil(-global_min_x)))
+    crop_y = int(max(0, np.ceil(-global_min_y)))
+    crop_w = w - int(np.ceil(global_max_x - w)) - crop_x
+    crop_h = h - int(np.ceil(global_max_y - h)) - crop_y
 
     if crop_w <= 0 or crop_h <= 0:
         print(language_config.FAIL_CROPPING_PROCESS)
@@ -554,6 +542,13 @@ def crop_image(image, crop_bounds):
     crop_x, crop_y, crop_w, crop_h = crop_bounds
     return image[crop_y:crop_y+crop_h, crop_x:crop_x+crop_w]
 
+
+def process_and_crop(processor, image, base_pts, target_pts, crop_bounds):
+    compensated = processor.compensate_motion(image, base_pts, target_pts)
+    if compensated is not None:
+        compensated = crop_image(compensated, crop_bounds)
+    return compensated
+      
 ## ---------------- Calculate Global Crop Process ---------------- ##
 
 # ====================== Main Process ====================== #
