@@ -723,8 +723,7 @@ def main(db_path,
 
         if update_progress:
             update_progress(total_images, total_images, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
-    
-                            
+                             
 def running_akaze(parent=None, single_process=None, batch_id=None):
     process_finished = False
     """

@@ -1,4 +1,5 @@
 import concurrent.futures 
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 import json
 import os
@@ -479,7 +480,6 @@ def extract_all_metadata(image_paths, metadata_file="metadata.json"):
     return existing_data
     
 ## ---------------- Calculate Global Crop Process ---------------- ##
-from concurrent.futures import ThreadPoolExecutor
 
 def compute_transform_bounds(transform, w, h, transformation_type):
     i, base_points, target_points = transform

@@ -159,7 +159,8 @@
     "syncstream": "cpp",
     "thread": "cpp",
     "typeindex": "cpp",
-    "valarray": "cpp"
+    "valarray": "cpp",
+    "*.inc": "cpp"
   },
   "C_Cpp.errorSquiggles": "disabled"
 }

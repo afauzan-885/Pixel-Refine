@@ -18,11 +18,11 @@ def load_similarity_v2_config():
     """Memuat konfigurasi Similarity V2 dari Parameter_Stack_Enhance.json."""
     defaults = {
         "similarity_v2_tile_size": 32,
-        "similarity_v2_overlap_percent": 35.0,
+        "similarity_v2_overlap_percent": 38.0,
         "similarity_v2_mbm_noise_mad_offset_factor": 0.65,
         "similarity_v2_mbm_mad_sensitivity": 18.8,
-        "similarity_v2_mbm_confidence_skip_dft_threshold": 0.78,
-        "similarity_v2_freq_merge_wiener_c_factor": 2.1,
+        "similarity_v2_mbm_confidence_skip_dft_threshold": 0.30,
+        "similarity_v2_freq_merge_wiener_c_factor": 4.0,
         "use_gpu": False, 
     }
     try:
@@ -110,11 +110,11 @@ def get_similarity_v2_settings_page():
     sim_v2_config = load_similarity_v2_config()
     original_v2_defaults = { 
         "similarity_v2_tile_size": 32,
-        "similarity_v2_overlap_percent": 35.0,
+        "similarity_v2_overlap_percent": 38.0,
         "similarity_v2_mbm_noise_mad_offset_factor": 0.65,
         "similarity_v2_mbm_mad_sensitivity": 18.8,
-        "similarity_v2_mbm_confidence_skip_dft_threshold": 0.78,
-        "similarity_v2_freq_merge_wiener_c_factor": 2.1,
+        "similarity_v2_mbm_confidence_skip_dft_threshold": 0.30,
+        "similarity_v2_freq_merge_wiener_c_factor": 4.0,
     }
 
     page_widget = QWidget()

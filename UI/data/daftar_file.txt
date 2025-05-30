@@ -127,7 +127,6 @@ libwebpmux-3.dll
 libwinpthread-1.dll
 libzstd.dll
 similarity_motion.dll
-similarity_motion_optimize.dll
 similarity_motion_v2.dll
 similarity_motion_v2_optimize.dll
 zlib1.dll

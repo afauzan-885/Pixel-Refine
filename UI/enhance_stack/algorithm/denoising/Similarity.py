@@ -91,7 +91,7 @@ class SimilarityAlgorithm:
                 images.append(image)
         return images
 
-    def similarity_mfnr(self, images, tile_size, overlap,
+    def spatial_merging(self, images, tile_size, overlap,
                         motion_sensitivity,noise_offset_factor, update_progress=None, stop_requested=None,
                         lib_path='UI/data/similarity_motion.dll',
                         save_weight_map_path=None, total_overall_images=None,
@@ -297,7 +297,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
         sim_overlap_percent = general_settings.get("similarity_V1_overlap_percent")
         
         tile_size_tuple = (sim_tile_size_int, sim_tile_size_int)
-        overlap_ratio = sim_overlap_percent / 100.0
+        overlap_ratio = sim_overlap_percent
 
         output_name_base = ""
         image_paths = []
@@ -419,7 +419,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
                         
                         print(language_config.START_IMAGE_ENHANCEMENT.format(len(batch_images)))
                         try:
-                            batch_result = image_processor.similarity_mfnr(
+                            batch_result = image_processor.spatial_merging(
                             batch_images,
                             tile_size=tile_size_tuple,
                             overlap=overlap_ratio,
@@ -482,7 +482,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
 
                 print(language_config.START_IMAGE_ENHANCEMENT.format(len(batch_images)))
                 try:
-                    batch_result = image_processor.similarity_mfnr(
+                    batch_result = image_processor.spatial_merging(
                     batch_images,
                     tile_size=tile_size_tuple,
                     overlap=overlap_ratio,
@@ -533,7 +533,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
                 pass
             final_result = None
             try:
-                 final_result = image_processor.similarity_mfnr(
+                 final_result = image_processor.spatial_merging(
                      processed_batches_results,
                      tile_size=tile_size_tuple,
                      overlap=overlap_ratio,    

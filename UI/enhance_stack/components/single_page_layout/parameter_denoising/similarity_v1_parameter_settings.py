@@ -20,7 +20,7 @@ def load_similarity_v1_config():
         "similarity_V1_tile_size": 24,
         "similarity_V1_motion_sensitivity": 110.0,
         "similarity_V1_noise_mad_offset_factor": 0.3,
-        "similarity_V1_overlap_percent": 0.35,
+        "similarity_V1_overlap_percent": 0.6,
         "use_multi_core": True,
     }
     try:
@@ -104,10 +104,10 @@ def create_slider_with_input(label_text, min_val, max_val, initial_value_slider,
 def get_similarity_v1_settings_page():
     sim_v1_config = load_similarity_v1_config() 
     original_v1_defaults = {
-        "similarity_V1_tile_size": 24, 
-        "similarity_V1_motion_sensitivity": 110.0,
-        "similarity_V1_noise_mad_offset_factor": 0.3,
-        "similarity_V1_overlap_percent": 0.35,
+        "similarity_V1_tile_size": 16, 
+        "similarity_V1_motion_sensitivity": 120.5,
+        "similarity_V1_noise_mad_offset_factor": 0.2,
+        "similarity_V1_overlap_percent": 0.38,
     }
 
     page_widget = QWidget()
@@ -241,11 +241,10 @@ def get_similarity_v1_settings_page():
     reset_button = QPushButton("Reset to Defaults")
     reset_button.setStyleSheet(APPLY_BUTTON)
     reset_button.setMinimumHeight(30)
-    # reset_button.setFixedWidth(150) # Beri lebar tetap agar tidak terlalu lebar
-
+    
     def reset_similarity_v1_defaults():
         defaults = original_v1_defaults
-        default_tile = defaults.get("tileGridSize", [24,24])[0]
+        default_tile = defaults.get("similarity_V1_tile_size", 16)
         
         widgets['tile_combo'].setCurrentText(str(default_tile))
         default_ms = defaults.get("similarity_V1_motion_sensitivity", 110.0)
@@ -254,7 +253,7 @@ def get_similarity_v1_settings_page():
         default_nm = defaults.get("similarity_V1_noise_mad_offset_factor", 0.3)
         widgets['noise_mad_offset_slider'].setValue(int(round(default_nm * noise_mad_multiplier_v1)))
         
-        default_ov_ratio = defaults.get("similarity_V1_overlap_percent", 0.35)
+        default_ov_ratio = defaults.get("similarity_V1_overlap_percent", 0.40)
         default_ov_percent = int(round(default_ov_ratio * 100))
         widgets['overlap_slider'].setValue(default_ov_percent)
         
@@ -271,7 +270,7 @@ def get_similarity_v1_settings_page():
 
     def save_current_settings_v1():
         try:
-            similarity_V1_tile_size = int(widgets['tile_combo'].currentText())
+            similarity_V1_tile_size_int = int(widgets['tile_combo'].currentText())
             motion_sensitivity, _ = c_locale.toDouble(widgets['motion_sensitivity_input'].text())
             noise_mad_offset, _ = c_locale.toDouble(widgets['noise_mad_offset_input'].text())
             overlap_percent = int(widgets['overlap_input'].text())
@@ -287,7 +286,7 @@ def get_similarity_v1_settings_page():
         except: pass
 
         sim_v1_params_to_save = {
-            "tileGridSize": [similarity_V1_tile_size, similarity_V1_tile_size],
+            "similarity_V1_tile_size": similarity_V1_tile_size_int,
             "similarity_V1_motion_sensitivity": motion_sensitivity,
             "similarity_V1_noise_mad_offset_factor": noise_mad_offset,
             "similarity_V1_overlap_percent": overlap_ratio,
