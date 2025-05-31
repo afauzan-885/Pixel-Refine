@@ -6,7 +6,7 @@ from UI.enhance_stack.components.single_page_layout.parameter_alignment.akaze_pa
 
 from UI.enhance_stack.components.single_page_layout.parameter_alignment.farneback_parameter_settings import get_farneback_optical_flow_page
 from UI.enhance_stack.components.single_page_layout.parameter_alignment.orb_parameter_settings import get_orb_page
-from UI.enhance_stack.components.single_page_layout.parameter_denoising.similarity_v1_parameter_settings import get_similarity_v1_settings_page
+from UI.enhance_stack.components.single_page_layout.parameter_denoising.similarity_parameter_settings import get_similarity_settings_page
 from UI.enhance_stack.components.single_page_layout.parameter_denoising.similarity_v2_parameter_settings import get_similarity_v2_settings_page
 from UI.settings.General.Language import language_config
 
@@ -41,7 +41,7 @@ class ParameterPages:
         self.setting_pages_map["Farneback Optical Flow"] = index_farneback
 
         # # Halaman untuk Average (dari Denoising Dropdown)
-        similarity_v1_page = get_similarity_v1_settings_page()
+        similarity_v1_page = get_similarity_settings_page()
         index_similarity_v1 = self.stacked_widget.addWidget(similarity_v1_page)
         self.setting_pages_map["Similarity"] = index_similarity_v1
         

@@ -8,9 +8,7 @@ import os
 from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
-# from UI.enhance_stack.algorithm.denoising.extra_similarity.compute_motion_metrics_aot import accumulate_tiles_jit
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, gaussian_window, get_all_image_paths_for_single_process, load_images_from_paths, normalize_image, resize_all_with_padding, save_image
-from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityV2MotionInterface
 from UI.enhance_stack.components.single_page_layout.parameter_denoising.similarity_v2_parameter_settings import load_similarity_v2_config
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.GeneralSetting import load_general_settings
@@ -179,9 +177,9 @@ class SimilarityAlgorithmV2:
         if dtype_orig not in (np.uint8, np.uint16):
             raise TypeError(language_config.IMAGE_BIT_REQUIRED)
 
-        mbm_block_h = val_tile_h
-        mbm_block_w = val_tile_w
-        mbm_search_radius = 0 
+        block_h = val_tile_h
+        block_w = val_tile_w
+        search_radius = 0 
         
         try:
             c_interface = SimilarityV2MotionInterface(lib_path)
@@ -277,7 +275,7 @@ class SimilarityAlgorithmV2:
                     current_image_float32_3ch, reference_image_float32_3ch,
                     base_window, row_starts, col_starts,
                     tile_h_proc, tile_w_proc, h_ref, w_ref, channels_buffer_cpp,
-                    mbm_block_h, mbm_block_w, mbm_search_radius, 
+                    block_h, block_w, search_radius, 
                     frame_max_multiplier, 
                     mbm_mad_sensitivity, mbm_noise_mad_offset_factor,
                     mbm_confidence_skip_dft_threshold, coarse_alignment_search_margin,

@@ -12,9 +12,6 @@
 #include "tile_noise_estimation.hpp"
 #include "spatial_merging.hpp"
 
-//=============================================================================
-// Konstanta dan Konfigurasi
-//=============================================================================
 namespace MotionMetricsConfig
 {
     constexpr float STABILITY_EPSILON = 1e-6f;
@@ -37,17 +34,16 @@ extern "C"
         int num_row_starts, int num_col_starts,
         int tile_h, int tile_w,
         int h_img, int w_img, int channels,
-        int mbm_block_h, int mbm_block_w, int mbm_search_radius,
-        float p_motion_sensitivity,
-        float p_noise_offset_factor)
+        int block_h, int block_w, int search_radius,
+        float motion_sensitivity,
+        float noise_offset_factor)
     {
         using namespace MotionMetricsConfig;
 
-        // Validasi parameter dasar
         if (!final_image_sum_ptr || !weight_map_sum_ptr || !current_image_ptr || !reference_image_ptr || !base_window_ptr ||
             !row_starts || !col_starts || h_img <= 0 || w_img <= 0 || tile_h <= 0 || tile_w <= 0 || channels <= 0 ||
-            (mbm_block_h <= 0 && tile_h > 0 && mbm_block_w > 0) ||
-            (mbm_block_w <= 0 && tile_w > 0 && mbm_block_h > 0))
+            (block_h <= 0 && tile_h > 0 && block_w > 0) ||
+            (block_w <= 0 && tile_w > 0 && block_h > 0))
         {
             return;
         }
@@ -90,14 +86,14 @@ extern "C"
             cv::Mat thread_block_confidences;
             MotionMatching::MBMBuffers mbm_buffers_th;
             int mbm_alloc_h = tile_h;
-            if (mbm_block_h > 0 && mbm_block_h < tile_h)
+            if (block_h > 0 && block_h < tile_h)
             {
-                mbm_alloc_h = mbm_block_h;
+                mbm_alloc_h = block_h;
             }
             int mbm_alloc_w = tile_w;
-            if (mbm_block_w > 0 && mbm_block_w < tile_w)
+            if (block_w > 0 && block_w < tile_w)
             {
-                mbm_alloc_w = mbm_block_w;
+                mbm_alloc_w = block_w;
             }
 
             if (mbm_alloc_h > 0 && mbm_alloc_w > 0)
@@ -139,10 +135,10 @@ extern "C"
 #endif
                     }
 
-                    int actual_mbm_block_h = (mbm_block_h > 0) ? mbm_block_h : tile_h;
-                    int actual_mbm_block_w = (mbm_block_w > 0) ? mbm_block_w : tile_w;
-                    int num_blocks_h = (actual_mbm_block_h > 0 && tile_h > 0) ? (tile_h + actual_mbm_block_h - 1) / actual_mbm_block_h : 0;
-                    int num_blocks_w = (actual_mbm_block_w > 0 && tile_w > 0) ? (tile_w + actual_mbm_block_w - 1) / actual_mbm_block_w : 0;
+                    int actual_block_h = (block_h > 0) ? block_h : tile_h;
+                    int actual_block_w = (block_w > 0) ? block_w : tile_w;
+                    int num_blocks_h = (actual_block_h > 0 && tile_h > 0) ? (tile_h + actual_block_h - 1) / actual_block_h : 0;
+                    int num_blocks_w = (actual_block_w > 0 && tile_w > 0) ? (tile_w + actual_block_w - 1) / actual_block_w : 0;
 
                     if (num_blocks_h == 0 || num_blocks_w == 0)
                         continue;
@@ -157,10 +153,10 @@ extern "C"
                     {
                         for (int bw_idx = 0; bw_idx < num_blocks_w; ++bw_idx)
                         {
-                            int block_local_r_start = bh_idx * actual_mbm_block_h;
-                            int block_local_c_start = bw_idx * actual_mbm_block_w;
-                            int current_block_h_dim = std::min(actual_mbm_block_h, tile_h - block_local_r_start);
-                            int current_block_w_dim = std::min(actual_mbm_block_w, tile_w - block_local_c_start);
+                            int block_local_r_start = bh_idx * actual_block_h;
+                            int block_local_c_start = bw_idx * actual_block_w;
+                            int current_block_h_dim = std::min(actual_block_h, tile_h - block_local_r_start);
+                            int current_block_w_dim = std::min(actual_block_w, tile_w - block_local_c_start);
 
                             if (current_block_h_dim <= 0 || current_block_w_dim <= 0)
                             {
@@ -183,7 +179,7 @@ extern "C"
                                     reference_tile_gray_for_mbm,
                                     block_local_r_start,
                                     block_local_c_start,
-                                    mbm_search_radius,
+                                    search_radius,
                                     GRADIENT_WEIGHT_FACTOR,
                                     STABILITY_EPSILON,
                                     mbm_buffers_th);
@@ -194,8 +190,8 @@ extern "C"
                                 confidence = calculate_match_confidence(
                                     mbm_result,
                                     estimated_noise_sigma_tile,
-                                    p_motion_sensitivity,
-                                    p_noise_offset_factor);
+                                    motion_sensitivity,
+                                    noise_offset_factor);
                             }
                             thread_block_confidences.at<float>(bh_idx, bw_idx) = confidence;
                         }
@@ -216,8 +212,8 @@ extern "C"
                         float *global_pixel_sum_row = final_image_sum_mat.ptr<float>(gy);
                         for (int x = 0; x < tile_w; ++x)
                         {
-                            int bh_idx = (actual_mbm_block_h > 0) ? std::min(y / actual_mbm_block_h, num_blocks_h - 1) : 0;
-                            int bw_idx = (actual_mbm_block_w > 0) ? std::min(x / actual_mbm_block_w, num_blocks_w - 1) : 0;
+                            int bh_idx = (actual_block_h > 0) ? std::min(y / actual_block_h, num_blocks_h - 1) : 0;
+                            int bw_idx = (actual_block_w > 0) ? std::min(x / actual_block_w, num_blocks_w - 1) : 0;
 
                             float block_confidence = thread_block_confidences.at<float>(bh_idx, bw_idx);
                             float base_win_val = base_window_row[x];

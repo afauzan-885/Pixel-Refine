@@ -357,9 +357,6 @@ class SinglePageLayout(QWidget):
             elif denoising_choice == "Similarity":
                 running_similarity(self, single_process=True)
                 denoising_executed = True
-            elif denoising_choice == "Similarity V2":
-               running_similarity_v2(self, single_process=True)
-               denoising_executed = True
             elif denoising_choice == "No Denoising":
                 pass 
            

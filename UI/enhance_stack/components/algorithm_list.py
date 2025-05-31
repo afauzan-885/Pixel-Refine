@@ -25,7 +25,7 @@ ALGORITHM_DATA = {
             ("Average", language_config.AVERAGE_DESCRIPTION),
             ("Median", language_config.MEDIAN_DESCRIPTION),
             ("Similarity", language_config.SIMILARITY_DESCRIPTION),
-            ("Similarity V2", language_config.SIMILARITY_MOTION_V2_DESCRIPTION)
+            # ("Similarity V2", language_config.SIMILARITY_MOTION_V2_DESCRIPTION)
         ]
     }
 }

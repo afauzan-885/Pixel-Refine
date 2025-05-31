@@ -378,8 +378,8 @@ class CombinedPanel(QWidget):
         is_alignment_checked = self.checkboxes.get(alignment_key, QCheckBox()).isChecked()
         is_denoising_checked = self.checkboxes.get(denoising_key, QCheckBox()).isChecked()
         is_superres_checked = self.checkboxes.get(superres_key, QCheckBox()).isChecked()
-        is_crop_edge_checked = self.checkboxes.get(crop_edge_key, QCheckBox()).isChecked() # Perlu untuk logic enabled keep_edge
-        is_keep_edge_checked = self.checkboxes.get(keep_edge_key, QCheckBox()).isChecked() # Perlu untuk logic enabled crop_edge
+        is_crop_edge_checked = self.checkboxes.get(crop_edge_key, QCheckBox()).isChecked()
+        is_keep_edge_checked = self.checkboxes.get(keep_edge_key, QCheckBox()).isChecked()
 
 
         # Atur Visibilitas ComboBox/Tombol
@@ -391,10 +391,10 @@ class CombinedPanel(QWidget):
         if align_folder_cb: align_folder_cb.setEnabled(is_alignment_checked)
 
         crop_edge_cb = self.checkboxes.get(crop_edge_key)
-        if crop_edge_cb: crop_edge_cb.setEnabled(is_alignment_checked and not is_keep_edge_checked) # Hanya aktif jika align TAPI keep edge F
+        if crop_edge_cb: crop_edge_cb.setEnabled(is_alignment_checked and not is_keep_edge_checked) 
 
         keep_edge_cb = self.checkboxes.get(keep_edge_key)
-        if keep_edge_cb: keep_edge_cb.setEnabled(is_alignment_checked and not is_crop_edge_checked) # Hanya aktif jika align TAPI crop edge F
+        if keep_edge_cb: keep_edge_cb.setEnabled(is_alignment_checked and not is_crop_edge_checked) 
 
     def process_all_batch(self):
         """Jalankan semua algoritma yang dipilih HANYA JIKA checkbox terkait dicentang."""
@@ -408,7 +408,7 @@ class CombinedPanel(QWidget):
                 "Interpolation": lambda: running_interpolation(self, single_process=False, batch_id=self.batch_id),
             },
             'denoising': {
-                "Average": lambda: running_average(self, single_process=False, batch_id=self.batch_id),
+                "Average": lambda:  running_average(self, single_process=False, batch_id=self.batch_id),
                 "Median": lambda: running_median(self, single_process=False, batch_id=self.batch_id),
                 "Similarity": lambda: running_similarity(self, single_process=False, batch_id=self.batch_id),
                 "Similarity V2": lambda: running_similarity_v2(self, single_process=False, batch_id=self.batch_id),
