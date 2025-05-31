@@ -1,3 +1,4 @@
+// similarity_motion_dft_only.cpp
 #include <cmath>
 #include <vector>
 #include <limits>
@@ -7,9 +8,9 @@
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/core/utility.hpp>
-#include "DFT_merging.hpp"
+// #include "block_matching.hpp" // DIHILANGKAN
 #include "tile_noise_estimation.hpp"
-#include "block_matching.hpp"
+#include "DFT_merging.hpp"
 
 //=============================================================================
 // Konstanta dan Konfigurasi
@@ -17,595 +18,270 @@
 namespace MotionMetricsConfig
 {
     constexpr float STABILITY_EPSILON = 1e-6f;
-    constexpr float CONFIDENCE_EPSILON = 1e-6f;
     constexpr float GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD = 1e-6f;
-    constexpr float GRADIENT_WEIGHT_FACTOR = 1.3f;
+    // constexpr float GRADIENT_WEIGHT_FACTOR = 1.3f; // Tidak digunakan lagi
     constexpr float MAD_TO_SIGMA_FACTOR = 1.4826f;
     constexpr int CONFIDENCE_MAP_BLUR_KERNEL_SIZE = 3;
-    constexpr bool  APPLY_FREQ_DOMAIN_MERGING = true;
-}
+    constexpr float DFT_WIENER_C_FACTOR = 3.0f; // Anda bisa sesuaikan ini
+} // namespace MotionMetricsConfig
 
 extern "C"
 {
     void accumulate_frame_weighted_jit(
-        float *final_image_sum_ptr, float *weight_map_sum_ptr,
-        const float *current_image_ptr, const float *reference_image_ptr,
-        const float *base_window_ptr, const int *row_starts, const int *col_starts,
-        int num_row_starts, int num_col_starts, int tile_h, int tile_w,
-        int h_img, int w_img, int channels_input,
-        int mbm_block_h, int mbm_block_w, int mbm_search_radius,
-        float frame_max_adaptive_multiplier,
-        float p_mbm_mad_sensitivity,
-        float p_mbm_noise_mad_offset_factor,
-        float p_mbm_confidence_skip_dft_threshold,
-        int p_coarse_alignment_search_margin,
-        float p_freq_merge_wiener_c_factor
-        )
+        float *final_image_sum_ptr,
+        float *weight_map_sum_ptr,
+        const float *current_image_ptr,
+        const float *reference_image_ptr,
+        const float *base_window_ptr,
+        const int *row_starts, const int *col_starts,
+        int num_row_starts, int num_col_starts,
+        int tile_h, int tile_w,
+        int h_img, int w_img, int channels,
+        int mbm_block_h, int mbm_block_w,
+        int mbm_search_radius,       // Tidak digunakan lagi secara aktif jika MBM dihilangkan
+        float p_motion_sensitivity,  // Tidak digunakan lagi
+        float p_noise_offset_factor) // Tidak digunakan lagi
     {
         using namespace MotionMetricsConfig;
 
         if (!final_image_sum_ptr || !weight_map_sum_ptr || !current_image_ptr || !reference_image_ptr || !base_window_ptr ||
-            !row_starts || !col_starts || h_img <= 0 || w_img <= 0 || tile_h <= 0 || tile_w <= 0 || channels_input <= 0 ||
-            (mbm_block_h <=0 && tile_h > 0 && mbm_block_w >0) ||
-            (mbm_block_w <=0 && tile_w > 0 && mbm_block_h >0) ) {
+            !row_starts || !col_starts || h_img <= 0 || w_img <= 0 || tile_h <= 0 || tile_w <= 0 || channels <= 0 ||
+            (mbm_block_h <= 0 && tile_h > 0 && mbm_block_w > 0) || // Validasi ukuran blok tetap relevan untuk pembagian tile
+            (mbm_block_w <= 0 && tile_w > 0 && mbm_block_h > 0))
+        {
             return;
         }
 
-        int channels_cpp = channels_input;
-        int mat_type_color = CV_32FC(channels_cpp);
-        if (mat_type_color == 0 && channels_cpp > 0) return;
+        int mat_type_color = CV_32FC(channels);
+        if (mat_type_color == 0 && channels > 0) return;
 
         cv::Mat final_image_sum_mat(h_img, w_img, mat_type_color, final_image_sum_ptr);
         cv::Mat weight_map_sum_mat(h_img, w_img, CV_32FC1, weight_map_sum_ptr);
-        const cv::Mat current_image_mat_input_const(h_img, w_img, CV_32FC(channels_input), const_cast<float *>(current_image_ptr));
-        const cv::Mat reference_image_mat_input_const(h_img, w_img, CV_32FC(channels_input), const_cast<float *>(reference_image_ptr));
+        const cv::Mat current_image_mat(h_img, w_img, mat_type_color, const_cast<float *>(current_image_ptr));
+        const cv::Mat reference_image_mat(h_img, w_img, mat_type_color, const_cast<float *>(reference_image_ptr));
 
-        cv::Mat current_image_gray_full_data, reference_image_gray_full_data;
-        cv::Mat current_image_gray_full, reference_image_gray_full;
-
-        if (current_image_mat_input_const.channels() > 1) {
-            cv::cvtColor(current_image_mat_input_const, current_image_gray_full_data, cv::COLOR_BGR2GRAY);
-            if (current_image_gray_full_data.type() != CV_32F) {
-                current_image_gray_full_data.convertTo(current_image_gray_full_data, CV_32F);
-            }
-            current_image_gray_full = current_image_gray_full_data;
+        // Kita masih butuh reference_image_gray_full untuk estimasi noise
+        cv::Mat reference_image_gray_full;
+        if (channels > 1) {
+            cv::Mat reference_image_gray_full_data;
+            cv::cvtColor(reference_image_mat, reference_image_gray_full_data, cv::COLOR_BGR2GRAY);
+            reference_image_gray_full_data.convertTo(reference_image_gray_full, CV_32F);
         } else {
-            if (current_image_mat_input_const.type() == CV_32FC1) {
-                current_image_gray_full = current_image_mat_input_const;
-            } else {
-                current_image_mat_input_const.convertTo(current_image_gray_full_data, CV_32F);
-                current_image_gray_full = current_image_gray_full_data;
-            }
+            reference_image_mat.convertTo(reference_image_gray_full, CV_32F);
         }
-
-        if (reference_image_mat_input_const.channels() > 1) {
-            cv::cvtColor(reference_image_mat_input_const, reference_image_gray_full_data, cv::COLOR_BGR2GRAY);
-            if (reference_image_gray_full_data.type() != CV_32F) {
-                reference_image_gray_full_data.convertTo(reference_image_gray_full_data, CV_32F);
-            }
-            reference_image_gray_full = reference_image_gray_full_data;
-        } else {
-             if (reference_image_mat_input_const.type() == CV_32FC1) {
-                reference_image_gray_full = reference_image_mat_input_const;
-            } else {
-                reference_image_mat_input_const.convertTo(reference_image_gray_full_data, CV_32F);
-                reference_image_gray_full = reference_image_gray_full_data;
-            }
-        }
-
-        if (current_image_gray_full.empty() || reference_image_gray_full.empty()) {
-            return;
-        }
-        CV_Assert(current_image_gray_full.type() == CV_32FC1 && reference_image_gray_full.type() == CV_32FC1);
+        CV_Assert(reference_image_gray_full.type() == CV_32FC1 && !reference_image_gray_full.empty());
 
 
 #pragma omp parallel
         {
-            cv::Mat block_confidences_raw_th, block_confidences_smoothed_th;
-            cv::Mat noise_estimation_patch_color_th; 
-            cv::Mat noise_estimation_patch_gray_th;
-
-            std::vector<cv::Mat> merged_blocks_for_tile_storage_th;
-            std::vector<cv::Mat> noise_estimation_channels_th; 
-
+            cv::Mat thread_block_confidences;
             MotionMerging::DFTBuffers dft_buffers_th;
-            int max_block_h_for_dft = (mbm_block_h > 0) ? mbm_block_h : tile_h;
-            int max_block_w_for_dft = (mbm_block_w > 0) ? mbm_block_w : tile_w;
-            if (tile_h < max_block_h_for_dft && tile_h > 0) max_block_h_for_dft = tile_h;
-            if (tile_w < max_block_w_for_dft && tile_w > 0) max_block_w_for_dft = tile_w;
-
-            if (max_block_h_for_dft > 0 && max_block_w_for_dft > 0) {
-                int max_optimal_rows = cv::getOptimalDFTSize(max_block_h_for_dft);
-                int max_optimal_cols = cv::getOptimalDFTSize(max_block_w_for_dft);
-                max_optimal_rows = std::max(max_optimal_rows, max_block_h_for_dft);
-                max_optimal_cols = std::max(max_optimal_cols, max_block_w_for_dft);
-
-                if (max_optimal_rows > 0 && max_optimal_cols > 0) {
-                    dft_buffers_th.current_padded.create(max_optimal_rows, max_optimal_cols, CV_32FC1);
-                    dft_buffers_th.ref_padded.create(max_optimal_rows, max_optimal_cols, CV_32FC1);
-                    dft_buffers_th.current_dft.create(max_optimal_rows, max_optimal_cols, CV_32FC2);
-                    dft_buffers_th.ref_dft.create(max_optimal_rows, max_optimal_cols, CV_32FC2);
-                    dft_buffers_th.merged_dft.create(max_optimal_rows, max_optimal_cols, CV_32FC2);
-                    dft_buffers_th.temp_spatial_merged.create(max_optimal_rows, max_optimal_cols, CV_32FC1);
-                }
-            }
-
-            MotionMatching::MBMBuffers mbm_buffers_th;
-            int mbm_alloc_h = max_block_h_for_dft;
-            int mbm_alloc_w = max_block_w_for_dft;
-
-            if (mbm_alloc_h > 0 && mbm_alloc_w > 0) {
-                mbm_buffers_th.diff_workspace.create(mbm_alloc_h, mbm_alloc_w, CV_32FC1);
-                mbm_buffers_th.grad_x.create(mbm_alloc_h, mbm_alloc_w, CV_32F);
-                mbm_buffers_th.grad_y.create(mbm_alloc_h, mbm_alloc_w, CV_32F);
-                mbm_buffers_th.grad_mag_current.create(mbm_alloc_h, mbm_alloc_w, CV_32FC1);
-            }
-
-
-            #pragma omp for collapse(2) schedule(static)
-            for (int i_tile_row = 0; i_tile_row < num_row_starts; i_tile_row++) {
-                for (int j_tile_col = 0; j_tile_col < num_col_starts; j_tile_col++) {
-                    int r_tile_start = row_starts[i_tile_row];
-                    int c_tile_start = col_starts[j_tile_col];
-
-                    if (r_tile_start < 0 || c_tile_start < 0 || (r_tile_start + tile_h) > h_img || (c_tile_start + tile_w) > w_img || tile_h <= 0 || tile_w <= 0)
-                        continue;
-
-                    cv::Rect tile_roi_orig(c_tile_start, r_tile_start, tile_w, tile_h);
-
-                    const cv::Mat current_tile_color_th = current_image_mat_input_const(tile_roi_orig);
-                    const cv::Mat current_tile_gray_for_mbm_th = current_image_gray_full(tile_roi_orig);
-                    const cv::Mat reference_tile_gray_for_mbm_th = reference_image_gray_full(tile_roi_orig);
-
-                    const cv::Mat base_window_tile_mat_th(tile_h, tile_w, CV_32FC1, const_cast<float*>(base_window_ptr));
-
-                    if (current_tile_color_th.empty() || current_tile_gray_for_mbm_th.empty() || reference_tile_gray_for_mbm_th.empty()) {
-                        continue;
-                    }
-
-                    
-                    std::vector<float> estimated_noise_sigma_tile_ch(channels_cpp, 0.0f);
-                    float estimated_noise_sigma_grayscale_for_mbm = 0.0f; 
-
-                    int larger_tile_factor_noise = 2;
-                    int noise_est_base_r = r_tile_start;
-                    int noise_est_base_c = c_tile_start;
-                    int larger_r_noise = std::max(0, noise_est_base_r - tile_h * (larger_tile_factor_noise - 1) / 2);
-                    int larger_c_noise = std::max(0, noise_est_base_c - tile_w * (larger_tile_factor_noise - 1) / 2);
-                    int larger_h_dim_noise = std::min(h_img - larger_r_noise, tile_h * larger_tile_factor_noise);
-                    int larger_w_dim_noise = std::min(w_img - larger_c_noise, tile_w * larger_tile_factor_noise);
-
-                    noise_estimation_patch_color_th.release();
-                    noise_estimation_patch_gray_th.release();
-
-                    if (larger_h_dim_noise >= 3 && larger_w_dim_noise >= 3) {
-                        cv::Rect larger_roi_noise(larger_c_noise, larger_r_noise, larger_w_dim_noise, larger_h_dim_noise);
-                        if (larger_roi_noise.x >= 0 && larger_roi_noise.y >= 0 &&
-                            larger_roi_noise.width > 0 && larger_roi_noise.height > 0 &&
-                            larger_roi_noise.x + larger_roi_noise.width <= reference_image_mat_input_const.cols &&
-                            larger_roi_noise.y + larger_roi_noise.height <= reference_image_mat_input_const.rows) {
-                            noise_estimation_patch_color_th = reference_image_mat_input_const(larger_roi_noise);
-                            noise_estimation_patch_gray_th = reference_image_gray_full(larger_roi_noise);
-                        }
-                    }
-
-                    
-                    if (noise_estimation_patch_color_th.empty() || noise_estimation_patch_color_th.rows < 3 || noise_estimation_patch_color_th.cols < 3) {
-                        const cv::Mat ref_tile_color_for_noise_th = reference_image_mat_input_const(tile_roi_orig); 
-                        if (ref_tile_color_for_noise_th.rows >= 3 && ref_tile_color_for_noise_th.cols >= 3) {
-                           noise_estimation_patch_color_th = ref_tile_color_for_noise_th;
-                        }
-                    }
-                    if (noise_estimation_patch_gray_th.empty() || noise_estimation_patch_gray_th.rows < 3 || noise_estimation_patch_gray_th.cols < 3) {
-                        if (reference_tile_gray_for_mbm_th.rows >=3 && reference_tile_gray_for_mbm_th.cols >=3) {
-                           noise_estimation_patch_gray_th = reference_tile_gray_for_mbm_th;
-                        }
-                    }
-
-                    
-                    if (!noise_estimation_patch_gray_th.empty()) {
-                        estimated_noise_sigma_grayscale_for_mbm = NoiseEstimation::estimate_tile_noise_sigma_mad_laplacian(
-                            noise_estimation_patch_gray_th, MAD_TO_SIGMA_FACTOR
-                        );
-                    }
-
-
-                
-                    if (channels_cpp == 1) {
-                        if (!noise_estimation_patch_gray_th.empty()) {
-                             estimated_noise_sigma_tile_ch[0] = NoiseEstimation::estimate_tile_noise_sigma_mad_laplacian(
-                                noise_estimation_patch_gray_th, MAD_TO_SIGMA_FACTOR
-                            );
-                        } else if (!noise_estimation_patch_color_th.empty()) {
-                             estimated_noise_sigma_tile_ch[0] = NoiseEstimation::estimate_tile_noise_sigma_mad_laplacian(
-                                noise_estimation_patch_color_th, MAD_TO_SIGMA_FACTOR
-                            );
-                        }
-                    } else {
-                        if (!noise_estimation_patch_color_th.empty() && noise_estimation_patch_color_th.channels() == channels_cpp) {
-                            cv::split(noise_estimation_patch_color_th, noise_estimation_channels_th);
-                            for (int ch = 0; ch < channels_cpp; ++ch) {
-                                if (noise_estimation_channels_th[ch].rows >= 3 && noise_estimation_channels_th[ch].cols >= 3) {
-                                    estimated_noise_sigma_tile_ch[ch] = NoiseEstimation::estimate_tile_noise_sigma_mad_laplacian(
-                                        noise_estimation_channels_th[ch], MAD_TO_SIGMA_FACTOR
-                                    );
-                                } else {
-                                     estimated_noise_sigma_tile_ch[ch] = estimated_noise_sigma_grayscale_for_mbm;
-                                }
-                            }
-                        } else {
-                            for (int ch = 0; ch < channels_cpp; ++ch) {
-                                estimated_noise_sigma_tile_ch[ch] = estimated_noise_sigma_grayscale_for_mbm;
-                            }
-                        }
-                    }
-                   
-
-                    int actual_mbm_block_h_tile = (mbm_block_h > 0 && tile_h > 0) ? mbm_block_h : tile_h;
-                    int actual_mbm_block_w_tile = (mbm_block_w > 0 && tile_w > 0) ? mbm_block_w : tile_w;
-
-                    int num_blocks_h_tile = (actual_mbm_block_h_tile > 0 && tile_h > 0) ? (tile_h + actual_mbm_block_h_tile - 1) / actual_mbm_block_h_tile : (tile_h > 0 ? 1:0);
-                    int num_blocks_w_tile = (actual_mbm_block_w_tile > 0 && tile_w > 0) ? (tile_w + actual_mbm_block_w_tile - 1) / actual_mbm_block_w_tile : (tile_w > 0 ? 1:0);
-
-                    if (num_blocks_h_tile == 0 || num_blocks_w_tile == 0) continue;
-
-                    if (block_confidences_raw_th.rows != num_blocks_h_tile || block_confidences_raw_th.cols != num_blocks_w_tile || block_confidences_raw_th.type() != CV_32F) {
-                        block_confidences_raw_th.create(num_blocks_h_tile, num_blocks_w_tile, CV_32F);
-                    }
-                    block_confidences_raw_th.setTo(cv::Scalar(0.0f));
-
-                    size_t required_block_storage_size = static_cast<size_t>(num_blocks_h_tile) * num_blocks_w_tile;
-                    if (merged_blocks_for_tile_storage_th.size() < required_block_storage_size) {
-                        merged_blocks_for_tile_storage_th.resize(required_block_storage_size);
-                    }
-
-                    for (int bh_idx = 0; bh_idx < num_blocks_h_tile; ++bh_idx) {
-                        for (int bw_idx = 0; bw_idx < num_blocks_w_tile; ++bw_idx) {
-                            size_t block_idx_flat = static_cast<size_t>(bh_idx) * num_blocks_w_tile + bw_idx;
-
-                            int block_local_r_start = bh_idx * actual_mbm_block_h_tile;
-                            int block_local_c_start = bw_idx * actual_mbm_block_w_tile;
-                            int current_block_h_dim = std::min(actual_mbm_block_h_tile, tile_h - block_local_r_start);
-                            int current_block_w_dim = std::min(actual_mbm_block_w_tile, tile_w - block_local_c_start);
-
-                            cv::Mat final_merged_block_for_accumulation_th;
-
-                            if (current_block_h_dim <= 0 || current_block_w_dim <= 0) {
-                                block_confidences_raw_th.at<float>(bh_idx, bw_idx) = 0.0f;
-                                if(block_idx_flat < merged_blocks_for_tile_storage_th.size()) merged_blocks_for_tile_storage_th[block_idx_flat].release();
-                                continue;
-                            }
-
-                            cv::Rect current_block_roi_local(block_local_c_start, block_local_r_start, current_block_w_dim, current_block_h_dim);
-
-                            if (!(current_block_roi_local.x >= 0 && current_block_roi_local.y >= 0 &&
-                                  current_block_roi_local.x + current_block_roi_local.width <= current_tile_gray_for_mbm_th.cols &&
-                                  current_block_roi_local.y + current_block_roi_local.height <= current_tile_gray_for_mbm_th.rows))
-                            {
-                                block_confidences_raw_th.at<float>(bh_idx, bw_idx) = 0.0f;
-                                if(block_idx_flat < merged_blocks_for_tile_storage_th.size()){
-                                     merged_blocks_for_tile_storage_th[block_idx_flat].create(current_block_h_dim, current_block_w_dim, CV_32FC(channels_cpp));
-                                     merged_blocks_for_tile_storage_th[block_idx_flat].setTo(cv::Scalar::all(0.0f));
-                                }
-                                continue;
-                            }
-
-                            const cv::Mat current_block_gray_th = current_tile_gray_for_mbm_th(current_block_roi_local);
-                            const cv::Mat current_block_color_th = current_tile_color_th(current_block_roi_local);
-
-                            current_block_color_th.copyTo(final_merged_block_for_accumulation_th);
-
-                            if (current_block_gray_th.empty() || current_block_color_th.empty()) {
-                                 block_confidences_raw_th.at<float>(bh_idx, bw_idx) = 0.0f;
-                                 if(block_idx_flat < merged_blocks_for_tile_storage_th.size()) merged_blocks_for_tile_storage_th[block_idx_flat] = final_merged_block_for_accumulation_th.clone();
-                                 continue;
-                            }
-
-                            MotionMatching::BlockMatchResult block_result =
-                                MotionMatching::find_best_block_match_mad(
-                                    current_block_gray_th, reference_tile_gray_for_mbm_th,
-                                    block_local_r_start, block_local_c_start, mbm_search_radius,
-                                    GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON,
-                                    mbm_buffers_th
-                                );
-
-                            float mbm_confidence_score = 0.0f;
-                            if (block_result.success) {
-                                float noise_induced_mad_offset_block = p_mbm_noise_mad_offset_factor * estimated_noise_sigma_grayscale_for_mbm;
-                                float excess_mad = std::max(0.0f, block_result.min_mad - noise_induced_mad_offset_block);
-                                mbm_confidence_score = std::exp(-excess_mad * p_mbm_mad_sensitivity);
-                                mbm_confidence_score = std::max(0.0f, std::min(1.0f, mbm_confidence_score));
-                            }
-
-                            float overall_freq_merge_confidence = 0.0f;
-                            int successful_channel_merges = 0;
-                            float min_channel_freq_merge_confidence = 1.0f;
-
-                            if (APPLY_FREQ_DOMAIN_MERGING && block_result.success && mbm_confidence_score >= p_mbm_confidence_skip_dft_threshold) {
-                                cv::Rect best_ref_block_roi_on_ref_tile(block_result.best_match_c, block_result.best_match_r, current_block_w_dim, current_block_h_dim);
-
-                                if (best_ref_block_roi_on_ref_tile.x >= 0 && best_ref_block_roi_on_ref_tile.y >= 0 &&
-                                    best_ref_block_roi_on_ref_tile.x + best_ref_block_roi_on_ref_tile.width <= reference_tile_gray_for_mbm_th.cols &&
-                                    best_ref_block_roi_on_ref_tile.y + best_ref_block_roi_on_ref_tile.height <= reference_tile_gray_for_mbm_th.rows)
-                                {
-                                    cv::Rect ref_block_color_roi_global(
-                                        c_tile_start + block_result.best_match_c,
-                                        r_tile_start + block_result.best_match_r,
-                                        current_block_w_dim, current_block_h_dim );
-
-                                    if (ref_block_color_roi_global.x >= 0 && ref_block_color_roi_global.y >= 0 &&
-                                        ref_block_color_roi_global.x + ref_block_color_roi_global.width <= reference_image_mat_input_const.cols &&
-                                        ref_block_color_roi_global.y + ref_block_color_roi_global.height <= reference_image_mat_input_const.rows)
-                                    {
-                                        const cv::Mat ref_block_color_from_mbm_th = reference_image_mat_input_const(ref_block_color_roi_global);
-
-                                        if (!ref_block_color_from_mbm_th.empty() && ref_block_color_from_mbm_th.size() == current_block_color_th.size()) {
-                                            if (channels_cpp == 1) {
-                                                const cv::Mat ref_block_gray_from_mbm_th = reference_tile_gray_for_mbm_th(best_ref_block_roi_on_ref_tile);
-                                                MotionMerging::FrequencyMergeResult merge_result =
-                                                    MotionMerging::merge_blocks_frequency_domain(
-                                                        current_block_color_th,
-                                                        ref_block_gray_from_mbm_th,
-                                                        estimated_noise_sigma_tile_ch[0],
-                                                        p_freq_merge_wiener_c_factor, STABILITY_EPSILON, dft_buffers_th);
-                                                if (merge_result.success && !merge_result.merged_block_gray.empty()) {
-                                                    final_merged_block_for_accumulation_th = merge_result.merged_block_gray;
-                                                    overall_freq_merge_confidence = merge_result.merge_confidence;
-                                                    min_channel_freq_merge_confidence = merge_result.merge_confidence;
-                                                    successful_channel_merges = 1;
-                                                }
-                                            } else {
-                                                std::vector<cv::Mat> current_split_channels(channels_cpp);
-                                                std::vector<cv::Mat> ref_split_channels(channels_cpp);
-                                                std::vector<cv::Mat> merged_split_channels(channels_cpp);
-                                                cv::split(current_block_color_th, current_split_channels);
-                                                cv::split(ref_block_color_from_mbm_th, ref_split_channels);
-
-                                                bool all_merges_ok_for_this_block = true;
-
-                                                min_channel_freq_merge_confidence = 1.0f; 
-                                                successful_channel_merges = 0;     
-
-                                                for (int ch = 0; ch < channels_cpp; ++ch) {
-                                                    MotionMerging::FrequencyMergeResult res = MotionMerging::merge_blocks_frequency_domain(
-                                                        current_split_channels[ch], ref_split_channels[ch],
-                                                        estimated_noise_sigma_tile_ch[ch], p_freq_merge_wiener_c_factor, STABILITY_EPSILON, dft_buffers_th);
-                                                  
-                                                    if (res.success && !res.merged_block_gray.empty()) {
-                                                        merged_split_channels[ch] = res.merged_block_gray; // Simpan hasil merge per channel
-                                                        min_channel_freq_merge_confidence = std::min(min_channel_freq_merge_confidence, res.merge_confidence);
-                                                        successful_channel_merges++;
-                                                    } else {
-                                                        merged_split_channels[ch] = current_split_channels[ch].clone(); // Gunakan channel asli dan pastikan di-clone
-                                                        min_channel_freq_merge_confidence = 0.0f; // Atau strategi lain jika merge gagal
-                                                        all_merges_ok_for_this_block = false;
-                                                    }
-                                                }
-
-                                                if (successful_channel_merges > 0) {
-                                                    overall_freq_merge_confidence = min_channel_freq_merge_confidence;
-                                                    cv::merge(merged_split_channels, final_merged_block_for_accumulation_th);
-                                                } else {
-                                                    overall_freq_merge_confidence = 0.0f;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            } else if (!APPLY_FREQ_DOMAIN_MERGING && block_result.success) {
-                                overall_freq_merge_confidence = 1.0f; 
-                            }
-
-                            if(block_idx_flat < merged_blocks_for_tile_storage_th.size()){
-                                if (final_merged_block_for_accumulation_th.data == current_block_color_th.data && !final_merged_block_for_accumulation_th.empty()) {
-                                     merged_blocks_for_tile_storage_th[block_idx_flat] = final_merged_block_for_accumulation_th.clone();
-                                } else {
-                                     merged_blocks_for_tile_storage_th[block_idx_flat] = final_merged_block_for_accumulation_th;
-                                }
-                            }
-
-                            float combined_confidence = mbm_confidence_score * overall_freq_merge_confidence;
-                             if (!APPLY_FREQ_DOMAIN_MERGING && block_result.success) {
-                                combined_confidence = mbm_confidence_score;
-                            }
-                            block_confidences_raw_th.at<float>(bh_idx, bw_idx) = std::max(0.0f, std::min(1.0f, combined_confidence));
-                        }
-                    }
-
-                    int kernel_sz_conf_tile = (CONFIDENCE_MAP_BLUR_KERNEL_SIZE >= 1 && CONFIDENCE_MAP_BLUR_KERNEL_SIZE % 2 == 1) ? CONFIDENCE_MAP_BLUR_KERNEL_SIZE : 1;
-                    if (!block_confidences_raw_th.empty() && kernel_sz_conf_tile >= 3) {
-                        cv::GaussianBlur(block_confidences_raw_th, block_confidences_smoothed_th, cv::Size(kernel_sz_conf_tile, kernel_sz_conf_tile), 0);
-                    } else if (!block_confidences_raw_th.empty()) {
-                        block_confidences_raw_th.copyTo(block_confidences_smoothed_th);
-                    } else {
-                         if(block_confidences_smoothed_th.rows != num_blocks_h_tile || block_confidences_smoothed_th.cols != num_blocks_w_tile || block_confidences_smoothed_th.type() != CV_32F) {
-                           block_confidences_smoothed_th.create(num_blocks_h_tile, num_blocks_w_tile, CV_32F);
-                        }
-                        block_confidences_smoothed_th.setTo(cv::Scalar(0.0f));
-                    }
-
-
-                    bool confidence_map_is_usable_for_pixels_tile = !block_confidences_smoothed_th.empty() &&
-                                                               block_confidences_smoothed_th.rows == num_blocks_h_tile &&
-                                                               block_confidences_smoothed_th.cols == num_blocks_w_tile;
-
-
-                    if (confidence_map_is_usable_for_pixels_tile) {
-                        for (int y_in_tile = 0; y_in_tile < tile_h; ++y_in_tile) {
-                            const float *base_window_row_ptr = base_window_tile_mat_th.ptr<const float>(y_in_tile);
-                            int gy_global = r_tile_start + y_in_tile;
-
-                            if (gy_global >= h_img) continue;
-
-                            float* final_image_sum_row_ptr = final_image_sum_mat.ptr<float>(gy_global);
-                            float* weight_map_sum_row_ptr = weight_map_sum_mat.ptr<float>(gy_global);
-
-                            for (int x_in_tile = 0; x_in_tile < tile_w; ++x_in_tile) {
-                                int bh_idx_pixel = (actual_mbm_block_h_tile > 0) ? std::min(y_in_tile / actual_mbm_block_h_tile, num_blocks_h_tile - 1) : 0;
-                                int bw_idx_pixel = (actual_mbm_block_w_tile > 0) ? std::min(x_in_tile / actual_mbm_block_w_tile, num_blocks_w_tile - 1) : 0;
-
-                                float block_confidence_pixel_val = block_confidences_smoothed_th.at<float>(bh_idx_pixel, bw_idx_pixel);
-                                float base_win_val = base_window_row_ptr[x_in_tile];
-                                float pixel_accum_weight = base_win_val * block_confidence_pixel_val;
-
-                                if (pixel_accum_weight > GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD) {
-                                    int gx_global = c_tile_start + x_in_tile;
-                                    if (gx_global >= w_img) continue;
-
-                                    #pragma omp atomic update
-                                    weight_map_sum_row_ptr[gx_global] += pixel_accum_weight;
-
-                                    int block_local_r_start_pixel = bh_idx_pixel * actual_mbm_block_h_tile;
-                                    int block_local_c_start_pixel = bw_idx_pixel * actual_mbm_block_w_tile;
-                                    int y_in_block_pixel = y_in_tile - block_local_r_start_pixel;
-                                    int x_in_block_pixel = x_in_tile - block_local_c_start_pixel;
-                                    size_t flat_block_index_pixel = static_cast<size_t>(bh_idx_pixel) * num_blocks_w_tile + bw_idx_pixel;
-
-                                    if (flat_block_index_pixel >= merged_blocks_for_tile_storage_th.size() ||
-                                        merged_blocks_for_tile_storage_th[flat_block_index_pixel].empty() ||
-                                        y_in_block_pixel < 0 || y_in_block_pixel >= merged_blocks_for_tile_storage_th[flat_block_index_pixel].rows ||
-                                        x_in_block_pixel < 0 || x_in_block_pixel >= merged_blocks_for_tile_storage_th[flat_block_index_pixel].cols ||
-                                        merged_blocks_for_tile_storage_th[flat_block_index_pixel].channels() != channels_cpp) {
-                                        continue;
-                                    }
-                                    const cv::Mat& active_merged_block_pixel = merged_blocks_for_tile_storage_th[flat_block_index_pixel];
-
-                                    if (channels_cpp == 1) {
-                                        float merged_val_pixel = active_merged_block_pixel.at<float>(y_in_block_pixel, x_in_block_pixel);
-                                        merged_val_pixel = std::max(0.0f, std::min(1.0f, merged_val_pixel));
-                                        float weighted_pixel_value = merged_val_pixel * pixel_accum_weight;
-                                        #pragma omp atomic update
-                                        final_image_sum_row_ptr[gx_global] += weighted_pixel_value;
-                                    } else {
-                                        const float* merged_pixel_ptr = active_merged_block_pixel.ptr<const float>(y_in_block_pixel);
-                                        for (int ch = 0; ch < channels_cpp; ++ch) {
-                                            float merged_channel_val_pixel = merged_pixel_ptr[x_in_block_pixel * channels_cpp + ch];
-                                            merged_channel_val_pixel = std::max(0.0f, std::min(1.0f, merged_channel_val_pixel));
-                                            float weighted_pixel_channel_value = merged_channel_val_pixel * pixel_accum_weight;
-                                            #pragma omp atomic update
-                                            final_image_sum_row_ptr[gx_global * channels_cpp + ch] += weighted_pixel_channel_value;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    [[nodiscard]] float estimate_global_noise(
-        const float *reference_image_ptr,
-        int h, int w, int channels,
-        int tile_h, int tile_w,
-        const int *row_starts, int num_row_starts,
-        const int *col_starts, int num_col_starts)
-    {
-        using namespace MotionMetricsConfig;
-
-        if (!reference_image_ptr || !row_starts || !col_starts || h <= 0 || w <= 0 ||
-            channels <= 0 || tile_h <= 0 || tile_w <= 0 || num_row_starts <= 0 || num_col_starts <= 0)
-        {
-            return 0.0f;
-        }
-
-        int mat_type = CV_32FC(channels);
-        if (mat_type == 0 && channels > 0) return 0.0f;
-
-        const cv::Mat reference_image_mat(h, w, mat_type, const_cast<float *>(reference_image_ptr));
-        cv::Mat ref_gray_float; // Tetap menggunakan grayscale untuk versi global saat ini
-
-        if (reference_image_mat.channels() > 1) {
-            cv::cvtColor(reference_image_mat, ref_gray_float, cv::COLOR_BGR2GRAY);
-        } else {
-            reference_image_mat.copyTo(ref_gray_float);
-        }
-        if (ref_gray_float.type() != CV_32F) {
-            ref_gray_float.convertTo(ref_gray_float, CV_32F);
-        }
-
-        if (ref_gray_float.empty()) {
-            return 0.0f;
-        }
-
-        double total_sigma_sum = 0.0;
-        long long valid_tile_count = 0;
-
-        #pragma omp parallel
-        {
-            cv::Mat thread_tile;
-
-            #pragma omp for collapse(2) schedule(guided) reduction(+:total_sigma_sum, valid_tile_count)
-            for (int i = 0; i < num_row_starts; i++) {
-                for (int j = 0; j < num_col_starts; j++) {
+            cv::Mat thread_merged_tile_data;
+
+            // Variabel mbm_alloc_h/w tidak lagi relevan jika MBM buffers dihilangkan
+            // Namun, actual_mbm_block_h/w masih digunakan untuk iterasi blok
+
+#pragma omp for collapse(2) schedule(static)
+            for (int i = 0; i < num_row_starts; i++)
+            {
+                for (int j = 0; j < num_col_starts; j++)
+                {
                     int r = row_starts[i];
                     int c = col_starts[j];
-
-                    if (r < 0 || c < 0 || (r + tile_h) > h || (c + tile_w) > w)
+                    if (r < 0 || c < 0 || (r + tile_h) > h_img || (c + tile_w) > w_img || tile_h <= 0 || tile_w <= 0)
                         continue;
 
                     cv::Rect tile_roi(c, r, tile_w, tile_h);
-                    thread_tile = ref_gray_float(tile_roi); // Mengambil dari grayscale
+                    const cv::Mat current_tile_color_data = current_image_mat(tile_roi);
+                    const cv::Mat reference_tile_color_data = reference_image_mat(tile_roi);
+                    const cv::Mat reference_tile_gray_for_noise_est = reference_image_gray_full(tile_roi); // Untuk estimasi noise
+                    const cv::Mat base_window_tile_mat(tile_h, tile_w, CV_32FC1, const_cast<float *>(base_window_ptr));
 
-                    if (thread_tile.rows < 3 || thread_tile.cols < 3) {
+                    if (current_tile_color_data.empty() || reference_tile_color_data.empty() || reference_tile_gray_for_noise_est.empty())
+                    {
                         continue;
                     }
 
-                    float estimated_sigma_tile = NoiseEstimation::estimate_tile_noise_sigma_mad_laplacian(
-                                                    thread_tile,
-                                                    MAD_TO_SIGMA_FACTOR
-                                                );
+                    int merged_tile_type = (channels == 1) ? CV_32FC1 : CV_32FC(channels);
+                    if (thread_merged_tile_data.rows != tile_h || thread_merged_tile_data.cols != tile_w || thread_merged_tile_data.type() != merged_tile_type) {
+                        thread_merged_tile_data.create(tile_h, tile_w, merged_tile_type);
+                    }
+                    thread_merged_tile_data.setTo(cv::Scalar::all(0.0f));
 
-                    if (estimated_sigma_tile > 0) {
-                        total_sigma_sum += static_cast<double>(estimated_sigma_tile);
-                        valid_tile_count++;
+                    float estimated_noise_sigma_tile = 0.0f;
+                    if (reference_tile_gray_for_noise_est.rows >= 3 && reference_tile_gray_for_noise_est.cols >= 3)
+                    {
+#ifdef TILE_NOISE_ESTIMATION_HPP
+                        estimated_noise_sigma_tile = NoiseEstimation::estimate_tile_noise_sigma_mad_laplacian(
+                            reference_tile_gray_for_noise_est, MAD_TO_SIGMA_FACTOR);
+#endif
+                    }
+
+                    // actual_mbm_block_h/w sekarang hanya berarti ukuran blok untuk DFT merging
+                    int actual_block_h = (mbm_block_h > 0) ? mbm_block_h : tile_h;
+                    int actual_block_w = (mbm_block_w > 0) ? mbm_block_w : tile_w;
+                    int num_blocks_h = (actual_block_h > 0 && tile_h > 0) ? (tile_h + actual_block_h - 1) / actual_block_h : 0;
+                    int num_blocks_w = (actual_block_w > 0 && tile_w > 0) ? (tile_w + actual_block_w - 1) / actual_block_w : 0;
+
+                    if (num_blocks_h == 0 || num_blocks_w == 0) continue;
+
+                    if (thread_block_confidences.rows != num_blocks_h || thread_block_confidences.cols != num_blocks_w || thread_block_confidences.type() != CV_32FC1)
+                    {
+                        thread_block_confidences.create(num_blocks_h, num_blocks_w, CV_32FC1);
+                    }
+                    thread_block_confidences.setTo(cv::Scalar(0.0f));
+
+                    for (int bh_idx = 0; bh_idx < num_blocks_h; ++bh_idx)
+                    {
+                        for (int bw_idx = 0; bw_idx < num_blocks_w; ++bw_idx)
+                        {
+                            int block_local_r_start = bh_idx * actual_block_h;
+                            int block_local_c_start = bw_idx * actual_block_w;
+                            int current_block_h_dim = std::min(actual_block_h, tile_h - block_local_r_start);
+                            int current_block_w_dim = std::min(actual_block_w, tile_w - block_local_c_start);
+
+                            if (current_block_h_dim <= 0 || current_block_w_dim <= 0) {
+                                thread_block_confidences.at<float>(bh_idx, bw_idx) = 0.0f;
+                                continue;
+                            }
+
+                            cv::Rect block_roi_local(block_local_c_start, block_local_r_start, current_block_w_dim, current_block_h_dim);
+                            const cv::Mat current_block_color_for_merge = current_tile_color_data(block_roi_local);
+                            const cv::Mat reference_block_color_at_same_pos = reference_tile_color_data(block_roi_local); // Ambil dari posisi yang sama
+                            cv::Mat target_merged_submat = thread_merged_tile_data(block_roi_local);
+
+                            if (current_block_color_for_merge.empty() || reference_block_color_at_same_pos.empty()) {
+                                thread_block_confidences.at<float>(bh_idx, bw_idx) = 0.0f;
+                                if(!current_block_color_for_merge.empty()) current_block_color_for_merge.copyTo(target_merged_submat);
+                                else { target_merged_submat.setTo(cv::Scalar::all(0.0f));} // Jika current kosong, isi dengan nol
+                                continue;
+                            }
+
+                            float dft_confidence_for_block = 0.0f;
+
+                            if (channels == 1) {
+                                MotionMerging::FrequencyMergeResult dft_result_gray =
+                                    MotionMerging::merge_blocks_frequency_domain(
+                                        current_block_color_for_merge, // Ini adalah grayscale
+                                        reference_block_color_at_same_pos, // Ini juga grayscale
+                                        estimated_noise_sigma_tile,
+                                        DFT_WIENER_C_FACTOR,
+                                        STABILITY_EPSILON,
+                                        dft_buffers_th);
+                                if (dft_result_gray.success && !dft_result_gray.merged_block_gray.empty()) {
+                                    dft_result_gray.merged_block_gray.copyTo(target_merged_submat);
+                                    dft_confidence_for_block = dft_result_gray.merge_confidence;
+                                } else {
+                                    current_block_color_for_merge.copyTo(target_merged_submat); // Fallback
+                                    dft_confidence_for_block = 0.1f; // Confidence rendah jika merge gagal
+                                }
+                            } else { // channels > 1
+                                std::vector<cv::Mat> current_channels, ref_channels_same_pos, merged_channels_vec;
+                                cv::split(current_block_color_for_merge, current_channels);
+                                cv::split(reference_block_color_at_same_pos, ref_channels_same_pos);
+                                merged_channels_vec.resize(channels);
+
+                                float total_confidence = 0.0f;
+                                bool all_channels_merged_successfully = true;
+
+                                for (int ch_idx = 0; ch_idx < channels; ++ch_idx) {
+                                    MotionMerging::FrequencyMergeResult dft_result_ch =
+                                        MotionMerging::merge_blocks_frequency_domain(
+                                            current_channels[ch_idx],
+                                            ref_channels_same_pos[ch_idx],
+                                            estimated_noise_sigma_tile,
+                                            DFT_WIENER_C_FACTOR,
+                                            STABILITY_EPSILON,
+                                            dft_buffers_th);
+                                    if (dft_result_ch.success && !dft_result_ch.merged_block_gray.empty()) {
+                                        merged_channels_vec[ch_idx] = dft_result_ch.merged_block_gray;
+                                        total_confidence += dft_result_ch.merge_confidence;
+                                    } else {
+                                        current_channels[ch_idx].copyTo(merged_channels_vec[ch_idx]); // Fallback
+                                        total_confidence += 0.1f;
+                                        all_channels_merged_successfully = false;
+                                    }
+                                }
+                                cv::merge(merged_channels_vec, target_merged_submat);
+                                dft_confidence_for_block = (channels > 0) ? (total_confidence / channels) : 0.0f;
+                                if (!all_channels_merged_successfully && dft_confidence_for_block > 0.2f) dft_confidence_for_block = 0.2f;
+                            }
+                            thread_block_confidences.at<float>(bh_idx, bw_idx) = std::max(0.0f, std::min(1.0f, dft_confidence_for_block));
+                        }
+                    }
+
+                    if (CONFIDENCE_MAP_BLUR_KERNEL_SIZE > 1 && num_blocks_h > 0 && num_blocks_w > 0) {
+                        int ksize = (CONFIDENCE_MAP_BLUR_KERNEL_SIZE % 2 == 1) ? CONFIDENCE_MAP_BLUR_KERNEL_SIZE : CONFIDENCE_MAP_BLUR_KERNEL_SIZE + 1;
+                        cv::GaussianBlur(thread_block_confidences, thread_block_confidences, cv::Size(ksize, ksize), 0, 0, cv::BORDER_REPLICATE);
+                    }
+
+                    // Loop akumulasi tetap sama
+                    for (int y_tile = 0; y_tile < tile_h; ++y_tile) {
+                        const float *merged_tile_row = thread_merged_tile_data.ptr<const float>(y_tile);
+                        const float *base_window_row = base_window_tile_mat.ptr<const float>(y_tile);
+                        int gy = r + y_tile;
+                        float *global_weight_sum_row = weight_map_sum_mat.ptr<float>(gy);
+                        float *global_pixel_sum_row = final_image_sum_mat.ptr<float>(gy);
+
+                        for (int x_tile = 0; x_tile < tile_w; ++x_tile) {
+                            int bh_idx = (actual_block_h > 0) ? std::min(y_tile / actual_block_h, num_blocks_h - 1) : 0;
+                            int bw_idx = (actual_block_w > 0) ? std::min(x_tile / actual_block_w, num_blocks_w - 1) : 0;
+                            float block_confidence = (num_blocks_h > 0 && num_blocks_w > 0) ? thread_block_confidences.at<float>(bh_idx, bw_idx) : 0.0f;
+                            float base_win_val = base_window_row[x_tile];
+                            float pixel_weight = base_win_val * block_confidence;
+
+                            if (pixel_weight > GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD) {
+                                int gx = c + x_tile;
+#pragma omp atomic update
+                                global_weight_sum_row[gx] += pixel_weight;
+                                int merged_pixel_idx_local = x_tile * channels;
+                                int global_pixel_idx_global = gx * channels;
+                                for (int ch_idx = 0; ch_idx < channels; ++ch_idx) {
+                                    float merged_pixel_value_ch = merged_tile_row[merged_pixel_idx_local + ch_idx];
+                                    float weighted_pixel_value = merged_pixel_value_ch * pixel_weight;
+#pragma omp atomic update
+                                    global_pixel_sum_row[global_pixel_idx_global + ch_idx] += weighted_pixel_value;
+                                }
+                            }
+                        }
                     }
                 }
             }
-        }
-
-        if (valid_tile_count > 0) {
-            return static_cast<float>(total_sigma_sum / valid_tile_count);
-        } else {
-            return 0.0f;
-        }
+        } // end pragma omp parallel
     }
 
+    // normalize_accumulated_image_jit tetap sama
     void normalize_accumulated_image_jit(
         float *final_image_ptr,
         const float *weight_map_sum_ptr,
         int h, int w, int channels)
     {
         using namespace MotionMetricsConfig;
-
-        if (!final_image_ptr || !weight_map_sum_ptr || h <= 0 || w <= 0 || channels <= 0) {
-            return;
-        }
+        if (!final_image_ptr || !weight_map_sum_ptr || h <= 0 || w <= 0 || channels <= 0) return;
         int mat_type = CV_32FC(channels);
         if (mat_type == 0 && channels > 0) return;
 
         cv::Mat final_image_mat(h, w, mat_type, final_image_ptr);
         const cv::Mat weight_map_sum_mat(h, w, CV_32FC1, const_cast<float *>(weight_map_sum_ptr));
 
-        #pragma omp parallel for collapse(2) schedule(static)
+#pragma omp parallel for collapse(2) schedule(static)
         for (int gy = 0; gy < h; ++gy) {
+            float *final_pixel_row_ptr = final_image_mat.ptr<float>(gy);
+            const float *weight_map_sum_row_ptr = weight_map_sum_mat.ptr<const float>(gy);
             for (int gx = 0; gx < w; ++gx) {
-                float total_weight = weight_map_sum_mat.at<float>(gy, gx);
-                float *final_pixel_row = final_image_mat.ptr<float>(gy);
+                float total_weight = weight_map_sum_row_ptr[gx];
                 int pixel_idx_base = gx * channels;
-
                 if (total_weight > GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD) {
                     float inv_total_weight = 1.0f / total_weight;
                     for (int ch = 0; ch < channels; ++ch) {
-                        final_pixel_row[pixel_idx_base + ch] *= inv_total_weight;
+                        final_pixel_row_ptr[pixel_idx_base + ch] *= inv_total_weight;
                     }
                 } else {
                     for (int ch = 0; ch < channels; ++ch) {
-                        final_pixel_row[pixel_idx_base + ch] = 0.0f;
+                        final_pixel_row_ptr[pixel_idx_base + ch] = 0.0f;
                     }
                 }
             }
         }
     }
-}
+} // extern C

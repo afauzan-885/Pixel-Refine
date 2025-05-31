@@ -62,10 +62,10 @@ TOGGLE_BUTTON = """
         background-color: #4893C1; /* Biru untuk state true */
     }
     QToolButton:hover:!checked {
-        background-color: #FF6666; /* Hover pada state false */
+        background-color: #FF6666;
     }
     QToolButton:hover:checked {
-        background-color: #2F7AA8; /* Hover pada state true */
+        background-color: #2F7AA8; 
     }
 """
 
@@ -76,7 +76,7 @@ APPLY_BUTTON = """
         color: white;
         border: none;
         border-radius: 5px;
-        padding: 2px 10px;
+        padding: 4px 10px;
         font-size: 14px;
         font-weight: bold;
     }

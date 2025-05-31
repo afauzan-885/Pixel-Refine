@@ -201,14 +201,12 @@ extern "C"
                         }
                     }
 
-                    // --- Blur confidence map untuk smoothing ---
                     if (CONFIDENCE_MAP_BLUR_KERNEL_SIZE > 1)
                     {
                         int ksize = (CONFIDENCE_MAP_BLUR_KERNEL_SIZE % 2 == 1) ? CONFIDENCE_MAP_BLUR_KERNEL_SIZE : CONFIDENCE_MAP_BLUR_KERNEL_SIZE + 1;
                         cv::GaussianBlur(thread_block_confidences, thread_block_confidences, cv::Size(ksize, ksize), 0, 0, cv::BORDER_REPLICATE);
                     }
 
-                    // --- Gunakan confidence map yang sudah di-blur untuk akumulasi weighted ---
                     for (int y = 0; y < tile_h; ++y)
                     {
                         const float *current_tile_color_row = current_tile_for_accumulation.ptr<const float>(y);
