@@ -35,6 +35,6 @@ FrequencyMergeResult merge_blocks_frequency_domain(
     DFTBuffers& buffers
 );
 
-} // namespace MotionMerging
+}
 
 #endif

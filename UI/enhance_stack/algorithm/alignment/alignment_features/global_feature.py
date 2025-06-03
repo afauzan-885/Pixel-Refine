@@ -1,6 +1,11 @@
 import concurrent.futures 
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
+import gc
+import traceback
+import bm3d
+import cv2
+from bm3d import bm3d_rgb
 import json
 import os
 import concurrent
@@ -22,6 +27,150 @@ except ImportError:
 from UI.settings.General.Language import language_config
 
 # ====================== Preprocessing ====================== #
+def extra_denoising(image, method="bm3d", sigma=0.05, bm3d_aggressiveness=1.0,
+                    bm3d_use_ycbcr_for_color=True # Parameter baru
+                   ):
+    """
+    Lakukan denoising pada gambar menggunakan metode yang ditentukan.
+
+    Args:
+        image (np.ndarray): Gambar input.
+        method (str): Metode denoising ("bm3d", "nlm", "none").
+        sigma (float): Nilai sigma estimasi noise dasar (range [0,1] untuk gambar float).
+        bm3d_aggressiveness (float): Faktor pengali untuk sigma saat menggunakan BM3D/NLM.
+        bm3d_use_ycbcr_for_color (bool): Jika True dan metode BM3D dipilih untuk gambar berwarna,
+                                         hanya channel luminance (Y dari YCbCr) yang akan di-denoise
+                                         untuk kecepatan. Jika False, bm3d_rgb akan digunakan.
+    Returns:
+        np.ndarray: Gambar hasil denoising.
+    """
+    try:
+        if method == "none": return image
+        original_dtype = image.dtype
+        original_shape = image.shape # Simpan shape asli
+
+        # --- Normalisasi Input ke Float [0,1] ---
+        image_float_internal = None # Akan diisi oleh blok normalisasi
+        max_val_internal = 1.0 # Default untuk float input [0,1]
+
+        if image.dtype == np.uint8:
+            max_val_internal = 255.0
+            image_float_internal = image.astype(np.float32) / max_val_internal
+        elif image.dtype == np.uint16:
+            max_val_internal = 65535.0
+            image_float_internal = image.astype(np.float32) / max_val_internal
+        elif np.issubdtype(image.dtype, np.floating):
+            min_img, max_img = image.min(), image.max()
+            if max_img <= 1.0001 and min_img >= -0.0001: # Sudah ~[0,1]
+                image_float_internal = image.astype(np.float32)
+                # max_val_internal tetap 1.0
+            else: # Float tapi range lain, normalisasi paksa
+                print(f"Peringatan: Input float range ({min_img:.2f}, {max_img:.2f}) bukan [0,1]. Normalisasi paksa.")
+                if max_img > min_img:
+                    image_float_internal = ((image - min_img) / (max_img - min_img)).astype(np.float32)
+                else: # Gambar konstan
+                    image_float_internal = np.zeros_like(image, dtype=np.float32)
+                # max_val_internal tetap 1.0
+        else:
+            raise ValueError(f"Unsupported dtype: {image.dtype}. Provide uint8, uint16, or float.")
+        # --- Akhir Normalisasi ---
+
+        denoised_float = None
+        is_rgb_input = image_float_internal.ndim == 3 and image_float_internal.shape[-1] == 3
+        is_gray_input_explicit_channel = image_float_internal.ndim == 3 and image_float_internal.shape[-1] == 1
+        is_gray_input_2d = image_float_internal.ndim == 2
+
+
+        if method == "bm3d":
+            if bm3d is None:
+                print("Metode 'bm3d' tidak tersedia. Mengembalikan gambar asli."); return image
+            
+            effective_sigma_psd = sigma * bm3d_aggressiveness
+            print(f"  BM3D: sigma_base={sigma:.4f}, agg_factor={bm3d_aggressiveness:.2f}, sigma_psd_eff={effective_sigma_psd:.4f}")
+
+            if is_rgb_input and bm3d_use_ycbcr_for_color:
+                print("  BM3D: Memproses channel Luminance (Y) dari YCbCr untuk gambar berwarna.")
+                # 1. Konversi RGB [0,1] ke YCbCr [0,1] (OpenCV YCbCr biasanya uint8)
+                # Kita perlu pastikan input ke cvtColor adalah uint8 jika ingin YCbCr standar
+                img_uint8_for_ycbcr = (np.clip(image_float_internal * 255.0, 0, 255)).astype(np.uint8)
+                ycbcr_image_uint8 = cv2.cvtColor(img_uint8_for_ycbcr, cv2.COLOR_RGB2YCrCb) # atau COLOR_BGR2YCrCb jika input BGR
+
+                y_channel_uint8 = ycbcr_image_uint8[..., 0]
+                cb_channel_uint8 = ycbcr_image_uint8[..., 1]
+                cr_channel_uint8 = ycbcr_image_uint8[..., 2]
+
+                # Normalisasi Y channel ke [0,1] untuk BM3D
+                y_channel_float = y_channel_uint8.astype(np.float32) / 255.0
+
+                # 2. Denoise Y channel
+                denoised_y_channel_float = bm3d.bm3d(y_channel_float, sigma_psd=effective_sigma_psd)
+
+                # Denormalisasi Y channel kembali ke uint8
+                denoised_y_channel_uint8 = (np.clip(denoised_y_channel_float * 255.0, 0, 255)).astype(np.uint8)
+
+                # 3. Gabungkan kembali dengan Cb, Cr asli
+                denoised_ycbcr_uint8 = cv2.merge([denoised_y_channel_uint8, cb_channel_uint8, cr_channel_uint8])
+
+                # 4. Konversi kembali ke RGB dan float [0,1]
+                denoised_rgb_uint8 = cv2.cvtColor(denoised_ycbcr_uint8, cv2.COLOR_YCrCb2RGB) # atau COLOR_YCrCb2BGR
+                denoised_float = denoised_rgb_uint8.astype(np.float32) / 255.0
+
+            elif is_rgb_input and not bm3d_use_ycbcr_for_color:
+                print("  BM3D: Memproses semua channel RGB dengan bm3d_rgb.")
+                denoised_float = bm3d.bm3d_rgb(image_float_internal, sigma_psd=effective_sigma_psd)
+            
+            elif is_gray_input_2d or is_gray_input_explicit_channel: # Grayscale
+                img_to_denoise_gray = image_float_internal[..., 0] if is_gray_input_explicit_channel else image_float_internal
+                denoised_gray = bm3d.bm3d(img_to_denoise_gray, sigma_psd=effective_sigma_psd)
+                if is_gray_input_explicit_channel: denoised_float = denoised_gray[..., np.newaxis]
+                else: denoised_float = denoised_gray
+            else:
+                raise ValueError(f"Format gambar tidak didukung untuk BM3D: shape {image_float_internal.shape}")
+
+        elif method == "nlm":
+            h_param_nlm = 10.0 * bm3d_aggressiveness
+            print(f"  NLM: sigma_base={sigma:.4f}, agg_factor={bm3d_aggressiveness:.2f}, h_eff={h_param_nlm:.2f}")
+            # NLM OpenCV mengharapkan uint8
+            if is_rgb_input:
+                img_uint8_c = (np.clip(image_float_internal * 255.0, 0, 255)).astype(np.uint8)
+                den_uint8_c = cv2.fastNlMeansDenoisingColored(img_uint8_c, None, float(h_param_nlm), float(h_param_nlm), 7, 21)
+                denoised_float = den_uint8_c.astype(np.float32) / 255.0
+            else: # Grayscale
+                img_to_denoise_gray_nlm = image_float_internal[..., 0] if is_gray_input_explicit_channel else image_float_internal
+                img_uint8_g = (np.clip(img_to_denoise_gray_nlm * 255.0, 0, 255)).astype(np.uint8)
+                den_uint8_g = cv2.fastNlMeansDenoising(img_uint8_g, None, float(h_param_nlm), 7, 21)
+                if is_gray_input_explicit_channel: denoised_float = den_uint8_g[..., np.newaxis].astype(np.float32) / 255.0
+                else: denoised_float = den_uint8_g.astype(np.float32) / 255.0
+        else:
+            raise ValueError(f"Unknown denoising method: {method}")
+
+        # --- Denormalisasi Output ke Tipe Data Asli ---
+        # Pastikan shape output konsisten dengan input asli sebelum denormalisasi
+        if denoised_float.shape != original_shape:
+             if len(original_shape) == 2 and denoised_float.ndim == 3 and denoised_float.shape[-1] == 1:
+                 denoised_float = np.squeeze(denoised_float, axis=-1)
+             elif len(original_shape) == 3 and original_shape[-1] == 1 and denoised_float.ndim == 2:
+                 denoised_float = denoised_float[..., np.newaxis]
+        
+        if max_val_internal > 1.0: # Jika input asli bukan float [0,1]
+            return np.clip(denoised_float * max_val_internal, 0, max_val_internal).astype(original_dtype)
+        else: # Jika input asli adalah float [0,1] atau dinormalisasi paksa ke [0,1]
+            # Jika original_dtype adalah float, kembalikan float. Jika uint, kembalikan uint (meskipun ini kasus aneh jika max_val_internal=1).
+            if np.issubdtype(original_dtype, np.floating):
+                return np.clip(denoised_float, 0, 1).astype(original_dtype) # Pertahankan float
+            else: # Jika original_dtype adalah integer tapi max_val_internal=1.0 (misal, setelah normalisasi paksa float non-[0,1])
+                  # Kembalikan ke range uint8 jika original_dtype adalah uint8
+                if original_dtype == np.uint8:
+                    return (np.clip(denoised_float, 0, 1) * 255.0).astype(np.uint8)
+                elif original_dtype == np.uint16:
+                     return (np.clip(denoised_float, 0, 1) * 65535.0).astype(np.uint16)
+                else: # Fallback jika tidak yakin
+                    return np.clip(denoised_float, 0, 1).astype(original_dtype)
+
+
+    except Exception as e:
+        print(f"Denoising gagal: {e}"); traceback.print_exc(); return image
+        
 @lru_cache(maxsize=3200)
 def gaussian_window(size, sigma_scale=1/6): 
         """Menghasilkan jendela Gaussian 2D [0, 1] float32 C-contiguous."""
@@ -41,8 +190,7 @@ def gaussian_window(size, sigma_scale=1/6):
         else:
              window = np.zeros_like(window)
         return np.ascontiguousarray(window.astype(np.float32))
-
-    
+  
 def normalize_image(image, dtype): 
         """
         Normalisasi gambar ke range [0, 1] float32 berdasarkan tipe data asli.
@@ -69,7 +217,6 @@ def normalize_image(image, dtype):
             norm_image = np.stack((norm_image,) * 3, axis=-1)
        
         return np.ascontiguousarray(norm_image.astype(np.float32)) 
-
 # ====================== End Preprocessing ====================== #
 
 # ====================== Load and Saving Process ====================== #
@@ -233,50 +380,71 @@ def load_images_from_paths(image_paths, stop_requested=None):
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def resize_all_with_padding(images, method="median", verbose=False):
+def resize_all_with_padding(images, method="median", verbose=False,
+                            pad_color=(0, 0, 0), return_original_sizes=False):
     """
     Resize + pad all images to the same size using letterbox strategy.
-    `method` determines the target size: 'min', 'max', or 'median'.
+
+    Returns:
+        By default: resized_images, (h, w)
+        If return_original_sizes=True: resized_images, (h, w), original_sizes
     """
     if not images:
         raise ValueError("Image list is empty")
 
-    dims = [img.shape[:2] for img in images if img is not None]
-    if not dims:
-        raise ValueError("No valid image dimensions found")
+    original_sizes = []
+    h_list, w_list = [], []
+    for img in images:
+        if img is not None:
+            h, w = img.shape[:2]
+            original_sizes.append((h, w))
+            h_list.append(h)
+            w_list.append(w)
+        else:
+            raise ValueError("One of the images is None")
 
-    if all(d == dims[0] for d in dims):
+    if all(size == original_sizes[0] for size in original_sizes):
         if verbose:
             print("All images already have same dimensions. Skipping resize.")
-        return images, dims[0]  # return as-is
+        result = (images, original_sizes[0])
+        return result if not return_original_sizes else (*result, original_sizes)
 
+    # Determine target size
     if method == "min":
-        target_h = min(h for h, w in dims)
-        target_w = min(w for h, w in dims)
+        target_h, target_w = min(h_list), min(w_list)
     elif method == "max":
-        target_h = max(h for h, w in dims)
-        target_w = max(w for h, w in dims)
+        target_h, target_w = max(h_list), max(w_list)
     elif method == "median":
-        h_list = sorted(h for h, w in dims)
-        w_list = sorted(w for h, w in dims)
-        mid = len(h_list) // 2
-        target_h = h_list[mid]
-        target_w = w_list[mid]
+        target_h = sorted(h_list)[len(h_list) // 2]
+        target_w = sorted(w_list)[len(w_list) // 2]
     else:
         raise ValueError("Unsupported resize method. Use 'min', 'max', or 'median'.")
 
     if verbose:
         print(f"Resizing all images to {target_w}x{target_h} using method: {method}")
 
-    resized = [resize_with_padding(img, (target_h, target_w)) for img in images]
-    return resized, (target_h, target_w)
+    resized_images = []
+    for img, (h, w) in zip(images, original_sizes):
+        if h == target_h and w == target_w:
+            resized_images.append(img)
+        else:
+            resized_images.append(
+                resize_with_padding(img, (target_h, target_w), pad_color=pad_color)
+            )
 
+    result = (resized_images, (target_h, target_w))
+    return result if not return_original_sizes else (*result, original_sizes)
 
 def resize_with_padding(img, target_size, pad_color=(0, 0, 0)):
     h, w = img.shape[:2]
     target_h, target_w = target_size
+
+    if (h, w) == (target_h, target_w):
+        return img.copy()
+
     scale = min(target_w / w, target_h / h)
     new_w, new_h = int(w * scale), int(h * scale)
+
     resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
     delta_w = target_w - new_w
@@ -284,10 +452,10 @@ def resize_with_padding(img, target_size, pad_color=(0, 0, 0)):
     top, bottom = delta_h // 2, delta_h - delta_h // 2
     left, right = delta_w // 2, delta_w - delta_w // 2
 
-    padded = cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=pad_color)
+    padded = cv2.copyMakeBorder(resized, top, bottom, left, right,
+                                 borderType=cv2.BORDER_CONSTANT, value=pad_color)
     return padded
 
-                
 def save_special_jpg_and_png(
     src_path: str,
     dst_path: str,
@@ -509,7 +677,7 @@ def compute_global_crop(all_transforms, total_images, w, h, transformation_type=
     global_max_x = -float('inf')
     global_max_y = -float('inf')
 
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         futures = [executor.submit(compute_transform_bounds, transform, w, h, transformation_type)
                    for transform in all_transforms]
 
@@ -542,11 +710,14 @@ def crop_image(image, crop_bounds):
     crop_x, crop_y, crop_w, crop_h = crop_bounds
     return image[crop_y:crop_y+crop_h, crop_x:crop_x+crop_w]
 
-
 def process_and_crop(processor, image, base_pts, target_pts, crop_bounds):
     compensated = processor.compensate_motion(image, base_pts, target_pts)
     if compensated is not None:
         compensated = crop_image(compensated, crop_bounds)
+    
+    del image, base_pts, target_pts
+    gc.collect()
+    
     return compensated
       
 ## ---------------- Calculate Global Crop Process ---------------- ##

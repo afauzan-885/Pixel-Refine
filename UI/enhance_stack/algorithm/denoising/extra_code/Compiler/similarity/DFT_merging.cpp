@@ -177,7 +177,6 @@ FrequencyMergeResult merge_blocks_frequency_domain(
         cv::idft(buffers.merged_dft, buffers.temp_spatial_merged,
                  cv::DFT_SCALE | cv::DFT_REAL_OUTPUT);
 
-        // Crop ke ukuran blok asli
         if (buffers.temp_spatial_merged.rows < block_h || buffers.temp_spatial_merged.cols < block_w)
         {
             current_block_gray.copyTo(result.merged_block_gray);

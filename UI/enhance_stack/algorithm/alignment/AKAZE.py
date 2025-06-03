@@ -1,4 +1,5 @@
 import gc
+from concurrent.futures import ThreadPoolExecutor
 import cv2
 import numpy as np
 import sqlite3
@@ -9,7 +10,9 @@ from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLa
 from PyQt6.QtCore import Qt
 import h5py
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import compute_global_crop, crop_image, extract_all_metadata, extract_exif, get_all_image_paths_for_single_process, load_images_from_paths, process_and_crop, resize_all_with_padding, resize_with_padding, save_align_to_folder, save_to_hdf5
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (compute_global_crop, crop_image, extract_all_metadata, extract_exif,
+                                                                                    get_all_image_paths_for_single_process, load_images_from_paths, process_and_crop,
+                                                                                    resize_all_with_padding, resize_with_padding, save_align_to_folder, save_to_hdf5)
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE
@@ -552,7 +555,7 @@ class AKAZEAlgorithm:
 
 def main(db_path,
          update_progress=None,
-         batch_size=8,
+         batch_size=10,
          stop_requested=None,
          single_process=None,
          batch_id=None,
@@ -598,8 +601,10 @@ def main(db_path,
     base_img_list = load_images_from_paths([image_paths[0]], stop_requested=stop_requested)
     if not base_img_list or base_img_list[0] is None:
         raise RuntimeError("Base image gagal dimuat.")
+    
     base_image_raw = base_img_list[0]
-    base_resized_list, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="custom")
+    
+    base_resized_list, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="median")
     base_image = base_resized_list[0]
 
     with h5py.File(processor.hdf5_path, "w") as h5f:
@@ -611,7 +616,6 @@ def main(db_path,
     total_batches = (total_images - 1) // batch_size + 1
 
     if enable_cropping and not keep_edges:
-        # === Tahap 1: Hitung & Simpan Transformasi ===
         all_transforms = []
         for batch_idx in range(total_batches):
             if stop_requested and stop_requested():
@@ -633,6 +637,9 @@ def main(db_path,
                 base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
                 if base_pts is not None and target_pts is not None:
                     all_transforms.append((i, path, base_pts, target_pts))
+                    
+            del batch_images, resized_images
+            gc.collect()
 
         # === Tahap 2: Hitung Global Crop ===
         h, w = base_image.shape[:2]
@@ -643,6 +650,10 @@ def main(db_path,
 
         # Simpan ulang gambar basis dengan cropping
         base_image_cropped = crop_image(base_image, crop_bounds)
+        
+        del base_image
+        gc.collect()
+        
         with h5py.File(processor.hdf5_path, "a") as h5f:
             if command_save_to_hd5f:
                 del h5f["image_0"]
@@ -651,32 +662,46 @@ def main(db_path,
                 save_align_to_folder(base_image_cropped, 0, image_paths[0], align_folder)
 
         # === Tahap 3: Proses & Simpan Gambar secara Paralel ===
-        with h5py.File(processor.hdf5_path, "a") as h5f, concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            futures = []
-            for idx, (i, path, base_pts, target_pts) in enumerate(all_transforms):
+        with h5py.File(processor.hdf5_path, "a") as h5f:
+            total_batches_crop = (len(all_transforms) - 1) // batch_size + 1
+            for batch_idx in range(total_batches_crop):
                 if stop_requested and stop_requested():
                     break
-                img_list = load_images_from_paths([path], stop_requested=stop_requested)
-                if not img_list or img_list[0] is None:
-                    continue
-                img_resized = resize_with_padding(img_list[0], (target_h, target_w))
-                future = executor.submit(process_and_crop, processor, img_resized, base_pts, target_pts, crop_bounds)
-                futures.append((i, future, path))
 
-            for i, future, path in futures:
-                if stop_requested and stop_requested():
-                    break
-                compensated = future.result()
-                if compensated is None:
-                    continue
-                if save_align:
-                    save_align_to_folder(compensated, i, path, align_folder)
-                if command_save_to_hd5f:
-                    save_to_hdf5(h5f, f"image_{i}", compensated, extract_exif(path))
-                if update_progress:
-                    update_progress(total_images + i, total_images * 3,
-                                    f"[2/3] Simpan dan kompensasi gambar {i} dari {total_images - 1}")
+                batch_slice = all_transforms[batch_idx * batch_size:(batch_idx + 1) * batch_size]
+                idxs = [i for i, _, _, _ in batch_slice]
+                paths = [path for _, path, _, _ in batch_slice]
+                base_pts_list = [base_pts for _, _, base_pts, _ in batch_slice]
+                target_pts_list = [target_pts for _, _, _, target_pts in batch_slice]
 
+
+                batch_images = load_images_from_paths(paths, stop_requested=stop_requested)
+                resized_images = [resize_with_padding(img, (target_h, target_w)) for img in batch_images]
+
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    futures = []
+                    for i, img, base_pts, target_pts, path in zip(idxs, resized_images, base_pts_list, target_pts_list, paths):
+                        future = executor.submit(process_and_crop, processor, img, base_pts, target_pts, crop_bounds)
+                        futures.append((i, future, path))
+
+                    for i, future, path in futures:
+                        if stop_requested and stop_requested():
+                            break
+                        compensated = future.result()
+                        if compensated is None:
+                            continue
+                        
+                        if save_align:
+                            save_align_to_folder(compensated, i, path, align_folder)
+                        if command_save_to_hd5f:
+                            save_to_hdf5(h5f, f"image_{i}", compensated, extract_exif(path))
+                        if update_progress:
+                            update_progress(total_images + i, total_images * 3,
+                                            f"[2/3] Simpan dan kompensasi gambar {i} dari {total_images - 1}")
+
+                    del batch_images, resized_images, futures, compensated
+                    gc.collect()
+                    
         if update_progress:
             update_progress(total_images * 3, total_images * 3, "[3/3] Proses selesai")
 
@@ -696,7 +721,7 @@ def main(db_path,
 
                 resized_images = [resize_with_padding(img, (target_h, target_w)) for img in batch_images]
 
-                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                with ThreadPoolExecutor(max_workers=4) as executor:
                     futures = []
                     for i, (target_image, path) in enumerate(zip(resized_images, batch_paths), start=start_idx):
                         if stop_requested and stop_requested():
@@ -720,10 +745,15 @@ def main(db_path,
                             save_align_to_folder(compensated, i, path, align_folder)
                         if command_save_to_hd5f:
                             save_to_hdf5(h5f, f"image_{i}", compensated, extract_exif(path))
+                            
+                    del batch_images, resized_images
+                    gc.collect()
 
         if update_progress:
             update_progress(total_images, total_images, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
-                             
+    
+   
+   
 def running_akaze(parent=None, single_process=None, batch_id=None):
     process_finished = False
     """

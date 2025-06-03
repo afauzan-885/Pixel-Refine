@@ -140,10 +140,10 @@ def get_similarity_settings_page():
         "similarity_merging_type": "spatial", 
         "similarity_spatial_tile_size": 20,
         "similarity_spatial_motion_sensitivity": 120.5, 
-        "similarity_spatial_noise_mad_offset_factor": 0.2,
+        "similarity_spatial_noise_mad_offset_factor": 0.25,
         "similarity_spatial_overlap_percent": 0.38, 
         
-        "similarity_frequency_c_wiener_factor": 2.0,
+        "similarity_frequency_c_wiener_factor": 8.0,
         "similarity_frequency_tile_size": 32,
         "similarity_frequency_overlap_percent": 0.35,
     }

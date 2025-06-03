@@ -85,7 +85,7 @@ class MedianAlgorithm:
                 images.append(image)
         return images
 
-    def stack_sigma_clip_images(self, images, stop_requested=None, block_size=256, overlap=0.3,
+    def stack_sigma_clip_images(self, images, stop_requested=None, block_size=400, overlap=0.2,
                                 update_progress=None, total_overall_images=None, images_processed_so_far=0,
                                 sigma_low=3.0, sigma_high=3.0, max_iterations=3,
                                 use_multi_core=True):

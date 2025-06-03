@@ -1,5 +1,4 @@
-import ctypes
-from functools import lru_cache
+from bm3d import bm3d_rgb
 import traceback
 import cv2
 import numpy as np
@@ -8,7 +7,7 @@ import os
 from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, gaussian_window, get_all_image_paths_for_single_process, load_images_from_paths, normalize_image, resize_all_with_padding, save_image
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extra_denoising, extract_all_metadata, gaussian_window, get_all_image_paths_for_single_process, load_images_from_paths, normalize_image, resize_all_with_padding, save_image
 from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityFrequencyInterface, SimilaritySpatialInterface
 from UI.enhance_stack.components.single_page_layout.parameter_denoising.similarity_parameter_settings import  load_similarity_config
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
@@ -163,8 +162,6 @@ class SimilarityAlgorithm:
                            total_overall_images=None, images_processed_so_far=0,
                            lib_path='UI/data/similarity_frequency_merging.dll', 
                            **unused_kwargs):
-
-        print(f"INFO: Frequency merging (C++ JIT) called with C Wiener: {freq_c_wiener_factor}, Tile: {freq_tile_size}, Overlap: {freq_overlap_percent}, Lib: {lib_path}")
 
         tile_h, tile_w = map(int, freq_tile_size) # Unpack dari tuple
 
@@ -403,7 +400,9 @@ class SimilarityAlgorithm:
             return np.zeros(out_shape_fb, dtype=dtype_ref)
         
 def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
-         single_process=None, batch_id=None, save_final_weight_map=False, progress_bar=None):
+         single_process=None, batch_id=None, save_final_weight_map=False,
+         progress_bar=None, denoising_method="none"):
+
     try:
         general_settings = load_similarity_config()
         image_processor = SimilarityAlgorithm(db_path) 
@@ -442,7 +441,8 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
             ref_name_base = os.path.splitext(os.path.basename(image_paths[0]))[0] if image_paths and isinstance(image_paths[0], str) else "single_default"
             output_name_base = f"{ref_name_base}"
         else:
-            if batch_id is None: raise ValueError(language_config.BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS)
+            if batch_id is None: 
+                raise ValueError(language_config.BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS)
             image_paths = image_processor.get_all_image_paths_for_batch_process(batch_id)
             ref_name_base = os.path.splitext(os.path.basename(image_paths[0]))[0] if image_paths and isinstance(image_paths[0], str) else "batch_default"
             output_name_base = f"{ref_name_base}"
@@ -580,6 +580,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
             num_fine_tuning_inputs = len(valid_batch_results)
             print(f"\n--- {language_config.STARTING_ENHANCEMENT} ({num_fine_tuning_inputs} batch results) using {merging_type_from_settings} ---")
             fine_tuning_start_progress, fine_tuning_end_progress = 95, 99
+            
             def fine_tuning_update_progress(inner_progress, message):
                 mapped_progress = fine_tuning_start_progress + int((inner_progress / 100.0) * (fine_tuning_end_progress - fine_tuning_start_progress))
                 if update_progress and not (stop_requested and stop_requested()):
@@ -606,8 +607,22 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
             except Exception as e_fine: traceback.print_exc(); final_result_img = None
             
             if stop_requested and stop_requested(): pass
+            
             elif final_result_img is not None:
                 ref_path_for_save = image_paths[0] if image_paths and isinstance(image_paths[0], str) else None
+                
+                if denoising_method != "none":
+                    print(f"Melakukan denoising menggunakan metode: {denoising_method}")
+                    sigma_noise_estimate = 0.05 
+                    aggressiveness_level = 2.0  # Default, tidak agresif. Coba 1.5, 2.0, 2.5, 3.0 untuk lebih agresif
+
+                    final_result_img = extra_denoising(
+                        image=final_result_img,
+                        method=denoising_method,
+                        sigma=sigma_noise_estimate,
+                        bm3d_aggressiveness=aggressiveness_level
+                    )
+
                 save_success = save_image(final_result_img, output_path, reference_image_path=ref_path_for_save)
                 if save_success:
                     final_msg = f"{language_config.IMAGE_PROCESS_FINISHED}: {os.path.basename(output_path)}"
