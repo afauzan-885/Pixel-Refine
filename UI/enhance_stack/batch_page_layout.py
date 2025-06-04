@@ -40,7 +40,9 @@ class BatchPageLayout(QWidget):
         self._total_pending_imports = 0
         self._total_processed_imports = 0
         self._active_import_threads = []
-
+        
+        self._ui_display_order_counter = 0 
+        
         # --- UI Setup ---
         self.combined_panel = CombinedPanel(self.database_manager)
         self.layout = QVBoxLayout(self)
@@ -67,12 +69,16 @@ class BatchPageLayout(QWidget):
                 except Exception as e:
                     print(f"Error getting state from panel for batch {batch_id}: {e}")
 
+        # 2. Reset counter urutan tampilan UI SEBELUM fungsi global refresh_ui dipanggil
+        self._ui_display_order_counter = 0
+        
         refresh_ui(
             self.database_manager,
-            self.main_panel_container,
-            self.setup_combined_panel
+            self.main_panel_container, 
+            self.setup_combined_panel   
         )
 
+        # 3. Logika animasi (seperti kode Anda)
         ids_after_refresh = set(self.active_batch_panels.keys())
         newly_added_ids = ids_after_refresh - ids_before_refresh
 
@@ -80,6 +86,7 @@ class BatchPageLayout(QWidget):
             panel_to_animate = self.active_batch_panels.get(new_id)
             if panel_to_animate:
                 self._start_fade_in_animation(panel_to_animate)
+
 
     def _start_fade_in_animation(self, panel_to_animate):
         if panel_to_animate in self._active_fade_in_animations and \
@@ -116,12 +123,19 @@ class BatchPageLayout(QWidget):
 
     # --- Combined Panel Setup ---
     def setup_combined_panel(self, batch_id=None):
+        self._ui_display_order_counter += 1 
+        current_ui_order_for_this_panel = self._ui_display_order_counter
+
         initial_state = self.batch_states.get(batch_id, {})
         combined_panel = CombinedPanel(
-            self.database_manager, batch_id, self, self.thumbnail_threads,
-            self.thumbnail_placeholders, initial_state=initial_state
+            database_manager=self.database_manager,
+            batch_id=batch_id,
+            parent=self,
+            thumbnail_threads=self.thumbnail_threads,
+            thumbnail_placeholders=self.thumbnail_placeholders,
+            initial_state=initial_state,
+            sequential_batch_number=current_ui_order_for_this_panel 
         )
-        combined_panel.setVisible(True)
         self.active_batch_panels[batch_id] = combined_panel
         return combined_panel
 
@@ -187,82 +201,192 @@ class BatchPageLayout(QWidget):
         return True
 
     # --- Batch Processing ---
+    def get_files_in_stack_folder(self):
+        """Mengembalikan daftar path lengkap file di folder 'database/stack'."""
+        folder_path = "database/stack"
+        if not os.path.isdir(folder_path):
+            return []
+        try:
+            return [os.path.join(folder_path, f)
+                    for f in os.listdir(folder_path)
+                    if os.path.isfile(os.path.join(folder_path, f))]
+        except Exception as e:
+            print(f"Error listing files in stack folder: {e}")
+            return []
+
     def process_all_batches(self):
-        active_panels_list = list(self.active_batch_panels.values()) # Dapatkan daftar panel
+        active_panels_list = list(self.active_batch_panels.values())
         active_panels = [
             panel for panel in active_panels_list
-            if panel and (panel not in self.animator._active_fade_outs) # Cek ke animator
+            if panel and (hasattr(self, 'animator') and panel not in self.animator._active_fade_outs)
         ]
 
         if not active_panels:
             self.show_toast_requested.emit(language_config.UI_LABEL_BATCH_NO_PROCESS, 3000, False)
             return
 
-        target_folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
-        if not target_folder: return
-
-        total_batches = len(active_panels)
-        if total_batches == 0: self.show_toast_requested.emit(language_config.UI_LABEL_BATCH_NO_PROCESS, 3000, False); return
-
-        self.show_toast_requested.emit(language_config.UI_LABEL_BATCH_PROCESS.format(total_batches), None, False); QApplication.processEvents()
-        print(f"Starting processing for {total_batches} batches...")
-        for i, batch_panel in enumerate(active_panels, start=1):
-            if batch_panel: # Seharusnya selalu True karena sudah difilter
-                 print(f"Processing batch {batch_panel.batch_id} ({i}/{total_batches})...")
-                 try:
-                    batch_panel.process_all_batch()
-                    self.show_toast_requested.emit(language_config.UI_LABEL_BATCH_PROGRESS.format(i, total_batches), None, True); QApplication.processEvents()
-                 except Exception as e:
-                    print(f"Error processing batch {batch_panel.batch_id}: {e}")
-                    QMessageBox.warning(self, "Processing Error", f"An error occurred while processing batch {batch_panel.batch_id}:\n{e}")
-
-        print("All batch processing finished. Saving images..."); self.save_image(target_folder)
-        self.show_toast_requested.emit(language_config.UI_LABEL_BATCH_SUCCES, 5000, False)
-
-    def save_image(self, target_folder):
-        """Memindahkan gambar dan MEMINTA toast ditampilkan."""
-        folder_path = "database/stack"
-
-        if not os.path.exists(folder_path):
-            self.show_toast_requested.emit(language_config.UI_SYSTEM_FOLDER_WRONG_TO_SAVE_IMAGE_BATCH, 4000, False)
+        target_folder = QFileDialog.getExistingDirectory(self, language_config.SELECT_OUTPUT_FOLDER_TITLE)
+        if not target_folder:
+            self.show_toast_requested.emit(language_config.OUTPUT_FOLDER_SELECTION_CANCELLED, 3000, False)
             return
+
+        total_batches_to_process = len(active_panels)
+        if total_batches_to_process == 0: # Redundant check, already covered by 'if not active_panels'
+            self.show_toast_requested.emit(language_config.UI_LABEL_BATCH_NO_PROCESS, 3000, False)
+            return
+
+        self.show_toast_requested.emit(
+            language_config.UI_LABEL_BATCH_PROCESS_START.format(total_batches_to_process), None, False
+        )
+        QApplication.processEvents()
+        print(language_config.LOG_BATCH_PROCESSING_START.format(total_batches_to_process))
+
+        processed_and_saved_count = 0
+        for i, batch_panel in enumerate(active_panels, start=1):
+            seq_num_for_msg = batch_panel.sequential_batch_number
+            batch_id_for_msg = batch_panel.batch_id
+
+            print(language_config.LOG_PROCESSING_BATCH_DETAIL.format(
+                seq_num_for_msg, batch_id_for_msg,
+                i, total_batches_to_process
+            ))
+
+            files_before_processing = set(self.get_files_in_stack_folder())
+
+            try:
+                batch_panel.process_all_batch() # Asumsikan ini memodifikasi file di stack_folder
+                files_after_processing = set(self.get_files_in_stack_folder())
+                newly_created_files = list(files_after_processing - files_before_processing)
+
+                if newly_created_files:
+                    output_file_to_move = newly_created_files[0]
+                    if len(newly_created_files) > 1:
+                        print(language_config.LOG_WARN_MULTIPLE_NEW_FILES.format(
+                            batch_id_for_msg,
+                            output_file_to_move
+                        ))
+
+                    print(language_config.LOG_BATCH_PROCESSED_NEW_OUTPUT.format(
+                        batch_id_for_msg,
+                        output_file_to_move
+                    ))
+                    move_success = self._move_single_batch_result(output_file_to_move, target_folder, seq_num_for_msg)
+                    if move_success:
+                        processed_and_saved_count += 1
+                        toast_msg = language_config.UI_LABEL_BATCH_PROGRESS_DONE_SAVED.format(
+                            seq_num_for_msg, i, total_batches_to_process
+                        )
+                    else:
+                        toast_msg = language_config.UI_LABEL_BATCH_PROGRESS_SAVE_FAILED.format(
+                            seq_num_for_msg, i, total_batches_to_process
+                        )
+                    self.show_toast_requested.emit(toast_msg, None, True)
+                else:
+                    # Definisikan stack_folder_path, misal:
+                    stack_folder_path = "database/stack" # atau ambil dari konfigurasi
+                    print(language_config.LOG_BATCH_PROCESSED_NO_OUTPUT.format(
+                        batch_id=batch_id_for_msg,
+                        stack_folder=stack_folder_path
+                    ))
+                    toast_msg = language_config.UI_LABEL_BATCH_PROGRESS_NO_OUTPUT.format(
+                        seq_num_for_msg, i, total_batches_to_process
+                    )
+                    self.show_toast_requested.emit(toast_msg, None, True)
+                QApplication.processEvents()
+
+            except Exception as e:
+                error_detail_msg = str(e)
+                print(language_config.LOG_ERROR_PROCESSING_BATCH.format(
+                    batch_id_for_msg,
+                    error_detail_msg
+                ))
+                QMessageBox.warning(self, language_config.BATCH_PROCESSING_ERROR_TITLE,
+                                    language_config.BATCH_PROCESSING_ERROR_MESSAGE.format(
+                                        seq_num_for_msg, batch_id_for_msg, error_detail_msg
+                                    ))
+                toast_msg = language_config.UI_LABEL_BATCH_PROGRESS_ERROR.format(
+                    seq_num_for_msg, i, total_batches_to_process
+                )
+                self.show_toast_requested.emit(toast_msg, None, True)
+                QApplication.processEvents()
+
+        folder_name_for_msg = os.path.basename(target_folder) if target_folder else "selected folder"
+        if processed_and_saved_count == total_batches_to_process and total_batches_to_process > 0:
+            final_message = language_config.UI_LABEL_BATCH_ALL_SUCCESS_SPECIFIC.format(
+                total_batches_to_process, folder_name_for_msg
+            )
+        elif processed_and_saved_count > 0:
+            final_message = language_config.UI_LABEL_BATCH_PARTIAL_SUCCESS_SPECIFIC.format(
+                processed_and_saved_count, total_batches_to_process, folder_name_for_msg
+            )
+        elif total_batches_to_process > 0:
+             final_message = language_config.UI_LABEL_BATCH_NO_SUCCESS_SPECIFIC.format(
+                 folder_name_for_msg
+             )
+        else: 
+            final_message = language_config.UI_LABEL_BATCH_NONE_PROCESSED
+
+
+        self.show_toast_requested.emit(final_message, 7000, False)
+        print(language_config.LOG_ALL_BATCH_ATTEMPTS_FINISHED)
+
+    def _move_single_batch_result(self, source_file_path, target_folder, sequential_batch_num_for_naming=None):
+        original_file_name_for_msg = os.path.basename(source_file_path) if source_file_path else "unknown_file"
+
+        if not source_file_path or not os.path.exists(source_file_path):
+            print(language_config.SOURCE_FILE_DOES_NOT_EXIST.format(source_file_path))
+            return False
+
+        if not target_folder or not os.path.isdir(target_folder):
+            print(language_config.TARGET_FOLDER_INVALID.format(target_folder))
+            QMessageBox.critical(self, language_config.BATCH_SAVE_ERROR_TITLE,
+                                 language_config.TARGET_FOLDER_NOT_ACCESSIBLE.format(target_folder))
+            return False
+
+        original_file_name = os.path.basename(source_file_path)
+
+        if sequential_batch_num_for_naming is not None:
+            # base, ext = os.path.splitext(original_file_name) # Tidak perlu jika format baru sudah mencakup nama asli
+            new_file_name = f"Batch_{sequential_batch_num_for_naming}_{original_file_name}"
+        else:
+            new_file_name = original_file_name
+
+        destination_path = os.path.join(target_folder, new_file_name)
 
         try:
-            image_files = [f for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
+            counter = 1
+            base_dest, ext_dest = os.path.splitext(new_file_name)
+            # Perbaiki logika penanganan nama file duplikat agar base_dest tidak kehilangan bagian nomor batch awal
+            temp_destination_path = destination_path
+            while os.path.exists(temp_destination_path):
+                temp_destination_path = os.path.join(target_folder, f"{base_dest}_{counter}{ext_dest}")
+                counter += 1
+            destination_path = temp_destination_path 
+
+            shutil.move(source_file_path, destination_path)
+            print(language_config.LOG_MOVE_SUCCESS.format(
+                original_file_name_for_msg,
+                destination_path
+            ))
+            return True
         except Exception as e:
-             self.show_toast_requested.emit(f"Error accessing stack folder: {e}", 4000, False)
-             return
-
-        if not image_files:
-            self.show_toast_requested.emit(language_config.UI_NO_IMAGE_TO_SAVE_IMAGE_BATCH, 4000, False)
-            return
-
-        # Tampilkan toast sebelum memindahkan
-        self.show_toast_requested.emit(language_config.UI_LABEL_MOVING_FILES.format(len(image_files), target_folder), None, True) # Progress
-        QApplication.processEvents()
-
-        move_errors = []
-        for image_file_name in image_files:
-             source_path = os.path.join(folder_path, image_file_name)
-             destination_path = os.path.join(target_folder, image_file_name)
-             try:
-                 shutil.move(source_path, destination_path)
-             except Exception as e:
-                 error_msg = f"Failed to move '{image_file_name}': {e}"
-                 print(error_msg)
-                 move_errors.append(error_msg)
-
-        if move_errors:
-             error_details = "\n".join(move_errors)
-             QMessageBox.critical(self, "Move Error", f"Some files could not be moved:\n{error_details}")
-
-    # --- Batch Deletion ---
+            error_detail_msg = str(e)
+            print(language_config.LOG_MOVE_FAILED.format(
+                original_file_name_for_msg,
+                target_folder,
+                error_detail_msg
+            ))
+            QMessageBox.warning(self, language_config.MOVE_FILE_ERROR_TITLE,
+                                language_config.COULD_NOT_SAVE_FILE_FOR_BATCH.format(
+                                    original_file_name_for_msg, error=error_detail_msg
+                                ))
+            return False
+    
     def handle_delete_individual_batch(self, batch_id):
         panel_to_delete = self.active_batch_panels.get(batch_id)
         panel_ref = weakref.ref(panel_to_delete) if panel_to_delete else None
 
         if not panel_to_delete:
-            print(f"Warning: Panel for batch {batch_id} not found for deletion animation.")
             return
 
         title, message = language_config.BATCH_DELETE_LABEL; message = message.format(batch_id)

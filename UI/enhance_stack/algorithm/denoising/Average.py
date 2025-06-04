@@ -256,13 +256,11 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
         images_processed_count = 0
         total_images = 0
 
-        # --- Logika Pemrosesan Utama (Batching dari HDF5 atau Path) ---
         use_hdf5 = os.path.exists(global_hdf5_path)
 
         if use_hdf5:
             print(language_config.PROCESSING_IMAGE_FROM_HDF5.format(global_hdf5_path))
             try:
-                # Dapatkan total gambar dari HDF5 untuk progress
                 with h5py.File(global_hdf5_path, 'r') as h5f_check:
                     total_images = len(h5f_check.keys())
                 print(language_config.NUMBER_OF_IMAGES_TO_BE_PROCESSED.format(total_images))

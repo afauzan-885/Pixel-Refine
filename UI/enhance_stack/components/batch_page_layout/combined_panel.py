@@ -2,10 +2,10 @@ import os
 import sqlite3
 from PyQt6.QtWidgets import (QLabel, QSizePolicy, QWidget, QVBoxLayout, QScrollArea,
                              QHBoxLayout, QPushButton, QComboBox, QCheckBox,
-                             QMessageBox, QProgressDialog)
+                             QMessageBox)
 import weakref
 from PyQt6.QtCore import (pyqtSignal, Qt, QSize)
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QIcon, QFont
 from UI.enhance_stack.algorithm.alignment.AKAZE import running_akaze
 from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import running_farneback_optical_flow
 from UI.enhance_stack.algorithm.alignment.ORB import running_orb
@@ -41,9 +41,10 @@ class CombinedPanel(QWidget):
     """
     def __init__(self, database_manager, batch_id=None, parent=None,
                  thumbnail_threads=None, thumbnail_placeholders=None,
-                 initial_state=None): 
+                 initial_state=None, sequential_batch_number=None): 
         super().__init__(parent)
         self.database_manager = database_manager
+        self.sequential_batch_number = sequential_batch_number
         self.batch_id = batch_id
         self.parent_widget = parent
         self.thumbnail_threads = thumbnail_threads if thumbnail_threads is not None else []
@@ -57,13 +58,24 @@ class CombinedPanel(QWidget):
         self.initial_state = initial_state if initial_state is not None else {}
         self.checkboxes = {}
         self.comboboxes = {}
+        # Hitung jumlah gambar dalam batch ini sekali
+        self.image_paths_in_batch = []
+        self.image_count_in_batch = 0
+        if self.batch_id is not None:
+            try:
+                self.image_paths_in_batch = self.database_manager.get_images_by_batch(self.batch_id)
+                self.image_count_in_batch = len(self.image_paths_in_batch)
+            except Exception as e:
+                print(f"Error getting images for batch {self.batch_id}: {e}")
+                # Biarkan image_count_in_batch = 0
+
         self.init_ui()
     
     def init_ui(self):
         create_thumbnail = CACHE.get("create_thumbnail", False)
         
         # Atur tinggi maksimal panel gabungan
-        self.setMaximumHeight(120)
+        self.setFixedHeight(115)
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         
@@ -102,15 +114,15 @@ class CombinedPanel(QWidget):
                     list_layout.addWidget(label)
         
         # Buat left widget yang berisi tombol & panel parameter
-        parameter_panel_layout = self.create_parameter_panel_layout(list_layout)
-        parameter_panel_layout.setMinimumWidth(420)
-        
+        parameter_section_widget = self.create_parameter_panel_layout(list_layout)
+        parameter_section_widget.setMinimumWidth(430)
+
         scroll_list_panel = QScrollArea()
         scroll_list_panel.setWidgetResizable(True)
         scroll_list_panel.setWidget(list_panel)
         scroll_list_panel.setStyleSheet(SCROLL_AREA)
-        
-        main_layout.addWidget(parameter_panel_layout, 1)
+
+        main_layout.addWidget(parameter_section_widget, 1)
         main_layout.addWidget(scroll_list_panel, 2)
         
     def get_current_state(self):
@@ -136,20 +148,53 @@ class CombinedPanel(QWidget):
     # --------------------------------------------------
     
     def create_parameter_panel_layout(self, list_layout):
-        """Buat widget bagian kiri yang menggabungkan tombol dan panel parameter."""
+        left_section_widget = QWidget()
+        left_section_h_layout = QHBoxLayout(left_section_widget)
+        left_section_h_layout.setContentsMargins(0, 0, 0, 0)
+        left_section_h_layout.setSpacing(5)
+
         button_widget = self.create_button_parameter(list_layout)
+        left_section_h_layout.addWidget(button_widget)
+
+        algorithm_area_with_tag = QWidget()
+        algorithm_area_v_layout = QVBoxLayout(algorithm_area_with_tag)
+        algorithm_area_v_layout.setContentsMargins(0, 0, 0, 0)
+        algorithm_area_v_layout.setSpacing(0)
+
+        # --- Label Batch ---
+        if self.sequential_batch_number is not None:
+            batch_label_text = f"Batch {self.sequential_batch_number}   -   ({self.image_count_in_batch} images)"
+            
+            batch_info_label = QLabel(batch_label_text)
+            batch_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            font = QFont()
+            font.setPointSize(8)
+            font.setBold(True)
+            batch_info_label.setFont(font)
+            batch_info_label.setStyleSheet("""
+                QLabel {
+                    background-color: #607D8B;
+                    color: white;
+                    padding: 3px 5px;
+                    border-top-left-radius: 3px;
+                    border-top-right-radius: 3px;
+                }
+            """)
+            algorithm_area_v_layout.addWidget(batch_info_label)
+        else: 
+            if self.batch_id is not None:
+                fallback_label = QLabel(f"ID: {self.batch_id} - {self.image_count_in_batch} images")
+                fallback_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                fallback_label.setStyleSheet("background-color: #78909C; color: white; padding: 2px;")
+                algorithm_area_v_layout.addWidget(fallback_label)
+
+
         algorithm_panel = self.create_parameter_panel()
-        
-        parameter_panel = QHBoxLayout()
-        parameter_panel.setContentsMargins(0, 0, 0, 0)
-        parameter_panel.addWidget(button_widget)
-        parameter_panel.addWidget(algorithm_panel, 1)
-        
-        parameter_panel_layout = QWidget()
-        parameter_panel_layout.setLayout(parameter_panel)
-        
-        return parameter_panel_layout
-    
+        algorithm_area_v_layout.addWidget(algorithm_panel)
+
+        left_section_h_layout.addWidget(algorithm_area_with_tag, 1)
+        return left_section_widget
+
     def create_button_parameter(self, list_layout):
         """Buat widget tombol yang berisi tombol add dan delete."""
         button_layout = QVBoxLayout()

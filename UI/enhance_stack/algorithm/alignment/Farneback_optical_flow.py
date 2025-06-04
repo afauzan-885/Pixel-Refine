@@ -1,6 +1,7 @@
 import gc
 import json
 import time
+import traceback
 import cv2
 import numpy as np
 import sqlite3
@@ -11,7 +12,7 @@ import h5py
 
 from PyQt6.QtCore import Qt
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, extract_exif, get_all_image_paths_for_single_process, load_images_from_paths, resize_all_with_padding,  save_to_hdf5
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, extract_exif, get_all_image_paths_for_single_process, load_images_from_paths, resize_all_with_padding, resize_with_padding,  save_to_hdf5
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
 from concurrent.futures import ThreadPoolExecutor
@@ -83,7 +84,7 @@ class FarnebackAlgorithm:
             "poly_n": 5,
             "poly_sigma": 1.2,
             "flags": 0,
-            "interpolation": "INTER_LANCZOS4",
+            "interpolation": "INTER_LINEAR",
             "use_gpu": False,
             "use_multi_core": True
         }
@@ -96,7 +97,7 @@ class FarnebackAlgorithm:
                 params = json.load(config_file)
             return params.get("Farneback_BATCH", default_config)
         except Exception as e:
-            print("Error loading Farneback configuration:", e)
+            # print("Error loading Farneback configuration:", e)
             return default_config
 
     def calculate_optical_flow(self, base_image, target_image, config_filename=None, stop_requested=None):
@@ -106,23 +107,20 @@ class FarnebackAlgorithm:
         fb_config = self.load_farneback_config(config_filename)
         opencl_available = cv2.ocl.haveOpenCL()
         use_gpu = fb_config.get("use_gpu", False) and opencl_available
-        use_multicore = fb_config.get("use_multi_core", True) # Default True jika hilang
+        use_multicore = fb_config.get("use_multi_core", True)
 
         mode_str = "GPU" if use_gpu else ("CPU (Multi-Core)" if use_multicore else "CPU (Single-Core)")
-        print(f"Calculating using ({mode_str})...")
-
         try:
-            def prepare_gray(img):
+            def prepare_gray(img, use_gpu=False):
                 if img is None:
                     raise ValueError("Input image is None.")
-                if img.ndim == 3: gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                elif img.ndim == 2: gray = img
-                else:
-                    raise ValueError(f"Invalid image dimensions: {img.ndim}")
-                if gray.dtype != np.uint8:
-                    gray_norm = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
-                    return gray_norm.astype(np.uint8)
-                return gray
+                if img.ndim == 3:
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                if use_gpu:
+                    return cv2.UMat(img.astype(np.uint8, copy=False))
+                return img.astype(np.uint8, copy=False)
+
+
 
             base_gray_8bit = prepare_gray(base_image)
             target_gray_8bit = prepare_gray(target_image)
@@ -133,10 +131,15 @@ class FarnebackAlgorithm:
                 try:
                     base_gray_umat = cv2.UMat(base_gray_8bit)
                     target_gray_umat = cv2.UMat(target_gray_8bit)
-                    flow_umat = cv2.calcOpticalFlowFarneback(...) # Isi parameter
+                    flow_umat = cv2.calcOpticalFlowFarneback(
+                        pyr_scale=fb_config["pyr_scale"], levels=fb_config["levels"],
+                        winsize=fb_config["winsize"], iterations=fb_config["iterations"],
+                        poly_n=fb_config["poly_n"], poly_sigma=fb_config["poly_sigma"],
+                        flags=fb_config["flags"]
+                    )
                     flow_full = flow_umat.get()
-                except cv2.error as gpu_err: use_gpu = False # Fallback
-                except Exception as gpu_exc: use_gpu = False # Fallback
+                except cv2.error as gpu_err: use_gpu = False 
+                except Exception as gpu_exc: use_gpu = False 
 
             if not use_gpu:
                 num_blocks_config = fb_config.get("cpu_num_blocks", [30, 23])
@@ -150,7 +153,7 @@ class FarnebackAlgorithm:
                 if block_w == 0 or block_h == 0: blocks_x, blocks_y = 1, 1; block_w, block_h = w, h
 
 
-                flow_full_cpu = np.zeros((h, w, 2), dtype=np.float32)
+                flow_full_cpu = np.empty((h, w, 2), dtype=np.float32)
                 compute_block_cpu = lambda x, y, bw, bh, ovr: self._compute_block_cpu_internal( # Buat fungsi internal
                      x, y, bw, bh, ovr, base_gray_8bit, target_gray_8bit, fb_config, w, h
                 )
@@ -179,7 +182,8 @@ class FarnebackAlgorithm:
                                     h_block, w_block, _ = flow_block.shape
                                     y_end = min(y + h_block, h); x_end = min(x + w_block, w)
                                     flow_full_cpu[y:y_end, x:x_end, :] = flow_block[0:y_end-y, 0:x_end-x, :]
-                            except Exception as exc: print(f'Block processing generated an exception: {exc}')
+                            except Exception as exc: 
+                                print(f'Block processing generated an exception: {exc}')
 
                 else: 
                     for i in range(blocks_x):
@@ -204,7 +208,6 @@ class FarnebackAlgorithm:
             print(fail_msg.format(ve))
             return None
         except Exception as e:
-            import traceback
             print(f"Unexpected error in calculate_optical_flow: {e}\n{traceback.format_exc()}")
             return None
 
@@ -245,37 +248,28 @@ class FarnebackAlgorithm:
             print(language_config.ERROR_IN_BASE_IMAGE.format(image_id))
             return None
 
-        # Pesan status bisa dipindah ke pemanggil jika perlu
         try:
-            # Cek shape flow
             if not (isinstance(flow, np.ndarray) and flow.ndim == 3 and flow.shape[2] == 2):
                  raise ValueError(f"Invalid flow field shape: {flow.shape}. Expected (h, w, 2).")
 
             h, w = flow.shape[:2]
-            # Cek shape base_image (hanya dimensi, tipe data bisa bervariasi)
             if base_image_input.shape[0] != h or base_image_input.shape[1] != w:
                  raise ValueError(f"Base image shape {base_image_input.shape[:2]} mismatch with flow field shape {flow.shape[:2]}.")
 
-            # --- Buat Peta Remap (di CPU, karena flow selalu NumPy) ---
             grid_y, grid_x = np.mgrid[0:h, 0:w]
-            # remap membutuhkan map x dan map y terpisah
             remap_x = (grid_x + flow[:, :, 0]).astype(np.float32)
             remap_y = (grid_y + flow[:, :, 1]).astype(np.float32)
-            # -----------------------------------------------------------
-
+            
             fb_config = self.load_farneback_config(config_filename)
             use_gpu = fb_config.get("use_gpu", False) and cv2.ocl.haveOpenCL()
-            interpolation_str = fb_config.get("interpolation", "INTER_LANCZOS4")
+            interpolation_str = fb_config.get("interpolation", "INTER_LINEAR")
             use_multicore = fb_config.get("use_multi_core", True)
-            # Ambil flag interpolasi dari cv2, fallback ke INTER_LINEAR jika tidak valid
-            interp_flag = getattr(cv2, interpolation_str, cv2.INTER_LANCZOS4)
+            interp_flag = getattr(cv2, interpolation_str, cv2.INTER_LINEAR)
             
-            # --- Operasi Remap (CPU atau GPU) ---
             compensated_image = None
             if use_gpu:
                 try:
-                    # Upload data yang diperlukan ke GPU
-                    base_image_umat = cv2.UMat(base_image_input) # Tipe data asli (uint8/uint16) dijaga
+                    base_image_umat = cv2.UMat(base_image_input)
                     remap_x_umat = cv2.UMat(remap_x)
                     remap_y_umat = cv2.UMat(remap_y)
 
@@ -284,27 +278,24 @@ class FarnebackAlgorithm:
                         remap_x_umat,
                         remap_y_umat,
                         interpolation=interp_flag,
-                        borderMode=cv2.BORDER_REFLECT # Atau BORDER_CONSTANT?
+                        borderMode=cv2.BORDER_REFLECT
                     )
-                    compensated_image = compensated_image_umat.get() # Download hasil
+                    compensated_image = compensated_image_umat.get()
                 except cv2.error as gpu_remap_err:
-                    use_gpu = False # Matikan flag jika remap GPU gagal
+                    use_gpu = False 
                     del base_image_umat, remap_x_umat, remap_y_umat, compensated_image_umat # Hapus UMat
                 except Exception as gpu_remap_exc:
                     use_gpu = False
 
-            # Jalur CPU (atau fallback dari GPU)
             if not use_gpu:
                 compensated_image = cv2.remap(
-                    base_image_input, # Gunakan input NumPy asli
+                    base_image_input, 
                     remap_x,
                     remap_y,
                     interpolation=interp_flag,
-                    borderMode=cv2.BORDER_REFLECT # Atau BORDER_CONSTANT?
+                    borderMode=cv2.BORDER_REFLECT 
                 )
-            # ----------------------------------
-
-            # Pesan selesai bisa dipindah ke pemanggil
+            
             return compensated_image
 
         except ValueError as ve:
@@ -314,7 +305,7 @@ class FarnebackAlgorithm:
         except Exception as e:
             return None
 
-def main(db_path, update_progress=None, batch_size=5, stop_requested=None, single_process=None, batch_id=None):
+def main(db_path, update_progress=None, batch_size=10, stop_requested=None, single_process=None, batch_id=None):
     processor = FarnebackAlgorithm(db_path)
 
     # 1) Ambil daftar image_paths & set hdf5_path
@@ -338,35 +329,39 @@ def main(db_path, update_progress=None, batch_size=5, stop_requested=None, singl
     metadata_file = os.path.join(metadata_folder, "metadata.json")
     extract_all_metadata(image_paths, metadata_file=metadata_file)
 
-    # 3) Load semua gambar
-    all_loaded_images = load_images_from_paths(image_paths, stop_requested=stop_requested)
-    if not all_loaded_images:
-        raise RuntimeError("Gagal memuat gambar dari path.")
+    # 3) Load base image & tentukan target size dari base image
+    base_image_raw = load_images_from_paths([image_paths[0]], stop_requested=stop_requested)[0]
+    base_image_resized, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="median")
+    base_image = base_image_resized[0]
+    del base_image_raw, base_image_resized
+    gc.collect()
 
-    # 4) Resize semua gambar (hanya jika diperlukan)
-    resized_images, (target_h, target_w) = resize_all_with_padding(all_loaded_images, method="median", verbose=True)
-
-    base_image = resized_images[0]
-    total_images = len(resized_images)
+    total_images = len(image_paths)
     total_batches = (total_images - 1) // batch_size + 1
 
-    # 5) Tulis base_image ke HDF5
+    # 4) Tulis base_image ke HDF5
     with h5py.File(processor.hdf5_path, "w") as h5f:
         h5f.create_dataset("image_0", data=base_image)
 
-        # 6) Proses batch dengan ThreadPoolExecutor
+        # 5) Proses batch dengan ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = []
+
             for batch_idx in range(total_batches):
                 if stop_requested and stop_requested():
                     break
 
                 start_idx = batch_idx * batch_size + 1
-                end_idx   = min((batch_idx + 1) * batch_size + 1, total_images)
-                batch_images = resized_images[start_idx:end_idx]
-                batch_paths  = image_paths[start_idx:end_idx]
+                end_idx = min((batch_idx + 1) * batch_size + 1, total_images)
+                batch_paths = image_paths[start_idx:end_idx]
 
-                for i, target_image in enumerate(batch_images, start=start_idx):
+                # Load dan resize batch image
+                batch_raw = load_images_from_paths(batch_paths, stop_requested=stop_requested)
+                batch_resized = [resize_with_padding(img, (target_h, target_w)) for img in batch_raw]
+                del batch_raw
+                gc.collect()
+
+                for i, target_image in enumerate(batch_resized, start=start_idx):
                     if stop_requested and stop_requested():
                         break
 
@@ -375,14 +370,21 @@ def main(db_path, update_progress=None, batch_size=5, stop_requested=None, singl
                     if update_progress:
                         update_progress(i - 1, total_images - 1, info_message)
 
+                    # Optical flow & compensation
                     flow = processor.calculate_optical_flow(base_image, target_image)
                     compensated = processor.compensate_motion(target_image, flow, image_id=i)
-
                     metadata = extract_exif(batch_paths[i - start_idx])
 
                     if compensated is not None:
                         name = f"image_{i}"
                         futures.append(executor.submit(save_to_hdf5, h5f, name, compensated, metadata))
+
+                    # Hapus alokasi berat
+                    del flow, compensated
+                    gc.collect()
+
+                del batch_resized
+                gc.collect()
 
             for f in futures:
                 f.result()

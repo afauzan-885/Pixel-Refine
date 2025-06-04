@@ -71,8 +71,55 @@ NUMBER_OF_BATCHES_TO_BE_PROCESSED = "Jumlah batch yang akan diproses: {}"
 BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS = "batch_id harus ada untuk proses batch"
 SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED = "Melewati batch {} karena gambar tidak ada yang dimuat."
 
+
+
+# --- Dialogue Title ---
+SELECT_OUTPUT_FOLDER_TITLE = "Pilih Folder Output untuk Simpan Batch"
+OUTPUT_FOLDER_SELECTION_CANCELLED = "Pemilihan folder dibatalkan. Proses dihentikan."
+
+# --- General Error Messages & Dialogs ---
+BATCH_PROCESSING_ERROR_TITLE = "Kesalahan Proses Batch"
+BATCH_PROCESSING_ERROR_MESSAGE = "Gagal memproses Batch {} (ID: {}):\n{}" 
+BATCH_SAVE_ERROR_TITLE = "Gagal Menyimpan"
+TARGET_FOLDER_NOT_ACCESSIBLE = "Folder tujuan tidak dapat diakses:\n{}" 
+MOVE_FILE_ERROR_TITLE = "Gagal Memindahkan File"
+COULD_NOT_SAVE_FILE_FOR_BATCH = "Gagal menyimpan file '{}' untuk batch:\n{}" 
+SOURCE_FILE_DOES_NOT_EXIST = "Gagal pindah: File sumber '{}' tidak ditemukan."
+TARGET_FOLDER_INVALID = "Gagal pindah: Folder tujuan '{}' tidak valid."
+
+# --- Log Message
+LOG_BATCH_PROCESSING_START = "Memulai pemrosesan untuk {} batch..." 
+LOG_PROCESSING_BATCH_DETAIL = "Memproses Batch ke-{} (ID: {}), urutan ({}/{})..."
+LOG_WARN_MULTIPLE_NEW_FILES = "Peringatan: Ada >1 file baru untuk Batch {}. Dipindahkan yang pertama: {}"
+LOG_BATCH_PROCESSED_NEW_OUTPUT = "Batch {} selesai, output baru: {}"
+LOG_BATCH_PROCESSED_NO_OUTPUT = "Batch {} selesai, tapi tidak ada file output baru di folder '{}'." 
+LOG_ERROR_PROCESSING_BATCH = "Error saat memproses Batch {}: {}" 
+LOG_ALL_BATCH_ATTEMPTS_FINISHED = "Semua pemrosesan batch telah selesai."
+
+LOG_MOVE_SUCCESS = "Berhasil memindahkan '{}' ke '{}'."
+LOG_MOVE_FAILED = "Gagal memindahkan '{}' ke '{}': {}" 
+LOG_SOURCE_FILE_NOT_FOUND = "File sumber tidak ditemukan: {}" 
+LOG_TARGET_FOLDER_NOT_FOUND = "Folder tujuan tidak valid: {}"
+
+
+# Toast message for process_all_batches
+UI_LABEL_BATCH_NO_PROCESS = "Tidak ada batch dipilih untuk diproses."
+UI_LABEL_BATCH_PROCESS_START = "Memulai proses untuk {} batch..." 
+UI_LABEL_BATCH_PROGRESS_DONE_SAVED = "Batch {} selesai & disimpan ({}/{})." 
+UI_LABEL_BATCH_PROGRESS_SAVE_FAILED = "Batch {} selesai, gagal simpan ({}/{})."
+UI_LABEL_BATCH_PROGRESS_NO_OUTPUT = "Batch {} selesai, tanpa output ({}/{})." 
+UI_LABEL_BATCH_PROGRESS_ERROR = "Error Batch {} ({}/{})." 
+
+# Final Finished Toast Message
+UI_LABEL_BATCH_ALL_SUCCESS_SPECIFIC = "Semua {} batch berhasil diproses & disimpan ke {}." 
+UI_LABEL_BATCH_PARTIAL_SUCCESS_SPECIFIC = "{} dari {} batch disimpan ke {}. Beberapa bermasalah."
+UI_LABEL_BATCH_NO_SUCCESS_SPECIFIC = "Proses selesai. Tidak ada hasil batch yang disimpan ke {}."
+UI_LABEL_BATCH_NONE_PROCESSED = "Tidak ada batch yang diproses."
+
+
+
 # Batch Deletion
-BATCH_DELETE_LABEL = "Konfirmasi Hapus Batch", "Apakah Anda yakin ingin menghapus batch {}?" # Tuple for Title, Message
+BATCH_DELETE_LABEL = "Konfirmasi Hapus Batch", "Apakah Anda yakin ingin menghapus batch {}?"
 TITLE_BATCH_ALL_DELETE_BUTTON = "Hapus Semua Batch"
 CONFIRM_BATCH_ALL_DELETE_BUTTON = "Anda yakin ingin menghapus {} batch?"
 NO_DATA_BATCH_ALL_DELETE_BUTTON = "Tidak ada data batch yang tersimpan."
