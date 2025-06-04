@@ -1,10 +1,11 @@
+import json
 import os
 import sqlite3
 from PyQt6.QtWidgets import (QLabel, QSizePolicy, QWidget, QVBoxLayout, QScrollArea,
                              QHBoxLayout, QPushButton, QComboBox, QCheckBox,
                              QMessageBox)
 import weakref
-from PyQt6.QtCore import (pyqtSignal, Qt, QSize)
+from PyQt6.QtCore import (pyqtSignal, Qt, QSize, QTimer)
 from PyQt6.QtGui import QIcon, QFont
 from UI.enhance_stack.algorithm.alignment.AKAZE import running_akaze
 from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import running_farneback_optical_flow
@@ -16,11 +17,12 @@ from UI.enhance_stack.algorithm.denoising.Similarity_V2 import running_similarit
 from UI.enhance_stack.algorithm.super_resolution.Interpolation import running_interpolation
 from UI.enhance_stack.components.algorithm_list import get_algorithm_options
 from UI.enhance_stack.components.batch_page_layout.image_batch_management import handle_add_image_to_batch
-from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, create_thumbnail_placeholder, update_thumbnail
+from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, create_thumbnail_placeholder, show_thumbnail
 from UI.enhance_stack.logic.workflow_process import ImageViewer, get_last_image
+from UI.resources.animation.animation_manager import StackedWidgetAnimator
 from UI.resources.stylesheet.stylesheet import DROPDOWN_BOX, SCROLL_AREA, TOGGLE_SWITCH_STYLE
 from UI.settings.General.Language import language_config
-from config import CACHE
+from config import GENERAL_SETTINGS_FILE
 
 class ClickableLabel(QLabel):
     clicked = pyqtSignal()
@@ -49,7 +51,7 @@ class CombinedPanel(QWidget):
         self.parent_widget = parent
         self.thumbnail_threads = thumbnail_threads if thumbnail_threads is not None else []
         self.thumbnail_placeholders = thumbnail_placeholders if thumbnail_placeholders is not None else weakref.WeakValueDictionary()
-        
+        self.animator = StackedWidgetAnimator(self)
         self.selected_algorithms = {
             'alignment': None,
             'super_resolution': None,
@@ -67,72 +69,89 @@ class CombinedPanel(QWidget):
                 self.image_count_in_batch = len(self.image_paths_in_batch)
             except Exception as e:
                 print(f"Error getting images for batch {self.batch_id}: {e}")
-                # Biarkan image_count_in_batch = 0
 
         self.init_ui()
+        
+    def get_create_thumbnail_setting(self):
+        if os.path.exists(GENERAL_SETTINGS_FILE):
+            try:
+                with open(GENERAL_SETTINGS_FILE, "r") as f:
+                    settings = json.load(f)
+                    return settings.get("create_thumbnail", False)
+            except Exception as e:
+                print(f"Error reading thumbnail setting: {e}")
+        return False
+
     
     def init_ui(self):
-        create_thumbnail = CACHE.get("create_thumbnail", False)
-        
-        # Atur tinggi maksimal panel gabungan
+        create_thumbnail = self.get_create_thumbnail_setting()
         self.setFixedHeight(115)
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         
         # Panel kanan: Thumbnail List Panel tanpa QScrollArea
-        list_panel = QWidget()
-        list_panel.setStyleSheet("background-color: #DBDBDB")
-        list_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        list_layout = QHBoxLayout(list_panel)
-        list_layout.setContentsMargins(5, 5, 5, 5)
-        list_layout.setSpacing(10)
+        self.list_panel = QWidget()
+        self.list_panel.setStyleSheet("background-color: #DBDBDB")
+        self.list_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.list_layout = QHBoxLayout(self.list_panel)
+        self.list_layout.setContentsMargins(5, 5, 5, 5)
+        self.list_layout.setSpacing(10)
         
-        if self.batch_id is not None:
-            image_paths = self.database_manager.get_images_by_batch(self.batch_id)
-            for path in image_paths:
-                if create_thumbnail:
-                    placeholder = create_thumbnail_placeholder(list_layout, path, self.thumbnail_placeholders)
-                    loader = ThumbnailLoader(path)
-                    loader.thumbnail_ready.connect(
-                        lambda pixmap, p, ref_layout=weakref.ref(list_layout):
-                        update_thumbnail(ref_layout, pixmap, p) if ref_layout() else None
-                    )
-                    loader.start()
-                    self.thumbnail_threads.append(loader)
-                else:
-                    label = QLabel(os.path.basename(path))
-                    label.setFixedSize(80, 80)
-                    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                    label.setWordWrap(True)
-                    label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                    label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-                    file_name = os.path.basename(path).replace("_", "\n")
-                    label.setText(file_name)
-                    label.setStyleSheet(
-                        "background-color: lightgray; border: 1px solid gray; font-size: 11px; color: gray; padding: 3px;"
-                    )
-                    list_layout.addWidget(label)
-        
-        # Buat left widget yang berisi tombol & panel parameter
-        parameter_section_widget = self.create_parameter_panel_layout(list_layout)
+        # Buat parameter panel sekarang
+        parameter_section_widget = self.create_parameter_panel_layout(self.list_layout)
         parameter_section_widget.setMinimumWidth(430)
 
         scroll_list_panel = QScrollArea()
         scroll_list_panel.setWidgetResizable(True)
-        scroll_list_panel.setWidget(list_panel)
+        scroll_list_panel.setWidget(self.list_panel)
         scroll_list_panel.setStyleSheet(SCROLL_AREA)
 
         main_layout.addWidget(parameter_section_widget, 1)
         main_layout.addWidget(scroll_list_panel, 2)
+
+        # Tunda pemuatan thumbnail selama 3 detik
+        if self.batch_id is not None and create_thumbnail:
+            QTimer.singleShot(1000, self.delay_thumbnails)
+        elif self.batch_id is not None:
+            self.load_text_labels()
+
+    def delay_thumbnails(self):
+        image_paths = self.database_manager.get_images_by_batch(self.batch_id)
+        animator = self.animator  # pastikan ini tersedia di class kamu
+
+        for path in image_paths:
+            placeholder = create_thumbnail_placeholder(self.list_layout, path, self.thumbnail_placeholders)
+            loader = ThumbnailLoader(path)
+
+            loader.thumbnail_ready.connect(
+                lambda image, p, ref_layout=weakref.ref(self.list_layout), a=animator:
+                show_thumbnail(ref_layout, image, p, a) if ref_layout() else None
+            )
+
+            loader.start()
+            self.thumbnail_threads.append(loader)
+
+
+    def load_text_labels(self):
+        image_paths = self.database_manager.get_images_by_batch(self.batch_id)
+        for path in image_paths:
+            label = QLabel(os.path.basename(path))
+            label.setFixedSize(80, 80)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            file_name = os.path.basename(path).replace("_", "\n")
+            label.setText(file_name)
+            label.setStyleSheet(
+                "background-color: lightgray; border: 1px solid gray; font-size: 11px; color: gray; padding: 3px;"
+            )
+            self.list_layout.addWidget(label)
         
     def get_current_state(self):
         """Mengambil state saat ini dari widget panel parameter."""
         state = {}
-        # Ambil state checkboxes
         for text, checkbox in self.checkboxes.items():
-             # Gunakan kunci yang stabil, mungkin bukan teks bahasa dinamis
-             # Misalnya, gunakan konstanta atau nama variabel
-             key = f"checkbox_{text.replace(' ', '_').lower()}" # Contoh kunci sederhana
+             key = f"checkbox_{text.replace(' ', '_').lower()}"
              state[key] = checkbox.isChecked()
 
         # Ambil state comboboxes (algoritma yang dipilih)
@@ -163,8 +182,7 @@ class CombinedPanel(QWidget):
 
         # --- Label Batch ---
         if self.sequential_batch_number is not None:
-            batch_label_text = f"Batch {self.sequential_batch_number}   -   ({self.image_count_in_batch} images)"
-            
+            batch_label_text = language_config.BATCH_LABEL_FORMAT.format(self.sequential_batch_number, self.image_count_in_batch)
             batch_info_label = QLabel(batch_label_text)
             batch_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             font = QFont()
@@ -406,7 +424,6 @@ class CombinedPanel(QWidget):
         
     def _update_visibility_internal(self):
         """Memperbarui visibilitas/enabled widget berdasarkan state checkbox."""
-        # Dapatkan instance combobox jika belum ada (misal, jika dipanggil sebelum create_parameter_panel selesai)
         algorithm_alignment = self.comboboxes.get('alignment')
         super_res_combo = self.comboboxes.get('super_resolution')
         denoising_combox = self.comboboxes.get('denoising')
@@ -474,8 +491,7 @@ class CombinedPanel(QWidget):
                 if checkbox_key:
                     checkbox = self.checkboxes.get(checkbox_key)
                     if checkbox and checkbox.isChecked():
-                        print(f"Executing {category} algorithm: {algo} because checkbox is checked.") # Debug log
-                        actions[category][algo]() # Jalankan aksi HANYA jika checkbox 
+                        actions[category][algo]() 
     
     def create_parameter_panel(self):
         """

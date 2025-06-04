@@ -22,7 +22,7 @@ def load_general_settings():
         "language": "English",
         "gpu_acceleration": False,
         "multi_core_cpu": True,
-        "enable_thumbnails": False,
+        "create_thumbnail": False,
 
     }
     if not os.path.exists(GENERAL_SETTINGS_FILE):
@@ -30,14 +30,11 @@ def load_general_settings():
             os.makedirs(os.path.dirname(GENERAL_SETTINGS_FILE), exist_ok=True)
         except OSError:
             pass
-        # Jika file tidak ada, settings_to_use adalah salinan dari defaults
         return defaults.copy(), defaults
     try:
         with open(GENERAL_SETTINGS_FILE, "r") as f:
             loaded_settings_from_file = json.load(f)
 
-        # settings_to_use dimulai sebagai salinan dari file yang dimuat,
-        # kemudian diisi dengan nilai default jika ada key yang hilang.
         settings_to_use = loaded_settings_from_file.copy()
         for key, default_value in defaults.items():
             settings_to_use.setdefault(key, default_value)
@@ -46,7 +43,6 @@ def load_general_settings():
 
     except (json.JSONDecodeError, IOError):
         print(f"Warning: Could not read settings file '{GENERAL_SETTINGS_FILE}'. Using defaults.")
-        # Jika error, settings_to_use adalah salinan dari defaults
         return defaults.copy(), defaults
 
 # --- Fungsi Pembuatan Komponen UI ---
@@ -58,7 +54,7 @@ def _create_language_settings(parent_layout, current_settings):
     language_label = QLabel(language_label_text)
     language_dropdown = QComboBox()
     languages = ["English", "Indonesian", "China Traditional", "Melayu"]
-    # Logika pemilihan bahasa awal (sama seperti sebelumnya)
+    
     current_lang_lower = initial_language.lower()
     selected_lang = next((lang for lang in languages if lang.lower() == current_lang_lower), None)
     if selected_lang:
@@ -69,7 +65,7 @@ def _create_language_settings(parent_layout, current_settings):
     language_dropdown.setStyleSheet(DROPDOWN_BOX)
     language_dropdown.setMinimumWidth(150)
     parent_layout.addRow(language_label, language_dropdown)
-    return language_dropdown # Kembalikan widget agar bisa diakses save_settings
+    return language_dropdown 
 
 def _create_acceleration_settings(parent_layout, current_settings):
     """Membuat dan menambahkan pengaturan akselerasi GPU & CPU ke layout."""
@@ -82,15 +78,28 @@ def _create_acceleration_settings(parent_layout, current_settings):
     parent_layout.addRow(gpu_checkbox)
 
     # CPU
-    # Pastikan nama atribut benar (MULTI_CORE_CPU vs MULTI_CORE_CPU_LABEL)
     cpu_label_text = getattr(language_config, 'MULTI_CORE_CPU', "Multi-Core CPU") # Atau 'MULTI_CORE_CPU' ?
     cpu_checkbox = QCheckBox(cpu_label_text)
     cpu_checkbox.setToolTip(getattr(language_config, 'MULTI_CORE_CPU_DESCRIPTION', ''))
     cpu_checkbox.setChecked(current_settings.get("multi_core_cpu", True))
     cpu_checkbox.setStyleSheet(TOGGLE_SWITCH_STYLE)
     parent_layout.addRow(cpu_checkbox)
+    
+    # Thumbnail
+    thumbnail_label_text = getattr(language_config, 'create_thumbnail_LABEL', "Enable Thumbnails")
+    thumbnail_checkbox = QCheckBox(thumbnail_label_text)
+    thumbnail_checkbox.setToolTip(getattr(language_config, 'create_thumbnail_DESCRIPTION', ''))
+    thumbnail_checkbox.setChecked(current_settings.get("create_thumbnail", False))
+    thumbnail_checkbox.setStyleSheet(TOGGLE_SWITCH_STYLE)
+    parent_layout.addRow(thumbnail_checkbox)
 
-    return {"gpu": gpu_checkbox, "cpu": cpu_checkbox}
+
+    return {
+        "gpu": gpu_checkbox,
+        "cpu": cpu_checkbox,
+        "thumbnail": thumbnail_checkbox
+    }
+
 
 def _create_apply_button():
     """Membuat layout dan tombol Apply."""
@@ -126,6 +135,7 @@ def general_page():
 
     current_settings, original_defaults_for_reset = load_general_settings()
     initial_language = current_settings.get("language", "English")
+    initial_thumbnail_setting = current_settings.get(False)
 
     main_layout = QVBoxLayout(general_tab)
     top_form_layout = QFormLayout()
@@ -150,13 +160,17 @@ def general_page():
         new_language = language_dropdown.currentText()
         new_gpu_setting = gpu_checkbox.isChecked()
         new_multicore_setting = cpu_checkbox.isChecked()
+        new_thumbnail_setting = accel_widgets['thumbnail'].isChecked()
+
 
 
         settings_to_save_general = {
             "language": new_language,
             "gpu_acceleration": new_gpu_setting,
             "multi_core_cpu": new_multicore_setting,
+            "create_thumbnail": new_thumbnail_setting
         }
+
 
         general_save_successful = False
         try:
@@ -207,21 +221,37 @@ def general_page():
             except Exception as e_update:
                  QMessageBox.warning(general_tab, "Update Warning", f"General settings saved, but an error occurred during algorithm settings update... Error: {e_update}")
 
+        # Cek perubahan bahasa dan thumbnail
         language_changed = (new_language.lower() != initial_language.lower())
-        if language_changed:
-            msg_box = QMessageBox(); restart_title = getattr(language_config, 'RESTART_APPLICATION_REQUIRED', "Restart Required")
-            restart_desc = getattr(language_config, 'RESTART_APPLICATION_DESCRIPTION', "Language change requires restart.")
-            accept_text = getattr(language_config, 'ACCEPT_RESTART_APPLICATION', "Restart Now"); reject_text = getattr(language_config, 'REJECT_APPLICATION_DESCRIPTION', "Later")
-            msg_box.setWindowTitle(restart_title); msg_box.setText(restart_desc); msg_box.setIcon(QMessageBox.Icon.Warning)
-            restart_button = msg_box.addButton(accept_text, QMessageBox.ButtonRole.AcceptRole); later_button = msg_box.addButton(reject_text, QMessageBox.ButtonRole.RejectRole)
+        thumbnail_setting_changed = (new_thumbnail_setting != initial_thumbnail_setting)
+
+        if language_changed or thumbnail_setting_changed:
+            msg_box = QMessageBox()
+            restart_title = getattr(language_config, 'RESTART_APPLICATION_REQUIRED', "Restart Required")
+            restart_desc = getattr(language_config, 'RESTART_APPLICATION_DESCRIPTION', "Changes require application restart.")
+            accept_text = getattr(language_config, 'ACCEPT_RESTART_APPLICATION', "Restart Now")
+            reject_text = getattr(language_config, 'REJECT_APPLICATION_DESCRIPTION', "Later")
+
+            msg_box.setWindowTitle(restart_title)
+            msg_box.setText(restart_desc)
+            msg_box.setIcon(QMessageBox.Icon.Warning)
+            restart_button = msg_box.addButton(accept_text, QMessageBox.ButtonRole.AcceptRole)
+            later_button = msg_box.addButton(reject_text, QMessageBox.ButtonRole.RejectRole)
             msg_box.exec()
-            if msg_box.clickedButton() == restart_button: restart_application()
+
+            if msg_box.clickedButton() == restart_button:
+                restart_application()
         else:
             if general_save_successful:
-                 QMessageBox.information(general_tab, "Setting", getattr(language_config, 'SETTINGS_SAVED', "Settings saved successfully!")) # Pakai getattr
+                QMessageBox.information(
+                    general_tab,
+                    "Setting",
+                    getattr(language_config, 'SETTINGS_SAVED', "Settings saved successfully!")
+                )
+
             
     def restart_application():
-        """Fungsi untuk merestart aplikasi menggunakan QProcess."""
+        """Fungsi untuk merestart aplikasi baik saat dev maupun saat dibungkus Nuitka."""
         try:
             print(language_config.TRY_RESTART_APPLICATION)
 
@@ -229,25 +259,28 @@ def general_page():
             try:
                 initial_launch_path = os.path.abspath(sys.argv[0])
             except Exception:
-                initial_launch_path = sys_executable_abs # Fallback
-            
+                initial_launch_path = sys_executable_abs
+
             working_dir = os.path.dirname(initial_launch_path)
 
-            is_frozen = getattr(sys, 'frozen', False)
-            
-            arguments = []
-            program_to_run = "" 
+            def is_frozen_app():
+                return hasattr(sys, 'frozen') or (sys.executable != sys.argv[0] and sys.executable.endswith(".exe"))
 
-            if is_frozen:
-                program_to_run = initial_launch_path 
+            frozen = is_frozen_app()
+
+            arguments = []
+            program_to_run = ""
+
+            if frozen:
+                program_to_run = sys_executable_abs  # Nuitka .exe
                 arguments = sys.argv[1:]
             else:
-                program_to_run = sys_executable_abs # Path ke python.exe
-                arguments = [initial_launch_path] + sys.argv[1:] # initial_launch_path adalah main.py
-            
+                program_to_run = sys_executable_abs  # python
+                arguments = [initial_launch_path] + sys.argv[1:]
+
             if not os.path.exists(program_to_run):
                 raise FileNotFoundError(f"Program to run not found: {program_to_run}")
-            if not is_frozen and not os.path.exists(arguments[0]): # Cek script path di mode dev
+            if not frozen and not os.path.exists(arguments[0]):
                 raise FileNotFoundError(f"Script to run not found: {arguments[0]}")
             if not os.path.isdir(working_dir):
                 raise NotADirectoryError(f"Working directory is not a valid directory: {working_dir}")
@@ -255,8 +288,6 @@ def general_page():
             started = QProcess.startDetached(program_to_run, arguments, working_dir)
 
             if started:
-                time.sleep(0.2) 
-                QCoreApplication.instance().quit() 
                 QCoreApplication.instance().quit()
             else:
                 print(language_config.COMMAND_FAILED_IN_RESTART_APPLICATION)
@@ -272,6 +303,7 @@ def general_page():
             error_msg.setWindowTitle(language_config.RESTART_FAILED)
             error_msg.setText(f"An error occurred while trying to restart:\n{e}\n\nPlease restart the application manually.")
             error_msg.exec()
+
     apply_button.clicked.connect(save_settings)
     general_tab.setLayout(main_layout)
     

@@ -69,6 +69,47 @@ PROCESSING_BATCH = "--- 正在处理 Batch {}/{} (已处理: {}) ---"
 NUMBER_OF_BATCHES_TO_BE_PROCESSED = "待处理的 Batch 数量：{}"
 BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS = "Batch 处理必须提供 batch_id"
 SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED = "跳过 Batch {} 因为没有加载图像。"
+BATCH_LABEL_FORMAT = "批次 {}   -   ({} 张图像)"
+
+
+SELECT_OUTPUT_FOLDER_TITLE = "选择输出文件夹以保存批处理"
+OUTPUT_FOLDER_SELECTION_CANCELLED = "文件夹选择已取消。处理已停止。"
+
+BATCH_PROCESSING_ERROR_TITLE = "批处理错误"
+BATCH_PROCESSING_ERROR_MESSAGE = "处理批次失败 {} (ID: {}):\n{}"
+BATCH_SAVE_ERROR_TITLE = "保存失败"
+TARGET_FOLDER_NOT_ACCESSIBLE = "目标文件夹无法访问：\n{}"
+MOVE_FILE_ERROR_TITLE = "文件移动失败"
+COULD_NOT_SAVE_FILE_FOR_BATCH = "无法保存文件 '{}' 到批次：\n{}"
+SOURCE_FILE_DOES_NOT_EXIST = "移动失败：源文件 '{}' 未找到。"
+TARGET_FOLDER_INVALID = "移动失败：目标文件夹 '{}' 无效。"
+
+LOG_BATCH_PROCESSING_START = "开始处理 {} 个批次..."
+LOG_PROCESSING_BATCH_DETAIL = "正在处理第 {} 批 (ID: {}), 进度 ({}/{})..."
+LOG_WARN_MULTIPLE_NEW_FILES = "警告：批次 {} 有多个新文件。已移动第一个：{}"
+LOG_BATCH_PROCESSED_NEW_OUTPUT = "批次 {} 完成，输出文件：{}"
+LOG_BATCH_PROCESSED_NO_OUTPUT = "批次 {} 完成，但文件夹 '{}' 中无新输出。"
+LOG_ERROR_PROCESSING_BATCH = "处理批次 {} 出错：{}"
+LOG_ALL_BATCH_ATTEMPTS_FINISHED = "所有批次处理已完成。"
+
+LOG_MOVE_SUCCESS = "成功将 '{}' 移动到 '{}'"
+LOG_MOVE_FAILED = "无法将 '{}' 移动到 '{}': {}"
+LOG_SOURCE_FILE_NOT_FOUND = "源文件未找到：{}"
+LOG_TARGET_FOLDER_NOT_FOUND = "目标文件夹无效：{}"
+
+UI_LABEL_BATCH_NO_PROCESS = "未选择要处理的批次。"
+UI_LABEL_BATCH_PROCESS_START = "开始处理 {} 个批次..."
+UI_LABEL_BATCH_PROGRESS_DONE_SAVED = "批次 {} 完成并已保存 ({}/{})."
+UI_LABEL_BATCH_PROGRESS_SAVE_FAILED = "批次 {} 完成但保存失败 ({}/{})."
+UI_LABEL_BATCH_PROGRESS_NO_OUTPUT = "批次 {} 完成，无输出 ({}/{})."
+UI_LABEL_BATCH_PROGRESS_ERROR = "批次 {} 错误 ({}/{})."
+
+UI_LABEL_BATCH_ALL_SUCCESS_SPECIFIC = "所有 {} 批次处理并保存到 {}。"
+UI_LABEL_BATCH_PARTIAL_SUCCESS_SPECIFIC = "{} / {} 批次已保存到 {}。部分失败。"
+UI_LABEL_BATCH_NO_SUCCESS_SPECIFIC = "处理完成。没有批次结果保存到 {}。"
+UI_LABEL_BATCH_NONE_PROCESSED = "没有批次被处理。"
+
+
 
 # Batch Deletion
 BATCH_DELETE_LABEL = "确认删除 Batch", "您确定要删除 Batch {} 吗？" # Tuple for Title, Message

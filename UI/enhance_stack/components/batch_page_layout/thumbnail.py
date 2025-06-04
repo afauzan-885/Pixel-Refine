@@ -1,17 +1,18 @@
 import os
-from PyQt6.QtWidgets import QLabel, QHBoxLayout
-from PyQt6.QtGui import QPixmap, QImage, QImageReader, QPixmapCache
+from PyQt6.QtWidgets import QLabel, QStackedWidget
+from PyQt6.QtGui import QPixmap, QImage, QImageReader 
 from PyQt6.QtCore import (Qt, QThread, pyqtSignal, QMutex, QWaitCondition,
                           QFile, QSemaphore, QTimer)
 import weakref
-from config import CACHE_DIR
+
+import rawpy
+from UI.resources.animation.fade import fade_in
+from config import CACHE_DIR, SUPPORTED_FORMATS
 from UI.settings.General.Language import language_config
 
-# Semaphore untuk menghindari banyak thread mengakses disk secara bersamaan
 semaphore = QSemaphore(1)
 
 class ThumbnailLoader(QThread):
-    # Mengirimkan QImage dan path gambar
     thumbnail_ready = pyqtSignal(QImage, str)
 
     def __init__(self, image_path, parent=None):
@@ -35,94 +36,120 @@ class ThumbnailLoader(QThread):
         self.mutex.unlock()
 
     def run(self):
-        # Tentukan lokasi cache file
         cache_path = os.path.join(CACHE_DIR, os.path.basename(self.image_path) + ".jpg")
 
-        # Periksa apakah proses dijeda sebelum memulai
         self.mutex.lock()
         while self.paused:
             self.cond.wait(self.mutex)
         self.mutex.unlock()
 
-        # Cek apakah thumbnail sudah ada di hard disk (disimpan sebagai QImage)
+        # Cek cache
         if QFile.exists(cache_path):
             image = QImage(cache_path)
             if not image.isNull():
                 self.thumbnail_ready.emit(image, self.image_path)
                 return
 
-        # Gunakan semaphore agar tidak ada banyak thread mengakses disk bersamaan
+        ext = os.path.splitext(self.image_path)[1].lower()
+
         semaphore.acquire()
         try:
-            reader = QImageReader(self.image_path)
-            reader.setAutoTransform(True)
-            # Mengatur ukuran thumbnail (80x80) dengan menjaga aspek rasio
-            reader.setScaledSize(reader.size().scaled(80, 80, Qt.AspectRatioMode.KeepAspectRatio))
-            image = reader.read()
-            if image.isNull():
+            if ext in SUPPORTED_FORMATS["jpg"] + SUPPORTED_FORMATS["png"] + SUPPORTED_FORMATS["tiff"]:
+                reader = QImageReader(self.image_path)
+                reader.setAutoTransform(True)
+                reader.setScaledSize(reader.size().scaled(80, 80, Qt.AspectRatioMode.KeepAspectRatio))
+                image = reader.read()
+                if image.isNull():
+                    return
+            elif ext in SUPPORTED_FORMATS["raw"]:
+                try:
+                    with rawpy.imread(self.image_path) as raw:
+                        img_array = raw.postprocess(
+                            output_bps=8,
+                            use_camera_wb=True,
+                            no_auto_bright=False,
+                            gamma=(2.5, 15.92),
+                            highlight_mode=rawpy.HighlightMode.Blend,
+                            half_size=True
+                        )
+                    # Konversi numpy array (HWC, uint8) ke QImage
+                    height, width, channel = img_array.shape
+                    bytes_per_line = 3 * width
+                    image = QImage(img_array.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+                    image = image.scaled(80, 80, Qt.AspectRatioMode.KeepAspectRatio)
+                except rawpy.LibRawError as e:
+                    print(f"Rawpy Error: {e}")
+                    return
+                except Exception as e:
+                    print(f"Unexpected error processing RAW file: {e}")
+                    return
+            else:
+                # Format tidak didukung
+                print(f"Format file tidak didukung: {ext}")
                 return
 
-            # Simpan hasil ke cache disk sebagai JPG
+            # Simpan thumbnail ke cache
             image.save(cache_path, "JPG", quality=75)
+
         finally:
             semaphore.release()
 
         self.thumbnail_ready.emit(image, self.image_path)
 
 
+
 def create_thumbnail_placeholder(list_layout, image_path, placeholders):
     """
-    Menampilkan placeholder loading sebelum thumbnail selesai diproses.
-    Placeholder akan menggunakan teks yang sama dengan yang dicek di update_thumbnail.
+    Membuat placeholder dalam QStackedWidget untuk bisa dianimasikan nanti.
     """
-    placeholder = QLabel(language_config.LOADING_THUMBNAIL)  # Contoh: "Memuat..."
-    placeholder.setFixedSize(80, 80)
-    placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    placeholder.setStyleSheet(
+    placeholder_label = QLabel(language_config.LOADING_THUMBNAIL)
+    placeholder_label.setFixedSize(80, 80)
+    placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    placeholder_label.setStyleSheet(
         "background-color: lightgray; "
         "border: 1px solid gray; "
         "font-size: 12px; "
         "color: gray;"
     )
-    list_layout.addWidget(placeholder)
-    # Simpan referensi layout agar tidak menyebabkan crash jika dihapus
-    placeholders[image_path] = list_layout  
-    return placeholder
+
+    stacked = QStackedWidget()
+    stacked.setFixedSize(80, 80)
+    stacked.addWidget(placeholder_label)
+    stacked.image_path = image_path
+
+    list_layout.addWidget(stacked)
+    placeholders[image_path] = list_layout
+    return stacked
 
 
-def update_thumbnail(ref_layout, image, image_path):
+def show_thumbnail(ref_layout, image, image_path, animator):
     """
-    Mengganti placeholder dengan thumbnail saat sudah tersedia.
-    Proses konversi dari QImage ke QPixmap dilakukan di GUI thread.
+    Mengganti placeholder dengan thumbnail + efek animasi fade-in.
     """
     list_layout = ref_layout() if callable(ref_layout) else ref_layout
-
     if list_layout is None:
-        return 
-    
-    # Konversi QImage menjadi QPixmap di thread utama
+        return
+
     pixmap = QPixmap.fromImage(image)
 
-    thumb_label = None
-    # Cari widget placeholder berdasarkan teks loading
     for i in range(list_layout.count()):
         item = list_layout.itemAt(i)
         widget = item.widget()
-        if isinstance(widget, QLabel) and widget.text() == language_config.LOADING_THUMBNAIL:
-            thumb_label = widget
+
+        if isinstance(widget, QStackedWidget) and getattr(widget, "image_path", None) == image_path:
+            thumb_label = QLabel()
+            thumb_label.setPixmap(pixmap.scaled(80, 80, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            thumb_label.setScaledContents(True)  
+            thumb_label.setMaximumSize(80, 80)
+            thumb_label.setStyleSheet("background-color: lightgray; border: 1px solid gray;")
+
+            widget.addWidget(thumb_label)
+            fade_in(animator, widget, thumb_label)
             break
 
-    if not thumb_label:
-        thumb_label = QLabel()
-        list_layout.addWidget(thumb_label)
 
-    thumb_label.setPixmap(pixmap)
-    thumb_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
-    thumb_label.setStyleSheet("background-color: lightgray; border: 1px solid gray;")
-    thumb_label.setFixedSize(80, 80)
-
-
-def stop_all_thumbnails(threads):
+def stop_process_thumbnails(threads):
     """Menghentikan semua thread ThumbnailLoader yang sedang berjalan dan membersihkan daftar thread."""
     if not threads:
         return

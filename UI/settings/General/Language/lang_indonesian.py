@@ -70,7 +70,7 @@ PROCESSING_BATCH = "--- Memproses batch {}/{} (Telah di proses: {}) ---"
 NUMBER_OF_BATCHES_TO_BE_PROCESSED = "Jumlah batch yang akan diproses: {}"
 BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS = "batch_id harus ada untuk proses batch"
 SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED = "Melewati batch {} karena gambar tidak ada yang dimuat."
-
+BATCH_LABEL_FORMAT = "Batch {}   -   ({} gambar)"
 
 
 # --- Dialogue Title ---

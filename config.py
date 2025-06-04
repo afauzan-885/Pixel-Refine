@@ -3,9 +3,6 @@ APP_VERSION = "0.4.5"
 
 PYTHON_INTERPRETER = "venv/Scripts/python.exe"
 CACHE_DIR = "database/cache/thumbnails"
-CACHE = {
-    "create_thumbnail": False
-}
 CONFIG_DIR = os.path.join("database", "setting")
 
 ALGORITHM_PARAMETER_SETTINGS_FILE = os.path.join(CONFIG_DIR, "Parameter_Stack_Enhance.json")

@@ -3,7 +3,7 @@ import weakref
 from PyQt6.QtWidgets import (QMessageBox, QFileDialog)
 from PIL import Image, UnidentifiedImageError
 from PyQt6.QtCore import QThread, pyqtSignal
-from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, update_thumbnail
+from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, show_thumbnail
 from UI.enhance_stack.logic.multi_threading import BatchImageImportThreading
 from UI.settings.General.Language import language_config
 from config import SUPPORTED_FORMATS
@@ -169,7 +169,7 @@ def handle_add_image_to_batch(batch_page_layout, database_manager, thumbnail_thr
                 # Pastikan koneksi lambda benar menangkap variabel
                 loader.thumbnail_ready.connect(
                     lambda pixmap, current_path=path, layout_ref=ref_layout:
-                        update_thumbnail(layout_ref, pixmap, current_path) if layout_ref() else None
+                        show_thumbnail(layout_ref, pixmap, current_path) if layout_ref() else None
                 )
                 loader.start()
                 thumbnail_threads.append(loader)

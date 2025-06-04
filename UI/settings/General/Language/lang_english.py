@@ -69,6 +69,47 @@ PROCESSING_BATCH = "--- Processing batch {}/{} (Processed: {}) ---"
 NUMBER_OF_BATCHES_TO_BE_PROCESSED = "Number of batches to be processed: {}"
 BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS = "batch_id must be present for batch process"
 SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED = "Skipping batch {} because no images were loaded."
+BATCH_LABEL_FORMAT = "Batch {}   -   ({} images)"
+
+
+SELECT_OUTPUT_FOLDER_TITLE = "Select Output Folder to Save Batch"
+OUTPUT_FOLDER_SELECTION_CANCELLED = "Folder selection canceled. Process stopped."
+
+BATCH_PROCESSING_ERROR_TITLE = "Batch Processing Error"
+BATCH_PROCESSING_ERROR_MESSAGE = "Failed to process Batch {} (ID: {}):\n{}"
+BATCH_SAVE_ERROR_TITLE = "Save Failed"
+TARGET_FOLDER_NOT_ACCESSIBLE = "Target folder is not accessible:\n{}"
+MOVE_FILE_ERROR_TITLE = "Failed to Move File"
+COULD_NOT_SAVE_FILE_FOR_BATCH = "Failed to save file '{}' for batch:\n{}"
+SOURCE_FILE_DOES_NOT_EXIST = "Move failed: Source file '{}' not found."
+TARGET_FOLDER_INVALID = "Move failed: Target folder '{}' is invalid."
+
+LOG_BATCH_PROCESSING_START = "Starting processing for {} batch(es)..."
+LOG_PROCESSING_BATCH_DETAIL = "Processing Batch #{} (ID: {}), order ({}/{})..."
+LOG_WARN_MULTIPLE_NEW_FILES = "Warning: >1 new file for Batch {}. Moved the first one: {}"
+LOG_BATCH_PROCESSED_NEW_OUTPUT = "Batch {} completed, new output: {}"
+LOG_BATCH_PROCESSED_NO_OUTPUT = "Batch {} completed, but no new output file in folder '{}'."
+LOG_ERROR_PROCESSING_BATCH = "Error processing Batch {}: {}"
+LOG_ALL_BATCH_ATTEMPTS_FINISHED = "All batch processing attempts are finished."
+
+LOG_MOVE_SUCCESS = "Successfully moved '{}' to '{}'."
+LOG_MOVE_FAILED = "Failed to move '{}' to '{}': {}"
+LOG_SOURCE_FILE_NOT_FOUND = "Source file not found: {}"
+LOG_TARGET_FOLDER_NOT_FOUND = "Invalid target folder: {}"
+
+UI_LABEL_BATCH_NO_PROCESS = "No batch selected for processing."
+UI_LABEL_BATCH_PROCESS_START = "Starting process for {} batch(es)..."
+UI_LABEL_BATCH_PROGRESS_DONE_SAVED = "Batch {} done & saved ({}/{})."
+UI_LABEL_BATCH_PROGRESS_SAVE_FAILED = "Batch {} done, save failed ({}/{})."
+UI_LABEL_BATCH_PROGRESS_NO_OUTPUT = "Batch {} done, no output ({}/{})."
+UI_LABEL_BATCH_PROGRESS_ERROR = "Error Batch {} ({}/{})."
+
+UI_LABEL_BATCH_ALL_SUCCESS_SPECIFIC = "All {} batches processed & saved to {}."
+UI_LABEL_BATCH_PARTIAL_SUCCESS_SPECIFIC = "{} of {} batches saved to {}. Some failed."
+UI_LABEL_BATCH_NO_SUCCESS_SPECIFIC = "Process completed. No batch results saved to {}."
+UI_LABEL_BATCH_NONE_PROCESSED = "No batches were processed."
+
+
 
 # Batch Deletion
 BATCH_DELETE_LABEL = "Confirm Batch Deletion", "Are you sure you want to delete batch {}?" # Tuple for Title, Message

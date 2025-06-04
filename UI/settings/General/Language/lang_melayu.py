@@ -69,6 +69,47 @@ PROCESSING_BATCH = "--- Memproses batch {}/{} (Telah diproses: {}) ---"
 NUMBER_OF_BATCHES_TO_BE_PROCESSED = "Jumlah batch yang akan diproses: {}"
 BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS = "batch_id mesti ada untuk proses batch"
 SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED = "Melangkau batch {} kerana tiada imej dimuatkan."
+BATCH_LABEL_FORMAT = "Batch {}   -   ({} imej)"
+
+
+
+SELECT_OUTPUT_FOLDER_TITLE = "Pilih Folder Output untuk Simpan Batch"
+OUTPUT_FOLDER_SELECTION_CANCELLED = "Pemilihan folder dibatalkan. Proses dihentikan."
+
+BATCH_PROCESSING_ERROR_TITLE = "Ralat Proses Batch"
+BATCH_PROCESSING_ERROR_MESSAGE = "Gagal memproses Batch {} (ID: {}):\n{}"
+BATCH_SAVE_ERROR_TITLE = "Gagal Menyimpan"
+TARGET_FOLDER_NOT_ACCESSIBLE = "Folder sasaran tidak dapat diakses:\n{}"
+MOVE_FILE_ERROR_TITLE = "Gagal Alih Fail"
+COULD_NOT_SAVE_FILE_FOR_BATCH = "Gagal menyimpan fail '{}' untuk batch:\n{}"
+SOURCE_FILE_DOES_NOT_EXIST = "Gagal alih: Fail sumber '{}' tidak dijumpai."
+TARGET_FOLDER_INVALID = "Gagal alih: Folder sasaran '{}' tidak sah."
+
+LOG_BATCH_PROCESSING_START = "Memulakan pemprosesan untuk {} batch..."
+LOG_PROCESSING_BATCH_DETAIL = "Memproses Batch ke-{} (ID: {}), urutan ({}/{})..."
+LOG_WARN_MULTIPLE_NEW_FILES = "Amaran: >1 fail baharu untuk Batch {}. Yang pertama dialihkan: {}"
+LOG_BATCH_PROCESSED_NEW_OUTPUT = "Batch {} selesai, output baharu: {}"
+LOG_BATCH_PROCESSED_NO_OUTPUT = "Batch {} selesai, tetapi tiada fail output baharu dalam folder '{}'."
+LOG_ERROR_PROCESSING_BATCH = "Ralat semasa memproses Batch {}: {}"
+LOG_ALL_BATCH_ATTEMPTS_FINISHED = "Semua percubaan pemprosesan batch telah selesai."
+
+LOG_MOVE_SUCCESS = "Berjaya mengalihkan '{}' ke '{}'."
+LOG_MOVE_FAILED = "Gagal mengalihkan '{}' ke '{}': {}"
+LOG_SOURCE_FILE_NOT_FOUND = "Fail sumber tidak dijumpai: {}"
+LOG_TARGET_FOLDER_NOT_FOUND = "Folder sasaran tidak sah: {}"
+
+UI_LABEL_BATCH_NO_PROCESS = "Tiada batch dipilih untuk diproses."
+UI_LABEL_BATCH_PROCESS_START = "Memulakan proses untuk {} batch..."
+UI_LABEL_BATCH_PROGRESS_DONE_SAVED = "Batch {} selesai & disimpan ({}/{})."
+UI_LABEL_BATCH_PROGRESS_SAVE_FAILED = "Batch {} selesai, gagal simpan ({}/{})."
+UI_LABEL_BATCH_PROGRESS_NO_OUTPUT = "Batch {} selesai, tiada output ({}/{})."
+UI_LABEL_BATCH_PROGRESS_ERROR = "Ralat Batch {} ({}/{})."
+
+UI_LABEL_BATCH_ALL_SUCCESS_SPECIFIC = "Semua {} batch berjaya diproses & disimpan ke {}."
+UI_LABEL_BATCH_PARTIAL_SUCCESS_SPECIFIC = "{} dari {} batch disimpan ke {}. Beberapa bermasalah."
+UI_LABEL_BATCH_NO_SUCCESS_SPECIFIC = "Proses selesai. Tiada hasil batch disimpan ke {}."
+UI_LABEL_BATCH_NONE_PROCESSED = "Tiada batch yang diproses."
+
 
 # Batch Deletion
 BATCH_DELETE_LABEL = "Sahkan Pemadaman Batch", "Adakah anda pasti mahu memadam batch {}?" # Tuple for Title, Message

@@ -9,7 +9,7 @@ import weakref
 from UI.enhance_stack.components.batch_page_layout.batch_layout import refresh_ui, setup_main_panel
 from UI.enhance_stack.components.batch_page_layout.combined_panel import CombinedPanel
 from UI.enhance_stack.components.batch_page_layout.image_batch_management import BatchDeleteProcess, process_and_start_batch_import
-from UI.enhance_stack.components.batch_page_layout.thumbnail import stop_all_thumbnails
+from UI.enhance_stack.components.batch_page_layout.thumbnail import stop_process_thumbnails
 from UI.enhance_stack.logic.database_manager import DatabaseManager
 from UI.resources.animation.animation_manager import StackedWidgetAnimator
 from UI.resources.animation.fade import fade_out
@@ -17,10 +17,7 @@ from UI.resources.stylesheet.stylesheet import SCROLL_AREA
 from UI.settings.General.Language import language_config
 from config import CACHE_DIR, SUPPORTED_FORMATS
 
-os.makedirs(CACHE_DIR, exist_ok=True)
-
 class BatchPageLayout(QWidget):
-    # --- Signals ---
     data_changed = pyqtSignal()
     show_toast_requested = pyqtSignal(str, object, bool)
 
@@ -41,7 +38,7 @@ class BatchPageLayout(QWidget):
         self._total_processed_imports = 0
         self._active_import_threads = []
         
-        self._ui_display_order_counter = 0 
+        self.batch_order_viewer = 0 
         
         # --- UI Setup ---
         self.combined_panel = CombinedPanel(self.database_manager)
@@ -70,7 +67,7 @@ class BatchPageLayout(QWidget):
                     print(f"Error getting state from panel for batch {batch_id}: {e}")
 
         # 2. Reset counter urutan tampilan UI SEBELUM fungsi global refresh_ui dipanggil
-        self._ui_display_order_counter = 0
+        self.batch_order_viewer = 0
         
         refresh_ui(
             self.database_manager,
@@ -123,8 +120,8 @@ class BatchPageLayout(QWidget):
 
     # --- Combined Panel Setup ---
     def setup_combined_panel(self, batch_id=None):
-        self._ui_display_order_counter += 1 
-        current_ui_order_for_this_panel = self._ui_display_order_counter
+        self.batch_order_viewer += 1 
+        current_ui_order_for_this_panel = self.batch_order_viewer
 
         initial_state = self.batch_states.get(batch_id, {})
         combined_panel = CombinedPanel(
@@ -519,7 +516,7 @@ class BatchPageLayout(QWidget):
     # --- Helper Methods ---
     def stop_thumbnail(self):
         """Menghentikan semua thread thumbnail yang sedang berjalan."""
-        stop_all_thumbnails(self.thumbnail_threads)
+        stop_process_thumbnails(self.thumbnail_threads)
 
     # --- Aggregated Progress ---
     @pyqtSlot()

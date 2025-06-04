@@ -9,7 +9,7 @@ class ReloadHandler(FileSystemEventHandler):
         self.process = process
 
     def on_modified(self, event):
-        if event.src_path.endswith(".py"):  # Hanya reload jika file Python berubah
+        if event.src_path.endswith(".py"): 
             print(f"Detected change in {event.src_path}, restarting application...")
             self.process.terminate()
             self.process = subprocess.Popen([sys.executable, "main.py"])
@@ -18,7 +18,7 @@ def start_watcher():
     process = subprocess.Popen([sys.executable, "main.py"])
     event_handler = ReloadHandler(process)
     observer = Observer()
-    observer.schedule(event_handler, path=".", recursive=True)  # Pantau semua file dalam proyek
+    observer.schedule(event_handler, path=".", recursive=True)
     observer.start()
     
     try:
