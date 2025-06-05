@@ -17,6 +17,27 @@ from UI.resources.stylesheet.stylesheet import SCROLL_AREA
 from UI.settings.General.Language import language_config
 from config import CACHE_DIR, SUPPORTED_FORMATS
 
+def is_widget_valid(widget):
+    """Cek apakah widget masih valid (belum dihapus)."""
+    if widget is None:
+        return False
+    try:
+        _ = widget.isVisible()  # akses properti sederhana
+        return True
+    except RuntimeError:
+        return False
+    except Exception:
+        return False
+
+def safe_hide_widget(widget):
+    """Sembunyikan widget jika masih valid, tangani error jika sudah dihapus."""
+    if not is_widget_valid(widget):
+        return
+    try:
+        widget.hide()
+    except Exception:
+        pass
+
 class BatchPageLayout(QWidget):
     data_changed = pyqtSignal()
     show_toast_requested = pyqtSignal(str, object, bool)
@@ -56,34 +77,49 @@ class BatchPageLayout(QWidget):
 
     # --- UI Refresh and Animation ---
     def refresh_ui(self):
-        ids_before_refresh = set(self.active_batch_panels.keys())
-        current_batch_ids_in_ui = list(self.active_batch_panels.keys())
-        for batch_id in current_batch_ids_in_ui:
-            panel = self.active_batch_panels.get(batch_id)
-            if panel:
-                try:
-                    self.batch_states[batch_id] = panel.get_current_state()
-                except Exception as e:
-                    print(f"Error getting state from panel for batch {batch_id}: {e}")
+        # 1. Kumpulkan batch_id yang sebaiknya dihapus dari active_batch_panels
+        to_remove = []
+        for batch_id, panel in list(self.active_batch_panels.items()):
+            try:
+                # Jika panel None atau sudah tidak valid (isWidgetType -> False), tandai untuk di‐remove
+                if panel is None or not panel.isWidgetType():
+                    to_remove.append(batch_id)
+            except RuntimeError:
+                # Kalau memanggil isWidgetType() langsung me‐lempar RuntimeError,
+                # berarti objek C++ sudah di‐destroy. Maka kita juga hapus entry ini.
+                to_remove.append(batch_id)
 
-        # 2. Reset counter urutan tampilan UI SEBELUM fungsi global refresh_ui dipanggil
+        # 2. Hapus semua panel yang sudah mati dari kamus
+        for bid in to_remove:
+            self.active_batch_panels.pop(bid, None)
+
+        # 3. Sekarang ambil state hanya dari panel yang masih hidup
+        ids_before_refresh = set(self.active_batch_panels.keys())
+        for batch_id, panel in list(self.active_batch_panels.items()):
+            try:
+                # Metode get_current_state() sebaiknya juga sudah dibuat aman, 
+                # meng‐handle widget yang mungkin telah dihapus
+                self.batch_states[batch_id] = panel.get_current_state()
+            except Exception as e:
+                print(f"Error getting state from panel for batch {batch_id}: {e}")
+
+        # 4. Reset urutan tampilan UI
         self.batch_order_viewer = 0
-        
+
+        # 5. Panggil fungsi global refresh_ui yang (kemungkinan) mem‐recreate UI
         refresh_ui(
             self.database_manager,
-            self.main_panel_container, 
-            self.setup_combined_panel   
+            self.main_panel_container,
+            self.setup_combined_panel
         )
 
-        # 3. Logika animasi (seperti kode Anda)
+        # 6. Animasi untuk panel yang baru masuk
         ids_after_refresh = set(self.active_batch_panels.keys())
         newly_added_ids = ids_after_refresh - ids_before_refresh
-
         for new_id in newly_added_ids:
             panel_to_animate = self.active_batch_panels.get(new_id)
             if panel_to_animate:
                 self._start_fade_in_animation(panel_to_animate)
-
 
     def _start_fade_in_animation(self, panel_to_animate):
         if panel_to_animate in self._active_fade_in_animations and \
@@ -218,8 +254,16 @@ class BatchPageLayout(QWidget):
             if panel and (hasattr(self, 'animator') and panel not in self.animator._active_fade_outs)
         ]
 
-        if not active_panels:
-            self.show_toast_requested.emit(language_config.UI_LABEL_BATCH_NO_PROCESS, 3000, False)
+        # Tambahan validasi jika seluruh panel tidak memiliki batch_id
+        valid_panels = []
+        for panel in active_panels:
+            if hasattr(panel, 'batch_id') and hasattr(panel, 'sequential_batch_number'):
+                valid_panels.append(panel)
+            else:
+                pass
+
+        if not valid_panels:
+            self.show_toast_requested.emit(language_config.UI_LABEL_BATCH_NO_PROCESS, 4000, False)
             return
 
         target_folder = QFileDialog.getExistingDirectory(self, language_config.SELECT_OUTPUT_FOLDER_TITLE)
@@ -227,10 +271,7 @@ class BatchPageLayout(QWidget):
             self.show_toast_requested.emit(language_config.OUTPUT_FOLDER_SELECTION_CANCELLED, 3000, False)
             return
 
-        total_batches_to_process = len(active_panels)
-        if total_batches_to_process == 0: # Redundant check, already covered by 'if not active_panels'
-            self.show_toast_requested.emit(language_config.UI_LABEL_BATCH_NO_PROCESS, 3000, False)
-            return
+        total_batches_to_process = len(valid_panels)
 
         self.show_toast_requested.emit(
             language_config.UI_LABEL_BATCH_PROCESS_START.format(total_batches_to_process), None, False
@@ -239,19 +280,20 @@ class BatchPageLayout(QWidget):
         print(language_config.LOG_BATCH_PROCESSING_START.format(total_batches_to_process))
 
         processed_and_saved_count = 0
-        for i, batch_panel in enumerate(active_panels, start=1):
-            seq_num_for_msg = batch_panel.sequential_batch_number
-            batch_id_for_msg = batch_panel.batch_id
-
-            print(language_config.LOG_PROCESSING_BATCH_DETAIL.format(
-                seq_num_for_msg, batch_id_for_msg,
-                i, total_batches_to_process
-            ))
-
-            files_before_processing = set(self.get_files_in_stack_folder())
-
+        for i, batch_panel in enumerate(valid_panels, start=1):
             try:
-                batch_panel.process_all_batch() # Asumsikan ini memodifikasi file di stack_folder
+                seq_num_for_msg = batch_panel.sequential_batch_number
+                batch_id_for_msg = batch_panel.batch_id
+
+                print(language_config.LOG_PROCESSING_BATCH_DETAIL.format(
+                    seq_num_for_msg, batch_id_for_msg,
+                    i, total_batches_to_process
+                ))
+
+                files_before_processing = set(self.get_files_in_stack_folder())
+
+                batch_panel.process_all_batch()
+
                 files_after_processing = set(self.get_files_in_stack_folder())
                 newly_created_files = list(files_after_processing - files_before_processing)
 
@@ -279,8 +321,7 @@ class BatchPageLayout(QWidget):
                         )
                     self.show_toast_requested.emit(toast_msg, None, True)
                 else:
-                    # Definisikan stack_folder_path, misal:
-                    stack_folder_path = "database/stack" # atau ambil dari konfigurasi
+                    stack_folder_path = "database/stack"
                     print(language_config.LOG_BATCH_PROCESSED_NO_OUTPUT.format(
                         batch_id=batch_id_for_msg,
                         stack_folder=stack_folder_path
@@ -294,15 +335,17 @@ class BatchPageLayout(QWidget):
             except Exception as e:
                 error_detail_msg = str(e)
                 print(language_config.LOG_ERROR_PROCESSING_BATCH.format(
-                    batch_id_for_msg,
+                    getattr(batch_panel, 'batch_id', 'UNKNOWN'),
                     error_detail_msg
                 ))
                 QMessageBox.warning(self, language_config.BATCH_PROCESSING_ERROR_TITLE,
                                     language_config.BATCH_PROCESSING_ERROR_MESSAGE.format(
-                                        seq_num_for_msg, batch_id_for_msg, error_detail_msg
+                                        getattr(batch_panel, 'sequential_batch_number', '?'),
+                                        getattr(batch_panel, 'batch_id', 'UNKNOWN'),
+                                        error_detail_msg
                                     ))
                 toast_msg = language_config.UI_LABEL_BATCH_PROGRESS_ERROR.format(
-                    seq_num_for_msg, i, total_batches_to_process
+                    getattr(batch_panel, 'sequential_batch_number', '?'), i, total_batches_to_process
                 )
                 self.show_toast_requested.emit(toast_msg, None, True)
                 QApplication.processEvents()
@@ -317,15 +360,15 @@ class BatchPageLayout(QWidget):
                 processed_and_saved_count, total_batches_to_process, folder_name_for_msg
             )
         elif total_batches_to_process > 0:
-             final_message = language_config.UI_LABEL_BATCH_NO_SUCCESS_SPECIFIC.format(
-                 folder_name_for_msg
-             )
-        else: 
+            final_message = language_config.UI_LABEL_BATCH_NO_SUCCESS_SPECIFIC.format(
+                folder_name_for_msg
+            )
+        else:
             final_message = language_config.UI_LABEL_BATCH_NONE_PROCESSED
-
 
         self.show_toast_requested.emit(final_message, 7000, False)
         print(language_config.LOG_ALL_BATCH_ATTEMPTS_FINISHED)
+
 
     def _move_single_batch_result(self, source_file_path, target_folder, sequential_batch_num_for_naming=None):
         original_file_name_for_msg = os.path.basename(source_file_path) if source_file_path else "unknown_file"
@@ -400,16 +443,32 @@ class BatchPageLayout(QWidget):
             )
 
     def handle_delete_all_batches(self):
-        title = language_config.TITLE_BATCH_ALL_DELETE_BUTTON; conn = None; batch_defined_count = 0
+        title = language_config.TITLE_BATCH_ALL_DELETE_BUTTON
+        conn = None
+        batch_defined_count = 0
         try:
-            db_path = self.database_manager.db_path; conn = sqlite3.connect(db_path); cursor = conn.cursor(); cursor.execute("PRAGMA foreign_keys = ON;"); cursor.execute("SELECT COUNT(*) FROM batch_process"); batch_defined_count = cursor.fetchone()[0]
-        except Exception as e: QMessageBox.critical(self, "Database Error", f"Failed to check batch status: {e}"); return
+            db_path = self.database_manager.db_path
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA foreign_keys = ON;")
+            cursor.execute("SELECT COUNT(*) FROM batch_process")
+            batch_defined_count = cursor.fetchone()[0]
+        except Exception as e:
+            QMessageBox.critical(self, "Database Error", f"Failed to check batch status: {e}")
+            return
         finally:
-            if conn: conn.close()
-        if batch_defined_count == 0: QMessageBox.information(self, title, language_config.NO_DATA_BATCH_ALL_DELETE_BUTTON, QMessageBox.StandardButton.Ok); return
-        message = language_config.CONFIRM_BATCH_ALL_DELETE_BUTTON.format(batch_defined_count)
-        reply = QMessageBox.question(self, title, message, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if conn:
+                conn.close()
 
+        if batch_defined_count == 0:
+            QMessageBox.information(self, title, language_config.NO_DATA_BATCH_ALL_DELETE_BUTTON, QMessageBox.StandardButton.Ok)
+            return
+
+        message = language_config.CONFIRM_BATCH_ALL_DELETE_BUTTON.format(batch_defined_count)
+        reply = QMessageBox.question(
+            self, title, message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
 
         if reply == QMessageBox.StandardButton.Yes:
             self.batch_states.clear()
@@ -417,71 +476,72 @@ class BatchPageLayout(QWidget):
             panel_refs = [weakref.ref(p) for p in panels_to_animate]
 
             if not panels_to_animate:
-                self._start_bulk_background_delete_process(); return
+                self._start_bulk_background_delete_process()
+                return
 
             self._bulk_delete_animation_counter = len(panels_to_animate)
             delay_ms = 300
 
             for index, panel_ref in enumerate(panel_refs):
-                 QTimer.singleShot(index * delay_ms,
-                                   lambda pref=panel_ref: self._trigger_single_bulk_fade_out(pref))
-                 
+                QTimer.singleShot(index * delay_ms,
+                                  lambda pref=panel_ref: self._trigger_single_bulk_fade_out(pref))
+
     def _start_bulk_background_delete_process(self):
         """Memulai proses penghapusan semua batch di background."""
         deleter = BatchDeleteProcess(self.database_manager, None, CACHE_DIR, self.thumbnail_threads)
         deleter.batch_deleted.connect(self.data_changed.emit)
         deleter.delete_all_batch()
-        
+
     def _trigger_single_bulk_fade_out(self, panel_ref):
         """Memulai fade out untuk satu panel dalam proses bulk delete."""
         panel = panel_ref() if panel_ref else None
-        if panel:
+        if is_widget_valid(panel):
             fade_out(
-                animator=self.animator, 
+                animator=self.animator,
                 widget=panel,
                 duration=300,
                 on_finished_callback=lambda pref=panel_ref: self._bulk_delete_post_single_animation(pref)
             )
         else:
+            # Widget sudah tidak valid, langsung cek animasi selesai
             self._check_bulk_delete_animations_finished()
-            
+
     def _check_bulk_delete_animations_finished(self):
         """Dipanggil setiap kali satu animasi fade-out selesai saat delete all."""
         self._bulk_delete_animation_counter -= 1
         if self._bulk_delete_animation_counter <= 0:
             self._start_bulk_background_delete_process()
-    
+
     def _bulk_delete_post_single_animation(self, panel_ref):
         panel = panel_ref() if panel_ref else None
-        if panel: panel.hide()
+        safe_hide_widget(panel)
         self._check_bulk_delete_animations_finished()
-        
+
     def _individual_delete_post_animation(self, batch_id, panel_ref):
         """Callback setelah animasi fade-out individual selesai."""
         panel = panel_ref() if panel_ref else None
-        if panel:
-             panel.hide() 
+        safe_hide_widget(panel)
         self._start_background_delete_process(batch_id)
-        
+
     def _start_background_delete_process(self, batch_id):
         """Memulai proses penghapusan di background thread."""
         deleter_thread = BatchDeleteProcess(self.database_manager, batch_id, CACHE_DIR, self.thumbnail_threads)
         self._running_delete_threads.append(deleter_thread)
-        
+
         # Hubungkan sinyal SEBELUM memulai thread
         deleter_thread.batch_deleted.connect(self.data_changed.emit)
 
         # --- HUBUNGKAN FINISHED UNTUK CLEANUP ---
         deleter_thread.finished.connect(lambda thread=deleter_thread: self._on_delete_thread_finished(thread))
         deleter_thread.start()
-        
+
     def _on_delete_thread_finished(self, thread_instance):
         """Dipanggil saat thread delete selesai untuk menghapusnya dari list."""
         try:
             self._running_delete_threads.remove(thread_instance)
         except ValueError:
             pass
-
+        
     # --- Batch Import ---
     def handle_batch_import_button(self):
         """Membuka dialog file dan memulai proses impor batch."""

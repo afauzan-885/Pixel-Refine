@@ -1,9 +1,11 @@
 import json
 import os
-import sqlite3
+
 from PyQt6.QtWidgets import (QLabel, QSizePolicy, QWidget, QVBoxLayout, QScrollArea,
                              QHBoxLayout, QPushButton, QComboBox, QCheckBox,
                              QMessageBox)
+from PyQt6.QtCore import (pyqtSignal, QPropertyAnimation, QEasingCurve, QEvent,
+                          QTimer, pyqtSlot, QThread)
 import weakref
 from PyQt6.QtCore import (pyqtSignal, Qt, QSize, QTimer)
 from PyQt6.QtGui import QIcon, QFont
@@ -17,7 +19,7 @@ from UI.enhance_stack.algorithm.denoising.Similarity_V2 import running_similarit
 from UI.enhance_stack.algorithm.super_resolution.Interpolation import running_interpolation
 from UI.enhance_stack.components.algorithm_list import get_algorithm_options
 from UI.enhance_stack.components.batch_page_layout.image_batch_management import handle_add_image_to_batch
-from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, create_thumbnail_placeholder, show_thumbnail
+from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, thumbnail_placeholder, show_thumbnail
 from UI.enhance_stack.logic.workflow_process import ImageViewer, get_last_image
 from UI.resources.animation.animation_manager import StackedWidgetAnimator
 from UI.resources.stylesheet.stylesheet import DROPDOWN_BOX, SCROLL_AREA, TOGGLE_SWITCH_STYLE
@@ -43,7 +45,7 @@ class CombinedPanel(QWidget):
     """
     def __init__(self, database_manager, batch_id=None, parent=None,
                  thumbnail_threads=None, thumbnail_placeholders=None,
-                 initial_state=None, sequential_batch_number=None): 
+                 initial_state=None, sequential_batch_number=None):
         super().__init__(parent)
         self.database_manager = database_manager
         self.sequential_batch_number = sequential_batch_number
@@ -52,6 +54,7 @@ class CombinedPanel(QWidget):
         self.thumbnail_threads = thumbnail_threads if thumbnail_threads is not None else []
         self.thumbnail_placeholders = thumbnail_placeholders if thumbnail_placeholders is not None else weakref.WeakValueDictionary()
         self.animator = StackedWidgetAnimator(self)
+
         self.selected_algorithms = {
             'alignment': None,
             'super_resolution': None,
@@ -60,6 +63,7 @@ class CombinedPanel(QWidget):
         self.initial_state = initial_state if initial_state is not None else {}
         self.checkboxes = {}
         self.comboboxes = {}
+
         # Hitung jumlah gambar dalam batch ini sekali
         self.image_paths_in_batch = []
         self.image_count_in_batch = 0
@@ -70,9 +74,12 @@ class CombinedPanel(QWidget):
             except Exception as e:
                 print(f"Error getting images for batch {self.batch_id}: {e}")
 
+        # Flag untuk mengecek apakah overlay masih “alive”
+        self._overlay_alive = False
+
         self.init_ui()
-        
-    def get_create_thumbnail_setting(self):
+
+    def get_thumbnail_setting(self):
         if os.path.exists(GENERAL_SETTINGS_FILE):
             try:
                 with open(GENERAL_SETTINGS_FILE, "r") as f:
@@ -82,54 +89,175 @@ class CombinedPanel(QWidget):
                 print(f"Error reading thumbnail setting: {e}")
         return False
 
-    
     def init_ui(self):
-        create_thumbnail = self.get_create_thumbnail_setting()
+        create_thumbnail = self.get_thumbnail_setting()
         self.setFixedHeight(115)
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Panel kanan: Thumbnail List Panel tanpa QScrollArea
+
+        # === Thumbnail list panel (kanan)
         self.list_panel = QWidget()
         self.list_panel.setStyleSheet("background-color: #DBDBDB")
         self.list_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.list_layout = QHBoxLayout(self.list_panel)
         self.list_layout.setContentsMargins(5, 5, 5, 5)
         self.list_layout.setSpacing(10)
-        
-        # Buat parameter panel sekarang
-        parameter_section_widget = self.create_parameter_panel_layout(self.list_layout)
+
+        # === Parameter panel (kiri)
+        parameter_section_widget = self.layout_panel_parameter(self.list_layout)
         parameter_section_widget.setMinimumWidth(430)
 
-        scroll_list_panel = QScrollArea()
-        scroll_list_panel.setWidgetResizable(True)
-        scroll_list_panel.setWidget(self.list_panel)
-        scroll_list_panel.setStyleSheet(SCROLL_AREA)
+        # === Scroll area untuk thumbnails
+        self.scroll_list_panel = QScrollArea()
+        self.scroll_list_panel.setWidgetResizable(True)
+        self.scroll_list_panel.setWidget(self.list_panel)
+        self.scroll_list_panel.setStyleSheet(SCROLL_AREA)
+        self.scroll_list_panel.setMinimumHeight(100)
 
+        # Tambahkan ke layout utama
         main_layout.addWidget(parameter_section_widget, 1)
-        main_layout.addWidget(scroll_list_panel, 2)
+        main_layout.addWidget(self.scroll_list_panel, 2)
 
-        # Tunda pemuatan thumbnail selama 3 detik
+        # === Overlay progress label (di atas viewport scroll area)
+        self.progress_overlay = QLabel(self.scroll_list_panel.viewport())
+        self.progress_overlay.setStyleSheet("""
+            background-color: rgba(0, 0, 0, 150);
+            color: white;
+            font-weight: bold;
+            font-size: 14px;
+            border-radius: 5px;
+            padding: 10px;
+        """)
+        self.progress_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.progress_overlay.hide()
+
+        # === Status overlay dan koneksi sinyal destroyed ke handler yang aman
+        self._overlay_alive = True
+        self.progress_overlay.destroyed.connect(self._on_overlay_destroyed)
+
+        # === Thumbnail generation logic
         if self.batch_id is not None and create_thumbnail:
-            QTimer.singleShot(1000, self.delay_thumbnails)
+            QTimer.singleShot(500, self.delay_thumbnails)
         elif self.batch_id is not None:
             self.load_text_labels()
 
+    def _on_overlay_destroyed(self, *args):
+        # Dipanggil otomatis ketika overlay QLabel dihancurkan oleh PyQt
+        self._overlay_alive = False
+        print(f"[DEBUG] Overlay progress di batch {self.batch_id} telah dihancurkan.")
+
     def delay_thumbnails(self):
-        image_paths = self.database_manager.get_images_by_batch(self.batch_id)
-        animator = self.animator  # pastikan ini tersedia di class kamu
+        # Ambil semua path gambar di batch
+        self.pending_thumbnail_paths = self.database_manager.get_images_by_batch(self.batch_id)
+        self.total_images = len(self.pending_thumbnail_paths)
+        self.thumbnails_loaded = 0
+        self.active_thumbnail_loaders = 0
+        self.max_concurrent_loaders = 4
+        self.thumbnail_loader_queue = []
 
-        for path in image_paths:
-            placeholder = create_thumbnail_placeholder(self.list_layout, path, self.thumbnail_placeholders)
+        # Tampilkan progress overlay, langsung atur ukurannya
+        self.progress_overlay.setText("Create thumbnail: 0%")
+        self.progress_overlay.resize(self.scroll_list_panel.viewport().size())
+        self.progress_overlay.show()
+        self.progress_overlay.raise_()
+
+        # Mulai load batch thumbnail
+        self._start_next_thumbnail_loaders()
+
+    def _start_next_thumbnail_loaders(self):
+        """
+        Jalankan loading thumbnail secara asynchronous hingga semua selesai.
+        """
+        while self.active_thumbnail_loaders < self.max_concurrent_loaders and self.pending_thumbnail_paths:
+            path = self.pending_thumbnail_paths.pop(0)
+
+            # Buat placeholder dulu (misal thumbnail_placeholder akan menaruh widget kosong)
+            placeholder = thumbnail_placeholder(self.list_layout, path, self.thumbnail_placeholders)
+
+            # Buat loader baru
             loader = ThumbnailLoader(path)
+            animator = self.animator
+            self.active_thumbnail_loaders += 1
 
-            loader.thumbnail_ready.connect(
-                lambda image, p, ref_layout=weakref.ref(self.list_layout), a=animator:
-                show_thumbnail(ref_layout, image, p, a) if ref_layout() else None
-            )
-
+            # Hubungkan signal thumbnail_ready ke callback on_ready
+            loader.thumbnail_ready.connect(self._make_loader_callback(animator))
             loader.start()
             self.thumbnail_threads.append(loader)
+
+    def _make_loader_callback(self, animator_ref):
+        """
+        Mengembalikan fungsi on_ready(image, image_path) yang sudah mengecek
+        apakah overlay masih 'alive' sebelum setText(...).
+        """
+        @pyqtSlot(object, str)
+        def on_ready(image, image_path):
+            try:
+                show_thumbnail(weakref.ref(self.list_layout), image, image_path, animator_ref)
+            except Exception as e:
+                print(f"Error while loading thumbnail: {e}")
+                try:
+                    show_thumbnail(weakref.ref(self.list_layout), image, image_path, animator_ref)
+                except:
+                    pass
+
+            # 2) Update counters
+            self.active_thumbnail_loaders -= 1
+            self.thumbnails_loaded += 1
+
+            # 3) Sebelum memanggil setText, cek dulu apakah overlay masih alive
+            if not getattr(self, "_overlay_alive", False):
+                self._start_next_thumbnail_loaders()
+                return
+
+            # 4) Jika overlay masih hidup, update persentase dan sembunyikan jika sudah 100%
+            if self.total_images > 0:
+                percent = int((self.thumbnails_loaded / self.total_images) * 100)
+                try:
+                    self.progress_overlay.setText(f"Create thumbnail: {percent}%")
+                    self.progress_overlay.setStyleSheet("""
+                        background-color: rgba(0, 0, 0, 150);
+                        color: white;
+                        font-size: 16px;
+                        font-weight: bold;
+                        padding: 10px;
+                    """)
+                    self.progress_overlay.adjustSize()
+                except RuntimeError:
+                    # Kalau tiba-tiba QLabel sudah dihapus, abaikan saja
+                    pass
+
+                if percent >= 100:
+                    # Setelah 100%, langsung sembunyikan overlay
+                    try:
+                        self.progress_overlay.hide()
+                    except:
+                        pass
+
+            # 5) Lanjutkan loading thumbnail berikutnya
+            self._start_next_thumbnail_loaders()
+
+        return on_ready
+
+    def closeEvent(self, event):
+        """
+        Override closeEvent agar kita bisa disconnect semua ThumbnailLoader
+        sebelum widget ini benar-benar di-destroy.
+        """
+        # 1) Abort semua thread/loader yang masih berjalan dan disconnect signal
+        for loader in getattr(self, 'thumbnail_threads', []):
+            try:
+                loader.thumbnail_ready.disconnect()
+            except Exception:
+                pass
+            try:
+                # Jika ThumbnailLoader punya method untuk menghentikan thread, panggil
+                loader.requestInterruption()
+            except Exception:
+                pass
+        self.thumbnail_threads.clear()
+
+        # 2) Terakhir, biarkan Qt memproses close seperti biasa
+        super().closeEvent(event)
 
 
     def load_text_labels(self):
@@ -166,7 +294,7 @@ class CombinedPanel(QWidget):
         return state
     # --------------------------------------------------
     
-    def create_parameter_panel_layout(self, list_layout):
+    def layout_panel_parameter(self, list_layout):
         left_section_widget = QWidget()
         left_section_h_layout = QHBoxLayout(left_section_widget)
         left_section_h_layout.setContentsMargins(0, 0, 0, 0)

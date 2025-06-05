@@ -2,8 +2,8 @@ import os
 import weakref
 from PyQt6.QtWidgets import (QMessageBox, QFileDialog)
 from PIL import Image, UnidentifiedImageError
-from PyQt6.QtCore import QThread, pyqtSignal
-from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, show_thumbnail
+from PyQt6.QtCore import QThread, pyqtSignal, QObject
+from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, make_safe_callback, show_thumbnail
 from UI.enhance_stack.logic.multi_threading import BatchImageImportThreading
 from UI.settings.General.Language import language_config
 from config import SUPPORTED_FORMATS
@@ -97,8 +97,6 @@ def handle_add_image_to_batch(batch_page_layout, database_manager, thumbnail_thr
          QMessageBox.critical(None, "Database Error", "Could not retrieve existing images for the batch.")
          return
 
-    # --- PERBAIKAN FILTER DIALOG ---
-    # Buat filter string dari SUPPORTED_FORMATS
     filter_parts = []
     all_supported_extensions = []
     for ext_list in SUPPORTED_FORMATS.values():
@@ -124,8 +122,6 @@ def handle_add_image_to_batch(batch_page_layout, database_manager, thumbnail_thr
     if not file_paths:
         return # Keluar jika tidak ada file dipilih
 
-    # --- Validasi Format & Duplikat ---
-    # Filter file yang dipilih HANYA untuk format yang didukung SEBELUM cek duplikat
     supported_extensions_set = {ext.lower() for fmt_list in SUPPORTED_FORMATS.values() for ext in fmt_list}
     selected_supported_files = [
         path for path in file_paths
@@ -152,36 +148,30 @@ def handle_add_image_to_batch(batch_page_layout, database_manager, thumbnail_thr
         QMessageBox.warning(None, language_config.HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE, message)
 
     if unique_files:
-        # Simpan path unik yang baru ke DB
         try:
-             database_manager.batch_process_save_image_path(batch_id, unique_files)
+            database_manager.batch_process_save_image_path(batch_id, unique_files)
         except Exception as e:
-             print(f"Error menyimpan path baru ke batch {batch_id}: {e}")
-             QMessageBox.critical(None, "Database Error", "Could not save new image paths to the batch.")
-             return # Jangan lanjutkan jika gagal simpan DB
+            print(f"Error menyimpan path baru ke batch {batch_id}: {e}")
+            QMessageBox.critical(None, "Database Error", "Could not save new image paths to the batch.")
+            return
 
-        # Proses pembuatan thumbnail (kode ini tampak oke)
-        ref_layout = weakref.ref(list_layout)
         newly_added_count = 0
+        layout_ref = weakref.ref(list_layout) if isinstance(list_layout, QObject) else None
+
         for path in unique_files:
             try:
-                loader = ThumbnailLoader(path) # Asumsikan ThumbnailLoader ada
-                # Pastikan koneksi lambda benar menangkap variabel
-                loader.thumbnail_ready.connect(
-                    lambda pixmap, current_path=path, layout_ref=ref_layout:
-                        show_thumbnail(layout_ref, pixmap, current_path) if layout_ref() else None
-                )
+                loader = ThumbnailLoader(path)
+                callback = make_safe_callback(path, layout_ref)
+                loader.thumbnail_ready.connect(callback)
                 loader.start()
                 thumbnail_threads.append(loader)
                 newly_added_count += 1
             except Exception as e_thumb:
-                 print(f"Error memulai thumbnail loader untuk {path}: {e_thumb}")
-                 # Pertimbangkan untuk memberi tahu pengguna tentang kegagalan thumbnail
+                print(f"Error memulai thumbnail loader untuk {path}: {e_thumb}")
 
         print(f"Added {newly_added_count} new supported images to batch {batch_id}")
-
-        # Emit sinyal data_changed dari BatchPageLayout jika ada penambahan
         batch_page_layout.data_changed.emit()
+
 
 # --- Fungsi Baru yang Dipindahkan ---
 def process_and_start_batch_import(batch_page_layout, image_paths: list):
