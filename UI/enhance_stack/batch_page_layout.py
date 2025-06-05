@@ -251,18 +251,22 @@ class BatchPageLayout(QWidget):
         active_panels_list = list(self.active_batch_panels.values())
         active_panels = [
             panel for panel in active_panels_list
-            if panel and (hasattr(self, 'animator') and panel not in self.animator._active_fade_outs)
+            if panel and hasattr(panel, 'isWidgetType') and panel.isWidgetType() and \
+               (not hasattr(self, 'animator') or not hasattr(self.animator, '_active_fade_outs') or \
+                panel not in self.animator._active_fade_outs)
         ]
 
-        # Tambahan validasi jika seluruh panel tidak memiliki batch_id
-        valid_panels = []
+        # Filter lebih lanjut untuk panel yang memiliki atribut yang diperlukan
+        candidate_panels = []
         for panel in active_panels:
-            if hasattr(panel, 'batch_id') and hasattr(panel, 'sequential_batch_number'):
-                valid_panels.append(panel)
+            if hasattr(panel, 'batch_id') and panel.batch_id is not None and \
+               hasattr(panel, 'sequential_batch_number'):
+                candidate_panels.append(panel)
             else:
-                pass
+                print(f"[INFO BPL] Panel dilewati karena tidak memiliki batch_id atau sequential_batch_number yang valid: {panel}")
 
-        if not valid_panels:
+
+        if not candidate_panels:
             self.show_toast_requested.emit(language_config.UI_LABEL_BATCH_NO_PROCESS, 4000, False)
             return
 
@@ -271,19 +275,41 @@ class BatchPageLayout(QWidget):
             self.show_toast_requested.emit(language_config.OUTPUT_FOLDER_SELECTION_CANCELLED, 3000, False)
             return
 
-        total_batches_to_process = len(valid_panels)
+        panels_to_actually_process = []
+        for panel_candidate in candidate_panels:
+            try:
+                batch_id_to_check = str(panel_candidate.batch_id) # Pastikan string
+                images_in_db_for_panel = self.database_manager.get_images_by_batch(batch_id_to_check)
+                
+                if not images_in_db_for_panel: 
+                    print(f"[INFO BPL] Batch ID '{batch_id_to_check}' (Panel UI-{panel_candidate.sequential_batch_number}) "
+                          f"tidak valid atau tidak memiliki gambar di database. Melewati pemrosesan untuk panel ini.")
+                else:
+                    panels_to_actually_process.append(panel_candidate) # Batch valid, tambahkan ke daftar proses
+
+            except Exception as db_val_e:
+                print(f"[WARN BPL] Error saat memvalidasi Batch ID '{getattr(panel_candidate, 'batch_id', 'N/A')}' "
+                      f"dengan database manager: {db_val_e}. Panel ini akan dilewati.")
+        
+        if not panels_to_actually_process:
+            self.show_toast_requested.emit(language_config.UI_LABEL_BATCH_NO_PROCESS + " (after DB validation).", 4000, False)
+            print(language_config.LOG_ALL_BATCH_ATTEMPTS_FINISHED + " (No valid batches found after DB check)")
+            return
+
+        total_batches_to_process = len(panels_to_actually_process)
+       
 
         self.show_toast_requested.emit(
-            language_config.UI_LABEL_BATCH_PROCESS_START.format(total_batches_to_process), None, False
+            language_config.UI_LABEL_BATCH_PROCESS_START.format(total_batches_to_process), None, False # Durasi None untuk toast default
         )
         QApplication.processEvents()
         print(language_config.LOG_BATCH_PROCESSING_START.format(total_batches_to_process))
 
         processed_and_saved_count = 0
-        for i, batch_panel in enumerate(valid_panels, start=1):
+        for i, batch_panel in enumerate(panels_to_actually_process, start=1):
             try:
                 seq_num_for_msg = batch_panel.sequential_batch_number
-                batch_id_for_msg = batch_panel.batch_id
+                batch_id_for_msg = str(batch_panel.batch_id)
 
                 print(language_config.LOG_PROCESSING_BATCH_DETAIL.format(
                     seq_num_for_msg, batch_id_for_msg,
@@ -292,7 +318,7 @@ class BatchPageLayout(QWidget):
 
                 files_before_processing = set(self.get_files_in_stack_folder())
 
-                batch_panel.process_all_batch()
+                batch_panel.process_all_batch() 
 
                 files_after_processing = set(self.get_files_in_stack_folder())
                 newly_created_files = list(files_after_processing - files_before_processing)
@@ -319,7 +345,7 @@ class BatchPageLayout(QWidget):
                         toast_msg = language_config.UI_LABEL_BATCH_PROGRESS_SAVE_FAILED.format(
                             seq_num_for_msg, i, total_batches_to_process
                         )
-                    self.show_toast_requested.emit(toast_msg, None, True)
+                    self.show_toast_requested.emit(toast_msg, 3000, True) # Durasi 3s, closable
                 else:
                     stack_folder_path = "database/stack"
                     print(language_config.LOG_BATCH_PROCESSED_NO_OUTPUT.format(
@@ -329,7 +355,7 @@ class BatchPageLayout(QWidget):
                     toast_msg = language_config.UI_LABEL_BATCH_PROGRESS_NO_OUTPUT.format(
                         seq_num_for_msg, i, total_batches_to_process
                     )
-                    self.show_toast_requested.emit(toast_msg, None, True)
+                    self.show_toast_requested.emit(toast_msg, 3000, True)
                 QApplication.processEvents()
 
             except Exception as e:
@@ -347,7 +373,7 @@ class BatchPageLayout(QWidget):
                 toast_msg = language_config.UI_LABEL_BATCH_PROGRESS_ERROR.format(
                     getattr(batch_panel, 'sequential_batch_number', '?'), i, total_batches_to_process
                 )
-                self.show_toast_requested.emit(toast_msg, None, True)
+                self.show_toast_requested.emit(toast_msg, 5000, True) # Durasi 5s, closable
                 QApplication.processEvents()
 
         folder_name_for_msg = os.path.basename(target_folder) if target_folder else "selected folder"
@@ -359,12 +385,13 @@ class BatchPageLayout(QWidget):
             final_message = language_config.UI_LABEL_BATCH_PARTIAL_SUCCESS_SPECIFIC.format(
                 processed_and_saved_count, total_batches_to_process, folder_name_for_msg
             )
-        elif total_batches_to_process > 0:
+        elif total_batches_to_process > 0: 
             final_message = language_config.UI_LABEL_BATCH_NO_SUCCESS_SPECIFIC.format(
                 folder_name_for_msg
             )
-        else:
-            final_message = language_config.UI_LABEL_BATCH_NONE_PROCESSED
+        else: 
+             final_message = language_config.UI_LABEL_BATCH_NONE_PROCESSED
+
 
         self.show_toast_requested.emit(final_message, 7000, False)
         print(language_config.LOG_ALL_BATCH_ATTEMPTS_FINISHED)

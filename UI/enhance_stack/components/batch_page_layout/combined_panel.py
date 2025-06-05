@@ -4,8 +4,7 @@ import os
 from PyQt6.QtWidgets import (QLabel, QSizePolicy, QWidget, QVBoxLayout, QScrollArea,
                              QHBoxLayout, QPushButton, QComboBox, QCheckBox,
                              QMessageBox)
-from PyQt6.QtCore import (pyqtSignal, QPropertyAnimation, QEasingCurve, QEvent,
-                          QTimer, pyqtSlot, QThread)
+from PyQt6.QtCore import (pyqtSignal, QTimer, pyqtSlot,)
 import weakref
 from PyQt6.QtCore import (pyqtSignal, Qt, QSize, QTimer)
 from PyQt6.QtGui import QIcon, QFont
@@ -25,6 +24,18 @@ from UI.resources.animation.animation_manager import StackedWidgetAnimator
 from UI.resources.stylesheet.stylesheet import DROPDOWN_BOX, SCROLL_AREA, TOGGLE_SWITCH_STYLE
 from UI.settings.General.Language import language_config
 from config import GENERAL_SETTINGS_FILE
+
+
+def load_json_state(path):
+    if os.path.exists(path):
+        with open(path, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_json_state(path, state):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as f:
+        json.dump(state, f, indent=4)
 
 class ClickableLabel(QLabel):
     clicked = pyqtSignal()
@@ -55,12 +66,39 @@ class CombinedPanel(QWidget):
         self.thumbnail_placeholders = thumbnail_placeholders if thumbnail_placeholders is not None else weakref.WeakValueDictionary()
         self.animator = StackedWidgetAnimator(self)
 
+        # --- MODIFIKASI DIMULAI DI SINI ---
+        # Tentukan initial_state: utamakan yang di-pass, jika tidak ada dan batch_id diketahui, coba load sendiri
+        _initial_state_passed = initial_state if initial_state is not None else {}
+
+        if self.batch_id is not None and not _initial_state_passed:
+            # Jika initial_state tidak di-pass atau kosong, dan kita punya batch_id, coba load dari JSON
+            json_path_val = os.path.join("database", "align", "batch_parameter.json")
+            all_saved_states = load_json_state(json_path_val) # Menggunakan fungsi load_json_state global Anda
+            self.initial_state = all_saved_states.get(str(self.batch_id), {})
+            if self.initial_state:
+                print(f"[DEBUG] CombinedPanel for batch '{self.batch_id}' loaded its own initial state from JSON.")
+            else:
+                print(f"[DEBUG] CombinedPanel for batch '{self.batch_id}': No saved state found in JSON, using defaults.")
+        else:
+            # Gunakan initial_state yang di-pass, atau {} jika tidak ada yang di-pass dan batch_id tidak diketahui
+            self.initial_state = _initial_state_passed
+            if self.initial_state:
+                 print(f"[DEBUG] CombinedPanel for batch '{self.batch_id}' used passed initial state.")
+            elif self.batch_id is None and not self.initial_state:
+                 print(f"[DEBUG] CombinedPanel: No batch_id and no initial_state provided, using defaults.")
+
+
+        # Pastikan self.initial_state selalu berupa dictionary
+        if not isinstance(self.initial_state, dict):
+            self.initial_state = {}
+        # --- MODIFIKASI SELESAI DI SINI ---
+
         self.selected_algorithms = {
-            'alignment': None,
-            'super_resolution': None,
-            'denoising': None
+            'alignment': self.initial_state.get('alignment_algo'), # Inisialisasi dari initial_state
+            'super_resolution': self.initial_state.get('super_resolution_algo'), # Inisialisasi dari initial_state
+            'denoising': self.initial_state.get('denoising_algo') # Inisialisasi dari initial_state
         }
-        self.initial_state = initial_state if initial_state is not None else {}
+        
         self.checkboxes = {}
         self.comboboxes = {}
 
@@ -137,7 +175,7 @@ class CombinedPanel(QWidget):
 
         # === Thumbnail generation logic
         if self.batch_id is not None and create_thumbnail:
-            QTimer.singleShot(500, self.delay_thumbnails)
+            QTimer.singleShot(50, self.delay_thumbnails)
         elif self.batch_id is not None:
             self.load_text_labels()
 
@@ -275,22 +313,41 @@ class CombinedPanel(QWidget):
             )
             self.list_layout.addWidget(label)
         
-    def get_current_state(self):
-        """Mengambil state saat ini dari widget panel parameter."""
+    def get_current_state(self, batch_id=None):
+        """Mengambil state saat ini dari widget panel parameter. Jika batch_id diberikan, baca dari file JSON."""
         state = {}
-        for text, checkbox in self.checkboxes.items():
-             key = f"checkbox_{text.replace(' ', '_').lower()}"
-             state[key] = checkbox.isChecked()
 
-        # Ambil state comboboxes (algoritma yang dipilih)
-        if 'alignment' in self.comboboxes:
-             state['alignment_algo'] = self.comboboxes['alignment'].currentText()
-        if 'super_resolution' in self.comboboxes:
-             state['super_resolution_algo'] = self.comboboxes['super_resolution'].currentText()
-        if 'denoising' in self.comboboxes:
-             state['denoising_algo'] = self.comboboxes['denoising'].currentText()
+        if batch_id is not None:
+            json_path = os.path.join("database", "align", "batch_parameter.json")
+            if os.path.exists(json_path):
+                with open(json_path, "r") as f:
+                    all_batches = json.load(f)
+                batch_data = all_batches.get(str(batch_id), {})
+                for text, checkbox in self.checkboxes.items():
+                    key = f"checkbox_{text.replace(' ', '_').lower()}"
+                    if key in batch_data:
+                        checkbox.setChecked(batch_data[key])
+                    state[key] = checkbox.isChecked()
+                # Muat nilai combobox jika ada
+                for name in ['alignment', 'super_resolution', 'denoising']:
+                    cb_key = f"{name}_algo"
+                    if name in self.comboboxes and cb_key in batch_data:
+                        self.comboboxes[name].setCurrentText(batch_data[cb_key])
+                        state[cb_key] = batch_data[cb_key]
+            else:
+                print(f"[WARN] File JSON tidak ditemukan: {json_path}")
+        else:
+            for text, checkbox in self.checkboxes.items():
+                key = f"checkbox_{text.replace(' ', '_').lower()}"
+                state[key] = checkbox.isChecked()
 
-        # Tambahkan state lain jika perlu
+            if 'alignment' in self.comboboxes:
+                state['alignment_algo'] = self.comboboxes['alignment'].currentText()
+            if 'super_resolution' in self.comboboxes:
+                state['super_resolution_algo'] = self.comboboxes['super_resolution'].currentText()
+            if 'denoising' in self.comboboxes:
+                state['denoising_algo'] = self.comboboxes['denoising'].currentText()
+
         return state
     # --------------------------------------------------
     
@@ -514,6 +571,24 @@ class CombinedPanel(QWidget):
             denoising_checkbox.blockSignals(False)
         else: 
             denoising_checkbox.setEnabled(True)
+            
+    def _save_checkbox_state_to_json(self, batch_id):
+        """Simpan state checkbox dan combobox untuk batch_id ke dalam file JSON."""
+        json_path = os.path.join("database", "align", "batch_parameter.json")
+        state = self.get_current_state()
+
+        # Baca data lama jika ada
+        if os.path.exists(json_path):
+            with open(json_path, "r") as f:
+                all_batches = json.load(f)
+        else:
+            all_batches = {}
+
+        all_batches[str(batch_id)] = state
+
+        with open(json_path, "w") as f:
+            json.dump(all_batches, f, indent=4)
+
         
     def _trigger_exclusive_handler(self, checkbox_key):
         """Dipanggil oleh klik label atau toggle checkbox untuk memicu logika eksklusif."""
@@ -521,17 +596,22 @@ class CombinedPanel(QWidget):
         if not checkbox: return
 
         is_checked = checkbox.isChecked()
-        
+
         if checkbox_key == language_config.PARAMETER_BATCH_DENOISING:
             self._handle_denoising_state_changed(is_checked)
         elif checkbox_key == language_config.PARAMETER_BATCH_SUPER_RESOLUTION:
             self._handle_superres_state_changed(is_checked)
         elif checkbox_key == language_config.PARAMETER_BATCH_CROP_EDGE:
-             self._handle_crop_keep_edge(is_checked, checkbox_key, language_config.PARAMETER_BATCH_KEEP_EDGE)
+            self._handle_crop_keep_edge(is_checked, checkbox_key, language_config.PARAMETER_BATCH_KEEP_EDGE)
         elif checkbox_key == language_config.PARAMETER_BATCH_KEEP_EDGE:
-             self._handle_crop_keep_edge(is_checked, checkbox_key, language_config.PARAMETER_BATCH_CROP_EDGE)
+            self._handle_crop_keep_edge(is_checked, checkbox_key, language_config.PARAMETER_BATCH_CROP_EDGE)
 
         self._update_visibility_internal()
+
+        # Simpan state terbaru ke JSON berdasarkan batch_id (pastikan Anda punya self.batch_id)
+        if hasattr(self, "batch_id"):
+            self._save_checkbox_state_to_json(self.batch_id)
+
         
     def _handle_crop_keep_edge(self, is_checked, changed_cb_key, other_cb_key):
          """Logika eksklusif untuk Crop Edge dan Keep Edge."""
@@ -587,39 +667,123 @@ class CombinedPanel(QWidget):
         if keep_edge_cb: keep_edge_cb.setEnabled(is_alignment_checked and not is_crop_edge_checked) 
 
     def process_all_batch(self):
-        """Jalankan semua algoritma yang dipilih HANYA JIKA checkbox terkait dicentang."""
+        """
+        Jalankan semua algoritma yang dipilih untuk self.batch_id.
+        Pertama, verifikasi bahwa self.batch_id masih valid di database_manager.
+        Kemudian, baca konfigurasi dari JSON dan jalankan algoritma jika checkbox terkait aktif.
+        """
+        # --- Langkah 0: Pemeriksaan Awal ---
+        if self.batch_id is None:
+            print("[WARN] process_all_batch dipanggil tanpa self.batch_id. Melewati.")
+            return
+
+        print(f"[INFO] Memulai process_all_batch untuk Batch ID: '{self.batch_id}'")
+
+        # --- Langkah 1: Verifikasi Batch ID terhadap Database Manager ---
+        try:
+            images_in_db = self.database_manager.get_images_by_batch(self.batch_id)
+            if not images_in_db:
+                print(f"[INFO] Batch ID '{self.batch_id}' tidak ditemukan di database manager atau tidak memiliki gambar. "
+                      f"Melewati pemrosesan untuk batch ini, meskipun mungkin ada di file parameter JSON.")
+                return
+        except Exception as e:
+            # Tangani kasus di mana get_images_by_batch mungkin melempar error jika batch_id tidak ada
+            print(f"[INFO] Terjadi error saat memverifikasi Batch ID '{self.batch_id}' dengan database manager: {e}. "
+                  f"Melewati pemrosesan untuk batch ini.")
+            return
+
+        print(f"[INFO] Batch ID '{self.batch_id}' terverifikasi valid di database manager.")
+
+        # --- Langkah 2: Baca Konfigurasi dari File JSON ---
+        json_path = os.path.join("database", "align", "batch_parameter.json")
+        config_from_json = {} # Akan menampung konfigurasi untuk self.batch_id dari JSON
+
+        if os.path.exists(json_path):
+            all_batches_in_json = load_json_state(json_path) # Gunakan fungsi global Anda
+            config_from_json = all_batches_in_json.get(str(self.batch_id), {})
+            if not config_from_json:
+                print(f"[INFO] Tidak ada konfigurasi parameter ditemukan di '{json_path}' untuk Batch ID '{self.batch_id}'. "
+                      "Melewati eksekusi algoritma.")
+                return
+        else:
+            print(f"[WARN] File parameter '{json_path}' tidak ditemukan. "
+                  f"Tidak dapat memproses Batch ID '{self.batch_id}'.")
+            return
+
+        print(f"[INFO] Konfigurasi dari JSON untuk Batch ID '{self.batch_id}': {config_from_json}")
+
+        # --- Langkah 3: Definisikan Aksi Algoritma ---
         actions = {
             'alignment': {
                 "Farneback Optical Flow": lambda: running_farneback_optical_flow(self, single_process=False, batch_id=self.batch_id),
                 "AKAZE": lambda: running_akaze(self, single_process=False, batch_id=self.batch_id),
                 "ORB": lambda: running_orb(self, single_process=False, batch_id=self.batch_id),
+                # Tambahkan "None" atau nama default jika ada di UI dan tidak melakukan apa-apa
+                "None": lambda: print("[INFO] Alignment: 'None' selected, no action."),
+                "No Alignment": lambda: print("[INFO] Alignment: 'No Alignment' selected, no action."),
             },
             'super_resolution': {
                 "Interpolation": lambda: running_interpolation(self, single_process=False, batch_id=self.batch_id),
+                "None": lambda: print("[INFO] Super Resolution: 'None' selected, no action."),
+                "No Super Resolution": lambda: print("[INFO] Super Resolution: 'No Super Resolution' selected, no action."),
             },
             'denoising': {
-                "Average": lambda:  running_average(self, single_process=False, batch_id=self.batch_id),
+                "Average": lambda: running_average(self, single_process=False, batch_id=self.batch_id),
                 "Median": lambda: running_median(self, single_process=False, batch_id=self.batch_id),
                 "Similarity": lambda: running_similarity(self, single_process=False, batch_id=self.batch_id),
                 "Similarity V2": lambda: running_similarity_v2(self, single_process=False, batch_id=self.batch_id),
+                "None": lambda: print("[INFO] Denoising: 'None' selected, no action."),
+                "No Denoising": lambda: print("[INFO] Denoising: 'No Denoising' selected, no action."),
             }
         }
 
-        # --- Tambahkan pemetaan dari kategori ke kunci checkbox ---
-        category_to_checkbox_key = {
-            'alignment': language_config.PARAMETER_BATCH_ALIGNMENT,
-            'super_resolution': language_config.PARAMETER_BATCH_SUPER_RESOLUTION,
-            'denoising': language_config.PARAMETER_BATCH_DENOISING
+        # Pemetaan kategori ke kunci checkbox di JSON (gunakan kunci yang konsisten dengan saat Anda menyimpan)
+        # Jika Anda sudah menerapkan standarisasi kunci, gunakan kunci standar tersebut.
+        # Jika masih menggunakan kunci turunan dari language_config, pastikan ini konsisten.
+        # Saya akan mengasumsikan Anda ingin menggunakan kunci yang lebih pendek dan standar:
+        category_to_json_checkbox_key = {
+            'alignment': "checkbox_alignment",        # Atau "checkbox_align_images" jika itu standar Anda
+            'super_resolution': "checkbox_super_resolution",
+            'denoising': "checkbox_denoising"
         }
-        # -------------------------------------------------------
+        # Jika Anda menggunakan pemetaan ui_text_to_standard_json_key di __init__, Anda bisa mereferensinya di sini
+        # atau mendefinisikannya lagi secara konsisten.
 
-        for category, algo in self.selected_algorithms.items():
-            if algo and algo != "None" and category in actions and algo in actions[category]:
-                checkbox_key = category_to_checkbox_key.get(category)
-                if checkbox_key:
-                    checkbox = self.checkboxes.get(checkbox_key)
-                    if checkbox and checkbox.isChecked():
-                        actions[category][algo]() 
+        # --- Langkah 4: Jalankan Algoritma Berdasarkan Konfigurasi JSON ---
+        any_algorithm_executed = False
+        for category, selected_algo_name in self.selected_algorithms.items():
+            # self.selected_algorithms berisi nama algoritma yang dipilih di UI (atau dimuat dari initial_state)
+            
+            # Dapatkan kunci JSON yang benar untuk checkbox kategori ini
+            json_checkbox_key = category_to_json_checkbox_key.get(category)
+
+            if not json_checkbox_key:
+                print(f"[WARN] Tidak ada pemetaan kunci JSON untuk kategori '{category}'. Melewati.")
+                continue
+
+            # Periksa apakah kategori ini diaktifkan di konfigurasi JSON
+            if config_from_json.get(json_checkbox_key, False):
+                # Kategori diaktifkan. Sekarang periksa apakah algoritma yang dipilih valid dan ada aksi.
+                if selected_algo_name and selected_algo_name != "None" and selected_algo_name != "No Alignment" \
+                   and selected_algo_name != "No Super Resolution" and selected_algo_name != "No Denoising":
+                    
+                    if category in actions and selected_algo_name in actions[category]:
+                        print(f"[INFO] Menjalankan '{selected_algo_name}' untuk kategori '{category}' pada Batch ID '{self.batch_id}'.")
+                        actions[category][selected_algo_name]()
+                        any_algorithm_executed = True
+                    else:
+                        print(f"[WARN] Algoritma '{selected_algo_name}' untuk kategori '{category}' dipilih "
+                              f"tetapi tidak memiliki aksi terdefinisi. Melewati.")
+                else:
+                    print(f"[INFO] Kategori '{category}' aktif, tetapi tidak ada algoritma spesifik yang dipilih ('{selected_algo_name}'). "
+                          "Tidak ada aksi dijalankan untuk kategori ini.")
+            else:
+                # Kategori tidak diaktifkan di JSON
+                print(f"[INFO] Kategori '{category}' (kunci JSON: '{json_checkbox_key}') tidak aktif dalam konfigurasi JSON "
+                      f"untuk Batch ID '{self.batch_id}'. Melewati algoritma '{selected_algo_name}'.")
+        
+        if not any_algorithm_executed:
+            print(f"[INFO] Tidak ada algoritma yang dieksekusi untuk Batch ID '{self.batch_id}' berdasarkan konfigurasi saat ini.")
     
     def create_parameter_panel(self):
         """
