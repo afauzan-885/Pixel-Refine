@@ -244,7 +244,6 @@ class BatchPageLayout(QWidget):
                     for f in os.listdir(folder_path)
                     if os.path.isfile(os.path.join(folder_path, f))]
         except Exception as e:
-            print(f"Error listing files in stack folder: {e}")
             return []
 
     def process_all_batches(self):
@@ -256,14 +255,13 @@ class BatchPageLayout(QWidget):
                 panel not in self.animator._active_fade_outs)
         ]
 
-        # Filter lebih lanjut untuk panel yang memiliki atribut yang diperlukan
         candidate_panels = []
         for panel in active_panels:
             if hasattr(panel, 'batch_id') and panel.batch_id is not None and \
                hasattr(panel, 'sequential_batch_number'):
                 candidate_panels.append(panel)
             else:
-                print(f"[INFO BPL] Panel dilewati karena tidak memiliki batch_id atau sequential_batch_number yang valid: {panel}")
+                pass
 
 
         if not candidate_panels:
@@ -278,18 +276,16 @@ class BatchPageLayout(QWidget):
         panels_to_actually_process = []
         for panel_candidate in candidate_panels:
             try:
-                batch_id_to_check = str(panel_candidate.batch_id) # Pastikan string
+                batch_id_to_check = str(panel_candidate.batch_id)
                 images_in_db_for_panel = self.database_manager.get_images_by_batch(batch_id_to_check)
                 
                 if not images_in_db_for_panel: 
-                    print(f"[INFO BPL] Batch ID '{batch_id_to_check}' (Panel UI-{panel_candidate.sequential_batch_number}) "
-                          f"tidak valid atau tidak memiliki gambar di database. Melewati pemrosesan untuk panel ini.")
+                   pass
                 else:
-                    panels_to_actually_process.append(panel_candidate) # Batch valid, tambahkan ke daftar proses
+                    panels_to_actually_process.append(panel_candidate)
 
             except Exception as db_val_e:
-                print(f"[WARN BPL] Error saat memvalidasi Batch ID '{getattr(panel_candidate, 'batch_id', 'N/A')}' "
-                      f"dengan database manager: {db_val_e}. Panel ini akan dilewati.")
+                pass
         
         if not panels_to_actually_process:
             self.show_toast_requested.emit(language_config.UI_LABEL_BATCH_NO_PROCESS + " (after DB validation).", 4000, False)

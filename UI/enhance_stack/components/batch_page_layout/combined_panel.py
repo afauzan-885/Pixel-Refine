@@ -21,6 +21,7 @@ from UI.enhance_stack.components.batch_page_layout.image_batch_management import
 from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, thumbnail_placeholder, show_thumbnail
 from UI.enhance_stack.logic.workflow_process import ImageViewer, get_last_image
 from UI.resources.animation.animation_manager import StackedWidgetAnimator
+from UI.resources.animation.fade import fade_out
 from UI.resources.stylesheet.stylesheet import DROPDOWN_BOX, SCROLL_AREA, TOGGLE_SWITCH_STYLE
 from UI.settings.General.Language import language_config
 from config import GENERAL_SETTINGS_FILE
@@ -66,27 +67,15 @@ class CombinedPanel(QWidget):
         self.thumbnail_placeholders = thumbnail_placeholders if thumbnail_placeholders is not None else weakref.WeakValueDictionary()
         self.animator = StackedWidgetAnimator(self)
 
-        # --- MODIFIKASI DIMULAI DI SINI ---
-        # Tentukan initial_state: utamakan yang di-pass, jika tidak ada dan batch_id diketahui, coba load sendiri
         _initial_state_passed = initial_state if initial_state is not None else {}
 
         if self.batch_id is not None and not _initial_state_passed:
-            # Jika initial_state tidak di-pass atau kosong, dan kita punya batch_id, coba load dari JSON
             json_path_val = os.path.join("database", "align", "batch_parameter.json")
-            all_saved_states = load_json_state(json_path_val) # Menggunakan fungsi load_json_state global Anda
+            all_saved_states = load_json_state(json_path_val)
             self.initial_state = all_saved_states.get(str(self.batch_id), {})
-            if self.initial_state:
-                print(f"[DEBUG] CombinedPanel for batch '{self.batch_id}' loaded its own initial state from JSON.")
-            else:
-                print(f"[DEBUG] CombinedPanel for batch '{self.batch_id}': No saved state found in JSON, using defaults.")
-        else:
-            # Gunakan initial_state yang di-pass, atau {} jika tidak ada yang di-pass dan batch_id tidak diketahui
-            self.initial_state = _initial_state_passed
-            if self.initial_state:
-                 print(f"[DEBUG] CombinedPanel for batch '{self.batch_id}' used passed initial state.")
-            elif self.batch_id is None and not self.initial_state:
-                 print(f"[DEBUG] CombinedPanel: No batch_id and no initial_state provided, using defaults.")
 
+        else:
+            self.initial_state = _initial_state_passed
 
         # Pastikan self.initial_state selalu berupa dictionary
         if not isinstance(self.initial_state, dict):
@@ -94,9 +83,9 @@ class CombinedPanel(QWidget):
         # --- MODIFIKASI SELESAI DI SINI ---
 
         self.selected_algorithms = {
-            'alignment': self.initial_state.get('alignment_algo'), # Inisialisasi dari initial_state
-            'super_resolution': self.initial_state.get('super_resolution_algo'), # Inisialisasi dari initial_state
-            'denoising': self.initial_state.get('denoising_algo') # Inisialisasi dari initial_state
+            'alignment': self.initial_state.get('alignment_algo'),
+            'super_resolution': self.initial_state.get('super_resolution_algo'),
+            'denoising': self.initial_state.get('denoising_algo')
         }
         
         self.checkboxes = {}
@@ -180,12 +169,9 @@ class CombinedPanel(QWidget):
             self.load_text_labels()
 
     def _on_overlay_destroyed(self, *args):
-        # Dipanggil otomatis ketika overlay QLabel dihancurkan oleh PyQt
         self._overlay_alive = False
-        print(f"[DEBUG] Overlay progress di batch {self.batch_id} telah dihancurkan.")
 
     def delay_thumbnails(self):
-        # Ambil semua path gambar di batch
         self.pending_thumbnail_paths = self.database_manager.get_images_by_batch(self.batch_id)
         self.total_images = len(self.pending_thumbnail_paths)
         self.thumbnails_loaded = 0
@@ -193,14 +179,26 @@ class CombinedPanel(QWidget):
         self.max_concurrent_loaders = 4
         self.thumbnail_loader_queue = []
 
-        # Tampilkan progress overlay, langsung atur ukurannya
         self.progress_overlay.setText("Create thumbnail: 0%")
         self.progress_overlay.resize(self.scroll_list_panel.viewport().size())
         self.progress_overlay.show()
         self.progress_overlay.raise_()
 
-        # Mulai load batch thumbnail
         self._start_next_thumbnail_loaders()
+
+    def _on_thumbnail_loaded(self):
+        self.thumbnails_loaded += 1
+
+        if self.thumbnails_loaded >= self.total_images:
+            def hide_overlay():
+                self.progress_overlay.hide()
+
+            fade_out(self.animator, self.progress_overlay, duration=500, on_finished_callback=hide_overlay)
+
+        else:
+            percent = int((self.thumbnails_loaded / self.total_images) * 100)
+            self.progress_overlay.setText(f"Create thumbnail: {percent}%")
+
 
     def _start_next_thumbnail_loaders(self):
         """
@@ -261,11 +259,9 @@ class CombinedPanel(QWidget):
                     """)
                     self.progress_overlay.adjustSize()
                 except RuntimeError:
-                    # Kalau tiba-tiba QLabel sudah dihapus, abaikan saja
                     pass
 
                 if percent >= 100:
-                    # Setelah 100%, langsung sembunyikan overlay
                     try:
                         self.progress_overlay.hide()
                     except:
@@ -496,9 +492,8 @@ class CombinedPanel(QWidget):
                             min-width: 100px;
                         }
                         """
-
         # --- Alignment Dropdown ---
-        alignment_options = get_algorithm_options("alignment") # Ambil data
+        alignment_options = get_algorithm_options("alignment")
         algorithm_alignment = QComboBox()
         algorithm_alignment.setStyleSheet(DROPDOWN_BOX + override_style)
         for name, _ in alignment_options:
@@ -506,7 +501,7 @@ class CombinedPanel(QWidget):
         algorithm_alignment.setVisible(False)
 
         # --- Super Resolution Dropdown ---
-        super_res_options = get_algorithm_options("super_resolution") # Ambil data
+        super_res_options = get_algorithm_options("super_resolution")
         super_res_combo = QComboBox()
         super_res_combo.setStyleSheet(DROPDOWN_BOX + override_style)
         for name, _ in super_res_options:
@@ -514,7 +509,7 @@ class CombinedPanel(QWidget):
         super_res_combo.setVisible(False)
 
         # --- Denoising Dropdown ---
-        denoising_options = get_algorithm_options("denoising") # Ambil data
+        denoising_options = get_algorithm_options("denoising")
         denoising_combox = QComboBox()
         denoising_combox.setStyleSheet(DROPDOWN_BOX + override_style)
         for name, _ in denoising_options:
@@ -674,57 +669,36 @@ class CombinedPanel(QWidget):
         """
         # --- Langkah 0: Pemeriksaan Awal ---
         if self.batch_id is None:
-            print("[WARN] process_all_batch dipanggil tanpa self.batch_id. Melewati.")
             return
-
-        print(f"[INFO] Memulai process_all_batch untuk Batch ID: '{self.batch_id}'")
 
         # --- Langkah 1: Verifikasi Batch ID terhadap Database Manager ---
         try:
             images_in_db = self.database_manager.get_images_by_batch(self.batch_id)
             if not images_in_db:
-                print(f"[INFO] Batch ID '{self.batch_id}' tidak ditemukan di database manager atau tidak memiliki gambar. "
-                      f"Melewati pemrosesan untuk batch ini, meskipun mungkin ada di file parameter JSON.")
                 return
         except Exception as e:
-            # Tangani kasus di mana get_images_by_batch mungkin melempar error jika batch_id tidak ada
-            print(f"[INFO] Terjadi error saat memverifikasi Batch ID '{self.batch_id}' dengan database manager: {e}. "
-                  f"Melewati pemrosesan untuk batch ini.")
             return
-
-        print(f"[INFO] Batch ID '{self.batch_id}' terverifikasi valid di database manager.")
-
+        
         # --- Langkah 2: Baca Konfigurasi dari File JSON ---
         json_path = os.path.join("database", "align", "batch_parameter.json")
-        config_from_json = {} # Akan menampung konfigurasi untuk self.batch_id dari JSON
+        config_from_json = {}
 
         if os.path.exists(json_path):
-            all_batches_in_json = load_json_state(json_path) # Gunakan fungsi global Anda
+            all_batches_in_json = load_json_state(json_path) 
             config_from_json = all_batches_in_json.get(str(self.batch_id), {})
             if not config_from_json:
-                print(f"[INFO] Tidak ada konfigurasi parameter ditemukan di '{json_path}' untuk Batch ID '{self.batch_id}'. "
-                      "Melewati eksekusi algoritma.")
                 return
-        else:
-            print(f"[WARN] File parameter '{json_path}' tidak ditemukan. "
-                  f"Tidak dapat memproses Batch ID '{self.batch_id}'.")
-            return
-
-        print(f"[INFO] Konfigurasi dari JSON untuk Batch ID '{self.batch_id}': {config_from_json}")
-
+    
         # --- Langkah 3: Definisikan Aksi Algoritma ---
         actions = {
             'alignment': {
                 "Farneback Optical Flow": lambda: running_farneback_optical_flow(self, single_process=False, batch_id=self.batch_id),
                 "AKAZE": lambda: running_akaze(self, single_process=False, batch_id=self.batch_id),
-                "ORB": lambda: running_orb(self, single_process=False, batch_id=self.batch_id),
-                # Tambahkan "None" atau nama default jika ada di UI dan tidak melakukan apa-apa
-                "None": lambda: print("[INFO] Alignment: 'None' selected, no action."),
+                "ORB": lambda: running_orb(self, single_process=False, batch_id=self.batch_id),    
                 "No Alignment": lambda: print("[INFO] Alignment: 'No Alignment' selected, no action."),
             },
             'super_resolution': {
                 "Interpolation": lambda: running_interpolation(self, single_process=False, batch_id=self.batch_id),
-                "None": lambda: print("[INFO] Super Resolution: 'None' selected, no action."),
                 "No Super Resolution": lambda: print("[INFO] Super Resolution: 'No Super Resolution' selected, no action."),
             },
             'denoising': {
@@ -732,58 +706,33 @@ class CombinedPanel(QWidget):
                 "Median": lambda: running_median(self, single_process=False, batch_id=self.batch_id),
                 "Similarity": lambda: running_similarity(self, single_process=False, batch_id=self.batch_id),
                 "Similarity V2": lambda: running_similarity_v2(self, single_process=False, batch_id=self.batch_id),
-                "None": lambda: print("[INFO] Denoising: 'None' selected, no action."),
                 "No Denoising": lambda: print("[INFO] Denoising: 'No Denoising' selected, no action."),
             }
         }
 
-        # Pemetaan kategori ke kunci checkbox di JSON (gunakan kunci yang konsisten dengan saat Anda menyimpan)
-        # Jika Anda sudah menerapkan standarisasi kunci, gunakan kunci standar tersebut.
-        # Jika masih menggunakan kunci turunan dari language_config, pastikan ini konsisten.
-        # Saya akan mengasumsikan Anda ingin menggunakan kunci yang lebih pendek dan standar:
         category_to_json_checkbox_key = {
-            'alignment': "checkbox_alignment",        # Atau "checkbox_align_images" jika itu standar Anda
+            'alignment': "checkbox_alignment",
             'super_resolution': "checkbox_super_resolution",
             'denoising': "checkbox_denoising"
         }
-        # Jika Anda menggunakan pemetaan ui_text_to_standard_json_key di __init__, Anda bisa mereferensinya di sini
-        # atau mendefinisikannya lagi secara konsisten.
-
         # --- Langkah 4: Jalankan Algoritma Berdasarkan Konfigurasi JSON ---
         any_algorithm_executed = False
         for category, selected_algo_name in self.selected_algorithms.items():
-            # self.selected_algorithms berisi nama algoritma yang dipilih di UI (atau dimuat dari initial_state)
-            
-            # Dapatkan kunci JSON yang benar untuk checkbox kategori ini
             json_checkbox_key = category_to_json_checkbox_key.get(category)
 
             if not json_checkbox_key:
-                print(f"[WARN] Tidak ada pemetaan kunci JSON untuk kategori '{category}'. Melewati.")
                 continue
 
-            # Periksa apakah kategori ini diaktifkan di konfigurasi JSON
             if config_from_json.get(json_checkbox_key, False):
-                # Kategori diaktifkan. Sekarang periksa apakah algoritma yang dipilih valid dan ada aksi.
                 if selected_algo_name and selected_algo_name != "None" and selected_algo_name != "No Alignment" \
                    and selected_algo_name != "No Super Resolution" and selected_algo_name != "No Denoising":
                     
                     if category in actions and selected_algo_name in actions[category]:
-                        print(f"[INFO] Menjalankan '{selected_algo_name}' untuk kategori '{category}' pada Batch ID '{self.batch_id}'.")
                         actions[category][selected_algo_name]()
                         any_algorithm_executed = True
-                    else:
-                        print(f"[WARN] Algoritma '{selected_algo_name}' untuk kategori '{category}' dipilih "
-                              f"tetapi tidak memiliki aksi terdefinisi. Melewati.")
-                else:
-                    print(f"[INFO] Kategori '{category}' aktif, tetapi tidak ada algoritma spesifik yang dipilih ('{selected_algo_name}'). "
-                          "Tidak ada aksi dijalankan untuk kategori ini.")
-            else:
-                # Kategori tidak diaktifkan di JSON
-                print(f"[INFO] Kategori '{category}' (kunci JSON: '{json_checkbox_key}') tidak aktif dalam konfigurasi JSON "
-                      f"untuk Batch ID '{self.batch_id}'. Melewati algoritma '{selected_algo_name}'.")
-        
+            
         if not any_algorithm_executed:
-            print(f"[INFO] Tidak ada algoritma yang dieksekusi untuk Batch ID '{self.batch_id}' berdasarkan konfigurasi saat ini.")
+            pass
     
     def create_parameter_panel(self):
         """
@@ -820,13 +769,12 @@ class CombinedPanel(QWidget):
         checkbox_texts = [
             language_config.PARAMETER_BATCH_ALIGNMENT,
             language_config.PARAMETER_BATCH_ALIGNMENT_TO_FOLDER,
-            language_config.PARAMETER_BATCH_DENOISING, # Checkbox Denoising
-            language_config.PARAMETER_BATCH_SUPER_RESOLUTION, # Checkbox Super Resolution
+            language_config.PARAMETER_BATCH_DENOISING,
+            language_config.PARAMETER_BATCH_SUPER_RESOLUTION,
             language_config.PARAMETER_BATCH_CROP_EDGE,
             language_config.PARAMETER_BATCH_KEEP_EDGE
         ]
 
-        # Key yang pasti untuk Denoising dan Super Resolution
         denoising_key = language_config.PARAMETER_BATCH_DENOISING
         superres_key = language_config.PARAMETER_BATCH_SUPER_RESOLUTION
         crop_edge_key = language_config.PARAMETER_BATCH_CROP_EDGE
@@ -854,10 +802,8 @@ class CombinedPanel(QWidget):
             initial_checked = self.initial_state.get(key_for_state, False)
             option_checkbox.setChecked(initial_checked)
 
-            # --- PERUBAHAN KONEKSI SINYAL ---
             current_key = text
             option_label.clicked.connect(lambda key=current_key: self._trigger_exclusive_handler(key))
-            # Hubungkan toggle checkbox ke fungsi perantara
             option_checkbox.toggled.connect(lambda checked, key=current_key: self._trigger_exclusive_handler(key))
 
             checkbox_layout.addWidget(option_checkbox)
@@ -888,11 +834,9 @@ class CombinedPanel(QWidget):
              self._trigger_exclusive_handler(crop_edge_key)
         if keep_edge_key in self.checkboxes:
              self._trigger_exclusive_handler(keep_edge_key)
-        # Panggil juga untuk alignment & align_folder jika mereka mempengaruhi enabled state lain
         if alignment_key in self.checkboxes:
-            self._update_visibility_internal() # Cukup panggil visibility
+            self._update_visibility_internal() 
         if align_folder_key in self.checkboxes:
-            self._update_visibility_internal() # Cukup panggil visibility
-
+            self._update_visibility_internal() 
 
         return algorithm_panel
