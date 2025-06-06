@@ -256,129 +256,82 @@ def get_all_image_paths_for_single_process(db_path: str)-> list:
             return [] 
         except Exception as e:
             return []
-        
-def _prepare_image_path(original_path, temp_dir):
+    
+def _prepare_image_array_from_raw(original_path):
     """
-    Memeriksa path gambar. Jika DNG/RAW dan rawpy tersedia, proses,
-    simpan sebagai TIFF sementara, dan kembalikan path sementara.
-    Jika tidak, kembalikan path asli.
-    Mengembalikan None jika terjadi error atau file RAW dilewati.
+    Membaca gambar RAW dan mengembalikan array NumPy BGR.
+    Jika gagal atau bukan RAW, mengembalikan None.
     """
     try:
-        _, ext = os.path.splitext(original_path)
-        ext = ext.lower()
+        if not RAWPY_AVAILABLE:
+            return None
 
-        raw_extensions = {'.dng', '.cr2', '.nef', '.arw', '.orf', '.rw2', '.pef', '.srw'}
+        with rawpy.imread(original_path) as raw:
+            gamma_setting = (2.5, 15.92)  # Natural Gamma
+            rgb = raw.postprocess(
+                use_camera_wb=True,
+                gamma=gamma_setting,
+                output_bps=16,
+                bad_pixels_path=None,
+                output_color=rawpy.ColorSpace.sRGB,
+                chromatic_aberration=None,
+                highlight_mode=rawpy.HighlightMode.Blend
+            )
 
-        if ext in raw_extensions:
-            if not RAWPY_AVAILABLE:
-                return None 
-
-            try:
-                with rawpy.imread(original_path) as raw:
-                    gamma_setting = (2.5, 15.92) # Natural Gamma
-                    rgb = raw.postprocess(use_camera_wb=True, gamma=gamma_setting, output_bps=16,
-                                          bad_pixels_path=None,output_color=rawpy.ColorSpace.sRGB,
-                                          chromatic_aberration=None, highlight_mode=rawpy.HighlightMode.Blend)
-
-                base_name = os.path.basename(original_path)
-                temp_filename = f"{os.path.splitext(base_name)[0]}_{int(time.time_ns())}.tiff"
-                temp_path = os.path.join(temp_dir, temp_filename)
-    
-                bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-                success = cv2.imwrite(temp_path, bgr)
-
-                if success:
-                    return temp_path 
-                else:
-                    return None
-
-            except rawpy.LibRawError as e:
-                return None
-            except Exception as e:
-                return None
-
-        else:
-            if os.path.exists(original_path):
-                return original_path
-            else:
-                return None
-
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        return bgr  # langsung return array, bukan path
     except Exception as e:
-        return None 
-    
+        print(f"Error membaca RAW file {original_path}: {e}")
+        return None
+ 
 def load_images_from_paths(image_paths, stop_requested=None):
-    session_id = f"imgproc_{os.getpid()}_{int(time.time_ns())}"
-    temp_dir = os.path.join("database", "align", session_id)
-    os.makedirs(temp_dir, exist_ok=True)
-    
-    processed_paths_futures = []
-    non_raw_paths = []
+    images = []
     raw_extensions = {'.dng', '.cr2', '.nef', '.arw', '.orf', '.rw2', '.pef', '.srw'}
-    num_threads = os.cpu_count() or 4 
+    num_threads = os.cpu_count() or 4
 
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor_prepare:
-            for path in image_paths:
-                if stop_requested and stop_requested():
-                    break
+    raw_futures = []
+    standard_futures = []
 
-                _, ext = os.path.splitext(path)
-                ext = ext.lower()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+        for path in image_paths:
+            if stop_requested and stop_requested():
+                break
 
-                if ext in raw_extensions:
-                    future = executor_prepare.submit(_prepare_image_path, path, temp_dir)
-                    processed_paths_futures.append(future)
-                else:
-                    if os.path.exists(path):
-                        non_raw_paths.append(path) 
-                    else:
-                        pass
+            _, ext = os.path.splitext(path)
+            ext = ext.lower()
 
-            temp_processed_raw_paths = []
-            for future in concurrent.futures.as_completed(processed_paths_futures):
-                if stop_requested and stop_requested():
-                    break
-                try:
-                    result_path = future.result() # Bisa None jika gagal
-                    if result_path:
-                        temp_processed_raw_paths.append(result_path)
-                except Exception as e:
-                    print(f"Error saat mengambil hasil future _prepare_image_path: {e}")
-            
-            if stop_requested and stop_requested(): # Cek lagi sebelum lanjut
-                return []
+            if ext in raw_extensions:
+                if os.path.exists(path):
+                    future = executor.submit(_prepare_image_array_from_raw, path)
+                    raw_futures.append(future)
+            else:
+                if os.path.exists(path):
+                    future = executor.submit(cv2.imread, path, cv2.IMREAD_UNCHANGED)
+                    standard_futures.append(future)
 
+        # Ambil hasil dari gambar RAW
+        for future in concurrent.futures.as_completed(raw_futures):
+            if stop_requested and stop_requested():
+                break
+            try:
+                img = future.result()
+                if img is not None:
+                    images.append(img)
+            except Exception as e:
+                print(f"Error loading RAW image: {e}")
 
-        all_paths_to_load = temp_processed_raw_paths + non_raw_paths
-       
+        # Ambil hasil dari gambar biasa
+        for future in concurrent.futures.as_completed(standard_futures):
+            if stop_requested and stop_requested():
+                break
+            try:
+                img = future.result()
+                if img is not None:
+                    images.append(img)
+            except Exception as e:
+                print(f"Error loading standard image: {e}")
 
-        images = []
-        if not all_paths_to_load:
-            return images
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor_load:
-            future_to_path = {executor_load.submit(cv2.imread, p, cv2.IMREAD_UNCHANGED): p for p in all_paths_to_load}
-
-            for future in concurrent.futures.as_completed(future_to_path):
-                if stop_requested and stop_requested():
-                    break
-                
-                original_input_path = future_to_path[future]
-                try:
-                    img = future.result()
-                    if img is not None:
-                        images.append(img)
-                    else:
-                      pass
-                except Exception as e:
-                    print(f"Error saat memuat gambar {original_input_path}: {e}")
-        
-        return images
-
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
+    return images
 
 def resize_all_with_padding(images, method="median", verbose=False,
                             pad_color=(0, 0, 0), return_original_sizes=False):
@@ -654,13 +607,20 @@ def compute_transform_bounds(transform, w, h, transformation_type):
     corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(-1, 1, 2)
 
     if transformation_type == 'homography':
-        matrix, _ = cv2.findHomography(np.array(base_points), np.array(target_points), 0)
+        matrix, mask = cv2.findHomography(np.array(base_points), np.array(target_points), cv2.RANSAC)
     else:
-        matrix = cv2.estimateAffine2D(np.array(base_points), np.array(target_points))[0]
+        matrix, mask = cv2.estimateAffine2D(np.array(base_points), np.array(target_points), method=cv2.RANSAC)
 
-    if matrix is None:
+    # Debugging jumlah keypoint dan inlier
+    if matrix is None or mask is None:
+        # print(f"[DEBUG] Transform #{i}: transform matrix is None. Total points: {len(base_points)}")
         return None
+    else:
+        inlier_count = int(mask.sum())
+        total_points = len(base_points)
+        # print(f"[DEBUG] Transform #{i}: total points = {total_points}, inliers = {inlier_count}")
 
+    # Transform corners
     if transformation_type == 'homography':
         transformed_corners = cv2.perspectiveTransform(corners, matrix)
     else:
@@ -669,7 +629,9 @@ def compute_transform_bounds(transform, w, h, transformation_type):
     transformed_corners = transformed_corners.reshape(-1, 2)
     min_xy = transformed_corners.min(axis=0)
     max_xy = transformed_corners.max(axis=0)
+
     return min_xy, max_xy
+
 
 def compute_global_crop(all_transforms, total_images, w, h, transformation_type='homography'):
     global_min_x = float('inf')

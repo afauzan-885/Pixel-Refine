@@ -376,11 +376,9 @@ class ORBAlgorithm:
         except cv2.error as cv_err:
              return None
         except Exception as e:
-             return None
-    
+             return None   
 def main(db_path,
          update_progress=None,
-         batch_size=10,
          stop_requested=None,
          single_process=None,
          batch_id=None,
@@ -418,17 +416,14 @@ def main(db_path,
 
     os.makedirs(os.path.dirname(processor.hdf5_path), exist_ok=True)
     os.makedirs(align_folder, exist_ok=True)
-
     extract_all_metadata(image_paths, metadata_file=os.path.join("database", "align", "metadata.json"))
 
     total_images = len(image_paths)
-
     base_img_list = load_images_from_paths([image_paths[0]], stop_requested=stop_requested)
     if not base_img_list or base_img_list[0] is None:
         raise RuntimeError("Base image gagal dimuat.")
-    
+
     base_image_raw = base_img_list[0]
-    
     base_resized_list, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="median")
     base_image = base_resized_list[0]
 
@@ -438,145 +433,117 @@ def main(db_path,
         if save_align:
             save_align_to_folder(base_image, 0, image_paths[0], align_folder)
 
-    total_batches = (total_images - 1) // batch_size + 1
+    if not enable_cropping or keep_edges:
+        # === Streaming tanpa cropping ===
+        with h5py.File(processor.hdf5_path, "a") as h5f:
+            for i, path in enumerate(image_paths[1:], start=1):
+                if stop_requested and stop_requested():
+                    break
 
-    if enable_cropping and not keep_edges:
+                if update_progress:
+                    update_progress(i, total_images, language_config.RUN_IMAGE_PROCESSING.format(i=i, total_images=total_images))
+
+                img_list = load_images_from_paths([path], stop_requested=stop_requested)
+                if not img_list or img_list[0] is None:
+                    continue
+
+                target_image = resize_with_padding(img_list[0], (target_h, target_w))
+                base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
+                if base_pts is None or target_pts is None:
+                    continue
+
+                compensated = processor.compensate_motion(target_image, base_pts, target_pts)
+                if compensated is None:
+                    continue
+
+                if save_align:
+                    save_align_to_folder(compensated, i, path, align_folder)
+
+                if command_save_to_hd5f:
+                    save_to_hdf5(h5f, f"image_{i}", compensated, extract_exif(path))
+
+                del img_list, target_image, compensated
+                gc.collect()
+
+            if update_progress:
+                update_progress(total_images, total_images, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
+
+    else:
+        # === Cropping global: tahap 1 - stream transformasi ===
         all_transforms = []
-        for batch_idx in range(total_batches):
+        for i, path in enumerate(image_paths[1:], start=1):
             if stop_requested and stop_requested():
                 break
 
-            start_idx = batch_idx * batch_size + 1
-            end_idx = min((batch_idx + 1) * batch_size + 1, total_images)
-            batch_paths = image_paths[start_idx:end_idx]
-            batch_images = load_images_from_paths(batch_paths, stop_requested=stop_requested)
-            if not batch_images:
+            if update_progress:
+                update_progress(i, total_images * 3, f"[1/3] Hitung transformasi {i}/{total_images}")
+
+            img_list = load_images_from_paths([path], stop_requested=stop_requested)
+            if not img_list or img_list[0] is None:
                 continue
 
-            resized_images = [resize_with_padding(img, (target_h, target_w)) for img in batch_images]
-            for i, (target_image, path) in enumerate(zip(resized_images, batch_paths), start=start_idx):
-                if stop_requested and stop_requested():
-                    break
-                if update_progress:
-                    update_progress(i, total_images * 3, f"[1/3] Hitung transformasi {i}/{total_images}")
-                base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
-                if base_pts is not None and target_pts is not None:
-                    all_transforms.append((i, path, base_pts, target_pts))
-                    
-            del batch_images, resized_images
+            target_image = resize_with_padding(img_list[0], (target_h, target_w))
+            base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
+            if base_pts is not None and target_pts is not None:
+                all_transforms.append((i, path, base_pts, target_pts))
+
+            del img_list, target_image
             gc.collect()
 
-        # === Tahap 2: Hitung Global Crop ===
-        h, w = base_image.shape[:2]
-        crop_bounds = compute_global_crop([(i, b, t) for i, _, b, t in all_transforms], total_images, w, h, transformation_type=transformation_type)
+        # === Tahap 2: Hitung dan terapkan crop global ===
+        crop_bounds = compute_global_crop(
+            [(i, b, t) for i, _, b, t in all_transforms],
+            total_images,
+            base_image.shape[1], base_image.shape[0],
+            transformation_type=transformation_type
+        )
+
         if crop_bounds is None:
             print(language_config.FAILED_TO_COMPUTE_CROP)
             return
 
-        # Simpan ulang gambar basis dengan cropping
         base_image_cropped = crop_image(base_image, crop_bounds)
-        
         del base_image
         gc.collect()
-        
+
         with h5py.File(processor.hdf5_path, "a") as h5f:
-            if command_save_to_hd5f:
-                del h5f["image_0"]
-                h5f.create_dataset("image_0", data=base_image_cropped)
+            del h5f["image_0"]
+            h5f.create_dataset("image_0", data=base_image_cropped)
             if save_align:
                 save_align_to_folder(base_image_cropped, 0, image_paths[0], align_folder)
 
-        # === Tahap 3: Proses & Simpan Gambar secara Paralel ===
+        # === Tahap 3: streaming ulang, align & simpan ===
         with h5py.File(processor.hdf5_path, "a") as h5f:
-            total_batches_crop = (len(all_transforms) - 1) // batch_size + 1
-            for batch_idx in range(total_batches_crop):
+            for i, path, base_pts, target_pts in all_transforms:
                 if stop_requested and stop_requested():
                     break
 
-                batch_slice = all_transforms[batch_idx * batch_size:(batch_idx + 1) * batch_size]
-                idxs = [i for i, _, _, _ in batch_slice]
-                paths = [path for _, path, _, _ in batch_slice]
-                base_pts_list = [base_pts for _, _, base_pts, _ in batch_slice]
-                target_pts_list = [target_pts for _, _, _, target_pts in batch_slice]
+                if update_progress:
+                    update_progress(i, total_images * 3, f"[3/3] Simpan hasil {i}/{total_images}")
 
-
-                batch_images = load_images_from_paths(paths, stop_requested=stop_requested)
-                resized_images = [resize_with_padding(img, (target_h, target_w)) for img in batch_images]
-
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    futures = []
-                    for i, img, base_pts, target_pts, path in zip(idxs, resized_images, base_pts_list, target_pts_list, paths):
-                        future = executor.submit(process_and_crop, processor, img, base_pts, target_pts, crop_bounds)
-                        futures.append((i, future, path))
-
-                    for i, future, path in futures:
-                        if stop_requested and stop_requested():
-                            break
-                        compensated = future.result()
-                        if compensated is None:
-                            continue
-                        
-                        if save_align:
-                            save_align_to_folder(compensated, i, path, align_folder)
-                        if command_save_to_hd5f:
-                            save_to_hdf5(h5f, f"image_{i}", compensated, extract_exif(path))
-                        if update_progress:
-                            update_progress(total_images + i, total_images * 3,
-                                            f"[2/3] Simpan dan kompensasi gambar {i} dari {total_images - 1}")
-
-                    del batch_images, resized_images, futures, compensated
-                    gc.collect()
-                    
-        if update_progress:
-            update_progress(total_images * 3, total_images * 3, "[3/3] Proses selesai")
-
-    else:
-        # Tanpa cropping, tetap seperti sebelumnya: langsung paralel
-        with h5py.File(processor.hdf5_path, "a") as h5f:
-            for batch_idx in range(total_batches):
-                if stop_requested and stop_requested():
-                    break
-
-                start_idx = batch_idx * batch_size + 1
-                end_idx = min((batch_idx + 1) * batch_size + 1, total_images)
-                batch_paths = image_paths[start_idx:end_idx]
-                batch_images = load_images_from_paths(batch_paths, stop_requested=stop_requested)
-                if not batch_images:
+                img_list = load_images_from_paths([path], stop_requested=stop_requested)
+                if not img_list or img_list[0] is None:
                     continue
 
-                resized_images = [resize_with_padding(img, (target_h, target_w)) for img in batch_images]
+                target_image = resize_with_padding(img_list[0], (target_h, target_w))
+                compensated = processor.compensate_motion(target_image, base_pts, target_pts)
+                if compensated is None:
+                    continue
 
-                with ThreadPoolExecutor(max_workers=4) as executor:
-                    futures = []
-                    for i, (target_image, path) in enumerate(zip(resized_images, batch_paths), start=start_idx):
-                        if stop_requested and stop_requested():
-                            break
+                cropped = crop_image(compensated, crop_bounds)
 
-                        if update_progress:
-                            update_progress(i, total_images, language_config.RUN_IMAGE_PROCESSING.format(i=i, total_images=total_images))
-                        base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
-                        if base_pts is None or target_pts is None:
-                            continue
-                        future = executor.submit(processor.compensate_motion, target_image, base_pts, target_pts)
-                        futures.append((i, future, path))
+                if save_align:
+                    save_align_to_folder(cropped, i, path, align_folder)
 
-                    for i, future, path in futures:
-                        if stop_requested and stop_requested():
-                            break
-                        compensated = future.result()
-                        if compensated is None:
-                            continue
-                        if save_align:
-                            save_align_to_folder(compensated, i, path, align_folder)
-                        if command_save_to_hd5f:
-                            save_to_hdf5(h5f, f"image_{i}", compensated, extract_exif(path))
-                            
-                    del batch_images, resized_images
-                    gc.collect()
+                if command_save_to_hd5f:
+                    save_to_hdf5(h5f, f"image_{i}", cropped, extract_exif(path))
 
-        if update_progress:
-            update_progress(total_images, total_images, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
-    
+                del img_list, target_image, compensated, cropped
+                gc.collect()
+
+            if update_progress:
+                update_progress(total_images * 3, total_images * 3, "[3/3] Proses selesai")
+   
              
 def running_orb(parent=None, single_process=None, batch_id=None):
     process_finished = False

@@ -248,12 +248,17 @@ class BatchPageLayout(QWidget):
 
     def process_all_batches(self):
         active_panels_list = list(self.active_batch_panels.values())
-        active_panels = [
-            panel for panel in active_panels_list
-            if panel and hasattr(panel, 'isWidgetType') and panel.isWidgetType() and \
-               (not hasattr(self, 'animator') or not hasattr(self.animator, '_active_fade_outs') or \
-                panel not in self.animator._active_fade_outs)
-        ]
+        active_panels = []
+        for panel in active_panels_list:
+            try:
+                if panel and hasattr(panel, 'isWidgetType') and panel.isWidgetType() and \
+                   (not hasattr(self, 'animator') or not hasattr(self.animator, '_active_fade_outs') or \
+                    panel not in self.animator._active_fade_outs):
+                    active_panels.append(panel)
+            except RuntimeError:
+                print(f"RuntimeError: Panel {panel} has been deleted.")
+            except Exception as e:
+                print(f"Unexpected error while processing panel {panel}: {e}")
 
         candidate_panels = []
         for panel in active_panels:

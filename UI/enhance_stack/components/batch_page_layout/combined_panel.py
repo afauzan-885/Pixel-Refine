@@ -696,10 +696,12 @@ class CombinedPanel(QWidget):
                 "AKAZE": lambda: running_akaze(self, single_process=False, batch_id=self.batch_id),
                 "ORB": lambda: running_orb(self, single_process=False, batch_id=self.batch_id),    
                 "No Alignment": lambda: print("[INFO] Alignment: 'No Alignment' selected, no action."),
+                "None": lambda: print("[INFO] Denoising: 'No Denoising' selected, no action."),
             },
             'super_resolution': {
                 "Interpolation": lambda: running_interpolation(self, single_process=False, batch_id=self.batch_id),
                 "No Super Resolution": lambda: print("[INFO] Super Resolution: 'No Super Resolution' selected, no action."),
+                "None": lambda: print("[INFO] Denoising: 'No Denoising' selected, no action."),
             },
             'denoising': {
                 "Average": lambda: running_average(self, single_process=False, batch_id=self.batch_id),
@@ -707,11 +709,12 @@ class CombinedPanel(QWidget):
                 "Similarity": lambda: running_similarity(self, single_process=False, batch_id=self.batch_id),
                 "Similarity V2": lambda: running_similarity_v2(self, single_process=False, batch_id=self.batch_id),
                 "No Denoising": lambda: print("[INFO] Denoising: 'No Denoising' selected, no action."),
+                "None": lambda: print("[INFO] Denoising: 'No Denoising' selected, no action."),
             }
         }
 
         category_to_json_checkbox_key = {
-            'alignment': "checkbox_alignment",
+            'alignment': "checkbox_align_images",
             'super_resolution': "checkbox_super_resolution",
             'denoising': "checkbox_denoising"
         }

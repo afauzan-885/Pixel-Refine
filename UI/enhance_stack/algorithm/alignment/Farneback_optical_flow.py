@@ -305,7 +305,13 @@ class FarnebackAlgorithm:
         except Exception as e:
             return None
 
-def main(db_path, update_progress=None, batch_size=10, stop_requested=None, single_process=None, batch_id=None):
+def main(
+    db_path,
+    update_progress=None,
+    stop_requested=None,
+    single_process=None,
+    batch_id=None
+):
     processor = FarnebackAlgorithm(db_path)
 
     # 1) Ambil daftar image_paths & set hdf5_path
@@ -324,74 +330,49 @@ def main(db_path, update_progress=None, batch_size=10, stop_requested=None, sing
         return
 
     # 2) Ekstrak metadata seluruh gambar
-    metadata_folder = os.path.join("database", "align")
-    os.makedirs(metadata_folder, exist_ok=True)
-    metadata_file = os.path.join(metadata_folder, "metadata.json")
-    extract_all_metadata(image_paths, metadata_file=metadata_file)
-
-    # 3) Load base image & tentukan target size dari base image
-    base_image_raw = load_images_from_paths([image_paths[0]], stop_requested=stop_requested)[0]
-    base_image_resized, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="median")
-    base_image = base_image_resized[0]
-    del base_image_raw, base_image_resized
-    gc.collect()
+    os.makedirs("database/align", exist_ok=True)
+    extract_all_metadata(image_paths, metadata_file=os.path.join("database", "align", "metadata.json"))
 
     total_images = len(image_paths)
-    total_batches = (total_images - 1) // batch_size + 1
 
-    # 4) Tulis base_image ke HDF5
+    # 3) Load & resize base image
+    base_img_list = load_images_from_paths([image_paths[0]], stop_requested=stop_requested)
+    if not base_img_list or base_img_list[0] is None:
+        raise RuntimeError("Base image gagal dimuat.")
+    base_image_raw = base_img_list[0]
+    base_resized_list, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="median")
+    base_image = base_resized_list[0]
+
+    # 4) Simpan base image ke HDF5
     with h5py.File(processor.hdf5_path, "w") as h5f:
         h5f.create_dataset("image_0", data=base_image)
 
-        # 5) Proses batch dengan ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = []
+    # 5) Streaming image satu per satu
+    with h5py.File(processor.hdf5_path, "a") as h5f:
+        for i, path in enumerate(image_paths[1:], start=1):
+            if stop_requested and stop_requested():
+                break
 
-            for batch_idx in range(total_batches):
-                if stop_requested and stop_requested():
-                    break
+            if update_progress:
+                update_progress(i, total_images, language_config.RUN_IMAGE_PROCESSING.format(i=i, total_images=total_images))
 
-                start_idx = batch_idx * batch_size + 1
-                end_idx = min((batch_idx + 1) * batch_size + 1, total_images)
-                batch_paths = image_paths[start_idx:end_idx]
+            img_list = load_images_from_paths([path], stop_requested=stop_requested)
+            if not img_list or img_list[0] is None:
+                continue
 
-                # Load dan resize batch image
-                batch_raw = load_images_from_paths(batch_paths, stop_requested=stop_requested)
-                batch_resized = [resize_with_padding(img, (target_h, target_w)) for img in batch_raw]
-                del batch_raw
-                gc.collect()
+            target_image = resize_with_padding(img_list[0], (target_h, target_w))
+            flow = processor.calculate_optical_flow(base_image, target_image)
+            compensated = processor.compensate_motion(target_image, flow, image_id=i)
 
-                for i, target_image in enumerate(batch_resized, start=start_idx):
-                    if stop_requested and stop_requested():
-                        break
+            if compensated is not None:
+                save_to_hdf5(h5f, f"image_{i}", compensated, extract_exif(path))
 
-                    info_message = language_config.RUN_IMAGE_PROCESSING.format(i=i, total_images=total_images)
-                    print(info_message)
-                    if update_progress:
-                        update_progress(i - 1, total_images - 1, info_message)
-
-                    # Optical flow & compensation
-                    flow = processor.calculate_optical_flow(base_image, target_image)
-                    compensated = processor.compensate_motion(target_image, flow, image_id=i)
-                    metadata = extract_exif(batch_paths[i - start_idx])
-
-                    if compensated is not None:
-                        name = f"image_{i}"
-                        futures.append(executor.submit(save_to_hdf5, h5f, name, compensated, metadata))
-
-                    # Hapus alokasi berat
-                    del flow, compensated
-                    gc.collect()
-
-                del batch_resized
-                gc.collect()
-
-            for f in futures:
-                f.result()
+            del img_list, target_image, flow, compensated
+            gc.collect()
 
     if update_progress:
-        update_progress(total_images - 1, total_images - 1, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
-       
+        update_progress(total_images, total_images, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
+
 def running_farneback_optical_flow(parent=None, single_process=None, batch_id=None):
     process_finished = False
     """
