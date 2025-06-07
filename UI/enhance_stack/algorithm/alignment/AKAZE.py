@@ -1,5 +1,6 @@
 import gc
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 import cv2
 import numpy as np
 import sqlite3
@@ -128,13 +129,13 @@ class AKAZEAlgorithm:
             return gray_norm
         return gray
 
-    def compute_features_block(self, akaze_instance, enhanced_gray_base, enhanced_gray_target, x, y, bw, bh, overlap_px, img_w, img_h):
+    def compute_features_block(self, akaze_instance, enhanced_gray_base, enhanced_gray_target, x, y, bw, bh, overlap_px, img_w, img_h, max_kps_per_block=300):
         roi_x_start = max(0, x - overlap_px)
         roi_y_start = max(0, y - overlap_px)
         roi_x_end = min(img_w, x + bw + overlap_px)
         roi_y_end = min(img_h, y + bh + overlap_px)
 
-        if roi_y_end <= roi_y_start or roi_x_end <= roi_x_start: 
+        if roi_y_end <= roi_y_start or roi_x_end <= roi_x_start:
             return [], None, [], None
 
         roi_base_enhanced = enhanced_gray_base[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
@@ -143,48 +144,47 @@ class AKAZEAlgorithm:
         kps_base, desc_base = akaze_instance.detectAndCompute(roi_base_enhanced, None)
         kps_target, desc_target = akaze_instance.detectAndCompute(roi_target_enhanced, None)
 
-        kps_base_adjusted = []
-        valid_desc_indices_base = []
-        if kps_base and desc_base is not None:
-            for idx, kp in enumerate(kps_base):
-                orig_kp_x = kp.pt[0] + roi_x_start
-                orig_kp_y = kp.pt[1] + roi_y_start
-                if x <= orig_kp_x < x + bw and y <= orig_kp_y < y + bh:
-                    if idx < len(desc_base):
-                        kp.pt = (orig_kp_x, orig_kp_y)
-                        kps_base_adjusted.append(kp)
-                        valid_desc_indices_base.append(idx)
+        def adjust_and_filter_kps(kps, descs):
+            adjusted_kps = []
+            valid_desc_indices = []
+            if kps and descs is not None:
+                for idx, kp in enumerate(kps):
+                    orig_x = kp.pt[0] + roi_x_start
+                    orig_y = kp.pt[1] + roi_y_start
+                    if x <= orig_x < x + bw and y <= orig_y < y + bh:
+                        if idx < len(descs):
+                            kp.pt = (orig_x, orig_y)
+                            adjusted_kps.append(kp)
+                            valid_desc_indices.append(idx)
+            if descs is not None and valid_desc_indices:
+                filtered_descs = descs[np.array(valid_desc_indices)]
+            else:
+                filtered_descs = None
+            return adjusted_kps, filtered_descs
 
-        kps_target_adjusted = []
-        valid_desc_indices_target = []
-        if kps_target and desc_target is not None:
-            for idx, kp in enumerate(kps_target):
-                orig_kp_x = kp.pt[0] + roi_x_start
-                orig_kp_y = kp.pt[1] + roi_y_start
-                if x <= orig_kp_x < x + bw and y <= orig_kp_y < y + bh:
-                    if idx < len(desc_target):
-                        kp.pt = (orig_kp_x, orig_kp_y)
-                        kps_target_adjusted.append(kp)
-                        valid_desc_indices_target.append(idx)
+        kps_base_adjusted, final_desc_base = adjust_and_filter_kps(kps_base, desc_base)
+        kps_target_adjusted, final_desc_target = adjust_and_filter_kps(kps_target, desc_target)
 
-        # Gunakan numpy indexing untuk ambil deskriptor yang valid
-        final_desc_base = desc_base[np.array(valid_desc_indices_base)] if desc_base is not None and valid_desc_indices_base else None
-        final_desc_target = desc_target[np.array(valid_desc_indices_target)] if desc_target is not None and valid_desc_indices_target else None
+        def select_top_k(kps, descs, k):
+            if descs is None or len(kps) == 0:
+                return [], None
+            if len(kps) <= k:
+                return kps, descs
+            sorted_idx = np.argsort([-kp.response for kp in kps])[:k]
+            return [kps[i] for i in sorted_idx], descs[sorted_idx]
 
-        if final_desc_base is not None and len(kps_base_adjusted) != len(final_desc_base):
-            print(f"Warning: Mismatch base keypoints ({len(kps_base_adjusted)}) vs descriptors ({len(final_desc_base)}) after filtering.")
-
-        if final_desc_target is not None and len(kps_target_adjusted) != len(final_desc_target):
-            print(f"Warning: Mismatch target keypoints ({len(kps_target_adjusted)}) vs descriptors ({len(final_desc_target)}) after filtering.")
+        kps_base_adjusted, final_desc_base = select_top_k(kps_base_adjusted, final_desc_base, max_kps_per_block)
+        kps_target_adjusted, final_desc_target = select_top_k(kps_target_adjusted, final_desc_target, max_kps_per_block)
 
         return kps_base_adjusted, final_desc_base, kps_target_adjusted, final_desc_target
-
+    
     def calculate_global_motion(self, base_image, target_image, config_filename=None, num_blocks=(3, 3), overlap=20, stop_requested=None):
         if stop_requested and stop_requested():
             return None, None
 
         akaze_config = self.load_akaze_config(config_filename)
         use_multicore = akaze_config.get("use_multi_core", True)
+        max_kps_per_block = 300
 
         try:
             base_gray = self.prepare_gray_akaze(base_image)
@@ -202,8 +202,6 @@ class AKAZEAlgorithm:
 
         h, w = base_gray.shape
         blocks_x, blocks_y = num_blocks
-        blocks_x = max(1, blocks_x)
-        blocks_y = max(1, blocks_y)
         block_w = max(1, w // blocks_x)
         block_h = max(1, h // blocks_y)
 
@@ -226,134 +224,112 @@ class AKAZEAlgorithm:
         def process_block(i, j):
             x = i * block_w
             y = j * block_h
-            current_bw = w - x if i == blocks_x - 1 else block_w
-            current_bh = h - y if j == blocks_y - 1 else block_h
-            current_bw = max(1, current_bw)
-            current_bh = max(1, current_bh)
+            bw = w - x if i == blocks_x - 1 else block_w
+            bh = h - y if j == blocks_y - 1 else block_h
             return self.compute_features_block(
-                akaze,
-                enhanced_base_gray,
-                enhanced_target_gray,
-                x, y, current_bw, current_bh,
-                overlap, w, h
+                akaze, enhanced_base_gray, enhanced_target_gray,
+                x, y, bw, bh, overlap, w, h, max_kps_per_block=max_kps_per_block
             )
 
-        if use_multicore:
-            futures = []
-            try:
-                max_workers = os.cpu_count() or 4
-                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    for i in range(blocks_x):
-                        for j in range(blocks_y):
-                            if stop_requested and stop_requested():
-                                return None, None
-                            futures.append(executor.submit(process_block, i, j))
-
+        try:
+            if use_multicore:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as executor:
+                    futures = [executor.submit(process_block, i, j)
+                            for i in range(blocks_x) for j in range(blocks_y)]
                     for future in concurrent.futures.as_completed(futures):
                         if stop_requested and stop_requested():
-                            for f in futures:
-                                f.cancel()
                             return None, None
                         try:
-                            kps_base, desc_base, kps_target, desc_target = future.result()
-                            if desc_base is not None and len(kps_base) > 0:
-                                keypoints_base_all.extend(kps_base)
-                                descriptors_base_list.append(desc_base)
-                            if desc_target is not None and len(kps_target) > 0:
-                                keypoints_target_all.extend(kps_target)
-                                descriptors_target_list.append(desc_target)
+                            kpb, db, kpt, dt = future.result()
+                            if db is not None and len(kpb) > 0:
+                                keypoints_base_all.extend(kpb)
+                                descriptors_base_list.append(db)
+                            if dt is not None and len(kpt) > 0:
+                                keypoints_target_all.extend(kpt)
+                                descriptors_target_list.append(dt)
                         except Exception as e:
                             print(f"Error in block processing: {e}")
-            except Exception as e:
-                print(f"ThreadPool execution error: {e}")
-                return None, None
-        else:
-            for i in range(blocks_x):
-                for j in range(blocks_y):
-                    if stop_requested and stop_requested():
-                        return None, None
-                    try:
-                        kps_base, desc_base, kps_target, desc_target = process_block(i, j)
-                        if desc_base is not None and len(kps_base) > 0:
-                            keypoints_base_all.extend(kps_base)
-                            descriptors_base_list.append(desc_base)
-                        if desc_target is not None and len(kps_target) > 0:
-                            keypoints_target_all.extend(kps_target)
-                            descriptors_target_list.append(desc_target)
-                    except Exception:
-                        continue
+            else:
+                for i in range(blocks_x):
+                    for j in range(blocks_y):
+                        if stop_requested and stop_requested():
+                            return None, None
+                        kpb, db, kpt, dt = process_block(i, j)
+                        if db is not None and len(kpb) > 0:
+                            keypoints_base_all.extend(kpb)
+                            descriptors_base_list.append(db)
+                        if dt is not None and len(kpt) > 0:
+                            keypoints_target_all.extend(kpt)
+                            descriptors_target_list.append(dt)
+        except Exception as e:
+            print(f"ThreadPool execution error: {e}")
+            return None, None
 
         if not descriptors_base_list or not descriptors_target_list:
             return None, None
 
         try:
             descriptor_size = akaze.getDescriptorSize()
-            descriptors_base_all = np.vstack(descriptors_base_list) if descriptors_base_list else np.array([], dtype=np.uint8).reshape(0, descriptor_size)
-            descriptors_target_all = np.vstack(descriptors_target_list) if descriptors_target_list else np.array([], dtype=np.uint8).reshape(0, descriptor_size)
+            descriptors_base_all = np.vstack(descriptors_base_list)
+            descriptors_target_all = np.vstack(descriptors_target_list)
 
-            if len(keypoints_base_all) != descriptors_base_all.shape[0]:
-                print(f"CRITICAL: Final mismatch base keypoints ({len(keypoints_base_all)}) vs descriptors ({descriptors_base_all.shape[0]}).")
+            if len(keypoints_base_all) != descriptors_base_all.shape[0] or \
+            len(keypoints_target_all) != descriptors_target_all.shape[0]:
+                print("CRITICAL: Mismatch between keypoints and descriptors after filtering.")
                 return None, None
-            if len(keypoints_target_all) != descriptors_target_all.shape[0]:
-                print(f"CRITICAL: Final mismatch target keypoints ({len(keypoints_target_all)}) vs descriptors ({descriptors_target_all.shape[0]}).")
-                return None, None
-
-        except ValueError as e:
-            print(f"Error stacking descriptors: {e}")
+        except Exception as e:
+            print(f"Descriptor stack error: {e}")
             return None, None
 
         if descriptors_base_all.shape[0] == 0 or descriptors_target_all.shape[0] == 0:
-            print("No descriptors available for matching.")
             return None, None
 
-        # --- BATASI keypoints & descriptors ke 500 terbaik berdasar response ---
-        def select_top_k(keypoints, descriptors, max_k=500):
-            if len(keypoints) <= max_k:
-                return keypoints, descriptors
-            # Sort berdasarkan response, descending
-            sorted_indices = np.argsort([-kp.response for kp in keypoints])[:max_k]
-            selected_kps = [keypoints[i] for i in sorted_indices]
-            selected_desc = descriptors[sorted_indices]
-            return selected_kps, selected_desc
+        def select_top_k(kps, descs, k):
+            if len(kps) <= k:
+                return kps, descs
+            idx = np.argsort([-kp.response for kp in kps])[:k]
+            return [kps[i] for i in idx], descs[idx]
 
         keypoints_base_all, descriptors_base_all = select_top_k(keypoints_base_all, descriptors_base_all, 500)
         keypoints_target_all, descriptors_target_all = select_top_k(keypoints_target_all, descriptors_target_all, 500)
 
-        # ------- MATCHING ---------
-        base_points = None
-        target_points = None
         try:
-            FLANN_INDEX_LSH = 6
-            index_params = dict(algorithm=FLANN_INDEX_LSH,
-                                table_number=6,
-                                key_size=12,
-                                multi_probe_level=1)
-            search_params = dict(checks=50)
-            flann = cv2.FlannBasedMatcher(index_params, search_params)
-
-            ratio_threshold = 0.6 if len(keypoints_base_all) < 500 else 0.75
-
+            flann = cv2.FlannBasedMatcher(
+                dict(algorithm=6, table_number=6, key_size=12, multi_probe_level=1),
+                dict(checks=50)
+            )
             matches = flann.knnMatch(descriptors_base_all, descriptors_target_all, k=2)
+            ratio_thresh = 0.75
+            good_matches = [m for m, n in matches if m.distance < ratio_thresh * n.distance] if all(len(mn) == 2 for mn in matches) else []
 
-            good_matches = []
-            for m_n in matches:
-                if len(m_n) != 2:
-                    continue
-                m, n = m_n
-                if m.distance < ratio_threshold * n.distance:
-                    good_matches.append(m)
-
-            if len(good_matches) == 0:
-                print("No good matches found.")
+            if len(good_matches) < akaze_config.get("min_matches_for_transform", 10):
                 return None, None
 
-            base_points = np.float32([keypoints_base_all[m.queryIdx].pt for m in good_matches])
-            target_points = np.float32([keypoints_target_all[m.trainIdx].pt for m in good_matches])
+            good_matches = sorted(good_matches, key=lambda m: m.distance)[:akaze_config.get("max_keypoints_used", 500)]
+            pts_base = np.float32([keypoints_base_all[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+            pts_target = np.float32([keypoints_target_all[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+
+            try:
+                refined_pts_target, status, _ = cv2.calcOpticalFlowPyrLK(
+                    enhanced_base_gray, enhanced_target_gray, pts_base, pts_target,
+                    winSize=(15, 15), maxLevel=3,
+                    criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
+                )
+                status = status.reshape(-1)
+                pts_base = pts_base[status == 1].reshape(-1, 2)
+                pts_target = refined_pts_target[status == 1].reshape(-1, 2)
+                if len(pts_base) < akaze_config.get("min_matches_for_transform", 10):
+                    return None, None
+            except Exception:
+                pts_base = pts_base.reshape(-1, 2)
+                pts_target = pts_target.reshape(-1, 2)
+
         except Exception as e:
-            print(f"Error during matching: {e}")
+            print(f"Matching error: {e}")
             return None, None
 
-        return base_points, target_points
+        return pts_base, pts_target
+
     
     def compensate_motion(self, base_image, base_points, target_points, config_filename=None):
         """
@@ -363,7 +339,7 @@ class AKAZEAlgorithm:
         if base_points is None or target_points is None:
              return None
 
-        config = self.load_akaze_config(config_filename) # Gunakan config ORB
+        config = self.load_akaze_config(config_filename)
         keep_edges = config.get("keep_edges", False)
         transformation_type = config.get("transformation", "affine")
         ransac_threshold = config.get("ransacThreshold", 5.0)
@@ -402,9 +378,8 @@ class AKAZEAlgorithm:
              return None
         except Exception as e:
              return None
-        # -------------------------------------------------
 
-        # --- Hitung batas pergeseran (sama) ---
+        # --- Hitung batas pergeseran---
         corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(-1, 1, 2)
         try:
             if transformation_type == 'homography':
@@ -418,7 +393,7 @@ class AKAZEAlgorithm:
                      return None
                  transformed_corners = cv2.transform(corners, matrix)
 
-            if transformed_corners is None: # Cek hasil transform
+            if transformed_corners is None:
                  return None
 
             transformed_corners = transformed_corners.reshape(-1, 2)
@@ -426,9 +401,7 @@ class AKAZEAlgorithm:
             max_x, max_y = transformed_corners.max(axis=0)
         except Exception as e:
              return None
-        # ------------------------------------
-
-        # --- Warping ---
+        
         try:
             if not keep_edges:
                 interpolation_flag = cv2.INTER_CUBIC 
@@ -470,7 +443,8 @@ class AKAZEAlgorithm:
         except cv2.error as cv_err:
              return None
         except Exception as e:
-             return None
+             return None   
+
 def main(db_path,
          update_progress=None,
          stop_requested=None,
@@ -480,10 +454,10 @@ def main(db_path,
          save_align=None,
          align_folder=None,
          command_save_to_hd5f=None):
-
+    
     processor = AKAZEAlgorithm(db_path)
     config = processor.load_akaze_config(config_filename)
-
+    
     save_align = save_align if save_align is not None else config.get("save_align", False)
     command_save_to_hd5f = command_save_to_hd5f if command_save_to_hd5f is not None else config.get("command_save_to_hd5f", True)
     align_folder = align_folder if align_folder is not None else config.get(
@@ -493,6 +467,9 @@ def main(db_path,
     enable_cropping = config.get("enable_cropping", False)
     keep_edges = config.get("keep_edges", False)
     transformation_type = config.get("transformation", "affine")
+    
+    progress_counter = {"count": 1 if not enable_cropping or keep_edges else 0}  # 1 untuk image_0 jika no cropping
+    progress_lock = threading.Lock()
 
     if single_process:
         image_paths = get_all_image_paths_for_single_process(db_path)
@@ -521,68 +498,81 @@ def main(db_path,
     base_resized_list, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="median")
     base_image = base_resized_list[0]
 
+    lock = threading.Lock()
     with h5py.File(processor.hdf5_path, "w") as h5f:
         if command_save_to_hd5f:
             h5f.create_dataset("image_0", data=base_image)
         if save_align:
             save_align_to_folder(base_image, 0, image_paths[0], align_folder)
 
-    if not enable_cropping or keep_edges:
-        # === Streaming tanpa cropping ===
-        with h5py.File(processor.hdf5_path, "a") as h5f:
-            for i, path in enumerate(image_paths[1:], start=1):
-                if stop_requested and stop_requested():
-                    break
+    def process_image(i, path, return_transform=False):
+        if stop_requested and stop_requested():
+            return None
 
-                if update_progress:
-                    update_progress(i, total_images, language_config.RUN_IMAGE_PROCESSING.format(i=i, total_images=total_images))
+        img_list = load_images_from_paths([path], stop_requested=stop_requested)
+        if not img_list or img_list[0] is None:
+            return None
 
-                img_list = load_images_from_paths([path], stop_requested=stop_requested)
-                if not img_list or img_list[0] is None:
-                    continue
+        target_image = resize_with_padding(img_list[0], (target_h, target_w))
+        base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
+        if base_pts is None or target_pts is None:
+            return None
 
-                target_image = resize_with_padding(img_list[0], (target_h, target_w))
-                base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
-                if base_pts is None or target_pts is None:
-                    continue
+        compensated = processor.compensate_motion(target_image, base_pts, target_pts)
+        if compensated is None:
+            return None
 
-                compensated = processor.compensate_motion(target_image, base_pts, target_pts)
-                if compensated is None:
-                    continue
+        if enable_cropping and not keep_edges and return_transform:
+            return (i, path, base_pts, target_pts)
 
-                if save_align:
-                    save_align_to_folder(compensated, i, path, align_folder)
+        if enable_cropping and not keep_edges:
+            return None
 
-                if command_save_to_hd5f:
+        if save_align:
+            save_align_to_folder(compensated, i, path, align_folder)
+
+        if command_save_to_hd5f:
+            with lock:
+                with h5py.File(processor.hdf5_path, "a") as h5f:
                     save_to_hdf5(h5f, f"image_{i}", compensated, extract_exif(path))
 
-                del img_list, target_image, compensated
-                gc.collect()
-
-            if update_progress:
-                update_progress(total_images, total_images, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
-
+        return None
+    num_threads = 3 # os.cpu_count() or 4   Default to 4 if os.cpu_count() returns None
+    if not enable_cropping or keep_edges:
+        # === Streaming tanpa cropping ===
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = {executor.submit(process_image, i, path): (i, path) for i, path in enumerate(image_paths[1:], start=1)}
+            for future in as_completed(futures):
+                i, path = futures[future]
+                with progress_lock:
+                    progress_counter["count"] += 1
+                    if update_progress:
+                        update_progress(
+                            progress_counter["count"],
+                            total_images,
+                            language_config.RUN_IMAGE_PROCESSING.format(
+                                i=progress_counter["count"],
+                                total_images=total_images
+                            )
+                        )
     else:
-        # === Cropping global: tahap 1 - stream transformasi ===
+        # === Global cropping (tahap 1 - hitung transformasi) ===
         all_transforms = []
-        for i, path in enumerate(image_paths[1:], start=1):
-            if stop_requested and stop_requested():
-                break
-
-            if update_progress:
-                update_progress(i, total_images * 3, f"[1/3] Hitung transformasi {i}/{total_images}")
-
-            img_list = load_images_from_paths([path], stop_requested=stop_requested)
-            if not img_list or img_list[0] is None:
-                continue
-
-            target_image = resize_with_padding(img_list[0], (target_h, target_w))
-            base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
-            if base_pts is not None and target_pts is not None:
-                all_transforms.append((i, path, base_pts, target_pts))
-
-            del img_list, target_image
-            gc.collect()
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = {executor.submit(process_image, i, path, return_transform=True): (i, path)
+                       for i, path in enumerate(image_paths[1:], start=1)}
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    all_transforms.append(result)
+                with progress_lock:
+                    progress_counter["count"] += 1
+                    if update_progress:
+                        update_progress(
+                            progress_counter["count"],
+                            total_images * 3,
+                            f"[1/3] Hitung transformasi {progress_counter['count']}/{total_images}"
+                        )
 
         # === Tahap 2: Hitung dan terapkan crop global ===
         crop_bounds = compute_global_crop(
@@ -606,38 +596,49 @@ def main(db_path,
             if save_align:
                 save_align_to_folder(base_image_cropped, 0, image_paths[0], align_folder)
 
-        # === Tahap 3: streaming ulang, align & simpan ===
-        with h5py.File(processor.hdf5_path, "a") as h5f:
-            for i, path, base_pts, target_pts in all_transforms:
-                if stop_requested and stop_requested():
-                    break
+        # === Tahap 3: streaming ulang, align dan simpan hasil crop ===
+        def apply_transform_and_save(i, path, base_pts, target_pts):
+            img_list = load_images_from_paths([path], stop_requested=stop_requested)
+            if not img_list or img_list[0] is None:
+                return
 
-                if update_progress:
-                    update_progress(i, total_images * 3, f"[3/3] Simpan hasil {i}/{total_images}")
+            target_image = resize_with_padding(img_list[0], (target_h, target_w))
+            compensated = processor.compensate_motion(target_image, base_pts, target_pts)
+            if compensated is None:
+                return
 
-                img_list = load_images_from_paths([path], stop_requested=stop_requested)
-                if not img_list or img_list[0] is None:
-                    continue
+            cropped = crop_image(compensated, crop_bounds)
 
-                target_image = resize_with_padding(img_list[0], (target_h, target_w))
-                compensated = processor.compensate_motion(target_image, base_pts, target_pts)
-                if compensated is None:
-                    continue
+            if save_align:
+                save_align_to_folder(cropped, i, path, align_folder)
 
-                cropped = crop_image(compensated, crop_bounds)
+            if command_save_to_hd5f:
+                with lock:
+                    with h5py.File(processor.hdf5_path, "a") as h5f:
+                        save_to_hdf5(h5f, f"image_{i}", cropped, extract_exif(path))
 
-                if save_align:
-                    save_align_to_folder(cropped, i, path, align_folder)
+            del img_list, target_image, compensated, cropped
+            gc.collect()
 
-                if command_save_to_hd5f:
-                    save_to_hdf5(h5f, f"image_{i}", cropped, extract_exif(path))
+        stage3_counter = {"count": 0}
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {executor.submit(apply_transform_and_save, i, path, b, t): (i, path)
+                    for i, path, b, t in all_transforms}
+            for future in as_completed(futures):
+                future.result()
+                with progress_lock:
+                    stage3_counter["count"] += 1
+                    if update_progress:
+                        update_progress(
+                            total_images * 2 + stage3_counter["count"],  # Mulai dari 2/3 progres
+                            total_images * 3,
+                            f"[2/3] Simpan hasil {stage3_counter['count']}/{total_images}"
+                        )
 
-                del img_list, target_image, compensated, cropped
-                gc.collect()
 
-            if update_progress:
-                update_progress(total_images * 3, total_images * 3, "[3/3] Proses selesai")
-   
+        if update_progress:
+            update_progress(total_images * 3, total_images * 3, "[3/3] Proses selesai")
+ 
 def running_akaze(parent=None, single_process=None, batch_id=None):
     process_finished = False
     """

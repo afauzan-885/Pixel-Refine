@@ -1,6 +1,7 @@
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import gc
 import json
+import threading
 import cv2
 import numpy as np
 import sqlite3
@@ -114,7 +115,6 @@ class ORBAlgorithm:
              config_data["clahe_tileGridSize"] = (8, 8)
 
         return config_data
-
 
     def calculate_global_motion(self, base_image, target_image, config_filename=None, stop_requested=None):
         """
@@ -234,22 +234,56 @@ class ORBAlgorithm:
                             if m.distance < ratio_thresh * n.distance:
                                 good_matches.append(m)
                     
-                # --- 7. Ekstrak titik-titik yang cocok ---
-                min_matches_req = int(orb_config.get("min_matches_for_transform", 10)) # Ambil dari config
+                # --- 7. Ekstrak titik-titik yang cocok, maksimum 500 keypoint terbaik ---
+                min_matches_req = int(orb_config.get("min_matches_for_transform", 10))
+                max_keypoints_used = 500
+
                 if len(good_matches) >= min_matches_req:
                     try:
-                        base_points_list = [keypoints_base[m.queryIdx].pt for m in good_matches]
-                        target_points_list = [keypoints_target[m.trainIdx].pt for m in good_matches]
+                        # Urutkan berdasarkan jarak (semakin kecil = semakin bagus)
+                        good_matches_sorted = sorted(good_matches, key=lambda m: m.distance)
 
-                        # Konversi ke format NumPy yang benar (N, 1, 2)
-                        base_points = np.float32(base_points_list).reshape(-1, 1, 2)
-                        target_points = np.float32(target_points_list).reshape(-1, 1, 2)
+                        # Ambil hanya maksimum 500 terbaik
+                        limited_matches = good_matches_sorted[:min(len(good_matches_sorted), max_keypoints_used)]
+
+                        base_points_list = [keypoints_base[m.queryIdx].pt for m in limited_matches]
+                        target_points_list = [keypoints_target[m.trainIdx].pt for m in limited_matches]
+
+                        # Konversi ke format NumPy (N, 1, 2)
+                        base_points_np = np.float32(base_points_list).reshape(-1, 1, 2)
+                        target_points_np = np.float32(target_points_list).reshape(-1, 1, 2)
+
+                        # --- Refinement menggunakan Optical Flow LK ---
+                        try:
+                            refined_target_points, status, err = cv2.calcOpticalFlowPyrLK(
+                                base_gray_enhanced, target_gray_enhanced,
+                                base_points_np, target_points_np,
+                                winSize=(15, 15),
+                                maxLevel=3,
+                                criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
+                            )
+
+                            # Filter hanya yang berhasil (status == 1)
+                            status = status.reshape(-1)
+                            base_points = base_points_np[status == 1]
+                            target_points = refined_target_points[status == 1]
+
+                            base_points = base_points.reshape(-1, 1, 2)
+                            target_points = target_points.reshape(-1, 1, 2)
+                        except Exception as e:
+                            print(f"Refinement with optical flow failed: {e}")
+                            base_points = base_points_np
+                            target_points = target_points_np
+
                     except IndexError as e:
-                        base_points = None; target_points = None
+                        base_points = None
+                        target_points = None
                     except Exception as e:
-                         base_points = None; target_points = None
+                        base_points = None
+                        target_points = None
                 else:
                     print(f"Not enough good matches found ({len(good_matches)} < {min_matches_req}) to estimate transform.")
+
 
             except cv2.error as cv_err:
                  base_points = None; target_points = None
@@ -269,7 +303,7 @@ class ORBAlgorithm:
         if base_points is None or target_points is None:
              return None
 
-        config = self.load_orb_config(config_filename) # Gunakan config ORB
+        config = self.load_orb_config(config_filename)
         keep_edges = config.get("keep_edges", False)
         transformation_type = config.get("transformation", "affine")
         ransac_threshold = config.get("ransacThreshold", 5.0)
@@ -324,7 +358,7 @@ class ORBAlgorithm:
                      return None
                  transformed_corners = cv2.transform(corners, matrix)
 
-            if transformed_corners is None: # Cek hasil transform
+            if transformed_corners is None:
                  return None
 
             transformed_corners = transformed_corners.reshape(-1, 2)
@@ -377,6 +411,7 @@ class ORBAlgorithm:
              return None
         except Exception as e:
              return None   
+
 def main(db_path,
          update_progress=None,
          stop_requested=None,
@@ -386,10 +421,10 @@ def main(db_path,
          save_align=None,
          align_folder=None,
          command_save_to_hd5f=None):
-
+    
     processor = ORBAlgorithm(db_path)
     config = processor.load_orb_config(config_filename)
-
+    
     save_align = save_align if save_align is not None else config.get("save_align", False)
     command_save_to_hd5f = command_save_to_hd5f if command_save_to_hd5f is not None else config.get("command_save_to_hd5f", True)
     align_folder = align_folder if align_folder is not None else config.get(
@@ -399,6 +434,9 @@ def main(db_path,
     enable_cropping = config.get("enable_cropping", False)
     keep_edges = config.get("keep_edges", False)
     transformation_type = config.get("transformation", "affine")
+    
+    progress_counter = {"count": 1 if not enable_cropping or keep_edges else 0}  # 1 untuk image_0 jika no cropping
+    progress_lock = threading.Lock()
 
     if single_process:
         image_paths = get_all_image_paths_for_single_process(db_path)
@@ -427,68 +465,81 @@ def main(db_path,
     base_resized_list, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="median")
     base_image = base_resized_list[0]
 
+    lock = threading.Lock()
     with h5py.File(processor.hdf5_path, "w") as h5f:
         if command_save_to_hd5f:
             h5f.create_dataset("image_0", data=base_image)
         if save_align:
             save_align_to_folder(base_image, 0, image_paths[0], align_folder)
 
-    if not enable_cropping or keep_edges:
-        # === Streaming tanpa cropping ===
-        with h5py.File(processor.hdf5_path, "a") as h5f:
-            for i, path in enumerate(image_paths[1:], start=1):
-                if stop_requested and stop_requested():
-                    break
+    def process_image(i, path, return_transform=False):
+        if stop_requested and stop_requested():
+            return None
 
-                if update_progress:
-                    update_progress(i, total_images, language_config.RUN_IMAGE_PROCESSING.format(i=i, total_images=total_images))
+        img_list = load_images_from_paths([path], stop_requested=stop_requested)
+        if not img_list or img_list[0] is None:
+            return None
 
-                img_list = load_images_from_paths([path], stop_requested=stop_requested)
-                if not img_list or img_list[0] is None:
-                    continue
+        target_image = resize_with_padding(img_list[0], (target_h, target_w))
+        base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
+        if base_pts is None or target_pts is None:
+            return None
 
-                target_image = resize_with_padding(img_list[0], (target_h, target_w))
-                base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
-                if base_pts is None or target_pts is None:
-                    continue
+        compensated = processor.compensate_motion(target_image, base_pts, target_pts)
+        if compensated is None:
+            return None
 
-                compensated = processor.compensate_motion(target_image, base_pts, target_pts)
-                if compensated is None:
-                    continue
+        if enable_cropping and not keep_edges and return_transform:
+            return (i, path, base_pts, target_pts)
 
-                if save_align:
-                    save_align_to_folder(compensated, i, path, align_folder)
+        if enable_cropping and not keep_edges:
+            return None
 
-                if command_save_to_hd5f:
+        if save_align:
+            save_align_to_folder(compensated, i, path, align_folder)
+
+        if command_save_to_hd5f:
+            with lock:
+                with h5py.File(processor.hdf5_path, "a") as h5f:
                     save_to_hdf5(h5f, f"image_{i}", compensated, extract_exif(path))
 
-                del img_list, target_image, compensated
-                gc.collect()
-
-            if update_progress:
-                update_progress(total_images, total_images, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
-
+        return None
+    num_threads = os.cpu_count() or 4  # Default to 4 if os.cpu_count() returns None
+    if not enable_cropping or keep_edges:
+        # === Streaming tanpa cropping ===
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = {executor.submit(process_image, i, path): (i, path) for i, path in enumerate(image_paths[1:], start=1)}
+            for future in as_completed(futures):
+                i, path = futures[future]
+                with progress_lock:
+                    progress_counter["count"] += 1
+                    if update_progress:
+                        update_progress(
+                            progress_counter["count"],
+                            total_images,
+                            language_config.RUN_IMAGE_PROCESSING.format(
+                                i=progress_counter["count"],
+                                total_images=total_images
+                            )
+                        )
     else:
-        # === Cropping global: tahap 1 - stream transformasi ===
+        # === Global cropping (tahap 1 - hitung transformasi) ===
         all_transforms = []
-        for i, path in enumerate(image_paths[1:], start=1):
-            if stop_requested and stop_requested():
-                break
-
-            if update_progress:
-                update_progress(i, total_images * 3, f"[1/3] Hitung transformasi {i}/{total_images}")
-
-            img_list = load_images_from_paths([path], stop_requested=stop_requested)
-            if not img_list or img_list[0] is None:
-                continue
-
-            target_image = resize_with_padding(img_list[0], (target_h, target_w))
-            base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
-            if base_pts is not None and target_pts is not None:
-                all_transforms.append((i, path, base_pts, target_pts))
-
-            del img_list, target_image
-            gc.collect()
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = {executor.submit(process_image, i, path, return_transform=True): (i, path)
+                       for i, path in enumerate(image_paths[1:], start=1)}
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    all_transforms.append(result)
+                with progress_lock:
+                    progress_counter["count"] += 1
+                    if update_progress:
+                        update_progress(
+                            progress_counter["count"],
+                            total_images * 3,
+                            f"[1/3] Hitung transformasi {progress_counter['count']}/{total_images}"
+                        )
 
         # === Tahap 2: Hitung dan terapkan crop global ===
         crop_bounds = compute_global_crop(
@@ -512,37 +563,48 @@ def main(db_path,
             if save_align:
                 save_align_to_folder(base_image_cropped, 0, image_paths[0], align_folder)
 
-        # === Tahap 3: streaming ulang, align & simpan ===
-        with h5py.File(processor.hdf5_path, "a") as h5f:
-            for i, path, base_pts, target_pts in all_transforms:
-                if stop_requested and stop_requested():
-                    break
+        # === Tahap 3: streaming ulang, align dan simpan hasil crop ===
+        def apply_transform_and_save(i, path, base_pts, target_pts):
+            img_list = load_images_from_paths([path], stop_requested=stop_requested)
+            if not img_list or img_list[0] is None:
+                return
 
-                if update_progress:
-                    update_progress(i, total_images * 3, f"[3/3] Simpan hasil {i}/{total_images}")
+            target_image = resize_with_padding(img_list[0], (target_h, target_w))
+            compensated = processor.compensate_motion(target_image, base_pts, target_pts)
+            if compensated is None:
+                return
 
-                img_list = load_images_from_paths([path], stop_requested=stop_requested)
-                if not img_list or img_list[0] is None:
-                    continue
+            cropped = crop_image(compensated, crop_bounds)
 
-                target_image = resize_with_padding(img_list[0], (target_h, target_w))
-                compensated = processor.compensate_motion(target_image, base_pts, target_pts)
-                if compensated is None:
-                    continue
+            if save_align:
+                save_align_to_folder(cropped, i, path, align_folder)
 
-                cropped = crop_image(compensated, crop_bounds)
+            if command_save_to_hd5f:
+                with lock:
+                    with h5py.File(processor.hdf5_path, "a") as h5f:
+                        save_to_hdf5(h5f, f"image_{i}", cropped, extract_exif(path))
 
-                if save_align:
-                    save_align_to_folder(cropped, i, path, align_folder)
+            del img_list, target_image, compensated, cropped
+            gc.collect()
 
-                if command_save_to_hd5f:
-                    save_to_hdf5(h5f, f"image_{i}", cropped, extract_exif(path))
+        stage3_counter = {"count": 0}
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {executor.submit(apply_transform_and_save, i, path, b, t): (i, path)
+                    for i, path, b, t in all_transforms}
+            for future in as_completed(futures):
+                future.result()
+                with progress_lock:
+                    stage3_counter["count"] += 1
+                    if update_progress:
+                        update_progress(
+                            total_images * 2 + stage3_counter["count"],  # Mulai dari 2/3 progres
+                            total_images * 3,
+                            f"[2/3] Simpan hasil {stage3_counter['count']}/{total_images}"
+                        )
 
-                del img_list, target_image, compensated, cropped
-                gc.collect()
 
-            if update_progress:
-                update_progress(total_images * 3, total_images * 3, "[3/3] Proses selesai")
+        if update_progress:
+            update_progress(total_images * 3, total_images * 3, "[3/3] Proses selesai")
    
              
 def running_orb(parent=None, single_process=None, batch_id=None):
