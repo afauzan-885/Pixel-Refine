@@ -221,11 +221,13 @@ def general_page():
             except Exception as e_update:
                  QMessageBox.warning(general_tab, "Update Warning", f"General settings saved, but an error occurred during algorithm settings update... Error: {e_update}")
 
-        # Cek perubahan bahasa dan thumbnail
+        # Cek perubahan yang butuh restart
         language_changed = (new_language.lower() != initial_language.lower())
         thumbnail_setting_changed = (new_thumbnail_setting != initial_thumbnail_setting)
 
-        if language_changed or thumbnail_setting_changed:
+        needs_restart = language_changed or thumbnail_setting_changed
+
+        if needs_restart:
             msg_box = QMessageBox()
             restart_title = getattr(language_config, 'RESTART_APPLICATION_REQUIRED', "Restart Required")
             restart_desc = getattr(language_config, 'RESTART_APPLICATION_DESCRIPTION', "Changes require application restart.")
@@ -249,7 +251,6 @@ def general_page():
                     getattr(language_config, 'SETTINGS_SAVED', "Settings saved successfully!")
                 )
 
-            
     def restart_application():
         """Fungsi untuk merestart aplikasi baik saat dev maupun saat dibungkus Nuitka."""
         try:

@@ -19,6 +19,7 @@ namespace MotionMetricsConfig
     constexpr float GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD = 1e-6f;
     constexpr float GRADIENT_WEIGHT_FACTOR = 1.3f;
     constexpr float MAD_TO_SIGMA_FACTOR = 1.4826f;
+    constexpr int CONFIDENCE_MAP_BLUR_KERNEL_SIZE = 3;
 }
 
 extern "C"
@@ -38,6 +39,7 @@ extern "C"
         float noise_offset_factor)
     {
         using namespace MotionMetricsConfig;
+
         if (!final_image_sum_ptr || !weight_map_sum_ptr || !current_image_ptr || !reference_image_ptr || !base_window_ptr ||
             !row_starts || !col_starts || h_img <= 0 || w_img <= 0 || tile_h <= 0 || tile_w <= 0 || channels <= 0 ||
             (block_h <= 0 && tile_h > 0 && block_w > 0) ||
@@ -45,8 +47,7 @@ extern "C"
             return;
 
         int mat_type_color = CV_32FC(channels);
-        if (mat_type_color == 0 && channels > 0)
-            return;
+        if (mat_type_color == 0 && channels > 0) return;
 
         cv::Mat final_image_sum_mat(h_img, w_img, mat_type_color, final_image_sum_ptr);
         cv::Mat weight_map_sum_mat(h_img, w_img, CV_32FC1, weight_map_sum_ptr);
@@ -54,88 +55,44 @@ extern "C"
         const cv::Mat reference_image_mat(h_img, w_img, mat_type_color, const_cast<float *>(reference_image_ptr));
 
         cv::Mat current_image_gray_full, reference_image_gray_full;
-        if (current_image_mat.channels() > 1)
-        {
+        if (current_image_mat.channels() > 1) {
             cv::Mat tmp;
             cv::cvtColor(current_image_mat, tmp, cv::COLOR_BGR2GRAY);
             tmp.convertTo(current_image_gray_full, CV_32F);
-        }
-        else
-        {
+        } else {
             current_image_mat.convertTo(current_image_gray_full, CV_32F);
         }
 
-        if (reference_image_mat.channels() > 1)
-        {
+        if (reference_image_mat.channels() > 1) {
             cv::Mat tmp;
             cv::cvtColor(reference_image_mat, tmp, cv::COLOR_BGR2GRAY);
             tmp.convertTo(reference_image_gray_full, CV_32F);
-        }
-        else
-        {
+        } else {
             reference_image_mat.convertTo(reference_image_gray_full, CV_32F);
         }
 
         CV_Assert(current_image_gray_full.type() == CV_32FC1 && reference_image_gray_full.type() == CV_32FC1);
 
-        // Fungsi adaptasi canggih
-        auto adapt_noise_offset_factor = [](float base_factor, float noise, float motion)
-        {
-            if (motion > 0.6f)
-            {
-                return base_factor * 1.0f;
-            }
-            else if (motion < 0.2f)
-            {
-                return base_factor * (1.0f + 2.0f * noise);
-            }
-            else
-            {
-                float blend = 1.0f + (1.0f - motion) * noise * 2.0f;
-                return base_factor * blend;
-            }
-        };
-
-        auto adapt_motion_sensitivity = [](float base_sensitivity, float noise, float motion)
-        {
-            if (motion > 0.6f)
-            {
-                return base_sensitivity * 1.0f;
-            }
-            else if (motion < 0.2f)
-            {
-                return base_sensitivity * 0.5f;
-            }
-            else
-            {
-                float scale = 0.5f + 0.5f * motion;
-                return base_sensitivity * scale;
-            }
-        };
-
-#pragma omp parallel
+    #pragma omp parallel
         {
             cv::Mat thread_block_confidences;
             MotionMatching::MBMBuffers mbm_buffers_th;
+
             int mbm_alloc_h = (block_h > 0 && block_h < tile_h) ? block_h : tile_h;
             int mbm_alloc_w = (block_w > 0 && block_w < tile_w) ? block_w : tile_w;
 
-            if (mbm_alloc_h > 0 && mbm_alloc_w > 0)
-            {
+            if (mbm_alloc_h > 0 && mbm_alloc_w > 0) {
                 mbm_buffers_th.diff_workspace.create(mbm_alloc_h, mbm_alloc_w, CV_32FC1);
                 mbm_buffers_th.grad_x.create(mbm_alloc_h, mbm_alloc_w, CV_32F);
                 mbm_buffers_th.grad_y.create(mbm_alloc_h, mbm_alloc_w, CV_32F);
                 mbm_buffers_th.grad_mag_current.create(mbm_alloc_h, mbm_alloc_w, CV_32FC1);
             }
 
-#pragma omp for collapse(2) schedule(static)
-            for (int i = 0; i < num_row_starts; ++i)
-            {
-                for (int j = 0; j < num_col_starts; ++j)
-                {
+    #pragma omp for collapse(2) schedule(static)
+            for (int i = 0; i < num_row_starts; ++i) {
+                for (int j = 0; j < num_col_starts; ++j) {
                     int r = row_starts[i], c = col_starts[j];
-                    if (r < 0 || c < 0 || r + tile_h > h_img || c + tile_w > w_img)
-                        continue;
+                    if (r < 0 || c < 0 || r + tile_h > h_img || c + tile_w > w_img) continue;
 
                     cv::Rect tile_roi(c, r, tile_w, tile_h);
                     const cv::Mat current_tile = current_image_mat(tile_roi);
@@ -144,14 +101,12 @@ extern "C"
                     const cv::Mat base_window_tile(tile_h, tile_w, CV_32FC1, const_cast<float *>(base_window_ptr));
 
                     float estimated_noise_sigma = 0.0f;
-
-#ifdef TILE_NOISE_ESTIMATION_HPP
-                    if (reference_tile_gray.rows >= 3 && reference_tile_gray.cols >= 3)
-                    {
+    #ifdef TILE_NOISE_ESTIMATION_HPP
+                    if (reference_tile_gray.rows >= 3 && reference_tile_gray.cols >= 3) {
                         estimated_noise_sigma = NoiseEstimation::estimate_tile_noise_sigma_mad_laplacian(
                             reference_tile_gray, MAD_TO_SIGMA_FACTOR);
                     }
-#endif
+    #endif
 
                     int actual_block_h = block_h > 0 ? block_h : tile_h;
                     int actual_block_w = block_w > 0 ? block_w : tile_w;
@@ -159,26 +114,19 @@ extern "C"
                     int num_blocks_w = (tile_w + actual_block_w - 1) / actual_block_w;
 
                     if (thread_block_confidences.rows != num_blocks_h || thread_block_confidences.cols != num_blocks_w ||
-                        thread_block_confidences.type() != CV_32FC1)
-                    {
+                        thread_block_confidences.type() != CV_32FC1) {
                         thread_block_confidences.create(num_blocks_h, num_blocks_w, CV_32FC1);
                     }
                     thread_block_confidences.setTo(0.0f);
 
-                    float motion_sum = 0.0f;
-                    int motion_count = 0;
-
-                    for (int bh = 0; bh < num_blocks_h; ++bh)
-                    {
-                        float *conf_row = thread_block_confidences.ptr<float>(bh);
-                        for (int bw = 0; bw < num_blocks_w; ++bw)
-                        {
+                    for (int bh = 0; bh < num_blocks_h; ++bh) {
+                        float* conf_row = thread_block_confidences.ptr<float>(bh);
+                        for (int bw = 0; bw < num_blocks_w; ++bw) {
                             int block_r = bh * actual_block_h;
                             int block_c = bw * actual_block_w;
                             int block_h_eff = std::min(actual_block_h, tile_h - block_r);
                             int block_w_eff = std::min(actual_block_w, tile_w - block_c);
-                            if (block_h_eff <= 0 || block_w_eff <= 0)
-                            {
+                            if (block_h_eff <= 0 || block_w_eff <= 0) {
                                 conf_row[bw] = 0.0f;
                                 continue;
                             }
@@ -186,97 +134,65 @@ extern "C"
                             cv::Rect block_roi(block_c, block_r, block_w_eff, block_h_eff);
                             const cv::Mat current_block = current_tile_gray(block_roi);
 
-                            if (current_block.empty())
-                            {
+                            if (current_block.empty()) {
                                 conf_row[bw] = 0.0f;
                                 continue;
                             }
 
-                            // Hitung confidence dari hasil motion matching
                             auto result = MotionMatching::find_best_block_match_mad(
                                 current_block, reference_tile_gray,
                                 block_r, block_c, search_radius,
                                 GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON,
                                 mbm_buffers_th);
 
-                            float confidence = result.success
-                                                ? calculate_match_confidence(result, estimated_noise_sigma, motion_sensitivity, noise_offset_factor)
-                                                : 0.0f;
-
-                            // --- DETEKSI LOW TEXTURE ---
-                            // Hitung gradient magnitude rata-rata dalam blok (gunakan Sobel misal)
-                            cv::Mat grad_x, grad_y;
-                            cv::Sobel(current_block, grad_x, CV_32F, 1, 0, 3);
-                            cv::Sobel(current_block, grad_y, CV_32F, 0, 1, 3);
-                            cv::Mat grad_mag;
-                            cv::magnitude(grad_x, grad_y, grad_mag);
-                            double mean_grad = cv::mean(grad_mag)[0];
-
-                            const float low_texture_threshold = 10.0f;  // Threshold bisa kamu sesuaikan
-
-                            if (mean_grad < low_texture_threshold)
-                            {
-                                // Jika area low-texture, naikkan confidence, misal kalikan 1.5
-                                confidence *= 1.5f;
-
-                                // Namun batasi agar confidence tidak melebihi 1.0
-                                confidence = std::min(confidence, 1.0f);
-                            }
-                            // -----------------------------
-
-                            conf_row[bw] = confidence;
-
-                            if (result.success)
-                            {
-                                float motion_level = 1.0f - std::clamp(confidence, 0.0f, 1.0f);
-                                motion_sum += motion_level;
-                                ++motion_count;
-                            }
+                            conf_row[bw] = result.success
+                                ? calculate_match_confidence(result, estimated_noise_sigma, motion_sensitivity, noise_offset_factor)
+                                : 0.0f;
                         }
                     }
 
+                    if (CONFIDENCE_MAP_BLUR_KERNEL_SIZE > 1) {
+                        int k = (CONFIDENCE_MAP_BLUR_KERNEL_SIZE % 2 == 1) ? CONFIDENCE_MAP_BLUR_KERNEL_SIZE : CONFIDENCE_MAP_BLUR_KERNEL_SIZE + 1;
+                        cv::GaussianBlur(thread_block_confidences, thread_block_confidences, cv::Size(k, k), 0, 0, cv::BORDER_REPLICATE);
+                    }
 
-                    float tile_motion_avg = (motion_count > 0) ? motion_sum / motion_count : 0.0f;
-                    float adaptive_noise_offset = adapt_noise_offset_factor(noise_offset_factor, estimated_noise_sigma, tile_motion_avg);
-                    float adaptive_motion_sensitivity = adapt_motion_sensitivity(motion_sensitivity, estimated_noise_sigma, tile_motion_avg);
+                    for (int y = 0; y < tile_h; ++y) {
+                    const float* color_row = current_tile.ptr<const float>(y);
+                    const float* base_row = base_window_tile.ptr<const float>(y);
+                    int gy = r + y;
+                    float* weight_row = weight_map_sum_mat.ptr<float>(gy);
+                    float* sum_row = final_image_sum_mat.ptr<float>(gy);
 
-                    for (int y = 0; y < tile_h; ++y)
-                    {
-                        const float *color_row = current_tile.ptr<const float>(y);
-                        const float *base_row = base_window_tile.ptr<const float>(y);
-                        int gy = r + y;
-                        float *weight_row = weight_map_sum_mat.ptr<float>(gy);
-                        float *sum_row = final_image_sum_mat.ptr<float>(gy);
+                    for (int x = 0; x < tile_w; ++x) {
+                        int bh = std::min(y / actual_block_h, num_blocks_h - 1);
+                        int bw = std::min(x / actual_block_w, num_blocks_w - 1);
 
-                        for (int x = 0; x < tile_w; ++x)
-                        {
-                            int bh = std::min(y / actual_block_h, num_blocks_h - 1);
-                            int bw = std::min(x / actual_block_w, num_blocks_w - 1);
+                        float confidence = thread_block_confidences.ptr<float>(bh)[bw];
+                        float weight = base_row[x] * confidence;
 
-                            float confidence = thread_block_confidences.ptr<float>(bh)[bw];
+                        if (weight > GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD) {
+                            int gx = c + x;
 
-                            float weight = base_row[x] * confidence;
+                            // update weight map
+                            weight_row[gx] += weight;
 
-                            if (weight > GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD)
-                            {
-                                int gx = c + x;
+                            int idx_local = x * channels;
+                            int idx_global = gx * channels;
 
-                                weight_row[gx] += weight;
-
-                                int idx_local = x * channels;
-                                int idx_global = gx * channels;
-#pragma omp simd
-                                for (int ch = 0; ch < channels; ++ch)
-                                {
-                                    sum_row[idx_global + ch] += color_row[idx_local + ch] * weight;
-                                }
+                            // asumsi channels kelipatan 4 (atau minimal 1), kita pakai simd pragma
+                            #pragma omp simd
+                            for (int ch = 0; ch < channels; ++ch) {
+                                sum_row[idx_global + ch] += color_row[idx_local + ch] * weight;
                             }
                         }
                     }
                 }
+
+                }
             }
         }
     }
+
 
     void normalize_accumulated_image_jit(
         float *final_image_ptr,

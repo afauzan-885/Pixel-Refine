@@ -1,5 +1,6 @@
 import gc
 import json
+import threading
 import time
 import traceback
 import cv2
@@ -99,6 +100,56 @@ class FarnebackAlgorithm:
         except Exception as e:
             # print("Error loading Farneback configuration:", e)
             return default_config
+        
+    def _filter_flow_by_magnitude(self, flow, min_thresh=0.1, max_thresh=10.0):
+        mag = np.linalg.norm(flow, axis=2)
+        mask = (mag >= min_thresh) & (mag <= max_thresh)
+        filtered = np.zeros_like(flow)
+        filtered[mask] = flow[mask]
+        return filtered
+
+    def _refine_flow_median(self, flow, size=3):
+        import scipy.ndimage
+        refined = np.zeros_like(flow)
+        for i in range(2):  # x dan y component
+            refined[..., i] = scipy.ndimage.median_filter(flow[..., i], size=size)
+        return refined
+
+    def _compute_block_cpu_internal(self, x, y, bw, bh, overlap_ratio, base_gray_8bit, target_gray_8bit, fb_config, w, h):
+        overlap_x = int(bw * overlap_ratio)
+        overlap_y = int(bh * overlap_ratio)
+        roi_x_start = max(0, x - overlap_x)
+        roi_y_start = max(0, y - overlap_y)
+        roi_x_end = min(w, x + bw + overlap_x)
+        roi_y_end = min(h, y + bh + overlap_y)
+        if roi_y_end <= roi_y_start or roi_x_end <= roi_x_start:
+            return None
+
+        roi_base = base_gray_8bit[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+        roi_target = target_gray_8bit[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+
+        try:
+            flow_roi = cv2.calcOpticalFlowFarneback(
+                roi_base, roi_target, None,
+                pyr_scale=fb_config["pyr_scale"], levels=fb_config["levels"],
+                winsize=fb_config["winsize"], iterations=fb_config["iterations"],
+                poly_n=fb_config["poly_n"], poly_sigma=fb_config["poly_sigma"],
+                flags=fb_config["flags"]
+            )
+            offset_x = x - roi_x_start
+            offset_y = y - roi_y_start
+            bh_valid = min(bh, flow_roi.shape[0] - offset_y)
+            bw_valid = min(bw, flow_roi.shape[1] - offset_x)
+            if bh_valid <= 0 or bw_valid <= 0:
+                return None
+            flow_block = flow_roi[offset_y:offset_y + bh_valid, offset_x:offset_x + bw_valid, :]
+
+            # Filter magnitude outliers (flow quality filtering)
+            flow_block = self._filter_flow_by_magnitude(flow_block)
+
+            return (x, y, flow_block)
+        except cv2.error: return None
+        except Exception: return None
 
     def calculate_optical_flow(self, base_image, target_image, config_filename=None, stop_requested=None):
         if stop_requested and stop_requested():
@@ -109,7 +160,6 @@ class FarnebackAlgorithm:
         use_gpu = fb_config.get("use_gpu", False) and opencl_available
         use_multicore = fb_config.get("use_multi_core", True)
 
-        mode_str = "GPU" if use_gpu else ("CPU (Multi-Core)" if use_multicore else "CPU (Single-Core)")
         try:
             def prepare_gray(img, use_gpu=False):
                 if img is None:
@@ -119,8 +169,6 @@ class FarnebackAlgorithm:
                 if use_gpu:
                     return cv2.UMat(img.astype(np.uint8, copy=False))
                 return img.astype(np.uint8, copy=False)
-
-
 
             base_gray_8bit = prepare_gray(base_image)
             target_gray_8bit = prepare_gray(target_image)
@@ -132,30 +180,42 @@ class FarnebackAlgorithm:
                     base_gray_umat = cv2.UMat(base_gray_8bit)
                     target_gray_umat = cv2.UMat(target_gray_8bit)
                     flow_umat = cv2.calcOpticalFlowFarneback(
+                        base_gray_umat, target_gray_umat, None,
                         pyr_scale=fb_config["pyr_scale"], levels=fb_config["levels"],
                         winsize=fb_config["winsize"], iterations=fb_config["iterations"],
                         poly_n=fb_config["poly_n"], poly_sigma=fb_config["poly_sigma"],
                         flags=fb_config["flags"]
                     )
                     flow_full = flow_umat.get()
-                except cv2.error as gpu_err: use_gpu = False 
-                except Exception as gpu_exc: use_gpu = False 
+                except: use_gpu = False
 
             if not use_gpu:
                 num_blocks_config = fb_config.get("cpu_num_blocks", [30, 23])
                 overlap_ratio = fb_config.get("cpu_overlap_ratio", 0.3)
-                if isinstance(num_blocks_config, (list, tuple)) and len(num_blocks_config) == 2: blocks_x, blocks_y = num_blocks_config
-                else: blocks_x, blocks_y = 2, 2
-                try: overlap_ratio = float(overlap_ratio); assert 0.0 <= overlap_ratio < 1.0
-                except: overlap_ratio = 0.3
-                if blocks_x <= 0 or blocks_y <= 0: blocks_x, blocks_y = 2, 2
-                block_w = w // blocks_x; block_h = h // blocks_y
-                if block_w == 0 or block_h == 0: blocks_x, blocks_y = 1, 1; block_w, block_h = w, h
+                if isinstance(num_blocks_config, (list, tuple)) and len(num_blocks_config) == 2:
+                    blocks_x, blocks_y = num_blocks_config
+                else:
+                    blocks_x, blocks_y = 2, 2
 
+                try:
+                    overlap_ratio = float(overlap_ratio)
+                    assert 0.0 <= overlap_ratio < 1.0
+                except:
+                    overlap_ratio = 0.3
+
+                if blocks_x <= 0 or blocks_y <= 0:
+                    blocks_x, blocks_y = 2, 2
+
+                block_w = w // blocks_x
+                block_h = h // blocks_y
+                if block_w == 0 or block_h == 0:
+                    blocks_x, blocks_y = 1, 1
+                    block_w, block_h = w, h
 
                 flow_full_cpu = np.empty((h, w, 2), dtype=np.float32)
-                compute_block_cpu = lambda x, y, bw, bh, ovr: self._compute_block_cpu_internal( # Buat fungsi internal
-                     x, y, bw, bh, ovr, base_gray_8bit, target_gray_8bit, fb_config, w, h
+
+                compute_block_cpu = lambda x, y, bw, bh, ovr: self._compute_block_cpu_internal(
+                    x, y, bw, bh, ovr, base_gray_8bit, target_gray_8bit, fb_config, w, h
                 )
 
                 if use_multicore:
@@ -164,83 +224,66 @@ class FarnebackAlgorithm:
                     with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
                         for i in range(blocks_x):
                             for j in range(blocks_y):
-                                if stop_requested and stop_requested(): break
-                                x = i * block_w; y = j * block_h
+                                if stop_requested and stop_requested():
+                                    break
+                                x = i * block_w
+                                y = j * block_h
                                 bw = block_w if i < blocks_x - 1 else w - x
                                 bh = block_h if j < blocks_y - 1 else h - y
                                 futures_cpu.append(executor.submit(compute_block_cpu, x, y, bw, bh, overlap_ratio))
-                            if stop_requested and stop_requested(): break
+                            if stop_requested and stop_requested():
+                                break
                         if stop_requested and stop_requested():
-                            for f in futures_cpu: f.cancel()
+                            for f in futures_cpu:
+                                f.cancel()
                             return None
                         for future in concurrent.futures.as_completed(futures_cpu):
-                            if stop_requested and stop_requested(): return None
+                            if stop_requested and stop_requested():
+                                return None
                             try:
                                 result_block = future.result()
                                 if result_block:
                                     x, y, flow_block = result_block
                                     h_block, w_block, _ = flow_block.shape
-                                    y_end = min(y + h_block, h); x_end = min(x + w_block, w)
-                                    flow_full_cpu[y:y_end, x:x_end, :] = flow_block[0:y_end-y, 0:x_end-x, :]
-                            except Exception as exc: 
+                                    y_end = min(y + h_block, h)
+                                    x_end = min(x + w_block, w)
+                                    flow_full_cpu[y:y_end, x:x_end, :] = flow_block[0:y_end - y, 0:x_end - x, :]
+                            except Exception as exc:
                                 print(f'Block processing generated an exception: {exc}')
-
-                else: 
+                else:
                     for i in range(blocks_x):
                         for j in range(blocks_y):
-                            if stop_requested and stop_requested(): return None
-                            x = i * block_w; y = j * block_h
+                            if stop_requested and stop_requested():
+                                return None
+                            x = i * block_w
+                            y = j * block_h
                             bw = block_w if i < blocks_x - 1 else w - x
                             bh = block_h if j < blocks_y - 1 else h - y
                             result_block = compute_block_cpu(x, y, bw, bh, overlap_ratio)
                             if result_block:
                                 x, y, flow_block = result_block
                                 h_block, w_block, _ = flow_block.shape
-                                y_end = min(y + h_block, h); x_end = min(x + w_block, w)
-                                flow_full_cpu[y:y_end, x:x_end, :] = flow_block[0:y_end-y, 0:x_end-x, :]
-                        if stop_requested and stop_requested(): break
+                                y_end = min(y + h_block, h)
+                                x_end = min(x + w_block, w)
+                                flow_full_cpu[y:y_end, x:x_end, :] = flow_block[0:y_end - y, 0:x_end - x, :]
+                        if stop_requested and stop_requested():
+                            break
 
+                # Refinement akhir
+                flow_full_cpu = self._refine_flow_median(flow_full_cpu, size=3)
                 flow_full = flow_full_cpu
+
             return flow_full
 
         except ValueError as ve:
-            fail_msg = getattr(language_config.FAILED_WHILE_PREPARING_IMAGE)
-            print(fail_msg.format(ve))
+            print(f"Gagal menyiapkan gambar: {ve}")
             return None
         except Exception as e:
             print(f"Unexpected error in calculate_optical_flow: {e}\n{traceback.format_exc()}")
             return None
 
-    def _compute_block_cpu_internal(self, x, y, bw, bh, overlap_ratio, base_gray_8bit, target_gray_8bit, fb_config, w, h):
-        overlap_x = int(bw * overlap_ratio)
-        overlap_y = int(bh * overlap_ratio)
-        roi_x_start = max(0, x - overlap_x); roi_y_start = max(0, y - overlap_y)
-        roi_x_end = min(w, x + bw + overlap_x); roi_y_end = min(h, y + bh + overlap_y)
-        if roi_y_end <= roi_y_start or roi_x_end <= roi_x_start: return None
-        roi_base = base_gray_8bit[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
-        roi_target = target_gray_8bit[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
-        try:
-            flow_roi = cv2.calcOpticalFlowFarneback(
-                roi_base, roi_target, None,
-                pyr_scale=fb_config["pyr_scale"], levels=fb_config["levels"],
-                winsize=fb_config["winsize"], iterations=fb_config["iterations"],
-                poly_n=fb_config["poly_n"], poly_sigma=fb_config["poly_sigma"],
-                flags=fb_config["flags"]
-            )
-            offset_x = x - roi_x_start; offset_y = y - roi_y_start
-            bh_valid = min(bh, flow_roi.shape[0] - offset_y)
-            bw_valid = min(bw, flow_roi.shape[1] - offset_x)
-            if bh_valid <= 0 or bw_valid <= 0 : return None
-            flow_block = flow_roi[offset_y:offset_y+bh_valid, offset_x:offset_x+bw_valid, :]
-            return (x, y, flow_block)
-        except cv2.error as cv_err: return None
-        except Exception as exc: return None
 
-    def compensate_motion(self, base_image_input, flow, image_id=0, config_filename=None): # image_id default
-        """
-        Menerapkan kompensasi gerakan menggunakan cv2.remap berdasarkan flow field.
-        Mendukung input CPU (NumPy) atau GPU (UMat) untuk remap jika diaktifkan.
-        """
+    def compensate_motion(self, base_image_input, flow, image_id=0, config_filename=None):
         if flow is None:
             print(language_config.ERROR_IN_FLOW_FIELD.format(image_id))
             return None
@@ -250,23 +293,22 @@ class FarnebackAlgorithm:
 
         try:
             if not (isinstance(flow, np.ndarray) and flow.ndim == 3 and flow.shape[2] == 2):
-                 raise ValueError(f"Invalid flow field shape: {flow.shape}. Expected (h, w, 2).")
+                raise ValueError(f"Invalid flow field shape: {flow.shape}. Expected (h, w, 2).")
 
             h, w = flow.shape[:2]
-            if base_image_input.shape[0] != h or base_image_input.shape[1] != w:
-                 raise ValueError(f"Base image shape {base_image_input.shape[:2]} mismatch with flow field shape {flow.shape[:2]}.")
+            if base_image_input.shape[:2] != (h, w):
+                raise ValueError(f"Base image shape {base_image_input.shape[:2]} mismatch with flow field shape {flow.shape[:2]}.")
 
             grid_y, grid_x = np.mgrid[0:h, 0:w]
             remap_x = (grid_x + flow[:, :, 0]).astype(np.float32)
             remap_y = (grid_y + flow[:, :, 1]).astype(np.float32)
-            
+
             fb_config = self.load_farneback_config(config_filename)
             use_gpu = fb_config.get("use_gpu", False) and cv2.ocl.haveOpenCL()
             interpolation_str = fb_config.get("interpolation", "INTER_LINEAR")
             use_multicore = fb_config.get("use_multi_core", True)
             interp_flag = getattr(cv2, interpolation_str, cv2.INTER_LINEAR)
-            
-            compensated_image = None
+
             if use_gpu:
                 try:
                     base_image_umat = cv2.UMat(base_image_input)
@@ -280,31 +322,69 @@ class FarnebackAlgorithm:
                         interpolation=interp_flag,
                         borderMode=cv2.BORDER_REFLECT
                     )
-                    compensated_image = compensated_image_umat.get()
+                    return compensated_image_umat.get()
                 except cv2.error as gpu_remap_err:
-                    use_gpu = False 
-                    del base_image_umat, remap_x_umat, remap_y_umat, compensated_image_umat # Hapus UMat
+                    print(f"[GPU REMAP ERROR] Fallback to CPU. Reason: {gpu_remap_err}")
+                    use_gpu = False
+                    del base_image_umat, remap_x_umat, remap_y_umat
                 except Exception as gpu_remap_exc:
+                    print(f"[GPU FALLBACK] Exception: {gpu_remap_exc}")
                     use_gpu = False
 
-            if not use_gpu:
-                compensated_image = cv2.remap(
-                    base_image_input, 
+            # ===== CPU MULTICORE WITH OVERLAP =====
+            if use_multicore:
+                num_chunks = 4
+                h_chunk = h // num_chunks
+                overlap = int(0.2 * h_chunk)
+
+                def remap_chunk(y_start, y_end):
+                    base_chunk = base_image_input[y_start:y_end]
+                    rx_chunk = remap_x[y_start:y_end]
+                    ry_chunk = remap_y[y_start:y_end]
+                    return cv2.remap(base_chunk, rx_chunk, ry_chunk, interpolation=interp_flag, borderMode=cv2.BORDER_REFLECT)
+
+                chunks = []
+                with ThreadPoolExecutor(max_workers=num_chunks) as executor:
+                    futures = []
+                    for i in range(num_chunks):
+                        y1 = max(0, i * h_chunk - overlap)
+                        y2 = min(h, (i + 1) * h_chunk + overlap)
+                        futures.append(executor.submit(remap_chunk, y1, y2))
+                    chunks = [f.result() for f in futures]
+
+                # Pangkas overlap dan gabungkan hasil
+                trimmed_chunks = []
+                for i, chunk in enumerate(chunks):
+                    if i == 0:
+                        trimmed = chunk[:h_chunk]
+                    elif i == num_chunks - 1:
+                        trimmed = chunk[overlap:]
+                    else:
+                        trimmed = chunk[overlap:overlap + h_chunk]
+                    trimmed_chunks.append(trimmed)
+
+                compensated_image = np.vstack(trimmed_chunks)
+                return compensated_image
+
+            # ===== Fallback Single Thread =====
+            else:
+                return cv2.remap(
+                    base_image_input,
                     remap_x,
                     remap_y,
                     interpolation=interp_flag,
-                    borderMode=cv2.BORDER_REFLECT 
+                    borderMode=cv2.BORDER_REFLECT
                 )
-            
-            return compensated_image
 
         except ValueError as ve:
+            print(f"[VALUE ERROR] {ve}")
             return None
         except cv2.error as cv_err:
+            print(f"[OpenCV ERROR] {cv_err}")
             return None
         except Exception as e:
+            print(f"[EXCEPTION] {e}")
             return None
-
 def main(
     db_path,
     update_progress=None,
@@ -346,6 +426,11 @@ def main(
     # 4) Simpan base image ke HDF5
     with h5py.File(processor.hdf5_path, "w") as h5f:
         h5f.create_dataset("image_0", data=base_image)
+        
+    # Lock untuk penulisan HDF5 secara aman
+    lock = threading.Lock()
+    progress_lock = threading.Lock()
+    progress_counter = {"count": 1}  # Sudah simpan image_0
 
     # 5) Streaming image satu per satu
     with h5py.File(processor.hdf5_path, "a") as h5f:

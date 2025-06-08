@@ -539,9 +539,12 @@ class CombinedPanel(QWidget):
         return algorithm_alignment, super_res_combo, denoising_combox
 
     def execute_algorithm(self, category, selected_algo):
-        """Simpan pilihan algoritma."""
+        """Simpan pilihan algoritma dan update JSON secara realtime.""" 
         self.selected_algorithms[category] = selected_algo
         print(language_config.CONSOL_LOG_RUNNING_ALGORITHM.format(category, selected_algo))
+        
+        if hasattr(self, "batch_id") and self.batch_id is not None:
+            self._save_state_to_json(self.batch_id)
         
     def _handle_denoising_state_changed(self, is_checked):
         """Logika eksklusif saat state checkbox Denoising berubah."""
@@ -567,7 +570,7 @@ class CombinedPanel(QWidget):
         else: 
             denoising_checkbox.setEnabled(True)
             
-    def _save_checkbox_state_to_json(self, batch_id):
+    def _save_state_to_json(self, batch_id):
         """Simpan state checkbox dan combobox untuk batch_id ke dalam file JSON."""
         json_path = os.path.join("database", "align", "batch_parameter.json")
         state = self.get_current_state()
@@ -605,7 +608,7 @@ class CombinedPanel(QWidget):
 
         # Simpan state terbaru ke JSON berdasarkan batch_id (pastikan Anda punya self.batch_id)
         if hasattr(self, "batch_id"):
-            self._save_checkbox_state_to_json(self.batch_id)
+            self._save_state_to_json(self.batch_id)
 
         
     def _handle_crop_keep_edge(self, is_checked, changed_cb_key, other_cb_key):

@@ -156,102 +156,132 @@ class SimilarityAlgorithm:
     def _frequency_merging(self, images, ref_image_h, ref_image_w, ref_channels_buffer, ref_dtype,
                            reference_image_float,
                            freq_c_wiener_factor,
-                           freq_tile_size,       # Ini tuple (tinggi, lebar)
+                           freq_tile_size,
                            freq_overlap_percent,
                            update_progress=None, stop_requested=None,
                            total_overall_images=None, images_processed_so_far=0,
                            lib_path='UI/data/similarity_frequency_merging.dll', 
                            **unused_kwargs):
 
-        tile_h, tile_w = map(int, freq_tile_size) # Unpack dari tuple
-
+        # Optimasi 1: Early validation dan caching
+        if not images:
+            return None, None, 0
+        
+        num_images = len(images)
+        if num_images == 0:
+            return None, None, 0
+        
+        # Unpack tile size once
+        tile_h, tile_w = map(int, freq_tile_size)
+        
+        # Optimasi 2: Pre-compute constants
+        step_y = max(int(tile_h * (1 - freq_overlap_percent)), 1)
+        step_x = max(int(tile_w * (1 - freq_overlap_percent)), 1)
+        progress_cap_percent = 95
+        
+        # Optimasi 3: Lazy loading C++ interface
+        c_interface = None
+        
+        # Optimasi 4: Pre-compute row and column starts (moved up)
+        def compute_starts(ref_size, tile_size, step_size):
+            if ref_size >= tile_size:
+                starts_temp = np.arange(0, ref_size - tile_size + 1, step_size)
+                if ref_size > tile_size and (starts_temp.size == 0 or starts_temp[-1] != ref_size - tile_size):
+                    starts_list = np.append(starts_temp, ref_size - tile_size)
+                elif ref_size == tile_size:
+                    starts_list = np.array([0])
+                else:
+                    starts_list = starts_temp
+            else:
+                starts_list = np.array([0])
+            
+            return np.ascontiguousarray(np.unique(starts_list.astype(np.int32)))
+        
+        row_starts = compute_starts(ref_image_h, tile_h, step_y)
+        col_starts = compute_starts(ref_image_w, tile_w, step_x)
+        
+        # Optimasi 5: Pre-allocate arrays dengan dtype yang tepat
+        final_image_sum = np.zeros((ref_image_h, ref_image_w, ref_channels_buffer), 
+                                dtype=np.float32, order='C')
+        weight_map_sum = np.zeros((ref_image_h, ref_image_w), dtype=np.float32, order='C')
+        
+        # Optimasi 6: Cache window computation
+        base_window = gaussian_window(freq_tile_size)
+        
+        # Optimasi 7: Pre-validate first image untuk reference
+        first_image = images[0]
+        if not isinstance(first_image, np.ndarray):
+            return None, None, 0
+            
+        orig_h, orig_w = first_image.shape[:2]
+        orig_channels = first_image.shape[2] if first_image.ndim == 3 else 1
+        
+        # Optimasi 8: Batch validation dan filtering
+        valid_images = []
+        for i, image_orig in enumerate(images):
+            if not isinstance(image_orig, np.ndarray):
+                continue
+                
+            # Quick shape and dtype validation
+            if (image_orig.shape[0] != orig_h or 
+                image_orig.shape[1] != orig_w or 
+                image_orig.dtype != ref_dtype):
+                continue
+                
+            num_ch_orig = image_orig.shape[2] if image_orig.ndim == 3 else 1
+            if num_ch_orig not in (1, 3):
+                continue
+                
+            valid_images.append((i, image_orig))
+        
+        if not valid_images:
+            return None, None, 0
+        
+        # Optimasi 9: Initialize C++ interface only when needed
         try:
             c_interface = SimilarityFrequencyInterface(lib_path)
         except (FileNotFoundError, OSError, AttributeError) as e:
             raise RuntimeError(f"Gagal C++ interface _frequency_merging: {e}")
-
-        final_image_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32))
-        weight_map_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w), dtype=np.float32))
-
-        step_y = max(int(tile_h * (1 - freq_overlap_percent)), 1)
-        step_x = max(int(tile_w * (1 - freq_overlap_percent)), 1)
         
-        rs_list = []
-        if ref_image_h >= tile_h:
-            rs_temp = np.arange(0, ref_image_h - tile_h + 1, step_y)
-            if ref_image_h > tile_h and (not rs_temp.size or rs_temp[-1] != ref_image_h - tile_h):
-                rs_list = np.append(rs_temp, ref_image_h - tile_h).tolist()
-            elif ref_image_h == tile_h:
-                rs_list = [0]
-            else:
-                rs_list = rs_temp.tolist()
-        else:
-            rs_list = [0]
-        row_starts = np.ascontiguousarray(np.unique(np.array(rs_list, dtype=np.int32)).astype(np.int32))
-        if not row_starts.size: row_starts = np.array([0], dtype=np.int32)
-
-
-        cs_list = []
-        if ref_image_w >= tile_w:
-            cs_temp = np.arange(0, ref_image_w - tile_w + 1, step_x)
-            if ref_image_w > tile_w and (not cs_temp.size or cs_temp[-1] != ref_image_w - tile_w):
-                cs_list = np.append(cs_temp, ref_image_w - tile_w).tolist()
-            elif ref_image_w == tile_w:
-                cs_list = [0]
-            else:
-                cs_list = cs_temp.tolist()
-        else:
-            cs_list = [0]
-        col_starts = np.ascontiguousarray(np.unique(np.array(cs_list, dtype=np.int32)).astype(np.int32))
-        if not col_starts.size: col_starts = np.array([0], dtype=np.int32)
-
-
-        # Base window (Gaussian atau lainnya)
-        base_window = gaussian_window(freq_tile_size) # Gunakan freq_tile_size
-
+        # Optimasi 10: Batch processing dengan error handling yang lebih efisien
+        processed_frames_freq = 0
         block_h_cxx = tile_h
         block_w_cxx = tile_w
         
-        # --- Loop Pemrosesan Gambar ---
-        num_images = len(images)
-        processed_frames_freq = 0
-        progress_cap_percent = 95
+        # Pre-compute progress calculation factors
+        if total_overall_images and total_overall_images > 0:
+            progress_factor = progress_cap_percent / total_overall_images
+            use_overall_progress = True
+        else:
+            progress_factor = progress_cap_percent / len(valid_images)
+            use_overall_progress = False
         
-        if not images:
-            return None, None, 0
-        orig_h, orig_w = images[0].shape[:2]
-
-        for i, image_orig in enumerate(images):
-            if not isinstance(image_orig, np.ndarray):
-                print(f"Frame {i+1} bukan ndarray, dilewati (frequency).")
-                continue
-
+        for idx, (original_idx, image_orig) in enumerate(valid_images):
+            # Optimasi 11: Efficient progress updates
             if update_progress:
-                current_img_overall = images_processed_so_far + i + 1
-                prog_val = int((current_img_overall / total_overall_images) * progress_cap_percent
-                               if total_overall_images and total_overall_images > 0
-                               else ((i + 1) / num_images) * progress_cap_percent)
-                msg_val = (language_config.IMAGE_PROCESS_IN_PROGRESS.format(current_img_overall, total_overall_images)
-                           if total_overall_images and total_overall_images > 0
-                           else language_config.ANALYZING_IMAGE.format(i + 1, num_images))
+                if use_overall_progress:
+                    current_img_overall = images_processed_so_far + original_idx + 1
+                    prog_val = int(current_img_overall * progress_factor)
+                    msg_val = language_config.IMAGE_PROCESS_IN_PROGRESS.format(
+                        current_img_overall, total_overall_images)
+                else:
+                    prog_val = int((idx + 1) * progress_factor)
+                    msg_val = language_config.ANALYZING_IMAGE.format(idx + 1, len(valid_images))
                 update_progress(prog_val, msg_val)
-
+            
+            # Optimasi 12: Early stop check
             if stop_requested and stop_requested():
                 break
-
+            
+            # Optimasi 13: Efficient image normalization
             try:
-                if image_orig.shape[0] != orig_h or image_orig.shape[1] != orig_w or image_orig.dtype != ref_dtype:
+                current_image_float = normalize_image(image_orig, ref_dtype)
+                if current_image_float.shape[2] != ref_channels_buffer:
                     continue
-                num_ch_orig = image_orig.shape[2] if image_orig.ndim == 3 else 1
-                if num_ch_orig not in (1, 3): # Asumsi hanya 1 atau 3 channel
-                    continue
-            except Exception as e_val:
+            except Exception:
                 continue
-
-            current_image_float = normalize_image(image_orig, ref_dtype)
-            if current_image_float.shape[2] != ref_channels_buffer:
-                continue
-
+            
+            # Optimasi 14: Single C++ call with better error handling
             try:
                 c_interface.call_accumulate_frame_weighted(
                     c_interface.clib, 
@@ -269,8 +299,11 @@ class SimilarityAlgorithm:
                 )
                 processed_frames_freq += 1
             except Exception as e_cxx:
-                raise RuntimeError(f"C++ accumulation failed for frame {i+1} during frequency merging: {e_cxx}")
-
+                # Optimasi 15: More informative error without breaking the loop
+                print(f"Warning: C++ accumulation failed for frame {original_idx+1}: {e_cxx}")
+                continue
+        
+        # Optimasi 16: Final normalization with validation
         if processed_frames_freq > 0:
             try:
                 c_interface.call_normalize_accumulated(
@@ -281,7 +314,7 @@ class SimilarityAlgorithm:
                 )
                 return final_image_sum, weight_map_sum, processed_frames_freq
             except Exception as e_norm:
-                 raise RuntimeError(language_config.NORMALIZATION_FAILED.format(e_norm) + " (frequency merging)")
+                raise RuntimeError(f"{language_config.NORMALIZATION_FAILED.format(e_norm)} (frequency merging)")
         else:
             return None, None, 0
 

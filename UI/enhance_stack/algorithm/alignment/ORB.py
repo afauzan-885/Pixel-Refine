@@ -504,7 +504,7 @@ def main(db_path,
                     save_to_hdf5(h5f, f"image_{i}", compensated, extract_exif(path))
 
         return None
-    num_threads = os.cpu_count() or 4  # Default to 4 if os.cpu_count() returns None
+    num_threads = os.cpu_count() or 4 
     if not enable_cropping or keep_edges:
         # === Streaming tanpa cropping ===
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
@@ -537,9 +537,10 @@ def main(db_path,
                     if update_progress:
                         update_progress(
                             progress_counter["count"],
-                            total_images * 3,
-                            f"[1/3] Hitung transformasi {progress_counter['count']}/{total_images}"
+                            2 * (total_images - 1),
+                            f"[1/2] Hitung transformasi {progress_counter['count']}/{total_images - 1}"
                         )
+
 
         # === Tahap 2: Hitung dan terapkan crop global ===
         crop_bounds = compute_global_crop(
@@ -597,15 +598,10 @@ def main(db_path,
                     stage3_counter["count"] += 1
                     if update_progress:
                         update_progress(
-                            total_images * 2 + stage3_counter["count"],  # Mulai dari 2/3 progres
-                            total_images * 3,
-                            f"[2/3] Simpan hasil {stage3_counter['count']}/{total_images}"
-                        )
-
-
-        if update_progress:
-            update_progress(total_images * 3, total_images * 3, "[3/3] Proses selesai")
-   
+                        (total_images - 1) + stage3_counter["count"],
+                        2 * (total_images - 1),
+                        f"[2/2] Simpan hasil {stage3_counter['count']}/{total_images - 1}"
+                    )
              
 def running_orb(parent=None, single_process=None, batch_id=None):
     process_finished = False
