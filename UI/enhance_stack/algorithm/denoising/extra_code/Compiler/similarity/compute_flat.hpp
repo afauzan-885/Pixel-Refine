@@ -6,15 +6,13 @@
 
 namespace TextureAnalysis
 {
-
     void detect_flat_tiles(
         const std::vector<cv::Mat> &channels,
         int tile_h, int tile_w,
         int num_channels,
-        float flatness_threshold,
-        std::vector<bool> &is_flat,
-        cv::Mat &laplacian_buffer);
+        float flatness_variance_threshold,
+        std::vector<bool> &is_flat);
 
 }
 
-#endif // COMPUTE_FLAT_HPP
+#endif

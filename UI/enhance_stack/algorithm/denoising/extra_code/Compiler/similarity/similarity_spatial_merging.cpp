@@ -1,4 +1,3 @@
-// similarity_motion.cpp
 #include <cmath>
 #include <vector>
 #include <limits>
@@ -11,6 +10,8 @@
 #include "block_matching.hpp"
 #include "tile_noise_estimation.hpp"
 #include "spatial_merging.hpp"
+#include "motion_compensate.hpp"
+#include "compute_flat.hpp"
 
 namespace MotionMetricsConfig
 {
@@ -20,6 +21,8 @@ namespace MotionMetricsConfig
     constexpr float GRADIENT_WEIGHT_FACTOR = 1.3f;
     constexpr float MAD_TO_SIGMA_FACTOR = 1.4826f;
     constexpr int CONFIDENCE_MAP_BLUR_KERNEL_SIZE = 3;
+    constexpr float FLATNESS_VARIANCE_THRESHOLD = 5.0f;
+    constexpr float FLATNESS_CONFIDENCE_BOOST = 1.7f;
 }
 
 extern "C"
@@ -41,9 +44,7 @@ extern "C"
         using namespace MotionMetricsConfig;
 
         if (!final_image_sum_ptr || !weight_map_sum_ptr || !current_image_ptr || !reference_image_ptr || !base_window_ptr ||
-            !row_starts || !col_starts || h_img <= 0 || w_img <= 0 || tile_h <= 0 || tile_w <= 0 || channels <= 0 ||
-            (block_h <= 0 && tile_h > 0 && block_w > 0) ||
-            (block_w <= 0 && tile_w > 0 && block_h > 0))
+            !row_starts || !col_starts || h_img <= 0 || w_img <= 0 || tile_h <= 0 || tile_w <= 0 || channels <= 0)
         {
             return;
         }
@@ -57,13 +58,12 @@ extern "C"
         const cv::Mat current_image_mat(h_img, w_img, mat_type_color, const_cast<float *>(current_image_ptr));
         const cv::Mat reference_image_mat(h_img, w_img, mat_type_color, const_cast<float *>(reference_image_ptr));
 
-        cv::Mat current_image_gray_full_data, reference_image_gray_full_data;
         cv::Mat current_image_gray_full, reference_image_gray_full;
-
         if (current_image_mat.channels() > 1)
         {
-            cv::cvtColor(current_image_mat, current_image_gray_full_data, cv::COLOR_BGR2GRAY);
-            current_image_gray_full_data.convertTo(current_image_gray_full, CV_32F);
+            cv::Mat temp;
+            cv::cvtColor(current_image_mat, temp, cv::COLOR_BGR2GRAY);
+            temp.convertTo(current_image_gray_full, CV_32F);
         }
         else
         {
@@ -71,38 +71,48 @@ extern "C"
         }
         if (reference_image_mat.channels() > 1)
         {
-            cv::cvtColor(reference_image_mat, reference_image_gray_full_data, cv::COLOR_BGR2GRAY);
-            reference_image_gray_full_data.convertTo(reference_image_gray_full, CV_32F);
+            cv::Mat temp;
+            cv::cvtColor(reference_image_mat, temp, cv::COLOR_BGR2GRAY);
+            temp.convertTo(reference_image_gray_full, CV_32F);
         }
         else
         {
             reference_image_mat.convertTo(reference_image_gray_full, CV_32F);
         }
-        CV_Assert(current_image_gray_full.type() == CV_32FC1 && reference_image_gray_full.type() == CV_32FC1);
-        CV_Assert(!current_image_gray_full.empty() && !reference_image_gray_full.empty());
 
+        std::vector<bool> is_tile_flat;
+        std::vector<cv::Mat> ref_channels_for_flat_detection;
+        if (reference_image_mat.channels() > 1)
+        {
+            cv::split(reference_image_mat, ref_channels_for_flat_detection);
+        }
+        else
+        {
+            ref_channels_for_flat_detection.push_back(reference_image_mat);
+        }
+
+        TextureAnalysis::detect_flat_tiles(
+            ref_channels_for_flat_detection,
+            tile_h, tile_w,
+            reference_image_mat.channels(),
+            MotionMetricsConfig::FLATNESS_VARIANCE_THRESHOLD,
+            is_tile_flat);
+        
 #pragma omp parallel
         {
-            cv::Mat thread_block_confidences;
-            MotionMatching::MBMBuffers mbm_buffers_th;
-            int mbm_alloc_h = tile_h;
-            if (block_h > 0 && block_h < tile_h)
-            {
-                mbm_alloc_h = block_h;
-            }
-            int mbm_alloc_w = tile_w;
-            if (block_w > 0 && block_w < tile_w)
-            {
-                mbm_alloc_w = block_w;
-            }
-
+            MotionCompensate::MotionCompensationBuffers buffers_th;
+            int mbm_alloc_h = (block_h > 0) ? block_h : tile_h;
+            int mbm_alloc_w = (block_w > 0) ? block_w : tile_w;
             if (mbm_alloc_h > 0 && mbm_alloc_w > 0)
             {
-                mbm_buffers_th.diff_workspace.create(mbm_alloc_h, mbm_alloc_w, CV_32FC1);
-                mbm_buffers_th.grad_x.create(mbm_alloc_h, mbm_alloc_w, CV_32F);
-                mbm_buffers_th.grad_y.create(mbm_alloc_h, mbm_alloc_w, CV_32F);
-                mbm_buffers_th.grad_mag_current.create(mbm_alloc_h, mbm_alloc_w, CV_32FC1);
+                buffers_th.mbm_buffers.diff_workspace.create(mbm_alloc_h, mbm_alloc_w, CV_32FC1);
+                buffers_th.mbm_buffers.grad_x.create(mbm_alloc_h, mbm_alloc_w, CV_32F);
+                buffers_th.mbm_buffers.grad_y.create(mbm_alloc_h, mbm_alloc_w, CV_32F);
+                buffers_th.mbm_buffers.grad_mag_current.create(mbm_alloc_h, mbm_alloc_w, CV_32FC1);
             }
+            cv::Mat thread_block_confidences;
+
+            const int num_tiles_x = w_img / tile_w;
 
 #pragma omp for collapse(2) schedule(static)
             for (int i = 0; i < num_row_starts; i++)
@@ -115,40 +125,57 @@ extern "C"
                         continue;
 
                     cv::Rect tile_roi(c, r, tile_w, tile_h);
-                    const cv::Mat current_tile_for_accumulation = current_image_mat(tile_roi);
-                    const cv::Mat current_tile_gray_for_mbm = current_image_gray_full(tile_roi);
+
+                    MotionCompensate::MotionData motion_data = MotionCompensate::process_tile_motion(
+                        current_image_mat, current_image_gray_full, reference_image_gray_full,
+                        tile_roi, search_radius, buffers_th);
+
+                    cv::Mat current_tile_for_accumulation;
+                    cv::Mat current_tile_gray_for_mbm;
+                    if (motion_data.compensation_applied)
+                    {
+                        current_tile_for_accumulation = motion_data.compensated_color_tile;
+                        current_tile_gray_for_mbm = motion_data.compensated_gray_tile;
+                    }
+                    else
+                    {
+                        current_tile_for_accumulation = current_image_mat(tile_roi);
+                        current_tile_gray_for_mbm = current_image_gray_full(tile_roi);
+                    }
+
                     const cv::Mat reference_tile_gray_for_mbm = reference_image_gray_full(tile_roi);
                     const cv::Mat base_window_tile_mat(tile_h, tile_w, CV_32FC1, const_cast<float *>(base_window_ptr));
 
                     if (current_tile_gray_for_mbm.empty() || reference_tile_gray_for_mbm.empty() || current_tile_for_accumulation.empty())
-                    {
                         continue;
-                    }
+
                     float estimated_noise_sigma_tile = 0.0f;
+#ifdef TILE_NOISE_ESTIMATION_HPP
                     if (reference_tile_gray_for_mbm.rows >= 3 && reference_tile_gray_for_mbm.cols >= 3)
                     {
-#ifdef TILE_NOISE_ESTIMATION_HPP
                         estimated_noise_sigma_tile = NoiseEstimation::estimate_tile_noise_sigma_mad_laplacian(
                             reference_tile_gray_for_mbm, MAD_TO_SIGMA_FACTOR);
-#else
-
-#endif
                     }
+#endif
 
                     int actual_block_h = (block_h > 0) ? block_h : tile_h;
                     int actual_block_w = (block_w > 0) ? block_w : tile_w;
-                    int num_blocks_h = (actual_block_h > 0 && tile_h > 0) ? (tile_h + actual_block_h - 1) / actual_block_h : 0;
-                    int num_blocks_w = (actual_block_w > 0 && tile_w > 0) ? (tile_w + actual_block_w - 1) / actual_block_w : 0;
+                    int num_blocks_h = (tile_h > 0 && actual_block_h > 0) ? (tile_h + actual_block_h - 1) / actual_block_h : 0;
+                    int num_blocks_w = (tile_w > 0 && actual_block_w > 0) ? (tile_w + actual_block_w - 1) / actual_block_w : 0;
 
                     if (num_blocks_h == 0 || num_blocks_w == 0)
                         continue;
 
-                    if (thread_block_confidences.rows != num_blocks_h || thread_block_confidences.cols != num_blocks_w || thread_block_confidences.type() != CV_32FC1)
+                    if (thread_block_confidences.rows != num_blocks_h || thread_block_confidences.cols != num_blocks_w)
                     {
                         thread_block_confidences.create(num_blocks_h, num_blocks_w, CV_32FC1);
                     }
-                    thread_block_confidences.setTo(cv::Scalar(0.0f));
 
+                    const int tx = c / tile_w;
+                    const int ty = r / tile_h;
+                    const int tile_idx = ty * num_tiles_x + tx;
+                    const bool current_tile_is_flat = is_tile_flat[tile_idx];
+                    
                     for (int bh_idx = 0; bh_idx < num_blocks_h; ++bh_idx)
                     {
                         for (int bw_idx = 0; bw_idx < num_blocks_w; ++bw_idx)
@@ -173,34 +200,26 @@ extern "C"
                                 continue;
                             }
 
-                            MotionMatching::BlockMatchResult mbm_result =
-                                MotionMatching::find_best_block_match_mad(
-                                    current_block_to_match,
-                                    reference_tile_gray_for_mbm,
-                                    block_local_r_start,
-                                    block_local_c_start,
-                                    search_radius,
-                                    GRADIENT_WEIGHT_FACTOR,
-                                    STABILITY_EPSILON,
-                                    mbm_buffers_th);
+                            MotionMatching::BlockMatchResult mbm_result = MotionMatching::find_best_block_match_mad(
+                                current_block_to_match, reference_tile_gray_for_mbm, block_local_r_start,
+                                block_local_c_start, search_radius, GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON, buffers_th.mbm_buffers);
 
                             float confidence = 0.0f;
                             if (mbm_result.success)
                             {
                                 confidence = calculate_match_confidence(
-                                    mbm_result,
-                                    estimated_noise_sigma_tile,
-                                    motion_sensitivity,
-                                    noise_offset_factor);
+                                    mbm_result, estimated_noise_sigma_tile, motion_sensitivity, noise_offset_factor);
+
+
+                                if (current_tile_is_flat)
+                                {
+                                    confidence *= MotionMetricsConfig::FLATNESS_CONFIDENCE_BOOST;
+                                    
+                                    confidence = std::min(confidence, 1.0f);
+                                }
                             }
                             thread_block_confidences.at<float>(bh_idx, bw_idx) = confidence;
                         }
-                    }
-
-                    if (CONFIDENCE_MAP_BLUR_KERNEL_SIZE > 1)
-                    {
-                        int ksize = (CONFIDENCE_MAP_BLUR_KERNEL_SIZE % 2 == 1) ? CONFIDENCE_MAP_BLUR_KERNEL_SIZE : CONFIDENCE_MAP_BLUR_KERNEL_SIZE + 1;
-                        cv::GaussianBlur(thread_block_confidences, thread_block_confidences, cv::Size(ksize, ksize), 0, 0, cv::BORDER_REPLICATE);
                     }
 
                     for (int y = 0; y < tile_h; ++y)
