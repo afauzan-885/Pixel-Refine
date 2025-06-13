@@ -7,7 +7,7 @@ import os
 from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extra_denoising, extract_all_metadata, gaussian_window, get_all_image_paths_for_single_process, load_images_from_paths, normalize_image, resize_all_with_padding, save_image
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extra_denoising, extract_all_metadata, gaussian_window, get_all_image_paths_for_single_process, load_images_from_paths, normalize_image, optical_flow_refinement, resize_all_with_padding, save_image, standard_refinement
 from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityFrequencyInterface, SimilaritySpatialInterface
 from UI.enhance_stack.components.single_page_layout.parameter_denoising.similarity_parameter_settings import  load_similarity_config
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
@@ -90,13 +90,41 @@ class SimilarityAlgorithm:
                 images.append(image)
         return images
 
+    
     def _spatial_merging(self, images, ref_image_h, ref_image_w, ref_channels_buffer, ref_dtype,
-                         reference_image_float, tile_size, overlap,
-                         motion_sensitivity, noise_offset_factor,
-                         update_progress=None, stop_requested=None,
-                         total_overall_images=None, images_processed_so_far=0,
-                         lib_path='UI/data/similarity_spatial_merging.dll',
-                         **unused_kwargs):
+                     reference_image_float, tile_size, overlap,
+                     motion_sensitivity, noise_offset_factor,
+                     refinement_algorithm='optical_flow',  # 'standard' atau 'optical_flow'
+                     optical_flows=None,               # List optical flow map, satu per frame, jika pakai optical_flow refinement
+                     update_progress=None, stop_requested=None,
+                     total_overall_images=None, images_processed_so_far=0,
+                     lib_path='UI/data/similarity_spatial_merging.dll',
+                     temporal_consistency=True,
+                     save_temporal_std_path=None,
+                     **unused_kwargs):
+
+        def add_legend_heatmap(img, labels=("Static", "Moving"), font_scale=0.5, thickness=2):
+            h, w = img.shape[:2]
+            legend_width = int(w * 0.25)
+            legend_height = int(h * 0.05)
+            margin = 10
+            overlay = img.copy()
+            cv2.rectangle(overlay, (margin, h - legend_height - margin), (margin + legend_width, h - margin), (0, 0, 0), -1)
+            alpha = 0.6
+            cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
+            legend_bar = np.zeros((20, legend_width, 3), dtype=np.uint8)
+            for i in range(legend_width):
+                val = int((i / legend_width) * 255)
+                color = cv2.applyColorMap(np.array([[val]], dtype=np.uint8), cv2.COLORMAP_JET)[0, 0]
+                legend_bar[:, i] = color
+            img[h - legend_height - 25: h - legend_height - 5, margin: margin + legend_width] = legend_bar
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            text_color = (255, 255, 255)
+            cv2.putText(img, labels[0], (margin, h - margin - legend_height - 30), font, font_scale, text_color, thickness, cv2.LINE_AA)
+            text_size = cv2.getTextSize(labels[1], font, font_scale, thickness)[0]
+            cv2.putText(img, labels[1], (margin + legend_width - text_size[0], h - margin - legend_height - 30), font, font_scale, text_color, thickness, cv2.LINE_AA)
+            return img
+
         tile_h, tile_w = map(int, tile_size)
         try:
             c_interface = SimilaritySpatialInterface(lib_path)
@@ -105,54 +133,106 @@ class SimilarityAlgorithm:
 
         final_image_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32))
         weight_map_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w), dtype=np.float32))
-        step_y = max(int(tile_h * (1 - overlap)), 1); step_x = max(int(tile_w * (1 - overlap)), 1)
-        if ref_image_h >= tile_h:
-            row_starts = np.arange(0, ref_image_h - tile_h + 1, step_y)
-            if ref_image_h > tile_h and (not row_starts.size or row_starts[-1] != ref_image_h - tile_h): row_starts = np.append(row_starts, ref_image_h - tile_h)
-            elif ref_image_h == tile_h: row_starts = np.array([0])
-        else: row_starts = np.array([0])
-        if ref_image_w >= tile_w:
-            col_starts = np.arange(0, ref_image_w - tile_w + 1, step_x)
-            if ref_image_w > tile_w and (not col_starts.size or col_starts[-1] != ref_image_w - tile_w): col_starts = np.append(col_starts, ref_image_w - tile_w)
-            elif ref_image_w == tile_w: col_starts = np.array([0])
-        else: col_starts = np.array([0])
+        step_y = max(int(tile_h * (1 - overlap)), 1)
+        step_x = max(int(tile_w * (1 - overlap)), 1)
+
+        row_starts = np.arange(0, ref_image_h - tile_h + 1, step_y) if ref_image_h >= tile_h else np.array([0])
+        if ref_image_h > tile_h and (not row_starts.size or row_starts[-1] != ref_image_h - tile_h):
+            row_starts = np.append(row_starts, ref_image_h - tile_h)
+        if ref_image_h == tile_h:
+            row_starts = np.array([0])
+        col_starts = np.arange(0, ref_image_w - tile_w + 1, step_x) if ref_image_w >= tile_w else np.array([0])
+        if ref_image_w > tile_w and (not col_starts.size or col_starts[-1] != ref_image_w - tile_w):
+            col_starts = np.append(col_starts, ref_image_w - tile_w)
+        if ref_image_w == tile_w:
+            col_starts = np.array([0])
+
         row_starts = np.ascontiguousarray(np.unique(row_starts).astype(np.int32))
         col_starts = np.ascontiguousarray(np.unique(col_starts).astype(np.int32))
+
         base_window = gaussian_window(tile_size)
         block_h, block_w, search_radius = tile_h, tile_w, 0
-        num_images, processed_frames_spatial, progress_cap_percent = len(images), 0, 95
+
+        num_images = len(images)
+        processed_frames_spatial = 0
+        progress_cap_percent = 95
         orig_h, orig_w = images[0].shape[:2]
 
+        if temporal_consistency:
+            weight_maps_all = []
+
+        prev_weight_map = None
+
         for i, image_orig in enumerate(images):
-            if not isinstance(image_orig, np.ndarray): continue
+            if not isinstance(image_orig, np.ndarray):
+                continue
             if update_progress:
                 current_img_overall = images_processed_so_far + i + 1
                 prog = int((current_img_overall / total_overall_images) * progress_cap_percent if total_overall_images and total_overall_images > 0 else ((i + 1) / num_images) * progress_cap_percent)
                 msg = language_config.IMAGE_PROCESS_IN_PROGRESS.format(current_img_overall, total_overall_images) if total_overall_images and total_overall_images > 0 else language_config.ANALYZING_IMAGE.format(i + 1, num_images)
                 update_progress(prog, msg)
-            if stop_requested and stop_requested(): break
+            if stop_requested and stop_requested():
+                break
             try:
-                if image_orig.shape[0] != orig_h or image_orig.shape[1] != orig_w or image_orig.dtype != ref_dtype: continue
+                if image_orig.shape[0] != orig_h or image_orig.shape[1] != orig_w or image_orig.dtype != ref_dtype:
+                    continue
                 num_ch_orig = image_orig.shape[2] if image_orig.ndim == 3 else 1
-                if num_ch_orig not in (1, 3): continue
-            except Exception: continue
+                if num_ch_orig not in (1, 3):
+                    continue
+            except Exception:
+                continue
+
             current_image_float = normalize_image(image_orig, ref_dtype)
-            if current_image_float.shape[2] != ref_channels_buffer: continue
+            if current_image_float.shape[2] != ref_channels_buffer:
+                continue
+
             try:
+                temp_weight_map = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w), dtype=np.float32))
+
                 c_interface.call_accumulate_frame_weighted(
-                    c_interface.clib, final_image_sum, weight_map_sum, current_image_float, reference_image_float,
+                    c_interface.clib, final_image_sum, temp_weight_map, current_image_float, reference_image_float,
                     base_window, row_starts, col_starts, tile_h, tile_w, ref_image_h, ref_image_w, ref_channels_buffer,
                     block_h, block_w, search_radius, motion_sensitivity, noise_offset_factor
                 )
+
+                # Refinement bobot berdasarkan pilihan algoritma
+                if refinement_algorithm == 'standard':
+                    refined_weight = standard_refinement(temp_weight_map, prev_weight_map, reference_image_float)
+                elif refinement_algorithm == 'optical_flow' and prev_weight_map is not None and optical_flows is not None and i < len(optical_flows):
+                    refined_weight = optical_flow_refinement(temp_weight_map, prev_weight_map, optical_flows[i])
+                else:
+                    refined_weight = temp_weight_map
+
+                weight_map_sum += refined_weight
+                if temporal_consistency:
+                    weight_maps_all.append(refined_weight.copy())
+
+                prev_weight_map = refined_weight
                 processed_frames_spatial += 1
-            except Exception as e: raise RuntimeError(f"C++ accumulation frame {i+1} spatial: {e}")
+
+            except Exception as e:
+                raise RuntimeError(f"C++ accumulation frame {i+1} spatial: {e}")
+
         if processed_frames_spatial > 0:
             try:
                 c_interface.call_normalize_accumulated(c_interface.clib, final_image_sum, weight_map_sum, ref_image_h, ref_image_w, ref_channels_buffer)
-                return final_image_sum, weight_map_sum, processed_frames_spatial
-            except Exception as e: raise RuntimeError(language_config.NORMALIZATION_FAILED.format(e))
-        return None, None, 0
 
+                if temporal_consistency and len(weight_maps_all) > 1:
+                    weight_stack = np.stack(weight_maps_all, axis=0)
+                    temporal_std = np.std(weight_stack, axis=0)
+                    if save_temporal_std_path:
+                        norm_std = (temporal_std - np.min(temporal_std)) / (np.max(temporal_std) - np.min(temporal_std) + 1e-8)
+                        heatmap_color = cv2.applyColorMap((norm_std * 255).astype(np.uint8), cv2.COLORMAP_JET)
+                        heatmap_with_legend = add_legend_heatmap(heatmap_color, labels=("Static (High Weight)", "Moving (Low Weight)"))
+                        os.makedirs(os.path.dirname(save_temporal_std_path), exist_ok=True)
+                        cv2.imwrite(save_temporal_std_path, heatmap_with_legend)
+
+                return final_image_sum, weight_map_sum, processed_frames_spatial
+
+            except Exception as e:
+                raise RuntimeError(language_config.NORMALIZATION_FAILED.format(e))
+
+        return None, None, 0
     def _frequency_merging(self, images, ref_image_h, ref_image_w, ref_channels_buffer, ref_dtype,
                            reference_image_float,
                            freq_c_wiener_factor,
@@ -324,7 +404,7 @@ class SimilarityAlgorithm:
                         motion_sensitivity=None, noise_offset_factor=None,
                         update_progress=None, stop_requested=None,
                         save_weight_map_path=None, total_overall_images=None,
-                        images_processed_so_far=0,
+                        images_processed_so_far=0, save_temporal_std_path="database/stack.jpg",
                         **merging_kwargs):
 
         if not isinstance(images, list) or not images: raise ValueError(language_config.IMAGE_DATA_MUST_BE_VALID)
@@ -361,14 +441,18 @@ class SimilarityAlgorithm:
             if any(p is None for p in [current_tile_size, current_overlap, current_motion_sensitivity, current_noise_offset_factor]):
                 raise ValueError("Untuk spatial merging, tile_size, overlap, motion_sensitivity, dan noise_offset_factor harus disediakan baik sebagai argumen atau di merging_kwargs.")
 
+            # Tambahkan temporal_consistency=True dan save_temporal_std_path agar heatmap aktif
             common_call_args.update({
                 "tile_size": current_tile_size,
                 "overlap": current_overlap,
                 "motion_sensitivity": current_motion_sensitivity,
-                "noise_offset_factor": current_noise_offset_factor
+                "noise_offset_factor": current_noise_offset_factor,
+                "temporal_consistency": True,  # aktifkan temporal std heatmap
+                "save_temporal_std_path": save_temporal_std_path  # path untuk menyimpan heatmap
             })
             
             final_image_normalized, final_weight_map, processed_frames = self._spatial_merging(**common_call_args)
+
 
         elif merging_type == 'frequency':
             default_freq_tile_val = 24
@@ -432,7 +516,7 @@ class SimilarityAlgorithm:
             print(f"No frames processed by {merging_type} merging. Returning zero image.")
             return np.zeros(out_shape_fb, dtype=dtype_ref)
         
-def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
+def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
          single_process=None, batch_id=None, save_final_weight_map=False,
          progress_bar=None, denoising_method="none"):
 

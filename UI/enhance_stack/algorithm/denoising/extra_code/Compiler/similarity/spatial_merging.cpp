@@ -6,7 +6,6 @@ namespace MotionMatching
     {
         constexpr float STABILITY_EPSILON = 1e-6f;
         constexpr float CONFIDENCE_EPSILON = 1e-6f;
-
     }
 
     float calculate_match_confidence(
@@ -52,6 +51,19 @@ namespace MotionMatching
             }
             match_confidence = absolute_quality_confidence * ratio_confidence;
         }
+
         return std::max(0.0f, std::min(1.0f, match_confidence));
     }
-}
+
+    bool is_motion_vector_outlier(
+        float dx_main, float dy_main,
+        float dx_neighbor, float dy_neighbor,
+        float motion_jump_threshold)
+    {
+        float dx_diff = dx_main - dx_neighbor;
+        float dy_diff = dy_main - dy_neighbor;
+        float distance_squared = dx_diff * dx_diff + dy_diff * dy_diff;
+        return distance_squared > (motion_jump_threshold * motion_jump_threshold);
+    }
+
+} // namespace MotionMatching

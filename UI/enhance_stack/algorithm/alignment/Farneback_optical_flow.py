@@ -14,6 +14,7 @@ import h5py
 from PyQt6.QtCore import Qt
 
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, extract_exif, get_all_image_paths_for_single_process, load_images_from_paths, resize_all_with_padding, resize_with_padding,  save_to_hdf5
+from UI.enhance_stack.algorithm.custom_gpu.grayscale_conversion import bgr_to_gray_gpu
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
 from concurrent.futures import ThreadPoolExecutor
@@ -161,13 +162,14 @@ class FarnebackAlgorithm:
         use_multicore = fb_config.get("use_multi_core", True)
 
         try:
-            def prepare_gray(img, use_gpu=False):
+            def prepare_gray(img):
                 if img is None:
                     raise ValueError("Input image is None.")
                 if img.ndim == 3:
-                    img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                if use_gpu:
-                    return cv2.UMat(img.astype(np.uint8, copy=False))
+                    if use_gpu:
+                        return bgr_to_gray_gpu(img)
+                    else:
+                        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                 return img.astype(np.uint8, copy=False)
 
             base_gray_8bit = prepare_gray(base_image)
@@ -187,10 +189,12 @@ class FarnebackAlgorithm:
                         flags=fb_config["flags"]
                     )
                     flow_full = flow_umat.get()
-                except: use_gpu = False
+                except Exception as e:
+                    print(f"GPU error: {e}, falling back to CPU")
+                    use_gpu = False
 
             if not use_gpu:
-                num_blocks_config = fb_config.get("cpu_num_blocks", [30, 23])
+                num_blocks_config = fb_config.get("cpu_num_blocks", [10, 8])
                 overlap_ratio = fb_config.get("cpu_overlap_ratio", 0.3)
                 if isinstance(num_blocks_config, (list, tuple)) and len(num_blocks_config) == 2:
                     blocks_x, blocks_y = num_blocks_config
@@ -203,9 +207,6 @@ class FarnebackAlgorithm:
                 except:
                     overlap_ratio = 0.3
 
-                if blocks_x <= 0 or blocks_y <= 0:
-                    blocks_x, blocks_y = 2, 2
-
                 block_w = w // blocks_x
                 block_h = h // blocks_y
                 if block_w == 0 or block_h == 0:
@@ -213,7 +214,6 @@ class FarnebackAlgorithm:
                     block_w, block_h = w, h
 
                 flow_full_cpu = np.empty((h, w, 2), dtype=np.float32)
-
                 compute_block_cpu = lambda x, y, bw, bh, ovr: self._compute_block_cpu_internal(
                     x, y, bw, bh, ovr, base_gray_8bit, target_gray_8bit, fb_config, w, h
                 )
@@ -269,7 +269,6 @@ class FarnebackAlgorithm:
                         if stop_requested and stop_requested():
                             break
 
-                # Refinement akhir
                 flow_full_cpu = self._refine_flow_median(flow_full_cpu, size=3)
                 flow_full = flow_full_cpu
 
@@ -281,8 +280,7 @@ class FarnebackAlgorithm:
         except Exception as e:
             print(f"Unexpected error in calculate_optical_flow: {e}\n{traceback.format_exc()}")
             return None
-
-
+    
     def compensate_motion(self, base_image_input, flow, image_id=0, config_filename=None):
         if flow is None:
             print(language_config.ERROR_IN_FLOW_FIELD.format(image_id))
@@ -292,8 +290,15 @@ class FarnebackAlgorithm:
             return None
 
         try:
-            if not (isinstance(flow, np.ndarray) and flow.ndim == 3 and flow.shape[2] == 2):
-                raise ValueError(f"Invalid flow field shape: {flow.shape}. Expected (h, w, 2).")
+            if isinstance(flow, cv2.UMat):
+                flow_np = flow.get()
+                h, w = flow_np.shape[:2]
+            elif isinstance(flow, np.ndarray):
+                if flow.ndim != 3 or flow.shape[2] != 2:
+                    raise ValueError(f"Invalid flow field shape: {flow.shape}. Expected (h, w, 2).")
+                h, w = flow.shape[:2]
+            else:
+                raise ValueError("Flow harus berupa numpy array atau UMat.")
 
             h, w = flow.shape[:2]
             if base_image_input.shape[:2] != (h, w):
@@ -385,6 +390,7 @@ class FarnebackAlgorithm:
         except Exception as e:
             print(f"[EXCEPTION] {e}")
             return None
+
 def main(
     db_path,
     update_progress=None,

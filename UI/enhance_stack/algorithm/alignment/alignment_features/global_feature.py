@@ -9,10 +9,10 @@ from bm3d import bm3d_rgb
 import json
 import os
 import concurrent
-import shutil
+
 import sqlite3
 import subprocess
-import time
+
 import cv2
 import exifread
 import numpy as np
@@ -27,6 +27,92 @@ except ImportError:
 from UI.settings.General.Language import language_config
 
 # ====================== Preprocessing ====================== #
+def standard_refinement(
+    weight_map: np.ndarray,
+    prev_weight_map: np.ndarray,
+    reference_image: np.ndarray,
+    texture_threshold: float = 10.0,
+    alpha: float = 0.7,
+    bilateral_d: int = 9,
+    bilateral_sigma_color: float = 0.1,
+    bilateral_sigma_space: float = 10.0
+) -> np.ndarray:
+    """
+    Refinement standar + temporal smoothing antar frame (tanpa optical flow).
+    Lebih halus dan stabil dibanding standard_refinement biasa.
+
+    Args:
+        weight_map: peta bobot saat ini
+        prev_weight_map: peta bobot dari frame sebelumnya
+        reference_image: citra referensi untuk mendeteksi area flat
+        texture_threshold: batasan untuk menentukan area flat
+        alpha: blending factor antar bobot sekarang dan sebelumnya
+        bilateral_d: diameter filter bilateral
+        bilateral_sigma_color: sigma warna bilateral
+        bilateral_sigma_space: sigma spasial bilateral
+
+    Returns:
+        weight_map_refined: peta bobot hasil refinement
+    """
+
+    # 1. Deteksi area low-texture seperti sebelumnya
+    if reference_image.ndim == 3 and reference_image.shape[2] == 3:
+        gray = cv2.cvtColor(reference_image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = reference_image
+
+    laplacian = cv2.Laplacian(gray, cv2.CV_32F)
+    texture_map = cv2.convertScaleAbs(laplacian)
+    mask_low_texture = texture_map < texture_threshold
+
+    # 2. Bilateral filter untuk spatial denoising
+    spatial_smoothed = cv2.bilateralFilter(weight_map, bilateral_d, bilateral_sigma_color, bilateral_sigma_space)
+
+    # 3. Kurangi bobot di area flat
+    spatial_smoothed[mask_low_texture] *= 0.7
+
+    # 4. Temporal blending tanpa optical flow
+    if prev_weight_map is not None:
+        refined = alpha * spatial_smoothed + (1 - alpha) * prev_weight_map
+    else:
+        refined = spatial_smoothed
+
+    return refined
+
+def optical_flow_refinement(weight_map: np.ndarray,
+                                prev_weight_map: np.ndarray,
+                                optical_flow: np.ndarray,
+                                alpha: float = 0.7) -> np.ndarray:
+        """
+        Refinement menggunakan optical flow untuk stabilisasi bobot antar frame.
+
+        Args:
+            weight_map: peta bobot frame saat ini (float32 2D)
+            prev_weight_map: peta bobot frame sebelumnya (float32 2D)
+            optical_flow: flow vektor dari frame sebelumnya ke frame saat ini, shape (H, W, 2)
+            alpha: bobot smoothing antara weight_map dan warped prev_weight_map
+
+        Returns:
+            weight_map_refined: peta bobot hasil refinement (float32 2D)
+        """
+
+        h, w = weight_map.shape
+
+        # Buat grid koordinat pixel frame saat ini
+        grid_x, grid_y = np.meshgrid(np.arange(w), np.arange(h))
+
+        # Hitung koordinat pixel sumber di frame sebelumnya (warped grid)
+        map_x = (grid_x - optical_flow[..., 0]).astype(np.float32)
+        map_y = (grid_y - optical_flow[..., 1]).astype(np.float32)
+
+        # Warp prev_weight_map ke frame saat ini dengan remap bilinear
+        warped_prev_weight = cv2.remap(prev_weight_map, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+
+        # Kombinasikan weight_map saat ini dengan warped bobot sebelumnya
+        weight_map_refined = alpha * weight_map + (1 - alpha) * warped_prev_weight
+
+        return weight_map_refined
+
 def extra_denoising(image, method="bm3d", sigma=0.05, bm3d_aggressiveness=1.0,
                     bm3d_use_ycbcr_for_color=True # Parameter baru
                    ):

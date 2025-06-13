@@ -56,7 +56,7 @@ static float calculate_mad_from_mat_32f(const cv::Mat &data_mat_32f, int tile_si
         }
     }
 
-    return calculate_median(local_mads); // robust overall MAD
+    return calculate_median(local_mads);
 }
 
 } // namespace Internal
