@@ -3,9 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 import gc
 import traceback
-import bm3d
 import cv2
-from bm3d import bm3d_rgb
 import json
 import os
 import concurrent
@@ -26,7 +24,144 @@ except ImportError:
     RAWPY_AVAILABLE = False
 from UI.settings.General.Language import language_config
 
+
+
+
+# ====================== Training ML ====================== #
+
+
 # ====================== Preprocessing ====================== #
+def add_legend_heatmap(img, norm_values, labels=("Static (High Weight)", "Moving (Low Weight)"),
+                       font_scale_info=1.7, thickness_info=2,
+                       font_scale_label=1.2, thickness_label=2):
+    h, w = img.shape[:2]
+    legend_width = 1000
+    legend_height = 500
+    margin = 10
+    bar_height = 20
+    bar_padding = 50  # Jarak antara color bar dan label
+    label_info_spacing = 100  # Jarak antara labels dan info_lines
+
+    # Posisi pojok kiri bawah
+    x0 = margin
+    y1 = h - margin
+    y0 = y1 - legend_height
+
+    # Buat panel transparan
+    overlay = img.copy()
+    cv2.rectangle(overlay, (x0, y0), (x0 + legend_width, y1), (0, 0, 0), -1)
+    alpha = 0.6
+    cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
+
+    # Buat color bar dengan step warna (diskrit)
+    legend_bar = np.zeros((bar_height, legend_width, 3), dtype=np.uint8)
+    num_steps = 15
+    step_width = legend_width // num_steps
+    for i in range(num_steps):
+        val = int((i / (num_steps - 1)) * 255)
+        color = cv2.applyColorMap(np.array([[val]], dtype=np.uint8), cv2.COLORMAP_JET)[0, 0]
+        x_start = i * step_width
+        x_end = (i + 1) * step_width if i < num_steps - 1 else legend_width
+        legend_bar[:, x_start:x_end] = color
+    img[y0 + 5: y0 + 5 + bar_height, x0: x0 + legend_width] = legend_bar
+
+    # Font dan warna
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    text_color = (255, 255, 255)
+
+    # Label kiri dan kanan di bawah color bar, dengan padding 50px
+    label_y = y0 + 5 + bar_height + bar_padding
+    cv2.putText(img, labels[0], (x0, label_y),
+                font, font_scale_label, text_color, thickness_label, cv2.LINE_AA)
+    text_size = cv2.getTextSize(labels[1], font, font_scale_label, thickness_label)[0]
+    cv2.putText(img, labels[1], (x0 + legend_width - text_size[0], label_y),
+                font, font_scale_label, text_color, thickness_label, cv2.LINE_AA)
+
+    # Statistik
+    high_thresh = 0.7
+    low_thresh = 0.3
+    percent_high = (norm_values > high_thresh).sum() / norm_values.size * 100
+    percent_low = (norm_values < low_thresh).sum() / norm_values.size * 100
+    mean_val = np.mean(norm_values)
+
+    info_lines = [
+        f"High: {percent_high:.1f}%",
+        f"Low: {percent_low:.1f}%",
+        f"Avg: {mean_val:.3f}"
+    ]
+
+    # Hitung tinggi font untuk spacing otomatis (berdasarkan font info)
+    _, text_height = cv2.getTextSize("Ag", font, font_scale_info, thickness_info)[0]
+    line_spacing = int(text_height * 1.4)
+
+    # Tampilkan statistik di bawah label dengan tambahan jarak
+    for i, line in enumerate(info_lines):
+        y_text = label_y + label_info_spacing + line_spacing * (i + 1)
+        cv2.putText(img, line, (x0, y_text),
+                    font, font_scale_info, text_color, thickness_info, cv2.LINE_AA)
+
+    return img
+
+def temporal_consistency_refinement(weight_maps_all, weight_map_sum, save_temporal_std_path=None,
+                                    max_boost=2.0, min_boost=0.5):
+    if len(weight_maps_all) <= 1:
+        return
+
+    weight_stack = np.stack(weight_maps_all, axis=0)
+    temporal_std = np.std(weight_stack, axis=0)
+    temporal_mean = np.mean(weight_stack, axis=0)
+
+    stability_score = temporal_mean / (temporal_std + 1e-6)
+    median_stability = np.median(stability_score)
+    std_stability = np.std(stability_score)
+
+    # ✅ Vektorized sigmoid-style scaling
+    delta = stability_score - median_stability
+    scaling_factors = 1 + np.tanh(delta / (std_stability + 1e-6))
+    scaling_factors = np.clip(scaling_factors, min_boost, max_boost)
+
+    weight_map_sum *= scaling_factors
+
+    if save_temporal_std_path:
+        norm_std = (temporal_std - np.min(temporal_std)) / (np.max(temporal_std) - np.min(temporal_std) + 1e-8)
+        heatmap_color = cv2.applyColorMap((norm_std * 255).astype(np.uint8), cv2.COLORMAP_JET)
+        heatmap_with_legend = add_legend_heatmap(
+            heatmap_color,
+            norm_values=norm_std,
+            labels=("Static (High Weight)", "Moving (Low Weight)")
+        )
+        os.makedirs(os.path.dirname(save_temporal_std_path), exist_ok=True)
+        cv2.imwrite(save_temporal_std_path, heatmap_with_legend)
+
+def optical_flow_refinement(weight_map, prev_weight_map_ema, optical_flow, alpha_base=0.4, spatial_sigma=0.1, temporal_threshold=0.005, spatial_influence=0.5):
+        """Implementasi refinement adaptif yang lebih cerdas."""
+        if prev_weight_map_ema is None or optical_flow is None:
+             return weight_map
+
+        h, w = weight_map.shape
+        grid_x, grid_y = np.meshgrid(np.arange(w), np.arange(h))
+        map_x = (grid_x - optical_flow[..., 0]).astype(np.float32)
+        map_y = (grid_y - optical_flow[..., 1]).astype(np.float32)
+
+        warped_prev_ema = cv2.remap(prev_weight_map_ema, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        smoothed_current_weight = cv2.GaussianBlur(weight_map, (0, 0), spatial_sigma)
+        
+        temporal_diff = np.abs(smoothed_current_weight - warped_prev_ema)
+        confidence_mask = np.clip(1.0 - temporal_diff / (temporal_threshold + 1e-8), 0.0, 1.0)
+        
+        local_median = cv2.medianBlur(smoothed_current_weight.astype(np.float32), 5)
+        spatial_outlier_mask = np.abs(smoothed_current_weight - local_median) > 0.25
+        
+        restore_mask = (confidence_mask < 0.5) & (~spatial_outlier_mask)
+        local_average = cv2.blur(smoothed_current_weight, (3, 3))
+        
+        recovered_weight = np.where(restore_mask, spatial_influence * local_average + (1 - spatial_influence) * smoothed_current_weight, smoothed_current_weight)
+        
+        effective_alpha = alpha_base * confidence_mask
+        weight_map_refined = (effective_alpha * recovered_weight) + ((1.0 - effective_alpha) * warped_prev_ema)
+        
+        return weight_map_refined
+    
 def standard_refinement(
     weight_map: np.ndarray,
     prev_weight_map: np.ndarray,
@@ -78,185 +213,7 @@ def standard_refinement(
         refined = spatial_smoothed
 
     return refined
-
-def optical_flow_refinement(weight_map: np.ndarray,
-                                prev_weight_map: np.ndarray,
-                                optical_flow: np.ndarray,
-                                alpha: float = 0.7) -> np.ndarray:
-        """
-        Refinement menggunakan optical flow untuk stabilisasi bobot antar frame.
-
-        Args:
-            weight_map: peta bobot frame saat ini (float32 2D)
-            prev_weight_map: peta bobot frame sebelumnya (float32 2D)
-            optical_flow: flow vektor dari frame sebelumnya ke frame saat ini, shape (H, W, 2)
-            alpha: bobot smoothing antara weight_map dan warped prev_weight_map
-
-        Returns:
-            weight_map_refined: peta bobot hasil refinement (float32 2D)
-        """
-
-        h, w = weight_map.shape
-
-        # Buat grid koordinat pixel frame saat ini
-        grid_x, grid_y = np.meshgrid(np.arange(w), np.arange(h))
-
-        # Hitung koordinat pixel sumber di frame sebelumnya (warped grid)
-        map_x = (grid_x - optical_flow[..., 0]).astype(np.float32)
-        map_y = (grid_y - optical_flow[..., 1]).astype(np.float32)
-
-        # Warp prev_weight_map ke frame saat ini dengan remap bilinear
-        warped_prev_weight = cv2.remap(prev_weight_map, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-
-        # Kombinasikan weight_map saat ini dengan warped bobot sebelumnya
-        weight_map_refined = alpha * weight_map + (1 - alpha) * warped_prev_weight
-
-        return weight_map_refined
-
-def extra_denoising(image, method="bm3d", sigma=0.05, bm3d_aggressiveness=1.0,
-                    bm3d_use_ycbcr_for_color=True # Parameter baru
-                   ):
-    """
-    Lakukan denoising pada gambar menggunakan metode yang ditentukan.
-
-    Args:
-        image (np.ndarray): Gambar input.
-        method (str): Metode denoising ("bm3d", "nlm", "none").
-        sigma (float): Nilai sigma estimasi noise dasar (range [0,1] untuk gambar float).
-        bm3d_aggressiveness (float): Faktor pengali untuk sigma saat menggunakan BM3D/NLM.
-        bm3d_use_ycbcr_for_color (bool): Jika True dan metode BM3D dipilih untuk gambar berwarna,
-                                         hanya channel luminance (Y dari YCbCr) yang akan di-denoise
-                                         untuk kecepatan. Jika False, bm3d_rgb akan digunakan.
-    Returns:
-        np.ndarray: Gambar hasil denoising.
-    """
-    try:
-        if method == "none": return image
-        original_dtype = image.dtype
-        original_shape = image.shape # Simpan shape asli
-
-        # --- Normalisasi Input ke Float [0,1] ---
-        image_float_internal = None # Akan diisi oleh blok normalisasi
-        max_val_internal = 1.0 # Default untuk float input [0,1]
-
-        if image.dtype == np.uint8:
-            max_val_internal = 255.0
-            image_float_internal = image.astype(np.float32) / max_val_internal
-        elif image.dtype == np.uint16:
-            max_val_internal = 65535.0
-            image_float_internal = image.astype(np.float32) / max_val_internal
-        elif np.issubdtype(image.dtype, np.floating):
-            min_img, max_img = image.min(), image.max()
-            if max_img <= 1.0001 and min_img >= -0.0001: # Sudah ~[0,1]
-                image_float_internal = image.astype(np.float32)
-                # max_val_internal tetap 1.0
-            else: # Float tapi range lain, normalisasi paksa
-                print(f"Peringatan: Input float range ({min_img:.2f}, {max_img:.2f}) bukan [0,1]. Normalisasi paksa.")
-                if max_img > min_img:
-                    image_float_internal = ((image - min_img) / (max_img - min_img)).astype(np.float32)
-                else: # Gambar konstan
-                    image_float_internal = np.zeros_like(image, dtype=np.float32)
-                # max_val_internal tetap 1.0
-        else:
-            raise ValueError(f"Unsupported dtype: {image.dtype}. Provide uint8, uint16, or float.")
-        # --- Akhir Normalisasi ---
-
-        denoised_float = None
-        is_rgb_input = image_float_internal.ndim == 3 and image_float_internal.shape[-1] == 3
-        is_gray_input_explicit_channel = image_float_internal.ndim == 3 and image_float_internal.shape[-1] == 1
-        is_gray_input_2d = image_float_internal.ndim == 2
-
-
-        if method == "bm3d":
-            if bm3d is None:
-                print("Metode 'bm3d' tidak tersedia. Mengembalikan gambar asli."); return image
-            
-            effective_sigma_psd = sigma * bm3d_aggressiveness
-            print(f"  BM3D: sigma_base={sigma:.4f}, agg_factor={bm3d_aggressiveness:.2f}, sigma_psd_eff={effective_sigma_psd:.4f}")
-
-            if is_rgb_input and bm3d_use_ycbcr_for_color:
-                print("  BM3D: Memproses channel Luminance (Y) dari YCbCr untuk gambar berwarna.")
-                # 1. Konversi RGB [0,1] ke YCbCr [0,1] (OpenCV YCbCr biasanya uint8)
-                # Kita perlu pastikan input ke cvtColor adalah uint8 jika ingin YCbCr standar
-                img_uint8_for_ycbcr = (np.clip(image_float_internal * 255.0, 0, 255)).astype(np.uint8)
-                ycbcr_image_uint8 = cv2.cvtColor(img_uint8_for_ycbcr, cv2.COLOR_RGB2YCrCb) # atau COLOR_BGR2YCrCb jika input BGR
-
-                y_channel_uint8 = ycbcr_image_uint8[..., 0]
-                cb_channel_uint8 = ycbcr_image_uint8[..., 1]
-                cr_channel_uint8 = ycbcr_image_uint8[..., 2]
-
-                # Normalisasi Y channel ke [0,1] untuk BM3D
-                y_channel_float = y_channel_uint8.astype(np.float32) / 255.0
-
-                # 2. Denoise Y channel
-                denoised_y_channel_float = bm3d.bm3d(y_channel_float, sigma_psd=effective_sigma_psd)
-
-                # Denormalisasi Y channel kembali ke uint8
-                denoised_y_channel_uint8 = (np.clip(denoised_y_channel_float * 255.0, 0, 255)).astype(np.uint8)
-
-                # 3. Gabungkan kembali dengan Cb, Cr asli
-                denoised_ycbcr_uint8 = cv2.merge([denoised_y_channel_uint8, cb_channel_uint8, cr_channel_uint8])
-
-                # 4. Konversi kembali ke RGB dan float [0,1]
-                denoised_rgb_uint8 = cv2.cvtColor(denoised_ycbcr_uint8, cv2.COLOR_YCrCb2RGB) # atau COLOR_YCrCb2BGR
-                denoised_float = denoised_rgb_uint8.astype(np.float32) / 255.0
-
-            elif is_rgb_input and not bm3d_use_ycbcr_for_color:
-                print("  BM3D: Memproses semua channel RGB dengan bm3d_rgb.")
-                denoised_float = bm3d.bm3d_rgb(image_float_internal, sigma_psd=effective_sigma_psd)
-            
-            elif is_gray_input_2d or is_gray_input_explicit_channel: # Grayscale
-                img_to_denoise_gray = image_float_internal[..., 0] if is_gray_input_explicit_channel else image_float_internal
-                denoised_gray = bm3d.bm3d(img_to_denoise_gray, sigma_psd=effective_sigma_psd)
-                if is_gray_input_explicit_channel: denoised_float = denoised_gray[..., np.newaxis]
-                else: denoised_float = denoised_gray
-            else:
-                raise ValueError(f"Format gambar tidak didukung untuk BM3D: shape {image_float_internal.shape}")
-
-        elif method == "nlm":
-            h_param_nlm = 10.0 * bm3d_aggressiveness
-            print(f"  NLM: sigma_base={sigma:.4f}, agg_factor={bm3d_aggressiveness:.2f}, h_eff={h_param_nlm:.2f}")
-            # NLM OpenCV mengharapkan uint8
-            if is_rgb_input:
-                img_uint8_c = (np.clip(image_float_internal * 255.0, 0, 255)).astype(np.uint8)
-                den_uint8_c = cv2.fastNlMeansDenoisingColored(img_uint8_c, None, float(h_param_nlm), float(h_param_nlm), 7, 21)
-                denoised_float = den_uint8_c.astype(np.float32) / 255.0
-            else: # Grayscale
-                img_to_denoise_gray_nlm = image_float_internal[..., 0] if is_gray_input_explicit_channel else image_float_internal
-                img_uint8_g = (np.clip(img_to_denoise_gray_nlm * 255.0, 0, 255)).astype(np.uint8)
-                den_uint8_g = cv2.fastNlMeansDenoising(img_uint8_g, None, float(h_param_nlm), 7, 21)
-                if is_gray_input_explicit_channel: denoised_float = den_uint8_g[..., np.newaxis].astype(np.float32) / 255.0
-                else: denoised_float = den_uint8_g.astype(np.float32) / 255.0
-        else:
-            raise ValueError(f"Unknown denoising method: {method}")
-
-        # --- Denormalisasi Output ke Tipe Data Asli ---
-        # Pastikan shape output konsisten dengan input asli sebelum denormalisasi
-        if denoised_float.shape != original_shape:
-             if len(original_shape) == 2 and denoised_float.ndim == 3 and denoised_float.shape[-1] == 1:
-                 denoised_float = np.squeeze(denoised_float, axis=-1)
-             elif len(original_shape) == 3 and original_shape[-1] == 1 and denoised_float.ndim == 2:
-                 denoised_float = denoised_float[..., np.newaxis]
-        
-        if max_val_internal > 1.0: # Jika input asli bukan float [0,1]
-            return np.clip(denoised_float * max_val_internal, 0, max_val_internal).astype(original_dtype)
-        else: # Jika input asli adalah float [0,1] atau dinormalisasi paksa ke [0,1]
-            # Jika original_dtype adalah float, kembalikan float. Jika uint, kembalikan uint (meskipun ini kasus aneh jika max_val_internal=1).
-            if np.issubdtype(original_dtype, np.floating):
-                return np.clip(denoised_float, 0, 1).astype(original_dtype) # Pertahankan float
-            else: # Jika original_dtype adalah integer tapi max_val_internal=1.0 (misal, setelah normalisasi paksa float non-[0,1])
-                  # Kembalikan ke range uint8 jika original_dtype adalah uint8
-                if original_dtype == np.uint8:
-                    return (np.clip(denoised_float, 0, 1) * 255.0).astype(np.uint8)
-                elif original_dtype == np.uint16:
-                     return (np.clip(denoised_float, 0, 1) * 65535.0).astype(np.uint16)
-                else: # Fallback jika tidak yakin
-                    return np.clip(denoised_float, 0, 1).astype(original_dtype)
-
-
-    except Exception as e:
-        print(f"Denoising gagal: {e}"); traceback.print_exc(); return image
-        
+     
 @lru_cache(maxsize=3200)
 def gaussian_window(size, sigma_scale=1/6): 
         """Menghasilkan jendela Gaussian 2D [0, 1] float32 C-contiguous."""

@@ -19,7 +19,7 @@ class PixelRefineMain(QMainWindow):
         self.database_manager.create_database()
         self.main_content = MainContent(self.database_manager)
         self.main_content_animator = StackedWidgetAnimator(self)
-
+    
         # Ikon dan Judul Jendela
         self.setWindowIcon(QIcon("UI/resources/image/Logo_Pixel_Refine.png")) # Pastikan path ini benar
         self.setWindowTitle(f"Pixel Refine - Version {config.APP_VERSION}")

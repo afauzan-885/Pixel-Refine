@@ -21,7 +21,7 @@ namespace MotionMetricsConfig
     constexpr float GRADIENT_WEIGHT_FACTOR = 1.3f;
     constexpr float MAD_TO_SIGMA_FACTOR = 1.4826f;
     constexpr int CONFIDENCE_MAP_BLUR_KERNEL_SIZE = 3;
-    constexpr float FLATNESS_VARIANCE_THRESHOLD = 5.0f;
+    constexpr float FLATNESS_VARIANCE_THRESHOLD = 15.0f;
     constexpr float FLATNESS_CONFIDENCE_BOOST = 1.7f;
 }
 
@@ -59,30 +59,23 @@ extern "C"
         const cv::Mat reference_image_mat(h_img, w_img, mat_type_color, const_cast<float *>(reference_image_ptr));
 
         cv::Mat current_image_gray_full, reference_image_gray_full;
-        if (current_image_mat.channels() > 1)
+        if (channels > 1)
         {
-            cv::Mat temp;
-            cv::cvtColor(current_image_mat, temp, cv::COLOR_BGR2GRAY);
-            temp.convertTo(current_image_gray_full, CV_32F);
+            cv::Mat temp_curr, temp_ref;
+            cv::cvtColor(current_image_mat, temp_curr, cv::COLOR_BGR2GRAY);
+            cv::cvtColor(reference_image_mat, temp_ref, cv::COLOR_BGR2GRAY);
+            temp_curr.convertTo(current_image_gray_full, CV_32F);
+            temp_ref.convertTo(reference_image_gray_full, CV_32F);
         }
         else
         {
             current_image_mat.convertTo(current_image_gray_full, CV_32F);
-        }
-        if (reference_image_mat.channels() > 1)
-        {
-            cv::Mat temp;
-            cv::cvtColor(reference_image_mat, temp, cv::COLOR_BGR2GRAY);
-            temp.convertTo(reference_image_gray_full, CV_32F);
-        }
-        else
-        {
             reference_image_mat.convertTo(reference_image_gray_full, CV_32F);
         }
 
         std::vector<bool> is_tile_flat;
         std::vector<cv::Mat> ref_channels_for_flat_detection;
-        if (reference_image_mat.channels() > 1)
+        if (channels > 1)
         {
             cv::split(reference_image_mat, ref_channels_for_flat_detection);
         }
@@ -90,17 +83,31 @@ extern "C"
         {
             ref_channels_for_flat_detection.push_back(reference_image_mat);
         }
-
         TextureAnalysis::detect_flat_tiles(
-            ref_channels_for_flat_detection,
-            tile_h, tile_w,
-            reference_image_mat.channels(),
-            MotionMetricsConfig::FLATNESS_VARIANCE_THRESHOLD,
-            is_tile_flat);
-        
+            ref_channels_for_flat_detection, tile_h, tile_w, channels,
+            FLATNESS_VARIANCE_THRESHOLD, is_tile_flat);
+
+        float global_estimated_noise_sigma = 0.015f;
+#ifdef TILE_NOISE_ESTIMATION_HPP
+        if (reference_image_gray_full.rows >= 3 && reference_image_gray_full.cols >= 3)
+        {
+            global_estimated_noise_sigma = NoiseEstimation::estimate_tile_noise_sigma_mad_laplacian(
+                reference_image_gray_full, MAD_TO_SIGMA_FACTOR);
+        }
+#endif
+        global_estimated_noise_sigma = std::max(0.001f, std::min(0.25f, global_estimated_noise_sigma));
+
 #pragma omp parallel
         {
             MotionCompensate::MotionCompensationBuffers buffers_th;
+
+            // ======================== SOLUSI ========================
+            // Blok kode yang menyebabkan error DIHAPUS.
+            // `compensated_..._tile` adalah bagian dari hasil (`MotionData`),
+            // bukan bagian dari buffer input (`MotionCompensationBuffers`).
+            // ========================================================
+
+            // Inisialisasi buffer untuk block matching (ini sudah benar)
             int mbm_alloc_h = (block_h > 0) ? block_h : tile_h;
             int mbm_alloc_w = (block_w > 0) ? block_w : tile_w;
             if (mbm_alloc_h > 0 && mbm_alloc_w > 0)
@@ -110,9 +117,9 @@ extern "C"
                 buffers_th.mbm_buffers.grad_y.create(mbm_alloc_h, mbm_alloc_w, CV_32F);
                 buffers_th.mbm_buffers.grad_mag_current.create(mbm_alloc_h, mbm_alloc_w, CV_32FC1);
             }
-            cv::Mat thread_block_confidences;
 
-            const int num_tiles_x = w_img / tile_w;
+            cv::Mat thread_block_confidences;
+            const int num_tiles_x = (w_img > 0 && tile_w > 0) ? w_img / tile_w : 0;
 
 #pragma omp for collapse(2) schedule(static)
             for (int i = 0; i < num_row_starts; i++)
@@ -149,15 +156,6 @@ extern "C"
                     if (current_tile_gray_for_mbm.empty() || reference_tile_gray_for_mbm.empty() || current_tile_for_accumulation.empty())
                         continue;
 
-                    float estimated_noise_sigma_tile = 0.0f;
-#ifdef TILE_NOISE_ESTIMATION_HPP
-                    if (reference_tile_gray_for_mbm.rows >= 3 && reference_tile_gray_for_mbm.cols >= 3)
-                    {
-                        estimated_noise_sigma_tile = NoiseEstimation::estimate_tile_noise_sigma_mad_laplacian(
-                            reference_tile_gray_for_mbm, MAD_TO_SIGMA_FACTOR);
-                    }
-#endif
-
                     int actual_block_h = (block_h > 0) ? block_h : tile_h;
                     int actual_block_w = (block_w > 0) ? block_w : tile_w;
                     int num_blocks_h = (tile_h > 0 && actual_block_h > 0) ? (tile_h + actual_block_h - 1) / actual_block_h : 0;
@@ -171,11 +169,11 @@ extern "C"
                         thread_block_confidences.create(num_blocks_h, num_blocks_w, CV_32FC1);
                     }
 
-                    const int tx = c / tile_w;
-                    const int ty = r / tile_h;
+                    const int tx = (tile_w > 0) ? c / tile_w : 0;
+                    const int ty = (tile_h > 0) ? r / tile_h : 0;
                     const int tile_idx = ty * num_tiles_x + tx;
-                    const bool current_tile_is_flat = is_tile_flat[tile_idx];
-                    
+                    const bool current_tile_is_flat = (tile_idx < is_tile_flat.size()) ? is_tile_flat[tile_idx] : false;
+
                     for (int bh_idx = 0; bh_idx < num_blocks_h; ++bh_idx)
                     {
                         for (int bw_idx = 0; bw_idx < num_blocks_w; ++bw_idx)
@@ -193,7 +191,6 @@ extern "C"
 
                             cv::Rect current_block_roi_local(block_local_c_start, block_local_r_start, current_block_w_dim, current_block_h_dim);
                             const cv::Mat current_block_to_match = current_tile_gray_for_mbm(current_block_roi_local);
-
                             if (current_block_to_match.empty())
                             {
                                 thread_block_confidences.at<float>(bh_idx, bw_idx) = 0.0f;
@@ -207,14 +204,12 @@ extern "C"
                             float confidence = 0.0f;
                             if (mbm_result.success)
                             {
-                                confidence = calculate_match_confidence(
-                                    mbm_result, estimated_noise_sigma_tile, motion_sensitivity, noise_offset_factor);
-
+                                confidence = MotionMatching::calculate_match_confidence(
+                                    mbm_result, global_estimated_noise_sigma, motion_sensitivity, noise_offset_factor);
 
                                 if (current_tile_is_flat)
                                 {
-                                    confidence *= MotionMetricsConfig::FLATNESS_CONFIDENCE_BOOST;
-                                    
+                                    confidence *= FLATNESS_CONFIDENCE_BOOST;
                                     confidence = std::min(confidence, 1.0f);
                                 }
                             }
@@ -227,10 +222,18 @@ extern "C"
                         const float *current_tile_color_row = current_tile_for_accumulation.ptr<const float>(y);
                         const float *base_window_row = base_window_tile_mat.ptr<const float>(y);
                         int gy = r + y;
+                        if (gy >= h_img)
+                            continue;
+
                         float *global_weight_sum_row = weight_map_sum_mat.ptr<float>(gy);
                         float *global_pixel_sum_row = final_image_sum_mat.ptr<float>(gy);
+
                         for (int x = 0; x < tile_w; ++x)
                         {
+                            int gx = c + x;
+                            if (gx >= w_img)
+                                continue;
+
                             int bh_idx = (actual_block_h > 0) ? std::min(y / actual_block_h, num_blocks_h - 1) : 0;
                             int bw_idx = (actual_block_w > 0) ? std::min(x / actual_block_w, num_blocks_w - 1) : 0;
 
@@ -240,16 +243,16 @@ extern "C"
 
                             if (pixel_weight > GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD)
                             {
-                                int gx = c + x;
 #pragma omp atomic update
                                 global_weight_sum_row[gx] += pixel_weight;
-                                int current_pixel_idx_local = x * channels;
-                                int current_pixel_idx_global = gx * channels;
-                                for (int ch_idx = 0; ch_idx < channels; ++ch_idx)
+
+                                int local_pixel_idx = x * channels;
+                                int global_pixel_idx = gx * channels;
+                                for (int ch = 0; ch < channels; ++ch)
                                 {
-                                    float weighted_pixel_value = current_tile_color_row[current_pixel_idx_local + ch_idx] * pixel_weight;
+                                    float weighted_pixel_value = current_tile_color_row[local_pixel_idx + ch] * pixel_weight;
 #pragma omp atomic update
-                                    global_pixel_sum_row[current_pixel_idx_global + ch_idx] += weighted_pixel_value;
+                                    global_pixel_sum_row[global_pixel_idx + ch] += weighted_pixel_value;
                                 }
                             }
                         }
@@ -265,11 +268,8 @@ extern "C"
         int h, int w, int channels)
     {
         using namespace MotionMetricsConfig;
-
         if (!final_image_ptr || !weight_map_sum_ptr || h <= 0 || w <= 0 || channels <= 0)
-        {
             return;
-        }
         int mat_type = CV_32FC(channels);
         if (mat_type == 0 && channels > 0)
             return;
@@ -286,7 +286,6 @@ extern "C"
             {
                 float total_weight = weight_map_sum_row_ptr[gx];
                 int pixel_idx_base = gx * channels;
-
                 if (total_weight > GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD)
                 {
                     float inv_total_weight = 1.0f / total_weight;

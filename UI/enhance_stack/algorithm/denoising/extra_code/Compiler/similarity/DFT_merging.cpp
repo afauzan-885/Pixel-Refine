@@ -124,10 +124,9 @@ static float merge_frequency_loop_avx2(
     return total_sum;
 }
 
-} // namespace Internal
+}
 
 
-// Fungsi publik sekarang bertindak sebagai dispatcher
 FrequencyMergeResult merge_blocks_frequency_domain(
     const cv::Mat &current_block_gray,
     const cv::Mat &reference_block_gray,
@@ -313,4 +312,4 @@ FrequencyMergeResult merge_blocks_frequency_domain(
     return result;
 }
 
-} // namespace MotionMerging
+}

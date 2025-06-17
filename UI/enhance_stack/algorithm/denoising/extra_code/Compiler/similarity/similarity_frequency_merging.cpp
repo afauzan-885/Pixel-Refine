@@ -21,10 +21,10 @@ namespace MotionMetricsConfig
 
     // Parameter dari kode spasial Anda
     constexpr float SPATIAL_GRADIENT_WEIGHT_FACTOR = 0.0f;
-    constexpr float SPATIAL_MOTION_SENSITIVITY = 150.0f;
-    constexpr float SPATIAL_NOISE_OFFSET_FACTOR = 0.2f;
+    constexpr float SPATIAL_MOTION_SENSITIVITY = 170.0f;
+    constexpr float SPATIAL_NOISE_OFFSET_FACTOR = 0.07f;
     constexpr int SPATIAL_SEARCH_RADIUS = 0;
-    constexpr float MIN_SPATIAL_CONF_FOR_DFT = 0.01f;
+    constexpr float MIN_SPATIAL_CONF_FOR_DFT = 0.02f;
 }
 
 extern "C"
@@ -76,72 +76,22 @@ extern "C"
             reference_image_mat_full.convertTo(reference_image_gray_full, CV_32FC1);
         }
         CV_Assert(!current_image_gray_full.empty() && !reference_image_gray_full.empty());
-
-        std::vector<cv::Mat> reference_image_channels_full_vec;
-        if (channels > 1)
-        {
-            cv::split(reference_image_mat_full, reference_image_channels_full_vec);
-        }
-
-        // =========================================================================
-        // PERUBAHAN DIMULAI DI SINI: Estimasi Noise Global Dilakukan Sekali Saja
-        // =========================================================================
-
-        // 1. Estimasi noise untuk spatial matching (pada gambar grayscale penuh)
-        float global_estimated_noise_sigma_spatial = 0.015f;
+        
+        float global_estimated_noise_sigma = 0.015f; 
         if (reference_image_gray_full.rows >= 3 && reference_image_gray_full.cols >= 3)
         {
 #ifdef TILE_NOISE_ESTIMATION_HPP
-            global_estimated_noise_sigma_spatial = NoiseEstimation::estimate_tile_noise_sigma_mad_laplacian(reference_image_gray_full, MAD_TO_SIGMA_FACTOR);
+            global_estimated_noise_sigma = NoiseEstimation::estimate_tile_noise_sigma_mad_laplacian(reference_image_gray_full, MAD_TO_SIGMA_FACTOR);
 #endif
         }
-        global_estimated_noise_sigma_spatial = std::max(0.001f, std::min(0.25f, global_estimated_noise_sigma_spatial));
-
-        // 2. Estimasi noise untuk DFT merging (per kanal pada gambar penuh)
-        std::vector<float> global_estimated_noise_sigma_dft_per_channel(channels);
-        for (int ch_idx = 0; ch_idx < channels; ++ch_idx)
-        {
-            cv::Mat ref_ch_full;
-            if (channels > 1)
-            {
-                if (ch_idx < reference_image_channels_full_vec.size())
-                    ref_ch_full = reference_image_channels_full_vec[ch_idx];
-                else
-                { // Error case, set default
-                    global_estimated_noise_sigma_dft_per_channel[ch_idx] = 0.015f;
-                    continue;
-                }
-            }
-            else
-            {
-                ref_ch_full = reference_image_mat_full;
-            }
-
-            if (!ref_ch_full.empty() && ref_ch_full.rows >= 3 && ref_ch_full.cols >= 3)
-            {
-#ifdef TILE_NOISE_ESTIMATION_HPP
-                global_estimated_noise_sigma_dft_per_channel[ch_idx] = NoiseEstimation::estimate_tile_noise_sigma_mad_laplacian(ref_ch_full, MAD_TO_SIGMA_FACTOR);
-#else
-                global_estimated_noise_sigma_dft_per_channel[ch_idx] = 0.015f;
-#endif
-            }
-            else
-            {
-                global_estimated_noise_sigma_dft_per_channel[ch_idx] = 0.015f;
-            }
-            global_estimated_noise_sigma_dft_per_channel[ch_idx] = std::max(0.001f, std::min(0.25f, global_estimated_noise_sigma_dft_per_channel[ch_idx]));
-        }
-        // =========================================================================
-        // AKHIR DARI BLOK PERUBAHAN
-        // =========================================================================
-
+        global_estimated_noise_sigma = std::max(0.001f, std::min(0.25f, global_estimated_noise_sigma));
+        
 #pragma omp parallel
         {
             cv::Mat thread_block_confidences;
             MotionMerging::DFTBuffers dft_buffers_th;
             MotionMatching::MBMBuffers mbm_buffers_th;
             cv::Mat thread_merged_tile_data;
-            // Variabel noise thread-local DIHAPUS karena kita menggunakan variabel global
 
 #pragma omp for collapse(2) schedule(guided)
             for (int i = 0; i < num_row_starts; i++)
@@ -165,8 +115,6 @@ extern "C"
                                            !current_tile_gray_for_mbm.empty() && !reference_tile_gray_for_mbm.empty();
                     if (!tile_data_valid)
                         continue;
-
-                    // <<== KODE ESTIMASI NOISE PER-TILE DIHAPUS DARI SINI ==>>
 
                     int merged_tile_type = CV_32FC(channels);
                     if (thread_merged_tile_data.rows != tile_h || thread_merged_tile_data.cols != tile_w || thread_merged_tile_data.type() != merged_tile_type)
@@ -194,6 +142,7 @@ extern "C"
                     }
                     thread_block_confidences.setTo(cv::Scalar(0.0f));
 
+                    // --- TAHAP 1: PERHITUNGAN BERAT TANPA SINKRONISASI ---
                     for (int bh_idx = 0; bh_idx < num_blocks_h; ++bh_idx)
                     {
                         for (int bw_idx = 0; bw_idx < num_blocks_w; ++bw_idx)
@@ -239,7 +188,7 @@ extern "C"
                             if (mbm_result.success)
                             {
                                 spatial_confidence = MotionMatching::calculate_match_confidence(
-                                    mbm_result, global_estimated_noise_sigma_spatial, // <<== PERUBAHAN: Gunakan noise global
+                                    mbm_result, global_estimated_noise_sigma,
                                     SPATIAL_MOTION_SENSITIVITY, SPATIAL_NOISE_OFFSET_FACTOR);
                             }
                             spatial_confidence = std::max(0.0f, std::min(1.0f, spatial_confidence));
@@ -252,7 +201,7 @@ extern "C"
                                     MotionMerging::FrequencyMergeResult dft_res_gray =
                                         MotionMerging::merge_blocks_frequency_domain(
                                             current_block_color_orig, reference_block_color_for_dft_roi,
-                                            global_estimated_noise_sigma_dft_per_channel[0], // <<== PERUBAHAN: Gunakan noise global
+                                            global_estimated_noise_sigma,
                                             dft_wiener_c_factor, STABILITY_EPSILON, dft_buffers_th);
                                     if (dft_res_gray.success && !dft_res_gray.merged_block_gray.empty())
                                     {
@@ -278,7 +227,7 @@ extern "C"
                                         MotionMerging::FrequencyMergeResult dft_res_ch =
                                             MotionMerging::merge_blocks_frequency_domain(
                                                 current_ch_vec[ch_idx], ref_ch_vec[ch_idx],
-                                                global_estimated_noise_sigma_dft_per_channel[ch_idx], // <<== PERUBAHAN: Gunakan noise global
+                                                global_estimated_noise_sigma,
                                                 dft_wiener_c_factor, STABILITY_EPSILON, dft_buffers_th);
                                         if (dft_res_ch.success && !dft_res_ch.merged_block_gray.empty())
                                         {
@@ -291,32 +240,15 @@ extern "C"
                                             current_ch_vec[ch_idx].copyTo(merged_ch_vec[ch_idx]);
                                         }
                                     }
-                                    bool can_merge = true;
-                                    for (const auto &c_mat : merged_ch_vec)
-                                    {
-                                        if (c_mat.empty())
-                                        {
-                                            can_merge = false;
-                                            break;
+                                    bool can_merge = merged_ch_vec.size() == channels;
+                                    for (const auto &c_mat : merged_ch_vec) { if (c_mat.empty()) { can_merge = false; break; } }
+                                    if (can_merge) {
+                                        try { cv::merge(merged_ch_vec, target_merged_submat); }
+                                        catch (const cv::Exception &) {
+                                            current_block_color_orig.copyTo(target_merged_submat); successful_dft_ch = 0;
                                         }
-                                    }
-
-                                    if (can_merge && merged_ch_vec.size() == channels && !merged_ch_vec[0].empty())
-                                    {
-                                        try
-                                        {
-                                            cv::merge(merged_ch_vec, target_merged_submat);
-                                        }
-                                        catch (const cv::Exception &)
-                                        {
-                                            current_block_color_orig.copyTo(target_merged_submat);
-                                            successful_dft_ch = 0;
-                                        }
-                                    }
-                                    else
-                                    {
-                                        current_block_color_orig.copyTo(target_merged_submat);
-                                        successful_dft_ch = 0;
+                                    } else {
+                                        current_block_color_orig.copyTo(target_merged_submat); successful_dft_ch = 0;
                                     }
                                     dft_confidence = (successful_dft_ch > 0) ? (total_dft_conf / successful_dft_ch) : 0.0f;
                                 }
@@ -332,42 +264,48 @@ extern "C"
                         }
                     }
 
+                    // --- TAHAP 2: AKUMULASI KE BUFFER GLOBAL DENGAN ATOMIC ---
+                    // Setelah semua data untuk tile ini (`thread_merged_tile_data` dan `thread_block_confidences`)
+                    // siap, sekarang kita lakukan penulisan ke buffer global.
+                    // Loop ini hanya melakukan kalkulasi sederhana dan penulisan atomik.
                     for (int y_tile = 0; y_tile < tile_h; ++y_tile)
                     {
                         const float *merged_tile_row = thread_merged_tile_data.ptr<const float>(y_tile);
                         const float *base_window_row = base_window_tile_mat.ptr<const float>(y_tile);
                         int gy = r + y_tile;
-                        if (gy >= h_img)
-                            continue;
+                        if (gy >= h_img) continue;
+
                         float *global_weight_sum_row = weight_map_sum_mat.ptr<float>(gy);
                         float *global_pixel_sum_row = final_image_sum_mat.ptr<float>(gy);
+
                         for (int x_tile = 0; x_tile < tile_w; ++x_tile)
                         {
                             int gx = c + x_tile;
-                            if (gx >= w_img)
-                                continue;
-                            int bh_idx_eff = (actual_block_h > 0 && num_blocks_h > 0) ? std::min(y_tile / actual_block_h, num_blocks_h - 1) : 0;
-                            int bw_idx_eff = (actual_block_w > 0 && num_blocks_w > 0) ? std::min(x_tile / actual_block_w, num_blocks_w - 1) : 0;
-                            float block_confidence = 0.0f;
-                            if (num_blocks_h > 0 && num_blocks_w > 0 &&
-                                thread_block_confidences.rows > bh_idx_eff && bh_idx_eff >= 0 &&
-                                thread_block_confidences.cols > bw_idx_eff && bw_idx_eff >= 0)
-                            {
-                                block_confidence = thread_block_confidences.at<float>(bh_idx_eff, bw_idx_eff);
-                            }
+                            if (gx >= w_img) continue;
+
+                            // Dapatkan confidence blok yang sesuai untuk piksel ini
+                            int bh_idx_eff = (actual_block_h > 0) ? std::min(y_tile / actual_block_h, num_blocks_h - 1) : 0;
+                            int bw_idx_eff = (actual_block_w > 0) ? std::min(x_tile / actual_block_w, num_blocks_w - 1) : 0;
+                            float block_confidence = thread_block_confidences.at<float>(bh_idx_eff, bw_idx_eff);
+                            
+                            // Hitung bobot akhir untuk piksel ini
                             float base_win_val = base_window_row[x_tile];
                             float pixel_weight = base_win_val * block_confidence;
+
+                            // Hanya lakukan update jika bobotnya signifikan
                             if (pixel_weight > GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD)
                             {
-#pragma omp atomic update
+                                // Operasi atomik hanya dipanggil di sini, di akhir pipeline untuk satu tile
+                                #pragma omp atomic update
                                 global_weight_sum_row[gx] += pixel_weight;
+
                                 int merged_pixel_idx_local = x_tile * channels;
                                 int global_pixel_idx_global = gx * channels;
                                 for (int ch_idx = 0; ch_idx < channels; ++ch_idx)
                                 {
                                     float merged_pixel_value_ch = merged_tile_row[merged_pixel_idx_local + ch_idx];
                                     float weighted_pixel_value = merged_pixel_value_ch * pixel_weight;
-#pragma omp atomic update
+                                    #pragma omp atomic update
                                     global_pixel_sum_row[global_pixel_idx_global + ch_idx] += weighted_pixel_value;
                                 }
                             }

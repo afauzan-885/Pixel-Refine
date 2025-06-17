@@ -298,7 +298,6 @@ namespace MotionMatching
 
     } // namespace Internal
 
-    // Fungsi utama tidak perlu diubah karena panggilannya ke fungsi internal sudah dioptimalkan
     BlockMatchResult find_best_block_match_mad(
         const cv::Mat &current_block_gray,
         const cv::Mat &reference_tile_gray,
@@ -309,9 +308,7 @@ namespace MotionMatching
         float stability_epsilon,
         MBMBuffers &buffers)
     {
-        // ... (seluruh isi fungsi ini tetap sama persis seperti kode asli Anda) ...
-        // ... (No changes needed here) ...
-
+      
         BlockMatchResult result;
 
         if (current_block_gray.empty() || reference_tile_gray.empty())
