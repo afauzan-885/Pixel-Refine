@@ -1,7 +1,10 @@
 import concurrent.futures 
 from concurrent.futures import ThreadPoolExecutor
+import datetime
 from functools import lru_cache
 import gc
+import glob
+import re
 import traceback
 import cv2
 import json
@@ -13,6 +16,7 @@ import subprocess
 
 import cv2
 import exifread
+import h5py
 import numpy as np
 import rawpy
 import tifffile
@@ -22,13 +26,13 @@ try:
     RAWPY_AVAILABLE = True
 except ImportError:
     RAWPY_AVAILABLE = False
+from UI.enhance_stack.algorithm.model_trainer.train_similarity_model import train_model
 from UI.settings.General.Language import language_config
 
 
 
 
 # ====================== Training ML ====================== #
-
 
 # ====================== Preprocessing ====================== #
 def add_legend_heatmap(img, norm_values, labels=("Static (High Weight)", "Moving (Low Weight)"),
