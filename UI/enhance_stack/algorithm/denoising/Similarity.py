@@ -107,88 +107,36 @@ class SimilarityAlgorithm:
         return images
     
     def _load_knowledge_model(self):
-        """ Memuat model ViTAutoencoder dan DBSCAN. """
-        encoder_path = "database/Learning_Model/vit_autoencoder_pytorch.pth"
-        cluster_path = "database/Learning_Model/dbscan_clusters.pth"
-        # if not os.path.exists(self.encoder_path) or not os.path.exists(self.model_path):
-        #     print(f"Model Loader: File model tidak lengkap. Membutuhkan '{os.path.basename(self.encoder_path)}' dan '{os.path.basename(self.model_path)}'.")
-        #     self.is_model_loaded = False
-        #     return False
-            
-        print(f"Model Loader: Ditemukan model CAE dan K-Means")
-        try:
-            # Parameter harus sama
-            training_resolution = (256, 256)
-            encoding_dim = 64
+        """ 
+        (VERSI SIMULASI) 
+        Mensimulasikan pemuatan model. Tidak ada model AI yang dimuat dari disk.
+        Menyiapkan kerangka untuk pemuatan model di masa depan.
+        """
+        print("\nModel Loader: [Simulasi] Pemuatan model AI diaktifkan.")
+        
+        # --- Logika Simulasi ---
+        # Atur flag ini ke True agar bagian lain dari kode berpikir model sudah dimuat.
+        self.knowledge_model = {} # Kosongkan karena tidak ada model nyata
+        self.model_type = 'simulation' # Tandai bahwa ini adalah mode simulasi
+        self.is_model_loaded = True
+        print("  -> SUKSES: Mode simulasi model AI siap.")
+        return True
 
-            autoencoder = ViTAutoencoder(image_size=training_resolution[0], encoding_dim=encoding_dim)
-            autoencoder.load_state_dict(torch.load(encoder_path, map_location=self.device, weights_only=True))
-            autoencoder.to(self.device)
-            autoencoder.eval()
-            
-            clusterer = DBSCANClusterer(device=self.device)
-            clusterer.load_model(cluster_path)
-            
-            self.knowledge_model = {
-                'autoencoder': autoencoder,
-                'clusterer': clusterer, 
-                'training_resolution': training_resolution
-            }
-            self.model_type = 'vit_plus_dbscan'
-            self.is_model_loaded = True
-            print(f"  -> SUKSES: Model ConvAutoencoder dan K-Means berhasil dimuat di '{self.device}'.")
-            return True
-            
-        except Exception as e:
-            print(f"  -> GAGAL memuat model: {e}")
-            traceback.print_exc() 
-            self.is_model_loaded = False
-            return False
 
     def _apply_knowledge_model(self, weight_map, blending_factor=0.7):
         """
-        Menerapkan model ConvAutoencoder & K-Means untuk menyempurnakan peta bobot.
+        (VERSI SIMULASI) 
+        Mensimulasikan penerapan model pada peta bobot. 
+        Fungsi ini hanya akan mengembalikan peta bobot asli tanpa perubahan.
         """
-        if not self.is_model_loaded or self.model_type != 'cae_plus_kmeans':
+        # Guard clause ini tetap berguna untuk memeriksa apakah _load_knowledge_model berhasil (atau disimulasikan berhasil).
+        if not self.is_model_loaded:
             return weight_map
-
-        autoencoder = self.knowledge_model['autoencoder']
-        clusterer = self.knowledge_model['clusterer'] # Gunakan clusterer
-        training_resolution = self.knowledge_model['training_resolution']
-        
-        # Pra-pemrosesan (resize dan normalisasi, sama seperti sebelumnya)
-        original_map_float = weight_map.astype(np.float32)
-        resized_map = cv2.resize(original_map_float, training_resolution, interpolation=cv2.INTER_AREA)
-        max_val = np.max(resized_map)
-        normalized_map = resized_map / max_val if max_val > 0 else resized_map
-        
-        # Ubah input menjadi 3 channel untuk ViT
-        input_tensor = torch.from_numpy(normalized_map).float().unsqueeze(0).unsqueeze(0)
-        input_tensor_3ch = input_tensor.repeat(1, 3, 1, 1).to(self.device)
-
-        with torch.no_grad():
-            # 1. Dapatkan fitur dari ViT encoder
-            encoded_input = autoencoder.encode(input_tensor_3ch)
             
-            # 2. Ambil pusat-pusat cluster dari model DBSCAN
-            cluster_centers = clusterer.centroids
-            
-            # 3. Hitung jarak dan temukan cluster terdekat
-            distances = torch.sum((encoded_input - cluster_centers)**2, dim=1)
-            cluster_id = torch.argmin(distances).item()
-            
-            # 4. Ambil vektor ideal dari pusat cluster yang menang
-            ideal_encoded_vec = cluster_centers[cluster_id]
-            
-            # 5. Rekonstruksi gambar dari vektor ideal menggunakan decoder
-            reconstructed_output = autoencoder.decode(ideal_encoded_vec.unsqueeze(0))
-            
-            ideal_map = reconstructed_output.cpu().numpy().squeeze()
-
-        # Proses blending dan post-processing (tidak berubah)
-        blended_map_resized = (blending_factor * ideal_map) + ((1 - blending_factor) * normalized_map)
-        blended_map_original_scale = blended_map_resized * max_val if max_val > 0 else blended_map_resized
-        return cv2.resize(blended_map_original_scale, (weight_map.shape[1], weight_map.shape[0]), interpolation=cv2.INTER_LINEAR)
+        # --- Logika Simulasi ---
+        # Hanya cetak pesan dan langsung kembalikan input asli.
+        print("  -> [Simulasi] Menerapkan model pengetahuan... (melewatkan proses AI)") # Uncomment untuk log yang lebih detail
+        return weight_map
     
     def _create_weight_map_heatmap(self, float_map, labels=("Static (High Weight)", "Moving (Low Weight)")):
         """
@@ -227,9 +175,9 @@ class SimilarityAlgorithm:
                     update_progress=None, stop_requested=None,
                     total_overall_images=None, images_processed_so_far=0,
                     lib_path='UI/data/similarity_spatial_merging.dll',
-                    temporal_consistency=False,
+                    temporal_consistency=True,
                     save_temporal_std_path=None,
-                    weight_of_each_image=False,
+                    weight_of_each_image=True,
                     collect_raw_maps_for_learning=False,
                     use_ai_reconstruction=True,
                     **unused_kwargs):
@@ -371,7 +319,7 @@ class SimilarityAlgorithm:
                         lib_path='UI/data/similarity_frequency_merging.dll',
                         refinement_algorithm='optical_flow',
                         optical_flows=None,
-                        temporal_consistency=False,
+                        temporal_consistency=True,
                         save_temporal_std_path=None,
                         weight_of_each_image=False,
                         collect_raw_maps_for_learning=False, 
@@ -713,13 +661,13 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
     try:
         # --- 1. KONFIGURASI AWAL ---
         general_settings = load_similarity_config()
-        use_learning_model_setting = general_settings.get("use_learning_model", True)
         perform_learning_setting = general_settings.get("perform_learning", False)
-        data_collection_only_mode = general_settings.get("data_collection_only_mode", False)
+        use_learning_model_setting = general_settings.get("use_learning_model", False)
         
         print("\n--- Konfigurasi Proses ---")
         print(f"  Mode Pembelajaran (Gunakan Model): {'Aktif' if use_learning_model_setting else 'Nonaktif'}")
-        print(f"  Mode Pembelajaran (Lakukan Pelatihan): {'Aktif' if perform_learning_setting else 'Nonaktif'}")
+        # Pesan ini disesuaikan untuk mencerminkan fungsi baru
+        print(f"  Mode Pengumpulan Data Peta Bobot: {'Aktif' if perform_learning_setting else 'Nonaktif'}")
         print("--------------------------\n")
         
         image_processor = SimilarityAlgorithm(db_path) 
@@ -835,16 +783,12 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
                 update_progress=update_progress, stop_requested=stop_requested,
                 total_overall_images=total_images, images_processed_so_far=images_processed_count,
                 use_learning_model=use_learning_model_setting,
-                perform_learning=False, # Pelatihan terjadi nanti
+                perform_learning=False, # Pelatihan tidak pernah dipicu di sini
                 weight_of_each_image=should_get_weights,
-                collect_raw_maps_for_learning=perform_learning_setting, # Kumpulkan data mentah jika pelatihan diaktifkan
+                # Kumpulkan data mentah JIKA 'perform_learning_setting' diaktifkan
+                collect_raw_maps_for_learning=perform_learning_setting, 
                 **extra_merging_params
             )
-            print(f"DEBUG: Batch {current_batch_num} menghasilkan {len(individual_raw_maps)} peta dari {len(batch_images_list)} gambar.")
-
-            if len(individual_raw_maps) > len(batch_images_list):
-                print(f"  -> PERINGATAN: Terdeteksi penggandaan peta bobot. Memotong dari {len(individual_raw_maps)} menjadi {len(batch_images_list)}.")
-                individual_raw_maps = individual_raw_maps[:len(batch_images_list)]
             
             if stop_requested and stop_requested(): 
                 break
@@ -874,7 +818,6 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
                     existing_keys = list(hf.keys())
                     last_index = 0
                     if existing_keys:
-                        # Handle potential non-numeric keys safely
                         numeric_keys = [int(k.split('_')[-1]) for k in existing_keys if k.startswith('map_') and k.split('_')[-1].isdigit()]
                         if numeric_keys:
                            last_index = max(numeric_keys)
@@ -888,12 +831,10 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
             except Exception as e:
                 print(f"  -> GAGAL memperbarui database data mentah: {e}")
                 traceback.print_exc()
-                perform_learning_setting = False
 
         # --- TAHAP 2: FINE-TUNING & PEMBUATAN GROUND TRUTH ---
         print("\n--- TAHAP 2: FINE-TUNING & PERSIAPAN GROUND TRUTH ---")
         final_result_img = None
-        final_weight_map_for_ground_truth = None
         
         if stop_requested and stop_requested():
             pass
@@ -915,14 +856,15 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
                 if update_progress: update_progress(fine_tuning_start_progress, language_config.STARTING_ENHANCEMENT)
                 
                 try:
-                    final_result_img, final_weight_map_for_ground_truth, _ = image_processor.similarity_mnfr(
+                    # Panggil similarity_mnfr untuk fine-tuning tanpa mengaktifkan mode learning
+                    final_result_img, _, _ = image_processor.similarity_mnfr(
                         images=valid_batch_results, merging_type=merging_type_from_settings,
                         tile_size=spatial_tile_size_arg, overlap=spatial_overlap_arg,
                         motion_sensitivity=spatial_motion_sensitivity_arg, noise_offset_factor=spatial_noise_offset_factor_arg,
                         update_progress=fine_tuning_update_progress, stop_requested=stop_requested,
                         save_weight_map_path=(weight_map_output_path if save_final_weight_map else None),
                         total_overall_images=len(valid_batch_results), images_processed_so_far=0,
-                        use_learning_model=False, perform_learning=False, weight_of_each_image=True,
+                        use_learning_model=False, perform_learning=False, weight_of_each_image=False,
                         collect_raw_maps_for_learning=False, **extra_merging_params
                     )
                     print("  -> Fine-tuning selesai.")
@@ -934,63 +876,8 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
                 final_result_img = valid_batch_results[0]
                 print("  -> Melewatkan fine-tuning karena hanya ada 1 hasil batch.")
         
-        # --- Logika Fallback untuk Ground Truth ---
-        if perform_learning_setting and final_weight_map_for_ground_truth is None:
-            print("  -> Ground truth tidak tersedia dari fine-tuning. Mencoba membuat dari database mentah...")
-            all_collected_raw_maps = []
-            if os.path.exists(raw_maps_db_path):
-                try:
-                    training_resolution_setting = tuple(general_settings.get("training_resolution", (256, 256)))
-                    print(f"    -> Memastikan semua peta dari database memiliki resolusi {training_resolution_setting}...")
-                    
-                    with h5py.File(raw_maps_db_path, 'r') as hf:
-                        for key in hf.keys():
-                            map_data = np.array(hf[key])
-                            if map_data.shape[:2] != training_resolution_setting:
-                                map_data = cv2.resize(map_data, training_resolution_setting, interpolation=cv2.INTER_AREA)
-                            all_collected_raw_maps.append(map_data)
-                except Exception as e:
-                    print(f"    -> GAGAL memuat data mentah untuk membuat GT: {e}")
-
-            if all_collected_raw_maps:
-                try:
-                    print(f"    -> Menjumlahkan {len(all_collected_raw_maps)} peta untuk membuat ground truth gabungan...")
-                    simulated_weight_map_sum = np.sum(np.stack(all_collected_raw_maps, axis=0), axis=0)
-                    if 'temporal_consistency_refinement' in globals():
-                         temporal_consistency_refinement(all_collected_raw_maps, simulated_weight_map_sum)
-                    max_val = np.max(simulated_weight_map_sum)
-                    final_weight_map_for_ground_truth = simulated_weight_map_sum / max_val if max_val > 0 else simulated_weight_map_sum
-                    print("    -> SUKSES: Ground truth gabungan berhasil dibuat.")
-                except Exception as e:
-                    print(f"    -> GAGAL membuat ground truth gabungan: {e}")
-                    traceback.print_exc()
-            else:
-                print("    -> PERINGATAN: Tidak ada peta bobot mentah untuk membuat ground truth.")
-        
-        # --- TAHAP 3: PELATIHAN MODEL AI (Logika Pemicu yang Disederhanakan) ---
-        if perform_learning_setting and not data_collection_only_mode:
-            print("\n--- TAHAP 3: MEMICU FASE PELATIHAN MODEL ---")
-            if os.path.exists(raw_maps_db_path):
-                try:
-                    training_successful = _execute_learning_phase(
-                        image_visulization=image_processor,
-                        raw_maps_database_path=raw_maps_db_path, 
-                        general_settings=general_settings,
-                        update_callback=update_progress
-                    )
-                    
-                    if training_successful:
-                        os.remove(raw_maps_db_path)
-                        print(f"\n  -> Pembersihan: Database mentah '{os.path.basename(raw_maps_db_path)}' telah dihapus setelah pelatihan berhasil.")
-                except Exception as e:
-                    print(f"\n[FATAL] Terjadi error selama fase pelatihan model: {e}")
-                    traceback.print_exc()
-            else:
-                 print("  -> PERINGATAN: Pelatihan dilewati karena data tidak lengkap (kurang ground truth atau database mentah).")
-
-        elif perform_learning_setting and data_collection_only_mode:
-            print("\n--- Mode Koleksi Data Saja Aktif. Proses pelatihan dilewati. ---")
-            print(f"    -> Data mentah telah ditambahkan/disimpan di: {raw_maps_db_path}")
+        if perform_learning_setting:
+            print(f"    -> Mode pengumpulan data aktif. Data mentah telah disimpan (jika ada) di: {raw_maps_db_path}")
 
         # --- TAHAP 4: PENYIMPANAN HASIL AKHIR ---
         if final_result_img is not None and not (stop_requested and stop_requested()):
@@ -1024,114 +911,8 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
         traceback.print_exc()
         if update_progress and not (stop_requested and stop_requested()): update_progress(0, error_msg)
     finally:
-       pass
- 
-def _execute_learning_phase(image_visulization, raw_maps_database_path, general_settings, update_callback=None):
-    """
-    Menjalankan seluruh siklus pelatihan model AI menggunakan data yang sudah disiapkan.
-    """
-    print("\n" + "="*50)
-    print("  MEMULAI FASE PELATIHAN MODEL")
-    print("="*50)
+       pass 
 
-    # 1. Muat Data Mentah dari database-nya
-    try:
-        with h5py.File(raw_maps_database_path, 'r') as hf:
-            new_weight_maps_to_learn = [np.array(hf[key]) for key in hf.keys()]
-        if not new_weight_maps_to_learn:
-            print("  [FAIL] Database peta mentah kosong. Pelatihan dibatalkan.")
-            return False
-    except Exception as e:
-        print(f"  [FAIL] Gagal memuat data dari '{os.path.basename(raw_maps_database_path)}': {e}")
-        traceback.print_exc()
-        return False
-
-    # 2. Ambil Parameter Pelatihan dari Konfigurasi
-    dbscan_eps_setting = general_settings.get("dbscan_eps", 0.75)
-    dbscan_min_samples_setting = general_settings.get("dbscan_min_samples", 5)
-    loss_alpha_setting = general_settings.get("loss_alpha", 0.85)
-    loss_beta_setting = general_settings.get("loss_beta", 0.15)
-    training_resolution = tuple(general_settings.get("training_resolution", (256, 256)))
-    
-    # 3. Panggil Fungsi Pelatihan Inti dan Tangkap Model yang Dikembalikan
-    trained_autoencoder, trained_clusterer, training_status = train_model(
-        new_weight_maps=new_weight_maps_to_learn,
-        model_dir="database/Learning_Model/",
-        database_path="database/Learning_Model/training_database.h5",
-        training_resolution=training_resolution,
-        update_callback=update_callback,
-        guidance_weight=1.0,
-        dbscan_eps=dbscan_eps_setting,
-        dbscan_min_samples=dbscan_min_samples_setting,
-        loss_alpha=loss_alpha_setting,
-        loss_beta=loss_beta_setting
-    )
-
-    # 4. Buat Visualisasi Preview Jika Diminta dan Pelatihan Berhasil
-    create_preview = general_settings.get("create_tuning_preview", False)
-    
-    if trained_autoencoder is not None and trained_clusterer is not None and create_preview:
-        
-        # Langkah A: Muat model yang baru saja dilatih ke dalam instance image_processor
-        image_visulization.knowledge_model = {
-            'autoencoder': trained_autoencoder,
-            'clusterer': trained_clusterer,
-            'training_resolution': training_resolution
-        }
-        image_visulization.model_type = 'vit_plus_dbscan'
-        image_visulization.is_model_loaded = True
-        
-        # Langkah B: Tentukan path untuk menyimpan gambar preview yang unik
-        model_dir = os.path.join("database", "Learning_Model", "previews")
-        os.makedirs(model_dir, exist_ok=True)
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        preview_path = os.path.join(model_dir, f"preview_eps{dbscan_eps_setting}_alpha{loss_alpha_setting}_{timestamp}.png")
-        
-        # Langkah C: Panggil fungsi untuk membuat dan menyimpan gambar visualisasi
-        _create_tuning_visualization(
-            image_processor=image_visulization,
-            raw_map_sample=new_weight_maps_to_learn[0],
-            training_resolution=training_resolution,
-            output_path=preview_path
-        )
-    return training_status
-   
-def _create_tuning_visualization(image_processor, raw_map_sample, ground_truth_map, training_resolution, output_path):
-    """
-    Membuat gambar perbandingan visual untuk evaluasi tuning.
-    """
-    print("\n--- Membuat Visualisasi Preview untuk Tuning ---")
-    try:
-        # 1. Dapatkan Peta Bobot Rekonstruksi dari Model
-        reconstructed_map = image_processor._apply_knowledge_model(raw_map_sample)
-        
-        def generate_labeled_heatmap(w_map, label):
-            if w_map.ndim == 3 and w_map.shape[2] == 1:
-                w_map = w_map.squeeze(axis=2)
-            w_map_resized = cv2.resize(w_map, training_resolution, interpolation=cv2.INTER_NEAREST)
-            norm_map = cv2.normalize(w_map_resized, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
-            heatmap = cv2.applyColorMap(norm_map, cv2.COLORMAP_JET)
-            
-            # Tambahkan label teks
-            cv2.putText(heatmap, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
-            return heatmap
-
-        # 2. Buat heatmap untuk setiap gambar
-        raw_heatmap = generate_labeled_heatmap(raw_map_sample, "Input Mentah")
-        reconstructed_heatmap = generate_labeled_heatmap(reconstructed_map, "Output AI (Clustered)")
-        
-        # 3. Gabungkan gambar secara horizontal
-        comparison_image = np.hstack([raw_heatmap, reconstructed_heatmap])
-
-        # 4. Simpan gambar
-        cv2.imwrite(output_path, comparison_image)
-        print(f"  -> SUKSES: Preview disimpan ke '{os.path.basename(output_path)}'")
-
-    except Exception as e:
-        print(f"  -> GAGAL membuat visualisasi preview: {e}")
-        traceback.print_exc()
-   
 def running_similarity(parent=None, single_process=None, batch_id=None):
     process_finished = False
     """

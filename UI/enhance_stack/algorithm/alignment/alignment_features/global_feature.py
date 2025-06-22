@@ -137,35 +137,99 @@ def temporal_consistency_refinement(weight_maps_all, weight_map_sum, save_tempor
         os.makedirs(os.path.dirname(save_temporal_std_path), exist_ok=True)
         cv2.imwrite(save_temporal_std_path, heatmap_with_legend)
 
-def optical_flow_refinement(weight_map, prev_weight_map_ema, optical_flow, alpha_base=0.4, spatial_sigma=0.1, temporal_threshold=0.005, spatial_influence=0.5):
-        """Implementasi refinement adaptif yang lebih cerdas."""
-        if prev_weight_map_ema is None or optical_flow is None:
-             return weight_map
+def optical_flow_refinement(
+    current_weight_map, 
+    prev_weight_map_ema, 
+    optical_flow, 
+    flow_confidence_map=None,
+    alpha_base=0.1, 
+    alpha_no_confidence=0.9,
+    bilateral_d=9, 
+    bilateral_sigma_color=0.05, 
+    bilateral_sigma_space=75):
+    """
+    Menyempurnakan peta bobot menggunakan optical flow dengan cara yang lebih kuat dan robust.
+    Fungsi ini menggabungkan Bilateral Filtering untuk menjaga tepi, dan menggunakan peta 
+    kepercayaan optical flow untuk menangani oklusi dan area tidak akurat secara cerdas.
 
-        h, w = weight_map.shape
-        grid_x, grid_y = np.meshgrid(np.arange(w), np.arange(h))
-        map_x = (grid_x - optical_flow[..., 0]).astype(np.float32)
-        map_y = (grid_y - optical_flow[..., 1]).astype(np.float32)
+    Args:
+        current_weight_map (np.ndarray): Peta bobot untuk frame saat ini (mentah atau dari AI).
+        prev_weight_map_ema (np.ndarray): Peta bobot yang sudah disempurnakan dari frame sebelumnya (hasil EMA).
+        optical_flow (np.ndarray): Vektor pergerakan dari frame sebelumnya ke frame saat ini.
+        flow_confidence_map (np.ndarray, optional): Peta [0,1] yang menunjukkan kepercayaan pada
+                                                    setiap vektor optical flow. Nilai 1 sangat percaya,
+                                                    nilai 0 tidak percaya. Defaults to None.
+        alpha_base (float): Faktor pencampuran dasar. Bobot untuk prev_weight_map_ema ketika 
+                            kepercayaan tinggi. Nilai rendah berarti lebih stabil.
+        alpha_no_confidence (float): Faktor pencampuran untuk current_weight_map ketika kepercayaan
+                                     sangat rendah. Nilai tinggi (mendekati 1.0) akan lebih
+                                     mengandalkan frame saat ini.
+        bilateral_d, bilateral_sigma_color, bilateral_sigma_space: Parameter untuk Bilateral Filter.
 
-        warped_prev_ema = cv2.remap(prev_weight_map_ema, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-        smoothed_current_weight = cv2.GaussianBlur(weight_map, (0, 0), spatial_sigma)
-        
-        temporal_diff = np.abs(smoothed_current_weight - warped_prev_ema)
-        confidence_mask = np.clip(1.0 - temporal_diff / (temporal_threshold + 1e-8), 0.0, 1.0)
-        
-        local_median = cv2.medianBlur(smoothed_current_weight.astype(np.float32), 5)
-        spatial_outlier_mask = np.abs(smoothed_current_weight - local_median) > 0.25
-        
-        restore_mask = (confidence_mask < 0.5) & (~spatial_outlier_mask)
-        local_average = cv2.blur(smoothed_current_weight, (3, 3))
-        
-        recovered_weight = np.where(restore_mask, spatial_influence * local_average + (1 - spatial_influence) * smoothed_current_weight, smoothed_current_weight)
-        
-        effective_alpha = alpha_base * confidence_mask
-        weight_map_refined = (effective_alpha * recovered_weight) + ((1.0 - effective_alpha) * warped_prev_ema)
-        
-        return weight_map_refined
+    Returns:
+        np.ndarray: Peta bobot yang telah disempurnakan.
+    """
+    if prev_weight_map_ema is None or optical_flow is None:
+        return current_weight_map
+
+    h, w = current_weight_map.shape
     
+    # --- UPGRADE 1: Deteksi Area Tidak Valid Setelah Warping ---
+    # Warp peta bobot dari frame sebelumnya ke posisi saat ini
+    grid_x, grid_y = np.meshgrid(np.arange(w), np.arange(h))
+    map_x = (grid_x - optical_flow[..., 0]).astype(np.float32)
+    map_y = (grid_y - optical_flow[..., 1]).astype(np.float32)
+    
+    # Warp peta bobot historis
+    warped_prev_ema = cv2.remap(
+        prev_weight_map_ema, map_x, map_y, 
+        interpolation=cv2.INTER_LINEAR, 
+        borderMode=cv2.BORDER_REPLICATE
+    )
+    
+    # Deteksi area disoklusi (piksel yang baru muncul dan tidak memiliki sumber di frame lama)
+    warped_ones = cv2.remap(np.ones_like(prev_weight_map_ema), map_x, map_y, interpolation=cv2.INTER_LINEAR)
+    disocclusion_mask = warped_ones < 0.95 
+
+    # --- UPGRADE 2: Gunakan Bilateral Filter untuk Menjaga Tepi ---
+    smoothed_current_weight = cv2.bilateralFilter(
+        current_weight_map.astype(np.float32), 
+        d=bilateral_d, 
+        sigmaColor=bilateral_sigma_color, 
+        sigmaSpace=bilateral_sigma_space
+    )
+    
+    # --- UPGRADE 3: Kalkulasi Kepercayaan Gabungan yang Cerdas ---
+    # Kepercayaan dasar: seberapa mirip prediksi histori dengan data saat ini.
+    temporal_diff = np.abs(smoothed_current_weight - warped_prev_ema)
+    temporal_confidence = np.clip(1.0 - temporal_diff * 5.0, 0.0, 1.0) # Skala bisa disesuaikan
+    
+    # Gabungkan dengan kepercayaan dari optical flow jika tersedia
+    if flow_confidence_map is not None:
+        # Kepercayaan final hanya tinggi jika KEDUA sumber (temporal & flow) percaya diri.
+        final_confidence = temporal_confidence * flow_confidence_map
+    else:
+        # Jika tidak ada info flow, andalkan kepercayaan temporal saja.
+        final_confidence = temporal_confidence
+        
+    # Di area disoklusi, kita tidak bisa percaya pada histori sama sekali.
+    final_confidence[disocclusion_mask] = 0.0
+
+    # --- UPGRADE 4: Pencampuran Adaptif Berbasis Kepercayaan ---
+    # `alpha_for_current` adalah bobot untuk frame SAAT INI.
+    # Jika kepercayaan (pada histori) rendah, `alpha_for_current` harus tinggi.
+    # Jika kepercayaan (pada histori) tinggi, `alpha_for_current` harus rendah.
+    alpha_for_current = alpha_no_confidence - (alpha_no_confidence - alpha_base) * final_confidence
+    alpha_for_current = np.clip(alpha_for_current, alpha_base, alpha_no_confidence)
+    
+    # Perluas dimensi alpha agar bisa di-broadcast dengan gambar berwarna
+    alpha_for_current = alpha_for_current[..., np.newaxis] if current_weight_map.ndim > smoothed_current_weight.ndim else alpha_for_current
+
+    # Lakukan pencampuran akhir
+    weight_map_refined = (alpha_for_current * smoothed_current_weight) + ((1.0 - alpha_for_current) * warped_prev_ema)
+
+    return weight_map_refined
+   
 def standard_refinement(
     weight_map: np.ndarray,
     prev_weight_map: np.ndarray,

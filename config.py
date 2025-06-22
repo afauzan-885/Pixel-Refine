@@ -1,6 +1,9 @@
 import os
 APP_VERSION = "0.4.5"
-
+MODEL_CONFIG = {
+    "refiner": "database/Learning_Model/mobilenet_refiner.pth", # Path hasil training Anda
+    "backbone": "database/Learning_Model/mobilenet_v2_weights.pth" # Path backbone dari download_model.py
+}
 PYTHON_INTERPRETER = "venv/Scripts/python.exe"
 CACHE_DIR = "database/cache/thumbnails"
 CONFIG_DIR = os.path.join("database", "setting")
