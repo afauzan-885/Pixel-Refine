@@ -1,20 +1,17 @@
-import datetime
 import traceback
 import cv2
-import joblib
 import numpy as np
 import sqlite3
 import os
 from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
-import torch
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (add_legend_heatmap, extract_all_metadata, 
                                                                                     gaussian_window, get_all_image_paths_for_single_process, load_images_from_paths, 
-                                                                                    normalize_image, optical_flow_refinement, resize_all_with_padding, save_image, 
+                                                                                    normalize_image, ml_driven_refinement, optical_flow_refinement, resize_all_with_padding, save_image, 
                                                                                     standard_refinement, temporal_consistency_refinement)
 from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityFrequencyInterface, SimilaritySpatialInterface
-from UI.enhance_stack.algorithm.model_trainer.train_similarity_model import DBSCANClusterer, ViTAutoencoder, train_model
+from UI.enhance_stack.algorithm.model_trainer.mobile_net_v2 import AlphaGenerator
 from UI.enhance_stack.components.single_page_layout.parameter_denoising.similarity_parameter_settings import  load_similarity_config
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
@@ -57,15 +54,23 @@ class ThreadWorker(QThread):
 
 class SimilarityAlgorithm:
     def __init__(self, db_path, hdf5_path=None, 
-                 encoder_path="database/Learning_Model/autoencoder_pytorch.pth",
-                 model_path="database/Learning_Model/dbscan_clusters.pth"):
-        self.encoder_path = encoder_path
-        self.model_path = model_path
+                 ml_model_path="path/to/your/model.pt"):
         self.db_path = db_path
         self.knowledge_model = None
         self.is_model_loaded = False
-        self.model_type = None 
-
+        self.model_type = None
+        self.smart_alpha_generator = None
+        try:
+            # Muat model hanya jika path diberikan dan valid
+            if ml_model_path and os.path.exists(ml_model_path):
+                print(f"Memuat model Smart Alpha Generator dari: {ml_model_path}")
+                self.smart_alpha_generator = AlphaGenerator(model_path=ml_model_path)
+            else:
+                print("PERINGATAN: Path model ML tidak valid atau tidak ada. Refinement ML akan dinonaktifkan.")
+        except Exception as e:
+            print(f"ERROR: Gagal memuat model ML. Refinement ML dinonaktifkan. Kesalahan: {e}")
+            self.smart_alpha_generator = None
+            
         if hdf5_path is None:
             self.hdf5_path = "database/align/aligned_images.h5"
         else:
@@ -228,6 +233,12 @@ class SimilarityAlgorithm:
 
         accumulated_weight_map, prev_weight_map_for_standard = None, None
 
+        # PERUBAHAN: Cek ketersediaan model ML sebelum loop untuk efisiensi
+        use_ml_refinement = (refinement_algorithm == 'ml_driven' and self.smart_alpha_generator is not None)
+        if refinement_algorithm == 'ml_driven' and self.smart_alpha_generator is None:
+            print("PERINGATAN: Refinement ML diminta, tetapi model tidak dimuat. Beralih ke refinement standar.")
+            refinement_algorithm = 'optical_flow' # Fallback ke metode lama
+
         for i, image_orig in enumerate(images):
             if not isinstance(image_orig, np.ndarray):
                 continue
@@ -267,16 +278,32 @@ class SimilarityAlgorithm:
                 if use_ai_reconstruction:
                     map_for_refinement = self._apply_knowledge_model(temp_weight_map)
                 
-                # Lakukan penyempurnaan (refinement) menggunakan peta bobot yang sudah dipilih
-                if refinement_algorithm == 'optical_flow' and optical_flows is not None and i < len(optical_flows):
-                    if accumulated_weight_map is None:
-                        refined_weight = map_for_refinement
-                    else:
-                        refined_weight = optical_flow_refinement(map_for_refinement, accumulated_weight_map, optical_flows[i])
-                    accumulated_weight_map = refined_weight.copy()
-                elif refinement_algorithm == 'standard':
-                    refined_weight = standard_refinement(map_for_refinement, prev_weight_map_for_standard, reference_image_float)
-                    prev_weight_map_for_standard = refined_weight.copy()
+                # --- PERUBAHAN UTAMA DI SINI ---
+                refined_weight = map_for_refinement # Default jika tidak ada refinement
+
+                if optical_flows is not None and i < len(optical_flows):
+                    if accumulated_weight_map is not None:
+                        # Unpack flow dan confidence dengan aman
+                        current_flow, current_confidence = (optical_flows[i] 
+                            if isinstance(optical_flows[i], tuple) 
+                            else (optical_flows[i], None))
+
+                        if use_ml_refinement:
+                            # Panggil fungsi refinement yang digerakkan oleh ML
+                            refined_weight = ml_driven_refinement(
+                                current_weight_map=map_for_refinement,
+                                prev_weight_map_ema=accumulated_weight_map,
+                                optical_flow=current_flow,
+                                alpha_generator=self.smart_alpha_generator,
+                                flow_confidence_map=current_confidence
+                            )
+                        elif refinement_algorithm == 'optical_flow':
+                            refined_weight = optical_flow_refinement(
+                                map_for_refinement, accumulated_weight_map, current_flow, current_confidence
+                            )
+                        elif refinement_algorithm == 'standard':
+                            refined_weight = standard_refinement(map_for_refinement, prev_weight_map_for_standard, reference_image_float)
+                            prev_weight_map_for_standard = refined_weight.copy()
                 else:
                     refined_weight = map_for_refinement
 
@@ -445,7 +472,7 @@ class SimilarityAlgorithm:
                     if accumulated_weight_map is None:
                         refined_weight = map_for_refinement
                     else:
-                        refined_weight = optical_flow_refinement(map_for_refinement, accumulated_weight_map, optical_flows[original_idx])
+                        refined_weight = ml_driven_refinement(map_for_refinement, accumulated_weight_map, optical_flows[original_idx])
                     accumulated_weight_map = refined_weight.copy()
                 elif refinement_algorithm == 'standard':
                     refined_weight = standard_refinement(map_for_refinement, prev_weight_map_for_standard, reference_image_float)
