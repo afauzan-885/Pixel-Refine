@@ -20,11 +20,112 @@ namespace MotionMetricsConfig
     constexpr float MAD_TO_SIGMA_FACTOR = 1.4826f;
 
     // Parameter dari kode spasial Anda
-    constexpr float SPATIAL_GRADIENT_WEIGHT_FACTOR = 0.0f;
-    constexpr float SPATIAL_MOTION_SENSITIVITY = 170.0f;
-    constexpr float SPATIAL_NOISE_OFFSET_FACTOR = 0.07f;
+    constexpr float GRADIENT_WEIGHT_FACTOR = 1.3f;
+    constexpr float SPATIAL_MOTION_SENSITIVITY = 60.0f;
+    constexpr float SPATIAL_NOISE_OFFSET_FACTOR = 0.08f;
     constexpr int SPATIAL_SEARCH_RADIUS = 0;
-    constexpr float MIN_SPATIAL_CONF_FOR_DFT = 0.02f;
+    constexpr float MIN_SPATIAL_CONF_FOR_DFT = 0.5f;
+}
+
+// =======================================================================================
+// === FUNGSI HELPER YANG TELAH DISEMPURNAKAN (LEBIH GENERIK DAN AKURAT)            ===
+// =======================================================================================
+static cv::Mat generate_pyramid_guidance_map(
+    const cv::Mat &current_image_gray_full,
+    const cv::Mat &reference_image_gray_full,
+    int tile_h, int tile_w, int search_radius,
+    float motion_sensitivity, float noise_offset_factor, float global_estimated_noise_sigma)
+{
+    using namespace MotionMetricsConfig;
+    using namespace MotionMatching;
+
+    // --- Tahap A: Piramida Level 1 (1/4) - Fondasi Paling Kasar ---
+    cv::Mat current_image_gray_half, reference_image_gray_half;
+    cv::pyrDown(current_image_gray_full, current_image_gray_half);
+    cv::pyrDown(reference_image_gray_full, reference_image_gray_half);
+
+    cv::Mat current_image_gray_quarter, reference_image_gray_quarter;
+    cv::pyrDown(current_image_gray_half, current_image_gray_quarter);
+    cv::pyrDown(reference_image_gray_half, reference_image_gray_quarter);
+
+    // <<< PENYEMPURNAAN BARU: Tambahkan Gaussian Blur untuk stabilitas >>>
+    cv::Mat blurred_current_quarter, blurred_reference_quarter;
+    // Kernel (3,3) dan sigma 0.8 adalah titik awal yang baik.
+    cv::GaussianBlur(current_image_gray_quarter, blurred_current_quarter, cv::Size(3, 3), 0.8);
+    cv::GaussianBlur(reference_image_gray_quarter, blurred_reference_quarter, cv::Size(3, 3), 0.8);
+    // Sekarang, gunakan versi yang sudah di-blur untuk semua perhitungan di level 1/4.
+
+    cv::Mat confidence_map_quarter(current_image_gray_quarter.size(), CV_32FC1, cv::Scalar(0.0f));
+    int tile_h_quarter = std::max(1, tile_h / 4);
+    int tile_w_quarter = std::max(1, tile_w / 4);
+    int search_radius_quarter = search_radius / 4;
+
+#pragma omp parallel for schedule(static)
+    for (int r_q = 0; r_q < blurred_current_quarter.rows; r_q += tile_h_quarter)
+    {
+        MBMBuffers buffers_q;
+        for (int c_q = 0; c_q < blurred_current_quarter.cols; c_q += tile_w_quarter)
+        {
+            int current_w = std::min(tile_w_quarter, blurred_current_quarter.cols - c_q);
+            int current_h = std::min(tile_h_quarter, blurred_current_quarter.rows - r_q);
+            if (current_w <= 0 || current_h <= 0)
+                continue;
+
+            buffers_q.diff_workspace.create(current_h, current_w, CV_32FC1);
+            buffers_q.grad_x.create(current_h, current_w, CV_32F);
+            buffers_q.grad_y.create(current_h, current_w, CV_32F);
+            buffers_q.grad_mag_current.create(current_h, current_w, CV_32FC1);
+
+            cv::Rect roi_q(c_q, r_q, current_w, current_h);
+            // Gunakan gambar yang sudah di-blur untuk perbandingan
+            BlockMatchResult res_q = find_best_block_match_mad(blurred_current_quarter(roi_q), blurred_reference_quarter, r_q, c_q, search_radius_quarter, GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON, buffers_q);
+            float conf_q = res_q.success ? calculate_match_confidence(res_q, global_estimated_noise_sigma, motion_sensitivity, noise_offset_factor) : 0.0f;
+            confidence_map_quarter(roi_q).setTo(cv::Scalar(conf_q));
+        }
+    }
+
+    // --- Tahap B: Piramida Level 2 (1/2) - Penyempurnaan Menengah (Tidak Berubah) ---
+    // Logika di tahap ini tidak perlu diubah. Ia sudah menerima hasil yang lebih stabil dari tahap A.
+    cv::Mat guidance_map_for_half;
+    cv::resize(confidence_map_quarter, guidance_map_for_half, current_image_gray_half.size(), 0, 0, cv::INTER_LINEAR);
+
+    cv::Mat confidence_map_half(current_image_gray_half.size(), CV_32FC1, cv::Scalar(0.0f));
+    int tile_h_half = std::max(1, tile_h / 2);
+    int tile_w_half = std::max(1, tile_w / 2);
+    int search_radius_half = search_radius / 2;
+
+#pragma omp parallel for schedule(static)
+    for (int r_h = 0; r_h < current_image_gray_half.rows; r_h += tile_h_half)
+    {
+        MBMBuffers buffers_h;
+        for (int c_h = 0; c_h < current_image_gray_half.cols; c_h += tile_h_half)
+        {
+            int current_w = std::min(tile_w_half, current_image_gray_half.cols - c_h);
+            int current_h = std::min(tile_h_half, current_image_gray_half.rows - r_h);
+            if (current_w <= 0 || current_h <= 0)
+                continue;
+
+            buffers_h.diff_workspace.create(current_h, current_w, CV_32FC1);
+            buffers_h.grad_x.create(current_h, current_w, CV_32F);
+            buffers_h.grad_y.create(current_h, current_w, CV_32F);
+            buffers_h.grad_mag_current.create(current_h, current_w, CV_32FC1);
+
+            cv::Rect roi_h(c_h, r_h, current_w, current_h);
+            BlockMatchResult res_h = find_best_block_match_mad(current_image_gray_half(roi_h), reference_image_gray_half, r_h, c_h, search_radius_half, GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON, buffers_h);
+            float local_conf_h = res_h.success ? calculate_match_confidence(res_h, global_estimated_noise_sigma, motion_sensitivity, noise_offset_factor) : 0.0f;
+
+            cv::Scalar mean_guidance_scalar = cv::mean(guidance_map_for_half(roi_h));
+            float guidance_conf = static_cast<float>(mean_guidance_scalar[0]);
+
+            confidence_map_half(roi_h).setTo(cv::Scalar(local_conf_h * guidance_conf));
+        }
+    }
+
+    // --- Tahap C: Upscale peta level 2 menjadi peta panduan akhir (Tidak Berubah) ---
+    cv::Mat guidance_confidence_map_final;
+    cv::resize(confidence_map_half, guidance_confidence_map_final, current_image_gray_full.size(), 0, 0, cv::INTER_LINEAR);
+
+    return guidance_confidence_map_final;
 }
 
 extern "C"
@@ -44,23 +145,21 @@ extern "C"
     {
         using namespace MotionMetricsConfig;
 
+        // --- Bagian 1: Inisialisasi dan Persiapan Awal (Tidak Berubah) ---
         if (!final_image_sum_ptr || !weight_map_sum_ptr || !current_image_ptr || !reference_image_ptr || !base_window_ptr ||
             !row_starts || !col_starts || h_img <= 0 || w_img <= 0 || tile_h <= 0 || tile_w <= 0 || channels <= 0 ||
-            (block_h <= 0 && tile_h > 0 && block_w > 0) ||
-            (block_w <= 0 && tile_w > 0 && block_h > 0))
+            (block_h <= 0 && tile_h > 0 && block_w > 0) || (block_w <= 0 && tile_w > 0 && block_h > 0))
         {
             return;
         }
-
+        // ... (sisa inisialisasi, cvtColor, dll. tetap sama) ...
         int mat_type_color = CV_32FC(channels);
         if (mat_type_color == 0 && channels > 0)
             return;
-
         cv::Mat final_image_sum_mat(h_img, w_img, mat_type_color, final_image_sum_ptr);
         cv::Mat weight_map_sum_mat(h_img, w_img, CV_32FC1, weight_map_sum_ptr);
         const cv::Mat current_image_mat(h_img, w_img, mat_type_color, const_cast<float *>(current_image_ptr));
         const cv::Mat reference_image_mat_full(h_img, w_img, mat_type_color, const_cast<float *>(reference_image_ptr));
-
         cv::Mat current_image_gray_full, reference_image_gray_full;
         if (channels > 1)
         {
@@ -76,8 +175,7 @@ extern "C"
             reference_image_mat_full.convertTo(reference_image_gray_full, CV_32FC1);
         }
         CV_Assert(!current_image_gray_full.empty() && !reference_image_gray_full.empty());
-        
-        float global_estimated_noise_sigma = 0.015f; 
+        float global_estimated_noise_sigma = 0.015f;
         if (reference_image_gray_full.rows >= 3 && reference_image_gray_full.cols >= 3)
         {
 #ifdef TILE_NOISE_ESTIMATION_HPP
@@ -85,8 +183,15 @@ extern "C"
 #endif
         }
         global_estimated_noise_sigma = std::max(0.001f, std::min(0.25f, global_estimated_noise_sigma));
-        
+
+        // --- Bagian 2: Menghasilkan Peta Panduan dengan Memanggil Fungsi Helper ---
+        cv::Mat guidance_confidence_map_final = generate_pyramid_guidance_map(
+            current_image_gray_full, reference_image_gray_full,
+            tile_h, tile_w, SPATIAL_SEARCH_RADIUS,
+            SPATIAL_MOTION_SENSITIVITY, SPATIAL_NOISE_OFFSET_FACTOR, global_estimated_noise_sigma);
+
 #pragma omp parallel
+
         {
             cv::Mat thread_block_confidences;
             MotionMerging::DFTBuffers dft_buffers_th;
@@ -184,7 +289,7 @@ extern "C"
                                 MotionMatching::find_best_block_match_mad(
                                     current_block_gray_for_mbm, reference_block_gray_for_mbm_direct,
                                     0, 0, SPATIAL_SEARCH_RADIUS,
-                                    SPATIAL_GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON, mbm_buffers_th);
+                                    GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON, mbm_buffers_th);
                             if (mbm_result.success)
                             {
                                 spatial_confidence = MotionMatching::calculate_match_confidence(
@@ -241,14 +346,30 @@ extern "C"
                                         }
                                     }
                                     bool can_merge = merged_ch_vec.size() == channels;
-                                    for (const auto &c_mat : merged_ch_vec) { if (c_mat.empty()) { can_merge = false; break; } }
-                                    if (can_merge) {
-                                        try { cv::merge(merged_ch_vec, target_merged_submat); }
-                                        catch (const cv::Exception &) {
-                                            current_block_color_orig.copyTo(target_merged_submat); successful_dft_ch = 0;
+                                    for (const auto &c_mat : merged_ch_vec)
+                                    {
+                                        if (c_mat.empty())
+                                        {
+                                            can_merge = false;
+                                            break;
                                         }
-                                    } else {
-                                        current_block_color_orig.copyTo(target_merged_submat); successful_dft_ch = 0;
+                                    }
+                                    if (can_merge)
+                                    {
+                                        try
+                                        {
+                                            cv::merge(merged_ch_vec, target_merged_submat);
+                                        }
+                                        catch (const cv::Exception &)
+                                        {
+                                            current_block_color_orig.copyTo(target_merged_submat);
+                                            successful_dft_ch = 0;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        current_block_color_orig.copyTo(target_merged_submat);
+                                        successful_dft_ch = 0;
                                     }
                                     dft_confidence = (successful_dft_ch > 0) ? (total_dft_conf / successful_dft_ch) : 0.0f;
                                 }
@@ -265,15 +386,13 @@ extern "C"
                     }
 
                     // --- TAHAP 2: AKUMULASI KE BUFFER GLOBAL DENGAN ATOMIC ---
-                    // Setelah semua data untuk tile ini (`thread_merged_tile_data` dan `thread_block_confidences`)
-                    // siap, sekarang kita lakukan penulisan ke buffer global.
-                    // Loop ini hanya melakukan kalkulasi sederhana dan penulisan atomik.
                     for (int y_tile = 0; y_tile < tile_h; ++y_tile)
                     {
                         const float *merged_tile_row = thread_merged_tile_data.ptr<const float>(y_tile);
                         const float *base_window_row = base_window_tile_mat.ptr<const float>(y_tile);
                         int gy = r + y_tile;
-                        if (gy >= h_img) continue;
+                        if (gy >= h_img)
+                            continue;
 
                         float *global_weight_sum_row = weight_map_sum_mat.ptr<float>(gy);
                         float *global_pixel_sum_row = final_image_sum_mat.ptr<float>(gy);
@@ -281,13 +400,14 @@ extern "C"
                         for (int x_tile = 0; x_tile < tile_w; ++x_tile)
                         {
                             int gx = c + x_tile;
-                            if (gx >= w_img) continue;
+                            if (gx >= w_img)
+                                continue;
 
                             // Dapatkan confidence blok yang sesuai untuk piksel ini
                             int bh_idx_eff = (actual_block_h > 0) ? std::min(y_tile / actual_block_h, num_blocks_h - 1) : 0;
                             int bw_idx_eff = (actual_block_w > 0) ? std::min(x_tile / actual_block_w, num_blocks_w - 1) : 0;
                             float block_confidence = thread_block_confidences.at<float>(bh_idx_eff, bw_idx_eff);
-                            
+
                             // Hitung bobot akhir untuk piksel ini
                             float base_win_val = base_window_row[x_tile];
                             float pixel_weight = base_win_val * block_confidence;
@@ -295,8 +415,8 @@ extern "C"
                             // Hanya lakukan update jika bobotnya signifikan
                             if (pixel_weight > GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD)
                             {
-                                // Operasi atomik hanya dipanggil di sini, di akhir pipeline untuk satu tile
-                                #pragma omp atomic update
+// Operasi atomik hanya dipanggil di sini, di akhir pipeline untuk satu tile
+#pragma omp atomic update
                                 global_weight_sum_row[gx] += pixel_weight;
 
                                 int merged_pixel_idx_local = x_tile * channels;
@@ -305,7 +425,7 @@ extern "C"
                                 {
                                     float merged_pixel_value_ch = merged_tile_row[merged_pixel_idx_local + ch_idx];
                                     float weighted_pixel_value = merged_pixel_value_ch * pixel_weight;
-                                    #pragma omp atomic update
+#pragma omp atomic update
                                     global_pixel_sum_row[global_pixel_idx_global + ch_idx] += weighted_pixel_value;
                                 }
                             }
