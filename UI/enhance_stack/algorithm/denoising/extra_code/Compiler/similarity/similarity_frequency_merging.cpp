@@ -20,16 +20,13 @@ namespace MotionMetricsConfig
     constexpr float MAD_TO_SIGMA_FACTOR = 1.4826f;
 
     // Parameter dari kode spasial Anda
-    constexpr float GRADIENT_WEIGHT_FACTOR = 1.3f;
-    constexpr float SPATIAL_MOTION_SENSITIVITY = 60.0f;
-    constexpr float SPATIAL_NOISE_OFFSET_FACTOR = 0.08f;
+    constexpr float GRADIENT_WEIGHT_FACTOR = 1.5f;
+    constexpr float SPATIAL_MOTION_SENSITIVITY = 50.0f;
+    constexpr float SPATIAL_NOISE_OFFSET_FACTOR = 0.10f;
     constexpr int SPATIAL_SEARCH_RADIUS = 0;
-    constexpr float MIN_SPATIAL_CONF_FOR_DFT = 0.5f;
+    constexpr float MIN_SPATIAL_CONF_FOR_DFT = 0.0f;
 }
 
-// =======================================================================================
-// === FUNGSI HELPER YANG TELAH DISEMPURNAKAN (LEBIH GENERIK DAN AKURAT)            ===
-// =======================================================================================
 static cv::Mat generate_pyramid_guidance_map(
     const cv::Mat &current_image_gray_full,
     const cv::Mat &reference_image_gray_full,
@@ -50,7 +47,6 @@ static cv::Mat generate_pyramid_guidance_map(
 
     // <<< PENYEMPURNAAN BARU: Tambahkan Gaussian Blur untuk stabilitas >>>
     cv::Mat blurred_current_quarter, blurred_reference_quarter;
-    // Kernel (3,3) dan sigma 0.8 adalah titik awal yang baik.
     cv::GaussianBlur(current_image_gray_quarter, blurred_current_quarter, cv::Size(3, 3), 0.8);
     cv::GaussianBlur(reference_image_gray_quarter, blurred_reference_quarter, cv::Size(3, 3), 0.8);
     // Sekarang, gunakan versi yang sudah di-blur untuk semua perhitungan di level 1/4.
@@ -85,7 +81,6 @@ static cv::Mat generate_pyramid_guidance_map(
     }
 
     // --- Tahap B: Piramida Level 2 (1/2) - Penyempurnaan Menengah (Tidak Berubah) ---
-    // Logika di tahap ini tidak perlu diubah. Ia sudah menerima hasil yang lebih stabil dari tahap A.
     cv::Mat guidance_map_for_half;
     cv::resize(confidence_map_quarter, guidance_map_for_half, current_image_gray_half.size(), 0, 0, cv::INTER_LINEAR);
 
@@ -152,7 +147,7 @@ extern "C"
         {
             return;
         }
-        // ... (sisa inisialisasi, cvtColor, dll. tetap sama) ...
+        
         int mat_type_color = CV_32FC(channels);
         if (mat_type_color == 0 && channels > 0)
             return;

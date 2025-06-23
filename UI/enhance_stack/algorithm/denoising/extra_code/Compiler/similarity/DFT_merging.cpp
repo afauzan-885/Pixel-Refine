@@ -200,9 +200,9 @@ FrequencyMergeResult merge_blocks_frequency_domain(
     const float sigma_sq_dft_eff_block = std::max(sigma_sq_spatial_block / optimal_elements_inv, stability_epsilon);
     const float const_noise_floor_freq_part = std::max(wiener_c_factor * sigma_sq_dft_eff_block, stability_epsilon);
     
-    const float noise_threshold_multiplier = 2.0f;
-    const float high_confidence_boost = 0.8f;
-    const float low_confidence_penalty = 0.2f;
+    const float noise_threshold_multiplier = 1.2f;
+    const float high_confidence_boost = 2.0f;
+    const float low_confidence_penalty = 0.1f;
     const float noise_floor_adaptive = 1e-6f;
     const float base_noise_level = sigma_sq_dft_eff_block * optimal_elements_inv;
     const float noise_boundary_multiplier = base_noise_level * noise_threshold_multiplier;
