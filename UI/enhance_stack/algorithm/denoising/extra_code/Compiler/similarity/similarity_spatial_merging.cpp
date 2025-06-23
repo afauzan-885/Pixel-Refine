@@ -101,12 +101,6 @@ extern "C"
         {
             MotionCompensate::MotionCompensationBuffers buffers_th;
 
-            // ======================== SOLUSI ========================
-            // Blok kode yang menyebabkan error DIHAPUS.
-            // `compensated_..._tile` adalah bagian dari hasil (`MotionData`),
-            // bukan bagian dari buffer input (`MotionCompensationBuffers`).
-            // ========================================================
-
             // Inisialisasi buffer untuk block matching (ini sudah benar)
             int mbm_alloc_h = (block_h > 0) ? block_h : tile_h;
             int mbm_alloc_w = (block_w > 0) ? block_w : tile_w;
