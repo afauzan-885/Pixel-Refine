@@ -38,6 +38,7 @@ COMMAND_TO_RESTART_MANUALLY = "Tidak dapat memulai ulang aplikasi secara otomati
 # ==============================================================================
 # Sidebar UI
 # ==============================================================================
+
 SETTINGS_SIDEBAR_LABEL= "Pengaturan"
 HDR_SIDEBAR_LABEL= "Rekontruksi HDR"
 
@@ -536,6 +537,31 @@ antara dua gambar. Tujuannya untuk memastikan bahwa kecocokan yang ditemukan ben
 Nilai yang direkomendasikan: 0.80.
 """
 
+
+# DENOISING
+# --- Denoising Parameters ---
+OVERLAP_LABEL = "Overlap %"
+OVERLAP_DESCRIPTION = """Berfungsi untuk mengurangi artefak tile (yang menyebabkan efek kotak-kotak pada area yang bergerak). 
+
+Meningkatkan overlap dapat mengurangi efek tersebut, namun akan meningkatkan waktu komputasi """
+
+TILE_SIZE_LABEL = "Ukurat petak (tile)"
+TILE_SIZE_DESCRIPTION = """Semakin kecil ukuran tile, semakin detail dalam mendeteksi perbedaan. 
+
+Namun ini juga akan meningkatkan waktu komputasi dan meningkatkan kemungkinan kesalahan dalam deteksi perbedaan"""
+
+MOTION_SENSIVITY_LABEL = """Sensitivitas Pergerakan"""
+MOTION_SENSIVITY_DESCRIPTION = """Sensivitas pergerakan mengatur seberapa agresifnya algoritma dalam mendeteksi perbedaan dalam sebuah petak. 
+
+Semakin rendah nilainya, semakin agresif atau sensitif dalam mendeteksi perbedaan,
+namun hal ini menyebabkan noise akan ikut dianggap sebagai perbedaan"""
+
+NOISE_OFFSET_LABEL = """Offset Noise"""
+NOISE_OFFSET_DESCRIPTION = """Ambang batas dalam mengabaikan tingkat noise pada gambar, sehingga noise yang lebih tinggi tidak dianggap sebagai pergerakan.
+
+Semakin tinggi nilainya, hasil stacking bisa lebih bersih untuk gambar dengan noise ekstrim, namun ini juga dapat mengurangi deteksi pergerakan pada gambar."""
+
+
 # --- General Alignment Options (Edges, Crop, Saving) ---
 KEEP_EDGES_LABEL = """Pertahankan tepi"""
 IGNORE_EDGE_LABEL= """Abaikan Tepi"""
@@ -606,6 +632,7 @@ SIMILARITY_DESCRIPTION = """Algoritma penumpukan canggih, sangat kuat dalam meng
 Terinspirasi oleh:
 Monod, Antoine, Delon, Julie, & Veit, Thomas. (2021). An Analysis and Implementation of the HDR+ Burst Denoising Method.
 Image Processing On Line, 11, 142-169. https://doi.org/10.5201/ipol.2021.336"""
+
 SIMILARITY_MOTION_V2_DESCRIPTION = """Similarity V2 merupakan hasil pengembangan dari algoritma similarity v1 dengan sejumlah 
 peningkatan signifikan. Algoritma ini mampu menghasilkan gambar yang lebih bersih meskipun input mengandung noise yang parah, berkat kemampuannya 
 secara cerdas membedakan antara noise, tekstur, dan pergerakan halus. Lebih andal dengan pencahayaan minim, namun prosesnya berjalan lebih lambat 
@@ -623,20 +650,6 @@ MULTI_CORE_CPU = "Akselerasi Multi-Core CPU"
 SETTINGS_SAVED = "Pengaturan berhasil disimpan."
 
 CANT_READ_FILE_SETTINGS = "Peringatan: Tidak dapat membaca berkas pengaturan '{GENERAL_SETTINGS_FILE}'. Menggunakan nilai default."
-OVERLAP_DESCRIPTION = """Berfungsi untuk mengurangi artefak tile (yang menyebabkan efek kotak-kotak pada area yang bergerak). 
-
-Meningkatkan overlap dapat mengurangi efek tersebut, namun akan meningkatkan waktu komputasi """
-OVERLAP_LABEL = "Overlap %"
-TILE_SIZE_LABEL = "Ukurat petak (tile)"
-TILE_SIZE_DESCRIPTION = """Semakin kecil ukuran tile, semakin detail dalam mendeteksi perbedaan. 
-
-Namun ini juga akan meningkatkan waktu komputasi dan meningkatkan kemungkinan kesalahan dalam deteksi perbedaan"""
-
-MOTION_THRESHOLD_DESCRIPTION = """Motion Threshold mengatur seberapa agresifnya algoritma dalam mendeteksi perbedaan dalam sebuah tile. 
-
-Semakin rendah nilai threshold, semakin agresif atau sensitif dalam mendeteksi perbedaan,
-namun hal ini menyebabkan noise akan ikut dianggap sebagai perbedaan"""
-
 MULTI_CORE_CPU_DESCRIPTION = """Mengaktifkan akan meningkatkan kecepatan komputasi dalam memproses gambar, namun akan menambah sedikit penggunaan RAM 
 
 Jika Komputer memiliki RAM yang sangat terbatas, disarankan untuk tidak mencentangnya"""
@@ -644,6 +657,10 @@ Jika Komputer memiliki RAM yang sangat terbatas, disarankan untuk tidak mencenta
 GPU_ACCELERATION_DESCRIPTION = """Mengaktifkan akan sangat meningkatkan kecepatan komputasi, karena menggunakan GPU dalam prosesnya. 
 
 CATATAN: Penggunaan GPU hanya terbatas pada proses Farneback saja, algoritma lain akan menyusul implementasinya"""
+
+THUMBNAIL_LABEL = "Thumbnail"
+THUMBNAIL_DESCRIPTION = """Preview gambar untuk proses batch, masih bersifat EKSPERIMENTAL
+Terkadang menimbulkan seperti flicker atau lag saat menambahkan batch baru"""
 
 NOISE_MAD_OFFSET_LABEL = "MAD Noise Factor"
 NOISE_MAD_OFFSET_DESCRIPTION = """Seberapa sensitifnya deteksi MAD dalam menangani gambar dengan noise tinggi

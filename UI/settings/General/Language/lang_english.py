@@ -529,6 +529,29 @@ between two images. The goal is to ensure that the found matches are truly accur
 Recommended value: 0.80.
 """
 
+# DENOISING
+# --- Denoising Parameters ---
+OVERLAP_LABEL = "Overlap %"
+OVERLAP_DESCRIPTION = """Used to reduce tile artifacts (which cause blocky effects on moving areas).
+
+Increasing the overlap can reduce such effects but will also increase computation time."""
+
+TILE_SIZE_LABEL = "Tile Size"
+TILE_SIZE_DESCRIPTION = """The smaller the tile size, the more detailed the detection of differences.
+
+However, it also increases computation time and the likelihood of detection errors."""
+
+MOTION_SENSIVITY_LABEL = "Motion Sensitivity"
+MOTION_SENSIVITY_DESCRIPTION = """Motion sensitivity controls how aggressively the algorithm detects differences within a tile.
+
+Lower values make the detection more sensitive or aggressive, but may also treat noise as real differences."""
+
+NOISE_OFFSET_LABEL = "Noise Offset"
+NOISE_OFFSET_DESCRIPTION = """A threshold to ignore a certain level of noise in the image, so higher noise is not treated as motion.
+
+Higher values can lead to cleaner stacking for extremely noisy images, but may reduce motion detection accuracy."""
+
+
 # --- General Alignment Options (Edges, Crop, Saving) ---
 KEEP_EDGES_LABEL = """Keep Edges"""
 IGNORE_EDGE_LABEL= """Ignore Edges"""
@@ -617,24 +640,18 @@ MULTI_CORE_CPU = "Multi-Core CPU"
 SETTINGS_SAVED = "Settings saved successfully."
 
 CANT_READ_FILE_SETTINGS = "Warning: Unable to read the settings file '{GENERAL_SETTINGS_FILE}'. Using default values."
-OVERLAP_DESCRIPTION = """Serves to reduce tile artifacts (which cause blocky effects in moving areas).
-
-Increasing overlap can reduce this effect, but it will also increase computation time."""
-OVERLAP_LABEL = "Overlap %"
-TILE_SIZE_LABEL = "Tile Size (tile)"
-TILE_SIZE_DESCRIPTION = """The smaller the tile size, the more detail is captured when detecting differences.
-
-However, this will also increase computation time and raise the likelihood of detection errors."""
-MOTION_THRESHOLD_DESCRIPTION = """Motion Threshold sets how aggressive the algorithm is in detecting differences within a tile.
-
-The lower the threshold value, the more aggressive or sensitive it becomes in detecting differences; 
-however, this means that noise might also be interpreted as a difference."""
 MULTI_CORE_CPU_DESCRIPTION = """Enabling this will boost computation speed in image processing, though it will slightly increase RAM usage.
 
 If the computer has very limited RAM, it is recommended not to enable it."""
+
 GPU_ACCELERATION_DESCRIPTION = """Enabling this will significantly boost computation speed, as it utilizes the GPU in its processing.
 
 NOTE: GPU usage is currently limited to the Farneback process only; other algorithms will be implemented later."""
+
+THUMBNAIL_LABEL = "Thumbnail"
+THUMBNAIL_DESCRIPTION = """Image preview for batch process, still EXPERIMENTAL
+Sometimes causes flicker or lag when adding new batch"""
+
 
 NOISE_MAD_OFFSET_LABEL = "MAD Noise Factor"
 NOISE_MAD_OFFSET_DESCRIPTION = """How sensitive the MAD detection is when handling high-noise images.

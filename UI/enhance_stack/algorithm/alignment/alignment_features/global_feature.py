@@ -1,22 +1,16 @@
 import concurrent.futures 
 from concurrent.futures import ThreadPoolExecutor
-import datetime
 from functools import lru_cache
 import gc
-import glob
-import re
-import traceback
+import math
 import cv2
 import json
 import os
 import concurrent
-
 import sqlite3
 import subprocess
-
 import cv2
 import exifread
-import h5py
 import numpy as np
 import rawpy
 import tifffile
@@ -27,14 +21,63 @@ try:
 except ImportError:
     RAWPY_AVAILABLE = False
 from UI.enhance_stack.algorithm.model_trainer.mobile_net_v2 import AlphaGenerator
-from UI.enhance_stack.algorithm.model_trainer.train_similarity_model import train_model
 from UI.settings.General.Language import language_config
 
 
+# Fungsi pembantu (tetap ada, tapi tidak dipanggil langsung dari main)
+def generate_balanced_batches(total_images, max_batch_size=10):
+    """Sebuah generator yang menghasilkan indeks (awal, akhir) untuk setiap batch."""
+    if total_images <= 0:
+        return
+    if total_images <= max_batch_size:
+        yield (0, total_images)
+        return
+    num_batches = math.ceil(total_images / max_batch_size)
+    base_size = total_images // num_batches
+    remainder = total_images % num_batches
+    current_index = 0
+    for i in range(num_batches):
+        batch_size = base_size + 1 if i < remainder else base_size
+        start_index = current_index
+        end_index = current_index + batch_size
+        yield (start_index, end_index)
+        current_index = end_index
 
+# --- FUNGSI UTAMA BARU YANG AKAN DIPANGGIL DARI MAIN ---
+def setup_balanced_batching(total_images, max_batch_size=10):
+    """
+    Menyiapkan seluruh logika batching, termasuk mencetak info ke konsol.
+    
+    Fungsi ini menyembunyikan semua kompleksitas dan mengembalikan rencana batching
+    yang siap digunakan oleh perulangan di fungsi `main`.
 
-# ====================== Training ML ====================== #
+    Args:
+        total_images (int): Jumlah total gambar.
+        language_config: Objek konfigurasi bahasa untuk pesan.
+        max_batch_size (int): Ukuran maksimum per batch.
 
+    Returns:
+        list: Sebuah daftar tuple [(start1, end1), (start2, end2), ...] 
+              yang merupakan rencana eksekusi batch. Mengembalikan list kosong jika
+              tidak ada gambar.
+    """
+    if total_images <= 0:
+        return [] # Kembalikan list kosong jika tidak ada gambar
+
+    # 1. Panggil generator untuk membuat rencana batch
+    batch_plan = list(generate_balanced_batches(total_images, max_batch_size))
+    total_batches = len(batch_plan)
+
+    # 2. Lakukan semua printing di sini untuk menjaga `main` tetap bersih
+    print(language_config.NUMBER_OF_IMAGES_TO_BE_PROCESSED.format(total_images))
+    print(language_config.NUMBER_OF_BATCHES_TO_BE_PROCESSED.format(total_batches))
+    
+    # Buat string distribusi yang mudah dibaca
+    distribusi_str = ", ".join([f"{end-start}" for start, end in batch_plan])
+    # print(f"  -> Rencana distribusi gambar per batch: [{distribusi_str}]")
+
+    # 3. Kembalikan rencana yang sudah jadi
+    return batch_plan        
 # ====================== Preprocessing ====================== #
 def add_legend_heatmap(img, norm_values, labels=("Static (High Weight)", "Moving (Low Weight)"),
                        font_scale_info=1.7, thickness_info=2,

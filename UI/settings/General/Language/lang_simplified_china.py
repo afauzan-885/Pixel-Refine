@@ -519,6 +519,30 @@ AKAZE_RATIO_DESCRIPTION = """Ratio Threshold 是在匹配两个图像之间的�
 推荐值：0.80。
 """
 
+
+# DENOISING
+# --- Denoising Parameters ---
+OVERLAP_LABEL = "重叠百分比"
+OVERLAP_DESCRIPTION = """用于减少瓦片伪影（在运动区域产生块状效果的问题）。
+
+增加重叠率可以减少这种伪影，但也会增加计算时间。"""
+
+TILE_SIZE_LABEL = "瓦片大小"
+TILE_SIZE_DESCRIPTION = """瓦片越小，差异检测越精细。
+
+但这也会增加计算时间，并提高检测错误的可能性。"""
+
+MOTION_SENSIVITY_LABEL = "运动灵敏度"
+MOTION_SENSIVITY_DESCRIPTION = """运动灵敏度控制算法在一个瓦片中检测差异的激进程度。
+
+值越低，检测越敏感或激进，但也可能将噪声误判为真实差异。"""
+
+NOISE_OFFSET_LABEL = "噪声偏移"
+NOISE_OFFSET_DESCRIPTION = """用于忽略图像中某一水平的噪声的阈值，这样较高的噪声就不会被误认为是运动。
+
+值越高，对于噪声极高的图像可以获得更干净的堆叠效果，但可能降低运动检测的准确性。"""
+
+
 # --- General Alignment Options (Edges, Crop, Saving) ---
 KEEP_EDGES_LABEL = """保留边缘"""
 IGNORE_EDGE_LABEL= """忽略边缘"""
@@ -604,23 +628,17 @@ MULTI_CORE_CPU = "多核 CPU"
 SETTINGS_SAVED = "设置已保存"
 
 CANT_READ_FILE_SETTINGS = "警告：无法读取设置文件 '{GENERAL_SETTINGS_FILE}'。使用默认值。"
-OVERLAP_DESCRIPTION = """用于减少 tile 伪影（会在移动区域产生块状效果）。
 
-增加 overlap 可以减少这种效果，但会增加计算时间。"""
-OVERLAP_LABEL = "重叠 (overlap)"
-TILE_SIZE_LABEL = "Tile Size (tile 大小)"
-TILE_SIZE_DESCRIPTION = """图块尺寸越小，检测差异时捕获的细节就越多。
-
-然而，这也会增加计算时间并增加检测到错误的可能性。"""
-MOTION_THRESHOLD_DESCRIPTION = """Motion Threshold 用于设置算法在检测 tile 差异时的激进程度。
-
-门槛值越低，算法在检测差异时会越激进或敏感，但这也意味着噪声可能会被视为差异。"""
 MULTI_CORE_CPU_DESCRIPTION = """启用此功能将提高图像处理时的计算速度，但会略微增加 RAM 使用量。
 
 如果计算机的 RAM 非常有限，建议不要启用。"""
 GPU_ACCELERATION_DESCRIPTION = """启用此功能将大幅提升计算速度，因为它在处理过程中使用了 GPU。
 
 注意：GPU 的使用目前仅限于 Farneback 过程，其他算法的实现将随后跟进。"""
+
+THUMBNAIL_LABEL = "缩略图"
+THUMBNAIL_DESCRIPTION = """批量处理的图像预览，仍处于实验阶段
+添加新批次时有时会导致闪烁或延迟"""
 
 NOISE_MAD_OFFSET_LABEL = "MAD 噪声因子"
 NOISE_MAD_OFFSET_DESCRIPTION = """MAD检测在处理高噪声图像时的敏感程度。

@@ -529,6 +529,30 @@ antara dua imej. Tujuannya untuk memastikan bahawa padanan yang ditemui benar-be
 Nilai yang disyorkan: 0.80.
 """
 
+
+# DENOISING
+# --- Denoising Parameters ---
+OVERLAP_LABEL = "Peratus Overlap"
+OVERLAP_DESCRIPTION = """Digunakan untuk mengurangkan artifak petak (yang menyebabkan kesan berkotak pada kawasan yang bergerak).
+
+Meningkatkan overlap boleh mengurangkan kesan ini, tetapi juga akan menambah masa pemprosesan."""
+
+TILE_SIZE_LABEL = "Saiz Petak (Tile)"
+TILE_SIZE_DESCRIPTION = """Semakin kecil saiz petak, semakin halus perbezaan dapat dikesan.
+
+Namun, ini juga meningkatkan masa pemprosesan dan kebarangkalian kesilapan dalam pengesanan perbezaan."""
+
+MOTION_SENSIVITY_LABEL = "Sensitiviti Pergerakan"
+MOTION_SENSIVITY_DESCRIPTION = """Sensitiviti pergerakan mengawal betapa agresif algoritma mengesan perbezaan dalam setiap petak.
+
+Nilai yang lebih rendah menjadikan pengesanan lebih sensitif atau agresif, tetapi boleh menyebabkan bunyi (noise) dianggap sebagai perbezaan sebenar."""
+
+NOISE_OFFSET_LABEL = "Offset Noise"
+NOISE_OFFSET_DESCRIPTION = """Ambang untuk mengabaikan tahap noise dalam imej supaya noise yang tinggi tidak dianggap sebagai pergerakan.
+
+Nilai yang lebih tinggi boleh menghasilkan gabungan imej yang lebih bersih untuk gambar yang sangat bising, tetapi boleh menjejaskan ketepatan pengesanan pergerakan."""
+
+
 # --- General Alignment Options (Edges, Crop, Saving) ---
 KEEP_EDGES_LABEL = """Kekalkan Tepi"""
 IGNORE_EDGE_LABEL= """Abaikan Tepi"""
@@ -584,7 +608,7 @@ INTERPOLATION_DESCRIPTION = """Algoritma ringkas untuk meningkatkan resolusi den
 menambah sedikit butiran."""
 
 # --- Denoising Algorithm Descriptions ---
-DENOISING_NAME = "Algoritma Pengurangan Hingar (Denoising)"
+DENOISING_NAME = "Algoritma Denoising"
 NONE_DENOISING_DESCRIPTION = "Tiada pengurangan hingar (denoising) akan digunakan."
 WEIGHTED_AVERAGE_DESCRIPTION = """Hasil daripada penyederhanaan kaedah penindanan similarity.
 Cukup baik dalam menangani pergerakan kecil, tetapi menghasilkan artefak imej pada pergerakan yang lebih besar."""
@@ -616,23 +640,17 @@ MULTI_CORE_CPU = "Penggunaan CPU Multicore"
 SETTINGS_SAVED = "Settings telah disimpan."
 
 CANT_READ_FILE_SETTINGS = "Amaran: Tidak dapat membaca fail tetapan '{GENERAL_SETTINGS_FILE}'. Menggunakan nilai lalai."
-OVERLAP_DESCRIPTION = """Berlaku untuk mengurangkan artifak tile (yang menyebabkan kesan kotak-kotak pada kawasan yang bergerak).
 
-Meningkatkan overlap boleh mengurangkan kesan tersebut, namun akan meningkatkan masa pengiraan."""
-OVERLAP_LABEL = "Overlap %"
-TILE_SIZE_LABEL = "Saiz Tile (tile)"
-TILE_SIZE_DESCRIPTION = """Semakin kecil saiz tile, semakin terperinci dalam mengesan perbezaan.
-
-Walau bagaimanapun, ini juga akan meningkatkan masa pengiraan dan menambah kemungkinan kesalahan dalam pengesanan perbezaan."""
-MOTION_THRESHOLD_DESCRIPTION = """Motion Threshold menetapkan seberapa agresif algoritma dalam mengesan perbezaan dalam sesuatu tile.
-
-Semakin rendah nilai threshold, semakin agresif atau sensitif dalam mengesan perbezaan, namun ini menyebabkan noise turut dianggap sebagai perbezaan."""
 MULTI_CORE_CPU_DESCRIPTION = """Mengaktifkan fungsi ini akan meningkatkan kelajuan pengiraan dalam memproses imej, tetapi ia juga akan menambah sedikit penggunaan RAM.
 
 Jika komputer mempunyai RAM yang sangat terhad, disyorkan untuk tidak mengaktifkannya."""
 GPU_ACCELERATION_DESCRIPTION = """Mengaktifkan fungsi ini akan sangat meningkatkan kelajuan pengiraan kerana ia menggunakan GPU dalam prosesnya.
 
 NOTA: Penggunaan GPU adalah terhad kepada proses Farneback sahaja, algoritma lain akan mendapat implementasi kelak."""
+
+THUMBNAIL_LABEL = "Thumbnail"
+THUMBNAIL_DESCRIPTION = """Pratonton imej untuk proses kelompok, masih EKSPERIMEN
+Kadangkala menyebabkan kelipan atau ketinggalan apabila menambah kumpulan baharu"""
 
 NOISE_MAD_OFFSET_LABEL = "Faktor Noise MAD"
 NOISE_MAD_OFFSET_DESCRIPTION = """Menentukan seberapa sensitif pengesanan MAD dalam mengendalikan imej dengan noise tinggi.

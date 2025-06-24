@@ -8,7 +8,7 @@ import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (add_legend_heatmap, extract_all_metadata, 
                                                                                     gaussian_window, get_all_image_paths_for_single_process, load_images_from_paths, 
-                                                                                    normalize_image, ml_driven_refinement, optical_flow_refinement, resize_all_with_padding, save_image, 
+                                                                                    normalize_image, ml_driven_refinement, optical_flow_refinement, resize_all_with_padding, save_image, setup_balanced_batching, 
                                                                                     standard_refinement, temporal_consistency_refinement)
 from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityFrequencyInterface, SimilaritySpatialInterface
 from UI.enhance_stack.algorithm.model_trainer.mobile_net_v2 import AlphaGenerator
@@ -63,7 +63,7 @@ class SimilarityAlgorithm:
         try:
             # Muat model hanya jika path diberikan dan valid
             if ml_model_path and os.path.exists(ml_model_path):
-                print(f"Memuat model Smart Alpha Generator dari: {ml_model_path}")
+                # print(f"Memuat model Smart Alpha Generator dari: {ml_model_path}")
                 self.smart_alpha_generator = AlphaGenerator(model_path=ml_model_path)
             else:
                 print("PERINGATAN: Path model ML tidak valid atau tidak ada. Refinement ML akan dinonaktifkan.")
@@ -182,16 +182,16 @@ class SimilarityAlgorithm:
                     lib_path='UI/data/similarity_spatial_merging.dll',
                     temporal_consistency=True,
                     save_temporal_std_path=None,
-                    weight_of_each_image=True,
+                    weight_of_each_image=False,
                     collect_raw_maps_for_learning=False,
-                    use_ai_reconstruction=True,
+                    use_ai_reconstruction=False,
                     **unused_kwargs):
 
         tile_h, tile_w = map(int, tile_size)
         try:
             c_interface = SimilaritySpatialInterface(lib_path)
         except (FileNotFoundError, OSError, AttributeError) as e:
-            raise RuntimeError(f"Gagal C++ interface_spatial_merging: {e}")
+            raise RuntimeError(f"Failed C++ interface_spatial_merging: {e}")
 
         final_image_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32))
         weight_map_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w), dtype=np.float32))
@@ -223,9 +223,10 @@ class SimilarityAlgorithm:
          # ### PERUBAHAN: Logika pengecekan status rekonstruksi AI ###
         if use_ai_reconstruction:
             if self.is_model_loaded:
-                print("  -> Mode Rekonstruksi AI untuk Peta Bobot diaktifkan.")
+                pass
+                # print("  -> Mode Rekonstruksi AI untuk Peta Bobot diaktifkan.")
             else:
-                print("  -> PERINGATAN: Rekonstruksi AI diminta, tetapi model tidak dimuat. Akan dilewati.")
+                # print("  -> PERINGATAN: Rekonstruksi AI diminta, tetapi model tidak dimuat. Akan dilewati.")
                 use_ai_reconstruction = False # Nonaktifkan jika model tidak ada
 
         if temporal_consistency: weight_maps_all = []
@@ -621,11 +622,11 @@ class SimilarityAlgorithm:
             if individual_maps:
                 # KASUS 1: Jika mode 'gunakan model' aktif, ini adalah saat di mana
                 if use_learning_model and self.is_model_loaded:
-                    print(f"\n--- Menerapkan Pengetahuan Model (Final Pass) ---")
+                    # print(f"\n--- Menerapkan Pengetahuan Model (Final Pass) ---")
                     for i, w_map in enumerate(individual_maps):
                         final_w_map = self._apply_knowledge_model(w_map)
                         all_final_weight_maps_to_return.append(final_w_map)
-                    print("--- Penerapan Pengetahuan Selesai ---")
+                    # print("--- Penerapan Pengetahuan Selesai ---")
                 else:
                     # KASUS 2: Jika tidak, teruskan saja hasil dari tahap merging.
                     all_final_weight_maps_to_return = individual_maps
@@ -639,20 +640,21 @@ class SimilarityAlgorithm:
                     os.makedirs(os.path.dirname(save_weight_map_path), exist_ok=True)
                     cv2.imwrite(save_weight_map_path, w_map_vis)
                 except Exception as e:
-                    print(f"Error saat menyimpan peta bobot gabungan: {e}")
+                    # print(f"Error saat menyimpan peta bobot gabungan: {e}")
                     traceback.print_exc()
 
             if weight_of_each_image and save_weight_map_path and all_final_weight_maps_to_return and not perform_learning:
-                print(f"Mode Non-Pelatihan: Menyimpan {len(all_final_weight_maps_to_return)} peta bobot individual sebagai heatmap...")
+                # print(f"Mode Non-Pelatihan: Menyimpan {len(all_final_weight_maps_to_return)} peta bobot individual sebagai heatmap...")
                 try:
                     base, ext = os.path.splitext(save_weight_map_path)
                     for i, w_map in enumerate(all_final_weight_maps_to_return):
                         individual_map_path = f"{base}_frame_{i}{ext}"
                         w_map_vis = self._create_weight_map_heatmap(w_map)
                         if not cv2.imwrite(individual_map_path, w_map_vis):
-                            print(f"Gagal menyimpan peta bobot individual ke: {individual_map_path}")
+                            pass
+                            # print(f"Gagal menyimpan peta bobot individual ke: {individual_map_path}")
                 except Exception as e:
-                    print(f"Error saat menyimpan peta bobot individual: {e}")
+                    # print(f"Error saat menyimpan peta bobot individual: {e}")
                     traceback.print_exc()
 
             # --- Bagian 5: Finalisasi dan Return Value yang Konsisten ---
@@ -668,7 +670,7 @@ class SimilarityAlgorithm:
             final_img_output = np.clip(final_img_out_ch, min_v, max_v).astype(dtype_ref, copy=False)
             
             if stop_requested and stop_requested() and processed_frames < len(images):
-                print(f"PERINGATAN: Hasil parsial dari {merging_type} merging, {processed_frames} frame diproses.")
+                return final_img_output, final_weight_map, all_final_weight_maps_to_return
             
             # Selalu kembalikan TIGA nilai yang konsisten
             return final_img_output, final_weight_map, all_final_weight_maps_to_return
@@ -676,7 +678,7 @@ class SimilarityAlgorithm:
         else:
             # Jika tidak ada frame yang diproses
             out_shape_fb = (h_ref, w_ref) if channels_ref_orig == 1 else (h_ref, w_ref, channels_ref_orig)
-            print(f"Tidak ada frame yang diproses oleh {merging_type} merging. Mengembalikan nilai kosong.")
+            # print(f"Tidak ada frame yang diproses oleh {merging_type} merging. Mengembalikan nilai kosong.")
             
             # Kembalikan TIGA nilai yang konsisten
             return np.zeros(out_shape_fb, dtype=dtype_ref), None, []
@@ -691,11 +693,11 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
         perform_learning_setting = general_settings.get("perform_learning", False)
         use_learning_model_setting = general_settings.get("use_learning_model", False)
         
-        print("\n--- Konfigurasi Proses ---")
-        print(f"  Mode Pembelajaran (Gunakan Model): {'Aktif' if use_learning_model_setting else 'Nonaktif'}")
-        # Pesan ini disesuaikan untuk mencerminkan fungsi baru
-        print(f"  Mode Pengumpulan Data Peta Bobot: {'Aktif' if perform_learning_setting else 'Nonaktif'}")
-        print("--------------------------\n")
+        # print("\n--- Konfigurasi Proses ---")
+        # print(f"  Mode Pembelajaran (Gunakan Model): {'Aktif' if use_learning_model_setting else 'Nonaktif'}")
+        # # Pesan ini disesuaikan untuk mencerminkan fungsi baru
+        # print(f"  Mode Pengumpulan Data Peta Bobot: {'Aktif' if perform_learning_setting else 'Nonaktif'}")
+        # print("--------------------------\n")
         
         image_processor = SimilarityAlgorithm(db_path) 
 
@@ -732,13 +734,13 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
         if not image_paths:
             if update_progress: update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE); return
             
-        print("\n--- Mengekstrak Metadata dari Gambar Sumber ---")
+        # print("\n--- Mengekstrak Metadata dari Gambar Sumber ---")
         metadata_output_path = os.path.join("database", "align", "metadata.json")
         try:
             extract_all_metadata(image_paths, metadata_file=metadata_output_path)
-            print(f"  -> SUKSES: Metadata disimpan di '{metadata_output_path}'")
+            # print(f"  -> SUKSES: Metadata disimpan di '{metadata_output_path}'")
         except Exception as e:
-            print(f"  -> PERINGATAN: Gagal mengekstrak metadata: {e}")
+            pass
         
         output_folder_stack = "database/stack"
         os.makedirs(output_folder_stack, exist_ok=True)
@@ -751,7 +753,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
         if update_progress: update_progress(0, language_config.RUN_IMAGE_PROCESS_STARTED)
 
         # --- TAHAP 1: PENGUMPULAN DATA & PENGGABUNGAN BATCH ---
-        print("\n--- TAHAP 1: PENGUMPULAN DATA & PENGGABUNGAN BATCH ---")
+        # print("\n--- TAHAP 1: PENGUMPULAN DATA & PENGGABUNGAN BATCH ---")
         raw_weight_maps_for_learning = []
         processed_batches_results = []
         images_processed_count = 0
@@ -775,32 +777,40 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
             print(language_config.NO_HDF5_FILE_PROCESSING_FROM_PATH)
             total_images = len(image_paths)
 
-        if total_images == 0:
-            if update_progress: update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE); return
         
-        total_batches = (total_images + batch_size - 1) // batch_size
-        print(language_config.NUMBER_OF_IMAGES_TO_BE_PROCESSED.format(total_images))
-        print(language_config.NUMBER_OF_BATCHES_TO_BE_PROCESSED.format(total_batches))
+        # Panggil satu fungsi untuk mengatur semuanya.
+        batch_plan = setup_balanced_batching(total_images, language_config)
         
-        for batch_start_idx in range(0, total_images, batch_size):
-            current_batch_num = (batch_start_idx // batch_size) + 1
-            print(f"\n{language_config.PROCESSING_BATCH.format(current_batch_num, total_batches, batch_start_idx)}")
-            if stop_requested and stop_requested(): print(language_config.PROCESS_TERMINATED_BY_USER); break
+        # Jika tidak ada gambar, `batch_plan` akan kosong.
+        if not batch_plan:
+            if update_progress: update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
+            return
+
+        total_batches = len(batch_plan)
+        
+        # Iterasi sekarang menggunakan rencana batch yang sudah dibuat
+        for batch_num_counter, (batch_start_idx, batch_end_idx) in enumerate(batch_plan, 1):
+            
+            print(f"\n{language_config.PROCESSING_BATCH.format(batch_num_counter, total_batches, batch_start_idx)}")
+            if stop_requested and stop_requested(): 
+                print(language_config.PROCESS_TERMINATED_BY_USER)
+                break
 
             batch_images_list = []
             if data_source == 'HDF5':
                 with h5py.File(global_hdf5_path, 'r') as h5f:
                     keys = list(h5f.keys())
-                    batch_keys = keys[batch_start_idx : min(batch_start_idx + batch_size, total_images)]
+                    batch_keys = keys[batch_start_idx : batch_end_idx]
                     batch_images_list = [np.array(h5f[key]) for key in batch_keys if not (stop_requested and stop_requested())]
             else:
-                current_batch_paths = image_paths[batch_start_idx : min(batch_start_idx + batch_size, total_images)]
+                current_batch_paths = image_paths[batch_start_idx : batch_end_idx]
                 batch_images_list = load_images_from_paths(current_batch_paths, stop_requested)
                 if stop_requested and stop_requested(): break
                 if 'resize_all_with_padding' in globals(): batch_images_list, _ = resize_all_with_padding(batch_images_list, method="median")
 
             if not batch_images_list:
-                print(language_config.SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED.format(current_batch_num)); continue
+                print(language_config.SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED.format(batch_num_counter))
+                continue
 
             # Panggil similarity_mnfr untuk setiap batch
             batch_result_img, _, individual_raw_maps = image_processor.similarity_mnfr(

@@ -2,7 +2,7 @@ import os
 import json
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QSlider, QHBoxLayout,
                              QScrollArea, QComboBox, QLineEdit, QPushButton,
-                             QFormLayout, QSizePolicy, QToolButton) 
+                             QSizePolicy, QToolButton) 
 from PyQt6.QtGui import QFont, QDoubleValidator, QIntValidator
 from PyQt6.QtCore import Qt, QLocale
 
@@ -186,9 +186,9 @@ def get_similarity_settings_page():
     tile_size_sp_layout.setContentsMargins(0,0,0,0)
     tile_size_sp_layout.setSpacing(5) # Jarak antara label dan combo box
 
-    tile_size_label_sp = QLabel(getattr(language_config, 'TILE_SIZE_LABEL_SPATIAL', "Tile Size (Spatial):"))
+    tile_size_label_sp = QLabel(getattr(language_config, 'TILE_SIZE_LABEL', "Tile Size:"))
     tile_size_label_sp.setFont(get_default_font(10, QFont.Weight.Bold))
-    tile_size_label_sp.setToolTip(getattr(language_config, 'TILE_SIZE_DESCRIPTION_SPATIAL', '...'))
+    tile_size_label_sp.setToolTip(getattr(language_config, 'TILE_SIZE_DESCRIPTION', '...'))
     tile_size_sp_layout.addWidget(tile_size_label_sp) # Tambah label
 
     tile_size_combo_sp = QComboBox(); tile_options_int = [8, 10, 12, 16, 20, 24, 32, 48, 64, 128, 256]
@@ -203,9 +203,9 @@ def get_similarity_settings_page():
     overlap_sp_layout = QVBoxLayout(overlap_sp_group_widget)
     overlap_sp_layout.setContentsMargins(0,0,0,0); overlap_sp_layout.setSpacing(5)
 
-    overlap_label_text_sp_obj = QLabel(getattr(language_config, 'OVERLAP_LABEL_SPATIAL', "Overlap % (Spatial):"))
+    overlap_label_text_sp_obj = QLabel(getattr(language_config, 'OVERLAP_LABEL', "Overlap % (Spatial):"))
     overlap_label_text_sp_obj.setFont(get_default_font(10, QFont.Weight.Bold))
-    overlap_label_text_sp_obj.setToolTip(getattr(language_config, 'OVERLAP_DESCRIPTION_SPATIAL', '...'))
+    overlap_label_text_sp_obj.setToolTip(getattr(language_config, 'OVERLAP_DESCRIPTION', '...'))
     overlap_sp_layout.addWidget(overlap_label_text_sp_obj)
 
     initial_overlap_percent_sp = int(round(sim_v1_config.get("similarity_spatial_overlap_percent", 0.35) * 100)); overlap_validator_sp = QIntValidator(0, 90)
@@ -223,7 +223,7 @@ def get_similarity_settings_page():
     motion_sens_layout.setContentsMargins(0,0,0,0); motion_sens_layout.setSpacing(5)
 
     motion_sens_label_obj = QLabel(getattr(language_config, 'MOTION_THRESHOLD_LABEL', "Motion Sensitivity:"))
-    motion_sens_label_obj.setFont(get_default_font(10, QFont.Weight.Bold)); motion_sens_label_obj.setToolTip(getattr(language_config, 'MOTION_THRESHOLD_DESCRIPTION', '...'))
+    motion_sens_label_obj.setFont(get_default_font(10, QFont.Weight.Bold)); motion_sens_label_obj.setToolTip(getattr(language_config, 'MOTION_SENSIVITY_DESCRIPTION', '...'))
     motion_sens_layout.addWidget(motion_sens_label_obj)
 
     initial_motion_sens_v1 = sim_v1_config.get("similarity_spatial_motion_sensitivity", 110.0); motion_sens_multiplier_v1 = 10.0; motion_sens_slider_min_v1, motion_sens_slider_max_v1 = 10, 2000
@@ -242,8 +242,8 @@ def get_similarity_settings_page():
     noise_offset_layout = QVBoxLayout(noise_offset_group_widget)
     noise_offset_layout.setContentsMargins(0,0,0,0); noise_offset_layout.setSpacing(5)
 
-    noise_mad_label_obj = QLabel(getattr(language_config, 'NOISE_MAD_OFFSET_LABEL_V1', "Noise Offset Factor:"))
-    noise_mad_label_obj.setFont(get_default_font(10, QFont.Weight.Bold)); noise_mad_label_obj.setToolTip(getattr(language_config, 'NOISE_MAD_OFFSET_DESCRIPTION_V1', '...'))
+    noise_mad_label_obj = QLabel(getattr(language_config, 'NOISE_OFFSET_LABEL', "Noise Offset Factor:"))
+    noise_mad_label_obj.setFont(get_default_font(10, QFont.Weight.Bold)); noise_mad_label_obj.setToolTip(getattr(language_config, 'NOISE_OFFSET_DESCRIPTION', '...'))
     noise_offset_layout.addWidget(noise_mad_label_obj)
 
     initial_noise_mad_v1 = sim_v1_config.get("similarity_spatial_noise_mad_offset_factor", 0.3); noise_mad_multiplier_v1 = 100.0; noise_mad_slider_min_v1, noise_mad_slider_max_v1 = 0,100
@@ -258,7 +258,7 @@ def get_similarity_settings_page():
     
     spatial_container_main_layout.addWidget(noise_offset_group_widget) # Asumsi ini grup parameter terakhir
     
-    reset_spatial_button = QPushButton(getattr(language_config, 'RESET_SPATIAL_DEFAULTS_BUTTON', "Reset Spatial Defaults"))
+    reset_spatial_button = QPushButton(getattr(language_config, 'RESET_SPATIAL_DEFAULTS_BUTTON', "Reset Defaults"))
     reset_spatial_button.setStyleSheet(APPLY_BUTTON) 
     reset_spatial_button.setMinimumHeight(28)
     

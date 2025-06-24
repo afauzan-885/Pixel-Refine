@@ -88,7 +88,7 @@ def _create_acceleration_settings(parent_layout, current_settings):
     # Thumbnail
     thumbnail_label_text = getattr(language_config, 'THUMBNAIL_LABEL', "Enable Thumbnails")
     thumbnail_checkbox = QCheckBox(thumbnail_label_text)
-    thumbnail_checkbox.setToolTip(getattr(language_config, 'create_thumbnail_DESCRIPTION', ''))
+    thumbnail_checkbox.setToolTip(getattr(language_config, 'THUMBNAIL_DESCRIPTION', ''))
     thumbnail_checkbox.setChecked(current_settings.get("create_thumbnail", False))
     thumbnail_checkbox.setStyleSheet(TOGGLE_SWITCH_STYLE)
     parent_layout.addRow(thumbnail_checkbox)
