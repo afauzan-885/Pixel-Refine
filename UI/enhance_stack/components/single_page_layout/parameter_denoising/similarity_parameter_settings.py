@@ -19,15 +19,15 @@ def load_similarity_config():
         "similarity_merging_type": "spatial",
         "use_multi_core": True,
         "spatial_params": {
-            "similarity_spatial_tile_size": 16,
-            "similarity_spatial_motion_sensitivity": 110.0,
-            "similarity_spatial_noise_mad_offset_factor": 0.3,
-            "similarity_spatial_overlap_percent": 0.4,
+            "similarity_spatial_tile_size": 32,
+            "similarity_spatial_motion_sensitivity": 70.0,
+            "similarity_spatial_noise_mad_offset_factor": 0.07,
+            "similarity_spatial_overlap_percent": 0.35,
         },
         "frequency_params": {
-            "similarity_frequency_c_wiener_factor": 5.0,
+            "similarity_frequency_c_wiener_factor": 8.0,
             "similarity_frequency_tile_size": 32,
-            "similarity_frequency_overlap_percent": 0.25,
+            "similarity_frequency_overlap_percent": 0.35,
         }
     }
     final_config = {

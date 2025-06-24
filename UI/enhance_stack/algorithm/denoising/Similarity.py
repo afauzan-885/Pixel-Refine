@@ -60,16 +60,16 @@ class SimilarityAlgorithm:
         self.is_model_loaded = False
         self.model_type = None
         self.smart_alpha_generator = None
-        try:
-            # Muat model hanya jika path diberikan dan valid
-            if ml_model_path and os.path.exists(ml_model_path):
-                # print(f"Memuat model Smart Alpha Generator dari: {ml_model_path}")
-                self.smart_alpha_generator = AlphaGenerator(model_path=ml_model_path)
-            else:
-                print("PERINGATAN: Path model ML tidak valid atau tidak ada. Refinement ML akan dinonaktifkan.")
-        except Exception as e:
-            print(f"ERROR: Gagal memuat model ML. Refinement ML dinonaktifkan. Kesalahan: {e}")
-            self.smart_alpha_generator = None
+        # try:
+        #     # Muat model hanya jika path diberikan dan valid
+        #     if ml_model_path and os.path.exists(ml_model_path):
+        #         # print(f"Memuat model Smart Alpha Generator dari: {ml_model_path}")
+        #         self.smart_alpha_generator = AlphaGenerator(model_path=ml_model_path)
+        #     else:
+        #         print("PERINGATAN: Path model ML tidak valid atau tidak ada. Refinement ML akan dinonaktifkan.")
+        # except Exception as e:
+        #     print(f"ERROR: Gagal memuat model ML. Refinement ML dinonaktifkan. Kesalahan: {e}")
+        #     self.smart_alpha_generator = None
             
         if hdf5_path is None:
             self.hdf5_path = "database/align/aligned_images.h5"
@@ -544,7 +544,7 @@ class SimilarityAlgorithm:
 
         # <<< LOGIKA PEMBELAJARAN: Langkah 1 - Pemuatan Model & Persiapan >>>
         if (use_learning_model or use_ai_reconstruction) and not self.is_model_loaded:
-            print("Mode AI diaktifkan. Mencoba memuat model pengetahuan...")
+            # print("Mode AI diaktifkan. Mencoba memuat model pengetahuan...")
             self._load_knowledge_model()
         
         channels_buffer = 3
@@ -574,7 +574,9 @@ class SimilarityAlgorithm:
             current_noise_offset_factor = noise_offset_factor if noise_offset_factor is not None else common_call_args.get('noise_offset_factor')
             
             if any(p is None for p in [current_tile_size, current_overlap, current_motion_sensitivity, current_noise_offset_factor]):
-                raise ValueError("Untuk spatial merging, tile_size, overlap, motion_sensitivity, dan noise_offset_factor harus disediakan.")
+                if stop_requested and stop_requested():
+                    return np.zeros((h_ref, w_ref, channels_ref_orig), dtype=dtype_ref), None, []
+                # raise ValueError("Untuk spatial merging, tile_size, overlap, motion_sensitivity, dan noise_offset_factor harus disediakan.")
 
             common_call_args.update({
                 "tile_size": current_tile_size, "overlap": current_overlap,
@@ -841,15 +843,15 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
         if perform_learning_setting and raw_weight_maps_for_learning:
             training_resolution_setting = tuple(general_settings.get("training_resolution", (256, 256)))
             
-            print(f"\n--- Memproses {len(raw_weight_maps_for_learning)} Peta Bobot Mentah yang Baru Dikumpulkan ---")
-            print(f"    -> Meresize semua peta bobot ke resolusi training: {training_resolution_setting}")
+            # print(f"\n--- Memproses {len(raw_weight_maps_for_learning)} Peta Bobot Mentah yang Baru Dikumpulkan ---")
+            # print(f"    -> Meresize semua peta bobot ke resolusi training: {training_resolution_setting}")
             
             resized_maps_for_saving = [
                 cv2.resize(w_map, training_resolution_setting, interpolation=cv2.INTER_AREA)
                 for w_map in raw_weight_maps_for_learning
             ]
 
-            print(f"--- Menyimpan {len(resized_maps_for_saving)} peta bobot yang sudah di-resize ke '{os.path.basename(raw_maps_db_path)}' ---")
+            # print(f"--- Menyimpan {len(resized_maps_for_saving)} peta bobot yang sudah di-resize ke '{os.path.basename(raw_maps_db_path)}' ---")
             try:
                 with h5py.File(raw_maps_db_path, 'a') as hf:
                     existing_keys = list(hf.keys())
@@ -864,13 +866,13 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
                 
                 with h5py.File(raw_maps_db_path, 'r') as hf:
                     total_raw_maps = len(hf.keys())
-                print(f"  -> SUKSES: Database data mentah sekarang berisi total {total_raw_maps} peta.")
+                # print(f"  -> SUKSES: Database data mentah sekarang berisi total {total_raw_maps} peta.")
             except Exception as e:
-                print(f"  -> GAGAL memperbarui database data mentah: {e}")
+                # print(f"  -> GAGAL memperbarui database data mentah: {e}")
                 traceback.print_exc()
 
         # --- TAHAP 2: FINE-TUNING & PEMBUATAN GROUND TRUTH ---
-        print("\n--- TAHAP 2: FINE-TUNING & PERSIAPAN GROUND TRUTH ---")
+        # print("\n--- TAHAP 2: FINE-TUNING & PERSIAPAN GROUND TRUTH ---")
         final_result_img = None
         
         if stop_requested and stop_requested():
@@ -878,12 +880,12 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
         elif processed_batches_results:
             valid_batch_results = [res for res in processed_batches_results if res is not None]
             if not valid_batch_results:
-                 print("  -> Tidak ada hasil batch yang valid untuk diproses lebih lanjut.")
+                #  print("  -> Tidak ada hasil batch yang valid untuk diproses lebih lanjut.")
                  if update_progress: update_progress(100, language_config.DATA_FAILED_COMPLETION_CREATED); 
                  return
 
             if len(valid_batch_results) > 1:
-                print(f"  -> Memulai fine-tuning pada {len(valid_batch_results)} hasil batch...")
+                # print(f"  -> Memulai fine-tuning pada {len(valid_batch_results)} hasil batch...")
                 fine_tuning_start_progress, fine_tuning_end_progress = 95, 99
                 def fine_tuning_update_progress(inner_progress, message):
                     mapped_progress = fine_tuning_start_progress + int((inner_progress / 100.0) * (fine_tuning_end_progress - fine_tuning_start_progress))
@@ -904,21 +906,22 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
                         use_learning_model=False, perform_learning=False, weight_of_each_image=False,
                         collect_raw_maps_for_learning=False, **extra_merging_params
                     )
-                    print("  -> Fine-tuning selesai.")
+                    # print("  -> Fine-tuning selesai.")
                 except Exception as e_fine:
                     traceback.print_exc()
                     final_result_img = None
             
             elif len(valid_batch_results) == 1:
                 final_result_img = valid_batch_results[0]
-                print("  -> Melewatkan fine-tuning karena hanya ada 1 hasil batch.")
+                # print("  -> Melewatkan fine-tuning karena hanya ada 1 hasil batch.")
         
         if perform_learning_setting:
-            print(f"    -> Mode pengumpulan data aktif. Data mentah telah disimpan (jika ada) di: {raw_maps_db_path}")
+            pass
+            # print(f"    -> Mode pengumpulan data aktif. Data mentah telah disimpan (jika ada) di: {raw_maps_db_path}")
 
         # --- TAHAP 4: PENYIMPANAN HASIL AKHIR ---
         if final_result_img is not None and not (stop_requested and stop_requested()):
-            print("\n--- TAHAP 4: MENYIMPAN HASIL AKHIR ---")
+            # print("\n--- TAHAP 4: MENYIMPAN HASIL AKHIR ---")
             ref_path_for_save = image_paths[0] if image_paths else None
             save_success = save_image(final_result_img, output_path, reference_image_path=ref_path_for_save)
             

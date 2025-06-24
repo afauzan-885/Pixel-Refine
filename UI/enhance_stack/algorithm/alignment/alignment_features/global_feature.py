@@ -43,8 +43,7 @@ def generate_balanced_batches(total_images, max_batch_size=10):
         yield (start_index, end_index)
         current_index = end_index
 
-# --- FUNGSI UTAMA BARU YANG AKAN DIPANGGIL DARI MAIN ---
-def setup_balanced_batching(total_images, max_batch_size=10):
+def setup_balanced_batching(total_images, language_config, max_batch_size=10):
     """
     Menyiapkan seluruh logika batching, termasuk mencetak info ke konsol.
     
