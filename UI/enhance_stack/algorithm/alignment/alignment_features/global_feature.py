@@ -20,7 +20,7 @@ try:
     RAWPY_AVAILABLE = True
 except ImportError:
     RAWPY_AVAILABLE = False
-from UI.enhance_stack.algorithm.model_trainer.mobile_net_v2 import AlphaGenerator
+# from UI.enhance_stack.algorithm.model_trainer.mobile_net_v2 import AlphaGenerator
 from UI.settings.General.Language import language_config
 
 
@@ -270,62 +270,62 @@ def optical_flow_refinement(
 
     return weight_map_refined
 
-def ml_driven_refinement(
-    current_weight_map, 
-    prev_weight_map_ema, 
-    optical_flow, 
-    alpha_generator: AlphaGenerator,
-    flow_confidence_map=None,
-    bilateral_d=9, 
-    bilateral_sigma_color=0.05, 
-    bilateral_sigma_space=75):
-    """
-    Versi refinement yang digerakkan oleh Machine Learning untuk menghasilkan alpha map.
-    """
-    if prev_weight_map_ema is None or optical_flow is None or alpha_generator is None:
-        return current_weight_map
+# def ml_driven_refinement(
+#     current_weight_map, 
+#     prev_weight_map_ema, 
+#     optical_flow, 
+#     alpha_generator: AlphaGenerator,
+#     flow_confidence_map=None,
+#     bilateral_d=9, 
+#     bilateral_sigma_color=0.05, 
+#     bilateral_sigma_space=75):
+#     """
+#     Versi refinement yang digerakkan oleh Machine Learning untuk menghasilkan alpha map.
+#     """
+#     if prev_weight_map_ema is None or optical_flow is None or alpha_generator is None:
+#         return current_weight_map
 
-    h, w = current_weight_map.shape
+#     h, w = current_weight_map.shape
     
-    # --- LANGKAH 1: PERSIAPAN INPUT (Sama seperti sebelumnya) ---
-    grid_x, grid_y = np.meshgrid(np.arange(w), np.arange(h))
-    map_x = (grid_x - optical_flow[..., 0]).astype(np.float32)
-    map_y = (grid_y - optical_flow[..., 1]).astype(np.float32)
+#     # --- LANGKAH 1: PERSIAPAN INPUT (Sama seperti sebelumnya) ---
+#     grid_x, grid_y = np.meshgrid(np.arange(w), np.arange(h))
+#     map_x = (grid_x - optical_flow[..., 0]).astype(np.float32)
+#     map_y = (grid_y - optical_flow[..., 1]).astype(np.float32)
     
-    warped_prev_ema = cv2.remap(
-        prev_weight_map_ema, map_x, map_y, 
-        interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
-    )
+#     warped_prev_ema = cv2.remap(
+#         prev_weight_map_ema, map_x, map_y, 
+#         interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
+#     )
     
-    warped_ones = cv2.remap(np.ones_like(prev_weight_map_ema), map_x, map_y, interpolation=cv2.INTER_LINEAR)
-    disocclusion_mask = warped_ones < 0.95 
+#     warped_ones = cv2.remap(np.ones_like(prev_weight_map_ema), map_x, map_y, interpolation=cv2.INTER_LINEAR)
+#     disocclusion_mask = warped_ones < 0.95 
 
-    smoothed_current_weight = cv2.bilateralFilter(
-        current_weight_map.astype(np.float32), 
-        d=bilateral_d, sigmaColor=bilateral_sigma_color, sigmaSpace=bilateral_sigma_space
-    )
+#     smoothed_current_weight = cv2.bilateralFilter(
+#         current_weight_map.astype(np.float32), 
+#         d=bilateral_d, sigmaColor=bilateral_sigma_color, sigmaSpace=bilateral_sigma_space
+#     )
     
-    ### DIHAPUS ###
-    # Bagian UPGRADE 3 dan 4 (kalkulasi confidence dan alpha heuristik) dihapus.
-    # Model ML akan menggantikan logika ini sepenuhnya.
+#     ### DIHAPUS ###
+#     # Bagian UPGRADE 3 dan 4 (kalkulasi confidence dan alpha heuristik) dihapus.
+#     # Model ML akan menggantikan logika ini sepenuhnya.
 
-    # --- LANGKAH 2: PERUBAHAN UTAMA - INFERENSI MODEL ML ---
-    # Gunakan alpha_generator untuk membuat peta alpha yang cerdas.
-    alpha_for_current = alpha_generator.generate(
-        smoothed_current_weight=smoothed_current_weight,
-        warped_prev_ema=warped_prev_ema,
-        optical_flow=optical_flow,
-        flow_confidence_map=flow_confidence_map,
-        disocclusion_mask=disocclusion_mask
-    )
+#     # --- LANGKAH 2: PERUBAHAN UTAMA - INFERENSI MODEL ML ---
+#     # Gunakan alpha_generator untuk membuat peta alpha yang cerdas.
+#     alpha_for_current = alpha_generator.generate(
+#         smoothed_current_weight=smoothed_current_weight,
+#         warped_prev_ema=warped_prev_ema,
+#         optical_flow=optical_flow,
+#         flow_confidence_map=flow_confidence_map,
+#         disocclusion_mask=disocclusion_mask
+#     )
 
-    # --- LANGKAH 3: PENCAMPURAN AKHIR (Sama seperti sebelumnya) ---
-    # Logika blending tetap sama, tetapi sekarang menggunakan alpha map dari ML.
-    alpha_for_current_reshaped = alpha_for_current[..., np.newaxis] if current_weight_map.ndim > smoothed_current_weight.ndim else alpha_for_current
+#     # --- LANGKAH 3: PENCAMPURAN AKHIR (Sama seperti sebelumnya) ---
+#     # Logika blending tetap sama, tetapi sekarang menggunakan alpha map dari ML.
+#     alpha_for_current_reshaped = alpha_for_current[..., np.newaxis] if current_weight_map.ndim > smoothed_current_weight.ndim else alpha_for_current
 
-    weight_map_refined = (alpha_for_current_reshaped * smoothed_current_weight) + ((1.0 - alpha_for_current_reshaped) * warped_prev_ema)
+#     weight_map_refined = (alpha_for_current_reshaped * smoothed_current_weight) + ((1.0 - alpha_for_current_reshaped) * warped_prev_ema)
 
-    return weight_map_refined
+#     return weight_map_refined
    
 def standard_refinement(
     weight_map: np.ndarray,

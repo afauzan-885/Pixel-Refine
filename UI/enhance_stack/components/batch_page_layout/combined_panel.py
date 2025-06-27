@@ -584,6 +584,7 @@ class CombinedPanel(QWidget):
 
         all_batches[str(batch_id)] = state
 
+        os.makedirs(os.path.dirname(json_path), exist_ok=True)  # ✅ buat folder jika belum ada
         with open(json_path, "w") as f:
             json.dump(all_batches, f, indent=4)
 

@@ -4,10 +4,9 @@ import sys
 import time
 from PyQt6.QtWidgets import (QWidget, QLabel, QComboBox, QFormLayout,
                              QVBoxLayout, QHBoxLayout, QPushButton,
-                             QMessageBox, QCheckBox, QSlider, QGroupBox,
-                             QLineEdit)
-from PyQt6.QtCore import QProcess, QCoreApplication, Qt, QLocale
-from PyQt6.QtGui import QDoubleValidator, QIntValidator
+                             QMessageBox, QCheckBox,
+                             )
+from PyQt6.QtCore import QProcess, QCoreApplication, Qt
 from UI.resources.stylesheet.stylesheet import APPLY_BUTTON, DROPDOWN_BOX, TOGGLE_SWITCH_STYLE
 from UI.settings.General.Language import language_config
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE, GENERAL_SETTINGS_FILE

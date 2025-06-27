@@ -8,10 +8,10 @@ import h5py
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (add_legend_heatmap, extract_all_metadata, 
                                                                                     gaussian_window, get_all_image_paths_for_single_process, load_images_from_paths, 
-                                                                                    normalize_image, ml_driven_refinement, optical_flow_refinement, resize_all_with_padding, save_image, setup_balanced_batching, 
+                                                                                    normalize_image, optical_flow_refinement, resize_all_with_padding, save_image, setup_balanced_batching, 
                                                                                     standard_refinement, temporal_consistency_refinement)
 from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityFrequencyInterface, SimilaritySpatialInterface
-from UI.enhance_stack.algorithm.model_trainer.mobile_net_v2 import AlphaGenerator
+# from UI.enhance_stack.algorithm.model_trainer.mobile_net_v2 import AlphaGenerator
 from UI.enhance_stack.components.single_page_layout.parameter_denoising.similarity_parameter_settings import  load_similarity_config
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
@@ -291,13 +291,14 @@ class SimilarityAlgorithm:
 
                         if use_ml_refinement:
                             # Panggil fungsi refinement yang digerakkan oleh ML
-                            refined_weight = ml_driven_refinement(
-                                current_weight_map=map_for_refinement,
-                                prev_weight_map_ema=accumulated_weight_map,
-                                optical_flow=current_flow,
-                                alpha_generator=self.smart_alpha_generator,
-                                flow_confidence_map=current_confidence
-                            )
+                            # refined_weight = ml_driven_refinement(
+                            #     current_weight_map=map_for_refinement,
+                            #     prev_weight_map_ema=accumulated_weight_map,
+                            #     optical_flow=current_flow,
+                            #     alpha_generator=self.smart_alpha_generator,
+                            #     flow_confidence_map=current_confidence
+                            # )
+                            refined_weight = map_for_refinement  # ML refinement temporarily disabled
                         elif refinement_algorithm == 'optical_flow':
                             refined_weight = optical_flow_refinement(
                                 map_for_refinement, accumulated_weight_map, current_flow, current_confidence
@@ -473,7 +474,8 @@ class SimilarityAlgorithm:
                     if accumulated_weight_map is None:
                         refined_weight = map_for_refinement
                     else:
-                        refined_weight = ml_driven_refinement(map_for_refinement, accumulated_weight_map, optical_flows[original_idx])
+                        pass
+                        # refined_weight = ml_driven_refinement(map_for_refinement, accumulated_weight_map, optical_flows[original_idx])
                     accumulated_weight_map = refined_weight.copy()
                 elif refinement_algorithm == 'standard':
                     refined_weight = standard_refinement(map_for_refinement, prev_weight_map_for_standard, reference_image_float)
@@ -518,8 +520,8 @@ class SimilarityAlgorithm:
                 update_progress=None, stop_requested=None,
                 save_weight_map_path=None, 
                 total_overall_images=None, images_processed_so_far=0, 
-                save_temporal_std_path="database/stack.jpg",
-                weight_of_each_image=False, 
+                save_temporal_std_path= None #"database/stack.jpg",
+                , weight_of_each_image=False, 
                 collect_raw_maps_for_learning=False,
                 use_learning_model=False,
                 perform_learning=False,

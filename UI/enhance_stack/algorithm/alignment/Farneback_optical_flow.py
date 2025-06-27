@@ -14,7 +14,7 @@ import h5py
 from PyQt6.QtCore import Qt
 
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, extract_exif, get_all_image_paths_for_single_process, load_images_from_paths, resize_all_with_padding, resize_with_padding,  save_to_hdf5
-from UI.enhance_stack.algorithm.custom_gpu.grayscale_conversion import bgr_to_gray_gpu
+# from UI.enhance_stack.algorithm.custom_gpu.grayscale_conversion import bgr_to_gray_gpu
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
 from concurrent.futures import ThreadPoolExecutor
@@ -109,12 +109,11 @@ class FarnebackAlgorithm:
         filtered[mask] = flow[mask]
         return filtered
 
-    def _refine_flow_median(self, flow, size=3):
-        import scipy.ndimage
-        refined = np.zeros_like(flow)
-        for i in range(2):  # x dan y component
-            refined[..., i] = scipy.ndimage.median_filter(flow[..., i], size=size)
-        return refined
+    # def _refine_flow_median(self, flow, size=3):
+    #     refined = np.zeros_like(flow)
+    #     for i in range(2):  # x dan y component
+    #         refined[..., i] = scipy.ndimage.median_filter(flow[..., i], size=size)
+    #     return refined
 
     def _compute_block_cpu_internal(self, x, y, bw, bh, overlap_ratio, base_gray_8bit, target_gray_8bit, fb_config, w, h):
         overlap_x = int(bw * overlap_ratio)
@@ -162,14 +161,21 @@ class FarnebackAlgorithm:
         use_multicore = fb_config.get("use_multi_core", True)
 
         try:
+            # def prepare_gray(img):
+            #     if img is None:
+            #         raise ValueError("Input image is None.")
+            #     if img.ndim == 3:
+            #         if use_gpu:
+            #             return bgr_to_gray_gpu(img)
+            #         else:
+            #             img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            #     return img.astype(np.uint8, copy=False)
             def prepare_gray(img):
                 if img is None:
                     raise ValueError("Input image is None.")
                 if img.ndim == 3:
-                    if use_gpu:
-                        return bgr_to_gray_gpu(img)
-                    else:
-                        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    # Tidak melakukan konversi GPU
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                 return img.astype(np.uint8, copy=False)
 
             base_gray_8bit = prepare_gray(base_image)
@@ -269,7 +275,7 @@ class FarnebackAlgorithm:
                         if stop_requested and stop_requested():
                             break
 
-                flow_full_cpu = self._refine_flow_median(flow_full_cpu, size=3)
+                # flow_full_cpu = self._refine_flow_median(flow_full_cpu, size=3)
                 flow_full = flow_full_cpu
 
             return flow_full
