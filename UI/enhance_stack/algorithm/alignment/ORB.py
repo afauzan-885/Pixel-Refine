@@ -445,7 +445,7 @@ def main(db_path,
         if batch_id is None:
             raise ValueError(language_config.BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS)
         image_paths = processor.get_all_image_paths_for_batch_process(batch_id)
-        processor.hdf5_path = f"database/align/aligned_image_batch_{batch_id}.h5"
+        processor.hdf5_path = "database/align/aligned_image_batch_{batch_id}.h5"
 
     if not image_paths:
         if update_progress:

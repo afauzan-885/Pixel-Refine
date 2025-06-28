@@ -310,42 +310,36 @@ class CombinedPanel(QWidget):
             self.list_layout.addWidget(label)
         
     def get_current_state(self, batch_id=None):
-        """Mengambil state saat ini dari widget panel parameter. Jika batch_id diberikan, baca dari file JSON."""
+        """
+        Mengambil state saat ini dari widget panel parameter.
+        Sekarang menggunakan self.label_to_key_map untuk konsistensi kunci.
+        """
         state = {}
 
-        if batch_id is not None:
-            json_path = os.path.join("database", "align", "batch_parameter.json")
-            if os.path.exists(json_path):
-                with open(json_path, "r") as f:
-                    all_batches = json.load(f)
-                batch_data = all_batches.get(str(batch_id), {})
-                for text, checkbox in self.checkboxes.items():
-                    key = f"checkbox_{text.replace(' ', '_').lower()}"
-                    if key in batch_data:
-                        checkbox.setChecked(batch_data[key])
-                    state[key] = checkbox.isChecked()
-                # Muat nilai combobox jika ada
-                for name in ['alignment', 'super_resolution', 'denoising']:
-                    cb_key = f"{name}_algo"
-                    if name in self.comboboxes and cb_key in batch_data:
-                        self.comboboxes[name].setCurrentText(batch_data[cb_key])
-                        state[cb_key] = batch_data[cb_key]
-            else:
-                print(f"[WARN] File JSON tidak ditemukan: {json_path}")
-        else:
+        # --- PERBAIKAN: Gunakan self.label_to_key_map untuk mendapatkan kunci yang stabil ---
+        # Pastikan self.label_to_key_map sudah diinisialisasi (biasanya di create_parameter_panel)
+        if hasattr(self, 'label_to_key_map'):
             for text, checkbox in self.checkboxes.items():
+                key = self.label_to_key_map.get(text)
+                if key:
+                    state[key] = checkbox.isChecked()
+        else:
+            # Fallback jika map belum ada, meskipun seharusnya tidak terjadi dalam alur normal
+            print("[WARNING] self.label_to_key_map not found in get_current_state.")
+            for text, checkbox in self.checkboxes.items():
+                # Ini adalah logika lama yang rentan bug, hanya sebagai fallback
                 key = f"checkbox_{text.replace(' ', '_').lower()}"
                 state[key] = checkbox.isChecked()
 
-            if 'alignment' in self.comboboxes:
-                state['alignment_algo'] = self.comboboxes['alignment'].currentText()
-            if 'super_resolution' in self.comboboxes:
-                state['super_resolution_algo'] = self.comboboxes['super_resolution'].currentText()
-            if 'denoising' in self.comboboxes:
-                state['denoising_algo'] = self.comboboxes['denoising'].currentText()
+        # Logika untuk ComboBox sudah benar karena menggunakan kunci yang stabil
+        if 'alignment' in self.comboboxes:
+            state['alignment_algo'] = self.comboboxes['alignment'].currentText()
+        if 'super_resolution' in self.comboboxes:
+            state['super_resolution_algo'] = self.comboboxes['super_resolution'].currentText()
+        if 'denoising' in self.comboboxes:
+            state['denoising_algo'] = self.comboboxes['denoising'].currentText()
 
         return state
-    # --------------------------------------------------
     
     def layout_panel_parameter(self, list_layout):
         left_section_widget = QWidget()
@@ -744,6 +738,7 @@ class CombinedPanel(QWidget):
     def create_parameter_panel(self):
         """
         Buat panel parameter yang berisi combo box dan checkbox.
+        Diperbaiki untuk menggunakan pemetaan kunci yang stabil untuk penyimpanan state.
         """
         algorithm_panel = QWidget()
         algorithm_panel.setStyleSheet("background-color: #EBEAEA")
@@ -773,15 +768,21 @@ class CombinedPanel(QWidget):
         option_layout.setSpacing(5)
 
         checkbox_widgets = {}
-        checkbox_texts = [
-            language_config.PARAMETER_BATCH_ALIGNMENT,
-            language_config.PARAMETER_BATCH_ALIGNMENT_TO_FOLDER,
-            language_config.PARAMETER_BATCH_DENOISING,
-            language_config.PARAMETER_BATCH_SUPER_RESOLUTION,
-            language_config.PARAMETER_BATCH_CROP_EDGE,
-            language_config.PARAMETER_BATCH_KEEP_EDGE
-        ]
 
+        # --- PERBAIKAN 1: Definisikan pemetaan dari teks label ke kunci JSON yang stabil ---
+        self.label_to_key_map = {
+            language_config.PARAMETER_BATCH_ALIGNMENT: "checkbox_align_images",
+            language_config.PARAMETER_BATCH_ALIGNMENT_TO_FOLDER: "checkbox_save_alignment_to_folder",
+            language_config.PARAMETER_BATCH_DENOISING: "checkbox_denoising",
+            language_config.PARAMETER_BATCH_SUPER_RESOLUTION: "checkbox_super_resolution",
+            language_config.PARAMETER_BATCH_CROP_EDGE: "checkbox_crop_edges",
+            language_config.PARAMETER_BATCH_KEEP_EDGE: "checkbox_keep_edges"
+        }
+
+        # Gunakan keys dari map untuk iterasi agar konsisten
+        checkbox_texts = list(self.label_to_key_map.keys())
+
+        # Ambil referensi kunci untuk logika selanjutnya
         denoising_key = language_config.PARAMETER_BATCH_DENOISING
         superres_key = language_config.PARAMETER_BATCH_SUPER_RESOLUTION
         crop_edge_key = language_config.PARAMETER_BATCH_CROP_EDGE
@@ -805,9 +806,11 @@ class CombinedPanel(QWidget):
             self.checkboxes[text] = option_checkbox
             checkbox_widgets[text] = checkbox_widget
 
-            key_for_state = f"checkbox_{text.replace(' ', '_').lower()}"
-            initial_checked = self.initial_state.get(key_for_state, False)
-            option_checkbox.setChecked(initial_checked)
+            # --- PERBAIKAN 2: Gunakan pemetaan untuk mendapatkan kunci yang benar saat memuat state ---
+            key_for_state = self.label_to_key_map.get(text) # Mengambil kunci stabil, misal "checkbox_align_images"
+            if key_for_state:
+                initial_checked = self.initial_state.get(key_for_state, False)
+                option_checkbox.setChecked(initial_checked)
 
             current_key = text
             option_label.clicked.connect(lambda key=current_key: self._trigger_exclusive_handler(key))
@@ -842,8 +845,8 @@ class CombinedPanel(QWidget):
         if keep_edge_key in self.checkboxes:
              self._trigger_exclusive_handler(keep_edge_key)
         if alignment_key in self.checkboxes:
-            self._update_visibility_internal() 
+            self._update_visibility_internal()
         if align_folder_key in self.checkboxes:
-            self._update_visibility_internal() 
+            self._update_visibility_internal()
 
         return algorithm_panel
