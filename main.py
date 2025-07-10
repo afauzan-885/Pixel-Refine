@@ -49,17 +49,13 @@ class CircularProgress(QWidget):
             side
         )
 
-        # PERUBAHAN 1: Tambahkan latar belakang gelap semi-transparan untuk kontras
         painter.setPen(Qt.PenStyle.NoPen)
         # Warna hitam dengan opasitas ~30% untuk menciptakan efek alas
         painter.setBrush(QColor(0, 0, 0, 0)) 
         painter.drawEllipse(draw_rect)
         
-        # --- Sisa kode menggambar tetap sama ---
-
-        # Gambar titik-titik latar belakang
         num_dots = 12
-        dot_radius = side * 0.04  # Sedikit lebih kecil agar lebih rapi
+        dot_radius = side * 0.04  
         circle_radius = side / 2 - dot_radius * 2
 
         painter.setPen(Qt.PenStyle.NoPen)
@@ -94,26 +90,22 @@ class SplashScreen(QSplashScreen):
     Splash screen kustom yang menampilkan gambar, indikator progres melingkar,
     dan label status.
     """
-    def __init__(self, pixmap: QPixmap, flags=Qt.WindowType.WindowStaysOnTopHint):
+    # DIUBAH: Tambahkan parameter 'version_string' di konstruktor
+    def __init__(self, pixmap: QPixmap, version_string: str, flags=Qt.WindowType.WindowStaysOnTopHint):
         super().__init__(pixmap, flags)
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
 
         main_layout = QVBoxLayout(self)
-        
-        # PERUBAHAN 2: Atur margin bawah agar ada jarak 15px dari tepi bawah
         main_layout.setContentsMargins(10, 10, 10, 15)
         
-        # PERUBAHAN 3: Hanya gunakan satu spacer di atas.
-        # Ini akan mendorong semua widget di bawahnya ke bagian bawah layout.
         main_layout.addStretch()
 
         # Widget progres melingkar kustom
         self.progress_indicator = CircularProgress(self)
-        # PERUBAHAN 4: Kecilkan ukuran lingkaran agar tidak terlalu dominan
         self.progress_indicator.setFixedSize(120, 120) 
         main_layout.addWidget(self.progress_indicator, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        # Label untuk menampilkan status pemuatan ("LOADING...")
+        # Label untuk "LOADING..."
         self.status_label = QLabel("L O A D I N G . . .", self)
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_label.setStyleSheet("""
@@ -122,24 +114,35 @@ class SplashScreen(QSplashScreen):
             font-weight: normal;
             letter-spacing: 4px;
             background-color: transparent;
-            padding-top: 5px; /* Beri sedikit jarak dari lingkaran */
+            padding-top: 5px;
         """)
         main_layout.addWidget(self.status_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # Label untuk pesan detail
         self.detail_label = QLabel("", self)
         self.detail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        # Warna dibuat sedikit lebih terang agar lebih mudah dibaca
         self.detail_label.setStyleSheet("color: #DDDDDD; font-size: 11px; background-color: transparent;")
         main_layout.addWidget(self.detail_label, alignment=Qt.AlignmentFlag.AlignCenter)
         
-        # PERUBAHAN 5: Hapus spacer di bagian bawah.
-        # main_layout.addStretch() <-- Baris ini dihapus.
+        # BARU: Spacer kecil untuk memberi jarak ke nomor versi
+        main_layout.addSpacing(10)
+
+        # BARU: Label untuk nomor versi
+        self.version_label = QLabel(version_string, self)
+        self.version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Dibuat lebih kecil dan redup agar elegan dan tidak mengganggu
+        self.version_label.setStyleSheet("""
+            color: #AAAAAA; 
+            font-size: 9px; 
+            background-color: transparent;
+        """)
+        main_layout.addWidget(self.version_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
     def update_status(self, message: str, value: int):
         self.progress_indicator.setValue(value)
         self.detail_label.setText(message) 
         QApplication.processEvents()
+        
         
 class PixelRefineMain(QMainWindow):
     def __init__(self):
@@ -252,13 +255,15 @@ if __name__ == "__main__":
     screen_geometry = app.primaryScreen().geometry()
     original_pixmap = QPixmap("UI/resources/image/Logo_Pixel_Refine.png")
     
-    # Atur ukuran splash screen (misalnya 25% dari lebar layar)
     splash_width = int(screen_geometry.width() * 0.25)
     scaled_pixmap = original_pixmap.scaledToWidth(splash_width, Qt.TransformationMode.SmoothTransformation)
     
-    splash = SplashScreen(scaled_pixmap)
+    # DIUBAH: Berikan argumen nomor versi saat membuat splash screen
+    # Kita akan format stringnya di sini
+    version_text = f"Version {config.APP_VERSION}"
+    splash = SplashScreen(scaled_pixmap, version_text) # <-- Perubahan di sini
+    
     splash.show()
-    # PENTING: Beri waktu bagi event loop untuk menggambar splash screen
     app.processEvents()
     
     window = PixelRefineMain()
