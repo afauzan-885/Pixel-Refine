@@ -1,10 +1,10 @@
 # File: left_panel.py
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QComboBox, QStackedWidget, QPushButton,
     QSizePolicy, QButtonGroup
 )
-from PyQt6.QtCore import Qt
+from PySide6.QtCore import Qt
 from UI.enhance_stack.components.algorithm_list import get_algorithm_descriptions, get_algorithm_names, get_algorithm_options, get_category_display_name
 from UI.enhance_stack.components.single_page_layout.parameter_pages import ParameterPages
 from UI.resources.stylesheet.stylesheet import DROPDOWN_BOX, SWITCH_BUTTON_ACTIVE_STYLE, SWITCH_BUTTON_DEFAULT_STYLE

@@ -1,5 +1,5 @@
 import os
-from PyQt6.QtWidgets import QFileDialog, QMessageBox
+from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 from UI.settings.General.Language import language_config
 from config import SUPPORTED_FORMATS

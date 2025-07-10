@@ -1,15 +1,15 @@
 import os
 import weakref
-from PyQt6.QtWidgets import (QMessageBox, QFileDialog)
+from PySide6.QtWidgets import (QMessageBox, QFileDialog)
 from PIL import Image, UnidentifiedImageError
-from PyQt6.QtCore import QThread, pyqtSignal, QObject
+from PySide6.QtCore import QThread, Signal, QObject
 from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, make_safe_callback, show_thumbnail
 from UI.enhance_stack.logic.multi_threading import BatchImageImportThreading
 from UI.settings.General.Language import language_config
 from config import SUPPORTED_FORMATS
 
 class BatchDeleteProcess(QThread):
-    batch_deleted = pyqtSignal()
+    batch_deleted = Signal()
 
     def __init__(self, database_manager, batch_id, cache_dir, thumbnail_threads, parent=None):
         super().__init__(parent)

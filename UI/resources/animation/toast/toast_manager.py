@@ -1,10 +1,10 @@
 # UI/resources/toast_manager.py  (atau lokasi lain yang sesuai)
 
 import weakref
-from PyQt6.QtWidgets import QWidget, QLabel, QGraphicsOpacityEffect
-from PyQt6.QtCore import (QEasingCurve, QPropertyAnimation, Qt, QTimer,
-                          pyqtSlot, QObject, QPoint, QRect, QSize)
-from PyQt6.QtGui import QFont
+from PySide6.QtWidgets import QWidget, QLabel, QGraphicsOpacityEffect
+from PySide6.QtCore import (QEasingCurve, QPropertyAnimation, Qt, QTimer,
+                          Slot, QObject, QPoint, QRect, QSize)
+from PySide6.QtGui import QFont
 from enum import Enum, auto
 
 class ToastPosition(Enum):
@@ -71,10 +71,10 @@ class ToastManager(QObject):
 
     # --- Metode Helper Publik (API yang Disederhanakan) ---
 
-    @pyqtSlot(str)
-    @pyqtSlot(str, object) # Menerima None atau int untuk durasi
-    @pyqtSlot(str, object, object) # Menerima None atau ToastPosition
-    @pyqtSlot(str, object, object, object) # Menerima None atau ToastAnimation
+    @Slot(str)
+    @Slot(str, object) # Menerima None atau int untuk durasi
+    @Slot(str, object, object) # Menerima None atau ToastPosition
+    @Slot(str, object, object, object) # Menerima None atau ToastAnimation
     def show_message(self,
                      message: str,
                      duration: int | None = None,
@@ -93,9 +93,9 @@ class ToastManager(QObject):
         # Panggil metode inti dengan is_progress_update=False
         self._show(message, actual_duration, position, animation, False)
 
-    @pyqtSlot(str)
-    @pyqtSlot(str, object) # Menerima None atau ToastPosition
-    @pyqtSlot(str, object, object) # Menerima None atau ToastAnimation
+    @Slot(str)
+    @Slot(str, object) # Menerima None atau ToastPosition
+    @Slot(str, object, object) # Menerima None atau ToastAnimation
     def show_progress(self,
                       message: str,
                       position: ToastPosition | None = None,
@@ -112,7 +112,7 @@ class ToastManager(QObject):
         # Panggil metode inti dengan duration=None dan is_progress_update=True
         self._show(message, None, position, animation, True)
 
-    @pyqtSlot()
+    @Slot()
     def hide(self):
         """
         Starts the animation to hide the currently visible toast, if any.
@@ -263,11 +263,11 @@ class ToastManager(QObject):
 
     # --- Metode Utama ---
     # Tipe parameter 'duration' diubah agar konsisten dengan ToastManager asli
-    @pyqtSlot(str, object, bool) # Pertahankan signature untuk kompatibilitas sinyal
-    @pyqtSlot(str)
-    @pyqtSlot(str, int)
-    @pyqtSlot(str, int, bool)
-    @pyqtSlot(str, int, ToastPosition, ToastAnimation, bool)
+    @Slot(str, object, bool) # Pertahankan signature untuk kompatibilitas sinyal
+    @Slot(str)
+    @Slot(str, int)
+    @Slot(str, int, bool)
+    @Slot(str, int, ToastPosition, ToastAnimation, bool)
     def show(self,
              message: str,
              duration: int | None = None, # Tetap pakai int | None
@@ -602,7 +602,7 @@ class ToastManager(QObject):
         self.default_easing_curve = QEasingCurve.Type.InOutQuad
         self.default_vertical_margin = 20
 
-    @pyqtSlot(str, object, bool)
+    @Slot(str, object, bool)
     def show(self, message: str, duration: int | None = None, is_progress_update: bool = False):
         """
         Displays a toast notification.

@@ -1,9 +1,9 @@
 import os
 import json
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QSlider, QHBoxLayout,
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QSlider, QHBoxLayout,
                              QScrollArea, QToolButton, QComboBox, QFileDialog) # QPushButton tidak diperlukan lagi
-from PyQt6.QtGui import QFont
-from PyQt6.QtCore import Qt
+from PySide6.QtGui import QFont
+from PySide6.QtCore import Qt
 
 # Asumsikan ORBAlgorithm diimpor dengan benar
 from UI.enhance_stack.algorithm.alignment.ORB import ORBAlgorithm

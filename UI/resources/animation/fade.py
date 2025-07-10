@@ -1,5 +1,5 @@
-from PyQt6.QtWidgets import QStackedWidget, QWidget
-from PyQt6.QtCore import QEasingCurve
+from PySide6.QtWidgets import QStackedWidget, QWidget
+from PySide6.QtCore import QEasingCurve
 from .animation_manager import StackedWidgetAnimator, AnimationType
 
 def fade_in(animator: StackedWidgetAnimator,

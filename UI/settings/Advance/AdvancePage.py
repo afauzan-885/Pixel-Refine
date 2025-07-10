@@ -1,4 +1,4 @@
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QComboBox, QPushButton
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QComboBox, QPushButton
 
 def advance_page():
     advanced_tab = QWidget()

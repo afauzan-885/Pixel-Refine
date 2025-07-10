@@ -1,13 +1,13 @@
 import shutil
 import subprocess
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QMessageBox, QVBoxLayout, QWidget,
     QFileDialog,
 )
 import cv2
 import os
 from PIL import Image, UnidentifiedImageError
-from PyQt6.QtCore import pyqtSignal, pyqtSlot
+from PySide6.QtCore import Signal, Slot
 import tifffile
 from UI.enhance_stack.algorithm.alignment.AKAZE import running_akaze
 from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import running_farneback_optical_flow
@@ -32,7 +32,7 @@ from UI.settings.General.Language import language_config
 from config import SUPPORTED_FORMATS
 
 class SinglePageLayout(QWidget):
-    process_clicked = pyqtSignal()
+    process_clicked = Signal()
 
     def __init__(self, database_manager: DatabaseManager):
         super().__init__()
@@ -134,7 +134,7 @@ class SinglePageLayout(QWidget):
         if image_paths:
             self._process_and_start_import(image_paths)
 
-    @pyqtSlot(list)
+    @Slot(list)
     def handle_dropped_images(self, image_paths: list):
         """Menangani file gambar yang di-drop dan memulai proses impor."""
         if image_paths:

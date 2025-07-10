@@ -1,8 +1,8 @@
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPushButton
-from PyQt6.QtGui import QIcon
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QPushButton
+from PySide6.QtGui import QIcon
 from UI.resources.animation.animation_manager import WidthAnimator
 from UI.settings.General.Language import language_config
-from PyQt6.QtCore import pyqtSlot, QEasingCurve
+from PySide6.QtCore import Slot, QEasingCurve
 
 class Sidebar(QWidget):
     
@@ -106,7 +106,7 @@ class Sidebar(QWidget):
         btn.setProperty("default_text", text) # Simpan teks asli sebagai properti
         return btn
     
-    @pyqtSlot(int)
+    @Slot(int)
     def _handle_nav_click(self, index):
         """Menangani klik tombol navigasi."""
         for i, btn in enumerate(self.nav_buttons):

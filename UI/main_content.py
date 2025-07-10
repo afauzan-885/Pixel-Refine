@@ -1,6 +1,6 @@
-from PyQt6.QtWidgets import QStackedWidget, QWidget, QVBoxLayout, QLabel
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPixmap
+from PySide6.QtWidgets import QStackedWidget, QWidget, QVBoxLayout, QLabel
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
 
 from UI.enhance_stack.logic.database_manager import DatabaseManager
 from UI.resources.stylesheet.stylesheet import BLANK_CONTENT_BACKGROUND, BLANK_CONTENT_LABEL

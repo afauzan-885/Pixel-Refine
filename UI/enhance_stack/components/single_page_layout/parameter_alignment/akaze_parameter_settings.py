@@ -1,10 +1,10 @@
 import os
 import json
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QSlider,
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QSlider,
                              QHBoxLayout, QScrollArea,
                              QToolButton, QComboBox, QFileDialog)
-from PyQt6.QtGui import QFont
-from PyQt6.QtCore import Qt
+from PySide6.QtGui import QFont
+from PySide6.QtCore import Qt
 
 from UI.enhance_stack.algorithm.alignment.AKAZE import AKAZEAlgorithm
 from UI.resources.stylesheet.stylesheet import (DROPDOWN_BOX, TOGGLE_BUTTON,

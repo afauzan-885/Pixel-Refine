@@ -4,8 +4,8 @@ import time
 import concurrent
 import cv2
 import numpy as np
-from PyQt6.QtCore import QThread, pyqtSignal
-from PyQt6.QtGui import QPixmap, QImage
+from PySide6.QtCore import QThread, Signal
+from PySide6.QtGui import QPixmap, QImage
 import rawpy
 
 from config import SUPPORTED_FORMATS
@@ -15,10 +15,10 @@ class BaseMultiThreading(QThread):
     """
     Base class for multithreading tasks. This class supports batch processing.
     """
-    progress_signal = pyqtSignal(int, int)  # Mengirim progres (dalam persen) dan jumlah item tersisa
-    completion_signal = pyqtSignal(int)    # Mengirim jumlah total item setelah selesai
-    result_signal = pyqtSignal(object)     # Mengirim hasil dari setiap tugas
-    error_signal = pyqtSignal(str)         # Mengirim pesan error jika ada
+    progress_signal = Signal(int, int)  # Mengirim progres (dalam persen) dan jumlah item tersisa
+    completion_signal = Signal(int)    # Mengirim jumlah total item setelah selesai
+    result_signal = Signal(object)     # Mengirim hasil dari setiap tugas
+    error_signal = Signal(str)         # Mengirim pesan error jika ada
 
     def __init__(self, task_function, items, batch_size=3, delay_ms=50):
         super().__init__()
@@ -287,9 +287,9 @@ class BatchImageImportThreading(BaseMultiThreading):
 
         
 class ImageProcessingMultiThreading(QThread):
-    progress_updated = pyqtSignal(int, str)
-    finished = pyqtSignal()
-    error_occurred = pyqtSignal(str)
+    progress_updated = Signal(int, str)
+    finished = Signal()
+    error_occurred = Signal(str)
 
     def __init__(self, worker_function, db_path, single_process=True, batch_id=None, parent=None):
         super().__init__(parent)

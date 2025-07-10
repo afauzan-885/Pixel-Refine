@@ -1,7 +1,7 @@
 import os
 import subprocess
-from PyQt6.QtCore import QThread, pyqtSignal
-from PyQt6.QtGui import QPixmap
+from PySide6.QtCore import QThread, Signal
+from PySide6.QtGui import QPixmap
 import rawpy, io, numpy 
 from PIL import Image
 
@@ -9,10 +9,10 @@ class BaseMultiThreading(QThread):
     """
     Base class for multithreading tasks. This class supports batch processing.
     """
-    progress_signal = pyqtSignal(int, int)  # Mengirimkan progres (dalam persen) dan jumlah item tersisa
-    completion_signal = pyqtSignal(int)    # Mengirimkan jumlah total item setelah selesai
-    result_signal = pyqtSignal(object)     # Mengirimkan hasil dari setiap tugas
-    error_signal = pyqtSignal(str)         # Mengirimkan pesan error jika ada
+    progress_signal = Signal(int, int)  # Mengirimkan progres (dalam persen) dan jumlah item tersisa
+    completion_signal = Signal(int)    # Mengirimkan jumlah total item setelah selesai
+    result_signal = Signal(object)     # Mengirimkan hasil dari setiap tugas
+    error_signal = Signal(str)         # Mengirimkan pesan error jika ada
 
     def __init__(self, task_function, items, batch_size=3, delay_ms=50):
         super().__init__()

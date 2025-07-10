@@ -1,7 +1,7 @@
 from collections import OrderedDict
-from PyQt6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsTextItem
-from PyQt6.QtCore import Qt, QTimer, pyqtSlot, QObject, QRectF, QBuffer, QByteArray, QIODevice, QPointF
-from PyQt6.QtGui import QPixmap, QImage
+from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsTextItem
+from PySide6.QtCore import Qt, QTimer, Slot, QObject, QRectF, QBuffer, QByteArray, QIODevice, QPointF
+from PySide6.QtGui import QPixmap, QImage
 try:
     import psutil
     _PSUTIL_AVAILABLE = True
@@ -78,14 +78,14 @@ class ImagePreviewHandler(QObject):
 
         
     # --- Metode Publik ---
-    @pyqtSlot(int, object)
+    @Slot(int, object)
     def _store_view_state(self, level: int, relative_center: tuple[float, float] | None):
         """Menyimpan level zoom dan posisi tengah relatif terakhir."""
         self._persistent_zoom_level = level
         if isinstance(relative_center, tuple) and len(relative_center) == 2:
             self._persistent_relative_center = relative_center
 
-    @pyqtSlot(list)
+    @Slot(list)
     def update_preview(self, selected_paths: list):
         """
         Memulai proses pembaruan panel pratinjau. Mengecek cache QImage terlebih dahulu.
@@ -326,7 +326,7 @@ class ImagePreviewHandler(QObject):
         self._raw_thread = None
         
 
-    @pyqtSlot(str)
+    @Slot(str)
     def _handle_image_error(self, error_message: str):
         """Menangani pesan error dari thread pemrosesan."""
         processing_path = self._current_processing_path or "Unknown Path" # Gunakan path jika ada

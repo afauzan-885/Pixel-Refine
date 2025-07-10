@@ -1,13 +1,13 @@
 import json
 import os
 
-from PyQt6.QtWidgets import (QLabel, QSizePolicy, QWidget, QVBoxLayout, QScrollArea,
+from PySide6.QtWidgets import (QLabel, QSizePolicy, QWidget, QVBoxLayout, QScrollArea,
                              QHBoxLayout, QPushButton, QComboBox, QCheckBox,
                              QMessageBox)
-from PyQt6.QtCore import (pyqtSignal, QTimer, pyqtSlot,)
+from PySide6.QtCore import (Signal, QTimer, Slot,)
 import weakref
-from PyQt6.QtCore import (pyqtSignal, Qt, QSize, QTimer)
-from PyQt6.QtGui import QIcon, QFont
+from PySide6.QtCore import (Signal, Qt, QSize, QTimer)
+from PySide6.QtGui import QIcon, QFont
 from UI.enhance_stack.algorithm.alignment.AKAZE import running_akaze
 from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import running_farneback_optical_flow
 from UI.enhance_stack.algorithm.alignment.ORB import running_orb
@@ -39,7 +39,7 @@ def save_json_state(path, state):
         json.dump(state, f, indent=4)
 
 class ClickableLabel(QLabel):
-    clicked = pyqtSignal()
+    clicked = Signal()
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -225,7 +225,7 @@ class CombinedPanel(QWidget):
         Mengembalikan fungsi on_ready(image, image_path) yang sudah mengecek
         apakah overlay masih 'alive' sebelum setText(...).
         """
-        @pyqtSlot(object, str)
+        @Slot(object, str)
         def on_ready(image, image_path):
             try:
                 show_thumbnail(weakref.ref(self.list_layout), image, image_path, animator_ref)

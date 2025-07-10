@@ -1,9 +1,9 @@
 import os
 import json
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QSlider, QHBoxLayout,
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QSlider, QHBoxLayout,
                              QScrollArea)
-from PyQt6.QtGui import QFont
-from PyQt6.QtCore import Qt
+from PySide6.QtGui import QFont
+from PySide6.QtCore import Qt
 
 from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import FarnebackAlgorithm
 from UI.resources.stylesheet.stylesheet import  SCROLL_AREA, SLIDER_STYLE, SLIDER_VALUE_LABEL

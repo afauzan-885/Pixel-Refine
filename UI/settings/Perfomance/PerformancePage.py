@@ -1,4 +1,4 @@
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QCheckBox, QPushButton
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QCheckBox, QPushButton
 
 def performance_page():
     performance_tab = QWidget()

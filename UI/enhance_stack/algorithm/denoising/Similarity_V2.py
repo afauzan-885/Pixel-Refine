@@ -5,9 +5,9 @@ import cv2
 import numpy as np
 import sqlite3
 import os
-from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
+from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
-from PyQt6.QtCore import QThread, pyqtSignal, Qt
+from PySide6.QtCore import QThread, Signal, Qt
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, gaussian_window, get_all_image_paths_for_single_process, load_images_from_paths, normalize_image, resize_all_with_padding, save_image
 from UI.enhance_stack.components.single_page_layout.parameter_denoising.similarity_v2_parameter_settings import load_similarity_v2_config
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
@@ -15,9 +15,9 @@ from UI.settings.General.GeneralSetting import load_general_settings
 from UI.settings.General.Language import language_config
 
 class ThreadWorker(QThread):
-    progress_updated = pyqtSignal(int, str)  # Sinyal untuk memperbarui progress
-    finished = pyqtSignal()  # Sinyal untuk menandakan selesai
-    error_occurred = pyqtSignal(str)  # Sinyal untuk menandakan error
+    progress_updated = Signal(int, str)  # Sinyal untuk memperbarui progress
+    finished = Signal()  # Sinyal untuk menandakan selesai
+    error_occurred = Signal(str)  # Sinyal untuk menandakan error
 
     def __init__(self, db_path, single_process=True, batch_id=None):
         super().__init__()

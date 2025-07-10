@@ -1,4 +1,4 @@
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QStackedWidget,
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QStackedWidget,
                               ) 
 from UI.enhance_stack.batch_page_layout import BatchPageLayout
 from UI.enhance_stack.single_page_layout import SinglePageLayout

@@ -1,6 +1,6 @@
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel,
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLabel,
                              QScrollArea)
-from PyQt6.QtCore import Qt
+from PySide6.QtCore import Qt
 
 from UI.enhance_stack.components.single_page_layout.parameter_alignment.akaze_parameter_settings import get_akaze_page
 

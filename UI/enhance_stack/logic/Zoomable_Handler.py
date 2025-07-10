@@ -1,13 +1,13 @@
-from PyQt6.QtWidgets import QGraphicsView, QGraphicsScene
-from PyQt6.QtGui import QWheelEvent, QPainter, QMouseEvent
-from PyQt6.QtCore import Qt, pyqtSignal, QPointF
+from PySide6.QtWidgets import QGraphicsView, QGraphicsScene
+from PySide6.QtGui import QWheelEvent, QPainter, QMouseEvent
+from PySide6.QtCore import Qt, Signal, QPointF
 
 class Zoomable(QGraphicsView):
     """
     QGraphicsView dengan kemampuan zoom in/out berbasis kursor mouse.
     """
-    view_state_changed = pyqtSignal(int, object)
-    user_zoom_level_changed = pyqtSignal(int)
+    view_state_changed = Signal(int, object)
+    user_zoom_level_changed = Signal(int)
     def __init__(self, scene: QGraphicsScene = None, parent=None):
         if scene is None:
             scene = QGraphicsScene(parent) 

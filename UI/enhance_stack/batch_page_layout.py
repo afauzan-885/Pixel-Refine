@@ -1,10 +1,10 @@
 import os
 import shutil
 import sqlite3
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QMessageBox, QFileDialog,
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QMessageBox, QFileDialog,
                               QApplication, QGraphicsOpacityEffect)
-from PyQt6.QtCore import (pyqtSignal, QPropertyAnimation, QEasingCurve, QEvent,
-                          QTimer, pyqtSlot, QThread)
+from PySide6.QtCore import (Signal, QPropertyAnimation, QEasingCurve, QEvent,
+                          QTimer, Slot, QThread)
 import weakref
 from UI.enhance_stack.components.batch_page_layout.batch_layout import refresh_ui, setup_main_panel
 from UI.enhance_stack.components.batch_page_layout.combined_panel import CombinedPanel
@@ -39,8 +39,8 @@ def safe_hide_widget(widget):
         pass
 
 class BatchPageLayout(QWidget):
-    data_changed = pyqtSignal()
-    show_toast_requested = pyqtSignal(str, object, bool)
+    data_changed = Signal()
+    show_toast_requested = Signal(str, object, bool)
 
     def __init__(self):
         super().__init__()
@@ -607,13 +607,13 @@ class BatchPageLayout(QWidget):
         stop_process_thumbnails(self.thumbnail_threads)
 
     # --- Aggregated Progress ---
-    @pyqtSlot()
+    @Slot()
     def _handle_item_imported(self):
         """Dipanggil setiap kali satu item berhasil diimpor oleh thread manapun."""
         self._total_processed_imports += 1
         self._update_aggregated_progress_toast() # Update tampilan progres
 
-    @pyqtSlot(QThread)
+    @Slot(QThread)
     def _handle_thread_finished(self, thread_instance):
         """Dipanggil saat thread impor selesai."""
         if thread_instance in self._active_import_threads:
@@ -647,21 +647,21 @@ class BatchPageLayout(QWidget):
         elif not self._active_import_threads: 
              pass 
 
-    @pyqtSlot(int, int)
+    @Slot(int, int)
     def _update_import_progress_toast(self, progress_percent, items_left):
         """Update teks toast dengan informasi progres impor."""
         progress_msg = language_config.UPDATE_PROGRESS_BAR_STATUS.format(progress_percent, items_left)
         
         self.show_toast_requested.emit(progress_msg, None, True) 
 
-    @pyqtSlot(str)
+    @Slot(str)
     def on_batch_import_error(self, item_path, error_message):
         self._total_pending_imports -= 1
         if self._total_pending_imports < 0 : self._total_pending_imports = 0
         self._update_aggregated_progress_toast()
         QMessageBox.warning(self, "Batch Import Error", f"Failed import '{os.path.basename(item_path)}':\n{error_message}")
 
-    @pyqtSlot(int)
+    @Slot(int)
     def _on_batch_import_complete(self, total_items_processed):
         """Dipanggil saat thread impor batch selesai."""
         completion_msg = language_config.ON_IMPORT_COMPLETE_STATUS

@@ -7,8 +7,8 @@ import sqlite3
 import os
 import json
 import concurrent.futures
-from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
-from PyQt6.QtCore import Qt
+from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
+from PySide6.QtCore import Qt
 import h5py
 
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import compute_global_crop, crop_image, extract_all_metadata, extract_exif, get_all_image_paths_for_single_process, load_images_from_paths, save_align_to_folder, save_to_hdf5

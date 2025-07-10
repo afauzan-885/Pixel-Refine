@@ -3,18 +3,18 @@ import cv2
 import numpy as np
 import sqlite3
 import os
-from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
+from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
-from PyQt6.QtCore import QThread, pyqtSignal, Qt
+from PySide6.QtCore import QThread, Signal, Qt
 
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, save_image
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
 
 class ThreadWorker(QThread):
-    progress_updated = pyqtSignal(int, str)  # Sinyal untuk memperbarui progress
-    finished = pyqtSignal()  # Sinyal untuk menandakan selesai
-    error_occurred = pyqtSignal(str)  # Sinyal untuk menandakan error
+    progress_updated = Signal(int, str)  # Sinyal untuk memperbarui progress
+    finished = Signal()  # Sinyal untuk menandakan selesai
+    error_occurred = Signal(str)  # Sinyal untuk menandakan error
 
     def __init__(self, db_path, single_process=True, batch_id=None):
         super().__init__()

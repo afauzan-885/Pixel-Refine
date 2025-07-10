@@ -1,6 +1,6 @@
-from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QPushButton, QButtonGroup,
+from PySide6.QtWidgets import (QWidget, QHBoxLayout, QPushButton, QButtonGroup,
                              QGridLayout, QSizePolicy, QStackedWidget)
-from PyQt6.QtCore import Qt # Import Qt untuk AlignmentFlag
+from PySide6.QtCore import Qt # Import Qt untuk AlignmentFlag
 
 from UI.resources.stylesheet import stylesheet
 from UI.settings.General.Language import language_config

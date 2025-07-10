@@ -1,8 +1,8 @@
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QListWidget, QAbstractItemView,
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QListWidget, QAbstractItemView,
                              QMenu, QLabel, QStackedLayout, QMessageBox, QListWidgetItem,
                              )
-from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QVariant# Tambah QUrl, QEvent
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QColor
+from PySide6.QtCore import Qt, Signal, QEvent
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QColor
 import os
 from UI.enhance_stack.logic.database_manager import DatabaseManager
 from UI.resources.animation.animation_manager import StackedWidgetAnimator
@@ -14,9 +14,9 @@ from UI.settings.General.Language import language_config
 
 class RightPanel(QWidget):
     """Right panel containing a list of images."""
-    previewImageRequested = pyqtSignal(list)
-    imagesDropped = pyqtSignal(list)
-    referenceImageChanged = pyqtSignal(str)
+    previewImageRequested = Signal(list)
+    imagesDropped = Signal(list)
+    referenceImageChanged = Signal(str)
     
     def __init__(self, database_manager: DatabaseManager):
         super().__init__()

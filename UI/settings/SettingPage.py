@@ -1,4 +1,4 @@
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTabWidget
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QTabWidget
 
 from UI.enhance_stack.logic.database_manager import DatabaseManager
 from UI.settings.General.Language import language_config

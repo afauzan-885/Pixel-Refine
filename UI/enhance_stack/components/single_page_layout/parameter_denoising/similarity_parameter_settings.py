@@ -1,10 +1,10 @@
 import os
 import json
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QSlider, QHBoxLayout,
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QSlider, QHBoxLayout,
                              QScrollArea, QComboBox, QLineEdit, QPushButton,
                              QSizePolicy, QToolButton) 
-from PyQt6.QtGui import QFont, QDoubleValidator, QIntValidator
-from PyQt6.QtCore import Qt, QLocale
+from PySide6.QtGui import QFont, QDoubleValidator, QIntValidator
+from PySide6.QtCore import Qt, QLocale
 
 from UI.resources.stylesheet.stylesheet import (SCROLL_AREA, SLIDER_STYLE, DROPDOWN_BOX,
                                                 APPLY_BUTTON, VALUE_EDIT_LABEL, TOGGLE_BUTTON)

@@ -2,11 +2,11 @@ import json
 import os
 import sys
 import time
-from PyQt6.QtWidgets import (QWidget, QLabel, QComboBox, QFormLayout,
+from PySide6.QtWidgets import (QWidget, QLabel, QComboBox, QFormLayout,
                              QVBoxLayout, QHBoxLayout, QPushButton,
                              QMessageBox, QCheckBox,
                              )
-from PyQt6.QtCore import QProcess, QCoreApplication, Qt
+from PySide6.QtCore import QProcess, QCoreApplication, Qt
 from UI.resources.stylesheet.stylesheet import APPLY_BUTTON, DROPDOWN_BOX, TOGGLE_SWITCH_STYLE
 from UI.settings.General.Language import language_config
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE, GENERAL_SETTINGS_FILE

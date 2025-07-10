@@ -1,6 +1,6 @@
 # UI/enhance_stack/components/single_page_layout/page_layout.py
-from PyQt6.QtWidgets import QHBoxLayout, QProgressBar, QPushButton, QGraphicsScene, QWidget, QVBoxLayout
-from PyQt6.QtCore import Qt
+from PySide6.QtWidgets import QHBoxLayout, QProgressBar, QPushButton, QGraphicsScene, QWidget, QVBoxLayout
+from PySide6.QtCore import Qt
 # --- Hapus import update_preview_panel ---
 # from UI.enhance_stack.components.single_page_layout.image_preview_handler import update_preview_panel
 # --- Import Zoomable dan komponen lain yang diperlukan ---

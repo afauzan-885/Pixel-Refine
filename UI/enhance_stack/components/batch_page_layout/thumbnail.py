@@ -1,7 +1,7 @@
 import os
-from PyQt6.QtWidgets import QLabel, QStackedWidget
-from PyQt6.QtGui import QPixmap, QImage, QImageReader
-from PyQt6.QtCore import (Qt, QThread, pyqtSignal, QMutex, QWaitCondition,
+from PySide6.QtWidgets import QLabel, QStackedWidget
+from PySide6.QtGui import QPixmap, QImage, QImageReader
+from PySide6.QtCore import (Qt, QThread, Signal, QMutex, QWaitCondition,
                           QFile, QSemaphore, QTimer)
 import cv2
 import numpy as np
@@ -17,7 +17,7 @@ except OSError as e:
     print(f"Error creating cache directory {CACHE_DIR}: {e}")
 
 class ThumbnailLoader(QThread):
-    thumbnail_ready = pyqtSignal(QImage, str)
+    thumbnail_ready = Signal(QImage, str)
 
     def __init__(self, image_path, parent=None):
         super().__init__(parent)

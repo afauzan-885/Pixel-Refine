@@ -6,9 +6,9 @@ import cv2
 import numpy as np
 import sqlite3
 import os
-from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
+from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
-from PyQt6.QtCore import Qt
+from PySide6.QtCore import Qt
 
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import compute_global_crop, crop_image, extract_all_metadata, extract_exif, get_all_image_paths_for_single_process, load_images_from_paths, process_and_crop, resize_all_with_padding, resize_with_padding, save_align_to_folder, save_to_hdf5
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading

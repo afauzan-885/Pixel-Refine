@@ -1,10 +1,10 @@
 import weakref
-from PyQt6.QtWidgets import QStackedWidget, QGraphicsOpacityEffect, QWidget
-from PyQt6.QtCore import (QObject, QPropertyAnimation, QEasingCurve, pyqtSlot,
+from PySide6.QtWidgets import QStackedWidget, QGraphicsOpacityEffect, QWidget
+from PySide6.QtCore import (QObject, QPropertyAnimation, QEasingCurve, Slot,
                           QParallelAnimationGroup, QPoint, QRect, QTimer)
+
 from enum import Enum, auto
 
-# --- Enum untuk Jenis Animasi ---
 class AnimationType(Enum): FADE=auto(); SLIDE_LEFT=auto(); SLIDE_RIGHT=auto(); SLIDE_UP=auto(); SLIDE_DOWN=auto(); ZOOM=auto()
 class SlideDirection(Enum): LEFT=auto(); RIGHT=auto(); UP=auto(); DOWN=auto()
 
@@ -170,7 +170,7 @@ class StackedWidgetAnimator(QObject):
     # === Metode Internal (Helper dan Slot) ===
     # =====================================================
 
-    @pyqtSlot(weakref.ref, weakref.ref) 
+    @Slot(weakref.ref, weakref.ref) 
     def _on_standalone_fade_out_finished(self, widget_ref, effect_ref):
         """Slot internal: Membersihkan setelah animasi fade-out mandiri selesai."""
         widget = widget_ref() if widget_ref else None
@@ -232,7 +232,7 @@ class StackedWidgetAnimator(QObject):
         return geom_anim
 
 
-    @pyqtSlot(QStackedWidget)
+    @Slot(QStackedWidget)
     def _on_animation_out_finished(self, stack_widget: QStackedWidget):
         """Slot internal: Dipanggil setelah animasi 'out' selesai."""
         transition_data = self._transition_data.get(stack_widget)
@@ -306,7 +306,7 @@ class StackedWidgetAnimator(QObject):
         in_group.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
 
-    @pyqtSlot(QStackedWidget)
+    @Slot(QStackedWidget)
     def _on_animation_in_finished(self, stack_widget: QStackedWidget):
         """Slot internal: Dipanggil setelah animasi 'in' selesai."""
         current_widget = stack_widget.currentWidget()
@@ -401,7 +401,7 @@ class WidthAnimator(QObject):
         self._active_width_animations[target_widget] = animation_group
         animation_group.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
-    @pyqtSlot(QWidget) 
+    @Slot(QWidget) 
     def _on_width_animation_finished(self, target_widget: QWidget):
         """Slot internal: Dipanggil setelah animasi lebar selesai."""
         if target_widget in self._active_width_animations:

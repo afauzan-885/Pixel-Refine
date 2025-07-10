@@ -3,9 +3,9 @@ import cv2
 import numpy as np
 import sqlite3
 import os
-from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
+from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
-from PyQt6.QtCore import QThread, pyqtSignal, Qt
+from PySide6.QtCore import QThread, Signal, Qt
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (add_legend_heatmap, extract_all_metadata, 
                                                                                     gaussian_window, get_all_image_paths_for_single_process, load_images_from_paths, 
                                                                                     normalize_image, optical_flow_refinement, resize_all_with_padding, save_image, setup_balanced_batching, 
@@ -17,9 +17,9 @@ from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
 
 class ThreadWorker(QThread):
-    progress_updated = pyqtSignal(int, str)  
-    finished = pyqtSignal()  
-    error_occurred = pyqtSignal(str)
+    progress_updated = Signal(int, str)  
+    finished = Signal()  
+    error_occurred = Signal(str)
 
     def __init__(self, db_path, single_process=True, batch_id=None):
         super().__init__()

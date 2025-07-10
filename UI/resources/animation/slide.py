@@ -1,5 +1,5 @@
-from PyQt6.QtWidgets import QStackedWidget
-from PyQt6.QtCore import QEasingCurve
+from PySide6.QtWidgets import QStackedWidget
+from PySide6.QtCore import QEasingCurve
 # Import kelas Animator dan Enum dari lokasi yang benar
 from .animation_manager import StackedWidgetAnimator, AnimationType, SlideDirection # Sesuaikan '.animation_manager'
 
