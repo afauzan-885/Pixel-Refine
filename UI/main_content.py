@@ -19,7 +19,7 @@ class Pages:
 class MainContent(QStackedWidget):
     def __init__(self, database_manager: DatabaseManager, parent=None):
         super().__init__(parent)
-        self.database_manager = database_manager # Simpan referensi
+        self.database_manager = database_manager
         self.pages = {
             Pages.ENHANCE_STACK: EnhanceStackPage,
             Pages.SETTINGS: SettingPage,
@@ -50,7 +50,7 @@ class MainContent(QStackedWidget):
         if not pixmap.isNull():
             icon_label.setPixmap(pixmap.scaled(150, 150, Qt.AspectRatioMode.KeepAspectRatio))
             icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            icon_label.setStyleSheet("background: transparent;")  # Pastikan transparan
+            icon_label.setStyleSheet("background: transparent;")  
             layout.addWidget(icon_label)
 
         # Tambahkan teks
