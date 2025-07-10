@@ -142,8 +142,7 @@ class SplashScreen(QSplashScreen):
         self.progress_indicator.setValue(value)
         self.detail_label.setText(message) 
         QApplication.processEvents()
-        
-        
+               
 class PixelRefineMain(QMainWindow):
     def __init__(self):
         """
@@ -167,29 +166,29 @@ class PixelRefineMain(QMainWindow):
         db_path = "pixel_refine_database.db" 
         self.database_manager = DatabaseManager(db_path)
         self.database_manager.create_database()
-        time.sleep(1.3) # HAPUS PADA VERSI PRODUKSI
+        # time.sleep(1.3) # HAPUS PADA VERSI PRODUKSI
 
         splash.update_status("Initializing animations...", 25)
         self.main_content_animator = StackedWidgetAnimator(self)
-        time.sleep(1.3) # HAPUS PADA VERSI PRODUKSI
+        # time.sleep(1.3) # HAPUS PADA VERSI PRODUKSI
 
         splash.update_status("Setting up main window...", 40)
         self.setWindowIcon(QIcon("UI/resources/image/Logo_Pixel_Refine.png"))
         self.setWindowTitle(f"Pixel Refine - Version {config.APP_VERSION}")
         self.setMinimumSize(1200, 600)
-        time.sleep(1.2) # HAPUS PADA VERSI PRODUKSI
+        # time.sleep(1.2) # HAPUS PADA VERSI PRODUKSI
 
         splash.update_status("Preparing temporary folders...", 55)
         self.database_folder = "database" 
         self.align_folder = os.path.join(self.database_folder, "align")
         self.stack_folder = os.path.join(self.database_folder, "stack")
         self.create_folders_if_needed()
-        time.sleep(1.2) # HAPUS PADA VERSI PRODUKSI
+        # time.sleep(1.2) # HAPUS PADA VERSI PRODUKSI
 
         splash.update_status("Loading UI components...", 70)
         self.main_content = MainContent(self.database_manager) 
         self.sidebar = Sidebar(self.toggle_sidebar, self.switch_page)
-        time.sleep(1.3) # HAPUS PADA VERSI PRODUKSI
+        time.sleep(0.5) # HAPUS PADA VERSI PRODUKSI
 
         splash.update_status("Assembling UI layout...", 90)
         self.main_layout = QHBoxLayout()
@@ -202,7 +201,7 @@ class PixelRefineMain(QMainWindow):
         container = QWidget()
         container.setLayout(self.main_layout)
         self.setCentralWidget(container)
-        time.sleep(0.2) # HAPUS PADA VERSI PRODUKSI
+        time.sleep(0.3) # HAPUS PADA VERSI PRODUKSI
        
         splash.update_status("Finalizing...", 100)
         self.switch_page(0)
@@ -214,7 +213,7 @@ class PixelRefineMain(QMainWindow):
             os.makedirs(self.align_folder, exist_ok=True)
             os.makedirs(self.stack_folder, exist_ok=True)
         except OSError as e:
-            QMessageBox.critical(self, "Error", f"Terjadi kesalahan saat membuat folder: {e}. Aplikasi akan ditutup.")
+            QMessageBox.critical(self, "Error", f"An error occurred while creating folders: {e}. The application will now close.")
             sys.exit(1)
 
     def closeEvent(self, event):
@@ -230,7 +229,7 @@ class PixelRefineMain(QMainWindow):
                     if os.path.isfile(item_path) or os.path.islink(item_path): os.unlink(item_path)
                     elif os.path.isdir(item_path): rmtree(item_path)  
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Terjadi kesalahan saat menghapus konten folder: {e}")
+            QMessageBox.warning(self, "Error", f"An error occurred while deleting folder contents: {e}")
         finally:
             event.accept()
 
@@ -258,10 +257,8 @@ if __name__ == "__main__":
     splash_width = int(screen_geometry.width() * 0.25)
     scaled_pixmap = original_pixmap.scaledToWidth(splash_width, Qt.TransformationMode.SmoothTransformation)
     
-    # DIUBAH: Berikan argumen nomor versi saat membuat splash screen
-    # Kita akan format stringnya di sini
     version_text = f"Version {config.APP_VERSION}"
-    splash = SplashScreen(scaled_pixmap, version_text) # <-- Perubahan di sini
+    splash = SplashScreen(scaled_pixmap, version_text)
     
     splash.show()
     app.processEvents()

@@ -1,12 +1,13 @@
 import os
 import shutil
 import sqlite3
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QScrollArea, QSpacerItem, QSizePolicy, QLabel
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QMessageBox, QFileDialog,
                               QApplication, QGraphicsOpacityEffect)
 from PySide6.QtCore import (Signal, QPropertyAnimation, QEasingCurve, QEvent,
-                          QTimer, Slot, QThread)
+                          QTimer, Slot, QThread, Qt)
 import weakref
-from UI.enhance_stack.components.batch_page_layout.batch_layout import refresh_ui, setup_main_panel
+from UI.enhance_stack.components.batch_page_layout.batch_layout import setup_main_panel
 from UI.enhance_stack.components.batch_page_layout.combined_panel import CombinedPanel
 from UI.enhance_stack.components.batch_page_layout.image_batch_management import BatchDeleteProcess, process_and_start_batch_import
 from UI.enhance_stack.components.batch_page_layout.thumbnail import stop_process_thumbnails
@@ -44,7 +45,6 @@ class BatchPageLayout(QWidget):
 
     def __init__(self):
         super().__init__()
-        # --- Initialization ---
         self.thumbnail_threads = []
         self.thumbnail_placeholders = weakref.WeakValueDictionary()
         self.database_manager = DatabaseManager("pixel_refine_database.db")
@@ -59,67 +59,158 @@ class BatchPageLayout(QWidget):
         self._total_processed_imports = 0
         self._active_import_threads = []
         
-        self.batch_order_viewer = 0 
-        
-        # --- UI Setup ---
-        self.combined_panel = CombinedPanel(self.database_manager)
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 5, 0, 0)
         self.main_panel_container = QVBoxLayout()
+        self._spacer_item = None
+        self._placeholder_widget = None
+        
         self.main_scroll_area = setup_main_panel(self.main_panel_container, SCROLL_AREA)
         self.main_scroll_area.setObjectName("MainBatchScrollArea")
         self.main_scroll_area.setAcceptDrops(True)
         self.main_scroll_area.installEventFilter(self)
         self._original_scroll_stylesheet = self.main_scroll_area.styleSheet()
-        self.data_changed.connect(self.refresh_ui)
-        self.refresh_ui()
+        
+        self.data_changed.connect(self.update_batch_view)
+        
+        self.update_batch_view()
+        
         self.layout.addWidget(self.main_scroll_area)
 
-    # --- UI Refresh and Animation ---
-    def refresh_ui(self):
-        # 1. Kumpulkan batch_id yang sebaiknya dihapus dari active_batch_panels
-        to_remove = []
-        for batch_id, panel in list(self.active_batch_panels.items()):
-            try:
-                # Jika panel None atau sudah tidak valid (isWidgetType -> False), tandai untuk di‐remove
-                if panel is None or not panel.isWidgetType():
-                    to_remove.append(batch_id)
-            except RuntimeError:
-                # Kalau memanggil isWidgetType() langsung me‐lempar RuntimeError,
-                # berarti objek C++ sudah di‐destroy. Maka kita juga hapus entry ini.
-                to_remove.append(batch_id)
+    def update_batch_view(self):
+        """
+        Memperbarui tampilan daftar batch secara cerdas.
+        Hanya menambah, menghapus, atau mempertahankan widget yang ada
+        tanpa membangun ulang seluruh UI.
+        """
+        # 1. Dapatkan state dari database dan UI
+        # Gunakan list untuk menjaga urutan dari database
+        db_ids = self.database_manager.get_all_batch_ids()
+        ui_ids = set(self.active_batch_panels.keys())
+        
+        # 2. Identifikasi batch yang perlu dihapus dari UI
+        ids_to_remove = ui_ids - set(db_ids)
+        for batch_id in ids_to_remove:
+            panel_to_remove = self.active_batch_panels.pop(batch_id, None)
+            if panel_to_remove:
+                self.batch_states.pop(batch_id, None)
+                
+                # Hapus widget dari layout SECARA LANGSUNG
+                self.main_panel_container.removeWidget(panel_to_remove)
+                # Sembunyikan widget agar tidak terlihat sesaat sebelum benar-benar dihapus
+                panel_to_remove.hide()
+                # Jadwalkan penghapusan memori widget
+                panel_to_remove.deleteLater()
+                
+        # 3. Identifikasi batch yang perlu ditambahkan ke UI
+        # Pertahankan urutan dari database saat menambahkan
+        ids_to_add = [bid for bid in db_ids if bid not in ui_ids]
+        for batch_id in ids_to_add:
+            # Simpan state saat ini dari panel lain sebelum membuat yang baru
+            for bid, panel in self.active_batch_panels.items():
+                try:
+                    self.batch_states[bid] = panel.get_current_state()
+                except Exception:
+                    pass
 
-        # 2. Hapus semua panel yang sudah mati dari kamus
-        for bid in to_remove:
-            self.active_batch_panels.pop(bid, None)
+            # Buat dan tambahkan panel baru
+            new_panel = self.setup_combined_panel(batch_id)
+            
+            # Tambahkan widget baru ke layout. Jika ada spacer, tambahkan sebelum spacer.
+            if self._spacer_item:
+                # Sisipkan sebelum item terakhir (yaitu spacer)
+                self.main_panel_container.insertWidget(self.main_panel_container.count() - 1, new_panel)
+            else:
+                self.main_panel_container.addWidget(new_panel)
 
-        # 3. Sekarang ambil state hanya dari panel yang masih hidup
-        ids_before_refresh = set(self.active_batch_panels.keys())
-        for batch_id, panel in list(self.active_batch_panels.items()):
-            try:
-                # Metode get_current_state() sebaiknya juga sudah dibuat aman, 
-                # meng‐handle widget yang mungkin telah dihapus
-                self.batch_states[batch_id] = panel.get_current_state()
-            except Exception as e:
-                print(f"Error getting state from panel for batch {batch_id}: {e}")
+            self._start_fade_in_animation(new_panel) # Beri animasi untuk panel baru
 
-        # 4. Reset urutan tampilan UI
-        self.batch_order_viewer = 0
+        # 4. Atur ulang nomor urut visual untuk semua panel yang ada
+        self._reorder_visual_batch_numbers()
 
-        # 5. Panggil fungsi global refresh_ui yang (kemungkinan) mem‐recreate UI
-        refresh_ui(
-            self.database_manager,
-            self.main_panel_container,
-            self.setup_combined_panel
-        )
+        # 5. Kelola tampilan placeholder atau spacer
+        self._manage_placeholder_and_spacer()
 
-        # 6. Animasi untuk panel yang baru masuk
-        ids_after_refresh = set(self.active_batch_panels.keys())
-        newly_added_ids = ids_after_refresh - ids_before_refresh
-        for new_id in newly_added_ids:
-            panel_to_animate = self.active_batch_panels.get(new_id)
-            if panel_to_animate:
-                self._start_fade_in_animation(panel_to_animate)
+    def _reorder_visual_batch_numbers(self):
+        """Mengatur ulang label nomor urut (Batch #1, Batch #2, dst.) pada semua panel."""
+        # Ambil semua widget CombinedPanel yang ada di layout
+        panels_in_layout = []
+        for i in range(self.main_panel_container.count()):
+            widget = self.main_panel_container.itemAt(i).widget()
+            # Pastikan itu adalah instance dari CombinedPanel
+            if widget and isinstance(widget, CombinedPanel):
+                panels_in_layout.append(widget)
+
+        # Update nomor urut berdasarkan posisi mereka di layout
+        for index, panel in enumerate(panels_in_layout):
+            panel.update_sequential_number(index + 1)
+
+    def _manage_placeholder_and_spacer(self):
+        """Menampilkan placeholder jika tidak ada batch, atau spacer jika ada batch."""
+        has_batches = len(self.active_batch_panels) > 0
+
+        # Jika ada batch
+        if has_batches:
+            # Sembunyikan placeholder jika ada
+            if self._placeholder_widget:
+                self._placeholder_widget.hide()
+                self._placeholder_widget.deleteLater()
+                self._placeholder_widget = None
+
+            # Pastikan spacer ada di bagian bawah
+            if not self._spacer_item:
+                self._spacer_item = QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+                self.main_panel_container.addSpacerItem(self._spacer_item)
+        
+        else:
+            # Hapus spacer jika ada
+            if self._spacer_item:
+                self.main_panel_container.removeItem(self._spacer_item)
+                self._spacer_item = None
+            
+            # Tampilkan placeholder jika belum ada
+            if not self._placeholder_widget:
+                self._placeholder_widget = self._create_placeholder_widget()
+                self.main_panel_container.addWidget(self._placeholder_widget, 0, Qt.AlignmentFlag.AlignCenter)
+
+    def _create_placeholder_widget(self):
+        """Membuat widget placeholder untuk ditampilkan saat tidak ada batch."""
+        try:
+            format_keys = SUPPORTED_FORMATS.keys()
+            supported_formats_text = ", ".join(sorted(list(format_keys)))
+        except NameError:
+            supported_formats_text = "jpg, png, tiff" 
+        except Exception as e:
+            supported_formats_text = "(Gagal memuat format)"
+
+        html_text = f"""
+        <p align="center">
+            {language_config.PLACHOLDER_DRAG_AND_DROP_IMPORT_IMAGES}<br><br>
+            <span style="color:#666;">{language_config.SUPPORTED_IMAGE_EXTENSION}:</span><br>
+            {supported_formats_text}
+        </p>
+        """
+        placeholder_label = QLabel()
+        placeholder_label.setTextFormat(Qt.TextFormat.RichText)
+        placeholder_label.setText(html_text)
+        placeholder_label.setWordWrap(True)
+        placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        placeholder_label.setStyleSheet("""
+            QLabel {
+                color: #777777; font-size: 21px; border: none;
+                background-color: transparent; padding: 20px;
+            }
+        """)
+        placeholder_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
+        
+        # [BARU] Buat layout vertikal untuk memusatkan placeholder
+        container_widget = QWidget()
+        v_layout = QVBoxLayout(container_widget)
+        v_layout.addStretch(1)
+        v_layout.addWidget(placeholder_label)
+        v_layout.addStretch(1)
+        
+        return container_widget
 
     def _start_fade_in_animation(self, panel_to_animate):
         if panel_to_animate in self._active_fade_in_animations and \
@@ -154,11 +245,7 @@ class BatchPageLayout(QWidget):
         if widget in self._active_fade_in_animations:
             del self._active_fade_in_animations[widget]
 
-    # --- Combined Panel Setup ---
     def setup_combined_panel(self, batch_id=None):
-        self.batch_order_viewer += 1 
-        current_ui_order_for_this_panel = self.batch_order_viewer
-
         initial_state = self.batch_states.get(batch_id, {})
         combined_panel = CombinedPanel(
             database_manager=self.database_manager,
@@ -167,7 +254,7 @@ class BatchPageLayout(QWidget):
             thumbnail_threads=self.thumbnail_threads,
             thumbnail_placeholders=self.thumbnail_placeholders,
             initial_state=initial_state,
-            sequential_batch_number=current_ui_order_for_this_panel 
+            # sequential_batch_number akan diatur nanti
         )
         self.active_batch_panels[batch_id] = combined_panel
         return combined_panel

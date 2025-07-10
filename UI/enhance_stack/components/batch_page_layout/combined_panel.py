@@ -103,8 +103,20 @@ class CombinedPanel(QWidget):
 
         # Flag untuk mengecek apakah overlay masih “alive”
         self._overlay_alive = False
+        self.batch_info_label = None
 
         self.init_ui()
+        
+    def update_sequential_number(self, new_number):
+        """Memperbarui nomor urut batch yang ditampilkan di UI."""
+        self.sequential_batch_number = new_number
+        
+        # Temukan label yang menampilkan info batch. Asumsi ia ada di dalam `self.batch_info_label`
+        if hasattr(self, 'batch_info_label') and self.batch_info_label:
+            batch_label_text = language_config.BATCH_LABEL_FORMAT.format(
+                self.sequential_batch_number, self.image_count_in_batch
+            )
+            self.batch_info_label.setText(batch_label_text)
 
     def get_thumbnail_setting(self):
         if os.path.exists(GENERAL_SETTINGS_FILE):
@@ -355,32 +367,34 @@ class CombinedPanel(QWidget):
         algorithm_area_v_layout.setContentsMargins(0, 0, 0, 0)
         algorithm_area_v_layout.setSpacing(0)
 
-        # --- Label Batch ---
+        
+        # 1. Selalu buat label, tapi teks awalnya bisa kosong atau placeholder.
+        #    Ini memastikan self.batch_info_label selalu ada.
+        initial_label_text = ""
         if self.sequential_batch_number is not None:
-            batch_label_text = language_config.BATCH_LABEL_FORMAT.format(self.sequential_batch_number, self.image_count_in_batch)
-            batch_info_label = QLabel(batch_label_text)
-            batch_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            font = QFont()
-            font.setPointSize(8)
-            font.setBold(True)
-            batch_info_label.setFont(font)
-            batch_info_label.setStyleSheet("""
-                QLabel {
-                    background-color: #607D8B;
-                    color: white;
-                    padding: 3px 5px;
-                    border-top-left-radius: 3px;
-                    border-top-right-radius: 3px;
-                }
-            """)
-            algorithm_area_v_layout.addWidget(batch_info_label)
-        else: 
-            if self.batch_id is not None:
-                fallback_label = QLabel(f"ID: {self.batch_id} - {self.image_count_in_batch} images")
-                fallback_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                fallback_label.setStyleSheet("background-color: #78909C; color: white; padding: 2px;")
-                algorithm_area_v_layout.addWidget(fallback_label)
-
+            # Jika nomor sudah ada saat init (meskipun sekarang tidak), gunakan.
+            initial_label_text = language_config.BATCH_LABEL_FORMAT.format(self.sequential_batch_number, self.image_count_in_batch)
+        
+        self.batch_info_label = QLabel(initial_label_text)
+        
+        # 2. Atur style untuk label ini
+        self.batch_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        font = QFont()
+        font.setPointSize(8)
+        font.setBold(True)
+        self.batch_info_label.setFont(font)
+        self.batch_info_label.setStyleSheet("""
+            QLabel {
+                background-color: #607D8B;
+                color: white;
+                padding: 3px 5px;
+                border-top-left-radius: 3px;
+                border-top-right-radius: 3px;
+            }
+        """)
+        
+        # 3. Tambahkan widget yang benar ke layout
+        algorithm_area_v_layout.addWidget(self.batch_info_label)
 
         algorithm_panel = self.create_parameter_panel()
         algorithm_area_v_layout.addWidget(algorithm_panel)
