@@ -11,6 +11,10 @@ from config import CACHE_DIR, SUPPORTED_FORMATS
 from UI.settings.General.Language import language_config
 
 semaphore = QSemaphore(4)
+try:
+    os.makedirs(CACHE_DIR, exist_ok=True)
+except OSError as e:
+    print(f"Error creating cache directory {CACHE_DIR}: {e}")
 
 class ThumbnailLoader(QThread):
     thumbnail_ready = pyqtSignal(QImage, str)
