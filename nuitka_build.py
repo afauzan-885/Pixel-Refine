@@ -23,11 +23,9 @@ logging.getLogger().addHandler(console)
 
 # Informasi Dasar
 main_script = "main.py"
-output_name = "Pixel Refine"  # Nuitka akan menambahkan .exe secara otomatis
+output_name = "Pixel Refine"
 icon_path = os.path.abspath("UI/resources/image/Logo_Pixel_Refine.png")
 
-# Modul yang secara eksplisit TIDAK akan diimpor/diikuti
-# Ini adalah padanan Nuitka untuk --exclude-module PyInstaller
 excluded_modules = [
     "tkinter",
     "distutils",
