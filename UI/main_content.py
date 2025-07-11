@@ -3,6 +3,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 
 from UI.enhance_stack.logic.database_manager import DatabaseManager
+from UI.panorama.PanoramaPage import PanoramaPage
 from UI.resources.stylesheet.stylesheet import BLANK_CONTENT_BACKGROUND, BLANK_CONTENT_LABEL
 from UI.settings.General.Language import language_config
 
@@ -12,7 +13,7 @@ from .settings.SettingPage import SettingPage
 
 class Pages:
     ENHANCE_STACK = "Enhance Stack"
-    HDR_RECONTRUCTION = language_config.PANORAMA_SIDEBAR_LABEL
+    PANORAMA = language_config.PANORAMA_SIDEBAR_LABEL
     SETTINGS = language_config.SETTINGS_SIDEBAR_LABEL
 
 
@@ -22,6 +23,7 @@ class MainContent(QStackedWidget):
         self.database_manager = database_manager
         self.pages = {
             Pages.ENHANCE_STACK: EnhanceStackPage,
+            Pages.PANORAMA: PanoramaPage,
             Pages.SETTINGS: SettingPage,
         }
 

@@ -54,7 +54,7 @@ class Sidebar(QWidget):
         self.sidebar_layout.addWidget(self.toggle_button)
 
         # Tombol navigasi
-        self.nav_buttons = []
+        self.side_buttons = []
         button_data = [
             ("Enhance Stack", "UI/resources/icon/enhance_stack.png"),
             (language_config.PANORAMA_SIDEBAR_LABEL, "UI/resources/icon/panorama.png"),
@@ -62,7 +62,7 @@ class Sidebar(QWidget):
         for i, (text, icon_path) in enumerate(button_data):
             btn = self.create_nav_button(text, icon_path, i)
             self.sidebar_layout.addWidget(btn)
-            self.nav_buttons.append(btn)
+            self.side_buttons.append(btn)
 
         self.sidebar_layout.addStretch()
 
@@ -71,7 +71,7 @@ class Sidebar(QWidget):
             language_config.SETTINGS_SIDEBAR_LABEL, "UI/resources/icon/setting.png", len(button_data)
         )
         self.sidebar_layout.addWidget(settings_button)
-        self.nav_buttons.append(settings_button)
+        self.side_buttons.append(settings_button)
 
         # Atur ukuran awal sidebar
         self.setFixedWidth(self.expanded_width)
@@ -109,7 +109,7 @@ class Sidebar(QWidget):
     @Slot(int)
     def _handle_nav_click(self, index):
         """Menangani klik tombol navigasi."""
-        for i, btn in enumerate(self.nav_buttons):
+        for i, btn in enumerate(self.side_buttons):
             btn.setChecked(i == index)
         self.switch_page_callback(index) # Panggil callback dengan index
 
@@ -122,7 +122,7 @@ class Sidebar(QWidget):
         # Update state internal & tampilan teks/ikon SEGERA
         self.sidebar_expanded = target_expanded
         self.toggle_button.setText("☰" if target_expanded else "➡")
-        for btn in self.nav_buttons:
+        for btn in self.side_buttons:
              default_text = btn.property("default_text")
              btn.setText(default_text if target_expanded else "")
 

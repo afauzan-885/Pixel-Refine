@@ -238,10 +238,10 @@ class PixelRefineMain(QMainWindow):
         if not (0 <= index < self.main_content.count()): return
         if index == self.main_content.currentIndex() and self.main_content.widget(index) is not None:
              if self.sidebar: 
-                 for i, btn in enumerate(self.sidebar.nav_buttons): btn.setChecked(i == index)
+                 for i, btn in enumerate(self.sidebar.side_buttons): btn.setChecked(i == index)
              return
         if self.sidebar:
-            for i, btn in enumerate(self.sidebar.nav_buttons): btn.setChecked(i == index)
+            for i, btn in enumerate(self.sidebar.side_buttons): btn.setChecked(i == index)
         fade_in(self.main_content_animator, self.main_content, index, duration=250)
 
     def toggle_sidebar(self):
