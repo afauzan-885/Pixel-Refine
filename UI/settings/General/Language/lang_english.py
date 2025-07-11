@@ -213,6 +213,9 @@ RUN_IMAGE_PROCESSING = "Processing image {i} of {total_images}..."
 RUN_IMAGE_PROCESSING_SAVING = "Image {i} saved."
 RUN_IMAGE_PROCESSING_FINISHED = "Process finished."
 RUN_IMAGE_PROCESS_STARTED = "Starting process..."
+RUN_PROCESS_TRANSFORMATION = "[1/2] Calculating transformation {}/{}"
+RUN_SAVING_TRANSFORMATION = "[2/2] Saving result {}/{}"
+
 
 # Motion Compensation / Alignment Steps
 PROGRESS_CALCULATE_AND_COMPENSATE_MOTION_PROCESS ="Aligning and cropping image {}/{}"

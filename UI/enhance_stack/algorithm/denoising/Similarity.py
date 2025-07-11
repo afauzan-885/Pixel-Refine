@@ -1026,9 +1026,9 @@ def running_similarity(parent=None, single_process=None, batch_id=None):
         else:
             event.accept()
 
+    dialog.closeEvent = on_dialog_close
     worker.start()
     main("pixel_refine_database.db", update_progress=worker.progress_updated.emit, stop_requested=worker.stop_requested, progress_bar=progress_bar_instance)
-    worker.start()
     dialog.exec()
 
 if __name__ == "__main__":

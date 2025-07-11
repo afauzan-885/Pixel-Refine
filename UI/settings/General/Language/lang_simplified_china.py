@@ -214,6 +214,8 @@ RUN_IMAGE_PROCESSING = "正在处理图像 {i}/{total_images}..."
 RUN_IMAGE_PROCESSING_SAVING = "图像 {i} 已保存。"
 RUN_IMAGE_PROCESSING_FINISHED = "处理完成。"
 RUN_IMAGE_PROCESS_STARTED = "开始处理..."
+RUN_PROCESS_TRANSFORMATION = "[1/2] 计算转换 {}/{}"
+RUN_SAVING_TRANSFORMATION = "[2/2] 保存结果 {}/{}"
 
 # Motion Compensation / Alignment Steps
 PROGRESS_CALCULATE_AND_COMPENSATE_MOTION_PROCESS ="正在对齐和裁剪图像 {}/{}"

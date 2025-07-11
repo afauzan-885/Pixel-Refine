@@ -213,6 +213,9 @@ RUN_IMAGE_PROCESSING = "Memproses imej {i} daripada {total_images}..."
 RUN_IMAGE_PROCESSING_SAVING = "Imej ke-{i} telah disimpan."
 RUN_IMAGE_PROCESSING_FINISHED = "Proses selesai."
 RUN_IMAGE_PROCESS_STARTED = "Memulakan proses..."
+RUN_PROCESS_TRANSFORMATION = "[1/2] Kira transformasi {}/{}"
+RUN_SAVING_TRANSFORMATION = "[2/2] Simpan hasil {}/{}"
+
 
 # Motion Compensation / Alignment Steps
 PROGRESS_CALCULATE_AND_COMPENSATE_MOTION_PROCESS ="Menjajarkan dan memotong imej {}/{}"

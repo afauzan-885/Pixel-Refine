@@ -571,7 +571,10 @@ def main(db_path,
                         update_progress(
                             progress_counter["count"],
                             2 * (total_images - 1),
-                            f"[1/2] Hitung transformasi {progress_counter['count']}/{total_images - 1}"
+                            language_config.RUN_PROCESS_TRANSFORMATION.format(
+                                progress_counter["count"],
+                                total_images - 1
+                            )
                         )
 
 
@@ -633,7 +636,10 @@ def main(db_path,
                         update_progress(
                         (total_images - 1) + stage3_counter["count"],
                         2 * (total_images - 1),
-                        f"[2/2] Simpan hasil {stage3_counter['count']}/{total_images - 1}"
+                        language_config.RUN_SAVING_TRANSFORMATION.format(
+                                stage3_counter["count"],
+                                total_images - 1
+                            )
                     )
              
 
