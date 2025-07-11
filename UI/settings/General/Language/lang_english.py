@@ -38,7 +38,7 @@ COMMAND_TO_RESTART_MANUALLY = "Could not restart the application automatically. 
 # Sidebar UI
 # ==============================================================================
 SETTINGS_SIDEBAR_LABEL= "Settings"
-HDR_SIDEBAR_LABEL= "HDR Reconstruction"
+PANORAMA_SIDEBAR_LABEL= "Panorama"
 
 
 # ==============================================================================
@@ -83,6 +83,10 @@ MOVE_FILE_ERROR_TITLE = "Failed to Move File"
 COULD_NOT_SAVE_FILE_FOR_BATCH = "Failed to save file '{}' for batch:\n{}"
 SOURCE_FILE_DOES_NOT_EXIST = "Move failed: Source file '{}' not found."
 TARGET_FOLDER_INVALID = "Move failed: Target folder '{}' is invalid."
+BATCH_PROCESSING_ERROR_REPORT_TITLE = "Batch Processing Error Report"
+BATCH_PROCESSING_ERROR_REPORT_INTRO = "The process has completed with {num_failed} out of {num_total} batches failed. Details:"
+BATCH_PROCESSING_ERROR_REPORT_ITEM = "• Batch #{seq} (ID: {id})\n  Reason: {error}"
+
 
 LOG_BATCH_PROCESSING_START = "Starting processing for {} batch(es)..."
 LOG_PROCESSING_BATCH_DETAIL = "Processing Batch #{} (ID: {}), order ({}/{})..."

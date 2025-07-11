@@ -12,7 +12,7 @@ from .settings.SettingPage import SettingPage
 
 class Pages:
     ENHANCE_STACK = "Enhance Stack"
-    HDR_RECONTRUCTION = language_config.HDR_SIDEBAR_LABEL
+    HDR_RECONTRUCTION = language_config.PANORAMA_SIDEBAR_LABEL
     SETTINGS = language_config.SETTINGS_SIDEBAR_LABEL
 
 

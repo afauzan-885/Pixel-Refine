@@ -38,7 +38,7 @@ COMMAND_TO_RESTART_MANUALLY = "Tidak dapat memulakan semula aplikasi secara auto
 # Sidebar UI
 # ==============================================================================
 SETTINGS_SIDEBAR_LABEL= "Tetapan"
-HDR_SIDEBAR_LABEL= "Recontruction HDR"
+PANORAMA_SIDEBAR_LABEL= "Panorama"
 
 
 # ==============================================================================
@@ -84,6 +84,10 @@ MOVE_FILE_ERROR_TITLE = "Gagal Alih Fail"
 COULD_NOT_SAVE_FILE_FOR_BATCH = "Gagal menyimpan fail '{}' untuk batch:\n{}"
 SOURCE_FILE_DOES_NOT_EXIST = "Gagal alih: Fail sumber '{}' tidak dijumpai."
 TARGET_FOLDER_INVALID = "Gagal alih: Folder sasaran '{}' tidak sah."
+BATCH_PROCESSING_ERROR_REPORT_TITLE = "Laporan Ralat Pemprosesan Batch"
+BATCH_PROCESSING_ERROR_REPORT_INTRO = "Proses telah selesai dengan {num_failed} daripada {num_total} batch gagal diproses. Butiran:"
+BATCH_PROCESSING_ERROR_REPORT_ITEM = "• Batch #{seq} (ID: {id})\n  Sebab: {error}"
+
 
 LOG_BATCH_PROCESSING_START = "Memulakan pemprosesan untuk {} batch..."
 LOG_PROCESSING_BATCH_DETAIL = "Memproses Batch ke-{} (ID: {}), urutan ({}/{})..."

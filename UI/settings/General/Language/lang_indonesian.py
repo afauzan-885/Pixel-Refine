@@ -40,7 +40,7 @@ COMMAND_TO_RESTART_MANUALLY = "Tidak dapat memulai ulang aplikasi secara otomati
 # ==============================================================================
 
 SETTINGS_SIDEBAR_LABEL= "Pengaturan"
-HDR_SIDEBAR_LABEL= "Rekontruksi HDR"
+PANORAMA_SIDEBAR_LABEL= "Panorama"
 
 
 # ==============================================================================
@@ -87,6 +87,10 @@ MOVE_FILE_ERROR_TITLE = "Gagal Memindahkan File"
 COULD_NOT_SAVE_FILE_FOR_BATCH = "Gagal menyimpan file '{}' untuk batch:\n{}" 
 SOURCE_FILE_DOES_NOT_EXIST = "Gagal pindah: File sumber '{}' tidak ditemukan."
 TARGET_FOLDER_INVALID = "Gagal pindah: Folder tujuan '{}' tidak valid."
+
+BATCH_PROCESSING_ERROR_REPORT_TITLE = "Laporan Kesalahan Pemrosesan Batch"
+BATCH_PROCESSING_ERROR_REPORT_INTRO = "Proses selesai dengan {num_failed} dari {num_total} batch gagal diproses. Detail:"
+BATCH_PROCESSING_ERROR_REPORT_ITEM = "• Batch #{seq} (ID: {id})\n  Penyebab: {error}"
 
 # --- Log Message
 LOG_BATCH_PROCESSING_START = "Memulai pemrosesan untuk {} batch..." 

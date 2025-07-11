@@ -57,7 +57,7 @@ class Sidebar(QWidget):
         self.nav_buttons = []
         button_data = [
             ("Enhance Stack", "UI/resources/icon/enhance_stack.png"),
-            (language_config.HDR_SIDEBAR_LABEL, "UI/resources/icon/hdr_recontruction.png"),
+            (language_config.PANORAMA_SIDEBAR_LABEL, "UI/resources/icon/panorama.png"),
         ]
         for i, (text, icon_path) in enumerate(button_data):
             btn = self.create_nav_button(text, icon_path, i)

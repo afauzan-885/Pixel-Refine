@@ -38,7 +38,7 @@ COMMAND_TO_RESTART_MANUALLY = "无法自动重启应用程序。请手动重启�
 # Sidebar UI
 # ==============================================================================
 SETTINGS_SIDEBAR_LABEL= "设置"
-HDR_SIDEBAR_LABEL= "HDR 重建"
+PANORAMA_SIDEBAR_LABEL= "全景"
 
 
 # ==============================================================================
@@ -83,6 +83,9 @@ MOVE_FILE_ERROR_TITLE = "文件移动失败"
 COULD_NOT_SAVE_FILE_FOR_BATCH = "无法保存文件 '{}' 到批次：\n{}"
 SOURCE_FILE_DOES_NOT_EXIST = "移动失败：源文件 '{}' 未找到。"
 TARGET_FOLDER_INVALID = "移动失败：目标文件夹 '{}' 无效。"
+BATCH_PROCESSING_ERROR_REPORT_TITLE = "批处理错误报告"
+BATCH_PROCESSING_ERROR_REPORT_INTRO = "处理完成，但有 {num_failed} 个批次失败（共 {num_total} 个批次）。详情如下："
+BATCH_PROCESSING_ERROR_REPORT_ITEM = "• 批次 #{seq} (ID: {id}) \n  原因：{error}"
 
 LOG_BATCH_PROCESSING_START = "开始处理 {} 个批次..."
 LOG_PROCESSING_BATCH_DETAIL = "正在处理第 {} 批 (ID: {}), 进度 ({}/{})..."
