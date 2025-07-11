@@ -411,3 +411,169 @@ SWITCH_BUTTON_ACTIVE_STYLE = """
         background-color: #004C8A;
     }
 """
+
+def stylesheet_panorama_page():
+        """Mengembalikan QSS untuk styling aplikasi. (Tidak ada perubahan)"""
+        return """
+            /* === Latar Belakang dan Font Dasar === */
+            QMainWindow, QWidget {
+                background-color: #F5F8FA;
+            }
+            * {
+                font-family: 'Segoe UI', 'Roboto', 'Helvetica Neue', sans-serif;
+                font-size: 10pt;
+                border: none; /* Menghilangkan border default */
+            }
+            
+            /* === Judul dan Kontainer Utama === */
+            #sectionTitle {
+                font-size: 14pt;
+                font-weight: bold;
+                color: #333;
+                margin-bottom: 5px;
+            }
+            #displayContainer, #projectPanel, QTabWidget::pane {
+                background-color: #FFFFFF;
+                border-radius: 8px;
+            }
+            QTabWidget::pane {
+                border-top-left-radius: 0;
+            }
+            #scrollArea {
+                background-color: transparent;
+            }
+            #imageThumbnail {
+                border: 1px solid #E8EDF2;
+                background-color: #F8F9FA;
+                border-radius: 4px;
+                font-size: 14pt;
+                font-weight: bold;
+                color: #B0B0B0;
+            }
+            
+            /* === Panel Proyek (Kanan) === */
+            #projectPanel {
+                padding: 5px;
+            }
+            QListWidget {
+                border: 1px solid #E8EDF2;
+                border-radius: 5px;
+            }
+            QListWidget::item {
+                padding: 8px;
+            }
+            QListWidget::item:selected {
+                background-color: #E7F5FE;
+                color: #005A82;
+                border-radius: 3px;
+                border: 1px solid #BCE3F9;
+            }
+            
+            /* === Tombol-tombol === */
+            QPushButton {
+                padding: 8px 12px;
+                border: 1px solid #DCDCDC;
+                border-radius: 5px;
+                background-color: #FFFFFF;
+            }
+            QPushButton:hover {
+                background-color: #F8F9FA;
+                border-color: #CCCCCC;
+            }
+            QPushButton:pressed {
+                background-color: #F0F2F5;
+            }
+            QPushButton#addButton, QPushButton#processButton {
+                background-color: #2ECC71;
+                color: white;
+                font-weight: bold;
+            }
+            QPushButton#addButton:hover, QPushButton#processButton:hover {
+                background-color: #28B463;
+            }
+            QPushButton#deleteButton {
+                background-color: #E74C3C;
+                color: white;
+                font-weight: bold;
+            }
+            QPushButton#deleteButton:hover {
+                background-color: #C0392B;
+            }
+            
+            /* === Panel Tab Workflow === */
+            QTabBar::tab {
+                background: transparent;
+                border-bottom: 3px solid transparent; 
+                padding: 6px 10px;
+                margin-right: 5px;
+                color: #555;
+            }
+            QTabBar::tab:selected {
+                font-weight: bold;
+                color: #005A82;
+                border-bottom: 3px solid #0078D4;
+            }
+            QTabBar::tab:!selected:hover {
+                color: #222;
+            }
+            
+            /* === Widget di dalam Tab (Dropdown, Slider) === */
+            QComboBox {
+                padding: 5px;
+                border: 1px solid #DCDCDC;
+                border-radius: 4px;
+                background-color: white;
+            }
+            QComboBox:hover {
+                border-color: #0078D4;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QSlider::groove:horizontal {
+                border: 1px solid #E0E0E0;
+                background: #F0F2F5;
+                height: 4px;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background: #0078D4;
+                border: 2px solid white;
+                width: 16px;
+                margin: -8px 0; 
+                border-radius: 10px;
+            }
+
+            /* === Desain Scrollbar Modern === */
+            QScrollBar:vertical {
+                background: transparent;
+                width: 10px;
+                margin: 0px;
+            }
+            QScrollBar:horizontal {
+                background: transparent;
+                height: 10px;
+                margin: 0px;
+            }
+            QScrollBar::handle {
+                background-color: #D0D4DA;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical {
+                min-height: 25px;
+            }
+            QScrollBar::handle:horizontal {
+                min-width: 25px;
+            }
+            QScrollBar::handle:hover {
+                background-color: #A8AEB4;
+            }
+            QScrollBar::add-line, QScrollBar::sub-line {
+                height: 0px;
+                width: 0px;
+                background: none;
+            }
+            QScrollBar::add-page, QScrollBar::sub-page {
+                background: none;
+            }
+        """

@@ -120,13 +120,194 @@ class DatabaseManager:
                     self._add_column_if_not_exists(cursor, 'batch_process_image', 'is_reference_batch', 'INTEGER NOT NULL DEFAULT 0')
 
 
+                # 1. Buat tabel untuk menyimpan proyek panorama
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS panorama_projects (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL UNIQUE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                print("Table 'panorama_projects' ensured to exist.")
+
+                # 2. Buat tabel penghubung antara proyek dan gambar
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS panorama_project_images (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        project_id INTEGER NOT NULL,
+                        image_id INTEGER NOT NULL,
+                        image_order INTEGER, -- Penting untuk urutan gambar dalam panorama
+                        FOREIGN KEY (project_id) REFERENCES panorama_projects(id) ON DELETE CASCADE,
+                        FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE,
+                        UNIQUE(project_id, image_id)
+                    )
+                """)
+                print("Table 'panorama_project_images' ensured to exist.")
+                
                 conn.commit()
         except sqlite3.Error as e:
             print(f"Error during database/table creation or modification: {e}")
 
 
     # --- 2. Helper Methods (Internal) ---
+    def create_new_panorama_project(self, name):
+        """
+        Membuat entri proyek panorama baru di database.
 
+        Args:
+            name (str): Nama untuk proyek panorama baru (misalnya, "Panorama 1").
+
+        Returns:
+            int: ID dari proyek yang baru dibuat, atau None jika gagal.
+        """
+        sql = "INSERT INTO panorama_projects (name) VALUES (?)"
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(sql, (name,))
+                conn.commit()
+                print(f"Successfully created panorama project '{name}' with ID: {cursor.lastrowid}")
+                return cursor.lastrowid # Mengembalikan ID dari baris yang baru dimasukkan
+        except sqlite3.IntegrityError:
+            print(f"Error: A panorama project with the name '{name}' already exists.")
+            return None
+        except sqlite3.Error as e:
+            print(f"Database error while creating new panorama project: {e}")
+            return None
+        
+    def get_all_panorama_projects(self):
+        """
+        Mengambil semua proyek panorama dari database, diurutkan berdasarkan nama.
+
+        Returns:
+            list: Daftar tuple, di mana setiap tuple berisi (id, name).
+        """
+        sql = "SELECT id, name FROM panorama_projects ORDER BY name"
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(sql)
+                return cursor.fetchall()
+        except sqlite3.Error as e:
+            print(f"Database error while fetching panorama projects: {e}")
+            return [] # Kembalikan list kosong jika terjadi error
+
+    def delete_panorama_project(self, project_id):
+        """
+        Menghapus proyek panorama berdasarkan ID-nya.
+        Karena ON DELETE CASCADE, gambar terkait di panorama_project_images juga akan terhapus.
+
+        Args:
+            project_id (int): ID dari proyek yang akan dihapus.
+
+        Returns:
+            bool: True jika berhasil, False jika gagal.
+        """
+        sql = "DELETE FROM panorama_projects WHERE id = ?"
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(sql, (project_id,))
+                conn.commit()
+                print(f"Successfully deleted panorama project with ID: {project_id}")
+                return True
+        except sqlite3.Error as e:
+            print(f"Database error while deleting panorama project {project_id}: {e}")
+            return False
+
+    def rename_panorama_project(self, project_id, new_name):
+        """
+        Mengubah nama proyek panorama di database.
+
+        Args:
+            project_id (int): ID dari proyek yang akan diubah namanya.
+            new_name (str): Nama baru untuk proyek.
+
+        Returns:
+            bool: True jika berhasil, False jika gagal.
+        """
+        sql = "UPDATE panorama_projects SET name = ? WHERE id = ?"
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(sql, (new_name, project_id))
+                conn.commit()
+                print(f"Successfully renamed project {project_id} to '{new_name}'")
+                return True
+        except sqlite3.IntegrityError:
+            print(f"Error: A project with the name '{new_name}' likely already exists.")
+            return False
+        except sqlite3.Error as e:
+            print(f"Database error while renaming project {project_id}: {e}")
+            return False
+
+    # Tambahkan fungsi untuk menambahkan gambar ke proyek (akan kita gunakan nanti)
+    def add_images_to_project(self, project_id, image_paths):
+        """
+        Menambahkan daftar path gambar ke sebuah proyek panorama.
+        Ini adalah operasi transaksional.
+
+        Args:
+            project_id (int): ID dari proyek target.
+            image_paths (list): Daftar string path gambar.
+
+        Returns:
+            bool: True jika semua gambar berhasil ditambahkan, False jika ada error.
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                for path in image_paths:
+                    # 1. Masukkan path ke tabel 'images' jika belum ada.
+                    # 'OR IGNORE' akan mencegah error jika path sudah ada (UNIQUE constraint).
+                    cursor.execute("INSERT OR IGNORE INTO images (path) VALUES (?)", (path,))
+                    
+                    # 2. Ambil image_id dari path tersebut.
+                    cursor.execute("SELECT id FROM images WHERE path = ?", (path,))
+                    image_id_result = cursor.fetchone()
+                    if image_id_result:
+                        image_id = image_id_result[0]
+                        # 3. Hubungkan image_id dengan project_id.
+                        cursor.execute("""
+                            INSERT OR IGNORE INTO panorama_project_images (project_id, image_id)
+                            VALUES (?, ?)
+                        """, (project_id, image_id))
+                conn.commit()
+                print(f"Successfully added/updated {len(image_paths)} images for project ID {project_id}.")
+                return True
+        except sqlite3.Error as e:
+            print(f"Database error while adding images to project {project_id}: {e}")
+            conn.rollback() # Batalkan semua perubahan jika terjadi error
+            return False
+
+    def get_images_for_project(self, project_id):
+        """
+        Mengambil semua path gambar untuk sebuah proyek panorama tertentu.
+
+        Args:
+            project_id (int): ID dari proyek yang gambarnya ingin diambil.
+
+        Returns:
+            list: Daftar string path gambar.
+        """
+        sql = """
+            SELECT i.path 
+            FROM images i
+            JOIN panorama_project_images ppi ON i.id = ppi.image_id
+            WHERE ppi.project_id = ?
+            ORDER BY ppi.image_order, ppi.id -- Urutkan berdasarkan urutan, lalu ID
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(sql, (project_id,))
+                # cursor.fetchall() akan mengembalikan list of tuples, misal [('path1',), ('path2',)]
+                # Kita ubah menjadi list of strings: ['path1', 'path2']
+                return [row[0] for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            print(f"Database error while fetching images for project {project_id}: {e}")
+            return []
+    
     def _get_or_create_image_id(self, cursor, image_path):
         """
         Helper function to get existing image_id or create a new one.

@@ -5,9 +5,9 @@ import time
 
 # Impor semua modul PySide6 yang dibutuhkan
 from PySide6.QtWidgets import (QApplication, QMainWindow, QHBoxLayout, QWidget, 
-                               QMessageBox, QSplashScreen, QProgressBar, QLabel, 
+                               QMessageBox, QSplashScreen, QLabel, 
                                QVBoxLayout, QWidget)
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QPen
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont
 from PySide6.QtCore import Qt, QRectF
 
 # Impor modul-modul dari proyek Anda
