@@ -462,11 +462,18 @@ def stylesheet_panorama_page():
             QListWidget::item {
                 padding: 8px;
             }
+            /* Style QListWidget::item:selected BARU - OPSI 2 (Biru Jenuh) */
             QListWidget::item:selected {
-                background-color: #E7F5FE;
-                color: #005A82;
-                border-radius: 3px;
-                border: 1px solid #BCE3F9;
+                background-color: #CDE8F4;  /* Biru yang lebih jenuh/gelap dari sebelumnya */
+                color: #003C5A;             /* Teks biru yang sangat gelap */
+                border-radius: 4px;
+                border: 1px solid #9ACCE4;  /* Border yang lebih terlihat */
+            }
+            /* [Opsional] Tambahkan ini untuk mengubah warna saat list tidak aktif */
+            QListWidget:!focus QListWidget::item:selected {
+                background-color: #E0E0E0;
+                color: #333;
+                border-color: #CCCCCC;
             }
             
             /* === Tombol-tombol === */
@@ -515,6 +522,29 @@ def stylesheet_panorama_page():
             }
             QTabBar::tab:!selected:hover {
                 color: #222;
+            }
+            QMenu {
+            background-color: white;
+            border: 1px solid #DCDCDC;
+            padding: 5px;
+            border-radius: 4px;
+            }
+            QMenu::item {
+                padding: 8px 20px;
+                background-color: transparent;
+                border-radius: 3px;
+            }
+            QMenu::item:disabled {
+                color: #AAAAAA; /* Warna teks untuk item yang nonaktif */
+            }
+            QMenu::item:selected { /* :selected adalah state untuk hover */
+                background-color: #0078D4; /* Biru solid yang jelas */
+                color: white; /* Teks putih agar kontras */
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #E0E0E0;
+                margin: 4px 0px;
             }
             
             /* === Widget di dalam Tab (Dropdown, Slider) === */

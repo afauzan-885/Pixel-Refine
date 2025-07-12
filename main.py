@@ -188,7 +188,7 @@ class PixelRefineMain(QMainWindow):
         splash.update_status("Loading UI components...", 70)
         self.main_content = MainContent(self.database_manager) 
         self.sidebar = Sidebar(self.toggle_sidebar, self.switch_page)
-        time.sleep(0.5) # HAPUS PADA VERSI PRODUKSI
+        # time.sleep(0.5) # HAPUS PADA VERSI PRODUKSI
 
         splash.update_status("Assembling UI layout...", 90)
         self.main_layout = QHBoxLayout()
@@ -201,11 +201,11 @@ class PixelRefineMain(QMainWindow):
         container = QWidget()
         container.setLayout(self.main_layout)
         self.setCentralWidget(container)
-        time.sleep(0.3) # HAPUS PADA VERSI PRODUKSI
+        # time.sleep(0.3) # HAPUS PADA VERSI PRODUKSI
        
         splash.update_status("Finalizing...", 100)
         self.switch_page(0)
-        time.sleep(0.3) # HAPUS PADA VERSI PRODUKSI
+        # time.sleep(0.3) # HAPUS PADA VERSI PRODUKSI
 
     def create_folders_if_needed(self):
         try:

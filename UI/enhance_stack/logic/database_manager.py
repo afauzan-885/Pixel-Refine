@@ -307,6 +307,46 @@ class DatabaseManager:
         except sqlite3.Error as e:
             print(f"Database error while fetching images for project {project_id}: {e}")
             return []
+        
+    def delete_images_from_project(self, project_id, image_paths_to_delete):
+        """
+        Menghapus beberapa gambar dari sebuah proyek panorama tertentu.
+
+        Args:
+            project_id (int): ID dari proyek.
+            image_paths_to_delete (list): Daftar path gambar yang akan dihapus dari proyek ini.
+
+        Returns:
+            bool: True jika berhasil, False jika ada error.
+        """
+        if not image_paths_to_delete:
+            return True # Tidak ada yang perlu dihapus
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Ambil semua ID gambar dari path-nya
+                placeholders = ','.join('?' for _ in image_paths_to_delete)
+                cursor.execute(f"SELECT id FROM images WHERE path IN ({placeholders})", image_paths_to_delete)
+                image_ids_to_delete = [row[0] for row in cursor.fetchall()]
+
+                if not image_ids_to_delete:
+                    return True # Tidak ada ID gambar yang cocok untuk dihapus
+
+                # Hapus hubungan antara proyek dan gambar
+                id_placeholders = ','.join('?' for _ in image_ids_to_delete)
+                sql = f"DELETE FROM panorama_project_images WHERE project_id = ? AND image_id IN ({id_placeholders})"
+                
+                params = [project_id] + image_ids_to_delete
+                cursor.execute(sql, params)
+                
+                conn.commit()
+                print(f"Successfully deleted {cursor.rowcount} image links from project ID {project_id}.")
+                return True
+        except sqlite3.Error as e:
+            print(f"Database error while deleting images from project {project_id}: {e}")
+            return False
     
     def _get_or_create_image_id(self, cursor, image_path):
         """
