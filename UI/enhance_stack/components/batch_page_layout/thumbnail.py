@@ -1,6 +1,6 @@
 import os
 from PySide6.QtWidgets import QLabel, QStackedWidget
-from PySide6.QtGui import QPixmap, QImage, QImageReader
+from PySide6.QtGui import QPixmap, QImage
 from PySide6.QtCore import (Qt, QThread, Signal, QMutex, QWaitCondition,
                           QFile, QSemaphore, QTimer)
 import cv2
@@ -8,6 +8,7 @@ import numpy as np
 import rawpy
 from UI.resources.animation.fade import fade_in
 from config import CACHE_DIR, SUPPORTED_FORMATS
+from PIL import Image, ImageOps
 from UI.settings.General.Language import language_config
 
 semaphore = QSemaphore(4)
@@ -55,63 +56,58 @@ class ThumbnailLoader(QThread):
 
         semaphore.acquire()
         try:
+            # === PERUBAHAN UTAMA: Logika untuk JPG, PNG, TIFF menggunakan Pillow ===
             if ext in SUPPORTED_FORMATS["jpg"] + SUPPORTED_FORMATS["png"] + SUPPORTED_FORMATS["tiff"]:
                 try:
-                    img = cv2.imread(self.image_path, cv2.IMREAD_UNCHANGED)
-                    if img is None:
-                        return
+                    # 1. Buka dengan Pillow dan terapkan orientasi EXIF
+                    pil_img = Image.open(self.image_path)
+                    pil_img = ImageOps.exif_transpose(pil_img)
 
-                    # Tangani kasus grayscale
-                    if len(img.shape) == 2:
-                        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                    # 2. Konversi dari Pillow (RGB) ke array NumPy untuk OpenCV (BGR)
+                    img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+                    if img is None: return
 
-                    # Tangani 16-bit -> konversi ke 8-bit
-                    if img.dtype == np.uint16:
-                        img = (img / 256).astype(np.uint8)
+                    # ... (sisa logika pemrosesan Anda sama)
+                    if len(img.shape) == 2: img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                    if img.dtype == np.uint16: img = (img / 256).astype(np.uint8)
 
-                    # Resize 25%
-                    h, w = img.shape[:2]
-                    img = cv2.resize(img, (w // 4, h // 4), interpolation=cv2.INTER_AREA)
-
-                    # Konversi ke RGB
+                    # 3. Buat QImage dari data yang sudah benar orientasinya
                     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-                    # Buat QImage
                     height, width, channel = img_rgb.shape
                     bytes_per_line = 3 * width
-                    image = QImage(img_rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).copy()
-
-                    # Skala ke thumbnail
-                    image = image.scaled(80, 80, Qt.AspectRatioMode.KeepAspectRatio)
-
-                except Exception:
+                    final_image = QImage(img_rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).copy()
+                
+                except Exception as e:
+                    print(f"Error processing standard image {self.image_path}: {e}")
                     return
 
-
+            # Logika untuk RAW (sudah cukup baik, kita hanya menyatukan scaling)
             elif ext in SUPPORTED_FORMATS["raw"]:
                 try:
                     with rawpy.imread(self.image_path) as raw:
-                        img_array = raw.postprocess(
-                            output_bps=8,
-                            use_camera_wb=True,
-                            no_auto_bright=False,
-                            gamma=(2.5, 15.92),
-                            highlight_mode=rawpy.HighlightMode.Blend,
-                            half_size=True,
-                            demosaic_algorithm=rawpy.DemosaicAlgorithm.LINEAR
-                        )
+                        img_array = raw.postprocess(output_bps=8, use_camera_wb=True, half_size=True)
+                    
                     height, width, channel = img_array.shape
                     bytes_per_line = 3 * width
-                    image = QImage(img_array.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
-                    image = image.scaledToHeight(80, Qt.TransformationMode.SmoothTransformation)
-                except rawpy.LibRawError:
+                    final_image = QImage(img_array.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).copy()
+                except Exception as e:
+                    print(f"Error processing RAW image {self.image_path}: {e}")
                     return
-                except Exception:
-                    return
+            
             else:
                 return
 
-            image.save(cache_path, "JPG", quality=75)
+            # === PERUBAHAN UTAMA 2: Penskalaan yang disatukan dan benar ===
+            if final_image and not final_image.isNull():
+                # Skalakan agar pas di dalam kotak 100x100 dengan mempertahankan rasio aspek
+                # Ini akan menangani potret dan lanskap dengan benar.
+                final_image = final_image.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                
+                # Simpan thumbnail yang sudah diskalakan ke cache
+                final_image.save(cache_path, "JPG", quality=85)
+                
+                # Kirim sinyal
+                self.thumbnail_ready.emit(final_image, self.image_path)
 
         finally:
             semaphore.release()

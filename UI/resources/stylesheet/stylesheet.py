@@ -484,7 +484,7 @@ def stylesheet_panorama_page():
             
             /* === Tombol-tombol === */
             QPushButton {
-                padding: 8px 12px;
+                padding: 4px 6px;
                 border: 1px solid #DCDCDC;
                 border-radius: 5px;
                 background-color: #FFFFFF;
