@@ -451,6 +451,12 @@ def stylesheet_panorama_page():
                 color: #B0B0B0;
             }
             
+            #thumbnailWidget {
+                border: 1px solid #E8EDF2;
+                border-radius: 4px;
+                background-color: #F8F9FA;
+            }
+            
             /* === Panel Proyek (Kanan) === */
             #projectPanel {
                 padding: 5px;

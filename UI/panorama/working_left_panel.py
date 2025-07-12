@@ -14,10 +14,9 @@ from PySide6.QtWidgets import (
     QDialog,
     QGraphicsScene,
     QMenu,
-    QStackedLayout
 )
 from PySide6.QtCore import Qt, Slot, Signal, QEvent, QPoint
-from PySide6.QtGui import QPixmap, QImage, QMouseEvent
+from PySide6.QtGui import QPixmap, QImage, QMouseEvent, QPainter, QColor, QKeySequence
 
 from UI.enhance_stack.components.batch_page_layout.thumbnail import (
     ThumbnailLoader,
@@ -26,71 +25,6 @@ from UI.enhance_stack.components.batch_page_layout.thumbnail import (
 from UI.enhance_stack.logic.Zoomable_Handler import Zoomable
 
 
-class ThumbnailWidget(QWidget):
-    """Widget kustom untuk setiap thumbnail, menggunakan overlay untuk status seleksi."""
-    clicked = Signal(str, QMouseEvent)
-    double_clicked = Signal(str)
-
-    def __init__(self, image_path, parent=None):
-        super().__init__(parent)
-        self.image_path = image_path
-        self._is_selected = False
-        
-        self.setFixedSize(110, 110)
-        # Atur style dasar untuk border dan background di sini
-        self.setObjectName("thumbnailWidget")
-        # Kita akan pindahkan style ini ke QSS utama agar lebih konsisten
-        
-        # === PERUBAHAN UTAMA: Gunakan QStackedLayout ===
-        stacked_layout = QStackedLayout(self)
-        # Hapus margin agar overlay menutupi seluruh area
-        stacked_layout.setContentsMargins(0, 0, 0, 0) 
-        
-        # Lapisan 1: Widget untuk menampung gambar (dengan padding)
-        image_container = QWidget()
-        image_layout = QVBoxLayout(image_container)
-        image_layout.setContentsMargins(5, 5, 5, 5)
-        self.image_label = QLabel("...")
-        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        image_layout.addWidget(self.image_label)
-        
-        # Lapisan 2: Widget overlay untuk efek seleksi
-        self.overlay = QWidget(self)
-        # Warna biru semi-transparan. #0078D4 adalah biru, 80 adalah alpha (sekitar 31%)
-        self.overlay.setStyleSheet("background-color: rgba(0, 120, 212, 0.4); border-radius: 4px;")
-        self.overlay.setVisible(False) # Awalnya tidak terlihat
-
-        # Tambahkan kedua lapisan ke tumpukan. Overlay di atas gambar.
-        stacked_layout.addWidget(image_container)
-        stacked_layout.addWidget(self.overlay)
-        
-        # Set layout
-        self.setLayout(stacked_layout)
-
-    def set_pixmap(self, pixmap: QPixmap):
-        self.image_label.setPixmap(
-            pixmap.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio,
-                          Qt.TransformationMode.SmoothTransformation))
-        self.image_label.setText("")
-
-    def set_selected(self, selected: bool):
-        """Mengontrol visibilitas lapisan overlay untuk menunjukkan seleksi."""
-        self._is_selected = selected
-        # Cukup tampilkan atau sembunyikan overlay
-        self.overlay.setVisible(selected)
-
-    def is_selected(self):
-        return self._is_selected
-
-    def mousePressEvent(self, event: QMouseEvent):
-        self.clicked.emit(self.image_path, event)
-        # super().mousePressEvent(event) # Tidak perlu dipanggil
-
-    def mouseDoubleClickEvent(self, event: QMouseEvent):
-        self.double_clicked.emit(self.image_path)
-        # super().mouseDoubleClickEvent(event) # Tidak perlu dipanggil
-        
-        
 class ImagePreviewDialog(QDialog):
     """Dialog sederhana untuk menampilkan gambar dengan kemampuan zoom."""
 
@@ -109,7 +43,62 @@ class ImagePreviewDialog(QDialog):
             scene.addPixmap(pixmap)
             self.view.fitInView(scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
 
+class ThumbnailWidget(QWidget):
+    """Widget kustom untuk setiap thumbnail, menggunakan paintEvent untuk seleksi."""
+    clicked = Signal(str, QMouseEvent)
+    double_clicked = Signal(str)
 
+    def __init__(self, image_path, parent=None):
+        super().__init__(parent)
+        self.image_path = image_path
+        self._is_selected = False
+        
+        self.setFixedSize(110, 110)
+        self.setObjectName("thumbnailWidget") # Ini akan mengambil style dari QSS utama
+
+        # Layout kembali sederhana
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        self.image_label = QLabel("Loading...")
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.image_label)
+
+    def set_pixmap(self, pixmap: QPixmap):
+        self.image_label.setPixmap(
+            pixmap.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio,
+                          Qt.TransformationMode.SmoothTransformation))
+        self.image_label.setText("")
+
+    def set_selected(self, selected: bool):
+        """
+        Mengubah status seleksi dan memicu penggambaran ulang (repaint).
+        """
+        if self._is_selected != selected:
+            self._is_selected = selected
+            self.update() 
+
+    def is_selected(self):
+        return self._is_selected
+
+    def paintEvent(self, event):
+        """
+        Menggambar widget. Jika terpilih, gambar lapisan overlay di atasnya.
+        """
+        super().paintEvent(event)
+
+        if self._is_selected:
+            painter = QPainter(self)
+            overlay_color = QColor(0, 120, 212, 128) 
+            painter.setBrush(overlay_color)
+            painter.setPen(Qt.NoPen)    
+            painter.drawRect(self.rect())
+
+    def mousePressEvent(self, event: QMouseEvent):
+        self.clicked.emit(self.image_path, event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent):
+        self.double_clicked.emit(self.image_path)
+        
 class WorkingLeftPanel(QWidget):
     rename_project_requested = Signal(int, str)
     selection_changed = Signal(int)
@@ -123,18 +112,19 @@ class WorkingLeftPanel(QWidget):
         self.thumbnail_threads = []
         self.selected_thumbnails = set()
         self.last_clicked_index = -1
-
+        
         left_panel_layout = QVBoxLayout(self)
         left_panel_layout.setContentsMargins(0, 0, 0, 0)
         left_panel_layout.setSpacing(10)
 
         display_area = self._create_display_area()
-        workflow_panel = self.workflow_panel()
-        workflow_panel.setMaximumHeight(270)
-
+        # === PERUBAHAN: Buat workflow_panel sebagai variabel instance ===
+        self.workflow_panel_widget = self.workflow_panel()
+        self.workflow_panel_widget.setMaximumHeight(270)
+        
         left_panel_layout.addWidget(display_area, 3)
-        left_panel_layout.addWidget(workflow_panel, 1)
-
+        left_panel_layout.addWidget(self.workflow_panel_widget)
+        
         self.setAcceptDrops(True)
         self.clear_display()
 
@@ -183,29 +173,18 @@ class WorkingLeftPanel(QWidget):
 
     @Slot()
     def clear_display(self):
-        stop_process_thumbnails(self.thumbnail_threads)
-        self.selected_thumbnails.clear()
-
-        self.title_label.setText("No Project Selected")
-        self.current_project_id = None
-        self.import_button.setVisible(False)
-
-        if self.scroll_area.widget():
-            self.scroll_area.takeWidget().deleteLater()
-
-        if self.projects_exist:
-            html_text = "<p align='center'>Please select a panorama project from the list on the right.</p>"
-        else:
-            html_text = "<p align='center'>No panorama projects found.<br>Click 'Add Pano' to create your first project.</p>"
-
-        placeholder = self._create_placeholder_widget(html_text)
-        self.scroll_area.setWidget(placeholder)
-        self.selection_changed.emit(0)  # Beri tahu panel kanan tidak ada yang dipilih
+        stop_process_thumbnails(self.thumbnail_threads); self.selected_thumbnails.clear()
+        self.title_label.setText("No Project Selected"); self.current_project_id = None; self.import_button.setVisible(False)
+        self.workflow_panel_widget.setVisible(False)
+        if self.scroll_area.widget(): self.scroll_area.takeWidget().deleteLater()
+        if self.projects_exist: html_text = "<p align='center'>Please select a panorama project from the list on the right.</p>"
+        else: html_text = "<p align='center'>No panorama projects found.<br>Click 'Add Pano' to create your first project.</p>"
+        placeholder = self._create_placeholder_widget(html_text); self.scroll_area.setWidget(placeholder)
 
     def load_images_for_project(self, project_id):
         stop_process_thumbnails(self.thumbnail_threads)
         self.selected_thumbnails.clear()
-        self.selection_changed.emit(0)  # Reset seleksi
+        # self.selection_changed.emit(0)  # Reset seleksi
 
         if self.scroll_area.widget():
             self.scroll_area.takeWidget().deleteLater()
@@ -255,6 +234,19 @@ class WorkingLeftPanel(QWidget):
             if isinstance(widget, ThumbnailWidget) and widget.image_path == image_path:
                 widget.set_pixmap(QPixmap.fromImage(image))
                 break
+            
+    def keyPressEvent(self, event):
+        """Menangani penekanan tombol keyboard."""
+        if event.matches(QKeySequence.StandardKey.SelectAll): # Cek untuk CTRL+A
+            print("Ctrl+A pressed. Calling _select_all_images.")
+            self._select_all_images()
+            event.accept()
+        elif event.key() == Qt.Key_Delete and self.selected_thumbnails:
+            print("Delete key pressed. Calling delete_selected_images.")
+            self.delete_selected_images()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
 
     @Slot(str, QMouseEvent)
     def _on_thumbnail_clicked(self, image_path, event):
@@ -269,20 +261,15 @@ class WorkingLeftPanel(QWidget):
 
         # === PERUBAHAN 2: Logika klik kanan yang disempurnakan ===
         if button == Qt.MouseButton.RightButton:
-            # Jika item yang diklik kanan belum terpilih,
-            # bersihkan seleksi lain dan pilih hanya item ini.
             if not clicked_widget.is_selected():
-                # Deselect semua dulu
                 for thumb in list(self.selected_thumbnails):
                     thumb.set_selected(False)
                 self.selected_thumbnails.clear()
-                # Select yang diklik kanan
                 clicked_widget.set_selected(True)
                 self.selected_thumbnails.add(clicked_widget)
                 self.last_clicked_index = clicked_index
 
         elif modifiers == Qt.KeyboardModifier.ControlModifier:
-            # Seleksi CTRL: Toggle
             if clicked_widget.is_selected():
                 clicked_widget.set_selected(False)
                 self.selected_thumbnails.discard(clicked_widget)
@@ -314,7 +301,7 @@ class WorkingLeftPanel(QWidget):
             self.last_clicked_index = clicked_index
 
         # Pancarkan sinyal bahwa seleksi telah berubah
-        self.selection_changed.emit(len(self.selected_thumbnails))
+        # self.selection_changed.emit(len(self.selected_thumbnails))
 
     @Slot(str)
     def _on_thumbnail_double_clicked(self, image_path):
@@ -329,14 +316,11 @@ class WorkingLeftPanel(QWidget):
 
         menu = QMenu(self)
         delete_action = menu.addAction(f"Delete Selected Image(s)")
-        # Nonaktifkan jika tidak ada yang dipilih
         delete_action.setEnabled(len(self.selected_thumbnails) > 0)
 
-        # Tambahkan aksi lain jika perlu
         menu.addSeparator()
         select_all_action = menu.addAction("Select All")
 
-        # Hubungkan aksi
         delete_action.triggered.connect(self.delete_selected_images)
         select_all_action.triggered.connect(self._select_all_images)
 
@@ -353,9 +337,9 @@ class WorkingLeftPanel(QWidget):
             if isinstance(widget, ThumbnailWidget):
                 widget.set_selected(True)
                 self.selected_thumbnails.add(widget)
-        self.selection_changed.emit(len(self.selected_thumbnails))
+        # self.selection_changed.emit(len(self.selected_thumbnails))
 
-    @Slot()  # === PERUBAHAN 3: Jadikan slot publik untuk dipanggil dari panel kanan ===
+    @Slot() 
     def delete_selected_images(self):
         """Menghapus gambar yang dipilih dari DB dan UI."""
         if not self.selected_thumbnails:
@@ -383,10 +367,33 @@ class WorkingLeftPanel(QWidget):
 
     @Slot(int, str)
     def update_display_for_project(self, project_id, project_name):
+        """Slot yang dipanggil saat proyek baru dipilih."""
+        print(f"Slot activated in Left Panel. Updating for: {project_name}")
         self.title_label.setText(project_name)
         self.current_project_id = project_id
         self.import_button.setVisible(True)
+        # === PERUBAHAN: Tampilkan workflow panel dan muat pengaturannya ===
+        self.workflow_panel_widget.setVisible(True)
+        self._load_workflow_settings(project_id)
         self.load_images_for_project(project_id)
+        
+    def _load_workflow_settings(self, project_id):
+        """Memuat pengaturan dari DB dan menerapkannya ke UI."""
+        settings = self.database_manager.get_project_workflow_settings(project_id)
+        if settings:
+            self.combo_align.setCurrentText(settings.get('align_algorithm', 'AKAZE'))
+            self.combo_proj.setCurrentText(settings.get('projection_type', 'Cylindrical'))
+            self.combo_blend.setCurrentText(settings.get('blending_method', 'Multi-band'))
+            # ... terapkan pengaturan lain di sini
+    
+    @Slot(str)
+    def _on_workflow_setting_changed(self, value, setting_key):
+        """Slot yang dipanggil saat dropdown di workflow panel berubah."""
+        if self.current_project_id:
+            print(f"Saving setting '{setting_key}' = '{value}' for project ID {self.current_project_id}")
+            self.database_manager.save_project_workflow_setting(
+                self.current_project_id, setting_key, value
+            )
 
     @Slot(bool)
     def on_project_existence_changed(self, exists):
@@ -468,22 +475,19 @@ class WorkingLeftPanel(QWidget):
         main_layout = QVBoxLayout(tab_content)
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-
+        
         main_layout.addWidget(QLabel("Alignment Algorithm:"))
         combo_layout = QHBoxLayout()
-        combo_align = QComboBox()
-        combo_align.addItems(["AKAZE", "ORB", "SIFT", "BRISK"])
-        combo_layout.addWidget(combo_align)
+        # Jadikan variabel instance
+        self.combo_align = QComboBox() 
+        self.combo_align.addItems(["AKAZE", "ORB", "SIFT", "BRISK"])
+        # Hubungkan sinyal
+        self.combo_align.currentTextChanged.connect(
+            lambda value: self._on_workflow_setting_changed(value, 'align_algorithm')
+        )
+        combo_layout.addWidget(self.combo_align)
         combo_layout.addStretch()
         main_layout.addLayout(combo_layout)
-
-        # main_layout.addSpacing(10)
-        # main_layout.addWidget(QLabel("Parameter 1:"))
-        # main_layout.addWidget(QSlider(Qt.Orientation.Horizontal))
-        # main_layout.addSpacing(5)
-        # main_layout.addWidget(QLabel("Parameter 2:"))
-        # main_layout.addWidget(QSlider(Qt.Orientation.Horizontal))
-        # main_layout.addStretch()
         return tab_content
 
     def projection_tab(self):
@@ -491,22 +495,26 @@ class WorkingLeftPanel(QWidget):
         main_layout = QVBoxLayout(tab_content)
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        
         main_layout.addWidget(QLabel("Projection Type:"))
         combo_layout = QHBoxLayout()
-        combo_proj = QComboBox()
-        combo_proj.addItems(["Planar", "Cylindrical", "Spherical", "Fisheye"])
-        combo_layout.addWidget(combo_proj)
+        self.combo_proj = QComboBox()
+        self.combo_proj.addItems(["Planar", "Cylindrical", "Spherical", "Fisheye"])
+        self.combo_proj.currentTextChanged.connect(
+            lambda value: self._on_workflow_setting_changed(value, 'projection_type')
+        )
+        combo_layout.addWidget(self.combo_proj)
         combo_layout.addStretch()
         main_layout.addLayout(combo_layout)
+        
         main_layout.addSpacing(10)
         main_layout.addWidget(QLabel("Set Region:"))
         button_layout = QHBoxLayout()
-        btn_auto = QPushButton("Auto")
-        btn_manual = QPushButton("Manual")
-        button_layout.addWidget(btn_auto)
-        button_layout.addWidget(btn_manual)
+        btn_auto = QPushButton("Auto"); btn_manual = QPushButton("Manual")
+        button_layout.addWidget(btn_auto); button_layout.addWidget(btn_manual)
         button_layout.addStretch()
         main_layout.addLayout(button_layout)
+        
         main_layout.addStretch()
         return tab_content
 
@@ -515,11 +523,15 @@ class WorkingLeftPanel(QWidget):
         main_layout = QVBoxLayout(tab_content)
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        
         main_layout.addWidget(QLabel("Blending Method:"))
         combo_layout_1 = QHBoxLayout()
-        combo_blend = QComboBox()
-        combo_blend.addItems(["Multi-band", "Feathering", "No Blending"])
-        combo_layout_1.addWidget(combo_blend)
+        self.combo_blend = QComboBox()
+        self.combo_blend.addItems(["Multi-band", "Feathering", "No Blending"])
+        self.combo_blend.currentTextChanged.connect(
+            lambda value: self._on_workflow_setting_changed(value, 'blending_method')
+        )
+        combo_layout_1.addWidget(self.combo_blend)
         combo_layout_1.addStretch()
         main_layout.addLayout(combo_layout_1)
         main_layout.addSpacing(10)

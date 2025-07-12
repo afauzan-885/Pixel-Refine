@@ -126,10 +126,16 @@ class DatabaseManager:
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         name TEXT NOT NULL UNIQUE,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        -- Kolom baru akan ditambahkan di bawah
                     )
                 """)
-                print("Table 'panorama_projects' ensured to exist.")
-
+                
+                # === PERUBAHAN: Tambahkan kolom untuk setiap parameter workflow ===
+                self._add_column_if_not_exists(cursor, 'panorama_projects', 'align_algorithm', 'TEXT DEFAULT "AKAZE"')
+                self._add_column_if_not_exists(cursor, 'panorama_projects', 'projection_type', 'TEXT DEFAULT "Cylindrical"')
+                self._add_column_if_not_exists(cursor, 'panorama_projects', 'blending_method', 'TEXT DEFAULT "Multi-band"')
+                # Tambahkan kolom lain jika Anda punya parameter lain (misal: slider)
+                
                 # 2. Buat tabel penghubung antara proyek dan gambar
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS panorama_project_images (
@@ -142,8 +148,6 @@ class DatabaseManager:
                         UNIQUE(project_id, image_id)
                     )
                 """)
-                print("Table 'panorama_project_images' ensured to exist.")
-                
                 conn.commit()
         except sqlite3.Error as e:
             print(f"Error during database/table creation or modification: {e}")
@@ -239,6 +243,59 @@ class DatabaseManager:
             return False
         except sqlite3.Error as e:
             print(f"Database error while renaming project {project_id}: {e}")
+            return False
+        
+    def get_project_workflow_settings(self, project_id):
+        """
+        Mengambil pengaturan workflow untuk sebuah proyek panorama tertentu.
+
+        Args:
+            project_id (int): ID dari proyek.
+
+        Returns:
+            dict: Dictionary berisi pengaturan, atau None jika proyek tidak ditemukan.
+        """
+        sql = "SELECT align_algorithm, projection_type, blending_method FROM panorama_projects WHERE id = ?"
+        try:
+            with self._get_connection() as conn:
+                conn.row_factory = sqlite3.Row # Ini memungkinkan kita mengakses kolom berdasarkan nama
+                cursor = conn.cursor()
+                cursor.execute(sql, (project_id,))
+                row = cursor.fetchone()
+                if row:
+                    return dict(row) # Ubah baris menjadi dictionary
+                return None
+        except sqlite3.Error as e:
+            print(f"Database error while fetching workflow settings for project {project_id}: {e}")
+            return None
+
+    def save_project_workflow_setting(self, project_id, setting_key, setting_value):
+        """
+        Menyimpan satu pengaturan workflow untuk sebuah proyek.
+
+        Args:
+            project_id (int): ID dari proyek.
+            setting_key (str): Nama kolom di database (misal: 'align_algorithm').
+            setting_value (str/int/float): Nilai baru untuk pengaturan.
+
+        Returns:
+            bool: True jika berhasil, False jika gagal.
+        """
+        # Validasi untuk mencegah SQL Injection, meskipun kita tidak menggunakan f-string di sini
+        allowed_keys = ['align_algorithm', 'projection_type', 'blending_method']
+        if setting_key not in allowed_keys:
+            print(f"Error: Invalid setting key '{setting_key}'")
+            return False
+            
+        sql = f"UPDATE panorama_projects SET {setting_key} = ? WHERE id = ?"
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(sql, (setting_value, project_id))
+                conn.commit()
+                return True
+        except sqlite3.Error as e:
+            print(f"Database error while saving setting '{setting_key}' for project {project_id}: {e}")
             return False
 
     # Tambahkan fungsi untuk menambahkan gambar ke proyek (akan kita gunakan nanti)
