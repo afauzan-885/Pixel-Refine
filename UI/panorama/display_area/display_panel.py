@@ -42,8 +42,6 @@ from UI.enhance_stack.components.batch_page_layout.thumbnail import (
 from UI.enhance_stack.logic.Zoomable_Handler import Zoomable
 from UI.panorama.logic.processing_view import ProcessingView
 from UI.resources.animation.animation_manager import StackedWidgetAnimator
-from UI.resources.animation.fade import fade_in
-
 
 class ImagePreviewDialog(QDialog):
     """Dialog yang menampilkan gambar dengan orientasi dan ukuran awal yang benar."""
@@ -143,7 +141,7 @@ class ImagePreviewDialog(QDialog):
 
 class ThumbnailWidget(QWidget):
     """Widget kustom untuk setiap thumbnail, menggunakan paintEvent untuk seleksi."""
-
+    back_to_preview_requested = Signal() 
     clicked = Signal(str, QMouseEvent)
     double_clicked = Signal(str)
 
@@ -155,7 +153,7 @@ class ThumbnailWidget(QWidget):
         self.setFixedSize(110, 110)
         self.setObjectName("thumbnailWidget")
 
-        # Struktur UI kembali sederhana
+        self.has_valid_preview = False
         layout = QVBoxLayout(self)
         # Beri sedikit margin agar border tidak menempel pada gambar
         layout.setContentsMargins(5, 5, 5, 5) 

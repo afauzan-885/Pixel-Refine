@@ -10,7 +10,8 @@ from PySide6.QtWidgets import (
     QComboBox,
 )
 
-from UI.panorama.logic.DynamicFlowPanel import DynamicFlowPanel
+from UI.panorama.logic.DynamicPanel import DynamicFlowPanel
+
 
 class WorkflowPanel(QWidget):
     setting_changed = Signal(str, str)  
@@ -63,6 +64,7 @@ class WorkflowPanel(QWidget):
         )
         combo_layout = QHBoxLayout()
         combo_layout.addWidget(self.combo_align)
+        combo_layout.addSpacing(5)
         combo_layout.addStretch()
         main_layout.addLayout(combo_layout)
         return content
@@ -74,8 +76,7 @@ class WorkflowPanel(QWidget):
         main_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         
         # --- GRUP 1: Projection Type ---
-        # Gunakan panel dinamis kita
-        proj_panel = DynamicFlowPanel(horizontal_threshold=220)
+        proj_panel = DynamicFlowPanel(horizontal_threshold=200)
         proj_panel.addWidget(QLabel("Projection Type:"))
         self.combo_proj = QComboBox()
         self.combo_proj.addItems(["Planar", "Cylindrical", "Spherical", "Fisheye"])
@@ -88,7 +89,6 @@ class WorkflowPanel(QWidget):
         main_layout.addSpacing(5)
 
         # --- GRUP 2: Set Region ---
-        # Gunakan panel dinamis lagi
         region_panel = DynamicFlowPanel(horizontal_threshold=200)
         region_panel.addWidget(QLabel("Set Region:"))
         btn_auto = QPushButton("Auto")
@@ -107,7 +107,7 @@ class WorkflowPanel(QWidget):
         main_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         # --- GRUP 1: Blending Method ---
-        blend_panel = DynamicFlowPanel(horizontal_threshold=220)
+        blend_panel = DynamicFlowPanel(horizontal_threshold=200)
         blend_panel.addWidget(QLabel("Blending Method:"))
         self.combo_blend = QComboBox()
         self.combo_blend.addItems(["Multi-band", "Feathering", "No Blending"])
@@ -117,7 +117,7 @@ class WorkflowPanel(QWidget):
         blend_panel.addWidget(self.combo_blend)
         main_layout.addWidget(blend_panel)
         
-        main_layout.addSpacing(10)
+        main_layout.addSpacing(5)
 
         # --- GRUP 2: Anti-ghosting ---
         ghost_panel = DynamicFlowPanel(horizontal_threshold=220)
