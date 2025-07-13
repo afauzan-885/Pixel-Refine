@@ -1,34 +1,44 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QMessageBox
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QMessageBox, QStackedWidget
 from PySide6.QtCore import Slot, Signal, QTimer
 
 from UI.panorama.display_area.display_panel import DisplayPanel
 from UI.panorama.workflow_area.workflow_panel import WorkflowPanel
+from UI.resources.animation.animation_manager import HeightAnimator, SlideDirection, StackedWidgetAnimator
+from UI.resources.animation.slide import slide
 
 
 class WorkingLeftPanel(QWidget):
-    # Sinyal yang diteruskan ke luar (misal ke main window)
     rename_project_requested = Signal(int, str)
 
     def __init__(self, database_manager, parent=None):
         super().__init__(parent)
         self.database_manager = database_manager
 
-        # --- Variabel State Utama ---
         self.current_project_id = None
         self.projects_exist = False
         self.latest_successful_stage = "grid"
+        self.slide_animator = StackedWidgetAnimator()
+        self.height_animator = HeightAnimator(self)
 
-        # --- Setup UI dengan Komponen Baru ---
+        # --- Setup UI ---
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(10)
-
         self.display_panel = DisplayPanel()
+        self.workflow_stack = QStackedWidget()
         self.workflow_panel = WorkflowPanel()
-
-        main_layout.addWidget(self.display_panel, 3)  # Beri lebih banyak ruang
-        main_layout.addWidget(self.workflow_panel, 1)
-
+        self.workflow_placeholder = QWidget()
+        self.workflow_stack.addWidget(self.workflow_panel)
+        self.workflow_stack.addWidget(self.workflow_placeholder)
+        main_layout.addWidget(self.display_panel, 1)
+        main_layout.addWidget(self.workflow_stack, 0)
+        self.workflow_stack.setCurrentWidget(self.workflow_placeholder)
+        self.workflow_stack.setFixedHeight(0)
+        self.progress_timer = QTimer(self)
+        self.progress_value = 0
+        self._current_process_callback = None
+        self._current_process_title = ""
+        self.progress_timer.timeout.connect(self._update_simulation_progress)
         self._connect_signals()
 
     def _connect_signals(self):
@@ -52,18 +62,62 @@ class WorkingLeftPanel(QWidget):
         image_paths = self.database_manager.get_images_for_project(project_id)
         settings = self.database_manager.get_project_workflow_settings(project_id)
 
-        # 2. Perintahkan anak-anak untuk update
         self.display_panel.load_project(project_id, project_name, image_paths)
-        self.workflow_panel.load_settings(settings)
-        self.workflow_panel.update_workflow_stage("grid", has_images=bool(image_paths))
-        self.workflow_panel.setVisible(True)
-        self.workflow_panel.tab_widget.setCurrentIndex(0)
+
+        if image_paths:
+            self.workflow_panel.load_settings(settings)
+            self.workflow_panel.update_workflow_stage("grid", has_images=True)
+            self.workflow_panel.tab_widget.setCurrentIndex(0)
+            
+            if self.workflow_stack.height() == 0:
+                target_height = self.workflow_panel.sizeHint().height()
+                if target_height <= 0: target_height = 200 # Fallback
+
+                self.height_animator.animate_height(
+                    target_widget=self.workflow_stack,
+                    end_height=target_height,
+                    duration=350
+                )
+                slide(
+                    animator=self.slide_animator,
+                    stack_widget=self.workflow_stack,
+                    target=self.workflow_panel,
+                    direction=SlideDirection.UP,
+                    duration=350
+                )
+        else:
+            if self.workflow_stack.height() > 0:
+                self.height_animator.animate_height(
+                    target_widget=self.workflow_stack,
+                    end_height=0,
+                    duration=300
+                )
+                slide(
+                    animator=self.slide_animator,
+                    stack_widget=self.workflow_stack,
+                    target=self.workflow_placeholder,
+                    direction=SlideDirection.DOWN,
+                    duration=300
+                )
 
     @Slot()
     def clear_display(self):
         self.current_project_id = None
         self.display_panel.clear_display(no_projects_exist=(not self.projects_exist))
-        self.workflow_panel.setVisible(False)
+        
+        if self.workflow_stack.height() > 0:
+            self.height_animator.animate_height(
+                target_widget=self.workflow_stack,
+                end_height=0,
+                duration=300
+            )
+            slide(
+                animator=self.slide_animator,
+                stack_widget=self.workflow_stack,
+                target=self.workflow_placeholder,
+                direction=SlideDirection.DOWN,
+                duration=300
+            )
 
     @Slot(bool)
     def on_project_existence_changed(self, exists):
@@ -71,7 +125,7 @@ class WorkingLeftPanel(QWidget):
         if not self.current_project_id:
             self.clear_display()
 
-    @Slot(str)
+    @Slot(int, str)
     def _on_rename_request(self, current_name):
         self.rename_project_requested.emit(self.current_project_id, current_name)
 
@@ -99,10 +153,11 @@ class WorkingLeftPanel(QWidget):
             QMessageBox.critical(self, "Database Error", "Failed to delete images.")
 
     @Slot(str, str)
-    def _on_workflow_setting_changed(self, key, value):
+    def _on_workflow_setting_changed(self, setting_key, value): 
+        """Menyimpan perubahan setting workflow ke DB."""
         if self.current_project_id:
             self.database_manager.save_project_workflow_setting(
-                self.current_project_id, key, value
+                self.current_project_id, setting_key, value
             )
 
     @Slot()
@@ -118,34 +173,47 @@ class WorkingLeftPanel(QWidget):
 
     @Slot(str)
     def _on_preview_requested(self, stage_name):
-        """Menangani permintaan preview dan menjalankan simulasi."""
+        """Menangani permintaan preview dengan progress bar modern."""
+        self.progress_timer.stop()
+        
+        # Ganti "message" menjadi "title" agar lebih deskriptif
         simulations = {
-            "alignment": {
-                "message": "Processing Alignment...",
-                "delay": 1500,
-                "callback": self._on_alignment_finished,
-            },
-            "projection": {
-                "message": "Updating Projection...",
-                "delay": 1000,
-                "callback": self._on_projection_finished,
-            },
-            "blending": {
-                "message": "Updating Blending...",
-                "delay": 1000,
-                "callback": self._on_blending_finished,
-            },
+            "alignment": {"title": "Aligning Images", "delay": 2500, "callback": self._on_alignment_finished},
+            "projection": {"title": "Applying Projection", "delay": 1500, "callback": self._on_projection_finished},
+            "blending": {"title": "Blending Panorama", "delay": 2000, "callback": self._on_blending_finished},
         }
+        
         sim = simulations.get(stage_name)
-        if sim:
-            print(f"SIMULASI: Memulai {stage_name}...")
-            self.display_panel.show_preview_message(sim["message"])
-            QTimer.singleShot(sim["delay"], sim["callback"])
+        if not sim: return
+
+        print(f"SIMULASI: Memulai {sim['title']}...")
+        
+        self._current_process_callback = sim["callback"]
+        self._current_process_title = sim["title"]
+        self.progress_value = 0
+        
+        self.display_panel.show_processing_view(self._current_process_title)
+        
+        interval = sim["delay"] / 100.0
+        self.progress_timer.start(int(interval))
+
+    @Slot()
+    def _update_simulation_progress(self):
+        """Slot yang dipanggil oleh timer untuk mengupdate progress bar."""
+        if self.progress_value < 100:
+            self.progress_value += 1
+            self.display_panel.update_processing_progress(self._current_process_title, self.progress_value)
+        else:
+            self.progress_timer.stop()
+            if self._current_process_callback:
+                self._current_process_callback()
+                self._current_process_callback = None
+
 
     # --- Simulasi Proses Workflow (sekarang berada di Kontroler) ---
     def _on_alignment_finished(self):
         print("SIMULASI: Alignment selesai.")
-        self.display_panel.show_preview_message("DUMMY ALIGNMENT RESULT")
+        self.display_panel.show_preview_result("DUMMY ALIGNMENT RESULT")
         self.latest_successful_stage = "aligned"
         image_paths = self.database_manager.get_images_for_project(
             self.current_project_id

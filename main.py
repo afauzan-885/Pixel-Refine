@@ -1,89 +1,22 @@
-import math
 import os
 import sys
-import time
 
 # Impor semua modul PySide6 yang dibutuhkan
 from PySide6.QtWidgets import (QApplication, QMainWindow, QHBoxLayout, QWidget, 
                                QMessageBox, QSplashScreen, QLabel, 
                                QVBoxLayout, QWidget)
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont
-from PySide6.QtCore import Qt, QRectF
+from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtCore import Qt
 
 # Impor modul-modul dari proyek Anda
 from UI.enhance_stack.logic.database_manager import DatabaseManager
 from UI.resources.animation.animation_manager import StackedWidgetAnimator
 from UI.resources.animation.fade import fade_in
+from UI.resources.animation.loading.circular_progress import CircularProgress
 from UI.sidebar import Sidebar
 from UI.main_content import MainContent 
 import config
 from shutil import rmtree
-
-class CircularProgress(QWidget):
-    """
-    Widget kustom untuk menampilkan progress bar berbentuk lingkaran.
-    """
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._value = 0
-        self.setMinimumSize(80, 80) # Ukuran minimum bisa lebih kecil
-
-    def setValue(self, value: int):
-        if 0 <= value <= 100:
-            self._value = value
-            self.update()
-
-    def value(self) -> int:
-        return self._value
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        rect = self.rect()
-        side = min(rect.width(), rect.height())
-        draw_rect = QRectF(
-            (rect.width() - side) / 2,
-            (rect.height() - side) / 2,
-            side,
-            side
-        )
-
-        painter.setPen(Qt.PenStyle.NoPen)
-        # Warna hitam dengan opasitas ~30% untuk menciptakan efek alas
-        painter.setBrush(QColor(0, 0, 0, 0)) 
-        painter.drawEllipse(draw_rect)
-        
-        num_dots = 12
-        dot_radius = side * 0.04  
-        circle_radius = side / 2 - dot_radius * 2
-
-        painter.setPen(Qt.PenStyle.NoPen)
-        for i in range(num_dots):
-            angle_rad = math.radians(i * (360 / num_dots) - 90) # -90 agar mulai dari atas
-            center_x = draw_rect.center().x()
-            center_y = draw_rect.center().y()
-            x = center_x + circle_radius * math.cos(angle_rad)
-            y = center_y + circle_radius * math.sin(angle_rad)
-            painter.setBrush(QColor(255, 255, 255, 60)) # Warna abu-abu lebih redup
-            painter.drawEllipse(x - dot_radius/2, y - dot_radius/2, dot_radius, dot_radius)
-
-        # Gambar titik-titik progres
-        num_active_dots = int(self._value / 100 * num_dots)
-        painter.setBrush(QColor(255, 255, 255, 255))
-        for i in range(num_active_dots):
-            angle_rad = math.radians(i * (360 / num_dots) - 90) # -90 agar mulai dari atas
-            center_x = draw_rect.center().x()
-            center_y = draw_rect.center().y()
-            x = center_x + circle_radius * math.cos(angle_rad)
-            y = center_y + circle_radius * math.sin(angle_rad)
-            painter.drawEllipse(x - dot_radius/2, y - dot_radius/2, dot_radius, dot_radius)
-
-        # Gambar teks persentase
-        font = QFont("Segoe UI", int(side * 0.18), QFont.Weight.Bold)
-        painter.setFont(font)
-        painter.setPen(QColor("white"))
-        painter.drawText(draw_rect, Qt.AlignmentFlag.AlignCenter, f"{self._value}%")
 
 class SplashScreen(QSplashScreen):
     """
@@ -155,28 +88,23 @@ class PixelRefineMain(QMainWindow):
         self.database_manager = None
         self.main_content_animator = None
 
-    def setup_ui_and_logic(self, splash: SplashScreen):
-        """
-        Metode ini berisi semua pekerjaan berat untuk membangun UI dan logika,
-        yang sebelumnya ada di __init__.
-        """
-        # Setiap langkah "berat" diikuti oleh pembaruan splash screen.
-        
+    def setup_ui_and_logic(self, splash: 'SplashScreen'):
         splash.update_status("Loading database...", 10)
         db_path = "pixel_refine_database.db" 
         self.database_manager = DatabaseManager(db_path)
         self.database_manager.create_database()
-        # time.sleep(1.3) # HAPUS PADA VERSI PRODUKSI
 
         splash.update_status("Initializing animations...", 25)
         self.main_content_animator = StackedWidgetAnimator(self)
-        # time.sleep(1.3) # HAPUS PADA VERSI PRODUKSI
 
         splash.update_status("Setting up main window...", 40)
         self.setWindowIcon(QIcon("UI/resources/image/Logo_Pixel_Refine.png"))
         self.setWindowTitle(f"Pixel Refine - Version {config.APP_VERSION}")
-        self.setMinimumSize(1200, 600)
-        # time.sleep(1.2) # HAPUS PADA VERSI PRODUKSI
+        
+        # <<< PERUBAHAN DI SINI >>>
+        # Hapus baris lama: self.setMinimumSize(1200, 600)
+        # Ganti dengan pemanggilan fungsi adaptif kita
+        self._set_adaptive_window_size()
 
         splash.update_status("Preparing temporary folders...", 55)
         self.database_folder = "database" 
@@ -206,7 +134,59 @@ class PixelRefineMain(QMainWindow):
         splash.update_status("Finalizing...", 100)
         self.switch_page(0)
         # time.sleep(0.3) # HAPUS PADA VERSI PRODUKSI
+        
+    def _set_adaptive_window_size(self):
+        """
+        Mengatur ukuran awal dan UKURAN MINIMUM jendela secara adaptif,
+        sehingga tidak bisa di-resize lebih kecil dari persentase layar yang ditentukan.
+        """
+        # --- Parameter Konfigurasi ---
+        # Aspek rasio yang diinginkan untuk aplikasi Anda (lebar / tinggi)
+        APP_ASPECT_RATIO = 1200 / 600  # Hasilnya 2.0
 
+        # Persentase layar yang akan menjadi UKURAN MINIMUM
+        MIN_SCREEN_RATIO = 0.76
+
+        # Ukuran minimum absolut (fallback untuk layar resolusi sangat rendah)
+        ABS_MIN_WIDTH = 800
+        ABS_MIN_HEIGHT = 400
+
+        # 1. Dapatkan geometri layar yang tersedia
+        screen_geom = QApplication.primaryScreen().availableGeometry()
+        
+        # 2. Tentukan area minimum di layar
+        min_safe_width = int(screen_geom.width() * MIN_SCREEN_RATIO)
+        min_safe_height = int(screen_geom.height() * MIN_SCREEN_RATIO)
+        
+        # 3. Hitung aspek rasio dari area minimum di layar
+        screen_aspect_ratio = min_safe_width / min_safe_height
+
+        # --- Logika "Fit Inside a Box" untuk Menentukan Ukuran Minimum Adaptif ---
+        if screen_aspect_ratio > APP_ASPECT_RATIO:
+            # Layar lebih LEBAR daripada aplikasi -> Tinggi menjadi pembatas
+            adaptive_min_height = min_safe_height
+            adaptive_min_width = int(adaptive_min_height * APP_ASPECT_RATIO)
+        else:
+            # Layar lebih TINGGI (atau sama) daripada aplikasi -> Lebar menjadi pembatas
+            adaptive_min_width = min_safe_width
+            adaptive_min_height = int(adaptive_min_width / APP_ASPECT_RATIO)
+
+        # 4. Tentukan ukuran minimum final: ambil yang lebih besar antara
+        #    hasil adaptif dan batas absolut.
+        final_min_width = max(ABS_MIN_WIDTH, adaptive_min_width)
+        final_min_height = max(ABS_MIN_HEIGHT, adaptive_min_height)
+
+        # 5. Atur UKURAN MINIMUM jendela
+        self.setMinimumSize(final_min_width, final_min_height)
+        
+        # 6. Atur UKURAN AWAL jendela sama dengan ukuran minimumnya
+        self.resize(final_min_width, final_min_height)
+        
+        # 7. Pusatkan jendela di tengah area layar yang tersedia
+        center_x = screen_geom.x() + (screen_geom.width() - final_min_width) / 2
+        center_y = screen_geom.y() + (screen_geom.height() - final_min_height) / 2
+        self.move(int(center_x), int(center_y))
+        
     def create_folders_if_needed(self):
         try:
             os.makedirs(self.database_folder, exist_ok=True) 

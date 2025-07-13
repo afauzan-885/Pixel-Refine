@@ -1,5 +1,3 @@
-# File: working_right_panel.py
-
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -12,7 +10,6 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import QMessageBox
-
 
 class WorkingRightPanel(QWidget):
     """
@@ -59,7 +56,6 @@ class WorkingRightPanel(QWidget):
         panel_layout.addWidget(self.list_widget)
 
         self.btn_add.clicked.connect(self.add_new_panorama)
-        # KEMBALIKAN KONEKSI LANGSUNG
         self.btn_delete.clicked.connect(self.delete_selected_panorama)
         self.list_widget.currentItemChanged.connect(self.on_project_selection_changed)
         self.list_widget.itemDoubleClicked.connect(self.rename_selected_project)
@@ -76,13 +72,11 @@ class WorkingRightPanel(QWidget):
             item = QListWidgetItem(project_name)
             item.setData(Qt.UserRole, project_id)  
             self.list_widget.addItem(item)
-        print(f"Loaded {len(projects)} projects from database.")
-
+        
         # Pancarkan sinyal untuk memberi tahu panel kiri apakah ada proyek atau tidak
         self.project_list_updated.emit(self.list_widget.count() > 0)
 
         if self.list_widget.count() > 0:
-            print("Projects found. Auto-selecting the first project.")
             self.list_widget.setCurrentRow(0)
 
     def add_new_panorama(self):
@@ -143,7 +137,6 @@ class WorkingRightPanel(QWidget):
     @Slot(int, str)
     def handle_rename_request(self, project_id, old_name):
         """Menangani permintaan rename yang datang dari panel kiri."""
-        print(f"Right panel received rename request for ID {project_id}")
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
             if item.data(Qt.UserRole) == project_id:
@@ -156,11 +149,7 @@ class WorkingRightPanel(QWidget):
             project_id = current_item.data(Qt.UserRole)
             project_name = current_item.text()
             self.btn_delete.setEnabled(True)
-            print(
-                f"Selection changed. Emitting signal for project: {project_name} (ID: {project_id})"
-            )
             self.project_selection_changed.emit(project_id, project_name)
         else:
             self.btn_delete.setEnabled(False)
-            print("Selection cleared. Emitting signal.")
             self.project_selection_cleared.emit()

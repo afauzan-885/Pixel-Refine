@@ -12,6 +12,7 @@ from PySide6.QtGui import (
     QColor,
     QMouseEvent,
     QKeySequence,
+    QPen
 )
 from PySide6.QtWidgets import (
     QWidget,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QGraphicsScene,
     QMessageBox,
     QFileDialog,
+    QApplication
 )
 
 from PIL import Image, ImageOps
@@ -38,6 +40,9 @@ from UI.enhance_stack.components.batch_page_layout.thumbnail import (
     stop_process_thumbnails,
 )
 from UI.enhance_stack.logic.Zoomable_Handler import Zoomable
+from UI.panorama.logic.processing_view import ProcessingView
+from UI.resources.animation.animation_manager import StackedWidgetAnimator
+from UI.resources.animation.fade import fade_in
 
 
 class ImagePreviewDialog(QDialog):
@@ -46,49 +51,95 @@ class ImagePreviewDialog(QDialog):
     def __init__(self, image_path, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Preview - {image_path}")
-        self.setMinimumSize(800, 600)
+        
+        # <<< PERUBAHAN KUNCI ADA DI SINI >>>
+        self.set_adaptive_initial_size()
 
+        # Kode sisa __init__ tetap sama
         layout = QVBoxLayout(self)
-        scene = QGraphicsScene(self)
-        self.view = Zoomable(scene, self)
+        self.scene = QGraphicsScene(self)
+        self.view = Zoomable(self.scene, self)
         layout.addWidget(self.view)
 
-        # === PERUBAHAN 2: Gunakan Pillow untuk memuat gambar dengan benar ===
+        self.pixmap_item = None
         pixmap = self.load_pixmap_with_correct_orientation(image_path)
 
         if pixmap and not pixmap.isNull():
-            scene.addPixmap(pixmap)
-            # fitInView akan bekerja dengan benar sekarang karena dimensi pixmap sudah tepat
-            self.view.fitInView(scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+            self.pixmap_item = self.scene.addPixmap(pixmap)
         else:
-            # Tampilkan pesan error jika gambar gagal dimuat
             error_label = QLabel(f"Failed to load image:\n{image_path}")
             error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.removeWidget(self.view)
+            self.view.deleteLater()
             layout.addWidget(error_label)
+            
+    def set_adaptive_initial_size(self, width_ratio: float = 0.3, height_ratio: float = 0.5):
+        """
+        Mengatur ukuran dan posisi awal dialog agar relatif terhadap ukuran layar.
+        """
+        # 1. Dapatkan layar utama tempat aplikasi berjalan
+        primary_screen = QApplication.primaryScreen()
+        if not primary_screen:
+            # Fallback jika tidak ada layar utama terdeteksi
+            self.resize(800, 600)
+            return
 
-    # === PERUBAHAN 3: Fungsi pembantu baru untuk logika pemuatan ===
+        # 2. Dapatkan geometri area yang tersedia di layar (tidak termasuk taskbar, dll.)
+        available_geometry = primary_screen.availableGeometry()
+        screen_width = available_geometry.width()
+        screen_height = available_geometry.height()
+
+        # 3. Hitung ukuran dialog berdasarkan rasio
+        dialog_width = int(screen_width * width_ratio)
+        dialog_height = int(screen_height * height_ratio)
+
+        # 4. Atur ukuran dialog
+        self.resize(dialog_width, dialog_height)
+        
+        # 5. Pusatkan dialog di tengah layar
+        # Hitung posisi x dan y agar jendela berada di tengah
+        x = available_geometry.x() + (screen_width - dialog_width) / 2
+        y = available_geometry.y() + (screen_height - dialog_height) / 2
+        self.move(int(x), int(y))
+        
+        # Atur ukuran minimum agar pengguna tidak bisa membuatnya terlalu kecil
+        self.setMinimumSize(int(screen_width * 0.4), int(screen_height * 0.4))
+
     def load_pixmap_with_correct_orientation(self, image_path: str) -> QPixmap | None:
         """
         Membuka file gambar menggunakan Pillow, menerapkan orientasi EXIF,
         dan mengonversinya menjadi QPixmap.
         """
         try:
-            # 1. Buka dengan Pillow
             pil_image = Image.open(image_path)
-
-            # 2. Terapkan orientasi dari metadata EXIF
             oriented_pil_image = ImageOps.exif_transpose(pil_image)
-
-            # 3. Konversi dari gambar Pillow ke QImage
             qimage = ImageQt(oriented_pil_image)
-
-            # 4. Konversi dari QImage ke QPixmap
             return QPixmap.fromImage(qimage)
-
         except Exception as e:
             print(f"Error loading image with Pillow for preview: {e}")
             return None
 
+    # <<< PERBAIKAN KUNCI ADA DI SINI >>>
+    def showEvent(self, event):
+        """
+        Dipanggil secara otomatis oleh Qt setelah dialog ditampilkan.
+        Ini adalah tempat yang tepat untuk melakukan 'fitInView'.
+        """
+        # Selalu panggil implementasi parent terlebih dahulu
+        super().showEvent(event)
+
+        # Hanya lakukan fit jika pixmap berhasil dimuat
+        if self.pixmap_item:
+            self.view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def resizeEvent(self, event):
+        """
+        Opsional, tapi sangat disarankan: Lakukan fitInView lagi saat jendela di-resize.
+        """
+        super().resizeEvent(event)
+        if self.pixmap_item:
+            self.view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+            
 
 class ThumbnailWidget(QWidget):
     """Widget kustom untuk setiap thumbnail, menggunakan paintEvent untuk seleksi."""
@@ -102,48 +153,74 @@ class ThumbnailWidget(QWidget):
         self._is_selected = False
 
         self.setFixedSize(110, 110)
-        self.setObjectName("thumbnailWidget")  # Ini akan mengambil style dari QSS utama
+        self.setObjectName("thumbnailWidget")
 
-        # Layout kembali sederhana
+        # Struktur UI kembali sederhana
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(5, 5, 5, 5)
+        # Beri sedikit margin agar border tidak menempel pada gambar
+        layout.setContentsMargins(5, 5, 5, 5) 
         self.image_label = QLabel("Loading...")
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.image_label)
 
+    # Metode untuk menerima gambar dari thread
     def set_pixmap(self, pixmap: QPixmap):
-        scaled_pixmap = pixmap.scaled(
-            100,
-            100,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self.image_label.setPixmap(scaled_pixmap)
-        self.image_label.setText("")
+        if not pixmap.isNull():
+            self.pixmap = pixmap.scaled(
+                100, 100, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+            )
+            self.image_label.setPixmap(self.pixmap)
+            
+    def is_selected(self) -> bool:
+        """Getter: Mengembalikan status terpilih."""
+        return self._is_selected
 
     def set_selected(self, selected: bool):
         """
-        Mengubah status seleksi dan memicu penggambaran ulang (repaint).
+        Setter: Mengatur status terpilih dan memicu penggambaran ulang.
         """
+        # Hanya proses jika status benar-benar berubah
         if self._is_selected != selected:
             self._is_selected = selected
-            self.update()
-
-    def is_selected(self):
-        return self._is_selected
-
+            self.update() 
+    
     def paintEvent(self, event):
         """
-        Menggambar widget. Jika terpilih, gambar lapisan overlay di atasnya.
+        Menggambar widget. Dipanggil secara otomatis oleh Qt saat 'update()' dipanggil.
         """
+        # Selalu panggil implementasi parent terlebih dahulu
         super().paintEvent(event)
 
+        # Hanya gambar efek visual jika widget ini sedang terpilih
         if self._is_selected:
             painter = QPainter(self)
-            overlay_color = QColor(0, 120, 212, 128)
+            # Aktifkan antialiasing agar sudut-sudut terlihat lebih halus
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+            # --- Definisikan Warna & Pena ---
+            overlay_color = QColor(173, 216, 230, 128)
+
+            # Warna border: Biru tua (misal: 0, 84, 166)
+            border_color = QColor(0, 84, 166)
+            
+            # Siapkan pena (stroke) untuk border
+            border_pen = QPen(border_color)
+            border_pen.setWidth(2) # Ketebalan 5px
+
+            # --- Atur Painter ---
+            painter.setPen(border_pen)
             painter.setBrush(overlay_color)
-            painter.setPen(Qt.NoPen)
-            painter.drawRect(self.rect())
+
+            # --- Gambar Persegi Panjang ---
+            pen_half_width = border_pen.width() / 2.0
+            draw_rect = self.rect().adjusted(
+                pen_half_width, pen_half_width, 
+                -pen_half_width, -pen_half_width
+            )
+            
+            # Gambar persegi panjang dengan sudut membulat agar lebih manis
+            painter.drawRoundedRect(draw_rect, 4.0, 4.0)
+
 
     def mousePressEvent(self, event: QMouseEvent):
         self.clicked.emit(self.image_path, event)
@@ -164,6 +241,7 @@ class DisplayPanel(QWidget):
         super().__init__(parent)
 
         # --- Variabel State Lokal ---
+        self.animator = StackedWidgetAnimator(self) 
         self.thumbnail_threads = []
         self.selected_thumbnails = set()
         self.last_clicked_index = -1
@@ -214,6 +292,21 @@ class DisplayPanel(QWidget):
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setObjectName("scrollArea")
         grid_view_layout.addWidget(self.scroll_area)
+        
+        processing_container = QWidget()
+        processing_layout = QVBoxLayout(processing_container)
+        processing_layout.setContentsMargins(50, 50, 50, 50) # Margin
+        self.processing_view = ProcessingView() # Widget kita
+        processing_layout.addWidget(self.processing_view)
+
+        # Halaman 2: Hasil Preview (Label seperti sebelumnya)
+        self.result_label = QLabel()
+        self.result_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # Tambahkan halaman-halaman baru ini ke display_stack
+        self.display_stack.addWidget(self.grid_view_widget)
+        self.display_stack.addWidget(processing_container)
+        self.display_stack.addWidget(self.result_label)
 
         # View Preview
         self.preview_view_widget = QWidget()
@@ -288,6 +381,29 @@ class DisplayPanel(QWidget):
         self.scroll_area.setWidget(self._create_placeholder_widget(html_text))
         self.show_grid_view()
         self.selection_count_changed.emit(0)
+        
+    @Slot(str)
+    def show_processing_view(self, title: str):
+        """Beralih ke tampilan progress dan set judul awalnya."""
+        self.processing_view.update_progress(title, 0)
+        # Ambil widget kontainer dari stack
+        processing_container = self.processing_view.parentWidget()
+        self.display_stack.setCurrentWidget(processing_container)
+        self.import_button.setVisible(False)
+        self.back_to_grid_button.setVisible(True)
+
+    @Slot(str, int)
+    def update_processing_progress(self, title: str, value: int):
+        """Memperbarui progress di tampilan progress."""
+        self.processing_view.update_progress(title, value)
+
+    @Slot(str)
+    def show_preview_result(self, message: str):
+        """Beralih ke tampilan hasil dan tampilkan pesan."""
+        self.result_label.setText(message)
+        self.display_stack.setCurrentWidget(self.result_label)
+        self.import_button.setVisible(False)
+        self.back_to_grid_button.setVisible(True)
 
     @Slot(str)
     def show_preview_message(self, message):
@@ -303,8 +419,6 @@ class DisplayPanel(QWidget):
         self.display_stack.setCurrentWidget(self.grid_view_widget)
         self.import_button.setVisible(self.project_id is not None)
         self.back_to_grid_button.setVisible(False)
-
-    # --- Logika Internal & Event Handling ---
 
     def import_images(self):
         if not self.project_id:
@@ -342,7 +456,7 @@ class DisplayPanel(QWidget):
         clicked_index = grid_layout.indexOf(clicked_widget)
 
         if button == Qt.MouseButton.RightButton:
-            if not clicked_widget.is_selected():
+            if not clicked_widget.is_selected(): # Panggilan fungsi is_selected()
                 self._clear_selection()
                 self._select_one_thumbnail(clicked_widget)
         elif modifiers == Qt.KeyboardModifier.ControlModifier:
@@ -358,12 +472,10 @@ class DisplayPanel(QWidget):
 
         self.last_clicked_index = clicked_index
 
-        # self.selection_changed.emit(len(self.selected_thumbnails)) # Aktifkan jika perlu
-
     def _clear_selection(self):
         """Membatalkan pilihan semua thumbnail."""
         for thumb in list(self.selected_thumbnails):
-            thumb.set_selected(False)
+            thumb.set_selected(False) # Panggil metode setter
         self.selected_thumbnails.clear()
 
     def _select_one_thumbnail(self, widget):
@@ -374,10 +486,10 @@ class DisplayPanel(QWidget):
     def _toggle_thumbnail_selection(self, widget):
         """Menambah atau mengurangi satu thumbnail dari seleksi."""
         if widget.is_selected():
-            widget.set_selected(False)
+            widget.set_selected(False) # Panggil metode setter
             self.selected_thumbnails.discard(widget)
         else:
-            widget.set_selected(True)
+            widget.set_selected(True) # Panggil metode setter
             self.selected_thumbnails.add(widget)
 
     def _select_range(self, clicked_index):
@@ -446,7 +558,8 @@ class DisplayPanel(QWidget):
 
     def dragEnterEvent(self, event):
         """Menerima event drag jika berisi URL file dan ada proyek yang aktif."""
-        if self.current_project_id and event.mimeData().hasUrls():
+        # PERBAIKAN: Gunakan self.project_id yang dimiliki oleh DisplayPanel
+        if self.project_id is not None and event.mimeData().hasUrls():
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -463,7 +576,8 @@ class DisplayPanel(QWidget):
             .endswith((".png", ".jpg", ".jpeg", ".bmp", ".tif"))
         ]
         if image_paths:
-            self.process_imported_images(image_paths)
+            # PERBAIKAN: Pancarkan sinyal dengan membawa daftar path gambar
+            self.images_to_import_selected.emit(image_paths)
 
     def keyPressEvent(self, event):
         """Menangani shortcut keyboard (Ctrl+A, Delete)."""
@@ -481,11 +595,9 @@ class DisplayPanel(QWidget):
         if (
             watched_object == self.title_label
             and event.type() == QEvent.MouseButtonDblClick
-            and self.current_project_id
+            and self.project_id is not None 
         ):
-            self.rename_project_requested.emit(
-                self.current_project_id, self.title_label.text()
-            )
+            self.rename_project_requested.emit(self.title_label.text()) 
             return True
         return super().eventFilter(watched_object, event)
 
