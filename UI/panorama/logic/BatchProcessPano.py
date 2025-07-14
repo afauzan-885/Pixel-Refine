@@ -2,13 +2,13 @@
 
 import os
 import time
-from PySide6.QtCore import Signal, QObject, QThread, QRectF
+from PySide6.QtCore import Signal, QObject, QThread
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
     QWidget
 )
-from PySide6.QtGui import QColor, QPixmap, QColor, QBrush
+from PySide6.QtGui import QColor, QPixmap, QColor
 
 from UI.panorama.Algorithm.dispatcher_panorama_algorithm import run_panorama_stitching_process
 from UI.resources.animation.loading.modern_progress_bar import ModernProgressBar
@@ -55,10 +55,10 @@ class ProgressSegmentWidget(QWidget):
         
         # Layout sekarang hanya berisi progress bar
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0) # Tidak perlu margin
+        layout.setContentsMargins(0, 0, 0, 0)
         
         self.progress_bar = ModernProgressBar()
-        self.progress_bar.setFixedHeight(15) # Sedikit lebih tinggi agar lebih jelas
+        self.progress_bar.setFixedHeight(15)
         
         layout.addWidget(self.progress_bar)
 
@@ -152,29 +152,21 @@ class SingleProjectWorker(QObject):
                 target_stage=self.target_stage
             )
 
-            # <<< PERUBAHAN UTAMA DI SINI >>>
             # Buat QPixmap placeholder dengan warna berbeda untuk setiap tahap
-            pixmap = QPixmap(600, 450) # Ukuran yang layak untuk preview
+            pixmap = QPixmap(600, 450) 
             
             if self.target_stage == "alignment":
-                # Biru muda untuk alignment
                 pixmap.fill(QColor("#A8D8EA")) 
                 print(f"DEBUG: Created BLUE pixmap for '{self.target_stage}'")
             elif self.target_stage == "projection":
-                # Merah muda untuk projection
                 pixmap.fill(QColor("#F4B6C2"))
                 print(f"DEBUG: Created PINK pixmap for '{self.target_stage}'")
             elif self.target_stage == "blending":
-                # Hijau muda untuk blending
                 pixmap.fill(QColor("#A8E6CF"))
                 print(f"DEBUG: Created GREEN pixmap for '{self.target_stage}'")
             else:
-                # Warna default jika ada kesalahan
                 pixmap.fill(QColor("lightgray"))
 
-            # Dalam implementasi nyata, Anda akan mengubah 'result_data' menjadi QPixmap di sini.
-            # Untuk sekarang, kita gunakan placeholder berwarna.
-            
             self.finished.emit(pixmap, self.target_stage)
 
         except Exception as e:
@@ -189,7 +181,6 @@ class PanoramaProcessorWorker(QObject):
 
     def __init__(self, projects, output_folder, database_manager):
         super().__init__()
-        # ... (properti lain tetap sama) ...
         self.projects = projects
         self.output_folder = output_folder
         self.database_manager = database_manager
@@ -209,13 +200,10 @@ class PanoramaProcessorWorker(QObject):
                 images = self.database_manager.get_images_for_project(project_id)
                 settings = self.database_manager.get_project_workflow_settings(project_id)
 
-                # Definisikan callback untuk menerima progress dari dispatcher
                 def progress_update_handler(progress_value, status_text):
-                    # Teruskan progress ke UI
                     self.project_progress_updated.emit(i, progress_value, QColor("orange"))
                     self.overall_status_updated.emit(status_text)
                 
-                # <<< PERUBAHAN UTAMA: Panggil dispatcher yang sebenarnya >>>
                 result_image = run_panorama_stitching_process(
                     images, 
                     settings, 
@@ -224,8 +212,6 @@ class PanoramaProcessorWorker(QObject):
 
                 if result_image:
                     output_path = os.path.join(self.output_folder, f"{project_name.replace(' ', '_')}.jpg")
-                    # Di dunia nyata, Anda akan menyimpan result_image ke output_path
-                    # result_image.save(output_path)
                     
                     self.table_status_updated.emit(i, "Completed", output_path)
                     self.project_progress_updated.emit(i, 1.0, QColor("lightgreen"))
@@ -295,13 +281,13 @@ class BatchProcessDialog(QDialog):
         progress_layout = QHBoxLayout()
         progress_layout.addWidget(QLabel("Overall Progress:"))
         
-        # Label baru untuk menampilkan status (misal: "Aligning...")
+        # Label baru untuk menampilkan status 
         self.current_step_label = QLabel("Idle")
-        self.current_step_label.setStyleSheet("color: #888;") # Warna abu-abu agar tidak terlalu menonjol
+        self.current_step_label.setStyleSheet("color: #888;") 
         progress_layout.addWidget(self.current_step_label)
         progress_layout.addStretch()
         
-        main_layout.addLayout(progress_layout) # Tambahkan layout horizontal ini
+        main_layout.addLayout(progress_layout) 
         
         self.progress_bar = SegmentedProgressBar()
         main_layout.addWidget(self.progress_bar)
@@ -348,7 +334,6 @@ class BatchProcessDialog(QDialog):
         self.worker = PanoramaProcessorWorker(self.projects_to_process, self.output_folder_edit.text(), self.database_manager)
         self.worker.moveToThread(self.worker_thread)
 
-        # --- PERUBAHAN KONEKSI SINYAL ---
         self.worker.table_status_updated.connect(self._update_table_status)
         
         # Hubungkan sinyal yang sudah diubah ke slot yang benar
@@ -364,7 +349,7 @@ class BatchProcessDialog(QDialog):
         self.progress_table.item(row, 1).setText(status)
         self.progress_table.item(row, 2).setText(detail)
         
-        color = QColor("orange") # Processing
+        color = QColor("orange") 
         if status == "Completed":
             color = QColor("lightgreen")
         elif status == "Failed":
