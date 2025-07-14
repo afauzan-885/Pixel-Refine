@@ -43,19 +43,14 @@ class SinglePageLayout(QWidget):
         self.layout.setContentsMargins(0, 5, 0, 0)
 
 # ==================== LAYOUT APP ==================== #
-        # Penting: Urutan setup mungkin berpengaruh pada ketersediaan objek
-        setup_main_layout(self, self.database_manager) # Membuat left/right panel
-        setup_progress_section(self)                   # Membuat progress bar/tombol
-        setup_preview_panel(self)                      # Membuat scene/view di left_panel
-
-        # --- Inisialisasi Handler SETELAH scene/view dibuat oleh setup_preview_panel ---
+        setup_main_layout(self, self.database_manager) 
+        setup_progress_section(self)                   
+        setup_preview_panel(self)                      
         if hasattr(self, 'preview_scene') and hasattr(self, 'preview_view'):
-            # Pastikan preview_view adalah tipe Zoomable jika diperlukan
             if isinstance(getattr(self, 'preview_view', None), QWidget):
                  self.preview_handler = ImagePreviewHandler(self.preview_scene, self.preview_view, self)
             else:
                  print("Error: preview_view is not a valid QWidget for ImagePreviewHandler.")
-                 # Atau tampilkan QMessageBox kritis
         else:
             print("Error: preview_scene or preview_view not found for ImagePreviewHandler.")
             QMessageBox.critical(self, "Layout Error", "Preview panel components could not be initialized.")
@@ -63,10 +58,8 @@ class SinglePageLayout(QWidget):
 
         setup_signals(self) # Menghubungkan sinyal tombol proses/simpan
 
-        # --- Hubungkan Sinyal Preview di SINI ---
         if self.preview_handler and hasattr(self, 'right_panel'):
             try:
-                # Hubungkan sinyal dari right_panel ke slot handler
                 self.right_panel.previewImageRequested.connect(self.preview_handler.update_preview)
                 if hasattr(self.right_panel, 'imagesDropped'):
                      self.right_panel.imagesDropped.connect(self.handle_dropped_images)

@@ -2,14 +2,15 @@
 
 import os
 import time
-from PySide6.QtCore import Qt, Signal, QObject, QThread, QRectF
+from PySide6.QtCore import Signal, QObject, QThread, QRectF
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
     QWidget
 )
-from PySide6.QtGui import QColor, QPainter, QColor, QBrush
+from PySide6.QtGui import QColor, QPixmap, QColor, QBrush
 
+from UI.panorama.Algorithm.dispatcher_panorama_algorithm import run_panorama_stitching_process
 from UI.resources.animation.loading.modern_progress_bar import ModernProgressBar
 
 def stitch_panorama_placeholder(images, settings, progress_callback):
@@ -114,6 +115,70 @@ class SegmentedProgressBar(QWidget):
             segment_widget.setProgress(progress_int)
             if color:
                 segment_widget.setColor(color)
+                
+class SingleProjectWorker(QObject):
+    """Worker yang memproses satu proyek panorama di thread terpisah."""
+    # Sinyal untuk progress bar di DisplayPanel: (title, value)
+    progress_updated = Signal(str, int)
+    
+    # Sinyal saat selesai: (hasil_gambar, stage_selesai)
+    finished = Signal(QPixmap, str) 
+    
+    # Sinyal jika ada error: (pesan_error)
+    error = Signal(str)
+
+    def __init__(self, project_id, target_stage, database_manager):
+        super().__init__()
+        self.db_manager = database_manager
+        self.project_id = project_id
+        self.target_stage = target_stage # "alignment", "projection", dll.
+
+    def run(self):
+        try:
+            # 1. Ambil data dari DB
+            images = self.db_manager.get_images_for_project(self.project_id)
+            settings = self.db_manager.get_project_workflow_settings(self.project_id)
+
+            # 2. Definisikan callback untuk menerima progress
+            def progress_update_handler(progress_float, status_text):
+                progress_int = int(progress_float * 100)
+                self.progress_updated.emit(status_text, progress_int)
+
+            # 3. Panggil dispatcher utama dengan target stage
+            result_data = run_panorama_stitching_process(
+                images,
+                settings,
+                progress_update_handler,
+                target_stage=self.target_stage
+            )
+
+            # <<< PERUBAHAN UTAMA DI SINI >>>
+            # Buat QPixmap placeholder dengan warna berbeda untuk setiap tahap
+            pixmap = QPixmap(600, 450) # Ukuran yang layak untuk preview
+            
+            if self.target_stage == "alignment":
+                # Biru muda untuk alignment
+                pixmap.fill(QColor("#A8D8EA")) 
+                print(f"DEBUG: Created BLUE pixmap for '{self.target_stage}'")
+            elif self.target_stage == "projection":
+                # Merah muda untuk projection
+                pixmap.fill(QColor("#F4B6C2"))
+                print(f"DEBUG: Created PINK pixmap for '{self.target_stage}'")
+            elif self.target_stage == "blending":
+                # Hijau muda untuk blending
+                pixmap.fill(QColor("#A8E6CF"))
+                print(f"DEBUG: Created GREEN pixmap for '{self.target_stage}'")
+            else:
+                # Warna default jika ada kesalahan
+                pixmap.fill(QColor("lightgray"))
+
+            # Dalam implementasi nyata, Anda akan mengubah 'result_data' menjadi QPixmap di sini.
+            # Untuk sekarang, kita gunakan placeholder berwarna.
+            
+            self.finished.emit(pixmap, self.target_stage)
+
+        except Exception as e:
+            self.error.emit(str(e))
 
 class PanoramaProcessorWorker(QObject):
     table_status_updated = Signal(int, str, str)
@@ -144,20 +209,28 @@ class PanoramaProcessorWorker(QObject):
                 images = self.database_manager.get_images_for_project(project_id)
                 settings = self.database_manager.get_project_workflow_settings(project_id)
 
-                # --- PERUBAHAN CALLBACK HANDLER ---
+                # Definisikan callback untuk menerima progress dari dispatcher
                 def progress_update_handler(progress_value, status_text):
-                    # Pancarkan dua sinyal terpisah
+                    # Teruskan progress ke UI
                     self.project_progress_updated.emit(i, progress_value, QColor("orange"))
                     self.overall_status_updated.emit(status_text)
+                
+                # <<< PERUBAHAN UTAMA: Panggil dispatcher yang sebenarnya >>>
+                result_image = run_panorama_stitching_process(
+                    images, 
+                    settings, 
+                    progress_update_handler
+                )
 
-                result = stitch_panorama_placeholder(images, settings, progress_update_handler)
-
-                if result:
+                if result_image:
                     output_path = os.path.join(self.output_folder, f"{project_name.replace(' ', '_')}.jpg")
+                    # Di dunia nyata, Anda akan menyimpan result_image ke output_path
+                    # result_image.save(output_path)
+                    
                     self.table_status_updated.emit(i, "Completed", output_path)
                     self.project_progress_updated.emit(i, 1.0, QColor("lightgreen"))
                 else:
-                    raise RuntimeError("Stitching returned no result.")
+                    raise RuntimeError("Stitching process returned no result.")
 
             except Exception as e:
                 error_msg = str(e)

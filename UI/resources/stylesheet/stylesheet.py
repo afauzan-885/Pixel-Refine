@@ -464,16 +464,17 @@ def stylesheet_panorama_page():
             QListWidget {
                 border: 1px solid #E8EDF2;
                 border-radius: 5px;
+                outline: 0;
             }
             QListWidget::item {
                 padding: 8px;
             }
             /* Style QListWidget::item:selected BARU - OPSI 2 (Biru Jenuh) */
             QListWidget::item:selected {
-                background-color: #CDE8F4;  /* Biru yang lebih jenuh/gelap dari sebelumnya */
-                color: #003C5A;             /* Teks biru yang sangat gelap */
+                background-color: #CDE8F4;
+                color: #003C5A;
                 border-radius: 4px;
-                border: 1px solid #9ACCE4;  /* Border yang lebih terlihat */
+                border: 1px solid #9ACCE4;
             }
             /* [Opsional] Tambahkan ini untuk mengubah warna saat list tidak aktif */
             QListWidget:!focus QListWidget::item:selected {

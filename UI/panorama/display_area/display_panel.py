@@ -29,7 +29,8 @@ from PySide6.QtWidgets import (
     QGraphicsScene,
     QMessageBox,
     QFileDialog,
-    QApplication
+    QApplication,
+    QSizePolicy
 )
 
 from PIL import Image, ImageOps
@@ -317,6 +318,13 @@ class DisplayPanel(QWidget):
         preview_layout = QVBoxLayout(self.preview_view_widget)
         self.preview_label = QLabel()
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        # <<< TAMBAHKAN DUA BARIS INI >>>
+        # Beritahu label untuk mengisi ruang yang diberikan, BUKAN meminta ruang baru.
+        self.preview_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        # Pastikan konten (gambar) di-rescale agar sesuai dengan ukuran label.
+        self.preview_label.setScaledContents(True)
+
         preview_layout.addWidget(self.preview_label)
 
         self.display_stack.addWidget(self.grid_view_widget)
@@ -413,6 +421,29 @@ class DisplayPanel(QWidget):
         self.import_button.setVisible(False)
         self.back_to_grid_button.setVisible(True)
         self.back_to_preview_button.setVisible(False) 
+        
+    @Slot(QPixmap)
+    def show_preview_pixmap(self, pixmap):
+        """
+        Menampilkan hasil gambar (QPixmap) di area preview.
+        Ini adalah metode yang benar untuk menampilkan gambar.
+        """
+        if pixmap.isNull():
+            self.preview_label.setText("Preview generation failed.")
+        else:
+            # Gunakan setPixmap untuk menampilkan gambar.
+            # scaled() memastikan gambar pas di dalam label tanpa merusak rasio aspek.
+            self.preview_label.setPixmap(pixmap.scaled(
+                self.preview_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            ))
+        
+        # Sisa logika sama seperti show_preview_message
+        self.display_stack.setCurrentWidget(self.preview_view_widget)
+        self.import_button.setVisible(False)
+        self.back_to_grid_button.setVisible(True)
+        self.back_to_preview_button.setVisible(False)
 
     @Slot(str)
     def show_preview_message(self, message):
