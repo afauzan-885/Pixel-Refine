@@ -7,9 +7,13 @@ from PySide6.QtWidgets import (
     QListWidget,
     QInputDialog,
     QListWidgetItem,
+    QAbstractItemView,
+    
 )
-from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtCore import Qt, Signal, Slot, QEvent
 from PySide6.QtWidgets import QMessageBox
+
+from UI.panorama.logic.BatchProcessPano import BatchProcessDialog
 
 class WorkingRightPanel(QWidget):
     """
@@ -32,6 +36,7 @@ class WorkingRightPanel(QWidget):
         project_list_panel = self._create_project_list_panel()
         self.process_button = QPushButton("Process All Pano")
         self.process_button.setObjectName("processButton")
+        self.process_button.clicked.connect(self._show_batch_process_dialog)
 
         right_panel_layout.addWidget(project_list_panel, 1)
         right_panel_layout.addWidget(self.process_button)
@@ -53,14 +58,28 @@ class WorkingRightPanel(QWidget):
         panel_layout.addLayout(btn_layout)
 
         self.list_widget = QListWidget()
+        self.list_widget.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         panel_layout.addWidget(self.list_widget)
 
         self.btn_add.clicked.connect(self.add_new_panorama)
         self.btn_delete.clicked.connect(self.delete_selected_panorama)
-        self.list_widget.currentItemChanged.connect(self.on_project_selection_changed)
+        self.list_widget.itemSelectionChanged.connect(self.on_project_selection_changed)
         self.list_widget.itemDoubleClicked.connect(self.rename_selected_project)
-
+        self.list_widget.installEventFilter(self)
+        
         return project_panel
+    
+    def _show_batch_process_dialog(self):
+        # 1. Ambil semua proyek dari database
+        all_projects = self.database_manager.get_all_panorama_projects()
+        
+        if not all_projects:
+            QMessageBox.information(self, "No Projects", "There are no panorama projects to process.")
+            return
+
+        # 2. Buat dan tampilkan dialog, kirimkan daftar proyek dan db manager
+        dialog = BatchProcessDialog(all_projects, self.database_manager, self)
+        dialog.exec() # exec() akan menampilkan dialog sebagai modal
 
     def load_projects_from_db(self):
         """
@@ -96,22 +115,42 @@ class WorkingRightPanel(QWidget):
                         break
 
     def delete_selected_panorama(self):
-        current_item = self.list_widget.currentItem()
-        if not current_item:
+        selected_items = self.list_widget.selectedItems()
+        
+        # Jika tidak ada yang terpilih, jangan lakukan apa-apa
+        if not selected_items:
             return
-        project_id = current_item.data(Qt.UserRole)
-        project_name = current_item.text()
+
+        # Buat pesan konfirmasi yang dinamis
+        item_count = len(selected_items)
+        project_names = "\n - ".join([item.text() for item in selected_items])
+        question = (f"Are you sure you want to delete these {item_count} projects?\n\n"
+                    f" - {project_names}")
+
         reply = QMessageBox.question(
             self,
-            "Confirm Delete Project",
-            f"Are you sure you want to delete the entire project '{project_name}'?",
+            "Confirm Delete Projects",
+            question,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
+
         if reply == QMessageBox.StandardButton.Yes:
-            if self.database_manager.delete_panorama_project(project_id):
-                self.list_widget.takeItem(self.list_widget.row(current_item))
-                self.project_list_updated.emit(self.list_widget.count() > 0)
+            # Loop melalui item-item yang terpilih untuk dihapus
+            # Kita ambil datanya dulu sebelum mulai mengubah UI
+            items_to_delete = [(item.data(Qt.UserRole), item) for item in selected_items]
+            
+            for project_id, item in items_to_delete:
+                if self.database_manager.delete_panorama_project(project_id):
+                    # Hapus item dari list widget jika berhasil dihapus dari DB
+                    self.list_widget.takeItem(self.list_widget.row(item))
+                else:
+                    # Beri tahu pengguna jika ada yang gagal
+                    QMessageBox.warning(self, "Deletion Failed", 
+                                        f"Could not delete the project '{item.text()}' from the database.")
+            
+            # Pancarkan sinyal bahwa daftar proyek telah diperbarui
+            self.project_list_updated.emit(self.list_widget.count() > 0)
 
     def initiate_rename_sequence(self, item_to_rename):
         """Memulai proses rename untuk item yang diberikan."""
@@ -142,14 +181,32 @@ class WorkingRightPanel(QWidget):
             if item.data(Qt.UserRole) == project_id:
                 self.initiate_rename_sequence(item)
                 return
+    def eventFilter(self, source, event):
+        # Pastikan event berasal dari list widget dan merupakan penekanan tombol
+        if source is self.list_widget and event.type() == QEvent.Type.KeyPress:
+            # Jika tombol yang ditekan adalah DELETE
+            if event.key() == Qt.Key.Key_Delete:
+                # Panggil fungsi penghapusan kita (yang akan kita upgrade)
+                self.delete_selected_panorama()
+                # Tandai event sebagai sudah ditangani
+                return True 
+        
+        # Untuk event lainnya, teruskan ke handler default
+        return super().eventFilter(source, event)
 
-    def on_project_selection_changed(self, current_item, previous_item):
-        """Memancarkan sinyal saat pilihan proyek berubah."""
-        if current_item:
+    def on_project_selection_changed(self):
+        """Memancarkan sinyal saat seleksi berubah, menangani 0, 1, atau banyak item."""
+        selected_items = self.list_widget.selectedItems()
+        
+        # Aktifkan atau nonaktifkan tombol delete berdasarkan apakah ada seleksi
+        self.btn_delete.setEnabled(len(selected_items) > 0)
+        
+        if len(selected_items) == 1:
+            # Jika hanya satu yang terpilih, perlakukan seperti biasa
+            current_item = selected_items[0]
             project_id = current_item.data(Qt.UserRole)
             project_name = current_item.text()
-            self.btn_delete.setEnabled(True)
             self.project_selection_changed.emit(project_id, project_name)
         else:
-            self.btn_delete.setEnabled(False)
+            # Jika 0 atau lebih dari 1 yang terpilih, bersihkan panel kiri
             self.project_selection_cleared.emit()

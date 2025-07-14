@@ -444,7 +444,7 @@ def stylesheet_panorama_page():
             }
             #imageThumbnail {
                 border: 1px solid #E8EDF2;
-                background-color: #F8F9FA;
+                background-color: Transparent;
                 border-radius: 4px;
                 font-size: 14pt;
                 font-weight: bold;

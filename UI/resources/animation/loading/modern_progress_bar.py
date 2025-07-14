@@ -14,6 +14,10 @@ class ModernProgressBar(QWidget):
         self.BG_COLOR = QColor("#5A5E6B") 
         self.FG_COLOR = QColor("#2ECEBA") 
         
+    def setBarColor(self, color: QColor):
+        """Mengatur warna untuk bar foreground (progress)."""
+        self.FG_COLOR = color
+        self.update() # Repaint untuk menampilkan warna baru
        
     def setValue(self, value: int):
         """Mengatur nilai progres utama (0-100)."""

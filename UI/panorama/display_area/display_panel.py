@@ -228,12 +228,12 @@ class ThumbnailWidget(QWidget):
 
 
 class DisplayPanel(QWidget):
-    # Sinyal yang akan dikirim ke kontroler/induk
     rename_project_requested = Signal(str)
     images_to_import_selected = Signal(list)
     images_to_delete_selected = Signal(list)
     selection_count_changed = Signal(int)
     back_to_grid_requested = Signal()
+    back_to_preview_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -271,10 +271,16 @@ class DisplayPanel(QWidget):
         self.back_to_grid_button = QPushButton("Back to Import Images")
         self.back_to_grid_button.clicked.connect(self.back_to_grid_requested.emit)
 
+        # <<< BARU: Tombol untuk kembali ke preview terakhir
+        self.back_to_preview_button = QPushButton("Restore Preview")
+        self.back_to_preview_button.clicked.connect(self.back_to_preview_requested.emit)
+        self.back_to_preview_button.setVisible(False) # Sembunyikan secara default
+
         header_layout = QHBoxLayout()
         header_layout.addWidget(self.title_label)
-        header_layout.addStretch()
         header_layout.addWidget(self.import_button)
+        header_layout.addStretch()
+        header_layout.addWidget(self.back_to_preview_button) # <<< BARU: Tambahkan ke layout
         header_layout.addWidget(self.back_to_grid_button)
         container_layout.addLayout(header_layout)
 
@@ -293,8 +299,8 @@ class DisplayPanel(QWidget):
         
         processing_container = QWidget()
         processing_layout = QVBoxLayout(processing_container)
-        processing_layout.setContentsMargins(50, 50, 50, 50) # Margin
-        self.processing_view = ProcessingView() # Widget kita
+        processing_layout.setContentsMargins(50, 50, 50, 50)
+        self.processing_view = ProcessingView()
         processing_layout.addWidget(self.processing_view)
 
         # Halaman 2: Hasil Preview (Label seperti sebelumnya)
@@ -319,6 +325,10 @@ class DisplayPanel(QWidget):
         main_layout.addWidget(display_container)
 
     # --- Slot Publik (Dipanggil oleh Kontroler) ---
+    
+    @Slot(bool)
+    def set_restore_button_visibility(self, visible):
+        self.back_to_preview_button.setVisible(visible)
 
     @Slot(int, str, list)
     def load_project(self, project_id, project_name, image_paths):
@@ -402,6 +412,7 @@ class DisplayPanel(QWidget):
         self.display_stack.setCurrentWidget(self.result_label)
         self.import_button.setVisible(False)
         self.back_to_grid_button.setVisible(True)
+        self.back_to_preview_button.setVisible(False) 
 
     @Slot(str)
     def show_preview_message(self, message):
@@ -410,6 +421,7 @@ class DisplayPanel(QWidget):
         self.display_stack.setCurrentWidget(self.preview_view_widget)
         self.import_button.setVisible(False)
         self.back_to_grid_button.setVisible(True)
+        self.back_to_preview_button.setVisible(False)
 
     @Slot()
     def show_grid_view(self):
@@ -417,6 +429,7 @@ class DisplayPanel(QWidget):
         self.display_stack.setCurrentWidget(self.grid_view_widget)
         self.import_button.setVisible(self.project_id is not None)
         self.back_to_grid_button.setVisible(False)
+        self.back_to_preview_button.setVisible(False) # Pastikan disembunyikan juga
 
     def import_images(self):
         if not self.project_id:

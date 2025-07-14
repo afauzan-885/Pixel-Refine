@@ -17,6 +17,7 @@ class WorkingLeftPanel(QWidget):
         self.current_project_id = None
         self.projects_exist = False
         self.latest_successful_stage = "grid"
+        self.last_preview_info = None 
         self.slide_animator = StackedWidgetAnimator()
         self.height_animator = HeightAnimator(self)
 
@@ -42,12 +43,13 @@ class WorkingLeftPanel(QWidget):
         self._connect_signals()
 
     def _connect_signals(self):
-        """Menghubungkan sinyal dari anak ke slot di kontroler ini."""
+        """Menghubungkan sinyal dari anak ke kontroler ini."""
         # Dari DisplayPanel
         self.display_panel.rename_project_requested.connect(self._on_rename_request)
         self.display_panel.images_to_import_selected.connect(self._on_images_imported)
         self.display_panel.images_to_delete_selected.connect(self._on_images_deleted)
         self.display_panel.back_to_grid_requested.connect(self._on_back_to_grid_request)
+        self.display_panel.back_to_preview_requested.connect(self._on_back_to_preview_request)
 
         # Dari WorkflowPanel
         self.workflow_panel.setting_changed.connect(self._on_workflow_setting_changed)
@@ -57,11 +59,12 @@ class WorkingLeftPanel(QWidget):
     def update_display_for_project(self, project_id, project_name):
         self.current_project_id = project_id
         self.latest_successful_stage = "grid"
+        self.last_preview_info = None # <<< MODIFIKASI: Reset memori saat ganti proyek
 
-        # 1. Muat data
         image_paths = self.database_manager.get_images_for_project(project_id)
         settings = self.database_manager.get_project_workflow_settings(project_id)
-
+        
+        self.display_panel.show_grid_view() 
         self.display_panel.load_project(project_id, project_name, image_paths)
 
         if image_paths:
@@ -103,6 +106,7 @@ class WorkingLeftPanel(QWidget):
     @Slot()
     def clear_display(self):
         self.current_project_id = None
+        self.last_preview_info = None 
         self.display_panel.clear_display(no_projects_exist=(not self.projects_exist))
         
         if self.workflow_stack.height() > 0:
@@ -163,20 +167,38 @@ class WorkingLeftPanel(QWidget):
     @Slot()
     def _on_back_to_grid_request(self):
         self.display_panel.show_grid_view()
-        # Perbarui juga state di workflow panel
+        
+        if self.last_preview_info:
+            self.display_panel.set_restore_button_visibility(True)
+
         image_paths = self.database_manager.get_images_for_project(
             self.current_project_id
         )
         self.workflow_panel.update_workflow_stage(
             self.latest_successful_stage, has_images=bool(image_paths)
         )
+        
+    @Slot()
+    def _on_back_to_preview_request(self):
+        if not self.last_preview_info:
+            return
+
+        stage, message, tab_index = self.last_preview_info
+
+        if stage == "aligned":
+            self.display_panel.show_preview_result(message)
+        else: 
+            self.display_panel.show_preview_message(message)
+
+        image_paths = self.database_manager.get_images_for_project(self.current_project_id)
+        self.workflow_panel.update_workflow_stage(stage, has_images=bool(image_paths))
+        self.workflow_panel.tab_widget.setCurrentIndex(tab_index)
 
     @Slot(str)
     def _on_preview_requested(self, stage_name):
         """Menangani permintaan preview dengan progress bar modern."""
         self.progress_timer.stop()
         
-        # Ganti "message" menjadi "title" agar lebih deskriptif
         simulations = {
             "alignment": {"title": "Aligning Images", "delay": 2500, "callback": self._on_alignment_finished},
             "projection": {"title": "Applying Projection", "delay": 1500, "callback": self._on_projection_finished},
@@ -210,10 +232,12 @@ class WorkingLeftPanel(QWidget):
                 self._current_process_callback = None
 
 
-    # --- Simulasi Proses Workflow (sekarang berada di Kontroler) ---
     def _on_alignment_finished(self):
         print("SIMULASI: Alignment selesai.")
-        self.display_panel.show_preview_result("DUMMY ALIGNMENT RESULT")
+        message = "DUMMY ALIGNMENT RESULT"
+        self.last_preview_info = ("aligned", message, 0)
+
+        self.display_panel.show_preview_result(message)
         self.latest_successful_stage = "aligned"
         image_paths = self.database_manager.get_images_for_project(
             self.current_project_id
@@ -225,7 +249,10 @@ class WorkingLeftPanel(QWidget):
 
     def _on_projection_finished(self):
         print("SIMULASI: Proyeksi selesai.")
-        self.display_panel.show_preview_message("DUMMY PROJECTION RESULT")
+        message = "DUMMY PROJECTION RESULT"
+        self.last_preview_info = ("projected", message, 1)
+
+        self.display_panel.show_preview_message(message)
         self.latest_successful_stage = "projected"
         image_paths = self.database_manager.get_images_for_project(
             self.current_project_id
@@ -237,7 +264,10 @@ class WorkingLeftPanel(QWidget):
 
     def _on_blending_finished(self):
         print("SIMULASI: Blending selesai.")
-        self.display_panel.show_preview_message("DUMMY FINAL PREVIEW")
+        message = "DUMMY FINAL PREVIEW"
+        self.last_preview_info = ("blended", message, 2)
+
+        self.display_panel.show_preview_message(message)
         self.latest_successful_stage = "blended"
         image_paths = self.database_manager.get_images_for_project(
             self.current_project_id
