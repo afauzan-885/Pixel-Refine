@@ -10,32 +10,31 @@ class PanoramaWorker(QObject):
     finished = Signal(str, object)
     error = Signal(str)
 
-    def __init__(self, image_paths, settings, target_stage):
+    def __init__(self, image_paths, settings, target_stage, 
+                 cached_alignment=None, cached_projection=None):
         super().__init__()
         self.image_paths = image_paths
         self.settings = settings
         self.target_stage = target_stage
+        self.cached_alignment = cached_alignment
+        self.cached_projection = cached_projection
         self.is_running = True
 
     def run(self):
-        """
-        Metode utama yang akan dieksekusi di dalam thread.
-        """
         try:
-            # Fungsi callback yang akan kita teruskan ke algoritma
             def progress_callback(percentage, message):
-                # Konversi persentase dari 0.0-1.0 ke 0-100
                 self.progress_updated.emit(int(percentage * 100), message)
 
-            # Jalankan algoritma sesungguhnya
+            # MODIFIKASI: Teruskan data cache ke fungsi proses
             result = run_panorama_stitching_process(
                 images=self.image_paths, 
                 settings=self.settings,
                 progress_callback=progress_callback,
-                target_stage=self.target_stage
+                target_stage=self.target_stage,
+                cached_alignment_data=self.cached_alignment,
+                cached_projection_data=self.cached_projection
             )
             
-            # Jika berhasil, pancarkan sinyal 'finished'
             self.finished.emit(self.target_stage, result)
 
         except Exception as e:

@@ -14,6 +14,8 @@ class WorkingLeftPanel(QWidget):
     def __init__(self, database_manager, parent=None):
         super().__init__(parent)
         self.database_manager = database_manager
+        self.cached_alignment_result = None
+        self.cached_projection_result = None
 
         self.current_project_id = None
         self.projects_exist = False
@@ -58,6 +60,8 @@ class WorkingLeftPanel(QWidget):
         self.current_project_id = project_id
         self.latest_successful_stage = "grid"
         self.last_preview_info = None # <<< MODIFIKASI: Reset memori saat ganti proyek
+        self.cached_alignment_result = None
+        self.cached_projection_result = None
 
         image_paths = self.database_manager.get_images_for_project(project_id)
         settings = self.database_manager.get_project_workflow_settings(project_id)
@@ -105,6 +109,8 @@ class WorkingLeftPanel(QWidget):
     def clear_display(self):
         self.current_project_id = None
         self.last_preview_info = None 
+        self.cached_alignment_result = None
+        self.cached_projection_result = None
         self.display_panel.clear_display(no_projects_exist=(not self.projects_exist))
         
         if self.workflow_stack.height() > 0:
@@ -156,7 +162,21 @@ class WorkingLeftPanel(QWidget):
 
     @Slot(str, str)
     def _on_workflow_setting_changed(self, setting_key, value): 
-        """Menyimpan perubahan setting workflow ke DB."""
+        """Menyimpan perubahan dan MENG-INVALIDASI CACHE yang relevan."""
+        # Daftar pengaturan untuk setiap tahap
+        alignment_settings = ['align_algorithm', 'akaze_threshold', 'orb_nfeatures'] # Tambahkan setting alignment lain
+        projection_settings = ['projection_type', 'projection_scale'] # Tambahkan setting proyeksi lain
+
+        # Logika invalidasi
+        if setting_key in alignment_settings:
+            print("INFO: Pengaturan alignment berubah. Membersihkan cache alignment dan projection.")
+            self.cached_alignment_result = None
+            self.cached_projection_result = None
+        elif setting_key in projection_settings:
+            print("INFO: Pengaturan proyeksi berubah. Membersihkan cache projection.")
+            self.cached_projection_result = None
+            
+        # Simpan perubahan ke DB seperti biasa
         if self.current_project_id:
             self.database_manager.save_project_workflow_setting(
                 self.current_project_id, setting_key, value
@@ -225,31 +245,31 @@ class WorkingLeftPanel(QWidget):
 
     @Slot(str, object)
     def _on_stitching_finished(self, stage_name, result):
-        """Menangani hasil yang sukses dari worker."""
-        print(f"PROSES NYATA: {stage_name} selesai.")
-        
-        # Di sini kita memanggil fungsi-fungsi "finished" LAMA Anda,
-        # tapi sekarang dengan data HASIL NYATA, bukan dummy.
-        # Ini mempertahankan logika UI Anda!
+        """Menangani hasil dan MENYIMPANNYA KE CACHE."""
+        print(f"PROSES NYATA: {stage_name} selesai. Menyimpan hasil ke cache.")
+
+        # BARU: Simpan hasil ke variabel cache yang sesuai
         if stage_name == "alignment":
+            self.cached_alignment_result = result
+            # Penting: Jika alignment dijalankan ulang, cache proyeksi jadi tidak valid
+            self.cached_projection_result = None 
             self._on_alignment_finished(result)
         elif stage_name == "projection":
+            self.cached_projection_result = result
             self._on_projection_finished(result)
         elif stage_name == "blending":
+            # Hasil blending adalah final, tidak perlu di-cache untuk tahap selanjutnya
             self._on_blending_finished(result)
             
-        self.cleanup_thread() # Membersihkan thread setelah selesai
-
-    # BARU: Slot untuk menangani error dari worker
+        self.cleanup_thread()
+    
     @Slot(str)
     def _on_stitching_error(self, error_message):
         print(f"ERROR: {error_message}")
         QMessageBox.critical(self, "Processing Error", error_message)
-        # Kembalikan UI ke keadaan sebelum proses dimulai
         self._on_back_to_grid_request() 
         self.cleanup_thread()
 
-    # BARU: Fungsi untuk membereskan thread
     def cleanup_thread(self):
         if self.thread is not None:
             self.thread.quit()
@@ -257,14 +277,12 @@ class WorkingLeftPanel(QWidget):
         self.thread = None
         self.worker = None
 
-    # --- MODIFIKASI BAGIAN UTAMA ---
     
     @Slot(str)
     def _on_preview_requested(self, stage_name):
         """
         MODIFIKASI: Menangani permintaan preview dengan menjalankan worker di thread baru.
         """
-        # Hentikan thread lama jika masih berjalan
         if self.thread and self.thread.isRunning():
             QMessageBox.warning(self, "Process Running", "Another process is already running. Please wait.")
             return
@@ -277,6 +295,27 @@ class WorkingLeftPanel(QWidget):
             
         settings = self.database_manager.get_project_workflow_settings(self.current_project_id)
         
+        # MODIFIKASI UTAMA: Tentukan data cache mana yang akan digunakan
+        align_cache = None
+        proj_cache = None
+
+        if stage_name == "projection":
+            if self.cached_alignment_result is None:
+                QMessageBox.information(self, "Langkah Dibutuhkan", 
+                                        "Silakan jalankan tahap 'Alignment' terlebih dahulu sebelum melihat pratinjau proyeksi.")
+                return
+            align_cache = self.cached_alignment_result
+            
+        elif stage_name == "blending":
+            if self.cached_projection_result is not None:
+                proj_cache = self.cached_projection_result
+            elif self.cached_alignment_result is not None:
+                align_cache = self.cached_alignment_result
+            else:
+                QMessageBox.information(self, "Langkah Dibutuhkan", 
+                                        "Silakan jalankan tahap 'Alignment' dan 'Projection' terlebih dahulu.")
+                return
+        
         titles = {
             "alignment": "Aligning Images",
             "projection": "Applying Projection",
@@ -286,12 +325,15 @@ class WorkingLeftPanel(QWidget):
         # 2. Siapkan UI untuk processing
         self.display_panel.show_processing_view(titles.get(stage_name, "Processing..."))
         
-        # 3. Buat dan jalankan Worker
+        # Buat thread dan worker dengan data cache yang relevan
         self.thread = QThread()
         self.worker = PanoramaWorker(
             image_paths=image_paths,
             settings=settings,
-            target_stage=stage_name
+            target_stage=stage_name,
+            # Teruskan cache ke worker
+            cached_alignment=align_cache,
+            cached_projection=proj_cache
         )
         self.worker.moveToThread(self.thread)
 
@@ -303,9 +345,6 @@ class WorkingLeftPanel(QWidget):
         
         # 5. Mulai thread
         self.thread.start()
-
-    # --- MODIFIKASI FUNGSI-FUNGSI FINISHED ---
-    # Sekarang mereka menerima 'result' sebagai argumen
 
     def _on_alignment_finished(self, aligned_data): # MODIFIKASI: Terima 'aligned_data'
         # 'aligned_data' sekarang adalah hasil nyata dari run_akaze_alignment, dll.
