@@ -56,17 +56,39 @@ class WorkflowPanel(QWidget):
         main_layout = QVBoxLayout(content)
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
         main_layout.addWidget(QLabel("Alignment Algorithm:"))
+
         self.combo_align = QComboBox()
-        self.combo_align.addItems(["AKAZE", "ORB", "SIFT", "BRISK"])
+
+        # 1. Definisikan nilai internal yang akan digunakan oleh sistem.
+        self._align_algorithms = [
+            "Standard_Homography", "ORB", "SIFT", "BRISK"
+        ]
+
+        # 2. Buat label yang akan ditampilkan di UI (user-friendly).
+        display_labels = [s.replace("_", " ") for s in self._align_algorithms]
+
+        # 3. Buat kamus untuk memetakan label UI ke nilai sistem.
+        self._align_label_to_value = dict(zip(display_labels, self._align_algorithms))
+        # Kamus sebaliknya (opsional, tapi bisa berguna untuk menyetel UI dari kode)
+        self._align_value_to_label = dict(zip(self._align_algorithms, display_labels))
+
+        # 4. Tambahkan label yang user-friendly ke dalam QComboBox.
+        self.combo_align.addItems(display_labels)
+
+        # 5. Hubungkan sinyal. CUKUP SATU KONEKSI.
         self.combo_align.currentTextChanged.connect(
-            lambda value: self.setting_changed.emit("align_algorithm", value) # BENAR: Memancarkan sinyal
+            lambda label: self.setting_changed.emit(
+                "align_algorithm", self._align_label_to_value.get(label)
+            )
         )
+
         combo_layout = QHBoxLayout()
         combo_layout.addWidget(self.combo_align)
-        combo_layout.addSpacing(5)
         combo_layout.addStretch()
         main_layout.addLayout(combo_layout)
+
         return content
 
     def _create_projection_tab_content(self):

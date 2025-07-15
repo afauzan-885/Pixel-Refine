@@ -1,19 +1,7 @@
-# panorama_algorithms.py
-
 import time
 
-# --- Bagian Alignment ---
-
-def run_akaze_alignment(images, settings, progress_callback):
-    """Fungsi untuk menjalankan alignment AKAZE."""
-    print("ALGORITHM: Running AKAZE Alignment...")
-    # Lakukan pekerjaan berat di sini...
-    progress_callback(0.5, "Detecting features...") # Progress 50% dari tahap ini
-    time.sleep(0.5)
-    progress_callback(1.0, "Matching features...") # Progress 100% dari tahap ini
-    print("ALGORITHM: AKAZE Alignment finished.")
-    # Kembalikan hasilnya (misalnya, gambar yang sudah di-align)
-    return "akaze_result"
+import cv2
+import numpy as np
 
 def run_orb_alignment(images, settings, progress_callback):
     """Fungsi untuk menjalankan alignment ORB."""

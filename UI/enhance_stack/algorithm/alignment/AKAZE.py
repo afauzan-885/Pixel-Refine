@@ -28,8 +28,6 @@ class AKAZEAlgorithm:
         if not os.path.exists(hdf5_folder):
             os.makedirs(hdf5_folder)
 
-    
-        
     def get_all_image_paths_for_batch_process(self, batch_id):
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()

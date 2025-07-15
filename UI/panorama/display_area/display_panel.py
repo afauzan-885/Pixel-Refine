@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 
 from PIL import Image, ImageOps
 from PIL.ImageQt import ImageQt
+import cv2
 
 from UI.enhance_stack.components.batch_page_layout.thumbnail import (
     ThumbnailLoader,
@@ -299,20 +300,83 @@ class DisplayPanel(QWidget):
         # View Preview
         self.preview_view_widget = QWidget()
         preview_layout = QVBoxLayout(self.preview_view_widget)
-        self.preview_label = QLabel()
-        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preview_layout.setContentsMargins(0, 0, 0, 0) # Hapus margin
+        # self.preview_label = QLabel()
+        # self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        # Beritahu label untuk mengisi ruang yang diberikan, BUKAN meminta ruang baru.
-        self.preview_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        self.preview_label.setScaledContents(True)
+        # # Beritahu label untuk mengisi ruang yang diberikan, BUKAN meminta ruang baru.
+        # self.preview_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        # self.preview_label.setScaledContents(True)
 
-        preview_layout.addWidget(self.preview_label)
+        # preview_layout.addWidget(self.preview_label)
+        self.zoomable_preview = Zoomable() 
+        preview_layout.addWidget(self.zoomable_preview)
+        widgets_in_stack = [self.display_stack.widget(i) for i in range(self.display_stack.count())]
+        if self.grid_view_widget not in widgets_in_stack:
+            self.display_stack.addWidget(self.grid_view_widget)
 
-        self.display_stack.addWidget(self.grid_view_widget)
-        self.display_stack.addWidget(self.preview_view_widget)
+        # self.display_stack.addWidget(self.grid_view_widget)
+        # self.display_stack.addWidget(self.preview_view_widget)
+        if self.preview_view_widget not in widgets_in_stack:
+             self.display_stack.addWidget(self.preview_view_widget)
 
         main_layout.addWidget(display_container)
+        
+    def display_zoomable_image(self, numpy_image, max_preview_dim=4096):
+        """
+        Menampilkan gambar NumPy di Zoomable view dengan resolusi yang aman.
+        Versi ini telah diperbaiki untuk menangani kasus di mana scene belum ada.
+        
+        Args:
+            numpy_image (np.ndarray): Gambar BGR dari OpenCV.
+            max_preview_dim (int): Dimensi maksimum (lebar/tinggi) untuk preview.
+        """
+        
+        # 1. Dapatkan scene dari view.
+        scene = self.zoomable_preview.scene()
 
+        # 2. Periksa apakah scene ada. Jika tidak, buat dan atur.
+        if scene is None:
+            scene = QGraphicsScene(self.zoomable_preview)
+            self.zoomable_preview.setScene(scene)
+        
+        if numpy_image is None:
+            scene.clear()
+            return
+            
+        # 1. STRATEGI RESOLUSI CERDAS: Kecilkan gambar jika terlalu besar
+        h, w = numpy_image.shape[:2]
+        display_image = numpy_image
+        if h > max_preview_dim or w > max_preview_dim:
+            scale = max_preview_dim / max(h, w)
+            new_w, new_h = int(w * scale), int(h * scale)
+            print(f"INFO: Mengecilkan preview dari {w}x{h} ke {new_w}x{new_h} untuk performa.")
+            display_image = cv2.resize(numpy_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        # 2. Konversi gambar yang sudah aman ukurannya ke QPixmap
+        try:
+            rgb_image = cv2.cvtColor(display_image, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb_image.shape
+            bytes_per_line = ch * w
+            qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+            pixmap = QPixmap.fromImage(qt_image)
+        except Exception as e:
+            print(f"Error converting image for display: {e}")
+            scene.clear() 
+            return
+
+        # 3. Hapus item lama dari scene dan tambahkan yang baru
+        scene.clear() 
+        pixmap_item = scene.addPixmap(pixmap)
+        
+        # 4. Atur view agar gambar pas di layar saat pertama kali ditampilkan
+        self.zoomable_preview.fitInView(pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+        
+        # 5. Tampilkan panel preview dan atur visibilitas tombol
+        self.display_stack.setCurrentWidget(self.preview_view_widget)
+        self.import_button.setVisible(False)
+        self.back_to_grid_button.setVisible(True)
+        self.back_to_preview_button.setVisible(False)
     
     @Slot(bool)
     def set_restore_button_visibility(self, visible):

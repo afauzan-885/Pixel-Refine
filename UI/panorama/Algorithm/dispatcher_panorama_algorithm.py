@@ -1,11 +1,9 @@
-# Di dalam panorama_algorithms.py (setelah fungsi-fungsi di atas)
-
-# Definisikan pemetaan dari nama di dropdown ke fungsi yang sebenarnya
-from UI.panorama.logic.panorama_algorithms import run_akaze_alignment, run_blending, run_orb_alignment, run_projection
+from UI.panorama.Algorithm.stitching.Standart_Homography import run_standart_homography
+from UI.panorama.logic.panorama_algorithms import run_blending, run_orb_alignment, run_projection
 
 
 ALIGNMENT_DISPATCHER = {
-    "AKAZE": run_akaze_alignment,
+    "Standard_Homography": run_standart_homography,
     "ORB": run_orb_alignment,
     # "SIFT": run_sift_alignment, # Tambahkan yang lain di sini
     # "BRISK": run_brisk_alignment,
@@ -38,16 +36,14 @@ def run_panorama_stitching_process(
         return final_image
 
     # --- TAHAP 2: PROJECTION ---
-    # Jika data alignment ada, mulai dari sini
     if cached_alignment_data is not None:
         aligned_data = cached_alignment_data
         progress_callback(0.0, "Using cached alignment. Starting Projection...")
     else:
-        # Jika tidak ada cache, jalankan alignment seperti biasa
         if len(images) < 2:
             raise ValueError("Not enough images to create a panorama.")
             
-        align_choice = settings.get('align_algorithm', 'AKAZE')
+        align_choice = settings.get('align_algorithm', 'Standard_Homography')
         align_function = ALIGNMENT_DISPATCHER.get(align_choice)
         
         if not align_function:
