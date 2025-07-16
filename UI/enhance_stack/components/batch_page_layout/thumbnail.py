@@ -20,67 +20,61 @@ except OSError as e:
 
 class ThumbnailLoader(QThread):
     """
-    Thread yang TAHAN BANTING untuk memuat thumbnail gambar.
-    Dijamin akan selalu mengirim sinyal 'thumbnail_ready' dengan hasil yang jelas
-    (gambar valid atau gambar null jika gagal).
+    Versi yang dioptimalkan: lebih cepat merespons permintaan berhenti.
     """
     thumbnail_ready = Signal(QImage, str)
 
     def __init__(self, image_path, parent=None):
         super().__init__(parent)
         self.image_path = image_path
+        # Pause/Resume logic tidak diubah, karena sudah benar.
         self.paused = False
         self.mutex = QMutex()
         self.cond = QWaitCondition()
-         
+
     def pause(self):
-        # Metode ini sudah benar, tidak perlu diubah.
         self.mutex.lock()
         self.paused = True
         self.mutex.unlock()
 
     def resume(self):
-        # Metode ini sudah benar, tidak perlu diubah.
         self.mutex.lock()
         self.paused = False
         self.cond.wakeAll()
         self.mutex.unlock()
 
     def run(self):
-        # === PRINSIP 1: DEKLARASIKAN HASIL AKHIR DI AWAL ===
-        # 'result_image' akan menjadi "paket" yang kita kirim.
-        # Kita mulai dengan asumsi paketnya kosong (gagal).
         result_image = QImage()
-
-        # === PRINSIP 2: MANAJEMEN SUMBER DAYA AMAN dengan try...finally ===
-        # Semua logika inti ada di dalam 'try'. 'finally' akan SELALU dijalankan,
-        # memastikan semaphore dilepaskan dan sinyal dikirim, bahkan jika ada crash.
         semaphore.acquire()
         try:
-            # --- Langkah A: Cek Pause/Resume ---
+            # === OPTIMASI: Cek interupsi lebih awal ===
+            # Jika thread sudah diminta berhenti bahkan sebelum mulai, keluar segera.
+            if self.isInterruptionRequested():
+                return # Langsung ke 'finally'
+
             self.mutex.lock()
             while self.paused:
                 self.cond.wait(self.mutex)
             self.mutex.unlock()
 
-            # --- Langkah B: Coba Muat dari Cache ---
             cache_path = os.path.join(CACHE_DIR, os.path.basename(self.image_path) + ".jpg")
             if QFile.exists(cache_path):
                 cached_image = QImage(cache_path)
                 if not cached_image.isNull():
-                    # Jika cache valid, kita tetapkan sebagai hasil dan selesai.
-                    # 'return' di sini aman karena kita akan masuk ke 'finally'.
                     result_image = cached_image
-                    return # Melompat langsung ke blok 'finally'
+                    return 
+            
+            # === OPTIMASI: Cek interupsi sebelum proses berat ===
+            # Jika cache tidak ada, cek lagi sebelum memulai pemrosesan file asli.
+            if self.isInterruptionRequested():
+                return # Langsung ke 'finally'
 
-            # --- Langkah C: Proses File Asli (jika cache gagal) ---
-            # 'processed_image' adalah hasil sementara dari pemrosesan berat.
             processed_image = QImage() 
             ext = os.path.splitext(self.image_path)[1].lower()
 
             try:
-                # Blok try...except internal ini untuk menangani error spesifik
-                # saat memproses file, tanpa menghentikan seluruh thread.
+                # Logika pemrosesan file Anda sudah bagus dan tidak perlu diubah.
+                # (kode untuk JPG, PNG, RAW tetap sama)
                 if ext in SUPPORTED_FORMATS["jpg"] + SUPPORTED_FORMATS["png"] + SUPPORTED_FORMATS["tiff"]:
                     pil_img = Image.open(self.image_path)
                     pil_img = ImageOps.exif_transpose(pil_img)
@@ -102,34 +96,21 @@ class ThumbnailLoader(QThread):
                     height, width, channel = img_array.shape
                     bytes_per_line = 3 * width
                     processed_image = QImage(img_array.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).copy()
-            
+
             except Exception as e:
-                # SELF-REPAIR: Jika ada masalah (file rusak, dll.), kita tidak crash.
-                # Kita hanya mencatat error dan melanjutkan. 'processed_image' akan tetap kosong.
                 print(f"SELF-REPAIR: Gagal memproses {self.image_path}. Error: {e}")
 
-            # --- Langkah D: Finalisasi Hasil (Skalakan & Simpan ke Cache) ---
             if not processed_image.isNull():
-                # Jika pemrosesan berhasil, kita skalakan dan simpan ke cache.
                 scaled_image = processed_image.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
                 scaled_image.save(cache_path, "JPG", quality=85)
-                
-                # Tetapkan gambar yang sudah diskalakan sebagai hasil akhir kita.
                 result_image = scaled_image
 
         finally:
-            # === PRINSIP 3: SATU TITIK KELUAR & PEMBERSIHAN ===
-            # Blok ini adalah jaminan. Akan selalu dieksekusi, apa pun yang terjadi di 'try'.
-            
-            # 1. Lepaskan semaphore agar thread lain bisa berjalan.
             semaphore.release()
-            
-            # 2. Kirim "paket" ke tujuan. 'result_image' akan berisi:
-            #    - Gambar dari cache (jika valid).
-            #    - Gambar yang baru diproses dan diskalakan (jika berhasil).
-            #    - QImage kosong (jika semua usaha di atas gagal).
-            # TIDAK ADA LAGI UnboundLocalError karena 'result_image' selalu ada.
-            self.thumbnail_ready.emit(result_image, self.image_path)
+            # Hanya emit sinyal jika thread tidak diminta untuk berhenti.
+            # Ini mencegah widget yang sudah tidak relevan untuk mencoba update.
+            if not self.isInterruptionRequested():
+                self.thumbnail_ready.emit(result_image, self.image_path)
 
 
 def thumbnail_placeholder(list_layout, image_path, placeholders, retry_count=0):
@@ -196,13 +177,11 @@ def show_thumbnail(ref_layout, image, image_path, animator=None, retry_count=0):
             widget = item.widget()
 
             if isinstance(widget, QStackedWidget) and getattr(widget, "image_path", None) == image_path:
-                # Cek apakah sudah ada thumbnail yang valid (hindari duplikasi)
                 for j in range(widget.count()):
                     w = widget.widget(j)
                     if isinstance(w, QLabel) and w.pixmap() is not None and not w.pixmap().isNull():
-                        return  # Sudah ada thumbnail valid, tidak perlu fade lagi
-
-                # === Buat thumbnail label baru
+                        return  
+                    
                 thumb_label = QLabel()
                 thumb_label.setPixmap(pixmap.scaledToHeight(80, Qt.TransformationMode.SmoothTransformation))
                 thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -213,9 +192,8 @@ def show_thumbnail(ref_layout, image, image_path, animator=None, retry_count=0):
                 widget.addWidget(thumb_label)
                 widget.setCurrentWidget(thumb_label)
 
-                # === Tambahkan efek fade-in (jika animator tersedia)
                 if animator:
-                    thumb_label.setGraphicsEffect(None)  # Hapus efek sebelumnya jika ada
+                    thumb_label.setGraphicsEffect(None)
                     fade_in(animator, widget, thumb_label)
 
                 return
@@ -225,12 +203,39 @@ def show_thumbnail(ref_layout, image, image_path, animator=None, retry_count=0):
             QTimer.singleShot(100, lambda: show_thumbnail(ref_layout, image, image_path, animator, retry_count + 1))
 
 def stop_process_thumbnails(threads):
+    """
+    Menghentikan semua thread thumbnail dengan aman dan sinkron.
+    Fungsi ini sekarang akan memblokir sampai semua thread benar-benar berhenti
+    sebelum membersihkan daftar referensi.
+    """
     if not threads:
         return
 
+    # Fase 1: Minta semua thread untuk berhenti dan putuskan koneksi sinyal.
+    # Ini dilakukan terlebih dahulu agar thread berhenti menerima permintaan baru
+    # dan kita tidak lagi memproses sinyal dari thread yang akan dihentikan.
     for thread in threads:
         if thread.isRunning():
-            thread.thumbnail_ready.disconnect()
-            thread.quit()
+            try:
+                # Mencegah slot dipanggil setelah kita tidak lagi menginginkannya.
+                thread.thumbnail_ready.disconnect()
+            except (TypeError, RuntimeError):
+                # Abaikan error jika sinyal sudah terputus.
+                pass
+            
+            # Meminta thread untuk berhenti. Ini akan mengatur flag internal
+            # yang bisa kita periksa di dalam metode run().
+            thread.requestInterruption()
 
-    QTimer.singleShot(100, lambda: threads.clear())
+    # Fase 2: Tunggu setiap thread untuk benar-benar selesai.
+    # Ini adalah bagian yang memblokir dan merupakan kunci dari perbaikan.
+    for thread in threads:
+        if thread.isRunning():
+            # .wait() akan menjeda eksekusi di sini sampai metode .run()
+            # dari thread tersebut selesai sepenuhnya.
+            thread.wait()
+
+    # Fase 3: Sekarang 100% aman untuk membersihkan daftar.
+    # Semua objek thread sudah tidak aktif, sehingga tidak akan ada lagi
+    # 'destroyed while running' error.
+    threads.clear()
