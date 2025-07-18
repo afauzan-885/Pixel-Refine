@@ -20,95 +20,97 @@ except OSError as e:
 
 class ThumbnailLoader(QThread):
     """
-    Versi yang dioptimalkan: lebih cepat merespons permintaan berhenti.
+    Versi yang telah di-upgrade sepenuhnya menggunakan Pillow untuk kecepatan,
+    keandalan, dan koreksi orientasi otomatis.
     """
     thumbnail_ready = Signal(QImage, str)
 
     def __init__(self, image_path, parent=None):
         super().__init__(parent)
         self.image_path = image_path
-        # Pause/Resume logic tidak diubah, karena sudah benar.
         self.paused = False
         self.mutex = QMutex()
         self.cond = QWaitCondition()
 
+    # Metode pause() dan resume() tidak perlu diubah
     def pause(self):
-        self.mutex.lock()
-        self.paused = True
-        self.mutex.unlock()
+        self.mutex.lock(); self.paused = True; self.mutex.unlock()
 
     def resume(self):
-        self.mutex.lock()
-        self.paused = False
-        self.cond.wakeAll()
-        self.mutex.unlock()
+        self.mutex.lock(); self.paused = False; self.cond.wakeAll(); self.mutex.unlock()
 
     def run(self):
         result_image = QImage()
         semaphore.acquire()
         try:
-            # === OPTIMASI: Cek interupsi lebih awal ===
-            # Jika thread sudah diminta berhenti bahkan sebelum mulai, keluar segera.
-            if self.isInterruptionRequested():
-                return # Langsung ke 'finally'
+            if self.isInterruptionRequested(): return
 
             self.mutex.lock()
-            while self.paused:
-                self.cond.wait(self.mutex)
+            while self.paused: self.cond.wait(self.mutex)
             self.mutex.unlock()
 
+            # <<< PERUBAHAN: Ukuran thumbnail yang diinginkan
+            THUMBNAIL_SIZE = (128, 128)
             cache_path = os.path.join(CACHE_DIR, os.path.basename(self.image_path) + ".jpg")
+
             if QFile.exists(cache_path):
                 cached_image = QImage(cache_path)
                 if not cached_image.isNull():
                     result_image = cached_image
-                    return 
-            
-            # === OPTIMASI: Cek interupsi sebelum proses berat ===
-            # Jika cache tidak ada, cek lagi sebelum memulai pemrosesan file asli.
-            if self.isInterruptionRequested():
-                return # Langsung ke 'finally'
+                    return # Langsung ke finally
 
-            processed_image = QImage() 
+            if self.isInterruptionRequested(): return
+
+            # <<< PERUBAHAN: Alur kerja baru yang disederhanakan
+            pil_thumb = None
             ext = os.path.splitext(self.image_path)[1].lower()
 
             try:
-                # Logika pemrosesan file Anda sudah bagus dan tidak perlu diubah.
-                # (kode untuk JPG, PNG, RAW tetap sama)
+                # --- ALUR UNTUK GAMBAR NON-RAW (JPG, TIFF, PNG, dll.) ---
                 if ext in SUPPORTED_FORMATS["jpg"] + SUPPORTED_FORMATS["png"] + SUPPORTED_FORMATS["tiff"]:
-                    pil_img = Image.open(self.image_path)
-                    pil_img = ImageOps.exif_transpose(pil_img)
-                    img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-
-                    if img is not None:
-                        if len(img.shape) == 2: img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-                        if img.dtype == np.uint16: img = (img / 256).astype(np.uint8)
+                    with Image.open(self.image_path) as img:
+                        # 1. Koreksi orientasi secara otomatis berdasarkan EXIF
+                        img_corrected = ImageOps.exif_transpose(img)
                         
-                        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                        height, width, channel = img_rgb.shape
-                        bytes_per_line = 3 * width
-                        processed_image = QImage(img_rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).copy()
+                        # 2. Buat thumbnail berkualitas tinggi.
+                        #    Metode .thumbnail() memodifikasi gambar secara in-place
+                        #    dan mempertahankan rasio aspek.
+                        img_corrected.thumbnail(THUMBNAIL_SIZE, Image.Resampling.LANCZOS)
+                        pil_thumb = img_corrected
 
+                # --- ALUR UNTUK GAMBAR RAW (Tetap Sama) ---
                 elif ext in SUPPORTED_FORMATS["raw"]:
                     with rawpy.imread(self.image_path) as raw:
+                        # postprocess sudah melakukan koreksi orientasi dasar
                         img_array = raw.postprocess(output_bps=8, use_camera_wb=True, half_size=True)
                     
-                    height, width, channel = img_array.shape
-                    bytes_per_line = 3 * width
-                    processed_image = QImage(img_array.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).copy()
+                    # Buat objek PIL dari hasil rawpy untuk di-resize secara konsisten
+                    pil_img = Image.fromarray(img_array, 'RGB')
+                    pil_img.thumbnail(THUMBNAIL_SIZE, Image.Resampling.LANCZOS)
+                    pil_thumb = pil_img
 
             except Exception as e:
                 print(f"SELF-REPAIR: Gagal memproses {self.image_path}. Error: {e}")
 
-            if not processed_image.isNull():
-                scaled_image = processed_image.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-                scaled_image.save(cache_path, "JPG", quality=85)
-                result_image = scaled_image
+            # --- Konversi final ke QImage dan simpan ke cache ---
+            if pil_thumb:
+                # Konversi objek thumbnail PIL ke QImage untuk ditampilkan oleh Qt
+                if pil_thumb.mode == "RGB":
+                    q_image = QImage(pil_thumb.tobytes(), pil_thumb.width, pil_thumb.height, pil_thumb.width * 3, QImage.Format.Format_RGB888)
+                elif pil_thumb.mode == "RGBA":
+                    q_image = QImage(pil_thumb.tobytes(), pil_thumb.width, pil_thumb.height, pil_thumb.width * 4, QImage.Format.Format_RGBA8888)
+                elif pil_thumb.mode == "L": # Grayscale
+                    q_image = QImage(pil_thumb.tobytes(), pil_thumb.width, pil_thumb.height, pil_thumb.width, QImage.Format.Format_Grayscale8)
+                else: # Fallback dengan mengonversi ke RGB
+                    pil_thumb = pil_thumb.convert("RGB")
+                    q_image = QImage(pil_thumb.tobytes(), pil_thumb.width, pil_thumb.height, pil_thumb.width * 3, QImage.Format.Format_RGB888)
+
+                # Simpan QImage yang sudah benar ke cache
+                q_image.save(cache_path, "JPG", 85)
+                result_image = q_image.copy() # Gunakan salinan untuk thread-safety
 
         finally:
             semaphore.release()
-            # Hanya emit sinyal jika thread tidak diminta untuk berhenti.
-            # Ini mencegah widget yang sudah tidak relevan untuk mencoba update.
             if not self.isInterruptionRequested():
                 self.thumbnail_ready.emit(result_image, self.image_path)
 

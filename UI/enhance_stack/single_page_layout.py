@@ -19,6 +19,7 @@ from UI.enhance_stack.algorithm.denoising.Median import running_median
 from UI.enhance_stack.algorithm.denoising.Similarity import running_similarity
 from UI.enhance_stack.algorithm.denoising.Similarity_V2 import running_similarity_v2
 from UI.enhance_stack.algorithm.super_resolution.Interpolation import running_interpolation
+from UI.enhance_stack.components.batch_page_layout.image_batch_management import convert_tiff_to_uncompressed
 from UI.enhance_stack.components.single_page_layout.page_layout import (setup_main_layout, 
                                                                         setup_preview_panel, 
                                                                         setup_progress_section, 
@@ -83,16 +84,6 @@ class SinglePageLayout(QWidget):
         super().resizeEvent(event)
         if self.preview_handler:
             self.preview_handler.handle_resize()
-        
-    def convert_tiff_to_uncompressed(self, input_path, output_folder):
-        try:
-            with Image.open(input_path) as img:
-                output_path = os.path.join(output_folder, os.path.basename(input_path))
-                img.save(output_path, format="TIFF", compression="none")  # Simpan tanpa kompresi
-                return output_path
-        except Exception as e:
-            print(f"Error converting TIFF: {e}")
-            return None
 
     def handle_import_button(self):
         """Membuka dialog file dan memulai proses impor."""
@@ -209,7 +200,7 @@ class SinglePageLayout(QWidget):
                    
                   if needs_conversion:
                        print(f"  Converting compressed TIFF: {os.path.basename(tiff_path)}")
-                       converted = self.convert_tiff_to_uncompressed(tiff_path, output_folder)
+                       converted = convert_tiff_to_uncompressed(tiff_path, output_folder)
                        if converted:
                             processed_tiff_path = converted
                        else:

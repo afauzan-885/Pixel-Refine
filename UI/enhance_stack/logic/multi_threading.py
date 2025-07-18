@@ -1,3 +1,4 @@
+from asyncio import as_completed
 from concurrent.futures import ThreadPoolExecutor
 import os
 import time
@@ -137,14 +138,10 @@ class RawImageProcessingThread(BaseMultiThreading):
                     if len(img_array.shape) == 3 and img_array.shape[2] == 3:
                          img_array = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
                         
-                    # Jika inputnya Grayscale atau RGBA, pemecahan akan dilakukan
-                    # karena konversi warna perlu dilakukan per bagian.
                     if len(img_array.shape) == 2 or img_array.shape[2] == 4:
                          processed_via_parts = True # Tandai untuk pemrosesan paralel
-                         print(f"  Image {filename} needs per-part color conversion (Grayscale/RGBA). Will attempt parallel processing.")
-                    # Jika sudah RGB 8-bit pada tahap ini, tidak ada gunanya memecah lebih lanjut.
                     elif len(img_array.shape) == 3 and img_array.shape[2] == 3:
-                         print(f"  Image {filename} is already RGB uint8. Skipping experimental part splitting.")
+                         processed_via_parts = False
                     else:
                          raise RuntimeError(f"Unhandled image shape after initial processing: {img_array.shape}")
 
@@ -156,12 +153,9 @@ class RawImageProcessingThread(BaseMultiThreading):
                 # ============================================================
                 final_img = None
                 if processed_via_parts and img_array is not None:
-                    print(f"  Starting parallel part processing for {filename}...")
                     h, w = img_array.shape[:2]
                     # Hindari pemecahan jika gambar terlalu kecil
                     if h < 10 or w < 10:
-                         print(f"  Image {filename} too small, processing whole.")
-                         # Proses keseluruhan jika terlalu kecil
                          final_img = _process_image_part(img_array)
                     else:
                         # Tentukan titik potong (4 kuadran)
@@ -181,13 +175,11 @@ class RawImageProcessingThread(BaseMultiThreading):
                             # Buat future untuk setiap bagian
                             future_to_index = {executor.submit(_process_image_part, parts[i]): part_indices[i] for i in range(4)}
 
-                            for future in concurrent.futures.as_completed(future_to_index):
+                            for future in as_completed(future_to_index):
                                 index = future_to_index[future]
                                 try:
                                     processed_parts[index] = future.result()
                                 except Exception as exc:
-                                    print(f"  Quadrant {index} generated an exception: {exc}")
-                                    # Handle error: bisa raise error utama, atau coba lanjutkan tanpa bagian ini
                                     raise RuntimeError(f"Error in parallel processing for {filename}, quadrant {index}: {exc}")
 
                         # Periksa apakah semua bagian berhasil diproses

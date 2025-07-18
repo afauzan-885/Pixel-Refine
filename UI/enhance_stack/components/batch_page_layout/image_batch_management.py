@@ -1,8 +1,14 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
+import subprocess
 import weakref
 from PySide6.QtWidgets import (QMessageBox, QFileDialog)
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 from PySide6.QtCore import QThread, Signal, QObject
+import cv2
+import numpy as np
+import tifffile
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import save_image
 from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoader, make_safe_callback, show_thumbnail
 from UI.enhance_stack.logic.multi_threading import BatchImageImportThreading
 from UI.settings.General.Language import language_config
@@ -172,202 +178,219 @@ def handle_add_image_to_batch(batch_page_layout, database_manager, thumbnail_thr
         print(f"Added {newly_added_count} new supported images to batch {batch_id}")
         batch_page_layout.data_changed.emit()
 
-
 # --- Fungsi Baru yang Dipindahkan ---
 def process_and_start_batch_import(batch_page_layout, image_paths: list):
     """
-    Memproses daftar path gambar untuk impor batch: membuat batch baru,
-    validasi, konversi, seleksi, dan memulai impor background.
-
-    Args:
-        batch_page_layout: Instance dari BatchPageLayout.
-        image_paths: List path gambar yang akan diimpor.
+    Memproses dan memulai impor batch dengan pola streaming sejati,
+    memperbarui UI secara bertahap saat file siap.
     """
-    if not image_paths: return
+    if not image_paths:
+        return
 
-    db_manager = batch_page_layout.database_manager # Akses via argumen
-
+    db_manager = batch_page_layout.database_manager
+    CHUNK_SIZE = 2  
     try:
-         existing_batch_names = db_manager.get_all_batch_names()
-         next_batch_num = 1
-         prefix = "batch"
-         max_num_found = 0
-         for name in existing_batch_names:
-             if name.startswith(prefix):
-                 try:
-                     num_part = name[len(prefix):]
-                     if num_part.isdigit(): num = int(num_part)
-                     if num > max_num_found: max_num_found = num
-                 except ValueError: continue
-         next_batch_num = max_num_found + 1
-         target_batch_name = f"{prefix}{next_batch_num}"
-         target_batch_id = db_manager.create_new_batch(target_batch_name)
-         if target_batch_id is None:
-             raise Exception(f"Could not create or find batch '{target_batch_name}'.")
+        existing_batch_names = db_manager.get_all_batch_names()
+        prefix = "batch"
+        max_num_found = 0
+        for name in existing_batch_names:
+            if name.startswith(prefix):
+                try:
+                    num_part = name[len(prefix):]
+                    if num_part.isdigit():
+                        num = int(num_part)
+                        if num > max_num_found:
+                            max_num_found = num
+                except ValueError: continue
+        next_batch_num = max_num_found + 1
+        target_batch_name = f"{prefix}{next_batch_num}"
+        target_batch_id = db_manager.create_new_batch(target_batch_name)
+        if target_batch_id is None:
+            raise Exception(f"Could not create or find batch '{target_batch_name}'.")
     except Exception as e:
-        QMessageBox.critical(batch_page_layout, "Batch Error", f"Failed to prepare batch:\n{e}") # Gunakan batch_page_layout sbg parent
-        return
-    # ------------------------------------
-
-    # --- Step 1: Validasi Duplikat (dalam batch BARU ini) ---
-    unique_files = list(image_paths)
-
-    # --- Step 2: Group File berdasarkan Format ---
-    format_groups = {key: [] for key in SUPPORTED_FORMATS.keys()}
-    valid_files_grouped = False
-    for path in unique_files:
-        lower_path = path.lower()
-        for format_key, extensions in SUPPORTED_FORMATS.items():
-            if any(lower_path.endswith(ext) for ext in extensions):
-                format_groups[format_key].append(path)
-                valid_files_grouped = True
-                break
-
-    if not valid_files_grouped:
-        title, message = language_config.HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED
-        QMessageBox.information(batch_page_layout, title, message) # Gunakan batch_page_layout sbg parent
-        # Penting: Hapus batch kosong yang baru dibuat jika tidak ada file valid
-        db_manager.batch_process_delete_batch(target_batch_id)
+        QMessageBox.critical(batch_page_layout, "Batch Error", f"Failed to prepare batch:\n{e}")
         return
 
-    # --- Step 3: Konversi TIFF ---
-    output_folder = "database/align/uncompressed_tiff"
-    try:
-        os.makedirs(output_folder, exist_ok=True)
-    except OSError as e:
-        QMessageBox.critical(batch_page_layout, "Folder Error", f"Could not create folder for TIFF conversion:\n{e}")
-        # Hapus batch kosong jika konversi gagal di awal
-        db_manager.batch_process_delete_batch(target_batch_id)
-        return
+    # --- Fungsi Helper untuk Memulai Impor per Chunk ---
+    def start_import_for_chunk(files_to_import_chunk):
+        if not files_to_import_chunk:
+            return
+        
+        num_files_this_chunk = len(files_to_import_chunk)
+        print(f"Starting import thread for a chunk of {num_files_this_chunk} files...")
 
-    # --- Step 3: Konversi TIFF & Pengumpulan File ---
-    output_folder = "database/align/uncompressed_tiff"
-    try:
-        os.makedirs(output_folder, exist_ok=True)
-    except OSError as e:
-        QMessageBox.critical(batch_page_layout, "Folder Error", f"Could not create folder for TIFF conversion:\n{e}")
-        db_manager.batch_process_delete_batch(target_batch_id)
-        return
-
-    files_to_import = []
-    for fmt_key in SUPPORTED_FORMATS: 
-        if fmt_key != "tiff": 
-            files = format_groups.get(fmt_key, []) 
-            if files:
-                files_to_import.extend(files)
-    
-    tiff_files = format_groups.get("tiff", [])
-    if tiff_files:
-         converted_or_original_tiffs = []
-         tiff_errors = []
-         for tiff_path in tiff_files:
-              processed_tiff_path = tiff_path
-              needs_conversion = False
-              try:
-                  with Image.open(tiff_path) as img:
-                       compression = img.info.get("compression", "none").lower()
-                       if compression in ["tiff_lzw", "tiff_zip", "packbits", "jpeg"]: needs_conversion = True
-              except (FileNotFoundError, UnidentifiedImageError, Exception) as e:
-                   print(f"  TIFF Error reading info/opening: {os.path.basename(tiff_path)}, Error: {e}"); tiff_errors.append(f"{os.path.basename(tiff_path)} (Read Error)"); continue
-
-              if needs_conversion:
-                   converted = convert_tiff_to_uncompressed_static(tiff_path, output_folder)
-                   if converted: processed_tiff_path = converted
-                   else:
-                       print(f"  Skipping TIFF due to conversion error: {os.path.basename(tiff_path)}"); tiff_errors.append(f"{os.path.basename(tiff_path)} (Conversion Failed)"); continue
-              converted_or_original_tiffs.append(processed_tiff_path)
-
-         files_to_import.extend(converted_or_original_tiffs)
-         if tiff_errors: QMessageBox.warning(batch_page_layout, "TIFF Processing Issues", f"Could not process some TIFF files:\n{', '.join(tiff_errors)}")
-
-    # --- Step 4 & 5: Seleksi File (Logika Dominan/Prioritas) ---
-    selected_files = []
-    if files_to_import:
-        temp_format_groups = {key: [] for key in SUPPORTED_FORMATS.keys()}
-        for path in files_to_import:
-             lower_path = path.lower()
-             for format_key, extensions in SUPPORTED_FORMATS.items():
-                 if any(lower_path.endswith(ext) for ext in extensions):
-                      temp_format_groups[format_key].append(path)
-                      break
-
-        if any(temp_format_groups.values()):
-            dominant_format = max(temp_format_groups, key=lambda key: len(temp_format_groups[key]))
-            total_to_import = len(files_to_import)
-            if len(temp_format_groups[dominant_format]) > total_to_import / 2:
-                 selected_files = temp_format_groups[dominant_format]
-            else:
-                 for key in SUPPORTED_FORMATS.keys():
-                      if temp_format_groups[key]:
-                          selected_files = temp_format_groups[key]
-                          dominant_format = key 
-                          break
-        else:
-             selected_files = []
-             dominant_format = "N/A"
-    else:
-         dominant_format = "N/A"
-
-    # --- Step 6: Proses Impor File Terpilih ---
-    if selected_files:
-        num_files_this_batch = len(selected_files)
-
-        batch_page_layout._total_pending_imports += num_files_this_batch
-        batch_page_layout._update_aggregated_progress_toast() 
+        # Update progress bar agregat
+        batch_page_layout._total_pending_imports += num_files_this_chunk
+        batch_page_layout._update_aggregated_progress_toast()
 
         try:
             import_thread = BatchImageImportThreading(
                 database_manager=db_manager,
-                image_paths=selected_files,
+                image_paths=files_to_import_chunk,
                 batch_id=target_batch_id,
-                batch_size=15,
+                batch_size=CHUNK_SIZE, # Gunakan CHUNK_SIZE atau nilai lain
                 delay_ms=25
             )
-            # Tambahkan thread ke list di BatchPageLayout
             batch_page_layout._active_import_threads.append(import_thread)
-
-            # Hubungkan sinyal thread ke slot/metode di BatchPageLayout
             import_thread.result_signal.connect(batch_page_layout._handle_item_imported)
             import_thread.finished.connect(lambda t=import_thread: batch_page_layout._handle_thread_finished(t))
             if hasattr(import_thread, 'error_signal'):
-                 import_thread.error_signal.connect(batch_page_layout.on_batch_import_error)
-
+                import_thread.error_signal.connect(batch_page_layout.on_batch_import_error)
             import_thread.start()
-
         except Exception as e:
             print(f"Error creating/starting batch import thread: {e}")
-            QMessageBox.critical(batch_page_layout, "Threading Error", f"Could not start import process:\n{e}")
-            # Rollback state jika thread gagal start
-            batch_page_layout._total_pending_imports -= num_files_this_batch
-            if batch_page_layout._total_pending_imports < 0: batch_page_layout._total_pending_imports = 0
+            QMessageBox.critical(batch_page_layout, "Threading Error", f"Could not start import process for a chunk:\n{e}")
+            # Rollback progress jika thread gagal start
+            batch_page_layout._total_pending_imports -= num_files_this_chunk
+            if batch_page_layout._total_pending_imports < 0:
+                batch_page_layout._total_pending_imports = 0
             batch_page_layout._update_aggregated_progress_toast()
-             # Hapus batch yang gagal
-            db_manager.batch_process_delete_batch(target_batch_id)
+            # Tidak perlu hapus batch di sini karena mungkin chunk lain berhasil
 
-    else:
+    # --- Pengumpulan dan Pemrosesan Streaming ---
+    ready_files_chunk = []
+    tiff_errors = []
+
+    # Step 1: Kumpulkan semua file yang tidak butuh konversi
+    unique_files = list(set(image_paths))
+    all_tiff_files = []
+    
+    for path in unique_files:
+        lower_path = path.lower()
+        if any(lower_path.endswith(ext) for ext in SUPPORTED_FORMATS.get("tiff", [])):
+            all_tiff_files.append(path)
+        elif any(lower_path.endswith(ext) for fmt in SUPPORTED_FORMATS if fmt != "tiff" for ext in SUPPORTED_FORMATS[fmt]):
+             ready_files_chunk.append(path)
+
+    # Step 2: Analisis file TIFF
+    tiffs_to_convert = []
+    if all_tiff_files:
+        print(f"Analyzing {len(all_tiff_files)} TIFF files...")
+        for tiff_path in all_tiff_files:
+            try:
+                with Image.open(tiff_path) as img:
+                    compression = img.info.get("compression", "none").lower()
+                    if compression in ["tiff_lzw", "tiff_zip", "packbits", "jpeg", "lzw"]:
+                        tiffs_to_convert.append(tiff_path)
+                    else:
+                        # TIFF sudah OK, langsung tambahkan ke chunk
+                        ready_files_chunk.append(tiff_path)
+            except Exception as e:
+                print(f"  TIFF Error reading info: {os.path.basename(tiff_path)}, Error: {e}")
+                tiff_errors.append(f"{os.path.basename(tiff_path)} (Read Error)")
+
+    # Step 3: Langsung proses chunk pertama yang berisi file non-TIFF dan TIFF yang sudah OK
+    # Ini memberikan feedback instan kepada pengguna
+    start_import_for_chunk(list(ready_files_chunk)) # Kirim salinan
+    ready_files_chunk.clear()
+
+    # Step 4: Jalankan konversi untuk TIFF yang membutuhkan dan proses hasilnya secara streaming
+    total_files_processed = 0
+    if tiffs_to_convert:
+        output_folder = "database/align/uncompressed_tiff"
+        os.makedirs(output_folder, exist_ok=True)
+        
+        conversion_generator = convert_tiff_to_uncompressed(tiffs_to_convert, output_folder)
+        for success, path_or_message in conversion_generator:
+            if success:
+                ready_files_chunk.append(path_or_message)
+                # Jika chunk sudah penuh, mulai thread impor dan kosongkan chunk
+                if len(ready_files_chunk) >= CHUNK_SIZE:
+                    start_import_for_chunk(list(ready_files_chunk))
+                    ready_files_chunk.clear()
+            else:
+                tiff_errors.append(path_or_message)
+            total_files_processed += 1
+            
+    # Step 5: Proses sisa file di chunk terakhir yang mungkin tidak penuh
+    if ready_files_chunk:
+        start_import_for_chunk(list(ready_files_chunk))
+        ready_files_chunk.clear()
+        
+    # Step 6: Tampilkan semua error TIFF yang terkumpul
+    if tiff_errors:
+        error_message = "\n".join(tiff_errors)
+        if len(tiff_errors) > 10:
+             error_message = "\n".join(tiff_errors[:10]) + f"\n... dan {len(tiff_errors) - 10} lainnya."
+        QMessageBox.warning(batch_page_layout, "TIFF Processing Issues", f"Could not process some TIFF files:\n{error_message}")
+
+    # Cek jika pada akhirnya tidak ada impor yang dimulai sama sekali
+    if not batch_page_layout._active_import_threads and not batch_page_layout._total_pending_imports:
         title, message = language_config.HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED
         QMessageBox.information(batch_page_layout, title, message)
         db_manager.batch_process_delete_batch(target_batch_id)
+        print("No valid files were found to import after processing. Deleting empty batch.")
 
-# --- Helper Function (jika `convert_tiff_to_uncompressed` juga perlu dipindah) ---
-def convert_tiff_to_uncompressed_static(input_path, output_folder):
-    """Konversi TIFF terkompresi ke TIFF tanpa kompresi (versi statis)."""
-    try:
-        with Image.open(input_path) as img:
+
+def convert_tiff_to_uncompressed(input_paths, output_folder):
+    """
+    Mengonversi daftar gambar input secara paralel dan MENGHASILKAN (yield) setiap hasil
+    segera setelah selesai.
+
+    Args:
+        input_paths: Sebuah list path file yang akan dikonversi.
+        output_folder: Folder tujuan untuk semua file yang dikonversi.
+
+    Yields:
+        Tuple (bool, str) yang berisi status keberhasilan dan path hasil atau pesan error.
+    """
+    max_workers = 4
+    
+    print(f"Memulai konversi paralel untuk {len(input_paths)} file menggunakan {max_workers} thread (Mode Generator)...")
+
+    def _worker(input_path):
+        """Fungsi worker internal, tidak ada perubahan logika di sini."""
+        try:
             output_filename = os.path.basename(input_path)
             output_path = os.path.join(output_folder, output_filename)
+            
+            numpy_image_rgb = tifffile.imread(input_path)
+            
+            if len(numpy_image_rgb.shape) == 3 and numpy_image_rgb.shape[2] >= 3:
+                numpy_image = cv2.cvtColor(numpy_image_rgb[:,:,:3], cv2.COLOR_RGB2BGR)
+            else:
+                numpy_image = numpy_image_rgb
+                
+            source_orientation = 1
+            try:
+                result = subprocess.run(["exiftool", "-n", "-Orientation", input_path], capture_output=True, text=True, check=True)
+                output_str = result.stdout.strip()
+                if output_str: source_orientation = int(output_str.split(':')[-1].strip())
+            except (subprocess.CalledProcessError, FileNotFoundError, ValueError): pass
 
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            image_corrected = numpy_image.copy()
+            if source_orientation == 3: image_corrected = cv2.rotate(numpy_image, cv2.ROTATE_180)
+            elif source_orientation == 6: image_corrected = cv2.rotate(numpy_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            elif source_orientation == 8: image_corrected = cv2.rotate(numpy_image, cv2.ROTATE_90_CLOCKWISE)
 
-            img.save(output_path, format="TIFF", compression="none")
-            print(f"  Successfully converted '{os.path.basename(input_path)}' to uncompressed TIFF at '{output_path}'")
-            return output_path
-    except UnidentifiedImageError:
-        print(f"Error converting TIFF: Cannot identify image file '{input_path}'")
-        return None
-    except FileNotFoundError:
-         print(f"Error converting TIFF: Input file not found '{input_path}'")
-         return None
-    except Exception as e:
-        print(f"Error converting TIFF '{input_path}': {e}")
-        return None
+            saved_path = save_image(
+                image=image_corrected, 
+                output_path=output_path,
+                reference_image_path=input_path
+            )
+            
+            if saved_path:
+                return (True, saved_path)
+            else:
+                return (False, f"{os.path.basename(input_path)} (Save Failed)")
+
+        except Exception as e:
+            return (False, f"{os.path.basename(input_path)} (Error: {e})")
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_path = {executor.submit(_worker, path): path for path in input_paths}
+        
+        # as_completed akan menghasilkan future segera setelah selesai, tidak menunggu semua.
+        for future in as_completed(future_to_path):
+            input_file = os.path.basename(future_to_path[future])
+            try:
+                # Ambil hasil dari future yang sudah selesai
+                result = future.result()
+                # Langsung kirimkan hasilnya keluar dari fungsi menggunakan 'yield'
+                yield result
+            except Exception as e:
+                # Jika future itu sendiri gagal secara kritis, yield pesan error
+                yield (False, f"{input_file} (Critical Error: {e})")
+                
+    print(f"\nSemua pekerjaan konversi telah dikirim dan diselesaikan.")
+    

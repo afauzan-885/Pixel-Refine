@@ -1,8 +1,8 @@
+from concurrent.futures import ThreadPoolExecutor
+import os
 import cv2
 import numpy as np
 from typing import List, Union, Tuple, Any
-
-# Diperlukan untuk tipe data KeyPoint
 from cv2 import KeyPoint
 
 """
@@ -53,6 +53,87 @@ def estimate_focal_length(img: np.ndarray, sensor_width_mm: float = 36.0, focal_
     f_px = (focal_length_mm / sensor_width_mm) * w
     return f_px
 
+def get_image_dimensions(path):
+    img = cv2.imread(path)
+    return img.shape
+
+def _process_anms_chunk(args):
+    """
+    Fungsi pembantu yang dijalankan oleh setiap worker thread.
+    Menghitung suppression radii untuk sebagian (chunk) dari keypoints.
+    """
+    start_idx, end_idx, pts, responses = args
+    chunk_radii = np.full(end_idx - start_idx, np.inf)
+
+    # Lakukan perbandingan hanya dalam rentang yang diberikan (chunk)
+    for i in range(start_idx, end_idx):
+        # Temukan semua titik yang lebih kuat di seluruh set data
+        stronger_pts_mask = responses > responses[i]
+        
+        if not np.any(stronger_pts_mask):
+            continue
+            
+        stronger_pts = pts[stronger_pts_mask]
+        
+        # Hitung jarak kuadrat dan temukan minimumnya
+        dist_sq = np.sum((stronger_pts - pts[i])**2, axis=1)
+        chunk_radii[i - start_idx] = np.min(dist_sq)
+        
+    return chunk_radii
+
+def apply_anms(keypoints, num_points_to_keep, use_multicore=True):
+    """
+    Menerapkan Adaptive Non-Maximal Suppression secara paralel untuk menyebarkan keypoint.
+    """
+    n_keypoints = len(keypoints)
+    if n_keypoints <= num_points_to_keep:
+        return keypoints, list(range(n_keypoints))
+
+    # Ekstrak data sekali untuk efisiensi
+    pts = np.array([kp.pt for kp in keypoints])
+    responses = np.array([kp.response for kp in keypoints])
+    
+    radii = np.full(n_keypoints, np.inf)
+
+    # <<< INI BAGIAN UTAMA OPTIMISASI >>>
+    if use_multicore:
+        num_workers = os.cpu_count() or 4
+        chunk_size = (n_keypoints + num_workers - 1) // num_workers # Bagi pekerjaan secara merata
+        
+        tasks = []
+        for i in range(num_workers):
+            start_idx = i * chunk_size
+            end_idx = min((i + 1) * chunk_size, n_keypoints)
+            if start_idx >= end_idx:
+                continue
+            # Siapkan argumen untuk setiap worker
+            tasks.append((start_idx, end_idx, pts, responses))
+
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            # Jalankan semua tugas secara paralel
+            results = list(executor.map(_process_anms_chunk, tasks))
+        
+        # Gabungkan hasil dari semua worker menjadi satu array radii
+        current_pos = 0
+        for chunk_result in results:
+            radii[current_pos : current_pos + len(chunk_result)] = chunk_result
+            current_pos += len(chunk_result)
+            
+    else: # Fallback ke metode serial jika tidak menggunakan multicore
+        for i in range(n_keypoints):
+            stronger_pts_mask = responses > responses[i]
+            if not np.any(stronger_pts_mask):
+                continue
+            stronger_pts = pts[stronger_pts_mask]
+            dist_sq = np.sum((stronger_pts - pts[i])**2, axis=1)
+            radii[i] = np.min(dist_sq)
+
+    # Bagian ini tetap sama dan sangat cepat
+    sorted_indices = np.argsort(radii)[::-1]
+    best_indices = sorted_indices[:num_points_to_keep]
+    anms_keypoints = [keypoints[i] for i in best_indices]
+    
+    return anms_keypoints, best_indices    
 def compute_features_for_block(
     detector: Any,  # <<< INI KUNCINYA: Menerima detektor apa pun
     enhanced_gray_base: np.ndarray, 
@@ -60,7 +141,7 @@ def compute_features_for_block(
     block_coords: Tuple[int, int, int, int],
     img_dims: Tuple[int, int],
     overlap_px: int, 
-    max_kps_per_block: int = 300
+    max_kps_per_block: int = 500
 ) -> Tuple[List[KeyPoint], np.ndarray, List[KeyPoint], np.ndarray]:
     """
     Mengekstrak fitur dalam satu blok gambar menggunakan detektor yang diberikan.

@@ -737,29 +737,46 @@ def save_align_to_folder(image, index, original_path, align_folder=None, load_co
     return file_path
 
 def save_image(image, output_path, reference_image_path=None):
-        """
-        Menyimpan gambar ke output_path dengan cv2.imwrite, lalu 
-        mengembalikan metadata dari gambar referensi (reference_image_path) ke file yang disimpan.
+    """
+    Menyimpan gambar dengan menyinkronkan data pikselnya dengan metadata orientasi
+    dari gambar referensi, lalu menyalin semua metadata menggunakan exiftool.
+    Akurasi metadata adalah prioritas utama.
+    """
+    try:
+        image_to_save = image.copy()
+        if reference_image_path is None or not os.path.exists(reference_image_path):
+            cv2.imwrite(output_path, image_to_save)
+            return output_path
+
+        target_orientation = 1
+        try:
+            result = subprocess.run(["exiftool", "-n", "-Orientation", reference_image_path], capture_output=True, text=True, check=True)
+            output_str = result.stdout.strip()
+            if output_str:
+                target_orientation = int(output_str.split(':')[-1].strip())
+        except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
+            print(f"  Peringatan: Tidak dapat membaca orientasi dari '{reference_image_path}'.")
+
+        if target_orientation == 3: image_to_save = cv2.rotate(image, cv2.ROTATE_180)
+        elif target_orientation == 6: image_to_save = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+        elif target_orientation == 8: image_to_save = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        elif target_orientation == 2: image_to_save = cv2.flip(image, 1)
+        elif target_orientation == 4: image_to_save = cv2.flip(image, 0)
         
-        Parameter:
-        - image: array gambar yang akan disimpan
-        - output_path: path file output (misalnya, TIFF)
-        - reference_image_path: path gambar referensi untuk penyalinan metadata
-        """
-        # Simpan gambar menggunakan OpenCV
-        cv2.imwrite(output_path, image)
-        
-        # Jika reference_image_path disediakan, gunakan exiftool untuk mengembalikan metadata
-        if reference_image_path is not None and os.path.exists(reference_image_path):
-            try:
-                subprocess.run(
-                    ["exiftool", "-overwrite_original", "-TagsFromFile", reference_image_path, output_path],
-                    check=True
-                )
-                # print(f"Metadata successfully restored {reference_image_path} to {output_path}")
-            except subprocess.CalledProcessError as e:
-                print(f"Error restoring metadata to {output_path}: {e}")
+        success = cv2.imwrite(output_path, image_to_save)
+        if not success:
+            print(f"Error: OpenCV gagal menyimpan gambar ke '{output_path}'")
+            return None
+
+        try:
+            subprocess.run(["exiftool", "-q", "-overwrite_original", "-TagsFromFile", reference_image_path, output_path], check=True, capture_output=True)
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            print(f"  Peringatan: Gagal menyalin metadata ke '{output_path}'. Error: {e}")
+
         return output_path
+    except Exception as e:
+        print(f"Error fatal saat menyimpan gambar ke '{output_path}': {e}")
+        return None
 # ====================== Load and Saving Process ====================== #
 
 # ================ Fungsi Ekstraksi Metadata ====================== #

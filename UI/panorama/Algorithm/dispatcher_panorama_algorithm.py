@@ -1,4 +1,5 @@
 from UI.panorama.Algorithm.stitching.Standart_Homography import run_standart_homography
+# from UI.panorama.Algorithm.stitching.APAP.main import run_standart_homography
 from UI.panorama.logic.panorama_algorithms import run_blending, run_orb_alignment, run_projection
 
 
