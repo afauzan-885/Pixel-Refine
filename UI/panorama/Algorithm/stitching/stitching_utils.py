@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 from typing import List, Union, Tuple, Any
 from cv2 import KeyPoint
-
+from scipy.spatial.distance import cdist
 """
 Skrip ini berisi fungsi-fungsi utilitas statis untuk pemrosesan gambar,
 dirancang untuk dapat digunakan kembali di berbagai bagian aplikasi.

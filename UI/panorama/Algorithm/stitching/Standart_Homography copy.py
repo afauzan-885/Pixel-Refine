@@ -127,7 +127,7 @@ class MultiRowPlanarStitcher:
         img2,
         feature_algorithm="AKAZE",
         use_multicore=True,
-        num_anms_points=1000,
+        num_anms_points=3000,
     ):
         # ... (Langkah 1 & 2: Persiapan dan inisialisasi, tidak ada perubahan) ...
         def prepare_gray(img):
@@ -137,14 +137,11 @@ class MultiRowPlanarStitcher:
 
         base_gray = prepare_gray(img1)
         target_gray = prepare_gray(img2)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced_base_gray = clahe.apply(base_gray)
-        enhanced_target_gray = clahe.apply(target_gray)
         h, w = base_gray.shape
         num_blocks = (4, 3)
         overlap = 30
         min_matches_for_transform = 10
-        ratio_thresh = 0.75
+        ratio_thresh = 0.70
 
         print(f"Menggunakan algoritma fitur: {feature_algorithm}")
         if feature_algorithm.upper() == "SIFT":
@@ -165,7 +162,6 @@ class MultiRowPlanarStitcher:
             )
 
         # --- 3. Deteksi Fitur Paralel Berbasis Blok ---
-        # ... (Tidak ada perubahan pada logika deteksi blok) ...
         keypoints_base_all, descriptors_base_list = [], []
         keypoints_target_all, descriptors_target_list = [], []
         blocks_x, blocks_y = num_blocks
@@ -176,8 +172,8 @@ class MultiRowPlanarStitcher:
         def process_block(i, j):
             return stitching_utils.compute_features_for_block(
                 detector=detector,
-                enhanced_gray_base=enhanced_base_gray,
-                enhanced_gray_target=enhanced_target_gray,
+                enhanced_gray_base=base_gray,
+                enhanced_gray_target=target_gray,
                 block_coords=(
                     i * block_w,
                     j * block_h,
@@ -269,7 +265,7 @@ class MultiRowPlanarStitcher:
         # ... (Tidak ada perubahan di fungsi ini)
         pts1 = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
         pts2 = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
-        H, _ = cv2.findHomography(pts2, pts1, cv2.USAC_MAGSAC, 4.0)
+        H, _ = cv2.findHomography(pts2, pts1, cv2.USAC_MAGSAC, 3.5)
         return H
 
     # <<< MODIFIKASI: Tambahkan parameter num_anms_points ke stitch() >>>
@@ -298,11 +294,17 @@ class MultiRowPlanarStitcher:
                 "error": "Could not find enough confident matches...",
             }
 
-        # ... (Sisa fungsi stitch tidak perlu diubah) ...
         self.progress_callback(
             50, "Building connection graph and composing transformations..."
         )
-        anchor_idx = n_images // 2
+        centrality_scores = [0] * n_images
+        for match in pairwise_matches:
+            centrality_scores[match['src_idx']] += match['confidence']
+            centrality_scores[match['dst_idx']] += match['confidence']
+
+        anchor_idx = np.argmax(centrality_scores)
+        print(f"Anchor image dipilih secara dinamis: {anchor_idx}")
+
         homographies = self._compose_homographies_from_graph(
             pairwise_matches, n_images, anchor_idx
         )
