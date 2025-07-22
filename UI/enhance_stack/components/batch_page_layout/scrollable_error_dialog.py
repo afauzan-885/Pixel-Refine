@@ -1,7 +1,5 @@
-from PySide6.QtWidgets import (QApplication, QDialog, QVBoxLayout, QTextEdit, 
+from PySide6.QtWidgets import (QDialog, QVBoxLayout, QTextEdit, 
                              QDialogButtonBox, QLabel, QStyle, QHBoxLayout)
-from PySide6.QtGui import QIcon
-from PySide6.QtCore import Qt
 
 class ScrollableErrorDialog(QDialog):
     """

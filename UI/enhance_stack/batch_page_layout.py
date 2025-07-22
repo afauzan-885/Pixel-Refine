@@ -420,7 +420,7 @@ class BatchPageLayout(QWidget):
                             batch_id_for_msg, output_file_to_move
                         ))
                     
-                    move_success = self._move_single_batch_result(output_file_to_move, target_folder, seq_num_for_msg)
+                    move_success = self._move_single_batch_result(output_file_to_move, target_folder)
                     if move_success:
                         processed_and_saved_count += 1
                         toast_msg = language_config.UI_LABEL_BATCH_PROGRESS_DONE_SAVED.format(
@@ -515,11 +515,12 @@ class BatchPageLayout(QWidget):
                 parent=self
             )
             error_dialog.exec_() # Tampilkan dialog secara modal
-    
-    
-    def _move_single_batch_result(self, source_file_path, target_folder, sequential_batch_num_for_naming=None):
-        original_file_name_for_msg = os.path.basename(source_file_path) if source_file_path else "unknown_file"
-
+            
+    def _move_single_batch_result(self, source_file_path, target_folder):
+        """
+        Memindahkan file hasil ke folder target, hanya menggunakan nama file asli.
+        Jika file dengan nama yang sama sudah ada, tambahkan akhiran "_1", "_2", dst.
+        """
         if not source_file_path or not os.path.exists(source_file_path):
             print(language_config.SOURCE_FILE_DOES_NOT_EXIST.format(source_file_path))
             return False
@@ -531,42 +532,29 @@ class BatchPageLayout(QWidget):
             return False
 
         original_file_name = os.path.basename(source_file_path)
-
-        if sequential_batch_num_for_naming is not None:
-            # base, ext = os.path.splitext(original_file_name) # Tidak perlu jika format baru sudah mencakup nama asli
-            new_file_name = f"Batch_{sequential_batch_num_for_naming}_{original_file_name}"
-        else:
-            new_file_name = original_file_name
-
-        destination_path = os.path.join(target_folder, new_file_name)
+        destination_path = os.path.join(target_folder, original_file_name)
 
         try:
-            counter = 1
-            base_dest, ext_dest = os.path.splitext(new_file_name)
-            # Perbaiki logika penanganan nama file duplikat agar base_dest tidak kehilangan bagian nomor batch awal
-            temp_destination_path = destination_path
-            while os.path.exists(temp_destination_path):
-                temp_destination_path = os.path.join(target_folder, f"{base_dest}_{counter}{ext_dest}")
-                counter += 1
-            destination_path = temp_destination_path 
-
+            # Jika file tujuan sudah ada, cari nama baru yang tersedia.
+            if os.path.exists(destination_path):
+                base, ext = os.path.splitext(original_file_name)
+                counter = 1
+                while os.path.exists(destination_path):
+                    new_file_name = f"{base}_{counter}{ext}"
+                    destination_path = os.path.join(target_folder, new_file_name)
+                    counter += 1
+            
+            # Pindahkan file setelah nama tujuan yang valid ditemukan
             shutil.move(source_file_path, destination_path)
-            print(language_config.LOG_MOVE_SUCCESS.format(
-                original_file_name_for_msg,
-                destination_path
-            ))
+            
+            print(language_config.LOG_MOVE_SUCCESS.format(original_file_name, destination_path))
             return True
+
         except Exception as e:
             error_detail_msg = str(e)
-            print(language_config.LOG_MOVE_FAILED.format(
-                original_file_name_for_msg,
-                target_folder,
-                error_detail_msg
-            ))
+            print(language_config.LOG_MOVE_FAILED.format(original_file_name, target_folder, error_detail_msg))
             QMessageBox.warning(self, language_config.MOVE_FILE_ERROR_TITLE,
-                                language_config.COULD_NOT_SAVE_FILE_FOR_BATCH.format(
-                                    original_file_name_for_msg, error=error_detail_msg
-                                ))
+                                language_config.COULD_NOT_SAVE_FILE_FOR_BATCH.format(original_file_name, error=error_detail_msg))
             return False
     
     def handle_delete_individual_batch(self, batch_id):

@@ -316,6 +316,7 @@ CANCEL_PROCESSING = "您确定要取消处理吗？"
 WINDOW_TITLE_FARNEBACK = "Farneback Optical Flow 对齐"
 WINDOW_TITLE_AKAZE = "AKAZE 对齐"
 WINDOW_TITLE_ORB = "ORB 对齐"
+WINDOW_TITLE_LIGHT_GLUE = "Light Glue 对齐"
 
 # Denoising / Stacking
 WINDOW_TITLE_AVERAGE = "Average 堆叠"
@@ -591,9 +592,14 @@ FARNEBACK_DESCRIPTION = """该算法适用于需要像素级精度和准确性�
 AKAZE_DESCRIPTION = """该算法对于旋转、视角和尺度的巨大差异具有相当的鲁棒性。
 
 效果不错，但在像素级别不如 Farneback。"""
+
 ORB_DESCRIPTION = """算法速度快，但对于显著差异不够准确。
 
 适用于差异最小的图像，并且在具有随机纹理的图像上准确。"""
+
+LIGHT_GLUE_DESCRIPTION = """一种用于跨图像匹配局部特征的深度学习神经网络模型。
+
+Light Glue 比 AKAZE 算法更强大，甚至能够处理具有巨大视角差异的图像。"""
 
 # --- Super Resolution Algorithm Descriptions ---
 SUPER_RESOLUTION_NAME = "Super Resolution 算法"

@@ -1,9 +1,4 @@
-from PySide6.QtWidgets import (QLabel, QSpacerItem, QSizePolicy, QWidget,  QScrollArea)
-from PySide6.QtCore import Qt
-
-from UI.settings.General.Language import language_config
-from config import SUPPORTED_FORMATS
-
+from PySide6.QtWidgets import (QWidget,  QScrollArea)
 
 def setup_main_panel(layout_instance, scroll_area_style):
     """Membuat panel utama dengan layout yang diberikan."""

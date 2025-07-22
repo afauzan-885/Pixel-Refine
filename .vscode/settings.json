@@ -1,6 +1,7 @@
 {
   "python.analysis.extraPaths": [
-    "./UI/settings/General/Language"
+    "./UI/settings/General/Language",
+    "./UI/enhance_stack/algorithm/alignment/alignment_features/LightGlue-ONNX"
   ],
   "C_Cpp.default.compilerPath": "C:/MinGW/bin/gcc.exe",
   "C_Cpp_Runner.cCompilerPath": "gcc",

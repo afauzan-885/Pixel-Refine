@@ -696,13 +696,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
         general_settings = load_similarity_config()
         perform_learning_setting = general_settings.get("perform_learning", False)
         use_learning_model_setting = general_settings.get("use_learning_model", False)
-        
-        # print("\n--- Konfigurasi Proses ---")
-        # print(f"  Mode Pembelajaran (Gunakan Model): {'Aktif' if use_learning_model_setting else 'Nonaktif'}")
-        # # Pesan ini disesuaikan untuk mencerminkan fungsi baru
-        # print(f"  Mode Pengumpulan Data Peta Bobot: {'Aktif' if perform_learning_setting else 'Nonaktif'}")
-        # print("--------------------------\n")
-        
+
         image_processor = SimilarityAlgorithm(db_path) 
 
         merging_type_from_settings = general_settings.get("similarity_merging_type", "spatial")
@@ -874,7 +868,6 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
                 traceback.print_exc()
 
         # --- TAHAP 2: FINE-TUNING & PEMBUATAN GROUND TRUTH ---
-        # print("\n--- TAHAP 2: FINE-TUNING & PERSIAPAN GROUND TRUTH ---")
         final_result_img = None
         
         if stop_requested and stop_requested():

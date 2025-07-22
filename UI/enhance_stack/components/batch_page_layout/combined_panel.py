@@ -10,6 +10,7 @@ from PySide6.QtCore import (Signal, Qt, QSize, QTimer)
 from PySide6.QtGui import QIcon, QFont
 from UI.enhance_stack.algorithm.alignment.AKAZE import running_akaze
 from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import running_farneback_optical_flow
+from UI.enhance_stack.algorithm.alignment.Light_Glue import running_light_glue
 from UI.enhance_stack.algorithm.alignment.ORB import running_orb
 from UI.enhance_stack.algorithm.denoising.Average import running_average
 from UI.enhance_stack.algorithm.denoising.Median import running_median
@@ -707,6 +708,7 @@ class CombinedPanel(QWidget):
                 "Farneback Optical Flow": lambda: running_farneback_optical_flow(self, single_process=False, batch_id=self.batch_id),
                 "AKAZE": lambda: running_akaze(self, single_process=False, batch_id=self.batch_id),
                 "ORB": lambda: running_orb(self, single_process=False, batch_id=self.batch_id),    
+                "Light Glue": lambda: running_light_glue(self, single_process=False, batch_id=self.batch_id),    
                 "No Alignment": lambda: print("[INFO] Alignment: 'No Alignment' selected, no action."),
                 "None": lambda: print("[INFO] Denoising: 'No Denoising' selected, no action."),
             },

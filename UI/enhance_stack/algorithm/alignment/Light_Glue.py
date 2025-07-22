@@ -8,62 +8,42 @@ import os
 from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
 from PySide6.QtCore import Qt
-import torch
-from PIL import Image
-from transformers import AutoImageProcessor, AutoModel
+import requests
+import onnxruntime as ort
 
-
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import compute_global_crop, crop_image, extract_all_metadata, extract_exif, get_all_image_paths_for_single_process, load_images_from_paths, process_and_crop, resize_all_with_padding, resize_with_padding, save_align_to_folder, save_to_hdf5
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import compute_global_crop, crop_image, enhance_contrast_clahe, extract_all_metadata, extract_exif, get_all_image_paths_for_single_process, calculate_crop_parameters, do_warp_and_crop, load_images_from_paths, process_and_crop, resize_all_with_padding, resize_with_padding, save_align_to_folder, save_to_hdf5
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE
-
-# 1. Tentukan path dan ID model
-DEVICE = torch.device("cuda")
-MODEL_ID = "ETH-CVG/lightglue_superpoint"
-LOCAL_MODEL_PATH = os.path.join("database", "Learning_Model", "lightglue_superpoint")
-
-processor = None
-model = None
-
-try:
-    # 2. Coba muat dari path lokal terlebih dahulu
-    if os.path.exists(os.path.join(LOCAL_MODEL_PATH, "config.json")):
-        print(f"Loading model from local path: {LOCAL_MODEL_PATH}")
-        # --- TAMBAHKAN use_fast=True DI SINI ---
-        processor = AutoImageProcessor.from_pretrained(LOCAL_MODEL_PATH, use_fast=True)
-        model = AutoModel.from_pretrained(LOCAL_MODEL_PATH).eval().to(DEVICE)
-    else:
-        # 3. Jika path lokal tidak ada, unduh dari Hugging Face
-        print(f"Local model not found. Downloading from '{MODEL_ID}'...")
-        os.makedirs(LOCAL_MODEL_PATH, exist_ok=True)
-
-        # --- TAMBAHKAN use_fast=True DI SINI JUGA ---
-        processor = AutoImageProcessor.from_pretrained(MODEL_ID, use_fast=True)
-        model = AutoModel.from_pretrained(MODEL_ID).eval().to(DEVICE)
-        
-        # 4. Simpan ke path lokal untuk penggunaan berikutnya
-        print(f"Saving model to {LOCAL_MODEL_PATH} for future use...")
-        processor.save_pretrained(LOCAL_MODEL_PATH)
-        model.save_pretrained(LOCAL_MODEL_PATH)
-
-    print("Model and processor loaded successfully.")
-
-except Exception as e:
-    print(f"FATAL: Could not load or download the alignment model. Error: {e}")
-    processor = None
-    model = None
-
 
 class LightGlueAlgorithm:
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
         self.db_path = db_path
         self.hdf5_path = hdf5_path
 
-        # Pastikan folder HDF5 ada
         hdf5_folder = os.path.dirname(self.hdf5_path)
         if not os.path.exists(hdf5_folder):
             os.makedirs(hdf5_folder)
+
+        PIPELINE_ONNX = os.path.join("database", "Learning_Model", "disk_lightglue_pipeline.ort.onnx")
+        if not os.path.exists(PIPELINE_ONNX):
+            os.makedirs(os.path.dirname(PIPELINE_ONNX), exist_ok=True)
+            print("📥 Download Model ONNX…")
+            url = "https://github.com/fabio-sim/LightGlue-ONNX/releases/download/v2.0/disk_lightglue_pipeline.ort.onnx"
+            with open(PIPELINE_ONNX, "wb") as f:
+                f.write(requests.get(url).content)
+
+        sess_options = ort.SessionOptions()
+        sess_options.intra_op_num_threads = os.cpu_count()
+        sess_options.inter_op_num_threads = 1
+        sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+        self.sess = ort.InferenceSession(
+            PIPELINE_ONNX,
+            sess_options=sess_options,
+            providers=["CPUExecutionProvider"]
+        )
         
     def get_all_image_paths_for_batch_process(self, batch_id):
         with sqlite3.connect(self.db_path) as conn:
@@ -85,19 +65,15 @@ class LightGlueAlgorithm:
         """
         # --- LANGKAH 1: Optimalkan nilai default untuk LightGlue ---
         default_config = {
-            # Parameter utama untuk alignment
-            "transformation": "homography",     # Gunakan model yang lebih kuat
-            "ransacThreshold": 4.0,             # Ambang batas yang lebih ketat untuk presisi LightGlue
+            "transformation": "homography",
+            "ransacThreshold": 4.0,        
 
-            # Parameter lain yang masih relevan untuk proses penyimpanan/cropping
             "align_folder": os.path.join(os.path.expanduser("~"), "Documents", "Pixel Refine", "align_image"),
             "keep_edges": False,
             "enable_cropping": False,
             "save_align": False,
             "command_save_to_hd5f": True,
             
-            # Parameter di bawah ini tidak lagi relevan untuk LightGlue, tetapi biarkan saja
-            # untuk menjaga kompatibilitas jika file config dibaca lagi nanti.
             "nfeatures": 1500, "scaleFactor": 1.1, "nlevels": 5,
             "clahe_clipLimit": 2.0, "clahe_tileGridSize": [8, 8],
             "ratio_threshold": 0.75, "min_matches_for_transform": 10,
@@ -106,10 +82,6 @@ class LightGlueAlgorithm:
         config_data = default_config.copy()
 
         # --- LANGKAH 2: Nonaktifkan sementara pembacaan dari file JSON ---
-        # Dengan menonaktifkan blok di bawah, `config_data` tidak akan pernah
-        # diperbarui dengan nilai dari file, sehingga fungsi ini akan
-        # selalu mengembalikan `default_config` di atas.
-
         """
         ### BAGIAN INI DINONAKTIFKAN SEMENTARA UNTUK PENGUJIAN ###
         
@@ -138,12 +110,6 @@ class LightGlueAlgorithm:
         elif not isinstance(config_data.get("clahe_tileGridSize"), tuple):
              config_data["clahe_tileGridSize"] = (8, 8)
 
-        # Cetak pesan agar Anda tahu mode pengujian aktif
-        print("--- Using LightGlue Test Configuration ---")
-        print(f"   Transformation: {config_data['transformation']}")
-        print(f"   RANSAC Threshold: {config_data['ransacThreshold']}")
-        print("----------------------------------------")
-        
         return config_data
 
     @staticmethod
@@ -184,92 +150,106 @@ class LightGlueAlgorithm:
 
         return config_data
 
-    def calculate_global_motion(self, base_image, target_image, config_filename=None, stop_requested=None):
-        """
-        Menghitung keypoints menggunakan LightGlue. Secara internal akan mengonversi
-        gambar 16-bit ke 8-bit hanya untuk deteksi fitur.
-        """
-        if stop_requested and stop_requested(): return None, None
-        if model is None or processor is None:
-            print("Hugging Face models are not available. Aborting.")
+    def calculate_global_motion(self, base_image, target_image,
+                                      config_filename=None, stop_requested=None):
+        if stop_requested and stop_requested():
             return None, None
 
-        # --- LANGKAH BARU: Konversi internal ke uint8 ---
-        def convert_to_uint8_if_needed(img):
-            """Konversi gambar ke uint8, menangani uint16 dengan benar."""
-            if img.dtype == np.uint16:
-                # Turunkan skala dari 0-65535 ke 0-255
-                return (img / 257.0).astype(np.uint8)
-            elif img.dtype == np.uint8:
-                # Tidak perlu melakukan apa-apa
-                return img
-            else:
-                # Untuk tipe lain seperti float, normalisasi terlebih dahulu
-                norm_img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX)
-                return norm_img.astype(np.uint8)
-
-        try:
-            # Buat salinan 8-bit untuk deteksi fitur
-            base_image_8bit = convert_to_uint8_if_needed(base_image)
-            target_image_8bit = convert_to_uint8_if_needed(target_image)
-        except Exception as e:
-            print(f"Error converting images to 8-bit for feature detection: {e}")
-            return None, None
-
-        # --- 1. Persiapan Gambar (menggunakan versi 8-bit) ---
-        # Gambar asli (base_image, target_image) tidak diubah
-        base_pil = Image.fromarray(cv2.cvtColor(base_image_8bit, cv2.COLOR_BGR2RGB))
-        target_pil = Image.fromarray(cv2.cvtColor(target_image_8bit, cv2.COLOR_BGR2RGB))
-        
-        try:
-            inputs = processor(images=[base_pil, target_pil], return_tensors="pt").to(DEVICE)
-        except Exception as e:
-            print(f"Error during HF processing: {e}")
-            return None, None
-
-        # --- 2. Lakukan Matching & Ekstrak Output Mentah ---
-        try:
-            with torch.no_grad():
-                outputs = model(**inputs)
-
-            # --- 3. Lakukan Post-Processing (PERUBAHAN FINAL DI SINI) ---
-            image_sizes = [[(img.height, img.width) for img in [base_pil, target_pil]]]
+        def resize_and_pad(image, target_size=640):
+            """Mengubah ukuran dan memberi padding agar gambar menjadi persegi."""
+            h, w = image.shape[:2]
+            scale = target_size / max(h, w)
+            new_h, new_w = int(h * scale), int(w * scale)
+            resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
             
-            # HAPUS nama keyword "original_images_sizes="
-            # Teruskan `image_sizes` sebagai argumen posisional kedua.
-            processed_outputs = processor.post_process_keypoint_matching(
-                outputs, image_sizes, threshold=0.1
+            pad_top = (target_size - new_h) // 2
+            pad_left = (target_size - new_w) // 2
+            
+            padded = cv2.copyMakeBorder(
+                resized, pad_top, target_size - new_h - pad_top,
+                pad_left, target_size - new_w - pad_left,
+                borderType=cv2.BORDER_CONSTANT, value=0
             )
-            # --- AKHIR PERUBAHAN ---
+            return padded, (w / new_w, h / new_h), (pad_left, pad_top)
 
-            result = processed_outputs[0]
-            mkpts0 = result["keypoints0"].cpu().numpy()
-            mkpts1 = result["keypoints1"].cpu().numpy()
+        def prep_for_onnx(img):
+            """
+            Fungsi lengkap untuk pra-pemrosesan: CLAHE -> RGB -> Resize/Pad -> Tensor.
+            """
+            # <<< PERUBAHAN DI SINI: Terapkan CLAHE sebagai langkah pertama
+            enhanced_img = enhance_contrast_clahe(img)
+            
+            # Lanjutkan dengan konversi warna pada gambar yang sudah ditingkatkan
+            rgb = cv2.cvtColor(enhanced_img, cv2.COLOR_BGR2RGB)
+            
+            # Lanjutkan dengan resize dan padding
+            padded, scale_factors, pad_offsets = resize_and_pad(rgb)
+            
+            # Konversi ke float32 dan normalisasi untuk ONNX
+            return (padded.astype(np.float32)[None, :, :, :].transpose(0, 3, 1, 2) / 255.0, 
+                    scale_factors, pad_offsets)
 
-            if len(mkpts0) < 8:
-                print(f"DEBUG: Alignment failed. Found only {len(mkpts0)} matches, which is less than 8. Aborting for this image.")
-                return None, None
+        # --- ALUR UTAMA FUNGSI ---
+        
+        # Mempersiapkan gambar (sekarang sudah termasuk CLAHE)
+        imgL, scaleL, offsetL = prep_for_onnx(base_image)
+        imgR, scaleR, offsetR = prep_for_onnx(target_image)
 
-            # --- 4. Format output agar sesuai ---
-            base_points = np.float32(mkpts0).reshape(-1, 1, 2)
-            target_points = np.float32(mkpts1).reshape(-1, 1, 2)
-
-            if torch.cuda.is_available(): torch.cuda.empty_cache()
-            return base_points, target_points
+        # BLOK KRITIS UNTUK MANAJEMEN MEMORI (Tidak Berubah)
+        keypoints_b, matches, mscores = None, None, None
+        try:
+            batch = np.concatenate([imgL, imgR], axis=0).astype(np.float32)
+            del imgL, imgR
+            
+            inp_name = self.sess.get_inputs()[0].name
+            keypoints_b, matches, mscores = self.sess.run(None, {inp_name: batch})
 
         except Exception as e:
-            if torch.cuda.is_available(): torch.cuda.empty_cache()
-            import traceback
-            print(f"An error occurred during Hugging Face model inference: {e}")
-            traceback.print_exc()
             return None, None
+        finally:
+            del batch
+            gc.collect()
+
+        if keypoints_b is None:
+            return None, None
+
+        # Ekstraksi Keypoint (Tidak Berubah)
+        matches = matches.astype(np.int32)
+        batch_mask = matches[:, 0] == 0
+        idx0 = matches[batch_mask, 1]
+        idx1 = matches[batch_mask, 2]
+        scores = mscores[batch_mask]
+
+        conf_mask = scores > 0.5
+        if np.sum(conf_mask) < 8:
+            print("[INFO] Not enough confident matches found after filtering.")
+            return None, None
+
+        idx0, idx1 = idx0[conf_mask], idx1[conf_mask]
+        
+        mkptsL = keypoints_b[0][idx0].astype(np.float32)
+        mkptsR = keypoints_b[1][idx1].astype(np.float32)
+
+        del keypoints_b, matches, mscores, scores, batch_mask, conf_mask
+        gc.collect()
+
+        # Mengembalikan Koordinat ke Skala Asli (Tidak Berubah)
+        def restore_coords(pts, pad, scale):
+            pts -= np.array(pad)
+            pts *= np.array(scale)
+            return pts
+
+        mkptsL = restore_coords(mkptsL, offsetL, scaleL)
+        mkptsR = restore_coords(mkptsR, offsetR, scaleR)
+
+        return mkptsL.reshape(-1, 1, 2), mkptsR.reshape(-1, 1, 2)
     
     def compensate_motion(self, base_image, base_points, target_points, config_filename=None):
         """
         Menerapkan kompensasi gerakan menggunakan transformasi (dengan USAC_MAGSAC)
         untuk menyelaraskan gambar.
         """
-        if base_points is None or target_points is None:
+        if base_points is None or target_points is None or base_image is None or base_image.ndim < 2:
              return None
 
         config = self.load_orb_config(config_filename)
@@ -277,16 +257,12 @@ class LightGlueAlgorithm:
         transformation_type = config.get("transformation", "affine")
         ransac_threshold = config.get("ransacThreshold", 5.0)
 
-        # --- Cek input shape ---
-        if base_image is None or base_image.ndim < 2:
-             return None
-         
         h, w = base_image.shape[:2]
         if len(base_points) < 4 or len(target_points) < 4:
              return None
          
+        # --- 1. Hitung Matriks Transformasi ---
         matrix = None
-        mask = None
         try:
             if transformation_type == 'affine':
                 matrix, mask = cv2.estimateAffine2D(target_points.reshape(-1, 2), base_points.reshape(-1, 2),
@@ -297,89 +273,44 @@ class LightGlueAlgorithm:
             elif transformation_type == 'homography':
                 matrix, mask = cv2.findHomography(target_points, base_points, cv2.USAC_MAGSAC, ransac_threshold)
             else:
-                error_msg = getattr(language_config.UNRECOGNIZED_TRANSFORMATION)
-                raise ValueError(error_msg)
+                # error_msg = getattr(language_config.UNRECOGNIZED_TRANSFORMATION)
+                # raise ValueError(error_msg)
+                raise ValueError("Tipe transformasi tidak dikenali")
 
             if matrix is None:
-                 error_msg = getattr(language_config.FAILED_TO_COMPUTE_TRANSFORMATION)
-                 print(error_msg)
+                 # error_msg = getattr(language_config.FAILED_TO_COMPUTE_TRANSFORMATION)
+                 # print(error_msg)
+                 print("Gagal menghitung matriks transformasi")
                  return None
-
-            num_inliers = np.sum(mask) if mask is not None else len(base_points) 
             
-        except cv2.error as cv_err:
+        except (cv2.error, Exception) as e:
+             # print(f"Error saat estimasi transformasi: {e}")
              return None
-        except Exception as e:
-             return None
-        # -------------------------------------------------
-
-        # --- Hitung batas pergeseran (sama) ---
-        corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(-1, 1, 2)
-        try:
-            if transformation_type == 'homography':
-                # Cek matrix adalah 3x3
-                if matrix.shape != (3, 3):
-                     return None
-                transformed_corners = cv2.perspectiveTransform(corners, matrix)
-            else:
-                 # Cek matrix adalah 2x3
-                 if matrix.shape != (2, 3):
-                     return None
-                 transformed_corners = cv2.transform(corners, matrix)
-
-            if transformed_corners is None:
-                 return None
-
-            transformed_corners = transformed_corners.reshape(-1, 2)
-            min_x, min_y = transformed_corners.min(axis=0)
-            max_x, max_y = transformed_corners.max(axis=0)
-        except Exception as e:
-             return None
-        # ------------------------------------
-
-        # --- Warping ---
+        
+        # --- 2. Lakukan Warping pada Gambar ---
         try:
             if not keep_edges:
-                interpolation_flag = cv2.INTER_CUBIC 
+                # Kasus sederhana: warp tanpa menjaga tepi yang keluar
+                interpolation_flag = cv2.INTER_CUBIC
                 if transformation_type == 'homography':
-                    compensated_image = cv2.warpPerspective(base_image, matrix, (w, h), flags=interpolation_flag, borderMode=cv2.BORDER_CONSTANT)
+                    return cv2.warpPerspective(base_image, matrix, (w, h), flags=interpolation_flag, borderMode=cv2.BORDER_CONSTANT)
                 else:
-                    compensated_image = cv2.warpAffine(base_image, matrix, (w, h), flags=interpolation_flag, borderMode=cv2.BORDER_CONSTANT)
-                return compensated_image
-
-            pad_x = max(0, int(np.ceil(max_x - w)))
-            pad_y = max(0, int(np.ceil(max_y - h)))
-            pad_left = max(0, int(np.ceil(-min_x)))
-            pad_top = max(0, int(np.ceil(-min_y)))
-
-            pad = max(pad_x, pad_y, pad_left, pad_top)
-            padded_image = cv2.copyMakeBorder(base_image, pad, pad, pad, pad, cv2.BORDER_REFLECT)
-            
-            interpolation_flag_padded = cv2.INTER_LANCZOS4
-
-            target_w_padded = padded_image.shape[1]
-            target_h_padded = padded_image.shape[0]
-
-            if transformation_type == 'homography':
-                compensated_padded = cv2.warpPerspective(padded_image, matrix, (target_w_padded, target_h_padded), flags=interpolation_flag_padded, borderMode=cv2.BORDER_REFLECT)
+                    return cv2.warpAffine(base_image, matrix, (w, h), flags=interpolation_flag, borderMode=cv2.BORDER_CONSTANT)
             else:
-                compensated_padded = cv2.warpAffine(padded_image, matrix, (target_w_padded, target_h_padded), flags=interpolation_flag_padded, borderMode=cv2.BORDER_REFLECT)
+                # Kasus kompleks: hitung padding, lalu warp dan crop
+                # Panggil fungsi statis untuk menghitung parameter
+                pad = calculate_crop_parameters(matrix, w, h, transformation_type)
+                
+                if pad is None:
+                    # Gagal menghitung parameter, kembali ke warp standar
+                    return cv2.warpAffine(base_image, matrix, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT)
+                
+                # Panggil fungsi bantuan untuk melakukan prosesnya
+                return do_warp_and_crop(base_image, matrix, pad, w, h, transformation_type)
 
-            # Crop kembali ke ukuran asli
-            if pad + h > compensated_padded.shape[0] or pad + w > compensated_padded.shape[1]:
-                 if transformation_type == 'homography':
-                     compensated_image = cv2.warpPerspective(base_image, matrix, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT)
-                 else:
-                     compensated_image = cv2.warpAffine(base_image, matrix, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT)
-                 return compensated_image
-            else:
-                 compensated_image = compensated_padded[pad:pad+h, pad:pad+w]
-                 return compensated_image
-
-        except cv2.error as cv_err:
-             return None
-        except Exception as e:
-             return None   
+        except (cv2.error, Exception) as e:
+            # print(f"Error saat warping gambar: {e}")
+            return None 
 
 def main(db_path,
          update_progress=None,
@@ -390,8 +321,8 @@ def main(db_path,
          save_align=None,
          align_folder=None,
          command_save_to_hd5f=None):
-    
-    # --- Inisialisasi (Tidak ada perubahan di sini) ---
+
+    # --- Inisialisasi (Sama seperti kode original Anda) ---
     processor = LightGlueAlgorithm(db_path)
     config = processor.load_orb_config(config_filename)
     
@@ -406,20 +337,19 @@ def main(db_path,
     transformation_type = config.get("transformation", "affine")
     
     progress_counter = {"count": 1 if not enable_cropping or keep_edges else 0}
-    progress_lock = threading.Lock() # Lock tetap ada, tidak masalah
+    progress_lock = threading.Lock()
 
     if single_process:
         image_paths = get_all_image_paths_for_single_process(db_path)
         processor.hdf5_path = "database/align/aligned_images.h5"
     else:
         if batch_id is None:
-            raise ValueError("Batch ID harus ada saat proses batch") # Ganti dengan variabel bahasa Anda
+            raise ValueError("Batch ID harus ada saat proses batch")
         image_paths = processor.get_all_image_paths_for_batch_process(batch_id)
         processor.hdf5_path = f"database/align/aligned_image_batch_{batch_id}.h5"
 
     if not image_paths:
-        if update_progress:
-            update_progress(0, "Gagal memuat gambar") # Ganti dengan variabel bahasa Anda
+        if update_progress: update_progress(0, "Failed to load image")
         return
 
     os.makedirs(os.path.dirname(processor.hdf5_path), exist_ok=True)
@@ -434,142 +364,163 @@ def main(db_path,
     base_image_raw = base_img_list[0]
     base_resized_list, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="median")
     base_image = base_resized_list[0]
+    
+    # Hapus referensi awal yang tidak perlu
+    del base_image_raw, base_resized_list, base_img_list
+    gc.collect()
 
-    lock = threading.Lock() # Lock tetap ada, tidak masalah
+    lock = threading.Lock()
     with h5py.File(processor.hdf5_path, "w") as h5f:
         if command_save_to_hd5f:
             h5f.create_dataset("image_0", data=base_image)
         if save_align:
             save_align_to_folder(base_image, 0, image_paths[0], align_folder)
 
-    # --- Definisi Fungsi Helper (Tidak ada perubahan) ---
-    def process_image(i, path, return_transform=False):
-        # Fungsi ini tetap sama, debug print masih sangat berguna
-        print(f"\n--- DEBUG: Worker starting for image index {i} ---")
-        if stop_requested and stop_requested():
-            print(f"DEBUG [{i}]: Stop requested. Exiting worker.")
-            return None
-        img_list = load_images_from_paths([path], stop_requested=stop_requested)
-        if not img_list or img_list[0] is None:
-            print(f"DEBUG [{i}]: Failed to load image from path: {path}")
-            return None
-        print(f"DEBUG [{i}]: Image loaded successfully.")
-        target_image = resize_with_padding(img_list[0], (target_h, target_w))
-        print(f"DEBUG [{i}]: Base image shape: {base_image.shape}, Target image shape: {target_image.shape}")
-        print(f"DEBUG [{i}]: Calling calculate_global_motion...")
-        base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
-        if base_pts is None or target_pts is None:
-            print(f"DEBUG [{i}]: calculate_global_motion returned None. Worker finishing for this image.")
-            return None
-        print(f"DEBUG [{i}]: calculate_global_motion SUCCEEDED. Found {len(base_pts)} points.")
-        print(f"DEBUG [{i}]: Calling compensate_motion...")
-        compensated = processor.compensate_motion(target_image, base_pts, target_pts)
-        if compensated is None:
-            print(f"DEBUG [{i}]: compensate_motion returned None. Worker finishing for this image.")
-            return None
-        print(f"DEBUG [{i}]: compensate_motion SUCCEEDED.")
-        if enable_cropping and not keep_edges and return_transform:
-            return (i, path, base_pts, target_pts)
-        if enable_cropping and not keep_edges:
-            return None
-        print(f"DEBUG [{i}]: Proceeding to save results...")
-        if save_align:
-            save_align_to_folder(compensated, i, path, align_folder)
-        if command_save_to_hd5f:
-            with lock:
-                with h5py.File(processor.hdf5_path, "a") as h5f:
-                    save_to_hdf5(h5f, f"image_{i}", compensated, extract_exif(path))
-        print(f"--- DEBUG: Worker finished successfully for image index {i} ---")
-        return None
-
-    # Variabel num_threads tidak lagi diperlukan
-    # num_threads = 1
-    
-    # --- BLOK PEMROSESAN UTAMA (PERUBAHAN DI SINI) ---
     if not enable_cropping or keep_edges:
-        # === Streaming tanpa cropping (Mode Sekuensial) ===
-        print("\n--- INFO: Running alignment in sequential mode (No ThreadPoolExecutor) ---\n")
         for i, path in enumerate(image_paths[1:], start=1):
             if stop_requested and stop_requested(): break
-            # Panggil fungsi secara langsung
-            process_image(i, path)
-            # Update progress bar
+            
+            # Mendefinisikan variabel untuk dibersihkan nanti
+            img_list, target_image, base_pts, target_pts, compensated = None, None, None, None, None
+            
+            try:
+                # 1. Muat dan proses gambar
+                img_list = load_images_from_paths([path], stop_requested=stop_requested)
+                if not img_list or img_list[0] is None: continue
+                
+                target_image = resize_with_padding(img_list[0], (target_h, target_w))
+                
+                # 2. Hitung motion (sumber utama penggunaan memori)
+                base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
+                if base_pts is None or target_pts is None: continue
+                
+                # 3. Kompensasi motion
+                compensated = processor.compensate_motion(target_image, base_pts, target_pts)
+                if compensated is None: continue
+                
+                # 4. Simpan hasil
+                if save_align:
+                    save_align_to_folder(compensated, i, path, align_folder)
+                if command_save_to_hd5f:
+                    with lock:
+                        with h5py.File(processor.hdf5_path, "a") as h5f:
+                            save_to_hdf5(h5f, f"image_{i}", compensated, extract_exif(path))
+            
+            finally:
+                del img_list
+                del target_image
+                del base_pts
+                del target_pts
+                del compensated
+                
+                gc.collect()
+
             with progress_lock:
                 progress_counter["count"] += 1
                 if update_progress:
                     update_progress(
                         progress_counter["count"], total_images,
-                        f"Processing image {progress_counter['count']}/{total_images}" # Ganti dengan variabel bahasa Anda
+                        f"Processing image {progress_counter['count']}/{total_images}"
                     )
     else:
-        # === Global cropping (Mode Sekuensial) ===
-        # --- Tahap 1: Hitung transformasi ---
-        print("\n--- INFO: Cropping Stage 1: Calculating transforms sequentially ---\n")
         all_transforms = []
+        
+        # --- Tahap 1: Hitung transformasi ---
         for i, path in enumerate(image_paths[1:], start=1):
             if stop_requested and stop_requested(): break
-            result = process_image(i, path, return_transform=True)
-            if result is not None:
-                all_transforms.append(result)
+
+            # Variabel untuk dibersihkan
+            img_list, target_image, base_pts, target_pts = None, None, None, None
+            try:
+                img_list = load_images_from_paths([path], stop_requested=stop_requested)
+                if not img_list or img_list[0] is None: continue
+                
+                target_image = resize_with_padding(img_list[0], (target_h, target_w))
+                base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
+                
+                if base_pts is not None and target_pts is not None:
+                    all_transforms.append((i, path, base_pts, target_pts))
+
+            finally:
+                del img_list
+                del target_image
+                gc.collect()
+
             with progress_lock:
                 progress_counter["count"] += 1
                 if update_progress:
                     update_progress(
                         progress_counter["count"], 2 * (total_images - 1),
-                        f"Calculating transform {progress_counter['count']}/{total_images - 1}" # Ganti dengan variabel bahasa Anda
+                        f"Calculating transform {progress_counter['count']}/{total_images - 1}"
                     )
-        
-        # --- Tahap 2: Hitung dan terapkan crop global (Tidak ada perubahan) ---
-        print("\n--- INFO: Cropping Stage 2: Computing global crop bounds ---\n")
+
+        # --- Tahap 2: Hitung dan terapkan crop global ---
+        if not all_transforms:
+             return
+
         crop_bounds = compute_global_crop(
             [(i, b, t) for i, _, b, t in all_transforms],
             total_images, base_image.shape[1], base_image.shape[0],
             transformation_type=transformation_type
         )
         if crop_bounds is None:
-            print("Failed to compute crop bounds.") # Ganti dengan variabel bahasa Anda
             return
+            
         base_image_cropped = crop_image(base_image, crop_bounds)
         del base_image
         gc.collect()
+        
         with h5py.File(processor.hdf5_path, "a") as h5f:
             del h5f["image_0"]
             h5f.create_dataset("image_0", data=base_image_cropped)
-            if save_align:
-                save_align_to_folder(base_image_cropped, 0, image_paths[0], align_folder)
+        if save_align:
+            save_align_to_folder(base_image_cropped, 0, image_paths[0], align_folder)
+        
+        del base_image_cropped
+        gc.collect()
 
         # --- Tahap 3: Streaming ulang, align dan simpan hasil crop ---
-        def apply_transform_and_save(i, path, base_pts, target_pts):
-            # Fungsi helper ini tetap sama
-            img_list = load_images_from_paths([path], stop_requested=stop_requested)
-            if not img_list or img_list[0] is None: return
-            target_image = resize_with_padding(img_list[0], (target_h, target_w))
-            compensated = processor.compensate_motion(target_image, base_pts, target_pts)
-            if compensated is None: return
-            cropped = crop_image(compensated, crop_bounds)
-            if save_align:
-                save_align_to_folder(cropped, i, path, align_folder)
-            if command_save_to_hd5f:
-                with lock:
-                    with h5py.File(processor.hdf5_path, "a") as h5f:
-                        save_to_hdf5(h5f, f"image_{i}", cropped, extract_exif(path))
-            del img_list, target_image, compensated, cropped
-            gc.collect()
-
-        print("\n--- INFO: Cropping Stage 3: Applying transforms and saving sequentially ---\n")
         stage3_counter = {"count": 0}
-        for i, path, b, t in all_transforms:
+        
+        temp_transforms = all_transforms
+        all_transforms = [] 
+        gc.collect()
+
+        for i, path, base_pts, target_pts in temp_transforms:
             if stop_requested and stop_requested(): break
-            apply_transform_and_save(i, path, b, t)
+
+            img_list, target_image, compensated, cropped = None, None, None, None
+            try:
+                img_list = load_images_from_paths([path], stop_requested=stop_requested)
+                if not img_list or img_list[0] is None: continue
+                
+                target_image = resize_with_padding(img_list[0], (target_h, target_w))
+                compensated = processor.compensate_motion(target_image, base_pts, target_pts)
+                if compensated is None: continue
+                
+                cropped = crop_image(compensated, crop_bounds)
+                if save_align:
+                    save_align_to_folder(cropped, i, path, align_folder)
+                if command_save_to_hd5f:
+                    with lock:
+                        with h5py.File(processor.hdf5_path, "a") as h5f:
+                            save_to_hdf5(h5f, f"image_{i}", cropped, extract_exif(path))
+            finally:
+                del img_list
+                del target_image
+                del compensated
+                del cropped
+                gc.collect()
+
             with progress_lock:
                 stage3_counter["count"] += 1
                 if update_progress:
                     update_progress(
                         (total_images - 1) + stage3_counter["count"],
                         2 * (total_images - 1),
-                        f"Applying transform {stage3_counter['count']}/{len(all_transforms)}" # Ganti dengan variabel bahasa Anda
+                        f"Applying transform {stage3_counter['count']}/{len(temp_transforms)}"
                     )
-             
+                                
 def running_light_glue(parent=None, single_process=None, batch_id=None):
     process_finished = False
     """
@@ -577,7 +528,7 @@ def running_light_glue(parent=None, single_process=None, batch_id=None):
     """
     # Membuat dialog progress
     dialog = QDialog(parent)
-    dialog.setWindowTitle(language_config.WINDOW_TITLE_ORB)
+    dialog.setWindowTitle(language_config.WINDOW_TITLE_LIGHT_GLUE)
     dialog.setModal(True)
     dialog.setFixedSize(300, 90)
     dialog.setWindowFlags(

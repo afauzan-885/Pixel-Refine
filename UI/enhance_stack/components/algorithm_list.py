@@ -8,7 +8,7 @@ ALGORITHM_DATA = {
             ("Farneback Optical Flow", language_config.FARNEBACK_DESCRIPTION),
             ("AKAZE", language_config.AKAZE_DESCRIPTION),
             ("ORB", language_config.ORB_DESCRIPTION),
-            # ("Tile Align", language_config.ORB_DESCRIPTION)
+            ("Light Glue", language_config.LIGHT_GLUE_DESCRIPTION)
         ]
     },
     "super_resolution": {

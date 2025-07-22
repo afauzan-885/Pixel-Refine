@@ -78,6 +78,106 @@ def setup_balanced_batching(total_images, language_config, max_batch_size=10):
     # 3. Kembalikan rencana yang sudah jadi
     return batch_plan        
 # ====================== Preprocessing ====================== #
+def calculate_crop_parameters(matrix, w, h, transformation_type):
+        """
+        Fungsi statis untuk menghitung parameter padding yang diperlukan.
+        
+        Args:
+            matrix (np.ndarray): Matriks transformasi (2x3 untuk affine, 3x3 untuk homography).
+            w (int): Lebar gambar asli.
+            h (int): Tinggi gambar asli.
+            transformation_type (str): Tipe transformasi ('affine', 'homography', dll.).
+
+        Returns:
+            int: Nilai padding seragam yang diperlukan, atau None jika terjadi kesalahan.
+        """
+        corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(-1, 1, 2)
+        try:
+            if transformation_type == 'homography':
+                if matrix.shape != (3, 3): return None
+                transformed_corners = cv2.perspectiveTransform(corners, matrix)
+            else: # affine, similarity, euclidean
+                if matrix.shape != (2, 3): return None
+                transformed_corners = cv2.transform(corners, matrix)
+
+            if transformed_corners is None:
+                return None
+
+            transformed_corners = transformed_corners.reshape(-1, 2)
+            min_x, min_y = transformed_corners.min(axis=0)
+            max_x, max_y = transformed_corners.max(axis=0)
+            
+            # Hitung padding yang diperlukan untuk setiap sisi
+            pad_x = max(0, int(np.ceil(max_x - w)))
+            pad_y = max(0, int(np.ceil(max_y - h)))
+            pad_left = max(0, int(np.ceil(-min_x)))
+            pad_top = max(0, int(np.ceil(-min_y)))
+
+            # Gunakan nilai padding terbesar untuk memastikan semua tepi masuk
+            pad = max(pad_x, pad_y, pad_left, pad_top)
+            return pad
+
+        except Exception:
+            return None
+
+def do_warp_and_crop(image, matrix, pad, w, h, transformation_type):
+        """
+        Menerapkan padding, warping, dan cropping untuk menjaga tepi gambar.
+        """
+        try:
+            # Terapkan padding ke gambar asli
+            padded_image = cv2.copyMakeBorder(image, pad, pad, pad, pad, cv2.BORDER_REFLECT)
+            
+            target_w_padded = padded_image.shape[1]
+            target_h_padded = padded_image.shape[0]
+            
+            interpolation_flag = cv2.INTER_LANCZOS4
+
+            # Lakukan warping pada gambar yang sudah di-padding
+            if transformation_type == 'homography':
+                compensated_padded = cv2.warpPerspective(padded_image, matrix, (target_w_padded, target_h_padded), flags=interpolation_flag, borderMode=cv2.BORDER_REFLECT)
+            else:
+                compensated_padded = cv2.warpAffine(padded_image, matrix, (target_w_padded, target_h_padded), flags=interpolation_flag, borderMode=cv2.BORDER_REFLECT)
+
+            # Lakukan cropping untuk kembali ke ukuran gambar asli
+            # Pemeriksaan keamanan jika hasil warp lebih kecil dari yang diharapkan
+            if pad + h > compensated_padded.shape[0] or pad + w > compensated_padded.shape[1]:
+                 # Fallback: warp langsung tanpa menjaga tepi jika cropping tidak memungkinkan
+                 if transformation_type == 'homography':
+                     return cv2.warpPerspective(image, matrix, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT)
+                 else:
+                     return cv2.warpAffine(image, matrix, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT)
+            else:
+                 return compensated_padded[pad:pad+h, pad:pad+w]
+
+        except (cv2.error, Exception):
+            return None
+
+# ====================== Preprocessing - Ligh Glue Disk - ====================== #
+def convert_to_uint8(img):
+    # sama seperti Anda
+    if img.dtype == np.uint16:
+        return (img / 257.0).astype(np.uint8)
+    elif img.dtype == np.uint8:
+        return img
+    else:
+        norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX)
+        return norm.astype(np.uint8)
+    
+def enhance_contrast_clahe(image):
+    lab = cv2.cvtColor(convert_to_uint8(image), cv2.COLOR_BGR2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+    
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+
+    cl = clahe.apply(l_channel)
+
+    merged_channels = cv2.merge((cl, a_channel, b_channel))
+    enhanced_image = cv2.cvtColor(merged_channels, cv2.COLOR_LAB2BGR)
+    
+    return enhanced_image
+# ====================== End Preprocessing - Ligh Glue Disk - ====================== #
+
 def add_legend_heatmap(img, norm_values, labels=("Static (High Weight)", "Moving (Low Weight)"),
                        font_scale_info=1.7, thickness_info=2,
                        font_scale_label=1.2, thickness_label=2):

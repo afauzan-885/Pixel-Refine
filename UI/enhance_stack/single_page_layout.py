@@ -11,6 +11,7 @@ from PySide6.QtCore import Signal, Slot
 import tifffile
 from UI.enhance_stack.algorithm.alignment.AKAZE import running_akaze
 from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import running_farneback_optical_flow
+from UI.enhance_stack.algorithm.alignment.Light_Glue import running_light_glue
 from UI.enhance_stack.algorithm.alignment.ORB import running_orb
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import save_special_jpg_and_png
 from UI.enhance_stack.algorithm.alignment.tile_align import running_tile_align
@@ -299,8 +300,8 @@ class SinglePageLayout(QWidget):
                 running_farneback_optical_flow(self, single_process=True)
             elif alignment_choice == "AKAZE":
                 running_akaze(self, single_process=True)
-            elif alignment_choice == "Tile Align":
-                running_tile_align(self, single_process=True)
+            elif alignment_choice == "Light Glue":
+                running_light_glue(self, single_process=True)
             elif alignment_choice == "No Alignment":
                 if denoising_choice != "No Denoising" or super_resolution_choice != "No Super Resolution":
                     reply = QMessageBox.question(self, "Confirm",

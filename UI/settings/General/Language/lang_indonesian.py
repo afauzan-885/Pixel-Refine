@@ -325,6 +325,7 @@ CANCEL_PROCESSING = "Apakah Anda yakin ingin membatalkan proses?"
 WINDOW_TITLE_FARNEBACK = "Penyelarasan Farneback Optical Flow"
 WINDOW_TITLE_AKAZE = "Penyelarasan AKAZE"
 WINDOW_TITLE_ORB = "Penyelarasan ORB"
+WINDOW_TITLE_LIGHT_GLUE = "Penyelarasan Light Glue"
 
 # Denoising / Stacking
 WINDOW_TITLE_AVERAGE = "Penumpukan Average"
@@ -616,6 +617,11 @@ Cukup baik, tetapi tidak sebaik Farneback untuk level piksel."""
 ORB_DESCRIPTION = """Algoritma cepat namun kurang akurat untuk perbedaan yang signifikan.
 
 Cocok untuk gambar dengan perbedaan minimal, dan akurat pada gambar dengan tekstur acak."""
+
+
+LIGHT_GLUE_DESCRIPTION = """Model Jaringan saraf (Deep Learning) untuk mencocokan fitur lokal di seluruh gambar.
+
+Light Glue ini lebih kuat dibandingkan algoritma AKAZE, mampu menangani gambar dengan perbedaan perspektif yang besar sekalipun."""
 
 # --- Super Resolution Algorithm Descriptions ---
 SUPER_RESOLUTION_NAME = "Algoritma Super Resolusi"

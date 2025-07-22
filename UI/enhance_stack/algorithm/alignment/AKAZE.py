@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, Q
 from PySide6.QtCore import Qt
 import h5py
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (compute_global_crop, crop_image, extract_all_metadata, extract_exif,
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (calculate_crop_parameters, compute_global_crop, crop_image, do_warp_and_crop, extract_all_metadata, extract_exif,
                                                                                     get_all_image_paths_for_single_process, load_images_from_paths, process_and_crop,
                                                                                     resize_all_with_padding, resize_with_padding, save_align_to_folder, save_to_hdf5)
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
@@ -334,24 +334,20 @@ class AKAZEAlgorithm:
         Menerapkan kompensasi gerakan menggunakan transformasi (dengan USAC_MAGSAC)
         untuk menyelaraskan gambar.
         """
-        if base_points is None or target_points is None:
+        if base_points is None or target_points is None or base_image is None or base_image.ndim < 2:
              return None
 
-        config = self.load_akaze_config(config_filename)
+        config = self.load_orb_config(config_filename)
         keep_edges = config.get("keep_edges", False)
         transformation_type = config.get("transformation", "affine")
         ransac_threshold = config.get("ransacThreshold", 5.0)
 
-        # --- Cek input shape ---
-        if base_image is None or base_image.ndim < 2:
-             return None
-         
         h, w = base_image.shape[:2]
         if len(base_points) < 4 or len(target_points) < 4:
              return None
          
+        # --- 1. Hitung Matriks Transformasi ---
         matrix = None
-        mask = None
         try:
             if transformation_type == 'affine':
                 matrix, mask = cv2.estimateAffine2D(target_points.reshape(-1, 2), base_points.reshape(-1, 2),
@@ -362,86 +358,37 @@ class AKAZEAlgorithm:
             elif transformation_type == 'homography':
                 matrix, mask = cv2.findHomography(target_points, base_points, cv2.USAC_MAGSAC, ransac_threshold)
             else:
-                error_msg = getattr(language_config.UNRECOGNIZED_TRANSFORMATION)
-                raise ValueError(error_msg)
-
+                raise ValueError( getattr(language_config.UNRECOGNIZED_TRANSFORMATION))
+                
             if matrix is None:
-                 error_msg = getattr(language_config.FAILED_TO_COMPUTE_TRANSFORMATION)
-                 print(error_msg)
+                 print(language_config.FAILED_TO_COMPUTE_TRANSFORMATION)
                  return None
-
-            num_inliers = np.sum(mask) if mask is not None else len(base_points) 
             
-        except cv2.error as cv_err:
-             return None
-        except Exception as e:
-             return None
-
-        # --- Hitung batas pergeseran---
-        corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(-1, 1, 2)
-        try:
-            if transformation_type == 'homography':
-                # Cek matrix adalah 3x3
-                if matrix.shape != (3, 3):
-                     return None
-                transformed_corners = cv2.perspectiveTransform(corners, matrix)
-            else:
-                 # Cek matrix adalah 2x3
-                 if matrix.shape != (2, 3):
-                     return None
-                 transformed_corners = cv2.transform(corners, matrix)
-
-            if transformed_corners is None:
-                 return None
-
-            transformed_corners = transformed_corners.reshape(-1, 2)
-            min_x, min_y = transformed_corners.min(axis=0)
-            max_x, max_y = transformed_corners.max(axis=0)
-        except Exception as e:
+        except (cv2.error, Exception) as e:
+             # print(f"Error saat estimasi transformasi: {e}")
              return None
         
+        # --- 2. Lakukan Warping pada Gambar ---
         try:
             if not keep_edges:
-                interpolation_flag = cv2.INTER_CUBIC 
+                # Kasus sederhana: warp tanpa menjaga tepi yang keluar
+                interpolation_flag = cv2.INTER_CUBIC
                 if transformation_type == 'homography':
-                    compensated_image = cv2.warpPerspective(base_image, matrix, (w, h), flags=interpolation_flag, borderMode=cv2.BORDER_CONSTANT)
+                    return cv2.warpPerspective(base_image, matrix, (w, h), flags=interpolation_flag, borderMode=cv2.BORDER_CONSTANT)
                 else:
-                    compensated_image = cv2.warpAffine(base_image, matrix, (w, h), flags=interpolation_flag, borderMode=cv2.BORDER_CONSTANT)
-                return compensated_image
-
-            pad_x = max(0, int(np.ceil(max_x - w)))
-            pad_y = max(0, int(np.ceil(max_y - h)))
-            pad_left = max(0, int(np.ceil(-min_x)))
-            pad_top = max(0, int(np.ceil(-min_y)))
-
-            pad = max(pad_x, pad_y, pad_left, pad_top)
-            padded_image = cv2.copyMakeBorder(base_image, pad, pad, pad, pad, cv2.BORDER_REFLECT)
-            
-            interpolation_flag_padded = cv2.INTER_LANCZOS4
-
-            target_w_padded = padded_image.shape[1]
-            target_h_padded = padded_image.shape[0]
-
-            if transformation_type == 'homography':
-                compensated_padded = cv2.warpPerspective(padded_image, matrix, (target_w_padded, target_h_padded), flags=interpolation_flag_padded, borderMode=cv2.BORDER_REFLECT)
+                    return cv2.warpAffine(base_image, matrix, (w, h), flags=interpolation_flag, borderMode=cv2.BORDER_CONSTANT)
             else:
-                compensated_padded = cv2.warpAffine(padded_image, matrix, (target_w_padded, target_h_padded), flags=interpolation_flag_padded, borderMode=cv2.BORDER_REFLECT)
+                # Kasus kompleks: hitung padding, lalu warp dan crop
+                pad = calculate_crop_parameters(matrix, w, h, transformation_type)
+                
+                if pad is None:
+                    return cv2.warpAffine(base_image, matrix, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT)
+                
+                # Panggil fungsi bantuan untuk melakukan prosesnya
+                return do_warp_and_crop(base_image, matrix, pad, w, h, transformation_type)
 
-            # Crop kembali ke ukuran asli
-            if pad + h > compensated_padded.shape[0] or pad + w > compensated_padded.shape[1]:
-                 if transformation_type == 'homography':
-                     compensated_image = cv2.warpPerspective(base_image, matrix, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT)
-                 else:
-                     compensated_image = cv2.warpAffine(base_image, matrix, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT)
-                 return compensated_image
-            else:
-                 compensated_image = compensated_padded[pad:pad+h, pad:pad+w]
-                 return compensated_image
-
-        except cv2.error as cv_err:
-             return None
-        except Exception as e:
-             return None   
+        except (cv2.error, Exception) as e:
+            return None 
 
 def main(db_path,
          update_progress=None,

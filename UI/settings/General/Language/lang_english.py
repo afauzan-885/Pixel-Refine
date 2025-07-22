@@ -317,6 +317,7 @@ CANCEL_PROCESSING = "Are you sure you want to cancel the process?"
 WINDOW_TITLE_FARNEBACK = "Farneback Optical Flow Alignment"
 WINDOW_TITLE_AKAZE = "AKAZE Alignment"
 WINDOW_TITLE_ORB = "ORB Alignment"
+WINDOW_TITLE_LIGHT_GLUE = "Light Glue Alignment"
 
 # Denoising / Stacking
 WINDOW_TITLE_AVERAGE = "Average Stacking"
@@ -606,6 +607,10 @@ Quite good, but not as good as Farneback for pixel-level accuracy."""
 ORB_DESCRIPTION = """Fast algorithm but less accurate for significant differences.
 
 Suitable for images with minimal differences, and accurate on images with random textures."""
+
+LIGHT_GLUE_DESCRIPTION = """A deep learning neural network model for matching local features across images.
+
+Light Glue is more robust than the AKAZE algorithm, capable of handling images with even large perspective differences."""
 
 # --- Super Resolution Algorithm Descriptions ---
 SUPER_RESOLUTION_NAME = "Super Resolution Algorithm"
