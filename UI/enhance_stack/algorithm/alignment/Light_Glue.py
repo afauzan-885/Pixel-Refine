@@ -1,5 +1,4 @@
 import gc
-import json
 import site
 import threading
 import cv2
@@ -12,6 +11,7 @@ from PySide6.QtCore import Qt
 import h5py
 import requests
 import onnxruntime as ort
+from tqdm import tqdm
 
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (
     compute_global_crop,
@@ -28,9 +28,10 @@ from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature impo
     save_align_to_folder,
     save_to_hdf5,
 )
+from UI.enhance_stack.components.single_page_layout.parameter_alignment.light_glue_parameter_settings import load_light_glue_config
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
-from config import ALGORITHM_PARAMETER_SETTINGS_FILE
+from time import time
 
 
 os.environ["ORT_CUDA_MEM_LIMIT_MB"] = "1024"
@@ -61,35 +62,114 @@ class LightGlueAlgorithm:
             url = "https://github.com/fabio-sim/LightGlue-ONNX/releases/download/v2.0/disk_lightglue_pipeline.ort.onnx"
             with open(PIPELINE_ONNX, "wb") as f:
                 f.write(requests.get(url).content)
+        config = load_light_glue_config()
+        use_gpu_setting = config.get("use_gpu", False)
 
-        ort.print_debug_info()
-
-        # Konfigurasi ONNX Runtime untuk deployment
+        providers = ["CPUExecutionProvider"]
+        
+        if use_gpu_setting:
+            try:
+                available_providers = ort.get_available_providers()
+                if "CUDAExecutionProvider" in available_providers:
+                    providers.insert(0, "CUDAExecutionProvider")
+                else:
+                    print("[PERINGATAN] 'Gunakan GPU' aktif, tetapi CUDA tidak ditemukan. Kembali menggunakan CPU.")
+            except Exception as e:
+                print(f"[ERROR] Terjadi kesalahan saat memeriksa provider CUDA: {e}. Kembali menggunakan CPU.")
+        else:
+            print("[INFO] Sesi inferensi akan menggunakan CPU (sesuai konfigurasi).")
+            
+        # 3. Konfigurasi ONNX Runtime session (kode ini tetap sama)
         sess_options = ort.SessionOptions()
         sess_options.intra_op_num_threads = os.cpu_count()
         sess_options.inter_op_num_threads = 1
         sess_options.execution_mode = ort.ExecutionMode.ORT_PARALLEL
-        sess_options.graph_optimization_level = (
-            ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        )
-        sess_options.add_session_config_entry(
-            "arena_extend_strategy", "kSameAsRequested"
-        )
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sess_options.add_session_config_entry("arena_extend_strategy", "kSameAsRequested")
         sess_options.add_session_config_entry("session.disable_prepacking", "0")
         sess_options.log_severity_level = 3
-
-        try:
-            providers = (
-                ["CUDAExecutionProvider", "CPUExecutionProvider"]
-                if "CUDAExecutionProvider" in ort.get_available_providers()
-                else ["CPUExecutionProvider"]
-            )
-        except:
-            providers = ["CPUExecutionProvider"]
-
+        
+        # 4. Buat sesi inferensi dengan providers yang telah ditentukan secara dinamis
         self.sess = ort.InferenceSession(
             PIPELINE_ONNX, sess_options=sess_options, providers=providers
         )
+class LightGlueAlgorithm:
+    """
+    Kelas untuk melakukan alignment gambar menggunakan model LightGlue via ONNX.
+    """
+    def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
+        self.db_path = db_path
+        self.hdf5_path = hdf5_path
+
+        # Pastikan folder untuk menyimpan file HDF5 ada
+        hdf5_folder = os.path.dirname(self.hdf5_path)
+        if not os.path.exists(hdf5_folder):
+            os.makedirs(hdf5_folder)
+
+        # Panggil metode private untuk menangani semua logika pemuatan model
+        self.sess = self._initialize_model_light_glue()
+        
+        print("[INFO] LightGlueAlgorithm berhasil diinisialisasi.")
+
+    def _initialize_model_light_glue(self):
+        """
+        Metode helper untuk menangani semua langkah pemuatan model:
+        1. Mengecek path model.
+        2. Mengunduh model jika tidak ada.
+        3. Memuat konfigurasi.
+        4. Menentukan provider (CPU/GPU).
+        5. Membuat dan mengembalikan sesi inferensi ONNX.
+        """
+        PIPELINE_ONNX = os.path.join(
+            "database", "Learning_Model", "disk_lightglue_pipeline.ort.onnx"
+        )
+        
+        # --- Bagian 1: Download Model Jika Perlu ---
+        if not os.path.exists(PIPELINE_ONNX):
+            os.makedirs(os.path.dirname(PIPELINE_ONNX), exist_ok=True)
+            url = "https://github.com/fabio-sim/LightGlue-ONNX/releases/download/v2.0/disk_lightglue_pipeline.ort.onnx"
+            response = requests.get(url, stream=True)
+            response.raise_for_status()
+            total_size_in_bytes = int(response.headers.get('content-length', 0))
+            block_size = 1024
+            print("Download Model...")
+            with open(PIPELINE_ONNX, "wb") as file, tqdm(
+                desc="Model", total=total_size_in_bytes, unit='B',
+                unit_scale=True, unit_divisor=1024
+            ) as bar:
+                for data in response.iter_content(block_size):
+                    file.write(data)
+                    bar.update(len(data))
+            print("Download Complete.")
+
+        # --- Bagian 2: Konfigurasi Sesi ONNX ---
+        config = load_light_glue_config()
+        use_gpu_setting = config.get("use_gpu", False)
+
+        providers = ["CPUExecutionProvider"]
+        if use_gpu_setting:
+            try:
+                available_providers = ort.get_available_providers()
+                if "CUDAExecutionProvider" in available_providers:
+                    providers.insert(0, "CUDAExecutionProvider")
+            except Exception:
+                pass
+        
+        sess_options = ort.SessionOptions()
+        sess_options.intra_op_num_threads = os.cpu_count()
+        sess_options.inter_op_num_threads = 1
+        sess_options.execution_mode = ort.ExecutionMode.ORT_PARALLEL
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sess_options.add_session_config_entry("arena_extend_strategy", "kSameAsRequested")
+        sess_options.add_session_config_entry("session.disable_prepacking", "0")
+        sess_options.log_severity_level = 3
+
+        # --- Bagian 3: Buat dan Kembalikan Sesi ---
+        session = ort.InferenceSession(
+            PIPELINE_ONNX, sess_options=sess_options, providers=providers
+        )
+        return session
+
 
     def get_all_image_paths_for_batch_process(self, batch_id):
         with sqlite3.connect(self.db_path) as conn:
@@ -105,117 +185,8 @@ class LightGlueAlgorithm:
             )
             return [row[0] for row in cursor.fetchall()]
 
-    @staticmethod
-    def load_orb_config(config_filename=None):
-        """
-        Membaca konfigurasi dari file JSON.
-        UNTUK PENGUJIAN: Saat ini dimodifikasi untuk selalu mengembalikan
-        parameter default yang dioptimalkan untuk LightGlue.
-        """
-        # --- LANGKAH 1: Optimalkan nilai default untuk LightGlue ---
-        default_config = {
-            "transformation": "homography",
-            "ransacThreshold": 4.0,
-            "align_folder": os.path.join(
-                os.path.expanduser("~"), "Documents", "Pixel Refine", "align_image"
-            ),
-            "keep_edges": False,
-            "enable_cropping": False,
-            "save_align": False,
-            "command_save_to_hd5f": True,
-            "nfeatures": 1500,
-            "scaleFactor": 1.1,
-            "nlevels": 5,
-            "clahe_clipLimit": 2.0,
-            "clahe_tileGridSize": [8, 8],
-            "ratio_threshold": 0.75,
-            "min_matches_for_transform": 10,
-            "use_multi_core": True,
-        }
-        config_data = default_config.copy()
-
-        # --- LANGKAH 2: Nonaktifkan sementara pembacaan dari file JSON ---
-        """
-        ### BAGIAN INI DINONAKTIFKAN SEMENTARA UNTUK PENGUJIAN ###
-        
-        if config_filename is None:
-            config_filename = ALGORITHM_PARAMETER_SETTINGS_FILE 
-
-        try:
-            if os.path.exists(config_filename):
-                with open(config_filename, "r") as config_file:
-                    params = json.load(config_file)
-                loaded_orb_config = params.get("ORB", {})
-                config_data.update(loaded_orb_config)
-            else:
-                 print(f"Info: Config file '{config_filename}' not found. Using defaults.")
-
-        except Exception as e:
-            print(f"Error loading configuration from '{config_filename}': {e}. Using defaults.")
-            config_data = default_config.copy() # Kembali ke default jika error
-        
-        ### AKHIR DARI BAGIAN YANG DINONAKTIFKAN ###
-        """
-
-        # Bagian ini tidak perlu diubah
-        if isinstance(config_data.get("clahe_tileGridSize"), list):
-            config_data["clahe_tileGridSize"] = tuple(config_data["clahe_tileGridSize"])
-        elif not isinstance(config_data.get("clahe_tileGridSize"), tuple):
-            config_data["clahe_tileGridSize"] = (8, 8)
-
-        return config_data
-
-    @staticmethod
-    def load_orb_config_for_batch(config_filename=None):
-        """
-        Membaca konfigurasi ORB BATCH dari file JSON. Jika gagal, mengembalikan nilai default.
-        """
-        default_config = {
-            "nfeatures": 1500,
-            "scaleFactor": 1.1,
-            "nlevels": 5,
-            "ransacThreshold": 5.0,
-            "transformation": "homography",
-            "align_folder": os.path.join(
-                os.path.expanduser("~"), "Documents", "Pixel Refine", "align_image"
-            ),
-            "clahe_clipLimit": 2.0,
-            "clahe_tileGridSize": [8, 8],
-            "ratio_threshold": 0.75,
-            "min_matches_for_transform": 10,
-            "keep_edges": False,
-            "enable_cropping": False,
-            "save_align": False,
-            "command_save_to_hd5f": True,
-            "use_multi_core": True,
-        }
-        if config_filename is None:
-            config_filename = ALGORITHM_PARAMETER_SETTINGS_FILE
-
-        config_data = default_config.copy()
-        try:
-            if os.path.exists(config_filename):
-                with open(config_filename, "r") as config_file:
-                    params = json.load(config_file)
-                loaded_batch_config = params.get("ORB_BATCH", {})
-                config_data.update(loaded_batch_config)
-            else:
-                pass
-        except Exception as e:
-            print(
-                f"Error loading ORB BATCH configuration from '{config_filename}': {e}. Using defaults."
-            )
-            config_data = default_config
-
-        if isinstance(config_data.get("clahe_tileGridSize"), list):
-            config_data["clahe_tileGridSize"] = tuple(config_data["clahe_tileGridSize"])
-        elif not isinstance(config_data.get("clahe_tileGridSize"), tuple):
-            config_data["clahe_tileGridSize"] = (8, 8)
-
-        return config_data
-
     def calculate_global_motion(
-        self, base_image, target_image, config_filename=None, stop_requested=None
+        self, base_image, target_image, stop_requested=None
     ):
         if stop_requested and stop_requested():
             return None, None
@@ -321,7 +292,7 @@ class LightGlueAlgorithm:
         ):
             return None
 
-        config = self.load_orb_config(config_filename)
+        config = load_light_glue_config(config_filename)
         keep_edges = config.get("keep_edges", False)
         transformation_type = config.get("transformation", "affine")
         ransac_threshold = config.get("ransacThreshold", 5.0)
@@ -352,24 +323,18 @@ class LightGlueAlgorithm:
                     target_points, base_points, cv2.USAC_MAGSAC, ransac_threshold
                 )
             else:
-                # error_msg = getattr(language_config.UNRECOGNIZED_TRANSFORMATION)
-                # raise ValueError(error_msg)
                 raise ValueError("Tipe transformasi tidak dikenali")
 
             if matrix is None:
-                # error_msg = getattr(language_config.FAILED_TO_COMPUTE_TRANSFORMATION)
-                # print(error_msg)
                 print("Gagal menghitung matriks transformasi")
                 return None
 
         except (cv2.error, Exception) as e:
-            # print(f"Error saat estimasi transformasi: {e}")
             return None
 
         # --- 2. Lakukan Warping pada Gambar ---
         try:
             if not keep_edges:
-                # Kasus sederhana: warp tanpa menjaga tepi yang keluar
                 interpolation_flag = cv2.INTER_CUBIC
                 if transformation_type == "homography":
                     return cv2.warpPerspective(
@@ -426,26 +391,12 @@ def main(
 
     # --- Inisialisasi (Sama seperti kode original Anda) ---
     processor = LightGlueAlgorithm(db_path)
-    config = processor.load_orb_config(config_filename)
+    config = load_light_glue_config(config_filename)
 
-    save_align = (
-        save_align if save_align is not None else config.get("save_align", False)
-    )
-    command_save_to_hd5f = (
-        command_save_to_hd5f
-        if command_save_to_hd5f is not None
-        else config.get("command_save_to_hd5f", True)
-    )
-    align_folder = (
-        align_folder
-        if align_folder is not None
-        else config.get(
-            "align_folder",
-            os.path.join(
-                os.path.expanduser("~"), "Documents", "Pixel Refine", "align_image"
-            ),
-        )
-    )
+    # Inisialisasi parameter dari config yang sudah dimuat
+    save_align = save_align if save_align is not None else config.get("save_align", False)
+    command_save_to_hd5f = command_save_to_hd5f if command_save_to_hd5f is not None else config.get("command_save_to_hd5f", True)
+    align_folder = align_folder if align_folder is not None else config.get("align_folder")
     enable_cropping = config.get("enable_cropping", False)
     keep_edges = config.get("keep_edges", False)
     transformation_type = config.get("transformation", "affine")
