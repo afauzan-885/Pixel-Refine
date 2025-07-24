@@ -189,8 +189,8 @@ class LightGlueAlgorithm:
             return None, None
 
         # --- KONFIGURASI UNTUK PEMROSESAN BERBASIS UBIN ---
-        GRID_SIZE = (2, 2)  # (kolom, baris)
-        OVERLAP_PERCENT = 0.10 # >> PERUBAHAN 1: Menggunakan persentase <<
+        GRID_SIZE = (2, 2)  
+        OVERLAP_PERCENT = 0.10 # Menggunakan persentase 
 
         h, w = base_image.shape[:2]
         cols, rows = GRID_SIZE
@@ -284,22 +284,17 @@ class LightGlueAlgorithm:
             
             return mkptsL_global, mkptsR_global, scores
 
-        # >> PERUBAHAN UTAMA: Kembali ke loop sekuensial <<
         all_results = []
         for r in range(rows):
             for c in range(cols):
-                # Periksa sinyal berhenti di setiap iterasi
                 if stop_requested and stop_requested():
                     return None, None
                     
-                # Langsung panggil fungsi worker untuk setiap ubin, satu per satu
                 result = process_tile(r, c)
                 
-                # Jika ubin berhasil diproses, tambahkan hasilnya
                 if result is not None:
                     all_results.append(result)
 
-        # --- PENGGABUNGAN DAN FINALISASI (Tidak Berubah) ---
         if not all_results:
             return None, None
 
