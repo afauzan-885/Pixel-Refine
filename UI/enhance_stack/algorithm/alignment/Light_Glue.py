@@ -1,4 +1,5 @@
 import gc
+import queue
 import site
 import threading
 import cv2
@@ -48,6 +49,7 @@ class LightGlueAlgorithm:
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
         self.db_path = db_path
         self.hdf5_path = hdf5_path
+        cv2.ocl.setUseOpenCL(True)
 
         hdf5_folder = os.path.dirname(self.hdf5_path)
         if not os.path.exists(hdf5_folder):
@@ -63,11 +65,11 @@ class LightGlueAlgorithm:
             with open(PIPELINE_ONNX, "wb") as f:
                 f.write(requests.get(url).content)
         config = load_light_glue_config()
-        use_gpu_setting = config.get("use_gpu", False)
+        use_gpu = config.get("use_gpu", False)
 
         providers = ["CPUExecutionProvider"]
         
-        if use_gpu_setting:
+        if use_gpu:
             try:
                 available_providers = ort.get_available_providers()
                 if "CUDAExecutionProvider" in available_providers:
@@ -101,16 +103,12 @@ class LightGlueAlgorithm:
         self.db_path = db_path
         self.hdf5_path = hdf5_path
 
-        # Pastikan folder untuk menyimpan file HDF5 ada
         hdf5_folder = os.path.dirname(self.hdf5_path)
         if not os.path.exists(hdf5_folder):
             os.makedirs(hdf5_folder)
 
-        # Panggil metode private untuk menangani semua logika pemuatan model
         self.sess = self._initialize_model_light_glue()
-        
-        print("[INFO] LightGlueAlgorithm berhasil diinisialisasi.")
-
+      
     def _initialize_model_light_glue(self):
         """
         Metode helper untuk menangani semua langkah pemuatan model:
@@ -144,10 +142,10 @@ class LightGlueAlgorithm:
 
         # --- Bagian 2: Konfigurasi Sesi ONNX ---
         config = load_light_glue_config()
-        use_gpu_setting = config.get("use_gpu", False)
+        use_gpu = config.get("use_gpu", False)
 
         providers = ["CPUExecutionProvider"]
-        if use_gpu_setting:
+        if use_gpu:
             try:
                 available_providers = ort.get_available_providers()
                 if "CUDAExecutionProvider" in available_providers:
@@ -169,7 +167,6 @@ class LightGlueAlgorithm:
             PIPELINE_ONNX, sess_options=sess_options, providers=providers
         )
         return session
-
 
     def get_all_image_paths_for_batch_process(self, batch_id):
         with sqlite3.connect(self.db_path) as conn:
@@ -449,42 +446,66 @@ def main(
             save_align_to_folder(base_image, 0, image_paths[0], align_folder)
 
     if not enable_cropping or keep_edges:
-        for i, path in enumerate(image_paths[1:], start=1):
-            if stop_requested and stop_requested():
-                break
-
-            # Mendefinisikan variabel untuk dibersihkan nanti
-            img_list, target_image, base_pts, target_pts, compensated = (
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-
-            try:
-                # 1. Muat dan proses gambar
+        
+        # ### PERUBAHAN 1: Buat fungsi untuk Produsen (Loader) ###
+        def loader_worker(data_queue, paths, target_dims):
+            """Thread worker yang membaca & me-resize gambar, lalu memasukkannya ke antrian."""
+            for i, path in enumerate(paths, start=1):
+                if stop_requested and stop_requested():
+                    break
+                
+                # Muat dan resize (pekerjaan CPU/IO)
                 img_list = load_images_from_paths([path], stop_requested=stop_requested)
                 if not img_list or img_list[0] is None:
                     continue
+                
+                target_image = resize_with_padding(img_list[0], target_dims)
+                
+                # Masukkan data yang siap diproses ke antrian
+                # Antrian akan memblokir jika sudah penuh, mencegah RAM meledak
+                data_queue.put((i, path, target_image))
+            
+            # Masukkan "sinyal selesai" ke antrian saat semua path sudah diproses
+            data_queue.put(None)
 
-                target_image = resize_with_padding(img_list[0], (target_h, target_w))
+        data_queue = queue.Queue(maxsize=2)
+        
+        # Mulai thread produsen di latar belakang
+        loader_thread = threading.Thread(
+            target=loader_worker,
+            args=(data_queue, image_paths[1:], (target_h, target_w))
+        )
+        loader_thread.start()
 
-                # 2. Hitung motion (sumber utama penggunaan memori)
+        # ### PERUBAHAN 3: Ubah loop utama menjadi loop Konsumen ###
+        while True:
+            # Ambil data yang sudah siap dari antrian.
+            # Ini akan menunggu secara otomatis jika antrian kosong.
+            item = data_queue.get()
+            
+            # Jika menerima sinyal selesai, keluar dari loop
+            if item is None:
+                break
+                
+            i, path, target_image = item
+            
+            base_pts, target_pts, compensated = None, None, None
+            try:
+                # 2. Hitung motion (GPU-heavy) - Data sudah siap!
                 base_pts, target_pts = processor.calculate_global_motion(
                     base_image, target_image
                 )
                 if base_pts is None or target_pts is None:
                     continue
 
-                # 3. Kompensasi motion
+                # 3. Kompensasi motion (CPU-heavy)
                 compensated = processor.compensate_motion(
                     target_image, base_pts, target_pts
                 )
                 if compensated is None:
                     continue
 
-                # 4. Simpan hasil
+                # 4. Simpan hasil (IO-heavy)
                 if save_align:
                     save_align_to_folder(compensated, i, path, align_folder)
                 if command_save_to_hd5f:
@@ -493,14 +514,12 @@ def main(
                             save_to_hdf5(
                                 h5f, f"image_{i}", compensated, extract_exif(path)
                             )
-
             finally:
-                del img_list
+                # Bersihkan memori untuk iterasi saat ini
                 del target_image
                 del base_pts
                 del target_pts
                 del compensated
-
                 gc.collect()
 
             with progress_lock:
@@ -511,116 +530,165 @@ def main(
                         total_images,
                         f"Processing image {progress_counter['count']}/{total_images}",
                     )
+        
+        # Pastikan thread loader selesai sebelum melanjutkan
+        loader_thread.join()
     else:
         all_transforms = []
 
-        # --- Tahap 1: Hitung transformasi ---
-        for i, path in enumerate(image_paths[1:], start=1):
-            if stop_requested and stop_requested():
-                break
+    def loader_stage1(q, paths, target_dims):
+        """Produsen untuk Tahap 1: Memuat dan me-resize gambar."""
+        for i, path in enumerate(paths, start=1):
+            if stop_requested and stop_requested(): break
+            
+            img_list = load_images_from_paths([path], stop_requested=stop_requested)
+            if not img_list or img_list[0] is None: continue
+            
+            target_image = resize_with_padding(img_list[0], target_dims)
+            # Masukkan data yang siap diproses ke antrian
+            q.put((i, path, target_image))
+        # Kirim sinyal bahwa produsen sudah selesai
+        q.put(None)
 
-            # Variabel untuk dibersihkan
-            img_list, target_image, base_pts, target_pts = None, None, None, None
-            try:
-                img_list = load_images_from_paths([path], stop_requested=stop_requested)
-                if not img_list or img_list[0] is None:
-                    continue
+    # Inisialisasi antrian dan thread untuk Tahap 1
+    queue_stage1 = queue.Queue(maxsize=2)
+    thread_stage1 = threading.Thread(
+        target=loader_stage1,
+        args=(queue_stage1, image_paths[1:], (target_h, target_w))
+    )
+    thread_stage1.start()
 
-                target_image = resize_with_padding(img_list[0], (target_h, target_w))
-                base_pts, target_pts = processor.calculate_global_motion(
-                    base_image, target_image
+    # Loop utama (Konsumen) untuk Tahap 1
+    while True:
+        item = queue_stage1.get()
+        if item is None: break  # Selesai jika menerima sinyal dari produsen
+        
+        i, path, target_image = item
+        
+        try:
+            base_pts, target_pts = processor.calculate_global_motion(
+                base_image, target_image
+            )
+            if base_pts is not None and target_pts is not None:
+                all_transforms.append((i, path, base_pts, target_pts))
+        finally:
+            del target_image
+            gc.collect()
+
+        with progress_lock:
+            progress_counter["count"] += 1
+            if update_progress:
+                update_progress(
+                    progress_counter["count"],
+                    2 * (total_images - 1),
+                    f"Calculating transform {progress_counter['count']}/{total_images - 1}",
                 )
 
-                if base_pts is not None and target_pts is not None:
-                    all_transforms.append((i, path, base_pts, target_pts))
+    # Pastikan thread produsen sudah benar-benar selesai sebelum lanjut
+    thread_stage1.join()
 
-            finally:
-                del img_list
-                del target_image
-                gc.collect()
 
-            with progress_lock:
-                progress_counter["count"] += 1
-                if update_progress:
-                    update_progress(
-                        progress_counter["count"],
-                        2 * (total_images - 1),
-                        f"Calculating transform {progress_counter['count']}/{total_images - 1}",
-                    )
+    # =========================================================================
+    # --- TAHAP 2: Hitung dan Terapkan Crop Global (Sinkron) ---
+    # =========================================================================
+    if not all_transforms:
+        return
 
-        # --- Tahap 2: Hitung dan terapkan crop global ---
-        if not all_transforms:
-            return
+    crop_bounds = compute_global_crop(
+        [(i, b, t) for i, _, b, t in all_transforms],
+        total_images,
+        base_image.shape[1],
+        base_image.shape[0],
+        transformation_type=transformation_type,
+    )
+    if crop_bounds is None:
+        return
 
-        crop_bounds = compute_global_crop(
-            [(i, b, t) for i, _, b, t in all_transforms],
-            total_images,
-            base_image.shape[1],
-            base_image.shape[0],
-            transformation_type=transformation_type,
-        )
-        if crop_bounds is None:
-            return
+    # Terapkan crop ke base image dan simpan
+    base_image_cropped = crop_image(base_image, crop_bounds)
+    del base_image
+    gc.collect()
 
-        base_image_cropped = crop_image(base_image, crop_bounds)
-        del base_image
-        gc.collect()
+    with h5py.File(processor.hdf5_path, "a") as h5f:
+        del h5f["image_0"]
+        h5f.create_dataset("image_0", data=base_image_cropped)
+    if save_align:
+        save_align_to_folder(base_image_cropped, 0, image_paths[0], align_folder)
 
-        with h5py.File(processor.hdf5_path, "a") as h5f:
-            del h5f["image_0"]
-            h5f.create_dataset("image_0", data=base_image_cropped)
-        if save_align:
-            save_align_to_folder(base_image_cropped, 0, image_paths[0], align_folder)
+    del base_image_cropped
+    gc.collect()
 
-        del base_image_cropped
-        gc.collect()
+    # =========================================================================
+    # --- TAHAP 3: Streaming Ulang dan Simpan dengan Pipeline Queue ---
+    # =========================================================================
+    stage3_counter = {"count": 0}
+    
+    # Pindahkan hasil transformasi ke variabel sementara untuk dilewatkan ke thread
+    temp_transforms = all_transforms
+    all_transforms = []
+    gc.collect()
 
-        # --- Tahap 3: Streaming ulang, align dan simpan hasil crop ---
-        stage3_counter = {"count": 0}
+    def loader_stage3(q, transforms, target_dims):
+        """Produsen untuk Tahap 3: Membaca ulang gambar berdasarkan data transformasi."""
+        for i, path, base_pts, target_pts in transforms:
+            if stop_requested and stop_requested(): break
+            
+            img_list = load_images_from_paths([path], stop_requested=stop_requested)
+            if not img_list or img_list[0] is None: continue
+            
+            target_image = resize_with_padding(img_list[0], target_dims)
+            # Masukkan paket data lengkap ke antrian
+            q.put((i, path, base_pts, target_pts, target_image))
+        # Kirim sinyal selesai
+        q.put(None)
 
-        temp_transforms = all_transforms
-        all_transforms = []
-        gc.collect()
+    # Inisialisasi antrian dan thread untuk Tahap 3
+    queue_stage3 = queue.Queue(maxsize=2)
+    thread_stage3 = threading.Thread(
+        target=loader_stage3,
+        args=(queue_stage3, temp_transforms, (target_h, target_w))
+    )
+    thread_stage3.start()
 
-        for i, path, base_pts, target_pts in temp_transforms:
-            if stop_requested and stop_requested():
-                break
+    # Loop utama (Konsumen) untuk Tahap 3
+    while True:
+        item = queue_stage3.get()
+        if item is None: break
 
-            img_list, target_image, compensated, cropped = None, None, None, None
-            try:
-                img_list = load_images_from_paths([path], stop_requested=stop_requested)
-                if not img_list or img_list[0] is None:
-                    continue
+        i, path, base_pts, target_pts, target_image = item
+        
+        try:
+            # Kompensasi motion (CPU-heavy)
+            compensated = processor.compensate_motion(
+                target_image, base_pts, target_pts
+            )
+            if compensated is None: continue
+            
+            # Crop dan simpan (CPU/IO-heavy)
+            cropped = crop_image(compensated, crop_bounds)
+            if save_align:
+                save_align_to_folder(cropped, i, path, align_folder)
+            if command_save_to_hd5f:
+                with lock:
+                    with h5py.File(processor.hdf5_path, "a") as h5f:
+                        save_to_hdf5(h5f, f"image_{i}", cropped, extract_exif(path))
+        finally:
+            del target_image
+            del compensated
+            del cropped
+            gc.collect()
 
-                target_image = resize_with_padding(img_list[0], (target_h, target_w))
-                compensated = processor.compensate_motion(
-                    target_image, base_pts, target_pts
+        with progress_lock:
+            stage3_counter["count"] += 1
+            if update_progress:
+                update_progress(
+                    (total_images - 1) + stage3_counter["count"],
+                    2 * (total_images - 1),
+                    f"Applying transform {stage3_counter['count']}/{len(temp_transforms)}",
                 )
-                if compensated is None:
-                    continue
-
-                cropped = crop_image(compensated, crop_bounds)
-                if save_align:
-                    save_align_to_folder(cropped, i, path, align_folder)
-                if command_save_to_hd5f:
-                    with lock:
-                        with h5py.File(processor.hdf5_path, "a") as h5f:
-                            save_to_hdf5(h5f, f"image_{i}", cropped, extract_exif(path))
-            finally:
-                del img_list
-                del target_image
-                del compensated
-                del cropped
-                gc.collect()
-
-            with progress_lock:
-                stage3_counter["count"] += 1
-                if update_progress:
-                    update_progress(
-                        (total_images - 1) + stage3_counter["count"],
-                        2 * (total_images - 1),
-                        f"Applying transform {stage3_counter['count']}/{len(temp_transforms)}",
-                    )
+    
+    # Pastikan thread produsen Tahap 3 selesai
+    thread_stage3.join()
 
 
 def running_light_glue(parent=None, single_process=None, batch_id=None):

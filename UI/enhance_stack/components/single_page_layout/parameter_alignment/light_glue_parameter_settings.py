@@ -5,7 +5,6 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QSlider, QHBoxLayou
 from PySide6.QtGui import QFont
 from PySide6.QtCore import Qt
 
-from UI.enhance_stack.algorithm.alignment.ORB import ORBAlgorithm
 from UI.resources.stylesheet.stylesheet import (DROPDOWN_BOX, TOGGLE_BUTTON,
                                                 SCROLL_AREA, SLIDER_STYLE, SLIDER_VALUE_LABEL)
 from UI.settings.General.Language import language_config
@@ -145,6 +144,7 @@ def get_light_glue_page():
     # --- Fungsi Auto-Save ---
     def save_current_settings():
         general_settings = _load_general_settings()
+        use_gpu_setting = general_settings.get("gpu_acceleration", False)
         use_multicore_setting = general_settings.get("multi_core_cpu", True)
 
         current_config = load_light_glue_config() # Ambil basis terbaru
@@ -177,7 +177,8 @@ def get_light_glue_page():
             current_config["align_folder"] = normalized_path
         except TypeError:
             current_config["align_folder"] = ""
-
+            
+        current_config["use_gpu"] = use_gpu_setting
         current_config["use_multi_core"] = use_multicore_setting
 
         save_light_glue_config(current_config)

@@ -90,7 +90,7 @@ def get_farneback_optical_flow_page():
         if not farneback_section_exists:
            
             # 1. Dapatkan default Farneback
-            fb_params = load_farneback_config()
+            current_config = load_farneback_config()
 
             # 2. Dapatkan setting general saat ini
             general_settings = _load_general_setting()
@@ -98,12 +98,12 @@ def get_farneback_optical_flow_page():
             use_multicore_setting = general_settings.get("multi_core_cpu", True)
 
             # 3. Update default dengan setting general
-            fb_params["use_gpu"] = use_gpu_setting
-            fb_params["use_multi_core"] = use_multicore_setting
+            current_config["use_gpu"] = use_gpu_setting
+            current_config["use_multi_core"] = use_multicore_setting
 
             # 4. Panggil save_farneback_config untuk menyimpan default ini
-            save_farneback_config(fb_params)        
-            fb_config = fb_params
+            save_farneback_config(current_config)        
+            fb_config = current_config
         else:
             fb_config = load_farneback_config() 
     except (IOError, json.JSONDecodeError) as e:
@@ -127,34 +127,34 @@ def get_farneback_optical_flow_page():
         use_gpu_setting = general_settings.get("gpu_acceleration", False)
         use_multicore_setting = general_settings.get("multi_core_cpu", True)
       
-        fb_params = {}
+        current_config = {}
         for label_key, slider_widget in sliders.items():
             current_value = slider_widget.value()
             if label_key == language_config.FARNEBACK_PYRAMID_SCALE_LABEL:
-                fb_params["pyr_scale"] = current_value / 100.0
+                current_config["pyr_scale"] = current_value / 100.0
             elif label_key == language_config.FARNEBACK_LEVELS_LABEL:
-                fb_params["levels"] = current_value
+                current_config["levels"] = current_value
             elif label_key == language_config.FARNEBACK_WIN_SIZE_LABEL:
-                fb_params["winsize"] = current_value
+                current_config["winsize"] = current_value
             elif label_key == language_config.FARNEBACK_ITERATIONS_LABEL:
-                fb_params["iterations"] = current_value
+                current_config["iterations"] = current_value
             elif label_key == language_config.FARNEBACK_POLY_N_LABEL:
-                fb_params["poly_n"] = current_value
+                current_config["poly_n"] = current_value
             elif label_key == language_config.FARNEBACK_POLY_SIGMA_LABEL:
-                fb_params["poly_sigma"] = current_value / 100.0
+                current_config["poly_sigma"] = current_value / 100.0
             elif label_key == language_config.FARNEBACK_FLAGS_LABEL:
-                fb_params["flags"] = current_value
-            fb_params["cpu_num_blocks"] = fb_config.get("cpu_num_blocks", [2, 2]) # Ambil dari config yg dimuat
-            fb_params["cpu_overlap_ratio"] = fb_config.get("cpu_overlap_ratio", 0.3) # Ambil dari config yg dimuat
-            fb_params["interpolation"] = fb_config.get("interpolation", "INTER_CUBIC") # Ambil dari config yg dimuat
+                current_config["flags"] = current_value
+            current_config["cpu_num_blocks"] = fb_config.get("cpu_num_blocks", [2, 2]) # Ambil dari config yg dimuat
+            current_config["cpu_overlap_ratio"] = fb_config.get("cpu_overlap_ratio", 0.3) # Ambil dari config yg dimuat
+            current_config["interpolation"] = fb_config.get("interpolation", "INTER_CUBIC") # Ambil dari config yg dimuat
             if label_key in value_labels and label_key in param_formatters:
                  value_labels[label_key].setText(param_formatters[label_key](current_value))
 
-        fb_params["use_gpu"] = use_gpu_setting
-        fb_params["use_multi_core"] = use_multicore_setting # Tambahkan ini
+        current_config["use_gpu"] = use_gpu_setting
+        current_config["use_multi_core"] = use_multicore_setting # Tambahkan ini
 
         # Panggil fungsi save
-        save_farneback_config(fb_params)
+        save_farneback_config(current_config)
 
 
     params = [
