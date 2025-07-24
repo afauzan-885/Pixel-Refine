@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import gc
 import queue
 import site
@@ -17,6 +18,7 @@ from tqdm import tqdm
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (
     compute_global_crop,
     crop_image,
+    deduplicate_keypoints,
     enhance_contrast_clahe,
     extract_all_metadata,
     extract_exif,
@@ -182,11 +184,26 @@ class LightGlueAlgorithm:
             )
             return [row[0] for row in cursor.fetchall()]
 
-    def calculate_global_motion(
-        self, base_image, target_image, stop_requested=None
-    ):
+    def calculate_global_motion(self, base_image, target_image, stop_requested=None):
         if stop_requested and stop_requested():
             return None, None
+
+        # --- KONFIGURASI UNTUK PEMROSESAN BERBASIS UBIN ---
+        GRID_SIZE = (2, 2)  # (kolom, baris)
+        OVERLAP_PERCENT = 0.10 # >> PERUBAHAN 1: Menggunakan persentase <<
+
+        h, w = base_image.shape[:2]
+        cols, rows = GRID_SIZE
+        
+        # Hindari pembagian dengan nol
+        if cols == 0 or rows == 0: return None, None
+        
+        tile_w = w // cols
+        tile_h = h // rows
+        
+        # Hitung overlap dalam piksel berdasarkan persentase
+        overlap_w_px = int(tile_w * OVERLAP_PERCENT)
+        overlap_h_px = int(tile_h * OVERLAP_PERCENT)
 
         def resize_and_pad(image, target_size=640):
             """Mengubah ukuran dan memberi padding agar gambar menjadi persegi."""
@@ -223,56 +240,85 @@ class LightGlueAlgorithm:
                 scale_factors,
                 pad_offsets,
             )
+        
+        def process_tile(r, c):
+            x_start_overlap = max(0, c * tile_w - overlap_w_px)
+            y_start_overlap = max(0, r * tile_h - overlap_h_px)
+            x_end_overlap = min(w, (c + 1) * tile_w + overlap_w_px)
+            y_end_overlap = min(h, (r + 1) * tile_h + overlap_h_px)
 
-        imgL, scaleL, offsetL = prep_for_onnx(base_image)
-        imgR, scaleR, offsetR = prep_for_onnx(target_image)
-        keypoints_b, matches, mscores = None, None, None
-        try:
-            batch = np.concatenate([imgL, imgR], axis=0).astype(np.float32)
-            del imgL, imgR
+            base_tile = base_image[y_start_overlap:y_end_overlap, x_start_overlap:x_end_overlap]
+            target_tile = target_image[y_start_overlap:y_end_overlap, x_start_overlap:x_end_overlap]
 
-            inp_name = self.sess.get_inputs()[0].name
-            keypoints_b, matches, mscores = self.sess.run(None, {inp_name: batch})
+            imgL, scaleL, offsetL = prep_for_onnx(base_tile)
+            imgR, scaleR, offsetR = prep_for_onnx(target_tile)
+            
+            try:
+                batch = np.concatenate([imgL, imgR], axis=0).astype(np.float32)
+                inp_name = self.sess.get_inputs()[0].name
+                keypoints_b, matches, mscores = self.sess.run(None, {inp_name: batch})
+            except Exception:
+                return None
 
-        except Exception as e:
+            if keypoints_b is None: return None
+
+            matches = matches.astype(np.int32); batch_mask = matches[:, 0] == 0
+            idx0, idx1, scores = matches[batch_mask, 1], matches[batch_mask, 2], mscores[batch_mask]
+            conf_mask = scores > 0.5
+            if np.sum(conf_mask) < 8: return None
+            idx0, idx1, scores = idx0[conf_mask], idx1[conf_mask], scores[conf_mask]
+            
+            mkptsL_padded = keypoints_b[0][idx0].astype(np.float32)
+            mkptsR_padded = keypoints_b[1][idx1].astype(np.float32)
+
+            def restore_coords(pts, pad, scale):
+                pts -= np.array(pad); pts *= np.array(scale)
+                return pts
+
+            mkptsL_tile_local = restore_coords(mkptsL_padded, offsetL, scaleL)
+            mkptsR_tile_local = restore_coords(mkptsR_padded, offsetR, scaleR)
+            
+            offset_global = np.array([x_start_overlap, y_start_overlap])
+            mkptsL_global = mkptsL_tile_local + offset_global
+            mkptsR_global = mkptsR_tile_local + offset_global
+            
+            return mkptsL_global, mkptsR_global, scores
+
+        # >> PERUBAHAN UTAMA: Kembali ke loop sekuensial <<
+        all_results = []
+        for r in range(rows):
+            for c in range(cols):
+                # Periksa sinyal berhenti di setiap iterasi
+                if stop_requested and stop_requested():
+                    return None, None
+                    
+                # Langsung panggil fungsi worker untuk setiap ubin, satu per satu
+                result = process_tile(r, c)
+                
+                # Jika ubin berhasil diproses, tambahkan hasilnya
+                if result is not None:
+                    all_results.append(result)
+
+        # --- PENGGABUNGAN DAN FINALISASI (Tidak Berubah) ---
+        if not all_results:
             return None, None
-        finally:
-            del batch
-            gc.collect()
 
-        if keypoints_b is None:
+        all_mkptsL = [res[0] for res in all_results]
+        all_mkptsR = [res[1] for res in all_results]
+        all_scores = [res[2] for res in all_results]
+
+        final_mkptsL = np.vstack(all_mkptsL)
+        final_mkptsR = np.vstack(all_mkptsR)
+        final_scores = np.concatenate(all_scores)
+
+        dedup_mkptsL, dedup_mkptsR, _ = deduplicate_keypoints(
+            final_mkptsL, final_mkptsR, final_scores, base_image.shape
+        )
+        
+        if len(dedup_mkptsL) < 8:
             return None, None
 
-        # Ekstraksi Keypoint 
-        matches = matches.astype(np.int32)
-        batch_mask = matches[:, 0] == 0
-        idx0 = matches[batch_mask, 1]
-        idx1 = matches[batch_mask, 2]
-        scores = mscores[batch_mask]
-
-        conf_mask = scores > 0.5
-        if np.sum(conf_mask) < 8:
-            print("[INFO] Not enough confident matches found after filtering.")
-            return None, None
-
-        idx0, idx1 = idx0[conf_mask], idx1[conf_mask]
-
-        mkptsL = keypoints_b[0][idx0].astype(np.float32)
-        mkptsR = keypoints_b[1][idx1].astype(np.float32)
-
-        del keypoints_b, matches, mscores, scores, batch_mask, conf_mask
-        gc.collect()
-
-        # Mengembalikan Koordinat ke Skala Asli
-        def restore_coords(pts, pad, scale):
-            pts -= np.array(pad)
-            pts *= np.array(scale)
-            return pts
-
-        mkptsL = restore_coords(mkptsL, offsetL, scaleL)
-        mkptsR = restore_coords(mkptsR, offsetR, scaleR)
-
-        return mkptsL.reshape(-1, 1, 2), mkptsR.reshape(-1, 1, 2)
+        return dedup_mkptsL.reshape(-1, 1, 2), dedup_mkptsR.reshape(-1, 1, 2)
 
     def compensate_motion(
         self, base_image, base_points, target_points, config_filename=None
@@ -536,160 +582,165 @@ def main(
     else:
         all_transforms = []
 
-    def loader_stage1(q, paths, target_dims):
-        """Produsen untuk Tahap 1: Memuat dan me-resize gambar."""
-        for i, path in enumerate(paths, start=1):
-            if stop_requested and stop_requested(): break
+        def loader_stage1(q, paths, target_dims):
+            """Produsen untuk Tahap 1: Memuat dan me-resize gambar."""
+            for i, path in enumerate(paths, start=1):
+                if stop_requested and stop_requested(): break
+                
+                img_list = load_images_from_paths([path], stop_requested=stop_requested)
+                if not img_list or img_list[0] is None: continue
+                
+                target_image = resize_with_padding(img_list[0], target_dims)
+                # Masukkan data yang siap diproses ke antrian
+                q.put((i, path, target_image))
+            # Kirim sinyal bahwa produsen sudah selesai
+            q.put(None)
+
+        # Inisialisasi antrian dan thread untuk Tahap 1
+        queue_stage1 = queue.Queue(maxsize=2)
+        thread_stage1 = threading.Thread(
+            target=loader_stage1,
+            args=(queue_stage1, image_paths[1:], (target_h, target_w))
+        )
+        thread_stage1.start()
+
+        # Loop utama (Konsumen) untuk Tahap 1
+        while True:
+            item = queue_stage1.get()
+            if item is None: break  # Selesai jika menerima sinyal dari produsen
             
-            img_list = load_images_from_paths([path], stop_requested=stop_requested)
-            if not img_list or img_list[0] is None: continue
+            i, path, target_image = item
             
-            target_image = resize_with_padding(img_list[0], target_dims)
-            # Masukkan data yang siap diproses ke antrian
-            q.put((i, path, target_image))
-        # Kirim sinyal bahwa produsen sudah selesai
-        q.put(None)
-
-    # Inisialisasi antrian dan thread untuk Tahap 1
-    queue_stage1 = queue.Queue(maxsize=2)
-    thread_stage1 = threading.Thread(
-        target=loader_stage1,
-        args=(queue_stage1, image_paths[1:], (target_h, target_w))
-    )
-    thread_stage1.start()
-
-    # Loop utama (Konsumen) untuk Tahap 1
-    while True:
-        item = queue_stage1.get()
-        if item is None: break  # Selesai jika menerima sinyal dari produsen
-        
-        i, path, target_image = item
-        
-        try:
-            base_pts, target_pts = processor.calculate_global_motion(
-                base_image, target_image
-            )
-            if base_pts is not None and target_pts is not None:
-                all_transforms.append((i, path, base_pts, target_pts))
-        finally:
-            del target_image
-            gc.collect()
-
-        with progress_lock:
-            progress_counter["count"] += 1
-            if update_progress:
-                update_progress(
-                    progress_counter["count"],
-                    2 * (total_images - 1),
-                    f"Calculating transform {progress_counter['count']}/{total_images - 1}",
+            try:
+                base_pts, target_pts = processor.calculate_global_motion(
+                    base_image, target_image
                 )
+                if base_pts is not None and target_pts is not None:
+                    all_transforms.append((i, path, base_pts, target_pts))
+            finally:
+                del target_image
+                gc.collect()
 
-    # Pastikan thread produsen sudah benar-benar selesai sebelum lanjut
-    thread_stage1.join()
+            with progress_lock:
+                progress_counter["count"] += 1
+                if update_progress:
+                    update_progress(
+                        progress_counter["count"],
+                        2 * (total_images - 1),
+                        language_config.RUN_PROCESS_TRANSFORMATION.format(
+                                    progress_counter["count"],
+                                    total_images - 1
+                                )
+                    )
+
+        # Pastikan thread produsen sudah benar-benar selesai sebelum lanjut
+        thread_stage1.join()
 
 
-    # =========================================================================
-    # --- TAHAP 2: Hitung dan Terapkan Crop Global (Sinkron) ---
-    # =========================================================================
-    if not all_transforms:
-        return
+        # =========================================================================
+        # --- TAHAP 2: Hitung dan Terapkan Crop Global (Sinkron) ---
+        # =========================================================================
+        if not all_transforms:
+            return
 
-    crop_bounds = compute_global_crop(
-        [(i, b, t) for i, _, b, t in all_transforms],
-        total_images,
-        base_image.shape[1],
-        base_image.shape[0],
-        transformation_type=transformation_type,
-    )
-    if crop_bounds is None:
-        return
+        crop_bounds = compute_global_crop(
+            [(i, b, t) for i, _, b, t in all_transforms],
+            total_images,
+            base_image.shape[1],
+            base_image.shape[0],
+            transformation_type=transformation_type,
+        )
+        if crop_bounds is None:
+            return
 
-    # Terapkan crop ke base image dan simpan
-    base_image_cropped = crop_image(base_image, crop_bounds)
-    del base_image
-    gc.collect()
+        # Terapkan crop ke base image dan simpan
+        base_image_cropped = crop_image(base_image, crop_bounds)
+        del base_image
+        gc.collect()
 
-    with h5py.File(processor.hdf5_path, "a") as h5f:
-        del h5f["image_0"]
-        h5f.create_dataset("image_0", data=base_image_cropped)
-    if save_align:
-        save_align_to_folder(base_image_cropped, 0, image_paths[0], align_folder)
+        with h5py.File(processor.hdf5_path, "a") as h5f:
+            del h5f["image_0"]
+            h5f.create_dataset("image_0", data=base_image_cropped)
+        if save_align:
+            save_align_to_folder(base_image_cropped, 0, image_paths[0], align_folder)
 
-    del base_image_cropped
-    gc.collect()
+        del base_image_cropped
+        gc.collect()
 
-    # =========================================================================
-    # --- TAHAP 3: Streaming Ulang dan Simpan dengan Pipeline Queue ---
-    # =========================================================================
-    stage3_counter = {"count": 0}
-    
-    # Pindahkan hasil transformasi ke variabel sementara untuk dilewatkan ke thread
-    temp_transforms = all_transforms
-    all_transforms = []
-    gc.collect()
-
-    def loader_stage3(q, transforms, target_dims):
-        """Produsen untuk Tahap 3: Membaca ulang gambar berdasarkan data transformasi."""
-        for i, path, base_pts, target_pts in transforms:
-            if stop_requested and stop_requested(): break
-            
-            img_list = load_images_from_paths([path], stop_requested=stop_requested)
-            if not img_list or img_list[0] is None: continue
-            
-            target_image = resize_with_padding(img_list[0], target_dims)
-            # Masukkan paket data lengkap ke antrian
-            q.put((i, path, base_pts, target_pts, target_image))
-        # Kirim sinyal selesai
-        q.put(None)
-
-    # Inisialisasi antrian dan thread untuk Tahap 3
-    queue_stage3 = queue.Queue(maxsize=2)
-    thread_stage3 = threading.Thread(
-        target=loader_stage3,
-        args=(queue_stage3, temp_transforms, (target_h, target_w))
-    )
-    thread_stage3.start()
-
-    # Loop utama (Konsumen) untuk Tahap 3
-    while True:
-        item = queue_stage3.get()
-        if item is None: break
-
-        i, path, base_pts, target_pts, target_image = item
+        # =========================================================================
+        # --- TAHAP 3: Streaming Ulang dan Simpan dengan Pipeline Queue ---
+        # =========================================================================
+        stage3_counter = {"count": 0}
         
-        try:
-            # Kompensasi motion (CPU-heavy)
-            compensated = processor.compensate_motion(
-                target_image, base_pts, target_pts
-            )
-            if compensated is None: continue
+        # Pindahkan hasil transformasi ke variabel sementara untuk dilewatkan ke thread
+        temp_transforms = all_transforms
+        all_transforms = []
+        gc.collect()
+
+        def loader_stage3(q, transforms, target_dims):
+            """Produsen untuk Tahap 3: Membaca ulang gambar berdasarkan data transformasi."""
+            for i, path, base_pts, target_pts in transforms:
+                if stop_requested and stop_requested(): break
+                
+                img_list = load_images_from_paths([path], stop_requested=stop_requested)
+                if not img_list or img_list[0] is None: continue
+                
+                target_image = resize_with_padding(img_list[0], target_dims)
+                # Masukkan paket data lengkap ke antrian
+                q.put((i, path, base_pts, target_pts, target_image))
+            # Kirim sinyal selesai
+            q.put(None)
+
+        # Inisialisasi antrian dan thread untuk Tahap 3
+        queue_stage3 = queue.Queue(maxsize=2)
+        thread_stage3 = threading.Thread(
+            target=loader_stage3,
+            args=(queue_stage3, temp_transforms, (target_h, target_w))
+        )
+        thread_stage3.start()
+
+        # Loop utama (Konsumen) untuk Tahap 3
+        while True:
+            item = queue_stage3.get()
+            if item is None: break
+
+            i, path, base_pts, target_pts, target_image = item
             
-            # Crop dan simpan (CPU/IO-heavy)
-            cropped = crop_image(compensated, crop_bounds)
-            if save_align:
-                save_align_to_folder(cropped, i, path, align_folder)
-            if command_save_to_hd5f:
-                with lock:
-                    with h5py.File(processor.hdf5_path, "a") as h5f:
-                        save_to_hdf5(h5f, f"image_{i}", cropped, extract_exif(path))
-        finally:
-            del target_image
-            del compensated
-            del cropped
-            gc.collect()
-
-        with progress_lock:
-            stage3_counter["count"] += 1
-            if update_progress:
-                update_progress(
-                    (total_images - 1) + stage3_counter["count"],
-                    2 * (total_images - 1),
-                    f"Applying transform {stage3_counter['count']}/{len(temp_transforms)}",
+            try:
+                # Kompensasi motion (CPU-heavy)
+                compensated = processor.compensate_motion(
+                    target_image, base_pts, target_pts
                 )
-    
-    # Pastikan thread produsen Tahap 3 selesai
-    thread_stage3.join()
+                if compensated is None: continue
+                
+                # Crop dan simpan (CPU/IO-heavy)
+                cropped = crop_image(compensated, crop_bounds)
+                if save_align:
+                    save_align_to_folder(cropped, i, path, align_folder)
+                if command_save_to_hd5f:
+                    with lock:
+                        with h5py.File(processor.hdf5_path, "a") as h5f:
+                            save_to_hdf5(h5f, f"image_{i}", cropped, extract_exif(path))
+            finally:
+                del target_image
+                del compensated
+                del cropped
+                gc.collect()
 
+            with progress_lock:
+                stage3_counter["count"] += 1
+                if update_progress:
+                    update_progress(
+                        (total_images - 1) + stage3_counter["count"],
+                        2 * (total_images - 1),
+                        language_config.RUN_SAVING_TRANSFORMATION.format(
+                                    stage3_counter["count"],
+                                    total_images - 1
+                                )
+                    )
+        
+        # Pastikan thread produsen Tahap 3 selesai
+        thread_stage3.join()
 
 def running_light_glue(parent=None, single_process=None, batch_id=None):
     process_finished = False

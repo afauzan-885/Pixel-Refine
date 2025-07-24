@@ -337,7 +337,7 @@ class AKAZEAlgorithm:
         if base_points is None or target_points is None or base_image is None or base_image.ndim < 2:
              return None
 
-        config = self.load_orb_config(config_filename)
+        config = self.load_akaze_config(config_filename)
         keep_edges = config.get("keep_edges", False)
         transformation_type = config.get("transformation", "affine")
         ransac_threshold = config.get("ransacThreshold", 5.0)

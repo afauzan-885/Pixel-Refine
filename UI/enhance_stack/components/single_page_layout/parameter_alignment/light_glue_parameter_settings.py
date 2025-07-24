@@ -129,8 +129,8 @@ def get_light_glue_page():
     layout = QVBoxLayout(page)
     layout.setSpacing(10)
 
-    title_label = QLabel("LightGlue Parameter Setting") # Ganti dengan language_config jika perlu
-    title_label.setFont(get_default_font(12, QFont.Weight.Bold))
+    title_label = QLabel("Light Glue Parameter Setting") # Ganti dengan language_config jika perlu
+    title_label.setFont(get_default_font(10, QFont.Weight.Bold))
     title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
     layout.addWidget(title_label)
 

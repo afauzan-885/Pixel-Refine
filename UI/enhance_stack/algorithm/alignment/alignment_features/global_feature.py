@@ -78,6 +78,148 @@ def setup_balanced_batching(total_images, language_config, max_batch_size=10):
     # 3. Kembalikan rencana yang sudah jadi
     return batch_plan        
 # ====================== Preprocessing ====================== #
+
+# ====================== Global Feature Extraction ====================== #
+def filter_keypoints_spatially(keypoints, descriptors, image_shape, grid_size=(5, 5), max_kps_per_cell=80):
+        """
+        Menyaring keypoints untuk memastikan distribusi spasial yang merata.
+        
+        Metode ini membagi gambar menjadi sebuah grid, lalu mengambil N keypoint
+        terbaik (berdasarkan 'response') dari setiap sel grid. Ini mencegah
+        penumpukan keypoint di satu area dan memastikan fitur representatif
+        dari seluruh gambar.
+
+        Args:
+            keypoints: Daftar keypoint mentah dari detektor.
+            descriptors: Deskriptor yang sesuai dengan keypoint.
+            image_shape: Bentuk gambar (h, w) untuk menentukan batas grid.
+            grid_size: Tuple (cols, rows) untuk grid.
+            max_kps_per_cell: Jumlah maksimum keypoint yang diambil dari setiap sel.
+
+        Returns:
+            Tuple (filtered_keypoints, filtered_descriptors)
+        """
+        if not keypoints or descriptors is None:
+            return [], None
+            
+        h, w = image_shape
+        rows, cols = grid_size
+        
+        # Hindari pembagian dengan nol jika grid tidak valid
+        if cols == 0 or rows == 0:
+            return keypoints, descriptors
+
+        cell_w = w // cols
+        cell_h = h // rows
+        
+        # Buat grid untuk menampung keypoint per sel
+        grid_cells = [[] for _ in range(rows * cols)]
+        
+        # Masukkan setiap keypoint ke dalam sel grid yang sesuai
+        for i, kp in enumerate(keypoints):
+            # Hindari error jika koordinat di luar gambar
+            if not (0 <= kp.pt[0] < w and 0 <= kp.pt[1] < h):
+                continue
+
+            col_idx = int(kp.pt[0] // cell_w)
+            row_idx = int(kp.pt[1] // cell_h)
+            
+            # Pastikan tidak keluar dari batas karena pembulatan
+            col_idx = min(col_idx, cols - 1)
+            row_idx = min(row_idx, rows - 1)
+            
+            grid_idx = row_idx * cols + col_idx
+            grid_cells[grid_idx].append((kp, i)) # Simpan keypoint dan indeks aslinya
+
+        # Ambil keypoint terbaik dari setiap sel
+        final_keypoints = []
+        final_desc_indices = []
+
+        for cell in grid_cells:
+            if not cell:
+                continue
+            
+            # Urutkan keypoint di dalam sel berdasarkan response (terbaik di atas)
+            cell.sort(key=lambda item: item[0].response, reverse=True)
+            
+            # Ambil N teratas (atau semua jika lebih sedikit)
+            for kp, original_idx in cell[:max_kps_per_cell]:
+                final_keypoints.append(kp)
+                final_desc_indices.append(original_idx)
+
+        if not final_desc_indices:
+            return [], None
+
+        # Ambil deskriptor yang sesuai menggunakan indeks yang telah difilter
+        final_descriptors = descriptors[final_desc_indices]
+        
+        return final_keypoints, final_descriptors
+    
+def deduplicate_keypoints(mkptsL, mkptsR, scores, image_shape, distance_thresh=10):
+    """
+    Menghilangkan duplikat keypoint yang mungkin muncul dari area tumpang tindih.
+    
+    Hanya keypoint dengan skor kepercayaan tertinggi dalam radius tertentu yang dipertahankan.
+    
+    Args:
+        mkptsL, mkptsR: Array keypoint yang cocok.
+        scores: Skor kepercayaan untuk setiap pasangan match.
+        image_shape: Bentuk gambar penuh untuk membuat grid spasial.
+        distance_thresh: Jarak piksel untuk dianggap sebagai duplikat.
+
+    Returns:
+        Tuple (dedup_mkptsL, dedup_mkptsR, dedup_scores)
+    """
+    if len(mkptsL) == 0:
+        return np.array([]), np.array([]), np.array([])
+
+    # Pastikan input adalah array (N, 2)
+    if len(mkptsL.shape) != 2 or mkptsL.shape[1] != 2:
+        # Jika bentuknya (N, 1, 2), ubah menjadi (N, 2) untuk diproses
+        if len(mkptsL.shape) == 3 and mkptsL.shape[1] == 1 and mkptsL.shape[2] == 2:
+            mkptsL = mkptsL.reshape(-1, 2)
+            mkptsR = mkptsR.reshape(-1, 2)
+        else:
+            raise ValueError(f"Input mkptsL harus berbentuk (N, 2), tetapi ditemukan {mkptsL.shape}")
+            
+    h, w = image_shape[:2]
+    cols = int(w / distance_thresh)
+    rows = int(h / distance_thresh)
+    
+    grid = {}
+    
+    sorted_indices = np.argsort(scores)[::-1]
+
+    kept_indices = []
+    
+    for idx in sorted_indices:
+        pt = mkptsL[idx]  
+        
+        grid_col = int(pt[0] / distance_thresh)
+        grid_row = int(pt[1] / distance_thresh)
+        
+        is_duplicate = False
+        for r_offset in range(-1, 2):
+            for c_offset in range(-1, 2):
+                cell_key = (grid_row + r_offset, grid_col + c_offset)
+                if cell_key in grid:
+                    if np.linalg.norm(pt - grid[cell_key]) < distance_thresh: # SEKARANG: Menghitung jarak Euclidean yang benar
+                        is_duplicate = True
+                        break
+            if is_duplicate:
+                break
+        
+        if not is_duplicate:
+            kept_indices.append(idx)
+            grid[(grid_row, grid_col)] = pt
+
+    dedup_mkptsL = mkptsL[kept_indices]
+    dedup_mkptsR = mkptsR[kept_indices]
+    dedup_scores = scores[kept_indices]
+    
+    return dedup_mkptsL, dedup_mkptsR, dedup_scores
+
+
 def calculate_crop_parameters(matrix, w, h, transformation_type):
         """
         Fungsi statis untuk menghitung parameter padding yang diperlukan.

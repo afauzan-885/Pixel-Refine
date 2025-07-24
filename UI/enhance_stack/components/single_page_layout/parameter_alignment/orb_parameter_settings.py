@@ -224,7 +224,7 @@ def get_orb_page():
     layout.addWidget(transformation_label)
 
     transformation_combo = QComboBox()
-    transformation_combo.addItems(["homography", "affine", "similarity", "euclidean"])
+    transformation_combo.addItems(["homography", "affine"])
     # Set nilai awal dari config UI
     transformation_combo.setCurrentText(orb_config.get("transformation", "homography"))
     transformation_combo.setStyleSheet(DROPDOWN_BOX)

@@ -10,10 +10,11 @@ from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, Q
 import h5py
 from PySide6.QtCore import Qt
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import compute_global_crop, crop_image, extract_all_metadata, extract_exif, get_all_image_paths_for_single_process, calculate_crop_parameters, do_warp_and_crop, load_images_from_paths, resize_all_with_padding, resize_with_padding, save_align_to_folder, save_to_hdf5
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import compute_global_crop, crop_image, extract_all_metadata, extract_exif, filter_keypoints_spatially, get_all_image_paths_for_single_process, calculate_crop_parameters, do_warp_and_crop, load_images_from_paths, resize_all_with_padding, resize_with_padding, save_align_to_folder, save_to_hdf5
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE
+
 
 class ORBAlgorithm:
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
@@ -116,185 +117,131 @@ class ORBAlgorithm:
 
         return config_data
 
-    def calculate_global_motion(self, base_image, target_image, config_filename=None, stop_requested=None):
+    def calculate_global_motion(self, base_image, target_image, config_filename=None, 
+                                stop_requested=None, calib_filename=None):
         """
-        Menghitung keypoints/deskriptor menggunakan ORB dengan preprocessing CLAHE,
-        dan matching KNN + Ratio Test. Deteksi fitur bisa multi-core.
+        Menghitung keypoints ORB pada gambar global, menyaringnya secara spasial
+        berdasarkan kualitas, lalu melakukan matching. Mendukung eksekusi multi-core.
         """
+        # --- Tahap 1: Pre-processing (Undistortion) ---
+        if calib_filename:
+            try:
+                fs = cv2.FileStorage(calib_filename, cv2.FILE_STORAGE_READ)
+                mtx = fs.getNode("camera_matrix").mat()
+                dist = fs.getNode("dist_coeff").mat()
+                fs.release()
+                base_image = cv2.undistort(base_image, mtx, dist, None, mtx)
+                target_image = cv2.undistort(target_image, mtx, dist, None, mtx)
+            except Exception:
+                pass # Lanjutkan tanpa undistortion jika gagal
+
         if stop_requested and stop_requested():
             return None, None
 
-        # 1. Baca konfigurasi ORB
+        # --- Tahap 2: Baca Konfigurasi dan Persiapan Gambar ---
         orb_config = self.load_orb_config(config_filename)
         use_multicore = orb_config.get("use_multi_core", True)
         
-        # --- 2. Konversi gambar ke grayscale 8-bit ---
         try:
             def prepare_gray_orb(img):
                 if img is None: raise ValueError("Input image is None.")
-                if img.ndim == 3 and img.shape[2] == 3: gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                if img.ndim == 3: gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                 elif img.ndim == 2: gray = img
-                else: raise ValueError(f"Invalid image dimensions/channels: {img.shape}")
+                else: raise ValueError("Invalid image dimensions.")
                 if gray.dtype != np.uint8:
-                    gray_norm = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
-                    return gray_norm.astype(np.uint8)
+                    return cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
                 return gray
 
             base_gray_8bit = prepare_gray_orb(base_image)
             target_gray_8bit = prepare_gray_orb(target_image)
-        except ValueError as e:
-            print(f"Error preparing images: {e}")
+        except Exception:
             return None, None
-        except Exception as e:
-             print(f"Unexpected error during image preparation: {e}")
-             return None, None
 
-        # --- 3. Terapkan CLAHE (opsional, tetap sekuensial) ---
+        # --- Tahap 3: Peningkatan Kontras dengan CLAHE ---
         try:
-            clip_limit = orb_config.get("clahe_clipLimit", 6.0)
-            grid_size = tuple(orb_config.get("clahe_tileGridSize", (4, 4))) # Pastikan tuple
-        
-            # Hanya buat dan terapkan jika clip_limit > 0 (atau flag lain jika ada)
+            clip_limit = orb_config.get("clahe_clipLimit", 2.0)
             if clip_limit > 0:
-                clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=grid_size)
+                clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tuple(orb_config.get("clahe_tileGridSize", (8, 8))))
                 base_gray_enhanced = clahe.apply(base_gray_8bit)
                 target_gray_enhanced = clahe.apply(target_gray_8bit)
             else:
                 base_gray_enhanced = base_gray_8bit
                 target_gray_enhanced = target_gray_8bit
-        except Exception as e:
+        except Exception:
             base_gray_enhanced = base_gray_8bit
             target_gray_enhanced = target_gray_8bit
 
-        # --- 4. Buat instance ORB ---
+        # --- Tahap 4: Deteksi Fitur Global ---
         try:
-            nfeatures = int(orb_config.get("nfeatures", 1000))
-            scaleFactor = float(orb_config.get("scaleFactor", 1.2))
-            nlevels = int(orb_config.get("nlevels", 8))
-            if nfeatures <=0 or scaleFactor <= 1.0 or nlevels <= 0:
-                raise ValueError("Invalid ORB parameters in config.")
-
             orb = cv2.ORB_create(
-                nfeatures=nfeatures,
-                scaleFactor=scaleFactor,
-                nlevels=nlevels,
-                scoreType=cv2.ORB_HARRIS_SCORE 
+                # Minta lebih banyak fitur untuk memberi lebih banyak pilihan pada filter spasial
+                nfeatures=int(orb_config.get("nfeatures", 10000)), 
+                scaleFactor=float(orb_config.get("scaleFactor", 1.2)),
+                nlevels=int(orb_config.get("nlevels", 8)),
+                scoreType=cv2.ORB_HARRIS_SCORE
             )
-        except ValueError as e:
-             return None, None
-        except Exception as e:
+        except Exception:
             return None, None
-
-        # --- 5. Deteksi Fitur (Sekuensial atau Paralel) ---
-        keypoints_base, descriptors_base = None, None
-        keypoints_target, descriptors_target = None, None
 
         try:
             if use_multicore:
-                def detect_task(image_to_process):
-                    return orb.detectAndCompute(image_to_process, None)
-
-                with ThreadPoolExecutor(max_workers=3) as executor:
+                def detect_task(image): return orb.detectAndCompute(image, None)
+                with ThreadPoolExecutor(max_workers=2) as executor:
                     future_base = executor.submit(detect_task, base_gray_enhanced)
                     future_target = executor.submit(detect_task, target_gray_enhanced)
+                    keypoints_base_raw, descriptors_base_raw = future_base.result()
+                    keypoints_target_raw, descriptors_target_raw = future_target.result()
+            else:
+                keypoints_base_raw, descriptors_base_raw = orb.detectAndCompute(base_gray_enhanced, None)
+                keypoints_target_raw, descriptors_target_raw = orb.detectAndCompute(target_gray_enhanced, None)
+        except Exception:
+            return None, None
 
-                    keypoints_base, descriptors_base = future_base.result()
-                    keypoints_target, descriptors_target = future_target.result()
+        # --- Tahap 5: Filtrasi Spasial untuk Keypoint Terbaik & Terdistribusi ---
+        try:
+            keypoints_base, descriptors_base = filter_keypoints_spatially(
+                keypoints_base_raw, descriptors_base_raw, base_gray_enhanced.shape,
+                grid_size=tuple(orb_config.get("spatial_grid_size", (4, 4))),
+                max_kps_per_cell=int(orb_config.get("max_kps_per_cell", 50))
+            )
+            keypoints_target, descriptors_target = filter_keypoints_spatially(
+                keypoints_target_raw, descriptors_target_raw, target_gray_enhanced.shape,
+                grid_size=tuple(orb_config.get("spatial_grid_size", (4, 4))),
+                max_kps_per_cell=int(orb_config.get("max_kps_per_cell", 50))
+            )
+        except Exception:
+            return None, None
 
-            else: 
-                keypoints_base, descriptors_base = orb.detectAndCompute(base_gray_enhanced, None)
-                keypoints_target, descriptors_target = orb.detectAndCompute(target_gray_enhanced, None)
+        # --- Tahap 6: Matching Fitur pada Keypoint Berkualitas Tinggi ---
+        if descriptors_base is None or descriptors_target is None or len(descriptors_base) < 2 or len(descriptors_target) < 2:
+            return None, None
 
-        except Exception as e:
-             return None, None 
+        try:
+            bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+            matches_raw = bf.knnMatch(descriptors_base, descriptors_target, k=2)
 
-        # --- 6. Matching Fitur (Tetap Sekuensial) ---
-        base_points = None
-        target_points = None
-        if descriptors_base is not None and descriptors_target is not None and \
-           len(descriptors_base) > 0 and len(descriptors_target) > 0:
-            try:
-                bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+            good_matches = []
+            ratio_thresh = float(orb_config.get("ratio_threshold", 0.75))
+            for match_pair in matches_raw:
+                if len(match_pair) == 2:
+                    m, n = match_pair
+                    if m.distance < ratio_thresh * n.distance:
+                        good_matches.append(m)
+            
+            min_matches_req = int(orb_config.get("min_matches_for_transform", 10))
+            if len(good_matches) < min_matches_req:
+                return None, None
+                
+            good_matches.sort(key=lambda m: m.distance)
+            
+            base_points = np.float32([keypoints_base[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+            target_points = np.float32([keypoints_target[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
 
-                k_val = 2
-                if len(descriptors_base) < k_val or len(descriptors_target) < k_val:
-                    print(f"Warning: Not enough descriptors for KNN k={k_val}. Falling back to simple matching.")
-                    # Lakukan match biasa (lebih sedikit match tapi lebih aman)
-                    matches_raw = bf.match(descriptors_base, descriptors_target)
-                    good_matches = matches_raw
-                else:
-                    matches_raw = bf.knnMatch(descriptors_base, descriptors_target, k=k_val)
+        except Exception:
+            return None, None
 
-                    # Terapkan Ratio Test Lowe
-                    good_matches = []
-                    ratio_thresh = float(orb_config.get("ratio_threshold", 0.75)) # Ambil dari config
-                    for match_pair in matches_raw:
-                        if len(match_pair) == k_val:
-                            m, n = match_pair
-                            if m.distance < ratio_thresh * n.distance:
-                                good_matches.append(m)
-                    
-                # --- 7. Ekstrak titik-titik yang cocok, maksimum 500 keypoint terbaik ---
-                min_matches_req = int(orb_config.get("min_matches_for_transform", 10))
-                max_keypoints_used = 500
-
-                if len(good_matches) >= min_matches_req:
-                    try:
-                        # Urutkan berdasarkan jarak (semakin kecil = semakin bagus)
-                        good_matches_sorted = sorted(good_matches, key=lambda m: m.distance)
-
-                        # Ambil hanya maksimum 500 terbaik
-                        limited_matches = good_matches_sorted[:min(len(good_matches_sorted), max_keypoints_used)]
-
-                        base_points_list = [keypoints_base[m.queryIdx].pt for m in limited_matches]
-                        target_points_list = [keypoints_target[m.trainIdx].pt for m in limited_matches]
-
-                        # Konversi ke format NumPy (N, 1, 2)
-                        base_points_np = np.float32(base_points_list).reshape(-1, 1, 2)
-                        target_points_np = np.float32(target_points_list).reshape(-1, 1, 2)
-
-                        # --- Refinement menggunakan Optical Flow LK ---
-                        try:
-                            refined_target_points, status, err = cv2.calcOpticalFlowPyrLK(
-                                base_gray_enhanced, target_gray_enhanced,
-                                base_points_np, target_points_np,
-                                winSize=(15, 15),
-                                maxLevel=3,
-                                criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
-                            )
-
-                            # Filter hanya yang berhasil (status == 1)
-                            status = status.reshape(-1)
-                            base_points = base_points_np[status == 1]
-                            target_points = refined_target_points[status == 1]
-
-                            base_points = base_points.reshape(-1, 1, 2)
-                            target_points = target_points.reshape(-1, 1, 2)
-                        except Exception as e:
-                            print(f"Refinement with optical flow failed: {e}")
-                            base_points = base_points_np
-                            target_points = target_points_np
-
-                    except IndexError as e:
-                        base_points = None
-                        target_points = None
-                    except Exception as e:
-                        base_points = None
-                        target_points = None
-                else:
-                    print(f"Not enough good matches found ({len(good_matches)} < {min_matches_req}) to estimate transform.")
-
-
-            except cv2.error as cv_err:
-                 base_points = None; target_points = None
-            except Exception as e:
-                import traceback
-                base_points = None; target_points = None
-        else:
-            print("Not enough descriptors found in one or both images to perform matching.")
-      
         return base_points, target_points
-
+    
     def compensate_motion(self, base_image, base_points, target_points, config_filename=None):
         """
         Menerapkan kompensasi gerakan menggunakan transformasi (dengan USAC_MAGSAC)
@@ -318,9 +265,6 @@ class ORBAlgorithm:
             if transformation_type == 'affine':
                 matrix, mask = cv2.estimateAffine2D(target_points.reshape(-1, 2), base_points.reshape(-1, 2),
                                                      method=cv2.USAC_MAGSAC, ransacReprojThreshold=ransac_threshold)
-            elif transformation_type in ['similarity', 'euclidean']:
-                matrix, mask = cv2.estimateAffinePartial2D(target_points.reshape(-1, 2), base_points.reshape(-1, 2),
-                                                             method=cv2.USAC_MAGSAC, ransacReprojThreshold=ransac_threshold)
             elif transformation_type == 'homography':
                 matrix, mask = cv2.findHomography(target_points, base_points, cv2.USAC_MAGSAC, ransac_threshold)
             else:
