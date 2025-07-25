@@ -15,7 +15,7 @@ import requests
 import onnxruntime as ort
 from tqdm import tqdm
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (calculate_crop_parameters, deduplicate_keypoints, do_warp_and_crop, enhance_contrast_clahe, extract_all_metadata,
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (calculate_crop_parameters, deduplicate_keypoints, do_warp_and_crop, enhance_contrast_and_convert_8bit, extract_all_metadata,
                                                                                     get_all_image_paths_for_single_process, load_images_from_paths,
                                                                                     resize_all_with_padding, run_pipeline_global_crop, run_pipeline_streaming, save_align_to_folder)
 from UI.enhance_stack.components.single_page_layout.parameter_alignment.light_glue_parameter_settings import load_light_glue_config
@@ -176,7 +176,7 @@ class LightGlueAlgorithm:
             return None, None
 
         # --- KONFIGURASI UNTUK PEMROSESAN BERBASIS UBIN ---
-        GRID_SIZE = (2, 2)  
+        GRID_SIZE = (2, 1)  
         OVERLAP_PERCENT = 0.10 
 
         h, w = base_image.shape[:2]
@@ -216,7 +216,7 @@ class LightGlueAlgorithm:
             return padded, (w / new_w, h / new_h), (pad_left, pad_top)
 
         def prep_for_onnx(img):
-            enhanced_img = enhance_contrast_clahe(img)
+            enhanced_img = enhance_contrast_and_convert_8bit(img)
             rgb = cv2.cvtColor(enhanced_img, cv2.COLOR_BGR2RGB)
             padded, scale_factors, pad_offsets = resize_and_pad(rgb)
             return (padded.astype(np.float32)[None, :, :, :].transpose(0, 3, 1, 2) / 255.0,

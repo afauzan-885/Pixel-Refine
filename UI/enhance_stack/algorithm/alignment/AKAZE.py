@@ -102,30 +102,34 @@ class AKAZEAlgorithm:
             return default_config
         
     def prepare_gray_akaze(self, img):
-        if img is None: raise ValueError("Input image is None.")
-        if img.ndim == 3 and img.shape[2] == 3: gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        elif img.ndim == 3 and img.shape[2] == 4: gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY) # Tambahkan handle BGRA
-        elif img.ndim == 2: gray = img
+        """
+        Konversi gambar ke grayscale 8-bit (uint8).
+        """
+        if img is None:
+            raise ValueError("Input image is None.")
+        # Konversi ke grayscale jika perlu
+        if img.ndim == 3 and img.shape[2] == 3:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        elif img.ndim == 3 and img.shape[2] == 4:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
+        elif img.ndim == 2:
+            gray = img
         else:
             raise ValueError(f"Invalid image dimensions/channels: {img.shape}")
 
+        # Pastikan output adalah 8-bit
         if gray.dtype != np.uint8:
-            max_val = np.max(gray)
-            if gray.dtype == np.float32 or gray.dtype == np.float64:
-                 if max_val <= 1.0 and np.min(gray) >= 0:
-                     gray_norm = (gray * 255.0).astype(np.uint8)
-                 else:
-                     if gray.dtype == np.uint16:
-                         gray_norm = (gray / 256.0).astype(np.uint8) # Asumsi 16-bit ke 8-bit
-                     elif gray.dtype == np.int16:
-                          gray_norm = ((gray / 256.0) + 128).astype(np.uint8) # Perkiraan kasar
-                     else:
-                         gray_norm = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-            elif gray.dtype == np.uint16:
-                 gray_norm = (gray / 256.0).astype(np.uint8)
+            if gray.dtype == np.uint16:
+                gray = (gray / 256).astype(np.uint8)
+            elif gray.dtype in [np.float32, np.float64]:
+                max_val = np.max(gray)
+                min_val = np.min(gray)
+                if max_val <= 1.0 and min_val >= 0.0:
+                    gray = (gray * 255).astype(np.uint8)
+                else:
+                    gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
             else:
-                 gray_norm = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-            return gray_norm
+                gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         return gray
 
     def compute_features_block(self, akaze_instance, enhanced_gray_base, enhanced_gray_target, x, y, bw, bh, overlap_px, img_w, img_h, max_kps_per_block=300):

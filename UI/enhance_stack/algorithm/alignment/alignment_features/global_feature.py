@@ -356,22 +356,64 @@ def extract_all_metadata(image_paths, metadata_file="metadata.json"):
 # === 3. PRA-PEMROSESAN & UTILITAS GAMBAR
 # =========================================================================
 
-def convert_to_uint8(img):
-    # sama seperti Anda
-    if img.dtype == np.uint16:
-        return (img / 257.0).astype(np.uint8)
-    elif img.dtype == np.uint8:
-        return img
-    else:
-        norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX)
-        return norm.astype(np.uint8)
+def convert_to_uint8(image):
+    """
+    Mengonversi gambar dari tipe data apa pun ke uint8 dengan cara yang kuat,
+    memastikan kontras global dimaksimalkan menggunakan normalisasi min-max.
+    Ini adalah langkah krusial untuk data dengan kedalaman bit tinggi seperti uint16.
+
+    Args:
+        image: Gambar input (berwarna atau grayscale).
+
+    Returns:
+        Gambar uint8 dengan kontras yang telah diregangkan.
+    """
+    # Jika sudah 8-bit, tidak perlu melakukan apa-apa.
+    if image.dtype == np.uint8:
+        return image
+
+    # Untuk SEMUA tipe data lain (uint16, float32, dll.), gunakan
+    # cv2.normalize dengan NORM_MINMAX. Ini akan meregangkan rentang dinamis
+    # yang ada (misalnya, nilai piksel dari 1000 hingga 5000) ke rentang
+    # penuh 0-255. Inilah yang membuat hasilnya kuat.
     
-def enhance_contrast_clahe(image):
-    lab = cv2.cvtColor(convert_to_uint8(image), cv2.COLOR_BGR2LAB)
+    # Periksa apakah gambar memiliki rentang yang valid untuk dinormalisasi
+    min_val, max_val = np.min(image), np.max(image)
+    if max_val - min_val < 1e-6: # Jika gambar hampir datar (misal, semua hitam)
+        # Hindari pembagian dengan nol, kembalikan gambar dengan nilai rata-rata
+        return np.full(image.shape, int(np.mean(image)), dtype=np.uint8)
+
+    normalized_image = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX)
+    
+    return normalized_image.astype(np.uint8)
+    
+def enhance_contrast_and_convert_8bit(image):
+    """
+    Meningkatkan kontras pada gambar berwarna dengan cara yang kuat dan andal.
+    
+    Pertama, ia memastikan gambar dikonversi ke 8-bit dengan kontras global
+    yang optimal. Kemudian, ia menerapkan CLAHE pada channel Luminance (L) 
+    di ruang warna LAB untuk menyempurnakan kontras lokal tanpa merusak warna.
+
+    Args:
+        image: Gambar input berwarna (kedalaman bit apa pun).
+
+    Returns:
+        Gambar BGR 8-bit dengan kontras yang telah ditingkatkan.
+    """
+    # Langkah 1: Gunakan fungsi konversi 8-bit kita yang baru dan kuat.
+    # Ini memastikan kita memulai dengan gambar berkualitas tinggi.
+    image_8bit = convert_to_uint8(image)
+
+    # Pastikan input adalah gambar berwarna untuk konversi LAB
+    if image_8bit.ndim == 2:
+        image_8bit = cv2.cvtColor(image_8bit, cv2.COLOR_GRAY2BGR)
+
+    # Langkah 2: Terapkan CLAHE di ruang warna LAB (logika ini sudah bagus)
+    lab = cv2.cvtColor(image_8bit, cv2.COLOR_BGR2LAB)
     l_channel, a_channel, b_channel = cv2.split(lab)
     
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
-
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)) # Gunakan grid 8x8 seperti di AKAZE Anda
     cl = clahe.apply(l_channel)
 
     merged_channels = cv2.merge((cl, a_channel, b_channel))
