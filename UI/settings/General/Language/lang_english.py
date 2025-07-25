@@ -608,9 +608,11 @@ ORB_DESCRIPTION = """Fast algorithm but less accurate for significant difference
 
 Suitable for images with minimal differences, and accurate on images with random textures."""
 
-LIGHT_GLUE_DESCRIPTION = """A deep learning neural network model for matching local features across images.
+LIGHT_GLUE_DESCRIPTION = """A Deep Learning neural network model for matching local features across images.
 
-Light Glue is more robust than the AKAZE algorithm, capable of handling images with even large perspective differences."""
+Light Glue is more robust than the AKAZE algorithm, capable of handling images with perspective differences and even challenging conditions.
+Warning: This process only supports sufficiently powerful NVIDIA GPUs (CUDA). It can run on CPU, but processing time will be slower."""
+
 
 # --- Super Resolution Algorithm Descriptions ---
 SUPER_RESOLUTION_NAME = "Super Resolution Algorithm"

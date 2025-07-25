@@ -621,7 +621,8 @@ Cocok untuk gambar dengan perbedaan minimal, dan akurat pada gambar dengan tekst
 
 LIGHT_GLUE_DESCRIPTION = """Model Jaringan saraf (Deep Learning) untuk mencocokan fitur lokal di seluruh gambar.
 
-Light Glue ini lebih kuat dibandingkan algoritma AKAZE, mampu menangani gambar dengan perbedaan perspektif yang besar sekalipun."""
+Light Glue ini lebih kuat dibandingkan algoritma AKAZE, mampu menangani gambar dengan perbedaan perspektif dan kondisi gambar yang sulit sekalipun.
+Peringatan: Proses ini hanya mendukung GPU NVIDIA (CUDA) yang cukup kuat, bisa dijalankan pada CPU namun waktu prosesnya lebih lambat"""
 
 # --- Super Resolution Algorithm Descriptions ---
 SUPER_RESOLUTION_NAME = "Algoritma Super Resolusi"

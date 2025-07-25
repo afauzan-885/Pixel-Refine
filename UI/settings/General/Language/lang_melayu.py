@@ -609,9 +609,11 @@ ORB_DESCRIPTION = """Algoritma cepat namun kurang tepat untuk perbezaan yang sig
 
 Sesuai untuk imej dengan perbezaan minimum, dan tepat pada imej dengan tekstur rawak."""
 
-LIGHT_GLUE_DESCRIPTION = """Model rangkaian saraf pembelajaran mendalam untuk memadankan ciri setempat merentas imej.
+LIGHT_GLUE_DESCRIPTION = """Model rangkaian neural (Deep Learning) untuk memadankan ciri-ciri setempat merentasi imej.
 
-Light Glue lebih teguh daripada algoritma AKAZE, mampu mengendalikan imej dengan perbezaan perspektif yang besar."""
+Light Glue lebih kukuh berbanding algoritma AKAZE, mampu mengendalikan imej dengan perbezaan perspektif dan keadaan yang mencabar.
+Amaran: Proses ini hanya menyokong GPU NVIDIA (CUDA) yang cukup berkuasa. Ia boleh dijalankan pada CPU tetapi masa pemprosesan akan lebih perlahan."""
+
 
 # --- Super Resolution Algorithm Descriptions ---
 SUPER_RESOLUTION_NAME = "Algoritma Super Resolution"

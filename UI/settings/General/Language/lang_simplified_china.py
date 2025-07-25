@@ -599,7 +599,9 @@ ORB_DESCRIPTION = """算法速度快，但对于显著差异不够准确。
 
 LIGHT_GLUE_DESCRIPTION = """一种用于跨图像匹配局部特征的深度学习神经网络模型。
 
-Light Glue 比 AKAZE 算法更强大，甚至能够处理具有巨大视角差异的图像。"""
+Light Glue 比 AKAZE 算法更强大，能够处理具有视角差异和复杂条件的图像。
+警告：此过程仅支持性能足够强大的 NVIDIA GPU（CUDA），虽然可以在 CPU 上运行，但处理时间会更慢。"""
+
 
 # --- Super Resolution Algorithm Descriptions ---
 SUPER_RESOLUTION_NAME = "Super Resolution 算法"
