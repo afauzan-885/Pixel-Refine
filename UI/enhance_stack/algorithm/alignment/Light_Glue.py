@@ -15,9 +15,9 @@ import requests
 import onnxruntime as ort
 from tqdm import tqdm
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (calculate_crop_parameters, deduplicate_keypoints, do_warp_and_crop, enhance_contrast_and_convert_8bit, extract_all_metadata,
-                                                                                    get_all_image_paths_for_single_process, load_images_from_paths,
-                                                                                    resize_all_with_padding, run_pipeline_global_crop, run_pipeline_streaming, save_align_to_folder)
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (calculate_crop_parameters, deduplicate_keypoints, do_warp_and_crop, extract_all_metadata,
+                                                                                    get_all_image_paths_for_single_process, load_images_from_paths, prepare_image,
+                                                                                    resize_all_with_padding, run_pipeline_global_crop, run_pipeline_non_crop, save_align_to_folder)
 from UI.enhance_stack.components.single_page_layout.parameter_alignment.light_glue_parameter_settings import load_light_glue_config
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
@@ -216,7 +216,7 @@ class LightGlueAlgorithm:
             return padded, (w / new_w, h / new_h), (pad_left, pad_top)
 
         def prep_for_onnx(img):
-            enhanced_img = enhance_contrast_and_convert_8bit(img)
+            enhanced_img = prepare_image(img, grayscale=False, use_clahe=True)
             rgb = cv2.cvtColor(enhanced_img, cv2.COLOR_BGR2RGB)
             padded, scale_factors, pad_offsets = resize_and_pad(rgb)
             return (padded.astype(np.float32)[None, :, :, :].transpose(0, 3, 1, 2) / 255.0,
@@ -266,7 +266,7 @@ class LightGlueAlgorithm:
         for r in range(rows):
             for c in range(cols):
                 job_queue.put((r, c))
-        job_queue.put(None) # Tambahkan sinyal berhenti untuk worker
+        job_queue.put(None) 
 
         # --- PERUBAHAN 3: Loop utama sekarang menjadi konsumen GPU ---
         all_results = []
@@ -276,10 +276,8 @@ class LightGlueAlgorithm:
                 break
 
             try:
-                # Ambil data yang SUDAH DIPROSES dari antrian hasil
                 r, c, imgL, imgR, scaleL, offsetL, scaleR, offsetR, x_start_overlap, y_start_overlap = result_queue.get(timeout=30)
             except queue.Empty:
-                # Jika worker macet atau error, jangan menunggu selamanya
                 break
 
             # Lakukan pekerjaan GPU
@@ -367,13 +365,6 @@ class LightGlueAlgorithm:
                     method=cv2.USAC_MAGSAC,
                     ransacReprojThreshold=ransac_threshold,
                 )
-            elif transformation_type in ["similarity", "euclidean"]:
-                matrix, mask = cv2.estimateAffinePartial2D(
-                    target_points.reshape(-1, 2),
-                    base_points.reshape(-1, 2),
-                    method=cv2.USAC_MAGSAC,
-                    ransacReprojThreshold=ransac_threshold,
-                )
             elif transformation_type == "homography":
                 matrix, mask = cv2.findHomography(
                     target_points, base_points, cv2.USAC_MAGSAC, ransac_threshold
@@ -382,7 +373,6 @@ class LightGlueAlgorithm:
                 raise ValueError("Tipe transformasi tidak dikenali")
 
             if matrix is None:
-                print("Gagal menghitung matriks transformasi")
                 return None
 
         except (cv2.error, Exception) as e:
@@ -409,12 +399,9 @@ class LightGlueAlgorithm:
                         borderMode=cv2.BORDER_CONSTANT,
                     )
             else:
-                # Kasus kompleks: hitung padding, lalu warp dan crop
-                # Panggil fungsi statis untuk menghitung parameter
                 pad = calculate_crop_parameters(matrix, w, h, transformation_type)
 
                 if pad is None:
-                    # Gagal menghitung parameter, kembali ke warp standar
                     return cv2.warpAffine(
                         base_image,
                         matrix,
@@ -429,7 +416,6 @@ class LightGlueAlgorithm:
                 )
 
         except (cv2.error, Exception) as e:
-            # print(f"Error saat warping gambar: {e}")
             return None
 
 
@@ -456,9 +442,6 @@ def main(
     enable_cropping = config.get("enable_cropping", False)
     keep_edges = config.get("keep_edges", False)
     transformation_type = config.get("transformation", "affine")
-
-    progress_counter = {"count": 1 if not enable_cropping or keep_edges else 0}
-    progress_lock = threading.Lock()
 
     if single_process:
         image_paths = get_all_image_paths_for_single_process(db_path)
@@ -502,7 +485,7 @@ def main(
 
     # --- 4. Delegasi ke Pipeline yang Sesuai ---
     if not enable_cropping or keep_edges:
-        run_pipeline_streaming(
+        run_pipeline_non_crop(
             processor=processor,
             image_paths=image_paths[1:],
             base_image=base_image,

@@ -412,8 +412,8 @@ SWITCH_BUTTON_ACTIVE_STYLE = """
     }
 """
 
-def stylesheet_panorama_page():
-        """Mengembalikan QSS untuk styling aplikasi. (Tidak ada perubahan)"""
+def stylesheet_global_page():
+        """Mengembalikan QSS untuk styling aplikasi"""
         return """
             /* === Latar Belakang dan Font Dasar === */
             QMainWindow, QWidget {
@@ -422,7 +422,7 @@ def stylesheet_panorama_page():
             * {
                 font-family: 'Segoe UI', 'Roboto', 'Helvetica Neue', sans-serif;
                 font-size: 10pt;
-                border: none; /* Menghilangkan border default */
+                border: none;
             }
             
             /* === Judul dan Kontainer Utama === */
@@ -542,11 +542,11 @@ def stylesheet_panorama_page():
                 border-radius: 3px;
             }
             QMenu::item:disabled {
-                color: #AAAAAA; /* Warna teks untuk item yang nonaktif */
+                color: #AAAAAA;
             }
             QMenu::item:selected { /* :selected adalah state untuk hover */
-                background-color: #0078D4; /* Biru solid yang jelas */
-                color: white; /* Teks putih agar kontras */
+                background-color: #0078D4; 
+                color: white;
             }
             QMenu::separator {
                 height: 1px;
@@ -556,14 +556,19 @@ def stylesheet_panorama_page():
             
             /* === Widget di dalam Tab (Dropdown, Slider) === */
             QComboBox {
-                padding: 5px;
-                border: 1px solid #DCDCDC;
-                border-radius: 4px;
+                padding: 6px 5px;
+                border: none; 
                 background-color: white;
+                border-bottom: 4px solid #82CCD6; 
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
             }
+
             QComboBox:hover {
-                border-color: #0078D4;
+                /* Saat di-hover, ganti warna garis bawahnya, bukan border biasa */
+                border-bottom-color: #0078D4; 
             }
+
             QComboBox::drop-down {
                 border: none;
             }

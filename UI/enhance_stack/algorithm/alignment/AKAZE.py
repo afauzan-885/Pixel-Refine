@@ -1,7 +1,4 @@
 import gc
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import queue
-import threading
 import cv2
 import numpy as np
 import sqlite3
@@ -12,9 +9,9 @@ from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, Q
 from PySide6.QtCore import Qt
 import h5py
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (calculate_crop_parameters, do_warp_and_crop, extract_all_metadata,
-                                                                                    get_all_image_paths_for_single_process, load_images_from_paths,
-                                                                                    resize_all_with_padding, run_pipeline_global_crop, run_pipeline_streaming, save_align_to_folder)
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (calculate_crop_parameters, do_warp_and_crop, estimate_noise_variance, extract_all_metadata, get_adaptive_bilateral,
+                                                                                    get_all_image_paths_for_single_process, load_images_from_paths, prepare_image,
+                                                                                    resize_all_with_padding, run_pipeline_global_crop, run_pipeline_non_crop, save_align_to_folder)
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE
@@ -101,37 +98,6 @@ class AKAZEAlgorithm:
             print("Error loading AKAZE configuration:", e)
             return default_config
         
-    def prepare_gray_akaze(self, img):
-        """
-        Konversi gambar ke grayscale 8-bit (uint8).
-        """
-        if img is None:
-            raise ValueError("Input image is None.")
-        # Konversi ke grayscale jika perlu
-        if img.ndim == 3 and img.shape[2] == 3:
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        elif img.ndim == 3 and img.shape[2] == 4:
-            gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
-        elif img.ndim == 2:
-            gray = img
-        else:
-            raise ValueError(f"Invalid image dimensions/channels: {img.shape}")
-
-        # Pastikan output adalah 8-bit
-        if gray.dtype != np.uint8:
-            if gray.dtype == np.uint16:
-                gray = (gray / 256).astype(np.uint8)
-            elif gray.dtype in [np.float32, np.float64]:
-                max_val = np.max(gray)
-                min_val = np.min(gray)
-                if max_val <= 1.0 and min_val >= 0.0:
-                    gray = (gray * 255).astype(np.uint8)
-                else:
-                    gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-            else:
-                gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-        return gray
-
     def compute_features_block(self, akaze_instance, enhanced_gray_base, enhanced_gray_target, x, y, bw, bh, overlap_px, img_w, img_h, max_kps_per_block=300):
         roi_x_start = max(0, x - overlap_px)
         roi_y_start = max(0, y - overlap_px)
@@ -190,20 +156,45 @@ class AKAZEAlgorithm:
         max_kps_per_block = 300
 
         try:
-            base_gray = self.prepare_gray_akaze(base_image)
-            target_gray = self.prepare_gray_akaze(target_image)
+            enhanced_base_gray = prepare_image(base_image, grayscale=True, use_clahe=True)
+            enhanced_target_gray = prepare_image(target_image, grayscale=True, use_clahe=True)
         except Exception:
             return None, None
 
-        try:
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            enhanced_base_gray = clahe.apply(base_gray)
-            enhanced_target_gray = clahe.apply(target_gray)
-        except Exception:
-            enhanced_base_gray = base_gray
-            enhanced_target_gray = target_gray
+        # --- LOGIKA BARU DIMULAI DI SINI ---
 
-        h, w = base_gray.shape
+        # 1. Perkirakan tingkat noise pada salah satu gambar (misalnya, gambar dasar)
+        noise_level = estimate_noise_variance(enhanced_base_gray)
+    
+        # 1. Definisikan ambang batas dan rentang parameter (bisa Anda sesuaikan)
+        min_noise_threshold = 200.0
+        max_noise_threshold = 700.0
+
+        # Rentang parameter untuk filter bilateral
+        min_d, max_d = 5, 9           
+        min_sigma, max_sigma = 20, 75 
+        
+        print(f"Noise level detected: {noise_level:.2f}")
+
+        # 2. Periksa apakah noise reduction diperlukan
+        if noise_level > min_noise_threshold:
+            # 3. Dapatkan parameter filter yang dinamis
+            d, sigma_color, sigma_space = get_adaptive_bilateral(
+                noise_level,
+                min_noise_threshold, max_noise_threshold,
+                min_d, max_d,
+                min_sigma, max_sigma
+            )
+            
+            print(f"Applying adaptive Bilateral Filter. Params -> d={d}, sigmaColor={sigma_color}, sigmaSpace={sigma_space}")
+            
+            # 4. Terapkan filter dengan parameter yang sudah dihitung
+            enhanced_base_gray = cv2.bilateralFilter(enhanced_base_gray, d, sigma_color, sigma_space)
+            enhanced_target_gray = cv2.bilateralFilter(enhanced_target_gray, d, sigma_color, sigma_space)
+        else:
+            print(f"Noise level is below threshold of {min_noise_threshold}. Skipping noise reduction.")
+
+        h, w = enhanced_base_gray.shape
         blocks_x, blocks_y = num_blocks
         block_w = max(1, w // blocks_x)
         block_h = max(1, h // blocks_y)
@@ -357,9 +348,6 @@ class AKAZEAlgorithm:
             if transformation_type == 'affine':
                 matrix, mask = cv2.estimateAffine2D(target_points.reshape(-1, 2), base_points.reshape(-1, 2),
                                                      method=cv2.USAC_MAGSAC, ransacReprojThreshold=ransac_threshold)
-            elif transformation_type in ['similarity', 'euclidean']:
-                matrix, mask = cv2.estimateAffinePartial2D(target_points.reshape(-1, 2), base_points.reshape(-1, 2),
-                                                             method=cv2.USAC_MAGSAC, ransacReprojThreshold=ransac_threshold)
             elif transformation_type == 'homography':
                 matrix, mask = cv2.findHomography(target_points, base_points, cv2.USAC_MAGSAC, ransac_threshold)
             else:
@@ -408,7 +396,7 @@ def main(
 ):
     # --- 1. Inisialisasi dan Konfigurasi ---
     processor = AKAZEAlgorithm(db_path) 
-    config = processor.load_akaze_config(config_filename) # Pastikan memanggil config yang benar
+    config = processor.load_akaze_config(config_filename)
 
     # Muat parameter dari config
     save_align = save_align if save_align is not None else config.get("save_align", False)
@@ -445,7 +433,6 @@ def main(
         raise RuntimeError("Base image gagal dimuat.")
 
     base_image_raw = base_img_list[0]
-    # Dapatkan dimensi target dari gambar dasar sebelum diubah
     base_resized_list, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="median")
     base_image = base_resized_list[0]
 
@@ -461,7 +448,7 @@ def main(
 
     # --- 4. Delegasi ke Pipeline yang Sesuai ---
     if not enable_cropping or keep_edges:
-        run_pipeline_streaming(
+        run_pipeline_non_crop(
             processor=processor,
             image_paths=image_paths[1:],
             base_image=base_image,

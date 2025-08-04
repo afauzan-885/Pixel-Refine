@@ -356,70 +356,95 @@ def extract_all_metadata(image_paths, metadata_file="metadata.json"):
 # === 3. PRA-PEMROSESAN & UTILITAS GAMBAR
 # =========================================================================
 
-def convert_to_uint8(image):
+def prepare_gray(img):
+        if img is None: raise ValueError("Input image is None.")
+        if img.ndim == 3 and img.shape[2] == 3: gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        elif img.ndim == 3 and img.shape[2] == 4: gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY) # Tambahkan handle BGRA
+        elif img.ndim == 2: gray = img
+        else:
+            raise ValueError(f"Invalid image dimensions/channels: {img.shape}")
+
+        if gray.dtype != np.uint8:
+            max_val = np.max(gray)
+            if gray.dtype == np.float32 or gray.dtype == np.float64:
+                 if max_val <= 1.0 and np.min(gray) >= 0:
+                     gray_norm = (gray * 255.0).astype(np.uint8)
+                 else:
+                     if gray.dtype == np.uint16:
+                         gray_norm = (gray / 256.0).astype(np.uint8) # Asumsi 16-bit ke 8-bit
+                     elif gray.dtype == np.int16:
+                          gray_norm = ((gray / 256.0) + 128).astype(np.uint8) # Perkiraan kasar
+                     else:
+                         gray_norm = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            elif gray.dtype == np.uint16:
+                 gray_norm = (gray / 256.0).astype(np.uint8)
+            else:
+                 gray_norm = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            return gray_norm
+        return gray
+
+def prepare_image(image, grayscale=False, use_clahe=True):
     """
-    Mengonversi gambar dari tipe data apa pun ke uint8 dengan cara yang kuat,
-    memastikan kontras global dimaksimalkan menggunakan normalisasi min-max.
-    Ini adalah langkah krusial untuk data dengan kedalaman bit tinggi seperti uint16.
+    Fungsi Hibrida Cerdas.
+    - Untuk Grayscale (AKAZE): Mendelegasikan tugas ke `prepare_gray_akaze` untuk hasil yang 100% identik.
+    - Untuk Berwarna (LightGlue): Menggunakan logika internalnya sendiri yang kuat.
 
     Args:
-        image: Gambar input (berwarna atau grayscale).
+        image: Gambar input.
+        grayscale (bool): Jika True, akan memanggil pipeline khusus grayscale.
+        use_clahe (bool): Jika True, akan menerapkan CLAHE.
 
     Returns:
-        Gambar uint8 dengan kontras yang telah diregangkan.
+        Gambar uint8 yang telah diproses.
     """
-    # Jika sudah 8-bit, tidak perlu melakukan apa-apa.
-    if image.dtype == np.uint8:
-        return image
+    if image is None:
+        return None
 
-    # Untuk SEMUA tipe data lain (uint16, float32, dll.), gunakan
-    # cv2.normalize dengan NORM_MINMAX. Ini akan meregangkan rentang dinamis
-    # yang ada (misalnya, nilai piksel dari 1000 hingga 5000) ke rentang
-    # penuh 0-255. Inilah yang membuat hasilnya kuat.
+    if grayscale:
+        processed_image = prepare_gray(image)
+        
+        if use_clahe:
+            try:
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                processed_image = clahe.apply(processed_image)
+            except Exception:
+                pass 
+
+    else:
+        if image.dtype == np.uint8:
+            processed_image = image.copy()
+        elif image.dtype == np.uint16:
+            processed_image = (image / 256).astype(np.uint8)
+        elif image.dtype in [np.float32, np.float64]:
+            max_val, min_val = np.max(image), np.min(image)
+            if max_val <= 1.0 and min_val >= 0.0:
+                processed_image = (image * 255).astype(np.uint8)
+            else:
+                processed_image = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        else:
+            processed_image = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+        if processed_image.ndim == 2:
+            final_image = cv2.cvtColor(processed_image, cv2.COLOR_GRAY2BGR)
+        elif processed_image.shape[2] == 4:
+            final_image = cv2.cvtColor(processed_image, cv2.COLOR_BGRA2BGR)
+        else:
+            final_image = processed_image
+            
+        if use_clahe:
+            try:
+                lab = cv2.cvtColor(final_image, cv2.COLOR_BGR2LAB)
+                l, a, b = cv2.split(lab)
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                cl = clahe.apply(l)
+                merged_channels = cv2.merge((cl, a, b))
+                processed_image = cv2.cvtColor(merged_channels, cv2.COLOR_LAB2BGR)
+            except Exception:
+                pass
+        else:
+            processed_image = final_image 
     
-    # Periksa apakah gambar memiliki rentang yang valid untuk dinormalisasi
-    min_val, max_val = np.min(image), np.max(image)
-    if max_val - min_val < 1e-6: # Jika gambar hampir datar (misal, semua hitam)
-        # Hindari pembagian dengan nol, kembalikan gambar dengan nilai rata-rata
-        return np.full(image.shape, int(np.mean(image)), dtype=np.uint8)
-
-    normalized_image = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX)
-    
-    return normalized_image.astype(np.uint8)
-    
-def enhance_contrast_and_convert_8bit(image):
-    """
-    Meningkatkan kontras pada gambar berwarna dengan cara yang kuat dan andal.
-    
-    Pertama, ia memastikan gambar dikonversi ke 8-bit dengan kontras global
-    yang optimal. Kemudian, ia menerapkan CLAHE pada channel Luminance (L) 
-    di ruang warna LAB untuk menyempurnakan kontras lokal tanpa merusak warna.
-
-    Args:
-        image: Gambar input berwarna (kedalaman bit apa pun).
-
-    Returns:
-        Gambar BGR 8-bit dengan kontras yang telah ditingkatkan.
-    """
-    # Langkah 1: Gunakan fungsi konversi 8-bit kita yang baru dan kuat.
-    # Ini memastikan kita memulai dengan gambar berkualitas tinggi.
-    image_8bit = convert_to_uint8(image)
-
-    # Pastikan input adalah gambar berwarna untuk konversi LAB
-    if image_8bit.ndim == 2:
-        image_8bit = cv2.cvtColor(image_8bit, cv2.COLOR_GRAY2BGR)
-
-    # Langkah 2: Terapkan CLAHE di ruang warna LAB (logika ini sudah bagus)
-    lab = cv2.cvtColor(image_8bit, cv2.COLOR_BGR2LAB)
-    l_channel, a_channel, b_channel = cv2.split(lab)
-    
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)) # Gunakan grid 8x8 seperti di AKAZE Anda
-    cl = clahe.apply(l_channel)
-
-    merged_channels = cv2.merge((cl, a_channel, b_channel))
-    enhanced_image = cv2.cvtColor(merged_channels, cv2.COLOR_LAB2BGR)
-    
-    return enhanced_image
+    return processed_image
 
 def resize_with_padding(img, target_size, pad_color=(0, 0, 0)):
     h, w = img.shape[:2]
@@ -516,7 +541,44 @@ def gaussian_window(size, sigma_scale=1/6):
         else:
              window = np.zeros_like(window)
         return np.ascontiguousarray(window.astype(np.float32))
-  
+
+def estimate_noise_variance(gray_image):
+    """
+    Memperkirakan tingkat noise dalam gambar dengan menghitung varians dari output Laplacian.
+    """
+    # Menghitung Laplacian dari gambar dan kemudian variansnya
+    # CV_64F digunakan untuk menghindari overflow saat menangani nilai negatif dari Laplacian
+    laplacian = cv2.Laplacian(gray_image, cv2.CV_64F)
+    variance = laplacian.var()
+    return variance
+
+def get_adaptive_bilateral(noise_level, min_noise, max_noise, min_d, max_d, min_sigma, max_sigma):
+    """
+    Menghitung parameter untuk filter bilateral secara dinamis berdasarkan tingkat noise.
+    """
+    # Jika noise di atas atau sama dengan maksimum, gunakan parameter maksimum.
+    if noise_level >= max_noise:
+        return max_d, max_sigma, max_sigma
+
+    # Hitung rasio/progres noise antara rentang min dan max (nilai antara 0.0 dan 1.0)
+    # Ditambah epsilon (1e-6) untuk menghindari pembagian dengan nol jika min_noise == max_noise
+    ratio = (noise_level - min_noise) / (max_noise - min_noise + 1e-6)
+
+    # Lakukan interpolasi linear untuk menghitung parameter
+    calculated_d = min_d + ratio * (max_d - min_d)
+    calculated_sigma = min_sigma + ratio * (max_sigma - min_sigma)
+
+    # Parameter 'd' harus berupa integer ganjil.
+    # Bulatkan ke integer terdekat, lalu pastikan ganjil.
+    d = int(round(calculated_d))
+    if d % 2 == 0:
+        d += 1
+    
+    # Sigma bisa dibulatkan ke integer terdekat
+    sigma = int(round(calculated_sigma))
+    
+    return d, sigma, sigma
+
 def normalize_image(image, dtype): 
         """
         Normalisasi gambar ke range [0, 1] float32 berdasarkan tipe data asli.
@@ -1261,7 +1323,7 @@ def setup_balanced_batching(total_images, language_config, max_batch_size=10):
     # 3. Kembalikan rencana yang sudah jadi
     return batch_plan        
 
-def run_pipeline_streaming(processor, image_paths, base_image, target_dims, 
+def run_pipeline_non_crop(processor, image_paths, base_image, target_dims, 
                            update_progress, stop_requested, save_align, align_folder, command_save_to_hd5f):
     """
     Menjalankan pipeline tiga tahap penuh untuk alignment streaming sederhana.
@@ -1489,6 +1551,6 @@ def run_pipeline_global_crop(processor, image_paths, base_image, target_dims,
 
 #     # --- 4. Delegasi ke Pipeline yang Sesuai ---
 #     if not enable_cropping or keep_edges:
-#         run_pipeline_streaming(...)
+#         run_pipeline_non_crop(...)
 #     else:
 #         run_pipeline_global_crop(...)

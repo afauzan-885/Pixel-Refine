@@ -12,8 +12,8 @@ import h5py
 from PySide6.QtCore import Qt
 
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (calculate_crop_parameters, do_warp_and_crop, extract_all_metadata, filter_keypoints_spatially,
-                                                                                    get_all_image_paths_for_single_process, load_images_from_paths,
-                                                                                    resize_all_with_padding, run_pipeline_global_crop, run_pipeline_streaming, save_align_to_folder)
+                                                                                    get_all_image_paths_for_single_process, load_images_from_paths, prepare_image,
+                                                                                    resize_all_with_padding, run_pipeline_global_crop, run_pipeline_non_crop, save_align_to_folder)
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE
@@ -126,7 +126,7 @@ class ORBAlgorithm:
         Menghitung keypoints ORB pada gambar global, menyaringnya secara spasial
         berdasarkan kualitas, lalu melakukan matching. Mendukung eksekusi multi-core.
         """
-        # --- Tahap 1: Pre-processing (Undistortion) ---
+        # --- Tahap 1: Pre-processing ---
         if calib_filename:
             try:
                 fs = cv2.FileStorage(calib_filename, cv2.FILE_STORAGE_READ)
@@ -136,48 +136,27 @@ class ORBAlgorithm:
                 base_image = cv2.undistort(base_image, mtx, dist, None, mtx)
                 target_image = cv2.undistort(target_image, mtx, dist, None, mtx)
             except Exception:
-                pass # Lanjutkan tanpa undistortion jika gagal
+                pass
 
-        if stop_requested and stop_requested():
-            return None, None
-
-        # --- Tahap 2: Baca Konfigurasi dan Persiapan Gambar ---
         orb_config = self.load_orb_config(config_filename)
         use_multicore = orb_config.get("use_multi_core", True)
         
+        if stop_requested and stop_requested():
+            return None, None
+        
         try:
-            def prepare_gray_orb(img):
-                if img is None: raise ValueError("Input image is None.")
-                if img.ndim == 3: gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                elif img.ndim == 2: gray = img
-                else: raise ValueError("Invalid image dimensions.")
-                if gray.dtype != np.uint8:
-                    return cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-                return gray
+            base_gray_enhanced = prepare_image(base_image, grayscale=True, use_clahe=True)
+            target_gray_enhanced = prepare_image(target_image, grayscale=True, use_clahe=True)
+            
+            if base_gray_enhanced is None or target_gray_enhanced is None:
+                return None, None
 
-            base_gray_8bit = prepare_gray_orb(base_image)
-            target_gray_8bit = prepare_gray_orb(target_image)
         except Exception:
             return None, None
-
-        # --- Tahap 3: Peningkatan Kontras dengan CLAHE ---
-        try:
-            clip_limit = orb_config.get("clahe_clipLimit", 2.0)
-            if clip_limit > 0:
-                clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tuple(orb_config.get("clahe_tileGridSize", (8, 8))))
-                base_gray_enhanced = clahe.apply(base_gray_8bit)
-                target_gray_enhanced = clahe.apply(target_gray_8bit)
-            else:
-                base_gray_enhanced = base_gray_8bit
-                target_gray_enhanced = target_gray_8bit
-        except Exception:
-            base_gray_enhanced = base_gray_8bit
-            target_gray_enhanced = target_gray_8bit
 
         # --- Tahap 4: Deteksi Fitur Global ---
         try:
             orb = cv2.ORB_create(
-                # Minta lebih banyak fitur untuk memberi lebih banyak pilihan pada filter spasial
                 nfeatures=int(orb_config.get("nfeatures", 10000)), 
                 scaleFactor=float(orb_config.get("scaleFactor", 1.2)),
                 nlevels=int(orb_config.get("nlevels", 8)),
@@ -278,26 +257,22 @@ class ORBAlgorithm:
                  return None
             
         except (cv2.error, Exception) as e:
-             # print(f"Error saat estimasi transformasi: {e}")
              return None
         
         # --- 2. Lakukan Warping pada Gambar ---
         try:
             if not keep_edges:
-                # Kasus sederhana: warp tanpa menjaga tepi yang keluar
                 interpolation_flag = cv2.INTER_CUBIC
                 if transformation_type == 'homography':
                     return cv2.warpPerspective(base_image, matrix, (w, h), flags=interpolation_flag, borderMode=cv2.BORDER_CONSTANT)
                 else:
                     return cv2.warpAffine(base_image, matrix, (w, h), flags=interpolation_flag, borderMode=cv2.BORDER_CONSTANT)
             else:
-                # Kasus kompleks: hitung padding, lalu warp dan crop
                 pad = calculate_crop_parameters(matrix, w, h, transformation_type)
                 
                 if pad is None:
                     return cv2.warpAffine(base_image, matrix, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT)
                 
-                # Panggil fungsi bantuan untuk melakukan prosesnya
                 return do_warp_and_crop(base_image, matrix, pad, w, h, transformation_type)
 
         except (cv2.error, Exception) as e:
@@ -326,9 +301,6 @@ def main(db_path,
     keep_edges = config.get("keep_edges", False)
     transformation_type = config.get("transformation", "affine")
     
-    progress_counter = {"count": 1 if not enable_cropping or keep_edges else 0}
-    progress_lock = threading.Lock()
-
     if single_process:
         image_paths = get_all_image_paths_for_single_process(db_path)
         processor.hdf5_path = "database/align/aligned_images.h5"
@@ -352,7 +324,7 @@ def main(db_path,
     total_images = len(image_paths)
     base_img_list = load_images_from_paths([image_paths[0]], stop_requested=stop_requested)
     if not base_img_list or base_img_list[0] is None:
-        raise RuntimeError("Base image gagal dimuat.")
+        raise RuntimeError("Base image failed to load.")
 
     base_image_raw = base_img_list[0]
     # Dapatkan dimensi target dari gambar dasar sebelum diubah
@@ -371,7 +343,7 @@ def main(db_path,
 
     # --- 4. Delegasi ke Pipeline yang Sesuai ---
     if not enable_cropping or keep_edges:
-        run_pipeline_streaming(
+        run_pipeline_non_crop(
             processor=processor,
             image_paths=image_paths[1:],
             base_image=base_image,

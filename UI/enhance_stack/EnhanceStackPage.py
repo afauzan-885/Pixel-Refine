@@ -5,6 +5,7 @@ from UI.enhance_stack.single_page_layout import SinglePageLayout
 from UI.resources.animation.animation_manager import SlideDirection, StackedWidgetAnimator
 from UI.resources.animation.slide import slide
 from UI.resources.animation.toast.toast_manager import ToastManager
+from UI.resources.stylesheet.stylesheet import stylesheet_global_page
 from .components.top_bar import TopBar
 from .logic.database_manager import DatabaseManager
 
@@ -45,6 +46,8 @@ class EnhanceStackPage(QWidget):
       
         self.top_bar.left_stack.setCurrentIndex(0)
         self.top_bar.right_stack.setCurrentIndex(0)
+        
+        # self.setStyleSheet(stylesheet_global_page())
 
 
     def _handle_switch_request(self):

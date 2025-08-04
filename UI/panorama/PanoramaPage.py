@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (
 from UI.enhance_stack.logic.database_manager import DatabaseManager
 from UI.panorama.working_left_panel import WorkingLeftPanel
 from UI.panorama.working_right_panel import WorkingRightPanel
-from UI.resources.stylesheet.stylesheet import stylesheet_panorama_page
+from UI.resources.stylesheet.stylesheet import stylesheet_global_page
 
 class PanoramaPage(QMainWindow):
     def __init__(self, database_manager: DatabaseManager):
@@ -21,7 +21,7 @@ class PanoramaPage(QMainWindow):
         main_content = self._create_main_content()
         main_layout.addWidget(main_content)
         
-        self.setStyleSheet(stylesheet_panorama_page())
+        self.setStyleSheet(stylesheet_global_page())
 
     def _create_main_content(self):
         """
