@@ -15,7 +15,7 @@ import requests
 import onnxruntime as ort
 from tqdm import tqdm
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (calculate_crop_parameters, deduplicate_keypoints, do_warp_and_crop, extract_all_metadata,
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (calculate_crop_parameters, deduplicate_keypoints, do_warp_and_crop, estimate_noise_variance, extract_all_metadata, get_adaptive_bilateral,
                                                                                     get_all_image_paths_for_single_process, load_images_from_paths, prepare_image,
                                                                                     resize_all_with_padding, run_pipeline_global_crop, run_pipeline_non_crop, save_align_to_folder)
 from UI.enhance_stack.components.single_page_layout.parameter_alignment.light_glue_parameter_settings import load_light_glue_config
@@ -216,11 +216,43 @@ class LightGlueAlgorithm:
             return padded, (w / new_w, h / new_h), (pad_left, pad_top)
 
         def prep_for_onnx(img):
+            # Langkah awal preprocessing
             enhanced_img = prepare_image(img, grayscale=False, use_clahe=True)
+            
+            # Konversi ke grayscale sementara untuk estimasi noise
+            enhanced_gray = cv2.cvtColor(enhanced_img, cv2.COLOR_BGR2GRAY)
+            
+            # Estimasi noise
+            noise_level = estimate_noise_variance(enhanced_gray)
+            print(f"Tile noise level: {noise_level:.2f}")
+            
+            # Threshold dan rentang parameter (bisa disesuaikan)
+            min_noise_threshold = 200.0
+            max_noise_threshold = 700.0
+            min_d, max_d = 5, 9
+            min_sigma, max_sigma = 20, 75
+
+            # Terapkan bilateral filter jika diperlukan
+            if noise_level > min_noise_threshold:
+                d, sigma_color, sigma_space = get_adaptive_bilateral(
+                    noise_level,
+                    min_noise_threshold, max_noise_threshold,
+                    min_d, max_d,
+                    min_sigma, max_sigma
+                )
+                print(f"Applying bilateral filter: d={d}, sigmaColor={sigma_color}, sigmaSpace={sigma_space}")
+                enhanced_img = cv2.bilateralFilter(enhanced_img, d, sigma_color, sigma_space)
+            else:
+                print("Noise level below threshold, skipping denoising.")
+
+            # Lanjut ke padding & resize
             rgb = cv2.cvtColor(enhanced_img, cv2.COLOR_BGR2RGB)
             padded, scale_factors, pad_offsets = resize_and_pad(rgb)
-            return (padded.astype(np.float32)[None, :, :, :].transpose(0, 3, 1, 2) / 255.0,
-                    scale_factors, pad_offsets)
+            
+            return (
+                padded.astype(np.float32)[None, :, :, :].transpose(0, 3, 1, 2) / 255.0,
+                scale_factors, pad_offsets
+            )
 
         # --- PERUBAHAN 1: Buat fungsi worker untuk pra-pemrosesan CPU ---
         def preprocessor_worker(job_q, result_q):

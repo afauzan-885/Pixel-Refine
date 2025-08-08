@@ -1,14 +1,9 @@
 from UI.panorama.Algorithm.stitching.Standart_Homography import run_standart_homography
-# from UI.panorama.Algorithm.stitching.APAP.main import run_standart_homography
-from UI.panorama.logic.panorama_algorithms import run_blending, run_orb_alignment, run_projection
+from UI.panorama.logic.panorama_algorithms import run_blending, run_projection
 
 
 ALIGNMENT_DISPATCHER = {
-    "Standard_Homography": run_standart_homography,
-    "ORB": run_orb_alignment,
-    # "SIFT": run_sift_alignment, # Tambahkan yang lain di sini
-    # "BRISK": run_brisk_alignment,
-}
+    "Standard_Homography": run_standart_homography,}
 
 # Fungsi dispatcher utama
 def run_panorama_stitching_process(

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTabWidget,
     QComboBox,
+    QFrame
 )
 
 from UI.panorama.logic.DynamicPanel import DynamicFlowPanel
@@ -42,7 +43,7 @@ class WorkflowPanel(QWidget):
         # Panel Tab
         self.tab_widget = QTabWidget()
         self.tab_widget.currentChanged.connect(self._update_preview_button_state)
-        self.tab_widget.addTab(self._create_alignment_tab_content(), "Align gambar")
+        self.tab_widget.addTab(self._create_align_content(), "Align gambar")
         self.tab_widget.addTab(
             self._create_projection_tab_content(), "Projection dan Crop"
         )
@@ -51,46 +52,69 @@ class WorkflowPanel(QWidget):
         main_layout.addWidget(self.tab_widget, 3)
         main_layout.addLayout(button_layout, 1)
 
-    def _create_alignment_tab_content(self):
+    def _create_align_content(self):
         content = QWidget()
-        main_layout = QVBoxLayout(content)
+        # 1. Ganti layout utama menjadi HORIZONTAL (QHBoxLayout)
+        main_layout = QHBoxLayout(content)
         main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        # Atur agar elemen rata kiri, bukan atas
+        main_layout.setAlignment(Qt.AlignmentFlag.AlignLeft) 
+        main_layout.setSpacing(15)  # Jarak antar grup
 
-        main_layout.addWidget(QLabel("Alignment Algorithm:"))
+        # --- GRUP 1: Feature Detector (dalam layout vertikalnya sendiri) ---
+        detector_group_widget = QWidget()
+        detector_layout = QVBoxLayout(detector_group_widget)
+        detector_layout.setContentsMargins(0, 0, 0, 0)
+        detector_layout.setSpacing(5)
 
-        self.combo_align = QComboBox()
+        detector_layout.addWidget(QLabel("Metode Deteksi Fitur:"))
+        
+        self.combo_detector = QComboBox()
+        self._feature_detectors = ["AKAZE", "ORB", "SIFT", "BRISK"]
+        self.combo_detector.addItems(self._feature_detectors)
+        self.combo_detector.currentTextChanged.connect(
+            lambda value: self.setting_changed.emit("feature_detector", value)
+        )
+        detector_layout.addWidget(self.combo_detector)
+        detector_layout.addStretch()
+        
+        main_layout.addWidget(detector_group_widget)
 
-        # 1. Definisikan nilai internal yang akan digunakan oleh sistem.
-        self._align_algorithms = [
-            "Standard_Homography", "ORB", "SIFT", "BRISK"
-        ]
+        # --- 2. Tambahkan GARIS PEMISAH vertikal ---
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.VLine) 
+        separator.setFrameShadow(QFrame.Shadow.Sunken)
+        main_layout.addWidget(separator)
 
-        # 2. Buat label yang akan ditampilkan di UI (user-friendly).
-        display_labels = [s.replace("_", " ") for s in self._align_algorithms]
+        # --- GRUP 2: Warping Algorithm (dalam layout vertikalnya sendiri) ---
+        align_group_widget = QWidget()
+        align_layout = QVBoxLayout(align_group_widget)
+        align_layout.setContentsMargins(0, 0, 0, 0)
+        align_layout.setSpacing(5)
 
-        # 3. Buat kamus untuk memetakan label UI ke nilai sistem.
-        self._align_label_to_value = dict(zip(display_labels, self._align_algorithms))
-        # Kamus sebaliknya (opsional, tapi bisa berguna untuk menyetel UI dari kode)
-        self._align_value_to_label = dict(zip(self._align_algorithms, display_labels))
+        align_layout.addWidget(QLabel("Warping Algorithm:"))
 
-        # 4. Tambahkan label yang user-friendly ke dalam QComboBox.
-        self.combo_align.addItems(display_labels)
-
-        # 5. Hubungkan sinyal. CUKUP SATU KONEKSI.
-        self.combo_align.currentTextChanged.connect(
+        self.combo_warp = QComboBox()
+        self._warp_algorithms = ["Standard_Homography", "Local_Homography"]
+        display_labels = [s.replace("_", " ") for s in self._warp_algorithms]
+        self._align_label_to_value = dict(zip(display_labels, self._warp_algorithms))
+        self._align_value_to_label = dict(zip(self._warp_algorithms, display_labels))
+        self.combo_warp.addItems(display_labels)
+        self.combo_warp.currentTextChanged.connect(
             lambda label: self.setting_changed.emit(
                 "align_algorithm", self._align_label_to_value.get(label)
             )
         )
+        align_layout.addWidget(self.combo_warp)
+        align_layout.addStretch() # Agar tidak meregang secara vertikal
 
-        combo_layout = QHBoxLayout()
-        combo_layout.addWidget(self.combo_align)
-        combo_layout.addStretch()
-        main_layout.addLayout(combo_layout)
+        # Tambahkan grup widget kedua ke layout horizontal utama
+        main_layout.addWidget(align_group_widget)
+
+        # 3. Tambahkan stretch di akhir layout horizontal
+        main_layout.addStretch()
 
         return content
-
     def _create_projection_tab_content(self):
         content = QWidget()
         main_layout = QVBoxLayout(content)
@@ -156,12 +180,19 @@ class WorkflowPanel(QWidget):
     def load_settings(self, settings: dict):
         """Menerapkan pengaturan yang ada ke UI."""
         if settings:
-            
-            self.combo_align.blockSignals(True)
+            self.combo_detector.blockSignals(True) # BLOKIR sinyal detector
+            self.combo_warp.blockSignals(True)
             self.combo_proj.blockSignals(True)
             self.combo_blend.blockSignals(True)
 
-            self.combo_align.setCurrentText(settings.get("align_algorithm", "AKAZE"))
+            # Set nilai untuk combo box baru
+            self.combo_detector.setCurrentText(settings.get("feature_detector", "AKAZE"))
+            
+            # Mapping untuk warp algorithm perlu diperhatikan
+            warp_value = settings.get("align_algorithm", "Standard_Homography")
+            warp_label = self._align_value_to_label.get(warp_value, "Standard Homography")
+            self.combo_warp.setCurrentText(warp_label)
+
             self.combo_proj.setCurrentText(
                 settings.get("projection_type", "Cylindrical")
             )
@@ -169,7 +200,8 @@ class WorkflowPanel(QWidget):
                 settings.get("blending_method", "Multi-band")
             )
 
-            self.combo_align.blockSignals(False)
+            self.combo_detector.blockSignals(False) # BUKA blokir sinyal
+            self.combo_warp.blockSignals(False)
             self.combo_proj.blockSignals(False)
             self.combo_blend.blockSignals(False)
             

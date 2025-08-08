@@ -3,6 +3,7 @@ import gc
 import json
 import queue
 import threading
+import concurrent
 import cv2
 import numpy as np
 import sqlite3
@@ -11,7 +12,7 @@ from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, Q
 import h5py
 from PySide6.QtCore import Qt
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (calculate_crop_parameters, do_warp_and_crop, extract_all_metadata, filter_keypoints_spatially,
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (calculate_crop_parameters, do_warp_and_crop, estimate_noise_variance, extract_all_metadata, filter_keypoints_spatially, get_adaptive_bilateral,
                                                                                     get_all_image_paths_for_single_process, load_images_from_paths, prepare_image,
                                                                                     resize_all_with_padding, run_pipeline_global_crop, run_pipeline_non_crop, save_align_to_folder)
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
@@ -119,42 +120,108 @@ class ORBAlgorithm:
              config_data["clahe_tileGridSize"] = (8, 8)
 
         return config_data
+    
+    def compute_features_block(self, akaze_instance, enhanced_gray_base, enhanced_gray_target, x, y, bw, bh, overlap_px, img_w, img_h, max_kps_per_block=300):
+        roi_x_start = max(0, x - overlap_px)
+        roi_y_start = max(0, y - overlap_px)
+        roi_x_end = min(img_w, x + bw + overlap_px)
+        roi_y_end = min(img_h, y + bh + overlap_px)
 
-    def calculate_global_motion(self, base_image, target_image, config_filename=None, 
-                                stop_requested=None, calib_filename=None):
-        """
-        Menghitung keypoints ORB pada gambar global, menyaringnya secara spasial
-        berdasarkan kualitas, lalu melakukan matching. Mendukung eksekusi multi-core.
-        """
-        # --- Tahap 1: Pre-processing ---
-        if calib_filename:
-            try:
-                fs = cv2.FileStorage(calib_filename, cv2.FILE_STORAGE_READ)
-                mtx = fs.getNode("camera_matrix").mat()
-                dist = fs.getNode("dist_coeff").mat()
-                fs.release()
-                base_image = cv2.undistort(base_image, mtx, dist, None, mtx)
-                target_image = cv2.undistort(target_image, mtx, dist, None, mtx)
-            except Exception:
-                pass
+        if roi_y_end <= roi_y_start or roi_x_end <= roi_x_start:
+            return [], None, [], None
+
+        roi_base_enhanced = enhanced_gray_base[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+        roi_target_enhanced = enhanced_gray_target[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+
+        kps_base, desc_base = akaze_instance.detectAndCompute(roi_base_enhanced, None)
+        kps_target, desc_target = akaze_instance.detectAndCompute(roi_target_enhanced, None)
+
+        def adjust_and_filter_kps(kps, descs):
+            adjusted_kps = []
+            valid_desc_indices = []
+            if kps and descs is not None:
+                for idx, kp in enumerate(kps):
+                    orig_x = kp.pt[0] + roi_x_start
+                    orig_y = kp.pt[1] + roi_y_start
+                    if x <= orig_x < x + bw and y <= orig_y < y + bh:
+                        if idx < len(descs):
+                            kp.pt = (orig_x, orig_y)
+                            adjusted_kps.append(kp)
+                            valid_desc_indices.append(idx)
+            if descs is not None and valid_desc_indices:
+                filtered_descs = descs[np.array(valid_desc_indices)]
+            else:
+                filtered_descs = None
+            return adjusted_kps, filtered_descs
+
+        kps_base_adjusted, final_desc_base = adjust_and_filter_kps(kps_base, desc_base)
+        kps_target_adjusted, final_desc_target = adjust_and_filter_kps(kps_target, desc_target)
+
+        def select_top_k(kps, descs, k):
+            if descs is None or len(kps) == 0:
+                return [], None
+            if len(kps) <= k:
+                return kps, descs
+            sorted_idx = np.argsort([-kp.response for kp in kps])[:k]
+            return [kps[i] for i in sorted_idx], descs[sorted_idx]
+
+        kps_base_adjusted, final_desc_base = select_top_k(kps_base_adjusted, final_desc_base, max_kps_per_block)
+        kps_target_adjusted, final_desc_target = select_top_k(kps_target_adjusted, final_desc_target, max_kps_per_block)
+
+        return kps_base_adjusted, final_desc_base, kps_target_adjusted, final_desc_target
+    
+    def calculate_global_motion(self, base_image, target_image, config_filename=None, num_blocks=(3, 3), overlap=20, stop_requested=None):
+        if stop_requested and stop_requested():
+            return None, None
 
         orb_config = self.load_orb_config(config_filename)
         use_multicore = orb_config.get("use_multi_core", True)
-        
-        if stop_requested and stop_requested():
-            return None, None
-        
-        try:
-            base_gray_enhanced = prepare_image(base_image, grayscale=True, use_clahe=True)
-            target_gray_enhanced = prepare_image(target_image, grayscale=True, use_clahe=True)
-            
-            if base_gray_enhanced is None or target_gray_enhanced is None:
-                return None, None
+        max_kps_per_block = 300
 
+        try:
+            enhanced_base_gray = prepare_image(base_image, grayscale=True, use_clahe=True)
+            enhanced_target_gray = prepare_image(target_image, grayscale=True, use_clahe=True)
         except Exception:
             return None, None
 
-        # --- Tahap 4: Deteksi Fitur Global ---
+        # --- LOGIKA BARU DIMULAI DI SINI ---
+
+        # 1. Perkirakan tingkat noise pada salah satu gambar (misalnya, gambar dasar)
+        noise_level = estimate_noise_variance(enhanced_base_gray)
+    
+        # 1. Definisikan ambang batas dan rentang parameter (bisa Anda sesuaikan)
+        min_noise_threshold = 200.0
+        max_noise_threshold = 700.0
+
+        # Rentang parameter untuk filter bilateral
+        min_d, max_d = 5, 9           
+        min_sigma, max_sigma = 20, 75 
+        
+        print(f"Noise level detected: {noise_level:.2f}")
+
+        # 2. Periksa apakah noise reduction diperlukan
+        if noise_level > min_noise_threshold:
+            # 3. Dapatkan parameter filter yang dinamis
+            d, sigma_color, sigma_space = get_adaptive_bilateral(
+                noise_level,
+                min_noise_threshold, max_noise_threshold,
+                min_d, max_d,
+                min_sigma, max_sigma
+            )
+            
+            print(f"Applying adaptive Bilateral Filter. Params -> d={d}, sigmaColor={sigma_color}, sigmaSpace={sigma_space}")
+            
+            # 4. Terapkan filter dengan parameter yang sudah dihitung
+            enhanced_base_gray = cv2.bilateralFilter(enhanced_base_gray, d, sigma_color, sigma_space)
+            enhanced_target_gray = cv2.bilateralFilter(enhanced_target_gray, d, sigma_color, sigma_space)
+        else:
+            print(f"Noise level is below threshold of {min_noise_threshold}. Skipping noise reduction.")
+
+        h, w = enhanced_base_gray.shape
+        blocks_x, blocks_y = num_blocks
+        block_w = max(1, w // blocks_x)
+        block_h = max(1, h // blocks_y)
+
         try:
             orb = cv2.ORB_create(
                 nfeatures=int(orb_config.get("nfeatures", 10000)), 
@@ -165,64 +232,101 @@ class ORBAlgorithm:
         except Exception:
             return None, None
 
+        keypoints_base_all = []
+        descriptors_base_list = []
+        keypoints_target_all = []
+        descriptors_target_list = []
+
+        def process_block(i, j):
+            x = i * block_w
+            y = j * block_h
+            bw = w - x if i == blocks_x - 1 else block_w
+            bh = h - y if j == blocks_y - 1 else block_h
+            return self.compute_features_block(
+                orb, enhanced_base_gray, enhanced_target_gray,
+                x, y, bw, bh, overlap, w, h, max_kps_per_block=max_kps_per_block
+            )
+
         try:
             if use_multicore:
-                def detect_task(image): return orb.detectAndCompute(image, None)
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    future_base = executor.submit(detect_task, base_gray_enhanced)
-                    future_target = executor.submit(detect_task, target_gray_enhanced)
-                    keypoints_base_raw, descriptors_base_raw = future_base.result()
-                    keypoints_target_raw, descriptors_target_raw = future_target.result()
+                with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as executor:
+                    futures = [executor.submit(process_block, i, j)
+                            for i in range(blocks_x) for j in range(blocks_y)]
+                    for future in concurrent.futures.as_completed(futures):
+                        if stop_requested and stop_requested():
+                            return None, None
+                        try:
+                            kpb, db, kpt, dt = future.result()
+                            if db is not None and len(kpb) > 0:
+                                keypoints_base_all.extend(kpb)
+                                descriptors_base_list.append(db)
+                            if dt is not None and len(kpt) > 0:
+                                keypoints_target_all.extend(kpt)
+                                descriptors_target_list.append(dt)
+                        except Exception as e:
+                            print(f"Error in block processing: {e}")
             else:
-                keypoints_base_raw, descriptors_base_raw = orb.detectAndCompute(base_gray_enhanced, None)
-                keypoints_target_raw, descriptors_target_raw = orb.detectAndCompute(target_gray_enhanced, None)
-        except Exception:
+                for i in range(blocks_x):
+                    for j in range(blocks_y):
+                        if stop_requested and stop_requested():
+                            return None, None
+                        kpb, db, kpt, dt = process_block(i, j)
+                        if db is not None and len(kpb) > 0:
+                            keypoints_base_all.extend(kpb)
+                            descriptors_base_list.append(db)
+                        if dt is not None and len(kpt) > 0:
+                            keypoints_target_all.extend(kpt)
+                            descriptors_target_list.append(dt)
+        except Exception as e:
+            print(f"ThreadPool execution error: {e}")
             return None, None
 
-        # --- Tahap 5: Filtrasi Spasial untuk Keypoint Terbaik & Terdistribusi ---
+        if not descriptors_base_list or not descriptors_target_list:
+            return None, None
+
         try:
-            keypoints_base, descriptors_base = filter_keypoints_spatially(
-                keypoints_base_raw, descriptors_base_raw, base_gray_enhanced.shape,
-                grid_size=tuple(orb_config.get("spatial_grid_size", (4, 4))),
-                max_kps_per_cell=int(orb_config.get("max_kps_per_cell", 50))
-            )
-            keypoints_target, descriptors_target = filter_keypoints_spatially(
-                keypoints_target_raw, descriptors_target_raw, target_gray_enhanced.shape,
-                grid_size=tuple(orb_config.get("spatial_grid_size", (4, 4))),
-                max_kps_per_cell=int(orb_config.get("max_kps_per_cell", 50))
-            )
-        except Exception:
+            # descriptor_size = orb.getDescriptorSize()
+            descriptors_base_all = np.vstack(descriptors_base_list)
+            descriptors_target_all = np.vstack(descriptors_target_list)
+
+            if len(keypoints_base_all) != descriptors_base_all.shape[0] or \
+            len(keypoints_target_all) != descriptors_target_all.shape[0]:
+                print("CRITICAL: Mismatch between keypoints and descriptors after filtering.")
+                return None, None
+        except Exception as e:
+            print(f"Descriptor stack error: {e}")
             return None, None
 
-        # --- Tahap 6: Matching Fitur pada Keypoint Berkualitas Tinggi ---
-        if descriptors_base is None or descriptors_target is None or len(descriptors_base) < 2 or len(descriptors_target) < 2:
+        if descriptors_base_all.shape[0] == 0 or descriptors_target_all.shape[0] == 0:
             return None, None
+
+        def select_top_k(kps, descs, k):
+            if len(kps) <= k:
+                return kps, descs
+            idx = np.argsort([-kp.response for kp in kps])[:k]
+            return [kps[i] for i in idx], descs[idx]
+
+        keypoints_base_all, descriptors_base_all = select_top_k(keypoints_base_all, descriptors_base_all, 500)
+        keypoints_target_all, descriptors_target_all = select_top_k(keypoints_target_all, descriptors_target_all, 500)
 
         try:
             bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-            matches_raw = bf.knnMatch(descriptors_base, descriptors_target, k=2)
+            matches = bf.knnMatch(descriptors_base_all, descriptors_target_all, k=2)
+            ratio_thresh = orb_config.get("ratio_threshold", 0.75)
+            good_matches = [m for m, n in matches if m.distance < ratio_thresh * n.distance] if all(len(mn) == 2 for mn in matches) else []
 
-            good_matches = []
-            ratio_thresh = float(orb_config.get("ratio_threshold", 0.75))
-            for match_pair in matches_raw:
-                if len(match_pair) == 2:
-                    m, n = match_pair
-                    if m.distance < ratio_thresh * n.distance:
-                        good_matches.append(m)
-            
-            min_matches_req = int(orb_config.get("min_matches_for_transform", 10))
-            if len(good_matches) < min_matches_req:
+            if len(good_matches) < orb_config.get("min_matches_for_transform", 10):
                 return None, None
-                
-            good_matches.sort(key=lambda m: m.distance)
-            
-            base_points = np.float32([keypoints_base[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-            target_points = np.float32([keypoints_target[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
 
-        except Exception:
+            good_matches = sorted(good_matches, key=lambda m: m.distance)[:orb_config.get("max_keypoints_used", 500)]
+            pts_base = np.float32([keypoints_base_all[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+            pts_target = np.float32([keypoints_target_all[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+
+        except Exception as e:
+            print(f"Matching error: {e}")
             return None, None
 
-        return base_points, target_points
+        return pts_base, pts_target
     
     def compensate_motion(self, base_image, base_points, target_points, config_filename=None):
         """

@@ -303,21 +303,6 @@ class AKAZEAlgorithm:
             pts_base = np.float32([keypoints_base_all[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
             pts_target = np.float32([keypoints_target_all[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
 
-            try:
-                refined_pts_target, status, _ = cv2.calcOpticalFlowPyrLK(
-                    enhanced_base_gray, enhanced_target_gray, pts_base, pts_target,
-                    winSize=(15, 15), maxLevel=3,
-                    criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
-                )
-                status = status.reshape(-1)
-                pts_base = pts_base[status == 1].reshape(-1, 2)
-                pts_target = refined_pts_target[status == 1].reshape(-1, 2)
-                if len(pts_base) < akaze_config.get("min_matches_for_transform", 10):
-                    return None, None
-            except Exception:
-                pts_base = pts_base.reshape(-1, 2)
-                pts_target = pts_target.reshape(-1, 2)
-
         except Exception as e:
             print(f"Matching error: {e}")
             return None, None

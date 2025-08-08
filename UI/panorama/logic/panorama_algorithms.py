@@ -3,15 +3,6 @@ import time
 import cv2
 import numpy as np
 
-def run_orb_alignment(images, settings, progress_callback):
-    """Fungsi untuk menjalankan alignment ORB."""
-    print("ALGORITHM: Running ORB Alignment...")
-    time.sleep(0.3)
-    progress_callback(1.0, "ORB features matched.")
-    return "orb_result"
-
-# Tambahkan fungsi lain untuk SIFT, BRISK, dll.
-
 # --- Bagian Projection & Blending (Contoh) ---
 def run_projection(aligned_data, settings, progress_callback):
     print(f"ALGORITHM: Applying {settings.get('projection_type')} projection...")

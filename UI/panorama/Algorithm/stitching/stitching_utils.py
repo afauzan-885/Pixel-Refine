@@ -1,206 +1,234 @@
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import cv2
 import numpy as np
 from typing import List, Union, Tuple, Any
 from cv2 import KeyPoint
-from scipy.spatial.distance import cdist
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import minimum_spanning_tree
+
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import estimate_noise_variance, get_adaptive_bilateral
 """
 Skrip ini berisi fungsi-fungsi utilitas statis untuk pemrosesan gambar,
 dirancang untuk dapat digunakan kembali di berbagai bagian aplikasi.
 """
-
-def load_images(paths: List[str]) -> Union[List[np.ndarray], str]:
+def load_images(paths: List[str]) -> List[np.ndarray]:
     """
     Memuat satu atau lebih gambar dari path yang diberikan.
+    Memastikan semua gambar dikembalikan dalam format BGR 3-channel.
 
     Args:
         paths (List[str]): Daftar path file gambar.
 
     Returns:
-        Union[List[np.ndarray], str]: Daftar gambar yang dimuat sebagai array NumPy,
-                                      atau pesan error jika salah satu gambar gagal dimuat.
+        List[np.ndarray]: Daftar gambar yang dimuat sebagai array NumPy.
+
+    Raises:
+        IOError: Jika salah satu file gambar tidak dapat ditemukan atau dibaca.
     """
     images = []
     for path in paths:
+        if not os.path.exists(path):
+            raise IOError(f"File tidak ditemukan: {path}")
         img = cv2.imread(path)
         if img is None:
-            return f"Gagal memuat gambar: {path}"
-        # Pastikan gambar selalu 3 channel (BGR) untuk konsistensi
+            raise IOError(f"Gagal membaca atau format tidak didukung untuk gambar: {path}")
+        
+        # Untuk konsistensi, konversi gambar grayscale menjadi BGR
         if img.ndim == 2:
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
         images.append(img)
     return images
 
-def estimate_focal_length(img: np.ndarray, sensor_width_mm: float = 36.0, focal_length_mm: float = 26.0) -> float:
+def detect_features(img, feature_algorithm, use_multicore=True, num_features=500):
     """
-    Memperkirakan panjang fokus dalam piksel berdasarkan parameter kamera umum.
-    Fungsi dibuat lebih generik dengan parameter opsional.
+    Mendeteksi fitur pada satu gambar dengan strategi per-blok yang canggih dan pra-pemrosesan adaptif.
+    """
+    if img is None: return [], None
+    gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img.astype(np.uint8)
+    
+    # 1. Pra-pemrosesan dengan CLAHE
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    enhanced_gray_img = clahe.apply(gray_img)
+    
+    # 2. Pra-pemrosesan dengan Bilateral Filter jika noise tinggi
+    noise_level = estimate_noise_variance(enhanced_gray_img)
+    if noise_level > 600.0:
+        d, sigma, _ = get_adaptive_bilateral(noise_level, 300, 800, 5, 9, 20, 75)
+        print(f"Noise tinggi ({noise_level:.2f}), menerapkan Bilateral Filter (d={d}, sigma={sigma})...")
+        enhanced_gray_img = cv2.bilateralFilter(enhanced_gray_img, d, sigma, sigma)
+
+    h, w = enhanced_gray_img.shape
+    num_blocks, overlap, max_kps_per_block = (3, 3), 30, 600
+
+    # 3. Inisialisasi Detektor
+    algo = feature_algorithm.upper()
+    if algo == "SIFT": detector = cv2.SIFT_create(nfeatures=max_kps_per_block)
+    elif algo == "ORB": detector = cv2.ORB_create(nfeatures=max_kps_per_block)
+    elif algo == "BRISK": detector = cv2.BRISK_create()
+    else: detector = cv2.AKAZE_create(descriptor_type=cv2.AKAZE_DESCRIPTOR_MLDB)
+
+    def process_block(i, j):
+        roi_x, roi_y = i * (w // num_blocks[0]), j * (h // num_blocks[1])
+        roi_w, roi_h = w // num_blocks[0], h // num_blocks[1]
+        x_start, y_start = max(0, roi_x - overlap), max(0, roi_y - overlap)
+        x_end, y_end = min(w, roi_x + roi_w + overlap), min(h, roi_y + roi_h + overlap)
+        block_gray = enhanced_gray_img[y_start:y_end, x_start:x_end]
+        kps, des = detector.detectAndCompute(block_gray, None)
+        if kps is None or len(kps) == 0: return [], None
+        
+        # Seleksi Top-K per-blok
+        if len(kps) > max_kps_per_block:
+            indices = np.argsort([-kp.response for kp in kps])[:max_kps_per_block]
+            kps = [kps[i] for i in indices]
+            if des is not None: des = des[indices]
+
+        for kp in kps: kp.pt = (kp.pt[0] + x_start, kp.pt[1] + y_start)
+        return kps, des
+    
+    keypoints, descriptor_list = [], []
+    if use_multicore:
+        with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as executor:
+            futures = [executor.submit(process_block, i, j) for i in range(num_blocks[0]) for j in range(num_blocks[1])]
+            for future in as_completed(futures):
+                kps, des = future.result()
+                if des is not None and des.shape[0] > 0:
+                    keypoints.extend(kps)
+                    descriptor_list.append(des)
+    else:
+        for i in range(num_blocks[0]):
+            for j in range(num_blocks[1]):
+                kps, des = process_block(i, j)
+                if des is not None and des.shape[0] > 0:
+                    keypoints.extend(kps)
+                    descriptor_list.append(des)
+
+    if not descriptor_list: return [], None
+    descriptors = np.vstack(descriptor_list)
+    
+    # Hapus duplikat
+    unique_kps, unique_des_indices = [], []
+    seen_coords = set()
+    for i, kp in enumerate(keypoints):
+        coord = tuple(map(int, kp.pt))
+        if coord not in seen_coords:
+            seen_coords.add(coord)
+            unique_kps.append(kp)
+            unique_des_indices.append(i)
+    keypoints, descriptors = unique_kps, descriptors[unique_des_indices]
+    
+    # Seleksi Top-K Final
+    if num_features > 0 and len(keypoints) > num_features:
+        indices = np.argsort([-kp.response for kp in keypoints])[:num_features]
+        keypoints = [keypoints[i] for i in indices]
+        descriptors = descriptors[indices]
+    
+    return keypoints, descriptors
+
+def match_features(des1: np.ndarray, des2: np.ndarray, ratio_thresh: float = 0.75) -> List[cv2.DMatch]:
+    """
+    Mencocokkan dua set deskriptor menggunakan Lowe's Ratio Test.
+    Secara otomatis memilih matcher yang sesuai (BFMatcher atau FlannBasedMatcher).
 
     Args:
-        img (np.ndarray): Gambar input untuk mendapatkan dimensi lebar.
-        sensor_width_mm (float, optional): Lebar sensor fisik kamera dalam mm. Default ke 36.0 (full-frame).
-        focal_length_mm (float, optional): Panjang fokus lensa dalam mm. Default ke 26.0.
+        des1 (np.ndarray): Deskriptor dari gambar pertama.
+        des2 (np.ndarray): Deskriptor dari gambar kedua.
+        ratio_thresh (float): Ambang batas untuk Lowe's Ratio Test.
 
     Returns:
-        float: Panjang fokus yang diperkirakan dalam satuan piksel.
+        List[cv2.DMatch]: Daftar pencocokan yang baik.
     """
-    if img.ndim != 2:
-        h, w, _ = img.shape
-    else:
-        h, w = img.shape
-        
-    f_px = (focal_length_mm / sensor_width_mm) * w
-    return f_px
+    if des1 is None or des2 is None or len(des1) < 2 or len(des2) < 2:
+        return []
 
-def get_image_dimensions(path):
-    img = cv2.imread(path)
-    return img.shape
-
-def _process_anms_chunk(args):
-    """
-    Fungsi pembantu yang dijalankan oleh setiap worker thread.
-    Menghitung suppression radii untuk sebagian (chunk) dari keypoints.
-    """
-    start_idx, end_idx, pts, responses = args
-    chunk_radii = np.full(end_idx - start_idx, np.inf)
-
-    # Lakukan perbandingan hanya dalam rentang yang diberikan (chunk)
-    for i in range(start_idx, end_idx):
-        # Temukan semua titik yang lebih kuat di seluruh set data
-        stronger_pts_mask = responses > responses[i]
-        
-        if not np.any(stronger_pts_mask):
-            continue
-            
-        stronger_pts = pts[stronger_pts_mask]
-        
-        # Hitung jarak kuadrat dan temukan minimumnya
-        dist_sq = np.sum((stronger_pts - pts[i])**2, axis=1)
-        chunk_radii[i - start_idx] = np.min(dist_sq)
-        
-    return chunk_radii
-
-def apply_anms(keypoints, num_points_to_keep, use_multicore=True):
-    """
-    Menerapkan Adaptive Non-Maximal Suppression secara paralel untuk menyebarkan keypoint.
-    """
-    n_keypoints = len(keypoints)
-    if n_keypoints <= num_points_to_keep:
-        return keypoints, list(range(n_keypoints))
-
-    # Ekstrak data sekali untuk efisiensi
-    pts = np.array([kp.pt for kp in keypoints])
-    responses = np.array([kp.response for kp in keypoints])
+    # Pilih matcher berdasarkan tipe data deskriptor
+    if des1.dtype == np.uint8:  # Biasanya untuk ORB, BRISK (binary)
+        matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+    else:  # Biasanya untuk SIFT, AKAZE (float)
+        des1 = np.float32(des1)
+        des2 = np.float32(des2)
+        matcher = cv2.FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))
     
-    radii = np.full(n_keypoints, np.inf)
-
-    # <<< INI BAGIAN UTAMA OPTIMISASI >>>
-    if use_multicore:
-        num_workers = os.cpu_count() or 4
-        chunk_size = (n_keypoints + num_workers - 1) // num_workers # Bagi pekerjaan secara merata
-        
-        tasks = []
-        for i in range(num_workers):
-            start_idx = i * chunk_size
-            end_idx = min((i + 1) * chunk_size, n_keypoints)
-            if start_idx >= end_idx:
-                continue
-            # Siapkan argumen untuk setiap worker
-            tasks.append((start_idx, end_idx, pts, responses))
-
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            # Jalankan semua tugas secara paralel
-            results = list(executor.map(_process_anms_chunk, tasks))
-        
-        # Gabungkan hasil dari semua worker menjadi satu array radii
-        current_pos = 0
-        for chunk_result in results:
-            radii[current_pos : current_pos + len(chunk_result)] = chunk_result
-            current_pos += len(chunk_result)
-            
-    else: # Fallback ke metode serial jika tidak menggunakan multicore
-        for i in range(n_keypoints):
-            stronger_pts_mask = responses > responses[i]
-            if not np.any(stronger_pts_mask):
-                continue
-            stronger_pts = pts[stronger_pts_mask]
-            dist_sq = np.sum((stronger_pts - pts[i])**2, axis=1)
-            radii[i] = np.min(dist_sq)
-
-    # Bagian ini tetap sama dan sangat cepat
-    sorted_indices = np.argsort(radii)[::-1]
-    best_indices = sorted_indices[:num_points_to_keep]
-    anms_keypoints = [keypoints[i] for i in best_indices]
+    # Lakukan pencocokan k-NN
+    matches_knn = matcher.knnMatch(des1, des2, k=2)
     
-    return anms_keypoints, best_indices    
-def compute_features_for_block(
-    detector: Any,  # <<< INI KUNCINYA: Menerima detektor apa pun
-    enhanced_gray_base: np.ndarray, 
-    enhanced_gray_target: np.ndarray, 
-    block_coords: Tuple[int, int, int, int],
-    img_dims: Tuple[int, int],
-    overlap_px: int, 
-    max_kps_per_block: int = 500
-) -> Tuple[List[KeyPoint], np.ndarray, List[KeyPoint], np.ndarray]:
+    # Terapkan Lowe's Ratio Test
+    good_matches = []
+    for m_n in matches_knn:
+        if len(m_n) == 2 and m_n[0].distance < ratio_thresh * m_n[1].distance:
+            good_matches.append(m_n[0])
+            
+    return good_matches
+
+# ==============================================================================
+# Fungsi untuk Komposisi Graf dan Warping
+# ==============================================================================
+
+def compose_transformations_from_graph(pairwise_matches, n_images, anchor_idx):
+    if not pairwise_matches: return None
+    rows = [m["src_idx"] for m in pairwise_matches]
+    cols = [m["dst_idx"] for m in pairwise_matches]
+    weights = [-float(m["confidence"]) for m in pairwise_matches]
+    graph = csr_matrix((weights, (rows, cols)), shape=(n_images, n_images), dtype=np.float64)
+    
+    mst = minimum_spanning_tree(graph)
+    mst_graph = mst.toarray()
+    
+    transform_map = {}
+    for match in pairwise_matches:
+        transform_map[(match['src_idx'], match['dst_idx'])] = match['T']
+        try:
+            transform_map[(match['dst_idx'], match['src_idx'])] = np.linalg.inv(match['T'])
+        except np.linalg.LinAlgError: continue
+    
+    final_transforms = [None] * n_images
+    final_transforms[anchor_idx] = np.eye(3)
+    q = [anchor_idx]
+    visited = {anchor_idx}
+    while q:
+        current_idx = q.pop(0)
+        neighbors_fwd = np.where(mst_graph[current_idx, :] != 0)[0]
+        neighbors_bwd = np.where(mst_graph[:, current_idx] != 0)[0]
+        for neighbor_idx in list(neighbors_fwd) + list(neighbors_bwd):
+            if neighbor_idx not in visited:
+                visited.add(neighbor_idx)
+                T_to_neighbor = transform_map.get((current_idx, neighbor_idx))
+                if T_to_neighbor is not None:
+                    final_transforms[neighbor_idx] = final_transforms[current_idx] @ T_to_neighbor
+                    q.append(neighbor_idx)
+    
+    if any(t is None for t in final_transforms): return None
+    return final_transforms
+
+def warp_image(image: np.ndarray, homography: np.ndarray, output_size: tuple, translation: list = [0, 0]) -> tuple:
     """
-    Mengekstrak fitur dalam satu blok gambar menggunakan detektor yang diberikan.
-    Fungsi ini agnostik terhadap algoritma (bisa SIFT, ORB, AKAZE, dll.).
+    Melakukan warp perspektif pada sebuah gambar dan membuat mask-nya.
+
+    Args:
+        image (np.ndarray): Gambar yang akan di-warp.
+        homography (np.ndarray): Matriks homografi 3x3.
+        output_size (tuple): Ukuran kanvas output (lebar, tinggi).
+        translation (list): Ofset translasi [tx, ty] untuk diterapkan pada homografi.
 
     Returns:
-        Tuple: Keypoints dan deskriptor untuk gambar dasar dan target.
+        tuple: (warped_image, mask)
+               - warped_image: Gambar yang telah di-warp.
+               - mask: Mask biner dari area non-hitam pada gambar yang di-warp.
     """
-    x, y, bw, bh = block_coords
-    img_w, img_h = img_dims
+    # Gabungkan matriks translasi dengan homografi
+    translation_matrix = np.array([[1, 0, translation[0]], 
+                                   [0, 1, translation[1]], 
+                                   [0, 0, 1]])
+    final_homography = translation_matrix @ homography
 
-    # Logika untuk ROI, cropping, dll. tetap sama persis
-    roi_x_start = max(0, x - overlap_px)
-    roi_y_start = max(0, y - overlap_px)
-    roi_x_end = min(img_w, x + bw + overlap_px)
-    roi_y_end = min(img_h, y + bh + overlap_px)
-
-    if roi_y_end <= roi_y_start or roi_x_end <= roi_x_start:
-        return [], np.array([]), [], np.array([]) # Selalu kembalikan tipe yang konsisten
-
-    roi_base_enhanced = enhanced_gray_base[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
-    roi_target_enhanced = enhanced_gray_target[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
-
-    # >>> INI PERUBAHAN UTAMANYA <<<
-    # Tidak lagi memanggil akaze_instance, tapi objek 'detector' yang generik
-    kps_base, desc_base = detector.detectAndCompute(roi_base_enhanced, None)
-    kps_target, desc_target = detector.detectAndCompute(roi_target_enhanced, None)
-
-    def adjust_and_filter_kps(kps, descs, current_block_coords):
-        adjusted_kps = []
-        valid_desc_indices = []
-        if kps and descs is not None:
-            cx, cy, cbw, cbh = current_block_coords
-            for idx, kp in enumerate(kps):
-                orig_x = kp.pt[0] + roi_x_start
-                orig_y = kp.pt[1] + roi_y_start
-                if cx <= orig_x < cx + cbw and cy <= orig_y < cy + cbh:
-                    if idx < len(descs):
-                        kp.pt = (orig_x, orig_y)
-                        adjusted_kps.append(kp)
-                        valid_desc_indices.append(idx)
-        if descs is not None and valid_desc_indices:
-            filtered_descs = descs[np.array(valid_desc_indices)]
-        else:
-            filtered_descs = np.array([]) # Kembalikan array kosong, bukan None
-        return adjusted_kps, filtered_descs
-
-    kps_base_adj, final_desc_base = adjust_and_filter_kps(kps_base, desc_base, block_coords)
-    kps_target_adj, final_desc_target = adjust_and_filter_kps(kps_target, desc_target, block_coords)
+    # Lakukan warp pada gambar
+    warped_image = cv2.warpPerspective(image, final_homography, output_size,
+                                       flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0))
     
-    def select_top_k(kps, descs, k):
-        if descs is None or len(kps) == 0:
-            return [], np.array([])
-        if len(kps) <= k:
-            return kps, descs
-        sorted_idx = np.argsort([-kp.response for kp in kps])[:k]
-        return [kps[i] for i in sorted_idx], descs[sorted_idx]
+    # Buat mask dari hasil warp (area yang tidak hitam)
+    gray_warped = cv2.cvtColor(warped_image, cv2.COLOR_BGR2GRAY)
+    mask = (gray_warped > 0).astype(np.uint8)
+    
+    return warped_image, mask
 
-    kps_base_adj, final_desc_base = select_top_k(kps_base_adj, final_desc_base, max_kps_per_block)
-    kps_target_adj, final_desc_target = select_top_k(kps_target_adj, final_desc_target, max_kps_per_block)
-
-    return kps_base_adj, final_desc_base, kps_target_adj, final_desc_target

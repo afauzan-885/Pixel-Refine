@@ -542,14 +542,47 @@ def gaussian_window(size, sigma_scale=1/6):
              window = np.zeros_like(window)
         return np.ascontiguousarray(window.astype(np.float32))
 
-def estimate_noise_variance(gray_image):
+def estimate_noise_variance(gray_image, edge_threshold_low=70, dilate_kernel_size=4, min_flat_pixels_ratio=0.1):
     """
-    Memperkirakan tingkat noise dalam gambar dengan menghitung varians dari output Laplacian.
+    Memperkirakan tingkat noise dalam gambar dengan menghitung varians Laplacian
+    hanya pada area gambar yang dianggap "datar" (tidak ada tepi atau tekstur yang kuat).
+
+    Args:
+        gray_image (np.array): Gambar grayscale.
+        edge_threshold_low (int): Ambang batas rendah untuk detektor tepi Canny.
+        dilate_kernel_size (int): Ukuran kernel untuk operasi dilasi pada tepi.
+        min_flat_pixels_ratio (float): Rasio minimum piksel datar yang dibutuhkan.
+                                       Jika terlalu sedikit, estimasi bisa tidak andal.
+    Returns:
+        float: Varians noise yang diestimasi.
     """
-    # Menghitung Laplacian dari gambar dan kemudian variansnya
-    # CV_64F digunakan untuk menghindari overflow saat menangani nilai negatif dari Laplacian
-    laplacian = cv2.Laplacian(gray_image, cv2.CV_64F)
-    variance = laplacian.var()
+    if gray_image is None or gray_image.size == 0:
+        return 0.0 # Atau nilai default yang sesuai
+
+    # 1. Deteksi tepi untuk mengidentifikasi area non-datar
+    # Gunakan Canny. Threshold tinggi x 2 untuk high threshold adalah standar.
+    edges = cv2.Canny(gray_image, edge_threshold_low, edge_threshold_low * 2)
+    
+    # 2. Dilatasi tepi untuk sedikit memperluas area non-datar
+    kernel = np.ones((dilate_kernel_size, dilate_kernel_size), np.uint8)
+    dilated_edges = cv2.dilate(edges, kernel, iterations=1)
+    
+    # 3. Buat mask untuk area "datar" (piksel yang bukan bagian dari tepi yang diperluas)
+    flat_mask = (dilated_edges == 0).astype(np.bool_) # Ubah ke boolean mask
+    
+    # Periksa apakah ada cukup piksel "datar"
+    num_flat_pixels = np.sum(flat_mask)
+    if num_flat_pixels < (gray_image.size * min_flat_pixels_ratio):
+        print(f"Peringatan: Tidak ditemukan cukup piksel datar ({num_flat_pixels}/{gray_image.size * min_flat_pixels_ratio:.0f}). Estimasi noise mungkin kurang akurat.")
+        laplacian_full = cv2.Laplacian(gray_image, cv2.CV_64F)
+        return laplacian_full.var()
+
+    # 4. Hitung Laplacian dari gambar asli
+    laplacian_output = cv2.Laplacian(gray_image, cv2.CV_64F)
+    
+    # 5. Hitung varians hanya pada piksel yang dianggap "datar"
+    variance = laplacian_output[flat_mask].var()
+    
     return variance
 
 def get_adaptive_bilateral(noise_level, min_noise, max_noise, min_d, max_d, min_sigma, max_sigma):

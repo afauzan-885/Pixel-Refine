@@ -173,6 +173,12 @@ class DatabaseManager:
                 self._add_column_if_not_exists(
                     cursor,
                     "panorama_projects",
+                    "feature_detector",
+                    'TEXT DEFAULT "AKAZE"',
+                )
+                self._add_column_if_not_exists(
+                    cursor,
+                    "panorama_projects",
                     "projection_type",
                     'TEXT DEFAULT "Cylindrical"',
                 )
@@ -339,7 +345,7 @@ class DatabaseManager:
         Returns:
             dict: Dictionary berisi pengaturan, atau None jika proyek tidak ditemukan.
         """
-        sql = "SELECT align_algorithm, projection_type, blending_method FROM panorama_projects WHERE id = ?"
+        sql = "SELECT align_algorithm, feature_detector, projection_type, blending_method FROM panorama_projects WHERE id = ?"
         try:
             with self._get_connection() as conn:
                 conn.row_factory = (
@@ -370,7 +376,7 @@ class DatabaseManager:
             bool: True jika berhasil, False jika gagal.
         """
         # Validasi untuk mencegah SQL Injection, meskipun kita tidak menggunakan f-string di sini
-        allowed_keys = ["align_algorithm", "projection_type", "blending_method"]
+        allowed_keys = ["align_algorithm", "feature_detector", "projection_type", "blending_method"]
         if setting_key not in allowed_keys:
             print(f"Error: Invalid setting key '{setting_key}'")
             return False
