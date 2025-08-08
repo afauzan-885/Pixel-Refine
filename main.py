@@ -102,14 +102,14 @@ class PixelRefineMain(QMainWindow):
         self.setWindowTitle(f"Pixel Refine - Version {config.APP_VERSION}")
         
         # <<< PERUBAHAN DI SINI >>>
-        # Hapus baris lama: self.setMinimumSize(1200, 600)
-        # Ganti dengan pemanggilan fungsi adaptif kita
         self._set_adaptive_window_size()
 
         splash.update_status("Preparing temporary folders...", 55)
         self.database_folder = "database" 
         self.align_folder = os.path.join(self.database_folder, "align")
         self.stack_folder = os.path.join(self.database_folder, "stack")
+        self.align_stitch_cache_folder = os.path.join(self.database_folder, "cache", "align_stitch")
+        
         self.create_folders_if_needed()
         # time.sleep(1.2) # HAPUS PADA VERSI PRODUKSI
 
@@ -203,11 +203,15 @@ class PixelRefineMain(QMainWindow):
                     item_path = os.path.join(self.align_folder, item)
                     if os.path.isfile(item_path) or os.path.islink(item_path): os.unlink(item_path) 
                     elif os.path.isdir(item_path): rmtree(item_path) 
+            
             if os.path.exists(self.stack_folder):
                 for item in os.listdir(self.stack_folder):
                     item_path = os.path.join(self.stack_folder, item)
                     if os.path.isfile(item_path) or os.path.islink(item_path): os.unlink(item_path)
-                    elif os.path.isdir(item_path): rmtree(item_path)  
+                    elif os.path.isdir(item_path): rmtree(item_path)
+            if os.path.exists(self.align_stitch_cache_folder):
+                rmtree(self.align_stitch_cache_folder)
+
         except Exception as e:
             QMessageBox.warning(self, "Error", f"An error occurred while deleting folder contents: {e}")
         finally:

@@ -1,13 +1,15 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QMessageBox, QStackedWidget
 from PySide6.QtCore import Slot, Signal, QThread
 import numpy as np
+import os
+import pickle  # Untuk menyimpan objek Python (termasuk NumPy array) ke disk
+import hashlib # Untuk membuat nama file yang unik
 
 from UI.panorama.display_area.display_panel import DisplayPanel
 from UI.panorama.logic.panorama_worker import PanoramaWorker
 from UI.panorama.workflow_area.workflow_panel import WorkflowPanel
 from UI.resources.animation.animation_manager import HeightAnimator, SlideDirection, StackedWidgetAnimator
 from UI.resources.animation.slide import slide
-
 
 class WorkingLeftPanel(QWidget):
     """
@@ -145,6 +147,7 @@ class WorkingLeftPanel(QWidget):
     @Slot(list)
     def _on_images_imported(self, file_paths):
         """Menangani penambahan gambar baru ke proyek."""
+        self._invalidate_alignment_cache() # Hapus cache sebelum operasi DB
         success = self.database_manager.add_images_to_project(self.current_project_id, file_paths)
         if success:
             project_name = self.display_panel.project_name
@@ -155,6 +158,7 @@ class WorkingLeftPanel(QWidget):
     @Slot(list)
     def _on_images_deleted(self, paths_to_delete):
         """Menangani penghapusan gambar dari proyek."""
+        self._invalidate_alignment_cache() # Hapus cache sebelum operasi DB
         success = self.database_manager.delete_images_from_project(self.current_project_id, paths_to_delete)
         if success:
             project_name = self.display_panel.project_name
@@ -196,20 +200,44 @@ class WorkingLeftPanel(QWidget):
     @Slot(str, str)
     def _on_workflow_setting_changed(self, setting_key, value): 
         """Menyimpan perubahan pengaturan dan membatalkan validasi cache yang relevan."""
+        # Definisikan kedua daftar pengaturan di sini
         alignment_settings = ['align_algorithm', 'akaze_threshold', 'orb_nfeatures']
-        projection_settings = ['projection_type', 'projection_scale']
+        projection_settings = ['projection_type', 'projection_scale'] # <-- TAMBAHKAN BARIS INI
 
-        # Logika invalidasi cache berdasarkan jenis pengaturan yang diubah
         if setting_key in alignment_settings:
-            print("INFO: Pengaturan alignment berubah. Membersihkan cache alignment dan projection.")
+            print("INFO: Pengaturan alignment berubah. Membersihkan cache alignment.")
+            # --- BAGIAN BARU: HAPUS CACHE DARI DISK ---
+            cache_path, _ = self._get_alignment_cache_path()
+            if cache_path and os.path.exists(cache_path):
+                try:
+                    os.remove(cache_path)
+                    print(f"INFO: File cache alignment '{cache_path}' telah dihapus.")
+                except OSError as e:
+                    print(f"ERROR: Gagal menghapus file cache: {e}")
+            # --- AKHIR BAGIAN BARU ---
+            
             self.cached_alignment_result = None
             self.cached_projection_result = None
+        
         elif setting_key in projection_settings:
             print("INFO: Pengaturan proyeksi berubah. Membersihkan cache projection.")
+            # (Di sini Anda juga bisa menambahkan logika untuk menghapus cache disk untuk proyeksi jika sudah diimplementasikan)
             self.cached_projection_result = None
             
         if self.current_project_id:
             self.database_manager.save_project_workflow_setting(self.current_project_id, setting_key, value)
+            
+    def _invalidate_alignment_cache(self):
+        """Fungsi bantuan untuk menghapus cache alignment."""
+        cache_path, _ = self._get_alignment_cache_path()
+        if cache_path and os.path.exists(cache_path):
+            try:
+                os.remove(cache_path)
+                print(f"INFO: File cache alignment '{cache_path}' telah dihapus karena perubahan gambar.")
+            except OSError as e:
+                print(f"ERROR: Gagal menghapus file cache: {e}")
+        self.cached_alignment_result = None
+        self.cached_projection_result = None
 
     # =========================================================================
     # === 4. Logika Pemrosesan Asinkron (Panorama Stitching) ===
@@ -219,11 +247,56 @@ class WorkingLeftPanel(QWidget):
     
     @Slot(str)
     def _on_preview_requested(self, stage_name):
-        """Memulai proses stitching pada thread terpisah."""
+        """
+        Memulai proses stitching. Untuk alignment, periksa cache disk dan verifikasi
+        pengaturan yang digunakan sebelumnya.
+        """
         if self.thread and self.thread.isRunning():
             QMessageBox.warning(self, "Process Running", "Another process is already running. Please wait.")
             return
 
+        # --- BAGIAN PEMERIKSAAN CACHE YANG DIPERBARUI ---
+        if stage_name == "alignment":
+            cache_path, _ = self._get_alignment_cache_path()
+            if cache_path and os.path.exists(cache_path):
+                print(f"INFO: File cache alignment ditemukan. Memverifikasi pengaturan...")
+                try:
+                    # 1. Muat seluruh data dari cache (pengaturan + hasil)
+                    with open(cache_path, 'rb') as f:
+                        cached_data = pickle.load(f)
+                    
+                    saved_settings = cached_data.get("settings")
+                    result_data = cached_data.get("result_data")
+                    
+                    # 2. Ambil pengaturan terbaru dari database untuk perbandingan
+                    current_settings = self.database_manager.get_project_workflow_settings(self.current_project_id)
+
+                    if not saved_settings or not result_data or not current_settings:
+                        raise ValueError("Format cache tidak valid atau pengaturan tidak ditemukan.")
+
+                    # 3. Bandingkan pengaturan yang relevan untuk alignment
+                    keys_to_check = ['align_algorithm', 'feature_detector']
+                    settings_match = True
+                    for key in keys_to_check:
+                        if saved_settings.get(key) != current_settings.get(key):
+                            print(f"INFO: Pengaturan '{key}' telah berubah. (Cache: '{saved_settings.get(key)}', Saat ini: '{current_settings.get(key)}')")
+                            settings_match = False
+                            break 
+                        
+                    # 4. Jika pengaturan cocok, gunakan cache. Jika tidak, lanjutkan ke pemrosesan ulang.
+                    if settings_match:
+                        print("INFO: Pengaturan cocok. Memuat hasil dari cache.")
+                        self._on_alignment_finished(result_data) # Kirim hanya data hasilnya
+                        return # Lewati pemrosesan ulang
+
+                    else:
+                        print("INFO: Pengaturan tidak cocok. Cache tidak valid, akan diproses ulang.")
+
+                except Exception as e:
+                    print(f"ERROR: Gagal memuat atau memverifikasi file cache: {e}. Melanjutkan dengan pemrosesan ulang.")
+                    if os.path.exists(cache_path):
+                        os.remove(cache_path) # Hapus file cache yang rusak atau tidak valid
+        
         image_paths = self.database_manager.get_images_for_project(self.current_project_id)
         if not image_paths or len(image_paths) < 2:
             QMessageBox.information(self, "Not Enough Images", "You need at least two images for alignment.")
@@ -233,14 +306,12 @@ class WorkingLeftPanel(QWidget):
         
         # Tentukan data cache yang akan digunakan berdasarkan tahap yang diminta
         align_cache = None
-        proj_cache = None
+        proj_cache = None 
+
         if stage_name == "projection":
-            if not self.cached_alignment_result:
-                QMessageBox.information(self, "Langkah Dibutuhkan", "Silakan jalankan tahap 'Alignment' terlebih dahulu.")
-                return
-            align_cache = self.cached_alignment_result
+            QMessageBox.information(self, "Langkah Dibutuhkan", "Silakan jalankan tahap 'Alignment' terlebih dahulu.")
+            return
         elif stage_name == "blending":
-            # Logika serupa untuk tahap blending
             pass
 
         titles = {"alignment": "Aligning Images...", "projection": "Applying Projection...", "blending": "Blending Panorama..."}
@@ -253,7 +324,7 @@ class WorkingLeftPanel(QWidget):
             settings=settings,
             target_stage=stage_name,
             cached_alignment=align_cache,
-            cached_projection=proj_cache
+            cached_projection=proj_cache  # Sekarang variabel ini sudah didefinisikan
         )
         self.worker.moveToThread(self.thread)
 
@@ -273,8 +344,10 @@ class WorkingLeftPanel(QWidget):
 
     @Slot(str, object)
     def _on_stitching_finished(self, stage_name, result):
-        """Menangani hasil sukses dari worker dan menyimpannya ke cache."""
-        print(f"PROSES SELESAI: Tahap '{stage_name}' berhasil. Menyimpan hasil ke cache.")
+        """
+        Menangani hasil sukses dari worker. Menyimpan hasil alignment DAN pengaturannya 
+        ke cache disk.
+        """
         self.cleanup_thread()
 
         if result.get("error"):
@@ -282,17 +355,38 @@ class WorkingLeftPanel(QWidget):
             self._on_back_to_grid_request()
             return
 
-        # Panggil handler spesifik berdasarkan tahap yang selesai
         if stage_name == "alignment":
-            self.cached_alignment_result = result
-            self.cached_projection_result = None # Invalidate cache selanjutnya
+            cache_path, _ = self._get_alignment_cache_path()
+            if cache_path:
+                try:
+                    # 1. Ambil pengaturan saat ini yang digunakan untuk proses ini
+                    current_settings = self.database_manager.get_project_workflow_settings(self.current_project_id)
+                    
+                    # 2. Buat dictionary untuk disimpan, berisi pengaturan dan hasil
+                    data_to_cache = {
+                        "settings": current_settings,
+                        "result_data": result 
+                    }
+                    
+                    print(f"PROSES SELESAI: Menyimpan hasil dan pengaturan ke cache di: {cache_path}")
+                    with open(cache_path, 'wb') as f:
+                        # Simpan seluruh dictionary ke file cache
+                        pickle.dump(data_to_cache, f)
+
+                except Exception as e:
+                    print(f"ERROR: Gagal menyimpan file cache: {e}")
+            
+            self.cached_projection_result = None
+            # Panggil handler selanjutnya dengan hasil pemrosesan ('result')
             self._on_alignment_finished(result) 
+        
         elif stage_name == "projection":
+            # Logika serupa bisa diterapkan untuk cache proyeksi
             self.cached_projection_result = result
-            # self._on_projection_finished(result) # (uncomment jika sudah diimplementasikan)
+            self._on_projection_finished(result)
+        
         elif stage_name == "blending":
             pass
-            # self._on_blending_finished(result) # (uncomment jika sudah diimplementasikan)
     
     @Slot(str)
     def _on_stitching_error(self, error_message):
@@ -343,6 +437,36 @@ class WorkingLeftPanel(QWidget):
     # =========================================================================
     # === 5. Metode Utilitas dan Bantuan ===
     # =========================================================================
+    
+    def _get_alignment_cache_path(self):
+        """
+        Membuat path file cache yang unik untuk hasil alignment.
+        Nama file didasarkan pada hash dari ID proyek dan daftar path gambar.
+        """
+        if not self.current_project_id:
+            return None, None
+
+        # 1. Tentukan direktori cache
+        cache_dir = os.path.join("database", "cache", "align_stitch")
+        os.makedirs(cache_dir, exist_ok=True) # Buat folder jika belum ada
+
+        # 2. Kumpulkan input yang relevan untuk hash
+        image_paths = sorted(self.database_manager.get_images_for_project(self.current_project_id))
+        
+        # Jika tidak ada gambar, tidak ada cache
+        if not image_paths:
+            return None, None
+            
+        input_string = f"project:{self.current_project_id}-images:{','.join(image_paths)}"
+        
+        # 3. Buat hash yang unik
+        # Menggunakan MD5 untuk kecepatan, SHA256 lebih aman tetapi tidak diperlukan di sini
+        filename = hashlib.md5(input_string.encode('utf-8')).hexdigest() + ".pkl"
+        
+        # 4. Kembalikan path lengkap
+        full_path = os.path.join(cache_dir, filename)
+        
+        return full_path, cache_dir
     
     def cleanup_thread(self):
         """Membersihkan thread dan worker setelah selesai atau terjadi error."""
