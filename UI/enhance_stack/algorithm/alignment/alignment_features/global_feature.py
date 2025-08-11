@@ -1,8 +1,7 @@
 # =========================================================================
 # === 1. IMPORTS & KONFIGURASI GLOBAL
 # =========================================================================
-import concurrent.futures 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from functools import lru_cache
 import gc
 import math
@@ -105,7 +104,7 @@ def load_images_from_paths(image_paths, stop_requested=None):
     raw_futures = []
     standard_futures = []
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
         for path in image_paths:
             if stop_requested and stop_requested():
                 break
@@ -123,7 +122,7 @@ def load_images_from_paths(image_paths, stop_requested=None):
                     standard_futures.append(future)
 
         # Ambil hasil dari gambar RAW
-        for future in concurrent.futures.as_completed(raw_futures):
+        for future in as_completed(raw_futures):
             if stop_requested and stop_requested():
                 break
             try:
@@ -134,7 +133,7 @@ def load_images_from_paths(image_paths, stop_requested=None):
                 print(f"Error loading RAW image: {e}")
 
         # Ambil hasil dari gambar biasa
-        for future in concurrent.futures.as_completed(standard_futures):
+        for future in as_completed(standard_futures):
             if stop_requested and stop_requested():
                 break
             try:
@@ -167,7 +166,7 @@ def save_to_hdf5(h5f, dataset_name, cropped, metadata=None):
     total_items = cropped.shape[0]
     chunk_size = total_items // num_threads if total_items >= num_threads else total_items
     # Gunakan multithreading untuk menulis dataset secara paralel
-    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
         futures = []
         start = 0
         while start < total_items:
@@ -176,7 +175,7 @@ def save_to_hdf5(h5f, dataset_name, cropped, metadata=None):
                 end = total_items
             futures.append(executor.submit(write_chunk, start, end))
             start = end
-        concurrent.futures.wait(futures)
+        wait(futures)
 
     if metadata is not None:
         # Simpan metadata sebagai atribut (dalam format JSON)
@@ -207,7 +206,7 @@ def save_align_to_folder(image, index, original_path, align_folder=None, load_co
     # multithreading untuk menjalankan exiftool
     try:
         num_threads = os.cpu_count() or 4  # Default to 4 if os.cpu_count() returns None
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
             future = executor.submit(
             subprocess.run,
             ["exiftool", "-overwrite_original", "-TagsFromFile", original_path, file_path],
@@ -1285,7 +1284,7 @@ def compute_optical_flow_images_multithreaded(base_gray, target_gray, process_fu
         h_block, w_block, _ = result_block.shape
         result_full[y:y+h_block, x:x+w_block, :] = result_block
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=blocks_x * blocks_y) as executor:
+    with ThreadPoolExecutor(max_workers=blocks_x * blocks_y) as executor:
         futures = []
         for i in range(blocks_x):
             for j in range(blocks_y):
@@ -1295,7 +1294,7 @@ def compute_optical_flow_images_multithreaded(base_gray, target_gray, process_fu
                 bh = block_h if j < blocks_y - 1 else h - y
                 futures.append(executor.submit(process_block, x, y, bw, bh))
         
-        concurrent.futures.wait(futures)
+        wait(futures)
     
     return result_full
 

@@ -1,5 +1,14 @@
+import gc
+import math
+import os
+import shutil
 import cv2
+from joblib import Parallel, delayed
 import numpy as np
+import zarr
+# Tambahkan import ini di bagian atas file Anda
+import dask
+import dask.array as da
 from scipy.optimize import least_squares
 from UI.panorama.Algorithm.stitching import stitching_utils
 
@@ -67,159 +76,225 @@ class MultiRowStandartHomography:
         print("Bundle Adjustment selesai.")
         return unpack_params(res.x)
 
-    def stitch(self, image_paths, feature_algorithm, num_features=2000, use_bundle_adjustment=True):
+    def stitch(self, image_paths, feature_algorithm, num_features=2000,preview_scale=0.1):
         n_images = len(image_paths)
+
         def create_error_response(message):
             return {
-                "stitched_image": None, "warped_images": None, "warped_masks": None,
-                "homographies": None, "canvas_size": None, "translation": None, "error": message
+                "stitched_image": None, "warped_images": None,
+                "warped_masks": None, "homographies": None, "canvas_size": None,
+                "translation": None, "error": message
             }
 
         if n_images < 2:
             return create_error_response("Butuh setidaknya 2 gambar.")
-        
-        self.progress_callback(0, "Membaca gambar...")
-        try:
-            images = stitching_utils.load_images(image_paths)
-        except IOError as e:
-            return create_error_response(str(e))
 
-        # Tahap 1: Deteksi dan Pencocokan Fitur (Tidak ada perubahan)
+        # ==================== Tahap 1: Deteksi fitur ====================
         self.progress_callback(5, "Mendeteksi fitur...")
         all_kps, all_des = [None] * n_images, [None] * n_images
-        for i in range(n_images):
+        image_shapes = [None] * n_images
+
+        for i, path in enumerate(image_paths):
             self.progress_callback(5 + i * (40 / n_images), f"Mendeteksi fitur di gambar {i+1}...")
+            img_to_process = cv2.imread(path)
+            if img_to_process is None:
+                return create_error_response(f"Gagal membaca gambar: {path}")
+
+            image_shapes[i] = img_to_process.shape
             all_kps[i], all_des[i] = stitching_utils.detect_features(
-                images[i], feature_algorithm, num_features=num_features
+                img_to_process, feature_algorithm, num_features=num_features
             )
-        
+
+        # ==================== Tahap 2: Pencocokan & Homografi ====================
         self.progress_callback(45, "Mencocokkan fitur...")
         pairwise_matches = []
         for i in range(n_images):
             for j in range(i + 1, n_images):
                 matches = stitching_utils.match_features(all_des[i], all_des[j])
-                if len(matches) < 20: continue
-                
+                if len(matches) < 20:
+                    continue
+
                 H, mask = self.estimate_homography(all_kps[i], all_kps[j], matches)
-                if H is None: continue
-                
+                if H is None:
+                    continue
+
                 confidence = np.sum(mask)
-                if confidence < 20: continue
-                
+                if confidence < 20:
+                    continue
+
                 inlier_matches = [m for k, m in enumerate(matches) if mask[k] == 1]
-                if not inlier_matches: continue
+                if not inlier_matches:
+                    continue
 
                 pairwise_matches.append({
                     "src_idx": i, "dst_idx": j, "T": H, "confidence": confidence, "matches": inlier_matches
                 })
 
-        del all_des, all_kps # Membersihkan memori
+        del all_des, all_kps
         if not pairwise_matches:
             return create_error_response("Tidak bisa menemukan pencocokan berkualitas.")
 
-        # Tahap 2: Komposisi Graf dan Optimasi (Bundle Adjustment)
-        self.progress_callback(80, "Menyusun transformasi awal...")
+        # ==================== Tahap 3: Komposisi graf ====================
+        self.progress_callback(80, "Menyusun transformasi...")
         centrality_scores = [0] * n_images
         for match in pairwise_matches:
             centrality_scores[match['src_idx']] += match['confidence']
             centrality_scores[match['dst_idx']] += match['confidence']
         anchor_idx = np.argmax(centrality_scores)
-        
-        initial_homographies = stitching_utils.compose_transformations_from_graph(pairwise_matches, n_images, anchor_idx)
-        if initial_homographies is None:
+
+        homographies = stitching_utils.compose_transformations_from_graph(pairwise_matches, n_images, anchor_idx)
+        if homographies is None:
             return create_error_response("Gagal membuat grafik terhubung.")
 
-        homographies = initial_homographies
-        progress_start_warping = 85
-        if use_bundle_adjustment:
-            self.progress_callback(85, "Menyempurnakan transformasi (Bundle Adjustment)...")
-            # Menggunakan kembali `all_kps` tidak efisien, jadi kita hapus saja di atas. BA perlu penyesuaian jika ingin digunakan.
-            # Untuk sementara, mari asumsikan BA tidak membutuhkan all_kps, atau jika butuh, jangan dihapus.
-            # homographies = self._bundle_adjust_homographies(initial_homographies, pairwise_matches, all_kps, n_images, anchor_idx)
-            # ^ Jika baris di atas aktif, jangan 'del all_kps' sebelumnya.
-            progress_start_warping = 90
-        
-        # --- KOREKSI DAN PEMBERSIHAN DIMULAI DI SINI ---
+        self.progress_callback(85, "Menghitung transformasi terpusat...")
+        centered_homographies = stitching_utils.center_FOV(homographies)
 
-        # Tahap 3: Pemusatan Global (Meet-in-the-Middle)
-        # Seluruh logika `logm`, `expm`, `H_correction` sekarang ada di dalam `center_FOV`.
-        # Kita cukup memanggilnya. Ini membuat `stitch` jauh lebih bersih.
-        self.progress_callback(progress_start_warping, "Menghitung transformasi terpusat...")
-        final_homographies = stitching_utils.center_FOV(homographies)
-
-        # Tahap 4: Hitung Kanvas Akhir & Translasi
-        # Kode ini diperlukan untuk menentukan ukuran dan pergeseran panorama akhir.
+        # ==================== Tahap 4: Perhitungan kanvas ====================
+        self.progress_callback(88, "Menghitung kanvas akhir...")
         all_corners = []
-        for i, H in enumerate(final_homographies):
-            h, w = images[i].shape[:2]
+        for i, H in enumerate(centered_homographies):
+            h, w, _ = image_shapes[i]
             corners = np.float32([[0, 0], [0, h], [w, h], [w, 0]]).reshape(-1, 1, 2)
             warped = cv2.perspectiveTransform(corners, H)
             all_corners.append(warped)
-            
+
         all_corners = np.concatenate(all_corners, axis=0)
         x_min, y_min = np.int32(all_corners.min(axis=0).ravel() - 0.5)
         x_max, y_max = np.int32(all_corners.max(axis=0).ravel() + 0.5)
-        
-        # Translasi ini penting untuk menggeser panorama (yang mungkin punya koordinat negatif)
-        # agar pas di dalam kanvas berukuran `output_size`.
+
         translation_offset = [-x_min, -y_min]
         output_size = (x_max - x_min, y_max - y_min)
-        
-        T_translate = np.array([[1, 0, translation_offset[0]], 
-                                [0, 1, translation_offset[1]], 
-                                [0, 0, 1]])
 
-        # "Panggang" translasi ke dalam setiap homografi. Ini adalah transformasi final
-        # yang akan digunakan untuk warping dan dikembalikan.
-        homographies_to_warp_and_return = [T_translate @ H for H in final_homographies]
-        
-        # --- KOREKSI SELESAI ---
+        T_translate = np.array([[1, 0, translation_offset[0]], [0, 1, translation_offset[1]], [0, 0, 1]])
+        homographies_final = [T_translate @ H for H in centered_homographies]
 
-        # Tahap 5: Warping dan Blending
-        progress_warp_step = (98 - progress_start_warping) / n_images
-        panorama_sum = np.zeros((output_size[1], output_size[0], 3), dtype=np.float32)
-        image_count_map = np.zeros((output_size[1], output_size[0]), dtype=np.float32)
-        final_warped_images = []
-        final_warped_masks = []
+        # ==================== Tahap 5: Rendering (Preview + Tile-Based Full-Res) ====================
         
-        # Loop menggunakan homografi yang sudah final (terpusat DAN tertranslasi)
-        for idx, (img, H_final) in enumerate(zip(images, homographies_to_warp_and_return)):
-            self.progress_callback(progress_start_warping + idx * progress_warp_step, f"Warping image {idx+1}...")
+        # 1) Preview (kecil) — lazy stack + compute (TETAP SAMA)
+        # Bagian ini sudah sangat cepat dan hemat memori, jadi kita pertahankan.
+        self.progress_callback(90, "Memulai rendering dengan Dask (preview)...")
+        preview_output_size = (int(output_size[0] * preview_scale), int(output_size[1] * preview_scale))
+        preview_output_shape = (preview_output_size[1], preview_output_size[0], 3)
+        S = np.array([[preview_scale, 0, 0], [0, preview_scale, 0], [0, 0, 1]])
+        preview_homographies = [S @ H for H in homographies_final]
+
+        lazy_preview_warps = []
+        lazy_preview_masks = []
+        for i in range(n_images):
+            lazy_result = dask.delayed(stitching_utils._warp_to_dask_array)(
+                image_paths[i], preview_homographies[i], preview_output_shape, chunks='auto'
+            )
+            preview_warp_da = da.from_delayed(lazy_result[0], shape=preview_output_shape, dtype=np.float32)
+            preview_mask_da = da.from_delayed(lazy_result[1], shape=(preview_output_shape[0], preview_output_shape[1]), dtype=np.float32)
+            lazy_preview_warps.append(preview_warp_da)
+            lazy_preview_masks.append(preview_mask_da)
+
+        preview_sum = da.stack(lazy_preview_warps).sum(axis=0)
+        preview_count = da.maximum(da.stack(lazy_preview_masks).sum(axis=0), 1.0)
+        panorama_preview = (preview_sum / preview_count[..., np.newaxis]).astype(np.uint8).compute()
+
+        # ==============================================================================
+        # 2) Full-resolution TILE-BASED PARALLEL rendering dengan Custom Progress
+        # ==============================================================================
+        self.progress_callback(95, "Mempersiapkan rendering paralel berbasis ubin...")
+        full_output_shape = (output_size[1], output_size[0], 3)
+        TILE_SIZE = (1024, 1024)
+
+        cache_dir = os.path.join("database", "cache", "align_stitch")
+        os.makedirs(cache_dir, exist_ok=True)
+        temp_pano_path = os.path.join(cache_dir, "panorama_temp.mmap")
+        
+        if os.path.exists(temp_pano_path):
+            os.remove(temp_pano_path)
+
+        panorama_full = np.memmap(temp_pano_path, dtype=np.uint8, mode='w+', shape=full_output_shape)
+        
+        # Buat daftar semua tugas (ubin) yang akan diproses
+        all_tasks = []
+        for y_start in range(0, full_output_shape[0], TILE_SIZE[0]):
+            for x_start in range(0, full_output_shape[1], TILE_SIZE[1]):
+                y_end = min(y_start + TILE_SIZE[0], full_output_shape[0])
+                x_end = min(x_start + TILE_SIZE[1], full_output_shape[1])
+                tile_shape = (y_end - y_start, x_end - x_start, 3)
+                
+                args = (
+                    y_start, x_start, tile_shape, full_output_shape, 
+                    homographies_final, image_paths, image_shapes
+                )
+                all_tasks.append(args)
+
+        total_tiles = len(all_tasks)
+        self.progress_callback(96, f"Memulai pemrosesan {total_tiles} ubin...")
+
+        # --- LOGIKA BATCHING UNTUK PROGRESS REPORTING ---
+        
+        # Tentukan ukuran batch. Ukuran yang sama dengan jumlah core adalah pilihan yang baik.
+        n_cores = os.cpu_count() or 4
+        batch_size = n_cores 
+        
+        num_batches = int(math.ceil(total_tiles / batch_size))
+        tasks_completed = 0
+
+        # Proses tugas dalam beberapa batch
+        for i in range(num_batches):
+            # Ambil batch tugas saat ini
+            start_index = i * batch_size
+            end_index = start_index + batch_size
+            current_batch_tasks = all_tasks[start_index:end_index]
             
-            # Karena translasi sudah dipanggang, argumen translasi di warp_image adalah [0,0]
-            # Ini menyederhanakan panggilan fungsi warp.
-            warped_img, mask = stitching_utils.warp_image(img, H_final, output_size, [0, 0])
-            
-            final_warped_images.append(warped_img)
-            final_warped_masks.append(mask)
-            panorama_sum += warped_img
-            image_count_map += mask
+            if not current_batch_tasks:
+                continue
 
-        self.progress_callback(98, "Finalizing panorama...")
-        image_count_map[image_count_map == 0] = 1.0 
-        panorama_preview = (panorama_sum / image_count_map[..., np.newaxis]).astype(np.uint8)
-        
-        # Tahap 6: Return Hasil
+            # Jalankan joblib hanya untuk batch ini
+            batch_results = Parallel(n_jobs=n_cores, backend="loky")(
+                delayed(stitching_utils._process_single_tile)(task) for task in current_batch_tasks
+            )
+            
+            # Tulis hasil dari batch yang sudah selesai ke disk
+            for y_start, x_start, final_tile in batch_results:
+                y_end = y_start + final_tile.shape[0]
+                x_end = x_start + final_tile.shape[1]
+                panorama_full[y_start:y_end, x_start:x_end] = final_tile
+            
+            # Perbarui progress setelah setiap batch selesai
+            tasks_completed += len(batch_results)
+            progress = 96 + (tasks_completed / total_tiles) * 3 # Progress dari 96% ke 99%
+            self.progress_callback(progress, f"Memproses ubin... ({tasks_completed}/{total_tiles})")
+
+        # --- AKHIR LOGIKA BATCHING ---
+
+        self.progress_callback(99.5, "Menyelesaikan gambar akhir...")
+        final_image_in_memory = np.array(panorama_full)
+
+        panorama_full.flush()
+        del panorama_full
+        try:
+            os.remove(temp_pano_path)
+        except OSError as e:
+            print(f"Peringatan: Tidak bisa menghapus file temp: {e}")
+
+        self.progress_callback(100, "Selesai.")
+
         return {
-            "stitched_image": panorama_preview,
-            "warped_images": final_warped_images,
-            "warped_masks": final_warped_masks,
-            "homographies": homographies_to_warp_and_return, # Kembalikan homografi yang sudah "siap pakai"
+            "stitched_image": final_image_in_memory,  # Resolusi penuh, sekarang dimuat dari hasil di disk
+            "stitched_preview": panorama_preview,  
+            "warped_images": None,
+            "warped_masks": None,
+            "homographies": homographies_final,
             "canvas_size": output_size,
-            "translation": [0, 0], # Translasi sudah menjadi bagian dari homografi
+            "translation": [0, 0],
             "error": None
         }
+        
 def run_standart_homography(image_paths, settings, progress_callback, return_full_data=False):
     try:
         # Ekstrak konfigurasi
         feature_detector_name = settings.get('feature_detector', 'AKAZE')
         num_features = settings.get('num_features', 2000)
-        enable_ba = settings.get('use_bundle_adjustment', True) 
         
         print(f"--- KONFIGURASI STITCHING ---")
         print(f"  > Algoritma Deteksi Fitur: {feature_detector_name.upper()}")
         print(f"  > Jumlah Fitur per Gambar: {num_features}")
-        print(f"  > Bundle Adjustment: {'AKTIF' if enable_ba else 'NON-AKTIF'}")
         print(f"  > Mode Return: {'FULL' if return_full_data else 'MINIMAL'}")
         print(f"-----------------------------")
 
@@ -230,7 +305,6 @@ def run_standart_homography(image_paths, settings, progress_callback, return_ful
             image_paths=image_paths,
             feature_algorithm=feature_detector_name,
             num_features=num_features, 
-            use_bundle_adjustment=enable_ba
         )
 
         if full_result.get("error"):

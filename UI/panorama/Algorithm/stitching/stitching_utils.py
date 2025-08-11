@@ -1,7 +1,10 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import gc
 import os
 import cv2
 import numpy as np
+import dask
+import dask.array as da
 from typing import List
 from scipy.linalg import expm, logm
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -89,7 +92,7 @@ def detect_features(img, feature_algorithm, use_multicore=True, num_features=500
     
     keypoints, descriptor_list = [], []
     if use_multicore:
-        with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor:
             futures = [executor.submit(process_block, i, j) for i in range(num_blocks[0]) for j in range(num_blocks[1])]
             for future in as_completed(futures):
                 kps, des = future.result()
@@ -252,6 +255,69 @@ def center_FOV(homographies: list):
     
     print("    - Transformasi berhasil dipusatkan.")
     return centered_homographies
+
+def _warp_to_dask_array(image_path, homography, output_shape, *args, **kwargs):
+    img = cv2.imread(image_path)
+    if img is None:
+        return (
+            np.zeros(output_shape, dtype=np.float32), 
+            np.zeros((output_shape[0], output_shape[1]), dtype=np.float32)
+        )
+
+    warped_np = cv2.warpPerspective(img, homography, (output_shape[1], output_shape[0]))
+    mask_np = (cv2.cvtColor(warped_np, cv2.COLOR_BGR2GRAY) > 0).astype(np.float32)
+
+    del img
+    return warped_np.astype(np.float32), mask_np
+
+def _process_single_tile(args):
+    """
+    Fungsi helper yang memproses satu ubin. Dirancang untuk dijalankan secara paralel oleh joblib.
+    """
+    # Unpack argumen
+    y_start, x_start, tile_shape, full_output_shape, homographies, image_paths, image_shapes = args
+    
+    # KUNCI: Akumulator hanya seukuran satu ubin!
+    tile_sum = np.zeros(tile_shape, dtype=np.float32)
+    count_map = np.zeros((tile_shape[0], tile_shape[1]), dtype=np.float32)
+
+    # Iterasi melalui setiap gambar sumber untuk melihat apakah ia berkontribusi pada ubin ini
+    for i in range(len(image_paths)):
+        try:
+            H_inv = np.linalg.inv(homographies[i])
+        except np.linalg.LinAlgError:
+            continue
+
+        y_end, x_end = y_start + tile_shape[0], x_start + tile_shape[1]
+        tile_corners = np.float32([[x_start, y_start], [x_end, y_start], [x_end, y_end], [x_start, y_end]]).reshape(-1, 1, 2)
+        orig_corners = cv2.perspectiveTransform(tile_corners, H_inv)
+        
+        min_x_orig, min_y_orig = np.min(orig_corners, axis=0).ravel()
+        max_x_orig, max_y_orig = np.max(orig_corners, axis=0).ravel()
+        
+        h_orig, w_orig, _ = image_shapes[i]
+        if max_x_orig < 0 or min_x_orig > w_orig or max_y_orig < 0 or min_y_orig > h_orig:
+            continue
+
+        T_tile = np.array([[1, 0, -x_start], [0, 1, -y_start], [0, 0, 1]])
+        H_tile = T_tile @ homographies[i]
+
+        img_to_process = cv2.imread(image_paths[i])
+        if img_to_process is None: continue
+
+        warped_tile = cv2.warpPerspective(img_to_process, H_tile, (tile_shape[1], tile_shape[0]))
+        
+        mask = (cv2.cvtColor(warped_tile, cv2.COLOR_BGR2GRAY) > 0).astype(np.float32)
+        tile_sum += warped_tile
+        count_map += mask
+        
+        del img_to_process, warped_tile, mask
+
+    count_map[count_map == 0] = 1.0
+    final_tile = (tile_sum / count_map[..., np.newaxis]).astype(np.uint8)
+    
+    # Kembalikan posisi ubin dan datanya
+    return (y_start, x_start, final_tile)
 
 def warp_image(image: np.ndarray, homography: np.ndarray, output_size: tuple, translation: list = [0, 0]) -> tuple:
     """
