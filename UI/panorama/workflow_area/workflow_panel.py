@@ -86,6 +86,7 @@ class WorkflowPanel(QWidget):
         separator.setFrameShadow(QFrame.Shadow.Sunken)
         main_layout.addWidget(separator)
 
+        
         # --- GRUP 2: Warping Algorithm (dalam layout vertikalnya sendiri) ---
         align_group_widget = QWidget()
         align_layout = QVBoxLayout(align_group_widget)

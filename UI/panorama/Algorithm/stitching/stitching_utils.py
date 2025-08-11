@@ -2,8 +2,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import cv2
 import numpy as np
-from typing import List, Union, Tuple, Any
-from cv2 import KeyPoint
+from typing import List
+from scipy.linalg import expm, logm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import minimum_spanning_tree
@@ -41,7 +41,7 @@ def load_images(paths: List[str]) -> List[np.ndarray]:
         images.append(img)
     return images
 
-def detect_features(img, feature_algorithm, use_multicore=True, num_features=500):
+def detect_features(img, feature_algorithm, use_multicore=True, num_features=5000):
     """
     Mendeteksi fitur pada satu gambar dengan strategi per-blok yang canggih dan pra-pemrosesan adaptif.
     """
@@ -201,6 +201,58 @@ def compose_transformations_from_graph(pairwise_matches, n_images, anchor_idx):
     if any(t is None for t in final_transforms): return None
     return final_transforms
 
+def center_FOV(homographies: list):
+    """
+    Mengambil daftar homografi yang relatif terhadap satu anchor, dan memusatkannya
+    sehingga semua gambar di-warp menuju "bidang tengah" virtual.
+    Ini mengimplementasikan prinsip "Meet in the Middle" untuk N-gambar.
+
+    Args:
+        homographies (list): Daftar matriks homografi 3x3 (np.ndarray).
+                             Salah satunya diasumsikan sebagai matriks identitas (anchor).
+
+    Returns:
+        list: Daftar homografi 3x3 baru yang semuanya telah dikoreksi.
+    """
+    print("  > Menghitung transformasi terpusat (centering transformations)...")
+    
+    # Langkah 1: Hitung "rata-rata" dari semua homografi di ruang logaritmik.
+    log_homographies = []
+    for H in homographies:
+        # Normalisasi untuk stabilitas numerik, penting untuk logm
+        H_normalized = H / H[2, 2]
+        try:
+            # logm mengubah transformasi proyektif menjadi ruang linear di mana kita bisa merata-ratakannya
+            log_H = logm(H_normalized)
+            log_homographies.append(log_H)
+        except Exception as e:
+            print(f"Peringatan: logm gagal untuk homografi, dilewati. Error: {e}")
+            continue
+            
+    if not log_homographies:
+        print("Peringatan: Tidak bisa menghitung pusat virtual. Tidak ada koreksi yang diterapkan.")
+        return homographies # Kembalikan homografi asli jika gagal
+
+    # Rata-ratakan semua log-homografi untuk menemukan "orientasi tengah"
+    avg_log_H = np.mean(log_homographies, axis=0)
+    
+    # Kembalikan ke ruang homografi normal dengan expm
+    H_avg = expm(avg_log_H)
+    
+    # Langkah 2: Buat "transformasi koreksi" yang merupakan kebalikan dari orientasi rata-rata.
+    try:
+        H_correction = np.linalg.inv(H_avg)
+    except np.linalg.LinAlgError:
+        print("Peringatan: Gagal menginversi H_avg. Tidak ada koreksi yang diterapkan.")
+        return homographies
+
+    # Langkah 3: Terapkan koreksi ke SEMUA homografi.
+    # Ini memastikan bahkan gambar anchor pun ikut di-warp.
+    centered_homographies = [H_correction @ H for H in homographies]
+    
+    print("    - Transformasi berhasil dipusatkan.")
+    return centered_homographies
+
 def warp_image(image: np.ndarray, homography: np.ndarray, output_size: tuple, translation: list = [0, 0]) -> tuple:
     """
     Melakukan warp perspektif pada sebuah gambar dan membuat mask-nya.
@@ -232,3 +284,120 @@ def warp_image(image: np.ndarray, homography: np.ndarray, output_size: tuple, tr
     
     return warped_image, mask
 
+def rewarp_from_homography(original_images, minimal_cache_data, settings, progress_callback):
+    """
+    Merekontruksi paket data panorama lengkap hanya dari gambar asli dan data homografi.
+    Fungsi ini menjalankan bagian akhir dari proses stitching.
+    """
+    print("INFO: Memulai proses re-warping dari data cache minimal...")
+    try:
+        # 1. Ekstrak data yang dibutuhkan dari cache
+        homographies = minimal_cache_data.get("homographies")
+        output_size = minimal_cache_data.get("canvas_size")
+        translation = minimal_cache_data.get("translation")
+        
+        if not all([homographies, output_size, translation]):
+            return {"error": "Data cache minimal tidak lengkap."}
+
+        # 2. Loop melalui setiap gambar dan lakukan warp
+        n_images = len(original_images)
+        final_warped_images = []
+        final_warped_masks = []
+        
+        # Siapkan untuk membuat gambar pratinjau
+        panorama_sum = np.zeros((output_size[1], output_size[0], 3), dtype=np.float32)
+        image_count_map = np.zeros((output_size[1], output_size[0]), dtype=np.float32)
+
+        progress_step = 1.0 / n_images
+        
+        for idx, (img, H) in enumerate(zip(original_images, homographies)):
+            # Beri laporan progres
+            progress_callback(idx * progress_step, f"Re-warping gambar {idx+1}...")
+            
+            # Gunakan utilitas warp_image di sini, dengan argumen yang benar!
+            warped_img, mask = warp_image(
+                image=img, 
+                homography=H, 
+                output_size=output_size, 
+                translation=translation
+            )
+            
+            # Kumpulkan hasil individual
+            final_warped_images.append(warped_img)
+            final_warped_masks.append(mask)
+            
+            # Hitung panorama kasar untuk preview
+            panorama_sum += warped_img
+            image_count_map += mask
+
+        progress_callback(0.98, "Menyelesaikan pratinjau...")
+        image_count_map[image_count_map == 0] = 1.0 
+        panorama_preview = (panorama_sum / image_count_map[..., np.newaxis]).astype(np.uint8)
+        
+        # 3. Kembalikan paket data lengkap, sama seperti hasil dari proses penuh
+        return {
+            "stitched_image": panorama_preview,
+            "warped_images": final_warped_images,
+            "warped_masks": final_warped_masks,
+            "homographies": homographies,
+            "canvas_size": output_size,
+            "translation": translation,
+            "error": None
+        }
+        
+    except Exception as e:
+        import traceback
+        error_msg = f"Error selama re-warping: {e}\n{traceback.format_exc()}"
+        print(error_msg)
+        return {"error": error_msg}
+    
+def create_simple_preview(warped_images: list, warped_masks: list) -> np.ndarray:
+    """
+    Membuat gambar pratinjau panorama sederhana dengan merata-ratakan
+    gambar-gambar yang tumpang tindih.
+
+    Args:
+        warped_images (list): Daftar gambar (np.ndarray) yang sudah di-warp
+                              dan berukuran sama (kanvas panorama).
+        warped_masks (list): Daftar mask biner yang sesuai dengan warped_images.
+
+    Returns:
+        np.ndarray: Gambar panorama pratinjau, atau None jika input kosong.
+    """
+    if not warped_images or not warped_masks:
+        return None
+
+    # Asumsikan semua gambar memiliki ukuran yang sama
+    h, w = warped_images[0].shape[:2]
+    
+    # Siapkan kanvas untuk penjumlahan
+    # Gunakan float32 untuk presisi saat menjumlah dan membagi
+    panorama_sum = np.zeros((h, w, 3), dtype=np.float32)
+    image_count_map = np.zeros((h, w), dtype=np.float32)
+    
+    for img, mask in zip(warped_images, warped_masks):
+        # Pastikan gambar dalam format float untuk dijumlahkan
+        # Jika gambar dalam format uint8, ubah ke float
+        if img.dtype != np.float32:
+            img = img.astype(np.float32)
+            
+        panorama_sum += img
+        
+        # Tambahkan mask ke peta hitungan
+        # (Ubah mask menjadi float jika perlu)
+        if mask.dtype != np.float32:
+            image_count_map += mask.astype(np.float32)
+        else:
+            image_count_map += mask
+
+    # Hindari pembagian dengan nol
+    # Di mana pun image_count_map adalah 0, ubah menjadi 1
+    # Ini berarti area hitam akan tetap hitam (0 / 1 = 0)
+    image_count_map[image_count_map == 0] = 1.0
+    
+    # Lakukan pembagian elemen-demi-elemen untuk mendapatkan rata-rata
+    # Gunakan broadcasting (..., np.newaxis) untuk membuat image_count_map menjadi 3D
+    # agar cocok dengan dimensi panorama_sum.
+    panorama_preview = (panorama_sum / image_count_map[..., np.newaxis]).astype(np.uint8)
+    
+    return panorama_preview

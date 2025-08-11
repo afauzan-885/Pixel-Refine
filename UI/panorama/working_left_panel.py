@@ -32,6 +32,7 @@ class WorkingLeftPanel(QWidget):
         self.latest_successful_stage = "grid"
         self.last_preview_info = None
         self.cached_alignment_result = None
+        self.cached_alignment_data = None      # <-- menjadi ini, untuk menyimpan seluruh paket
         self.cached_projection_result = None
         
         # --- Worker Thread ---
@@ -244,7 +245,6 @@ class WorkingLeftPanel(QWidget):
     # =========================================================================
 
     # --- 4a. Inisiasi Proses ---
-    
     @Slot(str)
     def _on_preview_requested(self, stage_name):
         """
@@ -286,8 +286,8 @@ class WorkingLeftPanel(QWidget):
                     # 4. Jika pengaturan cocok, gunakan cache. Jika tidak, lanjutkan ke pemrosesan ulang.
                     if settings_match:
                         print("INFO: Pengaturan cocok. Memuat hasil dari cache.")
-                        self._on_alignment_finished(result_data) # Kirim hanya data hasilnya
-                        return # Lewati pemrosesan ulang
+                        self._on_alignment_finished(result_data) 
+                        return
 
                     else:
                         print("INFO: Pengaturan tidak cocok. Cache tidak valid, akan diproses ulang.")
@@ -295,7 +295,7 @@ class WorkingLeftPanel(QWidget):
                 except Exception as e:
                     print(f"ERROR: Gagal memuat atau memverifikasi file cache: {e}. Melanjutkan dengan pemrosesan ulang.")
                     if os.path.exists(cache_path):
-                        os.remove(cache_path) # Hapus file cache yang rusak atau tidak valid
+                        os.remove(cache_path)
         
         image_paths = self.database_manager.get_images_for_project(self.current_project_id)
         if not image_paths or len(image_paths) < 2:
@@ -309,8 +309,12 @@ class WorkingLeftPanel(QWidget):
         proj_cache = None 
 
         if stage_name == "projection":
-            QMessageBox.information(self, "Langkah Dibutuhkan", "Silakan jalankan tahap 'Alignment' terlebih dahulu.")
-            return
+            if not self.cached_alignment_data:
+                QMessageBox.information(self, "Langkah Dibutuhkan", "Silakan jalankan tahap 'Alignment' terlebih dahulu.")
+                return
+            # Siapkan data alignment untuk diteruskan ke worker
+            print("INFO: Menggunakan data alignment dari memori untuk tahap Proyeksi.")
+            align_cache = self.cached_alignment_data
         elif stage_name == "blending":
             pass
 
@@ -368,7 +372,6 @@ class WorkingLeftPanel(QWidget):
                         "result_data": result 
                     }
                     
-                    print(f"PROSES SELESAI: Menyimpan hasil dan pengaturan ke cache di: {cache_path}")
                     with open(cache_path, 'wb') as f:
                         # Simpan seluruh dictionary ke file cache
                         pickle.dump(data_to_cache, f)
@@ -381,9 +384,9 @@ class WorkingLeftPanel(QWidget):
             self._on_alignment_finished(result) 
         
         elif stage_name == "projection":
-            # Logika serupa bisa diterapkan untuk cache proyeksi
-            self.cached_projection_result = result
-            self._on_projection_finished(result)
+            # Simpan hasil proyeksi ke cache memori untuk tahap blending
+            self.cached_projection_data = result
+            self._on_projection_finished(result) # Panggil handler UI yang baru
         
         elif stage_name == "blending":
             pass
@@ -398,31 +401,49 @@ class WorkingLeftPanel(QWidget):
 
     # --- 4c. Penanganan Hasil Spesifik per Tahap ---
 
-    def _on_alignment_finished(self, stitch_result):
-        """Menampilkan hasil alignment dan memperbarui state UI."""
-        stitched_panorama = stitch_result.get("stitched_image")
+    def _on_alignment_finished(self, alignment_result_data):
+        """
+        Menampilkan hasil alignment dan MENYIMPAN PAKET DATA LENGKAP
+        untuk digunakan oleh tahap selanjutnya.
+        """
+        # 1. Dapatkan gambar pratinjau dari paket data untuk ditampilkan
+        stitched_panorama = alignment_result_data.get("stitched_image")
         if stitched_panorama is None:
-            self.display_panel.show_preview_message("Alignment failed: No final image was created.")
+            error_msg = alignment_result_data.get("error", "Alignment failed: No final image was created.")
+            self.display_panel.show_preview_message(error_msg)
             return
 
-        self.last_preview_info = ("aligned", stitched_panorama, 0) # stage, data, tab_index
+        # 2. Simpan SELURUH paket data ke variabel instance untuk digunakan nanti
+        print("INFO: Menyimpan data alignment lengkap (warped images, masks, etc.) ke memori.")
+        self.cached_alignment_data = alignment_result_data
+        self.cached_projection_result = None # Invalidate cache selanjutnya
+
+        # 3. Lanjutkan logika UI seperti biasa
+        self.last_preview_info = ("aligned", stitched_panorama, 0)
         self.display_panel.display_zoomable_image(stitched_panorama)
         
         self.latest_successful_stage = "aligned"
         has_images = bool(self.database_manager.get_images_for_project(self.current_project_id))
         self.workflow_panel.update_workflow_stage("aligned", has_images=has_images)
-        self.workflow_panel.tab_widget.setCurrentIndex(1)
+        self.workflow_panel.tab_widget.setCurrentIndex(1) # Pindah ke tab Projection
 
     def _on_projection_finished(self, projected_data): 
-        """Menampilkan hasil proyeksi dan memperbarui state UI."""
-        message = "Projection process completed successfully."
-        self.last_preview_info = ("projected", message, 1)
-        self.display_panel.show_preview_message(message)
+        """
+        Menampilkan hasil proyeksi dan memperbarui state UI.
+        """
+        stitched_panorama = projected_data.get("stitched_image")
+        if stitched_panorama is None:
+            error_msg = projected_data.get("error", "Projection failed.")
+            self.display_panel.show_preview_message(error_msg)
+            return
+
+        self.last_preview_info = ("projected", stitched_panorama, 1) # stage, data, tab_index
+        self.display_panel.display_zoomable_image(stitched_panorama)
         
         self.latest_successful_stage = "projected"
         has_images = bool(self.database_manager.get_images_for_project(self.current_project_id))
         self.workflow_panel.update_workflow_stage("projected", has_images=has_images)
-        self.workflow_panel.tab_widget.setCurrentIndex(2)
+        self.workflow_panel.tab_widget.setCurrentIndex(2) # Pindah ke tab Blending
 
     def _on_blending_finished(self, final_image):
         """Menampilkan hasil blending akhir dan memperbarui state UI."""

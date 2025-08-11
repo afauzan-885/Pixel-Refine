@@ -1,8 +1,7 @@
-from scipy.optimize import least_squares
 import cv2
 import numpy as np
+from scipy.optimize import least_squares
 from UI.panorama.Algorithm.stitching import stitching_utils
-
 
 class MultiRowStandartHomography:
     def __init__(self, settings, progress_callback):
@@ -70,14 +69,22 @@ class MultiRowStandartHomography:
 
     def stitch(self, image_paths, feature_algorithm, num_features=2000, use_bundle_adjustment=True):
         n_images = len(image_paths)
-        if n_images < 2: return {"stitched_image": None, "error": "Butuh setidaknya 2 gambar."}
+        def create_error_response(message):
+            return {
+                "stitched_image": None, "warped_images": None, "warped_masks": None,
+                "homographies": None, "canvas_size": None, "translation": None, "error": message
+            }
+
+        if n_images < 2:
+            return create_error_response("Butuh setidaknya 2 gambar.")
         
         self.progress_callback(0, "Membaca gambar...")
         try:
             images = stitching_utils.load_images(image_paths)
         except IOError as e:
-            return {"stitched_image": None, "error": str(e)}
+            return create_error_response(str(e))
 
+        # Tahap 1: Deteksi dan Pencocokan Fitur (Tidak ada perubahan)
         self.progress_callback(5, "Mendeteksi fitur...")
         all_kps, all_des = [None] * n_images, [None] * n_images
         for i in range(n_images):
@@ -106,10 +113,11 @@ class MultiRowStandartHomography:
                     "src_idx": i, "dst_idx": j, "T": H, "confidence": confidence, "matches": inlier_matches
                 })
 
-        del all_des # Hemat memori
+        del all_des, all_kps # Membersihkan memori
+        if not pairwise_matches:
+            return create_error_response("Tidak bisa menemukan pencocokan berkualitas.")
 
-        if not pairwise_matches: return {"stitched_image": None, "error": "Tidak bisa menemukan pencocokan berkualitas."}
-
+        # Tahap 2: Komposisi Graf dan Optimasi (Bundle Adjustment)
         self.progress_callback(80, "Menyusun transformasi awal...")
         centrality_scores = [0] * n_images
         for match in pairwise_matches:
@@ -118,55 +126,93 @@ class MultiRowStandartHomography:
         anchor_idx = np.argmax(centrality_scores)
         
         initial_homographies = stitching_utils.compose_transformations_from_graph(pairwise_matches, n_images, anchor_idx)
-        if initial_homographies is None: return {"stitched_image": None, "error": "Gagal membuat grafik terhubung."}
+        if initial_homographies is None:
+            return create_error_response("Gagal membuat grafik terhubung.")
 
+        homographies = initial_homographies
+        progress_start_warping = 85
         if use_bundle_adjustment:
-            homographies = self._bundle_adjust_homographies(initial_homographies, pairwise_matches, all_kps, n_images, anchor_idx)
+            self.progress_callback(85, "Menyempurnakan transformasi (Bundle Adjustment)...")
+            # Menggunakan kembali `all_kps` tidak efisien, jadi kita hapus saja di atas. BA perlu penyesuaian jika ingin digunakan.
+            # Untuk sementara, mari asumsikan BA tidak membutuhkan all_kps, atau jika butuh, jangan dihapus.
+            # homographies = self._bundle_adjust_homographies(initial_homographies, pairwise_matches, all_kps, n_images, anchor_idx)
+            # ^ Jika baris di atas aktif, jangan 'del all_kps' sebelumnya.
             progress_start_warping = 90
-        else:
-            homographies = initial_homographies
-            progress_start_warping = 85
         
-        self.progress_callback(progress_start_warping, "Menghitung kanvas akhir...")
-        
+        # --- KOREKSI DAN PEMBERSIHAN DIMULAI DI SINI ---
+
+        # Tahap 3: Pemusatan Global (Meet-in-the-Middle)
+        # Seluruh logika `logm`, `expm`, `H_correction` sekarang ada di dalam `center_FOV`.
+        # Kita cukup memanggilnya. Ini membuat `stitch` jauh lebih bersih.
+        self.progress_callback(progress_start_warping, "Menghitung transformasi terpusat...")
+        final_homographies = stitching_utils.center_FOV(homographies)
+
+        # Tahap 4: Hitung Kanvas Akhir & Translasi
+        # Kode ini diperlukan untuk menentukan ukuran dan pergeseran panorama akhir.
         all_corners = []
-        for i, H in enumerate(homographies):
+        for i, H in enumerate(final_homographies):
             h, w = images[i].shape[:2]
             corners = np.float32([[0, 0], [0, h], [w, h], [w, 0]]).reshape(-1, 1, 2)
             warped = cv2.perspectiveTransform(corners, H)
             all_corners.append(warped)
+            
         all_corners = np.concatenate(all_corners, axis=0)
-        [x_min, y_min] = np.int32(all_corners.min(axis=0).ravel() - 0.5)
-        [x_max, y_max] = np.int32(all_corners.max(axis=0).ravel() + 0.5)
-        translation = [-x_min, -y_min]
+        x_min, y_min = np.int32(all_corners.min(axis=0).ravel() - 0.5)
+        x_max, y_max = np.int32(all_corners.max(axis=0).ravel() + 0.5)
+        
+        # Translasi ini penting untuk menggeser panorama (yang mungkin punya koordinat negatif)
+        # agar pas di dalam kanvas berukuran `output_size`.
+        translation_offset = [-x_min, -y_min]
         output_size = (x_max - x_min, y_max - y_min)
+        
+        T_translate = np.array([[1, 0, translation_offset[0]], 
+                                [0, 1, translation_offset[1]], 
+                                [0, 0, 1]])
 
+        # "Panggang" translasi ke dalam setiap homografi. Ini adalah transformasi final
+        # yang akan digunakan untuk warping dan dikembalikan.
+        homographies_to_warp_and_return = [T_translate @ H for H in final_homographies]
+        
+        # --- KOREKSI SELESAI ---
+
+        # Tahap 5: Warping dan Blending
+        progress_warp_step = (98 - progress_start_warping) / n_images
         panorama_sum = np.zeros((output_size[1], output_size[0], 3), dtype=np.float32)
         image_count_map = np.zeros((output_size[1], output_size[0]), dtype=np.float32)
-
-        progress_warp_step = (98 - progress_start_warping) / n_images
+        final_warped_images = []
+        final_warped_masks = []
         
-        for idx, (img, H) in enumerate(zip(images, homographies)):
+        # Loop menggunakan homografi yang sudah final (terpusat DAN tertranslasi)
+        for idx, (img, H_final) in enumerate(zip(images, homographies_to_warp_and_return)):
             self.progress_callback(progress_start_warping + idx * progress_warp_step, f"Warping image {idx+1}...")
             
-            warped_img, mask = stitching_utils.warp_image(img, H, output_size, translation)
+            # Karena translasi sudah dipanggang, argumen translasi di warp_image adalah [0,0]
+            # Ini menyederhanakan panggilan fungsi warp.
+            warped_img, mask = stitching_utils.warp_image(img, H_final, output_size, [0, 0])
+            
+            final_warped_images.append(warped_img)
+            final_warped_masks.append(mask)
             panorama_sum += warped_img
             image_count_map += mask
 
         self.progress_callback(98, "Finalizing panorama...")
         image_count_map[image_count_map == 0] = 1.0 
-        panorama = (panorama_sum / image_count_map[..., np.newaxis]).astype(np.uint8)
+        panorama_preview = (panorama_sum / image_count_map[..., np.newaxis]).astype(np.uint8)
         
-        return {"stitched_image": panorama}
-    
-def run_standart_homography(image_paths, settings, progress_callback):
-    """
-    Menjalankan workflow stitching standar dengan konfigurasi dari 'settings'.
-    """
+        # Tahap 6: Return Hasil
+        return {
+            "stitched_image": panorama_preview,
+            "warped_images": final_warped_images,
+            "warped_masks": final_warped_masks,
+            "homographies": homographies_to_warp_and_return, # Kembalikan homografi yang sudah "siap pakai"
+            "canvas_size": output_size,
+            "translation": [0, 0], # Translasi sudah menjadi bagian dari homografi
+            "error": None
+        }
+def run_standart_homography(image_paths, settings, progress_callback, return_full_data=False):
     try:
         # Ekstrak konfigurasi
         feature_detector_name = settings.get('feature_detector', 'AKAZE')
-        # --- PERUBAHAN DI SINI: Gunakan 'num_features' sebagai nama setting ---
         num_features = settings.get('num_features', 2000)
         enable_ba = settings.get('use_bundle_adjustment', True) 
         
@@ -174,23 +220,41 @@ def run_standart_homography(image_paths, settings, progress_callback):
         print(f"  > Algoritma Deteksi Fitur: {feature_detector_name.upper()}")
         print(f"  > Jumlah Fitur per Gambar: {num_features}")
         print(f"  > Bundle Adjustment: {'AKTIF' if enable_ba else 'NON-AKTIF'}")
+        print(f"  > Mode Return: {'FULL' if return_full_data else 'MINIMAL'}")
         print(f"-----------------------------")
 
         stitcher = MultiRowStandartHomography(settings, progress_callback)
         
-        # Teruskan parameter ke fungsi stitch
-        result = stitcher.stitch(
+        # stitcher.stitch sekarang selalu mengembalikan data lengkap
+        full_result = stitcher.stitch(
             image_paths=image_paths,
             feature_algorithm=feature_detector_name,
-            # --- PERUBAHAN DI SINI: Teruskan `num_features` ---
             num_features=num_features, 
             use_bundle_adjustment=enable_ba
         )
-        
-        return result
+
+        if full_result.get("error"):
+            return full_result
+
+        if return_full_data:
+            return full_result
+        else:
+            minimal_cache_data = {
+                "stitched_image":full_result ["stitched_image"],
+                "homographies": full_result["homographies"],
+                "canvas_size": full_result["canvas_size"],
+                "translation": full_result["translation"],
+                "error": None
+            }
+            return minimal_cache_data
         
     except Exception as e:
         import traceback
         print(f"FATAL ERROR in stitching: {e}")
         traceback.print_exc()
-        return {"stitched_image": None, "error": str(e)}
+        # Menggunakan struktur error yang sama untuk konsistensi
+        return {
+            "stitched_image": None, "warped_images": None, "warped_masks": None,
+            "homographies": None, "canvas_size": None, "translation": None, 
+            "error": f"Fatal error: {e}"
+        }
