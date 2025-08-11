@@ -44,9 +44,10 @@ def load_images(paths: List[str]) -> List[np.ndarray]:
         images.append(img)
     return images
 
-def detect_features(img, feature_algorithm, use_multicore=True, num_features=5000):
+def detect_features(img, detector, use_multicore=True, num_features=5000):
     """
-    Mendeteksi fitur pada satu gambar dengan strategi per-blok yang canggih dan pra-pemrosesan adaptif.
+    Mendeteksi fitur pada satu gambar dengan strategi per-blok yang canggih.
+    VERSI OPTIMAL: Menerima objek detektor yang sudah dibuat.
     """
     if img is None: return [], None
     gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img.astype(np.uint8)
@@ -55,7 +56,9 @@ def detect_features(img, feature_algorithm, use_multicore=True, num_features=500
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     enhanced_gray_img = clahe.apply(gray_img)
     
-    # 2. Pra-pemrosesan dengan Bilateral Filter jika noise tinggi
+    # 2. Pra-pemrosesan dengan Bilateral Filter (INI MASIH PER GAMBAR, DAN ITU BENAR)
+    #    Keputusan untuk menerapkan filter ini bergantung pada noise gambar individual, jadi
+    #    logika ini harus tetap di sini. Kita tidak bisa menghindarinya.
     noise_level = estimate_noise_variance(enhanced_gray_img)
     if noise_level > 600.0:
         d, sigma, _ = get_adaptive_bilateral(noise_level, 300, 800, 5, 9, 20, 75)
@@ -63,25 +66,22 @@ def detect_features(img, feature_algorithm, use_multicore=True, num_features=500
         enhanced_gray_img = cv2.bilateralFilter(enhanced_gray_img, d, sigma, sigma)
 
     h, w = enhanced_gray_img.shape
+    # Kita bisa membuat max_kps_per_block lebih dinamis, tapi untuk sekarang ini sudah cukup.
     num_blocks, overlap, max_kps_per_block = (3, 3), 30, 600
 
-    # 3. Inisialisasi Detektor
-    algo = feature_algorithm.upper()
-    if algo == "SIFT": detector = cv2.SIFT_create(nfeatures=max_kps_per_block)
-    elif algo == "ORB": detector = cv2.ORB_create(nfeatures=max_kps_per_block)
-    elif algo == "BRISK": detector = cv2.BRISK_create()
-    else: detector = cv2.AKAZE_create(descriptor_type=cv2.AKAZE_DESCRIPTOR_MLDB)
+    # 3. Inisialisasi Detektor DIHAPUS DARI SINI
+    #    'detector' sekarang adalah argumen yang masuk.
 
     def process_block(i, j):
+        # ... (logika process_block tidak berubah) ...
         roi_x, roi_y = i * (w // num_blocks[0]), j * (h // num_blocks[1])
         roi_w, roi_h = w // num_blocks[0], h // num_blocks[1]
         x_start, y_start = max(0, roi_x - overlap), max(0, roi_y - overlap)
-        x_end, y_end = min(w, roi_x + roi_w + overlap), min(h, roi_y + roi_h + overlap)
+        x_end, y_end = min(w, roi_x + roi_w + overlap), min(h, y_start + roi_h + overlap) # Koreksi bug kecil
         block_gray = enhanced_gray_img[y_start:y_end, x_start:x_end]
         kps, des = detector.detectAndCompute(block_gray, None)
         if kps is None or len(kps) == 0: return [], None
         
-        # Seleksi Top-K per-blok
         if len(kps) > max_kps_per_block:
             indices = np.argsort([-kp.response for kp in kps])[:max_kps_per_block]
             kps = [kps[i] for i in indices]

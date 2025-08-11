@@ -2,6 +2,7 @@ import gc
 import math
 import os
 import shutil
+import threading
 import cv2
 from joblib import Parallel, delayed
 import numpy as np
@@ -89,20 +90,40 @@ class MultiRowStandartHomography:
         if n_images < 2:
             return create_error_response("Butuh setidaknya 2 gambar.")
 
-        # ==================== Tahap 1: Deteksi fitur ====================
-        self.progress_callback(5, "Mendeteksi fitur...")
+        # ==================== Tahap 1: Deteksi fitur (Dengan Optimasi Overhead) ====================
+        self.progress_callback(5, "Menginisialisasi detektor fitur...")
+
+        # OPTIMASI 1: Buat objek detektor HANYA SEKALI di luar loop.
+        algo = feature_algorithm.upper()
+        # max_kps_per_block diambil dari stitching_utils, mari kita hardcode di sini agar konsisten.
+        max_kps_per_block = 600 
+        if algo == "SIFT":
+            detector = cv2.SIFT_create(nfeatures=max_kps_per_block)
+        elif algo == "ORB":
+            detector = cv2.ORB_create(nfeatures=max_kps_per_block)
+        elif algo == "BRISK":
+            detector = cv2.BRISK_create()
+        else: # AKAZE sebagai default
+            detector = cv2.AKAZE_create(descriptor_type=cv2.AKAZE_DESCRIPTOR_MLDB)
+
+        self.progress_callback(6, "Mendeteksi fitur...")
         all_kps, all_des = [None] * n_images, [None] * n_images
         image_shapes = [None] * n_images
 
+        # Loop utama untuk memproses setiap gambar
         for i, path in enumerate(image_paths):
-            self.progress_callback(5 + i * (40 / n_images), f"Mendeteksi fitur di gambar {i+1}...")
+            self.progress_callback(6 + i * (39 / n_images), f"Mendeteksi fitur di gambar {i+1}...")
             img_to_process = cv2.imread(path)
             if img_to_process is None:
                 return create_error_response(f"Gagal membaca gambar: {path}")
 
             image_shapes[i] = img_to_process.shape
+            
+            # Panggil versi `detect_features` yang dioptimalkan, dengan meneruskan objek 'detector'
             all_kps[i], all_des[i] = stitching_utils.detect_features(
-                img_to_process, feature_algorithm, num_features=num_features
+                img_to_process, 
+                detector,
+                num_features=num_features
             )
 
         # ==================== Tahap 2: Pencocokan & Homografi ====================
@@ -196,7 +217,7 @@ class MultiRowStandartHomography:
         # ==============================================================================
         # 2) Full-resolution TILE-BASED PARALLEL rendering dengan Custom Progress
         # ==============================================================================
-        self.progress_callback(95, "Mempersiapkan rendering paralel berbasis ubin...")
+        self.progress_callback(95, "Mempersiapkan rendering paralel real-time...")
         full_output_shape = (output_size[1], output_size[0], 3)
         TILE_SIZE = (1024, 1024)
 
@@ -216,7 +237,6 @@ class MultiRowStandartHomography:
                 y_end = min(y_start + TILE_SIZE[0], full_output_shape[0])
                 x_end = min(x_start + TILE_SIZE[1], full_output_shape[1])
                 tile_shape = (y_end - y_start, x_end - x_start, 3)
-                
                 args = (
                     y_start, x_start, tile_shape, full_output_shape, 
                     homographies_final, image_paths, image_shapes
@@ -226,43 +246,34 @@ class MultiRowStandartHomography:
         total_tiles = len(all_tasks)
         self.progress_callback(96, f"Memulai pemrosesan {total_tiles} ubin...")
 
-        # --- LOGIKA BATCHING UNTUK PROGRESS REPORTING ---
-        
-        # Tentukan ukuran batch. Ukuran yang sama dengan jumlah core adalah pilihan yang baik.
-        n_cores = os.cpu_count() or 4
-        batch_size = n_cores 
-        
-        num_batches = int(math.ceil(total_tiles / batch_size))
-        tasks_completed = 0
+        progress_counter = [0]
+        progress_lock = threading.Lock()
 
-        # Proses tugas dalam beberapa batch
-        for i in range(num_batches):
-            # Ambil batch tugas saat ini
-            start_index = i * batch_size
-            end_index = start_index + batch_size
-            current_batch_tasks = all_tasks[start_index:end_index]
+        def process_and_update_progress(task):
+            result = stitching_utils._process_single_tile(task)
             
-            if not current_batch_tasks:
-                continue
+            with progress_lock:
+                progress_counter[0] += 1
+                current_count = progress_counter[0]
+                progress = 96 + (current_count / total_tiles) * 3
+                self.progress_callback(progress, f"Memproses ubin... ({current_count}/{total_tiles})")
+            
+            return result
 
-            # Jalankan joblib hanya untuk batch ini
-            batch_results = Parallel(n_jobs=n_cores, backend="loky")(
-                delayed(stitching_utils._process_single_tile)(task) for task in current_batch_tasks
-            )
-            
-            # Tulis hasil dari batch yang sudah selesai ke disk
-            for y_start, x_start, final_tile in batch_results:
+        results = Parallel(n_jobs=-1, backend="threading")(
+            delayed(process_and_update_progress)(task) for task in all_tasks
+        )
+        
+        # --- AKHIR LOGIKA REAL-TIME PROGRESS ---
+        
+        self.progress_callback(99, "Menyusun ubin menjadi gambar akhir...")
+        for y_start, x_start, final_tile in results:
+            if final_tile is not None:
                 y_end = y_start + final_tile.shape[0]
                 x_end = x_start + final_tile.shape[1]
                 panorama_full[y_start:y_end, x_start:x_end] = final_tile
-            
-            # Perbarui progress setelah setiap batch selesai
-            tasks_completed += len(batch_results)
-            progress = 96 + (tasks_completed / total_tiles) * 3 # Progress dari 96% ke 99%
-            self.progress_callback(progress, f"Memproses ubin... ({tasks_completed}/{total_tiles})")
 
-        # --- AKHIR LOGIKA BATCHING ---
-
+        # Finalisasi gambar
         self.progress_callback(99.5, "Menyelesaikan gambar akhir...")
         final_image_in_memory = np.array(panorama_full)
 
