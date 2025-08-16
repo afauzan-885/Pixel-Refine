@@ -70,16 +70,15 @@ class MultiRowStandartHomography:
     
     def center_transformations(self, transformations: list, warp_method: str):
         """
-        Versi generik dari center_FOV yang sekarang menerima warp_method
-        untuk menerapkan normalisasi yang benar.
+        Versi generik dari center_FOV yang sekarang secara eksplisit memastikan
+        outputnya adalah matriks riil untuk mencegah bilangan kompleks.
         """
         print(f"  > Menghitung transformasi terpusat untuk model '{warp_method}'...")
         
         log_transforms = []
         for T in transformations:
-            T_processed = T.copy() # Bekerja dengan salinan
+            T_processed = T.copy()
             
-            # Lakukan normalisasi HANYA untuk homografi planar
             if warp_method == "planar":
                 if T_processed[2, 2] != 0:
                     T_processed = T_processed / T_processed[2, 2]
@@ -87,7 +86,9 @@ class MultiRowStandartHomography:
             try:
                 log_T = logm(T_processed)
                 log_transforms.append(log_T)
-            except Exception:
+            except Exception as e:
+                # Peringatan RuntimeWarning dari logm tidak fatal, jadi kita bisa lanjutkan
+                print(f"    - Peringatan saat menghitung logm: {e}")
                 continue
                 
         if not log_transforms:
@@ -103,7 +104,12 @@ class MultiRowStandartHomography:
             print("Peringatan: Gagal menginversi T_avg. Tidak ada koreksi.")
             return transformations
 
-        centered_transforms = [T_correction @ T for T in transformations]
+        # ==============================================================================
+        # ### PERBAIKAN KUNCI DI SINI ###
+        # ==============================================================================
+        # Pastikan SETIAP matriks di hasil akhir adalah riil.
+        # Ini membersihkan kontaminasi kompleks dari seluruh rantai perhitungan.
+        centered_transforms = [(T_correction @ T).real for T in transformations]
         
         print("    - Transformasi berhasil dipusatkan.")
         return centered_transforms
@@ -123,6 +129,7 @@ class MultiRowStandartHomography:
 
         # ==================== Tahap 1: Deteksi Fitur ====================
         self.progress_callback(5, "Menginisialisasi detektor fitur...")
+        
         algo = feature_algorithm.upper()
         max_kps_per_block = 600 
         if algo == "SIFT":
@@ -133,7 +140,7 @@ class MultiRowStandartHomography:
             detector = cv2.BRISK_create()
         else:
             detector = cv2.AKAZE_create(descriptor_type=cv2.AKAZE_DESCRIPTOR_MLDB)
-        
+
         self.progress_callback(6, "Mendeteksi fitur...")
         all_kps, all_des, image_shapes = [None] * n_images, [None] * n_images, [None] * n_images
         for i, path in enumerate(image_paths):
@@ -144,34 +151,22 @@ class MultiRowStandartHomography:
             image_shapes[i] = img_to_process.shape
             all_kps[i], all_des[i] = panorama_utils.detect_features(img_to_process, detector, num_features)
 
-        # ==============================================================================
-        # Tahap 2: Pencocokan Fitur (Langkah Umum untuk Semua Metode)
-        # ==============================================================================
+        # ==================== Tahap 2: Pencocokan Fitur (Langkah Umum) ====================
         self.progress_callback(45, "Mencocokkan fitur antar gambar...")
         pairwise_matches = []
         for i in range(n_images):
             for j in range(i + 1, n_images):
                 matches = panorama_utils.match_features(all_des[i], all_des[j])
-                if len(matches) < 20:
-                    continue
-
-                # Hitung homografi relatif untuk digunakan nanti
+                if len(matches) < 20: continue
                 H, mask = self.estimate_homography(all_kps[i], all_kps[j], matches)
-                if H is None:
-                    continue
-
+                if H is None: continue
                 confidence = np.sum(mask)
-                if confidence < 20:
-                    continue
-
+                if confidence < 20: continue
                 inlier_matches = [m for k, m in enumerate(matches) if mask[k] == 1]
-                if not inlier_matches:
-                    continue
-
+                if not inlier_matches: continue
                 pairwise_matches.append({
                     "src_idx": i, "dst_idx": j, "T": H, "confidence": confidence, "matches": inlier_matches
                 })
-
         if not pairwise_matches:
             return create_error_response("Tidak bisa menemukan pencocokan berkualitas.")
 
@@ -216,62 +211,60 @@ class MultiRowStandartHomography:
             warp_params = {"homographies": homographies_final}
 
         elif warp_method in ["cylindrical", "mercator"]:
-            self.progress_callback(70, f"Mengestimasi rotasi untuk model {warp_method.capitalize()}...")
+            # --- BLOK BARU DENGAN ESTIMASI DAN PERHITUNGAN KANVAS YANG DIPERBAIKI ---
+            self.progress_callback(45, f"Mengestimasi transformasi untuk model {warp_method.capitalize()}...")
             
-            estimator = cv2.detail.HomographyBasedEstimator()
+            # ==============================================================================
+            # ### PERBAIKAN: Tambahkan kembali pemuatan gambar ###
+            # ==============================================================================
+            # OpenCV Stitcher membutuhkan daftar gambar mentah, bukan hanya fitur.
+            images_for_estimator = []
+            for path in image_paths:
+                img = cv2.imread(path)
+                if img is None:
+                    return create_error_response(f"Gagal membaca ulang gambar untuk estimator: {path}")
+                images_for_estimator.append(img)
+            # ==============================================================================
             
-            # Konversi data ke format yang dibutuhkan oleh OpenCV Stitcher
-            features = []
-            for i in range(n_images):
-                feature = cv2.detail.ImageFeatures()
-                feature.img_idx = i
-                feature.keypoints = tuple(all_kps[i])
-                
-                # Perbaikan Tipe Data Kunci untuk mengatasi cv2.error
-                if all_des[i].dtype != np.float32:
-                    feature.descriptors = np.float32(all_des[i])
-                else:
-                    feature.descriptors = all_des[i]
-                
-                features.append(feature)
-
-            cv_matches = []
-            for match_info in pairwise_matches:
-                m = cv2.detail.MatchesInfo()
-                m.src_img_idx = match_info['src_idx']
-                m.dst_img_idx = match_info['dst_idx']
-                m.matches = tuple(match_info['matches'])
-                m.num_inliers = int(match_info['confidence'])
-                m.confidence = match_info['confidence']
-                m.H = match_info['T']
-                cv_matches.append(m)
+            # Gunakan OpenCV Stitcher hanya untuk estimasi
+            stitcher_estimator = cv2.Stitcher.create(cv2.Stitcher_PANORAMA)
             
-            # Lakukan estimasi rotasi dan focal length
-            success, cameras = estimator.apply(features, cv_matches, None)
-            if not success:
-                return create_error_response("Gagal mengestimasi rotasi kamera.")
+            # Di Python, estimateTransform HANYA mengembalikan status.
+            status = stitcher_estimator.estimateTransform(images_for_estimator)
+            
+            if status != cv2.Stitcher_OK:
+                error_map = {1: "ERR_NEED_MORE_IMGS", 2: "ERR_HOMOGRAPHY_EST_FAIL", 3: "ERR_CAMERA_PARAMS_ADJUST_FAIL"}
+                return create_error_response(f"Gagal mengestimasi transformasi: {error_map.get(status, 'Error tidak diketahui')}")
+            
+            # Dapatkan `cameras` setelah estimasi berhasil
+            cameras = stitcher_estimator.cameras()
 
             rotations = [cam.R for cam in cameras]
             focal_lengths = [cam.focal for cam in cameras if cam.focal > 0]
             
             if not focal_lengths:
-                return create_error_response("Tidak dapat mengestimasi focal length kamera.")
+                return create_error_response("Tidak dapat mengestimasi focal length kamera dari estimator.")
             
             focal_length = np.median(focal_lengths)
+            
+            # Gunakan fungsi centering yang sudah diperbaiki
+            centered_rotations = self.center_transformations(rotations, warp_method=warp_method)
 
-            # Gunakan rotasi apa adanya (centering bisa diterapkan nanti dengan wave correction)
-            centered_rotations = rotations
-
-            # Hitung Ukuran & Pusat Kanvas
+            # PERHITUNGAN KANVAS YANG LEBIH SEDERHANA DAN ROBUST
             canvas_width = int(focal_length * 2 * np.pi)
-            canvas_height = int(max(s[0] for s in image_shapes) * 1.2) # Beri ruang ekstra
+            max_image_height = max(s[0] for s in image_shapes)
+            canvas_height = int(max_image_height * 1.2) # Beri padding 20%
+            
             canvas_center_x = canvas_width / 2
             canvas_center_y = canvas_height / 2
 
             output_size = (canvas_width, canvas_height)
+            
             warp_params = {
-                "rotations": centered_rotations, "focal_length": focal_length,
-                "canvas_center_x": canvas_center_x, "canvas_center_y": canvas_center_y
+                "rotations": centered_rotations, 
+                "focal_length": focal_length,
+                "canvas_center_x": canvas_center_x,
+                "canvas_center_y": canvas_center_y
             }
         else:
             return create_error_response(f"Metode warp '{warp_method}' tidak didukung.")
@@ -307,7 +300,7 @@ class MultiRowStandartHomography:
             "image_shapes": image_shapes,
             "translation": translation_offset,
             "error": None
-        }        
+        }   
 
 def run_standart_homography(image_paths, settings, progress_callback, return_full_data=False):
     try:
