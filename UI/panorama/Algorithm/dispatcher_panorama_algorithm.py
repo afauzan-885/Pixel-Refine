@@ -1,5 +1,4 @@
 from UI.panorama.Algorithm.Projection_and_Crop.projection import run_projection_and_crop
-from UI.panorama.Algorithm.stitching import stitching_utils
 from UI.panorama.Algorithm.stitching.Local_Homography import run_local_homography
 from UI.panorama.Algorithm.stitching.Standart_Homography import run_standart_homography
 from UI.panorama.logic.panorama_algorithms import run_blending
@@ -20,53 +19,28 @@ def run_panorama_stitching_process(
 ):
     """
     Fungsi pabrik utama yang menjalankan seluruh alur kerja panorama.
-    Fungsi ini dirancang untuk dapat memulai dari tahap tengah jika data 
-    cache yang relevan disediakan.
-
-    Args:
-        images (list): Daftar path gambar (str) atau gambar yang sudah dimuat (np.ndarray).
-        settings (dict): Dictionary berisi semua pengaturan dari UI.
-        progress_callback (function): Fungsi untuk melaporkan progres kembali ke UI.
-        target_stage (str): Tahap tujuan ('alignment', 'projection', 'blending').
-        cached_alignment_data (dict, optional): Data dari cache tahap alignment.
-        cached_projection_data (dict, optional): Data dari cache tahap projection.
-
-    Returns:
-        dict: Dictionary berisi hasil akhir dari `target_stage`.
     """
     try:
+        # --- PERSIAPAN AWAL ---
+        # Tentukan image_paths di awal agar selalu tersedia.
+        if isinstance(images[0], str):
+            image_paths = images
+        else:
+            # Jika input bukan path, kita tidak bisa melanjutkan dengan alur kerja baru.
+            # Ini adalah batasan desain yang harus kita terima untuk efisiensi.
+            return {"error": "Alur kerja membutuhkan daftar path gambar, bukan gambar yang sudah dimuat."}
+
         # --- TAHAP 1: RESOLUSI DATA ALIGNMENT ---
-        # Tujuan tahap ini adalah untuk mendapatkan 'alignment_package' yang LENGKAP,
-        # baik dari cache, re-warping, maupun proses dari awal.
-        
         alignment_package = None
 
-        if cached_alignment_data:
-            # Kasus 1: Cache Lengkap ditemukan. Langsung gunakan.
-            if "warped_images" in cached_alignment_data:
-                progress_callback(0.0, "Menggunakan data alignment lengkap dari cache...")
-                alignment_package = cached_alignment_data
-            
-            # Kasus 2: Cache Minimal ditemukan. Perlu re-warping.
-            elif "homographies" in cached_alignment_data:
-                progress_callback(0.0, "Menggunakan cache minimal, memulai re-warping...")
-                if isinstance(images[0], str):
-                    original_images = stitching_utils.load_images(images)
-                else:
-                    original_images = images
-                
-                # <<< PERBAIKAN DI SINI >>>
-                # Panggil fungsi rewarp yang benar, bukan warp_image
-                alignment_package = stitching_utils.rewarp_from_homography(
-                    original_images=original_images, 
-                    minimal_cache_data=cached_alignment_data, 
-                    settings=settings, 
-                    progress_callback=progress_callback
-                )
+        if cached_alignment_data and "homographies" in cached_alignment_data:
+            # Jika ada cache (minimal atau penuh), kita akan menggunakannya.
+            # Kita akan melengkapinya nanti di tahap proyeksi.
+            progress_callback(0.0, "Menggunakan data alignment dari cache...")
+            alignment_package = cached_alignment_data
         
-        # Kasus 3: Tidak ada cache yang valid. Proses dari awal.
-        if alignment_package is None:
-            if len(images) < 2:
+        else: # Tidak ada cache yang valid, proses dari awal.
+            if len(image_paths) < 2:
                 return {"error": "Butuh setidaknya 2 gambar untuk membuat panorama."}
             
             align_choice = settings.get('align_algorithm', 'Standard_Homography')
@@ -75,15 +49,14 @@ def run_panorama_stitching_process(
             if not align_function:
                 return {"error": f"Algoritma alignment '{align_choice}' tidak terimplementasi."}
             
-            # Alokasikan 40% dari total progres untuk tahap alignment
             def align_progress_reporter(p, msg):
-                progress_callback(p * 0.4, msg)
+                progress_callback(p * 0.4, msg) # 0% -> 40%
 
-            alignment_package = align_function(images, settings, align_progress_reporter)
+            # Panggil fungsi alignment. images di sini adalah image_paths.
+            alignment_package = align_function(image_paths, settings, align_progress_reporter)
 
-        # Periksa error setelah tahap alignment
         if alignment_package.get("error"):
-            return alignment_package # Kembalikan dictionary error
+            return alignment_package
 
         # --- Titik Keluar 1: Jika targetnya hanya alignment ---
         if target_stage == "alignment":
@@ -91,34 +64,27 @@ def run_panorama_stitching_process(
             return alignment_package
 
         # --- TAHAP 2: PROYEKSI DAN CROPPING ---
-        # Jika kode sampai di sini, kita pasti memiliki `alignment_package` yang lengkap.
-        
         projection_package = None
         
-        # Periksa apakah kita sudah punya cache untuk tahap ini
         if target_stage == "blending" and cached_projection_data:
              progress_callback(0.4, "Menggunakan data proyeksi dari cache...")
              projection_package = cached_projection_data
         else:
-            # Muat gambar asli jika belum dimuat (dibutuhkan untuk proyeksi non-planar)
-            if 'original_images' not in locals():
-                if isinstance(images[0], str):
-                    original_images = stitching_utils.load_images(images)
-                else:
-                    original_images = images
+            # --- BLOK LOGIKA TERPUSAT DAN DIPERBAIKI ---
             
-            # Alokasikan 30% berikutnya untuk tahap proyeksi (total 40% -> 70%)
+            # Siapkan reporter progres yang sudah di-skalakan
             def projection_progress_reporter(p, msg):
-                 progress_callback(0.4 + (p * 0.3), msg)
+                 # p dari 0-100, diubah ke rentang 0.4 -> 0.95 (55% dari total)
+                 progress_callback(0.4 + (p / 100.0 * 0.55), msg)
 
+            # Panggil kontroler proyeksi dengan argumen yang KONSISTEN
             projection_package = run_projection_and_crop(
                 alignment_data=alignment_package,
-                original_images=original_images,
-                settings=settings
-                # progress_callback bisa diteruskan ke sini jika diperlukan
+                image_paths=image_paths, # <-- SELALU gunakan image_paths
+                settings=settings,
+                progress_callback=projection_progress_reporter # <-- SELALU gunakan reporter
             )
 
-        # Periksa error setelah tahap proyeksi
         if projection_package.get("error"):
             return projection_package
             
@@ -128,11 +94,8 @@ def run_panorama_stitching_process(
             return projection_package
 
         # --- TAHAP 3: BLENDING ---
-        # Jika kode sampai di sini, targetnya adalah blending dan kita punya `projection_package`.
-        
-        # Alokasikan 30% terakhir untuk blending (total 70% -> 100%)
         def blending_progress_reporter(p, msg):
-            progress_callback(0.7 + (p * 0.3), msg)
+            progress_callback(0.95 + (p * 0.05), msg) # 95% -> 100%
             
         final_image = run_blending(
             projection_package=projection_package,
@@ -142,7 +105,6 @@ def run_panorama_stitching_process(
         
         progress_callback(1.0, "Panorama selesai dibuat.")
         
-        # Blending biasanya mengembalikan gambar akhir, bungkus dalam format standar
         return {"stitched_image": final_image, "error": None}
 
     except Exception as e:

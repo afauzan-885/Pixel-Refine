@@ -1,21 +1,28 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import gc
 import os
+import threading
 import cv2
+from joblib import Parallel, delayed
 import numpy as np
-import dask
-import dask.array as da
-from typing import List
+from typing import Any, Callable, Dict, List, Optional
 from scipy.linalg import expm, logm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import minimum_spanning_tree
 
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import estimate_noise_variance, get_adaptive_bilateral
+from UI.panorama.Algorithm.Blend import get_blender
+from UI.panorama.Algorithm.Blend.base_blender import BaseBlender
+from UI.panorama.Algorithm.Projection_and_Crop.image_warping import get_warper
+from UI.panorama.Algorithm.Projection_and_Crop.image_warping.base_warper import BaseWarper
 """
 Skrip ini berisi fungsi-fungsi utilitas statis untuk pemrosesan gambar,
 dirancang untuk dapat digunakan kembali di berbagai bagian aplikasi.
 """
+
+# ==============================================================================
+# 1. IO DAN PRA-PEMROSESAN
+# ==============================================================================
 def load_images(paths: List[str]) -> List[np.ndarray]:
     """
     Memuat satu atau lebih gambar dari path yang diberikan.
@@ -44,6 +51,9 @@ def load_images(paths: List[str]) -> List[np.ndarray]:
         images.append(img)
     return images
 
+# ==============================================================================
+# 2. DETEKSI DAN PENCOCOKAN FITUR
+# ==============================================================================
 def detect_features(img, detector, use_multicore=True, num_features=5000):
     """
     Mendeteksi fitur pada satu gambar dengan strategi per-blok yang canggih.
@@ -56,9 +66,6 @@ def detect_features(img, detector, use_multicore=True, num_features=5000):
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     enhanced_gray_img = clahe.apply(gray_img)
     
-    # 2. Pra-pemrosesan dengan Bilateral Filter (INI MASIH PER GAMBAR, DAN ITU BENAR)
-    #    Keputusan untuk menerapkan filter ini bergantung pada noise gambar individual, jadi
-    #    logika ini harus tetap di sini. Kita tidak bisa menghindarinya.
     noise_level = estimate_noise_variance(enhanced_gray_img)
     if noise_level > 600.0:
         d, sigma, _ = get_adaptive_bilateral(noise_level, 300, 800, 5, 9, 20, 75)
@@ -69,11 +76,8 @@ def detect_features(img, detector, use_multicore=True, num_features=5000):
     # Kita bisa membuat max_kps_per_block lebih dinamis, tapi untuk sekarang ini sudah cukup.
     num_blocks, overlap, max_kps_per_block = (3, 3), 30, 600
 
-    # 3. Inisialisasi Detektor DIHAPUS DARI SINI
-    #    'detector' sekarang adalah argumen yang masuk.
 
     def process_block(i, j):
-        # ... (logika process_block tidak berubah) ...
         roi_x, roi_y = i * (w // num_blocks[0]), j * (h // num_blocks[1])
         roi_w, roi_h = w // num_blocks[0], h // num_blocks[1]
         x_start, y_start = max(0, roi_x - overlap), max(0, roi_y - overlap)
@@ -165,9 +169,8 @@ def match_features(des1: np.ndarray, des2: np.ndarray, ratio_thresh: float = 0.7
     return good_matches
 
 # ==============================================================================
-# Fungsi untuk Komposisi Graf dan Warping
+# 3. KOMPOSISI TRANSFORMASI DAN GEOMETRI
 # ==============================================================================
-
 def compose_transformations_from_graph(pairwise_matches, n_images, anchor_idx):
     if not pairwise_matches: return None
     rows = [m["src_idx"] for m in pairwise_matches]
@@ -256,214 +259,194 @@ def center_FOV(homographies: list):
     print("    - Transformasi berhasil dipusatkan.")
     return centered_homographies
 
-def _warp_to_dask_array(image_path, homography, output_shape, *args, **kwargs):
-    img = cv2.imread(image_path)
-    if img is None:
-        return (
-            np.zeros(output_shape, dtype=np.float32), 
-            np.zeros((output_shape[0], output_shape[1]), dtype=np.float32)
-        )
-
-    warped_np = cv2.warpPerspective(img, homography, (output_shape[1], output_shape[0]))
-    mask_np = (cv2.cvtColor(warped_np, cv2.COLOR_BGR2GRAY) > 0).astype(np.float32)
-
-    del img
-    return warped_np.astype(np.float32), mask_np
-
-def _process_single_tile(args):
+# ==============================================================================
+# WORKER PARALEL WARPING DAN BLENDING (GENERIC)
+# ==============================================================================
+def _render_single_tile(args: tuple) -> tuple:
     """
-    Fungsi helper yang memproses satu ubin. Dirancang untuk dijalankan secara paralel oleh joblib.
-    """
-    # Unpack argumen
-    y_start, x_start, tile_shape, full_output_shape, homographies, image_paths, image_shapes = args
-    
-    # KUNCI: Akumulator hanya seukuran satu ubin!
-    tile_sum = np.zeros(tile_shape, dtype=np.float32)
-    count_map = np.zeros((tile_shape[0], tile_shape[1]), dtype=np.float32)
+    Worker paralel yang sepenuhnya generik dan bertugas memproses satu ubin.
 
-    # Iterasi melalui setiap gambar sumber untuk melihat apakah ia berkontribusi pada ubin ini
-    for i in range(len(image_paths)):
-        try:
-            H_inv = np.linalg.inv(homographies[i])
-        except np.linalg.LinAlgError:
-            continue
-
-        y_end, x_end = y_start + tile_shape[0], x_start + tile_shape[1]
-        tile_corners = np.float32([[x_start, y_start], [x_end, y_start], [x_end, y_end], [x_start, y_end]]).reshape(-1, 1, 2)
-        orig_corners = cv2.perspectiveTransform(tile_corners, H_inv)
-        
-        min_x_orig, min_y_orig = np.min(orig_corners, axis=0).ravel()
-        max_x_orig, max_y_orig = np.max(orig_corners, axis=0).ravel()
-        
-        h_orig, w_orig, _ = image_shapes[i]
-        if max_x_orig < 0 or min_x_orig > w_orig or max_y_orig < 0 or min_y_orig > h_orig:
-            continue
-
-        T_tile = np.array([[1, 0, -x_start], [0, 1, -y_start], [0, 0, 1]])
-        H_tile = T_tile @ homographies[i]
-
-        img_to_process = cv2.imread(image_paths[i])
-        if img_to_process is None: continue
-
-        warped_tile = cv2.warpPerspective(img_to_process, H_tile, (tile_shape[1], tile_shape[0]))
-        
-        mask = (cv2.cvtColor(warped_tile, cv2.COLOR_BGR2GRAY) > 0).astype(np.float32)
-        tile_sum += warped_tile
-        count_map += mask
-        
-        del img_to_process, warped_tile, mask
-
-    count_map[count_map == 0] = 1.0
-    final_tile = (tile_sum / count_map[..., np.newaxis]).astype(np.uint8)
-    
-    # Kembalikan posisi ubin dan datanya
-    return (y_start, x_start, final_tile)
-
-def warp_image(image: np.ndarray, homography: np.ndarray, output_size: tuple, translation: list = [0, 0]) -> tuple:
-    """
-    Melakukan warp perspektif pada sebuah gambar dan membuat mask-nya.
+    Fungsi ini tidak memiliki pengetahuan spesifik tentang metode warping atau blending.
+    Ia hanya bertindak sebagai orkestrator yang mengikuti instruksi dari objek
+    'warper' dan 'blender' yang diterimanya.
 
     Args:
-        image (np.ndarray): Gambar yang akan di-warp.
-        homography (np.ndarray): Matriks homografi 3x3.
-        output_size (tuple): Ukuran kanvas output (lebar, tinggi).
-        translation (list): Ofset translasi [tx, ty] untuk diterapkan pada homografi.
+        args (tuple): Sebuah tuple berisi (task_info, warper_instance, blender_instance).
+                      - task_info (dict): Informasi spesifik untuk ubin ini (misal, koordinat, gambar relevan).
+                      - warper_instance (BaseWarper): Objek yang tahu cara melakukan warping.
+                      - blender_instance (BaseBlender): Objek yang tahu cara melakukan blending.
 
     Returns:
-        tuple: (warped_image, mask)
-               - warped_image: Gambar yang telah di-warp.
-               - mask: Mask biner dari area non-hitam pada gambar yang di-warp.
+        tuple: Berisi (y_start, x_start, final_tile_float) untuk ubin yang telah diproses.
     """
-    # Gabungkan matriks translasi dengan homografi
-    translation_matrix = np.array([[1, 0, translation[0]], 
-                                   [0, 1, translation[1]], 
-                                   [0, 0, 1]])
-    final_homography = translation_matrix @ homography
-
-    # Lakukan warp pada gambar
-    warped_image = cv2.warpPerspective(image, final_homography, output_size,
-                                       flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0))
+    task_info: Dict[str, Any]
+    warper: BaseWarper
+    blender: BaseBlender
+    task_info, warper, blender = args
     
-    # Buat mask dari hasil warp (area yang tidak hitam)
-    gray_warped = cv2.cvtColor(warped_image, cv2.COLOR_BGR2GRAY)
-    mask = (gray_warped > 0).astype(np.uint8)
-    
-    return warped_image, mask
+    warped_layers_float = []
+    mask_layers = []
 
-def rewarp_from_homography(original_images, minimal_cache_data, settings, progress_callback):
+    # 1. Loop melalui gambar-gambar yang sudah ditentukan relevan oleh warper
+    for image_index in task_info['relevant_indices']:
+        image_path = warper.image_paths[image_index]
+        
+        img_uint8 = cv2.imread(image_path)
+        if img_uint8 is None:
+            print(f"Peringatan: Gagal membaca gambar di worker: {image_path}")
+            continue
+        
+        img_float = img_uint8.astype(np.float32) / 255.0
+
+        # 2. Minta objek 'warper' untuk melakukan pekerjaan warping & masking
+        warped_tile, mask = warper.warp_and_mask_layer(img_float, task_info, image_index)
+        
+        warped_layers_float.append(warped_tile)
+        mask_layers.append(mask)
+
+    # Jika tidak ada layer yang berhasil di-warp untuk ubin ini
+    if not warped_layers_float:
+        return (task_info['y_start'], task_info['x_start'], np.zeros(task_info['tile_shape'], dtype=np.float32))
+
+    # 3. Minta objek 'blender' untuk melakukan pekerjaan blending
+    #    Worker ini tidak perlu tahu apakah ini multiband, feather, dll.
+    final_tile_float = blender.blend(warped_layers_float, mask_layers)
+    
+    # 4. Pastikan output berada dalam rentang yang valid sebelum dikembalikan
+    final_tile_float = np.clip(final_tile_float, 0.0, 1.0)
+    
+    return (task_info['y_start'], task_info['x_start'], final_tile_float)
+
+
+# ==============================================================================
+# FUNGSI ORKESTRATOR UTAMA
+# ==============================================================================
+def render_panorama_tiles(
+    image_paths: List[str], 
+    image_shapes: List[tuple], 
+    warp_params: Dict[str, Any],
+    output_shape: tuple, 
+    warp_method: str = "planar",
+    blending_method: str = "multiband",
+    progress_callback: Optional[Callable] = None, 
+    progress_range: tuple = (95, 99)
+) -> Optional[np.ndarray]:
     """
-    Merekontruksi paket data panorama lengkap hanya dari gambar asli dan data homografi.
-    Fungsi ini menjalankan bagian akhir dari proses stitching.
+    Fungsi rendering panorama berbasis ubin yang sepenuhnya generik dan modular.
+
+    Fungsi ini bertindak sebagai "otak" utama:
+    1. Membuat instance 'warper' dan 'blender' yang sesuai berdasarkan nama.
+    2. Meminta 'warper' untuk merencanakan semua pekerjaan (pra-komputasi relevansi ubin).
+    3. Menyiapkan dan menjalankan pemrosesan paralel.
+    4. Menyusun hasil dari para worker menjadi gambar panorama akhir.
+
+    Args:
+        image_paths: Daftar path ke gambar sumber.
+        image_shapes: Daftar shape (H, W, C) dari setiap gambar sumber.
+        warp_params: Dictionary berisi parameter yang spesifik untuk metode warp
+                     (misalnya: {"homographies": [...]}).
+        output_shape: Shape dari kanvas panorama akhir (H, W, C).
+        warp_method: Nama metode warp yang akan digunakan (misal, "planar").
+        blending_method: Nama metode blend yang akan digunakan (misal, "multiband").
+        progress_callback: Fungsi callback untuk melaporkan progres.
+        progress_range: Rentang progres (min, max) yang akan digunakan callback.
+
+    Returns:
+        np.ndarray: Gambar panorama akhir sebagai array float32 [0, 1], atau None jika gagal.
     """
-    print("INFO: Memulai proses re-warping dari data cache minimal...")
+    print(f"\n--- Memulai Rendering Panorama ---")
+    print(f"Metode Warp: '{warp_method}', Metode Blend: '{blending_method}'")
+    
+    # Langkah 1: Buat instance spesialis yang dibutuhkan menggunakan factory
     try:
-        # 1. Ekstrak data yang dibutuhkan dari cache
-        homographies = minimal_cache_data.get("homographies")
-        output_size = minimal_cache_data.get("canvas_size")
-        translation = minimal_cache_data.get("translation")
-        
-        if not all([homographies, output_size, translation]):
-            return {"error": "Data cache minimal tidak lengkap."}
-
-        # 2. Loop melalui setiap gambar dan lakukan warp
-        n_images = len(original_images)
-        final_warped_images = []
-        final_warped_masks = []
-        
-        # Siapkan untuk membuat gambar pratinjau
-        panorama_sum = np.zeros((output_size[1], output_size[0], 3), dtype=np.float32)
-        image_count_map = np.zeros((output_size[1], output_size[0]), dtype=np.float32)
-
-        progress_step = 1.0 / n_images
-        
-        for idx, (img, H) in enumerate(zip(original_images, homographies)):
-            # Beri laporan progres
-            progress_callback(idx * progress_step, f"Re-warping gambar {idx+1}...")
-            
-            # Gunakan utilitas warp_image di sini, dengan argumen yang benar!
-            warped_img, mask = warp_image(
-                image=img, 
-                homography=H, 
-                output_size=output_size, 
-                translation=translation
-            )
-            
-            # Kumpulkan hasil individual
-            final_warped_images.append(warped_img)
-            final_warped_masks.append(mask)
-            
-            # Hitung panorama kasar untuk preview
-            panorama_sum += warped_img
-            image_count_map += mask
-
-        progress_callback(0.98, "Menyelesaikan pratinjau...")
-        image_count_map[image_count_map == 0] = 1.0 
-        panorama_preview = (panorama_sum / image_count_map[..., np.newaxis]).astype(np.uint8)
-        
-        # 3. Kembalikan paket data lengkap, sama seperti hasil dari proses penuh
-        return {
-            "stitched_image": panorama_preview,
-            "warped_images": final_warped_images,
-            "warped_masks": final_warped_masks,
-            "homographies": homographies,
-            "canvas_size": output_size,
-            "translation": translation,
-            "error": None
-        }
-        
-    except Exception as e:
-        import traceback
-        error_msg = f"Error selama re-warping: {e}\n{traceback.format_exc()}"
-        print(error_msg)
-        return {"error": error_msg}
-    
-def create_simple_preview(warped_images: list, warped_masks: list) -> np.ndarray:
-    """
-    Membuat gambar pratinjau panorama sederhana dengan merata-ratakan
-    gambar-gambar yang tumpang tindih.
-
-    Args:
-        warped_images (list): Daftar gambar (np.ndarray) yang sudah di-warp
-                              dan berukuran sama (kanvas panorama).
-        warped_masks (list): Daftar mask biner yang sesuai dengan warped_images.
-
-    Returns:
-        np.ndarray: Gambar panorama pratinjau, atau None jika input kosong.
-    """
-    if not warped_images or not warped_masks:
+        warper = get_warper(
+            name=warp_method, 
+            image_paths=image_paths, 
+            image_shapes=image_shapes,
+            **warp_params  # Teruskan parameter spesifik seperti homographies
+        )
+        blender = get_blender(blending_method)
+    except (ValueError, NotImplementedError) as e:
+        print(f"ERROR: Gagal menginisialisasi warper atau blender: {e}")
         return None
 
-    # Asumsikan semua gambar memiliki ukuran yang sama
-    h, w = warped_images[0].shape[:2]
-    
-    # Siapkan kanvas untuk penjumlahan
-    # Gunakan float32 untuk presisi saat menjumlah dan membagi
-    panorama_sum = np.zeros((h, w, 3), dtype=np.float32)
-    image_count_map = np.zeros((h, w), dtype=np.float32)
-    
-    for img, mask in zip(warped_images, warped_masks):
-        # Pastikan gambar dalam format float untuk dijumlahkan
-        # Jika gambar dalam format uint8, ubah ke float
-        if img.dtype != np.float32:
-            img = img.astype(np.float32)
-            
-        panorama_sum += img
-        
-        # Tambahkan mask ke peta hitungan
-        # (Ubah mask menjadi float jika perlu)
-        if mask.dtype != np.float32:
-            image_count_map += mask.astype(np.float32)
-        else:
-            image_count_map += mask
+    temp_pano_path = ""
+    panorama_full_float = None
+    try:
+        if progress_callback:
+            progress_callback(progress_range[0], f"Mempersiapkan rendering dengan {warp_method}/{blending_method}...")
 
-    # Hindari pembagian dengan nol
-    # Di mana pun image_count_map adalah 0, ubah menjadi 1
-    # Ini berarti area hitam akan tetap hitam (0 / 1 = 0)
-    image_count_map[image_count_map == 0] = 1.0
+        TILE_SIZE = (1024, 1024)
+        
+        # Setup temporary memory-mapped file untuk output
+        cache_dir = os.path.join("database", "cache", "render_tiles")
+        os.makedirs(cache_dir, exist_ok=True)
+        temp_pano_path = os.path.join(cache_dir, "panorama_temp.mmap")
+        if os.path.exists(temp_pano_path):
+            os.remove(temp_pano_path)
+        panorama_full_float = np.memmap(temp_pano_path, dtype=np.float32, mode='w+', shape=output_shape)
+        
+        # Langkah 2: Minta 'warper' untuk merencanakan semua pekerjaan (tahap pra-komputasi)
+        print("Merencanakan tugas rendering untuk setiap ubin...")
+        all_tasks_info = warper.build_task_list(output_shape, TILE_SIZE)
+        
+        total_tiles = len(all_tasks_info)
+        if total_tiles == 0:
+            print("Peringatan: Tidak ada ubin yang perlu diproses berdasarkan analisis warper.")
+            return np.zeros(output_shape, dtype=np.float32)
+        
+        print(f"Ditemukan {total_tiles} ubin yang relevan untuk diproses.")
+        if progress_callback:
+            progress_callback(progress_range[0] + 1, f"Memulai pemrosesan {total_tiles} ubin...")
+
+        # Langkah 3: Siapkan argumen lengkap untuk setiap worker paralel
+        all_tasks_args = [(task_info, warper, blender) for task_info in all_tasks_info]
+
+        # Langkah 4: Jalankan eksekusi paralel
+        progress_counter = 0
+        progress_lock = threading.Lock()
+
+        def process_and_update_progress(task_args):
+            nonlocal progress_counter
+            result = _render_single_tile(task_args)
+            if progress_callback:
+                with progress_lock:
+                    progress_counter += 1
+                    p_start, p_end = progress_range
+                    progress = p_start + (progress_counter / total_tiles) * (p_end - p_start)
+                    progress_callback(progress, f"Memproses ubin... ({progress_counter}/{total_tiles})")
+            return result
+
+        results = Parallel(n_jobs=-1, backend="threading")(
+            delayed(process_and_update_progress)(args) for args in all_tasks_args
+        )
+
+        # Langkah 5: Susun hasil dari para worker menjadi gambar akhir
+        if progress_callback:
+            progress_callback(progress_range[1], "Menyusun ubin menjadi gambar akhir...")
+            
+        for y_start, x_start, final_tile_float in results:
+            if final_tile_float is not None:
+                y_end = y_start + final_tile_float.shape[0]
+                x_end = x_start + final_tile_float.shape[1]
+                panorama_full_float[y_start:y_end, x_start:x_end] = final_tile_float
+
+        # Konversi hasil dari memmap ke array numpy di memori
+        final_image_in_memory = np.array(panorama_full_float)
+        
+        return final_image_in_memory
     
-    # Lakukan pembagian elemen-demi-elemen untuk mendapatkan rata-rata
-    # Gunakan broadcasting (..., np.newaxis) untuk membuat image_count_map menjadi 3D
-    # agar cocok dengan dimensi panorama_sum.
-    panorama_preview = (panorama_sum / image_count_map[..., np.newaxis]).astype(np.uint8)
-    
-    return panorama_preview
+    finally:
+        # Pastikan file temporary selalu dibersihkan
+        if panorama_full_float is not None:
+            # Menutup file memmap
+            if hasattr(panorama_full_float, '_mmap'):
+                panorama_full_float._mmap.close()
+            del panorama_full_float
+        
+        if os.path.exists(temp_pano_path):
+            try:
+                os.remove(temp_pano_path)
+                print(f"File temporary '{temp_pano_path}' berhasil dihapus.")
+            except OSError as e:
+                print(f"Peringatan: Gagal menghapus file temporary: {e}")
