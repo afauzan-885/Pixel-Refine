@@ -10,35 +10,48 @@ from UI.settings.General.Language import language_config
 
 from .enhance_stack.EnhanceStackPage import EnhanceStackPage
 from .settings.SettingPage import SettingPage
-
 class Pages:
-    ENHANCE_STACK = "Enhance Stack"
-    PANORAMA = language_config.PANORAMA_SIDEBAR_LABEL
-    SETTINGS = language_config.SETTINGS_SIDEBAR_LABEL
+    """
+    Satu Sumber Kebenaran (Single Source of Truth) untuk semua halaman aplikasi.
+    Setiap entri adalah tuple dengan format: (label, path_ikon, kelas_widget)
+    Kelas widget bisa None jika halaman tersebut masih dalam pengembangan.
+    """
+    
+    # Halaman yang muncul di bagian atas sidebar
+    MAIN_PAGES = [
+        ("Enhance Stack", "UI/resources/icon/enhance_stack.png", EnhanceStackPage),
+        # (language_config.PANORAMA_SIDEBAR_LABEL, "UI/resources/icon/panorama.png", PanoramaPage),
+        # Tambahkan halaman utama baru di sini
+    ]
 
+    # Halaman yang muncul di bagian bawah sidebar (setelah pemisah)
+    FOOTER_PAGES = [
+        (language_config.SETTINGS_SIDEBAR_LABEL, "UI/resources/icon/setting.png", SettingPage),
+        # Tambahkan halaman footer baru di sini
+    ]
+
+    # Gabungan semua halaman untuk kemudahan MainContent dalam menjaga urutan.
+    ALL_PAGES = MAIN_PAGES + FOOTER_PAGES
 
 class MainContent(QStackedWidget):
     def __init__(self, database_manager: DatabaseManager, parent=None):
         super().__init__(parent)
         self.database_manager = database_manager
-        self.pages = {
-            Pages.ENHANCE_STACK: EnhanceStackPage,
-            Pages.PANORAMA: PanoramaPage,
-            Pages.SETTINGS: SettingPage,
-        }
 
-        # halaman berdasarkan peta halaman
-        for page_name in Pages.__dict__.keys():
-            if not page_name.startswith("_"):
-                page_label = getattr(Pages, page_name)
-                page_class = self.pages.get(page_label)
-                self.addWidget(self.Contents_page(page_label, page_class, self.database_manager))
+        # Hapus definisi 'self.pages' yang lama.
+        # Langsung bangun widget dari sumber kebenaran (Pages.ALL_PAGES).
+        # Urutan widget di sini akan SAMA PERSIS dengan urutan tombol di Sidebar.
+        for page_config in Pages.ALL_PAGES:
+            page_label, _, page_class = page_config # path ikon tidak diperlukan di sini
+            
+            # Buat dan tambahkan widget ke QStackedWidget
+            self.addWidget(self.Contents_page(page_label, page_class, self.database_manager))
 
     def Contents_page(self, page_name, page_class, database_manager: DatabaseManager):
         if page_class:
             return page_class(database_manager)
 
-        # Halaman default
+        # Halaman default (kode ini tidak perlu diubah, sudah bagus)
         page = QWidget()
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 150, 0, 0)
@@ -63,6 +76,4 @@ class MainContent(QStackedWidget):
 
         page.setLayout(layout)
         return page
-
-
-
+    

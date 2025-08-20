@@ -1,5 +1,6 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QPushButton
 from PySide6.QtGui import QIcon
+from UI.main_content import Pages
 from UI.resources.animation.animation_manager import WidthAnimator
 from UI.settings.General.Language import language_config
 from PySide6.QtCore import Slot, QEasingCurve
@@ -53,26 +54,26 @@ class Sidebar(QWidget):
         self.toggle_button.clicked.connect(self.toggle_sidebar)
         self.sidebar_layout.addWidget(self.toggle_button)
 
-        # Tombol navigasi
+        # --- MEMBUAT TOMBOL NAVIGASI SECARA DINAMIS DARI 'Pages' ---
         self.side_buttons = []
-        button_data = [
-            ("Enhance Stack", "UI/resources/icon/enhance_stack.png"),
-            (language_config.PANORAMA_SIDEBAR_LABEL, "UI/resources/icon/panorama.png"),
-        ]
-        for i, (text, icon_path) in enumerate(button_data):
-            btn = self.create_nav_button(text, icon_path, i)
+        current_index = 0 # Sangat penting untuk menjaga indeks yang benar
+
+        # Buat tombol navigasi utama
+        for text, icon_path, _ in Pages.MAIN_PAGES: # kelas widget tidak diperlukan di sini
+            btn = self.create_nav_button(text, icon_path, current_index)
             self.sidebar_layout.addWidget(btn)
             self.side_buttons.append(btn)
+            current_index += 1
 
-        self.sidebar_layout.addStretch()
+        self.sidebar_layout.addStretch() # Pemisah visual
 
-        # Tombol Settings
-        settings_button = self.create_nav_button(
-            language_config.SETTINGS_SIDEBAR_LABEL, "UI/resources/icon/setting.png", len(button_data)
-        )
-        self.sidebar_layout.addWidget(settings_button)
-        self.side_buttons.append(settings_button)
-
+        # Buat tombol navigasi footer (contoh: Settings)
+        for text, icon_path, _ in Pages.FOOTER_PAGES:
+            btn = self.create_nav_button(text, icon_path, current_index)
+            self.sidebar_layout.addWidget(btn)
+            self.side_buttons.append(btn)
+            current_index += 1
+        
         # Atur ukuran awal sidebar
         self.setFixedWidth(self.expanded_width)
 
