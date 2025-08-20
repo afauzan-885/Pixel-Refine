@@ -170,12 +170,17 @@ class DisplayPanel(QWidget):
         self.processing_view.update_progress(title, value)
 
     def display_zoomable_image(self, numpy_image, max_preview_dim=4096):
-        """Menampilkan gambar NumPy di view Zoomable dengan resolusi yang aman."""
+        """
+        Menampilkan gambar NumPy di view Zoomable dengan resolusi yang aman.
+        
+        - numpy_image: bisa merupakan crop dari memmap atau preview
+        - max_preview_dim: batas maksimal dimensi untuk performa UI
+        """
         scene = self.zoomable_preview.scene()
         if scene is None:
             scene = QGraphicsScene(self.zoomable_preview)
             self.zoomable_preview.setScene(scene)
-        
+
         if numpy_image is None:
             scene.clear()
             return
@@ -197,14 +202,14 @@ class DisplayPanel(QWidget):
             pixmap = QPixmap.fromImage(qt_image)
         except Exception as e:
             print(f"Error converting image for display: {e}")
-            scene.clear() 
+            scene.clear()
             return
 
         # Tampilkan di scene
-        scene.clear() 
+        scene.clear()
         pixmap_item = scene.addPixmap(pixmap)
         self.zoomable_preview.fitInView(pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
-        
+
         # Atur UI
         self.display_stack.setCurrentWidget(self.preview_view_widget)
         self.import_button.setVisible(False)

@@ -1,5 +1,6 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QMessageBox, QStackedWidget
 from PySide6.QtCore import Slot, Signal, QThread
+import cv2
 import numpy as np
 import os
 import pickle  # Untuk menyimpan objek Python (termasuk NumPy array) ke disk
@@ -401,31 +402,68 @@ class WorkingLeftPanel(QWidget):
 
     # --- 4c. Penanganan Hasil Spesifik per Tahap ---
 
-    def _on_alignment_finished(self, alignment_result_data):
+    def _on_alignment_finished(self, alignment_result_data, target_display_size=None, 
+                           viewport_offset=(0, 0), zoom_level=0.1):
         """
-        Menampilkan hasil alignment dan MENYIMPAN PAKET DATA LENGKAP
-        untuk digunakan oleh tahap selanjutnya.
-        """
-        # 1. Dapatkan gambar pratinjau dari paket data untuk ditampilkan
-        stitched_panorama = alignment_result_data.get("stitched_image")
-        if stitched_panorama is None:
-            error_msg = alignment_result_data.get("error", "Alignment failed: No final image was created.")
-            self.display_panel.show_preview_message(error_msg)
-            return
+        Menampilkan hasil alignment menggunakan memmap panorama besar.
 
-        # 2. Simpan SELURUH paket data ke variabel instance untuk digunakan nanti
-        print("INFO: Menyimpan data alignment lengkap (warped images, masks, etc.) ke memori.")
+        - target_display_size: (width, height) viewport di UI
+        - viewport_offset: (x, y) posisi tengah viewport dalam koordinat full panorama
+        - zoom_level: >1 = zoom in, <1 = zoom out
+        """
+        memmap_path = alignment_result_data.get("memmap_path")
+        full_shape = alignment_result_data.get("shape")  # (h, w, c)
+
+        # fallback jika memmap tidak ada
+        if memmap_path is None or full_shape is None or not os.path.exists(memmap_path):
+            stitched_panorama = alignment_result_data.get("stitched_image")
+            if stitched_panorama is None:
+                error_msg = alignment_result_data.get("error", "No preview available.")
+                self.display_panel.show_preview_message(error_msg)
+                return
+        else:
+            h_full, w_full, c_full = full_shape
+            fp = np.memmap(memmap_path, dtype=alignment_result_data.get("dtype", np.float32),
+                        mode="r", shape=full_shape)
+
+            if target_display_size is None:
+                # baca full panorama dari memmap → hati-hati RAM
+                stitched_panorama = np.array(fp)
+            else:
+                target_w, target_h = target_display_size
+                crop_w = int(target_w / zoom_level)
+                crop_h = int(target_h / zoom_level)
+
+                offset_x, offset_y = viewport_offset
+                x1 = max(0, min(offset_x, w_full - crop_w))
+                y1 = max(0, min(offset_y, h_full - crop_h))
+                x2 = x1 + crop_w
+                y2 = y1 + crop_h
+
+                # baca crop langsung dari memmap → RAM tetap kecil
+                stitched_panorama = np.array(fp[y1:y2, x1:x2])
+
+                # resize crop agar sesuai viewport
+                stitched_panorama = cv2.resize(
+                    stitched_panorama, (target_w, target_h), interpolation=cv2.INTER_LINEAR
+                )
+
+            del fp  # flush memmap
+
+        # simpan data alignment lengkap
         self.cached_alignment_data = alignment_result_data
-        self.cached_projection_result = None # Invalidate cache selanjutnya
+        self.cached_projection_result = None
 
-        # 3. Lanjutkan logika UI seperti biasa
-        self.last_preview_info = ("aligned", stitched_panorama, 0)
+        # tampilkan di UI (display_zoomable_image sudah resize aman)
+        self.last_preview_info = ("aligned", stitched_panorama, zoom_level)
         self.display_panel.display_zoomable_image(stitched_panorama)
-        
+
         self.latest_successful_stage = "aligned"
         has_images = bool(self.database_manager.get_images_for_project(self.current_project_id))
         self.workflow_panel.update_workflow_stage("aligned", has_images=has_images)
-        self.workflow_panel.tab_widget.setCurrentIndex(1) # Pindah ke tab Projection
+        self.workflow_panel.tab_widget.setCurrentIndex(1)
+
+
 
     def _on_projection_finished(self, projected_data): 
         """

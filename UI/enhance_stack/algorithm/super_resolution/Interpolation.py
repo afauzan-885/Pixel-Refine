@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, Q
 import h5py
 from PySide6.QtCore import QThread, Signal, Qt
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, save_image
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, get_all_image_paths_for_single_process, save_image
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
 

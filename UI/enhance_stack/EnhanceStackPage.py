@@ -5,7 +5,6 @@ from UI.enhance_stack.single_page_layout import SinglePageLayout
 from UI.resources.animation.animation_manager import SlideDirection, StackedWidgetAnimator
 from UI.resources.animation.slide import slide
 from UI.resources.animation.toast.toast_manager import ToastManager
-from UI.resources.stylesheet.stylesheet import stylesheet_global_page
 from .components.top_bar import TopBar
 from .logic.database_manager import DatabaseManager
 

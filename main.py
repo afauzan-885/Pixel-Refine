@@ -198,24 +198,38 @@ class PixelRefineMain(QMainWindow):
 
     def closeEvent(self, event):
         try:
+            # Hapus isi align_folder
             if os.path.exists(self.align_folder):
                 for item in os.listdir(self.align_folder):
                     item_path = os.path.join(self.align_folder, item)
-                    if os.path.isfile(item_path) or os.path.islink(item_path): os.unlink(item_path) 
-                    elif os.path.isdir(item_path): rmtree(item_path) 
-            
+                    if os.path.isfile(item_path) or os.path.islink(item_path):
+                        os.unlink(item_path)
+                    elif os.path.isdir(item_path):
+                        rmtree(item_path)
+
+            # Hapus isi stack_folder
             if os.path.exists(self.stack_folder):
                 for item in os.listdir(self.stack_folder):
                     item_path = os.path.join(self.stack_folder, item)
-                    if os.path.isfile(item_path) or os.path.islink(item_path): os.unlink(item_path)
-                    elif os.path.isdir(item_path): rmtree(item_path)
+                    if os.path.isfile(item_path) or os.path.islink(item_path):
+                        os.unlink(item_path)
+                    elif os.path.isdir(item_path):
+                        rmtree(item_path)
+
+            # Hapus align_stitch_cache_folder
             if os.path.exists(self.align_stitch_cache_folder):
                 rmtree(self.align_stitch_cache_folder)
+
+            # Hapus database\cache\render_tiles
+            render_tiles_folder = os.path.join("database", "cache", "render_tiles")
+            if os.path.exists(render_tiles_folder):
+                rmtree(render_tiles_folder)
 
         except Exception as e:
             QMessageBox.warning(self, "Error", f"An error occurred while deleting folder contents: {e}")
         finally:
             event.accept()
+
 
     def switch_page(self, index):
         if self.main_content is None: return
