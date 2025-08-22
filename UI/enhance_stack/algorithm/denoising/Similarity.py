@@ -775,11 +775,8 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
             print(language_config.NO_HDF5_FILE_PROCESSING_FROM_PATH)
             total_images = len(image_paths)
 
-        
-        # Panggil satu fungsi untuk mengatur semuanya.
         batch_plan = setup_balanced_batching(total_images, language_config)
         
-        # Jika tidak ada gambar, `batch_plan` akan kosong.
         if not batch_plan:
             if update_progress: update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
             return
@@ -839,15 +836,11 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
         if perform_learning_setting and raw_weight_maps_for_learning:
             training_resolution_setting = tuple(general_settings.get("training_resolution", (256, 256)))
             
-            # print(f"\n--- Memproses {len(raw_weight_maps_for_learning)} Peta Bobot Mentah yang Baru Dikumpulkan ---")
-            # print(f"    -> Meresize semua peta bobot ke resolusi training: {training_resolution_setting}")
-            
             resized_maps_for_saving = [
                 cv2.resize(w_map, training_resolution_setting, interpolation=cv2.INTER_AREA)
                 for w_map in raw_weight_maps_for_learning
             ]
 
-            # print(f"--- Menyimpan {len(resized_maps_for_saving)} peta bobot yang sudah di-resize ke '{os.path.basename(raw_maps_db_path)}' ---")
             try:
                 with h5py.File(raw_maps_db_path, 'a') as hf:
                     existing_keys = list(hf.keys())

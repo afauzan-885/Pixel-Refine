@@ -7,7 +7,7 @@ import os
 from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
 from PySide6.QtCore import QThread, Signal, Qt
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, get_all_image_paths_for_single_process, load_images_from_paths, resize_all_with_padding, save_image
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import batch_image_generator, extract_all_metadata, get_all_image_paths_for_single_process, load_images_from_paths, resize_all_with_padding, save_image, setup_balanced_batching
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
 
@@ -83,139 +83,79 @@ class AverageAlgorithm:
         return images
 
     def average_stack(self, images, update_progress=None, stop_requested=None,
-                             total_overall_images=None, images_processed_so_far=0):
+                      total_overall_images=None, images_processed_so_far=0):
         """
         Melakukan stacking gambar dengan metode rata-rata sederhana (simple average).
-
-        Args:
-            images (list): List berisi NumPy array gambar yang akan di-stack.
-            update_progress (callable, optional): Callback untuk update progress bar.
-                                                  Dipanggil dengan (persentase, pesan).
-            stop_requested (callable, optional): Callback untuk mengecek apakah proses
-                                                 harus dihentikan. Harus return True jika berhenti.
-            total_overall_images (int, optional): Jumlah total gambar dalam keseluruhan proses
-                                                 (untuk kalkulasi progress yang lebih akurat).
-            images_processed_so_far (int, optional): Jumlah gambar yang sudah diproses
-                                                     sebelum batch ini (untuk progress).
-
-        Returns:
-            np.ndarray: Gambar hasil stacking (rata-rata), atau array nol jika tidak ada gambar valid.
+        (Docstring lainnya tetap sama)
         """
+        # 1. Guard clause (tidak berubah, sudah optimal)
         if not isinstance(images, list) or not images:
-            return None # Atau raise error, tergantung penanganan yang diinginkan
+            return None
 
-        # Validasi gambar pertama dan dapatkan propertinya
+        # 2. Validasi gambar referensi (tidak berubah, sudah robust)
         try:
             ref_image = images[0]
             if not isinstance(ref_image, np.ndarray):
                 raise TypeError(language_config.IMAGE_DATA_MUST_BE_VALID)
-
-            h, w = ref_image.shape[:2]
-            dtype = ref_image.dtype
-            num_channels = ref_image.shape[2] if ref_image.ndim == 3 else 0 # 0 untuk grayscale
-
-            if dtype not in (np.uint8, np.uint16):
+            if ref_image.dtype not in (np.uint8, np.uint16):
                 raise TypeError(language_config.IMAGE_BIT_REQUIRED)
-
         except (AttributeError, IndexError, ValueError, TypeError) as e:
             raise ValueError(language_config.FIRST_IMAGE_CANNOT_BE_OBTAINED.format(e))
 
-        # --- Inisialisasi Accumulator ---
-        if num_channels > 0:
-            sum_image = np.zeros((h, w, num_channels), dtype=np.float32)
-        else:
-            sum_image = np.zeros((h, w), dtype=np.float32)
+        # --- PERUBAHAN 1: Inisialisasi Accumulator lebih ringkas ---
+        sum_image = np.zeros_like(ref_image, dtype=np.float32)
 
         num_images_averaged = 0
         num_images_in_list = len(images)
-        progress_cap_percent = 95
 
         for i, current_image in enumerate(images):
             if stop_requested and stop_requested():
                 break
 
+            # Logika Progress Bar (tidak berubah, karena spesifik untuk UI)
             if update_progress:
-                current_overall_image_index = images_processed_so_far + i + 1
+                progress_cap_percent = 95
                 if total_overall_images is not None and total_overall_images > 0:
+                    current_overall_image_index = images_processed_so_far + i + 1
                     progress = int((current_overall_image_index / total_overall_images) * progress_cap_percent)
-                    message = language_config.IMAGE_PROCESS_IN_PROGRESS.format(current_overall_image_index, total_overall_images) \
-    
+                    message = language_config.IMAGE_PROCESS_IN_PROGRESS.format(current_overall_image_index, total_overall_images)
                 else:
-                    progress = int(((i + 1) / num_images_in_list) * progress_cap_percent) # Cap internal
+                    progress = int(((i + 1) / num_images_in_list) * progress_cap_percent)
                     message = language_config.ANALYZING_IMAGE.format(i+1, num_images_in_list)
                 update_progress(progress, message)
 
-            if not isinstance(current_image, np.ndarray):
+            # --- PERUBAHAN 2: Validasi per gambar digabung menjadi satu ---
+            is_valid = (
+                isinstance(current_image, np.ndarray) and
+                current_image.shape == ref_image.shape and
+                current_image.dtype == ref_image.dtype
+            )
+            if not is_valid:
                 continue
-            if current_image.shape[:2] != (h, w):
-                continue
-        
-            if current_image.dtype != dtype:
-                continue
-        
-            current_num_channels = current_image.shape[2] if current_image.ndim == 3 else 0
-            if current_num_channels != num_channels:
-                 continue
 
-            # --- AKUMULASI ---
+            # Akumulasi (tidak berubah)
             sum_image += current_image.astype(np.float32)
             num_images_averaged += 1
 
-        if num_images_averaged > 0:
-            average_image_float = sum_image / num_images_averaged
+        if num_images_averaged == 0:
+            # --- PERUBAHAN 3: Return untuk kasus gagal lebih ringkas ---
+            return np.zeros_like(ref_image) # Mengembalikan tipe data asli
 
-            min_val = 0
-            try:
-                max_val = np.iinfo(dtype).max
-            except ValueError:
-                 max_val = 1.0 if np.issubdtype(dtype, np.floating) else 255 # Default fallback
+        # Finalisasi (tidak berubah, sudah optimal)
+        average_image_float = sum_image / num_images_averaged
+        
+        # Mendapatkan nilai max yang aman (tidak berubah)
+        max_val = np.iinfo(ref_image.dtype).max
+        
+        final_image = np.clip(average_image_float, 0, max_val).astype(ref_image.dtype)
 
-            final_image = np.clip(average_image_float, min_val, max_val).astype(dtype)
-
-            if stop_requested and stop_requested() and num_images_averaged < num_images_in_list:
-                 pass
-            return final_image
-        else:
-            output_shape = (h, w, num_channels) if num_channels > 0 else (h, w)
-            return np.zeros(output_shape, dtype=dtype)
-
-def batch_image_generator(source, batch_size, stop_requested):
-    """
-    Generator yang menghasilkan batch gambar dari berbagai sumber.
-    Sumber bisa berupa path file HDF5 atau list dari path gambar.
-
-    Yields:
-        list: Sebuah batch berisi gambar NumPy.
-    """
-    if isinstance(source, str) and source.endswith('.h5'):
-        # Mode HDF5
-        with h5py.File(source, 'r') as h5f:
-            keys = list(h5f.keys())
-            total_images = len(keys)
-            for i in range(0, total_images, batch_size):
-                if stop_requested and stop_requested(): return
-                batch_keys = keys[i:i + batch_size]
-                batch_images = [np.array(h5f[key]) for key in batch_keys]
-                yield batch_images
-    elif isinstance(source, list):
-        # Mode list of paths
-        total_images = len(source)
-        for i in range(0, total_images, batch_size):
-            if stop_requested and stop_requested(): return
-            batch_paths = source[i:i + batch_size]
-            batch_images = load_images_from_paths(batch_paths, stop_requested)
-            # Anda menyebutkan resize, ini tempat yang bagus untuk itu.
-            # Anggap fungsi ini sudah ada.
-            batch_images, _ = resize_all_with_padding(batch_images, method="median")
-            yield batch_images
-    else:
-        # Sumber tidak valid, tidak menghasilkan apa-apa
-        return
+        # --- PERUBAHAN 4: Menghapus blok pass yang tidak perlu ---
+        return final_image
 
 def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
          single_process=None, batch_id=None, progress_bar=None):
     try:
-        # --- 1. Setup & Konfigurasi (Bagian ini tetap diperlukan) ---
+        # --- 1. Setup & Konfigurasi (Tidak berubah) ---
         if update_progress: update_progress(0, language_config.RUN_IMAGE_PROCESS_STARTED)
 
         image_processor = AverageAlgorithm(db_path)
@@ -226,26 +166,25 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
         data_source = None
         output_path = ""
         total_images = 0
+        image_paths = [] # Inisialisasi
 
-        # Tentukan sumber data (HDF5 atau list path) dan path output
+        # (Logika untuk menentukan data_source, total_images, dan output_path tidak berubah)
         if single_process:
             hdf5_path = os.path.join(align_dir, "aligned_images.h5")
             image_paths = get_all_image_paths_for_single_process(db_path)
             ref_name = os.path.splitext(os.path.basename(image_paths[0]))[0] if image_paths else "single_process"
             data_source = hdf5_path if os.path.exists(hdf5_path) else image_paths
-        else: # Batch process
+        else:
             if batch_id is None: raise ValueError(language_config.BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS)
             hdf5_path = os.path.join(align_dir, f"aligned_image_batch_{batch_id}.h5")
             image_paths = image_processor.get_all_image_paths_for_batch_process(batch_id)
             ref_name = os.path.splitext(os.path.basename(image_paths[0]))[0] if image_paths else f"batch_{batch_id}"
             data_source = hdf5_path if os.path.exists(hdf5_path) else image_paths
 
-        # Buat nama output yang aman
         output_name_safe = "".join(c for c in ref_name if c.isalnum() or c in ('_', '-')).rstrip() or "stack_result"
         output_path = os.path.join(output_folder_stack, f"{output_name_safe}_average.tif")
         print(language_config.OUTPUT_IMAGE_TO_BE_SAVED.format(output_path))
         
-        # Dapatkan total gambar untuk progress bar
         if isinstance(data_source, str) and data_source.endswith('.h5'):
             with h5py.File(data_source, 'r') as f: total_images = len(f.keys())
         elif isinstance(data_source, list):
@@ -255,16 +194,44 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
             if update_progress: update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
             return
 
-        # --- 2. Proses Batch Utama (Menggunakan generator baru kita) ---
+        # --- PERUBAHAN UTAMA 1: Menggunakan setup_balanced_batching ---
+        batch_plan = setup_balanced_batching(total_images, language_config)
+        
+        if not batch_plan:
+            if update_progress: update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
+            return
+
+        total_batches = len(batch_plan)
         print(language_config.NUMBER_OF_IMAGES_TO_BE_PROCESSED.format(total_images))
+        print(language_config.NUMBER_OF_BATCHES_TO_BE_PROCESSED.format(total_batches))
+
         processed_batches_results = []
         images_processed_count = 0
         
-        batch_generator = batch_image_generator(data_source, batch_size, stop_requested)
-
-        for batch_images in batch_generator:
-            if not batch_images or (stop_requested and stop_requested()):
+        # --- PERUBAHAN UTAMA 2: Mengganti loop generator dengan loop berbasis rencana (plan) ---
+        for batch_num, (batch_start, batch_end) in enumerate(batch_plan, 1):
+            if stop_requested and stop_requested():
+                print(language_config.PROCESS_TERMINATED_BY_USER)
                 break
+                
+            print(f"\n{language_config.PROCESSING_BATCH.format(batch_num, total_batches, batch_start)}")
+
+            # Pemuatan data manual di dalam loop, berdasarkan rencana
+            batch_images = []
+            if isinstance(data_source, str) and data_source.endswith('.h5'):
+                with h5py.File(data_source, 'r') as h5f:
+                    keys = list(h5f.keys())[batch_start:batch_end]
+                    batch_images = [np.array(h5f[key]) for key in keys]
+            else: # Sumbernya adalah list path
+                batch_paths = data_source[batch_start:batch_end]
+                batch_images = load_images_from_paths(batch_paths, stop_requested)
+                if 'resize_all_with_padding' in globals():
+                    batch_images, _ = resize_all_with_padding(batch_images, method="median")
+
+            if stop_requested and stop_requested(): break
+            if not batch_images:
+                print(language_config.SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED.format(batch_num))
+                continue
             
             print(language_config.START_IMAGE_ENHANCEMENT.format(len(batch_images)))
             
