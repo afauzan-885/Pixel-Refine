@@ -686,13 +686,74 @@ class SimilarityAlgorithm:
             
             # Kembalikan TIGA nilai yang konsisten
             return np.zeros(out_shape_fb, dtype=dtype_ref), None, []
-        
+
+def _setup_data_source_and_paths(db_path, single_process, batch_id, image_processor):
+    """
+    Menentukan sumber data (HDF5 atau list path), path gambar,
+    nama dasar untuk file output, dan total gambar.
+    """
+    align_dir = os.path.join("database", "align")
+    image_paths = []
+    output_name_base = ""
+    hdf5_path = ""
+
+    if single_process:
+        hdf5_path = os.path.join(align_dir, "aligned_images.h5")
+        image_paths = get_all_image_paths_for_single_process(db_path)
+        ref_name = os.path.splitext(os.path.basename(image_paths[0]))[0] if image_paths else "single_process"
+        output_name_base = ref_name
+    else:
+        if batch_id is None:
+            raise ValueError(language_config.BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS)
+        hdf5_path = os.path.join(align_dir, f"aligned_image_batch_{batch_id}.h5")
+        image_paths = image_processor.get_all_image_paths_for_batch_process(batch_id)
+        ref_name = os.path.splitext(os.path.basename(image_paths[0]))[0] if image_paths else f"batch_{batch_id}"
+        output_name_base = ref_name
+
+    data_source = hdf5_path if os.path.exists(hdf5_path) else image_paths
+    
+    total_images = 0
+    if isinstance(data_source, str) and data_source.endswith('.h5'):
+        print(language_config.PROCESSING_IMAGE_FROM_HDF5.format(data_source))
+        try:
+            with h5py.File(data_source, 'r') as f:
+                total_images = len(f.keys())
+        except Exception as e_h5:
+            raise IOError(f"Gagal membaca file HDF5: {e_h5}")
+    elif isinstance(data_source, list):
+        print(language_config.NO_HDF5_FILE_PROCESSING_FROM_PATH)
+        total_images = len(data_source)
+
+    return data_source, image_paths, output_name_base, total_images
+
+def _load_images_for_batch(data_source, batch_indices, stop_requested=None):
+    """
+    Memuat gambar untuk batch tertentu dari sumber data (HDF5 atau list path).
+    """
+    batch_start, batch_end = batch_indices
+    batch_images = []
+    
+    if isinstance(data_source, str) and data_source.endswith('.h5'):
+        with h5py.File(data_source, 'r') as h5f:
+            keys = list(h5f.keys())[batch_start:batch_end]
+            batch_images = [np.array(h5f[key]) for key in keys if not (stop_requested and stop_requested())]
+    elif isinstance(data_source, list):
+        batch_paths = data_source[batch_start:batch_end]
+        batch_images = load_images_from_paths(batch_paths, stop_requested)
+        if 'resize_all_with_padding' in globals():
+            batch_images, _ = resize_all_with_padding(batch_images, method="median")
+            
+    return batch_images
+
+# --- FUNGSI MAIN SIMILARITY YANG SUDAH DIREFAKTOR ---
+
 def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
          single_process=None, batch_id=None, save_final_weight_map=False,
          progress_bar=None):
-
     try:
-        # --- 1. KONFIGURASI AWAL ---
+        if update_progress: update_progress(0, language_config.RUN_IMAGE_PROCESS_STARTED)
+
+        # --- 1. KONFIGURASI SPESIFIK UNTUK PROSES SIMILARITY ---
         general_settings = load_similarity_config()
         perform_learning_setting = general_settings.get("perform_learning", False)
         use_learning_model_setting = general_settings.get("use_learning_model", False)
@@ -717,28 +778,19 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
             extra_merging_params['freq_tile_size'] = tile_val_fq 
             extra_merging_params['freq_overlap_percent'] = general_settings.get("similarity_frequency_overlap_percent", 0.25)
         
-        output_name_base, image_paths = "", []
-        align_dir = os.path.join("database", "align")
+        # --- 2. SETUP SUMBER DATA & PATH (MENGGUNAKAN HELPER) ---
+        data_source, image_paths, output_name_base, total_images = \
+            _setup_data_source_and_paths(db_path, single_process, batch_id, image_processor)
 
-        if single_process:
-            image_paths = get_all_image_paths_for_single_process(db_path)
-            ref_name_base = os.path.splitext(os.path.basename(image_paths[0]))[0] if image_paths and isinstance(image_paths[0], str) else "single_default"
-            output_name_base = f"{ref_name_base}"
-        else:
-            image_paths = image_processor.get_all_image_paths_for_batch_process(batch_id)
-            ref_name_base = os.path.splitext(os.path.basename(image_paths[0]))[0] if image_paths and isinstance(image_paths[0], str) else "batch_default"
-            output_name_base = f"{ref_name_base}"
-           
-        if not image_paths:
+        if not total_images:
             if update_progress: update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE); return
-            
-        # print("\n--- Mengekstrak Metadata dari Gambar Sumber ---")
+
+        # Ekstrak Metadata (jika bagian dari pipeline ini)
         metadata_output_path = os.path.join("database", "align", "metadata.json")
         try:
             extract_all_metadata(image_paths, metadata_file=metadata_output_path)
-            # print(f"  -> SUKSES: Metadata disimpan di '{metadata_output_path}'")
         except Exception as e:
-            pass
+            pass 
         
         output_folder_stack = "database/stack"
         os.makedirs(output_folder_stack, exist_ok=True)
@@ -748,66 +800,37 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
         print(language_config.OUTPUT_IMAGE_TO_BE_SAVED.format(output_path))
         if save_final_weight_map: print(language_config.OUTPUT_SAVE_WEIGHT_MAP.format(weight_map_output_path))
         
-        if update_progress: update_progress(0, language_config.RUN_IMAGE_PROCESS_STARTED)
-
-        # --- TAHAP 1: PENGUMPULAN DATA & PENGGABUNGAN BATCH ---
-        # print("\n--- TAHAP 1: PENGUMPULAN DATA & PENGGABUNGAN BATCH ---")
-        raw_weight_maps_for_learning = []
-        processed_batches_results = []
-        images_processed_count = 0
-        total_images = 0
-        
-        global_hdf5_path = os.path.join(align_dir, "aligned_images.h5" if single_process else f"aligned_image_batch_{batch_id}.h5")
-        use_hdf5 = os.path.exists(global_hdf5_path)
-        should_get_weights = perform_learning_setting or use_learning_model_setting
-
-        data_source = 'HDF5' if use_hdf5 else 'path'
-        if use_hdf5:
-            print(language_config.PROCESSING_IMAGE_FROM_HDF5.format(global_hdf5_path))
-            try:
-                with h5py.File(global_hdf5_path, 'r') as h5f:
-                    keys = list(h5f.keys())
-                    total_images = len(keys)
-            except Exception as e_h5_main:
-                print(language_config.ERROR_IN_READING_FILE_HDF5.format(e_h5_main)); traceback.print_exc()
-                if update_progress: update_progress(0, language_config.ERROR_IN_READING_FILE_HDF5.format(e_h5_main)); return
-        else:
-            print(language_config.NO_HDF5_FILE_PROCESSING_FROM_PATH)
-            total_images = len(image_paths)
-
+        # --- 4. PERENCANAAN BATCH (UMUM) ---
         batch_plan = setup_balanced_batching(total_images, language_config)
-        
         if not batch_plan:
             if update_progress: update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
             return
-
         total_batches = len(batch_plan)
-        
-        # Iterasi sekarang menggunakan rencana batch yang sudah dibuat
-        for batch_num_counter, (batch_start_idx, batch_end_idx) in enumerate(batch_plan, 1):
-            
-            print(f"\n{language_config.PROCESSING_BATCH.format(batch_num_counter, total_batches, batch_start_idx)}")
-            if stop_requested and stop_requested(): 
+        print(language_config.NUMBER_OF_IMAGES_TO_BE_PROCESSED.format(total_images))
+        print(language_config.NUMBER_OF_BATCHES_TO_BE_PROCESSED.format(total_batches))
+
+        # --- 5. PROSES INTI PER BATCH ---
+        processed_batches_results = []
+        raw_weight_maps_for_learning = []
+        images_processed_count = 0
+        should_get_weights = perform_learning_setting or use_learning_model_setting
+
+        for batch_num, (batch_start, batch_end) in enumerate(batch_plan, 1):
+            if stop_requested and stop_requested():
                 print(language_config.PROCESS_TERMINATED_BY_USER)
                 break
+            
+            print(f"\n{language_config.PROCESSING_BATCH.format(batch_num, total_batches, batch_start)}")
 
-            batch_images_list = []
-            if data_source == 'HDF5':
-                with h5py.File(global_hdf5_path, 'r') as h5f:
-                    keys = list(h5f.keys())
-                    batch_keys = keys[batch_start_idx : batch_end_idx]
-                    batch_images_list = [np.array(h5f[key]) for key in batch_keys if not (stop_requested and stop_requested())]
-            else:
-                current_batch_paths = image_paths[batch_start_idx : batch_end_idx]
-                batch_images_list = load_images_from_paths(current_batch_paths, stop_requested)
-                if stop_requested and stop_requested(): break
-                if 'resize_all_with_padding' in globals(): batch_images_list, _ = resize_all_with_padding(batch_images_list, method="median")
+            # [REFAKTOR] Memuat gambar menggunakan fungsi helper
+            batch_images_list = _load_images_for_batch(data_source, (batch_start, batch_end), stop_requested)
 
+            if stop_requested and stop_requested(): break
             if not batch_images_list:
-                print(language_config.SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED.format(batch_num_counter))
+                print(language_config.SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED.format(batch_num))
                 continue
 
-            # Panggil similarity_mnfr untuk setiap batch
+            # [LOGIKA INTI] Panggilan spesifik ke similarity_mnfr
             batch_result_img, _, individual_raw_maps = image_processor.similarity_mnfr(
                 images=batch_images_list, merging_type=merging_type_from_settings,
                 tile_size=spatial_tile_size_arg, overlap=spatial_overlap_arg,
@@ -817,13 +840,11 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
                 use_learning_model=use_learning_model_setting,
                 perform_learning=False, # Pelatihan tidak pernah dipicu di sini
                 weight_of_each_image=should_get_weights,
-                # Kumpulkan data mentah JIKA 'perform_learning_setting' diaktifkan
                 collect_raw_maps_for_learning=perform_learning_setting, 
                 **extra_merging_params
             )
             
-            if stop_requested and stop_requested(): 
-                break
+            if stop_requested and stop_requested(): break
             
             if batch_result_img is not None:
                 processed_batches_results.append(batch_result_img)
@@ -831,49 +852,28 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
             if individual_raw_maps:
                 raw_weight_maps_for_learning.extend(individual_raw_maps)
 
-        # --- Penyimpanan Data Mentah ke Database Pusat ---
+        if stop_requested and stop_requested():
+            if update_progress and progress_bar: update_progress(progress_bar.value(), "Proses Dibatalkan.")
+            return
+
+        # --- 6. PENYIMPANAN DATA MENTAH UNTUK LEARNING (SPESIFIK SIMILARITY) ---
         raw_maps_db_path = os.path.join("database", "Learning_Model", "raw_weight_map_database.h5")
         if perform_learning_setting and raw_weight_maps_for_learning:
             training_resolution_setting = tuple(general_settings.get("training_resolution", (256, 256)))
-            
-            resized_maps_for_saving = [
-                cv2.resize(w_map, training_resolution_setting, interpolation=cv2.INTER_AREA)
-                for w_map in raw_weight_maps_for_learning
-            ]
+            resized_maps = [cv2.resize(w_map, training_resolution_setting, interpolation=cv2.INTER_AREA) for w_map in raw_weight_maps_for_learning]
 
             try:
                 with h5py.File(raw_maps_db_path, 'a') as hf:
-                    existing_keys = list(hf.keys())
-                    last_index = 0
-                    if existing_keys:
-                        numeric_keys = [int(k.split('_')[-1]) for k in existing_keys if k.startswith('map_') and k.split('_')[-1].isdigit()]
-                        if numeric_keys:
-                           last_index = max(numeric_keys)
-
-                    for i, w_map in enumerate(resized_maps_for_saving):
+                    last_index = max([int(k.split('_')[-1]) for k in hf.keys() if k.startswith('map_')] or [-1])
+                    for i, w_map in enumerate(resized_maps):
                         hf.create_dataset(f'map_{last_index + 1 + i}', data=w_map, compression="gzip")
-                
-                with h5py.File(raw_maps_db_path, 'r') as hf:
-                    total_raw_maps = len(hf.keys())
-                # print(f"  -> SUKSES: Database data mentah sekarang berisi total {total_raw_maps} peta.")
             except Exception as e:
-                # print(f"  -> GAGAL memperbarui database data mentah: {e}")
                 traceback.print_exc()
 
-        # --- TAHAP 2: FINE-TUNING & PEMBUATAN GROUND TRUTH ---
+        # --- 7. PENGGABUNGAN AKHIR / FINE-TUNING ---
         final_result_img = None
-        
-        if stop_requested and stop_requested():
-            pass
-        elif processed_batches_results:
-            valid_batch_results = [res for res in processed_batches_results if res is not None]
-            if not valid_batch_results:
-                #  print("  -> Tidak ada hasil batch yang valid untuk diproses lebih lanjut.")
-                 if update_progress: update_progress(100, language_config.DATA_FAILED_COMPLETION_CREATED); 
-                 return
-
-            if len(valid_batch_results) > 1:
-                # print(f"  -> Memulai fine-tuning pada {len(valid_batch_results)} hasil batch...")
+        if processed_batches_results:
+            if len(processed_batches_results) > 1:
                 fine_tuning_start_progress, fine_tuning_end_progress = 95, 99
                 def fine_tuning_update_progress(inner_progress, message):
                     mapped_progress = fine_tuning_start_progress + int((inner_progress / 100.0) * (fine_tuning_end_progress - fine_tuning_start_progress))
@@ -882,64 +882,44 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
                 
                 if update_progress: update_progress(fine_tuning_start_progress, language_config.STARTING_ENHANCEMENT)
                 
-                try:
-                    # Panggil similarity_mnfr untuk fine-tuning tanpa mengaktifkan mode learning
-                    final_result_img, _, _ = image_processor.similarity_mnfr(
-                        images=valid_batch_results, merging_type=merging_type_from_settings,
-                        tile_size=spatial_tile_size_arg, overlap=spatial_overlap_arg,
-                        motion_sensitivity=spatial_motion_sensitivity_arg, noise_offset_factor=spatial_noise_offset_factor_arg,
-                        update_progress=fine_tuning_update_progress, stop_requested=stop_requested,
-                        save_weight_map_path=(weight_map_output_path if save_final_weight_map else None),
-                        total_overall_images=len(valid_batch_results), images_processed_so_far=0,
-                        use_learning_model=False, perform_learning=False, weight_of_each_image=False,
-                        collect_raw_maps_for_learning=False, **extra_merging_params
-                    )
-                    # print("  -> Fine-tuning selesai.")
-                except Exception as e_fine:
-                    traceback.print_exc()
-                    final_result_img = None
-            
-            elif len(valid_batch_results) == 1:
-                final_result_img = valid_batch_results[0]
-                # print("  -> Melewatkan fine-tuning karena hanya ada 1 hasil batch.")
+                # [LOGIKA INTI] Panggilan spesifik ke similarity_mnfr untuk fine-tuning
+                final_result_img, _, _ = image_processor.similarity_mnfr(
+                    images=processed_batches_results, merging_type=merging_type_from_settings,
+                    tile_size=spatial_tile_size_arg, overlap=spatial_overlap_arg,
+                    motion_sensitivity=spatial_motion_sensitivity_arg, noise_offset_factor=spatial_noise_offset_factor_arg,
+                    update_progress=fine_tuning_update_progress, stop_requested=stop_requested,
+                    save_weight_map_path=(weight_map_output_path if save_final_weight_map else None),
+                    total_overall_images=len(processed_batches_results), images_processed_so_far=0,
+                    use_learning_model=False, perform_learning=False, weight_of_each_image=False,
+                    collect_raw_maps_for_learning=False, **extra_merging_params
+                )
+            else:
+                final_result_img = processed_batches_results[0]
         
-        if perform_learning_setting:
-            pass
-            # print(f"    -> Mode pengumpulan data aktif. Data mentah telah disimpan (jika ada) di: {raw_maps_db_path}")
-
-        # --- TAHAP 4: PENYIMPANAN HASIL AKHIR ---
-        if final_result_img is not None and not (stop_requested and stop_requested()):
-            # print("\n--- TAHAP 4: MENYIMPAN HASIL AKHIR ---")
+        # --- 8. PENYIMPANAN HASIL AKHIR & PEMBERSIHAN ---
+        if final_result_img is not None:
             ref_path_for_save = image_paths[0] if image_paths else None
             save_success = save_image(final_result_img, output_path, reference_image_path=ref_path_for_save)
             
-            if save_success:
-                final_msg = f"{language_config.IMAGE_PROCESS_FINISHED}: {os.path.basename(output_path)}"
-                print(f"  -> {final_msg}")
-                if update_progress: update_progress(100, final_msg)
-                if not single_process and batch_id is not None and os.path.exists(global_hdf5_path):
-                    try: os.remove(global_hdf5_path)
-                    except Exception: pass
-            else:
-                if update_progress: update_progress(100, f"Gagal simpan: {os.path.basename(output_path)}")
-        
-        elif not (stop_requested and stop_requested()):
-            print(language_config.DATA_FAILED_COMPLETION_CREATED)
+            final_message = f"{language_config.IMAGE_PROCESS_FINISHED}: {os.path.basename(output_path)}" if save_success \
+                else f"{language_config.FAILED_TO_SAVE_IMAGE}: {os.path.basename(output_path)}"
+            if update_progress: update_progress(100, final_message)
+
+            # Cleanup
+            if not single_process and batch_id is not None:
+                hdf5_path = os.path.join("database", "align", f"aligned_image_batch_{batch_id}.h5")
+                if os.path.exists(hdf5_path):
+                    try: os.remove(hdf5_path)
+                    except OSError as e: print(f"Error removing temp file: {e}")
+        else:
             if update_progress: update_progress(100, language_config.DATA_FAILED_COMPLETION_CREATED)
 
-        if stop_requested and stop_requested() and update_progress and progress_bar:
-            update_progress(progress_bar.value(), "Proses Dibatalkan.")
-
-    except ValueError as ve:
-        error_msg = language_config.RUN_ERROR_MESSAGE.format(error=str(ve))
+    # --- 9. PENANGANAN ERROR (UMUM) ---
+    except Exception as e:
+        error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(e))
         traceback.print_exc()
-        if update_progress and not (stop_requested and stop_requested()): update_progress(0, error_msg)
-    except Exception as e_main:
-        error_msg = language_config.RUN_ERROR_MESSAGE.format(error=str(e_main))
-        traceback.print_exc()
-        if update_progress and not (stop_requested and stop_requested()): update_progress(0, error_msg)
-    finally:
-       pass 
+        if update_progress and not (stop_requested and stop_requested()):
+            update_progress(0, error_message)
 
 def running_similarity(parent=None, single_process=None, batch_id=None):
     process_finished = False

@@ -9,9 +9,8 @@ from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, Q
 import h5py
 from PySide6.QtCore import Qt, QThread, Signal
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import batch_image_generator, extract_all_metadata, get_all_image_paths_for_single_process, load_images_from_paths, resize_all_with_padding, save_image, setup_balanced_batching
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, get_all_image_paths_for_single_process, load_images_from_paths, resize_all_with_padding, save_image, setup_balanced_batching
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
-from UI.settings.General.GeneralSetting import load_general_settings
 from UI.settings.General.Language import language_config
 
 class ThreadWorker(QThread):
@@ -279,7 +278,7 @@ class MedianAlgorithm:
 
         return final_image
     
-def main(db_path, update_progress=None, stop_requested=None, batch_size=8,
+def main(db_path, update_progress=None, stop_requested=None,
          single_process=None, batch_id=None, progress_bar=None):
     try:
         if update_progress: update_progress(0, language_config.RUN_IMAGE_PROCESS_STARTED)
@@ -292,9 +291,8 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=8,
         data_source = None
         output_path = ""
         total_images = 0
-        image_paths = [] # Inisialisasi di sini
+        image_paths = []
 
-        # Tentukan sumber data (HDF5 atau list path) dan path output
         if single_process:
             hdf5_path = os.path.join(align_dir, "aligned_images.h5")
             image_paths = get_all_image_paths_for_single_process(db_path)
@@ -307,6 +305,12 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=8,
             ref_name = os.path.splitext(os.path.basename(image_paths[0]))[0] if image_paths else f"batch_{batch_id}"
             data_source = hdf5_path if os.path.exists(hdf5_path) else image_paths
 
+        metadata_output_path = os.path.join("database", "align", "metadata.json")
+        try:
+            extract_all_metadata(image_paths, metadata_file=metadata_output_path)
+        except Exception as e:
+            pass
+        
         # Buat nama output yang aman
         output_name_safe = "".join(c for c in ref_name if c.isalnum() or c in ('_', '-')).rstrip() or "stack_result"
         output_path = os.path.join(output_folder_stack, f"{output_name_safe}_median.tif")
@@ -435,7 +439,6 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=8,
         else:
             if update_progress: update_progress(100, language_config.FAILED_IMAGE_ENHANCEMENT)
 
-    # --- 5. Penanganan Error (Tetap sama, karena sudah bagus) ---
     except Exception as e: 
         error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(e))
         traceback.print_exc()

@@ -32,38 +32,6 @@ from UI.settings.General.Language import language_config
 # === 2. MANAJEMEN DATA & I/O (Database, File, Metadata)
 # =========================================================================
 
-def batch_image_generator(source, batch_size, stop_requested):
-    """
-    Generator yang menghasilkan batch gambar dari berbagai sumber.
-    Sumber bisa berupa path file HDF5 atau list dari path gambar.
-
-    Yields:
-        list: Sebuah batch berisi gambar NumPy.
-    """
-    if isinstance(source, str) and source.endswith('.h5'):
-        # Mode HDF5
-        with h5py.File(source, 'r') as h5f:
-            keys = list(h5f.keys())
-            total_images = len(keys)
-            for i in range(0, total_images, batch_size):
-                if stop_requested and stop_requested(): return
-                batch_keys = keys[i:i + batch_size]
-                batch_images = [np.array(h5f[key]) for key in batch_keys]
-                yield batch_images
-    elif isinstance(source, list):
-        # Mode list of paths
-        total_images = len(source)
-        for i in range(0, total_images, batch_size):
-            if stop_requested and stop_requested(): return
-            batch_paths = source[i:i + batch_size]
-            batch_images = load_images_from_paths(batch_paths, stop_requested)
-            # Anda menyebutkan resize, ini tempat yang bagus untuk itu.
-            # Anggap fungsi ini sudah ada.
-            batch_images, _ = resize_all_with_padding(batch_images, method="median")
-            yield batch_images
-    else:
-        return
-
 def get_all_image_paths_for_single_process(db_path: str)-> list:
         """
     Retrieves all image paths for single process from the specified database,

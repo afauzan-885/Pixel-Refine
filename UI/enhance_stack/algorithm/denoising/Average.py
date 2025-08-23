@@ -7,32 +7,32 @@ import os
 from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
 from PySide6.QtCore import QThread, Signal, Qt
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import batch_image_generator, extract_all_metadata, get_all_image_paths_for_single_process, load_images_from_paths, resize_all_with_padding, save_image, setup_balanced_batching
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (extract_all_metadata, get_all_image_paths_for_single_process, 
+                                                                                    load_images_from_paths, resize_all_with_padding, save_image, 
+                                                                                    setup_balanced_batching)
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
 
 class ThreadWorker(QThread):
-    progress_updated = Signal(int, str)  # Sinyal untuk memperbarui progress
-    finished = Signal()  # Sinyal untuk menandakan selesai
-    error_occurred = Signal(str)  # Sinyal untuk menandakan error
+    progress_updated = Signal(int, str)  
+    finished = Signal()
+    error_occurred = Signal(str)
 
     def __init__(self, db_path, single_process=True, batch_id=None):
         super().__init__()
         self.db_path = db_path
-        self.single_process = single_process  # Menentukan apakah proses single atau batch
-        self.batch_id = batch_id  # ID batch jika batch processing
-        self.stop_requested = False  # Flag untuk menghentikan thread
+        self.single_process = single_process
+        self.batch_id = batch_id
+        self.stop_requested = False
 
     def run(self):
         try:
             def update_progress(progress, message):
                 self.progress_updated.emit(progress, message)
 
-            # Fungsi callback untuk mengecek status stop
             def is_stop_requested():
                 return self.stop_requested
 
-            # Panggil main dengan parameter yang sesuai
             main(
                 self.db_path, 
                 update_progress=update_progress, 
@@ -43,8 +43,8 @@ class ThreadWorker(QThread):
             
             self.finished.emit()
         except Exception as e:
-            print(f"Error terjadi: {str(e)}")  # Menampilkan pesan error di konsol
-            self.error_occurred.emit(str(e))  # Mengirim pesan error melalui sinyal
+            print(f"Error terjadi: {str(e)}")
+            self.error_occurred.emit(str(e)) 
 
     def stop(self):
         self.stop_requested = True  
@@ -152,10 +152,9 @@ class AverageAlgorithm:
         # --- PERUBAHAN 4: Menghapus blok pass yang tidak perlu ---
         return final_image
 
-def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
+def main(db_path, update_progress=None, stop_requested=None,
          single_process=None, batch_id=None, progress_bar=None):
     try:
-        # --- 1. Setup & Konfigurasi (Tidak berubah) ---
         if update_progress: update_progress(0, language_config.RUN_IMAGE_PROCESS_STARTED)
 
         image_processor = AverageAlgorithm(db_path)
@@ -166,9 +165,8 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
         data_source = None
         output_path = ""
         total_images = 0
-        image_paths = [] # Inisialisasi
+        image_paths = []
 
-        # (Logika untuk menentukan data_source, total_images, dan output_path tidak berubah)
         if single_process:
             hdf5_path = os.path.join(align_dir, "aligned_images.h5")
             image_paths = get_all_image_paths_for_single_process(db_path)
@@ -181,6 +179,12 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
             ref_name = os.path.splitext(os.path.basename(image_paths[0]))[0] if image_paths else f"batch_{batch_id}"
             data_source = hdf5_path if os.path.exists(hdf5_path) else image_paths
 
+        metadata_output_path = os.path.join("database", "align", "metadata.json")
+        try:
+            extract_all_metadata(image_paths, metadata_file=metadata_output_path)
+        except Exception as e:
+            pass
+        
         output_name_safe = "".join(c for c in ref_name if c.isalnum() or c in ('_', '-')).rstrip() or "stack_result"
         output_path = os.path.join(output_folder_stack, f"{output_name_safe}_average.tif")
         print(language_config.OUTPUT_IMAGE_TO_BE_SAVED.format(output_path))
@@ -194,7 +198,6 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
             if update_progress: update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
             return
 
-        # --- PERUBAHAN UTAMA 1: Menggunakan setup_balanced_batching ---
         batch_plan = setup_balanced_batching(total_images, language_config)
         
         if not batch_plan:
@@ -208,7 +211,6 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
         processed_batches_results = []
         images_processed_count = 0
         
-        # --- PERUBAHAN UTAMA 2: Mengganti loop generator dengan loop berbasis rencana (plan) ---
         for batch_num, (batch_start, batch_end) in enumerate(batch_plan, 1):
             if stop_requested and stop_requested():
                 print(language_config.PROCESS_TERMINATED_BY_USER)
@@ -216,7 +218,6 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
                 
             print(f"\n{language_config.PROCESSING_BATCH.format(batch_num, total_batches, batch_start)}")
 
-            # Pemuatan data manual di dalam loop, berdasarkan rencana
             batch_images = []
             if isinstance(data_source, str) and data_source.endswith('.h5'):
                 with h5py.File(data_source, 'r') as h5f:
@@ -253,14 +254,12 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
             if update_progress and progress_bar: update_progress(progress_bar.value(), "Proses dibatalkan.")
             return
 
-        # --- 3. Proses Finalisasi (Fine-Tuning) ---
         if not processed_batches_results:
             if update_progress: update_progress(100, language_config.DATA_FAILED_COMPLETION_CREATED)
             return
 
         print(f"\n--- {language_config.STARTING_ENHANCEMENT} ({len(processed_batches_results)} batch results) ---")
         
-        # --- KODE YANG DIPERBAIKI ADA DI SINI ---
         fine_tuning_start_progress = 95
         fine_tuning_end_progress = 99
 
@@ -271,20 +270,15 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
                 if not (stop_requested and stop_requested()):
                     update_progress(mapped_progress, language_config.ENHANCEMENT.format(message))
 
-        # Update progress awal untuk fase fine-tuning
         if update_progress: update_progress(fine_tuning_start_progress, language_config.STARTING_ENHANCEMENT)
 
-        # Panggil average_stack dengan callback progress yang sudah disesuaikan
         final_result = image_processor.average_stack(
             processed_batches_results,
             update_progress=fine_tuning_update_progress,
             stop_requested=stop_requested,
         )
-        # --- AKHIR DARI KODE YANG DIPERBAIKI ---
-
-        # --- 4. Simpan Hasil dan Cleanup ---
+        
         if stop_requested and stop_requested():
-            # Jika proses dibatalkan selama fine-tuning, jangan simpan dan keluar dengan baik
             if update_progress and progress_bar: update_progress(progress_bar.value(), "Proses dibatalkan.")
             return
 
