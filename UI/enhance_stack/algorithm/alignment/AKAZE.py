@@ -161,24 +161,17 @@ class AKAZEAlgorithm:
         except Exception:
             return None, None
 
-        # --- LOGIKA BARU DIMULAI DI SINI ---
-
-        # 1. Perkirakan tingkat noise pada salah satu gambar (misalnya, gambar dasar)
         noise_level = estimate_noise_variance(enhanced_base_gray)
-    
-        # 1. Definisikan ambang batas dan rentang parameter (bisa Anda sesuaikan)
+
         min_noise_threshold = 200.0
         max_noise_threshold = 700.0
 
-        # Rentang parameter untuk filter bilateral
         min_d, max_d = 5, 9           
         min_sigma, max_sigma = 20, 75 
         
         print(f"Noise level detected: {noise_level:.2f}")
 
-        # 2. Periksa apakah noise reduction diperlukan
         if noise_level > min_noise_threshold:
-            # 3. Dapatkan parameter filter yang dinamis
             d, sigma_color, sigma_space = get_adaptive_bilateral(
                 noise_level,
                 min_noise_threshold, max_noise_threshold,
@@ -186,13 +179,17 @@ class AKAZEAlgorithm:
                 min_sigma, max_sigma
             )
             
-            print(f"Applying adaptive Bilateral Filter. Params -> d={d}, sigmaColor={sigma_color}, sigmaSpace={sigma_space}")
+            print(f"Applying adaptive Bilateral Filter in parallel. Params -> d={d}, sigmaColor={sigma_color}, sigmaSpace={sigma_space}")
             
-            # 4. Terapkan filter dengan parameter yang sudah dihitung
-            enhanced_base_gray = cv2.bilateralFilter(enhanced_base_gray, d, sigma_color, sigma_space)
-            enhanced_target_gray = cv2.bilateralFilter(enhanced_target_gray, d, sigma_color, sigma_space)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                future_base = executor.submit(cv2.bilateralFilter, enhanced_base_gray, d, sigma_color, sigma_space)    
+                future_target = executor.submit(cv2.bilateralFilter, enhanced_target_gray, d, sigma_color, sigma_space)
+
+                enhanced_base_gray = future_base.result()
+                enhanced_target_gray = future_target.result()
+
         else:
-            print(f"Noise level is below threshold of {min_noise_threshold}. Skipping noise reduction.")
+            print(f"Noise level is below threshold")
 
         h, w = enhanced_base_gray.shape
         blocks_x, blocks_y = num_blocks

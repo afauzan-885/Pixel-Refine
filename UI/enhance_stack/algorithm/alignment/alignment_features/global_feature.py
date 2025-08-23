@@ -81,17 +81,19 @@ def _prepare_image_array_from_raw(original_path):
         with rawpy.imread(original_path) as raw:
             gamma_setting = (2.5, 15.92)  # Natural Gamma
             rgb = raw.postprocess(
+                demosaic_algorithm= rawpy.DemosaicAlgorithm.DCB,
                 use_camera_wb=True,
                 gamma=gamma_setting,
                 output_bps=16,
                 bad_pixels_path=None,
                 output_color=rawpy.ColorSpace.sRGB,
                 chromatic_aberration=None,
-                highlight_mode=rawpy.HighlightMode.Blend
+                highlight_mode=rawpy.HighlightMode.Blend,
+                user_flip = 0
             )
 
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        return bgr  # langsung return array, bukan path
+        return bgr
     except Exception as e:
         print(f"Error membaca RAW file {original_path}: {e}")
         return None
@@ -541,72 +543,76 @@ def gaussian_window(size, sigma_scale=1/6):
              window = np.zeros_like(window)
         return np.ascontiguousarray(window.astype(np.float32))
 
-def estimate_noise_variance(gray_image, edge_threshold_low=70, dilate_kernel_size=4, min_flat_pixels_ratio=0.1):
+def estimate_noise_variance(gray_image, min_flat_pixels_ratio=0.1):
     """
-    Memperkirakan tingkat noise dalam gambar dengan menghitung varians Laplacian
-    hanya pada area gambar yang dianggap "datar" (tidak ada tepi atau tekstur yang kuat).
+    Memperkirakan tingkat noise secara adaptif, robust untuk berbagai jenis gambar
+    dan resolusi, dengan beban komputasi minimal.
 
     Args:
         gray_image (np.array): Gambar grayscale.
-        edge_threshold_low (int): Ambang batas rendah untuk detektor tepi Canny.
-        dilate_kernel_size (int): Ukuran kernel untuk operasi dilasi pada tepi.
         min_flat_pixels_ratio (float): Rasio minimum piksel datar yang dibutuhkan.
-                                       Jika terlalu sedikit, estimasi bisa tidak andal.
+
     Returns:
         float: Varians noise yang diestimasi.
     """
     if gray_image is None or gray_image.size == 0:
-        return 0.0 # Atau nilai default yang sesuai
+        return 0.0
 
-    # 1. Deteksi tepi untuk mengidentifikasi area non-datar
-    # Gunakan Canny. Threshold tinggi x 2 untuk high threshold adalah standar.
-    edges = cv2.Canny(gray_image, edge_threshold_low, edge_threshold_low * 2)
+    # --- 1. THRESHOLD CANNY ADAPTIF (OTOMATIS) ---
+    # Menggunakan median intensitas piksel untuk menentukan threshold Canny.
+    # Ini membuat deteksi tepi lebih andal pada gambar yang sangat gelap atau terang.
+    median_intensity = np.median(gray_image)
+    sigma = 0.33  # Heuristik standar
+    low_threshold = int(max(0, (1.0 - sigma) * median_intensity))
+    high_threshold = int(min(255, (1.0 + sigma) * median_intensity))
+    edges = cv2.Canny(gray_image, low_threshold, high_threshold)
     
-    # 2. Dilatasi tepi untuk sedikit memperluas area non-datar
-    kernel = np.ones((dilate_kernel_size, dilate_kernel_size), np.uint8)
+    # --- 2. KERNEL DILASI ADAPTIF (BERDASARKAN RESOLUSI) ---
+    shorter_side = min(gray_image.shape)
+    kernel_size = max(3, int(shorter_side / 250))
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    
+    kernel = np.ones((kernel_size, kernel_size), np.uint8)
     dilated_edges = cv2.dilate(edges, kernel, iterations=1)
     
-    # 3. Buat mask untuk area "datar" (piksel yang bukan bagian dari tepi yang diperluas)
-    flat_mask = (dilated_edges == 0).astype(np.bool_) # Ubah ke boolean mask
+    # 3. Buat mask untuk area "datar"
+    flat_mask = (dilated_edges == 0)
     
-    # Periksa apakah ada cukup piksel "datar"
     num_flat_pixels = np.sum(flat_mask)
-    if num_flat_pixels < (gray_image.size * min_flat_pixels_ratio):
-        print(f"Peringatan: Tidak ditemukan cukup piksel datar ({num_flat_pixels}/{gray_image.size * min_flat_pixels_ratio:.0f}). Estimasi noise mungkin kurang akurat.")
-        laplacian_full = cv2.Laplacian(gray_image, cv2.CV_64F)
-        return laplacian_full.var()
+    min_required_pixels = gray_image.size * min_flat_pixels_ratio
+    
+    # --- 3. LOGIKA FALLBACK YANG LEBIH "AMAN" ---
+    if num_flat_pixels < min_required_pixels:
+        print(f"Peringatan: Tidak ditemukan cukup piksel datar ({num_flat_pixels}/{min_required_pixels:.0f}). "
+              f"Mengasumsikan noise moderat untuk menjaga tekstur.")
+        return 75.0 
 
-    # 4. Hitung Laplacian dari gambar asli
     laplacian_output = cv2.Laplacian(gray_image, cv2.CV_64F)
     
-    # 5. Hitung varians hanya pada piksel yang dianggap "datar"
     variance = laplacian_output[flat_mask].var()
     
     return variance
 
 def get_adaptive_bilateral(noise_level, min_noise, max_noise, min_d, max_d, min_sigma, max_sigma):
     """
+    (Tidak ada perubahan, fungsi ini sudah optimal)
     Menghitung parameter untuk filter bilateral secara dinamis berdasarkan tingkat noise.
     """
-    # Jika noise di atas atau sama dengan maksimum, gunakan parameter maksimum.
     if noise_level >= max_noise:
         return max_d, max_sigma, max_sigma
+    
+    # Clamp noise_level agar tidak negatif saat dikurangi min_noise
+    clamped_noise_level = max(min_noise, noise_level)
+    ratio = (clamped_noise_level - min_noise) / (max_noise - min_noise + 1e-6)
 
-    # Hitung rasio/progres noise antara rentang min dan max (nilai antara 0.0 dan 1.0)
-    # Ditambah epsilon (1e-6) untuk menghindari pembagian dengan nol jika min_noise == max_noise
-    ratio = (noise_level - min_noise) / (max_noise - min_noise + 1e-6)
-
-    # Lakukan interpolasi linear untuk menghitung parameter
     calculated_d = min_d + ratio * (max_d - min_d)
     calculated_sigma = min_sigma + ratio * (max_sigma - min_sigma)
 
-    # Parameter 'd' harus berupa integer ganjil.
-    # Bulatkan ke integer terdekat, lalu pastikan ganjil.
     d = int(round(calculated_d))
     if d % 2 == 0:
         d += 1
     
-    # Sigma bisa dibulatkan ke integer terdekat
     sigma = int(round(calculated_sigma))
     
     return d, sigma, sigma
