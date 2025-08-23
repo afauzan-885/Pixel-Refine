@@ -191,118 +191,145 @@ class SimilarityAlgorithm:
         try:
             c_interface = SimilaritySpatialInterface(lib_path)
         except (FileNotFoundError, OSError, AttributeError) as e:
-            raise RuntimeError(f"Failed C++ interface_spatial_merging: {e}")
+            raise RuntimeError(f"Gagal memuat C++ interface_spatial_merging: {e}")
 
-        final_image_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32))
-        weight_map_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w), dtype=np.float32))
         step_y = max(int(tile_h * (1 - overlap)), 1)
         step_x = max(int(tile_w * (1 - overlap)), 1)
-
         row_starts = np.arange(0, ref_image_h - tile_h + 1, step_y) if ref_image_h >= tile_h else np.array([0])
         if ref_image_h > tile_h and (not row_starts.size or row_starts[-1] != ref_image_h - tile_h):
             row_starts = np.append(row_starts, ref_image_h - tile_h)
-        if ref_image_h == tile_h:
-            row_starts = np.array([0])
         col_starts = np.arange(0, ref_image_w - tile_w + 1, step_x) if ref_image_w >= tile_w else np.array([0])
         if ref_image_w > tile_w and (not col_starts.size or col_starts[-1] != ref_image_w - tile_w):
             col_starts = np.append(col_starts, ref_image_w - tile_w)
-        if ref_image_w == tile_w:
-            col_starts = np.array([0])
-
         row_starts = np.ascontiguousarray(np.unique(row_starts).astype(np.int32))
         col_starts = np.ascontiguousarray(np.unique(col_starts).astype(np.int32))
-
         base_window = gaussian_window(tile_size)
-        block_h, block_w, search_radius = tile_h, tile_w, 0
-
         num_images = len(images)
-        processed_frames_spatial = 0
-        progress_cap_percent = 95
         orig_h, orig_w = images[0].shape[:2]
 
-         # ### PERUBAHAN: Logika pengecekan status rekonstruksi AI ###
-        if use_ai_reconstruction:
-            if self.is_model_loaded:
-                pass
-                # print("  -> Mode Rekonstruksi AI untuk Peta Bobot diaktifkan.")
-            else:
-                # print("  -> PERINGATAN: Rekonstruksi AI diminta, tetapi model tidak dimuat. Akan dilewati.")
-                use_ai_reconstruction = False # Nonaktifkan jika model tidak ada
+        # =================================================================================
+        # === PASS 1: Analisis Timeline dengan Optimasi Memori (Downsampling + float16) ===
+        # =================================================================================
+        if update_progress:
+            update_progress(5, "Pass 1/2: Menganalisis stabilitas adegan...")
 
+        downsampled_h = ref_image_h // 2
+        downsampled_w = ref_image_w // 2
+
+        low_res_raw_weight_maps = []
+        
+        for i, image_orig in enumerate(images):
+            if stop_requested and stop_requested(): return (None, None, 0)
+            
+            current_image_float = normalize_image(image_orig, ref_dtype)
+            if current_image_float.shape[2] != ref_channels_buffer: continue
+
+            temp_weight_map = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w), dtype=np.float32))
+            dummy_image_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32))
+
+            c_interface.call_accumulate_frame_weighted(
+                final_image_sum=dummy_image_sum,
+                weight_map_sum=temp_weight_map,
+                current_image=current_image_float,
+                reference_image=reference_image_float,
+                base_window=base_window,
+                stability_map=None,
+                row_starts=row_starts,
+                col_starts=col_starts,
+                tile_h=tile_h, tile_w=tile_w, h=ref_image_h, w=ref_image_w, channels=ref_channels_buffer,
+                block_h=tile_h, block_w=tile_w, search_radius=0,
+                motion_sensitivity=motion_sensitivity,
+                noise_offset_factor=noise_offset_factor
+            )
+            
+            downsampled_map = cv2.resize(temp_weight_map, (downsampled_w, downsampled_h), interpolation=cv2.INTER_AREA)
+            
+            # =================================================================
+            # === PERUBAHAN OPTIMISASI: Gunakan float16 untuk penyimpanan =====
+            # =================================================================
+            low_res_raw_weight_maps.append(downsampled_map.astype(np.float16))
+            
+        if not low_res_raw_weight_maps:
+            return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
+
+        # --- Buat Peta Stabilitas ---
+        maps_stack = np.stack(low_res_raw_weight_maps, axis=0)
+        
+        # Lakukan kalkulasi dalam float32 untuk menjaga presisi, lalu konversi kembali
+        std_weights_low_res = np.std(maps_stack.astype(np.float32), axis=0)
+        max_std = np.max(std_weights_low_res)
+        stability_map_low_res = 1.0 - (std_weights_low_res / (max_std + 1e-6))
+        
+        # Kembalikan Peta Stabilitas ke resolusi penuh
+        stability_map_full_res = cv2.resize(stability_map_low_res, (ref_image_w, ref_image_h), interpolation=cv2.INTER_CUBIC)
+        stability_map = np.ascontiguousarray(np.clip(stability_map_full_res**2.0, 0.0, 1.0).astype(np.float32))
+
+        # =================================================================================
+        # === PASS 2: Loop Pemrosesan Utama, Ditingkatkan dengan Peta Stabilitas =========
+        # =================================================================================
+        final_image_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32))
+        weight_map_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w), dtype=np.float32))
+        
+        # Inisialisasi variabel lain dari kode original Anda (tidak berubah)
+        processed_frames_spatial = 0
+        progress_cap_percent = 95
         if temporal_consistency: weight_maps_all = []
         if weight_of_each_image: weight_maps_per_image = []
-
         accumulated_weight_map, prev_weight_map_for_standard = None, None
-
-        # PERUBAHAN: Cek ketersediaan model ML sebelum loop untuk efisiensi
+        if use_ai_reconstruction:
+            if self.is_model_loaded: pass
+            else: use_ai_reconstruction = False
         use_ml_refinement = (refinement_algorithm == 'ml_driven' and self.smart_alpha_generator is not None)
         if refinement_algorithm == 'ml_driven' and self.smart_alpha_generator is None:
-            print("PERINGATAN: Refinement ML diminta, tetapi model tidak dimuat. Beralih ke refinement standar.")
-            refinement_algorithm = 'optical_flow' # Fallback ke metode lama
+            refinement_algorithm = 'optical_flow'
 
         for i, image_orig in enumerate(images):
-            if not isinstance(image_orig, np.ndarray):
-                continue
+            if not isinstance(image_orig, np.ndarray): continue
             if update_progress:
                 current_img_overall = images_processed_so_far + i + 1
-                prog = int((current_img_overall / total_overall_images) * progress_cap_percent
-                        if total_overall_images and total_overall_images > 0
-                        else ((i + 1) / num_images) * progress_cap_percent)
-                msg = language_config.IMAGE_PROCESS_IN_PROGRESS.format(current_img_overall, total_overall_images) \
-                    if total_overall_images and total_overall_images > 0 \
-                    else language_config.ANALYZING_IMAGE.format(i + 1, num_images)
+                prog = int(45 + ((current_img_overall / total_overall_images) * (progress_cap_percent-45) if total_overall_images and total_overall_images > 0 else ((i + 1) / num_images) * (progress_cap_percent-45)))
+                msg = f"Pass 2/2: Membangun gambar frame {i+1}/{num_images}"
                 update_progress(prog, msg)
-            if stop_requested and stop_requested():
-                break
+            if stop_requested and stop_requested(): break
             try:
-                if image_orig.shape[0] != orig_h or image_orig.shape[1] != orig_w or image_orig.dtype != ref_dtype:
-                    continue
+                if image_orig.shape[0] != orig_h or image_orig.shape[1] != orig_w or image_orig.dtype != ref_dtype: continue
                 num_ch_orig = image_orig.shape[2] if image_orig.ndim == 3 else 1
-                if num_ch_orig not in (1, 3):
-                    continue
-            except Exception:
-                continue
+                if num_ch_orig not in (1, 3): continue
+            except Exception: continue
 
             current_image_float = normalize_image(image_orig, ref_dtype)
             if current_image_float.shape[2] != ref_channels_buffer: continue
 
             try:
                 temp_weight_map = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w), dtype=np.float32))
+                
                 c_interface.call_accumulate_frame_weighted(
-                    c_interface.clib, final_image_sum, temp_weight_map, current_image_float, reference_image_float,
-                    base_window, row_starts, col_starts, tile_h, tile_w, ref_image_h, ref_image_w, ref_channels_buffer,
-                    tile_h, tile_w, 0, motion_sensitivity, noise_offset_factor
+                    final_image_sum=final_image_sum,
+                    weight_map_sum=temp_weight_map,
+                    current_image=current_image_float,
+                    reference_image=reference_image_float,
+                    base_window=base_window,
+                    stability_map=stability_map,
+                    row_starts=row_starts,
+                    col_starts=col_starts,
+                    tile_h=tile_h, tile_w=tile_w, h=ref_image_h, w=ref_image_w, channels=ref_channels_buffer,
+                    block_h=tile_h, block_w=tile_w, search_radius=0,
+                    motion_sensitivity=motion_sensitivity,
+                    noise_offset_factor=noise_offset_factor
                 )
 
-                # ### PERUBAHAN: Logika Inti untuk Rekonstruksi AI ###
                 map_for_refinement = temp_weight_map
                 if use_ai_reconstruction:
                     map_for_refinement = self._apply_knowledge_model(temp_weight_map)
                 
-                # --- PERUBAHAN UTAMA DI SINI ---
-                refined_weight = map_for_refinement # Default jika tidak ada refinement
-
+                refined_weight = map_for_refinement
                 if optical_flows is not None and i < len(optical_flows):
                     if accumulated_weight_map is not None:
-                        # Unpack flow dan confidence dengan aman
-                        current_flow, current_confidence = (optical_flows[i] 
-                            if isinstance(optical_flows[i], tuple) 
-                            else (optical_flows[i], None))
-
+                        current_flow, current_confidence = (optical_flows[i] if isinstance(optical_flows[i], tuple) else (optical_flows[i], None))
                         if use_ml_refinement:
-                            # Panggil fungsi refinement yang digerakkan oleh ML
-                            # refined_weight = ml_driven_refinement(
-                            #     current_weight_map=map_for_refinement,
-                            #     prev_weight_map_ema=accumulated_weight_map,
-                            #     optical_flow=current_flow,
-                            #     alpha_generator=self.smart_alpha_generator,
-                            #     flow_confidence_map=current_confidence
-                            # )
-                            refined_weight = map_for_refinement  # ML refinement temporarily disabled
+                            refined_weight = map_for_refinement
                         elif refinement_algorithm == 'optical_flow':
-                            refined_weight = optical_flow_refinement(
-                                map_for_refinement, accumulated_weight_map, current_flow, current_confidence
-                            )
+                            refined_weight = optical_flow_refinement(map_for_refinement, accumulated_weight_map, current_flow, current_confidence)
                         elif refinement_algorithm == 'standard':
                             refined_weight = standard_refinement(map_for_refinement, prev_weight_map_for_standard, reference_image_float)
                             prev_weight_map_for_standard = refined_weight.copy()
@@ -316,23 +343,19 @@ class SimilarityAlgorithm:
                         weight_maps_per_image.append(temp_weight_map.copy())
                     else:
                         weight_maps_per_image.append(refined_weight.copy())
-
                 if temporal_consistency:
                     weight_maps_all.append(refined_weight.copy())
-
                 processed_frames_spatial += 1
-
             except Exception as e:
                 raise RuntimeError(f"C++ accumulation frame {i+1} spatial: {e}")
 
         if processed_frames_spatial > 0:
             try:
-                c_interface.call_normalize_accumulated(c_interface.clib, final_image_sum, weight_map_sum, ref_image_h, ref_image_w, ref_channels_buffer)
+                c_interface.call_normalize_accumulated(final_image_sum, weight_map_sum, ref_image_h, ref_image_w, ref_channels_buffer)
                 if temporal_consistency:
                     temporal_consistency_refinement(weight_maps_all, weight_map_sum, save_temporal_std_path=save_temporal_std_path)
                 
                 return (final_image_sum, weight_map_sum, processed_frames_spatial, weight_maps_per_image) if weight_of_each_image else (final_image_sum, weight_map_sum, processed_frames_spatial)
-
             except Exception as e:
                 raise RuntimeError(f"Normalization failed: {e}")
         
@@ -686,6 +709,12 @@ class SimilarityAlgorithm:
             
             # Kembalikan TIGA nilai yang konsisten
             return np.zeros(out_shape_fb, dtype=dtype_ref), None, []
+
+def apply_temporal_filter(current_map, prev_smoothed_map, alpha=0.3):
+    """Fungsi helper untuk menerapkan filter Exponential Moving Average (EMA)."""
+    if prev_smoothed_map is None:
+        return current_map.copy()
+    return (alpha * current_map) + ((1.0 - alpha) * prev_smoothed_map)
 
 def _setup_data_source_and_paths(db_path, single_process, batch_id, image_processor):
     """

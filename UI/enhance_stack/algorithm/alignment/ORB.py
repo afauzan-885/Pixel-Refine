@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, Q
 import h5py
 from PySide6.QtCore import Qt
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (calculate_crop_parameters, do_warp_and_crop, estimate_noise_variance, extract_all_metadata, filter_keypoints_spatially, get_adaptive_bilateral,
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (calculate_crop_parameters, do_warp_and_crop, estimate_noise_variance, extract_all_metadata, get_adaptive_bilateral,
                                                                                     get_all_image_paths_for_single_process, load_images_from_paths, prepare_image,
                                                                                     resize_all_with_padding, run_pipeline_global_crop, run_pipeline_non_crop, save_align_to_folder)
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading

@@ -6,9 +6,7 @@ class SimilaritySpatialInterface:
     """Membungkus pemanggilan fungsi C++ untuk similarity_mfnr_v2."""
 
     def __init__(self, lib_path):
-        """
-        Memuat library C++, mendefinisikan argtypes, dan menyimpan objek clib.
-        """
+        # ... (init tidak berubah)
         if not os.path.exists(lib_path):
             raise FileNotFoundError(f"Shared library not found: {lib_path}")
         try:
@@ -20,63 +18,53 @@ class SimilaritySpatialInterface:
              raise AttributeError(f"Function not found in DLL or error setting argtypes. Did you compile C++ correctly? Error: {e}")
 
     def _define_argtypes(self):
-        """Mendefinisikan argtypes untuk semua fungsi C++ yang digunakan."""
-      
+        # ... (define_argtypes tidak berubah, ini sudah benar)
         self.clib.accumulate_frame_weighted_jit.argtypes = [
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS, WRITEABLE'), # 1 final_image_sum_ptr
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS, WRITEABLE'), # 2 weight_map_sum_ptr
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'),           # 3 current_image_ptr
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'),           # 4 reference_image_ptr
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),           # 5 base_window_ptr
-            np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),             # 6 row_starts
-            np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),             # 7 col_starts
-            ctypes.c_int, # 8 num_row_starts
-            ctypes.c_int, # 9 num_col_starts
-            ctypes.c_int, # 10 tile_h
-            ctypes.c_int, # 11 tile_w
-            ctypes.c_int, # 12 h
-            ctypes.c_int, # 13 w
-            ctypes.c_int, # 14 channels (jumlah channel buffer C++, yaitu 3)
-            ctypes.c_int, # 15 block_h (indeks bergeser jika motion_threshold dihapus)
-            ctypes.c_int, # 16 block_w
-            ctypes.c_int, # 17 search_radius
-            ctypes.c_float, # 18 motion_sensitivity
-            ctypes.c_float  # 19 noise_offset_factor
+            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS, WRITEABLE'),
+            np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS, WRITEABLE'),
+            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'),
+            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'),
+            np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),
+            ctypes.c_void_p,
+            np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),
+            np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.c_float, ctypes.c_float
         ]
         self.clib.accumulate_frame_weighted_jit.restype = None
-        
         self.clib.normalize_accumulated_image_jit.argtypes = [
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS, WRITEABLE'), # 1 final_image_ptr
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),           # 2 weight_map_sum_ptr
-            ctypes.c_int, ctypes.c_int, ctypes.c_int # 3-5 h, w, channels_buffer
+            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS, WRITEABLE'),
+            np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),
+            ctypes.c_int, ctypes.c_int, ctypes.c_int
         ]
         self.clib.normalize_accumulated_image_jit.restype = None
 
-    def call_accumulate_frame_weighted(self, lib, final_image_sum, weight_map_sum, current_image, reference_image,
-                               base_window, row_starts, col_starts,
-                               tile_h, tile_w, h, w, channels,
-                               block_h, block_w, search_radius,
-                               motion_sensitivity, noise_offset_factor
-                               ):
-        lib.accumulate_frame_weighted_jit(
+    def call_accumulate_frame_weighted(self, final_image_sum, weight_map_sum, current_image, reference_image,
+                                       base_window, stability_map, row_starts, col_starts,
+                                       tile_h, tile_w, h, w, channels,
+                                       block_h, block_w, search_radius,
+                                       motion_sensitivity, noise_offset_factor):
+        # ... (fungsi accumulate tidak berubah, ini sudah benar)
+        stability_map_ptr = None
+        if stability_map is not None:
+            if not stability_map.flags['C_CONTIGUOUS']:
+                stability_map = np.ascontiguousarray(stability_map)
+            stability_map_ptr = stability_map.ctypes.data_as(ctypes.c_void_p)
+        self.clib.accumulate_frame_weighted_jit(
             final_image_sum, weight_map_sum, current_image, reference_image, base_window,
-            row_starts, col_starts, len(row_starts), len(col_starts),
-            tile_h, tile_w, h, w, channels,
-            block_h, block_w, search_radius,
+            stability_map_ptr, row_starts, col_starts, len(row_starts), len(col_starts),
+            tile_h, tile_w, h, w, channels, block_h, block_w, search_radius,
             motion_sensitivity, noise_offset_factor
         )
 
-    def call_normalize_accumulated(self, lib, final_image_sum, weight_map_sum, h, w, channels):
-        """
-        Membungkus pemanggilan normalize_accumulated_image_jit.
-        ASUMSI: Semua argumen NumPy sudah C-contiguous.
-        ASUMSI: argtypes sudah didefinisikan pada objek 'lib'.
-        """
-        # Langsung panggil fungsi C dengan argumen yang sudah disiapkan
-        lib.normalize_accumulated_image_jit(final_image_sum, weight_map_sum, h, w, channels)
-        # Catatan: final_image_sum dimodifikasi secara inplace oleh fungsi C
-
-
+    # =================================================================================
+    # === PERBAIKAN UTAMA DI SINI =====================================================
+    # Hilangkan parameter 'lib' yang tidak perlu agar konsisten.
+    # =================================================================================
+    def call_normalize_accumulated(self, final_image_sum, weight_map_sum, h, w, channels):
+        self.clib.normalize_accumulated_image_jit(final_image_sum, weight_map_sum, h, w, channels)
+        
 class SimilarityFrequencyInterface:
     """Membungkus pemanggilan fungsi C++ untuk similarity_mfnr_v2."""
 

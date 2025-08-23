@@ -3,13 +3,12 @@
 #include <cmath>
 #include <limits>
 #include <algorithm>
-#include <immintrin.h> // Header utama untuk AVX/AVX2
+#include <immintrin.h>
 
 namespace MotionMatching
 {
     namespace Internal
     {
-        // Fungsi tidak diubah, sudah cukup optimal
         static float calculate_plain_mad_32f(const cv::Mat &block1_gray, const cv::Mat &block2_gray)
         {
             CV_Assert(block1_gray.size() == block2_gray.size() &&
@@ -296,7 +295,7 @@ namespace MotionMatching
                               static_cast<float>(best_r) + clamped_dy);
         }
 
-    } // namespace Internal
+    }
 
     BlockMatchResult find_best_block_match_mad(
         const cv::Mat &current_block_gray,

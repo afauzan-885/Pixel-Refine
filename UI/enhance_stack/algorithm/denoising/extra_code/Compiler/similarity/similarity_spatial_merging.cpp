@@ -10,7 +10,6 @@
 #include "block_matching.hpp"
 #include "tile_noise_estimation.hpp"
 #include "spatial_merging.hpp"
-#include "motion_compensate.hpp"
 #include "compute_flat.hpp"
 
 namespace MotionMetricsConfig
@@ -26,7 +25,7 @@ namespace MotionMetricsConfig
 }
 
 // =======================================================================================
-// === FUNGSI HELPER DENGAN PENYEMPURNAAN BLUR UNTUK STABILITAS KASAR                ===
+// === FUNGSI HELPER (generate_pyramid_guidance_map) TIDAK BERUBAH                     ===
 // =======================================================================================
 static cv::Mat generate_pyramid_guidance_map(
     const cv::Mat &current_image_gray_full,
@@ -46,12 +45,9 @@ static cv::Mat generate_pyramid_guidance_map(
     cv::pyrDown(current_image_gray_half, current_image_gray_quarter);
     cv::pyrDown(reference_image_gray_half, reference_image_gray_quarter);
 
-    // <<< PENYEMPURNAAN BARU: Tambahkan Gaussian Blur untuk stabilitas >>>
     cv::Mat blurred_current_quarter, blurred_reference_quarter;
-    // Kernel (3,3) dan sigma 0.8 adalah titik awal yang baik.
     cv::GaussianBlur(current_image_gray_quarter, blurred_current_quarter, cv::Size(3, 3), 0.8);
     cv::GaussianBlur(reference_image_gray_quarter, blurred_reference_quarter, cv::Size(3, 3), 0.8);
-    // Sekarang, gunakan versi yang sudah di-blur untuk semua perhitungan di level 1/4.
 
     cv::Mat confidence_map_quarter(current_image_gray_quarter.size(), CV_32FC1, cv::Scalar(0.0f));
     int tile_h_quarter = std::max(1, tile_h / 4);
@@ -75,15 +71,13 @@ static cv::Mat generate_pyramid_guidance_map(
             buffers_q.grad_mag_current.create(current_h, current_w, CV_32FC1);
 
             cv::Rect roi_q(c_q, r_q, current_w, current_h);
-            // Gunakan gambar yang sudah di-blur untuk perbandingan
             BlockMatchResult res_q = find_best_block_match_mad(blurred_current_quarter(roi_q), blurred_reference_quarter, r_q, c_q, search_radius_quarter, GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON, buffers_q);
             float conf_q = res_q.success ? calculate_match_confidence(res_q, global_estimated_noise_sigma, motion_sensitivity, noise_offset_factor) : 0.0f;
             confidence_map_quarter(roi_q).setTo(cv::Scalar(conf_q));
         }
     }
 
-    // --- Tahap B: Piramida Level 2 (1/2) - Penyempurnaan Menengah (Tidak Berubah) ---
-    // Logika di tahap ini tidak perlu diubah. Ia sudah menerima hasil yang lebih stabil dari tahap A.
+    // --- Tahap B: Piramida Level 2 (1/2) - Penyempurnaan Menengah ---
     cv::Mat guidance_map_for_half;
     cv::resize(confidence_map_quarter, guidance_map_for_half, current_image_gray_half.size(), 0, 0, cv::INTER_LINEAR);
 
@@ -119,7 +113,7 @@ static cv::Mat generate_pyramid_guidance_map(
         }
     }
 
-    // --- Tahap C: Upscale peta level 2 menjadi peta panduan akhir (Tidak Berubah) ---
+    // --- Tahap C: Upscale peta level 2 menjadi peta panduan akhir ---
     cv::Mat guidance_confidence_map_final;
     cv::resize(confidence_map_half, guidance_confidence_map_final, current_image_gray_full.size(), 0, 0, cv::INTER_LINEAR);
 
@@ -134,6 +128,7 @@ extern "C"
         const float *current_image_ptr,
         const float *reference_image_ptr,
         const float *base_window_ptr,
+        const float *stability_map_ptr,
         const int *row_starts, const int *col_starts,
         int num_row_starts, int num_col_starts,
         int tile_h, int tile_w,
@@ -144,7 +139,7 @@ extern "C"
     {
         using namespace MotionMetricsConfig;
 
-        // --- Bagian 1: Inisialisasi dan Persiapan Awal (Tidak Berubah) ---
+        // --- Bagian 1: Inisialisasi dan Persiapan Awal ---
         if (!final_image_sum_ptr || !weight_map_sum_ptr || !current_image_ptr || !reference_image_ptr || !base_window_ptr ||
             !row_starts || !col_starts || h_img <= 0 || w_img <= 0 || tile_h <= 0 || tile_w <= 0 || channels <= 0)
         {
@@ -160,7 +155,17 @@ extern "C"
         const cv::Mat current_image_mat(h_img, w_img, mat_type_color, const_cast<float *>(current_image_ptr));
         const cv::Mat reference_image_mat(h_img, w_img, mat_type_color, const_cast<float *>(reference_image_ptr));
 
+        cv::Mat stability_map_mat;
+        if (stability_map_ptr)
+        {
+            stability_map_mat = cv::Mat(h_img, w_img, CV_32FC1, const_cast<float *>(stability_map_ptr));
+        }
+
+        // --- Buffer Pra-Pemrosesan ---
         cv::Mat current_image_gray_full, reference_image_gray_full;
+        cv::Mat current_image_gray_temp, reference_image_gray_temp;
+
+        // --- Konversi ke Grayscale (langsung ke buffer utama) ---
         if (channels > 1)
         {
             cv::Mat temp_curr, temp_ref;
@@ -175,6 +180,64 @@ extern "C"
             reference_image_mat.convertTo(reference_image_gray_full, CV_32F);
         }
 
+        // --- Estimasi Noise (dilakukan pada gambar grayscale bersih sebelum modifikasi) ---
+        float global_estimated_noise_sigma = 0.015f;
+#ifdef TILE_NOISE_ESTIMATION_HPP
+        if (reference_image_gray_full.rows >= 3 && reference_image_gray_full.cols >= 3)
+        {
+            global_estimated_noise_sigma = NoiseEstimation::estimate_tile_noise_sigma_mad_laplacian(reference_image_gray_full, MAD_TO_SIGMA_FACTOR);
+        }
+#endif
+        global_estimated_noise_sigma = std::max(0.001f, std::min(0.25f, global_estimated_noise_sigma));
+
+        // --- Rantai Pra-Pemrosesan Efisien ---
+
+        // Tahap A: CLAHE Adaptif
+        float linear_strength_factor_clahe = 1.0f - std::min(global_estimated_noise_sigma / 0.12f, 1.0f);
+        float curved_strength_factor_clahe = std::pow(linear_strength_factor_clahe, 0.45f);
+        float clip_limit = 0.6f + (curved_strength_factor_clahe * 3.0f);
+
+        if (clip_limit > 0.61f)
+        {
+            cv::Mat current_8u, ref_8u;
+            current_image_gray_full.convertTo(current_8u, CV_8U, 255.0);
+            reference_image_gray_full.convertTo(ref_8u, CV_8U, 255.0);
+
+            cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(clip_limit, cv::Size(8, 8));
+            
+            clahe->apply(current_8u, current_8u);
+            clahe->apply(ref_8u, ref_8u);
+
+            current_8u.convertTo(current_image_gray_full, CV_32F, 1.0 / 255.0);
+            ref_8u.convertTo(reference_image_gray_full, CV_32F, 1.0 / 255.0);
+        }
+        
+        // Tahap B: Bilateral Denoising Adaptif
+        const float noise_activation_threshold = 0.08f;
+        const float noise_full_strength_threshold = 0.85f;
+        const float transition_range = noise_full_strength_threshold - noise_activation_threshold;
+        float denoising_strength_factor = 0.0f;
+
+        if (global_estimated_noise_sigma > noise_activation_threshold)
+        {
+            denoising_strength_factor = (global_estimated_noise_sigma - noise_activation_threshold) / transition_range;
+            denoising_strength_factor = std::min(1.0f, std::max(0.0f, denoising_strength_factor));
+        }
+
+        if (denoising_strength_factor > 0.01f)
+        {
+            int kernel_size = 5; 
+            double sigma_color = 5.0 + (denoising_strength_factor * 45.0);
+            double sigma_space = 7.0;
+
+            cv::bilateralFilter(current_image_gray_full, current_image_gray_temp, kernel_size, sigma_color / 255.0, sigma_space);
+            cv::bilateralFilter(reference_image_gray_full, reference_image_gray_temp, kernel_size, sigma_color / 255.0, sigma_space);
+
+            cv::swap(current_image_gray_full, current_image_gray_temp);
+            cv::swap(reference_image_gray_full, reference_image_gray_temp);
+        }
+
+        // --- Deteksi Area Datar (Dilakukan pada gambar original) ---
         std::vector<bool> is_tile_flat;
         std::vector<cv::Mat> ref_channels_for_flat_detection;
         if (channels > 1)
@@ -187,38 +250,30 @@ extern "C"
         }
         TextureAnalysis::detect_flat_tiles(ref_channels_for_flat_detection, tile_h, tile_w, channels, FLATNESS_VARIANCE_THRESHOLD, is_tile_flat);
 
-        float global_estimated_noise_sigma = 0.015f;
-#ifdef TILE_NOISE_ESTIMATION_HPP
-        if (reference_image_gray_full.rows >= 3 && reference_image_gray_full.cols >= 3)
-        {
-            global_estimated_noise_sigma = NoiseEstimation::estimate_tile_noise_sigma_mad_laplacian(reference_image_gray_full, MAD_TO_SIGMA_FACTOR);
-        }
-#endif
-        global_estimated_noise_sigma = std::max(0.001f, std::min(0.25f, global_estimated_noise_sigma));
-
-        // --- Bagian 2: Menghasilkan Peta Panduan dengan Memanggil Fungsi Helper ---
+        // --- Menghasilkan Peta Panduan Spasial ---
         cv::Mat guidance_confidence_map_final = generate_pyramid_guidance_map(
-            current_image_gray_full, reference_image_gray_full,
+            current_image_gray_full,
+            reference_image_gray_full,
             tile_h, tile_w, search_radius,
             motion_sensitivity, noise_offset_factor, global_estimated_noise_sigma);
 
-// --- Bagian 3: Proses Utama dengan Modulasi ---
-#pragma omp parallel
+        // --- Bagian 3: Proses Utama dengan Modulasi ---
+        #pragma omp parallel
         {
-            MotionCompensate::MotionCompensationBuffers buffers_th;
+            MotionMatching::MBMBuffers mbm_buffers_th;
             int mbm_alloc_h = (block_h > 0) ? block_h : tile_h;
             int mbm_alloc_w = (block_w > 0) ? block_w : tile_w;
             if (mbm_alloc_h > 0 && mbm_alloc_w > 0)
             {
-                buffers_th.mbm_buffers.diff_workspace.create(mbm_alloc_h, mbm_alloc_w, CV_32FC1);
-                buffers_th.mbm_buffers.grad_x.create(mbm_alloc_h, mbm_alloc_w, CV_32F);
-                buffers_th.mbm_buffers.grad_y.create(mbm_alloc_h, mbm_alloc_w, CV_32F);
-                buffers_th.mbm_buffers.grad_mag_current.create(mbm_alloc_h, mbm_alloc_w, CV_32FC1);
+                mbm_buffers_th.diff_workspace.create(mbm_alloc_h, mbm_alloc_w, CV_32FC1);
+                mbm_buffers_th.grad_x.create(mbm_alloc_h, mbm_alloc_w, CV_32F);
+                mbm_buffers_th.grad_y.create(mbm_alloc_h, mbm_alloc_w, CV_32F);
+                mbm_buffers_th.grad_mag_current.create(mbm_alloc_h, mbm_alloc_w, CV_32FC1);
             }
             cv::Mat thread_block_confidences;
             const int num_tiles_x = (w_img > 0 && tile_w > 0) ? w_img / tile_w : 0;
 
-#pragma omp for collapse(2) schedule(static)
+            #pragma omp for collapse(2) schedule(static)
             for (int i = 0; i < num_row_starts; i++)
             {
                 for (int j = 0; j < num_col_starts; j++)
@@ -230,23 +285,8 @@ extern "C"
 
                     cv::Rect tile_roi(c, r, tile_w, tile_h);
 
-                    MotionCompensate::MotionData motion_data = MotionCompensate::process_tile_motion(
-                        current_image_mat, current_image_gray_full, reference_image_gray_full,
-                        tile_roi, search_radius, buffers_th);
-
-                    cv::Mat current_tile_for_accumulation;
-                    cv::Mat current_tile_gray_for_mbm;
-                    if (motion_data.compensation_applied)
-                    {
-                        current_tile_for_accumulation = motion_data.compensated_color_tile;
-                        current_tile_gray_for_mbm = motion_data.compensated_gray_tile;
-                    }
-                    else
-                    {
-                        current_tile_for_accumulation = current_image_mat(tile_roi);
-                        current_tile_gray_for_mbm = current_image_gray_full(tile_roi);
-                    }
-
+                    const cv::Mat current_tile_for_accumulation = current_image_mat(tile_roi);
+                    const cv::Mat current_tile_gray_for_mbm = current_image_gray_full(tile_roi);
                     const cv::Mat reference_tile_gray_for_mbm = reference_image_gray_full(tile_roi);
                     const cv::Mat base_window_tile_mat(tile_h, tile_w, CV_32FC1, const_cast<float *>(base_window_ptr));
 
@@ -296,7 +336,7 @@ extern "C"
 
                             MotionMatching::BlockMatchResult mbm_result = MotionMatching::find_best_block_match_mad(
                                 current_block_to_match, reference_tile_gray_for_mbm, block_local_r_start,
-                                block_local_c_start, search_radius, GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON, buffers_th.mbm_buffers);
+                                block_local_c_start, search_radius, GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON, mbm_buffers_th);
 
                             float confidence = 0.0f;
                             if (mbm_result.success)
@@ -304,12 +344,33 @@ extern "C"
                                 confidence = MotionMatching::calculate_match_confidence(
                                     mbm_result, global_estimated_noise_sigma, motion_sensitivity, noise_offset_factor);
 
-                                // --- PERUBAHAN INTI: MODULASI DENGAN PETA PANDUAN ---
                                 int global_r_pixel = r + block_local_r_start;
                                 int global_c_pixel = c + block_local_c_start;
-                                float guidance_confidence = guidance_confidence_map_final.at<float>(global_r_pixel, global_c_pixel);
-                                confidence *= guidance_confidence;
-                                // ----------------------------------------------------
+
+                                if (global_r_pixel >= 0 && global_r_pixel < guidance_confidence_map_final.rows &&
+                                    global_c_pixel >= 0 && global_c_pixel < guidance_confidence_map_final.cols)
+                                {
+                                    float guidance_confidence = guidance_confidence_map_final.at<float>(global_r_pixel, global_c_pixel);
+                                    confidence *= guidance_confidence;
+                                }
+                                else
+                                {
+                                    confidence = 0.0f;
+                                }
+
+                                if (confidence > 0.0f && !stability_map_mat.empty())
+                                {
+                                    if (global_r_pixel >= 0 && global_r_pixel < stability_map_mat.rows &&
+                                        global_c_pixel >= 0 && global_c_pixel < stability_map_mat.cols)
+                                    {
+                                        float temporal_stability = stability_map_mat.at<float>(global_r_pixel, global_c_pixel);
+                                        confidence *= temporal_stability;
+                                    }
+                                    else
+                                    {
+                                        confidence = 0.0f;
+                                    }
+                                }
 
                                 if (current_tile_is_flat)
                                 {
@@ -321,7 +382,7 @@ extern "C"
                         }
                     }
 
-                    // --- Bagian 5: Akumulasi Bobot dan Piksel (Tidak Berubah) ---
+                    // --- Bagian 5: Akumulasi Bobot dan Piksel ---
                     for (int y = 0; y < tile_h; ++y)
                     {
                         const float *current_tile_color_row = current_tile_for_accumulation.ptr<const float>(y);
@@ -343,14 +404,14 @@ extern "C"
                             float pixel_weight = base_win_val * block_confidence;
                             if (pixel_weight > GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD)
                             {
-#pragma omp atomic update
+                                #pragma omp atomic update
                                 global_weight_sum_row[gx] += pixel_weight;
                                 int local_pixel_idx = x * channels;
                                 int global_pixel_idx = gx * channels;
                                 for (int ch = 0; ch < channels; ++ch)
                                 {
                                     float weighted_pixel_value = current_tile_color_row[local_pixel_idx + ch] * pixel_weight;
-#pragma omp atomic update
+                                    #pragma omp atomic update
                                     global_pixel_sum_row[global_pixel_idx + ch] += weighted_pixel_value;
                                 }
                             }
@@ -361,6 +422,7 @@ extern "C"
         }
     }
 
+    // --- Fungsi normalize_accumulated_image_jit TIDAK BERUBAH ---
     void normalize_accumulated_image_jit(
         float *final_image_ptr,
         const float *weight_map_sum_ptr,
