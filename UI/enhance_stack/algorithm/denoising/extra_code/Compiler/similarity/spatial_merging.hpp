@@ -1,4 +1,5 @@
 // spatial_merging.hpp
+
 #ifndef SPATIAL_MERGING_HPP
 #define SPATIAL_MERGING_HPP
 
@@ -8,14 +9,16 @@
 
 namespace MotionMatching { 
 
-// Deklarasi fungsi
+// --- PERBAIKAN DI SINI ---
+// Deklarasi fungsi harus cocok dengan implementasi di file .cpp
 float calculate_match_confidence( 
-    const MotionMatching::BlockMatchResult& result,
+    const MotionMatching::TileMatchResult& result, // Ganti dari BlockMatchResult
     float estimated_noise_sigma,
     float p_mbm_mad_sensitivity, 
     float p_mbm_noise_mad_offset_factor 
 );
+// --- AKHIR PERBAIKAN ---
 
-}
+} // namespace MotionMatching
 
-#endif
+#endif // SPATIAL_MERGING_HPP

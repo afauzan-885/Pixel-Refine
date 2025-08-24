@@ -188,7 +188,7 @@ class SimilarityAlgorithm:
                     temporal_analysis_mode='one_pass', # Opsi: 'one_pass', 'two_pass_full'
                     **unused_kwargs):
 
-        # --- LANGKAH 1: Inisialisasi dan Penentuan Resolusi Kerja ---
+        # --- LANGKAH 1: Inisialisasi dan Setup Tiles (Tanpa Resize Logic) ---
         tile_h, tile_w = map(int, tile_size)
         try:
             c_interface = SimilaritySpatialInterface(lib_path)
@@ -197,25 +197,18 @@ class SimilarityAlgorithm:
         num_images = len(images)
         orig_h, orig_w = images[0].shape[:2]
 
-        work_res_h, work_res_w = ref_image_h, ref_image_w
-        TARGET_MP = 12 * 1e6
-        if (ref_image_h * ref_image_w) > TARGET_MP:
-            scale_factor = np.sqrt(TARGET_MP / (ref_image_h * ref_image_w))
-            work_res_h, work_res_w = int(ref_image_h * scale_factor), int(ref_image_w * scale_factor)
-        else:
-            work_res_h, work_res_w = int(ref_image_h * 0.7), int(ref_image_w * 0.7)
-        work_res_h, work_res_w = (work_res_h // 2) * 2, (work_res_w // 2) * 2
-        
-        # Gunakan ukuran tile asli untuk keandalan
+        # Setup tile configuration for full resolution processing
         base_window = gaussian_window((tile_h, tile_w))
         step_y = max(int(tile_h * (1 - overlap)), 1)
         step_x = max(int(tile_w * (1 - overlap)), 1)
-        row_starts = np.arange(0, work_res_h - tile_h + 1, step_y) if work_res_h >= tile_h else np.array([0])
-        if work_res_h > tile_h and (not row_starts.size or row_starts[-1] != work_res_h - tile_h):
-            row_starts = np.append(row_starts, work_res_h - tile_h)
-        col_starts = np.arange(0, work_res_w - tile_w + 1, step_x) if work_res_w >= tile_w else np.array([0])
-        if work_res_w > tile_w and (not col_starts.size or col_starts[-1] != work_res_w - tile_w):
-            col_starts = np.append(col_starts, work_res_w - tile_w)
+        
+        # Generate tile positions for full resolution
+        row_starts = np.arange(0, ref_image_h - tile_h + 1, step_y) if ref_image_h >= tile_h else np.array([0])
+        if ref_image_h > tile_h and (not row_starts.size or row_starts[-1] != ref_image_h - tile_h):
+            row_starts = np.append(row_starts, ref_image_h - tile_h)
+        col_starts = np.arange(0, ref_image_w - tile_w + 1, step_x) if ref_image_w >= tile_w else np.array([0])
+        if ref_image_w > tile_w and (not col_starts.size or col_starts[-1] != ref_image_w - tile_w):
+            col_starts = np.append(col_starts, ref_image_w - tile_w)
         row_starts = np.ascontiguousarray(np.unique(row_starts).astype(np.int32))
         col_starts = np.ascontiguousarray(np.unique(col_starts).astype(np.int32))
 
@@ -225,36 +218,52 @@ class SimilarityAlgorithm:
             if update_progress:
                 update_progress(5, "Pass 1/2: Menganalisis stabilitas adegan...")
             
-            downsampled_h, downsampled_w = work_res_h // 2, work_res_w // 2
-            sum_map = np.zeros((downsampled_h, downsampled_w), dtype=np.float32)
-            sum_sq_map = np.zeros((downsampled_h, downsampled_w), dtype=np.float32)
+            # Use 1/2 resolution for stability analysis
+            stability_analysis_h, stability_analysis_w = ref_image_h // 2, ref_image_w // 2
+            sum_map = np.zeros((stability_analysis_h, stability_analysis_w), dtype=np.float32)
+            sum_sq_map = np.zeros((stability_analysis_h, stability_analysis_w), dtype=np.float32)
             frame_count = 0
-            
-            ref_work_res = cv2.resize(reference_image_float, (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
 
             for i, image_orig in enumerate(images):
                 if stop_requested and stop_requested(): return (None, None, 0)
                 if update_progress:
                     update_progress(int(5 + ((i + 1) / num_images) * 45), f"Pass 1/2: Menganalisis frame {i+1}/{num_images}")
                 
-                curr_work_res = cv2.resize(normalize_image(image_orig, ref_dtype), (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
-                temp_weight_map = np.ascontiguousarray(np.zeros((work_res_h, work_res_w), dtype=np.float32))
-                dummy_image_sum = np.ascontiguousarray(np.zeros((work_res_h, work_res_w, ref_channels_buffer), dtype=np.float32))
+                # Create temporary buffers for stability analysis at reduced resolution
+                temp_weight_map = np.ascontiguousarray(np.zeros((stability_analysis_h, stability_analysis_w), dtype=np.float32))
+                dummy_image_sum = np.ascontiguousarray(np.zeros((stability_analysis_h, stability_analysis_w, ref_channels_buffer), dtype=np.float32))
                 
+                # Generate tile positions for stability analysis resolution
+                stability_row_starts = np.arange(0, stability_analysis_h - tile_h + 1, step_y) if stability_analysis_h >= tile_h else np.array([0])
+                if stability_analysis_h > tile_h and (not stability_row_starts.size or stability_row_starts[-1] != stability_analysis_h - tile_h):
+                    stability_row_starts = np.append(stability_row_starts, stability_analysis_h - tile_h)
+                stability_col_starts = np.arange(0, stability_analysis_w - tile_w + 1, step_x) if stability_analysis_w >= tile_w else np.array([0])
+                if stability_analysis_w > tile_w and (not stability_col_starts.size or stability_col_starts[-1] != stability_analysis_w - tile_w):
+                    stability_col_starts = np.append(stability_col_starts, stability_analysis_w - tile_w)
+                stability_row_starts = np.ascontiguousarray(np.unique(stability_row_starts).astype(np.int32))
+                stability_col_starts = np.ascontiguousarray(np.unique(stability_col_starts).astype(np.int32))
+                
+                # Call C++ for stability analysis - C++ will handle resize internally
                 c_interface.call_accumulate_frame_weighted(
-                    final_image_sum=dummy_image_sum, weight_map_sum=temp_weight_map,
-                    current_image=curr_work_res, reference_image=ref_work_res, base_window=base_window,
-                    stability_map=None, row_starts=row_starts, col_starts=col_starts,
-                    tile_h=tile_h, tile_w=tile_w, h=work_res_h, w=work_res_w, channels=ref_channels_buffer,
-                    block_h=tile_h, block_w=tile_w, search_radius=0,
-                    motion_sensitivity=motion_sensitivity, noise_offset_factor=noise_offset_factor
+                    final_image_sum=dummy_image_sum, 
+                    weight_map_sum=temp_weight_map,
+                    current_image=normalize_image(image_orig, ref_dtype),  # Full resolution input
+                    reference_image=reference_image_float,  # Full resolution input
+                    base_window=base_window,
+                    stability_map=None, 
+                    row_starts=stability_row_starts, col_starts=stability_col_starts,
+                    tile_h=tile_h, tile_w=tile_w, 
+                    h=stability_analysis_h, w=stability_analysis_w, channels=ref_channels_buffer,
+                    motion_sensitivity=motion_sensitivity, noise_offset_factor=noise_offset_factor,
+                    orig_h=ref_image_h, orig_w=ref_image_w,
+                    target_h=stability_analysis_h, target_w=stability_analysis_w,
+                    auto_resize=False 
                 )
                 
-                downsampled_map = cv2.resize(temp_weight_map, (downsampled_w, downsampled_h), interpolation=cv2.INTER_AREA)
-                sum_map += downsampled_map
-                sum_sq_map += np.square(downsampled_map)
+                sum_map += temp_weight_map
+                sum_sq_map += np.square(temp_weight_map)
                 frame_count += 1
-                del temp_weight_map, dummy_image_sum, curr_work_res, downsampled_map
+                del temp_weight_map, dummy_image_sum
 
             if frame_count >= 2:
                 N = float(frame_count)
@@ -276,10 +285,11 @@ class SimilarityAlgorithm:
         if update_progress:
             update_progress(50, f"{msg_pass}Menggabungkan frame...")
 
+        # Initialize output buffers at full resolution
         final_image_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32))
         weight_map_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w), dtype=np.float32))
         
-        # Inisialisasi lain
+        # Initialize other variables
         processed_frames_spatial = 0
         progress_cap_percent = 95
         if temporal_consistency: weight_maps_all = []
@@ -290,11 +300,6 @@ class SimilarityAlgorithm:
         if refinement_algorithm == 'ml_driven' and not use_ml_refinement:
             refinement_algorithm = 'optical_flow'
 
-        ref_work_res_pass2 = cv2.resize(reference_image_float, (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
-        stability_map_work_res = None
-        if stability_map is not None:
-            stability_map_work_res = cv2.resize(stability_map, (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
-
         for i, image_orig in enumerate(images):
             if not isinstance(image_orig, np.ndarray): continue
             if update_progress:
@@ -304,31 +309,35 @@ class SimilarityAlgorithm:
                 msg = f"{msg_pass_str}Membangun gambar frame {i+1}/{num_images}"
                 update_progress(prog, msg)
             if stop_requested and stop_requested(): break
-        
-            curr_work_res_pass2 = cv2.resize(normalize_image(image_orig, ref_dtype), (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
 
             try:
-                temp_weight_map_work_res = np.ascontiguousarray(np.zeros((work_res_h, work_res_w), dtype=np.float32))
-                # BUAT BUFFER DUMMY KARENA C++ TIDAK MELAKUKAN AKUMULASI GAMBAR FINAL DI SINI
-                dummy_final_sum_work_res = np.ascontiguousarray(np.zeros((work_res_h, work_res_w, ref_channels_buffer), dtype=np.float32))
+                # Create temporary buffers for weight map generation
+                temp_weight_map_full_res = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w), dtype=np.float32))
+                dummy_final_sum_full_res = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32))
 
-                # Panggil C++ untuk mendapatkan peta bobot yang sudah dipandu oleh `stability_map`
+                # Call C++ to generate weight map - C++ handles all resize logic internally
                 c_interface.call_accumulate_frame_weighted(
-                    final_image_sum=dummy_final_sum_work_res, 
-                    weight_map_sum=temp_weight_map_work_res,
-                    current_image=curr_work_res_pass2, reference_image=ref_work_res_pass2, base_window=base_window,
-                    stability_map=stability_map_work_res, row_starts=row_starts, col_starts=col_starts,
-                    tile_h=tile_h, tile_w=tile_w, h=work_res_h, w=work_res_w, channels=ref_channels_buffer,
-                    block_h=tile_h, block_w=tile_w, search_radius=0,
-                    motion_sensitivity=motion_sensitivity, noise_offset_factor=noise_offset_factor
+                    final_image_sum=dummy_final_sum_full_res, 
+                    weight_map_sum=temp_weight_map_full_res,
+                    current_image=normalize_image(image_orig, ref_dtype),  # Full resolution input
+                    reference_image=reference_image_float,  # Full resolution input
+                    base_window=base_window,
+                    stability_map=stability_map,  # Full resolution stability map
+                    row_starts=row_starts, col_starts=col_starts,
+                    tile_h=tile_h, tile_w=tile_w, 
+                    h=ref_image_h, w=ref_image_w, channels=ref_channels_buffer,
+                    motion_sensitivity=motion_sensitivity, noise_offset_factor=noise_offset_factor,
+                    # Let C++ handle optimal resize strategy
+                    orig_h=ref_image_h, orig_w=ref_image_w,
+                    auto_resize=True, target_megapixels=12.0  # Auto-optimize working resolution
                 )
                 
-                temp_weight_map_full_res = cv2.resize(temp_weight_map_work_res, (ref_image_w, ref_image_h), interpolation=cv2.INTER_CUBIC)
-
+                # Apply AI reconstruction if available
                 map_for_refinement = temp_weight_map_full_res
                 if use_ai_reconstruction:
                     map_for_refinement = self._apply_knowledge_model(temp_weight_map_full_res)
                 
+                # Apply refinement algorithms
                 refined_weight = map_for_refinement
                 if optical_flows is not None and i < len(optical_flows):
                     if accumulated_weight_map is not None:
@@ -343,10 +352,11 @@ class SimilarityAlgorithm:
                 else:
                     refined_weight = map_for_refinement
 
-                # Akumulasi final dilakukan pada buffer resolusi penuh
+                # Accumulate results at full resolution
                 weight_map_sum += refined_weight
                 final_image_sum += normalize_image(image_orig, ref_dtype) * refined_weight[:, :, np.newaxis]
                 
+                # Store weight maps if required
                 if weight_of_each_image:
                     if collect_raw_maps_for_learning:
                         weight_maps_per_image.append(temp_weight_map_full_res.copy())
@@ -354,7 +364,15 @@ class SimilarityAlgorithm:
                         weight_maps_per_image.append(refined_weight.copy())
                 if temporal_consistency:
                     weight_maps_all.append(refined_weight.copy())
+                
+                # Update accumulated weight map for next iteration
+                if accumulated_weight_map is None:
+                    accumulated_weight_map = refined_weight.copy()
+                else:
+                    accumulated_weight_map += refined_weight
+                
                 processed_frames_spatial += 1
+                
             except Exception as e:
                 raise RuntimeError(f"C++ accumulation frame {i+1} spatial: {e}")
 
@@ -383,13 +401,12 @@ class SimilarityAlgorithm:
                         update_progress=None, stop_requested=None,
                         total_overall_images=None, images_processed_so_far=0,
                         lib_path='UI/data/similarity_frequency_merging.dll',
-                        refinement_algorithm='optical_flow',
+                        refinement_algorithm='none',
                         optical_flows=None,
                         temporal_consistency=True,
                         save_temporal_std_path=None,
                         weight_of_each_image=False,
                         collect_raw_maps_for_learning=False, 
-                        # ### PERUBAHAN: Parameter baru ditambahkan ###
                         use_ai_reconstruction=False,
                         **unused_kwargs):
 

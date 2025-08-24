@@ -1,3 +1,5 @@
+// spatial_merging.cpp
+
 #include "spatial_merging.hpp"
 
 namespace MotionMatching
@@ -9,52 +11,35 @@ namespace MotionMatching
     }
 
     float calculate_match_confidence(
-        const MotionMatching::BlockMatchResult &result,
+        const MotionMatching::TileMatchResult &result,
         float estimated_noise_sigma,
         float p_mbm_mad_sensitivity,
         float p_mbm_noise_mad_offset_factor)
     {
         using namespace MotionMetricsConfig;
-        float match_confidence = 0.0f;
 
-        if (!result.success || result.matches_found <= 0)
+        if (!result.success)
         {
             return 0.0f;
         }
 
+        // Perhitungan "excess MAD" setelah memperhitungkan noise tetap sangat berguna
         float noise_induced_mad_offset = p_mbm_noise_mad_offset_factor * estimated_noise_sigma;
-        float excess_mad = std::max(0.0f, result.min_mad - noise_induced_mad_offset);
+        float excess_mad = std::max(0.0f, result.mad_score - noise_induced_mad_offset); // Menggunakan mad_score
+
+        // --- DIHAPUS ---
+        // Logika `if (matches_found == 1)` dan `ratio_confidence` dihapus
+        // karena tidak ada lagi pencarian untuk menghasilkan `second_min_mad`.
+        // Kepercayaan sekarang murni berdasarkan kualitas absolut dari satu-satunya pencocokan.
 
         float absolute_quality_confidence = std::exp(-excess_mad * p_mbm_mad_sensitivity);
-        absolute_quality_confidence = std::max(0.0f, std::min(1.0f, absolute_quality_confidence));
 
-        if (result.matches_found == 1)
-        {
-            match_confidence = std::min(0.75f, absolute_quality_confidence);
-        }
-        else
-        {
-            float ratio_confidence = 1.0f;
-            if (result.second_min_mad < std::numeric_limits<float>::max() && result.second_min_mad > CONFIDENCE_EPSILON)
-            {
-                float excess_second_min_mad = std::max(0.0f, result.second_min_mad - noise_induced_mad_offset);
-                float ratio = 1.0f;
-                if (excess_second_min_mad > STABILITY_EPSILON)
-                {
-                    ratio = excess_mad / excess_second_min_mad;
-                }
-                else if (excess_mad < CONFIDENCE_EPSILON)
-                {
-                    ratio = 0.0f;
-                }
-                ratio_confidence = std::max(0.0f, 1.0f - ratio);
-            }
-            match_confidence = absolute_quality_confidence * ratio_confidence;
-        }
-
-        return std::max(0.0f, std::min(1.0f, match_confidence));
+        return std::max(0.0f, std::min(1.0f, absolute_quality_confidence));
     }
 
+    // --- TIDAK ADA PERUBAHAN, TAPI MUNGKIN TIDAK DIGUNAKAN LAGI ---
+    // Fungsi ini terkait dengan vektor gerak, yang tidak lagi dihitung.
+    // Bisa dihapus jika tidak ada bagian lain dari kode Anda yang menggunakannya.
     bool is_motion_vector_outlier(
         float dx_main, float dy_main,
         float dx_neighbor, float dy_neighbor,
@@ -66,4 +51,4 @@ namespace MotionMatching
         return distance_squared > (motion_jump_threshold * motion_jump_threshold);
     }
 
-} // namespace MotionMatching
+}
