@@ -185,142 +185,151 @@ class SimilarityAlgorithm:
                     weight_of_each_image=False,
                     collect_raw_maps_for_learning=False,
                     use_ai_reconstruction=False,
+                    temporal_analysis_mode='two_pass_full', # Opsi: 'one_pass', 'two_pass_full'
                     **unused_kwargs):
 
+        # --- LANGKAH 1: Inisialisasi dan Penentuan Resolusi Kerja ---
         tile_h, tile_w = map(int, tile_size)
         try:
             c_interface = SimilaritySpatialInterface(lib_path)
         except (FileNotFoundError, OSError, AttributeError) as e:
             raise RuntimeError(f"Gagal memuat C++ interface_spatial_merging: {e}")
-
-        step_y = max(int(tile_h * (1 - overlap)), 1)
-        step_x = max(int(tile_w * (1 - overlap)), 1)
-        row_starts = np.arange(0, ref_image_h - tile_h + 1, step_y) if ref_image_h >= tile_h else np.array([0])
-        if ref_image_h > tile_h and (not row_starts.size or row_starts[-1] != ref_image_h - tile_h):
-            row_starts = np.append(row_starts, ref_image_h - tile_h)
-        col_starts = np.arange(0, ref_image_w - tile_w + 1, step_x) if ref_image_w >= tile_w else np.array([0])
-        if ref_image_w > tile_w and (not col_starts.size or col_starts[-1] != ref_image_w - tile_w):
-            col_starts = np.append(col_starts, ref_image_w - tile_w)
-        row_starts = np.ascontiguousarray(np.unique(row_starts).astype(np.int32))
-        col_starts = np.ascontiguousarray(np.unique(col_starts).astype(np.int32))
-        base_window = gaussian_window(tile_size)
         num_images = len(images)
         orig_h, orig_w = images[0].shape[:2]
 
+        work_res_h, work_res_w = ref_image_h, ref_image_w
+        TARGET_MP = 12 * 1e6
+        if (ref_image_h * ref_image_w) > TARGET_MP:
+            scale_factor = np.sqrt(TARGET_MP / (ref_image_h * ref_image_w))
+            work_res_h, work_res_w = int(ref_image_h * scale_factor), int(ref_image_w * scale_factor)
+        else:
+            work_res_h, work_res_w = int(ref_image_h * 0.7), int(ref_image_w * 0.7)
+        work_res_h, work_res_w = (work_res_h // 2) * 2, (work_res_w // 2) * 2
+        
+        # Gunakan ukuran tile asli untuk keandalan
+        base_window = gaussian_window((tile_h, tile_w))
+        step_y = max(int(tile_h * (1 - overlap)), 1)
+        step_x = max(int(tile_w * (1 - overlap)), 1)
+        row_starts = np.arange(0, work_res_h - tile_h + 1, step_y) if work_res_h >= tile_h else np.array([0])
+        if work_res_h > tile_h and (not row_starts.size or row_starts[-1] != work_res_h - tile_h):
+            row_starts = np.append(row_starts, work_res_h - tile_h)
+        col_starts = np.arange(0, work_res_w - tile_w + 1, step_x) if work_res_w >= tile_w else np.array([0])
+        if work_res_w > tile_w and (not col_starts.size or col_starts[-1] != work_res_w - tile_w):
+            col_starts = np.append(col_starts, work_res_w - tile_w)
+        row_starts = np.ascontiguousarray(np.unique(row_starts).astype(np.int32))
+        col_starts = np.ascontiguousarray(np.unique(col_starts).astype(np.int32))
+
+        # ====================================================================================
+        # === LANGKAH 2 (PASS 1): Membuat Peta Stabilitas ==================================
+        # ====================================================================================
+        stability_map = None
+        if temporal_analysis_mode == 'two_pass_full':
+            if update_progress:
+                update_progress(5, "Pass 1/2: Menganalisis stabilitas adegan...")
+            
+            downsampled_h, downsampled_w = work_res_h // 2, work_res_w // 2
+            sum_map = np.zeros((downsampled_h, downsampled_w), dtype=np.float32)
+            sum_sq_map = np.zeros((downsampled_h, downsampled_w), dtype=np.float32)
+            frame_count = 0
+            
+            ref_work_res = cv2.resize(reference_image_float, (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
+
+            for i, image_orig in enumerate(images):
+                if stop_requested and stop_requested(): return (None, None, 0)
+                if update_progress:
+                    update_progress(int(5 + ((i + 1) / num_images) * 45), f"Pass 1/2: Menganalisis frame {i+1}/{num_images}")
+                
+                curr_work_res = cv2.resize(normalize_image(image_orig, ref_dtype), (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
+                temp_weight_map = np.ascontiguousarray(np.zeros((work_res_h, work_res_w), dtype=np.float32))
+                dummy_image_sum = np.ascontiguousarray(np.zeros((work_res_h, work_res_w, ref_channels_buffer), dtype=np.float32))
+                
+                c_interface.call_accumulate_frame_weighted(
+                    final_image_sum=dummy_image_sum, weight_map_sum=temp_weight_map,
+                    current_image=curr_work_res, reference_image=ref_work_res, base_window=base_window,
+                    stability_map=None, row_starts=row_starts, col_starts=col_starts,
+                    tile_h=tile_h, tile_w=tile_w, h=work_res_h, w=work_res_w, channels=ref_channels_buffer,
+                    block_h=tile_h, block_w=tile_w, search_radius=0,
+                    motion_sensitivity=motion_sensitivity, noise_offset_factor=noise_offset_factor
+                )
+                
+                downsampled_map = cv2.resize(temp_weight_map, (downsampled_w, downsampled_h), interpolation=cv2.INTER_AREA)
+                sum_map += downsampled_map
+                sum_sq_map += np.square(downsampled_map)
+                frame_count += 1
+                del temp_weight_map, dummy_image_sum, curr_work_res, downsampled_map
+
+            if frame_count >= 2:
+                N = float(frame_count)
+                mean_map = sum_map / N
+                variance_map = (sum_sq_map / N) - np.square(mean_map)
+                variance_map[variance_map < 0] = 0 
+                std_weights_low_res = np.sqrt(variance_map)
+                max_std = np.max(std_weights_low_res)
+                stability_map_low_res = 1.0 - (std_weights_low_res / (max_std + 1e-6))
+                stability_map_full_res = cv2.resize(stability_map_low_res.astype(np.float32), (ref_image_w, ref_image_h), interpolation=cv2.INTER_CUBIC)
+                stability_map = np.ascontiguousarray(np.clip(stability_map_full_res**2.0, 0.0, 1.0).astype(np.float32))
+            
+            del sum_map, sum_sq_map
+
         # =================================================================================
-        # === PASS 1: Analisis Timeline dengan Optimasi Memori (Downsampling + float16) ===
+        # === LANGKAH 3 (PASS 2 / UTAMA): Akumulasi Final Terpandu ========================
         # =================================================================================
+        msg_pass = "Pass 2/2: " if temporal_analysis_mode != 'one_pass' else ""
         if update_progress:
-            update_progress(5, "Pass 1/2: Menganalisis stabilitas adegan...")
+            update_progress(50, f"{msg_pass}Menggabungkan frame...")
 
-        downsampled_h = ref_image_h // 2
-        downsampled_w = ref_image_w // 2
-
-        low_res_raw_weight_maps = []
-        
-        for i, image_orig in enumerate(images):
-            if stop_requested and stop_requested(): return (None, None, 0)
-            
-            current_image_float = normalize_image(image_orig, ref_dtype)
-            if current_image_float.shape[2] != ref_channels_buffer: continue
-
-            temp_weight_map = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w), dtype=np.float32))
-            dummy_image_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32))
-
-            c_interface.call_accumulate_frame_weighted(
-                final_image_sum=dummy_image_sum,
-                weight_map_sum=temp_weight_map,
-                current_image=current_image_float,
-                reference_image=reference_image_float,
-                base_window=base_window,
-                stability_map=None,
-                row_starts=row_starts,
-                col_starts=col_starts,
-                tile_h=tile_h, tile_w=tile_w, h=ref_image_h, w=ref_image_w, channels=ref_channels_buffer,
-                block_h=tile_h, block_w=tile_w, search_radius=0,
-                motion_sensitivity=motion_sensitivity,
-                noise_offset_factor=noise_offset_factor
-            )
-            
-            downsampled_map = cv2.resize(temp_weight_map, (downsampled_w, downsampled_h), interpolation=cv2.INTER_AREA)
-            
-            # =================================================================
-            # === PERUBAHAN OPTIMISASI: Gunakan float16 untuk penyimpanan =====
-            # =================================================================
-            low_res_raw_weight_maps.append(downsampled_map.astype(np.float16))
-            
-        if not low_res_raw_weight_maps:
-            return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
-
-        # --- Buat Peta Stabilitas ---
-        maps_stack = np.stack(low_res_raw_weight_maps, axis=0)
-        
-        # Lakukan kalkulasi dalam float32 untuk menjaga presisi, lalu konversi kembali
-        std_weights_low_res = np.std(maps_stack.astype(np.float32), axis=0)
-        max_std = np.max(std_weights_low_res)
-        stability_map_low_res = 1.0 - (std_weights_low_res / (max_std + 1e-6))
-        
-        # Kembalikan Peta Stabilitas ke resolusi penuh
-        stability_map_full_res = cv2.resize(stability_map_low_res, (ref_image_w, ref_image_h), interpolation=cv2.INTER_CUBIC)
-        stability_map = np.ascontiguousarray(np.clip(stability_map_full_res**2.0, 0.0, 1.0).astype(np.float32))
-
-        # =================================================================================
-        # === PASS 2: Loop Pemrosesan Utama, Ditingkatkan dengan Peta Stabilitas =========
-        # =================================================================================
         final_image_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32))
         weight_map_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w), dtype=np.float32))
         
-        # Inisialisasi variabel lain dari kode original Anda (tidak berubah)
+        # Inisialisasi lain
         processed_frames_spatial = 0
         progress_cap_percent = 95
         if temporal_consistency: weight_maps_all = []
         if weight_of_each_image: weight_maps_per_image = []
         accumulated_weight_map, prev_weight_map_for_standard = None, None
-        if use_ai_reconstruction:
-            if self.is_model_loaded: pass
-            else: use_ai_reconstruction = False
-        use_ml_refinement = (refinement_algorithm == 'ml_driven' and self.smart_alpha_generator is not None)
-        if refinement_algorithm == 'ml_driven' and self.smart_alpha_generator is None:
+        use_ai_reconstruction = use_ai_reconstruction and hasattr(self, 'is_model_loaded') and self.is_model_loaded
+        use_ml_refinement = (refinement_algorithm == 'ml_driven' and hasattr(self, 'smart_alpha_generator') and self.smart_alpha_generator is not None)
+        if refinement_algorithm == 'ml_driven' and not use_ml_refinement:
             refinement_algorithm = 'optical_flow'
+
+        ref_work_res_pass2 = cv2.resize(reference_image_float, (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
+        stability_map_work_res = None
+        if stability_map is not None:
+            stability_map_work_res = cv2.resize(stability_map, (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
 
         for i, image_orig in enumerate(images):
             if not isinstance(image_orig, np.ndarray): continue
             if update_progress:
                 current_img_overall = images_processed_so_far + i + 1
-                prog = int(45 + ((current_img_overall / total_overall_images) * (progress_cap_percent-45) if total_overall_images and total_overall_images > 0 else ((i + 1) / num_images) * (progress_cap_percent-45)))
-                msg = f"Pass 2/2: Membangun gambar frame {i+1}/{num_images}"
+                prog = int(50 + ((current_img_overall / total_overall_images) * (progress_cap_percent - 50) if total_overall_images and total_overall_images > 0 else ((i + 1) / num_images) * (progress_cap_percent - 50)))
+                msg_pass_str = "Pass 2/2: " if temporal_analysis_mode != 'one_pass' else ""
+                msg = f"{msg_pass_str}Membangun gambar frame {i+1}/{num_images}"
                 update_progress(prog, msg)
             if stop_requested and stop_requested(): break
-            try:
-                if image_orig.shape[0] != orig_h or image_orig.shape[1] != orig_w or image_orig.dtype != ref_dtype: continue
-                num_ch_orig = image_orig.shape[2] if image_orig.ndim == 3 else 1
-                if num_ch_orig not in (1, 3): continue
-            except Exception: continue
-
-            current_image_float = normalize_image(image_orig, ref_dtype)
-            if current_image_float.shape[2] != ref_channels_buffer: continue
+        
+            curr_work_res_pass2 = cv2.resize(normalize_image(image_orig, ref_dtype), (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
 
             try:
-                temp_weight_map = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w), dtype=np.float32))
-                
+                temp_weight_map_work_res = np.ascontiguousarray(np.zeros((work_res_h, work_res_w), dtype=np.float32))
+                # BUAT BUFFER DUMMY KARENA C++ TIDAK MELAKUKAN AKUMULASI GAMBAR FINAL DI SINI
+                dummy_final_sum_work_res = np.ascontiguousarray(np.zeros((work_res_h, work_res_w, ref_channels_buffer), dtype=np.float32))
+
+                # Panggil C++ untuk mendapatkan peta bobot yang sudah dipandu oleh `stability_map`
                 c_interface.call_accumulate_frame_weighted(
-                    final_image_sum=final_image_sum,
-                    weight_map_sum=temp_weight_map,
-                    current_image=current_image_float,
-                    reference_image=reference_image_float,
-                    base_window=base_window,
-                    stability_map=stability_map,
-                    row_starts=row_starts,
-                    col_starts=col_starts,
-                    tile_h=tile_h, tile_w=tile_w, h=ref_image_h, w=ref_image_w, channels=ref_channels_buffer,
+                    final_image_sum=dummy_final_sum_work_res, 
+                    weight_map_sum=temp_weight_map_work_res,
+                    current_image=curr_work_res_pass2, reference_image=ref_work_res_pass2, base_window=base_window,
+                    stability_map=stability_map_work_res, row_starts=row_starts, col_starts=col_starts,
+                    tile_h=tile_h, tile_w=tile_w, h=work_res_h, w=work_res_w, channels=ref_channels_buffer,
                     block_h=tile_h, block_w=tile_w, search_radius=0,
-                    motion_sensitivity=motion_sensitivity,
-                    noise_offset_factor=noise_offset_factor
+                    motion_sensitivity=motion_sensitivity, noise_offset_factor=noise_offset_factor
                 )
+                
+                temp_weight_map_full_res = cv2.resize(temp_weight_map_work_res, (ref_image_w, ref_image_h), interpolation=cv2.INTER_CUBIC)
 
-                map_for_refinement = temp_weight_map
+                map_for_refinement = temp_weight_map_full_res
                 if use_ai_reconstruction:
-                    map_for_refinement = self._apply_knowledge_model(temp_weight_map)
+                    map_for_refinement = self._apply_knowledge_model(temp_weight_map_full_res)
                 
                 refined_weight = map_for_refinement
                 if optical_flows is not None and i < len(optical_flows):
@@ -336,11 +345,13 @@ class SimilarityAlgorithm:
                 else:
                     refined_weight = map_for_refinement
 
+                # Akumulasi final dilakukan pada buffer resolusi penuh
                 weight_map_sum += refined_weight
+                final_image_sum += normalize_image(image_orig, ref_dtype) * refined_weight[:, :, np.newaxis]
                 
                 if weight_of_each_image:
                     if collect_raw_maps_for_learning:
-                        weight_maps_per_image.append(temp_weight_map.copy())
+                        weight_maps_per_image.append(temp_weight_map_full_res.copy())
                     else:
                         weight_maps_per_image.append(refined_weight.copy())
                 if temporal_consistency:
@@ -349,13 +360,18 @@ class SimilarityAlgorithm:
             except Exception as e:
                 raise RuntimeError(f"C++ accumulation frame {i+1} spatial: {e}")
 
+        # --- LANGKAH 5: Normalisasi Final di Python ---
         if processed_frames_spatial > 0:
             try:
-                c_interface.call_normalize_accumulated(final_image_sum, weight_map_sum, ref_image_h, ref_image_w, ref_channels_buffer)
+                valid_pixels = weight_map_sum > 1e-6
+                weight_map_sum_3d = weight_map_sum[:, :, np.newaxis]
+                final_image = np.zeros_like(final_image_sum)
+                np.divide(final_image_sum, weight_map_sum_3d, out=final_image, where=valid_pixels[:, :, np.newaxis])
+                
                 if temporal_consistency:
                     temporal_consistency_refinement(weight_maps_all, weight_map_sum, save_temporal_std_path=save_temporal_std_path)
                 
-                return (final_image_sum, weight_map_sum, processed_frames_spatial, weight_maps_per_image) if weight_of_each_image else (final_image_sum, weight_map_sum, processed_frames_spatial)
+                return (final_image, weight_map_sum, processed_frames_spatial, weight_maps_per_image) if weight_of_each_image else (final_image, weight_map_sum, processed_frames_spatial)
             except Exception as e:
                 raise RuntimeError(f"Normalization failed: {e}")
         
