@@ -6,7 +6,6 @@ class SimilaritySpatialInterface:
     """Membungkus pemanggilan fungsi C++ untuk similarity_mfnr_v2."""
 
     def __init__(self, lib_path):
-        # ... (init tidak berubah)
         if not os.path.exists(lib_path):
             raise FileNotFoundError(f"Shared library not found: {lib_path}")
         try:
@@ -18,7 +17,6 @@ class SimilaritySpatialInterface:
              raise AttributeError(f"Function not found in DLL or error setting argtypes. Did you compile C++ correctly? Error: {e}")
 
     def _define_argtypes(self):
-        # ... (define_argtypes tidak berubah, ini sudah benar)
         self.clib.accumulate_frame_weighted_jit.argtypes = [
             np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS, WRITEABLE'),
             np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS, WRITEABLE'),
@@ -45,7 +43,6 @@ class SimilaritySpatialInterface:
                                        tile_h, tile_w, h, w, channels,
                                        block_h, block_w, search_radius,
                                        motion_sensitivity, noise_offset_factor):
-        # ... (fungsi accumulate tidak berubah, ini sudah benar)
         stability_map_ptr = None
         if stability_map is not None:
             if not stability_map.flags['C_CONTIGUOUS']:
@@ -58,10 +55,6 @@ class SimilaritySpatialInterface:
             motion_sensitivity, noise_offset_factor
         )
 
-    # =================================================================================
-    # === PERBAIKAN UTAMA DI SINI =====================================================
-    # Hilangkan parameter 'lib' yang tidak perlu agar konsisten.
-    # =================================================================================
     def call_normalize_accumulated(self, final_image_sum, weight_map_sum, h, w, channels):
         self.clib.normalize_accumulated_image_jit(final_image_sum, weight_map_sum, h, w, channels)
         

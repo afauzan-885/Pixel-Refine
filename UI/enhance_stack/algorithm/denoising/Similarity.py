@@ -175,7 +175,7 @@ class SimilarityAlgorithm:
     def _spatial_merging(self, images, ref_image_h, ref_image_w, ref_channels_buffer, ref_dtype,
                     reference_image_float, tile_size, overlap,
                     motion_sensitivity, noise_offset_factor,
-                    refinement_algorithm='optical_flow',
+                    refinement_algorithm='none',
                     optical_flows=None,
                     update_progress=None, stop_requested=None,
                     total_overall_images=None, images_processed_so_far=0,
@@ -185,7 +185,7 @@ class SimilarityAlgorithm:
                     weight_of_each_image=False,
                     collect_raw_maps_for_learning=False,
                     use_ai_reconstruction=False,
-                    temporal_analysis_mode='two_pass_full', # Opsi: 'one_pass', 'two_pass_full'
+                    temporal_analysis_mode='one_pass', # Opsi: 'one_pass', 'two_pass_full'
                     **unused_kwargs):
 
         # --- LANGKAH 1: Inisialisasi dan Penentuan Resolusi Kerja ---
@@ -219,9 +219,7 @@ class SimilarityAlgorithm:
         row_starts = np.ascontiguousarray(np.unique(row_starts).astype(np.int32))
         col_starts = np.ascontiguousarray(np.unique(col_starts).astype(np.int32))
 
-        # ====================================================================================
         # === LANGKAH 2 (PASS 1): Membuat Peta Stabilitas ==================================
-        # ====================================================================================
         stability_map = None
         if temporal_analysis_mode == 'two_pass_full':
             if update_progress:
@@ -559,8 +557,8 @@ class SimilarityAlgorithm:
                 update_progress=None, stop_requested=None,
                 save_weight_map_path=None, 
                 total_overall_images=None, images_processed_so_far=0, 
-                save_temporal_std_path= None #"database/stack.jpg",
-                , weight_of_each_image=False, 
+                save_temporal_std_path= "database/stack.jpg",
+                weight_of_each_image=False, 
                 collect_raw_maps_for_learning=False,
                 use_learning_model=False,
                 perform_learning=False,
