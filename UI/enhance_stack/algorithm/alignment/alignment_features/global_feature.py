@@ -933,24 +933,48 @@ def add_legend_heatmap(img, norm_values, labels=("Static (High Weight)", "Moving
     return img
 
 def temporal_consistency_refinement(weight_maps_all, weight_map_sum, save_temporal_std_path=None,
-                                    max_boost=2.0, min_boost=0.5):
-    if len(weight_maps_all) <= 1:
-        return
+                                    max_boost=2.0, min_boost=0.5,
+                                    num_iterations=10, # Parameter baru untuk iterasi
+                                    ksize=5): # Parameter untuk filter
+    """
+    Menyempurnakan peta bobot total secara iteratif berdasarkan stabilitas temporal.
+    Menggunakan pendekatan relaxation labeling untuk menghasilkan area stabil/tidak stabil yang koheren.
+    """
+    if len(weight_maps_all) <= 1 or num_iterations == 0:
+        return # Tidak melakukan apa-apa jika tidak ada cukup data
 
+    # --- LANGKAH 1: Analisis Statistik (Dilakukan Sekali) ---
+    print("Menganalisis stabilitas temporal...")
     weight_stack = np.stack(weight_maps_all, axis=0)
     temporal_std = np.std(weight_stack, axis=0)
     temporal_mean = np.mean(weight_stack, axis=0)
 
+    # Metrik stabilitas: rasio mean terhadap standar deviasi
     stability_score = temporal_mean / (temporal_std + 1e-6)
-    median_stability = np.median(stability_score)
-    std_stability = np.std(stability_score)
+    
+    # Gunakan persentil untuk ketahanan terhadap outlier, bukan median/std
+    p50_stability = np.percentile(stability_score, 50) # Median
+    p84_stability = np.percentile(stability_score, 84)
+    std_equivalent = p84_stability - p50_stability # Estimasi std yang lebih kuat
+    if std_equivalent < 1e-6: std_equivalent = 1.0 # Hindari pembagian dengan nol
 
-    # ✅ Vektorized sigmoid-style scaling
-    delta = stability_score - median_stability
-    scaling_factors = 1 + np.tanh(delta / (std_stability + 1e-6))
-    scaling_factors = np.clip(scaling_factors, min_boost, max_boost)
+    # --- LANGKAH 2: Hitung Faktor Penskalaan Awal ---
+    delta = stability_score - p50_stability
+    scaling_factors = 1.0 + np.tanh(delta / std_equivalent)
+    scaling_factors = np.clip(scaling_factors, min_boost, max_boost).astype(np.float32)
 
-    weight_map_sum *= scaling_factors
+    # --- LANGKAH 3: Refinement Iteratif (Cepat & Hemat Memori) ---
+    refined_scaling_factors = scaling_factors
+    
+    for i in range(num_iterations):
+        refined_scaling_factors = cv2.medianBlur(
+            refined_scaling_factors.astype(np.float32),
+            ksize=ksize
+        )
+
+    # --- LANGKAH 4: Terapkan Faktor Penskalaan Akhir ---
+    # Modifikasi weight_map_sum secara in-place
+    weight_map_sum *= refined_scaling_factors
 
     if save_temporal_std_path:
         norm_std = (temporal_std - np.min(temporal_std)) / (np.max(temporal_std) - np.min(temporal_std) + 1e-8)
@@ -1018,11 +1042,9 @@ def optical_flow_refinement(
     disocclusion_mask = warped_ones < 0.95 
 
     # --- UPGRADE 2: Gunakan Bilateral Filter untuk Menjaga Tepi ---
-    smoothed_current_weight = cv2.bilateralFilter(
+    smoothed_current_weight = cv2.medianBlur(
         current_weight_map.astype(np.float32), 
-        d=bilateral_d, 
-        sigmaColor=bilateral_sigma_color, 
-        sigmaSpace=bilateral_sigma_space
+        ksize=5
     )
     
     # --- UPGRADE 3: Kalkulasi Kepercayaan Gabungan yang Cerdas ---

@@ -17,33 +17,26 @@ class SimilaritySpatialInterface:
              raise AttributeError(f"Function not found in DLL or error setting argtypes. Did you compile C++ correctly? Error: {e}")
 
     def _define_argtypes(self):
-        # --- UPDATED: Added new resize parameters ---
         self.clib.accumulate_frame_weighted_jit.argtypes = [
             np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS, WRITEABLE'), # final_image_sum_ptr
             np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS, WRITEABLE'), # weight_map_sum_ptr
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'),            # current_image_ptr
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'),            # reference_image_ptr
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),            # base_window_ptr
-            ctypes.c_void_p,                                                                    # stability_map_ptr
-            np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),              # row_starts
-            np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),              # col_starts
-            ctypes.c_int,  # num_row_starts
-            ctypes.c_int,  # num_col_starts
-            ctypes.c_int,  # tile_h
-            ctypes.c_int,  # tile_w
-            ctypes.c_int,  # h_img
-            ctypes.c_int,  # w_img
-            ctypes.c_int,  # channels
-            ctypes.c_float,  # motion_sensitivity
-            ctypes.c_float,  # noise_offset_factor
-            # NEW PARAMETERS for integrated resize logic
-            ctypes.c_int,    # orig_h
-            ctypes.c_int,    # orig_w
-            ctypes.c_int,    # target_h
-            ctypes.c_int,    # target_w
-            ctypes.c_bool,   # auto_resize
-            ctypes.c_float   # target_megapixels
+            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'),          # current_image_ptr
+            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'),          # reference_image_ptr
+            np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),          # base_window_ptr
+            ctypes.c_void_p,                                                                  # stability_map_ptr
+            np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),             # row_starts
+            np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),             # col_starts
+            ctypes.c_int, # num_row_starts
+            ctypes.c_int, # num_col_starts
+            ctypes.c_int, # tile_h
+            ctypes.c_int, # tile_w
+            ctypes.c_int, # h_img
+            ctypes.c_int, # w_img
+            ctypes.c_int, # channels
+            ctypes.c_float, # motion_sensitivity
+            ctypes.c_float  # noise_offset_factor
         ]
+        # --- AKHIR PERBAIKAN ---
 
         self.clib.accumulate_frame_weighted_jit.restype = None
         
@@ -57,99 +50,23 @@ class SimilaritySpatialInterface:
     def call_accumulate_frame_weighted(self, final_image_sum, weight_map_sum, current_image, reference_image,
                                        base_window, stability_map, row_starts, col_starts,
                                        tile_h, tile_w, h, w, channels,
-                                       motion_sensitivity, noise_offset_factor,
-                                       # NEW PARAMETERS with default values for backward compatibility
-                                       orig_h=None, orig_w=None, 
-                                       target_h=0, target_w=0,
-                                       auto_resize=True, target_megapixels=12.0):
+                                       motion_sensitivity, noise_offset_factor):
         
-        # Handle stability map pointer
         stability_map_ptr = None
         if stability_map is not None:
             if not stability_map.flags['C_CONTIGUOUS']:
                 stability_map = np.ascontiguousarray(stability_map)
             stability_map_ptr = stability_map.ctypes.data_as(ctypes.c_void_p)
         
-        # Set default values for orig dimensions if not provided
-        if orig_h is None:
-            orig_h = h
-        if orig_w is None:
-            orig_w = w
-        
-        # Call C++ function with new parameters
         self.clib.accumulate_frame_weighted_jit(
             final_image_sum, weight_map_sum, current_image, reference_image, base_window,
             stability_map_ptr, row_starts, col_starts, len(row_starts), len(col_starts),
             tile_h, tile_w, h, w, channels,
-            motion_sensitivity, noise_offset_factor,
-            orig_h, orig_w, target_h, target_w, auto_resize, target_megapixels
+            motion_sensitivity, noise_offset_factor
         )
-
+        
     def call_normalize_accumulated(self, final_image_sum, weight_map_sum, h, w, channels):
         self.clib.normalize_accumulated_image_jit(final_image_sum, weight_map_sum, h, w, channels)
-
-    # --- OPTIONAL: Add helper method for easy migration ---
-    def call_accumulate_frame_weighted_legacy(self, final_image_sum, weight_map_sum, current_image, reference_image,
-                                              base_window, stability_map, row_starts, col_starts,
-                                              tile_h, tile_w, h, w, channels,
-                                              motion_sensitivity, noise_offset_factor):
-        """
-        Legacy wrapper for backward compatibility.
-        Uses auto-resize with default settings.
-        """
-        return self.call_accumulate_frame_weighted(
-            final_image_sum, weight_map_sum, current_image, reference_image,
-            base_window, stability_map, row_starts, col_starts,
-            tile_h, tile_w, h, w, channels,
-            motion_sensitivity, noise_offset_factor,
-            auto_resize=True, target_megapixels=12.0
-        )
-
-    # --- OPTIONAL: Add specialized methods for different use cases ---
-    def call_accumulate_frame_weighted_high_quality(self, final_image_sum, weight_map_sum, current_image, reference_image,
-                                                     base_window, stability_map, row_starts, col_starts,
-                                                     tile_h, tile_w, h, w, channels,
-                                                     motion_sensitivity, noise_offset_factor):
-        """
-        High-quality mode: minimal resizing, higher megapixel target.
-        """
-        return self.call_accumulate_frame_weighted(
-            final_image_sum, weight_map_sum, current_image, reference_image,
-            base_window, stability_map, row_starts, col_starts,
-            tile_h, tile_w, h, w, channels,
-            motion_sensitivity, noise_offset_factor,
-            auto_resize=True, target_megapixels=20.0  # Higher quality
-        )
-
-    def call_accumulate_frame_weighted_performance(self, final_image_sum, weight_map_sum, current_image, reference_image,
-                                                   base_window, stability_map, row_starts, col_starts,
-                                                   tile_h, tile_w, h, w, channels,
-                                                   motion_sensitivity, noise_offset_factor):
-        """
-        Performance mode: aggressive resizing for speed.
-        """
-        return self.call_accumulate_frame_weighted(
-            final_image_sum, weight_map_sum, current_image, reference_image,
-            base_window, stability_map, row_starts, col_starts,
-            tile_h, tile_w, h, w, channels,
-            motion_sensitivity, noise_offset_factor,
-            auto_resize=True, target_megapixels=8.0  # Lower quality, higher speed
-        )
-
-    def call_accumulate_frame_weighted_no_resize(self, final_image_sum, weight_map_sum, current_image, reference_image,
-                                                 base_window, stability_map, row_starts, col_starts,
-                                                 tile_h, tile_w, h, w, channels,
-                                                 motion_sensitivity, noise_offset_factor):
-        """
-        No resize mode: process at full resolution.
-        """
-        return self.call_accumulate_frame_weighted(
-            final_image_sum, weight_map_sum, current_image, reference_image,
-            base_window, stability_map, row_starts, col_starts,
-            tile_h, tile_w, h, w, channels,
-            motion_sensitivity, noise_offset_factor,
-            auto_resize=False  # Disable resizing
-        )
         
 class SimilarityFrequencyInterface:
     """Membungkus pemanggilan fungsi C++ untuk similarity_mfnr_v2."""

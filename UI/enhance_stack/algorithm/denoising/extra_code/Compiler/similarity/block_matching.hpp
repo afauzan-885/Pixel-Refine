@@ -23,7 +23,6 @@ struct TileMatchResult
     bool success = false;
 };
 
-
 // Membandingkan dua tile.
 TileMatchResult calculate_tile_similarity(
     const cv::Mat &current_tile_gray,

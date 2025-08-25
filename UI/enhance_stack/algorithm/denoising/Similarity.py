@@ -1,3 +1,5 @@
+import queue
+import threading
 import traceback
 import cv2
 import numpy as np
@@ -175,20 +177,16 @@ class SimilarityAlgorithm:
     def _spatial_merging(self, images, ref_image_h, ref_image_w, ref_channels_buffer, ref_dtype,
                     reference_image_float, tile_size, overlap,
                     motion_sensitivity, noise_offset_factor,
-                    refinement_algorithm='none',
-                    optical_flows=None,
                     update_progress=None, stop_requested=None,
                     total_overall_images=None, images_processed_so_far=0,
                     lib_path='UI/data/similarity_spatial_merging.dll',
                     temporal_consistency=True,
                     save_temporal_std_path=None,
                     weight_of_each_image=False,
-                    collect_raw_maps_for_learning=False,
-                    use_ai_reconstruction=False,
                     temporal_analysis_mode='one_pass', # Opsi: 'one_pass', 'two_pass_full'
                     **unused_kwargs):
 
-        # --- LANGKAH 1: Inisialisasi dan Setup Tiles (Tanpa Resize Logic) ---
+        # --- LANGKAH 1: Inisialisasi dan Penentuan Resolusi Kerja (Tidak Berubah) ---
         tile_h, tile_w = map(int, tile_size)
         try:
             c_interface = SimilaritySpatialInterface(lib_path)
@@ -197,73 +195,62 @@ class SimilarityAlgorithm:
         num_images = len(images)
         orig_h, orig_w = images[0].shape[:2]
 
-        # Setup tile configuration for full resolution processing
+        work_res_h, work_res_w = ref_image_h, ref_image_w
+        TARGET_MP = 12 * 1e6
+        if (ref_image_h * ref_image_w) > TARGET_MP:
+            scale_factor = np.sqrt(TARGET_MP / (ref_image_h * ref_image_w))
+            work_res_h, work_res_w = int(ref_image_h * scale_factor), int(ref_image_w * scale_factor)
+        else:
+            work_res_h, work_res_w = int(ref_image_h * 0.7), int(ref_image_w * 0.7)
+        work_res_h, work_res_w = (work_res_h // 2) * 2, (work_res_w // 2) * 2
+        
         base_window = gaussian_window((tile_h, tile_w))
         step_y = max(int(tile_h * (1 - overlap)), 1)
         step_x = max(int(tile_w * (1 - overlap)), 1)
-        
-        # Generate tile positions for full resolution
-        row_starts = np.arange(0, ref_image_h - tile_h + 1, step_y) if ref_image_h >= tile_h else np.array([0])
-        if ref_image_h > tile_h and (not row_starts.size or row_starts[-1] != ref_image_h - tile_h):
-            row_starts = np.append(row_starts, ref_image_h - tile_h)
-        col_starts = np.arange(0, ref_image_w - tile_w + 1, step_x) if ref_image_w >= tile_w else np.array([0])
-        if ref_image_w > tile_w and (not col_starts.size or col_starts[-1] != ref_image_w - tile_w):
-            col_starts = np.append(col_starts, ref_image_w - tile_w)
+        row_starts = np.arange(0, work_res_h - tile_h + 1, step_y) if work_res_h >= tile_h else np.array([0])
+        if work_res_h > tile_h and (not row_starts.size or row_starts[-1] != work_res_h - tile_h):
+            row_starts = np.append(row_starts, work_res_h - tile_h)
+        col_starts = np.arange(0, work_res_w - tile_w + 1, step_x) if work_res_w >= tile_w else np.array([0])
+        if work_res_w > tile_w and (not col_starts.size or col_starts[-1] != work_res_w - tile_w):
+            col_starts = np.append(col_starts, work_res_w - tile_w)
         row_starts = np.ascontiguousarray(np.unique(row_starts).astype(np.int32))
         col_starts = np.ascontiguousarray(np.unique(col_starts).astype(np.int32))
 
-        # === LANGKAH 2 (PASS 1): Membuat Peta Stabilitas ==================================
+        # (PASS 1): Membuat Peta Stabilitas ---
         stability_map = None
         if temporal_analysis_mode == 'two_pass_full':
             if update_progress:
                 update_progress(5, "Pass 1/2: Menganalisis stabilitas adegan...")
             
-            # Use 1/2 resolution for stability analysis
-            stability_analysis_h, stability_analysis_w = ref_image_h // 2, ref_image_w // 2
-            sum_map = np.zeros((stability_analysis_h, stability_analysis_w), dtype=np.float32)
-            sum_sq_map = np.zeros((stability_analysis_h, stability_analysis_w), dtype=np.float32)
+            downsampled_h, downsampled_w = work_res_h // 2, work_res_w // 2
+            sum_map = np.zeros((downsampled_h, downsampled_w), dtype=np.float32)
+            sum_sq_map = np.zeros((downsampled_h, downsampled_w), dtype=np.float32)
             frame_count = 0
+            
+            ref_work_res = cv2.resize(reference_image_float, (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
 
             for i, image_orig in enumerate(images):
                 if stop_requested and stop_requested(): return (None, None, 0)
                 if update_progress:
                     update_progress(int(5 + ((i + 1) / num_images) * 45), f"Pass 1/2: Menganalisis frame {i+1}/{num_images}")
                 
-                # Create temporary buffers for stability analysis at reduced resolution
-                temp_weight_map = np.ascontiguousarray(np.zeros((stability_analysis_h, stability_analysis_w), dtype=np.float32))
-                dummy_image_sum = np.ascontiguousarray(np.zeros((stability_analysis_h, stability_analysis_w, ref_channels_buffer), dtype=np.float32))
+                curr_work_res = cv2.resize(normalize_image(image_orig, ref_dtype), (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
+                temp_weight_map = np.ascontiguousarray(np.zeros((work_res_h, work_res_w), dtype=np.float32))
+                dummy_image_sum = np.ascontiguousarray(np.zeros((work_res_h, work_res_w, ref_channels_buffer), dtype=np.float32))
                 
-                # Generate tile positions for stability analysis resolution
-                stability_row_starts = np.arange(0, stability_analysis_h - tile_h + 1, step_y) if stability_analysis_h >= tile_h else np.array([0])
-                if stability_analysis_h > tile_h and (not stability_row_starts.size or stability_row_starts[-1] != stability_analysis_h - tile_h):
-                    stability_row_starts = np.append(stability_row_starts, stability_analysis_h - tile_h)
-                stability_col_starts = np.arange(0, stability_analysis_w - tile_w + 1, step_x) if stability_analysis_w >= tile_w else np.array([0])
-                if stability_analysis_w > tile_w and (not stability_col_starts.size or stability_col_starts[-1] != stability_analysis_w - tile_w):
-                    stability_col_starts = np.append(stability_col_starts, stability_analysis_w - tile_w)
-                stability_row_starts = np.ascontiguousarray(np.unique(stability_row_starts).astype(np.int32))
-                stability_col_starts = np.ascontiguousarray(np.unique(stability_col_starts).astype(np.int32))
-                
-                # Call C++ for stability analysis - C++ will handle resize internally
                 c_interface.call_accumulate_frame_weighted(
-                    final_image_sum=dummy_image_sum, 
-                    weight_map_sum=temp_weight_map,
-                    current_image=normalize_image(image_orig, ref_dtype),  # Full resolution input
-                    reference_image=reference_image_float,  # Full resolution input
-                    base_window=base_window,
-                    stability_map=None, 
-                    row_starts=stability_row_starts, col_starts=stability_col_starts,
-                    tile_h=tile_h, tile_w=tile_w, 
-                    h=stability_analysis_h, w=stability_analysis_w, channels=ref_channels_buffer,
-                    motion_sensitivity=motion_sensitivity, noise_offset_factor=noise_offset_factor,
-                    orig_h=ref_image_h, orig_w=ref_image_w,
-                    target_h=stability_analysis_h, target_w=stability_analysis_w,
-                    auto_resize=False 
+                    final_image_sum=dummy_image_sum, weight_map_sum=temp_weight_map,
+                    current_image=curr_work_res, reference_image=ref_work_res, base_window=base_window,
+                    stability_map=None, row_starts=row_starts, col_starts=col_starts,
+                    tile_h=tile_h, tile_w=tile_w, h=work_res_h, w=work_res_w, channels=ref_channels_buffer,
+                    motion_sensitivity=motion_sensitivity, noise_offset_factor=noise_offset_factor
                 )
                 
-                sum_map += temp_weight_map
-                sum_sq_map += np.square(temp_weight_map)
+                downsampled_map = cv2.resize(temp_weight_map, (downsampled_w, downsampled_h), interpolation=cv2.INTER_AREA)
+                sum_map += downsampled_map
+                sum_sq_map += np.square(downsampled_map)
                 frame_count += 1
-                del temp_weight_map, dummy_image_sum
+                del temp_weight_map, dummy_image_sum, curr_work_res, downsampled_map
 
             if frame_count >= 2:
                 N = float(frame_count)
@@ -278,105 +265,109 @@ class SimilarityAlgorithm:
             
             del sum_map, sum_sq_map
 
-        # =================================================================================
-        # === LANGKAH 3 (PASS 2 / UTAMA): Akumulasi Final Terpandu ========================
-        # =================================================================================
+        # === LANGKAH 3 (PASS 2 / UTAMA): Pipeline Akumulasi =======================
         msg_pass = "Pass 2/2: " if temporal_analysis_mode != 'one_pass' else ""
         if update_progress:
             update_progress(50, f"{msg_pass}Menggabungkan frame...")
 
-        # Initialize output buffers at full resolution
+        PIPELINE_QUEUE_SIZE = 2
+        SENTINEL = None
+        prepared_data_queue = queue.Queue(maxsize=PIPELINE_QUEUE_SIZE)
+        processed_results_queue = queue.Queue(maxsize=PIPELINE_QUEUE_SIZE)
+
+        ref_work_res_pass2 = cv2.resize(reference_image_float, (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
+        stability_map_work_res = None
+        if stability_map is not None:
+            stability_map_work_res = cv2.resize(stability_map, (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
+
+        # --- Definisi Worker Thread (Tetap Sama) ---
+        def producer_task():
+            try:
+                for i, image_orig in enumerate(images):
+                    if stop_requested and stop_requested(): break
+                    if not isinstance(image_orig, np.ndarray): continue
+                    curr_work_res = cv2.resize(normalize_image(image_orig, ref_dtype), (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
+                    prepared_data_queue.put((i, curr_work_res))
+                prepared_data_queue.put(SENTINEL)
+            except Exception as e:
+                prepared_data_queue.put(e)
+
+        def consumer_task():
+            while True:
+                item = prepared_data_queue.get()
+                if item is SENTINEL or isinstance(item, Exception):
+                    processed_results_queue.put(item)
+                    break
+                try:
+                    i, curr_work_res = item
+                    temp_weight_map_work_res = np.ascontiguousarray(np.zeros((work_res_h, work_res_w), dtype=np.float32))
+                    dummy_final_sum_work_res = np.ascontiguousarray(np.zeros((work_res_h, work_res_w, ref_channels_buffer), dtype=np.float32))
+                    c_interface.call_accumulate_frame_weighted(
+                        final_image_sum=dummy_final_sum_work_res, 
+                        weight_map_sum=temp_weight_map_work_res,
+                        current_image=curr_work_res, reference_image=ref_work_res_pass2, base_window=base_window,
+                        stability_map=stability_map_work_res, row_starts=row_starts, col_starts=col_starts,
+                        tile_h=tile_h, tile_w=tile_w, h=work_res_h, w=work_res_w, channels=ref_channels_buffer,
+                        motion_sensitivity=motion_sensitivity, noise_offset_factor=noise_offset_factor
+                    )
+                    processed_results_queue.put((i, temp_weight_map_work_res))
+                except Exception as e:
+                    processed_results_queue.put(e)
+                    break
+
+        # --- Menjalankan Pipeline dan Loop Akumulator ---
+        producer_thread = threading.Thread(target=producer_task)
+        consumer_thread = threading.Thread(target=consumer_task)
+        
+        producer_thread.start()
+        consumer_thread.start()
+        
         final_image_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32))
         weight_map_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w), dtype=np.float32))
         
-        # Initialize other variables
         processed_frames_spatial = 0
         progress_cap_percent = 95
         if temporal_consistency: weight_maps_all = []
         if weight_of_each_image: weight_maps_per_image = []
-        accumulated_weight_map, prev_weight_map_for_standard = None, None
-        use_ai_reconstruction = use_ai_reconstruction and hasattr(self, 'is_model_loaded') and self.is_model_loaded
-        use_ml_refinement = (refinement_algorithm == 'ml_driven' and hasattr(self, 'smart_alpha_generator') and self.smart_alpha_generator is not None)
-        if refinement_algorithm == 'ml_driven' and not use_ml_refinement:
-            refinement_algorithm = 'optical_flow'
 
-        for i, image_orig in enumerate(images):
-            if not isinstance(image_orig, np.ndarray): continue
+        valid_images_count = sum(1 for img in images if isinstance(img, np.ndarray))
+        for _ in range(valid_images_count):
+            if stop_requested and stop_requested(): break
+            
+            result_item = processed_results_queue.get()
+            
+            if result_item is SENTINEL: break
+            if isinstance(result_item, Exception): raise result_item
+
+            i, temp_weight_map_work_res = result_item
+            image_orig = images[i]
+
             if update_progress:
                 current_img_overall = images_processed_so_far + i + 1
                 prog = int(50 + ((current_img_overall / total_overall_images) * (progress_cap_percent - 50) if total_overall_images and total_overall_images > 0 else ((i + 1) / num_images) * (progress_cap_percent - 50)))
                 msg_pass_str = "Pass 2/2: " if temporal_analysis_mode != 'one_pass' else ""
                 msg = f"{msg_pass_str}Membangun gambar frame {i+1}/{num_images}"
                 update_progress(prog, msg)
-            if stop_requested and stop_requested(): break
+        
+            # Langsung gunakan hasil dari C++ setelah di-resize.
+            weight_map_full_res = cv2.resize(temp_weight_map_work_res, (ref_image_w, ref_image_h), interpolation=cv2.INTER_CUBIC)
+            
+            # --- Akumulasi final yang disederhanakan ---
+            weight_map_sum += weight_map_full_res
+            final_image_sum += normalize_image(image_orig, ref_dtype) * weight_map_full_res[:, :, np.newaxis]
+            
+            if weight_of_each_image:
+                # Logika 'collect_raw_maps_for_learning' tidak lagi relevan karena tidak ada 'refined_weight'
+                weight_maps_per_image.append(weight_map_full_res.copy())
+            if temporal_consistency:
+                weight_maps_all.append(weight_map_full_res.copy())
+                
+            processed_frames_spatial += 1
+        
+        producer_thread.join()
+        consumer_thread.join()
 
-            try:
-                # Create temporary buffers for weight map generation
-                temp_weight_map_full_res = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w), dtype=np.float32))
-                dummy_final_sum_full_res = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32))
-
-                # Call C++ to generate weight map - C++ handles all resize logic internally
-                c_interface.call_accumulate_frame_weighted(
-                    final_image_sum=dummy_final_sum_full_res, 
-                    weight_map_sum=temp_weight_map_full_res,
-                    current_image=normalize_image(image_orig, ref_dtype),  # Full resolution input
-                    reference_image=reference_image_float,  # Full resolution input
-                    base_window=base_window,
-                    stability_map=stability_map,  # Full resolution stability map
-                    row_starts=row_starts, col_starts=col_starts,
-                    tile_h=tile_h, tile_w=tile_w, 
-                    h=ref_image_h, w=ref_image_w, channels=ref_channels_buffer,
-                    motion_sensitivity=motion_sensitivity, noise_offset_factor=noise_offset_factor,
-                    # Let C++ handle optimal resize strategy
-                    orig_h=ref_image_h, orig_w=ref_image_w,
-                    auto_resize=True, target_megapixels=12.0  # Auto-optimize working resolution
-                )
-                
-                # Apply AI reconstruction if available
-                map_for_refinement = temp_weight_map_full_res
-                if use_ai_reconstruction:
-                    map_for_refinement = self._apply_knowledge_model(temp_weight_map_full_res)
-                
-                # Apply refinement algorithms
-                refined_weight = map_for_refinement
-                if optical_flows is not None and i < len(optical_flows):
-                    if accumulated_weight_map is not None:
-                        current_flow, current_confidence = (optical_flows[i] if isinstance(optical_flows[i], tuple) else (optical_flows[i], None))
-                        if use_ml_refinement:
-                            refined_weight = map_for_refinement
-                        elif refinement_algorithm == 'optical_flow':
-                            refined_weight = optical_flow_refinement(map_for_refinement, accumulated_weight_map, current_flow, current_confidence)
-                        elif refinement_algorithm == 'standard':
-                            refined_weight = standard_refinement(map_for_refinement, prev_weight_map_for_standard, reference_image_float)
-                            prev_weight_map_for_standard = refined_weight.copy()
-                else:
-                    refined_weight = map_for_refinement
-
-                # Accumulate results at full resolution
-                weight_map_sum += refined_weight
-                final_image_sum += normalize_image(image_orig, ref_dtype) * refined_weight[:, :, np.newaxis]
-                
-                # Store weight maps if required
-                if weight_of_each_image:
-                    if collect_raw_maps_for_learning:
-                        weight_maps_per_image.append(temp_weight_map_full_res.copy())
-                    else:
-                        weight_maps_per_image.append(refined_weight.copy())
-                if temporal_consistency:
-                    weight_maps_all.append(refined_weight.copy())
-                
-                # Update accumulated weight map for next iteration
-                if accumulated_weight_map is None:
-                    accumulated_weight_map = refined_weight.copy()
-                else:
-                    accumulated_weight_map += refined_weight
-                
-                processed_frames_spatial += 1
-                
-            except Exception as e:
-                raise RuntimeError(f"C++ accumulation frame {i+1} spatial: {e}")
-
-        # --- LANGKAH 5: Normalisasi Final di Python ---
+        # --- LANGKAH 5: Normalisasi Final di Python (Tidak Berubah) ---
         if processed_frames_spatial > 0:
             try:
                 valid_pixels = weight_map_sum > 1e-6
@@ -392,6 +383,7 @@ class SimilarityAlgorithm:
                 raise RuntimeError(f"Normalization failed: {e}")
         
         return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
+    
     
     def _frequency_merging(self, images, ref_image_h, ref_image_w, ref_channels_buffer, ref_dtype,
                         reference_image_float,
@@ -579,7 +571,6 @@ class SimilarityAlgorithm:
                 collect_raw_maps_for_learning=False,
                 use_learning_model=False,
                 perform_learning=False,
-                # ### PERUBAHAN: Parameter baru ditambahkan ###
                 use_ai_reconstruction=False,
                 **merging_kwargs):
 
@@ -843,7 +834,8 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
             _setup_data_source_and_paths(db_path, single_process, batch_id, image_processor)
 
         if not total_images:
-            if update_progress: update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE); return
+            if update_progress: update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE); 
+            return
 
         # Ekstrak Metadata (jika bagian dari pipeline ini)
         metadata_output_path = os.path.join("database", "align", "metadata.json")
