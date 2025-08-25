@@ -1,6 +1,7 @@
 #include <cmath>
 #include <vector>
 #include <limits>
+#include <iostream>
 #include <algorithm>
 #include <numeric>
 #include <omp.h>
@@ -143,53 +144,81 @@ extern "C"
         const int scale_factor = 2;
         const int tile_h_fine = tile_h;
         const int tile_w_fine = tile_w;
-        const int tile_h_coarse = tile_h_fine * scale_factor;
-        const int tile_w_coarse = tile_w_fine * scale_factor;
 
-        cv::Mat guidance_map = cv::Mat(h_img, w_img, CV_32FC1, cv::Scalar(1.0f)); // Inisialisasi dengan kepercayaan penuh
+        // Tentukan jumlah level piramida secara dinamis
+        int max_level = 0;
+        int current_tile_h = tile_h_fine;
+        while (current_tile_h * 2 <= h_img && current_tile_h * 2 <= w_img) {
+            current_tile_h *= 2;
+            max_level++;
+        }
+        
+        // Kita hanya akan membuat 2 level tambahan paling banyak untuk efisiensi (total 3 skala)
+        // Ini adalah "sweet spot" yang bisa Anda tuning. Ubah 2 menjadi 3 atau 1 untuk eksperimen.
+        const int num_pyramid_levels = std::min(max_level, 2) + 1; 
 
-        if (h_img >= tile_h_coarse && w_img >= tile_w_coarse) {
-            cv::Mat coarse_confidence_map(h_img, w_img, CV_32FC1, cv::Scalar(0.0f));
-            cv::Mat coarse_weight_map(h_img, w_img, CV_32FC1, cv::Scalar(0.0f));
-            
+        cv::Mat guidance_map = cv::Mat(h_img, w_img, CV_32FC1, cv::Scalar(1.0f)); // Peta panduan awal
+
+        // Loop dari skala paling kasar ke halus
+        for (int level = num_pyramid_levels - 1; level > 0; --level) {
+            const int scale_factor = 1 << level; // 2^level (misal: 4, 2)
+            const int current_h = tile_h_fine * scale_factor;
+            const int current_w = tile_w_fine * scale_factor;
+
+            if (h_img < current_h || w_img < current_w) continue;
+
+            std::cout << "Processing pyramid level " << level << " with tile size " << current_h << "x" << current_w << std::endl;
+
+            cv::Mat level_confidence_map(h_img, w_img, CV_32FC1, cv::Scalar(0.0f));
+            cv::Mat level_weight_map(h_img, w_img, CV_32FC1, cv::Scalar(0.0f));
+
             #pragma omp parallel
             {
-                MotionMatching::MBMBuffers mbm_buffers_coarse;
-                if (tile_h_coarse > 0 && tile_w_coarse > 0) {
-                    mbm_buffers_coarse.diff_workspace.create(tile_h_coarse, tile_w_coarse, CV_32FC1);
-                    mbm_buffers_coarse.grad_x.create(tile_h_coarse, tile_w_coarse, CV_32F);
-                    mbm_buffers_coarse.grad_y.create(tile_h_coarse, tile_w_coarse, CV_32F);
-                    mbm_buffers_coarse.grad_mag_current.create(tile_h_coarse, tile_w_coarse, CV_32FC1);
-                }
-                cv::Mat local_coarse_window = cv::Mat::ones(tile_h_coarse, tile_w_coarse, CV_32FC1);
-
+                MotionMatching::MBMBuffers mbm_buffers;
+                mbm_buffers.diff_workspace.create(current_h, current_w, CV_32FC1);
+                mbm_buffers.grad_x.create(current_h, current_w, CV_32F);
+                mbm_buffers.grad_y.create(current_h, current_w, CV_32F);
+                mbm_buffers.grad_mag_current.create(current_h, current_w, CV_32FC1);
+                cv::Mat local_window = cv::Mat::ones(current_h, current_w, CV_32FC1);
+                
                 #pragma omp for schedule(dynamic)
-                for (int r = 0; r <= h_img - tile_h_coarse; r += tile_h_fine) {
-                    for (int c = 0; c <= w_img - tile_w_coarse; c += tile_w_fine) {
-                        cv::Rect roi(c, r, tile_w_coarse, tile_h_coarse);
+                for (int r = 0; r <= h_img - current_h; r += current_h / 2) {
+                    for (int c = 0; c <= w_img - current_w; c += current_w / 2) {
+                        cv::Rect roi(c, r, current_w, current_h);
                         
                         MotionMatching::TileMatchResult res = MotionMatching::calculate_tile_similarity(
                             current_image_gray_full(roi), reference_image_gray_full(roi), 
-                            GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON, mbm_buffers_coarse
+                            GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON, mbm_buffers
                         );
 
-                        float confidence = res.success ? MotionMatching::calculate_match_confidence(
+                        float confidence_level = res.success ? MotionMatching::calculate_match_confidence(
                             res, global_estimated_noise_sigma, adapted_motion_sensitivity, adapted_noise_offset_factor
                         ) : 0.0f;
                         
-                        // Akumulasi untuk mendapatkan rata-rata terbobot yang mulus
-                        cv::add(coarse_confidence_map(roi), confidence, coarse_confidence_map(roi));
-                        cv::add(coarse_weight_map(roi), local_coarse_window, coarse_weight_map(roi));
+                        // Gunakan panduan dari level yang LEBIH KASAR (yang sudah dihitung di iterasi loop sebelumnya)
+                        float guidance_confidence = static_cast<float>(cv::mean(guidance_map(roi))[0]);
+                        float final_confidence_level = confidence_level * guidance_confidence;
+
+                        // Akumulasi untuk level ini
+                        cv::add(level_confidence_map(roi), final_confidence_level, level_confidence_map(roi));
+                        cv::add(level_weight_map(roi), local_window, level_weight_map(roi));
                     }
                 }
             }
             
-            cv::divide(coarse_confidence_map, coarse_weight_map, guidance_map);
-            guidance_map.setTo(1.0, coarse_weight_map < 1e-6); // Isi area yang tidak tercover
+            // Peta kepercayaan yang baru dihitung menjadi panduan untuk level berikutnya
+            cv::divide(level_confidence_map, level_weight_map, guidance_map);
+            guidance_map.setTo(1.0, level_weight_map < 1e-6);
+            
+            // Haluskan panduan agar tidak terlalu "kotak-kotak"
+            cv::GaussianBlur(guidance_map, guidance_map, cv::Size(current_w + 1, current_h + 1), 0);
         }
 
+        // `guidance_map` sekarang berisi hasil halus dari skala 2x (atau level terendah > 1x)
+        // dan siap digunakan oleh skala 1x (halus)
+
         // =========================================================================
-        // === TAHAP 2: ANALISIS SKALA HALUS & AKUMULASI FINAL =====================
+        // === TAHAP 2: ANALISIS SKALA HALUS & AKUMULASI FINAL (Tidak banyak berubah)
         // =========================================================================
         cv::Mat final_image_sum_mat(h_img, w_img, CV_32FC(channels), final_image_sum_ptr);
         cv::Mat weight_map_sum_mat(h_img, w_img, CV_32FC1, weight_map_sum_ptr);
