@@ -137,26 +137,77 @@ extern "C"
         else { ref_channels_for_flat.push_back(reference_image_mat); }
         TextureAnalysis::detect_flat_tiles(ref_channels_for_flat, tile_h, tile_w, channels, FLATNESS_VARIANCE_THRESHOLD, is_tile_flat);
 
-        // Inisialisasi buffer output
+        // =========================================================================
+        // === TAHAP 1: ANALISIS SKALA KASAR (MULTI-SCALE) =========================
+        // =========================================================================
+        const int scale_factor = 2;
+        const int tile_h_fine = tile_h;
+        const int tile_w_fine = tile_w;
+        const int tile_h_coarse = tile_h_fine * scale_factor;
+        const int tile_w_coarse = tile_w_fine * scale_factor;
+
+        cv::Mat guidance_map = cv::Mat(h_img, w_img, CV_32FC1, cv::Scalar(1.0f)); // Inisialisasi dengan kepercayaan penuh
+
+        if (h_img >= tile_h_coarse && w_img >= tile_w_coarse) {
+            cv::Mat coarse_confidence_map(h_img, w_img, CV_32FC1, cv::Scalar(0.0f));
+            cv::Mat coarse_weight_map(h_img, w_img, CV_32FC1, cv::Scalar(0.0f));
+            
+            #pragma omp parallel
+            {
+                MotionMatching::MBMBuffers mbm_buffers_coarse;
+                if (tile_h_coarse > 0 && tile_w_coarse > 0) {
+                    mbm_buffers_coarse.diff_workspace.create(tile_h_coarse, tile_w_coarse, CV_32FC1);
+                    mbm_buffers_coarse.grad_x.create(tile_h_coarse, tile_w_coarse, CV_32F);
+                    mbm_buffers_coarse.grad_y.create(tile_h_coarse, tile_w_coarse, CV_32F);
+                    mbm_buffers_coarse.grad_mag_current.create(tile_h_coarse, tile_w_coarse, CV_32FC1);
+                }
+                cv::Mat local_coarse_window = cv::Mat::ones(tile_h_coarse, tile_w_coarse, CV_32FC1);
+
+                #pragma omp for schedule(dynamic)
+                for (int r = 0; r <= h_img - tile_h_coarse; r += tile_h_fine) {
+                    for (int c = 0; c <= w_img - tile_w_coarse; c += tile_w_fine) {
+                        cv::Rect roi(c, r, tile_w_coarse, tile_h_coarse);
+                        
+                        MotionMatching::TileMatchResult res = MotionMatching::calculate_tile_similarity(
+                            current_image_gray_full(roi), reference_image_gray_full(roi), 
+                            GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON, mbm_buffers_coarse
+                        );
+
+                        float confidence = res.success ? MotionMatching::calculate_match_confidence(
+                            res, global_estimated_noise_sigma, adapted_motion_sensitivity, adapted_noise_offset_factor
+                        ) : 0.0f;
+                        
+                        // Akumulasi untuk mendapatkan rata-rata terbobot yang mulus
+                        cv::add(coarse_confidence_map(roi), confidence, coarse_confidence_map(roi));
+                        cv::add(coarse_weight_map(roi), local_coarse_window, coarse_weight_map(roi));
+                    }
+                }
+            }
+            
+            cv::divide(coarse_confidence_map, coarse_weight_map, guidance_map);
+            guidance_map.setTo(1.0, coarse_weight_map < 1e-6); // Isi area yang tidak tercover
+        }
+
+        // =========================================================================
+        // === TAHAP 2: ANALISIS SKALA HALUS & AKUMULASI FINAL =====================
+        // =========================================================================
         cv::Mat final_image_sum_mat(h_img, w_img, CV_32FC(channels), final_image_sum_ptr);
         cv::Mat weight_map_sum_mat(h_img, w_img, CV_32FC1, weight_map_sum_ptr);
         final_image_sum_mat.setTo(0.0f);
         weight_map_sum_mat.setTo(0.0f);
-
-        // --- Langkah 2: Loop Akumulasi Paralel dengan Metode Hibrida ---
+        
         #pragma omp parallel
         {
-            // --- Alokasi buffer LOKAL dan KECIL per-thread. Efisien memori! ---
-            cv::Mat local_weighted_tile(tile_h, tile_w, CV_32FC(channels));
-            cv::Mat local_weight_tile(tile_h, tile_w, CV_32FC1);
-            MotionMatching::MBMBuffers mbm_buffers_th;
-            if (tile_h > 0 && tile_w > 0) {
-                mbm_buffers_th.diff_workspace.create(tile_h, tile_w, CV_32FC1);
-                mbm_buffers_th.grad_x.create(tile_h, tile_w, CV_32F);
-                mbm_buffers_th.grad_y.create(tile_h, tile_w, CV_32F);
-                mbm_buffers_th.grad_mag_current.create(tile_h, tile_w, CV_32FC1);
+            cv::Mat local_weighted_tile(tile_h_fine, tile_w_fine, CV_32FC(channels));
+            cv::Mat local_weight_tile(tile_h_fine, tile_w_fine, CV_32FC1);
+            MotionMatching::MBMBuffers mbm_buffers_fine;
+            if (tile_h_fine > 0 && tile_w_fine > 0) {
+                mbm_buffers_fine.diff_workspace.create(tile_h_fine, tile_w_fine, CV_32FC1);
+                mbm_buffers_fine.grad_x.create(tile_h_fine, tile_w_fine, CV_32F);
+                mbm_buffers_fine.grad_y.create(tile_h_fine, tile_w_fine, CV_32F);
+                mbm_buffers_fine.grad_mag_current.create(tile_h_fine, tile_w_fine, CV_32FC1);
             }
-            const int num_tiles_x = (w_img > 0 && tile_w > 0) ? (w_img + tile_w - 1) / tile_w : 0;
+            const int num_tiles_x = (w_img > 0 && tile_w_fine > 0) ? (w_img + tile_w_fine - 1) / tile_w_fine : 0;
             
             #pragma omp for collapse(2) schedule(dynamic)
             for (int i = 0; i < num_row_starts; i++)
@@ -165,43 +216,43 @@ extern "C"
                 {
                     int r = row_starts[i];
                     int c = col_starts[j];
-                    if (r + tile_h > h_img || c + tile_w > w_img) continue;
+                    if (r + tile_h_fine > h_img || c + tile_w_fine > w_img) continue;
 
-                    cv::Rect tile_roi(c, r, tile_w, tile_h);
+                    cv::Rect tile_roi(c, r, tile_w_fine, tile_h_fine);
 
-                    // --- Kalkulasi similarity (intensif komputasi) ---
-                    const cv::Mat current_tile_gray_for_mbm = current_image_gray_full(tile_roi);
-                    const cv::Mat reference_tile_gray_for_mbm = reference_image_gray_full(tile_roi);
-                    if (current_tile_gray_for_mbm.empty()) continue;
-                    
                     MotionMatching::TileMatchResult mbm_result = MotionMatching::calculate_tile_similarity(
-                        current_tile_gray_for_mbm, reference_tile_gray_for_mbm,
-                        GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON, mbm_buffers_th
+                        current_image_gray_full(tile_roi), reference_image_gray_full(tile_roi),
+                        GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON, mbm_buffers_fine
                     );
 
-                    float confidence = 0.0f;
+                    float confidence_fine = 0.0f;
                     if (mbm_result.success) {
-                        confidence = MotionMatching::calculate_match_confidence(
+                        confidence_fine = MotionMatching::calculate_match_confidence(
                             mbm_result, global_estimated_noise_sigma, 
                             adapted_motion_sensitivity, adapted_noise_offset_factor);
-
-                        if (confidence > 0.0f && !stability_map_mat.empty()) {
-                            confidence *= static_cast<float>(cv::mean(stability_map_mat(tile_roi))[0]);
-                        }
-                        
-                        const int tile_idx = (r / tile_h) * num_tiles_x + (c / tile_w);
-                        if (tile_idx < is_tile_flat.size() && is_tile_flat[tile_idx]) {
-                            confidence = std::min(confidence * FLATNESS_CONFIDENCE_BOOST, 1.0f);
-                        }
                     }
                     
-                    if (confidence < 1e-5f) continue;
+                    // --- Menggunakan Peta Panduan ---
+                    float guidance_confidence = static_cast<float>(cv::mean(guidance_map(tile_roi))[0]);
+                    float final_confidence = confidence_fine * guidance_confidence;
+
+                    // Gabungkan dengan stability map jika ada
+                    if (final_confidence > 0.0f && !stability_map_mat.empty()) {
+                        final_confidence *= static_cast<float>(cv::mean(stability_map_mat(tile_roi))[0]);
+                    }
                     
-                    // --- Kalkulasi bobot dilakukan di buffer LOKAL (Sangat Cepat) ---
+                    // Beri boost untuk area datar
+                    const int tile_idx = (r / tile_h_fine) * num_tiles_x + (c / tile_w_fine);
+                    if (tile_idx < is_tile_flat.size() && is_tile_flat[tile_idx]) {
+                        final_confidence = std::min(final_confidence * FLATNESS_CONFIDENCE_BOOST, 1.0f);
+                    }
+                    
+                    if (final_confidence < 1e-5f) continue;
+                    
                     const cv::Mat current_tile_for_accumulation = current_image_mat(tile_roi);
-                    const cv::Mat base_window_tile_mat(tile_h, tile_w, CV_32FC1, const_cast<float *>(base_window_ptr));
+                    const cv::Mat base_window_tile_mat(tile_h_fine, tile_w_fine, CV_32FC1, const_cast<float *>(base_window_ptr));
                     
-                    cv::multiply(base_window_tile_mat, confidence, local_weight_tile);
+                    cv::multiply(base_window_tile_mat, final_confidence, local_weight_tile);
                     if (channels > 1) {
                         cv::Mat weighted_mask_color;
                         std::vector<cv::Mat> mask_channels(channels, local_weight_tile);
@@ -211,40 +262,31 @@ extern "C"
                         cv::multiply(current_tile_for_accumulation, local_weight_tile, local_weighted_tile);
                     }
 
-                    // --- Penggabungan ke Buffer Global menggunakan ATOMIC (Bagian Kritis) ---
-                    // Pointer ke ROI di buffer global
-                    float* final_sum_roi_ptr = final_image_sum_mat.ptr<float>(r, c);
-                    float* weight_sum_roi_ptr = weight_map_sum_mat.ptr<float>(r, c);
-                    
-                    // Pointer ke data di buffer lokal
-                    const float* local_weighted_ptr = local_weighted_tile.ptr<float>(0);
-                    const float* local_weight_ptr = local_weight_tile.ptr<float>(0);
+                    // --- Akumulasi Atomik ---
+                    for (int tile_r = 0; tile_r < tile_h_fine; ++tile_r) {
+                        float* weight_sum_row_ptr = weight_map_sum_mat.ptr<float>(r + tile_r) + c;
+                        float* final_sum_row_ptr = final_image_sum_mat.ptr<float>(r + tile_r) + c * channels;
+                        const float* local_weight_row_ptr = local_weight_tile.ptr<float>(tile_r);
+                        const float* local_final_row_ptr = local_weighted_tile.ptr<float>(tile_r);
 
-                    for (int tile_r = 0; tile_r < tile_h; ++tile_r) {
-                        for (int tile_c = 0; tile_c < tile_w; ++tile_c) {
-                            int local_idx = tile_r * tile_w + tile_c;
-                            int global_row_offset = tile_r * weight_map_sum_mat.cols;
-
-                            // Atomic add untuk weight map
-                            float weight_val = local_weight_ptr[local_idx];
+                        for (int tile_c = 0; tile_c < tile_w_fine; ++tile_c) {
+                            float weight_val = local_weight_row_ptr[tile_c];
                             if (weight_val > 1e-8f) {
                                 #pragma omp atomic
-                                weight_sum_roi_ptr[global_row_offset + tile_c] += weight_val;
+                                weight_sum_row_ptr[tile_c] += weight_val;
                             }
-                            
-                            // Atomic add untuk image channels
                             for (int ch = 0; ch < channels; ++ch) {
-                                float pixel_val = local_weighted_ptr[local_idx * channels + ch];
+                                float pixel_val = local_final_row_ptr[tile_c * channels + ch];
                                 if (std::abs(pixel_val) > 1e-8f) {
                                     #pragma omp atomic
-                                    final_sum_roi_ptr[(global_row_offset + tile_c) * channels + ch] += pixel_val;
+                                    final_sum_row_ptr[tile_c * channels + ch] += pixel_val;
                                 }
                             }
                         }
                     }
                 }
-            } // --- Akhir dari #pragma omp for ---
-        } // --- Akhir dari #pragma omp parallel ---
+            }
+        }
     }
 
     // --- Fungsi normalize_accumulated_image_jit  ---
