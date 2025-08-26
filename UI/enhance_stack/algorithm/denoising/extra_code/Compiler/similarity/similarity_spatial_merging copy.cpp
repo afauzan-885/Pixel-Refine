@@ -26,26 +26,26 @@ namespace MotionMetricsConfig
     constexpr float FLATNESS_CONFIDENCE_BOOST = 1.7f;
 }
 
-class SimpleTimer
-{
-public:
-    SimpleTimer(const std::string &name)
-        : m_name(name), m_start(std::chrono::high_resolution_clock::now())
-    {
-    }
+// class SimpleTimer
+// {
+// public:
+//     SimpleTimer(const std::string &name)
+//         : m_name(name), m_start(std::chrono::high_resolution_clock::now())
+//     {
+//     }
 
-    ~SimpleTimer()
-    {
-        auto end = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - m_start);
-        std::cout << "[C++ Timer] " << m_name << ": "
-                  << duration.count() / 1000.0 << " ms" << std::endl;
-    }
+//     ~SimpleTimer()
+//     {
+//         auto end = std::chrono::high_resolution_clock::now();
+//         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - m_start);
+//         std::cout << "[C++ Timer] " << m_name << ": "
+//                   << duration.count() / 1000.0 << " ms" << std::endl;
+//     }
 
-private:
-    std::string m_name;
-    std::chrono::time_point<std::chrono::high_resolution_clock> m_start;
-};
+// private:
+//     std::string m_name;
+//     std::chrono::time_point<std::chrono::high_resolution_clock> m_start;
+// };
 
 extern "C"
 {
@@ -95,7 +95,7 @@ extern "C"
 // --- TAHAP 1: Tugas Awal yang Bisa Berjalan Bersamaan ---
 #pragma omp task
                 {
-                    SimpleTimer cvt_current_timer("A1a. Grayscale Conversion (Current)");
+                    // SimpleTimer cvt_current_timer("A1a. Grayscale Conversion (Current)");
                     cv::Mat temp_gray;
                     if (channels > 1)
                     {
@@ -110,7 +110,7 @@ extern "C"
 
 #pragma omp task
                 {
-                    SimpleTimer cvt_ref_timer("A1b. Grayscale Conversion (Reference)");
+                    // SimpleTimer cvt_ref_timer("A1b. Grayscale Conversion (Reference)");
                     cv::Mat temp_gray;
                     if (channels > 1)
                     {
@@ -127,7 +127,7 @@ extern "C"
 // Menunggu TUGAS konversi grayscale selesai sebelum melanjutkan
 #pragma omp taskwait
 
-                SimpleTimer noise_est_timer("A2. Noise Estimation");
+                // SimpleTimer noise_est_timer("A2. Noise Estimation");
                 global_estimated_noise_sigma = 0.015f;
 #ifdef TILE_NOISE_ESTIMATION_HPP
                 if (reference_image_gray_full.rows >= 3 && reference_image_gray_full.cols >= 3)
@@ -135,10 +135,11 @@ extern "C"
 #endif
                 global_estimated_noise_sigma = std::max(0.001f, std::min(0.35f, global_estimated_noise_sigma));
 
-// --- TAHAP 3: Paralelkan Filter (Sekarang kita punya sigma) ---
+
+                // --- TAHAP 3: Paralelkan Filter (Sekarang kita punya sigma) ---
 #pragma omp task
                 {
-                    SimpleTimer filter_current_timer("A3a. Filtering (Current)");
+                    // SimpleTimer filter_current_timer("A3a. Filtering (Current)");
                     cv::Mat processed = current_image_gray_full.clone();
 
                     const float noise_activation_threshold = 0.07f;
@@ -176,7 +177,7 @@ extern "C"
 
 #pragma omp task
                 {
-                    SimpleTimer filter_ref_timer("A3b. Filtering (Reference)");
+                    // SimpleTimer filter_ref_timer("A3b. Filtering (Reference)");
                     cv::Mat processed = reference_image_gray_full.clone();
 
                     const float noise_activation_threshold = 0.07f;
@@ -226,7 +227,7 @@ extern "C"
         // =================================================================================
         // === BAGIAN B: ANALISIS SKALA KASAR (OPTIMASI BARU DENGAN GRID + INTERPOLASI) ===
         // =================================================================================
-        SimpleTimer pyramid_timer("B. Multi-Scale Pyramid Generation");
+        // SimpleTimer pyramid_timer("B. Multi-Scale Pyramid Generation");
 
         const int tile_h_fine = tile_h;
         const int tile_w_fine = tile_w;
@@ -244,24 +245,38 @@ extern "C"
 
         // --- Bangun piramida gambar ---
         std::vector<cv::Mat> current_pyramid, reference_pyramid;
-        current_pyramid.reserve(num_pyramid_levels);
-        reference_pyramid.reserve(num_pyramid_levels);
-        current_pyramid.push_back(current_image_gray_full);
-        reference_pyramid.push_back(reference_image_gray_full);
-
-        for (int i = 0; i < num_pyramid_levels - 1; ++i)
+        #pragma omp parallel
         {
-            cv::Mat next_current, next_ref;
-            cv::pyrDown(current_pyramid.back(), next_current);
-            cv::pyrDown(reference_pyramid.back(), next_ref);
-            current_pyramid.push_back(next_current);
-            reference_pyramid.push_back(next_ref);
+            #pragma omp single
+            {
+                #pragma omp task
+                {
+                    current_pyramid.reserve(num_pyramid_levels);
+                    current_pyramid.push_back(current_image_gray_full);
+                    for (int i = 0; i < num_pyramid_levels - 1; ++i) {
+                        cv::Mat next_current;
+                        cv::pyrDown(current_pyramid.back(), next_current);
+                        current_pyramid.push_back(next_current);
+                    }
+                }
+                #pragma omp task
+                {
+                    reference_pyramid.reserve(num_pyramid_levels);
+                    reference_pyramid.push_back(reference_image_gray_full);
+                    for (int i = 0; i < num_pyramid_levels - 1; ++i) {
+                        cv::Mat next_ref;
+                        cv::pyrDown(reference_pyramid.back(), next_ref);
+                        reference_pyramid.push_back(next_ref);
+                    }
+                }
+                #pragma omp taskwait
+            }
         }
 
         std::reverse(current_pyramid.begin(), current_pyramid.end());
         std::reverse(reference_pyramid.begin(), reference_pyramid.end());
 
-        // --- Peta panduan dimulai dari ukuran level terkecil (paling kasar) ---
+        // --- Peta panduan dimulai dari ukuran level terkecil ---
         cv::Mat guidance_map = cv::Mat(current_pyramid[0].size(), CV_32FC1, cv::Scalar(1.0f));
 
         // --- Loop dari skala paling kasar ke yang lebih halus ---
@@ -270,29 +285,27 @@ extern "C"
             const cv::Mat &current_img_level = current_pyramid[level];
             const cv::Mat &ref_img_level = reference_pyramid[level];
 
-            // Upscale peta panduan dari level sebelumnya
-            if (level > 0)
-            {
+            if (level > 0) {
                 cv::resize(guidance_map, guidance_map, current_img_level.size(), 0, 0, cv::INTER_LINEAR);
             }
 
-            // OPTIMASI BARU: Buat grid confidence yang ukurannya jauh lebih kecil.
             const int num_tiles_h = current_img_level.rows / tile_h_fine;
             const int num_tiles_w = current_img_level.cols / tile_w_fine;
-            
-            // Jika gambar terlalu kecil untuk satu tile pun, lewati level ini.
             if (num_tiles_h == 0 || num_tiles_w == 0) continue;
+
+            // --- OPTIMASI 2: Gunakan Integral Image untuk mean lookup super cepat ---
+            cv::Mat guidance_map_integral;
+            // Gunakan CV_64F (double) untuk menghindari overflow/masalah presisi saat menjumlahkan
+            cv::integral(guidance_map, guidance_map_integral, CV_64F);
 
             cv::Mat confidence_grid(num_tiles_h, num_tiles_w, CV_32FC1);
 
-// OPTIMASI BARU: Loop for sekarang bekerja pada grid non-overlapping yang jauh lebih kecil.
-#pragma omp parallel for schedule(dynamic)
+            #pragma omp parallel for schedule(dynamic)
             for (int r_tile = 0; r_tile < num_tiles_h; ++r_tile)
             {
-                // Inisialisasi buffer per-thread, jika diperlukan
                 MotionMatching::MBMBuffers mbm_buffers;
-                if (tile_h_fine > 0 && tile_w_fine > 0)
-                {
+                // ... inisialisasi buffer ...
+                if (tile_h_fine > 0 && tile_w_fine > 0) {
                     mbm_buffers.diff_workspace.create(tile_h_fine, tile_w_fine, CV_32FC1);
                     mbm_buffers.grad_x.create(tile_h_fine, tile_w_fine, CV_32F);
                     mbm_buffers.grad_y.create(tile_h_fine, tile_w_fine, CV_32F);
@@ -305,49 +318,62 @@ extern "C"
                     
                     MotionMatching::TileMatchResult res = MotionMatching::calculate_tile_similarity(
                         current_img_level(roi), ref_img_level(roi),
+                        global_estimated_noise_sigma, 
                         GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON, mbm_buffers);
 
                     float confidence_level = res.success ? MotionMatching::calculate_match_confidence(
-                                                               res, global_estimated_noise_sigma, adapted_motion_sensitivity, adapted_noise_offset_factor)
-                                                         : 0.0f;
+                        res, global_estimated_noise_sigma, adapted_motion_sensitivity, adapted_noise_offset_factor) : 0.0f;
                     
-                    // Dapatkan nilai panduan dari peta yang di-upscale
-                    float guidance_confidence = static_cast<float>(cv::mean(guidance_map(roi))[0]);
+                    // --- OPTIMASI 2 (Lanjutan): Ganti cv::mean dengan lookup Integral Image (O(1)) ---
+                    const int x1 = roi.x;
+                    const int y1 = roi.y;
+                    const int x2 = roi.x + roi.width;
+                    const int y2 = roi.y + roi.height;
 
-                    // Simpan hasil confidence final ke dalam grid kecil
+                    // Akses 4 titik pada integral image untuk mendapatkan jumlah area
+                    const double sum = guidance_map_integral.at<double>(y2, x2) 
+                                    - guidance_map_integral.at<double>(y2, x1) 
+                                    - guidance_map_integral.at<double>(y1, x2) 
+                                    + guidance_map_integral.at<double>(y1, x1);
+
+                    const float guidance_confidence = static_cast<float>(sum / (roi.width * roi.height));
+                    
                     confidence_grid.at<float>(r_tile, c_tile) = confidence_level * guidance_confidence;
                 }
             }
 
-            // OPTIMASI BARU: Ganti jutaan cv::add dan satu cv::GaussianBlur dengan satu cv::resize.
-            // Ini akan menginterpolasi nilai dari grid kecil ke peta seukuran gambar level saat ini,
-            // menciptakan hasil yang mulus dengan sangat cepat.
             cv::resize(confidence_grid, guidance_map, current_img_level.size(), 0, 0, cv::INTER_LINEAR);
         }
 
-        // --- Upscale peta panduan final ke resolusi penuh ---
-        if (!guidance_map.empty() && guidance_map.size() != current_image_gray_full.size())
-        {
+        // --- Upscale peta panduan final ke resolusi penuh (tidak berubah) ---
+        if (!guidance_map.empty() && guidance_map.size() != current_image_gray_full.size()) {
             cv::resize(guidance_map, guidance_map, current_image_gray_full.size(), 0, 0, cv::INTER_LINEAR);
-        }
-        else if(guidance_map.empty())
-        {
-            // Fallback jika tidak ada level piramida yang diproses
+        } else if(guidance_map.empty()) {
             guidance_map = cv::Mat(h_img, w_img, CV_32FC1, cv::Scalar(1.0f));
         }
 
-        // =========================================================================
-        // === TAHAP 2: ANALISIS SKALA HALUS & AKUMULASI FINAL (Tidak banyak berubah)
-        // =========================================================================
+        // =================================================================================
+        // === TAHAP 2: ANALISIS SKALA HALUS & AKUMULASI FINAL (OPTIMASI UNTUK KECEPATAN)
+        // =================================================================================
+        // SimpleTimer accumulation_timer("C. Fine Scale Analysis & Accumulation");
+
         cv::Mat final_image_sum_mat(h_img, w_img, CV_32FC(channels), final_image_sum_ptr);
         cv::Mat weight_map_sum_mat(h_img, w_img, CV_32FC1, weight_map_sum_ptr);
-        final_image_sum_mat.setTo(0.0f);
-        weight_map_sum_mat.setTo(0.0f);
-        
+
+        // Inisialisasi tetap bisa diparalelkan
+        #pragma omp parallel for
+        for (int i = 0; i < h_img * w_img * channels; ++i) final_image_sum_ptr[i] = 0.0f;
+        #pragma omp parallel for
+        for (int i = 0; i < h_img * w_img; ++i) weight_map_sum_ptr[i] = 0.0f;
+
         #pragma omp parallel
         {
+            // === Variabel Lokal per-Thread ===
+            // Kita kembalikan buffer lokal kecil ini.
+            // Ini penting agar setiap thread bisa bekerja tanpa mengganggu yang lain.
             cv::Mat local_weighted_tile(tile_h_fine, tile_w_fine, CV_32FC(channels));
             cv::Mat local_weight_tile(tile_h_fine, tile_w_fine, CV_32FC1);
+
             MotionMatching::MBMBuffers mbm_buffers_fine;
             if (tile_h_fine > 0 && tile_w_fine > 0) {
                 mbm_buffers_fine.diff_workspace.create(tile_h_fine, tile_w_fine, CV_32FC1);
@@ -355,7 +381,6 @@ extern "C"
                 mbm_buffers_fine.grad_y.create(tile_h_fine, tile_w_fine, CV_32F);
                 mbm_buffers_fine.grad_mag_current.create(tile_h_fine, tile_w_fine, CV_32FC1);
             }
-            const int num_tiles_x = (w_img > 0 && tile_w_fine > 0) ? (w_img + tile_w_fine - 1) / tile_w_fine : 0;
             
             #pragma omp for collapse(2) schedule(dynamic)
             for (int i = 0; i < num_row_starts; i++)
@@ -368,33 +393,33 @@ extern "C"
 
                     cv::Rect tile_roi(c, r, tile_w_fine, tile_h_fine);
 
+                    // Perhitungan confidence (tetap sama)
                     MotionMatching::TileMatchResult mbm_result = MotionMatching::calculate_tile_similarity(
                         current_image_gray_full(tile_roi), reference_image_gray_full(tile_roi),
+                        global_estimated_noise_sigma, 
                         GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON, mbm_buffers_fine
                     );
 
-                    float confidence_fine = 0.0f;
-                    if (mbm_result.success) {
-                        confidence_fine = MotionMatching::calculate_match_confidence(
-                            mbm_result, global_estimated_noise_sigma, 
-                            adapted_motion_sensitivity, adapted_noise_offset_factor);
-                    }
+                    float confidence_fine = mbm_result.success ? MotionMatching::calculate_match_confidence(
+                        mbm_result, global_estimated_noise_sigma, 
+                        adapted_motion_sensitivity, adapted_noise_offset_factor) : 0.0f;
                     
-                    // --- Menggunakan Peta Panduan ---
                     float guidance_confidence = static_cast<float>(cv::mean(guidance_map(tile_roi))[0]);
                     float final_confidence = confidence_fine * guidance_confidence;
 
-                    // Gabungkan dengan stability map jika ada
-                    if (final_confidence > 0.0f && !stability_map_mat.empty()) {
+                    if (!stability_map_mat.empty()) {
                         final_confidence *= static_cast<float>(cv::mean(stability_map_mat(tile_roi))[0]);
                     }
                     
                     if (final_confidence < 1e-5f) continue;
                     
+                    // --- LANGKAH 1: Hitung & Simpan ke Buffer LOKAL (Sangat Cepat, Tanpa Kunci/Lock) ---
                     const cv::Mat current_tile_for_accumulation = current_image_mat(tile_roi);
                     const cv::Mat base_window_tile_mat(tile_h_fine, tile_w_fine, CV_32FC1, const_cast<float *>(base_window_ptr));
                     
+                    // Operasi perkalian ini sekarang mengisi buffer lokal milik thread, bukan global.
                     cv::multiply(base_window_tile_mat, final_confidence, local_weight_tile);
+
                     if (channels > 1) {
                         cv::Mat weighted_mask_color;
                         std::vector<cv::Mat> mask_channels(channels, local_weight_tile);
@@ -404,27 +429,13 @@ extern "C"
                         cv::multiply(current_tile_for_accumulation, local_weight_tile, local_weighted_tile);
                     }
 
-                    // --- Akumulasi Atomik ---
-                    for (int tile_r = 0; tile_r < tile_h_fine; ++tile_r) {
-                        float* weight_sum_row_ptr = weight_map_sum_mat.ptr<float>(r + tile_r) + c;
-                        float* final_sum_row_ptr = final_image_sum_mat.ptr<float>(r + tile_r) + c * channels;
-                        const float* local_weight_row_ptr = local_weight_tile.ptr<float>(tile_r);
-                        const float* local_final_row_ptr = local_weighted_tile.ptr<float>(tile_r);
-
-                        for (int tile_c = 0; tile_c < tile_w_fine; ++tile_c) {
-                            float weight_val = local_weight_row_ptr[tile_c];
-                            if (weight_val > 1e-8f) {
-                                #pragma omp atomic
-                                weight_sum_row_ptr[tile_c] += weight_val;
-                            }
-                            for (int ch = 0; ch < channels; ++ch) {
-                                float pixel_val = local_final_row_ptr[tile_c * channels + ch];
-                                if (std::abs(pixel_val) > 1e-8f) {
-                                    #pragma omp atomic
-                                    final_sum_row_ptr[tile_c * channels + ch] += pixel_val;
-                                }
-                            }
-                        }
+                    // --- LANGKAH 2: Akumulasi ke Buffer GLOBAL dalam Critical Section (Jarang Terjadi) ---
+                    // Hanya satu thread yang bisa masuk ke sini pada satu waktu,
+                    // tapi operasinya sangat cepat (menambahkan seluruh blok memori).
+                    #pragma omp critical
+                    {
+                        cv::add(final_image_sum_mat(tile_roi), local_weighted_tile, final_image_sum_mat(tile_roi));
+                        cv::add(weight_map_sum_mat(tile_roi), local_weight_tile, weight_map_sum_mat(tile_roi));
                     }
                 }
             }

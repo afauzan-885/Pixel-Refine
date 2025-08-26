@@ -13,14 +13,10 @@
 
 namespace MotionMatching
 {
-    // --- TIDAK ADA PERUBAHAN DI SINI ---
     // Semua fungsi internal untuk menghitung skor MAD (plain, weighted, AVX2)
     // masih sangat relevan dan dipertahankan seperti adanya.
     namespace Internal
     {
-        // ... (Fungsi calculate_plain_mad_32f, horizontal_add_m256,
-        //      calculate_noise_motion_aware_weighted_mad_avx2, dan
-        //      calculate_noise_motion_aware_weighted_mad tetap di sini)
         static float calculate_plain_mad_32f(const cv::Mat &block1_gray, const cv::Mat &block2_gray)
         {
             CV_Assert(block1_gray.size() == block2_gray.size() &&
@@ -159,10 +155,10 @@ namespace MotionMatching
 
 
     // --- MODIFIKASI: Implementasi fungsi baru yang disederhanakan ---
-    // Fungsi `find_best_block_match_mad` yang lama dihapus seluruhnya.
     TileMatchResult calculate_tile_similarity(
         const cv::Mat &current_tile_gray,
         const cv::Mat &reference_tile_gray,
+        float global_noise_sigma, 
         float gradient_weight_factor,
         float stability_epsilon,
         MBMBuffers &buffers)
@@ -197,13 +193,11 @@ namespace MotionMatching
             cv::magnitude(grad_x, grad_y, grad_mag);
         }
 
-        cv::Scalar mean_val, stddev_val;
-        cv::meanStdDev(current_tile_gray, mean_val, stddev_val);
-        float noise_level = static_cast<float>(stddev_val[0] * 0.5); 
-        
+        float noise_level = global_noise_sigma; // Jauh lebih cepat!
+
         const float noise_threshold = std::max(0.01f, noise_level * 0.2f);
         const float diff_threshold = std::max(0.005f, noise_level * 0.1f);
-
+        
         // Siapkan workspace untuk `absdiff`
         if (buffers.diff_workspace.rows < bh || buffers.diff_workspace.cols < bw ||
             buffers.diff_workspace.type() != CV_32FC1)
@@ -222,7 +216,8 @@ namespace MotionMatching
         {
             result.mad_score = Internal::calculate_noise_motion_aware_weighted_mad(
                 current_tile_gray, reference_tile_gray, grad_mag, abs_diff_block,
-                noise_level, noise_threshold, diff_threshold,
+                noise_level, // <--- Gunakan noise_level dari parameter
+                noise_threshold, diff_threshold,
                 gradient_weight_factor, stability_epsilon);
         }
 

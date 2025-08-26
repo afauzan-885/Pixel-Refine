@@ -23,10 +23,10 @@ struct TileMatchResult
     bool success = false;
 };
 
-// Membandingkan dua tile.
 TileMatchResult calculate_tile_similarity(
     const cv::Mat &current_tile_gray,
     const cv::Mat &reference_tile_gray,
+    float global_noise_sigma,
     float gradient_weight_factor,
     float stability_epsilon,
     MBMBuffers& buffers
