@@ -192,18 +192,14 @@ class FarnebackAlgorithm:
                             noise_level, min_noise_threshold, max_noise_threshold,
                             min_d, max_d, min_sigma, max_sigma
                         )
-                        print(f"[{image_type}] Noise: {noise_level:.2f}. Applying Bilateral Filter: d={d}, sigmaColor={sigma_color}, sigmaSpace={sigma_space}")
-                        # Bilateral filter mempertahankan tipe data input, jadi outputnya juga uint8
                         denoised_image = cv2.bilateralFilter(gray_8bit, d, sigma_color, sigma_space)
                     else:
-                        print(f"[{image_type}] Noise: {noise_level:.2f}. Skipping filter.")
                         denoised_image = gray_8bit
                     
                     # Hasil akhir dijamin uint8, aman untuk Farneback
                     result_q.put((image_type, denoised_image))
 
                 except Exception as e:
-                    print(f"Error in denoise_worker for {image_type}: {e}")
                     result_q.put((image_type, None))
 
         # --- PERUBAHAN 2: Inisialisasi antrian dan thread worker ---

@@ -209,10 +209,8 @@ class ORBAlgorithm:
                             noise_level, min_noise_threshold, max_noise_threshold,
                             min_d, max_d, min_sigma, max_sigma
                         )
-                        print(f"[{image_type}] Noise: {noise_level:.2f}. Applying Bilateral Filter: d={d}, sigmaColor={sigma_color}, sigmaSpace={sigma_space}")
                         filtered_image = cv2.bilateralFilter(enhanced_gray, d, sigma_color, sigma_space)
                     else:
-                        print(f"[{image_type}] Noise: {noise_level:.2f}. Skipping filter.")
                         filtered_image = enhanced_gray
                     
                     # 4. Terapkan CLAHE setelah filtering
@@ -222,7 +220,6 @@ class ORBAlgorithm:
                     result_q.put((image_type, final_image))
 
                 except Exception as e:
-                    print(f"Error in filter_worker for {image_type}: {e}")
                     result_q.put((image_type, None)) # Kirim sinyal error
 
         # --- PERUBAHAN 2: Inisialisasi antrian dan thread worker ---
@@ -490,7 +487,8 @@ def main(db_path,
     # Buat file HDF5 dan simpan gambar dasar pertama
     with h5py.File(processor.hdf5_path, "w") as h5f:
         if command_save_to_hd5f:
-            h5f.create_dataset("image_0", data=base_image)
+            with h5py.File(processor.hdf5_path, "w") as h5f:
+                pass # File dibuat tapi dibiarkan kosong
         if save_align:
             save_align_to_folder(base_image, 0, image_paths[0], align_folder)
 

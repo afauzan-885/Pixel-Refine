@@ -1262,7 +1262,7 @@ def generate_balanced_batches(total_images, max_batch_size=10):
         yield (start_index, end_index)
         current_index = end_index
 
-def setup_balanced_batching(total_images, language_config, max_batch_size=10):
+def setup_balanced_batching(total_images, language_config, max_batch_size=8):
     """
     Menyiapkan seluruh logika batching, termasuk mencetak info ke konsol.
     
@@ -1300,18 +1300,30 @@ def setup_balanced_batching(total_images, language_config, max_batch_size=10):
 def run_pipeline_non_crop(processor, image_paths, base_image, target_dims, 
                            update_progress, stop_requested, save_align, align_folder, command_save_to_hd5f):
     """
-    Menjalankan pipeline tiga tahap penuh untuk alignment streaming sederhana.
-    Loader -> Feature Extractor (GPU/CPU) -> Compensator & Saver.
+    Menjalankan pipeline tiga tahap penuh untuk alignment streaming sederhana tanpa cropping.
     """
-    total_images = len(image_paths) + 1
-    progress_counter = {"count": 1}
+    # Catatan: image_paths di sini adalah image_paths[1:] dari main
+    total_images_in_stack = len(image_paths) + 1
+    
+    progress_counter = {"count": 1} # Mulai dari 1 untuk base image
     progress_lock = threading.Lock()
-    lock = threading.Lock()
+    lock = threading.Lock() # Lock untuk penulisan HDF5 jika diperlukan
 
-    queue_images = queue.Queue(maxsize=2)
-    queue_points = queue.Queue(maxsize=2)
+    # --- PERBAIKAN: Simpan base image secara kondisional di awal ---
+    if save_align:
+        print(f"Saving base image (index 0) to folder {align_folder}")
+        save_align_to_folder(base_image, 0, "base_image", align_folder)
 
-    # --- Stasiun 1: Loader ---
+    if command_save_to_hd5f:
+        print("Saving base image (index 0) to HDF5")
+        with h5py.File(processor.hdf5_path, "a") as h5f:
+             # Asumsi exif base image sudah diekstrak sebelumnya
+            save_to_hdf5(h5f, "image_0", base_image, {}) 
+    
+    # --- Definisi Worker ---
+    queue_images = queue.Queue(maxsize=4)
+    queue_points = queue.Queue(maxsize=4)
+
     def loader_worker():
         for i, path in enumerate(image_paths, start=1):
             if stop_requested and stop_requested(): break
@@ -1321,20 +1333,26 @@ def run_pipeline_non_crop(processor, image_paths, base_image, target_dims,
             queue_images.put((i, path, target_image))
         queue_images.put(None)
 
-    # --- Stasiun 2: Feature Extractor ---
     def feature_extractor_worker():
         while True:
             item = queue_images.get()
             if item is None: break
             i, path, target_image = item
-            base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
+            base_pts, target_pts = processor.calculate_global_motion(base_image, target_image, stop_requested=stop_requested)
             if base_pts is not None and target_pts is not None:
                 queue_points.put((i, path, target_image, base_pts, target_pts))
             else:
-                with progress_lock: progress_counter["count"] += 1
+                # Jika alignment gagal, tetap update progress
+                with progress_lock:
+                    progress_counter["count"] += 1
+                    if update_progress:
+                        update_progress(
+                            progress_counter["count"], total_images_in_stack,
+                            f"Aligning image {progress_counter['count']}/{total_images_in_stack}"
+                        )
         queue_points.put(None)
 
-    # Mulai thread worker
+    # --- Mulai Threads ---
     loader_thread = threading.Thread(target=loader_worker)
     extractor_thread = threading.Thread(target=feature_extractor_worker)
     loader_thread.start()
@@ -1348,7 +1366,10 @@ def run_pipeline_non_crop(processor, image_paths, base_image, target_dims,
         
         compensated = processor.compensate_motion(target_image, base_pts, target_pts)
         if compensated is not None:
-            if save_align: save_align_to_folder(compensated, i, path, align_folder)
+            if save_align:
+                save_align_to_folder(compensated, i, path, align_folder)
+            
+            # --- PERBAIKAN: Penulisan HDF5 dikondisikan ---
             if command_save_to_hd5f:
                 with lock:
                     with h5py.File(processor.hdf5_path, "a") as h5f:
@@ -1358,22 +1379,82 @@ def run_pipeline_non_crop(processor, image_paths, base_image, target_dims,
             progress_counter["count"] += 1
             if update_progress:
                 update_progress(
-                    progress_counter["count"], total_images,
-                    f"Processing image {progress_counter['count']}/{total_images}"
+                    progress_counter["count"], total_images_in_stack,
+                    f"Aligning image {progress_counter['count']}/{total_images_in_stack}"
                 )
 
+    # --- Cleanup ---
     loader_thread.join()
     extractor_thread.join()
+    
+def run_pipeline_global_crop(processor, image_paths, base_image, target_dims, 
+                             update_progress, stop_requested, transformation_type,
+                             save_align, align_folder, command_save_to_hd5f):
+    """
+    Menjalankan pipeline tiga tahap penuh untuk alignment dengan global cropping.
+    """
+    total_images_in_stack = len(image_paths)
+    images_to_process_for_transforms = image_paths[1:]
+    num_transforms_to_calc = len(images_to_process_for_transforms)
+    
+    # Tentukan total langkah progress di awal untuk konsistensi
+    total_progress_steps = num_transforms_to_calc + total_images_in_stack
+
+    # --- Tahap 1: Hitung semua transformasi ---
+    all_transforms = _run_transform_calculation_stage(
+        processor, images_to_process_for_transforms, base_image, target_dims,
+        update_progress, stop_requested, total_progress_steps
+    )
+    if not all_transforms:
+        print("Transform calculation failed or was cancelled. Aborting global crop.")
+        return
+
+    # --- Tahap 2 (Sinkron): Hitung batas crop ---
+    if update_progress:
+        update_progress(num_transforms_to_calc, total_progress_steps, "Computing global crop bounds...")
+        
+    crop_bounds = compute_global_crop(
+        [(i, b, t) for i, _, b, t in all_transforms],
+        total_images_in_stack, base_image.shape[1], base_image.shape[0],
+        transformation_type=transformation_type,
+    )
+    if crop_bounds is None:
+        print("Failed to compute global crop bounds. Aborting.")
+        return
+
+    base_image_cropped = crop_image(base_image, crop_bounds)
+    del base_image
+    gc.collect()
+
+    # --- Tahap 3: Terapkan transformasi, crop, dan simpan ---
+    
+    # ========================== PERBAIKAN UTAMA ==========================
+    # Pastikan SEMUA argumen yang dibutuhkan oleh _run_apply_and_save_stage diteruskan.
+    # =====================================================================
+    _run_apply_and_save_stage(
+        processor, 
+        all_transforms, 
+        crop_bounds, 
+        target_dims,
+        update_progress, 
+        stop_requested, 
+        total_progress_steps,
+        save_align,             # <-- Dikembalikan
+        align_folder,           # <-- Dikembalikan
+        command_save_to_hd5f,   # <-- Dikembalikan
+        base_image_cropped, 
+        image_paths[0]
+    )        
 
 def _run_transform_calculation_stage(processor, image_paths, base_image, target_dims, 
-                                     update_progress, stop_requested, total_images):
+                                     update_progress, stop_requested, total_progress_steps):
     """Helper untuk Tahap 1 dari Global Crop: Menghitung semua transformasi."""
     all_transforms = []
     progress_counter = {"count": 0}
     progress_lock = threading.Lock()
     
-    queue_images_s1 = queue.Queue(maxsize=2)
-    queue_transforms_s1 = queue.Queue(maxsize=2)
+    queue_images_s1 = queue.Queue(maxsize=4)
+    queue_transforms_s1 = queue.Queue(maxsize=4)
 
     def loader_s1_worker():
         for i, path in enumerate(image_paths, start=1):
@@ -1392,6 +1473,14 @@ def _run_transform_calculation_stage(processor, image_paths, base_image, target_
             base_pts, target_pts = processor.calculate_global_motion(base_image, target_image)
             if base_pts is not None and target_pts is not None:
                 queue_transforms_s1.put((i, path, base_pts, target_pts))
+            else:
+                 # Jika gagal, tetap update progress agar tidak macet
+                 with progress_lock:
+                    progress_counter["count"] += 1
+                    if update_progress:
+                        current_step = progress_counter["count"]
+                        status_text = f"Calculating transform {current_step}/{len(image_paths)} (Failed)"
+                        update_progress(current_step, total_progress_steps, status_text)
         queue_transforms_s1.put(None)
 
     loader_s1_thread = threading.Thread(target=loader_s1_worker)
@@ -1399,31 +1488,65 @@ def _run_transform_calculation_stage(processor, image_paths, base_image, target_
     loader_s1_thread.start()
     extractor_s1_thread.start()
 
+    num_images_to_process = len(image_paths)
+
     while True:
         item = queue_transforms_s1.get()
         if item is None: break
         all_transforms.append(item)
+        
         with progress_lock:
             progress_counter["count"] += 1
             if update_progress:
-                update_progress(
-                    progress_counter["count"], 2 * total_images,
-                    f"Calculating transform {progress_counter['count']}/{total_images}"
-                )
+                # Logika progress yang disederhanakan
+                current_step = progress_counter["count"]
+                status_text = f"Calculating transform {current_step}/{num_images_to_process}"
+                update_progress(current_step, total_progress_steps, status_text)
+
     loader_s1_thread.join()
     extractor_s1_thread.join()
     return all_transforms
 
 def _run_apply_and_save_stage(processor, temp_transforms, crop_bounds, target_dims,
-                               update_progress, stop_requested, total_images,
-                               save_align, align_folder, command_save_to_hd5f):
-    """Helper untuk Tahap 3 dari Global Crop: Menerapkan transformasi dan menyimpan."""
-    stage3_counter = {"count": 0}
-    progress_lock = threading.Lock()
-    lock = threading.Lock()
+                               update_progress, stop_requested, total_progress_steps,
+                               save_align, align_folder, command_save_to_hd5f, # <-- Argumen yang hilang dikembalikan
+                               base_image_cropped, base_image_path):
+    """
+    Helper untuk Tahap 3: Menyimpan BASE IMAGE dan menerapkan transformasi pada sisanya.
+    """
+    # Tentukan titik awal progress
+    progress_offset = len(temp_transforms)
     
-    queue_images_s3 = queue.Queue(maxsize=2)
-    queue_to_save_s3 = queue.Queue(maxsize=2)
+    # Total gambar yang akan disimpan di tahap ini
+    num_to_save_in_stage = len(temp_transforms) + 1
+    
+    # --- Proses dan simpan base image terlebih dahulu ---
+    print("Saving pre-cropped base image (index 0)...")
+    if save_align:
+        save_align_to_folder(base_image_cropped, 0, base_image_path, align_folder)
+    if command_save_to_hd5f:
+        # Asumsi lock didefinisikan di sini jika diperlukan oleh save_to_hdf5
+        # Untuk konsistensi, mari kita definisikan di dalam fungsi ini
+        lock = threading.Lock()
+        with lock:
+            with h5py.File(processor.hdf5_path, "a") as h5f:
+                save_to_hdf5(h5f, "image_0", base_image_cropped, extract_exif(base_image_path))
+    del base_image_cropped
+    gc.collect()
+
+    # Update progress setelah base image disimpan
+    if update_progress:
+        current_step = progress_offset + 1
+        status_text = f"Applying transform and saving 1/{num_to_save_in_stage}"
+        update_progress(current_step, total_progress_steps, status_text)
+
+    # --- Pipeline untuk gambar lainnya ---
+    stage3_counter = {"count": 1}
+    progress_lock = threading.Lock()
+    lock = threading.Lock() # Lock untuk HDF5 di dalam loop
+    
+    queue_images_s3 = queue.Queue(maxsize=4)
+    queue_to_save_s3 = queue.Queue(maxsize=4)
 
     def loader_s3_worker():
         for i, path, base_pts, target_pts in temp_transforms:
@@ -1449,82 +1572,31 @@ def _run_apply_and_save_stage(processor, temp_transforms, crop_bounds, target_di
     compensator_s3_thread = threading.Thread(target=compensator_s3_worker)
     loader_s3_thread.start()
     compensator_s3_thread.start()
-
+    
     while True:
         item = queue_to_save_s3.get()
         if item is None: break
         i, path, cropped = item
-        if save_align: save_align_to_folder(cropped, i, path, align_folder)
+        
+        # Variabel sekarang terdefinisi dengan benar
+        if save_align:
+            save_align_to_folder(cropped, i, path, align_folder)
         if command_save_to_hd5f:
             with lock:
                 with h5py.File(processor.hdf5_path, "a") as h5f:
                     save_to_hdf5(h5f, f"image_{i}", cropped, extract_exif(path))
+        
         del cropped
         gc.collect()
+
         with progress_lock:
             stage3_counter["count"] += 1
             if update_progress:
-                update_progress(
-                    total_images + stage3_counter["count"], 2 * total_images,
-                    f"Applying transform {stage3_counter['count']}/{len(temp_transforms)}"
-                )
+                # Logika progress yang sudah benar
+                current_step = progress_offset + stage3_counter["count"]
+                status_text = f"Applying transform and saving {stage3_counter['count'] + 1}/{num_to_save_in_stage}"
+                update_progress(current_step, total_progress_steps, status_text)
+
+    # Cleanup
     loader_s3_thread.join()
     compensator_s3_thread.join()
-
-def run_pipeline_global_crop(processor, image_paths, base_image, target_dims, 
-                             update_progress, stop_requested, transformation_type,
-                             save_align, align_folder, command_save_to_hd5f):
-    """Menjalankan pipeline tiga tahap penuh untuk alignment dengan global cropping."""
-    total_images_to_process = len(image_paths)
-
-    # --- Tahap 1 ---
-    all_transforms = _run_transform_calculation_stage(
-        processor, image_paths, base_image, target_dims,
-        update_progress, stop_requested, total_images_to_process
-    )
-    if not all_transforms: return
-
-    # --- Tahap 2 (Sinkron) ---
-    crop_bounds = compute_global_crop(
-        [(i, b, t) for i, _, b, t in all_transforms],
-        total_images_to_process + 1, base_image.shape[1], base_image.shape[0],
-        transformation_type=transformation_type,
-    )
-    if crop_bounds is None: return
-
-    base_image_cropped = crop_image(base_image, crop_bounds)
-    with h5py.File(processor.hdf5_path, "a") as h5f:
-        del h5f["image_0"]
-        h5f.create_dataset("image_0", data=base_image_cropped)
-    if save_align: save_align_to_folder(base_image_cropped, 0, image_paths[0], align_folder)
-    del base_image_cropped, base_image
-    gc.collect()
-
-    # --- Tahap 3 ---
-    _run_apply_and_save_stage(
-        processor, all_transforms, crop_bounds, target_dims,
-        update_progress, stop_requested, total_images_to_process,
-        save_align, align_folder, command_save_to_hd5f
-    )
-
-# def main(db_path, update_progress=None, ...):
-#     """Fungsi utama yang mengoordinasikan seluruh alur kerja."""
-    
-#     # --- 1. Inisialisasi dan Konfigurasi ---
-#     # Pilih prosesor yang sesuai (AKAZE, LightGlue, dll.)
-#     # processor = AKAZEAlgorithm(db_path) 
-#     # config = processor.load_akaze_config(config_filename)
-    
-#     # ... (sisa logika inisialisasi dari jawaban sebelumnya) ...
-
-#     # --- 2. Penyiapan Path dan Metadata ---
-#     # ... (sisa logika penyiapan path dari jawaban sebelumnya) ...
-    
-#     # --- 3. Pemuatan dan Penyiapan Base Image ---
-#     # ... (sisa logika pemuatan base image dari jawaban sebelumnya) ...
-
-#     # --- 4. Delegasi ke Pipeline yang Sesuai ---
-#     if not enable_cropping or keep_edges:
-#         run_pipeline_non_crop(...)
-#     else:
-#         run_pipeline_global_crop(...)
