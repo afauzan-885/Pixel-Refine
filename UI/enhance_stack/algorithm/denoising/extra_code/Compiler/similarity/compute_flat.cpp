@@ -1,57 +1,8 @@
 #include "compute_flat.hpp"
 #include <opencv2/imgproc.hpp>
-#include <immintrin.h>
 
 namespace TextureAnalysis
 {
-    namespace Internal
-    {
-        static inline float horizontal_add_m256(__m256 reg)
-        {
-            __m128 lo = _mm256_castps256_ps128(reg);
-            __m128 hi = _mm256_extractf128_ps(reg, 1);
-            __m128 sum = _mm_add_ps(lo, hi);
-            sum = _mm_hadd_ps(sum, sum);
-            sum = _mm_hadd_ps(sum, sum);
-            return _mm_cvtss_f32(sum);
-        }
-
-#if defined(__GNUC__) || defined(__clang__)
-        __attribute__((target("avx2,fma")))
-#endif
-        static std::pair<double, double>
-        calculate_sum_and_sum_sq_avx2(const cv::Mat &mat)
-        {
-            const int total = mat.total();
-            const int avx_end = total - (total % 8);
-            const float *ptr = mat.ptr<float>();
-
-            __m256 v_sum = _mm256_setzero_ps();
-            __m256 v_sum_sq = _mm256_setzero_ps();
-
-            for (int i = 0; i < avx_end; i += 8)
-            {
-                const __m256 v_data = _mm256_loadu_ps(ptr + i);
-
-                v_sum = _mm256_add_ps(v_sum, v_data);
-
-                v_sum_sq = _mm256_fmadd_ps(v_data, v_data, v_sum_sq);
-            }
-
-            double total_sum = static_cast<double>(horizontal_add_m256(v_sum));
-            double total_sum_sq = static_cast<double>(horizontal_add_m256(v_sum_sq));
-
-            for (int i = avx_end; i < total; ++i)
-            {
-                double val = static_cast<double>(ptr[i]);
-                total_sum += val;
-                total_sum_sq += val * val;
-            }
-
-            return {total_sum, total_sum_sq};
-        }
-    }
-
     void detect_flat_tiles(
         const std::vector<cv::Mat> &channels,
         int tile_h, int tile_w,
@@ -60,55 +11,53 @@ namespace TextureAnalysis
         std::vector<bool> &is_flat)
     {
         CV_Assert(!channels.empty());
-        CV_Assert(num_channels > 0 && num_channels <= static_cast<int>(channels.size()));
-
         int h = channels[0].rows;
         int w = channels[0].cols;
+
+        // --- INTI OPTIMISASI AGRESIF ---
+        // Tentukan faktor skala untuk bekerja pada resolusi yang jauh lebih rendah
+        const int scale_factor = 4; // Bekerja pada 1/4 resolusi. Angka ini bisa di-tuning.
+        int h_small = h / scale_factor;
+        int w_small = w / scale_factor;
+        int tile_h_small = std::max(1, tile_h / scale_factor);
+        int tile_w_small = std::max(1, tile_w / scale_factor);
+        
+        // Sesuaikan threshold varians untuk resolusi yang lebih rendah
+        // Varians akan lebih rendah pada gambar yang di-downsample
+        float scaled_variance_threshold = flatness_variance_threshold / (scale_factor * 0.5f);
+
         int num_tiles_y = h / tile_h;
         int num_tiles_x = w / tile_w;
+        is_flat.assign(num_tiles_y * num_tiles_x, false);
 
-        is_flat.resize(num_tiles_y * num_tiles_x, false);
+        std::vector<cv::Mat> small_channels(num_channels);
+        
+        #pragma omp parallel for
+        for (int c = 0; c < num_channels; ++c) {
+            cv::resize(channels[c], small_channels[c], cv::Size(w_small, h_small), 0, 0, cv::INTER_AREA);
+        }
 
-#pragma omp parallel
-        {
-            // Buat buffer per-thread untuk menghindari race condition
-            cv::Mat laplacian_buffer(tile_h, tile_w, CV_32F);
+        #pragma omp parallel for collapse(2) schedule(static)
+        for (int ty = 0; ty < num_tiles_y; ++ty) {
+            for (int tx = 0; tx < num_tiles_x; ++tx) {
+                // Hitung ROI di skala kecil yang sesuai
+                int small_tx = tx * tile_w / scale_factor;
+                int small_ty = ty * tile_h / scale_factor;
+                cv::Rect roi_small(small_tx, small_ty, tile_w_small, tile_h_small);
 
-#pragma omp for collapse(2)
-            for (int ty = 0; ty < num_tiles_y; ++ty)
-            {
-                for (int tx = 0; tx < num_tiles_x; ++tx)
-                {
-                    cv::Rect roi(tx * tile_w, ty * tile_h, tile_w, tile_h);
-
-                    double total_variance = 0.0;
-
-                    for (int c = 0; c < num_channels; ++c)
-                    {
-                        const cv::Mat &ch = channels[c];
-                        cv::Mat tile = ch(roi);
-
-                        // 1. Hitung Laplacian (tetap menggunakan OpenCV yang cepat)
-                        cv::Laplacian(tile, laplacian_buffer, CV_32F, 1, 1.0, 0.0, cv::BORDER_REFLECT101);
-
-                        // 2. Hitung statistik menggunakan fungsi AVX2 kita
-                        auto [sum, sum_sq] = Internal::calculate_sum_and_sum_sq_avx2(laplacian_buffer);
-
-                        double num_pixels = static_cast<double>(laplacian_buffer.total());
-                        if (num_pixels > 0)
-                        {
-                            double mean = sum / num_pixels;
-                            double variance = (sum_sq / num_pixels) - (mean * mean);
-                            total_variance += variance;
-                        }
+                double total_variance = 0.0;
+                for (int c = 0; c < num_channels; ++c) {
+                    // Pastikan ROI tidak keluar dari batas gambar kecil
+                    if (roi_small.x + roi_small.width <= w_small && roi_small.y + roi_small.height <= h_small) {
+                        cv::Mat tile_small = small_channels[c](roi_small);
+                        cv::Scalar mean, stddev;
+                        cv::meanStdDev(tile_small, mean, stddev);
+                        total_variance += stddev[0] * stddev[0];
                     }
-
-                    double avg_variance = total_variance / num_channels;
-
-                    if (avg_variance < flatness_variance_threshold)
-                    {
-                        is_flat[ty * num_tiles_x + tx] = true;
-                    }
+                }
+                
+                if ((total_variance / num_channels) < scaled_variance_threshold) {
+                    is_flat[ty * num_tiles_x + tx] = true;
                 }
             }
         }

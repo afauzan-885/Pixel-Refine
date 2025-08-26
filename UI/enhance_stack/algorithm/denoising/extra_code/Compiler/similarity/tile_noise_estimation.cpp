@@ -9,141 +9,25 @@ namespace NoiseEstimation
 {
     namespace Internal
     {
-
-        static float calculate_median(std::vector<float> &vec)
+        // Fungsi helper untuk estimasi median dari histogram
+        float get_median_from_hist(const cv::Mat& hist, float min_val, float max_val, int total_pixels)
         {
-            size_t n = vec.size();
-            if (n == 0)
-                return 0.0f;
-            std::nth_element(vec.begin(), vec.begin() + n / 2, vec.end());
-            float median = vec[n / 2];
-            if (n % 2 == 0)
+            float median = 0.0f;
+            int h_bins = hist.rows;
+            float bin_width = (max_val - min_val) / h_bins;
+            int median_count = total_pixels / 2;
+
+            float cumulative_sum = 0;
+            for (int i = 0; i < h_bins; ++i)
             {
-                std::nth_element(vec.begin(), vec.begin() + n / 2 - 1, vec.end());
-                median = (median + vec[n / 2 - 1]) / 2.0f;
+                cumulative_sum += hist.at<float>(i);
+                if (cumulative_sum >= median_count)
+                {
+                    median = min_val + (i + 0.5f) * bin_width;
+                    break;
+                }
             }
             return median;
-        }
-
-#if defined(__GNUC__) || defined(__clang__)
-        __attribute__((target("avx2")))
-#endif
-        static float
-        calculate_mad_from_mat_32f_avx2(const cv::Mat &data_mat_32f, int tile_size)
-        {
-            CV_Assert(data_mat_32f.type() == CV_32FC1);
-
-            int rows = data_mat_32f.rows;
-            int cols = data_mat_32f.cols;
-
-            std::vector<float> local_mads;
-
-            std::vector<float> values_buffer;
-            std::vector<float> abs_dev_buffer;
-
-            for (int y = 0; y < rows; y += tile_size)
-            {
-                for (int x = 0; x < cols; x += tile_size)
-                {
-                    int w = std::min(tile_size, cols - x);
-                    int h = std::min(tile_size, rows - y);
-                    cv::Mat tile = data_mat_32f(cv::Rect(x, y, w, h));
-
-                    values_buffer.clear();
-                    values_buffer.reserve(tile.total());
-                    if (tile.isContinuous())
-                    {
-                        const float *p = tile.ptr<float>(0);
-                        values_buffer.assign(p, p + tile.total());
-                    }
-                    else
-                    {
-                        for (int i = 0; i < h; ++i)
-                        {
-                            const float *p = tile.ptr<float>(i);
-                            values_buffer.insert(values_buffer.end(), p, p + w);
-                        }
-                    }
-
-                    if (values_buffer.size() < 2)
-                        continue;
-
-                    float median = calculate_median(values_buffer);
-
-                    abs_dev_buffer.clear();
-                    abs_dev_buffer.resize(values_buffer.size());
-
-                    const int total_values = values_buffer.size();
-                    const int avx_end = total_values - (total_values % 8);
-
-                    const __m256 v_median = _mm256_set1_ps(median);
-                    const __m256 v_sign_mask = _mm256_set1_ps(-0.0f);
-
-                    const float *values_ptr = values_buffer.data();
-                    float *abs_dev_ptr = abs_dev_buffer.data();
-
-                    for (int i = 0; i < avx_end; i += 8)
-                    {
-                        const __m256 v_values = _mm256_loadu_ps(values_ptr + i);
-                        const __m256 v_dev = _mm256_sub_ps(v_values, v_median);
-                        const __m256 v_abs_dev = _mm256_andnot_ps(v_sign_mask, v_dev);
-                        _mm256_storeu_ps(abs_dev_ptr + i, v_abs_dev);
-                    }
-
-                    for (int i = avx_end; i < total_values; ++i)
-                    {
-                        abs_dev_ptr[i] = std::abs(values_ptr[i] - median);
-                    }
-
-                    float mad = calculate_median(abs_dev_buffer);
-                    local_mads.push_back(mad);
-                }
-            }
-
-            return calculate_median(local_mads);
-        }
-
-        static float calculate_mad_from_mat_32f_scalar(const cv::Mat &data_mat_32f, int tile_size)
-        {
-            CV_Assert(data_mat_32f.type() == CV_32FC1);
-            int rows = data_mat_32f.rows;
-            int cols = data_mat_32f.cols;
-            std::vector<float> local_mads;
-            for (int y = 0; y < rows; y += tile_size)
-            {
-                for (int x = 0; x < cols; x += tile_size)
-                {
-                    int w = std::min(tile_size, cols - x);
-                    int h = std::min(tile_size, rows - y);
-                    cv::Mat tile = data_mat_32f(cv::Rect(x, y, w, h));
-                    std::vector<float> values;
-                    values.reserve(tile.total());
-                    for (int i = 0; i < tile.rows; ++i)
-                    {
-                        const float *row = tile.ptr<float>(i);
-                        values.insert(values.end(), row, row + tile.cols);
-                    }
-                    if (values.size() < 2)
-                        continue;
-                    float median = calculate_median(values);
-                    std::vector<float> abs_dev;
-                    abs_dev.reserve(values.size());
-                    for (float v : values)
-                        abs_dev.push_back(std::abs(v - median));
-                    float mad = calculate_median(abs_dev);
-                    local_mads.push_back(mad);
-                }
-            }
-            return calculate_median(local_mads);
-        }
-
-        static float calculate_mad_from_mat_32f(const cv::Mat &data_mat_32f, int tile_size = 16)
-        {
-#ifdef __AVX2__
-            return calculate_mad_from_mat_32f_avx2(data_mat_32f, tile_size);
-#else
-            return calculate_mad_from_mat_32f_scalar(data_mat_32f, tile_size);
-#endif
         }
     }
 
@@ -151,26 +35,52 @@ namespace NoiseEstimation
         const cv::Mat &tile_gray_float,
         float mad_to_sigma_factor)
     {
-        if (tile_gray_float.empty() || tile_gray_float.channels() != 1 || tile_gray_float.type() != CV_32F)
-            return 0.0f;
-        if (tile_gray_float.rows < 5 || tile_gray_float.cols < 5)
-            return 0.0f;
+        if (tile_gray_float.empty() || tile_gray_float.rows < 20 || tile_gray_float.cols < 20)
+            return 0.0f; // Butuh gambar yang cukup besar
 
+        // --- INTI OPTIMISASI ---
+        // 1. Bekerja pada versi gambar yang diperkecil (downsampled)
+        cv::Mat downsampled_img;
+        // Kita perkecil hingga sisi terpanjangnya sekitar 1024 piksel untuk kecepatan
+        float scale = 1024.0f / std::max(tile_gray_float.rows, tile_gray_float.cols);
+        if (scale < 1.0f) {
+            cv::resize(tile_gray_float, downsampled_img, cv::Size(), scale, scale, cv::INTER_AREA);
+        } else {
+            downsampled_img = tile_gray_float;
+        }
+
+        // 2. Sekarang, semua operasi berikutnya berjalan pada gambar yang jauh lebih kecil
         cv::Mat laplacian_output;
-        try
-        {
-            cv::Laplacian(tile_gray_float, laplacian_output, CV_32F, 3, 1.0, 0.0, cv::BORDER_REFLECT101);
-        }
-        catch (const cv::Exception &)
-        {
-            return 0.0f;
-        }
+        cv::Laplacian(downsampled_img, laplacian_output, CV_32F, 3, 1.0, 0.0, cv::BORDER_REFLECT101);
 
-        if (laplacian_output.empty())
-            return 0.0f;
+        if (laplacian_output.empty()) return 0.0f;
+        
+        // Sisa dari logika histogram Anda tetap sama, tetapi sekarang pada data yang jauh lebih sedikit
+        double min_val, max_val;
+        cv::minMaxLoc(laplacian_output, &min_val, &max_val);
 
-        float mad_value = Internal::calculate_mad_from_mat_32f(laplacian_output, 16);
-        float estimated_sigma = mad_value * mad_to_sigma_factor;
-        return std::max(0.0f, estimated_sigma);
+        int h_bins = 256; // Jumlah bin yang cukup untuk presisi
+        float range[] = { (float)min_val, (float)max_val };
+        const float* hist_range = { range };
+
+        cv::Mat hist;
+        cv::calcHist(&laplacian_output, 1, 0, cv::Mat(), hist, 1, &h_bins, &hist_range, true, false);
+
+        float median = Internal::get_median_from_hist(hist, min_val, max_val, laplacian_output.total());
+        
+        // Hitung deviasi absolut
+        cv::Mat abs_dev;
+        cv::absdiff(laplacian_output, cv::Scalar(median), abs_dev);
+        
+        // Hitung histogram lagi untuk deviasi absolut
+        cv::minMaxLoc(abs_dev, &min_val, &max_val);
+        range[0] = (float)min_val; range[1] = (float)max_val;
+
+        cv::Mat mad_hist;
+        cv::calcHist(&abs_dev, 1, 0, cv::Mat(), mad_hist, 1, &h_bins, &hist_range, true, false);
+
+        float mad_value = Internal::get_median_from_hist(mad_hist, min_val, max_val, abs_dev.total());
+        
+        return mad_value * mad_to_sigma_factor;
     }
 }
