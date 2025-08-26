@@ -1,5 +1,6 @@
 import gc
 import json
+import queue
 import threading
 import time
 import traceback
@@ -13,7 +14,7 @@ import h5py
 
 from PySide6.QtCore import Qt
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import extract_all_metadata, extract_exif, get_all_image_paths_for_single_process, load_images_from_paths, resize_all_with_padding, resize_with_padding,  save_to_hdf5
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import estimate_noise_variance, extract_all_metadata, extract_exif, get_adaptive_bilateral, get_all_image_paths_for_single_process, load_images_from_paths, resize_all_with_padding, resize_with_padding,  save_to_hdf5
 # from UI.enhance_stack.algorithm.custom_gpu.grayscale_conversion import bgr_to_gray_gpu
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
@@ -99,21 +100,7 @@ class FarnebackAlgorithm:
                 params = json.load(config_file)
             return params.get("Farneback_BATCH", default_config)
         except Exception as e:
-            # print("Error loading Farneback configuration:", e)
             return default_config
-        
-    def _filter_flow_by_magnitude(self, flow, min_thresh=0.1, max_thresh=10.0):
-        mag = np.linalg.norm(flow, axis=2)
-        mask = (mag >= min_thresh) & (mag <= max_thresh)
-        filtered = np.zeros_like(flow)
-        filtered[mask] = flow[mask]
-        return filtered
-
-    # def _refine_flow_median(self, flow, size=3):
-    #     refined = np.zeros_like(flow)
-    #     for i in range(2):  # x dan y component
-    #         refined[..., i] = scipy.ndimage.median_filter(flow[..., i], size=size)
-    #     return refined
 
     def _compute_block_cpu_internal(self, x, y, bw, bh, overlap_ratio, base_gray_8bit, target_gray_8bit, fb_config, w, h):
         overlap_x = int(bw * overlap_ratio)
@@ -144,9 +131,6 @@ class FarnebackAlgorithm:
                 return None
             flow_block = flow_roi[offset_y:offset_y + bh_valid, offset_x:offset_x + bw_valid, :]
 
-            # Filter magnitude outliers (flow quality filtering)
-            flow_block = self._filter_flow_by_magnitude(flow_block)
-
             return (x, y, flow_block)
         except cv2.error: return None
         except Exception: return None
@@ -160,26 +144,101 @@ class FarnebackAlgorithm:
         use_gpu = fb_config.get("use_gpu", False) and opencl_available
         use_multicore = fb_config.get("use_multi_core", True)
 
-        try:
-            # def prepare_gray(img):
-            #     if img is None:
-            #         raise ValueError("Input image is None.")
-            #     if img.ndim == 3:
-            #         if use_gpu:
-            #             return bgr_to_gray_gpu(img)
-            #         else:
-            #             img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            #     return img.astype(np.uint8, copy=False)
-            def prepare_gray(img):
-                if img is None:
-                    raise ValueError("Input image is None.")
-                if img.ndim == 3:
-                    # Tidak melakukan konversi GPU
-                    img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                return img.astype(np.uint8, copy=False)
+        # --- PERUBAHAN 1: Definisikan fungsi worker untuk denoising ---
+        def denoise_worker(job_q, result_q):
+            """
+            Thread worker yang mengambil gambar mentah, mengubah ke grayscale,
+            menerapkan bilateral filter adaptif, dan menaruh hasilnya di antrian.
+            """
+            while True:
+                item = job_q.get()
+                if item is None:
+                    result_q.put(None)
+                    break
+                
+                image_type, image_data = item
 
-            base_gray_8bit = prepare_gray(base_image)
-            target_gray_8bit = prepare_gray(target_image)
+                try:
+                    # 1. Konversi ke Grayscale 8-bit
+                    if image_data is None: raise ValueError("Input image is None.")
+                    
+                    gray_img = None
+                    if image_data.ndim == 3:
+                        gray_img = cv2.cvtColor(image_data, cv2.COLOR_BGR2GRAY)
+                    else:
+                        gray_img = image_data
+                    
+                    # --- PERBAIKAN PENTING ---
+                    if gray_img.dtype != np.uint8:
+                        if gray_img.max() <= 1.0:
+                            gray_8bit = (gray_img * 255).astype(np.uint8)
+                        else:
+                            gray_8bit = gray_img.astype(np.uint8)
+                    else:
+                        gray_8bit = gray_img
+
+                    # 2. Estimasi noise
+                    noise_level = estimate_noise_variance(gray_8bit) 
+                    
+                    # 3. Logika filter adaptif
+                    min_noise_threshold = 200.0
+                    max_noise_threshold = 700.0
+                    min_d, max_d = 5, 9
+                    min_sigma, max_sigma = 20, 75
+
+                    denoised_image = None
+                    if noise_level > min_noise_threshold:
+                        d, sigma_color, sigma_space = get_adaptive_bilateral(
+                            noise_level, min_noise_threshold, max_noise_threshold,
+                            min_d, max_d, min_sigma, max_sigma
+                        )
+                        print(f"[{image_type}] Noise: {noise_level:.2f}. Applying Bilateral Filter: d={d}, sigmaColor={sigma_color}, sigmaSpace={sigma_space}")
+                        # Bilateral filter mempertahankan tipe data input, jadi outputnya juga uint8
+                        denoised_image = cv2.bilateralFilter(gray_8bit, d, sigma_color, sigma_space)
+                    else:
+                        print(f"[{image_type}] Noise: {noise_level:.2f}. Skipping filter.")
+                        denoised_image = gray_8bit
+                    
+                    # Hasil akhir dijamin uint8, aman untuk Farneback
+                    result_q.put((image_type, denoised_image))
+
+                except Exception as e:
+                    print(f"Error in denoise_worker for {image_type}: {e}")
+                    result_q.put((image_type, None))
+
+        # --- PERUBAHAN 2: Inisialisasi antrian dan thread worker ---
+        job_queue = queue.Queue()
+        result_queue = queue.Queue(maxsize=2)
+
+        denoise_thread = threading.Thread(target=denoise_worker, args=(job_queue, result_queue))
+        denoise_thread.start()
+
+        # --- PERUBAHAN 3: Isi antrian tugas (Produser) ---
+        job_queue.put(("base", base_image))
+        job_queue.put(("target", target_image))
+        job_queue.put(None)
+
+        try:
+            # --- PERUBAHAN 4: Loop utama menjadi konsumen hasil denoising ---
+            base_gray_8bit, target_gray_8bit = None, None
+            results_received = 0
+            while results_received < 2:
+                item = result_queue.get(timeout=30) # Tambahkan timeout
+                if item is None: break
+                
+                image_type, image_data = item
+                if image_data is None: raise RuntimeError(f"Denoising failed for {image_type} image.")
+
+                if image_type == "base": base_gray_8bit = image_data
+                else: target_gray_8bit = image_data
+                results_received += 1
+                
+            denoise_thread.join()
+
+            if base_gray_8bit is None or target_gray_8bit is None:
+                raise RuntimeError("Failed to get denoised images from the worker thread.")
+                
+            # --- DARI SINI, KODE KEMBALI SEPERTI SEMULA, MENGGUNAKAN HASIL DARI QUEUE ---
             h, w = base_gray_8bit.shape
             flow_full = None
 
@@ -275,8 +334,29 @@ class FarnebackAlgorithm:
                         if stop_requested and stop_requested():
                             break
 
-                # flow_full_cpu = self._refine_flow_median(flow_full_cpu, size=3)
                 flow_full = flow_full_cpu
+
+            # --- PERUBAHAN BARU: Memperhalus dan Menstabilkan Peta Flow ---
+            if flow_full is not None:
+                # Parameter. Kernel 5 adalah pilihan yang baik untuk menghilangkan outlier.
+                # Nilai harus ganjil.
+                kernel_size = fb_config.get("flow_smoothing_kernel", 5)
+                
+                # Pastikan kernel ganjil
+                if kernel_size % 2 == 0:
+                    kernel_size += 1
+
+                print(f"Refining flow map with Median blur (kernel={kernel_size})")
+
+                # 1. Pisahkan peta flow menjadi channel X dan Y
+                flow_x, flow_y = cv2.split(flow_full)
+                
+                # 2. Terapkan Median Blur pada setiap channel secara terpisah
+                flow_x_smoothed = cv2.medianBlur(flow_x, kernel_size)
+                flow_y_smoothed = cv2.medianBlur(flow_y, kernel_size)
+                
+                # 3. Gabungkan kembali channel yang sudah diperhalus
+                flow_full = cv2.merge([flow_x_smoothed, flow_y_smoothed])
 
             return flow_full
 
@@ -438,37 +518,103 @@ def main(
     # 4) Simpan base image ke HDF5
     with h5py.File(processor.hdf5_path, "w") as h5f:
         h5f.create_dataset("image_0", data=base_image)
-        
-    # Lock untuk penulisan HDF5 secara aman
-    lock = threading.Lock()
-    progress_lock = threading.Lock()
-    progress_counter = {"count": 1}  # Sudah simpan image_0
-
-    # 5) Streaming image satu per satu
-    with h5py.File(processor.hdf5_path, "a") as h5f:
-        for i, path in enumerate(image_paths[1:], start=1):
-            if stop_requested and stop_requested():
+    
+    def aligner_worker(job_q, save_q, progress_counter, progress_lock):
+        """
+        Worker yang mengambil path, menyelaraskannya, dan mengupdate progress secara thread-safe.
+        """
+        while True:
+            item = job_q.get()
+            if item is None:
                 break
-
-            if update_progress:
-                update_progress(i, total_images, language_config.RUN_IMAGE_PROCESSING.format(i=i, total_images=total_images))
-
-            img_list = load_images_from_paths([path], stop_requested=stop_requested)
-            if not img_list or img_list[0] is None:
+            
+            if stop_requested and stop_requested():
                 continue
+            
+            i, path = item
+            try:
+                # 1. Load & Resize
+                img_list = load_images_from_paths([path], stop_requested=stop_requested)
+                if not img_list or img_list[0] is None:
+                    continue
+                target_image = resize_with_padding(img_list[0], (target_h, target_w))
+                
+                # 2. Proses Inti
+                flow = processor.calculate_optical_flow(base_image, target_image, stop_requested=stop_requested)
+                compensated = processor.compensate_motion(target_image, flow, image_id=i)
+                
+                if compensated is not None:
+                    exif_data = extract_exif(path)
+                    save_q.put((f"image_{i}", compensated, exif_data))
+                
+                with progress_lock:
+                    progress_counter["count"] += 1
+                    if update_progress:
+                        current_count = progress_counter["count"]
+                        update_progress(current_count, total_images, language_config.RUN_IMAGE_PROCESSING.format(i=i, total_images=total_images))
 
-            target_image = resize_with_padding(img_list[0], (target_h, target_w))
-            flow = processor.calculate_optical_flow(base_image, target_image)
-            compensated = processor.compensate_motion(target_image, flow, image_id=i)
+            except Exception as e:
+                print(f"Error processing image {path}: {e}")
+            finally:
+                # Manajemen memori
+                del img_list, target_image, flow, compensated
+                gc.collect()
 
-            if compensated is not None:
-                save_to_hdf5(h5f, f"image_{i}", compensated, extract_exif(path))
+    def saver_worker(save_q, hdf5_path, hdf5_lock):
+        """Worker untuk menyimpan ke HDF5, tidak berubah."""
+        with h5py.File(hdf5_path, "a") as h5f:
+            while True:
+                item = save_q.get()
+                if item is None:
+                    break
+                
+                dataset_name, data, attributes = item
+                try:
+                    with hdf5_lock:
+                        save_to_hdf5(h5f, dataset_name, data, attributes)
+                except Exception as e:
+                    print(f"Error saving {dataset_name} to HDF5: {e}")
 
-            del img_list, target_image, flow, compensated
-            gc.collect()
+    # --- Inisialisasi Antrian, Lock, dan Threads ---
+    MAX_QUEUE_SIZE = max(4, os.cpu_count() or 4)
+    job_queue = queue.Queue(maxsize=MAX_QUEUE_SIZE)
+    save_queue = queue.Queue(maxsize=MAX_QUEUE_SIZE)
+    
+    hdf5_lock = threading.Lock()
+    progress_lock = threading.Lock()
+    progress_counter = {"count": 1}
+
+    saver_thread = threading.Thread(target=saver_worker, args=(save_queue, processor.hdf5_path, hdf5_lock))
+    saver_thread.start()
+
+    num_aligner_threads = max(1, (os.cpu_count() or 4) // 2)
+    aligner_threads = []
+    for _ in range(num_aligner_threads):
+        thread = threading.Thread(target=aligner_worker, args=(job_queue, save_queue, progress_counter, progress_lock))
+        thread.start()
+        aligner_threads.append(thread)
+
+    # --- Isi antrian tugas (Thread Utama) ---
+    if update_progress:
+        update_progress(1, total_images, language_config.RUN_IMAGE_PROCESSING.format(i=1, total_images=total_images))
+
+    for i, path in enumerate(image_paths[1:], start=2):
+        if stop_requested and stop_requested():
+            break
+        job_queue.put((i-1, path))
+
+    for _ in range(num_aligner_threads):
+        job_queue.put(None)
+
+    for thread in aligner_threads:
+        thread.join()
+
+    save_queue.put(None)
+    saver_thread.join()
 
     if update_progress:
-        update_progress(total_images, total_images, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
+        if not (stop_requested and stop_requested()):
+             update_progress(total_images, total_images, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
 
 def running_farneback_optical_flow(parent=None, single_process=None, batch_id=None):
     process_finished = False

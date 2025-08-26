@@ -240,10 +240,9 @@ class LightGlueAlgorithm:
                     min_d, max_d,
                     min_sigma, max_sigma
                 )
-                print(f"Applying bilateral filter: d={d}, sigmaColor={sigma_color}, sigmaSpace={sigma_space}")
                 enhanced_img = cv2.bilateralFilter(enhanced_img, d, sigma_color, sigma_space)
             else:
-                print("Noise level below threshold, skipping denoising.")
+                pass
 
             # Lanjut ke padding & resize
             rgb = cv2.cvtColor(enhanced_img, cv2.COLOR_BGR2RGB)

@@ -1,4 +1,6 @@
 import gc
+import queue
+import threading
 import cv2
 import numpy as np
 import sqlite3
@@ -147,54 +149,105 @@ class AKAZEAlgorithm:
 
         return kps_base_adjusted, final_desc_base, kps_target_adjusted, final_desc_target
     
-    def calculate_global_motion(self, base_image, target_image, config_filename=None, num_blocks=(3, 3), overlap=20, stop_requested=None):
+    def calculate_global_motion(self, base_image, target_image, config_filename=None, num_blocks=(2, 2), overlap=10, stop_requested=None):
         if stop_requested and stop_requested():
             return None, None
 
         akaze_config = self.load_akaze_config(config_filename)
         use_multicore = akaze_config.get("use_multi_core", True)
-        max_kps_per_block = 300
-
-        try:
-            enhanced_base_gray = prepare_image(base_image, grayscale=True, use_clahe=True)
-            enhanced_target_gray = prepare_image(target_image, grayscale=True, use_clahe=True)
-        except Exception:
-            return None, None
-
-        noise_level = estimate_noise_variance(enhanced_base_gray)
-
-        min_noise_threshold = 200.0
-        max_noise_threshold = 700.0
-
-        min_d, max_d = 5, 9           
-        min_sigma, max_sigma = 20, 75 
         
-        print(f"Noise level detected: {noise_level:.2f}")
+        # --- PERUBAHAN 1: Definisikan fungsi worker untuk filtering ---
+        def filter_worker(job_q, result_q):
+            """
+            Thread worker yang mengambil gambar mentah, menerapkan bilateral filter,
+            dan menaruh hasilnya di antrian hasil.
+            """
+            while True:
+                item = job_q.get()
+                if item is None:  # Sinyal untuk berhenti
+                    result_q.put(None) # Beri sinyal selesai ke antrian hasil juga
+                    break
+                
+                image_type, image_data = item
+                
+                try:
+                    # 1. Persiapan awal (CLAHE dilewati untuk sementara)
+                    enhanced_gray = prepare_image(image_data, grayscale=True, use_clahe=False)
+                    
+                    # 2. Estimasi noise
+                    noise_level = estimate_noise_variance(enhanced_gray)
+                    
+                    # 3. Logika filter adaptif
+                    min_noise_threshold = 200.0
+                    max_noise_threshold = 700.0
+                    min_d, max_d = 5, 9
+                    min_sigma, max_sigma = 20, 75
 
-        if noise_level > min_noise_threshold:
-            d, sigma_color, sigma_space = get_adaptive_bilateral(
-                noise_level,
-                min_noise_threshold, max_noise_threshold,
-                min_d, max_d,
-                min_sigma, max_sigma
-            )
+                    if noise_level > min_noise_threshold:
+                        d, sigma_color, sigma_space = get_adaptive_bilateral(
+                            noise_level, min_noise_threshold, max_noise_threshold,
+                            min_d, max_d, min_sigma, max_sigma
+                        )
+                        filtered_image = cv2.bilateralFilter(enhanced_gray, d, sigma_color, sigma_space)
+                    else:
+                        filtered_image = enhanced_gray
+                    
+                    # 4. Terapkan CLAHE setelah filtering
+                    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+                    final_image = clahe.apply(filtered_image)
+                    
+                    result_q.put((image_type, final_image))
+
+                except Exception as e:
+                    print(f"Error in filter_worker for {image_type}: {e}")
+                    result_q.put((image_type, None)) # Kirim sinyal error
+
+
+        # --- PERUBAHAN 2: Inisialisasi antrian dan thread worker ---
+        job_queue = queue.Queue()
+        result_queue = queue.Queue(maxsize=3) # Cukup untuk base dan target
+
+        filter_thread = threading.Thread(target=filter_worker, args=(job_queue, result_queue))
+        filter_thread.start()
+
+        # --- PERUBAHAN 3: Isi antrian tugas (Produser) ---
+        job_queue.put(("base", base_image))
+        job_queue.put(("target", target_image))
+        job_queue.put(None)  # Sinyal akhir pekerjaan
+
+        # --- PERUBAHAN 4: Loop utama menjadi konsumen hasil filtering ---
+        enhanced_base_gray, enhanced_target_gray = None, None
+        results_received = 0
+        while results_received < 2:
+            item = result_queue.get() # Memblokir hingga hasil tersedia
+            if item is None: # Sinyal selesai dari worker
+                break
             
-            print(f"Applying adaptive Bilateral Filter in parallel. Params -> d={d}, sigmaColor={sigma_color}, sigmaSpace={sigma_space}")
+            image_type, image_data = item
+            if image_data is None: # Terjadi error di worker
+                filter_thread.join()
+                return None, None
+
+            if image_type == "base":
+                enhanced_base_gray = image_data
+            else: # target
+                enhanced_target_gray = image_data
             
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                future_base = executor.submit(cv2.bilateralFilter, enhanced_base_gray, d, sigma_color, sigma_space)    
-                future_target = executor.submit(cv2.bilateralFilter, enhanced_target_gray, d, sigma_color, sigma_space)
+            results_received += 1
+            
+        # Pastikan thread worker selesai sebelum melanjutkan
+        filter_thread.join()
 
-                enhanced_base_gray = future_base.result()
-                enhanced_target_gray = future_target.result()
-
-        else:
-            print(f"Noise level is below threshold")
-
+        if enhanced_base_gray is None or enhanced_target_gray is None:
+            print("Failed to get filtered images.")
+            return None, None
+            
+        # --- DARI SINI, KODE KEMBALI SEPERTI SEMULA, TAPI MENGGUNAKAN HASIL DARI QUEUE ---
         h, w = enhanced_base_gray.shape
         blocks_x, blocks_y = num_blocks
         block_w = max(1, w // blocks_x)
         block_h = max(1, h // blocks_y)
+        max_kps_per_block = 300
 
         try:
             akaze = cv2.AKAZE_create(
@@ -253,7 +306,6 @@ class AKAZEAlgorithm:
                             keypoints_target_all.extend(kpt)
                             descriptors_target_list.append(dt)
         except Exception as e:
-            print(f"ThreadPool execution error: {e}")
             return None, None
 
         if not descriptors_base_list or not descriptors_target_list:
