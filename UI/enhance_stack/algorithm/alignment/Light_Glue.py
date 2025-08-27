@@ -1,4 +1,4 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 import gc
 import queue
 import site
@@ -16,7 +16,7 @@ import requests
 import onnxruntime as ort
 from tqdm import tqdm
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (calculate_crop_parameters, deduplicate_keypoints, do_warp_and_crop, estimate_noise_variance, extract_all_metadata, get_adaptive_bilateral,
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (calculate_crop_parameters, deduplicate_keypoints, do_warp_and_crop, estimate_noise_variance, extract_all_metadata, get_adaptive_bilateral, get_all_image_paths_for_batch_process,
                                                                                     get_all_image_paths_for_single_process, load_images_from_paths, prepare_image,
                                                                                     resize_all_with_padding, run_pipeline_global_crop, run_pipeline_non_crop, save_align_to_folder)
 from UI.enhance_stack.components.single_page_layout.parameter_alignment.light_glue_parameter_settings import load_light_glue_config
@@ -158,158 +158,181 @@ class LightGlueAlgorithm:
         )
         return session
 
-    def get_all_image_paths_for_batch_process(self, batch_id):
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT images.path 
-                FROM batch_process_image
-                JOIN images ON batch_process_image.image_id_batch = images.id
-                WHERE batch_process_image.batch_id = ?
-            """,
-                (batch_id,),
-            )
-            return [row[0] for row in cursor.fetchall()]
-
     def calculate_global_motion(self, base_image, target_image, stop_requested=None):
         if stop_requested and stop_requested():
             return None, None
 
-        # --- KONFIGURASI UBIN (tidak berubah) ---
-        GRID_SIZE = (2, 1)
-        OVERLAP_PERCENT = 0.10
+        # --- KONFIGURASI UNTUK PEMROSESAN BERBASIS UBIN ---
+        GRID_SIZE = (2, 1)  
+        OVERLAP_PERCENT = 0.10 
 
         h, w = base_image.shape[:2]
         cols, rows = GRID_SIZE
+        
+        # Hindari pembagian dengan nol
         if cols == 0 or rows == 0: return None, None
-        tile_w, tile_h = w // cols, h // rows
-        overlap_w_px, overlap_h_px = int(tile_w * OVERLAP_PERCENT), int(tile_h * OVERLAP_PERCENT)
         
-        # --- FUNGSI HELPER UNTUK PRA-PEMROSESAN (dikeluarkan agar bersih) ---
+        tile_w = w // cols
+        tile_h = h // rows
         
+        # Hitung overlap dalam piksel berdasarkan persentase
+        overlap_w_px = int(tile_w * OVERLAP_PERCENT)
+        overlap_h_px = int(tile_h * OVERLAP_PERCENT)
+
         def resize_and_pad(image, target_size=512):
-            # ... (fungsi ini tidak berubah)
+            """Mengubah ukuran dan memberi padding agar gambar menjadi persegi."""
             h, w = image.shape[:2]
             scale = target_size / max(h, w)
             new_h, new_w = int(h * scale), int(w * scale)
-            resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR_EXACT)
-            pad_top, pad_left = (target_size - new_h) // 2, (target_size - new_w) // 2
+            resized = cv2.resize(
+                image, (new_w, new_h), interpolation=cv2.INTER_LINEAR_EXACT
+            )
+
+            pad_top = (target_size - new_h) // 2
+            pad_left = (target_size - new_w) // 2
+
             padded = cv2.copyMakeBorder(
-                resized, pad_top, target_size - new_h - pad_top,
-                pad_left, target_size - new_w - pad_left,
-                borderType=cv2.BORDER_CONSTANT, value=0
+                resized,
+                pad_top,
+                target_size - new_h - pad_top,
+                pad_left,
+                target_size - new_w - pad_left,
+                borderType=cv2.BORDER_CONSTANT,
+                value=0,
             )
             return padded, (w / new_w, h / new_h), (pad_left, pad_top)
 
         def prep_for_onnx(img):
-            # ... (fungsi ini tidak berubah, tetap melakukan pekerjaan CPU yang berat)
+            # Langkah awal preprocessing
             enhanced_img = prepare_image(img, grayscale=False, use_clahe=True)
-            enhanced_gray = cv2.cvtColor(enhanced_img, cv2.COLOR_BGR2GRAY)
-            noise_level = estimate_noise_variance(enhanced_gray)
             
-            min_noise_threshold, max_noise_threshold = 200.0, 700.0
-            min_d, max_d, min_sigma, max_sigma = 5, 9, 20, 75
+            # Konversi ke grayscale sementara untuk estimasi noise
+            enhanced_gray = cv2.cvtColor(enhanced_img, cv2.COLOR_BGR2GRAY)
+            
+            # Estimasi noise
+            noise_level = estimate_noise_variance(enhanced_gray)
+            print(f"Tile noise level: {noise_level:.2f}")
+            
+            # Threshold dan rentang parameter (bisa disesuaikan)
+            min_noise_threshold = 200.0
+            max_noise_threshold = 700.0
+            min_d, max_d = 5, 9
+            min_sigma, max_sigma = 20, 75
 
+            # Terapkan bilateral filter jika diperlukan
             if noise_level > min_noise_threshold:
                 d, sigma_color, sigma_space = get_adaptive_bilateral(
-                    noise_level, min_noise_threshold, max_noise_threshold,
-                    min_d, max_d, min_sigma, max_sigma
+                    noise_level,
+                    min_noise_threshold, max_noise_threshold,
+                    min_d, max_d,
+                    min_sigma, max_sigma
                 )
                 enhanced_img = cv2.bilateralFilter(enhanced_img, d, sigma_color, sigma_space)
+            else:
+                pass
 
+            # Lanjut ke padding & resize
             rgb = cv2.cvtColor(enhanced_img, cv2.COLOR_BGR2RGB)
             padded, scale_factors, pad_offsets = resize_and_pad(rgb)
+            
             return (
                 padded.astype(np.float32)[None, :, :, :].transpose(0, 3, 1, 2) / 255.0,
                 scale_factors, pad_offsets
             )
+
+        # --- PERUBAHAN 1: Buat fungsi worker untuk pra-pemrosesan CPU ---
+        def preprocessor_worker(job_q, result_q):
+            """
+            Thread worker yang mengambil tugas dari job_q, melakukan pra-pemrosesan CPU,
+            dan menaruh hasilnya di result_q.
+            """
+            while True:
+                # Ambil detail ubin dari antrian tugas
+                item = job_q.get()
+                if item is None:  # Sinyal untuk berhenti
+                    break
+                
+                r, c = item
+                
+                # Ekstrak ubin
+                x_start_overlap = max(0, c * tile_w - overlap_w_px)
+                y_start_overlap = max(0, r * tile_h - overlap_h_px)
+                x_end_overlap = min(w, (c + 1) * tile_w + overlap_w_px)
+                y_end_overlap = min(h, (r + 1) * tile_h + overlap_h_px)
+
+                base_tile = base_image[y_start_overlap:y_end_overlap, x_start_overlap:x_end_overlap]
+                target_tile = target_image[y_start_overlap:y_end_overlap, x_start_overlap:x_end_overlap]
+
+                # Lakukan pekerjaan CPU yang berat
+                imgL, scaleL, offsetL = prep_for_onnx(base_tile)
+                imgR, scaleR, offsetR = prep_for_onnx(target_tile)
+                
+                # Taruh hasil yang siap di-inferensi ke antrian hasil
+                result_q.put((r, c, imgL, imgR, scaleL, offsetL, scaleR, offsetR, x_start_overlap, y_start_overlap))
+
+        # --- PERUBAHAN 2: Inisialisasi antrian dan thread worker ---
+        job_queue = queue.Queue()
+        # Batasi antrian hasil untuk mencegah penggunaan RAM berlebih jika CPU lebih cepat dari GPU
+        result_queue = queue.Queue(maxsize=2) 
         
-        # --- FUNGSI UTAMA UNTUK SATU PEKERJAAN (SATU UBIN) ---
-        def process_single_tile(r, c):
-            """Mengekstrak ubin, melakukan pra-pemrosesan CPU, dan mengembalikan hasilnya."""
-            x_start = max(0, c * tile_w - overlap_w_px)
-            y_start = max(0, r * tile_h - overlap_h_px)
-            x_end = min(w, (c + 1) * tile_w + overlap_w_px)
-            y_end = min(h, (r + 1) * tile_h + overlap_h_px)
+        preprocessor_thread = threading.Thread(
+            target=preprocessor_worker, args=(job_queue, result_queue)
+        )
+        preprocessor_thread.start()
 
-            base_tile = base_image[y_start:y_end, x_start:x_end]
-            target_tile = target_image[y_start:y_end, x_start:x_end]
-            
-            # Jalankan pra-pemrosesan yang berat
-            imgL, scaleL, offsetL = prep_for_onnx(base_tile)
-            imgR, scaleR, offsetR = prep_for_onnx(target_tile)
-            
-            return {
-                "imgL": imgL, "imgR": imgR,
-                "scaleL": scaleL, "offsetL": offsetL,
-                "scaleR": scaleR, "offsetR": offsetR,
-                "x_start": x_start, "y_start": y_start
-            }
+        # Isi antrian tugas dengan semua ubin yang perlu diproses
+        for r in range(rows):
+            for c in range(cols):
+                job_queue.put((r, c))
+        job_queue.put(None) 
 
-        # --- TAHAP 1: PRA-PEMROSESAN PARALEL ---
-        preprocessed_tiles = []
-        num_workers = max(1, (os.cpu_count() or 4) // 2)
-        
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            futures = {executor.submit(process_single_tile, r, c): (r, c) for r in range(rows) for c in range(cols)}
-            
-            for future in as_completed(futures):
-                if stop_requested and stop_requested():
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    return None, None
-                try:
-                    result = future.result()
-                    preprocessed_tiles.append(result)
-                except Exception as e:
-                    print(f"Error during tile preprocessing: {e}")
-
-        # --- TAHAP 2: INFERENSI & PASCA-PEMROSESAN SERIAL ---
+        # --- PERUBAHAN 3: Loop utama sekarang menjadi konsumen GPU ---
         all_results = []
-        
-        # Loop sekarang berjalan satu per satu, tidak ada lagi pipeline tumpang tindih
-        for tile_data in preprocessed_tiles:
-            if stop_requested and stop_requested(): break
+        num_tiles = rows * cols
+        for _ in range(num_tiles):
+            if stop_requested and stop_requested():
+                break
 
             try:
-                # Lakukan pekerjaan GPU
-                batch = np.concatenate([tile_data["imgL"], tile_data["imgR"]], axis=0).astype(np.float32)
+                r, c, imgL, imgR, scaleL, offsetL, scaleR, offsetR, x_start_overlap, y_start_overlap = result_queue.get(timeout=30)
+            except queue.Empty:
+                break
+
+            # Lakukan pekerjaan GPU
+            try:
+                batch = np.concatenate([imgL, imgR], axis=0).astype(np.float32)
                 inp_name = self.sess.get_inputs()[0].name
                 keypoints_b, matches, mscores = self.sess.run(None, {inp_name: batch})
-                
-                if keypoints_b is None: continue
-
-                # Lakukan pasca-pemrosesan (CPU cepat)
-                matches = matches.astype(np.int32)
-                batch_mask = matches[:, 0] == 0
-                idx0, idx1, scores = matches[batch_mask, 1], matches[batch_mask, 2], mscores[batch_mask]
-                
-                conf_mask = scores > 0.5
-                if np.sum(conf_mask) < 8: continue
-                
-                idx0, idx1 = idx0[conf_mask], idx1[conf_mask]
-                scores = scores[conf_mask]
-                
-                mkptsL_padded = keypoints_b[0][idx0].astype(np.float32)
-                mkptsR_padded = keypoints_b[1][idx1].astype(np.float32)
-
-                def restore_coords(pts, pad, scale):
-                    return (pts - np.array(pad)) * np.array(scale)
-
-                mkptsL_tile = restore_coords(mkptsL_padded, tile_data["offsetL"], tile_data["scaleL"])
-                mkptsR_tile = restore_coords(mkptsR_padded, tile_data["offsetR"], tile_data["scaleR"])
-                
-                offset_global = np.array([tile_data["x_start"], tile_data["y_start"]])
-                mkptsL_global = mkptsL_tile + offset_global
-                mkptsR_global = mkptsR_tile + offset_global
-                
-                all_results.append((mkptsL_global, mkptsR_global, scores))
-                
-            except Exception as e:
-                print(f"Error during GPU inference or post-processing: {e}")
+            except Exception:
                 continue
 
-        # --- PENGGABUNGAN & FINALISASI (tidak berubah) ---
+            if keypoints_b is None: continue
+            
+            # Lakukan pasca-pemrosesan (CPU, tapi sangat cepat)
+            matches = matches.astype(np.int32); batch_mask = matches[:, 0] == 0
+            idx0, idx1, scores = matches[batch_mask, 1], matches[batch_mask, 2], mscores[batch_mask]
+            conf_mask = scores > 0.5
+            if np.sum(conf_mask) < 8: continue
+            idx0, idx1, scores = idx0[conf_mask], idx1[conf_mask], scores[conf_mask]
+            mkptsL_padded = keypoints_b[0][idx0].astype(np.float32)
+            mkptsR_padded = keypoints_b[1][idx1].astype(np.float32)
+
+            def restore_coords(pts, pad, scale):
+                pts -= np.array(pad); pts *= np.array(scale)
+                return pts
+
+            mkptsL_tile_local = restore_coords(mkptsL_padded, offsetL, scaleL)
+            mkptsR_tile_local = restore_coords(mkptsR_padded, offsetR, scaleR)
+            offset_global = np.array([x_start_overlap, y_start_overlap])
+            mkptsL_global = mkptsL_tile_local + offset_global
+            mkptsR_global = mkptsR_tile_local + offset_global
+            
+            all_results.append((mkptsL_global, mkptsR_global, scores))
+
+        # Pastikan thread worker selesai
+        preprocessor_thread.join()
+
+        # --- PENGGABUNGAN DAN FINALISASI---
         if not all_results:
             return None, None
 
@@ -447,7 +470,7 @@ def main(db_path,
     else:
         if batch_id is None:
             raise ValueError("Batch ID harus ada saat proses batch")
-        image_paths = processor.get_all_image_paths_for_batch_process(batch_id)
+        image_paths = get_all_image_paths_for_batch_process(batch_id)
         processor.hdf5_path = f"database/align/aligned_image_batch_{batch_id}.h5"
 
     if not image_paths:

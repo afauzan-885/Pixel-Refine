@@ -33,42 +33,132 @@ from UI.settings.General.Language import language_config
 # === 2. MANAJEMEN DATA & I/O (Database, File, Metadata)
 # =========================================================================
 
-def get_all_image_paths_for_single_process(db_path: str)-> list:
-        """
-    Retrieves all image paths for single process from the specified database,
-    ORDERED by reference status first, then alphabetically by image path.
-
-    Args:
-        db_path: The full path to the SQLite database file.
-
-    Returns:
-        A list of image paths in the correct order, or an empty list on error.
+def get_all_image_paths_for_single_process(db_path: str) -> list:
     """
-        try:
-            if not os.path.isfile(db_path):
-                return []
-
-            with sqlite3.connect(db_path) as conn:
-                cursor = conn.cursor()
-                sql_query = """
-                    SELECT i.path
-                    FROM images i
-                    JOIN single_process_image spi ON i.id = spi.image_id_single
-                    ORDER BY
-                        spi.is_reference DESC, -- Referensi (is_reference=1) selalu di atas
-                        i.path ASC             -- Urutkan sisanya (is_reference=0) berdasarkan nama file
-                """
-                cursor.execute(sql_query)
-                image_paths = [row[0] for row in cursor.fetchall()]
-
-                if not image_paths:
-                    pass
-                return image_paths
-
-        except sqlite3.Error as e:
-            return [] 
-        except Exception as e:
+    Mengambil semua path gambar, memvalidasi keberadaannya di disk,
+    dan menghapus entri yang tidak valid dari database.
+    """
+    try:
+        if not os.path.isfile(db_path):
             return []
+
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            # Ambil semua data yang relevan: path dan ID
+            sql_query = """
+                SELECT i.id, i.path
+                FROM images i
+                JOIN single_process_image spi ON i.id = spi.image_id_single
+                ORDER BY
+                    spi.is_reference DESC,
+                    i.path ASC
+            """
+            cursor.execute(sql_query)
+            
+            all_rows = cursor.fetchall()
+            
+            valid_image_paths = []
+            ids_to_delete = []
+
+            # --- Validasi dan Pemisahan ---
+            for image_id, image_path in all_rows:
+                if os.path.exists(image_path):
+                    # Jika file ada, simpan path-nya
+                    valid_image_paths.append(image_path)
+                else:
+                    # Jika file tidak ada, tandai ID-nya untuk dihapus
+                    print(f"Path not found, marking for deletion from DB: {image_path}")
+                    ids_to_delete.append(image_id)
+            
+            # --- Pembersihan Database (jika ada yang perlu dihapus) ---
+            if ids_to_delete:
+                print(f"Deleting {len(ids_to_delete)} invalid entries from the database...")
+                # Buat placeholder string, misal: (?, ?, ?)
+                placeholders = ', '.join(['?'] * len(ids_to_delete))
+                
+                # Hapus dari tabel relasi terlebih dahulu
+                cursor.execute(
+                    f"DELETE FROM single_process_image WHERE image_id_single IN ({placeholders})",
+                    ids_to_delete
+                )
+                
+                # Kemudian hapus dari tabel utama 'images'
+                cursor.execute(
+                    f"DELETE FROM images WHERE id IN ({placeholders})",
+                    ids_to_delete
+                )
+                
+                conn.commit() # Simpan perubahan
+            
+            return valid_image_paths
+
+    except sqlite3.Error as e:
+        print(f"Database error in get_all_image_paths_for_single_process: {e}")
+        return [] 
+    except Exception as e:
+        print(f"An unexpected error occurred in get_all_image_paths_for_single_process: {e}")
+        return []
+        
+def get_all_image_paths_for_batch_process(db_path, batch_id):
+    """
+    Mengambil semua path gambar untuk batch ID tertentu, memvalidasi,
+    dan menghapus entri yang tidak valid dari database.
+    """
+    try:
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            # Ambil path dan ID
+            cursor.execute("""
+                SELECT images.id, images.path 
+                FROM batch_process_image
+                JOIN images ON batch_process_image.image_id_batch = images.id
+                WHERE batch_process_image.batch_id = ?
+                ORDER BY images.path ASC
+            """, (batch_id,))
+            
+            all_rows = cursor.fetchall()
+            
+            valid_image_paths = []
+            ids_to_delete = []
+
+            # --- Validasi dan Pemisahan ---
+            for image_id, image_path in all_rows:
+                if os.path.exists(image_path):
+                    valid_image_paths.append(image_path)
+                else:
+                    print(f"Path not found, marking for deletion from DB: {image_path}")
+                    ids_to_delete.append(image_id)
+
+            # --- Pembersihan Database ---
+            if ids_to_delete:
+                print(f"Deleting {len(ids_to_delete)} invalid entries from the database...")
+                placeholders = ', '.join(['?'] * len(ids_to_delete))
+                
+                # Hapus dari tabel relasi `batch_process_image`
+                # Kita perlu memastikan kita hanya menghapus untuk batch_id yang relevan
+                # dan image_id yang tidak valid
+                for image_id in ids_to_delete:
+                    cursor.execute(
+                        "DELETE FROM batch_process_image WHERE batch_id = ? AND image_id_batch = ?",
+                        (batch_id, image_id)
+                    )
+
+                # Hapus dari tabel `images`
+                cursor.execute(
+                    f"DELETE FROM images WHERE id IN ({placeholders})",
+                    ids_to_delete
+                )
+                
+                conn.commit()
+
+            return valid_image_paths
+            
+    except sqlite3.Error as e:
+        print(f"Database error in get_all_image_paths_for_batch_process: {e}")
+        return []
+    except Exception as e:
+        print(f"An unexpected error occurred in get_all_image_paths_for_batch_process: {e}")
+        return []
 
 def _prepare_image_array_from_raw(original_path):
     """
@@ -1445,58 +1535,101 @@ def run_pipeline_global_crop(processor, image_paths, base_image, target_dims,
         base_image, # Teruskan base image asli
         image_paths[0]
     )    
+
 def _run_transform_calculation_stage(processor, image_paths, base_image, target_dims, 
                                      update_progress, stop_requested, total_images_in_stack):
     """
-    Tahap 1: Menghitung semua transformasi secara paralel dan melaporkan progress secara akurat.
+    Tahap 1: Menghitung transformasi satu per satu dengan pipeline serial "Loader -> Extractor"
+    untuk kontrol memori yang ketat.
     """
     all_transforms = []
+    progress_counter = {"count": 0}
+    progress_lock = threading.Lock()
     
-    # Gunakan ThreadPoolExecutor untuk manajemen thread yang lebih modern dan sederhana
-    # Ini akan secara otomatis menangani pembuatan dan pembersihan thread.
-    with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-        
-        future_to_path = {}
+    # --- Pipeline 2 Stasiun: Loader -> Extractor ---
+    # Batasi antrian untuk kontrol RAM, sama seperti di non-crop
+    queue_images = queue.Queue(maxsize=4)
+    queue_transforms = queue.Queue(maxsize=4)
+
+    # --- Definisi Worker ---
+
+    def loader_worker():
+        """Worker thread yang hanya memuat gambar dan memasukkannya ke antrian berikutnya."""
+        # `image_paths` di sini adalah daftar target_images
         for i, path in enumerate(image_paths, start=1):
             if stop_requested and stop_requested(): break
-            
-            # Load gambar di sini untuk menghindari race condition pada disk I/O
             img_list = load_images_from_paths([path], stop_requested=stop_requested)
-            if not img_list or img_list[0] is None: 
-                print(f"Skipping image {i} due to loading error.")
+            if not img_list or img_list[0] is None:
+                print(f"Failed to load image {i}, skipping.")
+                # Kita perlu memberi sinyal ke konsumer bahwa satu item gagal
+                # agar progress bar tidak macet.
+                queue_transforms.put(("failed", i))
                 continue
             
             target_image = resize_with_padding(img_list[0], target_dims)
-            
-            # Kirim pekerjaan (kalkulasi) ke thread pool
-            future = executor.submit(processor.calculate_global_motion, base_image, target_image, stop_requested=stop_requested)
-            future_to_path[future] = (i, path)
+            queue_images.put((i, path, target_image))
+        
+        # Sinyal selesai untuk extractor
+        queue_images.put(None)
 
-        # Kumpulkan hasil saat mereka selesai
-        num_calculated = 0
-        num_to_calculate = len(future_to_path)
+    def extractor_worker():
+        """Worker thread yang mengambil gambar, menghitung transformasi, dan menaruh hasil."""
+        while True:
+            item = queue_images.get()
+            if item is None: break
+            
+            i, path, target_image = item
+            
+            base_pts, target_pts = processor.calculate_global_motion(base_image, target_image, stop_requested=stop_requested)
+            
+            # Taruh hasil (bahkan jika gagal) ke antrian berikutnya
+            queue_transforms.put((i, path, base_pts, target_pts))
+            
+            # Bebaskan memori gambar sesegera mungkin
+            del target_image
+            gc.collect()
 
-        for future in concurrent.futures.as_completed(future_to_path):
-            if stop_requested and stop_requested(): break
-            
-            i, path = future_to_path[future]
-            try:
-                base_pts, target_pts = future.result()
-                if base_pts is not None and target_pts is not None:
-                    all_transforms.append((i, path, base_pts, target_pts))
-                else:
-                    print(f"Transform calculation failed for image {i} ({os.path.basename(path)})")
-            except Exception as exc:
-                print(f"Image {i} ({os.path.basename(path)}) generated an exception: {exc}")
-            
-            # --- PROGRESS BAR SEDERHANA DAN AKURAT ---
-            num_calculated += 1
+        # Sinyal selesai untuk thread utama (konsumer)
+        queue_transforms.put(None)
+
+    # --- Mulai Threads ---
+    loader_thread = threading.Thread(target=loader_worker)
+    extractor_thread = threading.Thread(target=extractor_worker)
+    loader_thread.start()
+    extractor_thread.start()
+
+    # --- Loop utama (Konsumer) untuk mengumpulkan hasil & update progress ---
+    num_images_to_process = len(image_paths)
+    
+    while len(all_transforms) < num_images_to_process:
+        item = queue_transforms.get()
+        if item is None: break # Sinyal selesai dari extractor
+
+        # Cek jika item adalah sinyal kegagalan dari loader
+        if item[0] == "failed":
+            i = item[1]
+            print(f"Skipping transform for image {i} due to loading failure.")
+        else:
+            i, path, base_pts, target_pts = item
+            if base_pts is not None and target_pts is not None:
+                all_transforms.append((i, path, base_pts, target_pts))
+            else:
+                print(f"Transform calculation failed for image {i} ({os.path.basename(path)})")
+
+        # --- PROGRESS BAR REALTIME & AKURAT ---
+        # Update progress untuk setiap gambar yang telah diproses (berhasil atau gagal)
+        with progress_lock:
+            progress_counter["count"] += 1
             if update_progress:
-                status_text = f"Calculating transform {num_calculated}/{num_to_calculate}"
-                # `num_calculated` adalah progress saat ini, `total_images_in_stack` adalah total keseluruhan
-                update_progress(num_calculated, total_images_in_stack, status_text)
+                status_text = f"Calculating transform {progress_counter['count']}/{num_images_to_process}"
+                # `total_images_in_stack` adalah total keseluruhan proses, bukan hanya tahap ini
+                update_progress(progress_counter["count"], total_images_in_stack, status_text)
 
-    # Urutkan hasil untuk memastikan urutan gambar benar
+    # --- Cleanup ---
+    loader_thread.join()
+    extractor_thread.join()
+    
+    # Urutkan hasil untuk memastikan urutan gambar benar jika terjadi pemrosesan out-of-order
     all_transforms.sort(key=lambda x: x[0])
     return all_transforms
 
@@ -1506,9 +1639,15 @@ def _run_apply_and_save_stage(processor, temp_transforms, crop_bounds, target_di
                                h5_file_handle,
                                base_image, base_image_path):
     """
-    Tahap 3: Menerapkan transformasi, crop, dan menyimpan semua gambar dengan progress yang akurat.
+    Tahap 3: Menerapkan transformasi dan menyimpan, dengan kontrol RAM menggunakan Semaphore
+    dan progress bar yang akurat.
     """
     lock = threading.Lock() # Lock untuk HDF5
+
+    # --- PERBAIKAN 1: Kontrol Konkurensi & RAM ---
+    # Batasi jumlah gambar yang diproses secara bersamaan untuk menghemat RAM
+    num_concurrent_tasks = max(1, (os.cpu_count() or 4) // 2)
+    semaphore = threading.Semaphore(num_concurrent_tasks)
 
     # --- Proses dan simpan base image TERLEBIH DAHULU ---
     print("Applying crop and saving base image (index 0)...")
@@ -1523,59 +1662,86 @@ def _run_apply_and_save_stage(processor, temp_transforms, crop_bounds, target_di
     del base_image_cropped, base_image
     gc.collect()
 
-    # --- Update progress setelah base image selesai ---
-    progress_offset = len(temp_transforms) # Jumlah pekerjaan di tahap 1
-    # Progress saat ini = 1 (base) + pekerjaan tahap 1
-    # Kita akan update setelah loop untuk menjaga konsistensi
+    # --- PERBAIKAN 2: Progress Bar Real-time ---
+    # Hitung jumlah pekerjaan dari tahap sebelumnya
+    progress_offset = len(temp_transforms)
+    
+    # Update progress SETELAH base image selesai diproses
+    if update_progress:
+        # 1 (base) + jumlah transform yang sudah dihitung
+        current_step = 1 + progress_offset
+        # Teks progress untuk base image
+        status_text = f"Applying transform and saving 1/{1 + len(temp_transforms)}"
+        update_progress(current_step, total_images_in_stack, status_text)
 
     # --- Gunakan ThreadPoolExecutor untuk pipeline kompensasi ---
-    with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+    with ThreadPoolExecutor(max_workers=num_concurrent_tasks) as executor:
         
         future_to_info = {}
+
+        # Fungsi ini akan dijalankan di dalam thread worker
+        def process_and_save_task(i, path, base_pts, target_pts):
+            # Dapatkan "izin" untuk memulai. Ini akan memblokir jika terlalu banyak
+            # thread yang sudah berjalan, sehingga mengontrol penggunaan RAM.
+            semaphore.acquire()
+            try:
+                # 1. Load gambar (tepat pada waktunya)
+                img_list = load_images_from_paths([path], stop_requested=stop_requested)
+                if not img_list or img_list[0] is None:
+                    return None, None # Kembalikan tuple untuk unpacking
+                
+                target_image = resize_with_padding(img_list[0], target_dims)
+                
+                # 2. Kompensasi dan Crop
+                compensated = processor.compensate_motion(target_image, base_pts, target_pts)
+                if compensated is None:
+                    return None, None
+                
+                processed_image = crop_image(compensated, crop_bounds)
+
+                # 3. Simpan hasil
+                if save_align:
+                    save_align_to_folder(processed_image, i, path, align_folder)
+                if h5_file_handle:
+                    with lock:
+                        save_to_hdf5(h5_file_handle, f"image_{i}", processed_image, extract_exif(path))
+                
+                del processed_image, target_image, img_list, compensated
+                gc.collect()
+
+                # Kembalikan informasi yang relevan
+                return i, path
+            
+            finally:
+                # Sangat penting: lepaskan "izin" agar thread lain bisa mulai
+                semaphore.release()
+
+        # Kirim semua pekerjaan ke thread pool
         for i, path, base_pts, target_pts in temp_transforms:
             if stop_requested and stop_requested(): break
-
-            img_list = load_images_from_paths([path], stop_requested=stop_requested)
-            if not img_list or img_list[0] is None: 
-                print(f"Skipping image {i} for saving due to loading error.")
-                continue
-            
-            target_image = resize_with_padding(img_list[0], target_dims)
-            
-            # Kirim pekerjaan (kompensasi & crop) ke thread pool
-            future = executor.submit(
-                lambda p, t, bp, tp, cb: crop_image(p.compensate_motion(t, bp, tp), cb),
-                processor, target_image, base_pts, target_pts, crop_bounds
-            )
+            future = executor.submit(process_and_save_task, i, path, base_pts, target_pts)
             future_to_info[future] = (i, path)
         
-        # Kumpulkan hasil, simpan, dan update progress
+        # Kumpulkan hasil dan update progress
         num_saved = 0
         num_to_save = len(future_to_info)
 
         for future in concurrent.futures.as_completed(future_to_info):
             if stop_requested and stop_requested(): break
             
-            i, path = future_to_info[future]
             try:
-                processed_image = future.result()
-                if processed_image is not None:
-                    # Simpan hasil
-                    if save_align:
-                        save_align_to_folder(processed_image, i, path, align_folder)
-                    if h5_file_handle:
-                        with lock:
-                            save_to_hdf5(h5_file_handle, f"image_{i}", processed_image, extract_exif(path))
-                    del processed_image
-                    gc.collect()
+                # Ambil hasil (meskipun kita tidak menggunakannya, ini akan memunculkan error jika ada)
+                res_i, res_path = future.result()
+                if res_i is None:
+                    continue # Lewati jika terjadi error di dalam task
             except Exception as exc:
-                print(f"Image {i} ({os.path.basename(path)}) failed during compensation/saving: {exc}")
-
-            # --- PROGRESS BAR SEDERHANA DAN AKURAT ---
-            num_saved += 1
-            if update_progress:
-                # Progress saat ini = (semua pekerjaan tahap 1) + 1 (base) + (jumlah yang baru disimpan)
-                current_progress = len(temp_transforms) + 1 + num_saved
-                status_text = f"Applying transform and saving {1 + num_saved}/{1 + num_to_save}"
-                # Total langkah adalah total gambar di stack
-                update_progress(current_progress, total_images_in_stack, status_text)
+                i, path = future_to_info[future]
+                continue # Tetap lanjutkan ke future berikutnya
+            finally:
+                # --- PROGRESS BAR REALTIME & AKURAT ---
+                num_saved += 1
+                if update_progress:
+                    # Progress saat ini = (semua pekerjaan tahap 1) + 1 (base) + (jumlah yang baru disimpan)
+                    current_progress = progress_offset + 1 + num_saved
+                    status_text = f"Applying transform and saving {1 + num_saved}/{1 + num_to_save}"
+                    update_progress(current_progress, total_images_in_stack, status_text)

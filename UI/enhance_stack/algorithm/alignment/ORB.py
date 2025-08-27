@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, Q
 import h5py
 from PySide6.QtCore import Qt
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (calculate_crop_parameters, do_warp_and_crop, estimate_noise_variance, extract_all_metadata, get_adaptive_bilateral,
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (calculate_crop_parameters, do_warp_and_crop, estimate_noise_variance, extract_all_metadata, get_adaptive_bilateral, get_all_image_paths_for_batch_process,
                                                                                     get_all_image_paths_for_single_process, load_images_from_paths, prepare_image,
                                                                                     resize_all_with_padding, run_pipeline_global_crop, run_pipeline_non_crop, save_align_to_folder)
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
@@ -30,17 +30,6 @@ class ORBAlgorithm:
         hdf5_folder = os.path.dirname(self.hdf5_path)
         if not os.path.exists(hdf5_folder):
             os.makedirs(hdf5_folder)
-        
-    def get_all_image_paths_for_batch_process(self, batch_id):
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT images.path 
-                FROM batch_process_image
-                JOIN images ON batch_process_image.image_id_batch = images.id
-                WHERE batch_process_image.batch_id = ?
-            """, (batch_id,))
-            return [row[0] for row in cursor.fetchall()]
         
     @staticmethod
     def load_orb_config(config_filename=None):
@@ -462,7 +451,7 @@ def main(db_path,
     else:
         if batch_id is None:
             raise ValueError("Batch ID harus ada saat proses batch")
-        image_paths = processor.get_all_image_paths_for_batch_process(batch_id)
+        image_paths = get_all_image_paths_for_batch_process(batch_id)
         processor.hdf5_path = f"database/align/aligned_image_batch_{batch_id}.h5"
 
     if not image_paths:
