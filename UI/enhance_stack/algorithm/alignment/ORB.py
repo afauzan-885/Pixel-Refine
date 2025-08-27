@@ -4,6 +4,7 @@ import json
 import queue
 import threading
 import concurrent
+import traceback
 import cv2
 import numpy as np
 import sqlite3
@@ -438,9 +439,12 @@ def main(db_path,
          align_folder=None,
          command_save_to_hd5f=None):
     
-    processor = ORBAlgorithm(db_path)
+    # --- Tahap 1: Inisialisasi dan Konfigurasi ---
+    # Ganti ORBAlgorithm dengan kelas prosesor Anda yang sesuai jika berbeda
+    processor = ORBAlgorithm(db_path) 
     config = processor.load_orb_config(config_filename)
     
+    # Tentukan parameter operasi dari argumen atau file konfigurasi
     save_align = save_align if save_align is not None else config.get("save_align", False)
     command_save_to_hd5f = command_save_to_hd5f if command_save_to_hd5f is not None else config.get("command_save_to_hd5f", True)
     align_folder = align_folder if align_folder is not None else config.get(
@@ -451,6 +455,7 @@ def main(db_path,
     keep_edges = config.get("keep_edges", False)
     transformation_type = config.get("transformation", "affine")
     
+    # Tentukan path input dan output
     if single_process:
         image_paths = get_all_image_paths_for_single_process(db_path)
         processor.hdf5_path = "database/align/aligned_images.h5"
@@ -462,63 +467,71 @@ def main(db_path,
 
     if not image_paths:
         if update_progress:
-            update_progress(0, "Failed to load image")
+            update_progress(0, "Failed to load image paths.")
         return
 
-    os.makedirs(os.path.dirname(processor.hdf5_path), exist_ok=True)
-    if align_folder:
+    # Buat direktori output jika belum ada
+    if command_save_to_hd5f:
+        os.makedirs(os.path.dirname(processor.hdf5_path), exist_ok=True)
+    if save_align and align_folder:
         os.makedirs(align_folder, exist_ok=True)
+        
     extract_all_metadata(image_paths, metadata_file=os.path.join("database", "align", "metadata.json"))
 
-    # --- 3. Pemuatan dan Penyiapan Base Image ---
+    # --- Tahap 2: Pemuatan dan Penyiapan Base Image ---
     total_images = len(image_paths)
     base_img_list = load_images_from_paths([image_paths[0]], stop_requested=stop_requested)
     if not base_img_list or base_img_list[0] is None:
         raise RuntimeError("Base image failed to load.")
 
     base_image_raw = base_img_list[0]
-    # Dapatkan dimensi target dari gambar dasar sebelum diubah
     base_resized_list, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="median")
     base_image = base_resized_list[0]
 
     del base_image_raw, base_resized_list, base_img_list
     gc.collect()
 
-    # Buat file HDF5 dan simpan gambar dasar pertama
-    with h5py.File(processor.hdf5_path, "w") as h5f:
+    # --- Tahap 3: Manajemen File dan Eksekusi Pipeline ---
+    h5f = None  # Inisialisasi handle file ke None
+    try:
         if command_save_to_hd5f:
-            with h5py.File(processor.hdf5_path, "w") as h5f:
-                pass # File dibuat tapi dibiarkan kosong
-        if save_align:
-            save_align_to_folder(base_image, 0, image_paths[0], align_folder)
+            h5f = h5py.File(processor.hdf5_path, "w")
 
-    # --- 4. Delegasi ke Pipeline yang Sesuai ---
-    if not enable_cropping or keep_edges:
-        run_pipeline_non_crop(
-            processor=processor,
-            image_paths=image_paths[1:],
-            base_image=base_image,
-            target_dims=(target_h, target_w),
-            update_progress=update_progress,
-            stop_requested=stop_requested,
-            save_align=save_align,
-            align_folder=align_folder,
-            command_save_to_hd5f=command_save_to_hd5f
-        )
-    else:
-        run_pipeline_global_crop(
-            processor=processor,
-            image_paths=image_paths[1:],
-            base_image=base_image,
-            target_dims=(target_h, target_w),
-            update_progress=update_progress,
-            stop_requested=stop_requested,
-            transformation_type=transformation_type,
-            save_align=save_align,
-            align_folder=align_folder,
-            command_save_to_hd5f=command_save_to_hd5f
-        )  
-             
+        # Pilih dan jalankan pipeline yang sesuai, dengan meneruskan handle file (bisa jadi None).
+        if not enable_cropping or keep_edges:
+            run_pipeline_non_crop(
+                processor=processor,
+                image_paths=image_paths,
+                base_image=base_image,
+                target_dims=(target_h, target_w),
+                update_progress=update_progress,
+                stop_requested=stop_requested,
+                save_align=save_align,
+                align_folder=align_folder,
+                h5_file_handle=h5f  # Teruskan handle
+            )
+        else:
+            run_pipeline_global_crop(
+                processor=processor,
+                image_paths=image_paths,
+                base_image=base_image,
+                target_dims=(target_h, target_w),
+                update_progress=update_progress,
+                stop_requested=stop_requested,
+                transformation_type=transformation_type,
+                save_align=save_align,
+                align_folder=align_folder,
+                h5_file_handle=h5f  # Teruskan handle
+            )
+            
+    except Exception as e:
+        # Tangkap error apa pun yang mungkin terjadi selama pipeline
+        print(f"A critical error occurred during the main pipeline: {e}\n{traceback.format_exc()}")
+    finally:
+        # --- Tahap 4: Cleanup ---
+        if h5f:
+            h5f.close()
+          
 def running_orb(parent=None, single_process=None, batch_id=None):
     process_finished = False
     """

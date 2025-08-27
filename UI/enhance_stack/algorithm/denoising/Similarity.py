@@ -755,7 +755,7 @@ def _setup_data_source_and_paths(db_path, single_process, batch_id, image_proces
         output_name_base = ref_name
     else:
         if batch_id is None:
-            raise ValueError(language_config.BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS)
+            pass
         hdf5_path = os.path.join(align_dir, f"aligned_image_batch_{batch_id}.h5")
         image_paths = image_processor.get_all_image_paths_for_batch_process(batch_id)
         ref_name = os.path.splitext(os.path.basename(image_paths[0]))[0] if image_paths else f"batch_{batch_id}"
