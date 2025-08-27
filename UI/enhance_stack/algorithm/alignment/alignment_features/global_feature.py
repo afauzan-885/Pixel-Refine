@@ -1478,270 +1478,174 @@ def run_pipeline_global_crop(processor, image_paths, base_image, target_dims,
     """
     Mengatur dan menjalankan pipeline global cropping dengan alur yang benar dan sederhana.
     """
-    # Total gambar dalam tumpukan (termasuk base image)
     total_images_in_stack = len(image_paths)
-    
-    # Gambar yang perlu dihitung transformasinya (semua kecuali base)
     images_to_process_for_transforms = image_paths[1:]
-    
-    # --- TAHAP 1: Menghitung semua transformasi ---
-    # Fungsi ini akan menangani progress untuk tahap ini.
+
+    # --- TAHAP 1: Menghitung semua transformasi (progress 0% -> 50%) ---
     all_transforms = _run_transform_calculation_stage(
-        processor, 
-        images_to_process_for_transforms, 
-        base_image, 
-        target_dims,
-        update_progress, 
-        stop_requested, 
-        total_images_in_stack
+        processor, images_to_process_for_transforms, base_image, target_dims,
+        update_progress, stop_requested
     )
-    
-    # Periksa jika tahap 1 gagal atau dibatalkan
     if not all_transforms or len(all_transforms) != len(images_to_process_for_transforms):
         print("Transform calculation did not complete for all images. Aborting global crop.")
         return
 
-    # --- TAHAP 2: Menghitung batas crop (sinkron) ---
-    print("Computing global crop bounds...")
     if update_progress:
-        # Tampilkan status ke pengguna bahwa kita sedang melakukan perhitungan singkat
-        update_progress(len(all_transforms), total_images_in_stack, "Computing global crop bounds...")
+        # Tampilkan status, set progress ke 50% secara eksplisit untuk menandai transisi
+        update_progress(50, 100, "Computing global crop bounds...")
         
     crop_bounds = compute_global_crop(
-        [(item[0], item[2], item[3]) for item in all_transforms], # (i, base_pts, target_pts)
-        total_images_in_stack, 
-        base_image.shape[1], 
-        base_image.shape[0],
+        [(item[0], item[2], item[3]) for item in all_transforms],
+        total_images_in_stack, base_image.shape[1], base_image.shape[0],
         transformation_type=transformation_type,
     )
-    
     if crop_bounds is None:
         print("Failed to compute global crop bounds. Aborting.")
         return
 
-    # --- TAHAP 3: Menerapkan transformasi, crop, dan menyimpan ---
-    # Fungsi ini akan menangani sisa progress.
+    # --- TAHAP 3: Menerapkan transformasi dan menyimpan (progress 50% -> 100%) ---
     _run_apply_and_save_stage(
-        processor, 
-        all_transforms, 
-        crop_bounds, 
-        target_dims,
-        update_progress, 
-        stop_requested, 
-        total_images_in_stack,
-        save_align, 
-        align_folder,
+        processor, all_transforms, crop_bounds, target_dims,
+        update_progress, stop_requested,
+        save_align, align_folder,
         h5_file_handle,
-        base_image, # Teruskan base image asli
-        image_paths[0]
-    )    
-
+        base_image, image_paths[0]
+    )
+    
 def _run_transform_calculation_stage(processor, image_paths, base_image, target_dims, 
-                                     update_progress, stop_requested, total_images_in_stack):
+                                     update_progress, stop_requested):
     """
-    Tahap 1: Menghitung transformasi satu per satu dengan pipeline serial "Loader -> Extractor"
-    untuk kontrol memori yang ketat.
+    Tahap 1: Menghitung transformasi satu per satu, melaporkan progress dari 0% hingga 50%.
     """
     all_transforms = []
-    progress_counter = {"count": 0}
-    progress_lock = threading.Lock()
+    num_to_process = len(image_paths)
     
-    # --- Pipeline 2 Stasiun: Loader -> Extractor ---
-    # Batasi antrian untuk kontrol RAM, sama seperti di non-crop
+    # Pipeline 2 Stasiun: Loader -> Extractor untuk kontrol RAM
     queue_images = queue.Queue(maxsize=4)
-    queue_transforms = queue.Queue(maxsize=4)
-
-    # --- Definisi Worker ---
+    queue_results = queue.Queue()
 
     def loader_worker():
-        """Worker thread yang hanya memuat gambar dan memasukkannya ke antrian berikutnya."""
-        # `image_paths` di sini adalah daftar target_images
         for i, path in enumerate(image_paths, start=1):
             if stop_requested and stop_requested(): break
             img_list = load_images_from_paths([path], stop_requested=stop_requested)
-            if not img_list or img_list[0] is None:
-                print(f"Failed to load image {i}, skipping.")
-                # Kita perlu memberi sinyal ke konsumer bahwa satu item gagal
-                # agar progress bar tidak macet.
-                queue_transforms.put(("failed", i))
-                continue
-            
-            target_image = resize_with_padding(img_list[0], target_dims)
-            queue_images.put((i, path, target_image))
-        
-        # Sinyal selesai untuk extractor
+            if img_list and img_list[0] is not None:
+                target_image = resize_with_padding(img_list[0], target_dims)
+                queue_images.put((i, path, target_image))
+            else:
+                queue_images.put((i, path, None)) # Kirim sinyal gagal
         queue_images.put(None)
 
     def extractor_worker():
-        """Worker thread yang mengambil gambar, menghitung transformasi, dan menaruh hasil."""
         while True:
             item = queue_images.get()
             if item is None: break
-            
             i, path, target_image = item
-            
+            if target_image is None:
+                queue_results.put((i, path, None, None))
+                continue
             base_pts, target_pts = processor.calculate_global_motion(base_image, target_image, stop_requested=stop_requested)
-            
-            # Taruh hasil (bahkan jika gagal) ke antrian berikutnya
-            queue_transforms.put((i, path, base_pts, target_pts))
-            
-            # Bebaskan memori gambar sesegera mungkin
-            del target_image
-            gc.collect()
+            queue_results.put((i, path, base_pts, target_pts))
+        queue_results.put(None)
 
-        # Sinyal selesai untuk thread utama (konsumer)
-        queue_transforms.put(None)
-
-    # --- Mulai Threads ---
     loader_thread = threading.Thread(target=loader_worker)
     extractor_thread = threading.Thread(target=extractor_worker)
     loader_thread.start()
     extractor_thread.start()
 
-    # --- Loop utama (Konsumer) untuk mengumpulkan hasil & update progress ---
-    num_images_to_process = len(image_paths)
-    
-    while len(all_transforms) < num_images_to_process:
-        item = queue_transforms.get()
-        if item is None: break # Sinyal selesai dari extractor
+    # Loop utama untuk mengumpulkan hasil dan melaporkan progress
+    for count in range(1, num_to_process + 1):
+        item = queue_results.get()
+        if item is None: break
 
-        # Cek jika item adalah sinyal kegagalan dari loader
-        if item[0] == "failed":
-            i = item[1]
-            print(f"Skipping transform for image {i} due to loading failure.")
+        i, path, base_pts, target_pts = item
+        if base_pts is not None and target_pts is not None:
+            all_transforms.append(item)
         else:
-            i, path, base_pts, target_pts = item
-            if base_pts is not None and target_pts is not None:
-                all_transforms.append((i, path, base_pts, target_pts))
-            else:
-                print(f"Transform calculation failed for image {i} ({os.path.basename(path)})")
+            print(f"Transform calculation failed for image {i} ({os.path.basename(path)})")
 
-        # --- PROGRESS BAR REALTIME & AKURAT ---
-        # Update progress untuk setiap gambar yang telah diproses (berhasil atau gagal)
-        with progress_lock:
-            progress_counter["count"] += 1
-            if update_progress:
-                status_text = f"Calculating transform {progress_counter['count']}/{num_images_to_process}"
-                # `total_images_in_stack` adalah total keseluruhan proses, bukan hanya tahap ini
-                update_progress(progress_counter["count"], total_images_in_stack, status_text)
-
-    # --- Cleanup ---
+        if update_progress:
+            # --- LOGIKA PROGRESS SEDERHANA & BENAR (0% -> 50%) ---
+            # (jumlah_selesai / total_di_tahap_ini) * 50
+            current_percent = (count / num_to_process) * 50
+            status_text = f"Calculating transform {count}/{num_to_process}"
+            # Kirim persentase sebagai nilai saat ini, dengan total 100
+            update_progress(int(current_percent), 100, status_text)
+            
     loader_thread.join()
     extractor_thread.join()
     
-    # Urutkan hasil untuk memastikan urutan gambar benar jika terjadi pemrosesan out-of-order
     all_transforms.sort(key=lambda x: x[0])
     return all_transforms
 
 def _run_apply_and_save_stage(processor, temp_transforms, crop_bounds, target_dims,
-                               update_progress, stop_requested, total_images_in_stack,
+                               update_progress, stop_requested,
                                save_align, align_folder,
                                h5_file_handle,
                                base_image, base_image_path):
     """
-    Tahap 3: Menerapkan transformasi dan menyimpan, dengan kontrol RAM menggunakan Semaphore
-    dan progress bar yang akurat.
+    Tahap 3: Menerapkan transformasi dan menyimpan, melaporkan progress dari 50% hingga 100%.
     """
-    lock = threading.Lock() # Lock untuk HDF5
-
-    # --- PERBAIKAN 1: Kontrol Konkurensi & RAM ---
-    # Batasi jumlah gambar yang diproses secara bersamaan untuk menghemat RAM
-    num_concurrent_tasks = max(1, (os.cpu_count() or 4) // 2)
-    semaphore = threading.Semaphore(num_concurrent_tasks)
-
-    # --- Proses dan simpan base image TERLEBIH DAHULU ---
-    print("Applying crop and saving base image (index 0)...")
-    base_image_cropped = crop_image(base_image, crop_bounds)
-
-    if save_align:
-        save_align_to_folder(base_image_cropped, 0, base_image_path, align_folder)
-    if h5_file_handle:
-        with lock:
-            save_to_hdf5(h5_file_handle, "image_0", base_image_cropped, extract_exif(base_image_path))
+    lock = threading.Lock()
     
-    del base_image_cropped, base_image
-    gc.collect()
-
-    # --- PERBAIKAN 2: Progress Bar Real-time ---
-    # Hitung jumlah pekerjaan dari tahap sebelumnya
-    progress_offset = len(temp_transforms)
+    # Gabungkan base image dan target menjadi satu daftar pekerjaan
+    tasks = [(0, base_image_path, None, None, base_image)] # (i, path, pts, pts, data)
+    for i, path, base_pts, target_pts in temp_transforms:
+        tasks.append((i, path, base_pts, target_pts, None))
+        
+    num_to_save = len(tasks)
     
-    # Update progress SETELAH base image selesai diproses
-    if update_progress:
-        # 1 (base) + jumlah transform yang sudah dihitung
-        current_step = 1 + progress_offset
-        # Teks progress untuk base image
-        status_text = f"Applying transform and saving 1/{1 + len(temp_transforms)}"
-        update_progress(current_step, total_images_in_stack, status_text)
+    # Pipeline 2 Stasiun: Loader/Compensator -> Saver
+    queue_to_save = queue.Queue(maxsize=4)
 
-    # --- Gunakan ThreadPoolExecutor untuk pipeline kompensasi ---
-    with ThreadPoolExecutor(max_workers=num_concurrent_tasks) as executor:
-        
-        future_to_info = {}
-
-        # Fungsi ini akan dijalankan di dalam thread worker
-        def process_and_save_task(i, path, base_pts, target_pts):
-            # Dapatkan "izin" untuk memulai. Ini akan memblokir jika terlalu banyak
-            # thread yang sudah berjalan, sehingga mengontrol penggunaan RAM.
-            semaphore.acquire()
-            try:
-                # 1. Load gambar (tepat pada waktunya)
-                img_list = load_images_from_paths([path], stop_requested=stop_requested)
-                if not img_list or img_list[0] is None:
-                    return None, None # Kembalikan tuple untuk unpacking
-                
-                target_image = resize_with_padding(img_list[0], target_dims)
-                
-                # 2. Kompensasi dan Crop
-                compensated = processor.compensate_motion(target_image, base_pts, target_pts)
-                if compensated is None:
-                    return None, None
-                
-                processed_image = crop_image(compensated, crop_bounds)
-
-                # 3. Simpan hasil
-                if save_align:
-                    save_align_to_folder(processed_image, i, path, align_folder)
-                if h5_file_handle:
-                    with lock:
-                        save_to_hdf5(h5_file_handle, f"image_{i}", processed_image, extract_exif(path))
-                
-                del processed_image, target_image, img_list, compensated
-                gc.collect()
-
-                # Kembalikan informasi yang relevan
-                return i, path
-            
-            finally:
-                # Sangat penting: lepaskan "izin" agar thread lain bisa mulai
-                semaphore.release()
-
-        # Kirim semua pekerjaan ke thread pool
-        for i, path, base_pts, target_pts in temp_transforms:
-            if stop_requested and stop_requested(): break
-            future = executor.submit(process_and_save_task, i, path, base_pts, target_pts)
-            future_to_info[future] = (i, path)
-        
-        # Kumpulkan hasil dan update progress
-        num_saved = 0
-        num_to_save = len(future_to_info)
-
-        for future in concurrent.futures.as_completed(future_to_info):
+    def worker():
+        for i, path, base_pts, target_pts, image_data in tasks:
             if stop_requested and stop_requested(): break
             
             try:
-                # Ambil hasil (meskipun kita tidak menggunakannya, ini akan memunculkan error jika ada)
-                res_i, res_path = future.result()
-                if res_i is None:
-                    continue # Lewati jika terjadi error di dalam task
-            except Exception as exc:
-                i, path = future_to_info[future]
-                continue # Tetap lanjutkan ke future berikutnya
-            finally:
-                # --- PROGRESS BAR REALTIME & AKURAT ---
-                num_saved += 1
-                if update_progress:
-                    # Progress saat ini = (semua pekerjaan tahap 1) + 1 (base) + (jumlah yang baru disimpan)
-                    current_progress = progress_offset + 1 + num_saved
-                    status_text = f"Applying transform and saving {1 + num_saved}/{1 + num_to_save}"
-                    update_progress(current_progress, total_images_in_stack, status_text)
+                # Muat gambar jika belum ada (untuk target images)
+                if image_data is None:
+                    img_list = load_images_from_paths([path], stop_requested=stop_requested)
+                    if not img_list or img_list[0] is None: continue
+                    image_data = resize_with_padding(img_list[0], target_dims)
+                
+                # Kompensasi (jika bukan base image) dan Crop
+                if i > 0:
+                    compensated = processor.compensate_motion(image_data, base_pts, target_pts)
+                    if compensated is None: continue
+                    processed_image = crop_image(compensated, crop_bounds)
+                else: # Ini adalah base image
+                    processed_image = crop_image(image_data, crop_bounds)
+                
+                queue_to_save.put((i, path, processed_image))
+            except Exception as e:
+                print(f"Error processing image {i} for saving: {e}")
+                
+        queue_to_save.put(None)
+
+    worker_thread = threading.Thread(target=worker)
+    worker_thread.start()
+
+    # Loop utama untuk menyimpan dan melaporkan progress
+    for count in range(1, num_to_save + 1):
+        item = queue_to_save.get()
+        if item is None: break
+
+        i, path, cropped_image = item
+        
+        if save_align:
+            save_align_to_folder(cropped_image, i, path, align_folder)
+        if h5_file_handle:
+            with lock:
+                save_to_hdf5(h5_file_handle, f"image_{i}", cropped_image, extract_exif(path))
+        
+        del cropped_image
+        gc.collect()
+
+        if update_progress:
+            # --- LOGIKA PROGRESS SEDERHANA & BENAR (50% -> 100%) ---
+            # 50 (basis) + (jumlah_selesai / total_di_tahap_ini) * 50
+            current_percent = 50 + (count / num_to_save) * 50
+            status_text = f"Applying transform and saving {count}/{num_to_save}"
+            update_progress(int(current_percent), 100, status_text)
+            
+    worker_thread.join()

@@ -211,7 +211,6 @@ class LightGlueAlgorithm:
             
             # Estimasi noise
             noise_level = estimate_noise_variance(enhanced_gray)
-            print(f"Tile noise level: {noise_level:.2f}")
             
             # Threshold dan rentang parameter (bisa disesuaikan)
             min_noise_threshold = 200.0
