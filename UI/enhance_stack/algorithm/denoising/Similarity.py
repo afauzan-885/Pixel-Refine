@@ -220,7 +220,7 @@ class SimilarityAlgorithm:
         stability_map = None
         if temporal_analysis_mode == 'two_pass_full':
             if update_progress:
-                update_progress(5, "Pass 1/2: Menganalisis stabilitas adegan...")
+                update_progress(5, language_config.ANALYSIS_STEP_ONE)
             
             downsampled_h, downsampled_w = work_res_h // 2, work_res_w // 2
             sum_map = np.zeros((downsampled_h, downsampled_w), dtype=np.float32)
@@ -232,7 +232,7 @@ class SimilarityAlgorithm:
             for i, image_orig in enumerate(images):
                 if stop_requested and stop_requested(): return (None, None, 0)
                 if update_progress:
-                    update_progress(int(5 + ((i + 1) / num_images) * 45), f"Pass 1/2: Menganalisis frame {i+1}/{num_images}")
+                    update_progress(int(5 + ((i + 1) / num_images) * 45), language_config.ANALYSIS_STEP_ONE_PROGRESS.format(i + 1, num_images))
                 
                 curr_work_res = cv2.resize(normalize_image(image_orig, ref_dtype), (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
                 temp_weight_map = np.ascontiguousarray(np.zeros((work_res_h, work_res_w), dtype=np.float32))
@@ -268,7 +268,7 @@ class SimilarityAlgorithm:
         # === LANGKAH 3 (PASS 2 / UTAMA): Pipeline Akumulasi =======================
         msg_pass = "Pass 2/2: " if temporal_analysis_mode != 'one_pass' else ""
         if update_progress:
-            update_progress(50, f"{msg_pass}Menggabungkan frame...")
+            update_progress(50, language_config.ANALYSIS_STEP_TWO.format(msg_pass))
 
         PIPELINE_QUEUE_SIZE = 2
         SENTINEL = None
@@ -346,7 +346,7 @@ class SimilarityAlgorithm:
                 current_img_overall = images_processed_so_far + i + 1
                 prog = int(50 + ((current_img_overall / total_overall_images) * (progress_cap_percent - 50) if total_overall_images and total_overall_images > 0 else ((i + 1) / num_images) * (progress_cap_percent - 50)))
                 msg_pass_str = "Pass 2/2: " if temporal_analysis_mode != 'one_pass' else ""
-                msg = f"{msg_pass_str}Membangun gambar frame {i+1}/{num_images}"
+                msg = language_config.ANALYSIS_STEP_TWO_PROGRESS.format(msg_pass_str, i + 1, num_images)
                 update_progress(prog, msg)
         
             # Langsung gunakan hasil dari C++ setelah di-resize.
@@ -772,7 +772,7 @@ def _setup_data_source_and_paths(db_path, single_process, batch_id, image_proces
         except Exception as e_h5:
             raise IOError(f"Gagal membaca file HDF5: {e_h5}")
     elif isinstance(data_source, list):
-        print(language_config.NO_HDF5_FILE_PROCESSING_FROM_PATH)
+        # print(language_config.NO_HDF5_FILE_PROCESSING_FROM_PATH)
         total_images = len(data_source)
 
     return data_source, image_paths, output_name_base, total_images
@@ -858,8 +858,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
             if update_progress: update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
             return
         total_batches = len(batch_plan)
-        print(language_config.NUMBER_OF_IMAGES_TO_BE_PROCESSED.format(total_images))
-        print(language_config.NUMBER_OF_BATCHES_TO_BE_PROCESSED.format(total_batches))
+        # print(language_config.NUMBER_OF_BATCHES_TO_BE_PROCESSED.format(total_batches))
 
         # --- 5. PROSES INTI PER BATCH ---
         processed_batches_results = []
@@ -973,12 +972,27 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
         if update_progress and not (stop_requested and stop_requested()):
             update_progress(0, error_message)
 
-def running_similarity(parent=None, single_process=None, batch_id=None):
+def running_similarity(parent=None, single_process=None, batch_id=None, progress_callback=None):
+    
+    # ==========================================================
+    # KONDISI 1: MODE BATCH (TANPA GUI)
+    # ==========================================================
+    if batch_id is not None and progress_callback is not None:
+        try:
+            main(
+                db_path="pixel_refine_database.db",
+                update_progress=progress_callback,
+                single_process=False, 
+                batch_id=batch_id
+            )
+        except Exception as e:
+            raise e
+        return 
+    
+    # ==========================================================
+    # KONDISI 2: MODE SINGLE (DENGAN GUI DIALOG)
+    # ==========================================================
     process_finished = False
-    """
-    Menampilkan progress bar dengan gaya kustom dan memanfaatkan thread.
-    """
-    # Membuat dialog progress
     dialog = QDialog(parent)
     dialog.setWindowTitle(language_config.WINDOW_TITLE_SIMILARITY)
     dialog.setModal(True)

@@ -93,7 +93,7 @@ SCROLL_AREA = """
     QScrollBar::handle:horizontal { background: #A0A0A0; min-width: 20px; border-radius: 5px; }
     QScrollBar::handle:horizontal:hover { background: #808080; }
 """
-TOGGLE_SWITCH_STYLE = """
+CHECKBOX_SWITCH_STYLE = """
     QCheckBox {
         spacing: 8px;
     }

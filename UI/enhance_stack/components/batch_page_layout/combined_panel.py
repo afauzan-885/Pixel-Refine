@@ -23,7 +23,7 @@ from UI.enhance_stack.components.batch_page_layout.thumbnail import ThumbnailLoa
 from UI.enhance_stack.logic.workflow_process import ImageViewer, get_last_image
 from UI.resources.animation.animation_manager import StackedWidgetAnimator
 from UI.resources.animation.fade import fade_out
-from UI.resources.stylesheet.stylesheet import DROPDOWN_BOX, SCROLL_AREA, TOGGLE_SWITCH_STYLE
+from UI.resources.stylesheet.stylesheet import DROPDOWN_BOX, SCROLL_AREA, CHECKBOX_SWITCH_STYLE
 from UI.settings.General.Language import language_config
 from config import GENERAL_SETTINGS_FILE
 
@@ -180,6 +180,69 @@ class CombinedPanel(QWidget):
             QTimer.singleShot(50, self.delay_thumbnails)
         elif self.batch_id is not None:
             self.load_text_labels()
+    
+    @Slot(dict)
+    def refresh_ui_from_broadcast(self, all_new_states):
+        """
+        Slot yang dipanggil saat BatchPageLayout menyiarkan perubahan state.
+        Slot ini TIDAK MEMBACA FILE. Ia hanya menerima data dan menerapkan perubahan.
+        """
+        if not self.batch_id:
+            return
+
+        # 1. Ambil state yang relevan untuk panel ini dari data yang disiarkan
+        new_state = all_new_states.get(str(self.batch_id))
+
+        # Jika tidak ada state untuk batch ini (misalnya baru dihapus), jangan lakukan apa-apa
+        if new_state is None:
+            return
+            
+        self.apply_state(new_state)
+
+
+    def apply_state(self, state):
+        """
+        Menerapkan state dari dictionary ke semua aspek panel:
+        1. Widget UI (checkboxes, comboboxes).
+        2. State internal (self.selected_algorithms).
+        3. Tampilan visual (visibilitas, status enabled/disabled).
+        """
+        # ... (KODE apply_state DARI JAWABAN SEBELUMNYA SUDAH BENAR, GUNAKAN KEMBALI)
+        if not isinstance(state, dict):
+            print(f"[ERROR] apply_state received invalid state for batch {self.batch_id}")
+            return
+
+        # LANGKAH 1: PERBARUI STATE INTERNAL (self.selected_algorithms)
+        self.selected_algorithms['alignment'] = state.get('alignment_algo', "None")
+        self.selected_algorithms['super_resolution'] = state.get('super_resolution_algo', "None")
+        self.selected_algorithms['denoising'] = state.get('denoising_algo', "None")
+
+        # LANGKAH 2: PERBARUI WIDGET UI (COMBOBOX & CHECKBOX)
+        # Update ComboBox
+        for category, key in [('alignment', 'alignment_algo'),
+                            ('super_resolution', 'super_resolution_algo'),
+                            ('denoising', 'denoising_algo')]:
+            combobox = self.comboboxes.get(category)
+            if combobox:
+                algo_name = state.get(key, "None")
+                combobox.blockSignals(True); combobox.setCurrentText(algo_name); combobox.blockSignals(False)
+
+        # Update Checkbox
+        if hasattr(self, 'label_to_key_map'):
+            for label_text, json_key in self.label_to_key_map.items():
+                checkbox = self.checkboxes.get(label_text)
+                if checkbox:
+                    is_checked = state.get(json_key, False)
+                    checkbox.blockSignals(True); checkbox.setChecked(is_checked); checkbox.blockSignals(False)
+
+        # LANGKAH 3: SINKRONKAN TAMPILAN VISUAL UI
+        self._update_visibility_internal()
+        
+        denoising_key = language_config.PARAMETER_BATCH_DENOISING
+        superres_key = language_config.PARAMETER_BATCH_SUPER_RESOLUTION
+        # ... (sisa logika handler eksklusif)
+        if denoising_key in self.checkboxes: self._handle_denoising_state_changed(self.checkboxes[denoising_key].isChecked())
+        if superres_key in self.checkboxes: self._handle_superres_state_changed(self.checkboxes[superres_key].isChecked())
 
     def _on_overlay_destroyed(self, *args):
         self._overlay_alive = False
@@ -328,9 +391,6 @@ class CombinedPanel(QWidget):
         Sekarang menggunakan self.label_to_key_map untuk konsistensi kunci.
         """
         state = {}
-
-        # --- PERBAIKAN: Gunakan self.label_to_key_map untuk mendapatkan kunci yang stabil ---
-        # Pastikan self.label_to_key_map sudah diinisialisasi (biasanya di create_parameter_panel)
         if hasattr(self, 'label_to_key_map'):
             for text, checkbox in self.checkboxes.items():
                 key = self.label_to_key_map.get(text)
@@ -593,7 +653,7 @@ class CombinedPanel(QWidget):
 
         all_batches[str(batch_id)] = state
 
-        os.makedirs(os.path.dirname(json_path), exist_ok=True)  # ✅ buat folder jika belum ada
+        os.makedirs(os.path.dirname(json_path), exist_ok=True)
         with open(json_path, "w") as f:
             json.dump(all_batches, f, indent=4)
 
@@ -674,22 +734,25 @@ class CombinedPanel(QWidget):
         keep_edge_cb = self.checkboxes.get(keep_edge_key)
         if keep_edge_cb: keep_edge_cb.setEnabled(is_alignment_checked and not is_crop_edge_checked) 
 
-    def process_all_batch(self):
+    def process_all_batch(self, progress_callback=None):
         """
         Jalankan semua algoritma yang dipilih untuk self.batch_id.
-        Pertama, verifikasi bahwa self.batch_id masih valid di database_manager.
-        Kemudian, baca konfigurasi dari JSON dan jalankan algoritma jika checkbox terkait aktif.
+        Fungsi ini sekarang menerima 'progress_callback' untuk melaporkan status
+        sub-proses kembali ke thread pemanggil tanpa membuat UI baru.
         """
         # --- Langkah 0: Pemeriksaan Awal ---
         if self.batch_id is None:
+            print("[ERROR] process_all_batch called with no batch_id.")
             return
 
         # --- Langkah 1: Verifikasi Batch ID terhadap Database Manager ---
         try:
             images_in_db = self.database_manager.get_images_by_batch(self.batch_id)
             if not images_in_db:
+                print(f"[WARN] No images found in database for batch_id: {self.batch_id}. Skipping.")
                 return
         except Exception as e:
+            print(f"[ERROR] Database verification failed for batch_id: {self.batch_id}. Error: {e}")
             return
         
         # --- Langkah 2: Baca Konfigurasi dari File JSON ---
@@ -700,30 +763,31 @@ class CombinedPanel(QWidget):
             all_batches_in_json = load_json_state(json_path) 
             config_from_json = all_batches_in_json.get(str(self.batch_id), {})
             if not config_from_json:
+                print(f"[WARN] No configuration found in batch_parameter.json for batch_id: {self.batch_id}. Skipping.")
                 return
-    
+
         # --- Langkah 3: Definisikan Aksi Algoritma ---
         actions = {
             'alignment': {
-                "Farneback Optical Flow": lambda: running_farneback_optical_flow(self, single_process=False, batch_id=self.batch_id),
-                "AKAZE": lambda: running_akaze(self, single_process=False, batch_id=self.batch_id),
-                "ORB": lambda: running_orb(self, single_process=False, batch_id=self.batch_id),    
-                "Light Glue": lambda: running_light_glue(self, single_process=False, batch_id=self.batch_id),    
+                "Farneback Optical Flow": lambda: running_farneback_optical_flow(self, single_process=False, batch_id=self.batch_id, progress_callback=progress_callback),
+                "AKAZE": lambda: running_akaze(self, single_process=False, batch_id=self.batch_id, progress_callback=progress_callback),
+                "ORB": lambda: running_orb(self, single_process=False, batch_id=self.batch_id, progress_callback=progress_callback),    
+                "Light Glue": lambda: running_light_glue(self, single_process=False, batch_id=self.batch_id, progress_callback=progress_callback),    
                 "No Alignment": lambda: print("[INFO] Alignment: 'No Alignment' selected, no action."),
-                "None": lambda: print("[INFO] Denoising: 'No Denoising' selected, no action."),
+                "None": lambda: print("[INFO] Alignment: 'None' selected, no action."),
             },
             'super_resolution': {
-                "Interpolation": lambda: running_interpolation(self, single_process=False, batch_id=self.batch_id),
+                # "Interpolation": lambda: running_interpolation(self, single_process=False, batch_id=self.batch_id, progress_callback=progress_callback),
                 "No Super Resolution": lambda: print("[INFO] Super Resolution: 'No Super Resolution' selected, no action."),
-                "None": lambda: print("[INFO] Denoising: 'No Denoising' selected, no action."),
+                "None": lambda: print("[INFO] Super Resolution: 'None' selected, no action."),
             },
             'denoising': {
-                "Average": lambda: running_average(self, single_process=False, batch_id=self.batch_id),
-                "Median": lambda: running_median(self, single_process=False, batch_id=self.batch_id),
-                "Similarity": lambda: running_similarity(self, single_process=False, batch_id=self.batch_id),
-                "Similarity V2": lambda: running_similarity_v2(self, single_process=False, batch_id=self.batch_id),
+                "Average": lambda: running_average(self, single_process=False, batch_id=self.batch_id, progress_callback=progress_callback),
+                "Median": lambda: running_median(self, single_process=False, batch_id=self.batch_id, progress_callback=progress_callback),
+                "Similarity": lambda: running_similarity(self, single_process=False, batch_id=self.batch_id, progress_callback=progress_callback),
+                # "Similarity V2": lambda: running_similarity_v2(self, single_process=False, batch_id=self.batch_id, progress_callback=progress_callback),
                 "No Denoising": lambda: print("[INFO] Denoising: 'No Denoising' selected, no action."),
-                "None": lambda: print("[INFO] Denoising: 'No Denoising' selected, no action."),
+                "None": lambda: print("[INFO] Denoising: 'None' selected, no action."),
             }
         }
 
@@ -732,6 +796,7 @@ class CombinedPanel(QWidget):
             'super_resolution': "checkbox_super_resolution",
             'denoising': "checkbox_denoising"
         }
+        
         # --- Langkah 4: Jalankan Algoritma Berdasarkan Konfigurasi JSON ---
         any_algorithm_executed = False
         for category, selected_algo_name in self.selected_algorithms.items():
@@ -741,14 +806,18 @@ class CombinedPanel(QWidget):
                 continue
 
             if config_from_json.get(json_checkbox_key, False):
-                if selected_algo_name and selected_algo_name != "None" and selected_algo_name != "No Alignment" \
-                   and selected_algo_name != "No Super Resolution" and selected_algo_name != "No Denoising":
+                # Cek untuk nama algoritma yang valid untuk diproses
+                if selected_algo_name and selected_algo_name not in ["None", "No Alignment", "No Super Resolution", "No Denoising"]:
                     
                     if category in actions and selected_algo_name in actions[category]:
+                        print(f"[INFO] Executing '{selected_algo_name}' for batch_id: {self.batch_id}")
                         actions[category][selected_algo_name]()
                         any_algorithm_executed = True
+                    else:
+                        print(f"[WARN] Algorithm '{selected_algo_name}' for category '{category}' not found in actions.")
             
         if not any_algorithm_executed:
+            print(f"[INFO] No algorithms were executed for batch_id: {self.batch_id} based on config.")
             pass
     
     def create_parameter_panel(self):
@@ -813,7 +882,7 @@ class CombinedPanel(QWidget):
             checkbox_layout.setSpacing(5)
 
             option_checkbox = QCheckBox()
-            option_checkbox.setStyleSheet(TOGGLE_SWITCH_STYLE)
+            option_checkbox.setStyleSheet(CHECKBOX_SWITCH_STYLE)
             option_label = ClickableLabel(text)
             option_label.setWordWrap(True)
             option_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)

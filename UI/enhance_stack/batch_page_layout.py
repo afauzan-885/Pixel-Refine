@@ -1,13 +1,14 @@
+import json
 import os
 import shutil
 import sqlite3
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QScrollArea, QSpacerItem, QSizePolicy, QLabel
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QSpacerItem, QSizePolicy, QLabel
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QMessageBox, QFileDialog,
-                              QApplication, QGraphicsOpacityEffect)
+                            QGraphicsOpacityEffect)
 from PySide6.QtCore import (Signal, QPropertyAnimation, QEasingCurve, QEvent,
-                          QTimer, Slot, QThread, Qt)
+                          QTimer, Slot, QThread, Qt, QFileSystemWatcher)
 import weakref
-from UI.enhance_stack.components.batch_page_layout.batch_layout import setup_main_panel
+from UI.enhance_stack.components.batch_page_layout.batch_layout import BatchProcessDialog, setup_main_panel
 from UI.enhance_stack.components.batch_page_layout.combined_panel import CombinedPanel
 from UI.enhance_stack.components.batch_page_layout.image_batch_management import BatchDeleteProcess, process_and_start_batch_import
 from UI.enhance_stack.components.batch_page_layout.scrollable_error_dialog import ScrollableErrorDialog
@@ -18,6 +19,12 @@ from UI.resources.animation.fade import fade_out
 from UI.resources.stylesheet.stylesheet import SCROLL_AREA
 from UI.settings.General.Language import language_config
 from config import CACHE_DIR, SUPPORTED_FORMATS
+
+def load_json_state(path):
+    if os.path.exists(path):
+        with open(path, 'r') as f:
+            return json.load(f)
+    return {}
 
 def is_widget_valid(widget):
     """Cek apakah widget masih valid (belum dihapus)."""
@@ -43,12 +50,29 @@ def safe_hide_widget(widget):
 class BatchPageLayout(QWidget):
     data_changed = Signal()
     show_toast_requested = Signal(str, object, bool)
+    parameters_changed = Signal(dict) 
 
     def __init__(self):
         super().__init__()
         self.thumbnail_threads = []
         self.thumbnail_placeholders = weakref.WeakValueDictionary()
         self.database_manager = DatabaseManager("pixel_refine_database.db")
+        self.json_path = os.path.join("database", "align", "batch_parameter.json")
+        self.param_watcher = QFileSystemWatcher(self)
+        self.param_watcher.fileChanged.connect(self._on_parameters_file_changed)
+        
+        # Pastikan direktori ada sebelum memonitor file
+        json_dir = os.path.dirname(self.json_path)
+        if not os.path.exists(json_dir):
+            os.makedirs(json_dir)
+            
+        # Jika file belum ada, buat file kosong agar bisa di-watch
+        if not os.path.exists(self.json_path):
+            with open(self.json_path, 'w') as f:
+                json.dump({}, f)
+
+        self.param_watcher.addPath(self.json_path)
+        
         self.database_manager.create_database()
         self.animator = StackedWidgetAnimator(self)
         self._active_fade_in_animations = {}
@@ -245,7 +269,22 @@ class BatchPageLayout(QWidget):
                 widget.setGraphicsEffect(None)
         if widget in self._active_fade_in_animations:
             del self._active_fade_in_animations[widget]
+            
+    @Slot(str)
+    def _on_parameters_file_changed(self, path):
+        all_new_states = {}
+        try:
+            all_new_states = load_json_state(path)
+        except json.JSONDecodeError:
+            QTimer.singleShot(100, lambda p=path: self._on_parameters_file_changed(p))
+            return
+        
+        if all_new_states:
+            self.parameters_changed.emit(all_new_states)
 
+        self.param_watcher.removePath(path)
+        QTimer.singleShot(100, lambda p=path: self.param_watcher.addPath(p))
+        
     def setup_combined_panel(self, batch_id=None):
         initial_state = self.batch_states.get(batch_id, {})
         combined_panel = CombinedPanel(
@@ -255,10 +294,11 @@ class BatchPageLayout(QWidget):
             thumbnail_threads=self.thumbnail_threads,
             thumbnail_placeholders=self.thumbnail_placeholders,
             initial_state=initial_state,
-            # sequential_batch_number akan diatur nanti
         )
         self.active_batch_panels[batch_id] = combined_panel
+        self.parameters_changed.connect(combined_panel.refresh_ui_from_broadcast)
         return combined_panel
+
 
     # --- Event Handling ---
     def eventFilter(self, source, event: QEvent):
@@ -336,10 +376,9 @@ class BatchPageLayout(QWidget):
 
     def process_all_batches(self):
         """
-        Memproses semua batch panel yang aktif, menangani error secara non-blocking,
-        dan menampilkan ringkasan error di akhir.
+        Mengumpulkan batch yang valid dan menampilkan dialog konfirmasi pemrosesan.
         """
-        # Bagian 1: Mengumpulkan dan memvalidasi panel yang akan diproses
+        # Bagian 1: Mengumpulkan dan memvalidasi panel yang akan diproses (sama seperti sebelumnya)
         active_panels_list = list(self.active_batch_panels.values())
         active_panels = []
         for panel in active_panels_list:
@@ -349,7 +388,6 @@ class BatchPageLayout(QWidget):
                         panel not in self.animator._active_fade_outs):
                     active_panels.append(panel)
             except RuntimeError:
-                # Widget mungkin sudah dihapus, ini aman untuk diabaikan
                 print(f"RuntimeError: Panel {panel} has been deleted.")
             except Exception as e:
                 print(f"Unexpected error while filtering panel {panel}: {e}")
@@ -364,13 +402,7 @@ class BatchPageLayout(QWidget):
             self.show_toast_requested.emit(language_config.UI_LABEL_BATCH_NO_PROCESS, 4000, False)
             return
 
-        # Bagian 2: Mendapatkan folder tujuan dari pengguna
-        target_folder = QFileDialog.getExistingDirectory(self, language_config.SELECT_OUTPUT_FOLDER_TITLE)
-        if not target_folder:
-            self.show_toast_requested.emit(language_config.OUTPUT_FOLDER_SELECTION_CANCELLED, 3000, False)
-            return
-
-        # Bagian 3: Validasi akhir terhadap database
+        # Bagian 2: Validasi akhir terhadap database (sama seperti sebelumnya)
         panels_to_actually_process = []
         for panel_candidate in candidate_panels:
             try:
@@ -380,141 +412,17 @@ class BatchPageLayout(QWidget):
                     panels_to_actually_process.append(panel_candidate)
             except Exception as db_val_e:
                 print(f"Error validating batch {panel_candidate.batch_id} against DB: {db_val_e}")
-                pass # Lanjutkan meskipun ada error validasi DB
         
         if not panels_to_actually_process:
             self.show_toast_requested.emit(language_config.UI_LABEL_BATCH_NO_PROCESS + " (after DB validation).", 4000, False)
-            print(language_config.LOG_ALL_BATCH_ATTEMPTS_FINISHED + " (No valid batches found after DB check)")
             return
-
-        # Bagian 4: Inisialisasi proses utama
-        total_batches_to_process = len(panels_to_actually_process)
-        self.show_toast_requested.emit(
-            language_config.UI_LABEL_BATCH_PROCESS_START.format(total_batches_to_process), None, False
-        )
-        QApplication.processEvents()
-        print(language_config.LOG_BATCH_PROCESSING_START.format(total_batches_to_process))
-
-        processed_and_saved_count = 0
-        failed_batches_summary = []
-        
-        # Bagian 5: Loop pemrosesan utama per batch
-        for i, batch_panel in enumerate(panels_to_actually_process, start=1):
-            try:
-                seq_num_for_msg = batch_panel.sequential_batch_number
-                batch_id_for_msg = str(batch_panel.batch_id)
-
-                print(language_config.LOG_PROCESSING_BATCH_DETAIL.format(
-                    seq_num_for_msg, batch_id_for_msg, i, total_batches_to_process
-                ))
-
-                files_before_processing = set(self.get_files_in_stack_folder())
-                batch_panel.process_all_batch() # Panggilan inti untuk memproses
-                files_after_processing = set(self.get_files_in_stack_folder())
-                newly_created_files = list(files_after_processing - files_before_processing)
-
-                if newly_created_files:
-                    output_file_to_move = newly_created_files[0]
-                    if len(newly_created_files) > 1:
-                        print(language_config.LOG_WARN_MULTIPLE_NEW_FILES.format(
-                            batch_id_for_msg, output_file_to_move
-                        ))
-                    
-                    move_success = self._move_single_batch_result(output_file_to_move, target_folder)
-                    if move_success:
-                        processed_and_saved_count += 1
-                        toast_msg = language_config.UI_LABEL_BATCH_PROGRESS_DONE_SAVED.format(
-                            seq_num_for_msg, i, total_batches_to_process
-                        )
-                    else:
-                        toast_msg = language_config.UI_LABEL_BATCH_PROGRESS_SAVE_FAILED.format(
-                            seq_num_for_msg, i, total_batches_to_process
-                        )
-                    self.show_toast_requested.emit(toast_msg, 3000, True)
-                else:
-                    stack_folder_path = "database/stack"
-                    print(language_config.LOG_BATCH_PROCESSED_NO_OUTPUT.format(
-                        batch_id=batch_id_for_msg, stack_folder=stack_folder_path
-                    ))
-                    toast_msg = language_config.UI_LABEL_BATCH_PROGRESS_NO_OUTPUT.format(
-                        seq_num_for_msg, i, total_batches_to_process
-                    )
-                    self.show_toast_requested.emit(toast_msg, 3000, True)
-                
-                QApplication.processEvents()
-
-            except Exception as e:
-                error_detail_msg = str(e)
-                seq_num = getattr(batch_panel, 'sequential_batch_number', '?')
-                batch_id = getattr(batch_panel, 'batch_id', 'UNKNOWN')
-
-                print(language_config.LOG_ERROR_PROCESSING_BATCH.format(batch_id, error_detail_msg))
-                
-                # 3. Tambahkan detail error ke dalam list untuk laporan akhir.
-                failed_batches_summary.append({
-                    "seq": seq_num,
-                    "id": batch_id,
-                    "error": error_detail_msg
-                })
-
-                # Tetap tampilkan notifikasi toast non-blocking untuk feedback instan.
-                toast_msg = language_config.UI_LABEL_BATCH_PROGRESS_ERROR.format(
-                    seq_num, i, total_batches_to_process
-                )
-                self.show_toast_requested.emit(toast_msg, 5000, True)
-                QApplication.processEvents() # Pastikan toast ditampilkan
-                # Loop akan otomatis berlanjut ke iterasi berikutnya (batch selanjutnya)
-                # ========================================================================
-
-        # Bagian 6: Memberikan pesan ringkasan akhir melalui toast
-        folder_name_for_msg = os.path.basename(target_folder) if target_folder else "selected folder"
-        if processed_and_saved_count == total_batches_to_process and total_batches_to_process > 0:
-            final_message = language_config.UI_LABEL_BATCH_ALL_SUCCESS_SPECIFIC.format(
-                total_batches_to_process, folder_name_for_msg
-            )
-        elif processed_and_saved_count > 0:
-            final_message = language_config.UI_LABEL_BATCH_PARTIAL_SUCCESS_SPECIFIC.format(
-                processed_and_saved_count, total_batches_to_process, folder_name_for_msg
-            )
-        elif total_batches_to_process > 0:
-            final_message = language_config.UI_LABEL_BATCH_NO_SUCCESS_SPECIFIC.format(
-                folder_name_for_msg
-            )
-        else: 
-            final_message = language_config.UI_LABEL_BATCH_NONE_PROCESSED
-
-        self.show_toast_requested.emit(final_message, 7000, False)
-        print(language_config.LOG_ALL_BATCH_ATTEMPTS_FINISHED)
-
-        # 4. Tampilkan ringkasan semua error jika ada, SETELAH SEMUA PROSES SELESAI
-        if failed_batches_summary:
-            error_report_title = language_config.BATCH_PROCESSING_ERROR_REPORT_TITLE
             
-            num_failed = len(failed_batches_summary)
-            # Teks pengantar yang tidak di-scroll
-            intro_message = language_config.BATCH_PROCESSING_ERROR_REPORT_INTRO.format(
-                num_failed=num_failed,
-                num_total=total_batches_to_process
-            )
-            
-            # Teks detail yang akan masuk ke area scroll
-            error_details = "\n\n".join([
-                language_config.BATCH_PROCESSING_ERROR_REPORT_ITEM.format(
-                    seq=err['seq'], 
-                    id=err['id'], 
-                    error=err['error']
-                )
-                for err in failed_batches_summary
-            ])
-
-            # Pastikan kelas ScrollableErrorDialog sudah diimpor atau ada di file yang sama
-            error_dialog = ScrollableErrorDialog(
-                title=error_report_title,
-                intro_text=intro_message,
-                detailed_text=error_details,
-                parent=self
-            )
-            error_dialog.exec_() # Tampilkan dialog secara modal
+        # Bagian 3: Buat dan tampilkan dialog baru
+        # Alih-alih melanjutkan pemrosesan di sini, kita panggil dialog.
+        # Kita meneruskan 'self' (instance BatchPageLayout) agar dialog dapat mengakses
+        # fungsi-fungsi helper seperti _move_single_batch_result dan get_files_in_stack_folder
+        dialog = BatchProcessDialog(panels_to_actually_process, self, self)
+        dialog.exec_()
             
     def _move_single_batch_result(self, source_file_path, target_folder):
         """

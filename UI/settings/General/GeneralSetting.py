@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (QWidget, QLabel, QComboBox, QFormLayout,
                              QMessageBox, QCheckBox,
                              )
 from PySide6.QtCore import QProcess, QCoreApplication, Qt
-from UI.resources.stylesheet.stylesheet import APPLY_BUTTON, DROPDOWN_BOX, TOGGLE_SWITCH_STYLE
+from UI.resources.stylesheet.stylesheet import APPLY_BUTTON, DROPDOWN_BOX, CHECKBOX_SWITCH_STYLE
 from UI.settings.General.Language import language_config
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE, GENERAL_SETTINGS_FILE
 
@@ -73,7 +73,7 @@ def _create_acceleration_settings(parent_layout, current_settings):
     gpu_checkbox = QCheckBox(gpu_label_text)
     gpu_checkbox.setChecked(current_settings.get("gpu_acceleration", False))
     gpu_checkbox.setToolTip(getattr(language_config, 'GPU_ACCELERATION_DESCRIPTION', ''))
-    gpu_checkbox.setStyleSheet(TOGGLE_SWITCH_STYLE)
+    gpu_checkbox.setStyleSheet(CHECKBOX_SWITCH_STYLE)
     parent_layout.addRow(gpu_checkbox)
 
     # CPU
@@ -81,7 +81,7 @@ def _create_acceleration_settings(parent_layout, current_settings):
     cpu_checkbox = QCheckBox(cpu_label_text)
     cpu_checkbox.setToolTip(getattr(language_config, 'MULTI_CORE_CPU_DESCRIPTION', ''))
     cpu_checkbox.setChecked(current_settings.get("multi_core_cpu", True))
-    cpu_checkbox.setStyleSheet(TOGGLE_SWITCH_STYLE)
+    cpu_checkbox.setStyleSheet(CHECKBOX_SWITCH_STYLE)
     parent_layout.addRow(cpu_checkbox)
     
     # Thumbnail
@@ -89,7 +89,7 @@ def _create_acceleration_settings(parent_layout, current_settings):
     thumbnail_checkbox = QCheckBox(thumbnail_label_text)
     thumbnail_checkbox.setToolTip(getattr(language_config, 'THUMBNAIL_DESCRIPTION', ''))
     thumbnail_checkbox.setChecked(current_settings.get("create_thumbnail", False))
-    thumbnail_checkbox.setStyleSheet(TOGGLE_SWITCH_STYLE)
+    thumbnail_checkbox.setStyleSheet(CHECKBOX_SWITCH_STYLE)
     parent_layout.addRow(thumbnail_checkbox)
 
 

@@ -342,8 +342,6 @@ class FarnebackAlgorithm:
                 if kernel_size % 2 == 0:
                     kernel_size += 1
 
-                print(f"Refining flow map with Median blur (kernel={kernel_size})")
-
                 # 1. Pisahkan peta flow menjadi channel X dan Y
                 flow_x, flow_y = cv2.split(flow_full)
                 
@@ -473,16 +471,10 @@ class FarnebackAlgorithm:
             print(f"[EXCEPTION] {e}")
             return None
 
-def main(
-    db_path,
-    update_progress=None,
-    stop_requested=None,
-    single_process=None,
-    batch_id=None
-):
+def main(db_path, update_progress=None, stop_requested=None, single_process=None, batch_id=None):
     processor = FarnebackAlgorithm(db_path)
 
-    # 1) Ambil daftar image_paths & set hdf5_path
+    # --- Bagian Setup Awal (Tidak Berubah) ---
     if single_process:
         image_paths = get_all_image_paths_for_single_process(db_path)
         processor.hdf5_path = "database/align/aligned_images.h5"
@@ -494,16 +486,15 @@ def main(
 
     if not image_paths:
         if update_progress:
-            update_progress(0, language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
+            update_progress(0, 1, language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
         return
 
-    # 2) Ekstrak metadata seluruh gambar
     os.makedirs("database/align", exist_ok=True)
     extract_all_metadata(image_paths, metadata_file=os.path.join("database", "align", "metadata.json"))
 
     total_images = len(image_paths)
 
-    # 3) Load & resize base image
+    # --- Memuat Gambar Dasar (Tidak Berubah) ---
     base_img_list = load_images_from_paths([image_paths[0]], stop_requested=stop_requested)
     if not base_img_list or base_img_list[0] is None:
         raise RuntimeError("Base image gagal dimuat.")
@@ -511,112 +502,102 @@ def main(
     base_resized_list, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="median")
     base_image = base_resized_list[0]
 
-    # 4) Simpan base image ke HDF5
-    with h5py.File(processor.hdf5_path, "w") as h5f:
-        h5f.create_dataset("image_0", data=base_image)
-    
-    def aligner_worker(job_q, save_q, progress_counter, progress_lock):
-        """
-        Worker yang mengambil path, menyelaraskannya, dan mengupdate progress secara thread-safe.
-        """
-        while True:
-            item = job_q.get()
-            if item is None:
+    # Hapus referensi yang tidak perlu untuk membebaskan memori
+    del base_image_raw, base_img_list, base_resized_list
+    gc.collect()
+
+    # --- AWAL DARI LOGIKA PROSES SEKUENSIAL ---
+    h5f = None
+    try:
+        # Buka file HDF5 sekali di awal
+        h5f = h5py.File(processor.hdf5_path, "w")
+
+        # 1. Simpan gambar dasar
+        base_exif = extract_exif(image_paths[0])
+        save_to_hdf5(h5f, "image_0", base_image, base_exif)
+        
+        if update_progress:
+            update_progress(1, total_images, language_config.RUN_IMAGE_PROCESSING.format(1, total_images))
+
+        # 2. Loop untuk setiap gambar lainnya, satu per satu
+        for i, path in enumerate(image_paths[1:], start=1):
+            if stop_requested and stop_requested():
+                print("Proses dihentikan oleh pengguna.")
                 break
             
-            if stop_requested and stop_requested():
-                continue
+            # Variabel untuk menampung data gambar saat ini, agar mudah dibersihkan
+            img_list = None
+            target_image = None
+            flow = None
+            compensated = None
             
-            i, path = item
             try:
-                # 1. Load & Resize
+                # Update progress sebelum memulai pemrosesan gambar
+                current_progress_index = i + 1
+                if update_progress:
+                    update_progress(current_progress_index, total_images, language_config.RUN_IMAGE_PROCESSING.format(current_progress_index, total_images))
+
+                # a. Muat dan siapkan gambar target
                 img_list = load_images_from_paths([path], stop_requested=stop_requested)
                 if not img_list or img_list[0] is None:
+                    print(f"Gagal memuat gambar: {path}, melompati.")
                     continue
+                
                 target_image = resize_with_padding(img_list[0], (target_h, target_w))
                 
-                # 2. Proses Inti
+                # b. Hitung optical flow
                 flow = processor.calculate_optical_flow(base_image, target_image, stop_requested=stop_requested)
+                
+                # c. Lakukan kompensasi gerak
                 compensated = processor.compensate_motion(target_image, flow, image_id=i)
                 
+                # d. Simpan hasil LANGSUNG ke HDF5
                 if compensated is not None:
                     exif_data = extract_exif(path)
-                    save_q.put((f"image_{i}", compensated, exif_data))
-                
-                with progress_lock:
-                    progress_counter["count"] += 1
-                    if update_progress:
-                        current_count = progress_counter["count"]
-                        update_progress(current_count, total_images, language_config.RUN_IMAGE_PROCESSING.format(i=i, total_images=total_images))
+                    save_to_hdf5(h5f, f"image_{i}", compensated, exif_data)
+                else:
+                    print(f"Gagal memproses gambar {path}, hasil kompensasi kosong.")
 
             except Exception as e:
-                print(f"Error processing image {path}: {e}")
+                print(f"Error terjadi saat memproses gambar {path}: {e}")
+                # Lanjutkan ke gambar berikutnya
+                continue
             finally:
-                # Manajemen memori
+                # e. Hal paling PENTING: bersihkan memori setelah setiap iterasi
                 del img_list, target_image, flow, compensated
-                gc.collect()
+                gc.collect()  # Panggil garbage collector secara eksplisit
 
-    def saver_worker(save_q, hdf5_path, hdf5_lock):
-        """Worker untuk menyimpan ke HDF5, tidak berubah."""
-        with h5py.File(hdf5_path, "a") as h5f:
-            while True:
-                item = save_q.get()
-                if item is None:
-                    break
-                
-                dataset_name, data, attributes = item
-                try:
-                    with hdf5_lock:
-                        save_to_hdf5(h5f, dataset_name, data, attributes)
-                except Exception as e:
-                    print(f"Error saving {dataset_name} to HDF5: {e}")
+        # Setelah loop selesai
+        if update_progress:
+            if not (stop_requested and stop_requested()):
+                 update_progress(total_images, total_images, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
 
-    # --- Inisialisasi Antrian, Lock, dan Threads ---
-    MAX_QUEUE_SIZE = max(4, os.cpu_count() or 4)
-    job_queue = queue.Queue(maxsize=MAX_QUEUE_SIZE)
-    save_queue = queue.Queue(maxsize=MAX_QUEUE_SIZE)
+    finally:
+        if h5f:
+            h5f.close()
+                 
+def running_farneback_optical_flow(parent=None, single_process=None, batch_id=None, progress_callback=None):
     
-    hdf5_lock = threading.Lock()
-    progress_lock = threading.Lock()
-    progress_counter = {"count": 1}
+    # ==========================================================
+    # KONDISI 1: MODE BATCH (TANPA GUI)
+    # ==========================================================
+    if batch_id is not None and progress_callback is not None:
+        try:
+            main(
+                db_path="pixel_refine_database.db",
+                update_progress=progress_callback,
+                single_process=False, 
+                batch_id=batch_id
+            )
+        except Exception as e:
+            raise e
+        return 
 
-    saver_thread = threading.Thread(target=saver_worker, args=(save_queue, processor.hdf5_path, hdf5_lock))
-    saver_thread.start()
-
-    num_aligner_threads = max(1, (os.cpu_count() or 4) // 2)
-    aligner_threads = []
-    for _ in range(num_aligner_threads):
-        thread = threading.Thread(target=aligner_worker, args=(job_queue, save_queue, progress_counter, progress_lock))
-        thread.start()
-        aligner_threads.append(thread)
-
-    # --- Isi antrian tugas (Thread Utama) ---
-    if update_progress:
-        update_progress(1, total_images, language_config.RUN_IMAGE_PROCESSING.format(i=1, total_images=total_images))
-
-    for i, path in enumerate(image_paths[1:], start=2):
-        if stop_requested and stop_requested():
-            break
-        job_queue.put((i-1, path))
-
-    for _ in range(num_aligner_threads):
-        job_queue.put(None)
-
-    for thread in aligner_threads:
-        thread.join()
-
-    save_queue.put(None)
-    saver_thread.join()
-
-    if update_progress:
-        if not (stop_requested and stop_requested()):
-             update_progress(total_images, total_images, language_config.SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED)
-
-def running_farneback_optical_flow(parent=None, single_process=None, batch_id=None):
+    # ==========================================================
+    # KONDISI 2: MODE SINGLE (DENGAN GUI DIALOG)
+    # ==========================================================
     process_finished = False
-    """
-    Menampilkan progress bar dengan gaya kustom dan memanfaatkan thread.
-    """
+    
     dialog = QDialog(parent)
     dialog.setWindowTitle(language_config.WINDOW_TITLE_FARNEBACK)
     dialog.setModal(True)
@@ -655,10 +636,10 @@ def running_farneback_optical_flow(parent=None, single_process=None, batch_id=No
 
     def finish_handler():
         nonlocal process_finished
-        process_finished = True  # set flag ketika proses selesai
+        process_finished = True
         dialog.close()
-        worker.quit()  # Berhenti dari thread
-        worker.wait()  # Tunggu thread selesai
+        worker.quit()
+        worker.wait()
 
     worker.finished.connect(finish_handler)
 
@@ -671,7 +652,6 @@ def running_farneback_optical_flow(parent=None, single_process=None, batch_id=No
     worker.error_occurred.connect(error_handler)
 
     def on_dialog_close(event):
-        # Jika proses telah selesai, lewati konfirmasi
         if process_finished:
             event.accept()
         elif worker.isRunning():
@@ -692,6 +672,7 @@ def running_farneback_optical_flow(parent=None, single_process=None, batch_id=No
     dialog.closeEvent = on_dialog_close
     worker.start()
     dialog.exec()
+
 
 if __name__ == "__main__":
     db_path = "pixel_refine_database.db"  # Path ke database Anda

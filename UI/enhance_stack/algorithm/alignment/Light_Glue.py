@@ -469,7 +469,7 @@ def main(db_path,
     else:
         if batch_id is None:
             raise ValueError("Batch ID harus ada saat proses batch")
-        image_paths = get_all_image_paths_for_batch_process(batch_id)
+        image_paths = get_all_image_paths_for_batch_process(db_path, batch_id)
         processor.hdf5_path = f"database/align/aligned_image_batch_{batch_id}.h5"
 
     if not image_paths:
@@ -538,25 +538,38 @@ def main(db_path,
         # --- Tahap 4: Cleanup ---
         if h5f:
             h5f.close()
+            
+def running_light_glue(parent=None, single_process=None, batch_id=None, progress_callback=None):
     
-def running_light_glue(parent=None, single_process=None, batch_id=None):
+    # ==========================================================
+    # KONDISI 1: MODE BATCH (TANPA GUI)
+    # ==========================================================
+    if batch_id is not None and progress_callback is not None:
+        try:
+            main(
+                db_path="pixel_refine_database.db",
+                update_progress=progress_callback,
+                single_process=False, 
+                batch_id=batch_id
+            )
+        except Exception as e:
+            raise e
+        return 
+
+    # ==========================================================
+    # KONDISI 2: MODE SINGLE (DENGAN GUI DIALOG)
+    # ==========================================================
     process_finished = False
-    """
-    Menampilkan progress bar dengan gaya kustom dan memanfaatkan thread.
-    """
-    # Membuat dialog progress
+    
     dialog = QDialog(parent)
     dialog.setWindowTitle(language_config.WINDOW_TITLE_LIGHT_GLUE)
     dialog.setModal(True)
     dialog.setFixedSize(300, 90)
     dialog.setWindowFlags(
-        Qt.WindowType.Window
-        | Qt.WindowType.CustomizeWindowHint
-        | Qt.WindowType.WindowTitleHint
-        | Qt.WindowType.WindowCloseButtonHint
+        Qt.WindowType.Window | Qt.WindowType.CustomizeWindowHint |
+        Qt.WindowType.WindowTitleHint | Qt.WindowType.WindowCloseButtonHint
     )
 
-    # Layout untuk progress bar dan label
     layout = QVBoxLayout(dialog)
     label = QLabel(language_config.WINDOW_START_PROCESSING)
     layout.addWidget(label)
@@ -564,8 +577,7 @@ def running_light_glue(parent=None, single_process=None, batch_id=None):
     progress_bar = QProgressBar()
     progress_bar.setRange(0, 100)
     progress_bar.setValue(0)
-    progress_bar.setStyleSheet(
-        """
+    progress_bar.setStyleSheet("""
         QProgressBar {
             border: 1px solid #bbb;
             border-radius: 5px;
@@ -576,38 +588,26 @@ def running_light_glue(parent=None, single_process=None, batch_id=None):
             background-color: #80C4E9;
             width: 20px;
         }
-    """
-    )
+    """)
     layout.addWidget(progress_bar)
 
-    # Inisialisasi thread worker
-    worker = ImageProcessingMultiThreading(
-        main,
-        "pixel_refine_database.db",
-        single_process=single_process,
-        batch_id=batch_id,
-    )
-    # Menghubungkan signal worker ke fungsi pembaruan UI
-    worker.progress_updated.connect(
-        lambda progress, message: (
-            progress_bar.setValue(progress),
-            label.setText(message),
-        )
-    )
+    worker = ImageProcessingMultiThreading(main, "pixel_refine_database.db", single_process=single_process, batch_id=batch_id)
+    worker.progress_updated.connect(lambda progress, message: (
+        progress_bar.setValue(progress),
+        label.setText(message)
+    ))
 
     def finish_handler():
         nonlocal process_finished
-        process_finished = True  # set flag ketika proses selesai
+        process_finished = True
         dialog.close()
-        worker.quit()  # Berhenti dari thread
-        worker.wait()  # Tunggu thread selesai
+        worker.quit()
+        worker.wait()
 
     worker.finished.connect(finish_handler)
 
     def error_handler(error):
-        QMessageBox.critical(
-            dialog, "Error", language_config.RUN_ERROR_STATUS.format(error=error)
-        )
+        QMessageBox.critical(dialog, "Error", language_config.RUN_ERROR_STATUS.format(error=error))
         dialog.close()
         worker.quit()
         worker.wait()
@@ -615,21 +615,17 @@ def running_light_glue(parent=None, single_process=None, batch_id=None):
     worker.error_occurred.connect(error_handler)
 
     def on_dialog_close(event):
-        # Jika proses telah selesai, lewati konfirmasi
         if process_finished:
             event.accept()
         elif worker.isRunning():
-            reply = QMessageBox.question(
-                dialog,
-                "Cancel Process",
-                language_config.CANCEL_PROCESSING,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
+            reply = QMessageBox.question(dialog, "Cancel Process",
+                                        language_config.CANCEL_PROCESSING,
+                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                        QMessageBox.StandardButton.No)
             if reply == QMessageBox.StandardButton.Yes:
                 worker.stop()
-                worker.quit()
-                worker.wait()
+                worker.quit() 
+                worker.wait() 
                 event.accept()
             else:
                 event.ignore()

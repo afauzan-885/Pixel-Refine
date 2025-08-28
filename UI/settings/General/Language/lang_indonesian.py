@@ -13,7 +13,10 @@ MODULE_NOT_IMPLEMENT = "Modul belum diimplementasikan."
 ADD_IMAGE_BUTTON = "Tambah"
 PREVIEW_IMAGE_BUTTON = "Pratinjau"
 DELETE_IMAGE_BUTTON = "Hapus"
+CLOSE_BUTTON = "Tutup"
 APPLY_PARAMETER_BUTTON_TEXT = "Terapkan Pengaturan"
+APPY_PARAMETER = "Terapkan"
+CANCEL_PARAMETER = "Batal"
 
 # Labels
 PREVIEW_PANEL_LABEL = "Panel Pratinjau"
@@ -62,6 +65,13 @@ TOPBAR_BATCH_SAVE_BUTTON_TEXT = "Simpan Ke"
 # ==============================================================================
 # General Batch Info & Status
 NO_DATA_BATCH = "Tidak ada batch yang tersimpan."
+UI_NO_CHANGE = "Tidak Berubah"
+UI_ALGORITHM_EDIT_HEADER = "Edit Algoritma secara massal"
+UI_BATCH_HEADER = "Proses Batch"
+UI_ALGORIHM_EDIT = "Edit Algoritma"
+UI_ALGORITHM_NOT_SET = "Algoritma belum dipilih."
+UI_FOLDER_PATH_NOT_SET = "Folder tujuan belum diatur."
+UI_BATCH_NOT_CONFIGURE = "Batch belum diatur."
 UI_LABEL_BATCH_NO_PROCESS = "Tidak ada batch yang diproses!"
 UI_LABEL_BATCH_SUCCES = "Semua batch telah diproses!"
 UI_LABEL_BATCH_PROCESS = "Memproses {} batch..."
@@ -72,11 +82,21 @@ NUMBER_OF_BATCHES_TO_BE_PROCESSED = "Jumlah batch yang akan diproses: {}"
 BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS = "batch_id harus ada untuk proses batch"
 SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED = "Melewati batch {} karena gambar tidak ada yang dimuat."
 BATCH_LABEL_FORMAT = "Batch {}   -   ({} gambar)"
+BATCH_CANCELED_BY_USER = "Proses batch dibatalkan."
+BATCH_CANCELED_HEADER = "Batch Dibatalkan"
+BATCH_CANCELED_INFO = "Dibatalkan"
+BATCH_CANCELED_PROCESS = "Batalkan Proses" 
+BATCH_CANCELED_CONFIRMATION = "Apakah Anda yakin ingin membatalkan semua proses yang sedang berlangsung?"
+BATCH_QUEUE = "Menunggu"
+BATCH_SUCCESS = "Proses batch selesai."
+BATCH_SUCCESS_HEADER = "Selesai"
+
 
 
 # --- Dialogue Title ---
 SELECT_OUTPUT_FOLDER_TITLE = "Pilih Folder Output untuk Simpan Batch"
 OUTPUT_FOLDER_SELECTION_CANCELLED = "Pemilihan folder dibatalkan. Proses dihentikan."
+ALGORITHM_SUCCESS_UPDATE = "Pengaturan algoritma berhasil diperbarui untuk batch {} hingga {}."
 
 # --- General Error Messages & Dialogs ---
 BATCH_PROCESSING_ERROR_TITLE = "Kesalahan Proses Batch"
@@ -87,6 +107,7 @@ MOVE_FILE_ERROR_TITLE = "Gagal Memindahkan File"
 COULD_NOT_SAVE_FILE_FOR_BATCH = "Gagal menyimpan file '{}' untuk batch:\n{}" 
 SOURCE_FILE_DOES_NOT_EXIST = "Gagal pindah: File sumber '{}' tidak ditemukan."
 TARGET_FOLDER_INVALID = "Gagal pindah: Folder tujuan '{}' tidak valid."
+BATCH_CONFIGURATION_INFO = "Batch belum dikonfigurasi"
 
 BATCH_PROCESSING_ERROR_REPORT_TITLE = "Laporan Kesalahan Pemrosesan Batch"
 BATCH_PROCESSING_ERROR_REPORT_INTRO = "Proses selesai dengan {num_failed} dari {num_total} batch gagal diproses. Detail:"
@@ -184,6 +205,7 @@ UPDATE_PREVIEW_PANEL_MESSAGE_NO_IMAGE_SELECTED = "Tidak ada gambar yang dipilih.
 # ==============================================================================
 # Progress Bar
 UPDATE_PROGRESS_BAR_STATUS = "{}% ({} proses tersisa)"
+OVERALL_PROGRESS = "Progress keseluruhan:"
 
 # Buttons in Progress Sections (if generic)
 PROGRESS_SECTION_PROCESS_BUTTON_TEXT = "Mulai Proses"
@@ -221,7 +243,7 @@ NO_HDF5_FILE_PROCESSING_FROM_PATH = "File HDF5 tidak ditemukan. Memproses dari p
 
 # Image Processing Steps
 RUN_SAVING_REFERENCE_IMAGE = "Menyimpan gambar referensi."
-RUN_IMAGE_PROCESSING = "Memproses gambar {i} dari {total_images}..."
+RUN_IMAGE_PROCESSING = "Memproses gambar {} dari {}..."
 RUN_IMAGE_PROCESSING_SAVING = "Gambar ke-{i} telah disimpan."
 RUN_IMAGE_PROCESSING_FINISHED = "Proses selesai."
 RUN_IMAGE_PROCESS_STARTED = "Memulai proses..."
@@ -244,6 +266,10 @@ ANALYZING_IMAGE = "Menganalisis gambar {}/{}..."
 SAVING_WEIGHT_MAP = "Peta bobot disimpan"
 
 # Analysis Steps (e.g., Similarity)
+ANALYSIS_STEP_ONE = "Pass 1/2: Membuat Data Adegan..."
+ANALYSIS_STEP_ONE_PROGRESS = "Pass 1/2: Menganalisis frame {}/{}"
+ANALYSIS_STEP_TWO = "{} Menggabungkan Data..."
+ANALYSIS_STEP_TWO_PROGRESS = "{} Menggabungkan gambar {}/{}"
 ANALYZING_COMPLETE = "Analisis Selesai"
 
 
@@ -670,7 +696,7 @@ Jika Komputer memiliki RAM yang sangat terbatas, disarankan untuk tidak mencenta
 
 GPU_ACCELERATION_DESCRIPTION = """Mengaktifkan akan sangat meningkatkan kecepatan komputasi, karena menggunakan GPU dalam prosesnya. 
 
-CATATAN: Penggunaan GPU hanya terbatas pada proses Farneback saja, algoritma lain akan menyusul implementasinya"""
+CATATAN: Penggunaan GPU hanya terbatas pada proses Farneback dan lightglue saja algoritma lain akan menyusul implementasinya"""
 
 THUMBNAIL_LABEL = "Thumbnail"
 THUMBNAIL_DESCRIPTION = """Preview gambar untuk proses batch, masih bersifat EKSPERIMENTAL

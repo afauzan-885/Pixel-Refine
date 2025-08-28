@@ -348,7 +348,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
                 return 
 
         else: 
-            print(language_config.NO_HDF5_FILE_PROCESSING_FROM_PATH)
+            # print(language_config.NO_HDF5_FILE_PROCESSING_FROM_PATH)
             total_images = len(image_paths)
             print(language_config.NUMBER_OF_IMAGES_TO_BE_PROCESSED.format(total_images))
 

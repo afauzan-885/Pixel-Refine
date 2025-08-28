@@ -665,7 +665,7 @@ def estimate_noise_variance(gray_image, edge_threshold_low=70, dilate_kernel_siz
     # Periksa apakah ada cukup piksel "datar"
     num_flat_pixels = np.sum(flat_mask)
     if num_flat_pixels < (gray_image.size * min_flat_pixels_ratio):
-        print(f"Peringatan: Tidak ditemukan cukup piksel datar ({num_flat_pixels}/{gray_image.size * min_flat_pixels_ratio:.0f}). Estimasi noise mungkin kurang akurat.")
+        # print(f"Peringatan: Tidak ditemukan cukup piksel datar ({num_flat_pixels}/{gray_image.size * min_flat_pixels_ratio:.0f}). Estimasi noise mungkin kurang akurat.")
         laplacian_full = cv2.Laplacian(gray_image, cv2.CV_64F)
         return laplacian_full.var()
 
@@ -1396,7 +1396,7 @@ def run_pipeline_non_crop(processor, image_paths, base_image, target_dims,
     total_images_in_stack = len(image_paths)
     progress_counter = {"count": 1}
     progress_lock = threading.Lock()
-    lock = threading.Lock() # Lock tetap berguna untuk melindungi penulisan ke handle bersama
+    lock = threading.Lock() 
 
     # Simpan base image di awal
     if save_align:
@@ -1434,7 +1434,7 @@ def run_pipeline_non_crop(processor, image_paths, base_image, target_dims,
                     if update_progress:
                         update_progress(
                             progress_counter["count"], total_images_in_stack,
-                            f"Aligning image {progress_counter['count']}/{total_images_in_stack}"
+                            language_config.IMAGE_PROCESS_IN_PROGRESS.format(progress_counter["count"], total_images_in_stack)
                         )
         queue_points.put(None)
 
@@ -1465,7 +1465,7 @@ def run_pipeline_non_crop(processor, image_paths, base_image, target_dims,
             if update_progress:
                 update_progress(
                     progress_counter["count"], total_images_in_stack,
-                    f"Aligning image {progress_counter['count']}/{total_images_in_stack}"
+                    language_config.IMAGE_PROCESS_IN_PROGRESS.format(progress_counter["count"], total_images_in_stack)
                 )
 
     # --- Cleanup ---
@@ -1486,12 +1486,16 @@ def run_pipeline_global_crop(processor, image_paths, base_image, target_dims,
         processor, images_to_process_for_transforms, base_image, target_dims,
         update_progress, stop_requested
     )
-    if not all_transforms or len(all_transforms) != len(images_to_process_for_transforms):
-        print("Transform calculation did not complete for all images. Aborting global crop.")
+    if not all_transforms:
+        print("Transform calculation failed for all images. Aborting global crop.")
         return
 
+    # Jika beberapa gambar gagal, cetak peringatan tapi tetap lanjutkan dengan yang berhasil
+    if len(all_transforms) < len(images_to_process_for_transforms):
+        failed_count = len(images_to_process_for_transforms) - len(all_transforms)
+        print(f"Warning: Could not calculate transforms for {failed_count} image(s). Continuing with the successful ones.")
+
     if update_progress:
-        # Tampilkan status, set progress ke 50% secara eksplisit untuk menandai transisi
         update_progress(50, 100, "Computing global crop bounds...")
         
     crop_bounds = compute_global_crop(
@@ -1500,7 +1504,6 @@ def run_pipeline_global_crop(processor, image_paths, base_image, target_dims,
         transformation_type=transformation_type,
     )
     if crop_bounds is None:
-        print("Failed to compute global crop bounds. Aborting.")
         return
 
     # --- TAHAP 3: Menerapkan transformasi dan menyimpan (progress 50% -> 100%) ---
@@ -1564,11 +1567,8 @@ def _run_transform_calculation_stage(processor, image_paths, base_image, target_
             print(f"Transform calculation failed for image {i} ({os.path.basename(path)})")
 
         if update_progress:
-            # --- LOGIKA PROGRESS SEDERHANA & BENAR (0% -> 50%) ---
-            # (jumlah_selesai / total_di_tahap_ini) * 50
             current_percent = (count / num_to_process) * 50
-            status_text = f"Calculating transform {count}/{num_to_process}"
-            # Kirim persentase sebagai nilai saat ini, dengan total 100
+            status_text = language_config.RUN_PROCESS_TRANSFORMATION.format(count, num_to_process)
             update_progress(int(current_percent), 100, status_text)
             
     loader_thread.join()
@@ -1642,10 +1642,8 @@ def _run_apply_and_save_stage(processor, temp_transforms, crop_bounds, target_di
         gc.collect()
 
         if update_progress:
-            # --- LOGIKA PROGRESS SEDERHANA & BENAR (50% -> 100%) ---
-            # 50 (basis) + (jumlah_selesai / total_di_tahap_ini) * 50
             current_percent = 50 + (count / num_to_save) * 50
-            status_text = f"Applying transform and saving {count}/{num_to_save}"
+            status_text = language_config.RUN_SAVING_TRANSFORMATION.format(count, num_to_save)
             update_progress(int(current_percent), 100, status_text)
             
     worker_thread.join()

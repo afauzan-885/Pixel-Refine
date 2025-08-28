@@ -334,8 +334,7 @@ def main(db_path, update_progress=None, stop_requested=None,
             return
             
         total_batches = len(batch_plan)
-        print(language_config.NUMBER_OF_IMAGES_TO_BE_PROCESSED.format(total_images))
-        print(language_config.NUMBER_OF_BATCHES_TO_BE_PROCESSED.format(total_batches))
+        # print(language_config.NUMBER_OF_BATCHES_TO_BE_PROCESSED.format(total_batches))
         
         processed_batches_results = []
         images_processed_count = 0
@@ -445,12 +444,27 @@ def main(db_path, update_progress=None, stop_requested=None,
         if update_progress and not (stop_requested and stop_requested()):
             update_progress(0, error_message)
    
-def running_median(parent=None, single_process=None, batch_id=None):
+def running_median(parent=None, single_process=None, batch_id=None, progress_callback=None):
+    
+    # ==========================================================
+    # KONDISI 1: MODE BATCH (TANPA GUI)
+    # ==========================================================
+    if batch_id is not None and progress_callback is not None:
+        try:
+            main(
+                db_path="pixel_refine_database.db",
+                update_progress=progress_callback,
+                single_process=False, 
+                batch_id=batch_id
+            )
+        except Exception as e:
+            raise e
+        return 
+    
+    # ==========================================================
+    # KONDISI 2: MODE SINGLE (DENGAN GUI DIALOG)
+    # ==========================================================
     process_finished = False
-    """
-    Menampilkan progress bar dengan gaya kustom dan memanfaatkan thread.
-    """
-    # Membuat dialog progress
     dialog = QDialog(parent)
     dialog.setWindowTitle(language_config.WINDOW_TITLE_MEDIAN)
     dialog.setModal(True)

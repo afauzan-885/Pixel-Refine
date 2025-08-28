@@ -440,7 +440,7 @@ def main(db_path,
     else:
         if batch_id is None:
             raise ValueError("Batch ID harus ada saat proses batch")
-        image_paths = get_all_image_paths_for_batch_process(batch_id)
+        image_paths = get_all_image_paths_for_batch_process(db_path, batch_id)
         processor.hdf5_path = f"database/align/aligned_image_batch_{batch_id}.h5"
 
     if not image_paths:
@@ -470,7 +470,7 @@ def main(db_path,
     gc.collect()
 
     # --- Tahap 3: Manajemen File dan Eksekusi Pipeline ---
-    h5f = None  # Inisialisasi handle file ke None
+    h5f = None 
     try:
         if command_save_to_hd5f:
             h5f = h5py.File(processor.hdf5_path, "w")
@@ -486,7 +486,7 @@ def main(db_path,
                 stop_requested=stop_requested,
                 save_align=save_align,
                 align_folder=align_folder,
-                h5_file_handle=h5f  # Teruskan handle
+                h5_file_handle=h5f
             )
         else:
             run_pipeline_global_crop(
@@ -499,23 +499,37 @@ def main(db_path,
                 transformation_type=transformation_type,
                 save_align=save_align,
                 align_folder=align_folder,
-                h5_file_handle=h5f  # Teruskan handle
+                h5_file_handle=h5f 
             )
             
     except Exception as e:
-        # Tangkap error apa pun yang mungkin terjadi selama pipeline
         print(f"A critical error occurred during the main pipeline: {e}\n{traceback.format_exc()}")
     finally:
-        # --- Tahap 4: Cleanup ---
         if h5f:
             h5f.close()
+            
+def running_akaze(parent=None, single_process=None, batch_id=None, progress_callback=None):
     
-def running_akaze(parent=None, single_process=None, batch_id=None):
+    # ==========================================================
+    # KONDISI 1: MODE BATCH (TANPA GUI)
+    # ==========================================================
+    if batch_id is not None and progress_callback is not None:
+        try:
+            main(
+                db_path="pixel_refine_database.db",
+                update_progress=progress_callback,
+                single_process=False, 
+                batch_id=batch_id
+            )
+        except Exception as e:
+            raise e
+        return 
+
+    # ==========================================================
+    # KONDISI 2: MODE SINGLE (DENGAN GUI DIALOG)
+    # ==========================================================
     process_finished = False
-    """
-    Menampilkan progress bar dengan gaya kustom dan memanfaatkan thread.
-    """
-    # Membuat dialog progress
+    
     dialog = QDialog(parent)
     dialog.setWindowTitle(language_config.WINDOW_TITLE_AKAZE)
     dialog.setModal(True)
@@ -525,7 +539,6 @@ def running_akaze(parent=None, single_process=None, batch_id=None):
         Qt.WindowType.WindowTitleHint | Qt.WindowType.WindowCloseButtonHint
     )
 
-    # Layout untuk progress bar dan label
     layout = QVBoxLayout(dialog)
     label = QLabel(language_config.WINDOW_START_PROCESSING)
     layout.addWidget(label)
@@ -547,9 +560,7 @@ def running_akaze(parent=None, single_process=None, batch_id=None):
     """)
     layout.addWidget(progress_bar)
 
-    # Inisialisasi thread worker
     worker = ImageProcessingMultiThreading(main, "pixel_refine_database.db", single_process=single_process, batch_id=batch_id)
-
     worker.progress_updated.connect(lambda progress, message: (
         progress_bar.setValue(progress),
         label.setText(message)
@@ -557,10 +568,10 @@ def running_akaze(parent=None, single_process=None, batch_id=None):
 
     def finish_handler():
         nonlocal process_finished
-        process_finished = True  # set flag ketika proses selesai
+        process_finished = True
         dialog.close()
-        worker.quit()  # Berhenti dari thread
-        worker.wait()  # Tunggu thread selesai
+        worker.quit()
+        worker.wait()
 
     worker.finished.connect(finish_handler)
 
@@ -573,7 +584,6 @@ def running_akaze(parent=None, single_process=None, batch_id=None):
     worker.error_occurred.connect(error_handler)
 
     def on_dialog_close(event):
-        # Jika proses telah selesai, lewati konfirmasi
         if process_finished:
             event.accept()
         elif worker.isRunning():
@@ -594,7 +604,7 @@ def running_akaze(parent=None, single_process=None, batch_id=None):
     dialog.closeEvent = on_dialog_close
     worker.start()
     dialog.exec()
-    
+ 
 if __name__ == "__main__":
     db_path = "pixel_refine_database.db"  # Path ke database Anda
     main(db_path)
