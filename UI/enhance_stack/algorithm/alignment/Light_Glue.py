@@ -1,12 +1,11 @@
-from concurrent.futures import ThreadPoolExecutor
 import gc
 import queue
 import site
+import sys
 import threading
 import traceback
 import cv2
 import numpy as np
-import sqlite3
 import os
 from pathlib import Path
 from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
@@ -22,18 +21,60 @@ from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature impo
 from UI.enhance_stack.components.single_page_layout.parameter_alignment.light_glue_parameter_settings import load_light_glue_config
 from UI.enhance_stack.logic.multi_threading import ImageProcessingMultiThreading
 from UI.settings.General.Language import language_config
-from time import time
-
 
 os.environ["ORT_CUDA_MEM_LIMIT_MB"] = "1024"
 
-# Setup cuDNN path agar dikenali oleh onnxruntime
-site_path = Path(site.getsitepackages()[0])
-cudnn_bin_path = site_path / "Lib/site-packages/nvidia/cudnn/bin"
-if cudnn_bin_path.exists():
-    os.add_dll_directory(str(cudnn_bin_path))
-    os.environ["PATH"] = str(cudnn_bin_path) + ";" + os.environ["PATH"]
+def is_frozen_app():
+    """
+    Memeriksa apakah aplikasi berjalan sebagai biner yang dibekukan (misalnya, Nuitka, PyInstaller).
+    """
+    return hasattr(sys, 'frozen') or (hasattr(sys, '_MEIPASS') or (sys.executable.endswith(".exe") and sys.executable != sys.argv[0]))
 
+def add_dll_to_path():
+    """
+    Menambahkan direktori yang berisi DLL ONNX Runtime dan CuDNN ke PATH
+    menggunakan variabel lingkungan.
+    """
+    cudnn_dll_path = None
+    cuda_bin_path = None
+
+    # --- Bagian 1: Deteksi Lingkungan ---
+    if is_frozen_app():
+        # Dalam lingkungan biner, cari variabel lingkungan NVIDIA
+        # Jika 'CUDNN_PATH' ada, gunakan itu terlebih dahulu
+        if 'CUDNN_PATH' in os.environ:
+            cudnn_dll_path = Path(os.environ['CUDNN_PATH']) / "bin"
+        # Jika 'CUDA_PATH' ada, gunakan itu sebagai alternatif
+        elif 'CUDA_PATH' in os.environ:
+            cudnn_dll_path = Path(os.environ['CUDA_PATH']) / "bin"
+    else:
+        # Jika di lingkungan pengembangan (misalnya venv)
+        try:
+            site_paths = site.getsitepackages()
+            if site_paths:
+                site_path = Path(site_paths[0])
+                cudnn_dll_path = site_path / "Lib/site-packages/nvidia/cudnn/bin"
+        except (IndexError, AttributeError):
+            pass
+
+    # --- Bagian 2: Terapkan Penambahan Jalur ---
+    paths_to_add = [cudnn_dll_path, cuda_bin_path]
+    for path in paths_to_add:
+        if path and path.exists():
+            os.add_dll_directory(str(path))
+            os.environ["PATH"] = str(path) + os.pathsep + os.environ.get("PATH", "")
+            
+    # Check if the CUDA provider can be loaded after adding the path
+    try:
+        if "CUDAExecutionProvider" in ort.get_available_providers():
+            print("[INFO] GPU support successfully enabled.")
+    except Exception as e:
+        print(f"[WARNING] Failed to enable GPU support. {e}")
+
+
+# --- Panggil fungsi ini di awal skrip Anda ---
+if os.name == 'nt':
+    add_dll_to_path()
 
 class LightGlueAlgorithm:
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
@@ -58,14 +99,13 @@ class LightGlueAlgorithm:
         use_gpu = config.get("use_gpu", False)
 
         providers = ["CPUExecutionProvider"]
-        
         if use_gpu:
             try:
                 available_providers = ort.get_available_providers()
                 if "CUDAExecutionProvider" in available_providers:
                     providers.insert(0, "CUDAExecutionProvider")
-                else:
-                    print("[PERINGATAN] 'Gunakan GPU' aktif, tetapi CUDA tidak ditemukan. Kembali menggunakan CPU.")
+            except Exception as e:
+                print(f"[ERROR] Terjadi kesalahan saat memeriksa provider CUDA: {e}. Kembali menggunakan CPU.")
             except Exception as e:
                 print(f"[ERROR] Terjadi kesalahan saat memeriksa provider CUDA: {e}. Kembali menggunakan CPU.")
         else:
