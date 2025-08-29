@@ -14,11 +14,9 @@ from UI.enhance_stack.algorithm.alignment.Farneback_optical_flow import running_
 from UI.enhance_stack.algorithm.alignment.Light_Glue import running_light_glue
 from UI.enhance_stack.algorithm.alignment.ORB import running_orb
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import save_special_jpg_and_png
-from UI.enhance_stack.algorithm.alignment.tile_align import running_tile_align
 from UI.enhance_stack.algorithm.denoising.Average import running_average
 from UI.enhance_stack.algorithm.denoising.Median import running_median
 from UI.enhance_stack.algorithm.denoising.Similarity import running_similarity
-from UI.enhance_stack.algorithm.denoising.Similarity_V2 import running_similarity_v2
 from UI.enhance_stack.algorithm.super_resolution.Interpolation import running_interpolation
 from UI.enhance_stack.components.batch_page_layout.image_batch_management import convert_tiff_to_uncompressed
 from UI.enhance_stack.components.single_page_layout.page_layout import (setup_main_layout, 

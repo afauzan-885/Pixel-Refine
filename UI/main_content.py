@@ -3,7 +3,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 
 from UI.enhance_stack.logic.database_manager import DatabaseManager
-from UI.panorama.PanoramaPage import PanoramaPage
+# from UI.panorama.PanoramaPage import PanoramaPage
 from UI.resources.stylesheet.stylesheet import BLANK_CONTENT_BACKGROUND, BLANK_CONTENT_LABEL
 from UI.settings.General.Language import language_config
 

@@ -19,9 +19,9 @@ def load_similarity_config():
         "similarity_merging_type": "spatial",
         "use_multi_core": True,
         "spatial_params": {
-            "similarity_spatial_tile_size": 32,
-            "similarity_spatial_motion_sensitivity": 70.0,
-            "similarity_spatial_noise_mad_offset_factor": 0.07,
+            "similarity_spatial_tile_size": 24,
+            "similarity_spatial_motion_sensitivity": 150.0,
+            "similarity_spatial_noise_mad_offset_factor": 0.10,
             "similarity_spatial_overlap_percent": 0.35,
         },
         "frequency_params": {
