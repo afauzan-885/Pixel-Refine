@@ -170,7 +170,8 @@ def _prepare_image_array_from_raw(original_path):
             return None
 
         with rawpy.imread(original_path) as raw:
-            gamma_setting = (2.5, 15.92)  # Natural Gamma
+            # gamma_setting = (2.5, 15.92)  # Natural Gamma
+            gamma_setting = (2.222, 4.5)
             rgb = raw.postprocess(
                 demosaic_algorithm= rawpy.DemosaicAlgorithm.DCB,
                 use_camera_wb=True,
@@ -180,7 +181,6 @@ def _prepare_image_array_from_raw(original_path):
                 output_color=rawpy.ColorSpace.sRGB,
                 chromatic_aberration=None,
                 highlight_mode=rawpy.HighlightMode.Blend,
-                user_flip = 0
             )
 
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
@@ -317,9 +317,9 @@ def save_align_to_folder(image, index, original_path, align_folder=None, load_co
 
 def save_image(image, output_path, reference_image_path=None):
     """
-    Menyimpan gambar dengan menyinkronkan data pikselnya dengan metadata orientasi
-    dari gambar referensi, lalu menyalin semua metadata menggunakan exiftool.
-    Akurasi metadata adalah prioritas utama.
+    Menyimpan gambar tanpa rotasi/flip fisik, 
+    tapi tetap menyalin metadata orientasi dari gambar referensi 
+    menggunakan exiftool agar metadata akurat.
     """
     try:
         image_to_save = image.copy()
@@ -327,32 +327,26 @@ def save_image(image, output_path, reference_image_path=None):
             cv2.imwrite(output_path, image_to_save)
             return output_path
 
-        target_orientation = 1
-        try:
-            result = subprocess.run(["exiftool", "-n", "-Orientation", reference_image_path], capture_output=True, text=True, check=True)
-            output_str = result.stdout.strip()
-            if output_str:
-                target_orientation = int(output_str.split(':')[-1].strip())
-        except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
-            print(f"  Peringatan: Tidak dapat membaca orientasi dari '{reference_image_path}'.")
-
-        if target_orientation == 3: image_to_save = cv2.rotate(image, cv2.ROTATE_180)
-        elif target_orientation == 6: image_to_save = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
-        elif target_orientation == 8: image_to_save = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        elif target_orientation == 2: image_to_save = cv2.flip(image, 1)
-        elif target_orientation == 4: image_to_save = cv2.flip(image, 0)
-        
+        # Langsung simpan gambar apa adanya (tidak diputar/flip)
         success = cv2.imwrite(output_path, image_to_save)
         if not success:
             print(f"Error: OpenCV gagal menyimpan gambar ke '{output_path}'")
             return None
 
+        # Salin metadata dari referensi (termasuk Orientation)
         try:
-            subprocess.run(["exiftool", "-q", "-overwrite_original", "-TagsFromFile", reference_image_path, output_path], check=True, capture_output=True)
+            subprocess.run([
+                "exiftool",
+                "-q",
+                "-overwrite_original",
+                "-TagsFromFile", reference_image_path,
+                output_path
+            ], check=True, capture_output=True)
         except (subprocess.CalledProcessError, FileNotFoundError) as e:
             print(f"  Peringatan: Gagal menyalin metadata ke '{output_path}'. Error: {e}")
 
         return output_path
+
     except Exception as e:
         print(f"Error fatal saat menyimpan gambar ke '{output_path}': {e}")
         return None
@@ -1166,63 +1160,6 @@ def optical_flow_refinement(
 
     return weight_map_refined
 
-# def ml_driven_refinement(
-#     current_weight_map, 
-#     prev_weight_map_ema, 
-#     optical_flow, 
-#     alpha_generator: AlphaGenerator,
-#     flow_confidence_map=None,
-#     bilateral_d=9, 
-#     bilateral_sigma_color=0.05, 
-#     bilateral_sigma_space=75):
-#     """
-#     Versi refinement yang digerakkan oleh Machine Learning untuk menghasilkan alpha map.
-#     """
-#     if prev_weight_map_ema is None or optical_flow is None or alpha_generator is None:
-#         return current_weight_map
-
-#     h, w = current_weight_map.shape
-    
-#     # --- LANGKAH 1: PERSIAPAN INPUT (Sama seperti sebelumnya) ---
-#     grid_x, grid_y = np.meshgrid(np.arange(w), np.arange(h))
-#     map_x = (grid_x - optical_flow[..., 0]).astype(np.float32)
-#     map_y = (grid_y - optical_flow[..., 1]).astype(np.float32)
-    
-#     warped_prev_ema = cv2.remap(
-#         prev_weight_map_ema, map_x, map_y, 
-#         interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
-#     )
-    
-#     warped_ones = cv2.remap(np.ones_like(prev_weight_map_ema), map_x, map_y, interpolation=cv2.INTER_LINEAR)
-#     disocclusion_mask = warped_ones < 0.95 
-
-#     smoothed_current_weight = cv2.bilateralFilter(
-#         current_weight_map.astype(np.float32), 
-#         d=bilateral_d, sigmaColor=bilateral_sigma_color, sigmaSpace=bilateral_sigma_space
-#     )
-    
-#     ### DIHAPUS ###
-#     # Bagian UPGRADE 3 dan 4 (kalkulasi confidence dan alpha heuristik) dihapus.
-#     # Model ML akan menggantikan logika ini sepenuhnya.
-
-#     # --- LANGKAH 2: PERUBAHAN UTAMA - INFERENSI MODEL ML ---
-#     # Gunakan alpha_generator untuk membuat peta alpha yang cerdas.
-#     alpha_for_current = alpha_generator.generate(
-#         smoothed_current_weight=smoothed_current_weight,
-#         warped_prev_ema=warped_prev_ema,
-#         optical_flow=optical_flow,
-#         flow_confidence_map=flow_confidence_map,
-#         disocclusion_mask=disocclusion_mask
-#     )
-
-#     # --- LANGKAH 3: PENCAMPURAN AKHIR (Sama seperti sebelumnya) ---
-#     # Logika blending tetap sama, tetapi sekarang menggunakan alpha map dari ML.
-#     alpha_for_current_reshaped = alpha_for_current[..., np.newaxis] if current_weight_map.ndim > smoothed_current_weight.ndim else alpha_for_current
-
-#     weight_map_refined = (alpha_for_current_reshaped * smoothed_current_weight) + ((1.0 - alpha_for_current_reshaped) * warped_prev_ema)
-
-#     return weight_map_refined
-
 def standard_refinement(
     weight_map: np.ndarray,
     prev_weight_map: np.ndarray,
@@ -1391,44 +1328,101 @@ def setup_balanced_batching(total_images, language_config, max_batch_size=8):
 def run_pipeline_non_crop(processor, image_paths, base_image, target_dims, 
                            update_progress, stop_requested, save_align, align_folder, h5_file_handle):
     """
-    Menjalankan pipeline tanpa cropping, menggunakan handle HDF5 yang sudah ada.
+    Pipeline tanpa cropping, paralel & hemat RAM:
+      Loader (bounded) -> Extractor Pool -> Compensator+Saver Pool (HDF5 pakai lock)
     """
+    import threading, queue, gc, os
+
     total_images_in_stack = len(image_paths)
+    if total_images_in_stack == 0:
+        return
+
+    # Progress (base image dianggap sudah diproses)
     progress_counter = {"count": 1}
     progress_lock = threading.Lock()
-    lock = threading.Lock() 
 
-    # Simpan base image di awal
+    # Lock untuk HDF5 (harus!)
+    h5_lock = threading.Lock()
+
+    # --- Simpan base image lebih dulu ---
     if save_align:
         save_align_to_folder(base_image, 0, image_paths[0], align_folder)
-    
-    # Gunakan handle yang sudah ada
     if h5_file_handle:
-        save_to_hdf5(h5_file_handle, "image_0", base_image, extract_exif(image_paths[0]))
-    
-    # --- Definisi Worker ---
-    queue_images = queue.Queue(maxsize=4)
-    queue_points = queue.Queue(maxsize=4)
+        with h5_lock:
+            save_to_hdf5(h5_file_handle, "image_0", base_image, extract_exif(image_paths[0]))
 
+    # --- Queue antar-stasiun (kecil agar RAM irit) ---
+    queue_images  = queue.Queue(maxsize=2)  # Loader -> Extractor
+    queue_points  = queue.Queue(maxsize=2)  # Extractor -> Compensator+Saver
+
+    # --- Loader: preload 1–2 ahead ---
     def loader_worker():
-        for i, path in enumerate(image_paths, start=1):
-            if stop_requested and stop_requested(): break
-            img_list = load_images_from_paths([path], stop_requested=stop_requested)
-            if not img_list or img_list[0] is None: continue
-            target_image = resize_with_padding(img_list[0], target_dims)
-            queue_images.put((i, path, target_image))
-        queue_images.put(None)
+        for i, path in enumerate(image_paths[1:], start=1):  # mulai dari 1 karena base=0
+            if stop_requested and stop_requested():
+                break
+            try:
+                img_list = load_images_from_paths([path], stop_requested=stop_requested)
+                if not img_list or img_list[0] is None:
+                    # kirim placeholder gagal agar progress tetap maju di stage akhir
+                    queue_images.put((i, path, None))
+                    continue
+                target_image = resize_with_padding(img_list[0], target_dims)
+                queue_images.put((i, path, target_image))
+            except Exception as e:
+                print(f"⚠️ Loader error {i} ({path}): {e}")
+                queue_images.put((i, path, None))
+        # kirim sentinel sebanyak jumlah extractor
+        for _ in range(num_extractors):
+            queue_images.put(None)
 
-    def feature_extractor_worker():
+    # --- Extractor: paralel hitung keypoints/motion ---
+    def extractor_worker():
         while True:
             item = queue_images.get()
-            if item is None: break
+            if item is None:
+                break
             i, path, target_image = item
-            base_pts, target_pts = processor.calculate_global_motion(base_image, target_image, stop_requested=stop_requested)
-            if base_pts is not None and target_pts is not None:
+            if target_image is None:
+                # kirim gagal lanjut ke stage akhir supaya progress naik
+                queue_points.put((i, path, None, None, None))
+                continue
+            try:
+                base_pts, target_pts = processor.calculate_global_motion(
+                    base_image, target_image, stop_requested=stop_requested
+                )
                 queue_points.put((i, path, target_image, base_pts, target_pts))
-            else:
-                # Jika alignment gagal, tetap update progress
+            except Exception as e:
+                print(f"⚠️ Extractor error {i} ({path}): {e}")
+                queue_points.put((i, path, target_image, None, None))
+
+    # --- Compensator+Saver: paralel I/O + update progress ---
+    def compensate_and_save_worker():
+        while True:
+            item = queue_points.get()
+            if item is None:
+                break
+            i, path, target_image, base_pts, target_pts = item
+            try:
+                compensated = None
+                if (target_image is not None) and (base_pts is not None) and (target_pts is not None):
+                    compensated = processor.compensate_motion(target_image, base_pts, target_pts)
+
+                if compensated is not None:
+                    if save_align:
+                        save_align_to_folder(compensated, i, path, align_folder)
+                    if h5_file_handle:
+                        with h5_lock:
+                            save_to_hdf5(h5_file_handle, f"image_{i}", compensated, extract_exif(path))
+            except Exception as e:
+                print(f"⚠️ Compensate/Save error {i} ({path}): {e}")
+            finally:
+                # Bebaskan memori cepat
+                del target_image
+                if 'compensated' in locals():
+                    del compensated
+                gc.collect()
+
+                # Update progress (selalu naik satu gambar, sukses/gagal)
                 with progress_lock:
                     progress_counter["count"] += 1
                     if update_progress:
@@ -1436,52 +1430,44 @@ def run_pipeline_non_crop(processor, image_paths, base_image, target_dims,
                             progress_counter["count"], total_images_in_stack,
                             language_config.IMAGE_PROCESS_IN_PROGRESS.format(progress_counter["count"], total_images_in_stack)
                         )
+
+    # --- Konfigurasi paralelisme ---
+    import os
+    num_extractors = max(1, min(4, os.cpu_count() or 1))
+    num_savers     = max(1, min(4, os.cpu_count() or 1))
+
+    # --- Start threads ---
+    loader_thread = threading.Thread(target=loader_worker, name="loader")
+    extractor_threads = [threading.Thread(target=extractor_worker, name=f"extractor-{k}") for k in range(num_extractors)]
+    saver_threads = [threading.Thread(target=compensate_and_save_worker, name=f"saver-{k}") for k in range(num_savers)]
+
+    loader_thread.start()
+    for t in extractor_threads: t.start()
+    for t in saver_threads: t.start()
+
+    # --- Shutdown sequencing ---
+    loader_thread.join()
+    for t in extractor_threads: t.join()
+
+    # kirim sentinel ke saver sebanyak jumlah saver
+    for _ in range(num_savers):
         queue_points.put(None)
 
-    # --- Mulai Threads ---
-    loader_thread = threading.Thread(target=loader_worker)
-    extractor_thread = threading.Thread(target=feature_extractor_worker)
-    loader_thread.start()
-    extractor_thread.start()
-
-    # --- Stasiun 3: Compensator & Saver (di Thread Utama) ---
-    while True:
-        item = queue_points.get()
-        if item is None: break
-        i, path, target_image, base_pts, target_pts = item
-        
-        compensated = processor.compensate_motion(target_image, base_pts, target_pts)
-        if compensated is not None:
-            if save_align:
-                save_align_to_folder(compensated, i, path, align_folder)
-            
-            # Gunakan handle yang sudah ada
-            if h5_file_handle:
-                with lock:
-                    save_to_hdf5(h5_file_handle, f"image_{i}", compensated, extract_exif(path))
-        
-        with progress_lock:
-            progress_counter["count"] += 1
-            if update_progress:
-                update_progress(
-                    progress_counter["count"], total_images_in_stack,
-                    language_config.IMAGE_PROCESS_IN_PROGRESS.format(progress_counter["count"], total_images_in_stack)
-                )
-
-    # --- Cleanup ---
-    loader_thread.join()
-    extractor_thread.join()
+    for t in saver_threads: t.join()
     
 def run_pipeline_global_crop(processor, image_paths, base_image, target_dims, 
                              update_progress, stop_requested, transformation_type,
                              save_align, align_folder, h5_file_handle):
     """
-    Mengatur dan menjalankan pipeline global cropping dengan alur yang benar dan sederhana.
+    Alur global crop:
+      Stage 1 (paralel & hemat RAM) -> hitung transform
+      Stage 2 -> hitung global crop
+      Stage 3 -> apply & save (pakai versi yang sudah kamu miliki)
     """
     total_images_in_stack = len(image_paths)
     images_to_process_for_transforms = image_paths[1:]
 
-    # --- TAHAP 1: Menghitung semua transformasi (progress 0% -> 50%) ---
+    # --- TAHAP 1: Hitung transform (0% -> 50%) ---
     all_transforms = _run_transform_calculation_stage(
         processor, images_to_process_for_transforms, base_image, target_dims,
         update_progress, stop_requested
@@ -1490,14 +1476,13 @@ def run_pipeline_global_crop(processor, image_paths, base_image, target_dims,
         print("Transform calculation failed for all images. Aborting global crop.")
         return
 
-    # Jika beberapa gambar gagal, cetak peringatan tapi tetap lanjutkan dengan yang berhasil
     if len(all_transforms) < len(images_to_process_for_transforms):
         failed_count = len(images_to_process_for_transforms) - len(all_transforms)
         print(f"Warning: Could not calculate transforms for {failed_count} image(s). Continuing with the successful ones.")
 
     if update_progress:
         update_progress(50, 100, "Computing global crop bounds...")
-        
+
     crop_bounds = compute_global_crop(
         [(item[0], item[2], item[3]) for item in all_transforms],
         total_images_in_stack, base_image.shape[1], base_image.shape[0],
@@ -1506,7 +1491,7 @@ def run_pipeline_global_crop(processor, image_paths, base_image, target_dims,
     if crop_bounds is None:
         return
 
-    # --- TAHAP 3: Menerapkan transformasi dan menyimpan (progress 50% -> 100%) ---
+    # --- TAHAP 3: Apply & Save (50% -> 100%) ---
     _run_apply_and_save_stage(
         processor, all_transforms, crop_bounds, target_dims,
         update_progress, stop_requested,
@@ -1518,132 +1503,162 @@ def run_pipeline_global_crop(processor, image_paths, base_image, target_dims,
 def _run_transform_calculation_stage(processor, image_paths, base_image, target_dims, 
                                      update_progress, stop_requested):
     """
-    Tahap 1: Menghitung transformasi satu per satu, melaporkan progress dari 0% hingga 50%.
+    Tahap 1: Hitung transformasi 0%→50% dengan:
+      Loader (bounded) -> Extractor Pool (paralel)
     """
+    import threading, queue, os
+
     all_transforms = []
     num_to_process = len(image_paths)
-    
-    # Pipeline 2 Stasiun: Loader -> Extractor untuk kontrol RAM
-    queue_images = queue.Queue(maxsize=4)
-    queue_results = queue.Queue()
+    if num_to_process == 0:
+        return all_transforms
 
+    # Queue kecil agar RAM irit
+    queue_images  = queue.Queue(maxsize=2)
+    queue_results = queue.Queue(maxsize=2)
+
+    # Loader
     def loader_worker():
         for i, path in enumerate(image_paths, start=1):
-            if stop_requested and stop_requested(): break
-            img_list = load_images_from_paths([path], stop_requested=stop_requested)
-            if img_list and img_list[0] is not None:
-                target_image = resize_with_padding(img_list[0], target_dims)
-                queue_images.put((i, path, target_image))
-            else:
-                queue_images.put((i, path, None)) # Kirim sinyal gagal
-        queue_images.put(None)
+            if stop_requested and stop_requested():
+                break
+            try:
+                img_list = load_images_from_paths([path], stop_requested=stop_requested)
+                if img_list and img_list[0] is not None:
+                    target_image = resize_with_padding(img_list[0], target_dims)
+                    queue_images.put((i, path, target_image))
+                else:
+                    queue_images.put((i, path, None))  # tandai gagal
+            except Exception as e:
+                print(f"⚠️ Loader error {i} ({path}): {e}")
+                queue_images.put((i, path, None))
+        # kirim sentinel untuk tiap extractor
+        for _ in range(num_extractors):
+            queue_images.put(None)
 
+    # Extractor paralel
     def extractor_worker():
         while True:
             item = queue_images.get()
-            if item is None: break
+            if item is None:
+                break
             i, path, target_image = item
             if target_image is None:
                 queue_results.put((i, path, None, None))
                 continue
-            base_pts, target_pts = processor.calculate_global_motion(base_image, target_image, stop_requested=stop_requested)
-            queue_results.put((i, path, base_pts, target_pts))
-        queue_results.put(None)
+            try:
+                base_pts, target_pts = processor.calculate_global_motion(
+                    base_image, target_image, stop_requested=stop_requested
+                )
+                queue_results.put((i, path, base_pts, target_pts))
+            except Exception as e:
+                print(f"⚠️ Extractor error {i} ({path}): {e}")
+                queue_results.put((i, path, None, None))
 
-    loader_thread = threading.Thread(target=loader_worker)
-    extractor_thread = threading.Thread(target=extractor_worker)
+    # Konfigurasi paralelisme
+    num_extractors = max(1, min(4, os.cpu_count() or 1))
+
+    # Start threads
+    loader_thread = threading.Thread(target=loader_worker, name="loader")
+    extractor_threads = [threading.Thread(target=extractor_worker, name=f"extractor-{k}") for k in range(num_extractors)]
     loader_thread.start()
-    extractor_thread.start()
+    for t in extractor_threads: t.start()
 
-    # Loop utama untuk mengumpulkan hasil dan melaporkan progress
-    for count in range(1, num_to_process + 1):
-        item = queue_results.get()
-        if item is None: break
+    # Kumpulkan hasil & progress (tanpa sentinel; kita tahu jumlahnya)
+    results_received = 0
+    while results_received < num_to_process:
+        i, path, base_pts, target_pts = queue_results.get()
+        results_received += 1
 
-        i, path, base_pts, target_pts = item
         if base_pts is not None and target_pts is not None:
-            all_transforms.append(item)
+            all_transforms.append((i, path, base_pts, target_pts))
         else:
             print(f"Transform calculation failed for image {i} ({os.path.basename(path)})")
 
         if update_progress:
-            current_percent = (count / num_to_process) * 50
-            status_text = language_config.RUN_PROCESS_TRANSFORMATION.format(count, num_to_process)
+            current_percent = (results_received / num_to_process) * 50
+            status_text = language_config.RUN_PROCESS_TRANSFORMATION.format(results_received, num_to_process)
             update_progress(int(current_percent), 100, status_text)
-            
+
+    # Tutup & join
     loader_thread.join()
-    extractor_thread.join()
-    
+    for t in extractor_threads: t.join()
+
     all_transforms.sort(key=lambda x: x[0])
     return all_transforms
 
 def _run_apply_and_save_stage(processor, temp_transforms, crop_bounds, target_dims,
-                               update_progress, stop_requested,
-                               save_align, align_folder,
-                               h5_file_handle,
-                               base_image, base_image_path):
+                                     update_progress, stop_requested,
+                                     save_align, align_folder,
+                                     h5_file_handle,
+                                     base_image, base_image_path):
     """
-    Tahap 3: Menerapkan transformasi dan menyimpan, melaporkan progress dari 50% hingga 100%.
+    Setiap worker akan load → kompensasi → crop → save.
     """
     lock = threading.Lock()
-    
+
     # Gabungkan base image dan target menjadi satu daftar pekerjaan
-    tasks = [(0, base_image_path, None, None, base_image)] # (i, path, pts, pts, data)
+    tasks = [(0, base_image_path, None, None, base_image)]
     for i, path, base_pts, target_pts in temp_transforms:
         tasks.append((i, path, base_pts, target_pts, None))
-        
+
     num_to_save = len(tasks)
-    
-    # Pipeline 2 Stasiun: Loader/Compensator -> Saver
-    queue_to_save = queue.Queue(maxsize=4)
+    completed = 0
 
-    def worker():
-        for i, path, base_pts, target_pts, image_data in tasks:
-            if stop_requested and stop_requested(): break
-            
-            try:
-                # Muat gambar jika belum ada (untuk target images)
-                if image_data is None:
-                    img_list = load_images_from_paths([path], stop_requested=stop_requested)
-                    if not img_list or img_list[0] is None: continue
-                    image_data = resize_with_padding(img_list[0], target_dims)
-                
-                # Kompensasi (jika bukan base image) dan Crop
-                if i > 0:
-                    compensated = processor.compensate_motion(image_data, base_pts, target_pts)
-                    if compensated is None: continue
-                    processed_image = crop_image(compensated, crop_bounds)
-                else: # Ini adalah base image
-                    processed_image = crop_image(image_data, crop_bounds)
-                
-                queue_to_save.put((i, path, processed_image))
-            except Exception as e:
-                print(f"Error processing image {i} for saving: {e}")
-                
-        queue_to_save.put(None)
+    def worker(i, path, base_pts, target_pts, image_data):
+        nonlocal completed
+        if stop_requested and stop_requested():
+            return
+        try:
+            # Muat gambar jika belum ada (target images)
+            if image_data is None:
+                img_list = load_images_from_paths([path], stop_requested=stop_requested)
+                if not img_list or img_list[0] is None:
+                    return
+                image_data = resize_with_padding(img_list[0], target_dims)
 
-    worker_thread = threading.Thread(target=worker)
-    worker_thread.start()
+            # Kompensasi + Crop
+            if i > 0:
+                compensated = processor.compensate_motion(image_data, base_pts, target_pts)
+                if compensated is None:
+                    return
+                processed_image = crop_image(compensated, crop_bounds)
+            else:  # base image
+                processed_image = crop_image(image_data, crop_bounds)
 
-    # Loop utama untuk menyimpan dan melaporkan progress
-    for count in range(1, num_to_save + 1):
-        item = queue_to_save.get()
-        if item is None: break
+            # Save langsung (tanpa queue)
+            if save_align:
+                save_align_to_folder(processed_image, i, path, align_folder)
+            if h5_file_handle:
+                with lock:  # h5py tidak thread-safe
+                    save_to_hdf5(h5_file_handle, f"image_{i}", processed_image, extract_exif(path))
 
-        i, path, cropped_image = item
-        
-        if save_align:
-            save_align_to_folder(cropped_image, i, path, align_folder)
-        if h5_file_handle:
+        except Exception as e:
+            print(f"⚠️ Error processing/saving image {i} ({path}): {e}")
+        finally:
+            del image_data
+            gc.collect()
+
             with lock:
-                save_to_hdf5(h5_file_handle, f"image_{i}", cropped_image, extract_exif(path))
-        
-        del cropped_image
-        gc.collect()
+                completed += 1
+                if update_progress:
+                    current_percent = 50 + (completed / num_to_save) * 50
+                    status_text = language_config.RUN_SAVING_TRANSFORMATION.format(completed, num_to_save)
+                    update_progress(int(current_percent), 100, status_text)
 
-        if update_progress:
-            current_percent = 50 + (count / num_to_save) * 50
-            status_text = language_config.RUN_SAVING_TRANSFORMATION.format(count, num_to_save)
-            update_progress(int(current_percent), 100, status_text)
-            
-    worker_thread.join()
+    # Jalankan thread pool
+    num_workers = min(4, os.cpu_count() or 1)
+    threads = []
+
+    for task in tasks:
+        t = threading.Thread(target=worker, args=task)
+        t.start()
+        threads.append(t)
+
+        # Batasi jumlah worker aktif agar tidak kebanyakan thread
+        while threading.active_count() > num_workers:
+            pass  # atau pakai sleep(0.01)
+
+    # Tunggu semua selesai
+    for t in threads:
+        t.join()

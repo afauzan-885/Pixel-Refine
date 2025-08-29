@@ -162,7 +162,7 @@ class AKAZEAlgorithm:
                 
                 try:
                     # 1. Persiapan awal (CLAHE dilewati untuk sementara)
-                    enhanced_gray = prepare_image(image_data, grayscale=True, use_clahe=False)
+                    enhanced_gray = prepare_image(image_data, grayscale=True, use_clahe=True)
                     
                     # 2. Estimasi noise
                     noise_level = estimate_noise_variance(enhanced_gray)

@@ -183,7 +183,7 @@ class ORBAlgorithm:
                 
                 try:
                     # 1. Persiapan awal (CLAHE dilewati untuk sementara)
-                    enhanced_gray = prepare_image(image_data, grayscale=True, use_clahe=False)
+                    enhanced_gray = prepare_image(image_data, grayscale=True, use_clahe=True)
                     
                     # 2. Estimasi noise
                     noise_level = estimate_noise_variance(enhanced_gray)
@@ -214,7 +214,7 @@ class ORBAlgorithm:
 
         # --- PERUBAHAN 2: Inisialisasi antrian dan thread worker ---
         job_queue = queue.Queue()
-        result_queue = queue.Queue(maxsize=2) # Cukup untuk base dan target
+        result_queue = queue.Queue(maxsize=4) # Cukup untuk base dan target
 
         filter_thread = threading.Thread(target=filter_worker, args=(job_queue, result_queue))
         filter_thread.start()

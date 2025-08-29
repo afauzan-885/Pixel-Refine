@@ -114,7 +114,7 @@ class RawImageProcessingThread(BaseMultiThreading):
                 if is_raw:
                     try:
                         with rawpy.imread(image_path) as raw:
-                            img_array = raw.postprocess(output_bps=8, use_camera_wb=True, no_auto_bright=False, gamma=(2.5, 15.92), 
+                            img_array = raw.postprocess(output_bps=8, use_camera_wb=True, no_auto_bright=False, gamma=(2.222, 4.5), 
                                                         highlight_mode=rawpy.HighlightMode.Blend)
                             if img_array is None: raise RuntimeError(f"Rawpy postprocessing failed for {filename}")
                           
