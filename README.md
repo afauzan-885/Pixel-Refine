@@ -2,7 +2,7 @@
 
 <h2 align="center"> Pixel Refine </h2>
 <p align="center">
-A modern noise-reduction & computational photography tool, inspired by Gcam, Raw+ Kandao, Burst.photo, and PhotoAcute 3.
+A computational photography tool, inspired by Gcam, Raw+ Kandao, Burst.photo, and PhotoAcute 3.
 </p>
 
 ---
