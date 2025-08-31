@@ -1,6 +1,7 @@
 import gc
 import queue
 import site
+import subprocess
 import sys
 import threading
 import traceback
@@ -30,44 +31,93 @@ def is_frozen_app():
     """
     return hasattr(sys, 'frozen') or (hasattr(sys, '_MEIPASS') or (sys.executable.endswith(".exe") and sys.executable != sys.argv[0]))
 
+def find_cudnn_dlls():
+    """
+    Cari semua file cuDNN (cudnn64_*.dll) + CUDA core (cublas, cufft, curand) 
+    hanya dari instalasi sistem, bukan dari venv.
+    """
+    dlls = []
+
+    # --- 1. Cari di environment variable (prioritas utama: sistem) ---
+    env_vars = ["CUDNN_PATH", "CUDA_PATH"] + [k for k in os.environ.keys() if k.startswith("CUDA_PATH_V")]
+    for var in env_vars:
+        if var in os.environ:
+            p = Path(os.environ[var])
+            if p.exists():
+                # ambil cuDNN
+                for dll in p.rglob("cudnn64_*.dll"):
+                    dlls.append(dll)
+                for dll in p.rglob("cublas64_*.dll"):
+                    dlls.append(dll)
+                for dll in p.rglob("cufft64_*.dll"):
+                    dlls.append(dll)
+                for dll in p.rglob("curand64_*.dll"):
+                    dlls.append(dll)
+
+    # --- 2. Cari di folder umum (misalnya instalasi CUDA di Program Files) ---
+    common_dirs = [
+        Path("C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA"),
+        Path("C:/Program Files/NVIDIA"),
+        Path("C:/tools/cuda"),
+    ]
+    for base in common_dirs:
+        if base.exists():
+            for dll in base.rglob("cudnn64_*.dll"):
+                dlls.append(dll)
+            for dll in base.rglob("cublas64_*.dll"):
+                dlls.append(dll)
+            for dll in base.rglob("cufft64_*.dll"):
+                dlls.append(dll)
+            for dll in base.rglob("curand64_*.dll"):
+                dlls.append(dll)
+
+    # --- 3. (Opsional) Gunakan perintah `where` (Windows only) ---
+    if not dlls:
+        try:
+            result = subprocess.check_output(["where", "cudnn64_*.dll"], shell=True, text=True).strip()
+            if result:
+                for line in result.splitlines():
+                    path = Path(line.strip())
+                    if path.exists():
+                        dlls.append(path)
+        except Exception:
+            pass
+
+    # Hilangkan duplikat
+    dlls = list(dict.fromkeys(dlls))
+
+    # --- Pilih versi cuDNN tertinggi saja ---
+    if dlls:
+        cudnn_only = [d for d in dlls if "cudnn64_" in d.name]
+        if cudnn_only:
+            cudnn_only.sort(key=lambda d: int(d.stem.split("cudnn64_")[-1]), reverse=True)
+            highest_version = int(cudnn_only[0].stem.split("cudnn64_")[-1])
+            dlls = [dll for dll in dlls if f"cudnn64_{highest_version}" in dll.name or not dll.name.startswith("cudnn64_")]
+
+    return dlls
+
 def add_dll_to_path():
     """
     Menambahkan direktori yang berisi DLL ONNX Runtime dan CuDNN ke PATH
-    menggunakan variabel lingkungan.
+    menggunakan variabel lingkungan atau pencarian global.
     """
-    cudnn_dll_path = None
-    cuda_bin_path = None
+    cudnn_dlls = find_cudnn_dlls()
 
-    # --- Bagian 1: Deteksi Lingkungan ---
-    if is_frozen_app():
-        # Dalam lingkungan biner, cari variabel lingkungan NVIDIA
-        # Jika 'CUDNN_PATH' ada, gunakan itu terlebih dahulu
-        if 'CUDNN_PATH' in os.environ:
-            cudnn_dll_path = Path(os.environ['CUDNN_PATH']) / "bin"
-        # Jika 'CUDA_PATH' ada, gunakan itu sebagai alternatif
-        elif 'CUDA_PATH' in os.environ:
-            cudnn_dll_path = Path(os.environ['CUDA_PATH']) / "bin"
+    if not cudnn_dlls:
+        print("[WARNING] Could not find cuDNN DLL on the system!")
     else:
-        # Jika di lingkungan pengembangan (misalnya venv)
-        try:
-            site_paths = site.getsitepackages()
-            if site_paths:
-                site_path = Path(site_paths[0])
-                cudnn_dll_path = site_path / "Lib/site-packages/nvidia/cudnn/bin"
-        except (IndexError, AttributeError):
-            pass
+        for dll in cudnn_dlls:
+            dll_dir = dll.parent
+            os.add_dll_directory(str(dll_dir))
+            os.environ["PATH"] = str(dll_dir) + os.pathsep + os.environ.get("PATH", "")
+        print(f"[INFO] Adding cuDNN version {cudnn_dlls[0].stem} from folder: {cudnn_dlls[0].parent}")
 
-    # --- Bagian 2: Terapkan Penambahan Jalur ---
-    paths_to_add = [cudnn_dll_path, cuda_bin_path]
-    for path in paths_to_add:
-        if path and path.exists():
-            os.add_dll_directory(str(path))
-            os.environ["PATH"] = str(path) + os.pathsep + os.environ.get("PATH", "")
-            
     # Check if the CUDA provider can be loaded after adding the path
     try:
         if "CUDAExecutionProvider" in ort.get_available_providers():
             print("[INFO] GPU support successfully enabled.")
+        else:
+            print("[WARNING] CUDAExecutionProvider tidak tersedia.")
     except Exception as e:
         print(f"[WARNING] Failed to enable GPU support. {e}")
 
@@ -105,9 +155,9 @@ class LightGlueAlgorithm:
                 if "CUDAExecutionProvider" in available_providers:
                     providers.insert(0, "CUDAExecutionProvider")
             except Exception as e:
-                print(f"[ERROR] Terjadi kesalahan saat memeriksa provider CUDA: {e}. Kembali menggunakan CPU.")
+                print(f"[ERROR] An error occurred while checking the CUDA provider: {e}. Falling back to using the CPU.")
             except Exception as e:
-                print(f"[ERROR] Terjadi kesalahan saat memeriksa provider CUDA: {e}. Kembali menggunakan CPU.")
+                print(f"[ERROR] An error occurred while checking the CUDA provider: {e}. Falling back to using the CPU.")
         else:
             print("[INFO] Sesi inferensi akan menggunakan CPU (sesuai konfigurasi).")
             
@@ -484,7 +534,8 @@ def main(db_path,
          config_filename=None,
          save_align=None,
          align_folder=None,
-         command_save_to_hd5f=None):
+         command_save_to_hd5f=None,
+         num_workers=None):
     
     # --- Tahap 1: Inisialisasi dan Konfigurasi ---
     # Ganti ORBAlgorithm dengan kelas prosesor Anda yang sesuai jika berbeda
@@ -526,11 +577,13 @@ def main(db_path,
     extract_all_metadata(image_paths, metadata_file=os.path.join("database", "align", "metadata.json"))
 
     # --- Tahap 2: Pemuatan dan Penyiapan Base Image ---
-    total_images = len(image_paths)
     base_img_list = load_images_from_paths([image_paths[0]], stop_requested=stop_requested)
     if not base_img_list or base_img_list[0] is None:
         raise RuntimeError("Base image failed to load.")
-
+    
+    if num_workers is None:
+        num_workers = 2
+    
     base_image_raw = base_img_list[0]
     base_resized_list, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="median")
     base_image = base_resized_list[0]
@@ -539,12 +592,11 @@ def main(db_path,
     gc.collect()
 
     # --- Tahap 3: Manajemen File dan Eksekusi Pipeline ---
-    h5f = None  # Inisialisasi handle file ke None
+    h5f = None
     try:
         if command_save_to_hd5f:
             h5f = h5py.File(processor.hdf5_path, "w")
 
-        # Pilih dan jalankan pipeline yang sesuai, dengan meneruskan handle file (bisa jadi None).
         if not enable_cropping or keep_edges:
             run_pipeline_non_crop(
                 processor=processor,
@@ -555,7 +607,8 @@ def main(db_path,
                 stop_requested=stop_requested,
                 save_align=save_align,
                 align_folder=align_folder,
-                h5_file_handle=h5f  # Teruskan handle
+                h5_file_handle=h5f,
+                num_workers=num_workers 
             )
         else:
             run_pipeline_global_crop(
@@ -568,7 +621,8 @@ def main(db_path,
                 transformation_type=transformation_type,
                 save_align=save_align,
                 align_folder=align_folder,
-                h5_file_handle=h5f  # Teruskan handle
+                h5_file_handle=h5f,
+                num_workers=num_workers 
             )
             
     except Exception as e:

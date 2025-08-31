@@ -425,10 +425,10 @@ def main(db_path,
          config_filename=None,
          save_align=None,
          align_folder=None,
-         command_save_to_hd5f=None):
+         command_save_to_hd5f=None,
+         num_workers=None):
     
     # --- Tahap 1: Inisialisasi dan Konfigurasi ---
-    # Ganti ORBAlgorithm dengan kelas prosesor Anda yang sesuai jika berbeda
     processor = ORBAlgorithm(db_path) 
     config = processor.load_orb_config(config_filename)
     
@@ -467,11 +467,13 @@ def main(db_path,
     extract_all_metadata(image_paths, metadata_file=os.path.join("database", "align", "metadata.json"))
 
     # --- Tahap 2: Pemuatan dan Penyiapan Base Image ---
-    total_images = len(image_paths)
     base_img_list = load_images_from_paths([image_paths[0]], stop_requested=stop_requested)
     if not base_img_list or base_img_list[0] is None:
         raise RuntimeError("Base image failed to load.")
-
+    
+    if num_workers is None:
+        num_workers = 4
+    
     base_image_raw = base_img_list[0]
     base_resized_list, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="median")
     base_image = base_resized_list[0]
@@ -480,12 +482,11 @@ def main(db_path,
     gc.collect()
 
     # --- Tahap 3: Manajemen File dan Eksekusi Pipeline ---
-    h5f = None  # Inisialisasi handle file ke None
+    h5f = None
     try:
         if command_save_to_hd5f:
             h5f = h5py.File(processor.hdf5_path, "w")
 
-        # Pilih dan jalankan pipeline yang sesuai, dengan meneruskan handle file (bisa jadi None).
         if not enable_cropping or keep_edges:
             run_pipeline_non_crop(
                 processor=processor,
@@ -496,7 +497,8 @@ def main(db_path,
                 stop_requested=stop_requested,
                 save_align=save_align,
                 align_folder=align_folder,
-                h5_file_handle=h5f  # Teruskan handle
+                h5_file_handle=h5f,
+                num_workers=num_workers 
             )
         else:
             run_pipeline_global_crop(
@@ -509,7 +511,8 @@ def main(db_path,
                 transformation_type=transformation_type,
                 save_align=save_align,
                 align_folder=align_folder,
-                h5_file_handle=h5f  # Teruskan handle
+                h5_file_handle=h5f,
+                num_workers=num_workers 
             )
             
     except Exception as e:

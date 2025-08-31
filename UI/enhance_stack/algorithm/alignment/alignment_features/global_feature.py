@@ -1326,138 +1326,105 @@ def setup_balanced_batching(total_images, language_config, max_batch_size=8):
     return batch_plan        
 
 def run_pipeline_non_crop(processor, image_paths, base_image, target_dims, 
-                           update_progress, stop_requested, save_align, align_folder, h5_file_handle):
+                           update_progress, stop_requested, save_align, align_folder, h5_file_handle,
+                           num_workers):
     """
-    Pipeline tanpa cropping, paralel & hemat RAM:
-      Loader (bounded) -> Extractor Pool -> Compensator+Saver Pool (HDF5 pakai lock)
+    Pipeline sederhana dan tangguh menggunakan Thread Pool dengan progress bar real-time.
+    Setiap thread memproses satu gambar, dan thread utama mengupdate progress saat masing-masing selesai.
     """
-    import threading, queue, gc, os
 
     total_images_in_stack = len(image_paths)
-    if total_images_in_stack == 0:
+    if total_images_in_stack <= 1:
         return
 
-    # Progress (base image dianggap sudah diproses)
-    progress_counter = {"count": 1}
-    progress_lock = threading.Lock()
-
-    # Lock untuk HDF5 (harus!)
+    # Kunci untuk operasi yang tidak thread-safe (HANYA HDF5)
+    # progress_lock tidak lagi diperlukan karena progress di-handle oleh thread utama.
     h5_lock = threading.Lock()
-
-    # --- Simpan base image lebih dulu ---
+    
+    # --- Simpan base image dulu ---
+    # Progress dimulai dari 1 karena base image sudah ada
+    if update_progress:
+        update_progress(1, total_images_in_stack, language_config.IMAGE_PROCESS_IN_PROGRESS.format(1, total_images_in_stack))
+        
     if save_align:
         save_align_to_folder(base_image, 0, image_paths[0], align_folder)
     if h5_file_handle:
         with h5_lock:
             save_to_hdf5(h5_file_handle, "image_0", base_image, extract_exif(image_paths[0]))
 
-    # --- Queue antar-stasiun (kecil agar RAM irit) ---
-    queue_images  = queue.Queue(maxsize=2)  # Loader -> Extractor
-    queue_points  = queue.Queue(maxsize=2)  # Extractor -> Compensator+Saver
-
-    # --- Loader: preload 1–2 ahead ---
-    def loader_worker():
-        for i, path in enumerate(image_paths[1:], start=1):  # mulai dari 1 karena base=0
-            if stop_requested and stop_requested():
-                break
-            try:
-                img_list = load_images_from_paths([path], stop_requested=stop_requested)
-                if not img_list or img_list[0] is None:
-                    # kirim placeholder gagal agar progress tetap maju di stage akhir
-                    queue_images.put((i, path, None))
-                    continue
-                target_image = resize_with_padding(img_list[0], target_dims)
-                queue_images.put((i, path, target_image))
-            except Exception as e:
-                print(f"⚠️ Loader error {i} ({path}): {e}")
-                queue_images.put((i, path, None))
-        # kirim sentinel sebanyak jumlah extractor
-        for _ in range(num_extractors):
-            queue_images.put(None)
-
-    # --- Extractor: paralel hitung keypoints/motion ---
-    def extractor_worker():
-        while True:
-            item = queue_images.get()
-            if item is None:
-                break
-            i, path, target_image = item
-            if target_image is None:
-                # kirim gagal lanjut ke stage akhir supaya progress naik
-                queue_points.put((i, path, None, None, None))
-                continue
-            try:
-                base_pts, target_pts = processor.calculate_global_motion(
-                    base_image, target_image, stop_requested=stop_requested
-                )
-                queue_points.put((i, path, target_image, base_pts, target_pts))
-            except Exception as e:
-                print(f"⚠️ Extractor error {i} ({path}): {e}")
-                queue_points.put((i, path, target_image, None, None))
-
-    # --- Compensator+Saver: paralel I/O + update progress ---
-    def compensate_and_save_worker():
-        while True:
-            item = queue_points.get()
-            if item is None:
-                break
-            i, path, target_image, base_pts, target_pts = item
-            try:
-                compensated = None
-                if (target_image is not None) and (base_pts is not None) and (target_pts is not None):
-                    compensated = processor.compensate_motion(target_image, base_pts, target_pts)
-
+    # --- Fungsi Worker Tunggal (LOGIKA PROGRESS DIHAPUS) ---
+    def process_image_task(i, path):
+        # Pemeriksaan stop_requested tetap penting
+        if stop_requested and stop_requested():
+            return
+        
+        try:
+            # 1. Muat & Resize
+            img_list = load_images_from_paths([path], stop_requested=stop_requested)
+            if not img_list or img_list[0] is None:
+                return
+            target_image = resize_with_padding(img_list[0], target_dims)
+            
+            # 2. Hitung Motion
+            base_pts, target_pts = processor.calculate_global_motion(
+                base_image, target_image, stop_requested=stop_requested
+            )
+            
+            # 3. Kompensasi & Simpan
+            if base_pts is not None and target_pts is not None:
+                compensated = processor.compensate_motion(target_image, base_pts, target_pts)
                 if compensated is not None:
                     if save_align:
                         save_align_to_folder(compensated, i, path, align_folder)
                     if h5_file_handle:
                         with h5_lock:
                             save_to_hdf5(h5_file_handle, f"image_{i}", compensated, extract_exif(path))
-            except Exception as e:
-                print(f"⚠️ Compensate/Save error {i} ({path}): {e}")
-            finally:
-                # Bebaskan memori cepat
-                del target_image
-                if 'compensated' in locals():
-                    del compensated
-                gc.collect()
+        except Exception as e:
+            # Penting untuk menangkap exception di sini agar bisa di-raise di thread utama
+            print(f"⚠️ Error processing image {i} ({os.path.basename(path)}): {e}")
+            raise # Melempar kembali exception agar future.result() bisa menangkapnya
+        finally:
+            # Cleanup RAM tetap di sini
+            gc.collect()
 
-                # Update progress (selalu naik satu gambar, sukses/gagal)
-                with progress_lock:
-                    progress_counter["count"] += 1
-                    if update_progress:
-                        update_progress(
-                            progress_counter["count"], total_images_in_stack,
-                            language_config.IMAGE_PROCESS_IN_PROGRESS.format(progress_counter["count"], total_images_in_stack)
-                        )
+    # --- Eksekusi Menggunakan Pola "as_completed" ---
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        
+        tasks_to_process = image_paths[1:]
+        
+        # Buat dictionary untuk melacak future
+        future_to_path = {
+            executor.submit(process_image_task, i, path): path
+            for i, path in enumerate(tasks_to_process, start=1)
+        }
+        
+        # Inisialisasi progress. 1 untuk base image.
+        completed_count = 1
 
-    # --- Konfigurasi paralelisme ---
-    import os
-    num_extractors = max(1, min(4, os.cpu_count() or 1))
-    num_savers     = max(1, min(4, os.cpu_count() or 1))
+        # Loop ini akan berjalan setiap kali sebuah tugas selesai
+        for future in as_completed(future_to_path):
+            if stop_requested and stop_requested():
+                break # Keluar dari loop jika diminta berhenti
 
-    # --- Start threads ---
-    loader_thread = threading.Thread(target=loader_worker, name="loader")
-    extractor_threads = [threading.Thread(target=extractor_worker, name=f"extractor-{k}") for k in range(num_extractors)]
-    saver_threads = [threading.Thread(target=compensate_and_save_worker, name=f"saver-{k}") for k in range(num_savers)]
+            path = future_to_path[future]
+            try:
+                # Panggil .result() untuk memeriksa apakah ada exception di dalam thread
+                future.result()
+            except Exception as exc:
+                print(f"Task for {os.path.basename(path)} generated an exception: {exc}")
 
-    loader_thread.start()
-    for t in extractor_threads: t.start()
-    for t in saver_threads: t.start()
-
-    # --- Shutdown sequencing ---
-    loader_thread.join()
-    for t in extractor_threads: t.join()
-
-    # kirim sentinel ke saver sebanyak jumlah saver
-    for _ in range(num_savers):
-        queue_points.put(None)
-
-    for t in saver_threads: t.join()
-    
+            # Update progress di sini, di thread utama!
+            completed_count += 1
+            if update_progress:
+                update_progress(
+                    completed_count,
+                    total_images_in_stack,
+                    language_config.IMAGE_PROCESS_IN_PROGRESS.format(completed_count, total_images_in_stack)
+                )         
 def run_pipeline_global_crop(processor, image_paths, base_image, target_dims, 
                              update_progress, stop_requested, transformation_type,
-                             save_align, align_folder, h5_file_handle):
+                             save_align, align_folder, h5_file_handle,
+                             num_workers):
     """
     Alur global crop:
       Stage 1 (paralel & hemat RAM) -> hitung transform
@@ -1470,7 +1437,8 @@ def run_pipeline_global_crop(processor, image_paths, base_image, target_dims,
     # --- TAHAP 1: Hitung transform (0% -> 50%) ---
     all_transforms = _run_transform_calculation_stage(
         processor, images_to_process_for_transforms, base_image, target_dims,
-        update_progress, stop_requested
+        update_progress, stop_requested,
+        num_workers=num_workers
     )
     if not all_transforms:
         print("Transform calculation failed for all images. Aborting global crop.")
@@ -1497,92 +1465,58 @@ def run_pipeline_global_crop(processor, image_paths, base_image, target_dims,
         update_progress, stop_requested,
         save_align, align_folder,
         h5_file_handle,
-        base_image, image_paths[0]
+        base_image, image_paths[0],
+        num_workers=num_workers
     )
     
 def _run_transform_calculation_stage(processor, image_paths, base_image, target_dims, 
-                                     update_progress, stop_requested):
-    """
-    Tahap 1: Hitung transformasi 0%→50% dengan:
-      Loader (bounded) -> Extractor Pool (paralel)
-    """
-    import threading, queue, os
+                                     update_progress, stop_requested,
+                                     num_workers):
+    """Tahap 1 yang disederhanakan: Menghitung transformasi secara paralel."""
+    import os
 
     all_transforms = []
     num_to_process = len(image_paths)
     if num_to_process == 0:
         return all_transforms
 
-    # Queue kecil agar RAM irit
-    queue_images  = queue.Queue(maxsize=2)
-    queue_results = queue.Queue(maxsize=2)
+    # --- Fungsi Worker Tunggal ---
+    def calculate_transform_task(i, path):
+        if stop_requested and stop_requested(): return None
+        try:
+            img_list = load_images_from_paths([path], stop_requested=stop_requested)
+            if not img_list or img_list[0] is None: return None
+            
+            target_image = resize_with_padding(img_list[0], target_dims)
+            base_pts, target_pts = processor.calculate_global_motion(
+                base_image, target_image, stop_requested=stop_requested
+            )
+            
+            if base_pts is not None and target_pts is not None:
+                return (i, path, base_pts, target_pts)
+        except Exception as e:
+            print(f"⚠️ Transform calc error {i} ({os.path.basename(path)}): {e}")
+        return None
 
-    # Loader
-    def loader_worker():
-        for i, path in enumerate(image_paths, start=1):
+    # --- Eksekusi dan Kumpulkan Hasil ---
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        future_to_task = {executor.submit(calculate_transform_task, i, path): i 
+                          for i, path in enumerate(image_paths, start=1)}
+
+        results_received = 0
+        for future in as_completed(future_to_task):
             if stop_requested and stop_requested():
                 break
-            try:
-                img_list = load_images_from_paths([path], stop_requested=stop_requested)
-                if img_list and img_list[0] is not None:
-                    target_image = resize_with_padding(img_list[0], target_dims)
-                    queue_images.put((i, path, target_image))
-                else:
-                    queue_images.put((i, path, None))  # tandai gagal
-            except Exception as e:
-                print(f"⚠️ Loader error {i} ({path}): {e}")
-                queue_images.put((i, path, None))
-        # kirim sentinel untuk tiap extractor
-        for _ in range(num_extractors):
-            queue_images.put(None)
 
-    # Extractor paralel
-    def extractor_worker():
-        while True:
-            item = queue_images.get()
-            if item is None:
-                break
-            i, path, target_image = item
-            if target_image is None:
-                queue_results.put((i, path, None, None))
-                continue
-            try:
-                base_pts, target_pts = processor.calculate_global_motion(
-                    base_image, target_image, stop_requested=stop_requested
-                )
-                queue_results.put((i, path, base_pts, target_pts))
-            except Exception as e:
-                print(f"⚠️ Extractor error {i} ({path}): {e}")
-                queue_results.put((i, path, None, None))
-
-    # Konfigurasi paralelisme
-    num_extractors = max(1, min(4, os.cpu_count() or 1))
-
-    # Start threads
-    loader_thread = threading.Thread(target=loader_worker, name="loader")
-    extractor_threads = [threading.Thread(target=extractor_worker, name=f"extractor-{k}") for k in range(num_extractors)]
-    loader_thread.start()
-    for t in extractor_threads: t.start()
-
-    # Kumpulkan hasil & progress (tanpa sentinel; kita tahu jumlahnya)
-    results_received = 0
-    while results_received < num_to_process:
-        i, path, base_pts, target_pts = queue_results.get()
-        results_received += 1
-
-        if base_pts is not None and target_pts is not None:
-            all_transforms.append((i, path, base_pts, target_pts))
-        else:
-            print(f"Transform calculation failed for image {i} ({os.path.basename(path)})")
-
-        if update_progress:
-            current_percent = (results_received / num_to_process) * 50
-            status_text = language_config.RUN_PROCESS_TRANSFORMATION.format(results_received, num_to_process)
-            update_progress(int(current_percent), 100, status_text)
-
-    # Tutup & join
-    loader_thread.join()
-    for t in extractor_threads: t.join()
+            result = future.result()
+            results_received += 1
+            if result:
+                all_transforms.append(result)
+            
+            if update_progress:
+                percent = (results_received / num_to_process) * 50
+                status = language_config.RUN_PROCESS_TRANSFORMATION.format(results_received, num_to_process)
+                update_progress(int(percent), 100, status)
 
     all_transforms.sort(key=lambda x: x[0])
     return all_transforms
@@ -1591,118 +1525,69 @@ def _run_apply_and_save_stage(processor, temp_transforms, crop_bounds, target_di
                               update_progress, stop_requested,
                               save_align, align_folder,
                               h5_file_handle,
-                              base_image, base_image_path):
-    """
-    Tahap 3 yang sudah direfactor: Menerapkan transformasi dan menyimpan dengan 
-    pola worker pool yang stabil dan hemat sumber daya.
-    """
-    # Lock untuk operasi yang tidak thread-safe (HDF5 dan counter)
+                              base_image, base_image_path,
+                              num_workers):
+    """Tahap 3 yang disederhanakan: Menerapkan transformasi dan menyimpan secara paralel."""
+
     h5_lock = threading.Lock()
     progress_lock = threading.Lock()
 
-    # Gabungkan base image dan target menjadi satu daftar pekerjaan
-    # Format: (indeks, path, base_pts, target_pts, data_gambar_jika_sudah_ada)
-    tasks = [(0, base_image_path, None, None, base_image)]
-    for i, path, base_pts, target_pts in temp_transforms:
-        tasks.append((i, path, base_pts, target_pts, None))
-
+    tasks = [(0, base_image_path, None, None, base_image)] + \
+            [(i, path, base_pts, target_pts, None) for i, path, base_pts, target_pts in temp_transforms]
+    
     num_to_save = len(tasks)
     completed_counter = {"count": 0}
+    
+    # --- Fungsi Worker Tunggal ---
+    def apply_and_save_task(task_data):
+        i, path, base_pts, target_pts, image_data = task_data
+        if stop_requested and stop_requested(): return
 
-    # Gunakan Queue untuk mendistribusikan pekerjaan ke worker
-    task_queue = queue.Queue()
+        try:
+            # 1. Muat gambar jika diperlukan
+            if image_data is None:
+                img_list = load_images_from_paths([path], stop_requested=stop_requested)
+                if not img_list or img_list[0] is None: return
+                image_data = resize_with_padding(img_list[0], target_dims)
 
-    # Worker function: setiap thread akan menjalankan fungsi ini
-    def worker():
-        while True:
-            # Ambil tugas dari queue, akan block sampai ada tugas
-            task = task_queue.get()
-
-            # Sentinel: sinyal untuk berhenti
-            if task is None:
-                break
+            # 2. Proses: Kompensasi & Crop
+            processed_image = None
+            if i > 0: # Target image
+                if base_pts is not None and target_pts is not None:
+                    compensated = processor.compensate_motion(image_data, base_pts, target_pts)
+                    if compensated is not None:
+                        processed_image = crop_image(compensated, crop_bounds)
+            else: # Base image
+                processed_image = crop_image(image_data, crop_bounds)
             
-            i, path, base_pts, target_pts, image_data = task
+            # 3. Simpan
+            if processed_image is not None:
+                if save_align:
+                    save_align_to_folder(processed_image, i, path, align_folder)
+                if h5_file_handle:
+                    with h5_lock:
+                        save_to_hdf5(h5_file_handle, f"image_{i}", processed_image, extract_exif(path))
+        except Exception as e:
+            print(f"⚠️ Apply/Save error {i} ({os.path.basename(path)}): {e}")
+        finally:
+            # 4. Update Progress & Cleanup
+            with progress_lock:
+                completed_counter["count"] += 1
+                count = completed_counter["count"]
+                if update_progress:
+                    percent = 50 + (count / num_to_save) * 50
+                    status = language_config.RUN_SAVING_TRANSFORMATION.format(count, num_to_save)
+                    update_progress(int(percent), 100, status)
+            
+            del image_data
+            if 'processed_image' in locals(): del processed_image
+            if 'compensated' in locals(): del compensated
+            gc.collect()
 
+    # --- Eksekusi Menggunakan ThreadPoolExecutor ---
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        for task in tasks:
             if stop_requested and stop_requested():
-                task_queue.task_done()
-                continue
-            
-            try:
-                # Muat gambar jika belum ada (hanya untuk target images)
-                if image_data is None:
-                    img_list = load_images_from_paths([path], stop_requested=stop_requested)
-                    if not img_list or img_list[0] is None:
-                        continue # Langsung ke tugas berikutnya
-                    image_data = resize_with_padding(img_list[0], target_dims)
-
-                # Kompensasi Gerakan + Crop
-                processed_image = None
-                if i > 0: # Ini adalah target image
-                    if base_pts is not None and target_pts is not None:
-                        compensated = processor.compensate_motion(image_data, base_pts, target_pts)
-                        if compensated is not None:
-                            processed_image = crop_image(compensated, crop_bounds)
-                else:  # Ini adalah base image
-                    processed_image = crop_image(image_data, crop_bounds)
-                
-                # Simpan hasil jika berhasil diproses
-                if processed_image is not None:
-                    if save_align:
-                        save_align_to_folder(processed_image, i, path, align_folder)
-                    if h5_file_handle:
-                        with h5_lock:  # h5py tidak thread-safe
-                            save_to_hdf5(h5_file_handle, f"image_{i}", processed_image, extract_exif(path))
-
-            except Exception as e:
-                print(f"⚠️ Error processing/saving image {i} ({os.path.basename(path)}): {e}")
-            finally:
-                # Selalu update progress, baik sukses maupun gagal
-                with progress_lock:
-                    completed_counter["count"] += 1
-                    current_completed = completed_counter["count"]
-                    if update_progress:
-                        # Progress dari 50% ke 100%
-                        current_percent = 50 + (current_completed / num_to_save) * 50
-                        status_text = language_config.RUN_SAVING_TRANSFORMATION.format(current_completed, num_to_save)
-                        update_progress(int(current_percent), 100, status_text)
-                
-                # Bebaskan memori
-                del image_data
-                if 'processed_image' in locals():
-                    del processed_image
-                if 'compensated' in locals():
-                    del compensated
-                gc.collect()
-
-                # Tandai tugas ini selesai
-                task_queue.task_done()
-
-    # --- Start Pipeline ---
-    
-    # Tentukan jumlah worker
-    num_workers = max(1, min(4, os.cpu_count() or 1))
-    
-    # Buat dan jalankan thread worker
-    threads = []
-    for _ in range(num_workers):
-        t = threading.Thread(target=worker)
-        t.daemon = True # Biarkan thread berhenti jika program utama selesai
-        t.start()
-        threads.append(t)
-
-    # Masukkan semua tugas ke dalam queue (Produsen)
-    for task in tasks:
-        task_queue.put(task)
-
-    # Tunggu sampai semua tugas di queue selesai diproses
-    task_queue.join()
-
-    # Kirim sinyal berhenti (sentinel) ke setiap worker
-    for _ in range(num_workers):
-        task_queue.put(None)
-
-    # Tunggu semua thread worker benar-benar selesai
-    for t in threads:
-        t.join()
-        
+                break
+            executor.submit(apply_and_save_task, task)     
+               

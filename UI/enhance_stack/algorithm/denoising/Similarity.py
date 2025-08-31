@@ -10,10 +10,9 @@ import h5py
 from PySide6.QtCore import QThread, Signal, Qt
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (add_legend_heatmap, extract_all_metadata, 
                                                                                     gaussian_window, get_all_image_paths_for_single_process, load_images_from_paths, 
-                                                                                    normalize_image, optical_flow_refinement, resize_all_with_padding, save_image, setup_balanced_batching, 
+                                                                                    normalize_image, resize_all_with_padding, save_image, setup_balanced_batching, 
                                                                                     standard_refinement, temporal_consistency_refinement)
 from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityFrequencyInterface, SimilaritySpatialInterface
-# from UI.enhance_stack.algorithm.model_trainer.mobile_net_v2 import AlphaGenerator
 from UI.enhance_stack.components.single_page_layout.parameter_denoising.similarity_parameter_settings import  load_similarity_config
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
@@ -122,9 +121,8 @@ class SimilarityAlgorithm:
         print("\nModel Loader: [Simulasi] Pemuatan model AI diaktifkan.")
         
         # --- Logika Simulasi ---
-        # Atur flag ini ke True agar bagian lain dari kode berpikir model sudah dimuat.
-        self.knowledge_model = {} # Kosongkan karena tidak ada model nyata
-        self.model_type = 'simulation' # Tandai bahwa ini adalah mode simulasi
+        self.knowledge_model = {}
+        self.model_type = 'simulation'
         self.is_model_loaded = True
         print("  -> SUKSES: Mode simulasi model AI siap.")
         return True
@@ -186,7 +184,7 @@ class SimilarityAlgorithm:
                     temporal_analysis_mode='one_pass', # Opsi: 'one_pass', 'two_pass_full'
                     **unused_kwargs):
 
-        # --- LANGKAH 1: Inisialisasi dan Penentuan Resolusi Kerja (Tidak Berubah) ---
+        # --- LANGKAH 1: Inisialisasi dan Penentuan Resolusi Kerja ---
         tile_h, tile_w = map(int, tile_size)
         try:
             c_interface = SimilaritySpatialInterface(lib_path)
@@ -216,11 +214,18 @@ class SimilarityAlgorithm:
         row_starts = np.ascontiguousarray(np.unique(row_starts).astype(np.int32))
         col_starts = np.ascontiguousarray(np.unique(col_starts).astype(np.int32))
 
+        is_two_pass = temporal_analysis_mode == 'two_pass_full'
+        use_overall_progress = total_overall_images and total_overall_images > 0
+        
+        # Tentukan rentang persentase untuk setiap tahap
+        pass1_range = (0, 50)
+        pass2_range = (50, 95) if is_two_pass else (0, 95)
+        
         # (PASS 1): Membuat Peta Stabilitas ---
         stability_map = None
-        if temporal_analysis_mode == 'two_pass_full':
+        if is_two_pass:
             if update_progress:
-                update_progress(5, language_config.ANALYSIS_STEP_ONE)
+                update_progress(pass1_range[0], language_config.ANALYSIS_STEP_ONE)
             
             downsampled_h, downsampled_w = work_res_h // 2, work_res_w // 2
             sum_map = np.zeros((downsampled_h, downsampled_w), dtype=np.float32)
@@ -231,8 +236,14 @@ class SimilarityAlgorithm:
 
             for i, image_orig in enumerate(images):
                 if stop_requested and stop_requested(): return (None, None, 0)
+                
                 if update_progress:
-                    update_progress(int(5 + ((i + 1) / num_images) * 45), language_config.ANALYSIS_STEP_ONE_PROGRESS.format(i + 1, num_images))
+                    progress_in_pass1 = (i + 1) / num_images
+                    current_total_progress = pass1_range[0] + (progress_in_pass1 * (pass1_range[1] - pass1_range[0]))
+                    update_progress(
+                        int(current_total_progress),
+                        language_config.ANALYSIS_STEP_ONE_PROGRESS.format(i + 1, num_images)
+                    )
                 
                 curr_work_res = cv2.resize(normalize_image(image_orig, ref_dtype), (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
                 temp_weight_map = np.ascontiguousarray(np.zeros((work_res_h, work_res_w), dtype=np.float32))
@@ -265,109 +276,70 @@ class SimilarityAlgorithm:
             
             del sum_map, sum_sq_map
 
-        # === LANGKAH 3 (PASS 2 / UTAMA): Pipeline Akumulasi =======================
-        msg_pass = "Pass 2/2: " if temporal_analysis_mode != 'one_pass' else ""
+        # === LANGKAH 3 (PASS 2 / UTAMA): Pipeline Akumulasi (VERSI SEKUENSIAL) =======================
+        msg_pass = "Pass 2/2: " if is_two_pass else ""
         if update_progress:
-            update_progress(50, language_config.ANALYSIS_STEP_TWO.format(msg_pass))
-
-        PIPELINE_QUEUE_SIZE = 2
-        SENTINEL = None
-        prepared_data_queue = queue.Queue(maxsize=PIPELINE_QUEUE_SIZE)
-        processed_results_queue = queue.Queue(maxsize=PIPELINE_QUEUE_SIZE)
+            update_progress(pass2_range[0], language_config.ANALYSIS_STEP_TWO.format(msg_pass))
 
         ref_work_res_pass2 = cv2.resize(reference_image_float, (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
         stability_map_work_res = None
         if stability_map is not None:
             stability_map_work_res = cv2.resize(stability_map, (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
 
-        # --- Definisi Worker Thread (Tetap Sama) ---
-        def producer_task():
-            try:
-                for i, image_orig in enumerate(images):
-                    if stop_requested and stop_requested(): break
-                    if not isinstance(image_orig, np.ndarray): continue
-                    curr_work_res = cv2.resize(normalize_image(image_orig, ref_dtype), (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
-                    prepared_data_queue.put((i, curr_work_res))
-                prepared_data_queue.put(SENTINEL)
-            except Exception as e:
-                prepared_data_queue.put(e)
-
-        def consumer_task():
-            while True:
-                item = prepared_data_queue.get()
-                if item is SENTINEL or isinstance(item, Exception):
-                    processed_results_queue.put(item)
-                    break
-                try:
-                    i, curr_work_res = item
-                    temp_weight_map_work_res = np.ascontiguousarray(np.zeros((work_res_h, work_res_w), dtype=np.float32))
-                    dummy_final_sum_work_res = np.ascontiguousarray(np.zeros((work_res_h, work_res_w, ref_channels_buffer), dtype=np.float32))
-                    c_interface.call_accumulate_frame_weighted(
-                        final_image_sum=dummy_final_sum_work_res, 
-                        weight_map_sum=temp_weight_map_work_res,
-                        current_image=curr_work_res, reference_image=ref_work_res_pass2, base_window=base_window,
-                        stability_map=stability_map_work_res, row_starts=row_starts, col_starts=col_starts,
-                        tile_h=tile_h, tile_w=tile_w, h=work_res_h, w=work_res_w, channels=ref_channels_buffer,
-                        motion_sensitivity=motion_sensitivity, noise_offset_factor=noise_offset_factor
-                    )
-                    processed_results_queue.put((i, temp_weight_map_work_res))
-                except Exception as e:
-                    processed_results_queue.put(e)
-                    break
-
-        # --- Menjalankan Pipeline dan Loop Akumulator ---
-        producer_thread = threading.Thread(target=producer_task)
-        consumer_thread = threading.Thread(target=consumer_task)
-        
-        producer_thread.start()
-        consumer_thread.start()
-        
         final_image_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32))
         weight_map_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w), dtype=np.float32))
         
         processed_frames_spatial = 0
-        progress_cap_percent = 95
         if temporal_consistency: weight_maps_all = []
         if weight_of_each_image: weight_maps_per_image = []
 
-        valid_images_count = sum(1 for img in images if isinstance(img, np.ndarray))
-        for _ in range(valid_images_count):
-            if stop_requested and stop_requested(): break
-            
-            result_item = processed_results_queue.get()
-            
-            if result_item is SENTINEL: break
-            if isinstance(result_item, Exception): raise result_item
+        # Loop sekuensial utama
+        for i, image_orig in enumerate(images):
+            if stop_requested and stop_requested():
+                print("Spatial merging process was cancelled.")
+                break
+            if not isinstance(image_orig, np.ndarray):
+                continue
 
-            i, temp_weight_map_work_res = result_item
-            image_orig = images[i]
+            curr_work_res = cv2.resize(normalize_image(image_orig, ref_dtype), (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
+            
+            temp_weight_map_work_res = np.ascontiguousarray(np.zeros((work_res_h, work_res_w), dtype=np.float32))
+            dummy_final_sum_work_res = np.ascontiguousarray(np.zeros((work_res_h, work_res_w, ref_channels_buffer), dtype=np.float32))
+            c_interface.call_accumulate_frame_weighted(
+                final_image_sum=dummy_final_sum_work_res, 
+                weight_map_sum=temp_weight_map_work_res,
+                current_image=curr_work_res, reference_image=ref_work_res_pass2, base_window=base_window,
+                stability_map=stability_map_work_res, row_starts=row_starts, col_starts=col_starts,
+                tile_h=tile_h, tile_w=tile_w, h=work_res_h, w=work_res_w, channels=ref_channels_buffer,
+                motion_sensitivity=motion_sensitivity, noise_offset_factor=noise_offset_factor
+            )
 
             if update_progress:
-                current_img_overall = images_processed_so_far + i + 1
-                prog = int(50 + ((current_img_overall / total_overall_images) * (progress_cap_percent - 50) if total_overall_images and total_overall_images > 0 else ((i + 1) / num_images) * (progress_cap_percent - 50)))
-                msg_pass_str = "Pass 2/2: " if temporal_analysis_mode != 'one_pass' else ""
-                msg = language_config.ANALYSIS_STEP_TWO_PROGRESS.format(msg_pass_str, i + 1, num_images)
-                update_progress(prog, msg)
+                if use_overall_progress:
+                    current_img_overall = images_processed_so_far + i + 1
+                    progress_in_pass2 = current_img_overall / total_overall_images
+                    msg = language_config.IMAGE_PROCESS_IN_PROGRESS.format(current_img_overall, total_overall_images)
+                else:
+                    progress_in_pass2 = (i + 1) / num_images
+                    msg = language_config.ANALYSIS_STEP_TWO_PROGRESS.format(msg_pass, i + 1, num_images)
+                
+                current_total_progress = pass2_range[0] + (progress_in_pass2 * (pass2_range[1] - pass2_range[0]))
+                update_progress(int(current_total_progress), msg)
         
-            # Langsung gunakan hasil dari C++ setelah di-resize.
             weight_map_full_res = cv2.resize(temp_weight_map_work_res, (ref_image_w, ref_image_h), interpolation=cv2.INTER_CUBIC)
             
-            # --- Akumulasi final yang disederhanakan ---
             weight_map_sum += weight_map_full_res
             final_image_sum += normalize_image(image_orig, ref_dtype) * weight_map_full_res[:, :, np.newaxis]
             
             if weight_of_each_image:
-                # Logika 'collect_raw_maps_for_learning' tidak lagi relevan karena tidak ada 'refined_weight'
                 weight_maps_per_image.append(weight_map_full_res.copy())
             if temporal_consistency:
                 weight_maps_all.append(weight_map_full_res.copy())
                 
             processed_frames_spatial += 1
-        
-        producer_thread.join()
-        consumer_thread.join()
-
-        # --- LANGKAH 5: Normalisasi Final di Python (Tidak Berubah) ---
+            del curr_work_res, temp_weight_map_work_res, dummy_final_sum_work_res, weight_map_full_res
+            
+        # --- LANGKAH 5: Normalisasi Final di Python ---
         if processed_frames_spatial > 0:
             try:
                 valid_pixels = weight_map_sum > 1e-6
@@ -378,12 +350,14 @@ class SimilarityAlgorithm:
                 if temporal_consistency:
                     temporal_consistency_refinement(weight_maps_all, weight_map_sum, save_temporal_std_path=save_temporal_std_path)
                 
+                # if update_progress:
+                #     update_progress(finalization_percent, language_config.PROCESS_FINISHED_STATUS)
+                
                 return (final_image, weight_map_sum, processed_frames_spatial, weight_maps_per_image) if weight_of_each_image else (final_image, weight_map_sum, processed_frames_spatial)
             except Exception as e:
                 raise RuntimeError(f"Normalization failed: {e}")
         
         return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
-    
     
     def _frequency_merging(self, images, ref_image_h, ref_image_w, ref_channels_buffer, ref_dtype,
                         reference_image_float,
