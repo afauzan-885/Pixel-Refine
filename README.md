@@ -1,26 +1,57 @@
 <p align="center"><img src="UI/resources/image/Logo_Pixel_Refine.png" width="200" alt="Logo Pixel Refine"></p>
 
-## Introduction
+<h2 align="center"> Pixel Refine </h2>
+<p align="center">
+A computational photography tool, inspired by Gcam, Raw+ Kandao, Burst.photo, and PhotoAcute 3.
+</p>
 
-Pixel Refine is designed to reduce noise in images. Inspired by the image processing techniques used in Google Pixel cameras, Raw+ Kandao, Burst.photo, and PhotoAcute 3.
+---
 
-This app was created to address the shortcomings of stock smartphone camera processing (old smartphones), Raw+ Kandao (which limits to 16 images), Burst.photo (which was exclusive to the MacOS ecosystem), and PhotoAcute 3 (a great software that has been discontinued).
+## 👋 Introduction
 
-This app is expected to bridge the gap between professional cameras (DSLR or Mirrorless) and the computational photography capabilities of smartphone cameras.
+**Pixel Refine** is designed to reduce noise and enhance details in images through multi-frame fusion and advanced alignment algorithms.  
+This project aims to **bridge the gap** between professional cameras (DSLR/Mirrorless) and computational photography features on modern smartphones.
 
-## Supported Image Formats
+It was created to address the shortcomings of:
+- **Stock camera processing** on older smartphones.  
+- **Raw+ Kandao** (limited to 16 images).  
+- **Burst.photo** (exclusive to macOS).  
+- **PhotoAcute 3** (powerful but discontinued).  
 
-| Image Format                    | Status        |
-| ------------------------------- | ------------- |
-| **JPG**                         | ✅ Supported   |
-| **TIFF**                        | ✅ Supported   |
-| **PNG**                         | ✅ Supported   |
-| **RAW (such as DNG, NEF, ARW, CR2, CR3, etc.)**|✅ Supported   |
-> Note: For the RAW process, the resulting image does not yet support DNG Out, this feature will be implemented at a later time.
+---
 
-## Sample Images
+## 📸 Supported Image Formats
 
-Below are some sample images processed (left: Original, Right: Processed):
+| Image Format | Status |
+|--------------|--------|
+| **JPG** | ✅ Supported |
+| **TIFF** | ✅ Supported |
+| **PNG** | ✅ Supported |
+| **RAW (DNG, NEF, ARW, CR2, CR3, etc.)** | ✅ Supported |
+
+> **Note**: RAW processing output does not yet support **DNG export** (planned in future release).
+
+---
+
+## 🛠️ Algorithms
+
+### **1. Alignment**
+- **Farneback Optical Flow** → Pixel-level precision, but weaker against large movements.  
+- **AKAZE** → Robust for large differences and deformation.  
+- **ORB (Oriented FAST & Rotated BRIEF)** → Fast, good general purpose, less robust for large variations.  
+- **LightGlue** → State-of-the-art deep learning based alignment, **stronger than AKAZE**, but requires more memory.
+
+### **2. Super Resolution**
+- **Interpolation** (temporarily disabled) → Simple upscaling to improve detail slightly.
+
+### **3. Denoising**
+- **Average** → Reduces noise by averaging frames.  
+- **Median** → Preserves edges while removing noise.  
+- **Similarity (Custom)** → Detail-preserving denoising based on pixel similarity, robust against large movements.
+
+---
+
+## 🖼️ Sample Results
 
 <p align="center">
   <img src="sample/evening_in_the_city.jpg" width="400" alt="Evening in the city">
@@ -38,17 +69,11 @@ Below are some sample images processed (left: Original, Right: Processed):
   <img src="sample/night_in_the_suburbs.jpg" width="400" alt="Night In the Suburbs">
 </p>
 
-<p>
-*Image taken with Samsung S9 Plus
-<p>
-**All images were taken with HDR Bracketing (HDR Burst)    
-</p>
-<p>
-***Color and contrast with Luminar Neo application  
-</p>
-</p>
+> *Shot on Samsung S9 Plus, HDR Burst mode, final color/contrast adjusted in Luminar Neo.*
 
-## Screenshots
+---
+
+## 🖥️ Screenshots
 
 <p align="center">
   <img src="sample/Home_Page.png" width="600" alt="Single Mode">
@@ -60,31 +85,28 @@ Below are some sample images processed (left: Original, Right: Processed):
   <img src="sample/Batch_Mode_Processing.png" width="600" alt="Batch Mode Processing">
 </p>
 
-## Algorithms
+---
 
-Following is a list of algorithms used in the process:
+## ⚙️ Minimum Requirements
 
-### **1. Alignment**
+To process **16 images at 12MP resolution**, the minimum requirements specs are:
 
-* **Farneback Optical Flow**:
-  * Very precise at the pixel level and works well in low light conditions.
-  * Fairly fast and able to handle local motion within the frame.
-  * Weak against significant differences between frames.
-* **AKAZE**:
-  * Advanced algorithm that excels at handling large differences between images.
-  * Ideal for images with high deformation or significant variations.
-* **ORB (Oriented FAST and Rotated BRIEF)**:
-  * Very fast and suitable for most conditions.
-  * Not as robust when handling large differences between images.
+| Component | Requirement |
+|-----------|-------------|
+| **Display** | 1280 × 720 |
+| **RAM** | 4 GB |
+| **Storage** | 4 GB free space (temporary files) |
+| **CPU** | Dual Core / 4 Threads @ 2.5 GHz |
+| **OS** | Windows 10 (Windows 7/8 not tested) |
 
-### **2. Super Resolution**
+---
 
-* **Interpolation**: Increases image resolution based on interpolation technique, slightly improves image detail. Note: Temporarily disabled
+### 📝 Planned Features
+- DNG output support  
+- More advanced noise reduction  
+- More GPU acceleration  
+- Panorama mode  
+- HDR stack processing  
 
-### **3. Denoising**
-
-* **Average**: Reduces noise by averaging pixel values across multiple frames.
-* **Median**: Uses the median of pixel values for better noise reduction while preserving edges.
-* **Similarity**: Special algorithm designed to enhance detail while suppressing noise based on pixel similarity to prevent motion artifacts, highly robust to large movements.
-
-**(This program is still under development and has many flaws)**
+## ⚠️ Status
+This program is **still under development** and may contain bugs or limitations.  
