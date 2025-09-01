@@ -1,5 +1,3 @@
-import queue
-import threading
 import traceback
 import cv2
 import numpy as np
@@ -540,7 +538,7 @@ class SimilarityAlgorithm:
                 update_progress=None, stop_requested=None,
                 save_weight_map_path=None, 
                 total_overall_images=None, images_processed_so_far=0, 
-                save_temporal_std_path= "database/stack.jpg",
+                save_temporal_std_path= None, #"database/stack.jpg",
                 weight_of_each_image=False, 
                 collect_raw_maps_for_learning=False,
                 use_learning_model=False,

@@ -5,16 +5,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from functools import lru_cache
 import gc
 import math
-import queue
 import threading
-import concurrent
 import cv2
 import json
 import os
 import sqlite3
 import subprocess
 import exifread
-import h5py
 import numpy as np
 import tifffile
 from PIL import Image
@@ -25,7 +22,6 @@ try:
 except ImportError:
     RAWPY_AVAILABLE = False
     
-# from UI.enhance_stack.algorithm.model_trainer.mobile_net_v2 import AlphaGenerator
 from UI.settings.General.Language import language_config
 
 

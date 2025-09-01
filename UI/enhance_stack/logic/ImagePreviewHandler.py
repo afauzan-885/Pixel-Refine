@@ -1,26 +1,37 @@
 from collections import OrderedDict
+import os, subprocess, platform
 from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsTextItem
 from PySide6.QtCore import Qt, QTimer, Slot, QObject, QRectF, QBuffer, QByteArray, QIODevice, QPointF
 from PySide6.QtGui import QPixmap, QImage
-try:
-    import psutil
-    _PSUTIL_AVAILABLE = True
-except ImportError:
-    print("Warning: psutil library not found. RAM-based cache limits disabled.")
-    print("Please install it: pip install psutil")
-    psutil = None
-    _PSUTIL_AVAILABLE = False
 from UI.settings.General.Language import language_config
 from UI.enhance_stack.logic.multi_threading import RawImageProcessingThread
 from UI.enhance_stack.logic.Zoomable_Handler import Zoomable
-# -------------------------------------------
+
 
 class ImagePreviewHandler(QObject):
     """
     Mengelola logika tampilan pratinjau gambar dengan cache LRU adaptif
     berbasis RAM/item count, dengan opsi penyimpanan cache sebagai JPEG bytes atau QImage.
     """
-    
+
+    @staticmethod
+    def get_total_system_ram() -> int:
+        """Ambil total RAM sistem (bytes) tanpa psutil."""
+        try:
+            if platform.system() == "Windows":
+                output = subprocess.check_output(
+                    ["wmic", "OS", "get", "TotalVisibleMemorySize", "/Value"],
+                    universal_newlines=True
+                )
+                for line in output.splitlines():
+                    if "TotalVisibleMemorySize" in line:
+                        kb = int(line.split("=")[1].strip())
+                        return kb * 1024
+            else:
+                return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        except Exception:
+            return 0
+
     def __init__(self, preview_scene: QGraphicsScene, preview_view: Zoomable, parent=None):
         super().__init__(parent)
         if not isinstance(preview_view, Zoomable):
@@ -54,28 +65,16 @@ class ImagePreviewHandler(QObject):
         self._current_processing_path: str | None = None
         self._persistent_zoom_level = 0
 
-        self._process: "psutil".Process | None = None
-        self._total_system_ram: int = 0
-        self.psutil_monitoring_active = False
-        
+        self._total_system_ram: int = self.get_total_system_ram()
+        self.psutil_monitoring_active = self._total_system_ram > 0
+
         self._persistent_zoom_level = 0
         self._persistent_relative_center: tuple[float, float] | None = None # Simpan posisi relatif
        
-        if _PSUTIL_AVAILABLE:
-            try:
-                self._process = psutil.Process()
-                self._total_system_ram = psutil.virtual_memory().total
-                self.psutil_monitoring_active = True
-            except (psutil.NoSuchProcess, psutil.AccessDenied, Exception) as e:
-                self._process = None
-                self._total_system_ram = 0
-                self.psutil_monitoring_active = False
-        
         if hasattr(self.preview_view, 'view_state_changed'):
             self.preview_view.view_state_changed.connect(self._store_view_state)
         else:
             print("Warning: Zoomable view does not have 'view_state_changed' signal.")
-
         
     # --- Metode Publik ---
     @Slot(int, object)
@@ -275,10 +274,23 @@ class ImagePreviewHandler(QObject):
 
         if value_to_cache is not None:
             ram_ok = True; item_count_ok = True
-            if self.psutil_monitoring_active and self._process:
-                 try:
-                      if self._process.memory_percent() > self.RAM_LIMIT_PERCENT: ram_ok = False
-                 except Exception: pass
+            if self.psutil_monitoring_active:
+                try:
+                    import resource  # hanya Linux/macOS
+                    usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                    # Catatan: di Linux ru_maxrss dalam KB, di macOS dalam bytes
+                    if platform.system() == "Linux":
+                        used_ram = usage * 1024
+                    else:
+                        used_ram = usage
+                    percent_used = (used_ram / self._total_system_ram * 100.0) if self._total_system_ram > 0 else 0
+                    if percent_used > self.RAM_LIMIT_PERCENT:
+                        ram_ok = False
+                except Exception:
+                    ram_ok = True
+            else:
+                ram_ok = True
+
             item_count_ok = len(self._preview_cache) < self.MAX_CACHE_ITEMS
 
             while not (ram_ok and item_count_ok) and len(self._preview_cache) > 0:

@@ -4,7 +4,6 @@ import threading
 import traceback
 import cv2
 import numpy as np
-import sqlite3
 import os
 import json
 import concurrent.futures
@@ -193,51 +192,77 @@ class AKAZEAlgorithm:
                     result_q.put((image_type, None)) # Kirim sinyal error
 
 
-        # --- PERUBAHAN 2: Inisialisasi antrian dan thread worker ---
+        # --- Inisialisasi antrian dan thread worker ---
         job_queue = queue.Queue()
-        result_queue = queue.Queue(maxsize=3) # Cukup untuk base dan target
+        result_queue = queue.Queue(maxsize=3) 
 
         filter_thread = threading.Thread(target=filter_worker, args=(job_queue, result_queue))
         filter_thread.start()
 
-        # --- PERUBAHAN 3: Isi antrian tugas (Produser) ---
+        # --- Isi antrian tugas (Produser) ---
         job_queue.put(("base", base_image))
         job_queue.put(("target", target_image))
-        job_queue.put(None)  # Sinyal akhir pekerjaan
+        job_queue.put(None)
 
-        # --- PERUBAHAN 4: Loop utama menjadi konsumen hasil filtering ---
+        # --- Loop utama menjadi konsumen hasil filtering ---
         enhanced_base_gray, enhanced_target_gray = None, None
         results_received = 0
         while results_received < 2:
-            item = result_queue.get() # Memblokir hingga hasil tersedia
-            if item is None: # Sinyal selesai dari worker
+            item = result_queue.get()
+            if item is None: 
                 break
             
             image_type, image_data = item
-            if image_data is None: # Terjadi error di worker
+            if image_data is None:
                 filter_thread.join()
                 return None, None
 
             if image_type == "base":
                 enhanced_base_gray = image_data
-            else: # target
+            else: 
                 enhanced_target_gray = image_data
             
             results_received += 1
             
-        # Pastikan thread worker selesai sebelum melanjutkan
         filter_thread.join()
 
         if enhanced_base_gray is None or enhanced_target_gray is None:
             print("Failed to get filtered images.")
             return None, None
+
+        # --- Logika Resize Berdasarkan Resolusi ---
+        h_orig, w_orig = enhanced_base_gray.shape
+        megapixels = (h_orig * w_orig) / 1_000_000.0
+        
+        scale_factor = 1.0
+        new_width, new_height = w_orig, h_orig
+
+        # Urutan kondisi penting: dari resolusi tertinggi ke terendah.
+        if megapixels > 22.0:
+            target_mp = 18.0
+            scale_factor = (target_mp / megapixels) ** 0.5 # Akar kuadrat karena area = w * h
+        elif megapixels > 18.0:
+            scale_factor = 0.7
+        elif 11.5 <= megapixels <= 12.5: # Memberi sedikit rentang untuk 12MP
+            scale_factor = 0.7
+        # Untuk 8MP dan resolusi lain, tidak ada perubahan (scale_factor tetap 1.0)
+
+        if scale_factor < 1.0:
+            new_width = int(w_orig * scale_factor)
+            new_height = int(h_orig * scale_factor)
             
-        # --- DARI SINI, KODE KEMBALI SEPERTI SEMULA, TAPI MENGGUNAKAN HASIL DARI QUEUE ---
-        h, w = enhanced_base_gray.shape
+            # Gunakan INTER_AREA untuk downscaling karena memberikan hasil terbaik
+            interpolation = cv2.INTER_AREA
+            
+            enhanced_base_gray = cv2.resize(enhanced_base_gray, (new_width, new_height), interpolation=interpolation)
+            enhanced_target_gray = cv2.resize(enhanced_target_gray, (new_width, new_height), interpolation=interpolation)
+       
+        h, w = enhanced_base_gray.shape 
         blocks_x, blocks_y = num_blocks
         block_w = max(1, w // blocks_x)
         block_h = max(1, h // blocks_y)
         max_kps_per_block = 300
+
 
         try:
             akaze = cv2.AKAZE_create(
@@ -348,7 +373,6 @@ class AKAZEAlgorithm:
 
         return pts_base, pts_target
 
-    
     def compensate_motion(self, base_image, base_points, target_points, config_filename=None):
         """
         Menerapkan kompensasi gerakan menggunakan transformasi (dengan USAC_MAGSAC)
@@ -462,7 +486,7 @@ def main(db_path,
         raise RuntimeError("Base image failed to load.")
     
     if num_workers is None:
-        num_workers = 2
+        num_workers = 4
     
     base_image_raw = base_img_list[0]
     base_resized_list, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="median")

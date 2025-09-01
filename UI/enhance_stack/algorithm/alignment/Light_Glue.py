@@ -1,6 +1,5 @@
 import gc
 import queue
-import site
 import subprocess
 import sys
 import threading
@@ -12,11 +11,11 @@ from pathlib import Path
 from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 from PySide6.QtCore import Qt
 import h5py
-import requests
 import onnxruntime as ort
-from tqdm import tqdm
+import urllib
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (calculate_crop_parameters, deduplicate_keypoints, do_warp_and_crop, estimate_noise_variance, extract_all_metadata, get_adaptive_bilateral, get_all_image_paths_for_batch_process,
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (calculate_crop_parameters, deduplicate_keypoints, do_warp_and_crop, estimate_noise_variance, 
+                                                                                    extract_all_metadata, get_adaptive_bilateral, get_all_image_paths_for_batch_process,
                                                                                     get_all_image_paths_for_single_process, load_images_from_paths, prepare_image,
                                                                                     resize_all_with_padding, run_pipeline_global_crop, run_pipeline_non_crop)
 from UI.enhance_stack.components.single_page_layout.parameter_alignment.light_glue_parameter_settings import load_light_glue_config
@@ -110,7 +109,7 @@ def add_dll_to_path():
             dll_dir = dll.parent
             os.add_dll_directory(str(dll_dir))
             os.environ["PATH"] = str(dll_dir) + os.pathsep + os.environ.get("PATH", "")
-        print(f"[INFO] Adding cuDNN version {cudnn_dlls[0].stem} from folder: {cudnn_dlls[0].parent}")
+        print(f"[INFO] Adding cuDNN from folder: {cudnn_dlls[0].parent}")
 
     # Check if the CUDA provider can be loaded after adding the path
     try:
@@ -125,7 +124,7 @@ def add_dll_to_path():
 # --- Panggil fungsi ini di awal skrip Anda ---
 if os.name == 'nt':
     add_dll_to_path()
-
+        
 class LightGlueAlgorithm:
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
         self.db_path = db_path
@@ -139,12 +138,55 @@ class LightGlueAlgorithm:
         PIPELINE_ONNX = os.path.join(
             "database", "Learning_Model", "disk_lightglue_pipeline.ort.onnx"
         )
-        if not os.path.exists(PIPELINE_ONNX):
-            os.makedirs(os.path.dirname(PIPELINE_ONNX), exist_ok=True)
+        url = "https://github.com/fabio-sim/LightGlue-ONNX/releases/download/v2.0/disk_lightglue_pipeline.ort.onnx"
+
+        # --- Hybrid download check ---
+        need_download = False
+        if os.path.exists(PIPELINE_ONNX):
+            local_size = os.path.getsize(PIPELINE_ONNX)
+            total_size = 0
+            try:
+                # HEAD request dengan urllib
+                req = urllib.request.Request(url, method="HEAD")
+                with urllib.request.urlopen(req) as resp:
+                    if resp.getheader("Content-Length"):
+                        total_size = int(resp.getheader("Content-Length"))
+            except Exception:
+                total_size = 0
+
+            if total_size > 0 and local_size < total_size:
+                print("📥 Resume download LightGlue model…")
+                req = urllib.request.Request(url)
+                req.add_header("Range", f"bytes={local_size}-")
+                with urllib.request.urlopen(req) as resp, open(PIPELINE_ONNX, "ab") as f:
+                    while True:
+                        chunk = resp.read(8192)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                print("✅ Download Complete.")
+            else:
+                try:
+                    _ = ort.InferenceSession(PIPELINE_ONNX)
+                except Exception:
+                    print("⚠️ Model file corrupt, delete and re-download…")
+                    os.remove(PIPELINE_ONNX)
+                    need_download = True
+        else:
+            need_download = True
+
+        if need_download:
             print("📥 Download Model ONNX…")
-            url = "https://github.com/fabio-sim/LightGlue-ONNX/releases/download/v2.0/disk_lightglue_pipeline.ort.onnx"
-            with open(PIPELINE_ONNX, "wb") as f:
-                f.write(requests.get(url).content)
+            os.makedirs(os.path.dirname(PIPELINE_ONNX), exist_ok=True)
+            with urllib.request.urlopen(url) as resp, open(PIPELINE_ONNX, "wb") as f:
+                while True:
+                    chunk = resp.read(8192)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            print("✅ Download selesai.")
+
+        # --- Config ---
         config = load_light_glue_config()
         use_gpu = config.get("use_gpu", False)
 
@@ -154,14 +196,12 @@ class LightGlueAlgorithm:
                 available_providers = ort.get_available_providers()
                 if "CUDAExecutionProvider" in available_providers:
                     providers.insert(0, "CUDAExecutionProvider")
-            except Exception as e:
-                print(f"[ERROR] An error occurred while checking the CUDA provider: {e}. Falling back to using the CPU.")
             except Exception as e:
                 print(f"[ERROR] An error occurred while checking the CUDA provider: {e}. Falling back to using the CPU.")
         else:
             print("[INFO] Sesi inferensi akan menggunakan CPU (sesuai konfigurasi).")
-            
-        # 3. Konfigurasi ONNX Runtime session (kode ini tetap sama)
+
+        # --- ONNX Runtime session ---
         sess_options = ort.SessionOptions()
         sess_options.intra_op_num_threads = os.cpu_count()
         sess_options.inter_op_num_threads = 1
@@ -170,180 +210,103 @@ class LightGlueAlgorithm:
         sess_options.add_session_config_entry("arena_extend_strategy", "kSameAsRequested")
         sess_options.add_session_config_entry("session.disable_prepacking", "0")
         sess_options.log_severity_level = 3
-        
-        # 4. Buat sesi inferensi dengan providers yang telah ditentukan secara dinamis
+
         self.sess = ort.InferenceSession(
             PIPELINE_ONNX, sess_options=sess_options, providers=providers
         )
-class LightGlueAlgorithm:
-    """
-    Kelas untuk melakukan alignment gambar menggunakan model LightGlue via ONNX.
-    """
-    def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
-        self.db_path = db_path
-        self.hdf5_path = hdf5_path
 
-        hdf5_folder = os.path.dirname(self.hdf5_path)
-        if not os.path.exists(hdf5_folder):
-            os.makedirs(hdf5_folder)
-
-        self.sess = self._initialize_model_light_glue()
-      
-    def _initialize_model_light_glue(self):
-        """
-        Metode helper untuk menangani semua langkah pemuatan model:
-        1. Mengecek path model.
-        2. Mengunduh model jika tidak ada.
-        3. Memuat konfigurasi.
-        4. Menentukan provider (CPU/GPU).
-        5. Membuat dan mengembalikan sesi inferensi ONNX.
-        """
-        PIPELINE_ONNX = os.path.join(
-            "database", "Learning_Model", "disk_lightglue_pipeline.ort.onnx"
-        )
-        
-        # --- Bagian 1: Download Model Jika Perlu ---
-        if not os.path.exists(PIPELINE_ONNX):
-            os.makedirs(os.path.dirname(PIPELINE_ONNX), exist_ok=True)
-            url = "https://github.com/fabio-sim/LightGlue-ONNX/releases/download/v2.0/disk_lightglue_pipeline.ort.onnx"
-            response = requests.get(url, stream=True)
-            response.raise_for_status()
-            total_size_in_bytes = int(response.headers.get('content-length', 0))
-            block_size = 1024
-            print("Download Model...")
-            with open(PIPELINE_ONNX, "wb") as file, tqdm(
-                desc="Model", total=total_size_in_bytes, unit='B',
-                unit_scale=True, unit_divisor=1024
-            ) as bar:
-                for data in response.iter_content(block_size):
-                    file.write(data)
-                    bar.update(len(data))
-            print("Download Complete.")
-
-        # --- Bagian 2: Konfigurasi Sesi ONNX ---
-        config = load_light_glue_config()
-        use_gpu = config.get("use_gpu", False)
-
-        providers = ["CPUExecutionProvider"]
-        if use_gpu:
-            try:
-                available_providers = ort.get_available_providers()
-                if "CUDAExecutionProvider" in available_providers:
-                    providers.insert(0, "CUDAExecutionProvider")
-            except Exception:
-                pass
-        
-        sess_options = ort.SessionOptions()
-        sess_options.intra_op_num_threads = os.cpu_count()
-        sess_options.inter_op_num_threads = 1
-        sess_options.execution_mode = ort.ExecutionMode.ORT_PARALLEL
-        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        sess_options.add_session_config_entry("arena_extend_strategy", "kSameAsRequested")
-        sess_options.add_session_config_entry("session.disable_prepacking", "0")
-        sess_options.log_severity_level = 3
-
-        # --- Bagian 3: Buat dan Kembalikan Sesi ---
-        session = ort.InferenceSession(
-            PIPELINE_ONNX, sess_options=sess_options, providers=providers
-        )
-        return session
 
     def calculate_global_motion(self, base_image, target_image, stop_requested=None):
         if stop_requested and stop_requested():
             return None, None
 
-        # --- KONFIGURASI UNTUK PEMROSESAN BERBASIS UBIN ---
-        GRID_SIZE = (2, 1)  
+        # --- LOGIKA ADAPTIF: Menentukan GRID_SIZE dan melakukan RESIZE berdasarkan resolusi ---
+        h_orig, w_orig = base_image.shape[:2]
+        megapixels = (h_orig * w_orig) / 1_000_000.0
+        
+        # Atur GRID_SIZE default untuk resolusi yang tidak tercakup dalam aturan spesifik
+        GRID_SIZE = (1, 1) 
+
+        # Terapkan aturan yang diminta, diurutkan dari resolusi tertinggi ke terendah
+        if megapixels > 22.0:
+            target_mp = 18.0
+            scale_factor = (target_mp / megapixels) ** 0.5
+            
+            new_width = int(w_orig * scale_factor)
+            new_height = int(h_orig * scale_factor)
+
+            # Resize kedua gambar menggunakan interpolasi INTER_AREA untuk hasil terbaik saat memperkecil
+            base_image = cv2.resize(base_image, (new_width, new_height), interpolation=cv2.INTER_AREA)
+            target_image = cv2.resize(target_image, (new_width, new_height), interpolation=cv2.INTER_AREA)
+            
+            # Setelah di-resize, gunakan GRID_SIZE untuk 18MP
+            GRID_SIZE = (3, 3)
+
+        elif 17.5 <= megapixels <= 20.0: # Rentang toleransi untuk 18MP
+            GRID_SIZE = (3, 3)
+
+        elif 11.5 <= megapixels <= 13.0: # Rentang toleransi untuk 12MP
+            GRID_SIZE = (2, 2)
+
+        elif megapixels <= 8.5: # Rentang untuk 8MP atau kurang
+            GRID_SIZE = (1, 1)
+        # --- AKHIR LOGIKA ADAPTIF ---
+
         OVERLAP_PERCENT = 0.10 
 
-        h, w = base_image.shape[:2]
+        h, w = base_image.shape[:2] # Gunakan dimensi baru jika ada resize
         cols, rows = GRID_SIZE
         
-        # Hindari pembagian dengan nol
-        if cols == 0 or rows == 0: return None, None
+        if cols <= 0 or rows <= 0: return None, None
         
         tile_w = w // cols
         tile_h = h // rows
         
-        # Hitung overlap dalam piksel berdasarkan persentase
+        if tile_w == 0 or tile_h == 0:
+            return None, None
+        
         overlap_w_px = int(tile_w * OVERLAP_PERCENT)
         overlap_h_px = int(tile_h * OVERLAP_PERCENT)
 
-        def resize_and_pad(image, target_size=512):
+        def resize_and_pad(image, target_size=448):
             """Mengubah ukuran dan memberi padding agar gambar menjadi persegi."""
-            h, w = image.shape[:2]
-            scale = target_size / max(h, w)
-            new_h, new_w = int(h * scale), int(w * scale)
-            resized = cv2.resize(
-                image, (new_w, new_h), interpolation=cv2.INTER_LINEAR_EXACT
-            )
-
+            h_tile, w_tile = image.shape[:2]
+            scale = target_size / max(h_tile, w_tile)
+            new_h, new_w = int(h_tile * scale), int(w_tile * scale)
+            resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR_EXACT)
             pad_top = (target_size - new_h) // 2
             pad_left = (target_size - new_w) // 2
-
             padded = cv2.copyMakeBorder(
-                resized,
-                pad_top,
-                target_size - new_h - pad_top,
-                pad_left,
-                target_size - new_w - pad_left,
-                borderType=cv2.BORDER_CONSTANT,
-                value=0,
-            )
-            return padded, (w / new_w, h / new_h), (pad_left, pad_top)
+                resized, pad_top, target_size - new_h - pad_top,
+                pad_left, target_size - new_w - pad_left,
+                borderType=cv2.BORDER_CONSTANT, value=0)
+            return padded, (w_tile / new_w, h_tile / new_h), (pad_left, pad_top)
 
         def prep_for_onnx(img):
-            # Langkah awal preprocessing
             enhanced_img = prepare_image(img, grayscale=False, use_clahe=True)
-            
-            # Konversi ke grayscale sementara untuk estimasi noise
             enhanced_gray = cv2.cvtColor(enhanced_img, cv2.COLOR_BGR2GRAY)
-            
-            # Estimasi noise
             noise_level = estimate_noise_variance(enhanced_gray)
-            
-            # Threshold dan rentang parameter (bisa disesuaikan)
-            min_noise_threshold = 200.0
-            max_noise_threshold = 700.0
-            min_d, max_d = 5, 9
-            min_sigma, max_sigma = 20, 75
+            min_noise_threshold, max_noise_threshold = 200.0, 700.0
+            min_d, max_d, min_sigma, max_sigma = 5, 9, 20, 75
 
-            # Terapkan bilateral filter jika diperlukan
             if noise_level > min_noise_threshold:
                 d, sigma_color, sigma_space = get_adaptive_bilateral(
-                    noise_level,
-                    min_noise_threshold, max_noise_threshold,
-                    min_d, max_d,
-                    min_sigma, max_sigma
-                )
+                    noise_level, min_noise_threshold, max_noise_threshold,
+                    min_d, max_d, min_sigma, max_sigma)
                 enhanced_img = cv2.bilateralFilter(enhanced_img, d, sigma_color, sigma_space)
-            else:
-                pass
 
-            # Lanjut ke padding & resize
             rgb = cv2.cvtColor(enhanced_img, cv2.COLOR_BGR2RGB)
             padded, scale_factors, pad_offsets = resize_and_pad(rgb)
-            
             return (
                 padded.astype(np.float32)[None, :, :, :].transpose(0, 3, 1, 2) / 255.0,
-                scale_factors, pad_offsets
-            )
+                scale_factors, pad_offsets)
 
-        # --- PERUBAHAN 1: Buat fungsi worker untuk pra-pemrosesan CPU ---
         def preprocessor_worker(job_q, result_q):
-            """
-            Thread worker yang mengambil tugas dari job_q, melakukan pra-pemrosesan CPU,
-            dan menaruh hasilnya di result_q.
-            """
             while True:
-                # Ambil detail ubin dari antrian tugas
                 item = job_q.get()
-                if item is None:  # Sinyal untuk berhenti
-                    break
-                
+                if item is None: break
                 r, c = item
                 
-                # Ekstrak ubin
                 x_start_overlap = max(0, c * tile_w - overlap_w_px)
                 y_start_overlap = max(0, r * tile_h - overlap_h_px)
                 x_end_overlap = min(w, (c + 1) * tile_w + overlap_w_px)
@@ -352,76 +315,70 @@ class LightGlueAlgorithm:
                 base_tile = base_image[y_start_overlap:y_end_overlap, x_start_overlap:x_end_overlap]
                 target_tile = target_image[y_start_overlap:y_end_overlap, x_start_overlap:x_end_overlap]
 
-                # Lakukan pekerjaan CPU yang berat
                 imgL, scaleL, offsetL = prep_for_onnx(base_tile)
                 imgR, scaleR, offsetR = prep_for_onnx(target_tile)
                 
-                # Taruh hasil yang siap di-inferensi ke antrian hasil
                 result_q.put((r, c, imgL, imgR, scaleL, offsetL, scaleR, offsetR, x_start_overlap, y_start_overlap))
 
-        # --- PERUBAHAN 2: Inisialisasi antrian dan thread worker ---
         job_queue = queue.Queue()
-        # Batasi antrian hasil untuk mencegah penggunaan RAM berlebih jika CPU lebih cepat dari GPU
         result_queue = queue.Queue(maxsize=2) 
         
-        preprocessor_thread = threading.Thread(
-            target=preprocessor_worker, args=(job_queue, result_queue)
-        )
+        preprocessor_thread = threading.Thread(target=preprocessor_worker, args=(job_queue, result_queue))
         preprocessor_thread.start()
 
-        # Isi antrian tugas dengan semua ubin yang perlu diproses
         for r in range(rows):
             for c in range(cols):
                 job_queue.put((r, c))
         job_queue.put(None) 
 
-        # --- PERUBAHAN 3: Loop utama sekarang menjadi konsumen GPU ---
         all_results = []
         num_tiles = rows * cols
         for _ in range(num_tiles):
-            if stop_requested and stop_requested():
-                break
+            if stop_requested and stop_requested(): break
 
             try:
                 r, c, imgL, imgR, scaleL, offsetL, scaleR, offsetR, x_start_overlap, y_start_overlap = result_queue.get(timeout=30)
             except queue.Empty:
+                print("WARNING: Antrian hasil kosong, pre-processing mungkin terlalu lambat atau error.")
                 break
 
-            # Lakukan pekerjaan GPU
             try:
                 batch = np.concatenate([imgL, imgR], axis=0).astype(np.float32)
                 inp_name = self.sess.get_inputs()[0].name
                 keypoints_b, matches, mscores = self.sess.run(None, {inp_name: batch})
-            except Exception:
+            except Exception as e:
+                print(f"ERROR: Gagal saat inferensi ONNX: {e}")
                 continue
 
             if keypoints_b is None: continue
             
-            # Lakukan pasca-pemrosesan (CPU, tapi sangat cepat)
-            matches = matches.astype(np.int32); batch_mask = matches[:, 0] == 0
+            matches = matches.astype(np.int32)
+            batch_mask = matches[:, 0] == 0
             idx0, idx1, scores = matches[batch_mask, 1], matches[batch_mask, 2], mscores[batch_mask]
+            
             conf_mask = scores > 0.5
             if np.sum(conf_mask) < 8: continue
-            idx0, idx1, scores = idx0[conf_mask], idx1[conf_mask], scores[conf_mask]
+            
+            idx0, idx1 = idx0[conf_mask], idx1[conf_mask]
             mkptsL_padded = keypoints_b[0][idx0].astype(np.float32)
             mkptsR_padded = keypoints_b[1][idx1].astype(np.float32)
 
             def restore_coords(pts, pad, scale):
-                pts -= np.array(pad); pts *= np.array(scale)
+                pts -= np.array(pad)
+                pts *= np.array(scale)
                 return pts
 
             mkptsL_tile_local = restore_coords(mkptsL_padded, offsetL, scaleL)
             mkptsR_tile_local = restore_coords(mkptsR_padded, offsetR, scaleR)
+            
             offset_global = np.array([x_start_overlap, y_start_overlap])
             mkptsL_global = mkptsL_tile_local + offset_global
             mkptsR_global = mkptsR_tile_local + offset_global
             
-            all_results.append((mkptsL_global, mkptsR_global, scores))
+            all_results.append((mkptsL_global, mkptsR_global, scores[conf_mask]))
 
-        # Pastikan thread worker selesai
         preprocessor_thread.join()
 
-        # --- PENGGABUNGAN DAN FINALISASI---
         if not all_results:
             return None, None
 
@@ -429,6 +386,7 @@ class LightGlueAlgorithm:
         final_mkptsR = np.vstack([res[1] for res in all_results])
         final_scores = np.concatenate([res[2] for res in all_results])
 
+        # Gunakan 'base_image.shape' di sini, yang merujuk ke gambar yang mungkin sudah di-resize
         dedup_mkptsL, dedup_mkptsR, _ = deduplicate_keypoints(
             final_mkptsL, final_mkptsR, final_scores, base_image.shape
         )
@@ -437,7 +395,7 @@ class LightGlueAlgorithm:
             return None, None
 
         return dedup_mkptsL.reshape(-1, 1, 2), dedup_mkptsR.reshape(-1, 1, 2)
-
+    
     def compensate_motion(
         self, base_image, base_points, target_points, config_filename=None
     ):

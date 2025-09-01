@@ -264,7 +264,8 @@ def general_page():
             working_dir = os.path.dirname(initial_launch_path)
 
             def is_frozen_app():
-                return hasattr(sys, 'frozen') or (sys.executable != sys.argv[0] and sys.executable.endswith(".exe"))
+                """ Cek apakah aplikasi berjalan sebagai executable yang dibekukan. """
+                return getattr(sys, 'frozen', True)
 
             frozen = is_frozen_app()
 
