@@ -1,5 +1,6 @@
 import shutil
 import subprocess
+import traceback
 from PySide6.QtWidgets import (
     QMessageBox, QVBoxLayout, QWidget,
     QFileDialog,
@@ -403,48 +404,39 @@ class SinglePageLayout(QWidget):
 
         try:
             if chosen_file_extension in [".tif", ".tiff"]:
-                if os.path.abspath(latest_image_path) == os.path.abspath(file_path):
-                    QMessageBox.information(self, "Info", "Source and destination are the same. No action taken.")
-                  
-                else:
+                # Jika tujuannya TIFF, cukup salin filenya
+                if os.path.abspath(latest_image_path) != os.path.abspath(file_path):
                     shutil.copy2(latest_image_path, file_path)
             else: 
-                source_image_data = cv2.imread(latest_image_path) # cv2 bisa membaca banyak format, termasuk TIFF
-                if source_image_data is None:
-                    try:
-                        source_image_data = tifffile.imread(latest_image_path)
-                    except Exception as tif_read_error:
+                # 1. Baca data gambar HANYA SEKALI menggunakan metode yang paling andal.
+                source_image_data = None
+                try:
+                    source_image_data = tifffile.imread(latest_image_path)
+                except Exception as tif_read_error:
                         QMessageBox.critical(self, "Error", f"{language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED}\nCould not read source: {tif_read_error}")
                         return
 
-                if source_image_data is None: # Cek lagi setelah fallback
+                # 2. Periksa apakah pembacaan berhasil
+                if source_image_data is None:
+                    # Jika kedua metode gagal, tampilkan pesan error dan berhenti
                     QMessageBox.critical(self, "Error", language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED)
                     return
                 
-                save_special_jpg_and_png(latest_image_path, file_path,
-                                         quality=100, optimize=True)
-                print(f"Image converted from {latest_image_path} and saved to {file_path}")
-
-                # Setelah konversi ke JPG/PNG, metadata dari latest_image_path (sumber asli) perlu diterapkan
-                if os.path.exists(latest_image_path) and os.path.exists(file_path):
-                    try:
-                        subprocess.run(
-                            ["exiftool", "-overwrite_original", "-TagsFromFile", latest_image_path, file_path],
-                            check=True, capture_output=True, text=True
-                        )
-                        print(f"Metadata restored from {latest_image_path} to {file_path}")
-                    except subprocess.CalledProcessError as e:
-                        print(f"Error restoring metadata to {file_path} after conversion: {e.stderr}")
-                    except FileNotFoundError:
-                        print("Exiftool not found. Metadata not restored.")
-
-
+                # 3. Panggil fungsi konversi dengan DATA GAMBAR, bukan path
+                save_special_jpg_and_png(
+                    img_np=source_image_data,           # <--- Kirim array NumPy
+                    dst_path=file_path,
+                    reference_image_path=latest_image_path, # <--- Tetap kirim path referensi untuk metadata
+                    quality=98,
+                    optimize=True
+                )
+                
+            # [PERBAIKAN] Logika pembersihan file sementara di luar blok konversi
             if os.path.exists(latest_image_path):
                 try:
                     os.remove(latest_image_path)
                 except OSError as e:
                     QMessageBox.warning(self, "Cleanup Error", f"Could not remove the temporary processed file:\n{latest_image_path}\n\nError: {e}")
-
 
             QMessageBox.information(self, "Success", language_config.UI_SUCCES_TO_SAVE_IMAGE_BATCH.format(file_path))
 

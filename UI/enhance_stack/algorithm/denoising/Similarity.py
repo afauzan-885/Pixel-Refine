@@ -52,23 +52,8 @@ class ThreadWorker(QThread):
         self.stop_requested = True  
 
 class SimilarityAlgorithm:
-    def __init__(self, db_path, hdf5_path=None, 
-                 ml_model_path="path/to/your/model.pt"):
+    def __init__(self, db_path, hdf5_path=None):
         self.db_path = db_path
-        self.knowledge_model = None
-        self.is_model_loaded = False
-        self.model_type = None
-        self.smart_alpha_generator = None
-        # try:
-        #     # Muat model hanya jika path diberikan dan valid
-        #     if ml_model_path and os.path.exists(ml_model_path):
-        #         # print(f"Memuat model Smart Alpha Generator dari: {ml_model_path}")
-        #         self.smart_alpha_generator = AlphaGenerator(model_path=ml_model_path)
-        #     else:
-        #         print("PERINGATAN: Path model ML tidak valid atau tidak ada. Refinement ML akan dinonaktifkan.")
-        # except Exception as e:
-        #     print(f"ERROR: Gagal memuat model ML. Refinement ML dinonaktifkan. Kesalahan: {e}")
-        #     self.smart_alpha_generator = None
             
         if hdf5_path is None:
             self.hdf5_path = "database/align/aligned_images.h5"
@@ -99,84 +84,14 @@ class SimilarityAlgorithm:
                 image = np.array(h5f[key])
                 images.append(image)
         return images
-
-    def load_images_from_hdf5(self, hdf5_path, stop_requested=None):
-        images = []
-        with h5py.File(hdf5_path, 'r') as h5f:
-            for key in h5f.keys():
-                if stop_requested and stop_requested():
-                    break
-                image = np.array(h5f[key])
-                images.append(image)
-        return images
     
-    def _load_knowledge_model(self):
-        """ 
-        (VERSI SIMULASI) 
-        Mensimulasikan pemuatan model. Tidak ada model AI yang dimuat dari disk.
-        Menyiapkan kerangka untuk pemuatan model di masa depan.
-        """
-        print("\nModel Loader: [Simulasi] Pemuatan model AI diaktifkan.")
-        
-        # --- Logika Simulasi ---
-        self.knowledge_model = {}
-        self.model_type = 'simulation'
-        self.is_model_loaded = True
-        print("  -> SUKSES: Mode simulasi model AI siap.")
-        return True
-
-
-    def _apply_knowledge_model(self, weight_map, blending_factor=0.7):
-        """
-        (VERSI SIMULASI) 
-        Mensimulasikan penerapan model pada peta bobot. 
-        Fungsi ini hanya akan mengembalikan peta bobot asli tanpa perubahan.
-        """
-        # Guard clause ini tetap berguna untuk memeriksa apakah _load_knowledge_model berhasil (atau disimulasikan berhasil).
-        if not self.is_model_loaded:
-            return weight_map
-            
-        # --- Logika Simulasi ---
-        # Hanya cetak pesan dan langsung kembalikan input asli.
-        print("  -> [Simulasi] Menerapkan model pengetahuan... (melewatkan proses AI)") # Uncomment untuk log yang lebih detail
-        return weight_map
-    
-    def _create_weight_map_heatmap(self, float_map, labels=("Static (High Weight)", "Moving (Low Weight)")):
-        """
-        Mengubah peta bobot float 2D menjadi gambar heatmap BGR berwarna,
-        dengan warna yang benar (tinggi=biru, rendah=merah) dan legenda.
-        
-        Ini meniru logika pembuatan heatmap temporal_std secara persis.
-        """
-        min_val, max_val = np.min(float_map), np.max(float_map)
-        if max_val - min_val < 1e-8:
-            return np.zeros((float_map.shape[0], float_map.shape[1], 3), dtype=np.uint8)
-
-        # 1. Normalisasi peta bobot ke rentang [0, 1]
-        norm_map = (float_map - min_val) / (max_val - min_val) 
-        inverted_norm_map = 1.0 - norm_map
-        
-        # 2. Skalakan ke [0, 255] dan ubah tipe data menjadi uint8
-        uint8_gray_map = (inverted_norm_map * 255).astype(np.uint8)
-        
-        # 3. Terapkan colormap (misalnya JET) untuk membuat gambar berwarna
-        heatmap_color = cv2.applyColorMap(uint8_gray_map, cv2.COLORMAP_JET)
-        
-        heatmap_with_legend = add_legend_heatmap(
-            heatmap_color,
-            norm_values=inverted_norm_map,
-            labels=labels
-        )
-        
-        return heatmap_with_legend
-
     def _spatial_merging(self, images, ref_image_h, ref_image_w, ref_channels_buffer, ref_dtype,
                     reference_image_float, tile_size, overlap,
                     motion_sensitivity, noise_offset_factor,
                     update_progress=None, stop_requested=None,
                     total_overall_images=None, images_processed_so_far=0,
                     lib_path='UI/data/similarity_spatial_merging.dll',
-                    temporal_consistency=True,
+                    temporal_consistency=False,
                     save_temporal_std_path=None,
                     weight_of_each_image=False,
                     temporal_analysis_mode='one_pass', # Opsi: 'one_pass', 'two_pass_full'
@@ -185,12 +100,12 @@ class SimilarityAlgorithm:
         # --- LANGKAH 1: Inisialisasi dan Penentuan Resolusi Kerja ---
         tile_h, tile_w = map(int, tile_size)
         try:
+            # Asumsi: SimilaritySpatialInterface adalah kelas yang Anda miliki untuk memuat .dll
             c_interface = SimilaritySpatialInterface(lib_path)
         except (FileNotFoundError, OSError, AttributeError) as e:
             raise RuntimeError(f"Gagal memuat C++ interface_spatial_merging: {e}")
         num_images = len(images)
-        orig_h, orig_w = images[0].shape[:2]
-
+        
         work_res_h, work_res_w = ref_image_h, ref_image_w
         TARGET_MP = 12 * 1e6
         if (ref_image_h * ref_image_w) > TARGET_MP:
@@ -214,12 +129,10 @@ class SimilarityAlgorithm:
 
         is_two_pass = temporal_analysis_mode == 'two_pass_full'
         use_overall_progress = total_overall_images and total_overall_images > 0
-        
-        # Tentukan rentang persentase untuk setiap tahap
         pass1_range = (0, 50)
         pass2_range = (50, 95) if is_two_pass else (0, 95)
         
-        # (PASS 1): Membuat Peta Stabilitas ---
+        # --- (PASS 1): Membuat Peta Stabilitas ---
         stability_map = None
         if is_two_pass:
             if update_progress:
@@ -274,70 +187,94 @@ class SimilarityAlgorithm:
             
             del sum_map, sum_sq_map
 
-        # === LANGKAH 3 (PASS 2 / UTAMA): Pipeline Akumulasi (VERSI SEKUENSIAL) =======================
+        # --- LANGKAH 3 (PASS 2 / UTAMA): Pipeline Akumulasi ---
         msg_pass = "Pass 2/2: " if is_two_pass else ""
         if update_progress:
-            update_progress(pass2_range[0], language_config.ANALYSIS_STEP_TWO.format(msg_pass))
+            update_progress(pass2_range[0], f"Memulai {msg_pass}Penggabungan Spasial")
 
         ref_work_res_pass2 = cv2.resize(reference_image_float, (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
         stability_map_work_res = None
         if stability_map is not None:
             stability_map_work_res = cv2.resize(stability_map, (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
 
-        final_image_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32))
-        weight_map_sum = np.ascontiguousarray(np.zeros((ref_image_h, ref_image_w), dtype=np.float32))
+        # Inisialisasi akumulator utama
+        final_image_sum = np.zeros((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32)
+        weight_map_sum = np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
         
+        # [OPTIMISASI STATISTIK] Inisialisasi variabel untuk algoritma Welford.
+        # Ini menggantikan kebutuhan untuk `weight_maps_all` yang boros memori.
+        if temporal_consistency and num_images > 1:
+            count = 0
+            mean = np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
+            M2 = np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
+
+        # Pra-alokasi buffer memori (tidak berubah)
+        curr_work_res_buffer = np.empty((work_res_h, work_res_w, ref_channels_buffer), dtype=np.float32)
+        temp_weight_map_work_res_buffer = np.zeros((work_res_h, work_res_w), dtype=np.float32, order='C')
+        dummy_final_sum_work_res_buffer = np.zeros((work_res_h, work_res_w, ref_channels_buffer), dtype=np.float32, order='C')
+        weight_map_full_res_buffer = np.empty((ref_image_h, ref_image_w), dtype=np.float32)
+        reusable_full_res_buffer = np.empty((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32)
+
         processed_frames_spatial = 0
-        if temporal_consistency: weight_maps_all = []
         if weight_of_each_image: weight_maps_per_image = []
 
-        # Loop sekuensial utama
+        # --- Loop Sekuensial Utama yang Telah Dioptimalkan ---
         for i, image_orig in enumerate(images):
-            if stop_requested and stop_requested():
-                print("Spatial merging process was cancelled.")
-                break
-            if not isinstance(image_orig, np.ndarray):
-                continue
+            if stop_requested and stop_requested(): break
+            if not isinstance(image_orig, np.ndarray): continue
 
-            curr_work_res = cv2.resize(normalize_image(image_orig, ref_dtype), (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
+            # Langkah 1 & 2: Normalisasi dan Resize
+            normalize_image(image_orig, ref_dtype, out=reusable_full_res_buffer)
+            cv2.resize(reusable_full_res_buffer, (work_res_w, work_res_h), dst=curr_work_res_buffer, interpolation=cv2.INTER_AREA)
             
-            temp_weight_map_work_res = np.ascontiguousarray(np.zeros((work_res_h, work_res_w), dtype=np.float32))
-            dummy_final_sum_work_res = np.ascontiguousarray(np.zeros((work_res_h, work_res_w, ref_channels_buffer), dtype=np.float32))
+            # Langkah 3: Panggil C++
+            temp_weight_map_work_res_buffer.fill(0)
+            dummy_final_sum_work_res_buffer.fill(0)
             c_interface.call_accumulate_frame_weighted(
-                final_image_sum=dummy_final_sum_work_res, 
-                weight_map_sum=temp_weight_map_work_res,
-                current_image=curr_work_res, reference_image=ref_work_res_pass2, base_window=base_window,
+                final_image_sum=dummy_final_sum_work_res_buffer, weight_map_sum=temp_weight_map_work_res_buffer,
+                current_image=curr_work_res_buffer, reference_image=ref_work_res_pass2, base_window=base_window,
                 stability_map=stability_map_work_res, row_starts=row_starts, col_starts=col_starts,
                 tile_h=tile_h, tile_w=tile_w, h=work_res_h, w=work_res_w, channels=ref_channels_buffer,
                 motion_sensitivity=motion_sensitivity, noise_offset_factor=noise_offset_factor
             )
 
             if update_progress:
+                # Asumsi: language_config adalah objek yang berisi string pesan
                 if use_overall_progress:
                     current_img_overall = images_processed_so_far + i + 1
                     progress_in_pass2 = current_img_overall / total_overall_images
-                    msg = language_config.IMAGE_PROCESS_IN_PROGRESS.format(current_img_overall, total_overall_images)
+                    msg = f"Memproses gambar {current_img_overall}/{total_overall_images}"
                 else:
                     progress_in_pass2 = (i + 1) / num_images
-                    msg = language_config.ANALYSIS_STEP_TWO_PROGRESS.format(msg_pass, i + 1, num_images)
-                
+                    msg = f"{msg_pass}Memproses gambar {i + 1}/{num_images}"
                 current_total_progress = pass2_range[0] + (progress_in_pass2 * (pass2_range[1] - pass2_range[0]))
                 update_progress(int(current_total_progress), msg)
         
-            weight_map_full_res = cv2.resize(temp_weight_map_work_res, (ref_image_w, ref_image_h), interpolation=cv2.INTER_CUBIC)
+            # Langkah 4: Resize peta bobot dari resolusi kerja kembali ke resolusi penuh
+            cv2.resize(temp_weight_map_work_res_buffer, (ref_image_w, ref_image_h), dst=weight_map_full_res_buffer, interpolation=cv2.INTER_CUBIC)
+        
+            # Langkah 5: Akumulasi peta bobot utama
+            weight_map_sum += weight_map_full_res_buffer
             
-            weight_map_sum += weight_map_full_res
-            final_image_sum += normalize_image(image_orig, ref_dtype) * weight_map_full_res[:, :, np.newaxis]
+            # Langkah 6: Perkalian in-place dan akumulasi gambar utama
+            reusable_full_res_buffer *= weight_map_full_res_buffer[:, :, np.newaxis]
+            final_image_sum += reusable_full_res_buffer
+            
+            # [OPTIMISASI STATISTIK] Perbarui statistik secara online, sedikit demi sedikit.
+            # Ini menggantikan `weight_maps_all.append(...)` yang boros memori.
+            if temporal_consistency and num_images > 1:
+                count += 1
+                delta = weight_map_full_res_buffer - mean
+                mean += delta / count
+                delta2 = weight_map_full_res_buffer - mean
+                M2 += delta * delta2
             
             if weight_of_each_image:
-                weight_maps_per_image.append(weight_map_full_res.copy())
-            if temporal_consistency:
-                weight_maps_all.append(weight_map_full_res.copy())
+                weight_maps_per_image.append(weight_map_full_res_buffer.copy())
                 
             processed_frames_spatial += 1
-            del curr_work_res, temp_weight_map_work_res, dummy_final_sum_work_res, weight_map_full_res
             
-        # --- LANGKAH 5: Normalisasi Final di Python ---
+        # --- LANGKAH 5: Normalisasi Final dan Refinement ---
         if processed_frames_spatial > 0:
             try:
                 valid_pixels = weight_map_sum > 1e-6
@@ -345,11 +282,18 @@ class SimilarityAlgorithm:
                 final_image = np.zeros_like(final_image_sum)
                 np.divide(final_image_sum, weight_map_sum_3d, out=final_image, where=valid_pixels[:, :, np.newaxis])
                 
-                if temporal_consistency:
-                    temporal_consistency_refinement(weight_maps_all, weight_map_sum, save_temporal_std_path=save_temporal_std_path)
-                
-                # if update_progress:
-                #     update_progress(finalization_percent, language_config.PROCESS_FINISHED_STATUS)
+                # [OPTIMISASI STATISTIK] Hitung hasil akhir dan panggil refinement.
+                if temporal_consistency and count >= 2:
+                    # Hitung varians dan std dev dari hasil akumulasi online
+                    variance = M2 / (count - 1)
+                    temporal_std = np.sqrt(variance)
+                    temporal_mean = mean # Mean sudah kita hitung
+                    
+                    # Panggil fungsi refinement yang baru dan hemat memori
+                    temporal_consistency_refinement(
+                        weight_map_sum, temporal_mean, temporal_std, 
+                        save_temporal_std_path=save_temporal_std_path
+                    )
                 
                 return (final_image, weight_map_sum, processed_frames_spatial, weight_maps_per_image) if weight_of_each_image else (final_image, weight_map_sum, processed_frames_spatial)
             except Exception as e:
@@ -370,8 +314,6 @@ class SimilarityAlgorithm:
                         temporal_consistency=True,
                         save_temporal_std_path=None,
                         weight_of_each_image=False,
-                        collect_raw_maps_for_learning=False, 
-                        use_ai_reconstruction=False,
                         **unused_kwargs):
 
         if not images:
@@ -432,13 +374,6 @@ class SimilarityAlgorithm:
         except (FileNotFoundError, OSError, AttributeError) as e:
             raise RuntimeError(f"Gagal C++ interface _frequency_merging: {e}")
         
-        if use_ai_reconstruction:
-            if self.is_model_loaded:
-                print("  -> Mode Rekonstruksi AI untuk Peta Bobot diaktifkan.")
-            else:
-                print("  -> PERINGATAN: Rekonstruksi AI diminta, tetapi model tidak dimuat. Akan dilewati.")
-                use_ai_reconstruction = False # Nonaktifkan jika model tidak ada
-
         if temporal_consistency: weight_maps_all = []
         if weight_of_each_image: weight_maps_per_image = []
 
@@ -484,8 +419,6 @@ class SimilarityAlgorithm:
                 temp_weight_map = weight_map_sum - weight_map_sum_before_this_frame
 
                 map_for_refinement = temp_weight_map
-                if use_ai_reconstruction:
-                    map_for_refinement = self._apply_knowledge_model(temp_weight_map)
 
                 # Lakukan penyempurnaan (refinement) menggunakan peta bobot yang sudah dipilih
                 if refinement_algorithm == 'optical_flow' and optical_flows is not None and original_idx < len(optical_flows):
@@ -504,10 +437,7 @@ class SimilarityAlgorithm:
                 weight_map_sum = weight_map_sum_before_this_frame + refined_weight
 
                 if weight_of_each_image:
-                    if collect_raw_maps_for_learning:
-                        weight_maps_per_image.append(temp_weight_map.copy()) 
-                    else:
-                        weight_maps_per_image.append(refined_weight.copy())
+                    weight_maps_per_image.append(refined_weight.copy())
 
                 if temporal_consistency:
                     weight_maps_all.append(refined_weight.copy())
@@ -538,12 +468,8 @@ class SimilarityAlgorithm:
                 update_progress=None, stop_requested=None,
                 save_weight_map_path=None, 
                 total_overall_images=None, images_processed_so_far=0, 
-                save_temporal_std_path= None, #"database/stack.jpg",
+                save_temporal_std_path= None,
                 weight_of_each_image=False, 
-                collect_raw_maps_for_learning=False,
-                use_learning_model=False,
-                perform_learning=False,
-                use_ai_reconstruction=False,
                 **merging_kwargs):
 
         if not isinstance(images, list) or not images:
@@ -561,11 +487,6 @@ class SimilarityAlgorithm:
         if dtype_ref not in (np.uint8, np.uint16):
             raise TypeError(language_config.IMAGE_BIT_REQUIRED)
 
-        # <<< LOGIKA PEMBELAJARAN: Langkah 1 - Pemuatan Model & Persiapan >>>
-        if (use_learning_model or use_ai_reconstruction) and not self.is_model_loaded:
-            # print("Mode AI diaktifkan. Mencoba memuat model pengetahuan...")
-            self._load_knowledge_model()
-        
         channels_buffer = 3
         reference_image_float = normalize_image(ref_image, dtype_ref)
         h_ref_norm, w_ref_norm, _ = reference_image_float.shape
@@ -580,9 +501,6 @@ class SimilarityAlgorithm:
             "update_progress": update_progress, "stop_requested": stop_requested,
             "total_overall_images": total_overall_images, "images_processed_so_far": images_processed_so_far,
             "weight_of_each_image": weight_of_each_image,
-            "collect_raw_maps_for_learning": collect_raw_maps_for_learning,
-            # ### PERUBAHAN: Teruskan parameter rekonstruksi ###
-            "use_ai_reconstruction": use_ai_reconstruction
         }
         common_call_args.update(merging_kwargs)
         
@@ -595,8 +513,7 @@ class SimilarityAlgorithm:
             if any(p is None for p in [current_tile_size, current_overlap, current_motion_sensitivity, current_noise_offset_factor]):
                 if stop_requested and stop_requested():
                     return np.zeros((h_ref, w_ref, channels_ref_orig), dtype=dtype_ref), None, []
-                # raise ValueError("Untuk spatial merging, tile_size, overlap, motion_sensitivity, dan noise_offset_factor harus disediakan.")
-
+            
             common_call_args.update({
                 "tile_size": current_tile_size, "overlap": current_overlap,
                 "motion_sensitivity": current_motion_sensitivity, "noise_offset_factor": current_noise_offset_factor,
@@ -636,23 +553,10 @@ class SimilarityAlgorithm:
             final_image_normalized, final_weight_map, processed_frames = results
             individual_maps = []
 
-        # --- Bagian ini sekarang lebih bersih karena logika AI sudah dipindahkan ---
         if processed_frames > 0 and final_image_normalized is not None:
-            
-            all_final_weight_maps_to_return = []
-            if individual_maps:
-                # KASUS 1: Jika mode 'gunakan model' aktif, ini adalah saat di mana
-                if use_learning_model and self.is_model_loaded:
-                    # print(f"\n--- Menerapkan Pengetahuan Model (Final Pass) ---")
-                    for i, w_map in enumerate(individual_maps):
-                        final_w_map = self._apply_knowledge_model(w_map)
-                        all_final_weight_maps_to_return.append(final_w_map)
-                    # print("--- Penerapan Pengetahuan Selesai ---")
-                else:
-                    # KASUS 2: Jika tidak, teruskan saja hasil dari tahap merging.
-                    all_final_weight_maps_to_return = individual_maps
+            all_final_weight_maps_to_return = individual_maps
 
-            # Logika penyimpanan peta bobot (sekarang lebih sederhana)
+            # Logika penyimpanan peta bobot gabungan
             if save_weight_map_path and final_weight_map is not None:
                 try:
                     max_w = np.max(final_weight_map)
@@ -661,21 +565,6 @@ class SimilarityAlgorithm:
                     os.makedirs(os.path.dirname(save_weight_map_path), exist_ok=True)
                     cv2.imwrite(save_weight_map_path, w_map_vis)
                 except Exception as e:
-                    # print(f"Error saat menyimpan peta bobot gabungan: {e}")
-                    traceback.print_exc()
-
-            if weight_of_each_image and save_weight_map_path and all_final_weight_maps_to_return and not perform_learning:
-                # print(f"Mode Non-Pelatihan: Menyimpan {len(all_final_weight_maps_to_return)} peta bobot individual sebagai heatmap...")
-                try:
-                    base, ext = os.path.splitext(save_weight_map_path)
-                    for i, w_map in enumerate(all_final_weight_maps_to_return):
-                        individual_map_path = f"{base}_frame_{i}{ext}"
-                        w_map_vis = self._create_weight_map_heatmap(w_map)
-                        if not cv2.imwrite(individual_map_path, w_map_vis):
-                            pass
-                            # print(f"Gagal menyimpan peta bobot individual ke: {individual_map_path}")
-                except Exception as e:
-                    # print(f"Error saat menyimpan peta bobot individual: {e}")
                     traceback.print_exc()
 
             # --- Bagian 5: Finalisasi dan Return Value yang Konsisten ---
@@ -693,28 +582,19 @@ class SimilarityAlgorithm:
             if stop_requested and stop_requested() and processed_frames < len(images):
                 return final_img_output, final_weight_map, all_final_weight_maps_to_return
             
-            # Selalu kembalikan TIGA nilai yang konsisten
             return final_img_output, final_weight_map, all_final_weight_maps_to_return
 
         else:
-            # Jika tidak ada frame yang diproses
             out_shape_fb = (h_ref, w_ref) if channels_ref_orig == 1 else (h_ref, w_ref, channels_ref_orig)
-            # print(f"Tidak ada frame yang diproses oleh {merging_type} merging. Mengembalikan nilai kosong.")
-            
-            # Kembalikan TIGA nilai yang konsisten
             return np.zeros(out_shape_fb, dtype=dtype_ref), None, []
 
+
 def apply_temporal_filter(current_map, prev_smoothed_map, alpha=0.3):
-    """Fungsi helper untuk menerapkan filter Exponential Moving Average (EMA)."""
     if prev_smoothed_map is None:
         return current_map.copy()
     return (alpha * current_map) + ((1.0 - alpha) * prev_smoothed_map)
 
 def _setup_data_source_and_paths(db_path, single_process, batch_id, image_processor):
-    """
-    Menentukan sumber data (HDF5 atau list path), path gambar,
-    nama dasar untuk file output, dan total gambar.
-    """
     align_dir = os.path.join("database", "align")
     image_paths = []
     output_name_base = ""
@@ -744,15 +624,11 @@ def _setup_data_source_and_paths(db_path, single_process, batch_id, image_proces
         except Exception as e_h5:
             raise IOError(f"Gagal membaca file HDF5: {e_h5}")
     elif isinstance(data_source, list):
-        # print(language_config.NO_HDF5_FILE_PROCESSING_FROM_PATH)
         total_images = len(data_source)
 
     return data_source, image_paths, output_name_base, total_images
 
 def _load_images_for_batch(data_source, batch_indices, stop_requested=None):
-    """
-    Memuat gambar untuk batch tertentu dari sumber data (HDF5 atau list path).
-    """
     batch_start, batch_end = batch_indices
     batch_images = []
     
@@ -768,9 +644,7 @@ def _load_images_for_batch(data_source, batch_indices, stop_requested=None):
             
     return batch_images
 
-# --- FUNGSI MAIN SIMILARITY YANG SUDAH DIREFAKTOR ---
-
-def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
+def main(db_path, update_progress=None, stop_requested=None,
          single_process=None, batch_id=None, save_final_weight_map=False,
          progress_bar=None):
     try:
@@ -778,9 +652,6 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
 
         # --- 1. KONFIGURASI SPESIFIK UNTUK PROSES SIMILARITY ---
         general_settings = load_similarity_config()
-        perform_learning_setting = general_settings.get("perform_learning", False)
-        use_learning_model_setting = general_settings.get("use_learning_model", False)
-
         image_processor = SimilarityAlgorithm(db_path) 
 
         merging_type_from_settings = general_settings.get("similarity_merging_type", "spatial")
@@ -809,7 +680,6 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
             if update_progress: update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE); 
             return
 
-        # Ekstrak Metadata (jika bagian dari pipeline ini)
         metadata_output_path = os.path.join("database", "align", "metadata.json")
         try:
             extract_all_metadata(image_paths, metadata_file=metadata_output_path)
@@ -830,13 +700,10 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
             if update_progress: update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
             return
         total_batches = len(batch_plan)
-        # print(language_config.NUMBER_OF_BATCHES_TO_BE_PROCESSED.format(total_batches))
 
         # --- 5. PROSES INTI PER BATCH ---
         processed_batches_results = []
-        raw_weight_maps_for_learning = []
         images_processed_count = 0
-        should_get_weights = perform_learning_setting or use_learning_model_setting
 
         for batch_num, (batch_start, batch_end) in enumerate(batch_plan, 1):
             if stop_requested and stop_requested():
@@ -845,7 +712,6 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
             
             print(f"\n{language_config.PROCESSING_BATCH.format(batch_num, total_batches, batch_start)}")
 
-            # [REFAKTOR] Memuat gambar menggunakan fungsi helper
             batch_images_list = _load_images_for_batch(data_source, (batch_start, batch_end), stop_requested)
 
             if stop_requested and stop_requested(): break
@@ -853,17 +719,13 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
                 print(language_config.SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED.format(batch_num))
                 continue
 
-            # [LOGIKA INTI] Panggilan spesifik ke similarity_mnfr
-            batch_result_img, _, individual_raw_maps = image_processor.similarity_mnfr(
+            batch_result_img, _, _ = image_processor.similarity_mnfr(
                 images=batch_images_list, merging_type=merging_type_from_settings,
                 tile_size=spatial_tile_size_arg, overlap=spatial_overlap_arg,
                 motion_sensitivity=spatial_motion_sensitivity_arg, noise_offset_factor=spatial_noise_offset_factor_arg,
                 update_progress=update_progress, stop_requested=stop_requested,
                 total_overall_images=total_images, images_processed_so_far=images_processed_count,
-                use_learning_model=use_learning_model_setting,
-                perform_learning=False, # Pelatihan tidak pernah dipicu di sini
-                weight_of_each_image=should_get_weights,
-                collect_raw_maps_for_learning=perform_learning_setting, 
+                weight_of_each_image=False, # Tidak lagi membutuhkan peta bobot individual
                 **extra_merging_params
             )
             
@@ -872,28 +734,12 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
             if batch_result_img is not None:
                 processed_batches_results.append(batch_result_img)
                 images_processed_count += len(batch_images_list)
-            if individual_raw_maps:
-                raw_weight_maps_for_learning.extend(individual_raw_maps)
 
         if stop_requested and stop_requested():
             if update_progress and progress_bar: update_progress(progress_bar.value(), "Proses Dibatalkan.")
             return
 
-        # --- 6. PENYIMPANAN DATA MENTAH UNTUK LEARNING (SPESIFIK SIMILARITY) ---
-        raw_maps_db_path = os.path.join("database", "Learning_Model", "raw_weight_map_database.h5")
-        if perform_learning_setting and raw_weight_maps_for_learning:
-            training_resolution_setting = tuple(general_settings.get("training_resolution", (256, 256)))
-            resized_maps = [cv2.resize(w_map, training_resolution_setting, interpolation=cv2.INTER_AREA) for w_map in raw_weight_maps_for_learning]
-
-            try:
-                with h5py.File(raw_maps_db_path, 'a') as hf:
-                    last_index = max([int(k.split('_')[-1]) for k in hf.keys() if k.startswith('map_')] or [-1])
-                    for i, w_map in enumerate(resized_maps):
-                        hf.create_dataset(f'map_{last_index + 1 + i}', data=w_map, compression="gzip")
-            except Exception as e:
-                traceback.print_exc()
-
-        # --- 7. PENGGABUNGAN AKHIR / FINE-TUNING ---
+        # --- 6. PENGGABUNGAN AKHIR / FINE-TUNING ---
         final_result_img = None
         if processed_batches_results:
             if len(processed_batches_results) > 1:
@@ -905,7 +751,6 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
                 
                 if update_progress: update_progress(fine_tuning_start_progress, language_config.STARTING_ENHANCEMENT)
                 
-                # [LOGIKA INTI] Panggilan spesifik ke similarity_mnfr untuk fine-tuning
                 final_result_img, _, _ = image_processor.similarity_mnfr(
                     images=processed_batches_results, merging_type=merging_type_from_settings,
                     tile_size=spatial_tile_size_arg, overlap=spatial_overlap_arg,
@@ -913,13 +758,13 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
                     update_progress=fine_tuning_update_progress, stop_requested=stop_requested,
                     save_weight_map_path=(weight_map_output_path if save_final_weight_map else None),
                     total_overall_images=len(processed_batches_results), images_processed_so_far=0,
-                    use_learning_model=False, perform_learning=False, weight_of_each_image=False,
-                    collect_raw_maps_for_learning=False, **extra_merging_params
+                    weight_of_each_image=False,
+                    **extra_merging_params
                 )
             else:
                 final_result_img = processed_batches_results[0]
         
-        # --- 8. PENYIMPANAN HASIL AKHIR & PEMBERSIHAN ---
+        # --- 7. PENYIMPANAN HASIL AKHIR & PEMBERSIHAN ---
         if final_result_img is not None:
             ref_path_for_save = image_paths[0] if image_paths else None
             save_success = save_image(final_result_img, output_path, reference_image_path=ref_path_for_save)
@@ -928,7 +773,6 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
                 else f"{language_config.FAILED_TO_SAVE_IMAGE}: {os.path.basename(output_path)}"
             if update_progress: update_progress(100, final_message)
 
-            # Cleanup
             if not single_process and batch_id is not None:
                 hdf5_path = os.path.join("database", "align", f"aligned_image_batch_{batch_id}.h5")
                 if os.path.exists(hdf5_path):
@@ -937,13 +781,13 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=7,
         else:
             if update_progress: update_progress(100, language_config.DATA_FAILED_COMPLETION_CREATED)
 
-    # --- 9. PENANGANAN ERROR (UMUM) ---
+    # --- 8. PENANGANAN ERROR (UMUM) ---
     except Exception as e:
         error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(e))
         traceback.print_exc()
         if update_progress and not (stop_requested and stop_requested()):
             update_progress(0, error_message)
-
+            
 def running_similarity(parent=None, single_process=None, batch_id=None, progress_callback=None):
     
     # ==========================================================

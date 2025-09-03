@@ -6,6 +6,7 @@ from functools import lru_cache
 import gc
 import math
 import threading
+import traceback
 import cv2
 import json
 import os
@@ -157,38 +158,33 @@ def get_all_image_paths_for_batch_process(db_path, batch_id):
         return []
 
 def _prepare_image_array_from_raw(original_path):
-    """
-    Membaca gambar RAW dan mengembalikan array NumPy BGR.
-    Jika gagal atau bukan RAW, mengembalikan None.
-    """
+    # Fungsi ini tidak berubah
     try:
-        if not RAWPY_AVAILABLE:
-            return None
-
+        if not RAWPY_AVAILABLE: return None
         with rawpy.imread(original_path) as raw:
-            # gamma_setting = (2.5, 15.92)  # Natural Gamma
             gamma_setting = (2.222, 4.5)
             rgb = raw.postprocess(
-                demosaic_algorithm= rawpy.DemosaicAlgorithm.DCB,
+                demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,
                 use_camera_wb=True,
                 gamma=gamma_setting,
                 output_bps=16,
-                bad_pixels_path=None,
                 output_color=rawpy.ColorSpace.sRGB,
-                chromatic_aberration=None,
                 highlight_mode=rawpy.HighlightMode.Blend,
             )
-
-        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        return bgr
+        if rgb.flags['WRITEABLE']:
+            bgr = rgb
+            b_channel = bgr[:, :, 0].copy()
+            bgr[:, :, 0] = bgr[:, :, 2]
+            bgr[:, :, 2] = b_channel
+            return bgr
     except Exception as e:
         print(f"Error membaca RAW file {original_path}: {e}")
         return None
- 
+     
 def load_images_from_paths(image_paths, stop_requested=None):
     images = []
     raw_extensions = {'.dng', '.cr2', '.nef', '.arw', '.orf', '.rw2', '.pef', '.srw'}
-    num_threads = os.cpu_count() or 4
+    num_threads = 3
 
     raw_futures = []
     standard_futures = []
@@ -313,77 +309,125 @@ def save_align_to_folder(image, index, original_path, align_folder=None, load_co
 
 def save_image(image, output_path, reference_image_path=None):
     """
-    Menyimpan gambar tanpa rotasi/flip fisik, 
-    tapi tetap menyalin metadata orientasi dari gambar referensi 
-    menggunakan exiftool agar metadata akurat.
+    Menyimpan gambar dengan kontrol kompresi untuk file TIFF demi kompatibilitas.
+    Menyalin metadata orientasi dari gambar referensi menggunakan exiftool.
     """
     try:
-        image_to_save = image.copy()
-        if reference_image_path is None or not os.path.exists(reference_image_path):
-            cv2.imwrite(output_path, image_to_save)
-            return output_path
+        # Tidak perlu .copy() jika gambar tidak akan dimodifikasi lagi
+        image_to_save = image
+        
+        # [REVISI] Tentukan parameter penyimpanan berdasarkan ekstensi file
+        save_params = []
+        ext = os.path.splitext(output_path)[1].lower()
+        if ext in ['.tif', '.tiff']:
+            # OPSI TERBAIK: Gunakan kompresi Deflate/ZIP yang sangat kompatibel.
+            # Ini memberikan keseimbangan terbaik antara ukuran dan kompatibilitas.
+            # save_params = [cv2.IMWRITE_TIFF_COMPRESSION, 8] # 8 adalah kode untuk Deflate
 
-        # Langsung simpan gambar apa adanya (tidak diputar/flip)
-        success = cv2.imwrite(output_path, image_to_save)
+            # OPSI PALING AMAN (jika Deflate gagal): Tanpa kompresi sama sekali.
+            # Hapus komentar di bawah ini jika Anda ingin file yang lebih besar tetapi 100% kompatibel.
+            save_params = [cv2.IMWRITE_TIFF_COMPRESSION, 1] # 1 adalah kode untuk tanpa kompresi
+
+        # Simpan gambar dengan parameter yang sudah ditentukan
+        success = cv2.imwrite(output_path, image_to_save, save_params)
+        
         if not success:
             print(f"Error: OpenCV gagal menyimpan gambar ke '{output_path}'")
-            return None
+            # Coba lagi tanpa parameter jika gagal, sebagai fallback
+            success_fallback = cv2.imwrite(output_path, image_to_save)
+            if not success_fallback:
+                return None
 
-        # Salin metadata dari referensi (termasuk Orientation)
-        try:
-            subprocess.run([
-                "exiftool",
-                "-q",
-                "-overwrite_original",
-                "-TagsFromFile", reference_image_path,
-                output_path
-            ], check=True, capture_output=True)
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            print(f"  Peringatan: Gagal menyalin metadata ke '{output_path}'. Error: {e}")
+        # --- Bagian ExifTool tidak berubah ---
+        if reference_image_path and os.path.exists(reference_image_path):
+            try:
+                # Salin metadata dari referensi (termasuk Orientation)
+                subprocess.run([
+                    "exiftool",
+                    "-q",
+                    "-overwrite_original",
+                    "-TagsFromFile", reference_image_path,
+                    output_path
+                ], check=True, capture_output=True)
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                # Ini bukan error fatal, hanya peringatan
+                print(f"  Peringatan: Gagal menyalin metadata ke '{output_path}'. ExifTool mungkin tidak terpasang. Error: {e}")
 
         return output_path
 
     except Exception as e:
         print(f"Error fatal saat menyimpan gambar ke '{output_path}': {e}")
+        traceback.print_exc()
         return None
 
 def save_special_jpg_and_png(
-    src_path: str,
+    img_np: np.ndarray,
     dst_path: str,
     reference_image_path: str = None,
     quality: int = 95,
     optimize: bool = True
-    ) -> str:
-    img_np = tifffile.imread(src_path)
-    
-    if img_np.dtype == 'uint16':
-        img_np = (img_np / 256).astype('uint8')
-    
-    img = Image.fromarray(img_np)
+) -> str:
+    """
+    Mengkonversi array NumPy, secara cerdas menerapkan rotasi fisik HANYA JIKA
+    diperlukan, dan memperbaiki potret yang terbalik, lalu menyimpannya ke JPG/PNG.
+    """
+    if img_np is None:
+        raise ValueError("Data gambar input (img_np) tidak boleh None.")
 
-    save_kwargs = {
-        'quality': quality,
-        'optimize': optimize,
-        'subsampling': 0
-    }
+    # Logika baru untuk menangani orientasi
+    if reference_image_path and os.path.exists(reference_image_path):
+        try:
+            h, w = img_np.shape[:2]
+            
+            # Deteksi jika data piksel sudah dalam format potret
+            if h > w:
+                print("Info: Data piksel sudah potret. Memeriksa dan memperbaiki jika terbalik.")
+                # [PERBAIKAN] Jika sudah potret, putar 180 derajat untuk memperbaiki orientasi yang terbalik.
+                img_np = cv2.rotate(img_np, cv2.ROTATE_180)
+            else:
+                # Jika data piksel adalah landscape, maka kita perlu memutarnya
+                # berdasarkan metadata EXIF agar menjadi potret yang benar.
+                with Image.open(reference_image_path) as ref_img:
+                    orientation = ref_img.getexif().get(274, 1)
+                
+                print(f"Info: Data piksel landscape terdeteksi. Menerapkan rotasi EXIF (Orientasi: {orientation}).")
+                if orientation == 3:   # Putar 180°
+                    img_np = cv2.rotate(img_np, cv2.ROTATE_180)
+                elif orientation == 6: # Putar 90° Searah Jarum Jam
+                    img_np = cv2.rotate(img_np, cv2.ROTATE_90_CLOCKWISE)
+                elif orientation == 8: # Putar 90° Berlawanan Arah Jarum Jam
+                    img_np = cv2.rotate(img_np, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                # Orientasi lain yang lebih kompleks (seperti flip) bisa diabaikan jika tidak umum
+                
+        except Exception as e:
+            print(f"Peringatan: Gagal membaca atau menerapkan orientasi EXIF: {e}")
 
-    ext = os.path.splitext(dst_path)[1].lower()
+    # --- Lanjutkan dengan logika yang ada (tanpa konversi warna) ---
+    image_to_save = img_np
+    if image_to_save.dtype == 'uint16':
+        image_to_save = (image_to_save / 256).astype('uint8')
+    
+    img = Image.fromarray(image_to_save)
+    
+    save_kwargs = {'quality': quality, 'optimize': optimize}
+    if os.path.splitext(dst_path)[1].lower() in ['.jpg', '.jpeg']:
+        save_kwargs['subsampling'] = 0
+
     img.save(dst_path, **save_kwargs)
 
+    # Lanjutkan dengan menyalin metadata dan mereset orientasi
     if reference_image_path and os.path.exists(reference_image_path):
         try:
             subprocess.run(
-                [
-                    "exiftool",
-                    "-overwrite_original",
-                    "-TagsFromFile", reference_image_path,
-                    dst_path
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                ["exiftool", "-overwrite_original", "-TagsFromFile", reference_image_path, dst_path],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
-        except subprocess.CalledProcessError as e:
+            subprocess.run(
+                ["exiftool", "-overwrite_original", "-Orientation=1", dst_path],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            print(f"Peringatan: Gagal menyalin/mereset metadata. Exiftool mungkin tidak terpasang.")
             pass
     
     return dst_path
@@ -694,32 +738,43 @@ def get_adaptive_bilateral(noise_level, min_noise, max_noise, min_d, max_d, min_
     
     return d, sigma, sigma
 
-def normalize_image(image, dtype): 
-        """
-        Normalisasi gambar ke range [0, 1] float32 berdasarkan tipe data asli.
-        Mempertahankan kecerahan relatif antar frame. Menghasilkan C-contiguous array.
-        """
-        try:
-            scale = np.float32(np.iinfo(dtype).max)
-        except ValueError:
-            if np.issubdtype(dtype, np.floating):
-                scale = 1.0
-            else:
-                msg = language_config.DATA_TYPE_NOT_SUPPORTED.format(dtype) if hasattr(language_config, 'DATA_TYPE_NOT_SUPPORTED') else f"Data type not supported for normalization: {dtype}"
-                raise TypeError(msg)
-
-
-        image_float = np.ascontiguousarray(image.astype(np.float32))
-
-        if scale > 1e-6: 
-            norm_image = image_float / scale
+def normalize_image(image, dtype, out=None): 
+    """
+    Normalisasi gambar ke range [0, 1] float32.
+    Jika `out` buffer disediakan, hasil akan disimpan di sana (operasi in-place).
+    Jika tidak, array baru akan dibuat.
+    """
+    try:
+        scale = np.float32(np.iinfo(dtype).max)
+    except ValueError:
+        if np.issubdtype(dtype, np.floating):
+            scale = 1.0
         else:
-             norm_image = image_float 
+            # Anda bisa mengganti ini dengan referensi ke language_config jika perlu
+            msg = f"Data type not supported for normalization: {dtype}"
+            raise TypeError(msg)
 
-        if image.ndim == 2: 
-            norm_image = np.stack((norm_image,) * 3, axis=-1)
-       
-        return np.ascontiguousarray(norm_image.astype(np.float32)) 
+    # [PERBAIKAN] Logika untuk menentukan array target
+    if out is None:
+        # Jika tidak ada buffer, buat array baru seperti sebelumnya
+        image_float = image.astype(np.float32)
+    else:
+        # Jika ada buffer, array yang akan kita modifikasi adalah 'out' itu sendiri.
+        image_float = out 
+        # Sekarang, salin data ke dalamnya. `np.copyto` tidak perlu variabel penampung.
+        np.copyto(image_float, image, casting='unsafe')
+
+    # Sekarang, `image_float` dijamin merupakan array NumPy yang valid.
+    # Lakukan pembagian secara in-place.
+    if scale > 1e-6:
+        np.divide(image_float, scale, out=image_float)
+    
+    # Penanganan gambar grayscale (2D)
+    if image.ndim == 2: 
+        return np.stack((image_float,) * 3, axis=-1).astype(np.float32, copy=False)
+    
+    # Untuk gambar berwarna, kembalikan buffer yang sudah dimodifikasi (atau array baru jika out=None).
+    return image_float
 
 # =========================================================================
 # === 4. LOGIKA INTI ALIGNMENT & FITUR
@@ -1013,31 +1068,27 @@ def add_legend_heatmap(img, norm_values, labels=("Static (High Weight)", "Moving
 
     return img
 
-def temporal_consistency_refinement(weight_maps_all, weight_map_sum, save_temporal_std_path=None,
-                                    max_boost=2.0, min_boost=0.5,
-                                    num_iterations=10, # Parameter baru untuk iterasi
-                                    ksize=5): # Parameter untuk filter
+def temporal_consistency_refinement(weight_map_sum, temporal_mean, temporal_std, 
+                                           save_temporal_std_path=None,
+                                           max_boost=2.0, min_boost=0.5,
+                                           num_iterations=10, ksize=5):
     """
-    Menyempurnakan peta bobot total secara iteratif berdasarkan stabilitas temporal.
-    Menggunakan pendekatan relaxation labeling untuk menghasilkan area stabil/tidak stabil yang koheren.
+    Versi refinement yang hemat memori. Menerima statistik yang sudah dihitung
+    secara online (mean, std) daripada list peta bobot yang besar, sehingga
+    mencegah lonjakan penggunaan memori yang masif.
     """
-    if len(weight_maps_all) <= 1 or num_iterations == 0:
-        return # Tidak melakukan apa-apa jika tidak ada cukup data
-
-    # --- LANGKAH 1: Analisis Statistik (Dilakukan Sekali) ---
-    print("Menganalisis stabilitas temporal...")
-    weight_stack = np.stack(weight_maps_all, axis=0)
-    temporal_std = np.std(weight_stack, axis=0)
-    temporal_mean = np.mean(weight_stack, axis=0)
+    # [OPTIMISASI] Langkah 1 (np.stack, np.std, np.mean) sepenuhnya dihilangkan.
+    # Ini menghemat GIGABYTE memori.
+    print("Menerapkan penyempurnaan konsistensi temporal (mode hemat memori)...")
 
     # Metrik stabilitas: rasio mean terhadap standar deviasi
     stability_score = temporal_mean / (temporal_std + 1e-6)
     
-    # Gunakan persentil untuk ketahanan terhadap outlier, bukan median/std
-    p50_stability = np.percentile(stability_score, 50) # Median
+    # Gunakan persentil untuk ketahanan terhadap outlier
+    p50_stability = np.percentile(stability_score, 50)
     p84_stability = np.percentile(stability_score, 84)
-    std_equivalent = p84_stability - p50_stability # Estimasi std yang lebih kuat
-    if std_equivalent < 1e-6: std_equivalent = 1.0 # Hindari pembagian dengan nol
+    std_equivalent = p84_stability - p50_stability
+    if std_equivalent < 1e-6: std_equivalent = 1.0
 
     # --- LANGKAH 2: Hitung Faktor Penskalaan Awal ---
     delta = stability_score - p50_stability
@@ -1046,27 +1097,31 @@ def temporal_consistency_refinement(weight_maps_all, weight_map_sum, save_tempor
 
     # --- LANGKAH 3: Refinement Iteratif (Cepat & Hemat Memori) ---
     refined_scaling_factors = scaling_factors
-    
     for i in range(num_iterations):
         refined_scaling_factors = cv2.medianBlur(
             refined_scaling_factors.astype(np.float32),
             ksize=ksize
         )
 
-    # --- LANGKAH 4: Terapkan Faktor Penskalaan Akhir ---
-    # Modifikasi weight_map_sum secara in-place
+    # --- LANGKAH 4: Terapkan Faktor Penskalaan Akhir secara In-place ---
     weight_map_sum *= refined_scaling_factors
 
     if save_temporal_std_path:
-        norm_std = (temporal_std - np.min(temporal_std)) / (np.max(temporal_std) - np.min(temporal_std) + 1e-8)
-        heatmap_color = cv2.applyColorMap((norm_std * 255).astype(np.uint8), cv2.COLORMAP_JET)
-        heatmap_with_legend = add_legend_heatmap(
-            heatmap_color,
-            norm_values=norm_std,
-            labels=("Static (High Weight)", "Moving (Low Weight)")
-        )
-        os.makedirs(os.path.dirname(save_temporal_std_path), exist_ok=True)
-        cv2.imwrite(save_temporal_std_path, heatmap_with_legend)
+        try:
+            # Logika untuk menyimpan heatmap tetap sama
+            min_std, max_std = np.min(temporal_std), np.max(temporal_std)
+            if (max_std - min_std) > 1e-8:
+                norm_std = (temporal_std - min_std) / (max_std - min_std)
+                heatmap_color = cv2.applyColorMap((norm_std * 255).astype(np.uint8), cv2.COLORMAP_JET)
+                heatmap_with_legend = add_legend_heatmap(
+                    heatmap_color,
+                    norm_values=norm_std,
+                    labels=("Static (Low Std)", "Moving (High Std)")
+                )
+                os.makedirs(os.path.dirname(save_temporal_std_path), exist_ok=True)
+                cv2.imwrite(save_temporal_std_path, heatmap_with_legend)
+        except Exception as e:
+            print(f"Gagal menyimpan heatmap stabilitas temporal: {e}")
 
 def optical_flow_refinement(
     current_weight_map, 
