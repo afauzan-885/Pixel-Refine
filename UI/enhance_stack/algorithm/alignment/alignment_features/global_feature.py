@@ -1417,6 +1417,7 @@ def run_pipeline_non_crop(processor, image_paths, base_image, target_dims,
                     total_images_in_stack,
                     language_config.IMAGE_PROCESS_IN_PROGRESS.format(completed_count, total_images_in_stack)
                 )         
+
 def run_pipeline_global_crop(processor, image_paths, base_image, target_dims, 
                              update_progress, stop_requested, transformation_type,
                              save_align, align_folder, h5_file_handle,

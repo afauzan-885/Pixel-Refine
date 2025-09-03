@@ -220,108 +220,74 @@ class LightGlueAlgorithm:
         if stop_requested and stop_requested():
             return None, None
 
-        # --- LOGIKA ADAPTIF: Menentukan GRID_SIZE dan melakukan RESIZE berdasarkan resolusi ---
         h_orig, w_orig = base_image.shape[:2]
         megapixels = (h_orig * w_orig) / 1_000_000.0
         
-        # Atur GRID_SIZE default untuk resolusi yang tidak tercakup dalam aturan spesifik
-        GRID_SIZE = (1, 1) 
-
-        # Terapkan aturan yang diminta, diurutkan dari resolusi tertinggi ke terendah
+        GRID_SIZE = (1, 1)
         if megapixels > 22.0:
             target_mp = 18.0
             scale_factor = (target_mp / megapixels) ** 0.5
-            
             new_width = int(w_orig * scale_factor)
             new_height = int(h_orig * scale_factor)
-
-            # Resize kedua gambar menggunakan interpolasi INTER_AREA untuk hasil terbaik saat memperkecil
             base_image = cv2.resize(base_image, (new_width, new_height), interpolation=cv2.INTER_AREA)
             target_image = cv2.resize(target_image, (new_width, new_height), interpolation=cv2.INTER_AREA)
-            
-            # Setelah di-resize, gunakan GRID_SIZE untuk 18MP
             GRID_SIZE = (3, 3)
+        elif 17.5 <= megapixels <= 22.0: GRID_SIZE = (2, 3)
+        elif 11.5 <= megapixels <= 13.0: GRID_SIZE = (1, 2)
+        elif megapixels <= 8.5: GRID_SIZE = (1, 1)
 
-        elif 17.5 <= megapixels <= 20.0: # Rentang toleransi untuk 18MP
-            GRID_SIZE = (3, 3)
-
-        elif 11.5 <= megapixels <= 13.0: # Rentang toleransi untuk 12MP
-            GRID_SIZE = (2, 2)
-
-        elif megapixels <= 8.5: # Rentang untuk 8MP atau kurang
-            GRID_SIZE = (1, 1)
-        # --- AKHIR LOGIKA ADAPTIF ---
-
-        OVERLAP_PERCENT = 0.10 
-
-        h, w = base_image.shape[:2] # Gunakan dimensi baru jika ada resize
+        OVERLAP_PERCENT = 0.10
+        h, w = base_image.shape[:2]
         cols, rows = GRID_SIZE
-        
         if cols <= 0 or rows <= 0: return None, None
-        
-        tile_w = w // cols
-        tile_h = h // rows
-        
-        if tile_w == 0 or tile_h == 0:
-            return None, None
-        
-        overlap_w_px = int(tile_w * OVERLAP_PERCENT)
-        overlap_h_px = int(tile_h * OVERLAP_PERCENT)
+        tile_w, tile_h = w // cols, h // rows
+        if tile_w == 0 or tile_h == 0: return None, None
+        overlap_w_px, overlap_h_px = int(tile_w * OVERLAP_PERCENT), int(tile_h * OVERLAP_PERCENT)
 
         def resize_and_pad(image, target_size=448):
-            """Mengubah ukuran dan memberi padding agar gambar menjadi persegi."""
             h_tile, w_tile = image.shape[:2]
             scale = target_size / max(h_tile, w_tile)
             new_h, new_w = int(h_tile * scale), int(w_tile * scale)
             resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR_EXACT)
-            pad_top = (target_size - new_h) // 2
-            pad_left = (target_size - new_w) // 2
-            padded = cv2.copyMakeBorder(
-                resized, pad_top, target_size - new_h - pad_top,
-                pad_left, target_size - new_w - pad_left,
-                borderType=cv2.BORDER_CONSTANT, value=0)
+            pad_top, pad_left = (target_size - new_h) // 2, (target_size - new_w) // 2
+            padded = cv2.copyMakeBorder(resized, pad_top, target_size - new_h - pad_top, pad_left, target_size - new_w - pad_left, cv2.BORDER_CONSTANT, value=0)
             return padded, (w_tile / new_w, h_tile / new_h), (pad_left, pad_top)
 
         def prep_for_onnx(img):
             enhanced_img = prepare_image(img, grayscale=False, use_clahe=True)
             enhanced_gray = cv2.cvtColor(enhanced_img, cv2.COLOR_BGR2GRAY)
             noise_level = estimate_noise_variance(enhanced_gray)
-            min_noise_threshold, max_noise_threshold = 200.0, 700.0
-            min_d, max_d, min_sigma, max_sigma = 5, 9, 20, 75
-
-            if noise_level > min_noise_threshold:
-                d, sigma_color, sigma_space = get_adaptive_bilateral(
-                    noise_level, min_noise_threshold, max_noise_threshold,
-                    min_d, max_d, min_sigma, max_sigma)
+            if noise_level > 200.0:
+                d, sigma_color, sigma_space = get_adaptive_bilateral(noise_level, 200.0, 700.0, 5, 9, 20, 75)
                 enhanced_img = cv2.bilateralFilter(enhanced_img, d, sigma_color, sigma_space)
-
             rgb = cv2.cvtColor(enhanced_img, cv2.COLOR_BGR2RGB)
             padded, scale_factors, pad_offsets = resize_and_pad(rgb)
-            return (
-                padded.astype(np.float32)[None, :, :, :].transpose(0, 3, 1, 2) / 255.0,
-                scale_factors, pad_offsets)
+            return padded.astype(np.float32)[None, :, :, :].transpose(0, 3, 1, 2) / 255.0, scale_factors, pad_offsets
 
         def preprocessor_worker(job_q, result_q):
             while True:
-                item = job_q.get()
+                # Periksa sinyal berhenti di dalam worker juga, untuk keluar lebih cepat
+                if stop_requested and stop_requested(): break
+                try:
+                    item = job_q.get(timeout=0.1)
+                except queue.Empty:
+                    continue # Jika tidak ada kerjaan, coba lagi
+                    
                 if item is None: break
                 r, c = item
-                
-                x_start_overlap = max(0, c * tile_w - overlap_w_px)
-                y_start_overlap = max(0, r * tile_h - overlap_h_px)
-                x_end_overlap = min(w, (c + 1) * tile_w + overlap_w_px)
-                y_end_overlap = min(h, (r + 1) * tile_h + overlap_h_px)
-
-                base_tile = base_image[y_start_overlap:y_end_overlap, x_start_overlap:x_end_overlap]
-                target_tile = target_image[y_start_overlap:y_end_overlap, x_start_overlap:x_end_overlap]
-
+                x_start = max(0, c * tile_w - overlap_w_px)
+                y_start = max(0, r * tile_h - overlap_h_px)
+                x_end = min(w, (c + 1) * tile_w + overlap_w_px)
+                y_end = min(h, (r + 1) * tile_h + overlap_h_px)
+                base_tile = base_image[y_start:y_end, x_start:x_end]
+                target_tile = target_image[y_start:y_end, x_start:x_end]
                 imgL, scaleL, offsetL = prep_for_onnx(base_tile)
                 imgR, scaleR, offsetR = prep_for_onnx(target_tile)
-                
-                result_q.put((r, c, imgL, imgR, scaleL, offsetL, scaleR, offsetR, x_start_overlap, y_start_overlap))
+                result_q.put((r, c, imgL, imgR, scaleL, offsetL, scaleR, offsetR, x_start, y_start))
 
+        num_tiles = rows * cols
         job_queue = queue.Queue()
-        result_queue = queue.Queue(maxsize=2) 
+        result_queue = queue.Queue(maxsize=num_tiles)
         
         preprocessor_thread = threading.Thread(target=preprocessor_worker, args=(job_queue, result_queue))
         preprocessor_thread.start()
@@ -329,19 +295,31 @@ class LightGlueAlgorithm:
         for r in range(rows):
             for c in range(cols):
                 job_queue.put((r, c))
-        job_queue.put(None) 
+        job_queue.put(None)
 
         all_results = []
-        num_tiles = rows * cols
-        for _ in range(num_tiles):
-            if stop_requested and stop_requested(): break
+        processed_tiles = 0
 
-            try:
-                r, c, imgL, imgR, scaleL, offsetL, scaleR, offsetR, x_start_overlap, y_start_overlap = result_queue.get(timeout=30)
-            except queue.Empty:
-                print("WARNING: Antrian hasil kosong, pre-processing mungkin terlalu lambat atau error.")
+        while processed_tiles < num_tiles:
+            # 1. Selalu periksa sinyal berhenti di setiap iterasi
+            if stop_requested and stop_requested():
                 break
 
+            try:
+                # 2. Ambil hasil dengan timeout singkat, ini kuncinya
+                item = result_queue.get(timeout=0.1)
+                processed_tiles += 1
+                r, c, imgL, imgR, scaleL, offsetL, scaleR, offsetR, x_start, y_start = item
+            
+            except queue.Empty:
+                # 3. Jika antrian kosong, berarti worker sedang sibuk.
+                # Cek apakah worker masih hidup. Jika sudah mati, tidak akan ada hasil lagi.
+                if not preprocessor_thread.is_alive() and result_queue.empty():
+                    break
+                # Jika masih hidup, lanjutkan loop untuk mencoba lagi dan memeriksa stop_requested
+                continue
+
+            # --- Blok inferensi dan post-processing (TIDAK BERUBAH) ---
             try:
                 batch = np.concatenate([imgL, imgR], axis=0).astype(np.float32)
                 inp_name = self.sess.get_inputs()[0].name
@@ -364,19 +342,17 @@ class LightGlueAlgorithm:
             mkptsR_padded = keypoints_b[1][idx1].astype(np.float32)
 
             def restore_coords(pts, pad, scale):
-                pts -= np.array(pad)
-                pts *= np.array(scale)
-                return pts
+                return (pts - np.array(pad)) * np.array(scale)
 
             mkptsL_tile_local = restore_coords(mkptsL_padded, offsetL, scaleL)
             mkptsR_tile_local = restore_coords(mkptsR_padded, offsetR, scaleR)
             
-            offset_global = np.array([x_start_overlap, y_start_overlap])
+            offset_global = np.array([x_start, y_start])
             mkptsL_global = mkptsL_tile_local + offset_global
             mkptsR_global = mkptsR_tile_local + offset_global
             
             all_results.append((mkptsL_global, mkptsR_global, scores[conf_mask]))
-
+        
         preprocessor_thread.join()
 
         if not all_results:
@@ -386,7 +362,6 @@ class LightGlueAlgorithm:
         final_mkptsR = np.vstack([res[1] for res in all_results])
         final_scores = np.concatenate([res[2] for res in all_results])
 
-        # Gunakan 'base_image.shape' di sini, yang merujuk ke gambar yang mungkin sudah di-resize
         dedup_mkptsL, dedup_mkptsR, _ = deduplicate_keypoints(
             final_mkptsL, final_mkptsR, final_scores, base_image.shape
         )
@@ -496,7 +471,6 @@ def main(db_path,
          num_workers=None):
     
     # --- Tahap 1: Inisialisasi dan Konfigurasi ---
-    # Ganti ORBAlgorithm dengan kelas prosesor Anda yang sesuai jika berbeda
     processor = LightGlueAlgorithm(db_path) 
     config = load_light_glue_config(config_filename)
     
