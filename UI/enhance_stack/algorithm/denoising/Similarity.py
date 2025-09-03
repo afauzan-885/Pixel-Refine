@@ -189,8 +189,8 @@ class SimilarityAlgorithm:
 
         # --- LANGKAH 3 (PASS 2 / UTAMA): Pipeline Akumulasi ---
         msg_pass = "Pass 2/2: " if is_two_pass else ""
-        if update_progress:
-            update_progress(pass2_range[0], f"Memulai {msg_pass}Penggabungan Spasial")
+        # if update_progress:
+        #     update_progress(pass2_range[0], f"Memulai {msg_pass}Penggabungan Spasial")
 
         ref_work_res_pass2 = cv2.resize(reference_image_float, (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
         stability_map_work_res = None
@@ -201,14 +201,13 @@ class SimilarityAlgorithm:
         final_image_sum = np.zeros((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32)
         weight_map_sum = np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
         
-        # [OPTIMISASI STATISTIK] Inisialisasi variabel untuk algoritma Welford.
-        # Ini menggantikan kebutuhan untuk `weight_maps_all` yang boros memori.
+        # Inisialisasi variabel untuk algoritma Welford.
         if temporal_consistency and num_images > 1:
             count = 0
             mean = np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
             M2 = np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
 
-        # Pra-alokasi buffer memori (tidak berubah)
+        # Pra-alokasi buffer memori
         curr_work_res_buffer = np.empty((work_res_h, work_res_w, ref_channels_buffer), dtype=np.float32)
         temp_weight_map_work_res_buffer = np.zeros((work_res_h, work_res_w), dtype=np.float32, order='C')
         dummy_final_sum_work_res_buffer = np.zeros((work_res_h, work_res_w, ref_channels_buffer), dtype=np.float32, order='C')

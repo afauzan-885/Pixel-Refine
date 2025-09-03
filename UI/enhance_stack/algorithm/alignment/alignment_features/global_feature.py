@@ -364,58 +364,76 @@ def save_special_jpg_and_png(
     img_np: np.ndarray,
     dst_path: str,
     reference_image_path: str = None,
-    quality: int = 95,
-    optimize: bool = True
+    # --- Parameter Kompresi Baru ---
+    quality: int = 98,
+    optimize: bool = True,
+    png_compress_level: int = 8
 ) -> str:
     """
-    Mengkonversi array NumPy, secara cerdas menerapkan rotasi fisik HANYA JIKA
-    diperlukan, dan memperbaiki potret yang terbalik, lalu menyimpannya ke JPG/PNG.
+    Mengkonversi array NumPy, menerapkan rotasi, dan menyimpannya ke JPG/PNG
+    dengan opsi kompresi yang lebih agresif dan cerdas.
     """
     if img_np is None:
         raise ValueError("Data gambar input (img_np) tidak boleh None.")
 
-    # Logika baru untuk menangani orientasi
+    # Logika untuk menangani orientasi (tetap sama)
     if reference_image_path and os.path.exists(reference_image_path):
         try:
             h, w = img_np.shape[:2]
-            
-            # Deteksi jika data piksel sudah dalam format potret
             if h > w:
-                print("Info: Data piksel sudah potret. Memeriksa dan memperbaiki jika terbalik.")
-                # [PERBAIKAN] Jika sudah potret, putar 180 derajat untuk memperbaiki orientasi yang terbalik.
                 img_np = cv2.rotate(img_np, cv2.ROTATE_180)
             else:
-                # Jika data piksel adalah landscape, maka kita perlu memutarnya
-                # berdasarkan metadata EXIF agar menjadi potret yang benar.
                 with Image.open(reference_image_path) as ref_img:
                     orientation = ref_img.getexif().get(274, 1)
                 
-                print(f"Info: Data piksel landscape terdeteksi. Menerapkan rotasi EXIF (Orientasi: {orientation}).")
-                if orientation == 3:   # Putar 180°
+                if orientation == 3:
                     img_np = cv2.rotate(img_np, cv2.ROTATE_180)
-                elif orientation == 6: # Putar 90° Searah Jarum Jam
+                elif orientation == 6:
                     img_np = cv2.rotate(img_np, cv2.ROTATE_90_CLOCKWISE)
-                elif orientation == 8: # Putar 90° Berlawanan Arah Jarum Jam
+                elif orientation == 8:
                     img_np = cv2.rotate(img_np, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                # Orientasi lain yang lebih kompleks (seperti flip) bisa diabaikan jika tidak umum
-                
-        except Exception as e:
-            print(f"Peringatan: Gagal membaca atau menerapkan orientasi EXIF: {e}")
+        except Exception:
+            pass
 
-    # --- Lanjutkan dengan logika yang ada (tanpa konversi warna) ---
+    # Konversi tipe data jika perlu (tetap sama)
     image_to_save = img_np
     if image_to_save.dtype == 'uint16':
         image_to_save = (image_to_save / 256).astype('uint8')
     
     img = Image.fromarray(image_to_save)
     
-    save_kwargs = {'quality': quality, 'optimize': optimize}
-    if os.path.splitext(dst_path)[1].lower() in ['.jpg', '.jpeg']:
-        save_kwargs['subsampling'] = 0
+    file_ext = os.path.splitext(dst_path)[1].lower()
 
-    img.save(dst_path, **save_kwargs)
+    # --- Logika Penyimpanan yang Ditingkatkan ---
+    if file_ext in ['.jpg', '.jpeg']:
+        save_kwargs = {
+            'quality': quality,
+            'optimize': True,
+            'progressive': True  # Membuat JPG dimuat secara bertahap, kadang bisa sedikit lebih kecil
+        }
+        # Mengaktifkan Chroma Subsampling untuk ukuran file yang jauh lebih kecil
+        if optimize:
+            # '4:2:0' adalah standar untuk web dan sangat efisien.
+            # Kode asli Anda menggunakan `subsampling=0` ('4:4:4') yang menjaga semua info warna.
+            save_kwargs['subsampling'] = '4:2:0' 
+        else:
+            # Jika tidak mau subsampling, samakan seperti kode asli Anda
+            save_kwargs['subsampling'] = 0
 
-    # Lanjutkan dengan menyalin metadata dan mereset orientasi
+        img.save(dst_path, **save_kwargs)
+
+    elif file_ext == '.png':
+        img.save(
+            dst_path,
+            optimize=True,
+            compress_level=png_compress_level # Level 0 (tanpa kompresi) hingga 9 (maksimal)
+        )
+    else:
+        # Fallback untuk format lain
+        img.save(dst_path)
+
+
+    # Logika menyalin metadata (tetap sama)
     if reference_image_path and os.path.exists(reference_image_path):
         try:
             subprocess.run(
@@ -427,7 +445,6 @@ def save_special_jpg_and_png(
                 check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
         except (subprocess.CalledProcessError, FileNotFoundError):
-            print(f"Peringatan: Gagal menyalin/mereset metadata. Exiftool mungkin tidak terpasang.")
             pass
     
     return dst_path
