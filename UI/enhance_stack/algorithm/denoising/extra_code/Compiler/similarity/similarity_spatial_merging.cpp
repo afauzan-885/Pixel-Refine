@@ -323,7 +323,7 @@ extern "C"
 
                     cv::Rect tile_roi(c, r, tile_w_fine, tile_h_fine);
 
-                    // Perhitungan confidence (tetap sama)
+                    // Perhitungan confidence 
                     MotionMatching::TileMatchResult mbm_result = MotionMatching::calculate_tile_similarity(
                         current_image_gray_full(tile_roi), reference_image_gray_full(tile_roi),
                         global_estimated_noise_sigma,

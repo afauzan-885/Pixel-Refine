@@ -23,6 +23,7 @@ def load_similarity_config():
             "similarity_spatial_motion_sensitivity": 150.0,
             "similarity_spatial_noise_mad_offset_factor": 0.10,
             "similarity_spatial_overlap_percent": 0.35,
+            "similarity_spatial_num_workers": 2, # [PENAMBAHAN] Default ke 'Auto' (-1)
         },
         "frequency_params": {
             "similarity_frequency_c_wiener_factor": 8.0,
@@ -81,7 +82,9 @@ def save_similarity_v1_config(config_to_save):
         "frequency_params": {}
     }
     spatial_keys = ["similarity_spatial_tile_size", "similarity_spatial_motion_sensitivity",
-                    "similarity_spatial_noise_mad_offset_factor", "similarity_spatial_overlap_percent"]
+                    "similarity_spatial_noise_mad_offset_factor", "similarity_spatial_overlap_percent",
+                    "similarity_spatial_num_workers"] # [PENAMBAHAN]
+
     for key in spatial_keys:
         if key in config_to_save:
             similarity_section_to_save["spatial_params"][key] = config_to_save[key]
@@ -142,6 +145,7 @@ def get_similarity_settings_page():
         "similarity_spatial_motion_sensitivity": 120.5, 
         "similarity_spatial_noise_mad_offset_factor": 0.25,
         "similarity_spatial_overlap_percent": 0.38, 
+        "similarity_spatial_num_workers": 2, # [PENAMBAHAN] Default UI
         
         "similarity_frequency_c_wiener_factor": 8.0,
         "similarity_frequency_tile_size": 32,
@@ -197,6 +201,37 @@ def get_similarity_settings_page():
     tile_size_sp_layout.addWidget(tile_size_combo_sp) # Tambah combo box
     widgets['tile_combo_spatial'] = tile_size_combo_sp
     spatial_container_main_layout.addWidget(tile_size_sp_group_widget)
+    
+    # [PENAMBAHAN] --- Grup Baru: Processing Cores ---
+    num_workers_group_widget = QWidget()
+    num_workers_layout = QVBoxLayout(num_workers_group_widget)
+    num_workers_layout.setContentsMargins(0,0,0,0)
+    num_workers_layout.setSpacing(5)
+
+    num_workers_label = QLabel("Processing Cores:") # Nama UI yang kita pilih
+    num_workers_label.setFont(get_default_font(10, QFont.Weight.Bold))
+    num_workers_label.setToolTip("Jumlah inti CPU yang digunakan untuk pemrosesan paralel.\n'Auto' akan memilih jumlah optimal.\nNilai lebih tinggi bisa lebih cepat tetapi menggunakan lebih banyak CPU dan RAM.")
+    num_workers_layout.addWidget(num_workers_label)
+
+    num_workers_combo = QComboBox()
+    # Dapatkan jumlah core CPU secara dinamis
+    max_cores = os.cpu_count() or 4 # Fallback ke 4 jika tidak terdeteksi
+    worker_options = ["Auto"] + [str(i) for i in range(1, max_cores + 1)]
+    num_workers_combo.addItems(worker_options)
+    
+    # Atur nilai awal dari config
+    current_worker_val = sim_v1_config.get("similarity_spatial_num_workers", -1)
+    if current_worker_val == -1:
+        num_workers_combo.setCurrentText("Auto")
+    else:
+        num_workers_combo.setCurrentText(str(current_worker_val))
+
+    num_workers_combo.setStyleSheet(DROPDOWN_BOX + "QComboBox { padding: 4px 6px; min-height: 20px; }")
+    num_workers_combo.setMinimumWidth(100)
+    num_workers_layout.addWidget(num_workers_combo)
+    widgets['num_workers_combo_spatial'] = num_workers_combo
+    # Tambahkan grup baru ini ke layout utama spatial
+    spatial_container_main_layout.addWidget(num_workers_group_widget)
 
     # --- Grup 2: Overlap (Spatial) ---
     overlap_sp_group_widget = QWidget()
@@ -358,6 +393,11 @@ def get_similarity_settings_page():
         try:
             settings_to_save_flat["similarity_merging_type"] = "spatial" if widgets['merging_type_button'].isChecked() else "frequency"
             settings_to_save_flat["similarity_spatial_tile_size"] = int(widgets['tile_combo_spatial'].currentText())
+            worker_text = widgets['num_workers_combo_spatial'].currentText()
+            if worker_text == "Auto":
+                settings_to_save_flat["similarity_spatial_num_workers"] = -1
+            else:
+                settings_to_save_flat["similarity_spatial_num_workers"] = int(worker_text)
             ms_val, _ = c_locale.toDouble(widgets['motion_sensitivity_input'].text()); settings_to_save_flat["similarity_spatial_motion_sensitivity"] = ms_val
             nm_val, _ = c_locale.toDouble(widgets['noise_mad_offset_input'].text()); settings_to_save_flat["similarity_spatial_noise_mad_offset_factor"] = nm_val
             ov_sp_percent = int(widgets['overlap_input_spatial'].text()); settings_to_save_flat["similarity_spatial_overlap_percent"] = ov_sp_percent / 100.0
@@ -417,6 +457,11 @@ def get_similarity_settings_page():
     def reset_spatial_defaults():
         defaults = original_v1_ui_defaults
         widgets['tile_combo_spatial'].setCurrentText(str(defaults.get("similarity_spatial_tile_size")))
+        worker_default = defaults.get("similarity_spatial_num_workers", -1)
+        if worker_default == -1:
+            widgets['num_workers_combo_spatial'].setCurrentText("Auto")
+        else:
+            widgets['num_workers_combo_spatial'].setCurrentText(str(worker_default))
         widgets['motion_sensitivity_slider'].setValue(int(round(defaults.get("similarity_spatial_motion_sensitivity") * motion_sens_multiplier_v1)))
         widgets['noise_mad_offset_slider'].setValue(int(round(defaults.get("similarity_spatial_noise_mad_offset_factor") * noise_mad_multiplier_v1)))
         widgets['overlap_slider_spatial'].setValue(int(round(defaults.get("similarity_spatial_overlap_percent") * 100)))
@@ -433,11 +478,10 @@ def get_similarity_settings_page():
 
     widgets['reset_spatial_button'].clicked.connect(reset_spatial_defaults)
     widgets['reset_frequency_button'].clicked.connect(reset_frequency_defaults)
-    
+    widgets['num_workers_combo_spatial'].currentIndexChanged.connect(save_current_settings_v1)
     widgets['tile_combo_spatial'].currentIndexChanged.connect(save_current_settings_v1)
     widgets['motion_sensitivity_slider'].sliderReleased.connect(save_current_settings_v1)
     widgets['motion_sensitivity_input'].editingFinished.connect(save_current_settings_v1)
-    # ... (dan seterusnya untuk semua widget yang bisa diedit)
     widgets['noise_mad_offset_slider'].sliderReleased.connect(save_current_settings_v1)
     widgets['noise_mad_offset_input'].editingFinished.connect(save_current_settings_v1)
     widgets['overlap_slider_spatial'].sliderReleased.connect(save_current_settings_v1)

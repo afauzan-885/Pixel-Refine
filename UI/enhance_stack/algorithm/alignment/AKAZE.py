@@ -138,7 +138,7 @@ class AKAZEAlgorithm:
 
         return kps_base_adjusted, final_desc_base, kps_target_adjusted, final_desc_target
     
-    def calculate_global_motion(self, base_image, target_image, config_filename=None, num_blocks=(2, 2), overlap=10, stop_requested=None):
+    def calculate_global_motion(self, base_image, target_image, config_filename=None, num_blocks=(1, 2), overlap=0, stop_requested=None):
         if stop_requested and stop_requested():
             return None, None
 
@@ -242,9 +242,9 @@ class AKAZEAlgorithm:
             target_mp = 18.0
             scale_factor = (target_mp / megapixels) ** 0.5 # Akar kuadrat karena area = w * h
         elif megapixels > 18.0:
-            scale_factor = 0.7
+            scale_factor = 0.8
         elif 11.5 <= megapixels <= 12.5: # Memberi sedikit rentang untuk 12MP
-            scale_factor = 0.7
+            scale_factor = 1.0
         # Untuk 8MP dan resolusi lain, tidak ada perubahan (scale_factor tetap 1.0)
 
         if scale_factor < 1.0:
@@ -252,7 +252,7 @@ class AKAZEAlgorithm:
             new_height = int(h_orig * scale_factor)
             
             # Gunakan INTER_AREA untuk downscaling karena memberikan hasil terbaik
-            interpolation = cv2.INTER_AREA
+            interpolation = cv2.INTER_NEAREST_EXACT
             
             enhanced_base_gray = cv2.resize(enhanced_base_gray, (new_width, new_height), interpolation=interpolation)
             enhanced_target_gray = cv2.resize(enhanced_target_gray, (new_width, new_height), interpolation=interpolation)
@@ -261,7 +261,7 @@ class AKAZEAlgorithm:
         blocks_x, blocks_y = num_blocks
         block_w = max(1, w // blocks_x)
         block_h = max(1, h // blocks_y)
-        max_kps_per_block = 300
+        max_kps_per_block = 400
 
 
         try:
@@ -486,7 +486,7 @@ def main(db_path,
         raise RuntimeError("Base image failed to load.")
     
     if num_workers is None:
-        num_workers = 4
+        num_workers = 2
     
     base_image_raw = base_img_list[0]
     base_resized_list, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="median")
