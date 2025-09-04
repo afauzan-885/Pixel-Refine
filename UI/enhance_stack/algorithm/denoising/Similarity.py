@@ -1,3 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import queue
+import threading
 import traceback
 import cv2
 import numpy as np
@@ -8,7 +11,7 @@ import h5py
 from PySide6.QtCore import QThread, Signal, Qt
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (add_legend_heatmap, extract_all_metadata, 
                                                                                     gaussian_window, get_all_image_paths_for_single_process, load_images_from_paths, 
-                                                                                    normalize_image, resize_all_with_padding, save_image, setup_balanced_batching, 
+                                                                                    normalize_image, preprocess_reference_in_python, resize_all_with_padding, save_image, setup_balanced_batching, 
                                                                                     standard_refinement, temporal_consistency_refinement)
 from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityFrequencyInterface, SimilaritySpatialInterface
 from UI.enhance_stack.components.single_page_layout.parameter_denoising.similarity_parameter_settings import  load_similarity_config
@@ -91,16 +94,15 @@ class SimilarityAlgorithm:
                     update_progress=None, stop_requested=None,
                     total_overall_images=None, images_processed_so_far=0,
                     lib_path='UI/data/similarity_spatial_merging.dll',
-                    temporal_consistency=False,
+                    temporal_consistency=True,
                     save_temporal_std_path=None,
                     weight_of_each_image=False,
                     temporal_analysis_mode='one_pass', # Opsi: 'one_pass', 'two_pass_full'
                     **unused_kwargs):
 
-        # --- LANGKAH 1: Inisialisasi dan Penentuan Resolusi Kerja ---
+        # --- LANGKAH 1: Inisialisasi dan Penentuan Resolusi Kerja (Tidak Berubah) ---
         tile_h, tile_w = map(int, tile_size)
         try:
-            # Asumsi: SimilaritySpatialInterface adalah kelas yang Anda miliki untuk memuat .dll
             c_interface = SimilaritySpatialInterface(lib_path)
         except (FileNotFoundError, OSError, AttributeError) as e:
             raise RuntimeError(f"Gagal memuat C++ interface_spatial_merging: {e}")
@@ -132,7 +134,7 @@ class SimilarityAlgorithm:
         pass1_range = (0, 50)
         pass2_range = (50, 95) if is_two_pass else (0, 95)
         
-        # --- (PASS 1): Membuat Peta Stabilitas ---
+        # --- (PASS 1): Membuat Peta Stabilitas (Tidak Berubah, Tetap Sekuensial) ---
         stability_map = None
         if is_two_pass:
             if update_progress:
@@ -187,80 +189,127 @@ class SimilarityAlgorithm:
             
             del sum_map, sum_sq_map
 
-        # --- LANGKAH 3 (PASS 2 / UTAMA): Pipeline Akumulasi ---
+        # --- LANGKAH 3 (PASS 2 / UTAMA): TAHAP A - PEMROSESAN C++ PARALEL ---
         msg_pass = "Pass 2/2: " if is_two_pass else ""
-        # if update_progress:
-        #     update_progress(pass2_range[0], f"Memulai {msg_pass}Penggabungan Spasial")
-
-        ref_work_res_pass2 = cv2.resize(reference_image_float, (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
+    
+        ref_gray_preprocessed, ref_noise_sigma = preprocess_reference_in_python(reference_image_float)
+        ref_work_res_pass2 = cv2.resize(ref_gray_preprocessed, (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
         stability_map_work_res = None
         if stability_map is not None:
             stability_map_work_res = cv2.resize(stability_map, (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
 
-        # Inisialisasi akumulator utama
+        # [BARU] Definisikan fungsi Producer yang akan dijalankan oleh setiap worker
+        def producer(task_queue, result_queue):
+            while True:
+                try:
+                    # Mengambil tugas (indeks dan gambar) dari antrian tugas
+                    image_index, image_orig = task_queue.get_nowait()
+                except queue.Empty:
+                    # Jika tidak ada tugas lagi, thread ini selesai
+                    break
+
+                if stop_requested and stop_requested():
+                    break
+
+                # --- Bagian ini adalah 'process_image_task' dari sebelumnya ---
+                if not isinstance(image_orig, np.ndarray): 
+                    result_queue.put(None)
+                    continue
+
+                local_curr_work_res = np.empty((work_res_h, work_res_w, ref_channels_buffer), dtype=np.float32)
+                dummy_final_sum = np.zeros((work_res_h, work_res_w, ref_channels_buffer), dtype=np.float32, order='C')
+                temp_weight_map = np.zeros((work_res_h, work_res_w), dtype=np.float32, order='C')
+                reusable_full_res_buffer = np.empty((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32)
+                weight_map_full_res_buffer = np.empty((ref_image_h, ref_image_w), dtype=np.float32)
+
+                normalize_image(image_orig, ref_dtype, out=reusable_full_res_buffer)
+                cv2.resize(reusable_full_res_buffer, (work_res_w, work_res_h), dst=local_curr_work_res, interpolation=cv2.INTER_AREA)
+                
+                c_interface.call_accumulate_frame_weighted(
+                    final_image_sum=dummy_final_sum, weight_map_sum=temp_weight_map,
+                    current_image=local_curr_work_res, reference_image_processed=ref_work_res_pass2,
+                    base_window=base_window, stability_map=stability_map_work_res,
+                    row_starts=row_starts, col_starts=col_starts,
+                    tile_h=tile_h, tile_w=tile_w, h=work_res_h, w=work_res_w, channels=ref_channels_buffer,
+                    motion_sensitivity=motion_sensitivity, noise_offset_factor=noise_offset_factor,
+                    precomputed_ref_noise_sigma=ref_noise_sigma
+                )
+                
+                cv2.resize(temp_weight_map, (ref_image_w, ref_image_h), dst=weight_map_full_res_buffer, interpolation=cv2.INTER_CUBIC)
+                reusable_full_res_buffer *= weight_map_full_res_buffer[:, :, np.newaxis]
+                
+                # Memasukkan hasil ke antrian hasil (akan berhenti jika antrian penuh)
+                result_queue.put((image_index, reusable_full_res_buffer, weight_map_full_res_buffer))
+
+        # --- LANGKAH 4: AKUMULASI DENGAN STREAMING (Logika Consumer) ---
         final_image_sum = np.zeros((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32)
         weight_map_sum = np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
         
-        # Inisialisasi variabel untuk algoritma Welford.
         if temporal_consistency and num_images > 1:
-            count = 0
-            mean = np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
-            M2 = np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
-
-        # Pra-alokasi buffer memori
-        curr_work_res_buffer = np.empty((work_res_h, work_res_w, ref_channels_buffer), dtype=np.float32)
-        temp_weight_map_work_res_buffer = np.zeros((work_res_h, work_res_w), dtype=np.float32, order='C')
-        dummy_final_sum_work_res_buffer = np.zeros((work_res_h, work_res_w, ref_channels_buffer), dtype=np.float32, order='C')
-        weight_map_full_res_buffer = np.empty((ref_image_h, ref_image_w), dtype=np.float32)
-        reusable_full_res_buffer = np.empty((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32)
+            count, mean, M2 = 0, np.zeros((ref_image_h, ref_image_w), dtype=np.float32), np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
 
         processed_frames_spatial = 0
-        if weight_of_each_image: weight_maps_per_image = []
+        if weight_of_each_image: 
+            weight_maps_per_image = [None] * num_images
 
-        # --- Loop Sekuensial Utama yang Telah Dioptimalkan ---
-        for i, image_orig in enumerate(images):
+        num_workers = 3
+        # [KUNCI] Buat antrian dengan ukuran maksimal untuk membatasi penggunaan memori
+        # Ukuran `num_workers` adalah pilihan yang baik.
+        task_queue = queue.Queue()
+        result_queue = queue.Queue(maxsize=num_workers)
+        
+        # Isi antrian tugas
+        for i, img in enumerate(images):
+            task_queue.put((i, img))
+
+        # Jalankan producer threads
+        threads = []
+        for _ in range(num_workers):
+            thread = threading.Thread(target=producer, args=(task_queue, result_queue))
+            thread.start()
+            threads.append(thread)
+
+        # [BARU] Loop Consumer: Mengambil hasil dan melakukan akumulasi
+        all_results_in_order = [None] * num_images
+        finished_count = 0
+        while finished_count < num_images:
             if stop_requested and stop_requested(): break
-            if not isinstance(image_orig, np.ndarray): continue
+            try:
+                # Mengambil hasil dari antrian. Akan menunggu jika kosong.
+                result = result_queue.get(timeout=0.1)
+                if result:
+                    # Simpan hasil sementara agar bisa diurutkan
+                    image_index, weighted_image, weight_map = result
+                    all_results_in_order[image_index] = (weighted_image, weight_map)
+                
+                finished_count += 1
+                # Update progress di sini, sama seperti sebelumnya
+                if update_progress:
+                    current_frame_index_in_pass = finished_count
+                    if use_overall_progress:
+                        current_img_overall = images_processed_so_far + current_frame_index_in_pass
+                        progress_in_pass2 = current_img_overall / total_overall_images
+                        msg = language_config.IMAGE_PROCESS_IN_PROGRESS.format(current_img_overall, total_overall_images)
+                    else:
+                        progress_in_pass2 = current_frame_index_in_pass / num_images
+                        msg = language_config.ANALYSIS_STEP_TWO_PROGRESS.format(msg_pass, current_frame_index_in_pass, num_images)
+                    current_total_progress = pass1_range[0] + (progress_in_pass2 * (pass2_range[1] - pass2_range[0]))
+                    update_progress(int(current_total_progress), msg)
+            except queue.Empty:
+                continue
 
-            # Langkah 1 & 2: Normalisasi dan Resize
-            normalize_image(image_orig, ref_dtype, out=reusable_full_res_buffer)
-            cv2.resize(reusable_full_res_buffer, (work_res_w, work_res_h), dst=curr_work_res_buffer, interpolation=cv2.INTER_AREA)
+        # Tunggu semua thread selesai
+        for thread in threads:
+            thread.join()
+
+        # [BARU] Loop Akumulasi Sekuensial, persis seperti logika asli Anda
+        for i, result_data in enumerate(all_results_in_order):
+            if result_data is None: continue
+            reusable_full_res_buffer, weight_map_full_res_buffer = result_data
             
-            # Langkah 3: Panggil C++
-            temp_weight_map_work_res_buffer.fill(0)
-            dummy_final_sum_work_res_buffer.fill(0)
-            c_interface.call_accumulate_frame_weighted(
-                final_image_sum=dummy_final_sum_work_res_buffer, weight_map_sum=temp_weight_map_work_res_buffer,
-                current_image=curr_work_res_buffer, reference_image=ref_work_res_pass2, base_window=base_window,
-                stability_map=stability_map_work_res, row_starts=row_starts, col_starts=col_starts,
-                tile_h=tile_h, tile_w=tile_w, h=work_res_h, w=work_res_w, channels=ref_channels_buffer,
-                motion_sensitivity=motion_sensitivity, noise_offset_factor=noise_offset_factor
-            )
-
-            if update_progress:
-                # Asumsi: language_config adalah objek yang berisi string pesan
-                if use_overall_progress:
-                    current_img_overall = images_processed_so_far + i + 1
-                    progress_in_pass2 = current_img_overall / total_overall_images
-                    msg = f"Memproses gambar {current_img_overall}/{total_overall_images}"
-                else:
-                    progress_in_pass2 = (i + 1) / num_images
-                    msg = f"{msg_pass}Memproses gambar {i + 1}/{num_images}"
-                current_total_progress = pass2_range[0] + (progress_in_pass2 * (pass2_range[1] - pass2_range[0]))
-                update_progress(int(current_total_progress), msg)
-        
-            # Langkah 4: Resize peta bobot dari resolusi kerja kembali ke resolusi penuh
-            cv2.resize(temp_weight_map_work_res_buffer, (ref_image_w, ref_image_h), dst=weight_map_full_res_buffer, interpolation=cv2.INTER_CUBIC)
-        
-            # Langkah 5: Akumulasi peta bobot utama
             weight_map_sum += weight_map_full_res_buffer
-            
-            # Langkah 6: Perkalian in-place dan akumulasi gambar utama
-            reusable_full_res_buffer *= weight_map_full_res_buffer[:, :, np.newaxis]
             final_image_sum += reusable_full_res_buffer
             
-            # [OPTIMISASI STATISTIK] Perbarui statistik secara online, sedikit demi sedikit.
-            # Ini menggantikan `weight_maps_all.append(...)` yang boros memori.
             if temporal_consistency and num_images > 1:
                 count += 1
                 delta = weight_map_full_res_buffer - mean
@@ -269,11 +318,11 @@ class SimilarityAlgorithm:
                 M2 += delta * delta2
             
             if weight_of_each_image:
-                weight_maps_per_image.append(weight_map_full_res_buffer.copy())
+                weight_maps_per_image[i] = weight_map_full_res_buffer.copy()
                 
             processed_frames_spatial += 1
-            
-        # --- LANGKAH 5: Normalisasi Final dan Refinement ---
+                    
+        # --- LANGKAH 5: Normalisasi Final dan Refinement (Tidak Berubah) ---
         if processed_frames_spatial > 0:
             try:
                 valid_pixels = weight_map_sum > 1e-6
@@ -281,14 +330,10 @@ class SimilarityAlgorithm:
                 final_image = np.zeros_like(final_image_sum)
                 np.divide(final_image_sum, weight_map_sum_3d, out=final_image, where=valid_pixels[:, :, np.newaxis])
                 
-                # [OPTIMISASI STATISTIK] Hitung hasil akhir dan panggil refinement.
                 if temporal_consistency and count >= 2:
-                    # Hitung varians dan std dev dari hasil akumulasi online
                     variance = M2 / (count - 1)
                     temporal_std = np.sqrt(variance)
-                    temporal_mean = mean # Mean sudah kita hitung
-                    
-                    # Panggil fungsi refinement yang baru dan hemat memori
+                    temporal_mean = mean
                     temporal_consistency_refinement(
                         weight_map_sum, temporal_mean, temporal_std, 
                         save_temporal_std_path=save_temporal_std_path

@@ -3,8 +3,10 @@ import os
 import numpy as np
 
 class SimilaritySpatialInterface:
-    """Membungkus pemanggilan fungsi C++ untuk similarity_mfnr_v2."""
-
+    """
+    Membungkus pemanggilan fungsi C++ yang telah dioptimalkan.
+    Sekarang menerima gambar referensi yang sudah diproses.
+    """
     def __init__(self, lib_path):
         if not os.path.exists(lib_path):
             raise FileNotFoundError(f"Shared library not found: {lib_path}")
@@ -20,37 +22,31 @@ class SimilaritySpatialInterface:
         self.clib.accumulate_frame_weighted_jit.argtypes = [
             np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS, WRITEABLE'), # final_image_sum_ptr
             np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS, WRITEABLE'), # weight_map_sum_ptr
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'),          # current_image_ptr
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'),          # reference_image_ptr
+            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'),          # current_image_ptr (tetap 3D)
+            
+            # --- PERUBAHAN KUNCI ---
+            # Sekarang secara eksplisit mengharapkan gambar referensi 2D (grayscale).
+            np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),          # reference_image_processed_ptr
+            
             np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),          # base_window_ptr
             ctypes.c_void_p,                                                                  # stability_map_ptr
             np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),             # row_starts
             np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),             # col_starts
-            ctypes.c_int, # num_row_starts
-            ctypes.c_int, # num_col_starts
-            ctypes.c_int, # tile_h
-            ctypes.c_int, # tile_w
-            ctypes.c_int, # h_img
-            ctypes.c_int, # w_img
-            ctypes.c_int, # channels
-            ctypes.c_float, # motion_sensitivity
-            ctypes.c_float  # noise_offset_factor
+            ctypes.c_int, ctypes.c_int, # num_row_starts, num_col_starts
+            ctypes.c_int, ctypes.c_int, # tile_h, tile_w
+            ctypes.c_int, ctypes.c_int, # h_img, w_img
+            ctypes.c_int,               # channels
+            ctypes.c_float,             # motion_sensitivity
+            ctypes.c_float,             # noise_offset_factor
+            ctypes.c_float              # precomputed_ref_noise_sigma
         ]
-        # --- AKHIR PERBAIKAN ---
-
         self.clib.accumulate_frame_weighted_jit.restype = None
-        
-        self.clib.normalize_accumulated_image_jit.argtypes = [
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS, WRITEABLE'),
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),
-            ctypes.c_int, ctypes.c_int, ctypes.c_int
-        ]
-        self.clib.normalize_accumulated_image_jit.restype = None
 
-    def call_accumulate_frame_weighted(self, final_image_sum, weight_map_sum, current_image, reference_image,
+    def call_accumulate_frame_weighted(self, final_image_sum, weight_map_sum, current_image, 
+                                       reference_image_processed, # Nama parameter diperbarui untuk kejelasan
                                        base_window, stability_map, row_starts, col_starts,
-                                       tile_h, tile_w, h, w, channels,
-                                       motion_sensitivity, noise_offset_factor):
+                                       tile_h, tile_w, h, w, channels, motion_sensitivity, noise_offset_factor, 
+                                       precomputed_ref_noise_sigma):
         
         stability_map_ptr = None
         if stability_map is not None:
@@ -59,15 +55,14 @@ class SimilaritySpatialInterface:
             stability_map_ptr = stability_map.ctypes.data_as(ctypes.c_void_p)
         
         self.clib.accumulate_frame_weighted_jit(
-            final_image_sum, weight_map_sum, current_image, reference_image, base_window,
+            final_image_sum, weight_map_sum, current_image, 
+            reference_image_processed, # Mengirim argumen yang benar
+            base_window,
             stability_map_ptr, row_starts, col_starts, len(row_starts), len(col_starts),
-            tile_h, tile_w, h, w, channels,
-            motion_sensitivity, noise_offset_factor
+            tile_h, tile_w, h, w, channels, motion_sensitivity, noise_offset_factor, 
+            precomputed_ref_noise_sigma
         )
-        
-    def call_normalize_accumulated(self, final_image_sum, weight_map_sum, h, w, channels):
-        self.clib.normalize_accumulated_image_jit(final_image_sum, weight_map_sum, h, w, channels)
-        
+              
 class SimilarityFrequencyInterface:
     """Membungkus pemanggilan fungsi C++ untuk similarity_mfnr_v2."""
 

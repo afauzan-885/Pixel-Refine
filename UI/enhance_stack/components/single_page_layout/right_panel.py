@@ -15,8 +15,11 @@ from UI.settings.General.Language import language_config
 class RightPanel(QWidget):
     """Right panel containing a list of images."""
     previewImageRequested = Signal(list)
+    preloadRequested = Signal(list) 
     imagesDropped = Signal(list)
     referenceImageChanged = Signal(str)
+    
+    PRELOAD_COUNT = 8 
     
     def __init__(self, database_manager: DatabaseManager):
         super().__init__()
@@ -307,15 +310,43 @@ class RightPanel(QWidget):
         except Exception as e: print(f"Error deleting: {e}"); QMessageBox.critical(self, "Error", f"Error during deletion:\n{e}")
 
     def select_list_preview(self):
-            """Emit sinyal ketika hanya satu gambar yang dipilih."""
-            if self.preview_pause:
-                return
-            selected_paths = self.get_select_image_list()
+        """
+        Memancarkan sinyal untuk gambar yang dipilih DAN untuk pra-pemuatan
+        gambar-gambar berikutnya.
+        """
+        if self.preview_pause:
+            return
 
-            if len(selected_paths) == 1:
-                self.previewImageRequested.emit(selected_paths)
-                
-            elif len(selected_paths) > 1:
-                pass
+        selected_items = self.image_list.selectedItems()
+
+        # Hanya jalankan jika tepat satu item yang dipilih
+        if len(selected_items) != 1:
+            # Jika lebih dari 1 dipilih, kita bisa memilih untuk tidak melakukan apa-apa
+            # atau membersihkan pratinjau. Untuk saat ini, kita ikuti logika Anda.
+            if len(self.get_select_image_list()) > 1:
+                pass # Sesuai kode asli Anda
+            return
+
+        # 1. Kirim permintaan untuk pratinjau resolusi penuh (perilaku yang ada)
+        selected_path = selected_items[0].data(Qt.ItemDataRole.UserRole)
+        if selected_path:
+            self.previewImageRequested.emit([selected_path])
+
+        # 2. Kumpulkan path untuk pra-pemuatan dan kirim sinyal baru
+        paths_to_preload = []
+        current_row = self.image_list.row(selected_items[0])
+
+        for i in range(1, self.PRELOAD_COUNT + 1):
+            next_row = current_row + i
+            if next_row < self.image_list.count():
+                item = self.image_list.item(next_row)
+                path = item.data(Qt.ItemDataRole.UserRole)
+                if path:
+                    paths_to_preload.append(path)
+            else:
+                break  # Berhenti jika sudah mencapai akhir daftar
+
+        if paths_to_preload:
+            self.preloadRequested.emit(paths_to_preload)
 
     

@@ -62,6 +62,7 @@ class SinglePageLayout(QWidget):
         if self.preview_handler and hasattr(self, 'right_panel'):
             try:
                 self.right_panel.previewImageRequested.connect(self.preview_handler.update_preview)
+                self.right_panel.preloadRequested.connect(self.preview_handler.preload_low_res_images)
                 if hasattr(self.right_panel, 'imagesDropped'):
                      self.right_panel.imagesDropped.connect(self.handle_dropped_images)
                      

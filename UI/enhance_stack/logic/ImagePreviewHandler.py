@@ -1,36 +1,17 @@
 from collections import OrderedDict
 import os, subprocess, platform
 from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsTextItem
-from PySide6.QtCore import Qt, QTimer, Slot, QObject, QRectF, QBuffer, QByteArray, QIODevice, QPointF
+from PySide6.QtCore import Qt, QTimer, Slot, QObject, QRectF, QBuffer, QByteArray, QIODevice, QPointF, Signal, QSize, QThread
 from PySide6.QtGui import QPixmap, QImage
 from UI.settings.General.Language import language_config
 from UI.enhance_stack.logic.multi_threading import RawImageProcessingThread
 from UI.enhance_stack.logic.Zoomable_Handler import Zoomable
-
 
 class ImagePreviewHandler(QObject):
     """
     Mengelola logika tampilan pratinjau gambar dengan cache LRU adaptif
     berbasis RAM/item count, dengan opsi penyimpanan cache sebagai JPEG bytes atau QImage.
     """
-
-    @staticmethod
-    def get_total_system_ram() -> int:
-        """Ambil total RAM sistem (bytes) tanpa psutil."""
-        try:
-            if platform.system() == "Windows":
-                output = subprocess.check_output(
-                    ["wmic", "OS", "get", "TotalVisibleMemorySize", "/Value"],
-                    universal_newlines=True
-                )
-                for line in output.splitlines():
-                    if "TotalVisibleMemorySize" in line:
-                        kb = int(line.split("=")[1].strip())
-                        return kb * 1024
-            else:
-                return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-        except Exception:
-            return 0
 
     def __init__(self, preview_scene: QGraphicsScene, preview_view: Zoomable, parent=None):
         super().__init__(parent)
@@ -42,6 +23,7 @@ class ImagePreviewHandler(QObject):
         self._original_pixmap: QPixmap | None = None
         self._pixmap_item: QGraphicsPixmapItem | None = None
         self._raw_thread: RawImageProcessingThread | None = None
+        self._preload_thread: RawImageProcessingThread | None = None
 
         # --- Timer Utama (untuk delay awal cache miss) ---
         self._preview_timer = QTimer(self)
@@ -65,8 +47,16 @@ class ImagePreviewHandler(QObject):
         self._current_processing_path: str | None = None
         self._persistent_zoom_level = 0
 
+        # --- Inisialisasi pemantauan RAM ---
         self._total_system_ram: int = self.get_total_system_ram()
-        self.psutil_monitoring_active = self._total_system_ram > 0
+        self.ram_monitoring_active = self._total_system_ram > 0
+        if not self.ram_monitoring_active:
+            print("Warning: Failed to get total system RAM. RAM monitoring is disabled.")
+        else:
+            print(f"Info: Total RAM: {self._total_system_ram // (1024*1024)} MB. RAM monitoring is active.")
+
+        self._persistent_zoom_level = 0
+        self._persistent_relative_center: tuple[float, float] | None = None
 
         self._persistent_zoom_level = 0
         self._persistent_relative_center: tuple[float, float] | None = None # Simpan posisi relatif
@@ -75,6 +65,63 @@ class ImagePreviewHandler(QObject):
             self.preview_view.view_state_changed.connect(self._store_view_state)
         else:
             print("Warning: Zoomable view does not have 'view_state_changed' signal.")
+            
+    @staticmethod
+    def get_total_system_ram() -> int:
+        """Ambil total RAM sistem (bytes) tanpa psutil."""
+        try:
+            if platform.system() == "Windows":
+                output = subprocess.check_output(
+                    ["wmic", "OS", "get", "TotalVisibleMemorySize", "/Value"],
+                    universal_newlines=True
+                )
+                for line in output.splitlines():
+                    if "TotalVisibleMemorySize" in line:
+                        kb = int(line.split("=")[1].strip())
+                        return kb * 1024
+            else:
+                return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        except Exception:
+            return 0
+        
+    def _get_current_process_ram_bytes(self) -> int:
+        """
+        Mengambil penggunaan memori saat ini (RSS) dari proses Python
+        tanpa menggunakan psutil.
+        """
+        try:
+            # Untuk Linux & macOS, gunakan modul 'resource'
+            if platform.system() != "Windows":
+                import resource
+                # ru_maxrss dilaporkan dalam KB di Linux, dan Bytes di macOS.
+                usage_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                if platform.system() == "Linux":
+                    return usage_kb * 1024  # Konversi KB ke Bytes
+                return usage_kb # Sudah dalam Bytes di macOS
+            
+            # Untuk Windows, gunakan 'tasklist' melalui subprocess
+            else:
+                pid = os.getpid()
+                # Gunakan format CSV dan tanpa header untuk parsing yang mudah
+                output = subprocess.check_output(
+                    ['tasklist', '/FI', f'PID eq {pid}', '/FO', 'CSV', '/NH'],
+                    universal_newlines=True
+                )
+                # Output CSV: "Image Name","PID","Session Name","Session#","Mem Usage"
+                # Contoh: "python.exe","1234","Console","1","25,123 K"
+                parts = output.strip().split('","')
+                if len(parts) >= 5:
+                    # Ambil bagian memori: '25,123 K"'
+                    mem_usage_str = parts[4].replace('"', '').replace(',', '').strip()
+                    # Pisahkan angka dari unit (K)
+                    mem_val, mem_unit = mem_usage_str.split()
+                    if mem_unit.upper() == 'K':
+                        return int(mem_val) * 1024
+                    else: # Jika unitnya B atau tidak terduga, anggap sebagai byte
+                        return int(mem_val)
+        except Exception:
+            return 0 # Kembalikan 0 jika ada kesalahan
+        return 0
         
     # --- Metode Publik ---
     @Slot(int, object)
@@ -132,6 +179,53 @@ class ImagePreviewHandler(QObject):
             self._show_status_message(language_config.UPDATE_PREVIEW_PANEL_MESSAGE_NO_IMAGE_SELECTED)
             self._fit_image_to_panel()
             
+    @Slot(list)
+    def preload_low_res_images(self, paths_to_preload: list[str]):
+        """Memulai thread untuk membuat cache resolusi rendah menggunakan RawImageProcessingThread."""
+        if self._preload_thread and self._preload_thread.isRunning():
+            self._preload_thread.stop()
+            self._preload_thread.wait(500)
+        
+        filtered_paths = [
+            p for p in paths_to_preload 
+            if p not in self._preview_cache and p not in self._low_res_cache
+        ]
+
+        if not filtered_paths:
+            return
+
+        # <<<--- GUNAKAN RawImageProcessingThread DENGAN PARAMETER BARU ---
+        self._preload_thread = RawImageProcessingThread(
+            image_paths=filtered_paths, 
+            low_res_target_size=self.LOW_RES_TARGET_SIZE
+        )
+        # Sinyal yang sama, tetapi akan diterima oleh slot yang berbeda
+        self._preload_thread.result_signal.connect(self._handle_preloaded_image_ready)
+        self._preload_thread.start()
+
+    # --- Slot Privat Baru ---
+    @Slot(str, QImage)
+    def _handle_preloaded_image_ready(self, result: object):
+        """Menyimpan hasil dari thread pra-pemuatan ke dalam cache low-res."""
+        # Pastikan hasilnya adalah tuple yang kita harapkan
+        if not isinstance(result, tuple) or len(result) != 2:
+            return
+        
+        path, qimage_low = result
+        
+        # Pastikan qimage_low adalah QImage yang valid
+        if not isinstance(qimage_low, QImage) or qimage_low.isNull():
+            return
+
+        if path in self._preview_cache:
+            return
+
+        if not path in self._low_res_cache:
+            if len(self._low_res_cache) >= self.MAX_LOW_RES_ITEMS:
+                self._low_res_cache.popitem(last=False)
+            
+            self._low_res_cache[path] = qimage_low
+            
     def _load_pixmap_from_cache_value(self, image_path: str, cached_value: QImage | bytes) -> QPixmap | None:
         """Helper untuk memuat QPixmap dari nilai cache (QImage atau bytes)."""
         pixmap = QPixmap()
@@ -186,7 +280,11 @@ class ImagePreviewHandler(QObject):
         """Menghentikan SEMUA timer dan thread pemrosesan."""
         if self._preview_timer.isActive(): self._preview_timer.stop()
         if self._full_res_load_timer.isActive(): self._full_res_load_timer.stop() # <<<--- Hentikan timer kedua juga
-        self._pending_full_res_path = None # <<<--- Reset path yang ditunda
+        self._pending_full_res_path = None
+        if self._preload_thread and self._preload_thread.isRunning():
+            self._preload_thread.stop()
+            self._preload_thread.wait(200)
+            self._preload_thread = None
 
         if self._raw_thread and self._raw_thread.isRunning():
             cancelling_path = self._current_processing_path or "Unknown"
@@ -232,7 +330,7 @@ class ImagePreviewHandler(QObject):
         try:
              self._current_processing_path = path_to_process
              self._raw_thread = RawImageProcessingThread([path_to_process], batch_size=1, delay_ms=0)
-             self._raw_thread.result_signal.connect(self._handle_image_ready)
+             self._raw_thread.result_signal.connect(self._handle_image_ready) # Slot yang ada
              self._raw_thread.error_signal.connect(self._handle_image_error)
              self._raw_thread.start()
         except Exception as e:
@@ -273,26 +371,25 @@ class ImagePreviewHandler(QObject):
         # --------------------------------------------------
 
         if value_to_cache is not None:
-            ram_ok = True; item_count_ok = True
-            if self.psutil_monitoring_active:
+            # --- Logika Pengecekan dan Pengelolaan Cache ---
+            def is_ram_usage_ok():
+                """Fungsi helper untuk mengecek penggunaan RAM."""
+                if not self.ram_monitoring_active:
+                    return True # Anggap aman jika pemantauan tidak aktif
                 try:
-                    import resource  # hanya Linux/macOS
-                    usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-                    # Catatan: di Linux ru_maxrss dalam KB, di macOS dalam bytes
-                    if platform.system() == "Linux":
-                        used_ram = usage * 1024
-                    else:
-                        used_ram = usage
-                    percent_used = (used_ram / self._total_system_ram * 100.0) if self._total_system_ram > 0 else 0
-                    if percent_used > self.RAM_LIMIT_PERCENT:
-                        ram_ok = False
+                    current_usage = self._get_current_process_ram_bytes()
+                    # Hindari pembagian dengan nol jika total RAM tidak terdeteksi
+                    if self._total_system_ram == 0:
+                        return True
+                    percent_used = (current_usage / self._total_system_ram) * 100.0
+                    return percent_used <= self.RAM_LIMIT_PERCENT
                 except Exception:
-                    ram_ok = True
-            else:
-                ram_ok = True
-
+                    return True
+                
+            ram_ok = is_ram_usage_ok()
             item_count_ok = len(self._preview_cache) < self.MAX_CACHE_ITEMS
 
+            # Loop untuk mengeluarkan item dari cache jika batas terlampaui
             while not (ram_ok and item_count_ok) and len(self._preview_cache) > 0:
                 try:
                     oldest_path, evicted_item = self._preview_cache.popitem(last=False)
@@ -311,22 +408,23 @@ class ImagePreviewHandler(QObject):
                               qimage_low = evicted_qimage.scaled(new_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
                               if not qimage_low.isNull():
                                    if len(self._low_res_cache) >= self.MAX_LOW_RES_ITEMS:
-                                        lru_low_path, _ = self._low_res_cache.popitem(last=False)
+                                        self._low_res_cache.popitem(last=False)
                                    self._low_res_cache[oldest_path] = qimage_low
                                    
-                    del evicted_item 
+                    del evicted_item
                     
+                    # Cek ulang kondisi setelah item dikeluarkan
                     item_count_ok = len(self._preview_cache) < self.MAX_CACHE_ITEMS
-                    if self.psutil_monitoring_active and self._process:
-                         try: ram_ok = self._process.memory_percent() <= self.RAM_LIMIT_PERCENT
-                         except Exception: ram_ok = True
-                    else: ram_ok = True
-                except KeyError: break
+                    ram_ok = is_ram_usage_ok()
+
+                except KeyError:
+                    break # Keluar dari loop jika cache kosong secara tak terduga
         
+            # Tambahkan item baru ke cache jika ada ruang
             if processing_path:
                  self._preview_cache[processing_path] = value_to_cache
                  self._preview_cache.move_to_end(processing_path)
-                 if processing_path in self._low_res_cache: # Hapus dari low-res
+                 if processing_path in self._low_res_cache:
                      del self._low_res_cache[processing_path]
                  
         if pixmap_for_display is not None and self._currently_displayed_path == processing_path:

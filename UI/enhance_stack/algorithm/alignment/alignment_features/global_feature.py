@@ -684,6 +684,65 @@ def gaussian_window(size, sigma_scale=1/6):
         else:
              window = np.zeros_like(window)
         return np.ascontiguousarray(window.astype(np.float32))
+    
+# ================= Replikasi Fungsi C++ untuk Estimasi Noise & Pra-pemrosesan Gambar Referensi =================  
+MAD_TO_SIGMA_FACTOR = 1.4826 
+
+def estimate_noise_in_python(ref_image_gray_float: np.ndarray) -> float:
+    """Mereplikasi logika estimasi noise dari C++ menggunakan Laplacian dan MAD."""
+    if ref_image_gray_float is None or ref_image_gray_float.size == 0:
+        return 0.015
+
+    max_dim = max(ref_image_gray_float.shape)
+    scale = 1024.0 / max_dim if max_dim > 1024 else 1.0
+    
+    if scale < 1.0:
+        h, w = ref_image_gray_float.shape
+        downsampled_img = cv2.resize(ref_image_gray_float, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+    else:
+        downsampled_img = ref_image_gray_float
+
+    laplacian_output = cv2.Laplacian(downsampled_img, cv2.CV_32F, ksize=3)
+    if laplacian_output is None: return 0.015
+
+    median_val = np.median(laplacian_output)
+    mad_value = np.median(np.abs(laplacian_output - median_val))
+    estimated_sigma = mad_value * MAD_TO_SIGMA_FACTOR
+    
+    return np.clip(estimated_sigma, 0.001, 0.35)
+
+def preprocess_reference_in_python(ref_image_float: np.ndarray):
+    """
+    Melakukan semua pra-pemrosesan gambar referensi di Python.
+    Mengembalikan gambar grayscale yang sudah di-filter dan nilai noise-nya.
+    """
+    if ref_image_float.ndim == 3 and ref_image_float.shape[2] > 1:
+        ref_gray = cv2.cvtColor(ref_image_float, cv2.COLOR_BGR2GRAY)
+    else:
+        ref_gray = ref_image_float.copy()
+
+    noise_sigma = estimate_noise_in_python(ref_gray)
+    processed = ref_gray.copy()
+    
+    if noise_sigma > 0.07:
+        if noise_sigma >= 0.14:
+            processed = cv2.medianBlur(processed, 5)
+        else:
+            processed = cv2.bilateralFilter(processed, 5, 50.0 / 255.0, 7.0)
+    
+    linear_strength = 1.0 - min(noise_sigma / 0.12, 1.0)
+    curved_strength = linear_strength ** 0.45
+    clip_limit = 0.6 + (curved_strength * 3.0)
+
+    if clip_limit > 0.61:
+        img_8u = (np.clip(processed, 0.0, 1.0) * 255).astype(np.uint8)
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+        img_8u_clahe = clahe.apply(img_8u)
+        processed = (img_8u_clahe / 255.0).astype(np.float32)
+
+    return processed, noise_sigma
+
+# =========================================================================
 
 def estimate_noise_variance(gray_image, edge_threshold_low=70, dilate_kernel_size=4, min_flat_pixels_ratio=0.1):
     """
@@ -1094,10 +1153,6 @@ def temporal_consistency_refinement(weight_map_sum, temporal_mean, temporal_std,
     secara online (mean, std) daripada list peta bobot yang besar, sehingga
     mencegah lonjakan penggunaan memori yang masif.
     """
-    # [OPTIMISASI] Langkah 1 (np.stack, np.std, np.mean) sepenuhnya dihilangkan.
-    # Ini menghemat GIGABYTE memori.
-    print("Menerapkan penyempurnaan konsistensi temporal (mode hemat memori)...")
-
     # Metrik stabilitas: rasio mean terhadap standar deviasi
     stability_score = temporal_mean / (temporal_std + 1e-6)
     
