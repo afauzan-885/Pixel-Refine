@@ -95,7 +95,7 @@ To process **16 images at 12MP resolution**, the minimum requirements specs are:
 |-----------|-------------|
 | **Display** | 1280 × 720 |
 | **RAM** | 4 GB |
-| **Storage** | 1.2 GB free space (temporary files) |
+| **Storage** | 2 GB free space (temporary files) |
 | **CPU** | Dual Core / 4 Threads @ 2.5 GHz |
 | **OS** | Windows 10 (Windows 7/8 not tested) |
 
