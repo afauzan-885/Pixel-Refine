@@ -1,0 +1,53 @@
+name: Build Pixel Refine
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12.9'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build with Nuitka
+        run: >
+          python -m nuitka main.py --standalone --mingw64
+          --jobs=8
+          --lto=yes
+          --output-filename="Pixel Refine"
+          --windows-product-name="Pixel Refine"
+          --windows-product-version=0.5.3
+          --windows-icon-from-ico=UI\resources\image\Logo_Pixel_Refine.png
+          --plugin-enable=pyside6
+          --include-data-dir=UI=UI
+          --include-module=h5py._npystrings
+          --include-module=h5py.defs
+          --include-module=h5py.utils
+          --include-module=h5py._proxy
+
+      # Langkah tambahan untuk copy DLL custom dari UI\data
+      - name: Copy custom DLLs from UI\data
+        run: |
+          mkdir "Pixel Refine\\UI\\data"
+          xcopy UI\\data\\*.dll "Pixel Refine\\UI\\data\\" /Y /I
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: Pixel-Refine-Build
+          path: ./Pixel Refine
