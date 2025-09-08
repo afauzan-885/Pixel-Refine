@@ -47,7 +47,7 @@ jobs:
           xcopy UI\\data\\*.dll "Pixel Refine\\UI\\data\\" /Y /I
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: Pixel-Refine-Build
           path: ./Pixel Refine
