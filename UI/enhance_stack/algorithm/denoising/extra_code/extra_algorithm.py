@@ -102,13 +102,6 @@ class SimilarityFrequencyInterface:
 
         self.clib.accumulate_frame_weighted_jit.restype = None
         
-        self.clib.normalize_accumulated_image_jit.argtypes = [
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS, WRITEABLE'), # 1 final_image_ptr
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),           # 2 weight_map_sum_ptr
-            ctypes.c_int, ctypes.c_int, ctypes.c_int # 3-5 h, w, channels_buffer
-        ]
-        self.clib.normalize_accumulated_image_jit.restype = None
-
     def call_accumulate_frame_weighted(self, clib_instance, final_image_sum, weight_map_sum,
                                      current_image_float, reference_image_float,
                                      base_window, row_starts, col_starts,

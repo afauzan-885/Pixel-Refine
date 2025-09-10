@@ -9,10 +9,8 @@
 
 namespace MotionMatching { 
 
-// --- PERBAIKAN DI SINI ---
-// Deklarasi fungsi harus cocok dengan implementasi di file .cpp
 float calculate_match_confidence( 
-    const MotionMatching::TileMatchResult& result, // Ganti dari BlockMatchResult
+    const MotionMatching::TileMatchResult& result,
     float estimated_noise_sigma,
     float p_mbm_mad_sensitivity, 
     float p_mbm_noise_mad_offset_factor 

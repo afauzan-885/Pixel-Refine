@@ -269,7 +269,8 @@ def save_to_hdf5(h5f, dataset_name, cropped, metadata=None):
 def save_align_to_folder(image, index, original_path, align_folder=None, load_config_func=None):
     """
     Menyimpan gambar dalam format TIFF ke folder yang ditentukan,
-    kemudian mengembalikan metadata dari file asli ke file output menggunakan exiftool
+    kemudian mengembalikan metadata dari file asli ke file output menggunakan exiftool.
+    [MODIFIED] Menggunakan logika penyimpanan yang lebih robust dengan kontrol kompresi.
     """
     
     # Gunakan nilai default dari config jika align_folder tidak diberikan
@@ -285,25 +286,43 @@ def save_align_to_folder(image, index, original_path, align_folder=None, load_co
     base_name = os.path.splitext(os.path.basename(original_path))[0]
     file_path = os.path.join(align_folder, f"{base_name}_align.tiff")
 
-    # Simpan gambar dengan OpenCV tanpa kompresi
-    cv2.imwrite(file_path, image)
-    
-    # multithreading untuk menjalankan exiftool
+    # =====================================================================
+    # === PERUBAHAN UTAMA: Mengadopsi logika penyimpanan dari save_image ===
+    # =====================================================================
     try:
-        num_threads = os.cpu_count() or 4  # Default to 4 if os.cpu_count() returns None
+        # Tentukan parameter penyimpanan untuk TIFF tanpa kompresi (nilai 1)
+        # Sesuai dengan spesifikasi TIFF, 1 berarti tidak ada kompresi.
+        save_params = [cv2.IMWRITE_TIFF_COMPRESSION, 1]
+        
+        # Simpan gambar dengan parameter
+        success = cv2.imwrite(file_path, image, save_params)
+        
+        if not success:
+            print(f"Peringatan: OpenCV gagal menyimpan TIFF dengan parameter ke '{file_path}'. Mencoba lagi tanpa parameter.")
+            # Coba lagi tanpa parameter sebagai fallback
+            success_fallback = cv2.imwrite(file_path, image)
+            if not success_fallback:
+                print(f"FATAL: Gagal total menyimpan gambar ke '{file_path}'")
+                return None # Hentikan proses jika penyimpanan gagal total
+    except Exception as e:
+        print(f"FATAL: Terjadi error saat menyimpan gambar ke '{file_path}': {e}")
+        return None
+    # =====================================================================
+    
+    # Logika multithreading untuk exiftool tidak berubah, karena sudah benar
+    try:
+        num_threads = os.cpu_count() or 4
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             future = executor.submit(
-            subprocess.run,
-            ["exiftool", "-overwrite_original", "-TagsFromFile", original_path, file_path],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+                subprocess.run,
+                ["exiftool", "-overwrite_original", "-TagsFromFile", original_path, file_path],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
             )
-            # Tunggu hingga proses selesai
-            future.result()
-        # print(f"Metadata successfully restored to {file_path}")
+            future.result() # Tunggu hingga proses selesai
     except Exception as e:
-        print(f"Error restoring metadata to {file_path}: {e}")
+        print(f"Peringatan: Gagal menyalin metadata ke {file_path}. ExifTool mungkin tidak terpasang. Error: {e}")
     
     return file_path
 
@@ -320,13 +339,7 @@ def save_image(image, output_path, reference_image_path=None):
         save_params = []
         ext = os.path.splitext(output_path)[1].lower()
         if ext in ['.tif', '.tiff']:
-            # OPSI TERBAIK: Gunakan kompresi Deflate/ZIP yang sangat kompatibel.
-            # Ini memberikan keseimbangan terbaik antara ukuran dan kompatibilitas.
-            # save_params = [cv2.IMWRITE_TIFF_COMPRESSION, 8] # 8 adalah kode untuk Deflate
-
-            # OPSI PALING AMAN (jika Deflate gagal): Tanpa kompresi sama sekali.
-            # Hapus komentar di bawah ini jika Anda ingin file yang lebih besar tetapi 100% kompatibel.
-            save_params = [cv2.IMWRITE_TIFF_COMPRESSION, 1] # 1 adalah kode untuk tanpa kompresi
+            save_params = [cv2.IMWRITE_TIFF_COMPRESSION, 1]
 
         # Simpan gambar dengan parameter yang sudah ditentukan
         success = cv2.imwrite(output_path, image_to_save, save_params)
@@ -711,9 +724,9 @@ def estimate_noise_in_python(ref_image_gray_float: np.ndarray) -> float:
     
     return np.clip(estimated_sigma, 0.001, 0.35)
 
-def preprocess_reference_in_python(ref_image_float: np.ndarray):
+def preprocess_reference_in_python(ref_image_float: np.ndarray, s_curve_contrast: float = 4.0):
     """
-    Melakukan semua pra-pemrosesan gambar referensi di Python.
+    Melakukan semua pra-pemrosesan gambar referensi di Python dengan logika yang ditingkatkan.
     Mengembalikan gambar grayscale yang sudah di-filter dan nilai noise-nya.
     """
     if ref_image_float.ndim == 3 and ref_image_float.shape[2] > 1:
@@ -721,24 +734,83 @@ def preprocess_reference_in_python(ref_image_float: np.ndarray):
     else:
         ref_gray = ref_image_float.copy()
 
+    # Perkirakan noise
     noise_sigma = estimate_noise_in_python(ref_gray)
     processed = ref_gray.copy()
     
+    # --- LANGKAH 1: Denoising Adaptif (Tidak diubah) ---
     if noise_sigma > 0.07:
         if noise_sigma >= 0.14:
             processed = cv2.medianBlur(processed, 5)
         else:
             processed = cv2.bilateralFilter(processed, 5, 50.0 / 255.0, 7.0)
+
+    # ### BARU: LANGKAH 1.5 - Kalkulasi Faktor Agresi Berdasarkan Kontras ###
+    # Hitung standar deviasi sebagai metrik kontras.
+    # Nilai di bawah 0.12 dianggap sangat rendah, di atas 0.2 dianggap cukup.
+    contrast_metric = np.std(processed)
+    low_contrast_thresh = 0.12
+    high_contrast_thresh = 0.20
     
+    # Hitung faktor agresi (0.0 untuk kontras tinggi, 1.0 untuk kontras sangat rendah)
+    aggression_factor = 1.0 - np.clip((contrast_metric - low_contrast_thresh) / (high_contrast_thresh - low_contrast_thresh), 0.0, 1.0)
+    
+    # --- LANGKAH 2: Peningkatan Mikro-Kontras (DIUBAH) ---
+    micro_contrast_noise_threshold = 0.05
+    micro_contrast_strength = 1.0 - min(noise_sigma / micro_contrast_noise_threshold, 1.0)
+    
+    if micro_contrast_strength > 0.01:
+        blurred = cv2.GaussianBlur(processed, (0, 0), sigmaX=1.0)
+        
+        # ### DIUBAH: Tingkatkan kekuatan unsharp mask secara adaptif ###
+        # Kekuatan dasar adalah 0.8, bisa meningkat hingga 50% (menjadi 1.2) untuk gambar kontras rendah.
+        base_amount = micro_contrast_strength * 0.8
+        boosted_amount = base_amount * (1.0 + 0.5 * aggression_factor)
+        
+        processed = cv2.addWeighted(processed, 1.0 + boosted_amount, blurred, -boosted_amount, 0)
+        processed = np.clip(processed, 0.0, 1.0)
+
+    # --- LANGKAH 3: Peningkatan Kontras Lokal Adaptif (CLAHE) (DIUBAH) ---
     linear_strength = 1.0 - min(noise_sigma / 0.12, 1.0)
     curved_strength = linear_strength ** 0.45
-    clip_limit = 0.6 + (curved_strength * 3.0)
+    
+    # ### DIUBAH: Tingkatkan clipLimit CLAHE secara adaptif ###
+    # Pengali dasar adalah 3.0, bisa meningkat hingga 50% (menjadi 4.5) untuk gambar kontras rendah.
+    base_clip_multiplier = 3.0
+    boosted_clip_multiplier = base_clip_multiplier * (1.0 + 0.5 * aggression_factor)
+    clip_limit = 0.6 + (curved_strength * boosted_clip_multiplier)
 
     if clip_limit > 0.61:
         img_8u = (np.clip(processed, 0.0, 1.0) * 255).astype(np.uint8)
         clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
         img_8u_clahe = clahe.apply(img_8u)
         processed = (img_8u_clahe / 255.0).astype(np.float32)
+
+    # --- LANGKAH 4: Penyesuaian Kecerahan Adaptif (Gamma) (Tidak diubah) ---
+    mean_brightness = np.mean(processed)
+    dark_threshold = 0.4
+    if mean_brightness < dark_threshold:
+        max_gamma_reduction = 0.3
+        factor = (dark_threshold - mean_brightness) / dark_threshold
+        gamma = 1.0 - (max_gamma_reduction * factor)
+        processed = np.power(processed.astype(np.float32) + 1e-6, gamma)
+        processed = np.clip(processed, 0.0, 1.0)
+
+    # --- LANGKAH 5: Tone Mapping Global (S-Curve) (DIUBAH) ---
+    # ### DIUBAH: Jadikan kekuatan S-Curve adaptif ###
+    # Kekuatan dasar adalah 4.0, bisa meningkat hingga 6.0 untuk gambar kontras rendah.
+    adaptive_s_curve_contrast = s_curve_contrast + (2.0 * aggression_factor)
+
+    def sigmoid_contrast(x, contrast):
+        contrast_f32 = np.float32(contrast)
+        return 1.0 / (1.0 + np.exp(-contrast_f32 * (x - 0.5)))
+
+    low = sigmoid_contrast(np.float32(0.0), adaptive_s_curve_contrast)
+    high = sigmoid_contrast(np.float32(1.0), adaptive_s_curve_contrast)
+
+    processed = sigmoid_contrast(processed.astype(np.float32), adaptive_s_curve_contrast)
+    processed = (processed - low) / (high - low)
+    processed = np.clip(processed, 0.0, 1.0).astype(np.float32)
 
     return processed, noise_sigma
 

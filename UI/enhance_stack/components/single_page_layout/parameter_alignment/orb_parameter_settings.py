@@ -112,8 +112,7 @@ def get_orb_page():
     except (IOError, json.JSONDecodeError) as e:
         print(f"Error during initial check/load of {ALGORITHM_PARAMETER_SETTINGS_FILE}: {e}. Using default values for ORB UI.")
         orb_config = load_orb_config() # Fallback ke default
-    # =======================================================
-
+    
     # --- Mulai Setup UI menggunakan orb_config ---
     page = QWidget()
     layout = QVBoxLayout(page)

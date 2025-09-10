@@ -69,9 +69,7 @@ extern "C"
     // =========================================================================
     // === BAGIAN A: Pra-pemrosesan ==
     // =========================================================================
-    // SimpleTimer preprocessing_timer("A. Pre-processing");
 
-    // Buat header Mat dari pointer input. Operasi ini murah (tidak ada penyalinan data).
     cv::Mat current_image_mat(h_img, w_img, CV_32FC(channels), const_cast<float *>(current_image_ptr));
     const cv::Mat reference_image_gray_full(h_img, w_img, CV_32FC1, const_cast<float *>(reference_image_processed_ptr));
 
@@ -85,20 +83,16 @@ extern "C"
     float adapted_motion_sensitivity, adapted_noise_offset_factor;
 
     // --- LANGKAH 1: Konversi Warna ---
-    // Operasi ini memerlukan buffer output baru karena jumlah channel berubah dari N menjadi 1.
-    // Paralelisasi OpenMP manual dihapus untuk memungkinkan paralelisasi internal OpenCV yang efisien.
     if (channels > 1)
     {
         cv::cvtColor(current_image_mat, current_image_gray_full, cv::COLOR_BGR2GRAY);
     }
     else
     {
-        // Jika sudah grayscale, cukup konversi tipe datanya (jika perlu)
         current_image_mat.convertTo(current_image_gray_full, CV_32F);
     }
 
-    // --- LANGKAH 2: Filtering dan CLAHE (Operasi In-Place) ---
-    // Ini secara signifikan mengurangi overhead alokasi dan penyalinan memori.
+    // --- LANGKAH 2: Filtering ---
     float global_estimated_noise_sigma = precomputed_ref_noise_sigma;
 
     const float noise_activation_threshold = 0.07f;
@@ -107,42 +101,104 @@ extern "C"
         const float median_filter_threshold = 0.14f;
         if (global_estimated_noise_sigma >= median_filter_threshold)
         {
-            // medianBlur mendukung operasi in-place (input dan output bisa sama).
             cv::medianBlur(current_image_gray_full, current_image_gray_full, 5);
         }
         else
         {
-            // bilateralFilter tidak mendukung in-place.
-            // Solusi efisien: gunakan buffer sementara, lalu tukar header Mat.
-            // Ini jauh lebih baik daripada .clone() di awal.
             cv::Mat temp_filtered;
             cv::bilateralFilter(current_image_gray_full, temp_filtered, 5, 50.0 / 255.0, 7.0);
             current_image_gray_full = temp_filtered;
         }
     }
 
-    // Terapkan CLAHE jika diperlukan.
-    float linear_strength_factor_clahe = 1.0f - std::min(global_estimated_noise_sigma / 0.12f, 1.0f);
-    float curved_strength_factor_clahe = std::pow(linear_strength_factor_clahe, 0.45f);
-    float clip_limit = 0.6f + (curved_strength_factor_clahe * 3.0f);
-    if (clip_limit > 0.61f)
+    // === LOGIKA PRE-PROSESING YANG TELAH DI-ENHANCE (SEKARANG MENJADI SATU-SATUNYA PROSES) ===
+    
+    // --- (BARU) LANGKAH 1.5: Kalkulasi Faktor Agresi Berdasarkan Kontras ---
+    cv::Scalar mean_val, stddev_val;
+    cv::meanStdDev(current_image_gray_full, mean_val, stddev_val);
+    float contrast_metric = static_cast<float>(stddev_val[0]);
+
+    const float low_contrast_thresh = 0.12f;
+    const float high_contrast_thresh = 0.20f;
+
+    float aggression_factor = 1.0f - std::max(0.0f, std::min(1.0f, 
+        (contrast_metric - low_contrast_thresh) / (high_contrast_thresh - low_contrast_thresh)));
+
+
+    // --- LANGKAH 2: Peningkatan Mikro-Kontras (DIUBAH) ---
+    const float micro_contrast_noise_threshold = 0.05f;
+    float micro_contrast_strength = 1.0f - std::min(1.0f, global_estimated_noise_sigma / micro_contrast_noise_threshold);
+
+    if (micro_contrast_strength > 0.01f)
     {
-        cv::Mat current_8u;
-        // Konversi ke 8-bit untuk CLAHE
-        current_image_gray_full.convertTo(current_8u, CV_8U, 255.0);
+        cv::Mat blurred_image;
+        cv::GaussianBlur(current_image_gray_full, blurred_image, cv::Size(0, 0), 1.0);
+        
+        float base_amount = micro_contrast_strength * 0.8f;
+        float boosted_amount = base_amount * (1.0f + 0.5f * aggression_factor);
 
-        // Buat instance CLAHE dan terapkan secara in-place
-        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(clip_limit, cv::Size(8, 8));
-        clahe->apply(current_8u, current_8u);
-
-        // Konversi kembali ke 32-bit float, menimpa buffer asli.
-        current_8u.convertTo(current_image_gray_full, CV_32F, 1.0 / 255.0);
+        cv::addWeighted(current_image_gray_full, 1.0f + boosted_amount, blurred_image, -boosted_amount, 0, current_image_gray_full);
+        
+        cv::threshold(current_image_gray_full, current_image_gray_full, 1.0f, 1.0f, cv::THRESH_TRUNC);
+        cv::threshold(current_image_gray_full, current_image_gray_full, 0.0f, 0.0f, cv::THRESH_TOZERO);
     }
 
-    // --- LANGKAH 3: Kalkulasi Parameter Adaptif ---
+    // --- (BARU & DIUBAH) LANGKAH 3: Peningkatan Kontras Lokal Adaptif (CLAHE) ---
+    float linear_strength = 1.0f - std::min(1.0f, global_estimated_noise_sigma / 0.12f);
+    float curved_strength = std::pow(linear_strength, 0.45f);
+
+    const float base_clip_multiplier = 3.0f;
+    float boosted_clip_multiplier = base_clip_multiplier * (1.0f + 0.5f * aggression_factor);
+
+    float clip_limit = 0.6f + (curved_strength * boosted_clip_multiplier);
+
+    if (clip_limit > 0.61f)
+    {
+        cv::Mat img_8u, img_8u_clahe;
+        current_image_gray_full.convertTo(img_8u, CV_8U, 255.0);
+        
+        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(clip_limit, cv::Size(8, 8));
+        clahe->apply(img_8u, img_8u_clahe);
+
+        img_8u_clahe.convertTo(current_image_gray_full, CV_32F, 1.0/255.0);
+    }
+
+    // --- LANGKAH 4: Penyesuaian Kecerahan Adaptif (Gamma) ---
+    cv::Scalar mean_scalar = cv::mean(current_image_gray_full);
+    float mean_brightness = static_cast<float>(mean_scalar[0]);
+    const float dark_threshold = 0.4f;
+
+    if (mean_brightness < dark_threshold)
+    {
+        const float max_gamma_reduction = 0.3f;
+        float factor = (dark_threshold - mean_brightness) / dark_threshold;
+        float gamma = 1.0f - (max_gamma_reduction * factor);
+        cv::pow(current_image_gray_full, gamma, current_image_gray_full);
+    }
+
+    // --- LANGKAH 5: Tone Mapping Global (S-Curve) ---
+    const float s_curve_contrast = 4.0f; 
+    float adaptive_s_curve_contrast = s_curve_contrast + (2.0f * aggression_factor);
+
+    auto sigmoid_contrast_cpp = [&](float x, float contrast) {
+        return 1.0f / (1.0f + std::exp(-contrast * (x - 0.5f)));
+    };
+
+    float low = sigmoid_contrast_cpp(0.0f, adaptive_s_curve_contrast);
+    float high = sigmoid_contrast_cpp(1.0f, adaptive_s_curve_contrast);
+
+    cv::Mat temp_exp;
+    cv::exp(-adaptive_s_curve_contrast * (current_image_gray_full - 0.5), temp_exp);
+    current_image_gray_full = 1.0 / (1.0 + temp_exp);
+    current_image_gray_full = (current_image_gray_full - low) / (high - low);
+
+    cv::threshold(current_image_gray_full, current_image_gray_full, 1.0f, 1.0f, cv::THRESH_TRUNC);
+    cv::threshold(current_image_gray_full, current_image_gray_full, 0.0f, 0.0f, cv::THRESH_TOZERO);
+
+    // --- Kalkulasi Parameter Adaptif ---
     float adaptation_factor = 1.0f - std::min(global_estimated_noise_sigma / 0.1f, 1.0f);
-    adapted_motion_sensitivity = motion_sensitivity * (1.0f - 0.75f * adaptation_factor);
-    adapted_noise_offset_factor = noise_offset_factor * (1.0f + 0.95f * adaptation_factor);
+    adapted_motion_sensitivity = motion_sensitivity * (1.0f - 0.65f * adaptation_factor);
+    adapted_noise_offset_factor = noise_offset_factor * (1.0f + 0.85f * adaptation_factor);
 
     // =================================================================================
     // === BAGIAN B: ANALISIS SKALA KASAR (OPTIMASI BARU DENGAN GRID + INTERPOLASI) ===
@@ -371,50 +427,6 @@ extern "C"
                     {
                         cv::add(final_image_sum_mat(tile_roi), local_weighted_tile, final_image_sum_mat(tile_roi));
                         cv::add(weight_map_sum_mat(tile_roi), local_weight_tile, weight_map_sum_mat(tile_roi));
-                    }
-                }
-            }
-        }
-    }
-
-    // --- Fungsi normalize_accumulated_image_jit  ---
-    void normalize_accumulated_image_jit(
-        float *final_image_ptr,
-        const float *weight_map_sum_ptr,
-        int h, int w, int channels)
-    {
-        using namespace MotionMetricsConfig;
-        if (!final_image_ptr || !weight_map_sum_ptr || h <= 0 || w <= 0 || channels <= 0)
-            return;
-        int mat_type = CV_32FC(channels);
-        if (mat_type == 0 && channels > 0)
-            return;
-
-        cv::Mat final_image_mat(h, w, mat_type, final_image_ptr);
-        const cv::Mat weight_map_sum_mat(h, w, CV_32FC1, const_cast<float *>(weight_map_sum_ptr));
-
-#pragma omp parallel for collapse(2) schedule(static)
-        for (int gy = 0; gy < h; ++gy)
-        {
-            float *final_pixel_row_ptr = final_image_mat.ptr<float>(gy);
-            const float *weight_map_sum_row_ptr = weight_map_sum_mat.ptr<const float>(gy);
-            for (int gx = 0; gx < w; ++gx)
-            {
-                float total_weight = weight_map_sum_row_ptr[gx];
-                int pixel_idx_base = gx * channels;
-                if (total_weight > GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD)
-                {
-                    float inv_total_weight = 1.0f / total_weight;
-                    for (int ch = 0; ch < channels; ++ch)
-                    {
-                        final_pixel_row_ptr[pixel_idx_base + ch] *= inv_total_weight;
-                    }
-                }
-                else
-                {
-                    for (int ch = 0; ch < channels; ++ch)
-                    {
-                        final_pixel_row_ptr[pixel_idx_base + ch] = 0.0f;
                     }
                 }
             }

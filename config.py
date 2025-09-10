@@ -1,5 +1,5 @@
 import os
-APP_VERSION = "0.5.1"
+APP_VERSION = "0.5.3"
 MODEL_CONFIG = {
     "refiner": "database/Learning_Model/mobilenet_refiner.pth",
     "backbone": "database/Learning_Model/mobilenet_v2_weights.pth"
