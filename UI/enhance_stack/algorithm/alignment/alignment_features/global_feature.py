@@ -561,7 +561,7 @@ def prepare_image(image, grayscale=False, use_clahe=True):
         
         if use_clahe:
             try:
-                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(3, 3))
                 processed_image = clahe.apply(processed_image)
             except Exception:
                 pass 

@@ -45,7 +45,7 @@ namespace MotionMatching
             float weighted_sum = 0.0f, total_weight = 0.0f;
             
             const float grad_sensitivity = 150.0f;
-            const float laplacian_sensitivity = 2.0f; // Laplacian bisa sangat "noisy", jadi sensitivitas lebih rendah
+            const float laplacian_sensitivity = 4.0f; // Laplacian bisa sangat "noisy", jadi sensitivitas lebih rendah
             
             const float adaptive_noise_threshold = std::max(0.01f, noise_level * 0.2f);
             const float adaptive_diff_threshold = std::max(0.005f, noise_level * 0.1f);

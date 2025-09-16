@@ -217,7 +217,7 @@ def get_akaze_page():
     layout.addWidget(transformation_label)
 
     transformation_combo = QComboBox()
-    transformation_combo.addItems(["homography", "affine", "similarity", "euclidean"])
+    transformation_combo.addItems(["homography", "affine"])
     transformation_combo.setCurrentText(akaze_config.get("transformation", "homography")) # Ambil dari akaze_config
     transformation_combo.setStyleSheet(DROPDOWN_BOX)
     layout.addWidget(transformation_combo)

@@ -1,4 +1,3 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import gc
 import queue
 import threading
@@ -14,7 +13,7 @@ from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature impo
                                                                                     gaussian_window, get_all_image_paths_for_single_process, load_images_from_paths, 
                                                                                     normalize_image, preprocess_reference_in_python, resize_all_with_padding, save_image, setup_balanced_batching, 
                                                                                     temporal_consistency_refinement)
-from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityFrequencyInterface, SimilaritySpatialInterface
+from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityFrequencyInterface, SimilaritySpatialInterface, perform_image_alignment
 from UI.enhance_stack.components.single_page_layout.parameter_denoising.similarity_parameter_settings import  load_similarity_config
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
 from UI.settings.General.Language import language_config
@@ -89,6 +88,7 @@ class SimilarityAlgorithm:
                 images.append(image)
         return images
     
+    
     def _spatial_merging(self, images, ref_image_h, ref_image_w, ref_channels_buffer, ref_dtype,
                     reference_image_float, tile_size, overlap,
                     motion_sensitivity, noise_offset_factor,
@@ -99,6 +99,7 @@ class SimilarityAlgorithm:
                     save_temporal_std_path=None,
                     weight_of_each_image=False,
                     temporal_analysis_mode='one_pass', # Opsi: 'one_pass', 'two_pass_full'
+                    enable_alignment=True,  # Parameter baru untuk mengaktifkan alignment
                     **unused_kwargs):
 
         # --- LANGKAH 1: Inisialisasi dan Penentuan Resolusi Kerja (Tidak Berubah) ---
@@ -167,10 +168,9 @@ class SimilarityAlgorithm:
                 
                 curr_work_res = cv2.resize(normalize_image(image_orig, ref_dtype), (work_res_w, work_res_h), interpolation=cv2.INTER_NEAREST_EXACT)
                 temp_weight_map = np.ascontiguousarray(np.zeros((work_res_h, work_res_w), dtype=np.float32))
-                dummy_image_sum = np.ascontiguousarray(np.zeros((work_res_h, work_res_w, ref_channels_buffer), dtype=np.float32))
                 
-                c_interface.call_accumulate_frame_weighted(
-                    final_image_sum=dummy_image_sum, weight_map_sum=temp_weight_map,
+                c_interface.call_generate_weight_map_jit(
+                    weight_map_sum=temp_weight_map,
                     current_image=curr_work_res, reference_image=ref_work_res, base_window=base_window,
                     stability_map=None, row_starts=row_starts, col_starts=col_starts,
                     tile_h=tile_h, tile_w=tile_w, h=work_res_h, w=work_res_w, channels=ref_channels_buffer,
@@ -181,7 +181,7 @@ class SimilarityAlgorithm:
                 sum_map += downsampled_map
                 sum_sq_map += np.square(downsampled_map)
                 frame_count += 1
-                del temp_weight_map, dummy_image_sum, curr_work_res, downsampled_map
+                del temp_weight_map, curr_work_res, downsampled_map
 
             if frame_count >= 2:
                 N = float(frame_count)
@@ -196,6 +196,26 @@ class SimilarityAlgorithm:
             
             del sum_map, sum_sq_map
 
+        # --- LANGKAH 2: PROSES ALIGNMENT ---
+        aligned_images = None
+        if enable_alignment and num_images > 1:
+            if update_progress:
+                update_progress(30, "Memulai proses alignment gambar...")
+            
+            aligned_images = perform_image_alignment(
+                images, reference_image_float, work_res_h, work_res_w,
+                tile_h, tile_w, ref_dtype, update_progress, stop_requested
+            )
+            
+            # Gunakan hasil alignment jika berhasil, atau fallback ke gambar asli
+            if aligned_images is not None:
+                images = aligned_images
+                if update_progress:
+                    update_progress(40, "Alignment selesai, melanjutkan ke spatial merging...")
+            else:
+                if update_progress:
+                    update_progress(40, "Alignment gagal, menggunakan gambar asli...")
+        
         # --- LANGKAH 3 (PASS 2 / UTAMA): TAHAP A - PEMROSESAN C++ PARALEL ---
         msg_pass = "Pass 2/2: " if is_two_pass else ""
         ref_gray_preprocessed, ref_noise_sigma = preprocess_reference_in_python(reference_image_float)
@@ -204,39 +224,38 @@ class SimilarityAlgorithm:
         if stability_map is not None:
             stability_map_work_res = cv2.resize(stability_map, (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
 
-        # --- [PENGGANTIAN] Producer sekarang menjadi 'weight_map_producer' ---
+        # --- Producer 'weight_map_producer' dengan penanganan berhenti yang tangguh ---
         def weight_map_producer(task_queue, result_queue, images_list_ref):
-            # Buffer untuk input (gambar yang sudah di-resize dan normalize)
             local_curr_work_res = np.empty((work_res_h, work_res_w, ref_channels_buffer), dtype=np.float32)
 
             while True:
-                try:
-                    image_index = task_queue.get_nowait()
-                except queue.Empty:
+                # Periksa sinyal berhenti sebelum mengambil tugas baru
+                if stop_requested and stop_requested():
                     break
-                if stop_requested and stop_requested(): break
+                try:
+                    # Ambil tugas dengan timeout untuk tetap responsif
+                    item = task_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue  # Coba lagi, ini memungkinkan pemeriksaan stop_requested di atas
+
+                # Jika 'None' diterima, itu adalah sinyal untuk berhenti
+                if item is None:
+                    break
+
+                image_index = item
                 
                 image_orig = images_list_ref[image_index]
                 if not isinstance(image_orig, np.ndarray):
                     result_queue.put((image_index, None))
                     continue
                 
-                # Persiapkan input untuk C++
                 temp_resized_image = cv2.resize(image_orig, (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
                 normalize_image(temp_resized_image, ref_dtype, out=local_curr_work_res)
                 del temp_resized_image
 
-                # [SOLUSI] Alokasikan buffer output yang dibutuhkan C++ dengan ukuran yang benar.
-                # Kita tidak akan menggunakan isinya, tapi C++ perlu ruang untuk menulis.
-                # Buffer ini akan dibuat dan dihancurkan untuk setiap gambar.
-                cpp_output_buffer = np.zeros((work_res_h, work_res_w, ref_channels_buffer), dtype=np.float32, order='C')
-                
-                # Ini adalah buffer yang benar-benar kita butuhkan hasilnya.
                 weight_map_work_res = np.zeros((work_res_h, work_res_w), dtype=np.float32, order='C')
                 
-                # Panggilan C++ sekarang aman karena semua buffer memiliki ukuran yang diharapkan.
-                c_interface.call_accumulate_frame_weighted(
-                    final_image_sum=cpp_output_buffer, # Berikan buffer berukuran penuh
+                c_interface.call_generate_weight_map_jit(
                     weight_map_sum=weight_map_work_res,
                     current_image=local_curr_work_res,
                     reference_image_processed=ref_work_res_pass2,
@@ -247,114 +266,142 @@ class SimilarityAlgorithm:
                     precomputed_ref_noise_sigma=ref_noise_sigma
                 )
                 
-                # Kirim HANYA hasil yang kita butuhkan ke consumer.
-                # `cpp_output_buffer` akan otomatis di-GC setelah iterasi loop ini selesai.
                 result_queue.put((image_index, weight_map_work_res))
 
-        # --- [PENGGANTIAN] LANGKAH 4: Arsitektur "Streaming Fusion" ---
-        # Inisialisasi akumulator pada RESOLUSI PENUH
+        # --- LANGKAH 4: Arsitektur "Streaming Fusion" dengan Logika Berhenti ---
         final_image_sum_full_res = np.zeros((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float64)
         weight_map_sum_full_res = np.zeros((ref_image_h, ref_image_w), dtype=np.float64)
         processed_frames_spatial = 0
         
-        # [DIPERTAHANKAN] Logika num_workers Anda tetap sama
         final_num_workers = num_workers
         if final_num_workers <= 0:  
             cpu_cores = os.cpu_count() or 2
             final_num_workers = max(1, min(cpu_cores // 2, 8))
             
         task_queue = queue.Queue()
-        result_queue = queue.Queue(maxsize=final_num_workers) # Queue lebih kecil untuk sinkronisasi
+        result_queue = queue.Queue(maxsize=final_num_workers * 2)
         
-        # Kirim hanya INDEKS ke task queue
         for i in range(num_images):
             task_queue.put(i)
         
+        # Kirim 'None' sebagai sinyal akhir pekerjaan untuk setiap worker
+        for _ in range(final_num_workers):
+            task_queue.put(None)
+
         threads = [threading.Thread(target=weight_map_producer, args=(task_queue, result_queue, images)) for _ in range(final_num_workers)]
-        for t in threads: t.start()
-
-        finished_count = 0
-        # Loop Consumer-Fusionis
-        while finished_count < num_images:
-            if stop_requested and stop_requested(): break
-            try:
-                image_index, weight_map_work_res = result_queue.get(timeout=0.1)
-                
-                if weight_map_work_res is not None:
-                    # --- FUSI KUALITAS PENUH SECARA STREAMING ---
-                    image_orig = images[image_index]
-                    weight_map_full_res = cv2.resize(weight_map_work_res, (ref_image_w, ref_image_h), interpolation=cv2.INTER_LINEAR_EXACT)
-                    normalized_image_full_res = normalize_image(image_orig, ref_dtype)
-                    
-                    weight_map_3d = weight_map_full_res[:, :, np.newaxis]
-                    weighted_image = normalized_image_full_res * weight_map_3d
-                    
-                    final_image_sum_full_res += weighted_image
-                    weight_map_sum_full_res += weight_map_full_res
-                    processed_frames_spatial += 1
-
-                    # GC proaktif untuk menjaga memori tetap rendah
-                    del weight_map_work_res, image_orig, weight_map_full_res, normalized_image_full_res, weighted_image, weight_map_3d
-                
-                finished_count += 1
-                if finished_count % 3 == 0:
-                    gc.collect()
-
-                # Update progress bar (logika sama seperti sebelumnya)
-                if update_progress:
-                    current_frame_index_in_pass = finished_count
-                    if use_overall_progress:
-                        current_img_overall = images_processed_so_far + current_frame_index_in_pass
-                        progress_in_pass2 = current_img_overall / total_overall_images
-                        msg = language_config.IMAGE_PROCESS_IN_PROGRESS.format(current_img_overall, total_overall_images)
-                    else:
-                        progress_in_pass2 = current_frame_index_in_pass / num_images
-                        msg = language_config.ANALYSIS_STEP_TWO_PROGRESS.format(msg_pass, current_frame_index_in_pass, num_images)
-                    current_total_progress = pass2_range[0] + (progress_in_pass2 * (pass2_range[1] - pass2_range[0]))
-                    update_progress(int(current_total_progress), msg)
-
-            except queue.Empty:
-                continue
-
-        for thread in threads:
-            thread.join()
-        gc.collect()
-
-        # --- [PENGGANTIAN] LANGKAH 5: Normalisasi Akhir ---
-        if processed_frames_spatial > 0:
-            try:
-                # Tidak perlu resize, karena sudah bekerja pada resolusi penuh
-                final_image_sum = final_image_sum_full_res
-                weight_map_sum = weight_map_sum_full_res.astype(np.float32) # Konversi ke float32 untuk output
-                
-                valid_pixels = weight_map_sum > 1e-6
-                weight_map_sum_3d = weight_map_sum[:, :, np.newaxis]
-                final_image = np.zeros_like(final_image_sum, dtype=np.float32)
-                
-                np.divide(final_image_sum.astype(np.float32), 
-                        weight_map_sum_3d, 
-                        out=final_image, 
-                        where=valid_pixels[:, :, np.newaxis])
-                
-                # Logika temporal consistency dan weight_of_each_image saat ini di-bypass
-                # karena arsitektur berubah. Jika diperlukan, harus diimplementasikan ulang di sini.
-                # Contoh: Welford's algorithm bisa dijalankan pada weight_map_full_res di dalam loop consumer.
-                
-                # Kita tidak lagi menghasilkan weight_maps_per_image dengan cara ini
-                if weight_of_each_image:
-                    # Placeholder, karena logika ini perlu didesain ulang
-                    # jika masih dibutuhkan dengan arsitektur baru.
-                    print("Warning: weight_of_each_image=True tidak didukung penuh oleh pipeline baru.")
-                    return (final_image, weight_map_sum, processed_frames_spatial, [])
-                else:
-                    return (final_image, weight_map_sum, processed_frames_spatial)
-
-            except Exception as e:
-                raise RuntimeError(f"Normalization failed: {e}")
         
-        # Return value jika tidak ada frame yang diproses
-        return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
-    
+        try:
+            for t in threads: t.start()
+
+            finished_count = 0
+            while finished_count < num_images:
+                # Periksa sinyal berhenti di setiap iterasi loop consumer
+                if stop_requested and stop_requested():
+                    break
+                
+                try:
+                    image_index, weight_map_work_res = result_queue.get(timeout=0.1)
+                    
+                    if weight_map_work_res is not None:
+                        image_orig = images[image_index]
+                        weight_map_full_res = cv2.resize(weight_map_work_res, (ref_image_w, ref_image_h), interpolation=cv2.INTER_LINEAR_EXACT)
+                        normalized_image_full_res = normalize_image(image_orig, ref_dtype)
+                        
+                        weight_map_3d = weight_map_full_res[:, :, np.newaxis]
+                        weighted_image = normalized_image_full_res * weight_map_3d
+                        
+                        final_image_sum_full_res += weighted_image
+                        weight_map_sum_full_res += weight_map_full_res
+                        processed_frames_spatial += 1
+
+                        del weight_map_work_res, image_orig, weight_map_full_res, normalized_image_full_res, weighted_image, weight_map_3d
+                    
+                    finished_count += 1
+                    if finished_count % 3 == 0:
+                        gc.collect()
+
+                    if update_progress:
+                        current_frame_index_in_pass = finished_count
+                        if use_overall_progress:
+                            current_img_overall = images_processed_so_far + current_frame_index_in_pass
+                            progress_in_pass2 = current_img_overall / total_overall_images
+                            msg = language_config.IMAGE_PROCESS_IN_PROGRESS.format(current_img_overall, total_overall_images)
+                        else:
+                            progress_in_pass2 = current_frame_index_in_pass / num_images
+                            msg = language_config.ANALYSIS_STEP_TWO_PROGRESS.format(msg_pass, current_frame_index_in_pass, num_images)
+                        current_total_progress = pass2_range[0] + (progress_in_pass2 * (pass2_range[1] - pass2_range[0]))
+                        update_progress(int(current_total_progress), msg)
+
+                except queue.Empty:
+                    # Jika antrian hasil kosong, cek apakah semua worker sudah selesai.
+                    # Jika ya, maka tidak ada lagi hasil yang akan datang, jadi kita bisa keluar.
+                    if not any(t.is_alive() for t in threads):
+                        break
+                    continue
+
+            # --- Logika Penghentian yang Bersih ---
+            if stop_requested and stop_requested():
+                print("Stop requested detected. Cleaning up threads and queues...")
+                # Kosongkan task_queue untuk membangunkan worker yang mungkin menunggu get()
+                while not task_queue.empty():
+                    try:
+                        task_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                # Kirim sinyal 'None' lagi untuk memastikan semua worker keluar
+                for _ in range(final_num_workers):
+                    task_queue.put(None)
+
+            # Tunggu semua thread selesai, dengan timeout untuk mencegah freeze
+            for i, thread in enumerate(threads):
+                thread.join(timeout=2.0)
+                if thread.is_alive():
+                    print(f"Warning: Worker thread {i} did not terminate gracefully.")
+
+            # --- LANGKAH 5: Normalisasi Akhir ---
+            if stop_requested and stop_requested():
+                return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
+
+            if processed_frames_spatial > 0:
+                try:
+                    final_image_sum = final_image_sum_full_res
+                    weight_map_sum = weight_map_sum_full_res.astype(np.float32)
+                    
+                    valid_pixels = weight_map_sum > 1e-6
+                    weight_map_sum_3d = weight_map_sum[:, :, np.newaxis]
+                    final_image = np.zeros_like(final_image_sum, dtype=np.float32)
+                    
+                    np.divide(final_image_sum.astype(np.float32), 
+                            weight_map_sum_3d, 
+                            out=final_image, 
+                            where=valid_pixels[:, :, np.newaxis])
+                    
+                    if weight_of_each_image:
+                        print("Warning: weight_of_each_image=True tidak didukung penuh oleh pipeline baru.")
+                        return (final_image, weight_map_sum, processed_frames_spatial, [])
+                    else:
+                        return (final_image, weight_map_sum, processed_frames_spatial)
+
+                except Exception as e:
+                    raise RuntimeError(f"Normalization failed: {e}")
+            
+            return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
+        
+        finally:
+            # --- BLOK PEMBERSIHAN YANG DIJAMIN ---
+            
+            if 'threads' in locals(): del threads
+            if 'task_queue' in locals(): del task_queue
+            if 'result_queue' in locals(): del result_queue
+            if 'ref_work_res_pass2' in locals(): del ref_work_res_pass2
+            if 'stability_map_work_res' in locals(): del stability_map_work_res
+            if 'base_window' in locals(): del base_window
+            if 'final_image_sum_full_res' in locals(): del final_image_sum_full_res
+            if 'weight_map_sum_full_res' in locals(): del weight_map_sum_full_res
+
+            gc.collect()
+            gc.collect()
+
     def _frequency_merging(self, images, ref_image_h, ref_image_w, ref_channels_buffer, ref_dtype,
                         reference_image_float,
                         freq_c_wiener_factor,
@@ -505,16 +552,18 @@ class SimilarityAlgorithm:
         if processed_frames_freq > 0:
             try:
                 c_interface.call_normalize_accumulated(c_interface.clib, final_image_sum, weight_map_sum, ref_image_h, ref_image_w, ref_channels_buffer)
-                if temporal_consistency:
-                    temporal_consistency_refinement(weight_maps_all, weight_map_sum, save_temporal_std_path=save_temporal_std_path)
+                
+                # --- [DINONAKTIFKAN SEMENTARA] ---
+                # if temporal_consistency:
+                #     temporal_consistency_refinement(weight_maps_all, weight_map_sum, save_temporal_std_path=save_temporal_std_path)
                 
                 return (final_image_sum, weight_map_sum, processed_frames_freq, weight_maps_per_image) if weight_of_each_image else (final_image_sum, weight_map_sum, processed_frames_freq)
 
             except Exception as e_norm:
                 raise RuntimeError(f"{language_config.NORMALIZATION_FAILED.format(e_norm)} (frequency merging)")
         else:
-            return (None, None, 0, []) if weight_of_each_image else (None, None, 0)    
-    
+            return (None, None, 0, []) if weight_of_each_image else (None, None, 0)       
+                 
     def similarity_mnfr(self, images,
                 merging_type='spatial',
                 tile_size=None, overlap=None,
@@ -574,7 +623,7 @@ class SimilarityAlgorithm:
             common_call_args.update({
                 "tile_size": current_tile_size, "overlap": current_overlap,
                 "motion_sensitivity": current_motion_sensitivity, "noise_offset_factor": current_noise_offset_factor,
-                "num_workers": current_num_workers,  # [PENAMBAHAN] Teruskan ke _spatial_merging
+                # "num_workers": current_num_workers,  # [PENAMBAHAN] Teruskan ke _spatial_merging
                 "temporal_consistency": True, "save_temporal_std_path": save_temporal_std_path
             })
             results = self._spatial_merging(**common_call_args)
@@ -585,7 +634,8 @@ class SimilarityAlgorithm:
             current_freq_c_wiener = common_call_args.get('freq_c_wiener_factor', default_freq_c_wiener)
             current_freq_tile_size_input = common_call_args.get('freq_tile_size', default_freq_tile_val)
             current_freq_overlap = common_call_args.get('freq_overlap_percent', default_freq_overlap)
-            
+            # current_num_workers = num_workers if num_workers is not None else common_call_args.get('num_workers', -1)
+
             if isinstance(current_freq_tile_size_input, int):
                 current_freq_tile_size_tuple = (current_freq_tile_size_input, current_freq_tile_size_input)
             elif isinstance(current_freq_tile_size_input, (list,tuple)) and len(current_freq_tile_size_input) == 2:
@@ -596,6 +646,7 @@ class SimilarityAlgorithm:
             common_call_args.update({
                 "freq_c_wiener_factor": current_freq_c_wiener, "freq_tile_size": current_freq_tile_size_tuple,
                 "freq_overlap_percent": current_freq_overlap, "lib_path": default_freq_lib_path,
+                # "num_workers": current_num_workers, # <-- TERUSKAN KE _frequency_merging
                 "temporal_consistency": True, "save_temporal_std_path": save_temporal_std_path
             })
             
@@ -731,6 +782,7 @@ def main(db_path, update_progress=None, stop_requested=None,
             tile_val_fq = general_settings.get("similarity_frequency_tile_size", 16)
             extra_merging_params['freq_tile_size'] = tile_val_fq 
             extra_merging_params['freq_overlap_percent'] = general_settings.get("similarity_frequency_overlap_percent", 0.25)
+            # extra_merging_params['num_workers'] = general_settings.get("similarity_spatial_num_workers", 2)
         
         # --- 2. SETUP SUMBER DATA & PATH (MENGGUNAKAN HELPER) ---
         data_source, image_paths, output_name_base, total_images = \
@@ -802,6 +854,15 @@ def main(db_path, update_progress=None, stop_requested=None,
         # --- 6. PENGGABUNGAN AKHIR / FINE-TUNING ---
         final_result_img = None
         if processed_batches_results:
+            
+            # Panggil fungsi resize_all_with_padding pada hasil-hasil batch
+            processed_batches_results, final_shape = resize_all_with_padding(
+                processed_batches_results, 
+                method="median" # 'median' atau 'max' biasanya pilihan yang aman di sini
+            )
+            print(f"Semua hasil batch disesuaikan ke ukuran target: {final_shape}")
+            # --- AKHIR PENAMBAHAN KODE ---
+
             if len(processed_batches_results) > 1:
                 fine_tuning_start_progress, fine_tuning_end_progress = 95, 99
                 def fine_tuning_update_progress(inner_progress, message):
