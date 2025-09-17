@@ -197,22 +197,31 @@ class SimilarityAlgorithm:
             del sum_map, sum_sq_map
 
         # --- LANGKAH 2: PROSES ALIGNMENT ---
-        aligned_images = None
         if enable_alignment and num_images > 1:
             if update_progress:
                 update_progress(30, "Memulai proses alignment gambar...")
             
-            aligned_images = perform_image_alignment(
-                images, reference_image_float, work_res_h, work_res_w,
-                tile_h, tile_w, ref_dtype, update_progress, stop_requested
+            # Panggil fungsi alignment yang sekarang memodifikasi 'images' secara langsung
+            alignment_success = perform_image_alignment(
+                images, # List ini akan diubah oleh fungsi
+                reference_image_float, 
+                work_res_h, work_res_w,
+                tile_h, tile_w, 
+                ref_dtype, 
+                update_progress, 
+                stop_requested
             )
             
-            # Gunakan hasil alignment jika berhasil, atau fallback ke gambar asli
-            if aligned_images is not None:
-                images = aligned_images
+            if alignment_success:
                 if update_progress:
                     update_progress(40, "Alignment selesai, melanjutkan ke spatial merging...")
             else:
+                # Fungsi mengembalikan False jika gagal atau dibatalkan.
+                # Jika dibatalkan oleh user, kita perlu keluar dari fungsi.
+                if stop_requested and stop_requested():
+                    return None, None, None # Keluar jika proses dibatalkan
+                
+                # Jika hanya gagal (bukan dibatalkan), kita bisa lanjutkan dengan gambar asli.
                 if update_progress:
                     update_progress(40, "Alignment gagal, menggunakan gambar asli...")
         

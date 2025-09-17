@@ -182,7 +182,7 @@ class ORBAlgorithm:
                 
                 try:
                     # 1. Persiapan awal (CLAHE dilewati untuk sementara)
-                    enhanced_gray = prepare_image(image_data, grayscale=True, use_clahe=True)
+                    enhanced_gray = prepare_image(image_data, grayscale=True, use_clahe=False)
                     
                     # 2. Estimasi noise
                     noise_level = estimate_noise_variance(enhanced_gray)

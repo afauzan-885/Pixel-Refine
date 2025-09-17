@@ -15,8 +15,7 @@ float calculate_match_confidence(
     float p_mbm_mad_sensitivity, 
     float p_mbm_noise_mad_offset_factor 
 );
-// --- AKHIR PERBAIKAN ---
 
-} // namespace MotionMatching
+}
 
-#endif // SPATIAL_MERGING_HPP
+#endif
