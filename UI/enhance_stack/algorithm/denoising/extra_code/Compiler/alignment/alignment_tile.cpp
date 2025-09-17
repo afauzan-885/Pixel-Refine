@@ -226,8 +226,8 @@ extern "C"
                 if (temp_ref.rows < MIN_PYRAMID_LAYER_SIZE || temp_ref.cols < MIN_PYRAMID_LAYER_SIZE)
                     break;
 
-                ref_pyramid.push_back(temp_ref.clone());
-                current_pyramid.push_back(temp_current.clone());
+                ref_pyramid.push_back(temp_ref);
+                current_pyramid.push_back(temp_current);
             }
         }
 
@@ -338,7 +338,7 @@ extern "C"
                         cv::Mat local_flow_acc = cv::Mat::zeros(h_layer, w_layer, CV_32FC2);
                         cv::Mat local_weight_acc = cv::Mat::zeros(h_layer, w_layer, CV_32FC1);
 
-#pragma omp for schedule(dynamic) nowait
+#pragma omp for schedule(dynamic, 8) nowait
                         for (int y = 0; y <= h_layer - current_tile_h; y += step_y)
                         {
                             for (int x = 0; x <= w_layer - current_tile_w; x += step_x)
@@ -386,7 +386,9 @@ extern "C"
                                 }
 
                                 float best_tile_score = std::numeric_limits<float>::max();
+                                float second_best_tile_score = std::numeric_limits<float>::max();
                                 int best_tile_dx = 0, best_tile_dy = 0;
+
 
                                 // OPTIMISASI 9: Early termination jika score sudah sangat baik
                                 const float early_termination_threshold = 0.01f;
@@ -435,13 +437,29 @@ extern "C"
                                             const float normalized_sad = current_cost  * tile_area_inv;
                                             if (normalized_sad < best_tile_score)
                                             {
+                                                second_best_tile_score = best_tile_score;
                                                 best_tile_score = normalized_sad;
                                                 best_tile_dx = init_dx + dx;
                                                 best_tile_dy = init_dy + dy;
                                             }
+                                            else if (normalized_sad < second_best_tile_score)
+                                            {
+                                                second_best_tile_score = normalized_sad;
+                                            }
                                         }
                                     }
                                 }
+
+                                // --- Confidence Check ---
+                                float confidence = 1.0f;
+                                if (second_best_tile_score < std::numeric_limits<float>::max())
+                                {
+                                    float ratio = second_best_tile_score / (best_tile_score + 1e-6f);
+                                    confidence = std::clamp(ratio, 0.0f, 1.0f);
+                                }
+                                // Penalti untuk match lemah / noisy
+                                if (best_tile_score > 0.05f)
+                                    confidence *= 0.5f;
 
                                 cv::Point2f refined_flow(best_tile_dx, best_tile_dy);
                                 // Subpixel refinement hanya di 2 level kasar (misalnya level terakhir dan kedua terakhir)
@@ -459,12 +477,17 @@ extern "C"
                                 cv::Mat local_flow_roi = local_flow_acc(tile_roi);
                                 cv::Mat local_weight_roi = local_weight_acc(tile_roi);
 
-                                std::vector<cv::Mat> channels(2);
-                                cv::split(local_flow_roi, channels);
-                                channels[0] += refined_flow.x * window;
-                                channels[1] += refined_flow.y * window;
-                                cv::merge(channels, local_flow_roi);
-                                local_weight_roi += window;
+                                for (int ry = 0; ry < current_tile_h; ++ry) {
+                                    cv::Vec2f* p_flow = local_flow_roi.ptr<cv::Vec2f>(ry);
+                                    float* p_weight = local_weight_roi.ptr<float>(ry);
+                                    const float* p_win = window.ptr<float>(ry);
+                                    for (int rx = 0; rx < current_tile_w; ++rx) {
+                                        float w = confidence * p_win[rx]; // scale by confidence
+                                        p_flow[rx][0] += refined_flow.x * w;
+                                        p_flow[rx][1] += refined_flow.y * w;
+                                        p_weight[rx]  += w;
+                                    }
+                                }
                             }
                         }
 
@@ -595,9 +618,7 @@ extern "C"
 
     ALIGNMENT_API void free_flow_memory(float *flow_data)
     {
-        if (flow_data)
-        {
-            free(flow_data);
-        }
+        delete[] flow_data;
     }
+
 }
