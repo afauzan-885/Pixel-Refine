@@ -48,7 +48,8 @@ private:
 //
 // Catatan: menggunakan parabola fitting pada 3x3 neighborhood sekitar (dx,dy).
 //
-static inline float bilinear_at(const cv::Mat& img, float x, float y) {
+static inline float bilinear_at(const cv::Mat &img, float x, float y)
+{
     int x0 = (int)std::floor(x);
     int y0 = (int)std::floor(y);
     int x1 = x0 + 1;
@@ -71,7 +72,7 @@ static inline float bilinear_at(const cv::Mat& img, float x, float y) {
 }
 
 static cv::Point2f subpixel_refinement(
-    const cv::Mat& ref_layer, const cv::Mat& comp_layer,
+    const cv::Mat &ref_layer, const cv::Mat &comp_layer,
     int x, int y, int dx, int dy,
     int tile_w, int tile_h)
 {
@@ -100,9 +101,11 @@ static cv::Point2f subpixel_refinement(
 
     // --- 2. Evaluasi dengan bilinear interpolation ---
     float sad_bilinear = 0.0f;
-    for (int r = 0; r < tile_h; r++) {
-        const float* p_ref = ref_tile.ptr<float>(r);
-        for (int c = 0; c < tile_w; c++) {
+    for (int r = 0; r < tile_h; r++)
+    {
+        const float *p_ref = ref_tile.ptr<float>(r);
+        for (int c = 0; c < tile_w; c++)
+        {
             float ref_val = p_ref[c];
             float comp_val = bilinear_at(comp_layer,
                                          (float)(x + dx + shift.x + c),
@@ -113,7 +116,8 @@ static cv::Point2f subpixel_refinement(
     sad_bilinear /= (tile_w * tile_h);
 
     // Jika score interpolasi buruk, fallback ke hasil phase correlation mentah
-    if (sad_bilinear > 1e5f) {
+    if (sad_bilinear > 1e5f)
+    {
         return cv::Point2f((float)dx + (float)shift.x,
                            (float)dy + (float)shift.y);
     }
@@ -121,9 +125,8 @@ static cv::Point2f subpixel_refinement(
     return cv::Point2f(fx, fy);
 }
 
-
-
-float block_cost_fft(const cv::Mat& ref, const cv::Mat& comp) {
+float block_cost_fft(const cv::Mat &ref, const cv::Mat &comp)
+{
     // Pastikan ukuran sama
     CV_Assert(ref.size() == comp.size());
     cv::Mat ref32, comp32;
@@ -151,27 +154,29 @@ float block_cost_fft(const cv::Mat& ref, const cv::Mat& comp) {
     return static_cast<float>(std::sqrt(ssd));
 }
 
-float block_cost(const float* ref, const float* comp, int len) {
+float block_cost(const float *ref, const float *comp, int len)
+{
     __m256 vsum = _mm256_setzero_ps();
     int i = 0;
-    for (; i + 8 <= len; i += 8) {
+    for (; i + 8 <= len; i += 8)
+    {
         __m256 vref = _mm256_loadu_ps(ref + i);
         __m256 vcomp = _mm256_loadu_ps(comp + i);
         __m256 vdiff = _mm256_sub_ps(vref, vcomp);
-        __m256 vabs  = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), vdiff); // abs()
+        __m256 vabs = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), vdiff); // abs()
         vsum = _mm256_add_ps(vsum, vabs);
     }
     float buf[8];
     _mm256_storeu_ps(buf, vsum);
-    float total = buf[0]+buf[1]+buf[2]+buf[3]+buf[4]+buf[5]+buf[6]+buf[7];
+    float total = buf[0] + buf[1] + buf[2] + buf[3] + buf[4] + buf[5] + buf[6] + buf[7];
 
     // tail handling
-    for (; i < len; i++) {
+    for (; i < len; i++)
+    {
         total += std::fabs(ref[i] - comp[i]);
     }
     return total;
 }
-
 
 // === API Fungsi yang Diekspos (C-Linkage)
 extern "C"
@@ -189,6 +194,11 @@ extern "C"
         constexpr float SEARCH_DIST_SCALE_L1 = 1.0f; // Level 1 → 90% (bisa kamu ubah sesuka hati)
     }
 
+    struct Candidate
+    {
+        cv::Point2f flow;
+        float cost;
+    };
 
     ALIGNMENT_API float *compute_alignment_flow(
         const float *ref_work_data, const float *current_work_data,
@@ -216,7 +226,6 @@ extern "C"
             ref_pyramid.push_back(ref_work);
             current_pyramid.push_back(current_work);
 
-            // OPTIMISASI 3: Pre-alokasi Mat untuk pyrDown untuk menghindari alokasi berulang
             cv::Mat temp_ref, temp_current;
             for (int i = 0; i < n_layers - 1; ++i)
             {
@@ -226,8 +235,8 @@ extern "C"
                 if (temp_ref.rows < MIN_PYRAMID_LAYER_SIZE || temp_ref.cols < MIN_PYRAMID_LAYER_SIZE)
                     break;
 
-                ref_pyramid.push_back(temp_ref);
-                current_pyramid.push_back(temp_current);
+                ref_pyramid.push_back(temp_ref.clone());
+                current_pyramid.push_back(temp_current.clone());
             }
         }
 
@@ -237,28 +246,18 @@ extern "C"
         cv::Mat flow;
         cv::Mat previous_level_flow;
 
-        // OPTIMISASI 4: Cache Gaussian window yang lebih efisien dengan LRU-like behavior
         static thread_local std::map<std::pair<int, int>, cv::Mat> gaussian_cache;
-        static thread_local int cache_access_counter = 0;
 
         auto getGaussianWindow_optimized = [](int rows, int cols) -> const cv::Mat &
         {
             auto key = std::make_pair(rows, cols);
-
-            // Cek cache terlebih dahulu
             auto it = gaussian_cache.find(key);
             if (it != gaussian_cache.end())
-            {
                 return it->second;
-            }
 
-            // Jika cache penuh, hapus elemen pertama (simple eviction)
             if (gaussian_cache.size() >= GAUSSIAN_CACHE_SIZE)
-            {
                 gaussian_cache.erase(gaussian_cache.begin());
-            }
 
-            // Buat window baru
             cv::Mat kernel_y = cv::getGaussianKernel(rows, -1, CV_32F);
             cv::Mat kernel_x = cv::getGaussianKernel(cols, -1, CV_32F);
             cv::Mat window = kernel_y * kernel_x.t();
@@ -266,23 +265,17 @@ extern "C"
             double minVal, maxVal;
             cv::minMaxLoc(window, &minVal, &maxVal);
             if (maxVal > NORMALIZATION_EPSILON)
-            {
-                window *= (1.0 / maxVal); // Lebih efisien dari pembagian
-            }
+                window *= (1.0 / maxVal);
             else
-            {
                 window = cv::Mat::zeros(rows, cols, CV_32F);
-            }
 
             return gaussian_cache[key] = std::move(window);
         };
 
-        // OPTIMISASI 5: Pre-alokasi buffer untuk mengurangi alokasi dalam loop
         cv::Mat flow_accumulator, weight_accumulator;
         std::vector<cv::Vec2f> candidate_flows;
-        candidate_flows.reserve(20); // Pre-reserve untuk menghindari realokasi
+        candidate_flows.reserve(20);
 
-        // --- C.2: Iterasi Melalui Setiap Level Piramida ---
         {
             SimpleTimer all_levels_timer("Coarse-to-Fine Flow (All Levels)");
             for (int i = static_cast<int>(ref_pyramid.size()) - 1; i >= 0; --i)
@@ -291,9 +284,7 @@ extern "C"
                 const cv::Mat &comp_layer = current_pyramid[i];
 
                 if (i == ref_pyramid.size() - 1)
-                {
                     flow = cv::Mat::zeros(ref_layer.size(), CV_32FC2);
-                }
                 else
                 {
                     cv::resize(previous_level_flow, flow, ref_layer.size(), 0, 0, cv::INTER_LINEAR);
@@ -307,13 +298,12 @@ extern "C"
 
                 if (current_tile_h <= 0 || current_tile_w <= 0 || h_layer < current_tile_h || w_layer < current_tile_w)
                 {
-                    previous_level_flow = std::move(flow); // OPTIMISASI 6: Move semantics
+                    previous_level_flow = std::move(flow);
                     continue;
                 }
 
                 const cv::Mat &window = getGaussianWindow_optimized(current_tile_h, current_tile_w);
 
-                // --- C.3: Penyempurnaan Flow dengan Multi-Hipotesis (OPTIMIZED) ---
                 {
                     SimpleTimer tile_matching_timer("  -> Level " + std::to_string(i) + " Tile Matching");
 
@@ -334,22 +324,17 @@ extern "C"
 
 #pragma omp parallel firstprivate(candidate_flows)
                     {
-                        // OPTIMISASI 8: Thread-local buffers untuk mengurangi critical sections
                         cv::Mat local_flow_acc = cv::Mat::zeros(h_layer, w_layer, CV_32FC2);
                         cv::Mat local_weight_acc = cv::Mat::zeros(h_layer, w_layer, CV_32FC1);
 
-#pragma omp for schedule(dynamic, 8) nowait
+#pragma omp for schedule(dynamic) nowait
                         for (int y = 0; y <= h_layer - current_tile_h; y += step_y)
                         {
                             for (int x = 0; x <= w_layer - current_tile_w; x += step_x)
                             {
-                                // --- Kumpulkan Kandidat Hipotesis Flow ---
                                 candidate_flows.clear();
-
                                 if (i == ref_pyramid.size() - 1)
-                                {
                                     candidate_flows.emplace_back(0.0f, 0.0f);
-                                }
                                 else
                                 {
                                     const int coarse_y = static_cast<int>((y + current_tile_h * 0.5f) * 0.5f);
@@ -371,27 +356,24 @@ extern "C"
                                     }
                                 }
 
-                                if (candidate_flows.empty()) {
-                                    // Ambil flow dari posisi tile center
+                                if (candidate_flows.empty())
+                                {
                                     cv::Vec2f center_flow = flow.at<cv::Vec2f>(y + current_tile_h / 2, x + current_tile_w / 2);
                                     candidate_flows.emplace_back(center_flow);
-
-                                    // Tambahkan offset ±1 piksel di sekitar kandidat pusat (multi-candidate)
-                                    for (int dy = -1; dy <= 1; ++dy) {
-                                        for (int dx = -1; dx <= 1; ++dx) {
-                                            if (dx == 0 && dy == 0) continue;
+                                    for (int dy = -1; dy <= 1; ++dy)
+                                    {
+                                        for (int dx = -1; dx <= 1; ++dx)
+                                        {
+                                            if (dx == 0 && dy == 0)
+                                                continue;
                                             candidate_flows.emplace_back(center_flow + cv::Vec2f(dx, dy));
                                         }
                                     }
                                 }
 
-                                float best_tile_score = std::numeric_limits<float>::max();
-                                float second_best_tile_score = std::numeric_limits<float>::max();
-                                int best_tile_dx = 0, best_tile_dy = 0;
-
-
-                                // OPTIMISASI 9: Early termination jika score sudah sangat baik
-                                const float early_termination_threshold = 0.01f;
+                                // === MODIFIKASI MULTI-KANDIDAT ===
+                                std::vector<Candidate> top_candidates;
+                                top_candidates.reserve(5);
 
                                 for (const auto &initial_vec : candidate_flows)
                                 {
@@ -399,99 +381,119 @@ extern "C"
                                     const int init_dx = static_cast<int>(std::round(initial_vec[0]));
                                     int current_search_dist = static_cast<int>(search_dist);
 
-                                    if (i == 0) {
+                                    if (i == 0)
                                         current_search_dist = static_cast<int>(search_dist * ImageAlignmentConfig::SEARCH_DIST_SCALE_L0);
-                                    }
-                                    else if (i == 1) {
+                                    else if (i == 1)
                                         current_search_dist = static_cast<int>(search_dist * ImageAlignmentConfig::SEARCH_DIST_SCALE_L1);
-                                    }
 
-                                    for (int dy = -current_search_dist; dy <= current_search_dist && best_tile_score > early_termination_threshold; ++dy)
+                                    for (int dy = -current_search_dist; dy <= current_search_dist; ++dy)
                                     {
                                         for (int dx = -current_search_dist; dx <= current_search_dist; ++dx)
                                         {
                                             const int test_y = y + init_dy + dy;
                                             const int test_x = x + init_dx + dx;
-
                                             if (test_y < 0 || test_x < 0 ||
                                                 test_y + current_tile_h > h_layer ||
                                                 test_x + current_tile_w > w_layer)
                                                 continue;
 
-                                            // OPTIMISASI 10: Vectorized SAD computation
-                                            float current_cost  = 0.0f;
-                                            if (current_tile_h * current_tile_w >= 64*64) {
-                                                // Gunakan FFT untuk tile besar
+                                            float current_cost = 0.0f;
+                                            if (current_tile_h * current_tile_w >= 64 * 64)
+                                            {
                                                 cv::Mat ref_tile(ref_layer, cv::Rect(x, y, current_tile_w, current_tile_h));
                                                 cv::Mat comp_tile(comp_layer, cv::Rect(test_x, test_y, current_tile_w, current_tile_h));
                                                 current_cost = block_cost_fft(ref_tile, comp_tile);
-                                            } else {
-                                                // Tetap pakai AVX SAD
-                                                for (int r_tile = 0; r_tile < current_tile_h; ++r_tile) {
-                                                    const float* p_ref  = ref_layer.ptr<float>(y + r_tile, x);
-                                                    const float* p_comp = comp_layer.ptr<float>(test_y + r_tile, test_x);
+                                            }
+                                            else
+                                            {
+                                                for (int r_tile = 0; r_tile < current_tile_h; ++r_tile)
+                                                {
+                                                    const float *p_ref = ref_layer.ptr<float>(y + r_tile, x);
+                                                    const float *p_comp = comp_layer.ptr<float>(test_y + r_tile, test_x);
                                                     current_cost += block_cost(p_ref, p_comp, current_tile_w);
                                                 }
                                             }
 
-                                            const float normalized_sad = current_cost  * tile_area_inv;
-                                            if (normalized_sad < best_tile_score)
+                                            Candidate cand{cv::Point2f(init_dx + dx, init_dy + dy),
+                                                           current_cost * tile_area_inv};
+
+                                            if (top_candidates.size() < 5)
                                             {
-                                                second_best_tile_score = best_tile_score;
-                                                best_tile_score = normalized_sad;
-                                                best_tile_dx = init_dx + dx;
-                                                best_tile_dy = init_dy + dy;
+                                                top_candidates.push_back(cand);
+                                                std::sort(top_candidates.begin(), top_candidates.end(),
+                                                          [](const Candidate &a, const Candidate &b)
+                                                          { return a.cost < b.cost; });
                                             }
-                                            else if (normalized_sad < second_best_tile_score)
+                                            else if (cand.cost < top_candidates.back().cost)
                                             {
-                                                second_best_tile_score = normalized_sad;
+                                                top_candidates.back() = cand;
+                                                std::sort(top_candidates.begin(), top_candidates.end(),
+                                                          [](const Candidate &a, const Candidate &b)
+                                                          { return a.cost < b.cost; });
                                             }
                                         }
                                     }
                                 }
 
-                                // --- Confidence Check ---
-                                float confidence = 1.0f;
-                                if (second_best_tile_score < std::numeric_limits<float>::max())
+                                cv::Point2f chosen_flow = top_candidates.front().flow;
+                                if (top_candidates.size() > 1 && x > 0 && y > 0)
                                 {
-                                    float ratio = second_best_tile_score / (best_tile_score + 1e-6f);
-                                    confidence = std::clamp(ratio, 0.0f, 1.0f);
-                                }
-                                // Penalti untuk match lemah / noisy
-                                if (best_tile_score > 0.05f)
-                                    confidence *= 0.5f;
+                                    cv::Vec2f avg_neigh(0.0f, 0.0f);
+                                    int count = 0;
+                                    for (int dy = -1; dy <= 1; dy++)
+                                    {
+                                        for (int dx = -1; dx <= 1; dx++)
+                                        {
+                                            if (dy == 0 && dx == 0)
+                                                continue;
+                                            if (y + dy >= 0 && y + dy < flow.rows && x + dx >= 0 && x + dx < flow.cols)
+                                            {
+                                                avg_neigh += flow.at<cv::Vec2f>(y + dy, x + dx); // ✅ sama-sama Vec2f
+                                                count++;
+                                            }
+                                        }
+                                    }
+                                    if (count > 0)
+                                        avg_neigh *= (1.0f / count);
 
-                                cv::Point2f refined_flow(best_tile_dx, best_tile_dy);
-                                // Subpixel refinement hanya di 2 level kasar (misalnya level terakhir dan kedua terakhir)
-                                if (i >= (int)ref_pyramid.size()-3) {
+                                    float best_dist = 1e9f;
+                                    for (const auto &cand : top_candidates)
+                                    {
+                                        cv::Vec2f cand_vec(cand.flow.x, cand.flow.y); // konversi Point2f -> Vec2f
+                                        float d = cv::norm(cand_vec - avg_neigh);
+                                        if (d < best_dist)
+                                        {
+                                            best_dist = d;
+                                            chosen_flow = cand.flow; // tetap simpan dalam Point2f
+                                        }
+                                    }
+                                }
+
+
+                                cv::Point2f refined_flow = chosen_flow;
+                                if (i >= (int)ref_pyramid.size() - 3)
+                                {
                                     refined_flow = subpixel_refinement(
                                         ref_layer, comp_layer,
                                         x, y,
-                                        best_tile_dx, best_tile_dy,
-                                        current_tile_w, current_tile_h
-                                    );
+                                        (int)std::round(chosen_flow.x),
+                                        (int)std::round(chosen_flow.y),
+                                        current_tile_w, current_tile_h);
                                 }
 
-                                // Update local buffers pakai refined_flow
                                 cv::Rect tile_roi(x, y, current_tile_w, current_tile_h);
                                 cv::Mat local_flow_roi = local_flow_acc(tile_roi);
                                 cv::Mat local_weight_roi = local_weight_acc(tile_roi);
 
-                                for (int ry = 0; ry < current_tile_h; ++ry) {
-                                    cv::Vec2f* p_flow = local_flow_roi.ptr<cv::Vec2f>(ry);
-                                    float* p_weight = local_weight_roi.ptr<float>(ry);
-                                    const float* p_win = window.ptr<float>(ry);
-                                    for (int rx = 0; rx < current_tile_w; ++rx) {
-                                        float w = confidence * p_win[rx]; // scale by confidence
-                                        p_flow[rx][0] += refined_flow.x * w;
-                                        p_flow[rx][1] += refined_flow.y * w;
-                                        p_weight[rx]  += w;
-                                    }
-                                }
+                                std::vector<cv::Mat> channels(2);
+                                cv::split(local_flow_roi, channels);
+                                channels[0] += refined_flow.x * window;
+                                channels[1] += refined_flow.y * window;
+                                cv::merge(channels, local_flow_roi);
+                                local_weight_roi += window;
                             }
                         }
 
-// OPTIMISASI 11: Single critical section untuk menggabungkan hasil
 #pragma omp critical
                         {
                             flow_accumulator += local_flow_acc;
@@ -499,7 +501,6 @@ extern "C"
                         }
                     }
 
-                    // Normalisasi flow - OPTIMISASI 12: Vectorized normalization
                     cv::Mat mask;
                     cv::compare(weight_accumulator, NORMALIZATION_EPSILON, mask, cv::CMP_GT);
 
@@ -513,16 +514,14 @@ extern "C"
                     cv::merge(flow_channels, flow);
                 }
 
-                // --- C.4: Estimasi Gerakan Global dengan RANSAC (OPTIMIZED) ---
+                // === RANSAC tetap sama ===
                 if (i >= static_cast<int>(ref_pyramid.size()) - 2)
                 {
-                    // OPTIMISASI 13: Pre-allocate dan reuse vector
                     SimpleTimer ransac_timer("  -> Level " + std::to_string(i) + " RANSAC");
                     static thread_local std::vector<cv::Point2f> flow_vectors;
                     flow_vectors.clear();
-                    flow_vectors.reserve(flow.total() / 4); // Estimasi kasar untuk menghindari realokasi
+                    flow_vectors.reserve(flow.total() / 4);
 
-                    // OPTIMISASI 14: Threshold adaptif berdasarkan ukuran layer
                     const float min_magnitude = std::max(0.1f, static_cast<float>(std::min(h_layer, w_layer)) * 0.001f);
 
                     for (int r = 0; r < flow.rows; ++r)
@@ -532,9 +531,7 @@ extern "C"
                         {
                             const cv::Vec2f &vec = row_ptr[c];
                             if (cv::norm(vec) > min_magnitude)
-                            {
                                 flow_vectors.emplace_back(vec[0], vec[1]);
-                            }
                         }
                     }
 
@@ -546,8 +543,6 @@ extern "C"
 
                         cv::Vec2f best_global_flow(0, 0);
                         int max_inliers = 0;
-
-                        // OPTIMISASI 15: Early termination untuk RANSAC
                         const int early_stop_threshold = static_cast<int>(flow_vectors.size() * 0.8);
 
                         for (int iter = 0; iter < max_iterations && max_inliers < early_stop_threshold; ++iter)
@@ -576,23 +571,19 @@ extern "C"
                         }
 
                         if (max_inliers > min_inliers_needed)
-                        {
                             flow.setTo(cv::Scalar(best_global_flow[0], best_global_flow[1]));
-                        }
                     }
                 }
 
                 previous_level_flow = std::move(flow);
-                flow = cv::Mat();                     
+                flow = cv::Mat();
             }
         }
 
         // =========================================================================
         // === BAGIAN D: Finalisasi dan Pengembalian Data (OPTIMIZED)           ===
         // =========================================================================
-        
-        // Restore flow dari previous_level_flow (karena kita move di atas)
-        float *output_flow_data = nullptr; // Deklarasikan di luar
+        float *output_flow_data = nullptr;
         {
             SimpleTimer finalization_timer("Finalization & Data Copy");
             flow = std::move(previous_level_flow);
@@ -600,25 +591,21 @@ extern "C"
             if (!flow.empty())
             {
                 if (!flow.isContinuous())
-                {
                     flow = flow.clone();
-                }
 
                 const size_t data_size = flow.total() * flow.elemSize();
                 output_flow_data = static_cast<float *>(malloc(data_size));
                 if (output_flow_data)
-                {
                     std::memcpy(output_flow_data, flow.data, data_size);
-                }
             }
         }
 
-        return output_flow_data; // <-- Titik return tunggal
+        return output_flow_data;
     }
 
     ALIGNMENT_API void free_flow_memory(float *flow_data)
     {
-        delete[] flow_data;
+        if (flow_data)
+            free(flow_data);
     }
-
 }

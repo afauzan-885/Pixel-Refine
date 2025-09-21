@@ -165,19 +165,13 @@ try:
 except (OSError, AttributeError) as e:
     ALIGN_LIB = None
 
-def perform_image_alignment(images, reference_image_float, work_res_h, work_res_w, 
-                            tile_h, tile_w, ref_dtype, update_progress=None, stop_requested=None):
+def perform_image_alignment(images, reference_image_float, work_res_h, work_res_w,
+                                    tile_h, tile_w, ref_dtype, update_progress=None, stop_requested=None):
     """
-    Melakukan alignment gambar secara IN-PLACE menggunakan backend C++ via ctypes.
-    Fungsi ini memodifikasi list 'images' yang diberikan.
-    
-    Returns:
-        Boolean: True jika berhasil, False jika gagal atau dibatalkan.
+    Alignment in-place dengan preallocated buffer supaya penggunaan RAM stabil.
     """
-    # Langkah 0: Periksa apakah library C++ berhasil dimuat
     if ALIGN_LIB is None:
-        print("Error Kritis: Library C++ 'alignment_engine.dll' tidak tersedia. Proses alignment dibatalkan.")
-        # Beri tahu pengguna melalui progress bar jika memungkinkan
+        print("Error: Library C++ 'alignment_engine.dll' tidak tersedia.")
         if update_progress:
             update_progress(40, "Error: Library C++ tidak ditemukan.")
         return False
@@ -187,45 +181,46 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
         if num_images <= 1:
             return True
 
-        # --- LANGKAH 1: Persiapan Gambar Referensi (dilakukan sekali di Python) ---
+        # --- Persiapan Referensi ---
         if len(reference_image_float.shape) == 3:
             ref_gray = cv2.cvtColor(reference_image_float, cv2.COLOR_RGB2GRAY)
         else:
             ref_gray = reference_image_float.copy()
 
-        # Buat gambar kerja float32, yang akan dikirim ke C++
         ref_work = cv2.resize(ref_gray, (work_res_w, work_res_h), interpolation=cv2.INTER_LINEAR)
         if ref_work.dtype != np.float32:
-            # Jika hasil normalize bukan float, konversi di sini. Asumsikan skala 0-1.
             if np.issubdtype(ref_work.dtype, np.integer):
-                 ref_work = ref_work.astype(np.float32) / 255.0
+                ref_work = ref_work.astype(np.float32) / 255.0
             else:
-                 ref_work = ref_work.astype(np.float32)
+                ref_work = ref_work.astype(np.float32)
 
-        # Hitung jumlah layer piramida untuk dikirim ke C++
         min_layer_res = min(tile_h, tile_w) * 2
-        # Tambahkan pengaman untuk log(0)
         log_arg = min(work_res_h, work_res_w) / min_layer_res if min_layer_res > 0 else 1
         n_layers = max(1, int(np.ceil(np.log2(log_arg))) if log_arg > 0 else 1)
-        
-        # --- LANGKAH 2: Loop Melalui Setiap Gambar untuk Diselaraskan ---
+
+        # --- Preallocate Buffers ---
+        flow_shape = (work_res_h, work_res_w, 2)
+        flow_buf = np.empty(flow_shape, dtype=np.float32)  # buffer untuk flow
+        flow_full_buf = None  # akan dibuat sesuai resolusi asli tiap gambar
+
+        # --- Loop setiap gambar ---
         for i in range(1, num_images):
             if stop_requested and stop_requested():
-                return False # Proses dibatalkan oleh pengguna
-            
+                return False
+
             if update_progress:
                 progress = 30 + (i / num_images) * 10
                 update_progress(int(progress), f"Alignment C++ gambar {i+1}/{num_images}...")
-            
+
             original_image = images[i]
-            
-            # --- Persiapan Gambar Saat Ini (dilakukan di Python) ---
+
+            # --- Gambar saat ini ---
             current_img_float = normalize_image(original_image, ref_dtype)
             if len(current_img_float.shape) == 3:
                 current_gray = cv2.cvtColor(current_img_float, cv2.COLOR_RGB2GRAY)
             else:
                 current_gray = current_img_float.copy()
-            
+
             current_work = cv2.resize(current_gray, (work_res_w, work_res_h), interpolation=cv2.INTER_LINEAR)
             if current_work.dtype != np.float32:
                 if np.issubdtype(current_work.dtype, np.integer):
@@ -233,18 +228,15 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
                 else:
                     current_work = current_work.astype(np.float32)
 
-            # --- LANGKAH 3: Panggilan ke Mesin C++ ---
-            # Pastikan array bersifat C-contiguous untuk keamanan
             if not ref_work.flags['C_CONTIGUOUS']:
                 ref_work = np.ascontiguousarray(ref_work)
             if not current_work.flags['C_CONTIGUOUS']:
                 current_work = np.ascontiguousarray(current_work)
-            
-            # Dapatkan pointer ke buffer data NumPy
+
             ref_work_ptr = ref_work.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
             current_work_ptr = current_work.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
 
-            # Panggil fungsi C++
+            # --- Panggil backend C++ ---
             flow_ptr = ALIGN_LIB.compute_alignment_flow(
                 ref_work_ptr,
                 current_work_ptr,
@@ -253,42 +245,53 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
                 tile_h,
                 tile_w,
                 n_layers,
-                1.5  # search_dist, bisa dijadikan parameter
+                1.5
             )
-            
-            flow = None
+
             if flow_ptr:
                 try:
-                    # Ubah pointer C kembali menjadi array NumPy
-                    flow_shape = (work_res_h, work_res_w, 2)
-                    # Buat salinan! Penting agar kita bisa membebaskan memori C++
-                    flow = np.ctypeslib.as_array(flow_ptr, shape=flow_shape).copy()
+                    flow_view = np.ctypeslib.as_array(flow_ptr, shape=flow_shape)
+                    np.copyto(flow_buf, flow_view)  # salin ke buffer preallocated
                 finally:
-                    # SANGAT PENTING: Selalu bebaskan memori C++, bahkan jika ada error
                     ALIGN_LIB.free_flow_memory(flow_ptr)
-            
-            # --- LANGKAH 4: Proses Hasil (kembali di Python) ---
-            if flow is not None:
-                # Skalakan flow ke resolusi penuh
-                flow_full_res = scale_flow_to_full_res(flow, work_res_h, work_res_w, 
-                                                       original_image.shape[0], original_image.shape[1])
-                
-                # Warp gambar asli menggunakan flow yang sudah dihitung
-                aligned_img = warp_image_opencv(original_image, flow_full_res)
-                
-                # Modifikasi list input secara in-place
-                images[i] = aligned_img
             else:
-                print(f"Peringatan: Alignment C++ gagal untuk gambar {i+1}. Menggunakan gambar asli.")
+                print(f"Peringatan: Alignment gagal untuk gambar {i+1}.")
+                continue
 
-        return True # Sukses
-        
+            # --- Scale flow ke resolusi penuh ---
+            full_h, full_w = original_image.shape[:2]
+            if (flow_full_buf is None) or (flow_full_buf.shape[0] != full_h or flow_full_buf.shape[1] != full_w):
+                flow_full_buf = np.empty((full_h, full_w, 2), dtype=np.float32)
+
+            flow_resized = cv2.resize(flow_buf, (full_w, full_h), interpolation=cv2.INTER_CUBIC)
+            flow_resized[:, :, 0] *= full_w / work_res_w
+            flow_resized[:, :, 1] *= full_h / work_res_h
+            np.copyto(flow_full_buf, flow_resized)
+
+            # --- Warp in-place ---
+            aligned_img = cv2.remap(
+                original_image,
+                (np.arange(full_w)[None, :] + flow_full_buf[:, :, 0]).astype(np.float32),
+                (np.arange(full_h)[:, None] + flow_full_buf[:, :, 1]).astype(np.float32),
+                interpolation=cv2.INTER_LANCZOS4,
+                borderMode=cv2.BORDER_REFLECT_101
+            )
+
+            images[i] = aligned_img
+
+            # --- Cleanup per frame ---
+            del flow_resized, aligned_img
+            import gc
+            gc.collect()
+
+        return True
+
     except Exception as e:
-        # Menambahkan traceback untuk debugging yang lebih mudah
         import traceback
-        print(f"Error dalam proses alignment C++: {e}")
+        print(f"Error perform_image_alignment_inplace: {e}")
         traceback.print_exc()
-        return False # Mengindikasikan kegagalan
+        return False
+
         
 def scale_flow_to_full_res(flow, work_h, work_w, full_h, full_w):
     """Scale optical flow dari resolusi kerja ke resolusi penuh dengan interpolasi yang lebih baik."""
@@ -337,3 +340,4 @@ def warp_image_opencv(image, flow, interpolation=cv2.INTER_LANCZOS4, border_mode
     except Exception as e:
         print(f"Error dalam warp_image_opencv_enhanced: {e}")
         return image
+    
