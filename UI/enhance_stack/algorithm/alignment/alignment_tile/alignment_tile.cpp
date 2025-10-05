@@ -3,182 +3,39 @@
 #include <vector>
 #include <cmath>
 #include <numeric>
+#include <immintrin.h>
 #include <map>
 #include <algorithm>
 #include <functional>
 #include <omp.h>
-#include <iostream> // Diperlukan untuk std::cout
-#include <chrono>   // Diperlukan untuk timing
+#include <iostream>
+#include <chrono> 
 #include <string>
+#include "alignment_tile.h"
+#include "cost_function.hpp"
+#include "refinement.hpp"
 
-class SimpleTimer
-{
-public:
-    SimpleTimer(const std::string &name)
-        : m_name(name), m_start(std::chrono::high_resolution_clock::now())
-    {
-    }
+// class SimpleTimer
+// {
+// public:
+//     SimpleTimer(const std::string &name)
+//         : m_name(name), m_start(std::chrono::high_resolution_clock::now())
+//     {
+//     }
 
-    ~SimpleTimer()
-    {
-        auto end = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - m_start);
-        std::cout << "[C++ Timer] " << m_name << ": "
-                  << duration.count() / 1000.0 << " ms" << std::endl;
-    }
+//     ~SimpleTimer()
+//     {
+//         auto end = std::chrono::high_resolution_clock::now();
+//         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - m_start);
+//         std::cout << "[C++ Timer] " << m_name << ": "
+//                   << duration.count() / 1000.0 << " ms" << std::endl;
+//     }
 
-private:
-    std::string m_name;
-    std::chrono::time_point<std::chrono::high_resolution_clock> m_start;
-};
+// private:
+//     std::string m_name;
+//     std::chrono::time_point<std::chrono::high_resolution_clock> m_start;
+// };
 
-// ============================================================================
-// Fungsi Sub-pixel Refinement
-// ============================================================================
-//
-// Input :
-//   ref_layer   - citra referensi (grayscale, CV_32FC1)
-//   comp_layer  - citra yang dibandingkan
-//   x, y        - posisi tile di ref_layer
-//   dx, dy      - displacement integer hasil SAD
-//   tile_w, tile_h - ukuran tile
-//
-// Output :
-//   cv::Point2f - displacement refined (sub-pixel)
-//
-// Catatan: menggunakan parabola fitting pada 3x3 neighborhood sekitar (dx,dy).
-//
-static inline float bilinear_at(const cv::Mat &img, float x, float y)
-{
-    int x0 = (int)std::floor(x);
-    int y0 = (int)std::floor(y);
-    int x1 = x0 + 1;
-    int y1 = y0 + 1;
-
-    if (x0 < 0 || y0 < 0 || x1 >= img.cols || y1 >= img.rows)
-        return 0.0f;
-
-    float dx = x - x0;
-    float dy = y - y0;
-
-    float v00 = img.at<float>(y0, x0);
-    float v01 = img.at<float>(y0, x1);
-    float v10 = img.at<float>(y1, x0);
-    float v11 = img.at<float>(y1, x1);
-
-    float v0 = v00 * (1 - dx) + v01 * dx;
-    float v1 = v10 * (1 - dx) + v11 * dx;
-    return v0 * (1 - dy) + v1 * dy;
-}
-
-static cv::Point2f subpixel_refinement(
-    const cv::Mat &ref_layer, const cv::Mat &comp_layer,
-    int x, int y, int dx, int dy,
-    int tile_w, int tile_h)
-{
-    // ROI pada reference dan comparison
-    cv::Rect ref_roi(x, y, tile_w, tile_h);
-    cv::Rect comp_roi(x + dx, y + dy, tile_w, tile_h);
-
-    if ((ref_roi.x < 0) || (ref_roi.y < 0) ||
-        (comp_roi.x < 0) || (comp_roi.y < 0) ||
-        (ref_roi.x + comp_roi.width > comp_layer.cols) ||
-        (ref_roi.y + comp_roi.height > comp_layer.rows))
-    {
-        return cv::Point2f((float)dx, (float)dy); // fallback
-    }
-
-    cv::Mat ref_tile = ref_layer(ref_roi).clone();
-    cv::Mat comp_tile = comp_layer(comp_roi).clone();
-
-    // --- 1. Phase correlation ---
-    cv::Point2d shift;
-    double response;
-    shift = cv::phaseCorrelate(ref_tile, comp_tile, cv::noArray(), &response);
-
-    float fx = (float)dx + (float)shift.x;
-    float fy = (float)dy + (float)shift.y;
-
-    // --- 2. Evaluasi dengan bilinear interpolation ---
-    float sad_bilinear = 0.0f;
-    for (int r = 0; r < tile_h; r++)
-    {
-        const float *p_ref = ref_tile.ptr<float>(r);
-        for (int c = 0; c < tile_w; c++)
-        {
-            float ref_val = p_ref[c];
-            float comp_val = bilinear_at(comp_layer,
-                                         (float)(x + dx + shift.x + c),
-                                         (float)(y + dy + shift.y + r));
-            sad_bilinear += std::fabs(ref_val - comp_val);
-        }
-    }
-    sad_bilinear /= (tile_w * tile_h);
-
-    // Jika score interpolasi buruk, fallback ke hasil phase correlation mentah
-    if (sad_bilinear > 1e5f)
-    {
-        return cv::Point2f((float)dx + (float)shift.x,
-                           (float)dy + (float)shift.y);
-    }
-
-    return cv::Point2f(fx, fy);
-}
-
-float block_cost_fft(const cv::Mat &ref, const cv::Mat &comp)
-{
-    // Pastikan ukuran sama
-    CV_Assert(ref.size() == comp.size());
-    cv::Mat ref32, comp32;
-    ref.convertTo(ref32, CV_32F);
-    comp.convertTo(comp32, CV_32F);
-
-    // Gunakan DFT untuk convolution
-    cv::Mat ref_dft, comp_dft;
-    cv::dft(ref32, ref_dft, cv::DFT_COMPLEX_OUTPUT);
-    cv::dft(comp32, comp_dft, cv::DFT_COMPLEX_OUTPUT);
-
-    // Hitung cross-correlation (ref * conj(comp))
-    cv::Mat cross;
-    cv::mulSpectrums(ref_dft, comp_dft, cross, 0, true);
-    cv::idft(cross, cross, cv::DFT_REAL_OUTPUT | cv::DFT_SCALE);
-
-    // Ambil nilai SSD = sum(ref^2) + sum(comp^2) - 2*cross
-    double ref_norm = cv::norm(ref32, cv::NORM_L2SQR);
-    double comp_norm = cv::norm(comp32, cv::NORM_L2SQR);
-    double cross_val;
-    cv::minMaxLoc(cross, &cross_val, nullptr); // ambil max correlation
-    double ssd = ref_norm + comp_norm - 2.0 * cross_val;
-
-    // Aproksimasi SAD
-    return static_cast<float>(std::sqrt(ssd));
-}
-
-float block_cost(const float *ref, const float *comp, int len)
-{
-    __m256 vsum = _mm256_setzero_ps();
-    int i = 0;
-    for (; i + 8 <= len; i += 8)
-    {
-        __m256 vref = _mm256_loadu_ps(ref + i);
-        __m256 vcomp = _mm256_loadu_ps(comp + i);
-        __m256 vdiff = _mm256_sub_ps(vref, vcomp);
-        __m256 vabs = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), vdiff); // abs()
-        vsum = _mm256_add_ps(vsum, vabs);
-    }
-    float buf[8];
-    _mm256_storeu_ps(buf, vsum);
-    float total = buf[0] + buf[1] + buf[2] + buf[3] + buf[4] + buf[5] + buf[6] + buf[7];
-
-    // tail handling
-    for (; i < len; i++)
-    {
-        total += std::fabs(ref[i] - comp[i]);
-    }
-    return total;
-}
-
-// === API Fungsi yang Diekspos (C-Linkage)
 extern "C"
 {
     namespace ImageAlignmentConfig
@@ -190,8 +47,8 @@ extern "C"
         constexpr int GAUSSIAN_CACHE_SIZE = 64; // Batasi cache untuk menghemat memori
 
         // Scaling factor untuk search distance per level
-        constexpr float SEARCH_DIST_SCALE_L0 = 1.0f; // Level 0 → 75% dari search_dist asli
-        constexpr float SEARCH_DIST_SCALE_L1 = 1.0f; // Level 1 → 90% (bisa kamu ubah sesuka hati)
+        constexpr float SEARCH_DIST_SCALE_L0 = 1.0f; // Level 0 â†’ 75% dari search_dist asli
+        constexpr float SEARCH_DIST_SCALE_L1 = 1.0f; // Level 1 â†’ 90% 
     }
 
     struct Candidate
@@ -204,7 +61,7 @@ extern "C"
         const float *ref_work_data, const float *current_work_data,
         int work_h, int work_w, int tile_h, int tile_w, int n_layers, float search_dist)
     {
-        SimpleTimer total_timer("Total Alignment Flow Computation");
+        // SimpleTimer total_timer("Total Alignment Flow Computation");
         using namespace ImageAlignmentConfig;
 
         // =========================================================================
@@ -219,7 +76,7 @@ extern "C"
 
         std::vector<cv::Mat> ref_pyramid, current_pyramid;
         {
-            SimpleTimer pyramid_timer("Pyramid Construction");
+            // SimpleTimer pyramid_timer("Pyramid Construction");
             ref_pyramid.reserve(n_layers);
             current_pyramid.reserve(n_layers);
 
@@ -277,7 +134,7 @@ extern "C"
         candidate_flows.reserve(20);
 
         {
-            SimpleTimer all_levels_timer("Coarse-to-Fine Flow (All Levels)");
+            // SimpleTimer all_levels_timer("Coarse-to-Fine Flow (All Levels)");
             for (int i = static_cast<int>(ref_pyramid.size()) - 1; i >= 0; --i)
             {
                 const cv::Mat &ref_layer = ref_pyramid[i];
@@ -305,7 +162,7 @@ extern "C"
                 const cv::Mat &window = getGaussianWindow_optimized(current_tile_h, current_tile_w);
 
                 {
-                    SimpleTimer tile_matching_timer("  -> Level " + std::to_string(i) + " Tile Matching");
+                    // SimpleTimer tile_matching_timer("  -> Level " + std::to_string(i) + " Tile Matching");
 
                     if (flow_accumulator.size() != cv::Size(w_layer, h_layer))
                     {
@@ -379,16 +236,22 @@ extern "C"
                                 {
                                     const int init_dy = static_cast<int>(std::round(initial_vec[1]));
                                     const int init_dx = static_cast<int>(std::round(initial_vec[0]));
-                                    int current_search_dist = static_cast<int>(search_dist);
 
-                                    if (i == 0)
-                                        current_search_dist = static_cast<int>(search_dist * ImageAlignmentConfig::SEARCH_DIST_SCALE_L0);
-                                    else if (i == 1)
-                                        current_search_dist = static_cast<int>(search_dist * ImageAlignmentConfig::SEARCH_DIST_SCALE_L1);
+                                    // === [NEW] Adaptive search distance ===
+                                    float base_dist = search_dist;
+                                    if (i == 0) base_dist *= ImageAlignmentConfig::SEARCH_DIST_SCALE_L0;
+                                    else if (i == 1) base_dist *= ImageAlignmentConfig::SEARCH_DIST_SCALE_L1;
+
+                                    float flow_mag = std::sqrt(initial_vec[0] * initial_vec[0] + initial_vec[1] * initial_vec[1]);
+                                    int current_search_dist = static_cast<int>(
+                                        base_dist * (1.0f + 0.5f * std::min(flow_mag / 5.0f, 2.0f))
+                                    );
+                                    current_search_dist = std::max(1, std::min(current_search_dist, (int)search_dist));
 
                                     for (int dy = -current_search_dist; dy <= current_search_dist; ++dy)
                                     {
                                         for (int dx = -current_search_dist; dx <= current_search_dist; ++dx)
+
                                         {
                                             const int test_y = y + init_dy + dy;
                                             const int test_x = x + init_dx + dx;
@@ -410,7 +273,7 @@ extern "C"
                                                 {
                                                     const float *p_ref = ref_layer.ptr<float>(y + r_tile, x);
                                                     const float *p_comp = comp_layer.ptr<float>(test_y + r_tile, test_x);
-                                                    current_cost += block_cost(p_ref, p_comp, current_tile_w);
+                                                    current_cost += block_cost_zsad_avx(p_ref, p_comp, current_tile_w);
                                                 }
                                             }
 
@@ -448,7 +311,7 @@ extern "C"
                                                 continue;
                                             if (y + dy >= 0 && y + dy < flow.rows && x + dx >= 0 && x + dx < flow.cols)
                                             {
-                                                avg_neigh += flow.at<cv::Vec2f>(y + dy, x + dx); // ✅ sama-sama Vec2f
+                                                avg_neigh += flow.at<cv::Vec2f>(y + dy, x + dx); // âœ… sama-sama Vec2f
                                                 count++;
                                             }
                                         }
@@ -517,7 +380,7 @@ extern "C"
                 // === RANSAC tetap sama ===
                 if (i >= static_cast<int>(ref_pyramid.size()) - 2)
                 {
-                    SimpleTimer ransac_timer("  -> Level " + std::to_string(i) + " RANSAC");
+                    // SimpleTimer ransac_timer("  -> Level " + std::to_string(i) + " RANSAC");
                     static thread_local std::vector<cv::Point2f> flow_vectors;
                     flow_vectors.clear();
                     flow_vectors.reserve(flow.total() / 4);
@@ -581,11 +444,11 @@ extern "C"
         }
 
         // =========================================================================
-        // === BAGIAN D: Finalisasi dan Pengembalian Data (OPTIMIZED)           ===
+        // === BAGIAN D: Finalisasi dan Pengembalian Data ===
         // =========================================================================
         float *output_flow_data = nullptr;
         {
-            SimpleTimer finalization_timer("Finalization & Data Copy");
+            // SimpleTimer finalization_timer("Finalization & Data Copy");
             flow = std::move(previous_level_flow);
 
             if (!flow.empty())

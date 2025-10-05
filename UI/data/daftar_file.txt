@@ -1,3 +1,4 @@
+alignment_tile.dll
 daftar_file.txt
 Generate_list.bat
 libabsl_bad_any_cast_impl-2407.0.0.dll
@@ -131,5 +132,4 @@ libwinpthread-1.dll
 libzstd.dll
 similarity_frequency_merging.dll
 similarity_spatial_merging.dll
-similarity_spatial_merging_new.dll
 zlib1.dll

@@ -11,8 +11,7 @@ import h5py
 from PySide6.QtCore import QThread, Signal, Qt
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (add_legend_heatmap, extract_all_metadata, 
                                                                                     gaussian_window, get_all_image_paths_for_single_process, load_images_from_paths, 
-                                                                                    normalize_image, preprocess_reference_in_python, resize_all_with_padding, save_image, setup_balanced_batching, 
-                                                                                    temporal_consistency_refinement)
+                                                                                    normalize_image, preprocess_in_python, resize_all_with_padding, save_image, setup_balanced_batching)
 from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityFrequencyInterface, SimilaritySpatialInterface, perform_image_alignment
 from UI.enhance_stack.components.single_page_layout.parameter_denoising.similarity_parameter_settings import  load_similarity_config
 from UI.resources.stylesheet.stylesheet import PROGRESS_BAR
@@ -88,7 +87,6 @@ class SimilarityAlgorithm:
                 images.append(image)
         return images
     
-    
     def _spatial_merging(self, images, ref_image_h, ref_image_w, ref_channels_buffer, ref_dtype,
                     reference_image_float, tile_size, overlap,
                     motion_sensitivity, noise_offset_factor,
@@ -103,7 +101,7 @@ class SimilarityAlgorithm:
                     **unused_kwargs):
 
         # --- LANGKAH 1: Inisialisasi dan Penentuan Resolusi Kerja (Tidak Berubah) ---
-        tile_h, tile_w = map(int, tile_size)
+        tile_h, tile_w =  map(int, tile_size)
         try:
             c_interface = SimilaritySpatialInterface(lib_path)
         except (FileNotFoundError, OSError, AttributeError) as e:
@@ -111,14 +109,12 @@ class SimilarityAlgorithm:
         num_images = len(images)
         
         work_res_h, work_res_w = ref_image_h, ref_image_w
-        # Turunkan target sedikit untuk mengaktifkan penskalaan lebih awal
         TARGET_MP = 10 * 1e6 
         if (ref_image_h * ref_image_w) > TARGET_MP:
             scale_factor = np.sqrt(TARGET_MP / (ref_image_h * ref_image_w))
             work_res_h, work_res_w = int(ref_image_h * scale_factor), int(ref_image_w * scale_factor)
         else:
             # [OPTIMASI MEMORI] Gunakan skala yang lebih agresif. 
-            # Dari 0.7 menjadi 0.5 akan mengurangi penggunaan memori buffer kerja sekitar 75%.
             scale_down_factor = 0.75
             work_res_h, work_res_w = int(ref_image_h * scale_down_factor), int(ref_image_w * scale_down_factor)
         
@@ -227,7 +223,7 @@ class SimilarityAlgorithm:
         
         # --- LANGKAH 3 (PASS 2 / UTAMA): TAHAP A - PEMROSESAN C++ PARALEL ---
         msg_pass = "Pass 2/2: " if is_two_pass else ""
-        ref_gray_preprocessed, ref_noise_sigma = preprocess_reference_in_python(reference_image_float)
+        ref_gray_preprocessed, ref_noise_sigma = preprocess_in_python(reference_image_float)
         ref_work_res_pass2 = cv2.resize(ref_gray_preprocessed, (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
         stability_map_work_res = None
         if stability_map is not None:
@@ -410,7 +406,7 @@ class SimilarityAlgorithm:
 
             gc.collect()
             gc.collect()
-
+            
     def _frequency_merging(self, images, ref_image_h, ref_image_w, ref_channels_buffer, ref_dtype,
                         reference_image_float,
                         freq_c_wiener_factor,

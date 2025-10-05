@@ -3,7 +3,7 @@ import os
 import cv2
 import numpy as np
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import gaussian_window, normalize_image
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import gaussian_window, normalize_image, preprocess_in_python
 
 class SimilaritySpatialInterface:
     """
@@ -15,7 +15,6 @@ class SimilaritySpatialInterface:
             raise FileNotFoundError(f"Shared library not found: {lib_path}")
         try:
             self.clib = ctypes.CDLL(lib_path)
-            # Pastikan nama fungsi di C++ adalah 'generate_weight_map_jit'
             if not hasattr(self.clib, 'generate_weight_map_jit'):
                  raise AttributeError("Function 'generate_weight_map_jit' not found in DLL. Check C++ extern \"C\" block.")
             self._define_argtypes()
@@ -25,10 +24,7 @@ class SimilaritySpatialInterface:
             raise AttributeError(f"Function not found in DLL or error setting argtypes. Did you compile C++ correctly? Error: {e}")
 
     def _define_argtypes(self):
-        # --- PERBAIKAN KUNCI: Sesuaikan dengan signature C++ yang baru ---
-        self.clib.generate_weight_map_jit.argtypes = [
-            # HAPUS: np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='...'), # final_image_sum_ptr
-            
+        self.clib.generate_weight_map_jit.argtypes = [    
             np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS, WRITEABLE'), # Arg 1: weight_map_sum_ptr
             np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'),          # Arg 2: current_image_ptr
             np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),          # Arg 3: reference_image_processed_ptr
@@ -61,7 +57,6 @@ class SimilaritySpatialInterface:
         
         # --- PERBAIKAN KUNCI: Panggil dengan argumen yang benar ---
         self.clib.generate_weight_map_jit(
-            # HAPUS: final_image_sum
             weight_map_sum, current_image, 
             reference_image_processed,
             base_window,
@@ -118,8 +113,6 @@ class SimilarityFrequencyInterface:
             ctypes.c_int  # channels
         ]
 
-    # ... sisa kelas (call_accumulate_frame_weighted dan call_normalize_accumulated) tidak perlu diubah ...
-    # Metode call_normalize_accumulated Anda sudah benar.
     def call_accumulate_frame_weighted(self, clib_instance, final_image_sum, weight_map_sum,
                                      current_image_float, reference_image_float,
                                      base_window, row_starts, col_starts,
@@ -139,7 +132,7 @@ class SimilarityFrequencyInterface:
 
     def call_normalize_accumulated(self, lib, final_image_sum, weight_map_sum, h, w, channels):
         lib.normalize_accumulated_image_jit(final_image_sum, weight_map_sum, h, w, channels)
-
+        
 ALIGN_LIB = None
 try:
     lib_path = os.path.join("UI", "data", "alignment_tile.dll") 
@@ -166,12 +159,12 @@ except (OSError, AttributeError) as e:
     ALIGN_LIB = None
 
 def perform_image_alignment(images, reference_image_float, work_res_h, work_res_w,
-                                    tile_h, tile_w, ref_dtype, update_progress=None, stop_requested=None):
+                            tile_h, tile_w, ref_dtype, update_progress=None, stop_requested=None):
     """
     Alignment in-place dengan preallocated buffer supaya penggunaan RAM stabil.
     """
     if ALIGN_LIB is None:
-        print("Error: Library C++ 'alignment_engine.dll' tidak tersedia.")
+        print("Error: Library C++ 'alignment_tile.dll' tidak tersedia.")
         if update_progress:
             update_progress(40, "Error: Library C++ tidak ditemukan.")
         return False
@@ -182,12 +175,8 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
             return True
 
         # --- Persiapan Referensi ---
-        if len(reference_image_float.shape) == 3:
-            ref_gray = cv2.cvtColor(reference_image_float, cv2.COLOR_RGB2GRAY)
-        else:
-            ref_gray = reference_image_float.copy()
-
-        ref_work = cv2.resize(ref_gray, (work_res_w, work_res_h), interpolation=cv2.INTER_LINEAR)
+        ref_preprocessed, ref_noise = preprocess_in_python(reference_image_float)
+        ref_work = cv2.resize(ref_preprocessed, (work_res_w, work_res_h), interpolation=cv2.INTER_LINEAR)
         if ref_work.dtype != np.float32:
             if np.issubdtype(ref_work.dtype, np.integer):
                 ref_work = ref_work.astype(np.float32) / 255.0
@@ -216,12 +205,9 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
 
             # --- Gambar saat ini ---
             current_img_float = normalize_image(original_image, ref_dtype)
-            if len(current_img_float.shape) == 3:
-                current_gray = cv2.cvtColor(current_img_float, cv2.COLOR_RGB2GRAY)
-            else:
-                current_gray = current_img_float.copy()
+            current_preprocessed, current_noise = preprocess_in_python(current_img_float)
 
-            current_work = cv2.resize(current_gray, (work_res_w, work_res_h), interpolation=cv2.INTER_LINEAR)
+            current_work = cv2.resize(current_preprocessed, (work_res_w, work_res_h), interpolation=cv2.INTER_LINEAR)
             if current_work.dtype != np.float32:
                 if np.issubdtype(current_work.dtype, np.integer):
                     current_work = current_work.astype(np.float32) / 255.0

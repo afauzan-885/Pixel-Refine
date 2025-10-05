@@ -203,7 +203,7 @@ class ORBAlgorithm:
                         filtered_image = enhanced_gray
                     
                     # 4. Terapkan CLAHE setelah filtering
-                    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+                    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4,4))
                     final_image = clahe.apply(filtered_image)
                     
                     result_q.put((image_type, final_image))

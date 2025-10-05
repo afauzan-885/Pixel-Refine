@@ -591,7 +591,7 @@ def prepare_image(image, grayscale=False, use_clahe=True):
             try:
                 lab = cv2.cvtColor(final_image, cv2.COLOR_BGR2LAB)
                 l, a, b = cv2.split(lab)
-                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
                 cl = clahe.apply(l)
                 merged_channels = cv2.merge((cl, a, b))
                 processed_image = cv2.cvtColor(merged_channels, cv2.COLOR_LAB2BGR)
@@ -724,7 +724,7 @@ def estimate_noise_in_python(ref_image_gray_float: np.ndarray) -> float:
     
     return np.clip(estimated_sigma, 0.001, 0.35)
 
-def preprocess_reference_in_python(ref_image_float: np.ndarray, s_curve_contrast: float = 4.0):
+def preprocess_in_python(ref_image_float: np.ndarray, s_curve_contrast: float = 4.0):
     """
     Melakukan semua pra-pemrosesan gambar referensi di Python dengan logika yang ditingkatkan.
     Mengembalikan gambar grayscale yang sudah di-filter dan nilai noise-nya.
@@ -1215,113 +1215,6 @@ def add_legend_heatmap(img, norm_values, labels=("Static (High Weight)", "Moving
                     font, font_scale_info, text_color, thickness_info, cv2.LINE_AA)
 
     return img
-
-def temporal_consistency_refinement(weight_map_sum, temporal_mean, temporal_std, 
-                                           save_temporal_std_path=None,
-                                           max_boost=2.0, min_boost=0.5,
-                                           num_iterations=10, ksize=5):
-    """
-    Versi refinement yang hemat memori. Menerima statistik yang sudah dihitung
-    secara online (mean, std) daripada list peta bobot yang besar, sehingga
-    mencegah lonjakan penggunaan memori yang masif.
-    """
-    # Metrik stabilitas: rasio mean terhadap standar deviasi
-    stability_score = temporal_mean / (temporal_std + 1e-6)
-    
-    # Gunakan persentil untuk ketahanan terhadap outlier
-    p50_stability = np.percentile(stability_score, 50)
-    p84_stability = np.percentile(stability_score, 84)
-    std_equivalent = p84_stability - p50_stability
-    if std_equivalent < 1e-6: std_equivalent = 1.0
-
-    # --- LANGKAH 2: Hitung Faktor Penskalaan Awal ---
-    delta = stability_score - p50_stability
-    scaling_factors = 1.0 + np.tanh(delta / std_equivalent)
-    scaling_factors = np.clip(scaling_factors, min_boost, max_boost).astype(np.float32)
-
-    # --- LANGKAH 3: Refinement Iteratif (Cepat & Hemat Memori) ---
-    refined_scaling_factors = scaling_factors
-    for i in range(num_iterations):
-        refined_scaling_factors = cv2.medianBlur(
-            refined_scaling_factors.astype(np.float32),
-            ksize=ksize
-        )
-
-    # --- LANGKAH 4: Terapkan Faktor Penskalaan Akhir secara In-place ---
-    weight_map_sum *= refined_scaling_factors
-
-    if save_temporal_std_path:
-        try:
-            # Logika untuk menyimpan heatmap tetap sama
-            min_std, max_std = np.min(temporal_std), np.max(temporal_std)
-            if (max_std - min_std) > 1e-8:
-                norm_std = (temporal_std - min_std) / (max_std - min_std)
-                heatmap_color = cv2.applyColorMap((norm_std * 255).astype(np.uint8), cv2.COLORMAP_JET)
-                heatmap_with_legend = add_legend_heatmap(
-                    heatmap_color,
-                    norm_values=norm_std,
-                    labels=("Static (Low Std)", "Moving (High Std)")
-                )
-                os.makedirs(os.path.dirname(save_temporal_std_path), exist_ok=True)
-                cv2.imwrite(save_temporal_std_path, heatmap_with_legend)
-        except Exception as e:
-            print(f"Gagal menyimpan heatmap stabilitas temporal: {e}")
-
-def compute_optical_flow_images_multithreaded(base_gray, target_gray, process_func, num_blocks=(3, 3), overlap_ratio=0.3, use_gpu=False):
-    """
-    Membagi gambar menjadi blok-blok dan memprosesnya secara paralel menggunakan fungsi yang diberikan.
-    
-    Parameters:
-      - base_gray: gambar grayscale untuk citra dasar.
-      - target_gray: gambar grayscale untuk citra target.
-      - process_func: fungsi yang menerima ROI gambar dan mengembalikan hasil komputasi.
-      - num_blocks: tuple (blocks_x, blocks_y) untuk pembagian blok.
-      - overlap_ratio: persentase overlap relatif terhadap ukuran blok.
-      - use_gpu: apakah menggunakan UMat untuk OpenCV GPU processing.
-    """
-    h, w = base_gray.shape if not use_gpu else base_gray.get().shape
-    blocks_x, blocks_y = num_blocks
-    block_w = w // blocks_x
-    block_h = h // blocks_y
-    
-    result_full = np.zeros((h, w, 2), dtype=np.float32)
-    
-    def process_block(x, y, bw, bh):
-        overlap_x = int(bw * overlap_ratio)
-        overlap_y = int(bh * overlap_ratio)
-        
-        roi_x_start = max(0, x - overlap_x)
-        roi_y_start = max(0, y - overlap_y)
-        roi_x_end = min(w, x + bw + overlap_x)
-        roi_y_end = min(h, y + bh + overlap_y)
-        
-        if use_gpu:
-            roi_base = base_gray.get()[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
-            roi_target = target_gray.get()[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
-        else:
-            roi_base = base_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
-            roi_target = target_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
-        
-        result_block = process_func(roi_base, roi_target)
-        
-        offset_x = x - roi_x_start
-        offset_y = y - roi_y_start
-        h_block, w_block, _ = result_block.shape
-        result_full[y:y+h_block, x:x+w_block, :] = result_block
-    
-    with ThreadPoolExecutor(max_workers=blocks_x * blocks_y) as executor:
-        futures = []
-        for i in range(blocks_x):
-            for j in range(blocks_y):
-                x = i * block_w
-                y = j * block_h
-                bw = block_w if i < blocks_x - 1 else w - x
-                bh = block_h if j < blocks_y - 1 else h - y
-                futures.append(executor.submit(process_block, x, y, bw, bh))
-        
-        wait(futures)
-    
-    return result_full
 
 # =========================================================================
 # === 7. LOGIKA PIPELINE & EKSEKUSI
