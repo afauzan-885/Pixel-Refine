@@ -4,70 +4,99 @@
 #include <cmath>               // Untuk std::fabs
 #include <opencv2/imgproc.hpp> // Untuk dft, idft, dll.
 
-// Implementasi Zero-Mean SAD dengan AVX
+#include <immintrin.h>
+#include <cmath>
+
+// Implementasi Zero-Mean SAD dengan AVX - Optimized Ultra-Fast
 float block_cost_zsad_avx(const float* ref, const float* comp, int len)
 {
-    // ===== 1. Hitung sum_ref & sum_comp =====
-    __m256 vsum_ref = _mm256_setzero_ps();
-    __m256 vsum_comp = _mm256_setzero_ps();
+    __m256 vsum_ref0 = _mm256_setzero_ps();
+    __m256 vsum_ref1 = _mm256_setzero_ps();
+    __m256 vsum_comp0 = _mm256_setzero_ps();
+    __m256 vsum_comp1 = _mm256_setzero_ps();
 
     int i = 0;
-    for (; i + 8 <= len; i += 8) {
-        __m256 vref  = _mm256_loadu_ps(ref + i);
-        __m256 vcomp = _mm256_loadu_ps(comp + i);
+    // Unroll x2 untuk throughput lebih tinggi
+    for (; i + 16 <= len; i += 16) {
+        __m256 vref0  = _mm256_loadu_ps(ref + i);
+        __m256 vref1  = _mm256_loadu_ps(ref + i + 8);
+        __m256 vcomp0 = _mm256_loadu_ps(comp + i);
+        __m256 vcomp1 = _mm256_loadu_ps(comp + i + 8);
 
-        vsum_ref  = _mm256_add_ps(vsum_ref, vref);
-        vsum_comp = _mm256_add_ps(vsum_comp, vcomp);
+        vsum_ref0  = _mm256_add_ps(vsum_ref0, vref0);
+        vsum_ref1  = _mm256_add_ps(vsum_ref1, vref1);
+        vsum_comp0 = _mm256_add_ps(vsum_comp0, vcomp0);
+        vsum_comp1 = _mm256_add_ps(vsum_comp1, vcomp1);
     }
 
-    float buf_ref[8], buf_comp[8];
-    _mm256_storeu_ps(buf_ref, vsum_ref);
-    _mm256_storeu_ps(buf_comp, vsum_comp);
+    __m256 vsum_ref  = _mm256_add_ps(vsum_ref0, vsum_ref1);
+    __m256 vsum_comp = _mm256_add_ps(vsum_comp0, vsum_comp1);
 
-    float sum_ref = buf_ref[0] + buf_ref[1] + buf_ref[2] + buf_ref[3] +
-                    buf_ref[4] + buf_ref[5] + buf_ref[6] + buf_ref[7];
-    float sum_comp = buf_comp[0] + buf_comp[1] + buf_comp[2] + buf_comp[3] +
-                     buf_comp[4] + buf_comp[5] + buf_comp[6] + buf_comp[7];
+    // Horizontal sum AVX
+    __m128 sum_ref_lo  = _mm256_castps256_ps128(vsum_ref);
+    __m128 sum_ref_hi  = _mm256_extractf128_ps(vsum_ref, 1);
+    __m128 sum_comp_lo = _mm256_castps256_ps128(vsum_comp);
+    __m128 sum_comp_hi = _mm256_extractf128_ps(vsum_comp, 1);
 
-    // Tail handling (sisa < 8 elemen)
-    for (; i < len; i++) {
+    __m128 sum_ref128  = _mm_add_ps(sum_ref_lo, sum_ref_hi);
+    __m128 sum_comp128 = _mm_add_ps(sum_comp_lo, sum_comp_hi);
+
+    // Reduce ke scalar
+    float sum_ref  = ((float*)&sum_ref128)[0] + ((float*)&sum_ref128)[1] +
+                     ((float*)&sum_ref128)[2] + ((float*)&sum_ref128)[3];
+    float sum_comp = ((float*)&sum_comp128)[0] + ((float*)&sum_comp128)[1] +
+                     ((float*)&sum_comp128)[2] + ((float*)&sum_comp128)[3];
+
+    // Tail handling (sisa <16)
+    for (; i < len; ++i) {
         sum_ref  += ref[i];
         sum_comp += comp[i];
     }
 
-    float mean_ref  = sum_ref  / len;
-    float mean_comp = sum_comp / len;
+    const float mean_ref  = sum_ref  / len;
+    const float mean_comp = sum_comp / len;
 
-    __m256 vmean_ref  = _mm256_set1_ps(mean_ref);
-    __m256 vmean_comp = _mm256_set1_ps(mean_comp);
+    const __m256 vmean_ref  = _mm256_set1_ps(mean_ref);
+    const __m256 vmean_comp = _mm256_set1_ps(mean_comp);
+    const __m256 vzero_mask = _mm256_set1_ps(-0.0f); // untuk abs()
 
-    // ===== 2. Hitung ZSAD =====
-    __m256 vsum = _mm256_setzero_ps();
+    __m256 vsum0 = _mm256_setzero_ps();
+    __m256 vsum1 = _mm256_setzero_ps();
+
     i = 0;
-    for (; i + 8 <= len; i += 8) {
-        __m256 vref  = _mm256_loadu_ps(ref + i);
-        __m256 vcomp = _mm256_loadu_ps(comp + i);
+    for (; i + 16 <= len; i += 16) {
+        __m256 vref0  = _mm256_loadu_ps(ref + i);
+        __m256 vref1  = _mm256_loadu_ps(ref + i + 8);
+        __m256 vcomp0 = _mm256_loadu_ps(comp + i);
+        __m256 vcomp1 = _mm256_loadu_ps(comp + i + 8);
 
-        __m256 vref_norm  = _mm256_sub_ps(vref, vmean_ref);
-        __m256 vcomp_norm = _mm256_sub_ps(vcomp, vmean_comp);
-        __m256 vdiff      = _mm256_sub_ps(vref_norm, vcomp_norm);
+        __m256 vdiff0 = _mm256_sub_ps(_mm256_sub_ps(vref0, vmean_ref),
+                                      _mm256_sub_ps(vcomp0, vmean_comp));
+        __m256 vdiff1 = _mm256_sub_ps(_mm256_sub_ps(vref1, vmean_ref),
+                                      _mm256_sub_ps(vcomp1, vmean_comp));
 
-        __m256 vabs = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), vdiff); // abs()
-        vsum = _mm256_add_ps(vsum, vabs);
+        __m256 vabs0 = _mm256_andnot_ps(vzero_mask, vdiff0);
+        __m256 vabs1 = _mm256_andnot_ps(vzero_mask, vdiff1);
+
+        vsum0 = _mm256_add_ps(vsum0, vabs0);
+        vsum1 = _mm256_add_ps(vsum1, vabs1);
     }
 
-    float buf[8];
-    _mm256_storeu_ps(buf, vsum);
-    float total = buf[0] + buf[1] + buf[2] + buf[3] +
-                  buf[4] + buf[5] + buf[6] + buf[7];
+    __m256 vsum = _mm256_add_ps(vsum0, vsum1);
+    __m128 sum_lo = _mm256_castps256_ps128(vsum);
+    __m128 sum_hi = _mm256_extractf128_ps(vsum, 1);
+    __m128 sum128 = _mm_add_ps(sum_lo, sum_hi);
 
-    for (; i < len; i++) {
-        total += std::fabs((ref[i] - mean_ref) - (comp[i] - mean_comp));
+    float total = ((float*)&sum128)[0] + ((float*)&sum128)[1] +
+                  ((float*)&sum128)[2] + ((float*)&sum128)[3];
+
+    for (; i < len; ++i) {
+        float d = (ref[i] - mean_ref) - (comp[i] - mean_comp);
+        total += std::fabs(d);
     }
 
     return total;
 }
-
 // Implementasi cost menggunakan FFT
 float block_cost_fft(const cv::Mat &ref, const cv::Mat &comp)
 {

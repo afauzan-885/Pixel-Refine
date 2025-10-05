@@ -9,7 +9,7 @@
 #include <functional>
 #include <omp.h>
 #include <iostream>
-#include <chrono> 
+#include <chrono>
 #include <string>
 #include "alignment_tile.h"
 #include "cost_function.hpp"
@@ -44,11 +44,11 @@ extern "C"
         constexpr int MIN_TILE_SIZE = 8;
         constexpr float FLOW_UPSCALE_FACTOR = 2.0f;
         constexpr float NORMALIZATION_EPSILON = 1e-6f;
-        constexpr int GAUSSIAN_CACHE_SIZE = 64; // Batasi cache untuk menghemat memori
+        constexpr int GAUSSIAN_CACHE_SIZE = 1024; // Batasi cache untuk menghemat memori
 
         // Scaling factor untuk search distance per level
         constexpr float SEARCH_DIST_SCALE_L0 = 1.0f; // Level 0 â†’ 75% dari search_dist asli
-        constexpr float SEARCH_DIST_SCALE_L1 = 1.0f; // Level 1 â†’ 90% 
+        constexpr float SEARCH_DIST_SCALE_L1 = 1.0f; // Level 1 â†’ 90%
     }
 
     struct Candidate
@@ -237,62 +237,91 @@ extern "C"
                                     const int init_dy = static_cast<int>(std::round(initial_vec[1]));
                                     const int init_dx = static_cast<int>(std::round(initial_vec[0]));
 
-                                    // === [NEW] Adaptive search distance ===
+                                    // === [NEW] Adaptive search distance (hanya untuk level kasar) ===
                                     float base_dist = search_dist;
-                                    if (i == 0) base_dist *= ImageAlignmentConfig::SEARCH_DIST_SCALE_L0;
-                                    else if (i == 1) base_dist *= ImageAlignmentConfig::SEARCH_DIST_SCALE_L1;
-
-                                    float flow_mag = std::sqrt(initial_vec[0] * initial_vec[0] + initial_vec[1] * initial_vec[1]);
-                                    int current_search_dist = static_cast<int>(
-                                        base_dist * (1.0f + 0.5f * std::min(flow_mag / 5.0f, 2.0f))
-                                    );
-                                    current_search_dist = std::max(1, std::min(current_search_dist, (int)search_dist));
-
-                                    for (int dy = -current_search_dist; dy <= current_search_dist; ++dy)
+                                    if (i == 0 || i == 1)
                                     {
-                                        for (int dx = -current_search_dist; dx <= current_search_dist; ++dx)
+                                        // Pada skala halus: hanya gunakan kandidat (tanpa loop pencarian)
+                                        const int test_y = y + init_dy;
+                                        const int test_x = x + init_dx;
+                                        if (test_y < 0 || test_x < 0 ||
+                                            test_y + current_tile_h > h_layer ||
+                                            test_x + current_tile_w > w_layer)
+                                            continue;
 
+                                        float current_cost = 0.0f;
+                                        if (current_tile_h * current_tile_w >= 64 * 64)
                                         {
-                                            const int test_y = y + init_dy + dy;
-                                            const int test_x = x + init_dx + dx;
-                                            if (test_y < 0 || test_x < 0 ||
-                                                test_y + current_tile_h > h_layer ||
-                                                test_x + current_tile_w > w_layer)
-                                                continue;
-
-                                            float current_cost = 0.0f;
-                                            if (current_tile_h * current_tile_w >= 64 * 64)
+                                            cv::Mat ref_tile(ref_layer, cv::Rect(x, y, current_tile_w, current_tile_h));
+                                            cv::Mat comp_tile(comp_layer, cv::Rect(test_x, test_y, current_tile_w, current_tile_h));
+                                            current_cost = block_cost_fft(ref_tile, comp_tile);
+                                        }
+                                        else
+                                        {
+                                            for (int r_tile = 0; r_tile < current_tile_h; ++r_tile)
                                             {
-                                                cv::Mat ref_tile(ref_layer, cv::Rect(x, y, current_tile_w, current_tile_h));
-                                                cv::Mat comp_tile(comp_layer, cv::Rect(test_x, test_y, current_tile_w, current_tile_h));
-                                                current_cost = block_cost_fft(ref_tile, comp_tile);
+                                                const float *p_ref = ref_layer.ptr<float>(y + r_tile, x);
+                                                const float *p_comp = comp_layer.ptr<float>(test_y + r_tile, test_x);
+                                                current_cost += block_cost_zsad_avx(p_ref, p_comp, current_tile_w);
                                             }
-                                            else
+                                        }
+
+                                        Candidate cand{cv::Point2f(init_dx, init_dy), current_cost * tile_area_inv};
+                                        top_candidates.push_back(cand);
+                                    }
+                                    else
+                                    {
+                                        // === Pencarian penuh hanya untuk level kasar ===
+                                        float flow_mag = std::sqrt(initial_vec[0] * initial_vec[0] + initial_vec[1] * initial_vec[1]);
+                                        int current_search_dist = static_cast<int>(
+                                            base_dist * (1.0f + 0.5f * std::min(flow_mag / 5.0f, 2.0f)));
+                                        current_search_dist = std::max(1, std::min(current_search_dist, (int)search_dist));
+
+                                        for (int dy = -current_search_dist; dy <= current_search_dist; ++dy)
+                                        {
+                                            for (int dx = -current_search_dist; dx <= current_search_dist; ++dx)
                                             {
-                                                for (int r_tile = 0; r_tile < current_tile_h; ++r_tile)
+                                                const int test_y = y + init_dy + dy;
+                                                const int test_x = x + init_dx + dx;
+                                                if (test_y < 0 || test_x < 0 ||
+                                                    test_y + current_tile_h > h_layer ||
+                                                    test_x + current_tile_w > w_layer)
+                                                    continue;
+
+                                                float current_cost = 0.0f;
+                                                if (current_tile_h * current_tile_w >= 64 * 64)
                                                 {
-                                                    const float *p_ref = ref_layer.ptr<float>(y + r_tile, x);
-                                                    const float *p_comp = comp_layer.ptr<float>(test_y + r_tile, test_x);
-                                                    current_cost += block_cost_zsad_avx(p_ref, p_comp, current_tile_w);
+                                                    cv::Mat ref_tile(ref_layer, cv::Rect(x, y, current_tile_w, current_tile_h));
+                                                    cv::Mat comp_tile(comp_layer, cv::Rect(test_x, test_y, current_tile_w, current_tile_h));
+                                                    current_cost = block_cost_fft(ref_tile, comp_tile);
                                                 }
-                                            }
+                                                else
+                                                {
+                                                    for (int r_tile = 0; r_tile < current_tile_h; ++r_tile)
+                                                    {
+                                                        const float *p_ref = ref_layer.ptr<float>(y + r_tile, x);
+                                                        const float *p_comp = comp_layer.ptr<float>(test_y + r_tile, test_x);
+                                                        current_cost += block_cost_zsad_avx(p_ref, p_comp, current_tile_w);
+                                                    }
+                                                }
 
-                                            Candidate cand{cv::Point2f(init_dx + dx, init_dy + dy),
-                                                           current_cost * tile_area_inv};
+                                                Candidate cand{cv::Point2f(init_dx + dx, init_dy + dy),
+                                                               current_cost * tile_area_inv};
 
-                                            if (top_candidates.size() < 5)
-                                            {
-                                                top_candidates.push_back(cand);
-                                                std::sort(top_candidates.begin(), top_candidates.end(),
-                                                          [](const Candidate &a, const Candidate &b)
-                                                          { return a.cost < b.cost; });
-                                            }
-                                            else if (cand.cost < top_candidates.back().cost)
-                                            {
-                                                top_candidates.back() = cand;
-                                                std::sort(top_candidates.begin(), top_candidates.end(),
-                                                          [](const Candidate &a, const Candidate &b)
-                                                          { return a.cost < b.cost; });
+                                                if (top_candidates.size() < 5)
+                                                {
+                                                    top_candidates.push_back(cand);
+                                                    std::sort(top_candidates.begin(), top_candidates.end(),
+                                                              [](const Candidate &a, const Candidate &b)
+                                                              { return a.cost < b.cost; });
+                                                }
+                                                else if (cand.cost < top_candidates.back().cost)
+                                                {
+                                                    top_candidates.back() = cand;
+                                                    std::sort(top_candidates.begin(), top_candidates.end(),
+                                                              [](const Candidate &a, const Candidate &b)
+                                                              { return a.cost < b.cost; });
+                                                }
                                             }
                                         }
                                     }
@@ -331,7 +360,6 @@ extern "C"
                                         }
                                     }
                                 }
-
 
                                 cv::Point2f refined_flow = chosen_flow;
                                 if (i >= (int)ref_pyramid.size() - 3)

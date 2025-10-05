@@ -3,7 +3,7 @@ import os
 import cv2
 import numpy as np
 
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import gaussian_window, normalize_image, preprocess_in_python
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import normalize_image, preprocess_in_python
 
 class SimilaritySpatialInterface:
     """
@@ -231,7 +231,7 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
                 tile_h,
                 tile_w,
                 n_layers,
-                1.5
+                1.0
             )
 
             if flow_ptr:
@@ -259,7 +259,7 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
                 original_image,
                 (np.arange(full_w)[None, :] + flow_full_buf[:, :, 0]).astype(np.float32),
                 (np.arange(full_h)[:, None] + flow_full_buf[:, :, 1]).astype(np.float32),
-                interpolation=cv2.INTER_LANCZOS4,
+                interpolation=cv2.INTER_CUBIC,
                 borderMode=cv2.BORDER_REFLECT_101
             )
 

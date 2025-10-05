@@ -782,7 +782,7 @@ def preprocess_in_python(ref_image_float: np.ndarray, s_curve_contrast: float = 
 
     if clip_limit > 0.61:
         img_8u = (np.clip(processed, 0.0, 1.0) * 255).astype(np.uint8)
-        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(3, 3))
         img_8u_clahe = clahe.apply(img_8u)
         processed = (img_8u_clahe / 255.0).astype(np.float32)
 
