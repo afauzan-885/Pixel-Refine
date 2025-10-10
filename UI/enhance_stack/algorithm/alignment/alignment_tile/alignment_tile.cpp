@@ -36,32 +36,43 @@
 //     std::chrono::time_point<std::chrono::high_resolution_clock> m_start;
 // };
 
+namespace ImageAlignmentConfig
+{
+    constexpr int MIN_PYRAMID_LAYER_SIZE = 16;
+    constexpr int MIN_TILE_SIZE = 8;
+    constexpr float FLOW_UPSCALE_FACTOR = 2.0f;
+    constexpr float NORMALIZATION_EPSILON = 1e-6f;
+    constexpr int GAUSSIAN_CACHE_SIZE = 1024;
+    constexpr float SEARCH_DIST_SCALE_L0 = 1.0f;
+    constexpr float SEARCH_DIST_SCALE_L1 = 1.0f;
+
+    // struct hasher ini adalah template C++, jadi HARUS di luar extern "C"
+    struct pair_hash
+    {
+        template <class T1, class T2>
+        std::size_t operator()(const std::pair<T1, T2> &p) const
+        {
+            auto h1 = std::hash<T1>{}(p.first);
+            auto h2 = std::hash<T2>{}(p.second);
+            return h1 ^ (h2 << 1);
+        }
+    };
+}
+
+// struct ini adalah detail implementasi C++, lebih baik di luar juga.
+struct Candidate
+{
+    cv::Point2f flow;
+    float cost;
+};
+
 extern "C"
 {
-    namespace ImageAlignmentConfig
-    {
-        constexpr int MIN_PYRAMID_LAYER_SIZE = 16;
-        constexpr int MIN_TILE_SIZE = 8;
-        constexpr float FLOW_UPSCALE_FACTOR = 2.0f;
-        constexpr float NORMALIZATION_EPSILON = 1e-6f;
-        constexpr int GAUSSIAN_CACHE_SIZE = 1024; // Batasi cache untuk menghemat memori
-
-        // Scaling factor untuk search distance per level
-        constexpr float SEARCH_DIST_SCALE_L0 = 1.0f; // Level 0 â†’ 75% dari search_dist asli
-        constexpr float SEARCH_DIST_SCALE_L1 = 1.0f; // Level 1 â†’ 90%
-    }
-
-    struct Candidate
-    {
-        cv::Point2f flow;
-        float cost;
-    };
-
     ALIGNMENT_API float *compute_alignment_flow(
         const float *ref_work_data, const float *current_work_data,
         int work_h, int work_w, int tile_h, int tile_w, int n_layers, float search_dist)
     {
-        // SimpleTimer total_timer("Total Alignment Flow Computation");
+        // Di dalam fungsi, kita bisa menggunakan semua construct C++ yang didefinisikan di atas
         using namespace ImageAlignmentConfig;
 
         // =========================================================================
@@ -76,24 +87,31 @@ extern "C"
 
         std::vector<cv::Mat> ref_pyramid, current_pyramid;
         {
-            // SimpleTimer pyramid_timer("Pyramid Construction");
             ref_pyramid.reserve(n_layers);
             current_pyramid.reserve(n_layers);
 
             ref_pyramid.push_back(ref_work);
             current_pyramid.push_back(current_work);
 
-            cv::Mat temp_ref, temp_current;
             for (int i = 0; i < n_layers - 1; ++i)
             {
-                cv::pyrDown(ref_pyramid.back(), temp_ref);
-                cv::pyrDown(current_pyramid.back(), temp_current);
+                // 1. Buat Mat kosong sebagai tujuan. Ini tidak mengalokasikan buffer data.
+                cv::Mat next_ref, next_current;
 
-                if (temp_ref.rows < MIN_PYRAMID_LAYER_SIZE || temp_ref.cols < MIN_PYRAMID_LAYER_SIZE)
+                // 2. panggil pyrDown. Karena 'next_ref' ukurannya tidak pas,
+                //    OpenCV akan secara otomatis mengalokasikan memori yang tepat untuk itu.
+                cv::pyrDown(ref_pyramid.back(), next_ref);
+                cv::pyrDown(current_pyramid.back(), next_current);
+
+                // 3. Lakukan pengecekan ukuran
+                if (next_ref.rows < MIN_PYRAMID_LAYER_SIZE || next_ref.cols < MIN_PYRAMID_LAYER_SIZE)
                     break;
 
-                ref_pyramid.push_back(temp_ref.clone());
-                current_pyramid.push_back(temp_current.clone());
+                // 4. Pindahkan (move) Mat beserta buffer datanya ke dalam vector.
+                //    Ini adalah operasi yang sangat cepat, karena hanya memindahkan pointer,
+                //    bukan menyalin seluruh data gambar. Tidak ada alokasi memori baru.
+                ref_pyramid.push_back(std::move(next_ref));
+                current_pyramid.push_back(std::move(next_current));
             }
         }
 

@@ -90,28 +90,31 @@ extern "C"
             current_image_mat.convertTo(current_image_gray_full, CV_32F);
         }
 
-        // --- LANGKAH 2: Filtering ---
+        // --- LANGKAH 2: Filtering Adaptif ---
         float global_estimated_noise_sigma = precomputed_ref_noise_sigma;
 
-        const float noise_activation_threshold = 0.07f;
-        if (global_estimated_noise_sigma > noise_activation_threshold)
+        // sesuai versi Python: noise 0.04–0.18 bilateral, >0.18 median
+        if (global_estimated_noise_sigma > 0.04f)
         {
-            const float median_filter_threshold = 0.14f;
-            if (global_estimated_noise_sigma >= median_filter_threshold)
+            if (global_estimated_noise_sigma < 0.18f)
             {
-                cv::medianBlur(current_image_gray_full, current_image_gray_full, 5);
+                float norm_noise = std::clamp((global_estimated_noise_sigma - 0.04f) / (0.18f - 0.04f), 0.0f, 1.0f);
+                int diameter = 3 + static_cast<int>(4 * norm_noise);   // 3–7
+                float d_sigma = 3.0f + 6.0f * norm_noise;              // 3–9
+                float r_sigma = (20.0f + 80.0f * norm_noise) / 255.0f; // 0.078–0.39
+
+                cv::Mat temp_filtered;
+                cv::bilateralFilter(current_image_gray_full, temp_filtered, diameter, r_sigma, d_sigma);
+                current_image_gray_full = temp_filtered;
             }
             else
             {
-                cv::Mat temp_filtered;
-                cv::bilateralFilter(current_image_gray_full, temp_filtered, 5, 50.0 / 255.0, 7.0);
-                current_image_gray_full = temp_filtered;
+                int ksize = (global_estimated_noise_sigma < 0.22f) ? 3 : 5;
+                cv::medianBlur(current_image_gray_full, current_image_gray_full, ksize);
             }
         }
 
-        // === LOGIKA PRE-PROSESING YANG TELAH DI-ENHANCE (SEKARANG MENJADI SATU-SATUNYA PROSES) ===
-
-        // --- (BARU) LANGKAH 1.5: Kalkulasi Faktor Agresi Berdasarkan Kontras ---
+        // --- LANGKAH 1.5: Faktor Agresi Berdasarkan Kontras ---
         cv::Scalar mean_val, stddev_val;
         cv::meanStdDev(current_image_gray_full, mean_val, stddev_val);
         float contrast_metric = static_cast<float>(stddev_val[0]);
@@ -119,61 +122,76 @@ extern "C"
         const float low_contrast_thresh = 0.12f;
         const float high_contrast_thresh = 0.20f;
 
-        float aggression_factor = 1.0f - std::max(0.0f, std::min(1.0f,
-                                                                 (contrast_metric - low_contrast_thresh) / (high_contrast_thresh - low_contrast_thresh)));
+        float aggression_factor = 1.0f - std::clamp(
+                                             (contrast_metric - low_contrast_thresh) / (high_contrast_thresh - low_contrast_thresh),
+                                             0.0f, 1.0f);
 
-        // --- LANGKAH 2: Peningkatan Mikro-Kontras (DIUBAH) ---
+        // --- LANGKAH 2: Multi-scale Micro-Contrast Enhancement ---
         const float micro_contrast_noise_threshold = 0.05f;
         float micro_contrast_strength = 1.0f - std::min(1.0f, global_estimated_noise_sigma / micro_contrast_noise_threshold);
 
         if (micro_contrast_strength > 0.01f)
         {
-            cv::Mat blurred_image;
-            cv::GaussianBlur(current_image_gray_full, blurred_image, cv::Size(0, 0), 1.0);
+            cv::Mat blur_small, blur_large;
+            cv::GaussianBlur(current_image_gray_full, blur_small, cv::Size(0, 0), 0.8);
+            cv::GaussianBlur(current_image_gray_full, blur_large, cv::Size(0, 0), 2.0);
 
-            float base_amount = micro_contrast_strength * 0.8f;
-            float boosted_amount = base_amount * (1.0f + 0.5f * aggression_factor);
+            cv::Mat detail_small = current_image_gray_full - blur_small;
+            cv::Mat detail_large = current_image_gray_full - blur_large;
+            cv::Mat detail_mix = detail_small + 0.6f * detail_large;
 
-            cv::addWeighted(current_image_gray_full, 1.0f + boosted_amount, blurred_image, -boosted_amount, 0, current_image_gray_full);
+            float base_strength = 0.6f + 0.4f * aggression_factor;
+            float boost = base_strength * micro_contrast_strength;
 
+            current_image_gray_full += boost * detail_mix;
             cv::threshold(current_image_gray_full, current_image_gray_full, 1.0f, 1.0f, cv::THRESH_TRUNC);
             cv::threshold(current_image_gray_full, current_image_gray_full, 0.0f, 0.0f, cv::THRESH_TOZERO);
         }
 
-        // --- (BARU & DIUBAH) LANGKAH 3: Peningkatan Kontras Lokal Adaptif (CLAHE) ---
+        // --- LANGKAH 3: CLAHE dua tahap adaptif ---
         float linear_strength = 1.0f - std::min(1.0f, global_estimated_noise_sigma / 0.12f);
         float curved_strength = std::pow(linear_strength, 0.45f);
-
-        const float base_clip_multiplier = 3.0f;
-        float boosted_clip_multiplier = base_clip_multiplier * (1.0f + 0.5f * aggression_factor);
-
-        float clip_limit = 0.6f + (curved_strength * boosted_clip_multiplier);
+        float clip_limit = 0.6f + (curved_strength * (3.0f * (1.0f + 0.5f * aggression_factor)));
 
         if (clip_limit > 0.61f)
         {
-            cv::Mat img_8u, img_8u_clahe;
+            cv::Mat img_8u;
             current_image_gray_full.convertTo(img_8u, CV_8U, 255.0);
 
             cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(clip_limit, cv::Size(8, 8));
-            clahe->apply(img_8u, img_8u_clahe);
+            clahe->apply(img_8u, img_8u);
 
-            img_8u_clahe.convertTo(current_image_gray_full, CV_32F, 1.0 / 255.0);
+            // tahap kedua jika aggression_factor > 0.5
+            if (aggression_factor > 0.5f)
+            {
+                cv::Ptr<cv::CLAHE> clahe2 = cv::createCLAHE(clip_limit * 0.6f, cv::Size(12, 12));
+                clahe2->apply(img_8u, img_8u);
+            }
+
+            img_8u.convertTo(current_image_gray_full, CV_32F, 1.0 / 255.0);
         }
 
-        // --- LANGKAH 4: Penyesuaian Kecerahan Adaptif (Gamma) ---
+        // --- LANGKAH 4: Local Structure Enhancement (Laplacian) ---
+        cv::Mat lap;
+        cv::Laplacian(current_image_gray_full, lap, CV_32F, 3);
+        float lap_strength = 0.15f * aggression_factor * (1.0f - global_estimated_noise_sigma * 2.0f);
+        current_image_gray_full += lap_strength * lap;
+        cv::threshold(current_image_gray_full, current_image_gray_full, 1.0f, 1.0f, cv::THRESH_TRUNC);
+        cv::threshold(current_image_gray_full, current_image_gray_full, 0.0f, 0.0f, cv::THRESH_TOZERO);
+
+        // --- LANGKAH 5: Adaptive Gamma Correction ---
         cv::Scalar mean_scalar = cv::mean(current_image_gray_full);
         float mean_brightness = static_cast<float>(mean_scalar[0]);
-        const float dark_threshold = 0.4f;
-
-        if (mean_brightness < dark_threshold)
+        if (mean_brightness < 0.4f)
         {
-            const float max_gamma_reduction = 0.3f;
-            float factor = (dark_threshold - mean_brightness) / dark_threshold;
-            float gamma = 1.0f - (max_gamma_reduction * factor);
-            cv::pow(current_image_gray_full, gamma, current_image_gray_full);
+            float factor = (0.4f - mean_brightness) / 0.4f;
+            float gamma = 1.0f - (0.3f * factor);
+            cv::pow(current_image_gray_full + 1e-6f, gamma, current_image_gray_full);
+            cv::threshold(current_image_gray_full, current_image_gray_full, 1.0f, 1.0f, cv::THRESH_TRUNC);
+            cv::threshold(current_image_gray_full, current_image_gray_full, 0.0f, 0.0f, cv::THRESH_TOZERO);
         }
 
-        // --- LANGKAH 5: Tone Mapping Global (S-Curve) ---
+        // --- LANGKAH 6: Adaptive S-Curve Tone Mapping ---
         const float s_curve_contrast = 4.0f;
         float adaptive_s_curve_contrast = s_curve_contrast + (2.0f * aggression_factor);
 
@@ -186,8 +204,8 @@ extern "C"
         float high = sigmoid_contrast_cpp(1.0f, adaptive_s_curve_contrast);
 
         cv::Mat temp_exp;
-        cv::exp(-adaptive_s_curve_contrast * (current_image_gray_full - 0.5), temp_exp);
-        current_image_gray_full = 1.0 / (1.0 + temp_exp);
+        cv::exp(-adaptive_s_curve_contrast * (current_image_gray_full - 0.5f), temp_exp);
+        current_image_gray_full = 1.0f / (1.0f + temp_exp);
         current_image_gray_full = (current_image_gray_full - low) / (high - low);
 
         cv::threshold(current_image_gray_full, current_image_gray_full, 1.0f, 1.0f, cv::THRESH_TRUNC);
@@ -346,7 +364,7 @@ extern "C"
             // =================================================================================
 
             cv::Mat weight_map_sum_mat(h_img, w_img, CV_32FC1, weight_map_sum_ptr);
-            weight_map_sum_mat.setTo(0.0f); // Cara lebih bersih untuk inisialisasi
+            weight_map_sum_mat.setTo(0.0f);
 
 #pragma omp parallel
             {
@@ -395,6 +413,37 @@ extern "C"
 
                         if (final_confidence < 1e-5f)
                             continue;
+
+                        // ==============================================================
+                        // === PENYISIPAN: Adaptive Spatial Proximity Weighting (Gaussian)
+                        // ==============================================================
+                        static thread_local cv::Mat spatial_weight;
+                        if (spatial_weight.empty() ||
+                            spatial_weight.rows != tile_h_fine || spatial_weight.cols != tile_w_fine)
+                        {
+                            spatial_weight.create(tile_h_fine, tile_w_fine, CV_32F);
+                            const float sigma_x = tile_w_fine * 0.35f;
+                            const float sigma_y = tile_h_fine * 0.35f;
+                            const float cx = (tile_w_fine - 1) * 0.5f;
+                            const float cy = (tile_h_fine - 1) * 0.5f;
+
+                            for (int y = 0; y < tile_h_fine; ++y)
+                            {
+                                float *ptr = spatial_weight.ptr<float>(y);
+                                for (int x = 0; x < tile_w_fine; ++x)
+                                {
+                                    const float dx = (x - cx);
+                                    const float dy = (y - cy);
+                                    ptr[x] = std::exp(-0.5f * (dx * dx / (sigma_x * sigma_x) + dy * dy / (sigma_y * sigma_y)));
+                                }
+                            }
+                            double minv, maxv;
+                            cv::minMaxLoc(spatial_weight, &minv, &maxv);
+                            spatial_weight /= static_cast<float>(maxv);
+                        }
+                        // ==============================================================
+                        // === AKHIR PENYISIPAN
+                        // ==============================================================
 
                         const cv::Mat base_window_tile_mat(tile_h_fine, tile_w_fine, CV_32FC1, const_cast<float *>(base_window_ptr));
                         cv::multiply(base_window_tile_mat, final_confidence, local_weight_tile);

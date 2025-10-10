@@ -6,7 +6,8 @@
 // Deklarasi fungsi Zero-Mean SAD dengan AVX
 float block_cost_zsad_avx(const float* ref, const float* comp, int len);
 
-// Deklarasi fungsi cost menggunakan FFT
-float block_cost_fft(const cv::Mat &ref, const cv::Mat &comp);
+// Deklarasi fungsi cost menggunakan FFT + Geman–McClure Robust Cost
+float block_cost_fft(const cv::Mat &ref, const cv::Mat &comp, float c = 5.0f);
+
 
 #endif
