@@ -231,7 +231,7 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
                 tile_h,
                 tile_w,
                 n_layers,
-                1.0
+                1.5
             )
 
             if flow_ptr:

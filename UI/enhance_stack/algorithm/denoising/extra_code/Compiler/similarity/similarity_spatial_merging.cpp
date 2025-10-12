@@ -65,7 +65,7 @@ extern "C"
             return;
 
         // =========================================================================
-        // === BAGIAN A: Pra-pemrosesan ==
+        // === BAGIAN A: Pra-pemrosesan (disesuaikan dengan preprocess_in_python) ==
         // =========================================================================
 
         cv::Mat current_image_mat(h_img, w_img, CV_32FC(channels), const_cast<float *>(current_image_ptr));
@@ -99,9 +99,9 @@ extern "C"
             if (global_estimated_noise_sigma < 0.18f)
             {
                 float norm_noise = std::clamp((global_estimated_noise_sigma - 0.04f) / (0.18f - 0.04f), 0.0f, 1.0f);
-                int diameter = 3 + static_cast<int>(4 * norm_noise);   // 3–7
-                float d_sigma = 3.0f + 6.0f * norm_noise;              // 3–9
-                float r_sigma = (20.0f + 80.0f * norm_noise) / 255.0f; // 0.078–0.39
+                int diameter = 3 + static_cast<int>(4 * norm_noise);            // 3–7
+                float d_sigma = 3.0f + 6.0f * norm_noise;                       // 3–9
+                float r_sigma = (20.0f + 80.0f * norm_noise) / 255.0f;          // 0.078–0.39
 
                 cv::Mat temp_filtered;
                 cv::bilateralFilter(current_image_gray_full, temp_filtered, diameter, r_sigma, d_sigma);
@@ -123,8 +123,8 @@ extern "C"
         const float high_contrast_thresh = 0.20f;
 
         float aggression_factor = 1.0f - std::clamp(
-                                             (contrast_metric - low_contrast_thresh) / (high_contrast_thresh - low_contrast_thresh),
-                                             0.0f, 1.0f);
+            (contrast_metric - low_contrast_thresh) / (high_contrast_thresh - low_contrast_thresh),
+            0.0f, 1.0f);
 
         // --- LANGKAH 2: Multi-scale Micro-Contrast Enhancement ---
         const float micro_contrast_noise_threshold = 0.05f;
@@ -364,7 +364,7 @@ extern "C"
             // =================================================================================
 
             cv::Mat weight_map_sum_mat(h_img, w_img, CV_32FC1, weight_map_sum_ptr);
-            weight_map_sum_mat.setTo(0.0f);
+            weight_map_sum_mat.setTo(0.0f); // Cara lebih bersih untuk inisialisasi
 
 #pragma omp parallel
             {
@@ -413,37 +413,6 @@ extern "C"
 
                         if (final_confidence < 1e-5f)
                             continue;
-
-                        // ==============================================================
-                        // === PENYISIPAN: Adaptive Spatial Proximity Weighting (Gaussian)
-                        // ==============================================================
-                        static thread_local cv::Mat spatial_weight;
-                        if (spatial_weight.empty() ||
-                            spatial_weight.rows != tile_h_fine || spatial_weight.cols != tile_w_fine)
-                        {
-                            spatial_weight.create(tile_h_fine, tile_w_fine, CV_32F);
-                            const float sigma_x = tile_w_fine * 0.35f;
-                            const float sigma_y = tile_h_fine * 0.35f;
-                            const float cx = (tile_w_fine - 1) * 0.5f;
-                            const float cy = (tile_h_fine - 1) * 0.5f;
-
-                            for (int y = 0; y < tile_h_fine; ++y)
-                            {
-                                float *ptr = spatial_weight.ptr<float>(y);
-                                for (int x = 0; x < tile_w_fine; ++x)
-                                {
-                                    const float dx = (x - cx);
-                                    const float dy = (y - cy);
-                                    ptr[x] = std::exp(-0.5f * (dx * dx / (sigma_x * sigma_x) + dy * dy / (sigma_y * sigma_y)));
-                                }
-                            }
-                            double minv, maxv;
-                            cv::minMaxLoc(spatial_weight, &minv, &maxv);
-                            spatial_weight /= static_cast<float>(maxv);
-                        }
-                        // ==============================================================
-                        // === AKHIR PENYISIPAN
-                        // ==============================================================
 
                         const cv::Mat base_window_tile_mat(tile_h_fine, tile_w_fine, CV_32FC1, const_cast<float *>(base_window_ptr));
                         cv::multiply(base_window_tile_mat, final_confidence, local_weight_tile);

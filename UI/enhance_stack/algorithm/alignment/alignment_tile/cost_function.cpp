@@ -97,90 +97,33 @@ float block_cost_zsad_avx(const float* ref, const float* comp, int len)
 
     return total;
 }
+
 // Implementasi cost menggunakan FFT
-float block_cost_fft(const cv::Mat &ref, const cv::Mat &comp, float c)
+float block_cost_fft(const cv::Mat &ref, const cv::Mat &comp)
 {
-    // =========================================================================
-    // === 0. VALIDASI DAN KONVERSI ============================================
-    // =========================================================================
+    // Pastikan ukuran sama
     CV_Assert(ref.size() == comp.size());
     cv::Mat ref32, comp32;
     ref.convertTo(ref32, CV_32F);
     comp.convertTo(comp32, CV_32F);
 
-    // =========================================================================
-    // === 1. AVOID DFT PADDING ARTIFACT =======================================
-    // =========================================================================
-    int dft_M = cv::getOptimalDFTSize(ref32.rows);
-    int dft_N = cv::getOptimalDFTSize(ref32.cols);
-
-    cv::Mat ref_padded, comp_padded;
-    cv::copyMakeBorder(ref32, ref_padded, 0, dft_M - ref32.rows, 0, dft_N - ref32.cols, cv::BORDER_REFLECT_101);
-    cv::copyMakeBorder(comp32, comp_padded, 0, dft_M - comp32.rows, 0, dft_N - comp32.cols, cv::BORDER_REFLECT_101);
-
-    // =========================================================================
-    // === 2. DFT DAN BAND-PASS WEIGHTING ======================================
-    // =========================================================================
+    // Gunakan DFT untuk convolution
     cv::Mat ref_dft, comp_dft;
-    cv::dft(ref_padded, ref_dft, cv::DFT_COMPLEX_OUTPUT);
-    cv::dft(comp_padded, comp_dft, cv::DFT_COMPLEX_OUTPUT);
+    cv::dft(ref32, ref_dft, cv::DFT_COMPLEX_OUTPUT);
+    cv::dft(comp32, comp_dft, cv::DFT_COMPLEX_OUTPUT);
 
-    // Band-pass Gaussian mask di domain frekuensi
-    cv::Mat freq_mask(dft_M, dft_N, CV_32F);
-    const float low_sigma = 0.03f;
-    const float high_sigma = 0.25f;
-
-    for (int y = 0; y < dft_M; ++y)
-    {
-        float fy = (y - dft_M / 2) / float(dft_M);
-        for (int x = 0; x < dft_N; ++x)
-        {
-            float fx = (x - dft_N / 2) / float(dft_N);
-            float radius = std::sqrt(fx * fx + fy * fy);
-            float low = std::exp(-radius * radius / (low_sigma * low_sigma));
-            float high = 1.0f - std::exp(-radius * radius / (high_sigma * high_sigma));
-            freq_mask.at<float>(y, x) = low * high;
-        }
-    }
-
-    // Terapkan mask ke DFT
-    cv::Mat planes_ref[2], planes_comp[2];
-    cv::split(ref_dft, planes_ref);
-    cv::split(comp_dft, planes_comp);
-
-    planes_ref[0] = planes_ref[0].mul(freq_mask);
-    planes_ref[1] = planes_ref[1].mul(freq_mask);
-    planes_comp[0] = planes_comp[0].mul(freq_mask);
-    planes_comp[1] = planes_comp[1].mul(freq_mask);
-
-    cv::merge(planes_ref, 2, ref_dft);
-    cv::merge(planes_comp, 2, comp_dft);
-
-    // =========================================================================
-    // === 3. CROSS-CORRELATION ===============================================
-    // =========================================================================
+    // Hitung cross-correlation (ref * conj(comp))
     cv::Mat cross;
-    cv::mulSpectrums(ref_dft, comp_dft, cross, 0, true); // conj(comp)
+    cv::mulSpectrums(ref_dft, comp_dft, cross, 0, true);
     cv::idft(cross, cross, cv::DFT_REAL_OUTPUT | cv::DFT_SCALE);
 
-    // =========================================================================
-    // === 4. BASELINE SSD =====================================================
-    // =========================================================================
-    double ref_norm = cv::norm(ref_padded, cv::NORM_L2SQR);
-    double comp_norm = cv::norm(comp_padded, cv::NORM_L2SQR);
+    // Ambil nilai SSD = sum(ref^2) + sum(comp^2) - 2*cross
+    double ref_norm = cv::norm(ref32, cv::NORM_L2SQR);
+    double comp_norm = cv::norm(comp32, cv::NORM_L2SQR);
     double cross_val;
     cv::minMaxLoc(cross, &cross_val, nullptr); // ambil max correlation
     double ssd = ref_norm + comp_norm - 2.0 * cross_val;
 
-    // =========================================================================
-    // === 5. GEMAN–MCCLURE ROBUSTIFICATION ===================================
-    // =========================================================================
-    // Normalisasi SSD per piksel agar skala masuk akal
-    double norm_ssd = ssd / (ref.total() + 1e-8);
-
-    // Robust Geman–McClure
-    double robust_cost = (norm_ssd * norm_ssd) / (norm_ssd * norm_ssd + c * c);
-
-    // Skala kembali ke domain mirip SSD agar sebanding
-    return static_cast<float>(robust_cost * 1000.0);
+    // Aproksimasi SAD
+    return static_cast<float>(std::sqrt(ssd));
 }
