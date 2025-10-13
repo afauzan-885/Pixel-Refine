@@ -10,10 +10,12 @@ import os
 from pathlib import Path
 from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 from PySide6.QtCore import Qt
+
+from UI.enhance_stack.algorithm.alignment import lightglue_safety
+lightglue_safety.install_delayed_patches()
 import h5py
 import onnxruntime as ort
 import urllib
-
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (calculate_crop_parameters, deduplicate_keypoints, do_warp_and_crop, estimate_noise_variance, 
                                                                                     extract_all_metadata, get_adaptive_bilateral, get_all_image_paths_for_batch_process,
                                                                                     get_all_image_paths_for_single_process, load_images_from_paths, prepare_image,
@@ -120,37 +122,65 @@ def add_dll_to_path():
     except Exception as e:
         print(f"[WARNING] Failed to enable GPU support. {e}")
 
-
 # --- Panggil fungsi ini di awal skrip Anda ---
 if os.name == 'nt':
     add_dll_to_path()
-        
+    
 class LightGlueAlgorithm:
+    """
+    LightGlueAlgorithm versi threaded:
+    - Model ONNX dimuat di thread terpisah agar UI tidak hang.
+    - Inferensi dijalankan di thread worker dengan proteksi error.
+    - GPU memory dilepas otomatis saat crash, OOM, atau stop manual.
+    """
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
         self.db_path = db_path
         self.hdf5_path = hdf5_path
+        self.sess = None
+        self.initialized = False
+        self.stop_event = threading.Event()
+
         cv2.ocl.setUseOpenCL(True)
 
         hdf5_folder = os.path.dirname(self.hdf5_path)
-        if not os.path.exists(hdf5_folder):
-            os.makedirs(hdf5_folder)
+        os.makedirs(hdf5_folder, exist_ok=True)
 
-        PIPELINE_ONNX = os.path.join(
+        # Path dan URL model
+        self.PIPELINE_ONNX = os.path.join(
             "database", "Learning_Model", "disk_lightglue_pipeline.ort.onnx"
         )
-        url = "https://github.com/fabio-sim/LightGlue-ONNX/releases/download/v2.0/disk_lightglue_pipeline.ort.onnx"
+        self.MODEL_URL = "https://github.com/fabio-sim/LightGlue-ONNX/releases/download/v2.0/disk_lightglue_pipeline.ort.onnx"
 
-        # --- Hybrid download check ---
+        # Jalankan inisialisasi model di thread terpisah
+        self.init_thread = threading.Thread(target=self._initialize_model_thread, daemon=True)
+        self.init_thread.start()
+
+    # ==========================================================
+    # === THREAD 1: INISIALISASI MODEL ONNX ====================
+    # ==========================================================
+    def _initialize_model_thread(self):
+        try:
+            self._download_and_prepare_model()
+            self._create_inference_session()
+            self.initialized = True
+            
+        except Exception as e:
+            traceback.print_exc()
+            self.initialized = False
+            self._cleanup_gpu()
+
+    def _download_and_prepare_model(self):
+        PIPELINE_ONNX = self.PIPELINE_ONNX
+        url = self.MODEL_URL
+
         need_download = False
         if os.path.exists(PIPELINE_ONNX):
             local_size = os.path.getsize(PIPELINE_ONNX)
             total_size = 0
             try:
-                # HEAD request dengan urllib
                 req = urllib.request.Request(url, method="HEAD")
                 with urllib.request.urlopen(req) as resp:
-                    if resp.getheader("Content-Length"):
-                        total_size = int(resp.getheader("Content-Length"))
+                    total_size = int(resp.getheader("Content-Length", 0))
             except Exception:
                 total_size = 0
 
@@ -159,17 +189,14 @@ class LightGlueAlgorithm:
                 req = urllib.request.Request(url)
                 req.add_header("Range", f"bytes={local_size}-")
                 with urllib.request.urlopen(req) as resp, open(PIPELINE_ONNX, "ab") as f:
-                    while True:
-                        chunk = resp.read(8192)
-                        if not chunk:
-                            break
+                    while chunk := resp.read(8192):
                         f.write(chunk)
                 print("✅ Download Complete.")
             else:
                 try:
                     _ = ort.InferenceSession(PIPELINE_ONNX)
                 except Exception:
-                    print("⚠️ Model file corrupt, delete and re-download…")
+                    print("⚠️ Model corrupt, re-download...")
                     os.remove(PIPELINE_ONNX)
                     need_download = True
         else:
@@ -179,43 +206,104 @@ class LightGlueAlgorithm:
             print("📥 Download Model ONNX…")
             os.makedirs(os.path.dirname(PIPELINE_ONNX), exist_ok=True)
             with urllib.request.urlopen(url) as resp, open(PIPELINE_ONNX, "wb") as f:
-                while True:
-                    chunk = resp.read(8192)
-                    if not chunk:
-                        break
+                while chunk := resp.read(8192):
                     f.write(chunk)
             print("✅ Download selesai.")
 
-        # --- Config ---
+    def _create_inference_session(self):
         config = load_light_glue_config()
         use_gpu = config.get("use_gpu", False)
 
-        providers = ["CPUExecutionProvider"]
-        if use_gpu:
-            try:
-                available_providers = ort.get_available_providers()
-                if "CUDAExecutionProvider" in available_providers:
-                    providers.insert(0, "CUDAExecutionProvider")
-            except Exception as e:
-                print(f"[ERROR] An error occurred while checking the CUDA provider: {e}. Falling back to using the CPU.")
-        else:
-            print("[INFO] Sesi inferensi akan menggunakan CPU (sesuai konfigurasi).")
+        try:
+            available = ort.get_available_providers()
+            preferred = [
+                ("DmlExecutionProvider", {"device_id": 1}),
+                # ("CUDAExecutionProvider", {"device_id": 0}),
+                "CPUExecutionProvider"
+            ]
+            usable = [p for p in preferred if (p if isinstance(p, str) else p[0]) in available]
 
-        # --- ONNX Runtime session ---
-        sess_options = ort.SessionOptions()
-        sess_options.intra_op_num_threads = os.cpu_count()
-        sess_options.inter_op_num_threads = 1
-        sess_options.execution_mode = ort.ExecutionMode.ORT_PARALLEL
-        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        sess_options.add_session_config_entry("arena_extend_strategy", "kSameAsRequested")
-        sess_options.add_session_config_entry("session.disable_prepacking", "0")
-        sess_options.log_severity_level = 3
+            if not usable:
+                raise RuntimeError("❌ Tidak ada provider ONNX Runtime yang tersedia di sistem ini.")
 
-        self.sess = ort.InferenceSession(
-            PIPELINE_ONNX, sess_options=sess_options, providers=providers
-        )
+            if use_gpu and any("DmlExecutionProvider" in (p if isinstance(p, str) else p[0]) for p in usable):
+                print("⚡ Menggunakan DirectML untuk akselerasi GPU (NVIDIA / AMD / Intel).")
+            elif use_gpu and any("CUDAExecutionProvider" in (p if isinstance(p, str) else p[0]) for p in usable):
+                print("⚡ Menggunakan CUDAExecutionProvider (NVIDIA).")
+            else:
+                print("🧠 Menggunakan CPUExecutionProvider (fallback).")
 
+            sess_options = ort.SessionOptions()
+            sess_options.enable_mem_pattern = False
+            sess_options.intra_op_num_threads = os.cpu_count()
+            sess_options.inter_op_num_threads = 1
+            sess_options.execution_mode = ort.ExecutionMode.ORT_PARALLEL
+            sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            sess_options.log_severity_level = 3
 
+            self.sess = ort.InferenceSession(self.PIPELINE_ONNX, sess_options=sess_options, providers=usable)
+            # print(f"✅ Model LightGlue berhasil dimuat dengan provider: {self.sess.get_providers()[0]}")
+
+        except Exception as e:
+            # print(f"🔥 Gagal membuat InferenceSession dengan GPU: {e}")
+            # print("➡️ Fallback ke CPUExecutionProvider...")
+            sess_options = ort.SessionOptions()
+            self.sess = ort.InferenceSession(self.PIPELINE_ONNX, sess_options=sess_options, providers=["CPUExecutionProvider"])
+            # print("✅ Berhasil memuat model di CPU.")
+
+    # ==========================================================
+    # === THREAD 2: INFERENSI DENGAN CLEANUP OTOMATIS ==========
+    # ==========================================================
+    def run_inference_threaded(self, input_data, callback=None):
+        """
+        Jalankan inferensi di thread terpisah dengan auto-cleanup GPU.
+        callback: fungsi opsional yang menerima hasil output.
+        """
+        if not self.initialized or self.sess is None:
+            # print("⚠️ Model belum siap untuk inferensi.")
+            return
+
+        thread = threading.Thread(
+            target=self._inference_worker,
+            args=(input_data, callback),
+            daemon=True
+        ) 
+        thread.start()
+
+    def _inference_worker(self, input_data, callback):
+        try:
+            if self.stop_event.is_set():
+                # print("🛑 Inferensi dibatalkan sebelum mulai.")
+                return
+
+            # Jalankan inferensi
+            # print("🚀 Menjalankan inferensi LightGlue...")
+            ort_inputs = {self.sess.get_inputs()[0].name: input_data}
+            ort_outs = self.sess.run(None, ort_inputs)
+
+            if callback:
+                callback(ort_outs)
+
+            # print("✅ Inferensi selesai.")
+        except Exception as e:
+            # print(f"💥 Error selama inferensi: {e}")
+            traceback.print_exc()
+        finally:
+            self._cleanup_gpu()
+
+    # ==========================================================
+    # === CLEANUP GPU OTOMATIS ================================
+    # ==========================================================
+    def _cleanup_gpu(self):
+        try:
+            if self.sess:
+                del self.sess
+                self.sess = None
+            gc.collect()
+            # print("🧹 GPU resources telah dibersihkan.")
+        except Exception as e:
+            print(f"⚠️ Cleanup GPU gagal: {e}")
+        
     def calculate_global_motion(self, base_image, target_image, stop_requested=None):
         if stop_requested and stop_requested():
             return None, None
@@ -225,15 +313,15 @@ class LightGlueAlgorithm:
         
         GRID_SIZE = (1, 1)
         if megapixels > 22.0:
-            target_mp = 18.0
+            target_mp = 22.0
             scale_factor = (target_mp / megapixels) ** 0.5
             new_width = int(w_orig * scale_factor)
             new_height = int(h_orig * scale_factor)
             base_image = cv2.resize(base_image, (new_width, new_height), interpolation=cv2.INTER_AREA)
             target_image = cv2.resize(target_image, (new_width, new_height), interpolation=cv2.INTER_AREA)
-            GRID_SIZE = (3, 3)
-        elif 17.5 <= megapixels <= 22.0: GRID_SIZE = (2, 3)
-        elif 11.5 <= megapixels <= 13.0: GRID_SIZE = (1, 2)
+            GRID_SIZE = (4, 4)
+        elif 17.5 <= megapixels <= 22.0: GRID_SIZE = (3, 3)
+        elif 11.5 <= megapixels <= 13.0: GRID_SIZE = (2, 2)
         elif megapixels <= 8.5: GRID_SIZE = (1, 1)
 
         OVERLAP_PERCENT = 0.10
@@ -254,7 +342,7 @@ class LightGlueAlgorithm:
             return padded, (w_tile / new_w, h_tile / new_h), (pad_left, pad_top)
 
         def prep_for_onnx(img):
-            enhanced_img = prepare_image(img, grayscale=False, use_clahe=True)
+            enhanced_img = prepare_image(img, grayscale=False, use_clahe=False)
             enhanced_gray = cv2.cvtColor(enhanced_img, cv2.COLOR_BGR2GRAY)
             noise_level = estimate_noise_variance(enhanced_gray)
             if noise_level > 200.0:
@@ -514,7 +602,7 @@ def main(db_path,
         raise RuntimeError("Base image failed to load.")
     
     if num_workers is None:
-        num_workers = 2
+        num_workers = 1
     
     base_image_raw = base_img_list[0]
     base_resized_list, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="median")

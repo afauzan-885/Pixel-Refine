@@ -211,10 +211,27 @@ extern "C"
         cv::threshold(current_image_gray_full, current_image_gray_full, 1.0f, 1.0f, cv::THRESH_TRUNC);
         cv::threshold(current_image_gray_full, current_image_gray_full, 0.0f, 0.0f, cv::THRESH_TOZERO);
 
-        // --- Kalkulasi Parameter Adaptif ---
+        // adaptation_factor:
+        //   - Mendekati 1.0 untuk gambar SANGAT BERSIH (noise ~ 0.0)
+        //   - Mendekati 0.0 untuk gambar BISING (noise >= 0.1)
         float adaptation_factor = 1.0f - std::min(global_estimated_noise_sigma / 0.1f, 1.0f);
-        adapted_motion_sensitivity = motion_sensitivity * (1.0f - 0.1f * adaptation_factor);
-        adapted_noise_offset_factor = noise_offset_factor * (1.0f + 0.1f * adaptation_factor);
+
+        // Tentukan seberapa besar dorongan/pengurangan maksimum yang kita inginkan
+        const float MAX_SENSITIVITY_BOOST = 0.50f; // 50% boost pada gambar paling bersih
+        const float MAX_OFFSET_REDUCTION = 0.50f; // 50% reduksi pada gambar paling bersih
+
+        // Hitung "faktor agresi" saat ini berdasarkan seberapa bersih gambar tersebut
+        float current_aggression = adaptation_factor;
+
+        // LOGIKA BARU 1: Tingkatkan sensitivitas gerakan pada gambar bersih
+        // - Jika gambar bersih (adaptation_factor=1.0), sensitivitas naik 50% (multiplier = 1.5).
+        // - Jika gambar bising (adaptation_factor=0.0), sensitivitas tidak berubah (multiplier = 1.0).
+        adapted_motion_sensitivity = motion_sensitivity * (1.0f + MAX_SENSITIVITY_BOOST * current_aggression);
+
+        // LOGIKA BARU 2: Turunkan offset noise pada gambar bersih
+        // - Jika gambar bersih (adaptation_factor=1.0), offset turun 50% (multiplier = 0.5).
+        // - Jika gambar bising (adaptation_factor=0.0), offset tidak berubah (multiplier = 1.0).
+        adapted_noise_offset_factor = noise_offset_factor * (1.0f - MAX_OFFSET_REDUCTION * current_aggression);
 
         /// =================================================================================
         // === BAGIAN B: ANALISIS SKALA KASAR (DENGAN MULTI-HIPOTESIS & PERKALIAN)      ===
