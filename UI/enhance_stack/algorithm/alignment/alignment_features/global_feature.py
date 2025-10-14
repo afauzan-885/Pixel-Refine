@@ -725,96 +725,97 @@ def estimate_noise_in_python(ref_image_gray_float: np.ndarray) -> float:
     estimated_sigma = mad_value * MAD_TO_SIGMA_FACTOR
     return float(np.clip(estimated_sigma, 0.001, 0.35))
 
-def preprocess_in_python(ref_image_float: np.ndarray, s_curve_contrast: float = 4.0):
-    """Optimized preprocessing: minimal copy, mostly in-place ops."""
+def preprocess_in_python(ref_image_float: np.ndarray,
+                         s_curve_contrast: float = 4.0,
+                         use_raft: bool = False):
+    """
+    Optimized preprocessing with optional RAFT support.
+    
+    Args:
+        ref_image_float: input image float32, 0-1
+        s_curve_contrast: faktor S-curve tone mapping
+        use_raft: jika True, pertahankan RGB; jika False, konversi ke grayscale dan estimasi noise
+
+    Returns:
+        processed image float32, noise_sigma
+    """
     img = ref_image_float.astype(np.float32, copy=False)
 
-    # konversi grayscale hanya jika perlu
-    if img.ndim == 3 and img.shape[2] > 1:
-        ref_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    # === LANGKAH 0: RGB vs Grayscale ===
+    if not use_raft:
+        if img.ndim == 3 and img.shape[2] > 1:
+            processed = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        else:
+            processed = img
+        noise_sigma = estimate_noise_in_python(processed)
     else:
-        ref_gray = img  # tidak perlu copy
+        processed = img
+        noise_sigma = 0.02  # placeholder ringan
 
-    noise_sigma = estimate_noise_in_python(ref_gray)
-
-    processed = ref_gray
-    # noise_sigma sudah diketahui (0–~0.3)
-    if noise_sigma > 0.04:  # threshold minimal untuk mulai denoising
-        # Kita pakai dua rentang: 0.04–0.18 untuk bilateral, >0.18 median
+    # === LANGKAH 1: Denoising adaptif hanya untuk backend C++ ===
+    if not use_raft and noise_sigma > 0.04:
         if noise_sigma < 0.18:
-            # Skala parameter bilateral secara adaptif (semakin tinggi noise, semakin kuat)
-            # d_sigma: domain filter (spatial), r_sigma: range filter (intensity)
-            # Kita gunakan kurva logaritmik agar responnya lembut
             norm_noise = np.clip((noise_sigma - 0.04) / (0.18 - 0.04), 0.0, 1.0)
-            d_sigma = 3 + 6 * norm_noise       # 3 → 9 (ukuran efektif area)
-            r_sigma = (20 + 80 * norm_noise) / 255.0  # 0.078 → 0.39
-            diameter = 3 + int(4 * norm_noise)        # diameter 3–7
-            
-            # Bilateral adaptif
+            d_sigma = 3 + 6 * norm_noise
+            r_sigma = (20 + 80 * norm_noise) / 255.0
+            diameter = 3 + int(4 * norm_noise)
             processed = cv2.bilateralFilter(processed, diameter, r_sigma, d_sigma)
         else:
-            # Noise tinggi, gunakan median filter
-            # Noise 0.18–0.22 → kernel 3, di atas 0.22 → kernel 5
-            if noise_sigma < 0.22:
-                ksize = 3
-            else:
-                ksize = 5
+            ksize = 3 if noise_sigma < 0.22 else 5
             processed = cv2.medianBlur(processed, ksize)
 
-
-    # === LANGKAH 1.5: Faktor Agresi ===
+    # === LANGKAH 1.5 – 5: Contrast, micro-detail, CLAHE, Laplacian, S-curve ===
     contrast_metric = np.std(processed)
     low_contrast_thresh, high_contrast_thresh = 0.12, 0.20
     aggression_factor = 1.0 - np.clip((contrast_metric - low_contrast_thresh) /
-                                    (high_contrast_thresh - low_contrast_thresh), 0.0, 1.0)
+                                      (high_contrast_thresh - low_contrast_thresh), 0.0, 1.0)
 
-    # === LANGKAH 2: Multi-Scale Micro-Contrast (Edge-Aware Sharpening) ===
     micro_contrast_noise_threshold = 0.05
     micro_contrast_strength = 1.0 - min(noise_sigma / micro_contrast_noise_threshold, 1.0)
-
     if micro_contrast_strength > 0.01:
-        # multi-scale Gaussian: detail kecil dan sedang
         blur_small = cv2.GaussianBlur(processed, (0, 0), sigmaX=0.8)
         blur_large = cv2.GaussianBlur(processed, (0, 0), sigmaX=2.0)
-
-        # detail = (fine detail + mid detail) / 2
         detail_small = processed - blur_small
         detail_large = processed - blur_large
         detail_mix = (detail_small + 0.6 * detail_large)
-
-        # adaptif strength (lebih kuat untuk low-contrast, tapi sensitif terhadap noise)
         base_strength = 0.6 + 0.4 * aggression_factor
         boost = base_strength * micro_contrast_strength
-
         processed += boost * detail_mix
         np.clip(processed, 0.0, 1.0, out=processed)
 
-    # === LANGKAH 3: CLAHE dua tahap adaptif (local brightness balance) ===
-    linear_strength = 1.0 - min(noise_sigma / 0.12, 1.0)
-    curved_strength = linear_strength ** 0.45
-    clip_limit = 0.6 + (curved_strength * (3.0 * (1.0 + 0.5 * aggression_factor)))
-
+    # === CLAHE di channel Luminance jika grayscale atau RGB ===
+    clip_limit = 0.6 + ((1.0 - min(noise_sigma / 0.12, 1.0)) ** 0.45 * (3.0 * (1.0 + 0.5 * aggression_factor)))
     if clip_limit > 0.61:
-        img_8u = np.empty_like(processed, dtype=np.uint8)
-        np.multiply(processed, 255.0, out=img_8u, casting="unsafe")
-        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
-        img_8u = clahe.apply(img_8u)
+        if processed.ndim == 3 and processed.shape[2] == 3:
+            # RGB → YCrCb
+            ycrcb = cv2.cvtColor(processed, cv2.COLOR_BGR2YCrCb)
+            y_channel = np.clip(ycrcb[:, :, 0] * 255.0, 0, 255).astype(np.uint8)
 
-        # tahap kedua CLAHE ringan untuk memperhalus peta luminansi
-        if aggression_factor > 0.5:
-            clahe2 = cv2.createCLAHE(clipLimit=clip_limit * 0.6, tileGridSize=(12, 12))
-            img_8u = clahe2.apply(img_8u)
+            clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+            y_channel = clahe.apply(y_channel)
 
-        processed[:] = img_8u.astype(np.float32) / 255.0
+            if aggression_factor > 0.5:
+                clahe2 = cv2.createCLAHE(clipLimit=clip_limit * 0.6, tileGridSize=(12, 12))
+                y_channel = clahe2.apply(y_channel)
 
-    # === LANGKAH 4: Edge-based Local Structure Enhancement ===
-    # gunakan Laplacian untuk mempertegas struktur, bukan hanya tepi kasar
+            ycrcb[:, :, 0] = y_channel.astype(np.float32) / 255.0
+            processed = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
+        else:
+            # Grayscale
+            img_8u = np.clip(processed * 255.0, 0, 255).astype(np.uint8)
+            clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+            img_8u = clahe.apply(img_8u)
+            if aggression_factor > 0.5:
+                clahe2 = cv2.createCLAHE(clipLimit=clip_limit * 0.6, tileGridSize=(12, 12))
+                img_8u = clahe2.apply(img_8u)
+            processed[:] = img_8u.astype(np.float32) / 255.0
+
+    # === Laplacian & S-curve ===
     lap = cv2.Laplacian(processed, cv2.CV_32F, ksize=3)
     lap_strength = 0.15 * aggression_factor * (1.0 - noise_sigma * 2.0)
     processed += lap_strength * lap
     np.clip(processed, 0.0, 1.0, out=processed)
 
-    # === LANGKAH 5: Adaptive Gamma & Tone Mapping (S-Curve upgrade) ===
     mean_brightness = float(np.mean(processed))
     if mean_brightness < 0.4:
         factor = (0.4 - mean_brightness) / 0.4
@@ -822,11 +823,9 @@ def preprocess_in_python(ref_image_float: np.ndarray, s_curve_contrast: float = 
         np.power(processed + 1e-6, gamma, out=processed)
         np.clip(processed, 0.0, 1.0, out=processed)
 
-    # Adaptive S-Curve Tone Mapping
     adaptive_s_curve_contrast = s_curve_contrast + (2.0 * aggression_factor)
     def sigmoid_contrast(x, contrast):
         return 1.0 / (1.0 + np.exp(-np.float32(contrast) * (x - 0.5)))
-
     low = sigmoid_contrast(0.0, adaptive_s_curve_contrast)
     high = sigmoid_contrast(1.0, adaptive_s_curve_contrast)
     processed = sigmoid_contrast(processed, adaptive_s_curve_contrast)
@@ -834,8 +833,8 @@ def preprocess_in_python(ref_image_float: np.ndarray, s_curve_contrast: float = 
     processed /= (high - low)
     np.clip(processed, 0.0, 1.0, out=processed)
 
-
     return processed.astype(np.float32, copy=False), noise_sigma
+
 
 def estimate_noise_variance(gray_image, edge_threshold_low=70, dilate_kernel_size=4, min_flat_pixels_ratio=0.1):
     """

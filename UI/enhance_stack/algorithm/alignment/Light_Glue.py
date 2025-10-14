@@ -111,7 +111,7 @@ def add_dll_to_path():
             dll_dir = dll.parent
             os.add_dll_directory(str(dll_dir))
             os.environ["PATH"] = str(dll_dir) + os.pathsep + os.environ.get("PATH", "")
-        print(f"[INFO] Adding cuDNN from folder: {cudnn_dlls[0].parent}")
+        # print(f"[INFO] Adding cuDNN from folder: {cudnn_dlls[0].parent}")
 
     # Check if the CUDA provider can be loaded after adding the path
     try:

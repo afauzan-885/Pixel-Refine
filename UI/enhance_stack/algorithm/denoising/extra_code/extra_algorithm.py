@@ -189,7 +189,7 @@ class ONNXSessionManager:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Dipanggil saat keluar dari blok 'with'. Menjamin pelepasan sumber daya."""
-        print("ONNXSessionManager: Keluar dari blok 'with', melepaskan sumber daya GPU...")
+        # print("ONNXSessionManager: Keluar dari blok 'with', melepaskan sumber daya GPU...")
         if exc_type:
             print(f"ONNXSessionManager: Exception terjadi di dalam blok: {exc_val}")
         
@@ -197,51 +197,51 @@ class ONNXSessionManager:
             self.session = None
         
         gc.collect()
-        print("ONNXSessionManager: Sumber daya GPU seharusnya sudah dilepaskan.")
+        # print("ONNXSessionManager: Sumber daya GPU seharusnya sudah dilepaskan.")
 
     def _initialize_raft_model(self, model_path):
         """
-        Logika untuk memuat session ONNX.
-        FUNGSI INI HARUS MENGEMBALIKAN OBJEK SESSION ATAU NONE.
+        Memuat session ONNX RAFT dengan logging minimal (hanya error fatal).
+
+        Returns:
+            ort.InferenceSession atau None jika gagal.
         """
         try:
-            print(f"Mencoba memuat model ONNX RAFT dari: {model_path}")
+            # print(f"Mencoba memuat model ONNX RAFT dari: {model_path}")
             available_providers = ort.get_available_providers()
-            
+
             preferred_providers = [
                 ('DmlExecutionProvider', {'device_id': 1}),
                 ('CUDAExecutionProvider', {'device_id': 1}),
                 'CPUExecutionProvider'
             ]
 
-            providers_to_try = [p for p in preferred_providers if (p if isinstance(p, str) else p[0]) in available_providers]
-            
+            # Filter provider yang tersedia
+            providers_to_try = [
+                p for p in preferred_providers
+                if (p if isinstance(p, str) else p[0]) in available_providers
+            ]
+
             if not providers_to_try:
                 raise RuntimeError("Tidak ada provider ONNX Runtime yang tersedia.")
 
-            print(f"Provider yang tersedia dan akan dicoba: {[p if isinstance(p, str) else p[0] for p in providers_to_try]}")
+            # print(f"Provider yang tersedia dan akan dicoba: {[p if isinstance(p, str) else p[0] for p in providers_to_try]}")
 
+            # SessionOptions dengan logging minimal
             session_options = ort.SessionOptions()
             session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-            
-            # Buat objek session
+            session_options.log_severity_level = 3  # 0=VERBOSE, 1=INFO, 2=WARNING, 3=ERROR, 4=FATAL
+
+            # Buat session
             session = ort.InferenceSession(model_path, providers=providers_to_try, sess_options=session_options)
-            
-            print(f"Model RAFT berhasil dimuat menggunakan: {session.get_providers()[0]}")
-            
-            # =======================================================
-            # === PERBAIKAN KRUSIAL ADA DI SINI ===
-            # =======================================================
-            return session  # <-- KEMBALIKAN OBJEK SESSION, BUKAN TRUE
-            
+            # print(f"Model RAFT berhasil dimuat menggunakan: {session.get_providers()[0]}")
+
+            return session
+
         except Exception as e:
-            print(f"Error fatal saat memuat model ONNX: {e}")
+            # print(f"Error fatal saat memuat model ONNX: {e}")
             traceback.print_exc()
-            
-            # =======================================================
-            # === PERBAIKAN KRUSIAL ADA DI SINI ===
-            # =======================================================
-            return None     # <-- KEMBALIKAN NONE JIKA GAGAL, BUKAN FALSE
+            return None
 
 # --- Global variable untuk menyimpan session ONNX agar tidak di-load berulang kali ---
 MODEL_SESSION = None
@@ -250,11 +250,13 @@ FLOW_MODEL_PATH = "database/Learning_Model/optical_flow_estimation_raft_2023aug_
 # ==============================================================================
 # === BAGIAN A: Fungsi Helper Baru untuk ONNX RAFT
 # ==============================================================================
-def process_single_tile_resized(args):
+def process_single_tile_resized(args, stop_requested=None):
     """
     Worker yang memproses satu tile (sudah di-resize sesuai ukuran model).
     """
     ref_tile_resized, current_tile_resized, session, original_coords = args
+    if stop_requested and stop_requested():
+        return None
     raw_flow_tile = compute_flow_with_raft(ref_tile_resized, current_tile_resized, session)
     if raw_flow_tile is None:
         return None
@@ -285,10 +287,11 @@ def create_blending_weights(tile_h, tile_w, overlap_h, overlap_w):
     weights_2d = y_weights[:, None] * x_weights[None, :]
     return weights_2d[:, :, None]
 
-def compute_flow_with_raft_tiled_dynamic(ref_img, current_img, session,
+def compute_flow_raft(ref_img, current_img, session,
                                          grid_rows=2, grid_cols=2,
                                          model_input_size=(360, 480),
-                                         overlap_ratio=0.1, progress_callback=None):
+                                         overlap_ratio=0.1, progress_callback=None,
+                                         stop_requested=None):
     """
     Menghitung optical flow dengan pembagian tile grid dinamis.
     Mendukung callback progres per tile untuk update progress UI secara real-time.
@@ -327,7 +330,7 @@ def compute_flow_with_raft_tiled_dynamic(ref_img, current_img, session,
             coords.append((y_start, x_start, y_end, x_end))
 
     total_tiles = len(coords)
-    print(f"🧩 Memproses grid {grid_rows}x{grid_cols} (total {total_tiles} tile)...")
+    # print(f"🧩 Memproses grid {grid_rows}x{grid_cols} (total {total_tiles} tile)...")
 
     # --- Penampung hasil sementara ---
     final_flow = np.zeros((full_h, full_w, 2), dtype=np.float32)
@@ -335,6 +338,9 @@ def compute_flow_with_raft_tiled_dynamic(ref_img, current_img, session,
 
     # --- Proses tile satu per satu ---
     for tile_idx, (y_start, x_start, y_end, x_end) in enumerate(coords, 1):
+        if stop_requested and stop_requested():
+            # print(f"⏹ Stop requested, tile {tile_idx}/{total_tiles} dihentikan")
+            return None
         try:
             # Ambil tile asli
             ref_tile = ref_img[y_start:y_end, x_start:x_end]
@@ -454,10 +460,17 @@ def visualize_flow(flow):
 
 def perform_image_alignment(images, reference_image_float, work_res_h, work_res_w,
                             tile_h, tile_w, ref_dtype, update_progress=None, stop_requested=None,
-                            use_raft=True, raft_workers=3):
+                            use_raft=False, raft_workers=2, visualization=True):
     """
-    Menyelaraskan (align) gambar dengan manajemen sumber daya GPU yang aman menggunakan Context Manager.
-    Kini mendukung paralelisme RAFT multi-thread dengan pembatasan worker.
+    Menyelaraskan (align) gambar dengan manajemen sumber daya GPU yang aman.
+    Mendukung:
+      - RAFT multi-thread (GPU) atau
+      - Backend C++ legacy (grayscale)
+    Optimasi ringan:
+      - Mengurangi salinan numpy berlebih
+      - Logging hanya untuk crash / peringatan
+      - Reuse buffer
+      - Jeda 2 detik antar submit worker
     """
     if not use_raft and ALIGN_LIB is None:
         error_msg = "Error: Backend C++ dipilih tetapi library 'alignment_tile.dll' tidak tersedia."
@@ -470,43 +483,49 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
         if num_images <= 1:
             return True
 
+        # === BACKEND RAFT (GPU, multi-thread) ===
         if use_raft:
             print(f"Memulai alignment menggunakan backend RAFT dengan {raft_workers} worker paralel...")
+
             try:
                 with ONNXSessionManager(FLOW_MODEL_PATH) as MODEL_SESSION:
-                    backend_name = f"RAFT ({MODEL_SESSION.get_providers()[0]})"
-                    print(f"Menggunakan backend: {backend_name}")
+                    # backend_name = f"RAFT ({MODEL_SESSION.get_providers()[0]})"
+                    # print(f"Menggunakan backend: {backend_name}")
 
                     ref_full_color_raft = (reference_image_float * 255).astype(np.uint8)
                     model_input_size = (360, 480)
-                    grid_rows, grid_cols = 3, 3
+                    grid_rows, grid_cols = 2, 2
 
                     # --- Fungsi untuk 1 tugas alignment ---
-                    def process_single_alignment(i):
+                    def process_single_alignment(i, stop_requested=None):
                         original_image = images[i]
                         current_img_float = normalize_image(original_image, ref_dtype)
-                        current_full_color_raft = (current_img_float * 255).astype(np.uint8)
+                        # Optimasi: langsung ubah ke uint8 tanpa salinan tambahan
+                        current_full_color_raft = np.clip(current_img_float * 255, 0, 255).astype(np.uint8)
 
-                        flow_full_res = compute_flow_with_raft_tiled_dynamic(
+                        flow_full_res = compute_flow_raft(
                             ref_full_color_raft,
                             current_full_color_raft,
                             MODEL_SESSION,
                             grid_rows=grid_rows,
                             grid_cols=grid_cols,
                             model_input_size=model_input_size,
-                            overlap_ratio=0.2
+                            overlap_ratio=0.2,
+                            stop_requested=stop_requested
                         )
 
+                        aligned_img = None
                         if flow_full_res is not None:
                             aligned_img = warp_image_opencv(original_image, flow_full_res)
-                            flow_vis = visualize_flow(flow_full_res)
-                            cv2.imwrite(f"flow_raft_{i+1:02d}.jpg", flow_vis)
-                            return (i, aligned_img)
+                            if visualization:
+                                flow_vis = visualize_flow(flow_full_res)
+                                cv2.imwrite(f"flow_raft_{i+1:02d}.jpg", flow_vis)
                         else:
                             print(f"Peringatan: Alignment RAFT gagal untuk gambar {i+1}.")
-                            return (i, None)
 
-                    # --- Jalankan paralel dengan ThreadPool ---
+                        return (i, aligned_img)
+
+                    # --- Jalankan paralel dengan ThreadPoolExecutor + jeda 2 detik antar submit ---
                     with ThreadPoolExecutor(max_workers=raft_workers) as executor:
                         futures = {}
                         for i in range(1, num_images):
@@ -514,11 +533,12 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
                                 executor.shutdown(wait=False, cancel_futures=True)
                                 return False
 
-                            # Delay antar-submit agar GPU tidak over-schedule
                             if i > 1:
-                                time.sleep(2.0)  # jeda 3 detik sebelum worker berikutnya dimulai
+                                time.sleep(2.0)  # jeda 2 detik antar submit worker
 
-                            future = executor.submit(process_single_alignment, i)
+                            future = executor.submit(
+                                lambda i=i: process_single_alignment(i, stop_requested=stop_requested)
+                            )
                             futures[future] = i
 
                         for future in as_completed(futures):
@@ -532,8 +552,8 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
                                 if aligned_img is not None:
                                     images[idx] = aligned_img
                             except Exception as e:
+                                # Logging ringan, cukup print pesan
                                 print(f"❌ Worker RAFT gagal untuk gambar {i+1}: {e}")
-                                traceback.print_exc()
 
                             if update_progress:
                                 progress = 30 + (i / num_images) * 10
@@ -541,21 +561,20 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
 
                             gc.collect()
 
-                print("✅ Alignment GPU RAFT selesai (multi-thread aktif, resource efisien).")
+                print("✅ Alignment GPU RAFT selesai.")
                 return True
 
             except Exception as e:
-                print(f"Error kritis terjadi selama proses RAFT: {e}")
+                print(f"Error kritis selama RAFT: {e}")
                 traceback.print_exc()
                 return False
 
-        # ==========================================================
-        # === BACKEND C++ (TIDAK BERUBAH) ===
-        # ==========================================================
+        # === BACKEND C++ (grayscale legacy) ===
         else:
             print("Memulai alignment menggunakan backend C++...")
-            ref_preprocessed_cpp, _ = preprocess_in_python(reference_image_float)
-            ref_work_gray_cpp = cv2.resize(ref_preprocessed_cpp, (work_res_w, work_res_h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+            ref_preprocessed_cpp, _ = preprocess_in_python(reference_image_float, use_raft=False)
+            ref_work_gray_cpp = cv2.resize(ref_preprocessed_cpp, (work_res_w, work_res_h),
+                                           interpolation=cv2.INTER_LINEAR).astype(np.float32)
             flow_shape_cpp = (work_res_h, work_res_w, 2)
             flow_buf_cpp = np.empty(flow_shape_cpp, dtype=np.float32)
 
@@ -567,13 +586,13 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
 
                 original_image = images[i]
                 current_img_float = normalize_image(original_image, ref_dtype)
-                current_preprocessed_cpp, _ = preprocess_in_python(current_img_float)
+                current_preprocessed_cpp, _ = preprocess_in_python(current_img_float, use_raft=False)
                 current_work_gray_cpp = cv2.resize(current_preprocessed_cpp, (work_res_w, work_res_h),
                                                    interpolation=cv2.INTER_LINEAR).astype(np.float32)
-                
+
                 ref_work_ptr = np.ascontiguousarray(ref_work_gray_cpp).ctypes.data_as(ctypes.POINTER(ctypes.c_float))
                 current_work_ptr = np.ascontiguousarray(current_work_gray_cpp).ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-                
+
                 min_layer_res = min(tile_h, tile_w) * 2
                 log_arg = min(work_res_h, work_res_w) / min_layer_res if min_layer_res > 0 else 1
                 n_layers = max(1, int(np.ceil(np.log2(log_arg))) if log_arg > 0 else 1)
@@ -582,7 +601,7 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
                     ref_work_ptr, current_work_ptr, work_res_h, work_res_w,
                     tile_h, tile_w, n_layers, 1.5
                 )
-                
+
                 flow_full_res = None
                 if flow_ptr:
                     try:
@@ -590,6 +609,9 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
                         np.copyto(flow_buf_cpp, flow_view)
                         full_h, full_w = original_image.shape[:2]
                         flow_full_res = scale_flow_to_full_res(flow_buf_cpp, work_res_h, work_res_w, full_h, full_w)
+                        if visualization:
+                            flow_vis = visualize_flow(flow_full_res)
+                            cv2.imwrite(f"flow_cpp_{i+1:02d}.jpg", flow_vis)
                     finally:
                         ALIGN_LIB.free_flow_memory(flow_ptr)
 

@@ -570,143 +570,178 @@ class SimilarityAlgorithm:
             return (None, None, 0, []) if weight_of_each_image else (None, None, 0)       
                  
     def similarity_mnfr(self, images,
-                merging_type='spatial',
-                tile_size=None, overlap=None,
-                motion_sensitivity=None, noise_offset_factor=None,
-                update_progress=None, stop_requested=None,
-                save_weight_map_path=None, num_workers=None,
-                total_overall_images=None, images_processed_so_far=0, 
-                save_temporal_std_path= None,
-                weight_of_each_image=False, 
-                **merging_kwargs):
-
+                    merging_type='spatial',
+                    tile_size=None, overlap=None,
+                    motion_sensitivity=None, noise_offset_factor=None,
+                    update_progress=None, stop_requested=None,
+                    save_weight_map_path=None, num_workers=None,
+                    total_overall_images=None, images_processed_so_far=0, 
+                    save_temporal_std_path=None,
+                    weight_of_each_image=False, 
+                    **merging_kwargs):
+        """
+        Fungsi utama untuk menghitung kesamaan dan penggabungan frame (spatial/frequency).
+        Sudah tahan stop_requested(), return value konsisten meski proses dibatalkan.
+        """
         if not isinstance(images, list) or not images:
             raise ValueError(language_config.IMAGE_DATA_MUST_BE_VALID)
+
         try:
             ref_image = images[0]
             if not isinstance(ref_image, np.ndarray):
                 raise TypeError(language_config.IMAGE_DATA_MUST_BE_VALID)
-            h_ref, w_ref, channels_ref_orig = ref_image.shape[0], ref_image.shape[1], (ref_image.shape[2] if ref_image.ndim == 3 else 1)
+
+            h_ref, w_ref, channels_ref_orig = (
+                ref_image.shape[0], ref_image.shape[1],
+                (ref_image.shape[2] if ref_image.ndim == 3 else 1)
+            )
             dtype_ref = ref_image.dtype
             if channels_ref_orig not in (1, 3):
                 raise ValueError(language_config.IMAGE_CHANNEL_DOES_NOT_SUPPORT.format(channels_ref_orig))
+
         except (AttributeError, IndexError, ValueError, TypeError) as e:
             raise ValueError(language_config.FIRST_IMAGE_CANNOT_BE_OBTAINED.format(e))
+
         if dtype_ref not in (np.uint8, np.uint16):
             raise TypeError(language_config.IMAGE_BIT_REQUIRED)
 
         channels_buffer = 3
         reference_image_float = normalize_image(ref_image, dtype_ref)
         h_ref_norm, w_ref_norm, _ = reference_image_float.shape
-        
+
         final_image_normalized, final_weight_map, processed_frames = None, None, 0
         weight_maps_per_image = []
 
+        # --- Persiapan argumen umum ---
         common_call_args = {
-            "images": images, "ref_image_h": h_ref_norm, "ref_image_w": w_ref_norm,
-            "ref_channels_buffer": channels_buffer, "ref_dtype": dtype_ref,
+            "images": images,
+            "ref_image_h": h_ref_norm,
+            "ref_image_w": w_ref_norm,
+            "ref_channels_buffer": channels_buffer,
+            "ref_dtype": dtype_ref,
             "reference_image_float": reference_image_float,
-            "update_progress": update_progress, "stop_requested": stop_requested,
-            "total_overall_images": total_overall_images, "images_processed_so_far": images_processed_so_far,
+            "update_progress": update_progress,
+            "stop_requested": stop_requested,
+            "total_overall_images": total_overall_images,
+            "images_processed_so_far": images_processed_so_far,
             "weight_of_each_image": weight_of_each_image,
         }
         common_call_args.update(merging_kwargs)
-        
+
+        # --- Cek stop_requested() di awal ---
+        if stop_requested and stop_requested():
+            out_shape_fb = (h_ref, w_ref) if channels_ref_orig == 1 else (h_ref, w_ref, channels_ref_orig)
+            return np.zeros(out_shape_fb, dtype=dtype_ref), None, []
+
+        # --- Jalankan merging berdasarkan type ---
+        results = None
         if merging_type == 'spatial':
             current_tile_size = tile_size if tile_size is not None else common_call_args.get('tile_size')
             current_overlap = overlap if overlap is not None else common_call_args.get('overlap')
             current_motion_sensitivity = motion_sensitivity if motion_sensitivity is not None else common_call_args.get('motion_sensitivity')
             current_noise_offset_factor = noise_offset_factor if noise_offset_factor is not None else common_call_args.get('noise_offset_factor')
-            
-            # [PENAMBAHAN] Ambil nilai num_workers, prioritaskan argumen langsung, lalu dari kwargs
             current_num_workers = num_workers if num_workers is not None else common_call_args.get('similarity_spatial_num_workers')
 
+            # Jika parameter penting belum tersedia, hentikan aman
             if any(p is None for p in [current_tile_size, current_overlap, current_motion_sensitivity, current_noise_offset_factor]):
-                if stop_requested and stop_requested():
-                    return np.zeros((h_ref, w_ref, channels_ref_orig), dtype=dtype_ref), None, []
-            
+                out_shape_fb = (h_ref, w_ref) if channels_ref_orig == 1 else (h_ref, w_ref, channels_ref_orig)
+                return np.zeros(out_shape_fb, dtype=dtype_ref), None, []
+
             common_call_args.update({
-                "tile_size": current_tile_size, "overlap": current_overlap,
-                "motion_sensitivity": current_motion_sensitivity, "noise_offset_factor": current_noise_offset_factor,
-                # "num_workers": current_num_workers,  # [PENAMBAHAN] Teruskan ke _spatial_merging
-                "temporal_consistency": True, "save_temporal_std_path": save_temporal_std_path
+                "tile_size": current_tile_size,
+                "overlap": current_overlap,
+                "motion_sensitivity": current_motion_sensitivity,
+                "noise_offset_factor": current_noise_offset_factor,
+                # "num_workers": current_num_workers,
+                "temporal_consistency": True,
+                "save_temporal_std_path": save_temporal_std_path
             })
             results = self._spatial_merging(**common_call_args)
-            
+
         elif merging_type == 'frequency':
             default_freq_tile_val, default_freq_overlap, default_freq_c_wiener = 24, 0.20, 5.0
             default_freq_lib_path = common_call_args.get('lib_path_freq', common_call_args.get('lib_path', 'UI/data/similarity_frequency_merging.dll'))
             current_freq_c_wiener = common_call_args.get('freq_c_wiener_factor', default_freq_c_wiener)
             current_freq_tile_size_input = common_call_args.get('freq_tile_size', default_freq_tile_val)
             current_freq_overlap = common_call_args.get('freq_overlap_percent', default_freq_overlap)
-            # current_num_workers = num_workers if num_workers is not None else common_call_args.get('num_workers', -1)
 
             if isinstance(current_freq_tile_size_input, int):
                 current_freq_tile_size_tuple = (current_freq_tile_size_input, current_freq_tile_size_input)
-            elif isinstance(current_freq_tile_size_input, (list,tuple)) and len(current_freq_tile_size_input) == 2:
-                current_freq_tile_size_tuple = tuple(map(int,current_freq_tile_size_input))
+            elif isinstance(current_freq_tile_size_input, (list, tuple)) and len(current_freq_tile_size_input) == 2:
+                current_freq_tile_size_tuple = tuple(map(int, current_freq_tile_size_input))
             else:
                 current_freq_tile_size_tuple = (default_freq_tile_val, default_freq_tile_val)
 
             common_call_args.update({
-                "freq_c_wiener_factor": current_freq_c_wiener, "freq_tile_size": current_freq_tile_size_tuple,
-                "freq_overlap_percent": current_freq_overlap, "lib_path": default_freq_lib_path,
-                # "num_workers": current_num_workers, # <-- TERUSKAN KE _frequency_merging
-                "temporal_consistency": True, "save_temporal_std_path": save_temporal_std_path
+                "freq_c_wiener_factor": current_freq_c_wiener,
+                "freq_tile_size": current_freq_tile_size_tuple,
+                "freq_overlap_percent": current_freq_overlap,
+                "lib_path": default_freq_lib_path,
+                # "num_workers": current_num_workers,
+                "temporal_consistency": True,
+                "save_temporal_std_path": save_temporal_std_path
             })
-            
+
+            # Hapus parameter spatial agar tidak kacau
             for key_to_remove in ['tile_size', 'overlap', 'motion_sensitivity', 'noise_offset_factor']:
                 common_call_args.pop(key_to_remove, None)
+
             results = self._frequency_merging(**common_call_args)
+
         else:
             raise ValueError(f"Unsupported merging_type: {merging_type}. Choose 'spatial' or 'frequency'.")
 
+        # --- Jika tidak ada hasil karena stop_requested() ---
+        if results is None:
+            out_shape_fb = (h_ref, w_ref) if channels_ref_orig == 1 else (h_ref, w_ref, channels_ref_orig)
+            return np.zeros(out_shape_fb, dtype=dtype_ref), None, []
+
+        # --- Unpack results aman ---
         if weight_of_each_image:
             final_image_normalized, final_weight_map, processed_frames, individual_maps = results
         else:
             final_image_normalized, final_weight_map, processed_frames = results
             individual_maps = []
 
+        # --- Stop_requested setelah proses tapi sebelum semua frame selesai ---
+        if stop_requested and stop_requested() and (processed_frames is None or processed_frames < len(images)):
+            processed_frames = 0 if processed_frames is None else processed_frames
+            all_final_weight_maps_to_return = individual_maps
+            final_img_output = np.zeros((h_ref, w_ref, channels_ref_orig), dtype=dtype_ref) if final_image_normalized is None else final_image_normalized
+            return final_img_output, final_weight_map, all_final_weight_maps_to_return
+
+        # --- Finalisasi output ---
         if processed_frames > 0 and final_image_normalized is not None:
             all_final_weight_maps_to_return = individual_maps
 
-            # Logika penyimpanan peta bobot gabungan
+            # Simpan weight map jika diminta
             if save_weight_map_path and final_weight_map is not None:
                 try:
+                    os.makedirs(os.path.dirname(save_weight_map_path), exist_ok=True)
                     max_w = np.max(final_weight_map)
                     norm_w_vis = final_weight_map / max_w if max_w > 1e-6 else np.zeros_like(final_weight_map)
                     w_map_vis = (np.clip(norm_w_vis, 0.0, 1.0) * 255).astype(np.uint8)
-                    os.makedirs(os.path.dirname(save_weight_map_path), exist_ok=True)
                     cv2.imwrite(save_weight_map_path, w_map_vis)
-                except Exception as e:
+                except Exception:
                     traceback.print_exc()
 
-            # --- Bagian 5: Finalisasi dan Return Value yang Konsisten ---
+            # Skala ke tipe asli
             scale_val = np.float32(np.iinfo(dtype_ref).max)
             final_img_scaled = final_image_normalized * scale_val
-            
             if channels_ref_orig == 1:
                 final_img_out_ch = np.mean(final_img_scaled, axis=2)
             else:
                 final_img_out_ch = final_img_scaled
-                
             min_v, max_v = 0, np.iinfo(dtype_ref).max
             final_img_output = np.clip(final_img_out_ch, min_v, max_v).astype(dtype_ref, copy=False)
-            
-            if stop_requested and stop_requested() and processed_frames < len(images):
-                return final_img_output, final_weight_map, all_final_weight_maps_to_return
-            
+
             return final_img_output, final_weight_map, all_final_weight_maps_to_return
 
         else:
+            # Jika tidak ada frame diproses
             out_shape_fb = (h_ref, w_ref) if channels_ref_orig == 1 else (h_ref, w_ref, channels_ref_orig)
             return np.zeros(out_shape_fb, dtype=dtype_ref), None, []
 
-
-def apply_temporal_filter(current_map, prev_smoothed_map, alpha=0.3):
-    if prev_smoothed_map is None:
-        return current_map.copy()
-    return (alpha * current_map) + ((1.0 - alpha) * prev_smoothed_map)
 
 def _setup_data_source_and_paths(db_path, single_process, batch_id, image_processor):
     align_dir = os.path.join("database", "align")

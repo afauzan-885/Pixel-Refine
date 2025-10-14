@@ -208,11 +208,11 @@ def patch_running_light_glue():
                 print(f"✅ Wrapped running_light_glue in module: {module_name}")
                 return True
         
-        print("⚠️ running_light_glue not found in loaded modules")
+        # print("⚠️ running_light_glue not found in loaded modules")
         return False
         
     except Exception as e:
-        print(f"⚠️ Error wrapping running_light_glue: {e}")
+        # print(f"⚠️ Error wrapping running_light_glue: {e}")
         return False
 
 
