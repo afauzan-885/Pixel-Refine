@@ -9,7 +9,6 @@ import traceback
 import cv2
 import numpy as np
 import onnxruntime as ort
-from tqdm import tqdm
 
 from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import normalize_image, preprocess_in_python
 
@@ -33,20 +32,20 @@ class SimilaritySpatialInterface:
 
     def _define_argtypes(self):
         self.clib.generate_weight_map_jit.argtypes = [    
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS, WRITEABLE'), # Arg 1: weight_map_sum_ptr
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=3, flags='C_CONTIGUOUS'),          # Arg 2: current_image_ptr
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),          # Arg 3: reference_image_processed_ptr
-            np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS'),          # base_window_ptr
-            ctypes.c_void_p,                                                                # stability_map_ptr
-            np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),          # row_starts
-            np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),          # col_starts
-            ctypes.c_int, ctypes.c_int, # num_row_starts, num_col_starts
-            ctypes.c_int, ctypes.c_int, # tile_h, tile_w
-            ctypes.c_int, ctypes.c_int, # h_img, w_img
-            ctypes.c_int,               # channels
-            ctypes.c_float,             # motion_sensitivity
-            ctypes.c_float,             # noise_offset_factor
-            ctypes.c_float              # precomputed_ref_noise_sigma
+            np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS, WRITEABLE'), # weight_map_sum (2D)
+            np.ctypeslib.ndpointer(dtype=np.float32, flags='C_CONTIGUOUS'),                    # current_image (flattened 1D/3D OK)
+            np.ctypeslib.ndpointer(dtype=np.float32, flags='C_CONTIGUOUS'),                    # reference_image_processed
+            np.ctypeslib.ndpointer(dtype=np.float32, flags='C_CONTIGUOUS'),                    # base_window
+            ctypes.c_void_p,                                                                   # stability_map_ptr
+            np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),              # row_starts
+            np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),              # col_starts
+            ctypes.c_int, ctypes.c_int,                                                        # num_row_starts, num_col_starts
+            ctypes.c_int, ctypes.c_int,                                                        # tile_h, tile_w
+            ctypes.c_int, ctypes.c_int,                                                        # h_img, w_img
+            ctypes.c_int,                                                                      # channels
+            ctypes.c_float,                                                                    # motion_sensitivity
+            ctypes.c_float,                                                                    # noise_offset_factor
+            ctypes.c_float                                                                     # precomputed_ref_noise_sigma
         ]
         self.clib.generate_weight_map_jit.restype = None
 
@@ -429,7 +428,7 @@ def scale_flow_to_full_res(flow, work_h, work_w, full_h, full_w):
     flow_full[:, :, 1] *= scale_y
     return flow_full
 
-def warp_image_opencv(image, flow, interpolation=cv2.INTER_CUBIC, border_mode=cv2.BORDER_REFLECT_101):
+def warp_image_opencv(image, flow, interpolation=cv2.INTER_LINEAR, border_mode=cv2.BORDER_REFLECT_101):
     """Warp gambar menggunakan optical flow."""
     h, w = image.shape[:2]
     y_coords, x_coords = np.mgrid[0:h, 0:w].astype(np.float32)
@@ -460,174 +459,271 @@ def visualize_flow(flow):
 
 def perform_image_alignment(images, reference_image_float, work_res_h, work_res_w,
                             tile_h, tile_w, ref_dtype, update_progress=None, stop_requested=None,
-                            use_raft=False, raft_workers=2, visualization=True):
+                            use_raft=True, num_alignment_workers=2, visualization=False): # Ganti default 2 ke 4
     """
-    Menyelaraskan (align) gambar dengan manajemen sumber daya GPU yang aman.
-    Mendukung:
-      - RAFT multi-thread (GPU) atau
-      - Backend C++ legacy (grayscale)
-    Optimasi ringan:
-      - Mengurangi salinan numpy berlebih
-      - Logging hanya untuk crash / peringatan
-      - Reuse buffer
-      - Jeda 2 detik antar submit worker
+    Menyelaraskan (align) gambar dengan manajemen sumber daya yang aman,
+    menggunakan paralelisasi untuk RAFT (GPU) atau C++ (CPU/Legacy).
     """
-    if not use_raft and ALIGN_LIB is None:
-        error_msg = "Error: Backend C++ dipilih tetapi library 'alignment_tile.dll' tidak tersedia."
-        print(error_msg)
-        if update_progress: update_progress(0, error_msg)
-        return False
+    
+    # Tidak perlu lagi baris num_alignment_workers = alignment_worker
+    num_images = len(images)
+    if num_images <= 1:
+        return True
 
-    try:
-        num_images = len(images)
-        if num_images <= 1:
-            return True
+    # --- Preprocessing referensi (Dilakukan 1x di thread utama) ---
+    ref_preprocessed_cpp, _ = preprocess_in_python(reference_image_float, use_raft=False)
+    ref_work_gray_cpp = cv2.resize(ref_preprocessed_cpp, (work_res_w, work_res_h),
+                                interpolation=cv2.INTER_LINEAR).astype(np.float32)
+    ref_work_gray_cpp = np.ascontiguousarray(ref_work_gray_cpp)
+    ref_work_ptr = ref_work_gray_cpp.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+    del ref_preprocessed_cpp
 
-        # === BACKEND RAFT (GPU, multi-thread) ===
-        if use_raft:
-            print(f"Memulai alignment menggunakan backend RAFT dengan {raft_workers} worker paralel...")
+    # Siapkan variabel konfigurasi C++ (jika dibutuhkan)
+    min_layer_res = min(tile_h, tile_w) * 2
+    log_arg = min(work_res_h, work_res_w) / min_layer_res if min_layer_res > 0 else 1
+    n_layers = max(1, int(np.ceil(np.log2(log_arg))) if log_arg > 0 else 1)
 
-            try:
-                with ONNXSessionManager(FLOW_MODEL_PATH) as MODEL_SESSION:
-                    # backend_name = f"RAFT ({MODEL_SESSION.get_providers()[0]})"
-                    # print(f"Menggunakan backend: {backend_name}")
 
-                    ref_full_color_raft = (reference_image_float * 255).astype(np.uint8)
-                    model_input_size = (360, 480)
-                    grid_rows, grid_cols = 2, 2
+    # =================================================================
+    # === BACKEND RAFT (GPU, multi-thread) ===
+    # =================================================================
+    if use_raft:
+        print(f"Memulai alignment menggunakan backend RAFT dengan {num_alignment_workers} worker paralel...")
 
-                    # --- Fungsi untuk 1 tugas alignment ---
-                    def process_single_alignment(i, stop_requested=None):
-                        original_image = images[i]
-                        current_img_float = normalize_image(original_image, ref_dtype)
-                        # Optimasi: langsung ubah ke uint8 tanpa salinan tambahan
-                        current_full_color_raft = np.clip(current_img_float * 255, 0, 255).astype(np.uint8)
+        try:
+            # RAFT memerlukan sesi ONNX dan referensi gambar warna penuh
+            with ONNXSessionManager(FLOW_MODEL_PATH) as MODEL_SESSION:
+                ref_full_color_raft = (reference_image_float * 255).astype(np.uint8)
+                model_input_size = (360, 480)
+                grid_rows, grid_cols = 2, 2
 
-                        flow_full_res = compute_flow_raft(
-                            ref_full_color_raft,
-                            current_full_color_raft,
-                            MODEL_SESSION,
-                            grid_rows=grid_rows,
-                            grid_cols=grid_cols,
-                            model_input_size=model_input_size,
-                            overlap_ratio=0.2,
+                # --- Fungsi untuk 1 tugas alignment RAFT (dijalankan di worker) ---
+                def process_single_alignment_raft(i, original_image, ref_full_color_raft, 
+                                                  MODEL_SESSION, ref_dtype, stop_requested=None):
+                    
+                    if stop_requested and stop_requested(): return (i, None)
+                    
+                    current_img_float = normalize_image(original_image, ref_dtype)
+                    current_full_color_raft = np.clip(current_img_float * 255, 0, 255).astype(np.uint8)
+
+                    flow_full_res = compute_flow_raft(
+                        ref_full_color_raft,
+                        current_full_color_raft,
+                        MODEL_SESSION,
+                        grid_rows=grid_rows,
+                        grid_cols=grid_cols,
+                        model_input_size=model_input_size,
+                        overlap_ratio=0.2,
+                        stop_requested=stop_requested
+                    )
+                    
+                    aligned_img = None
+                    if flow_full_res is not None:
+                        aligned_img = warp_image_opencv(original_image, flow_full_res)
+                        if visualization:
+                            flow_vis = visualize_flow(flow_full_res)
+                            cv2.imwrite(f"flow_raft_{i+1:02d}.jpg", flow_vis)
+
+                    return (i, aligned_img)
+
+                # --- Jalankan paralel dengan ThreadPoolExecutor ---
+                with ThreadPoolExecutor(max_workers=num_alignment_workers) as executor:
+                    futures = {}
+                    processed_count = 0
+                    
+                    for i in range(1, num_images):
+                        if stop_requested and stop_requested():
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            return False
+
+                        if i > 1:
+                            # Opsional: jeda 2 detik antar submit worker (untuk manajemen memori/GPU)
+                            time.sleep(2.0) 
+
+                        future = executor.submit(
+                            process_single_alignment_raft, 
+                            i, images[i], ref_full_color_raft, 
+                            MODEL_SESSION, ref_dtype, 
                             stop_requested=stop_requested
                         )
+                        futures[future] = i
 
-                        aligned_img = None
-                        if flow_full_res is not None:
-                            aligned_img = warp_image_opencv(original_image, flow_full_res)
-                            if visualization:
-                                flow_vis = visualize_flow(flow_full_res)
-                                cv2.imwrite(f"flow_raft_{i+1:02d}.jpg", flow_vis)
-                        else:
-                            print(f"Peringatan: Alignment RAFT gagal untuk gambar {i+1}.")
+                    for future in as_completed(futures):
+                        i = futures[future]
+                        if stop_requested and stop_requested():
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            return False
 
-                        return (i, aligned_img)
+                        try:
+                            idx, aligned_img = future.result()
+                            if aligned_img is not None:
+                                images[idx] = aligned_img
+                            else:
+                                print(f"Peringatan: Alignment RAFT gagal untuk gambar {i+1}.")
+                        except Exception as e:
+                            print(f"❌ Worker RAFT gagal untuk gambar {i+1}: {e}")
 
-                    # --- Jalankan paralel dengan ThreadPoolExecutor + jeda 2 detik antar submit ---
-                    with ThreadPoolExecutor(max_workers=raft_workers) as executor:
-                        futures = {}
-                        for i in range(1, num_images):
-                            if stop_requested and stop_requested():
-                                executor.shutdown(wait=False, cancel_futures=True)
-                                return False
+                        processed_count += 1
+                        if update_progress:
+                            progress = 30 + (processed_count / (num_images - 1)) * 10
+                            update_progress(int(progress), f"Alignment gambar {processed_count}/{num_images - 1} (RAFT)...")
 
-                            if i > 1:
-                                time.sleep(2.0)  # jeda 2 detik antar submit worker
+                        gc.collect()
 
-                            future = executor.submit(
-                                lambda i=i: process_single_alignment(i, stop_requested=stop_requested)
-                            )
-                            futures[future] = i
+            print("✅ Alignment GPU RAFT selesai.")
+            return True
 
-                        for future in as_completed(futures):
-                            i = futures[future]
-                            if stop_requested and stop_requested():
-                                executor.shutdown(wait=False, cancel_futures=True)
-                                return False
+        except Exception as e:
+            print(f"Error kritis selama RAFT: {e}")
+            traceback.print_exc()
+            return False
 
-                            try:
-                                idx, aligned_img = future.result()
-                                if aligned_img is not None:
-                                    images[idx] = aligned_img
-                            except Exception as e:
-                                # Logging ringan, cukup print pesan
-                                print(f"❌ Worker RAFT gagal untuk gambar {i+1}: {e}")
+    # =================================================================
+    # === BACKEND C++ (grayscale legacy) - PARALEL ===
+    # =================================================================
+    else:
+        if ALIGN_LIB is None:
+            error_msg = "Error: Backend C++ dipilih tetapi library 'alignment_tile.dll' tidak tersedia."
+            print(error_msg)
+            if update_progress: update_progress(0, error_msg)
+            return False
+            
+        # print(f"Memulai alignment menggunakan backend C++ (paralel, {num_alignment_workers} worker)...")
 
-                            if update_progress:
-                                progress = 30 + (i / num_images) * 10
-                                update_progress(int(progress), f"Alignment gambar {i+1}/{num_images}...")
+        try:
+            # --- Fungsi untuk 1 tugas alignment C++ (dijalankan di worker) ---
+            def process_single_alignment_cpp(i, 
+                                             ref_work_ptr, work_res_h, work_res_w, 
+                                             tile_h, tile_w, n_layers, 
+                                             original_image, ref_dtype, 
+                                             ALIGN_LIB, stop_requested):
+                
+                if stop_requested and stop_requested():
+                    return (i, None)
+                    
+                flow_ptr = None
+                
+                # Buffer lokal yang harus dibersihkan setelah digunakan
+                current_work_gray_cpp = None 
+                
+                try:
+                    # 1. Preprocess Gambar Saat Ini
+                    current_img_float = normalize_image(original_image, ref_dtype)
+                    current_preprocessed_cpp, _ = preprocess_in_python(current_img_float, use_raft=False)
+                    current_work_gray_cpp = cv2.resize(current_preprocessed_cpp, (work_res_w, work_res_h),
+                                                    interpolation=cv2.INTER_LINEAR).astype(np.float32)
 
-                            gc.collect()
-
-                print("✅ Alignment GPU RAFT selesai.")
-                return True
-
-            except Exception as e:
-                print(f"Error kritis selama RAFT: {e}")
-                traceback.print_exc()
-                return False
-
-        # === BACKEND C++ (grayscale legacy) ===
-        else:
-            print("Memulai alignment menggunakan backend C++...")
-            ref_preprocessed_cpp, _ = preprocess_in_python(reference_image_float, use_raft=False)
-            ref_work_gray_cpp = cv2.resize(ref_preprocessed_cpp, (work_res_w, work_res_h),
-                                           interpolation=cv2.INTER_LINEAR).astype(np.float32)
-            flow_shape_cpp = (work_res_h, work_res_w, 2)
-            flow_buf_cpp = np.empty(flow_shape_cpp, dtype=np.float32)
-
-            for i in range(1, num_images):
-                if stop_requested and stop_requested(): return False
-                if update_progress:
-                    progress = 30 + (i / num_images) * 10
-                    update_progress(int(progress), f"Alignment gambar {i+1}/{num_images}...")
-
-                original_image = images[i]
-                current_img_float = normalize_image(original_image, ref_dtype)
-                current_preprocessed_cpp, _ = preprocess_in_python(current_img_float, use_raft=False)
-                current_work_gray_cpp = cv2.resize(current_preprocessed_cpp, (work_res_w, work_res_h),
-                                                   interpolation=cv2.INTER_LINEAR).astype(np.float32)
-
-                ref_work_ptr = np.ascontiguousarray(ref_work_gray_cpp).ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-                current_work_ptr = np.ascontiguousarray(current_work_gray_cpp).ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-
-                min_layer_res = min(tile_h, tile_w) * 2
-                log_arg = min(work_res_h, work_res_w) / min_layer_res if min_layer_res > 0 else 1
-                n_layers = max(1, int(np.ceil(np.log2(log_arg))) if log_arg > 0 else 1)
-
-                flow_ptr = ALIGN_LIB.compute_alignment_flow(
-                    ref_work_ptr, current_work_ptr, work_res_h, work_res_w,
-                    tile_h, tile_w, n_layers, 1.5
-                )
-
-                flow_full_res = None
+                    current_work_gray_cpp = np.ascontiguousarray(current_work_gray_cpp)
+                    current_work_ptr = current_work_gray_cpp.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+                    
+                    # 2. Panggil fungsi C++
+                    flow_ptr = ALIGN_LIB.compute_alignment_flow(
+                        ref_work_ptr, current_work_ptr,
+                        work_res_h, work_res_w,
+                        tile_h, tile_w, n_layers, 1.5
+                    )
+                
+                except Exception as e:
+                    print(f"Error C++ setup/call for image {i+1}: {e}")
+                    return (i, None)
+                    
+                finally:
+                    # Pastikan referensi Python lokal dibersihkan
+                    del current_work_gray_cpp, current_preprocessed_cpp, current_img_float
+                
+                aligned_img = None
+                
                 if flow_ptr:
                     try:
-                        flow_view = np.ctypeslib.as_array(flow_ptr, shape=flow_shape_cpp)
-                        np.copyto(flow_buf_cpp, flow_view)
+                        # 3. Baca Flow dan Rescale
+                        flow_buf_cpp = np.empty((work_res_h, work_res_w, 2), dtype=np.float32)
+                        flow_buf_ptr_temp = flow_buf_cpp.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+                        # Salin data dari memori C++ ke buffer NumPy lokal thread
+                        ctypes.memmove(flow_buf_ptr_temp, flow_ptr, flow_buf_cpp.nbytes)
+                        
                         full_h, full_w = original_image.shape[:2]
                         flow_full_res = scale_flow_to_full_res(flow_buf_cpp, work_res_h, work_res_w, full_h, full_w)
+
                         if visualization:
                             flow_vis = visualize_flow(flow_full_res)
                             cv2.imwrite(f"flow_cpp_{i+1:02d}.jpg", flow_vis)
+
+                        # 4. Warp Gambar
+                        aligned_img = warp_image_opencv(original_image, flow_full_res)
+
+                    except Exception as e:
+                        print(f"Error processing flow result for image {i+1}: {e}")
                     finally:
-                        ALIGN_LIB.free_flow_memory(flow_ptr)
+                        # 5. Pastikan C++ free memori yang dialokasikan
+                        if flow_ptr:
+                            ALIGN_LIB.free_flow_memory(flow_ptr)
+                
+                return (i, aligned_img)
 
-                if flow_full_res is not None:
-                    aligned_img = warp_image_opencv(original_image, flow_full_res)
-                    images[i] = aligned_img
-                else:
-                    print(f"Peringatan: Alignment C++ gagal untuk gambar {i+1}.")
+            # --- Jalankan paralel dengan ThreadPoolExecutor ---
+            with ThreadPoolExecutor(max_workers=num_alignment_workers) as executor:
+                futures = {}
+                processed_count = 0
+                
+                # Kirim tugas ke executor (Mulai dari indeks 1, karena indeks 0 adalah referensi)
+                for i in range(1, num_images):
+                    if stop_requested and stop_requested():
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        return False
 
-                del original_image, current_img_float, flow_full_res
-                if 'aligned_img' in locals(): del aligned_img
-                gc.collect()
+                    # --- PENAMBAHAN JEDA DI SINI ---
+                    if i > 1:
+                        time.sleep(2.0)
+                    # ------------------------------
 
-        return True
+                    future = executor.submit(
+                        process_single_alignment_cpp, 
+                        i, 
+                        ref_work_ptr, work_res_h, work_res_w, 
+                        tile_h, tile_w, n_layers, 
+                        images[i], ref_dtype, 
+                        ALIGN_LIB, stop_requested
+                    )
+                    futures[future] = i
 
-    except Exception as e:
-        print(f"Error fatal di luar blok alignment utama: {e}")
-        traceback.print_exc()
-        return False
+                # Kumpulkan hasil (di thread utama)
+                for future in as_completed(futures):
+                    i = futures[future]
+                    if stop_requested and stop_requested():
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        return False
+
+                    try:
+                        idx, aligned_img = future.result()
+                        if aligned_img is not None:
+                            # Tulis hasil alignment kembali ke list utama
+                            images[idx] = aligned_img
+                        else:
+                            # Jika worker gagal/dibatalkan, gunakan gambar asli
+                            pass 
+                            
+                        processed_count += 1
+                        
+                    except Exception as e:
+                        print(f"❌ Worker C++ gagal untuk gambar {i+1} (saat fetch result): {e}")
+                        
+                    if update_progress:
+                        progress = 30 + (processed_count / (num_images - 1)) * 10 
+                        update_progress(int(progress), f"Alignment gambar {processed_count}/{num_images - 1} (C++)...")
+
+                    gc.collect() 
+
+            # print("✅ Alignment C++ paralel selesai.")
+            return True
+
+        except Exception as e:
+            print(f"Error fatal di luar blok alignment C++ utama: {e}")
+            traceback.print_exc()
+            return False
+            
+    # finally:
+    #     # Bersihkan referensi yang dibuat di thread utama
+    #     if 'ref_work_gray_cpp' in locals():
+    #         del ref_work_gray_cpp
+    #     gc.collect()

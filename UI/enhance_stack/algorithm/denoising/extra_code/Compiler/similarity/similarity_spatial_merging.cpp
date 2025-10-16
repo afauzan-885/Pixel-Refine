@@ -48,7 +48,7 @@ extern "C"
     void generate_weight_map_jit(
         float *weight_map_sum_ptr,
         const float *current_image_ptr,
-        const float *reference_image_processed_ptr,
+        const float *reference_image_ptr,
         const float *base_window_ptr,
         const float *stability_map_ptr,
         const int *row_starts, const int *col_starts,
@@ -64,174 +64,18 @@ extern "C"
         if (!weight_map_sum_ptr)
             return;
 
-        // =========================================================================
-        // === BAGIAN A: Pra-pemrosesan (disesuaikan dengan preprocess_in_python) ==
-        // =========================================================================
-
-        cv::Mat current_image_mat(h_img, w_img, CV_32FC(channels), const_cast<float *>(current_image_ptr));
-        const cv::Mat reference_image_gray_full(h_img, w_img, CV_32FC1, const_cast<float *>(reference_image_processed_ptr));
-
-        cv::Mat stability_map_mat;
-        if (stability_map_ptr)
-        {
-            stability_map_mat = cv::Mat(h_img, w_img, CV_32FC1, const_cast<float *>(stability_map_ptr));
-        }
-
-        cv::Mat current_image_gray_full;
-        float adapted_motion_sensitivity, adapted_noise_offset_factor;
-
-        // --- LANGKAH 1: Konversi Warna ---
-        if (channels > 1)
-        {
-            cv::cvtColor(current_image_mat, current_image_gray_full, cv::COLOR_BGR2GRAY);
-        }
-        else
-        {
-            current_image_mat.convertTo(current_image_gray_full, CV_32F);
-        }
-
-        // --- LANGKAH 2: Filtering Adaptif ---
         float global_estimated_noise_sigma = precomputed_ref_noise_sigma;
 
-        // sesuai versi Python: noise 0.04–0.18 bilateral, >0.18 median
-        if (global_estimated_noise_sigma > 0.04f)
-        {
-            if (global_estimated_noise_sigma < 0.18f)
-            {
-                float norm_noise = std::clamp((global_estimated_noise_sigma - 0.04f) / (0.18f - 0.04f), 0.0f, 1.0f);
-                int diameter = 3 + static_cast<int>(4 * norm_noise);            // 3–7
-                float d_sigma = 3.0f + 6.0f * norm_noise;                       // 3–9
-                float r_sigma = (20.0f + 80.0f * norm_noise) / 255.0f;          // 0.078–0.39
-
-                cv::Mat temp_filtered;
-                cv::bilateralFilter(current_image_gray_full, temp_filtered, diameter, r_sigma, d_sigma);
-                current_image_gray_full = temp_filtered;
-            }
-            else
-            {
-                int ksize = (global_estimated_noise_sigma < 0.22f) ? 3 : 5;
-                cv::medianBlur(current_image_gray_full, current_image_gray_full, ksize);
-            }
-        }
-
-        // --- LANGKAH 1.5: Faktor Agresi Berdasarkan Kontras ---
-        cv::Scalar mean_val, stddev_val;
-        cv::meanStdDev(current_image_gray_full, mean_val, stddev_val);
-        float contrast_metric = static_cast<float>(stddev_val[0]);
-
-        const float low_contrast_thresh = 0.12f;
-        const float high_contrast_thresh = 0.20f;
-
-        float aggression_factor = 1.0f - std::clamp(
-            (contrast_metric - low_contrast_thresh) / (high_contrast_thresh - low_contrast_thresh),
-            0.0f, 1.0f);
-
-        // --- LANGKAH 2: Multi-scale Micro-Contrast Enhancement ---
-        const float micro_contrast_noise_threshold = 0.05f;
-        float micro_contrast_strength = 1.0f - std::min(1.0f, global_estimated_noise_sigma / micro_contrast_noise_threshold);
-
-        if (micro_contrast_strength > 0.01f)
-        {
-            cv::Mat blur_small, blur_large;
-            cv::GaussianBlur(current_image_gray_full, blur_small, cv::Size(0, 0), 0.8);
-            cv::GaussianBlur(current_image_gray_full, blur_large, cv::Size(0, 0), 2.0);
-
-            cv::Mat detail_small = current_image_gray_full - blur_small;
-            cv::Mat detail_large = current_image_gray_full - blur_large;
-            cv::Mat detail_mix = detail_small + 0.6f * detail_large;
-
-            float base_strength = 0.6f + 0.4f * aggression_factor;
-            float boost = base_strength * micro_contrast_strength;
-
-            current_image_gray_full += boost * detail_mix;
-            cv::threshold(current_image_gray_full, current_image_gray_full, 1.0f, 1.0f, cv::THRESH_TRUNC);
-            cv::threshold(current_image_gray_full, current_image_gray_full, 0.0f, 0.0f, cv::THRESH_TOZERO);
-        }
-
-        // --- LANGKAH 3: CLAHE dua tahap adaptif ---
-        float linear_strength = 1.0f - std::min(1.0f, global_estimated_noise_sigma / 0.12f);
-        float curved_strength = std::pow(linear_strength, 0.45f);
-        float clip_limit = 0.6f + (curved_strength * (3.0f * (1.0f + 0.5f * aggression_factor)));
-
-        if (clip_limit > 0.61f)
-        {
-            cv::Mat img_8u;
-            current_image_gray_full.convertTo(img_8u, CV_8U, 255.0);
-
-            cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(clip_limit, cv::Size(8, 8));
-            clahe->apply(img_8u, img_8u);
-
-            // tahap kedua jika aggression_factor > 0.5
-            if (aggression_factor > 0.5f)
-            {
-                cv::Ptr<cv::CLAHE> clahe2 = cv::createCLAHE(clip_limit * 0.6f, cv::Size(12, 12));
-                clahe2->apply(img_8u, img_8u);
-            }
-
-            img_8u.convertTo(current_image_gray_full, CV_32F, 1.0 / 255.0);
-        }
-
-        // --- LANGKAH 4: Local Structure Enhancement (Laplacian) ---
-        cv::Mat lap;
-        cv::Laplacian(current_image_gray_full, lap, CV_32F, 3);
-        float lap_strength = 0.15f * aggression_factor * (1.0f - global_estimated_noise_sigma * 2.0f);
-        current_image_gray_full += lap_strength * lap;
-        cv::threshold(current_image_gray_full, current_image_gray_full, 1.0f, 1.0f, cv::THRESH_TRUNC);
-        cv::threshold(current_image_gray_full, current_image_gray_full, 0.0f, 0.0f, cv::THRESH_TOZERO);
-
-        // --- LANGKAH 5: Adaptive Gamma Correction ---
-        cv::Scalar mean_scalar = cv::mean(current_image_gray_full);
-        float mean_brightness = static_cast<float>(mean_scalar[0]);
-        if (mean_brightness < 0.4f)
-        {
-            float factor = (0.4f - mean_brightness) / 0.4f;
-            float gamma = 1.0f - (0.3f * factor);
-            cv::pow(current_image_gray_full + 1e-6f, gamma, current_image_gray_full);
-            cv::threshold(current_image_gray_full, current_image_gray_full, 1.0f, 1.0f, cv::THRESH_TRUNC);
-            cv::threshold(current_image_gray_full, current_image_gray_full, 0.0f, 0.0f, cv::THRESH_TOZERO);
-        }
-
-        // --- LANGKAH 6: Adaptive S-Curve Tone Mapping ---
-        const float s_curve_contrast = 4.0f;
-        float adaptive_s_curve_contrast = s_curve_contrast + (2.0f * aggression_factor);
-
-        auto sigmoid_contrast_cpp = [&](float x, float contrast)
-        {
-            return 1.0f / (1.0f + std::exp(-contrast * (x - 0.5f)));
-        };
-
-        float low = sigmoid_contrast_cpp(0.0f, adaptive_s_curve_contrast);
-        float high = sigmoid_contrast_cpp(1.0f, adaptive_s_curve_contrast);
-
-        cv::Mat temp_exp;
-        cv::exp(-adaptive_s_curve_contrast * (current_image_gray_full - 0.5f), temp_exp);
-        current_image_gray_full = 1.0f / (1.0f + temp_exp);
-        current_image_gray_full = (current_image_gray_full - low) / (high - low);
-
-        cv::threshold(current_image_gray_full, current_image_gray_full, 1.0f, 1.0f, cv::THRESH_TRUNC);
-        cv::threshold(current_image_gray_full, current_image_gray_full, 0.0f, 0.0f, cv::THRESH_TOZERO);
-
-        // adaptation_factor:
-        //   - Mendekati 1.0 untuk gambar SANGAT BERSIH (noise ~ 0.0)
-        //   - Mendekati 0.0 untuk gambar BISING (noise >= 0.1)
+        // Adaptasi sensitivitas berdasarkan noise
         float adaptation_factor = 1.0f - std::min(global_estimated_noise_sigma / 0.1f, 1.0f);
 
-        // Tentukan seberapa besar dorongan/pengurangan maksimum yang kita inginkan
-        const float MAX_SENSITIVITY_BOOST = 0.50f; // 50% boost pada gambar paling bersih
-        const float MAX_OFFSET_REDUCTION = 0.50f; // 50% reduksi pada gambar paling bersih
+        const float MAX_SENSITIVITY_BOOST = 0.50f;
+        const float MAX_OFFSET_REDUCTION = 0.50f;
 
-        // Hitung "faktor agresi" saat ini berdasarkan seberapa bersih gambar tersebut
         float current_aggression = adaptation_factor;
 
-        // LOGIKA BARU 1: Tingkatkan sensitivitas gerakan pada gambar bersih
-        // - Jika gambar bersih (adaptation_factor=1.0), sensitivitas naik 50% (multiplier = 1.5).
-        // - Jika gambar bising (adaptation_factor=0.0), sensitivitas tidak berubah (multiplier = 1.0).
-        adapted_motion_sensitivity = motion_sensitivity * (1.0f + MAX_SENSITIVITY_BOOST * current_aggression);
-
-        // LOGIKA BARU 2: Turunkan offset noise pada gambar bersih
-        // - Jika gambar bersih (adaptation_factor=1.0), offset turun 50% (multiplier = 0.5).
-        // - Jika gambar bising (adaptation_factor=0.0), offset tidak berubah (multiplier = 1.0).
-        adapted_noise_offset_factor = noise_offset_factor * (1.0f - MAX_OFFSET_REDUCTION * current_aggression);
+        float adapted_motion_sensitivity = motion_sensitivity * (1.0f + MAX_SENSITIVITY_BOOST * current_aggression);
+        float adapted_noise_offset_factor = noise_offset_factor * (1.0f - MAX_OFFSET_REDUCTION * current_aggression);
 
         /// =================================================================================
         // === BAGIAN B: ANALISIS SKALA KASAR (DENGAN MULTI-HIPOTESIS & PERKALIAN)      ===
@@ -239,6 +83,13 @@ extern "C"
         {
             const int tile_h_fine = tile_h;
             const int tile_w_fine = tile_w;
+
+            // --- Bungkus pointer Python sebagai cv::Mat tanpa alokasi ulang ---
+            cv::Mat current_image_gray(h_img, w_img, CV_32FC1, (void *)current_image_ptr);
+            cv::Mat reference_image_gray(h_img, w_img, CV_32FC1, (void *)reference_image_ptr);
+            cv::Mat stability_map_mat;
+            if (stability_map_ptr != nullptr)
+                stability_map_mat = cv::Mat(h_img, w_img, CV_32FC1, (void *)stability_map_ptr);
 
             // --- Tentukan jumlah level piramida ---
             int max_level = 0;
@@ -251,13 +102,13 @@ extern "C"
             }
             const int num_pyramid_levels = std::min(max_level, 2) + 1;
 
-            // --- Bangun piramida gambar ---
+            // --- Bangun piramida gambar (langsung dari Mat di atas) ---
             std::vector<cv::Mat> current_pyramid, reference_pyramid;
             current_pyramid.reserve(num_pyramid_levels);
             reference_pyramid.reserve(num_pyramid_levels);
 
-            current_pyramid.push_back(current_image_gray_full);
-            reference_pyramid.push_back(reference_image_gray_full);
+            current_pyramid.push_back(current_image_gray);
+            reference_pyramid.push_back(reference_image_gray);
             for (int i = 0; i < num_pyramid_levels - 1; ++i)
             {
                 cv::Mat next_current, next_ref;
@@ -271,13 +122,15 @@ extern "C"
             std::reverse(reference_pyramid.begin(), reference_pyramid.end());
 
             // --- Peta panduan dimulai dari ukuran level terkecil ---
-            cv::Mat guidance_map = cv::Mat(current_pyramid[0].rows / tile_h_fine, current_pyramid[0].cols / tile_w_fine, CV_32FC1, cv::Scalar(1.0f));
+            cv::Mat guidance_map = cv::Mat(
+                current_pyramid[0].rows / tile_h_fine,
+                current_pyramid[0].cols / tile_w_fine,
+                CV_32FC1, cv::Scalar(1.0f));
 
             // --- Loop dari skala paling kasar ke yang lebih halus ---
             for (int level = 0; level < num_pyramid_levels - 1; ++level)
             {
-                const cv::Mat &coarse_guidance_grid = guidance_map; // Peta dari iterasi sebelumnya (kasar)
-
+                const cv::Mat &coarse_guidance_grid = guidance_map;
                 const cv::Mat &current_img_fine = current_pyramid[level + 1];
                 const cv::Mat &ref_img_fine = reference_pyramid[level + 1];
 
@@ -285,13 +138,10 @@ extern "C"
                 const int num_tiles_w_fine = current_img_fine.cols / tile_w_fine;
                 if (num_tiles_h_fine == 0 || num_tiles_w_fine == 0)
                 {
-                    cv::Mat temp_guidance_map;
-                    cv::resize(coarse_guidance_grid, temp_guidance_map, current_img_fine.size(), 0, 0, cv::INTER_LINEAR);
-                    guidance_map = temp_guidance_map;
+                    cv::resize(coarse_guidance_grid, guidance_map, current_img_fine.size(), 0, 0, cv::INTER_LINEAR);
                     continue;
                 }
 
-                // Grid baru yang akan kita bangun untuk level halus
                 cv::Mat fine_confidence_grid(num_tiles_h_fine, num_tiles_w_fine, CV_32FC1);
 
 #pragma omp parallel for schedule(dynamic)
@@ -308,7 +158,6 @@ extern "C"
 
                     for (int c_tile_fine = 0; c_tile_fine < num_tiles_w_fine; ++c_tile_fine)
                     {
-                        // 1. Hitung Confidence Lokal di Level Halus
                         cv::Rect roi_fine(c_tile_fine * tile_w_fine, r_tile_fine * tile_h_fine, tile_w_fine, tile_h_fine);
 
                         MotionMatching::TileMatchResult res = MotionMatching::calculate_tile_similarity(
@@ -316,17 +165,17 @@ extern "C"
                             global_estimated_noise_sigma,
                             GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON, mbm_buffers);
 
-                        float local_confidence_fine = res.success ? MotionMatching::calculate_match_confidence(
-                                                                        res, global_estimated_noise_sigma, adapted_motion_sensitivity, adapted_noise_offset_factor)
-                                                                  : 0.0f;
+                        float local_confidence_fine = res.success
+                                                          ? MotionMatching::calculate_match_confidence(
+                                                                res, global_estimated_noise_sigma,
+                                                                adapted_motion_sensitivity, adapted_noise_offset_factor)
+                                                          : 0.0f;
 
-                        // 2. Kumpulkan Kandidat (Hipotesis) dari Grid Kasar
                         const int r_tile_coarse = r_tile_fine / 2;
                         const int c_tile_coarse = c_tile_fine / 2;
 
                         std::vector<float> candidate_guidances;
                         candidate_guidances.reserve(9);
-
                         for (int dr = -1; dr <= 1; ++dr)
                         {
                             for (int dc = -1; dc <= 1; ++dc)
@@ -334,54 +183,36 @@ extern "C"
                                 int nr = r_tile_coarse + dr;
                                 int nc = c_tile_coarse + dc;
                                 if (nr >= 0 && nr < coarse_guidance_grid.rows && nc >= 0 && nc < coarse_guidance_grid.cols)
-                                {
                                     candidate_guidances.push_back(coarse_guidance_grid.at<float>(nr, nc));
-                                }
                             }
                         }
                         if (candidate_guidances.empty())
-                        {
                             candidate_guidances.push_back(1.0f);
-                        }
 
-                        // 3. Uji Semua Hipotesis dengan PERKALIAN dan Pilih Hasil MAKSIMUM
-                        float best_multiplied_confidence = 0.0f; // Inisialisasi ke 0
-
+                        float best_multiplied_confidence = 0.0f;
                         for (const float guidance_candidate : candidate_guidances)
-                        {
-                            float multiplied_confidence = local_confidence_fine * guidance_candidate;
-                            if (multiplied_confidence > best_multiplied_confidence)
-                            {
-                                best_multiplied_confidence = multiplied_confidence;
-                            }
-                        }
+                            best_multiplied_confidence = std::max(best_multiplied_confidence, local_confidence_fine * guidance_candidate);
 
-                        // 4. Simpan hasil terbaik ke grid halus yang baru
                         fine_confidence_grid.at<float>(r_tile_fine, c_tile_fine) = best_multiplied_confidence;
                     }
                 }
 
-                // 5. Update `guidance_map` untuk iterasi selanjutnya (sekarang menjadi grid baru)
                 guidance_map = fine_confidence_grid;
             }
 
             // --- Upscale peta panduan final ke resolusi penuh (interpolasi) ---
             cv::Mat final_guidance_map_full_res;
             if (!guidance_map.empty())
-            {
-                cv::resize(guidance_map, final_guidance_map_full_res, current_image_gray_full.size(), 0, 0, cv::INTER_LINEAR);
-            }
+                cv::resize(guidance_map, final_guidance_map_full_res, current_image_gray.size(), 0, 0, cv::INTER_LINEAR);
             else
-            {
                 final_guidance_map_full_res = cv::Mat(h_img, w_img, CV_32FC1, cv::Scalar(1.0f));
-            }
 
             // =================================================================================
             // === TAHAP 2: ANALISIS SKALA HALUS & AKUMULASI FINAL (DENGAN PERKALIAN)      ===
             // =================================================================================
 
             cv::Mat weight_map_sum_mat(h_img, w_img, CV_32FC1, weight_map_sum_ptr);
-            weight_map_sum_mat.setTo(0.0f); // Cara lebih bersih untuk inisialisasi
+            weight_map_sum_mat.setTo(0.0f);
 
 #pragma omp parallel
             {
@@ -408,25 +239,21 @@ extern "C"
                         cv::Rect tile_roi(c, r, tile_w_fine, tile_h_fine);
 
                         MotionMatching::TileMatchResult mbm_result = MotionMatching::calculate_tile_similarity(
-                            current_image_gray_full(tile_roi), reference_image_gray_full(tile_roi),
+                            current_image_gray(tile_roi), reference_image_gray(tile_roi),
                             global_estimated_noise_sigma,
                             GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON, mbm_buffers_fine);
 
-                        float confidence_fine = mbm_result.success ? MotionMatching::calculate_match_confidence(
-                                                                         mbm_result, global_estimated_noise_sigma,
-                                                                         adapted_motion_sensitivity, adapted_noise_offset_factor)
-                                                                   : 0.0f;
+                        float confidence_fine = mbm_result.success
+                                                    ? MotionMatching::calculate_match_confidence(
+                                                          mbm_result, global_estimated_noise_sigma,
+                                                          adapted_motion_sensitivity, adapted_noise_offset_factor)
+                                                    : 0.0f;
 
-                        // Ambil nilai dari peta panduan yang sudah di-upscale
                         float guidance_confidence = static_cast<float>(cv::mean(final_guidance_map_full_res(tile_roi))[0]);
-
-                        // Gunakan perkalian murni seperti yang diminta
                         float final_confidence = confidence_fine * guidance_confidence;
 
                         if (!stability_map_mat.empty())
-                        {
                             final_confidence *= static_cast<float>(cv::mean(stability_map_mat(tile_roi))[0]);
-                        }
 
                         if (final_confidence < 1e-5f)
                             continue;

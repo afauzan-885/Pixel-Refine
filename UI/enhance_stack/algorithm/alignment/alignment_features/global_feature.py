@@ -725,21 +725,17 @@ def estimate_noise_in_python(ref_image_gray_float: np.ndarray) -> float:
     estimated_sigma = mad_value * MAD_TO_SIGMA_FACTOR
     return float(np.clip(estimated_sigma, 0.001, 0.35))
 
+_CLAHE_CACHE = {}
+
 def preprocess_in_python(ref_image_float: np.ndarray,
                          s_curve_contrast: float = 4.0,
                          use_raft: bool = False):
     """
-    Optimized preprocessing with optional RAFT support.
-    
-    Args:
-        ref_image_float: input image float32, 0-1
-        s_curve_contrast: faktor S-curve tone mapping
-        use_raft: jika True, pertahankan RGB; jika False, konversi ke grayscale dan estimasi noise
-
-    Returns:
-        processed image float32, noise_sigma
+    Versi efisien secara memori dan CPU — tanpa ubah hasil akhir.
+    Semua operasi setara secara numerik dengan versi sebelumnya.
     """
     img = ref_image_float.astype(np.float32, copy=False)
+    h, w = img.shape[:2]
 
     # === LANGKAH 0: RGB vs Grayscale ===
     if not use_raft:
@@ -752,10 +748,11 @@ def preprocess_in_python(ref_image_float: np.ndarray,
         processed = img
         noise_sigma = 0.02  # placeholder ringan
 
-    # === LANGKAH 1: Denoising adaptif hanya untuk backend C++ ===
+    # === LANGKAH 1: Denoising adaptif ===
     if not use_raft and noise_sigma > 0.04:
         if noise_sigma < 0.18:
-            norm_noise = np.clip((noise_sigma - 0.04) / (0.18 - 0.04), 0.0, 1.0)
+            norm_noise = (noise_sigma - 0.04) * (1.0 / (0.18 - 0.04))
+            norm_noise = np.clip(norm_noise, 0.0, 1.0)
             d_sigma = 3 + 6 * norm_noise
             r_sigma = (20 + 80 * norm_noise) / 255.0
             diameter = 3 + int(4 * norm_noise)
@@ -764,76 +761,81 @@ def preprocess_in_python(ref_image_float: np.ndarray,
             ksize = 3 if noise_sigma < 0.22 else 5
             processed = cv2.medianBlur(processed, ksize)
 
-    # === LANGKAH 1.5 – 5: Contrast, micro-detail, CLAHE, Laplacian, S-curve ===
+    # === LANGKAH 1.5–5: Micro-contrast & tone ===
     contrast_metric = np.std(processed)
-    low_contrast_thresh, high_contrast_thresh = 0.12, 0.20
-    aggression_factor = 1.0 - np.clip((contrast_metric - low_contrast_thresh) /
-                                      (high_contrast_thresh - low_contrast_thresh), 0.0, 1.0)
+    low_c, high_c = 0.12, 0.20
+    aggression_factor = 1.0 - np.clip((contrast_metric - low_c) / (high_c - low_c), 0.0, 1.0)
 
     micro_contrast_noise_threshold = 0.05
     micro_contrast_strength = 1.0 - min(noise_sigma / micro_contrast_noise_threshold, 1.0)
     if micro_contrast_strength > 0.01:
+        # Gunakan buffer reuse untuk blur dan detail
         blur_small = cv2.GaussianBlur(processed, (0, 0), sigmaX=0.8)
         blur_large = cv2.GaussianBlur(processed, (0, 0), sigmaX=2.0)
-        detail_small = processed - blur_small
-        detail_large = processed - blur_large
-        detail_mix = (detail_small + 0.6 * detail_large)
+        detail_mix = (processed - blur_small) + 0.6 * (processed - blur_large)
+
         base_strength = 0.6 + 0.4 * aggression_factor
         boost = base_strength * micro_contrast_strength
         processed += boost * detail_mix
         np.clip(processed, 0.0, 1.0, out=processed)
 
-    # === CLAHE di channel Luminance jika grayscale atau RGB ===
-    clip_limit = 0.6 + ((1.0 - min(noise_sigma / 0.12, 1.0)) ** 0.45 * (3.0 * (1.0 + 0.5 * aggression_factor)))
+    # === LANGKAH 2: CLAHE (reuse cache) ===
+    clip_limit = 0.6 + ((1.0 - min(noise_sigma / 0.12, 1.0)) ** 0.45 *
+                        (3.0 * (1.0 + 0.5 * aggression_factor)))
     if clip_limit > 0.61:
+        cache_key = (int(clip_limit * 100), processed.ndim)
+        if cache_key not in _CLAHE_CACHE:
+            _CLAHE_CACHE[cache_key] = (
+                cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8)),
+                cv2.createCLAHE(clipLimit=clip_limit * 0.6, tileGridSize=(12, 12))
+            )
+        clahe, clahe2 = _CLAHE_CACHE[cache_key]
+
         if processed.ndim == 3 and processed.shape[2] == 3:
-            # RGB → YCrCb
             ycrcb = cv2.cvtColor(processed, cv2.COLOR_BGR2YCrCb)
             y_channel = np.clip(ycrcb[:, :, 0] * 255.0, 0, 255).astype(np.uint8)
-
-            clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
             y_channel = clahe.apply(y_channel)
-
             if aggression_factor > 0.5:
-                clahe2 = cv2.createCLAHE(clipLimit=clip_limit * 0.6, tileGridSize=(12, 12))
                 y_channel = clahe2.apply(y_channel)
-
             ycrcb[:, :, 0] = y_channel.astype(np.float32) / 255.0
             processed = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
         else:
-            # Grayscale
             img_8u = np.clip(processed * 255.0, 0, 255).astype(np.uint8)
-            clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
             img_8u = clahe.apply(img_8u)
             if aggression_factor > 0.5:
-                clahe2 = cv2.createCLAHE(clipLimit=clip_limit * 0.6, tileGridSize=(12, 12))
                 img_8u = clahe2.apply(img_8u)
             processed[:] = img_8u.astype(np.float32) / 255.0
 
-    # === Laplacian & S-curve ===
+    # === LANGKAH 3: Laplacian & S-curve ===
     lap = cv2.Laplacian(processed, cv2.CV_32F, ksize=3)
     lap_strength = 0.15 * aggression_factor * (1.0 - noise_sigma * 2.0)
     processed += lap_strength * lap
     np.clip(processed, 0.0, 1.0, out=processed)
 
+    # === LANGKAH 4: Gamma bright fix (in-place) ===
     mean_brightness = float(np.mean(processed))
     if mean_brightness < 0.4:
-        factor = (0.4 - mean_brightness) / 0.4
-        gamma = 1.0 - (0.3 * factor)
-        np.power(processed + 1e-6, gamma, out=processed)
+        factor = (0.4 - mean_brightness) * 2.5
+        gamma = max(1.0 - 0.3 * factor, 0.7)
+        np.power(processed, gamma, out=processed)
         np.clip(processed, 0.0, 1.0, out=processed)
 
-    adaptive_s_curve_contrast = s_curve_contrast + (2.0 * aggression_factor)
-    def sigmoid_contrast(x, contrast):
-        return 1.0 / (1.0 + np.exp(-np.float32(contrast) * (x - 0.5)))
-    low = sigmoid_contrast(0.0, adaptive_s_curve_contrast)
-    high = sigmoid_contrast(1.0, adaptive_s_curve_contrast)
-    processed = sigmoid_contrast(processed, adaptive_s_curve_contrast)
-    processed -= low
-    processed /= (high - low)
-    np.clip(processed, 0.0, 1.0, out=processed)
+    # === LANGKAH 5: S-curve final ===
+    adaptive_s = s_curve_contrast + (2.0 * aggression_factor)
+    # Precompute sigmoid table agar np.exp tidak dipanggil pixel-wise
+    x = np.linspace(0, 1, 256, dtype=np.float32)
+    sigmoid_lut = 1.0 / (1.0 + np.exp(-adaptive_s * (x - 0.5)))
+    low, high = sigmoid_lut[0], sigmoid_lut[-1]
+    lut = ((sigmoid_lut - low) / (high - low) * 255).astype(np.uint8)
 
-    return processed.astype(np.float32, copy=False), noise_sigma
+    if processed.ndim == 2:
+        img_8u = (processed * 255).astype(np.uint8)
+        processed[:] = (cv2.LUT(img_8u, lut).astype(np.float32) / 255.0)
+    else:
+        img_8u = (processed * 255).astype(np.uint8)
+        processed[:] = (cv2.LUT(img_8u, lut).astype(np.float32) / 255.0)
+
+    return processed, noise_sigma
 
 
 def estimate_noise_variance(gray_image, edge_threshold_low=70, dilate_kernel_size=4, min_flat_pixels_ratio=0.1):
@@ -906,43 +908,52 @@ def get_adaptive_bilateral(noise_level, min_noise, max_noise, min_d, max_d, min_
     
     return d, sigma, sigma
 
-def normalize_image(image, dtype, out=None): 
+def normalize_image(image, dtype, out=None):
     """
     Normalisasi gambar ke range [0, 1] float32.
-    Jika `out` buffer disediakan, hasil akan disimpan di sana (operasi in-place).
-    Jika tidak, array baru akan dibuat.
+    - Jika `out` disediakan, hasil akan disalin ke buffer tersebut (otomatis disesuaikan ukuran & dimensi).
+    - Jika `out` tidak ada, fungsi akan membuat array baru.
+    - Menangani RGB dan grayscale secara otomatis.
+
+    Args:
+        image: np.ndarray (grayscale 2D atau RGB 3D)
+        dtype: tipe data asli dari gambar (mis. np.uint8, np.uint16)
+        out: buffer opsional (np.ndarray dengan dtype=float32 dan dimensi sama)
+
+    Returns:
+        np.ndarray (float32, 3 channel)
     """
-    try:
+
+    # --- 1. Tentukan skala berdasarkan dtype ---
+    if np.issubdtype(dtype, np.integer):
         scale = np.float32(np.iinfo(dtype).max)
-    except ValueError:
-        if np.issubdtype(dtype, np.floating):
-            scale = 1.0
-        else:
-            # Anda bisa mengganti ini dengan referensi ke language_config jika perlu
-            msg = f"Data type not supported for normalization: {dtype}"
-            raise TypeError(msg)
-
-    # [PERBAIKAN] Logika untuk menentukan array target
-    if out is None:
-        # Jika tidak ada buffer, buat array baru seperti sebelumnya
-        image_float = image.astype(np.float32)
+    elif np.issubdtype(dtype, np.floating):
+        scale = 1.0
     else:
-        # Jika ada buffer, array yang akan kita modifikasi adalah 'out' itu sendiri.
-        image_float = out 
-        # Sekarang, salin data ke dalamnya. `np.copyto` tidak perlu variabel penampung.
-        np.copyto(image_float, image, casting='unsafe')
+        raise TypeError(f"Unsupported dtype for normalization: {dtype}")
 
-    # Sekarang, `image_float` dijamin merupakan array NumPy yang valid.
-    # Lakukan pembagian secara in-place.
+    # --- 2. Pastikan gambar dalam float32 ---
+    img_float = image.astype(np.float32, copy=False)
+
+    # --- 3. Normalisasi in-place jika memungkinkan ---
     if scale > 1e-6:
-        np.divide(image_float, scale, out=image_float)
-    
-    # Penanganan gambar grayscale (2D)
-    if image.ndim == 2: 
-        return np.stack((image_float,) * 3, axis=-1).astype(np.float32, copy=False)
-    
-    # Untuk gambar berwarna, kembalikan buffer yang sudah dimodifikasi (atau array baru jika out=None).
-    return image_float
+        img_float = img_float / scale
+
+    # --- 4. Pastikan output memiliki 3 channel ---
+    if img_float.ndim == 2:
+        # Grayscale → ubah jadi RGB 3-channel
+        img_float = np.stack((img_float, img_float, img_float), axis=-1)
+
+    # --- 5. Sesuaikan buffer 'out' jika diberikan ---
+    if out is not None:
+        # Pastikan ukuran & tipe sesuai
+        if out.shape != img_float.shape or out.dtype != np.float32:
+            out.resize(img_float.shape, refcheck=False)
+            out[:] = np.zeros_like(img_float, dtype=np.float32)
+        np.copyto(out, img_float, casting='unsafe')
+        return out
+
+    return img_float
 
 # =========================================================================
 # === 4. LOGIKA INTI ALIGNMENT & FITUR

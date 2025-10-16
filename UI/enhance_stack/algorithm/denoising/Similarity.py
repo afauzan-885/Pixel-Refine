@@ -115,7 +115,7 @@ class SimilarityAlgorithm:
             work_res_h, work_res_w = int(ref_image_h * scale_factor), int(ref_image_w * scale_factor)
         else:
             # [OPTIMASI MEMORI] Gunakan skala yang lebih agresif. 
-            scale_down_factor = 0.75
+            scale_down_factor = 1.0
             work_res_h, work_res_w = int(ref_image_h * scale_down_factor), int(ref_image_w * scale_down_factor)
         
         # Pastikan resolusi genap (penting untuk beberapa algoritma)
@@ -199,13 +199,14 @@ class SimilarityAlgorithm:
             
             # Panggil fungsi alignment yang sekarang memodifikasi 'images' secara langsung
             alignment_success = perform_image_alignment(
-                images, # List ini akan diubah oleh fungsi
+                images,
                 reference_image_float, 
                 work_res_h, work_res_w,
                 tile_h, tile_w, 
                 ref_dtype, 
                 update_progress, 
-                stop_requested
+                stop_requested,
+                num_alignment_workers=num_workers
             )
             
             if alignment_success:
@@ -231,51 +232,64 @@ class SimilarityAlgorithm:
 
         # --- Producer 'weight_map_producer' dengan penanganan berhenti yang tangguh ---
         def weight_map_producer(task_queue, result_queue, images_list_ref):
-            local_curr_work_res = np.empty((work_res_h, work_res_w, ref_channels_buffer), dtype=np.float32)
+            # Prealokasi buffer sekali saja (grayscale channel 1)
+            local_curr_work_res = np.empty((work_res_h, work_res_w, 1), dtype=np.float32)
+            curr_work_gray = np.empty((work_res_h, work_res_w), dtype=np.float32)
 
             while True:
-                # Periksa sinyal berhenti sebelum mengambil tugas baru
                 if stop_requested and stop_requested():
                     break
                 try:
-                    # Ambil tugas dengan timeout untuk tetap responsif
                     item = task_queue.get(timeout=0.1)
                 except queue.Empty:
-                    continue  # Coba lagi, ini memungkinkan pemeriksaan stop_requested di atas
-
-                # Jika 'None' diterima, itu adalah sinyal untuk berhenti
+                    continue
                 if item is None:
                     break
 
                 image_index = item
-                
                 image_orig = images_list_ref[image_index]
                 if not isinstance(image_orig, np.ndarray):
+                    # Jika gambar sudah dihapus (di set ke None) oleh mekanisme sebelumnya, 
+                    # atau ada kegagalan, kirim None dan tandai tugas selesai.
                     result_queue.put((image_index, None))
+                    task_queue.task_done()
                     continue
-                
-                temp_resized_image = cv2.resize(image_orig, (work_res_w, work_res_h), interpolation=cv2.INTER_AREA)
-                normalize_image(temp_resized_image, ref_dtype, out=local_curr_work_res)
-                del temp_resized_image
+
+                # === Preprocess current image jadi grayscale ===
+                curr_float = normalize_image(image_orig, ref_dtype)
+                curr_preproc, _ = preprocess_in_python(curr_float, use_raft=False)
+                cv2.resize(curr_preproc, (work_res_w, work_res_h), dst=curr_work_gray, interpolation=cv2.INTER_AREA)
+
+                # Bungkus ke format 3D agar kompatibel dengan C++
+                local_curr_work_res[:, :, 0] = curr_work_gray
 
                 weight_map_work_res = np.zeros((work_res_h, work_res_w), dtype=np.float32, order='C')
-                
+
                 c_interface.call_generate_weight_map_jit(
                     weight_map_sum=weight_map_work_res,
                     current_image=local_curr_work_res,
                     reference_image_processed=ref_work_res_pass2,
-                    base_window=base_window, stability_map=stability_map_work_res,
-                    row_starts=row_starts, col_starts=col_starts, tile_h=tile_h, tile_w=tile_w, 
-                    h=work_res_h, w=work_res_w, channels=ref_channels_buffer,
-                    motion_sensitivity=motion_sensitivity, noise_offset_factor=noise_offset_factor,
+                    base_window=base_window,
+                    stability_map=stability_map_work_res,
+                    row_starts=row_starts, col_starts=col_starts,
+                    tile_h=tile_h, tile_w=tile_w, 
+                    h=work_res_h, w=work_res_w,
+                    channels=1,
+                    motion_sensitivity=motion_sensitivity,
+                    noise_offset_factor=noise_offset_factor,
                     precomputed_ref_noise_sigma=ref_noise_sigma
                 )
-                
-                result_queue.put((image_index, weight_map_work_res))
 
-        # --- LANGKAH 4: Arsitektur "Streaming Fusion" dengan Logika Berhenti ---
-        final_image_sum_full_res = np.zeros((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float64)
-        weight_map_sum_full_res = np.zeros((ref_image_h, ref_image_w), dtype=np.float64)
+                weight_map_work_res = np.clip(weight_map_work_res, 0.0, 1.0)
+                weight_map_uint16 = (weight_map_work_res * 65535.0).astype(np.uint16)
+                del weight_map_work_res  
+
+                result_queue.put((image_index, weight_map_uint16))
+                task_queue.task_done() # Penting: Beri tahu task_queue bahwa tugas ini selesai
+
+        # --- LANGKAH 4: Arsitektur "Streaming Fusion" dengan Kontrol Konkurensi Ketat ---
+        final_image_sum_full_res = np.zeros((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32)
+        weight_map_sum_full_res = np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
         processed_frames_spatial = 0
         
         final_num_workers = num_workers
@@ -283,47 +297,82 @@ class SimilarityAlgorithm:
             cpu_cores = os.cpu_count() or 2
             final_num_workers = max(1, min(cpu_cores // 2, 8))
             
+        # task_queue (Unbounded): Digunakan untuk mengirimkan INDEX gambar ke worker.
         task_queue = queue.Queue()
-        result_queue = queue.Queue(maxsize=final_num_workers * 2)
+        result_queue = queue.Queue(maxsize=final_num_workers) 
         
-        for i in range(num_images):
-            task_queue.put(i)
-        
-        # Kirim 'None' sebagai sinyal akhir pekerjaan untuk setiap worker
-        for _ in range(final_num_workers):
-            task_queue.put(None)
-
+        # Inisialisasi thread workers
         threads = [threading.Thread(target=weight_map_producer, args=(task_queue, result_queue, images)) for _ in range(final_num_workers)]
+        
+        next_index_to_send = 0
         
         try:
             for t in threads: t.start()
 
+            # --- Inisialisasi Pengiriman Tugas (Hanya Sejumlah Workers) ---
+            # Ini memastikan bahwa HANYA num_workers frame yang diproses/menunggu pada satu waktu.
+            initial_batch_size = min(num_images, final_num_workers)
+            for i in range(initial_batch_size):
+                task_queue.put(i)
+                next_index_to_send += 1
+            
             finished_count = 0
+            gc_trigger_count = 0 
+            
+            # --- Konsumen Utama (Main Loop) ---
             while finished_count < num_images:
-                # Periksa sinyal berhenti di setiap iterasi loop consumer
                 if stop_requested and stop_requested():
                     break
                 
                 try:
-                    image_index, weight_map_work_res = result_queue.get(timeout=0.1)
-                    
-                    if weight_map_work_res is not None:
+                    # Ambil hasil dari worker (weight map)
+                    image_index, weight_map_uint16 = result_queue.get(timeout=0.1)
+                    result_queue.task_done() # Tandai item di result_queue selesai
+
+                    if weight_map_uint16 is not None:
+                        
+                        weight_map_work_res = weight_map_uint16.astype(np.float32) / 65535.0
+                        del weight_map_uint16
+                        
                         image_orig = images[image_index]
-                        weight_map_full_res = cv2.resize(weight_map_work_res, (ref_image_w, ref_image_h), interpolation=cv2.INTER_LINEAR_EXACT)
+                        
+                        if image_orig is None:
+                            # Ini seharusnya tidak terjadi jika kita mengelola 'images' dengan benar
+                            finished_count += 1
+                            continue
+                            
+                        # --- LANGKAH FUSI GAMBAR RESOLUSI PENUH (Terjadi di thread utama) ---
+                        weight_map_full_res = cv2.resize(weight_map_work_res, (ref_image_w, ref_image_h), interpolation=cv2.INTER_LINEAR)
                         normalized_image_full_res = normalize_image(image_orig, ref_dtype)
                         
-                        weight_map_3d = weight_map_full_res[:, :, np.newaxis]
-                        weighted_image = normalized_image_full_res * weight_map_3d
-                        
-                        final_image_sum_full_res += weighted_image
-                        weight_map_sum_full_res += weight_map_full_res
-                        processed_frames_spatial += 1
+                        np.multiply(normalized_image_full_res, weight_map_full_res[:, :, np.newaxis], out=normalized_image_full_res)
 
-                        del weight_map_work_res, image_orig, weight_map_full_res, normalized_image_full_res, weighted_image, weight_map_3d
-                    
+                        final_image_sum_full_res += normalized_image_full_res.astype(np.float32)
+                        weight_map_sum_full_res += weight_map_full_res.astype(np.float32)
+
+                        del normalized_image_full_res, weight_map_full_res, weight_map_work_res
+                        
+                        # --- PELEPASAN MEMORI DAN PENGATURAN GC (KRUSIAL) ---
+                        images[image_index] = None
+                        gc_trigger_count += 1 
+                        
+                        if gc_trigger_count >= final_num_workers:
+                            gc.collect()
+                            gc_trigger_count = 0 
+                        
+                        processed_frames_spatial += 1
+                        
+                        # --- PENGGANTIAN TUGAS (MENGATUR KONKURENSI) ---
+                        # Setelah FUSI selesai dan memori dilepaskan, 
+                        # kita kirim tugas berikutnya ke task_queue.
+                        if next_index_to_send < num_images:
+                            task_queue.put(next_index_to_send)
+                            next_index_to_send += 1
+                        # ----------------------------------------------------
+
                     finished_count += 1
-                    if finished_count % 3 == 0:
-                        gc.collect()
+                    # if finished_count % 1 == 0:
+                    #     gc.collect()
 
                     if update_progress:
                         current_frame_index_in_pass = finished_count
@@ -337,27 +386,30 @@ class SimilarityAlgorithm:
                         current_total_progress = pass2_range[0] + (progress_in_pass2 * (pass2_range[1] - pass2_range[0]))
                         update_progress(int(current_total_progress), msg)
 
+
                 except queue.Empty:
-                    # Jika antrian hasil kosong, cek apakah semua worker sudah selesai.
-                    # Jika ya, maka tidak ada lagi hasil yang akan datang, jadi kita bisa keluar.
+                    # Jika antrian hasil kosong, pastikan kita tidak terjebak.
+                    if finished_count == num_images:
+                         break
                     if not any(t.is_alive() for t in threads):
+                        # Jika semua thread mati tetapi kita belum selesai, mungkin ada error.
                         break
                     continue
 
             # --- Logika Penghentian yang Bersih ---
             if stop_requested and stop_requested():
                 print("Stop requested detected. Cleaning up threads and queues...")
-                # Kosongkan task_queue untuk membangunkan worker yang mungkin menunggu get()
+                # Kosongkan task_queue dan kirim sinyal 'None' ke worker
                 while not task_queue.empty():
-                    try:
-                        task_queue.get_nowait()
-                    except queue.Empty:
-                        break
-                # Kirim sinyal 'None' lagi untuk memastikan semua worker keluar
-                for _ in range(final_num_workers):
-                    task_queue.put(None)
-
-            # Tunggu semua thread selesai, dengan timeout untuk mencegah freeze
+                    try: task_queue.get_nowait()
+                    except queue.Empty: break
+                task_queue.queue.clear()
+            
+            # Kirim sinyal 'None' hanya jika belum dikirim (misal, jika loop selesai secara normal)
+            for _ in range(final_num_workers):
+                task_queue.put(None) 
+                
+            # Tunggu semua thread selesai
             for i, thread in enumerate(threads):
                 thread.join(timeout=2.0)
                 if thread.is_alive():
@@ -652,7 +704,7 @@ class SimilarityAlgorithm:
                 "overlap": current_overlap,
                 "motion_sensitivity": current_motion_sensitivity,
                 "noise_offset_factor": current_noise_offset_factor,
-                # "num_workers": current_num_workers,
+                "num_workers": current_num_workers,
                 "temporal_consistency": True,
                 "save_temporal_std_path": save_temporal_std_path
             })
