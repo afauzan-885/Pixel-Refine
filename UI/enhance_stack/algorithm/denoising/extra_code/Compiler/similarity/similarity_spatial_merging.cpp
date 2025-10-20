@@ -69,8 +69,8 @@ extern "C"
         // Adaptasi sensitivitas berdasarkan noise
         float adaptation_factor = 1.0f - std::min(global_estimated_noise_sigma / 0.1f, 1.0f);
 
-        const float MAX_SENSITIVITY_BOOST = 0.50f;
-        const float MAX_OFFSET_REDUCTION = 0.50f;
+        const float MAX_SENSITIVITY_BOOST = 0.20f;
+        const float MAX_OFFSET_REDUCTION = 0.20f;
 
         float current_aggression = adaptation_factor;
 
@@ -78,7 +78,7 @@ extern "C"
         float adapted_noise_offset_factor = noise_offset_factor * (1.0f - MAX_OFFSET_REDUCTION * current_aggression);
 
         /// =================================================================================
-        // === BAGIAN B: ANALISIS SKALA KASAR (DENGAN MULTI-HIPOTESIS & PERKALIAN)      ===
+        // === BAGIAN B: ANALISIS SKALA KASAR (DENGAN FFT & MULTI-HIPOTESIS)           ===
         // =================================================================================
         {
             const int tile_h_fine = tile_h;
@@ -147,23 +147,17 @@ extern "C"
 #pragma omp parallel for schedule(dynamic)
                 for (int r_tile_fine = 0; r_tile_fine < num_tiles_h_fine; ++r_tile_fine)
                 {
-                    MotionMatching::MBMBuffers mbm_buffers;
-                    if (tile_h_fine > 0 && tile_w_fine > 0)
-                    {
-                        mbm_buffers.diff_workspace.create(tile_h_fine, tile_w_fine, CV_32FC1);
-                        mbm_buffers.grad_x.create(tile_h_fine, tile_w_fine, CV_32F);
-                        mbm_buffers.grad_y.create(tile_h_fine, tile_w_fine, CV_32F);
-                        mbm_buffers.grad_mag_current.create(tile_h_fine, tile_w_fine, CV_32FC1);
-                    }
-
+                    // *** PERUBAHAN: Tidak perlu buffer MBM untuk FFT di skala kasar ***
                     for (int c_tile_fine = 0; c_tile_fine < num_tiles_w_fine; ++c_tile_fine)
                     {
                         cv::Rect roi_fine(c_tile_fine * tile_w_fine, r_tile_fine * tile_h_fine, tile_w_fine, tile_h_fine);
 
-                        MotionMatching::TileMatchResult res = MotionMatching::calculate_tile_similarity(
-                            current_img_fine(roi_fine), ref_img_fine(roi_fine),
-                            global_estimated_noise_sigma,
-                            GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON, mbm_buffers);
+                        // *** GUNAKAN FFT untuk skala kasar (lebih cepat & robust untuk pola global) ***
+                        MotionMatching::TileMatchResult res = MotionMatching::calculate_tile_fft(
+                            current_img_fine(roi_fine), 
+                            ref_img_fine(roi_fine),
+                            global_estimated_noise_sigma
+                        );
 
                         float local_confidence_fine = res.success
                                                           ? MotionMatching::calculate_match_confidence(
@@ -208,7 +202,7 @@ extern "C"
                 final_guidance_map_full_res = cv::Mat(h_img, w_img, CV_32FC1, cv::Scalar(1.0f));
 
             // =================================================================================
-            // === TAHAP 2: ANALISIS SKALA HALUS & AKUMULASI FINAL (DENGAN PERKALIAN)      ===
+            // === TAHAP 2: ANALISIS SKALA HALUS & AKUMULASI FINAL (DENGAN MAD SPATIAL)    ===
             // =================================================================================
 
             cv::Mat weight_map_sum_mat(h_img, w_img, CV_32FC1, weight_map_sum_ptr);
@@ -217,6 +211,8 @@ extern "C"
 #pragma omp parallel
             {
                 cv::Mat local_weight_tile(tile_h_fine, tile_w_fine, CV_32FC1);
+                
+                // *** PERUBAHAN: Buffer MBM hanya untuk skala halus (MAD) ***
                 MotionMatching::MBMBuffers mbm_buffers_fine;
                 if (tile_h_fine > 0 && tile_w_fine > 0)
                 {
@@ -238,10 +234,15 @@ extern "C"
 
                         cv::Rect tile_roi(c, r, tile_w_fine, tile_h_fine);
 
-                        MotionMatching::TileMatchResult mbm_result = MotionMatching::calculate_tile_similarity(
-                            current_image_gray(tile_roi), reference_image_gray(tile_roi),
+                        // *** GUNAKAN MAD (gradient+Laplacian) untuk skala halus ***
+                        MotionMatching::TileMatchResult mbm_result = MotionMatching::calculate_tile_mad(
+                            current_image_gray(tile_roi), 
+                            reference_image_gray(tile_roi),
                             global_estimated_noise_sigma,
-                            GRADIENT_WEIGHT_FACTOR, STABILITY_EPSILON, mbm_buffers_fine);
+                            GRADIENT_WEIGHT_FACTOR, 
+                            STABILITY_EPSILON, 
+                            mbm_buffers_fine
+                        );
 
                         float confidence_fine = mbm_result.success
                                                     ? MotionMatching::calculate_match_confidence(

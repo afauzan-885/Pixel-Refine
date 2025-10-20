@@ -721,9 +721,4 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
             print(f"Error fatal di luar blok alignment C++ utama: {e}")
             traceback.print_exc()
             return False
-            
-    # finally:
-    #     # Bersihkan referensi yang dibuat di thread utama
-    #     if 'ref_work_gray_cpp' in locals():
-    #         del ref_work_gray_cpp
-    #     gc.collect()
+       

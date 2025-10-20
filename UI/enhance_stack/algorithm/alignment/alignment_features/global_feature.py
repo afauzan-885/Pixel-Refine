@@ -699,7 +699,8 @@ def gaussian_window(size, sigma_scale=1/6):
         return np.ascontiguousarray(window.astype(np.float32))
     
 # ================= Replikasi Fungsi C++ untuk Estimasi Noise & Pra-pemrosesan Gambar Referensi =================  
-MAD_TO_SIGMA_FACTOR = 1.4826 
+MAD_TO_SIGMA_FACTOR = 1.4826
+_CLAHE_CACHE = {}  
 
 def estimate_noise_in_python(ref_image_gray_float: np.ndarray) -> float:
     """Estimasi noise dengan minimal alokasi memori."""
@@ -707,14 +708,9 @@ def estimate_noise_in_python(ref_image_gray_float: np.ndarray) -> float:
         return 0.015
 
     h, w = ref_image_gray_float.shape
-    max_dim = max(h, w)
-    if max_dim > 1024:
-        scale = 1024.0 / max_dim
-        downsampled_img = cv2.resize(ref_image_gray_float, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-    else:
-        downsampled_img = ref_image_gray_float  # tanpa copy
+    native_img = ref_image_gray_float
     # hitung Laplacian
-    laplacian_output = cv2.Laplacian(downsampled_img, cv2.CV_32F, ksize=3)
+    laplacian_output = cv2.Laplacian(native_img, cv2.CV_32F, ksize=3)
     if laplacian_output is None:
         return 0.015
 
@@ -725,17 +721,13 @@ def estimate_noise_in_python(ref_image_gray_float: np.ndarray) -> float:
     estimated_sigma = mad_value * MAD_TO_SIGMA_FACTOR
     return float(np.clip(estimated_sigma, 0.001, 0.35))
 
-_CLAHE_CACHE = {}
-
 def preprocess_in_python(ref_image_float: np.ndarray,
                          s_curve_contrast: float = 4.0,
                          use_raft: bool = False):
     """
-    Versi efisien secara memori dan CPU — tanpa ubah hasil akhir.
-    Semua operasi setara secara numerik dengan versi sebelumnya.
+    Versi efisien secara memori dan CPU — dengan denoising di AWAL pipeline.
     """
     img = ref_image_float.astype(np.float32, copy=False)
-    h, w = img.shape[:2]
 
     # === LANGKAH 0: RGB vs Grayscale ===
     if not use_raft:
@@ -748,20 +740,27 @@ def preprocess_in_python(ref_image_float: np.ndarray,
         processed = img
         noise_sigma = 0.02  # placeholder ringan
 
-    # === LANGKAH 1: Denoising adaptif ===
+    # === LANGKAH 1: Denoising adaptif (DILAKUKAN DI AWAL) ===
     if not use_raft and noise_sigma > 0.04:
         if noise_sigma < 0.18:
+            # Noise sedang → bilateral yang lebih agresif
             norm_noise = (noise_sigma - 0.04) * (1.0 / (0.18 - 0.04))
             norm_noise = np.clip(norm_noise, 0.0, 1.0)
-            d_sigma = 3 + 6 * norm_noise
-            r_sigma = (20 + 80 * norm_noise) / 255.0
-            diameter = 3 + int(4 * norm_noise)
+            d_sigma = 5 + 10 * norm_noise
+            r_sigma = (40 + 120 * norm_noise) / 255.0
+            diameter = 5 + int(4 * norm_noise)
             processed = cv2.bilateralFilter(processed, diameter, r_sigma, d_sigma)
-        else:
-            ksize = 3 if noise_sigma < 0.22 else 5
-            processed = cv2.medianBlur(processed, ksize)
 
-    # === LANGKAH 1.5–5: Micro-contrast & tone ===
+        else:
+            # Noise tinggi → median iteratif
+            temp = processed.copy()
+            for _ in range(3):
+                temp_8u = np.clip(temp * 255.0, 0, 255).astype(np.uint8)
+                medianed_8u = cv2.medianBlur(temp_8u, 3 if noise_sigma < 0.28 else 5)
+                temp = medianed_8u.astype(np.float32) / 255.0
+            processed = temp
+
+    # === LANGKAH 2: Micro-contrast & tone ===
     contrast_metric = np.std(processed)
     low_c, high_c = 0.12, 0.20
     aggression_factor = 1.0 - np.clip((contrast_metric - low_c) / (high_c - low_c), 0.0, 1.0)
@@ -769,7 +768,6 @@ def preprocess_in_python(ref_image_float: np.ndarray,
     micro_contrast_noise_threshold = 0.05
     micro_contrast_strength = 1.0 - min(noise_sigma / micro_contrast_noise_threshold, 1.0)
     if micro_contrast_strength > 0.01:
-        # Gunakan buffer reuse untuk blur dan detail
         blur_small = cv2.GaussianBlur(processed, (0, 0), sigmaX=0.8)
         blur_large = cv2.GaussianBlur(processed, (0, 0), sigmaX=2.0)
         detail_mix = (processed - blur_small) + 0.6 * (processed - blur_large)
@@ -779,7 +777,7 @@ def preprocess_in_python(ref_image_float: np.ndarray,
         processed += boost * detail_mix
         np.clip(processed, 0.0, 1.0, out=processed)
 
-    # === LANGKAH 2: CLAHE (reuse cache) ===
+    # === LANGKAH 3: CLAHE (reuse cache) ===
     clip_limit = 0.6 + ((1.0 - min(noise_sigma / 0.12, 1.0)) ** 0.45 *
                         (3.0 * (1.0 + 0.5 * aggression_factor)))
     if clip_limit > 0.61:
@@ -806,13 +804,13 @@ def preprocess_in_python(ref_image_float: np.ndarray,
                 img_8u = clahe2.apply(img_8u)
             processed[:] = img_8u.astype(np.float32) / 255.0
 
-    # === LANGKAH 3: Laplacian & S-curve ===
+    # === LANGKAH 4: Laplacian & S-curve enhancement ===
     lap = cv2.Laplacian(processed, cv2.CV_32F, ksize=3)
     lap_strength = 0.15 * aggression_factor * (1.0 - noise_sigma * 2.0)
     processed += lap_strength * lap
     np.clip(processed, 0.0, 1.0, out=processed)
 
-    # === LANGKAH 4: Gamma bright fix (in-place) ===
+    # === LANGKAH 5: Gamma bright fix ===
     mean_brightness = float(np.mean(processed))
     if mean_brightness < 0.4:
         factor = (0.4 - mean_brightness) * 2.5
@@ -820,20 +818,15 @@ def preprocess_in_python(ref_image_float: np.ndarray,
         np.power(processed, gamma, out=processed)
         np.clip(processed, 0.0, 1.0, out=processed)
 
-    # === LANGKAH 5: S-curve final ===
+    # === LANGKAH 6: S-curve final ===
     adaptive_s = s_curve_contrast + (2.0 * aggression_factor)
-    # Precompute sigmoid table agar np.exp tidak dipanggil pixel-wise
     x = np.linspace(0, 1, 256, dtype=np.float32)
     sigmoid_lut = 1.0 / (1.0 + np.exp(-adaptive_s * (x - 0.5)))
     low, high = sigmoid_lut[0], sigmoid_lut[-1]
     lut = ((sigmoid_lut - low) / (high - low) * 255).astype(np.uint8)
 
-    if processed.ndim == 2:
-        img_8u = (processed * 255).astype(np.uint8)
-        processed[:] = (cv2.LUT(img_8u, lut).astype(np.float32) / 255.0)
-    else:
-        img_8u = (processed * 255).astype(np.uint8)
-        processed[:] = (cv2.LUT(img_8u, lut).astype(np.float32) / 255.0)
+    img_8u = (processed * 255).astype(np.uint8)
+    processed[:] = (cv2.LUT(img_8u, lut).astype(np.float32) / 255.0)
 
     return processed, noise_sigma
 

@@ -96,8 +96,8 @@ class SimilarityAlgorithm:
                     temporal_consistency=False, num_workers=-1,
                     save_temporal_std_path=None,
                     weight_of_each_image=False,
-                    temporal_analysis_mode='one_pass', # Opsi: 'one_pass', 'two_pass_full'
-                    enable_alignment=True,  # Parameter baru untuk mengaktifkan alignment
+                    temporal_analysis_mode='one_pass',
+                    enable_alignment=False,
                     **unused_kwargs):
 
         # --- LANGKAH 1: Inisialisasi dan Penentuan Resolusi Kerja (Tidak Berubah) ---
@@ -115,7 +115,7 @@ class SimilarityAlgorithm:
             work_res_h, work_res_w = int(ref_image_h * scale_factor), int(ref_image_w * scale_factor)
         else:
             # [OPTIMASI MEMORI] Gunakan skala yang lebih agresif. 
-            scale_down_factor = 1.0
+            scale_down_factor = 0.75
             work_res_h, work_res_w = int(ref_image_h * scale_down_factor), int(ref_image_w * scale_down_factor)
         
         # Pastikan resolusi genap (penting untuk beberapa algoritma)
