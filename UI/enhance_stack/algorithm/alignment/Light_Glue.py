@@ -113,15 +113,6 @@ def add_dll_to_path():
             os.environ["PATH"] = str(dll_dir) + os.pathsep + os.environ.get("PATH", "")
         # print(f"[INFO] Adding cuDNN from folder: {cudnn_dlls[0].parent}")
 
-    # Check if the CUDA provider can be loaded after adding the path
-    try:
-        if "CUDAExecutionProvider" in ort.get_available_providers():
-            print("[INFO] GPU support successfully enabled.")
-        else:
-            print("[WARNING] CUDAExecutionProvider tidak tersedia.")
-    except Exception as e:
-        print(f"[WARNING] Failed to enable GPU support. {e}")
-
 # --- Panggil fungsi ini di awal skrip Anda ---
 if os.name == 'nt':
     add_dll_to_path()

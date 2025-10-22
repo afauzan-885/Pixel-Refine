@@ -700,7 +700,8 @@ def gaussian_window(size, sigma_scale=1/6):
     
 # ================= Replikasi Fungsi C++ untuk Estimasi Noise & Pra-pemrosesan Gambar Referensi =================  
 MAD_TO_SIGMA_FACTOR = 1.4826
-_CLAHE_CACHE = {}  
+_CLAHE_CACHE = {}
+_SIGMOID_LUT_CACHE = {}  
 
 def estimate_noise_in_python(ref_image_gray_float: np.ndarray) -> float:
     """Estimasi noise dengan minimal alokasi memori."""
@@ -719,114 +720,121 @@ def estimate_noise_in_python(ref_image_gray_float: np.ndarray) -> float:
     np.abs(laplacian_output - median_val, out=laplacian_output)
     mad_value = np.median(laplacian_output)
     estimated_sigma = mad_value * MAD_TO_SIGMA_FACTOR
-    return float(np.clip(estimated_sigma, 0.001, 0.35))
+    return float(np.clip(estimated_sigma, 0.001, 0.999))
 
 def preprocess_in_python(ref_image_float: np.ndarray,
                          s_curve_contrast: float = 4.0,
                          use_raft: bool = False):
-    """
-    Versi efisien secara memori dan CPU — dengan denoising di AWAL pipeline.
-    """
-    img = ref_image_float.astype(np.float32, copy=False)
+    """Versi optimal untuk efisiensi CPU & memori, dengan adaptasi noise & kontrol agresi filter."""
+    img = ref_image_float
+    if img.dtype != np.float32:
+        img = img.astype(np.float32, copy=False)
 
-    # === LANGKAH 0: RGB vs Grayscale ===
+    # === LANGKAH 0: Noise estimation ===
     if not use_raft:
         if img.ndim == 3 and img.shape[2] > 1:
-            processed = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         else:
-            processed = img
-        noise_sigma = estimate_noise_in_python(processed)
+            gray = img
+        noise_sigma = estimate_noise_in_python(gray)
+        processed = gray.copy() if gray is img else gray
     else:
         processed = img
-        noise_sigma = 0.02  # placeholder ringan
+        noise_sigma = 0.02
 
-    # === LANGKAH 1: Denoising adaptif (DILAKUKAN DI AWAL) ===
+    # === LANGKAH 1: Denoising adaptif ===
+    median_denoise_used = False
     if not use_raft and noise_sigma > 0.04:
         if noise_sigma < 0.18:
-            # Noise sedang → bilateral yang lebih agresif
-            norm_noise = (noise_sigma - 0.04) * (1.0 / (0.18 - 0.04))
-            norm_noise = np.clip(norm_noise, 0.0, 1.0)
+            norm_noise = np.clip((noise_sigma - 0.04) / (0.18 - 0.04), 0.0, 1.0)
             d_sigma = 5 + 10 * norm_noise
             r_sigma = (40 + 120 * norm_noise) / 255.0
             diameter = 5 + int(4 * norm_noise)
             processed = cv2.bilateralFilter(processed, diameter, r_sigma, d_sigma)
-
         else:
-            # Noise tinggi → median iteratif
-            temp = processed.copy()
+            # === Median denoising untuk noise tinggi ===
+            median_denoise_used = True
+            temp = processed
+            ksize = 3 if noise_sigma < 0.28 else 5
             for _ in range(3):
-                temp_8u = np.clip(temp * 255.0, 0, 255).astype(np.uint8)
-                medianed_8u = cv2.medianBlur(temp_8u, 3 if noise_sigma < 0.28 else 5)
-                temp = medianed_8u.astype(np.float32) / 255.0
+                np.clip(temp, 0.0, 1.0, out=temp)
+                temp_8u = (temp * 255).astype(np.uint8, copy=False)
+                temp_8u = cv2.medianBlur(temp_8u, ksize)
+                temp = temp_8u.astype(np.float32) / 255.0
             processed = temp
 
-    # === LANGKAH 2: Micro-contrast & tone ===
-    contrast_metric = np.std(processed)
+    # === LANGKAH 2: Micro-contrast ===
+    contrast_metric = float(np.std(processed))
     low_c, high_c = 0.12, 0.20
-    aggression_factor = 1.0 - np.clip((contrast_metric - low_c) / (high_c - low_c), 0.0, 1.0)
+    aggression = 1.0 - np.clip((contrast_metric - low_c) / (high_c - low_c), 0.0, 1.0)
+    micro_th = 0.05
+    micro_strength = 1.0 - min(noise_sigma / micro_th, 1.0)
 
-    micro_contrast_noise_threshold = 0.05
-    micro_contrast_strength = 1.0 - min(noise_sigma / micro_contrast_noise_threshold, 1.0)
-    if micro_contrast_strength > 0.01:
-        blur_small = cv2.GaussianBlur(processed, (0, 0), sigmaX=0.8)
-        blur_large = cv2.GaussianBlur(processed, (0, 0), sigmaX=2.0)
-        detail_mix = (processed - blur_small) + 0.6 * (processed - blur_large)
-
-        base_strength = 0.6 + 0.4 * aggression_factor
-        boost = base_strength * micro_contrast_strength
-        processed += boost * detail_mix
+    if micro_strength > 0.01:
+        blur_s = cv2.GaussianBlur(processed, (0, 0), sigmaX=0.8)
+        blur_l = cv2.GaussianBlur(processed, (0, 0), sigmaX=2.0)
+        detail = (processed - blur_s) + 0.6 * (processed - blur_l)
+        boost = (0.6 + 0.4 * aggression) * micro_strength
+        processed += boost * detail
         np.clip(processed, 0.0, 1.0, out=processed)
 
-    # === LANGKAH 3: CLAHE (reuse cache) ===
-    clip_limit = 0.6 + ((1.0 - min(noise_sigma / 0.12, 1.0)) ** 0.45 *
-                        (3.0 * (1.0 + 0.5 * aggression_factor)))
-    if clip_limit > 0.61:
-        cache_key = (int(clip_limit * 100), processed.ndim)
-        if cache_key not in _CLAHE_CACHE:
-            _CLAHE_CACHE[cache_key] = (
-                cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8)),
-                cv2.createCLAHE(clipLimit=clip_limit * 0.6, tileGridSize=(12, 12))
-            )
-        clahe, clahe2 = _CLAHE_CACHE[cache_key]
+    # === LANGKAH 3: CLAHE ===
+    # Skip jika median denoising digunakan
+    if not median_denoise_used:
+        clip_limit = 0.6 + ((1.0 - min(noise_sigma / 0.12, 1.0)) ** 0.45 *
+                            (3.0 * (1.0 + 0.5 * aggression)))
+        if clip_limit > 0.61:
+            key = (int(clip_limit * 100), processed.ndim)
+            if key not in _CLAHE_CACHE:
+                _CLAHE_CACHE[key] = (
+                    cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8)),
+                    cv2.createCLAHE(clipLimit=clip_limit * 0.6, tileGridSize=(12, 12))
+                )
+            clahe1, clahe2 = _CLAHE_CACHE[key]
 
-        if processed.ndim == 3 and processed.shape[2] == 3:
-            ycrcb = cv2.cvtColor(processed, cv2.COLOR_BGR2YCrCb)
-            y_channel = np.clip(ycrcb[:, :, 0] * 255.0, 0, 255).astype(np.uint8)
-            y_channel = clahe.apply(y_channel)
-            if aggression_factor > 0.5:
-                y_channel = clahe2.apply(y_channel)
-            ycrcb[:, :, 0] = y_channel.astype(np.float32) / 255.0
-            processed = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
-        else:
-            img_8u = np.clip(processed * 255.0, 0, 255).astype(np.uint8)
-            img_8u = clahe.apply(img_8u)
-            if aggression_factor > 0.5:
-                img_8u = clahe2.apply(img_8u)
-            processed[:] = img_8u.astype(np.float32) / 255.0
+            if processed.ndim == 3 and processed.shape[2] == 3:
+                ycrcb = cv2.cvtColor(processed, cv2.COLOR_BGR2YCrCb)
+                y = (ycrcb[:, :, 0] * 255).astype(np.uint8)
+                y = clahe1.apply(y)
+                if aggression > 0.5:
+                    y = clahe2.apply(y)
+                ycrcb[:, :, 0] = y.astype(np.float32) / 255.0
+                processed = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
+            else:
+                img_8u = (processed * 255).astype(np.uint8)
+                img_8u = clahe1.apply(img_8u)
+                if aggression > 0.5:
+                    img_8u = clahe2.apply(img_8u)
+                processed[:] = img_8u.astype(np.float32) / 255.0
 
-    # === LANGKAH 4: Laplacian & S-curve enhancement ===
-    lap = cv2.Laplacian(processed, cv2.CV_32F, ksize=3)
-    lap_strength = 0.15 * aggression_factor * (1.0 - noise_sigma * 2.0)
-    processed += lap_strength * lap
-    np.clip(processed, 0.0, 1.0, out=processed)
+    # === LANGKAH 4: Laplacian detail ===
+    # Skip jika median denoising digunakan (untuk menghindari amplifikasi noise residu)
+    if not median_denoise_used:
+        lap = cv2.Laplacian(processed, cv2.CV_32F, ksize=3)
+        lap_strength = 0.15 * aggression * (1.0 - noise_sigma * 2.0)
+        processed += lap_strength * lap
+        np.clip(processed, 0.0, 1.0, out=processed)
 
-    # === LANGKAH 5: Gamma bright fix ===
-    mean_brightness = float(np.mean(processed))
-    if mean_brightness < 0.4:
-        factor = (0.4 - mean_brightness) * 2.5
-        gamma = max(1.0 - 0.3 * factor, 0.7)
+    # === LANGKAH 5: Gamma fix ===
+    mean_bright = float(np.mean(processed))
+    if mean_bright < 0.4:
+        gamma = max(1.0 - 0.3 * ((0.4 - mean_bright) * 2.5), 0.7)
         np.power(processed, gamma, out=processed)
         np.clip(processed, 0.0, 1.0, out=processed)
 
-    # === LANGKAH 6: S-curve final ===
-    adaptive_s = s_curve_contrast + (2.0 * aggression_factor)
-    x = np.linspace(0, 1, 256, dtype=np.float32)
-    sigmoid_lut = 1.0 / (1.0 + np.exp(-adaptive_s * (x - 0.5)))
-    low, high = sigmoid_lut[0], sigmoid_lut[-1]
-    lut = ((sigmoid_lut - low) / (high - low) * 255).astype(np.uint8)
+    # === LANGKAH 6: S-curve (cache LUT) ===
+    adaptive_s = s_curve_contrast + (2.0 * aggression)
+    if adaptive_s not in _SIGMOID_LUT_CACHE:
+        x = np.linspace(0, 1, 256, dtype=np.float32)
+        sig = 1.0 / (1.0 + np.exp(-adaptive_s * (x - 0.5)))
+        low, high = sig[0], sig[-1]
+        lut = ((sig - low) / (high - low) * 255).astype(np.uint8)
+        _SIGMOID_LUT_CACHE[adaptive_s] = lut
+    else:
+        lut = _SIGMOID_LUT_CACHE[adaptive_s]
 
     img_8u = (processed * 255).astype(np.uint8)
-    processed[:] = (cv2.LUT(img_8u, lut).astype(np.float32) / 255.0)
+    processed[:] = cv2.LUT(img_8u, lut).astype(np.float32) / 255.0
 
     return processed, noise_sigma
 

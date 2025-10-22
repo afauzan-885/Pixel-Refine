@@ -459,7 +459,7 @@ def visualize_flow(flow):
 
 def perform_image_alignment(images, reference_image_float, work_res_h, work_res_w,
                             tile_h, tile_w, ref_dtype, update_progress=None, stop_requested=None,
-                            use_raft=True, num_alignment_workers=2, visualization=False): # Ganti default 2 ke 4
+                            use_raft=False, num_alignment_workers=2, visualization=False): # Ganti default 2 ke 4
     """
     Menyelaraskan (align) gambar dengan manajemen sumber daya yang aman,
     menggunakan paralelisasi untuk RAFT (GPU) atau C++ (CPU/Legacy).

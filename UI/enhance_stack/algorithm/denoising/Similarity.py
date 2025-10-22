@@ -97,29 +97,50 @@ class SimilarityAlgorithm:
                     save_temporal_std_path=None,
                     weight_of_each_image=False,
                     temporal_analysis_mode='one_pass',
-                    enable_alignment=False,
+                    enable_alignment=True,
+                    scale_down_factor: float = 1.0,  # <--- Tambahan baru
                     **unused_kwargs):
 
-        # --- LANGKAH 1: Inisialisasi dan Penentuan Resolusi Kerja (Tidak Berubah) ---
-        tile_h, tile_w =  map(int, tile_size)
+        # --- LANGKAH 1: Inisialisasi dan Penentuan Resolusi Kerja ---
+        tile_h, tile_w = map(int, tile_size)
         try:
             c_interface = SimilaritySpatialInterface(lib_path)
         except (FileNotFoundError, OSError, AttributeError) as e:
             raise RuntimeError(f"Gagal memuat C++ interface_spatial_merging: {e}")
+
         num_images = len(images)
-        
         work_res_h, work_res_w = ref_image_h, ref_image_w
-        TARGET_MP = 10 * 1e6 
-        if (ref_image_h * ref_image_w) > TARGET_MP:
-            scale_factor = np.sqrt(TARGET_MP / (ref_image_h * ref_image_w))
-            work_res_h, work_res_w = int(ref_image_h * scale_factor), int(ref_image_w * scale_factor)
+        TARGET_MP = 12 * 1e6  # target maksimum megapixel untuk skala otomatis
+
+        # --- Logika skala otomatis + manual ---
+        if scale_down_factor != 1.0:
+            if scale_down_factor < 1.0:
+                # Skalakan ke resolusi lebih rendah sesuai faktor manual
+                work_res_h = int(ref_image_h * scale_down_factor)
+                work_res_w = int(ref_image_w * scale_down_factor)
+                if update_progress:
+                    update_progress(10, f"Menggunakan scale_down_factor={scale_down_factor:.2f} (downscale aktif)")
+            else:
+                # > 1.0: skip resize (anggap tidak perlu scaling ke atas)
+                work_res_h, work_res_w = ref_image_h, ref_image_w
+                if update_progress:
+                    update_progress(10, f"scale_down_factor={scale_down_factor:.2f} > 1.0, menggunakan resolusi asli")
         else:
-            # [OPTIMASI MEMORI] Gunakan skala yang lebih agresif. 
-            scale_down_factor = 0.75
-            work_res_h, work_res_w = int(ref_image_h * scale_down_factor), int(ref_image_w * scale_down_factor)
-        
-        # Pastikan resolusi genap (penting untuk beberapa algoritma)
+            # scale_down_factor == 1.0 → tidak ada resize, tetapi jika resolusi terlalu besar, otomatis di-scale
+            if (ref_image_h * ref_image_w) > TARGET_MP:
+                scale_factor = np.sqrt(TARGET_MP / (ref_image_h * ref_image_w))
+                work_res_h, work_res_w = int(ref_image_h * scale_factor), int(ref_image_w * scale_factor)
+                if update_progress:
+                    update_progress(10, f"Resolusi tinggi terdeteksi, otomatis scale ke {scale_factor:.2f}x")
+            else:
+                # Tidak perlu resize (resolusi masih aman)
+                work_res_h, work_res_w = ref_image_h, ref_image_w
+                if update_progress:
+                    update_progress(10, "Menggunakan resolusi asli (scale_down_factor=1.0)")
+
+        # Pastikan resolusi genap (penting untuk tile processing)
         work_res_h, work_res_w = (work_res_h // 2) * 2, (work_res_w // 2) * 2
+
         
         base_window = gaussian_window((tile_h, tile_w))
         step_y = max(int(tile_h * (1 - overlap)), 1)
@@ -213,10 +234,8 @@ class SimilarityAlgorithm:
                 if update_progress:
                     update_progress(40, "Alignment selesai, melanjutkan ke spatial merging...")
             else:
-                # Fungsi mengembalikan False jika gagal atau dibatalkan.
-                # Jika dibatalkan oleh user, kita perlu keluar dari fungsi.
                 if stop_requested and stop_requested():
-                    return None, None, None # Keluar jika proses dibatalkan
+                    return None, None, None
                 
                 # Jika hanya gagal (bukan dibatalkan), kita bisa lanjutkan dengan gambar asli.
                 if update_progress:

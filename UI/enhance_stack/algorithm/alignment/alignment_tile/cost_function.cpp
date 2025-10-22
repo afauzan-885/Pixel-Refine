@@ -11,52 +11,43 @@
 // OPTIMIZED: Zero-Mean SAD dengan AVX - Performa Maksimal, Akurasi Sama
 // ============================================================================
 
-// OPTIMIZATION 1: Horizontal sum yang lebih efisien
 static inline float horizontal_sum_avx(__m256 v)
 {
-    // Shuffle dan add lebih efisien dari extract
-    __m128 lo = _mm256_castps256_ps128(v);
-    __m128 hi = _mm256_extractf128_ps(v, 1);
-    __m128 sum4 = _mm_add_ps(lo, hi);
-    
-    // Horizontal add untuk 4 elements
-    __m128 shuf = _mm_movehdup_ps(sum4);        // [1,1,3,3]
-    __m128 sums = _mm_add_ps(sum4, shuf);       // [0+1, 1+1, 2+3, 3+3]
-    shuf = _mm_movehl_ps(shuf, sums);           // [2+3, 3+3, ?, ?]
-    sums = _mm_add_ss(sums, shuf);              // [0+1+2+3, ...]
-    
+    __m128 vlow  = _mm256_castps256_ps128(v);
+    __m128 vhigh = _mm256_extractf128_ps(v, 1);
+    vlow  = _mm_add_ps(vlow, vhigh);
+    __m128 shuf = _mm_movehdup_ps(vlow);
+    __m128 sums = _mm_add_ps(vlow, shuf);
+    shuf = _mm_movehl_ps(shuf, sums);
+    sums = _mm_add_ss(sums, shuf);
     return _mm_cvtss_f32(sums);
 }
 
-// OPTIMIZATION 2: Unroll lebih agresif untuk pipeline CPU
-float block_cost_zsad_avx(const float* ref, const float* comp, int len)
+// =============================================================
+// ===============  FUNGSI INTI: block_cost_zsad_avx  ================
+// =============================================================
+
+static inline float block_cost_zsad_avx(const float* ref, const float* comp, int len)
 {
-    // Prefetch strategy untuk large arrays
-    constexpr int PREFETCH_DISTANCE = 512; // bytes ahead
-    
-    __m256 vsum_ref[4] = {
-        _mm256_setzero_ps(), _mm256_setzero_ps(),
-        _mm256_setzero_ps(), _mm256_setzero_ps()
-    };
-    __m256 vsum_comp[4] = {
-        _mm256_setzero_ps(), _mm256_setzero_ps(),
-        _mm256_setzero_ps(), _mm256_setzero_ps()
-    };
+    constexpr int PREFETCH_DISTANCE = 512; // bytes
+
+    // Akumulator mean sementara
+    __m256 vsum_ref[4]  = { _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps() };
+    __m256 vsum_comp[4] = { _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps() };
 
     int i = 0;
-    
-    for (; i + 32 <= len; i += 32) {
-        // Prefetch data yang akan digunakan di iterasi berikutnya
+    for (; i + 32 <= len; i += 32)
+    {
         if (i + PREFETCH_DISTANCE < len) {
-            _mm_prefetch(reinterpret_cast<const char*>(ref + i + PREFETCH_DISTANCE), _MM_HINT_T0);
+            _mm_prefetch(reinterpret_cast<const char*>(ref  + i + PREFETCH_DISTANCE), _MM_HINT_T0);
             _mm_prefetch(reinterpret_cast<const char*>(comp + i + PREFETCH_DISTANCE), _MM_HINT_T0);
         }
-        
+
         __m256 vref0  = _mm256_loadu_ps(ref + i);
         __m256 vref1  = _mm256_loadu_ps(ref + i + 8);
         __m256 vref2  = _mm256_loadu_ps(ref + i + 16);
         __m256 vref3  = _mm256_loadu_ps(ref + i + 24);
-        
+
         __m256 vcomp0 = _mm256_loadu_ps(comp + i);
         __m256 vcomp1 = _mm256_loadu_ps(comp + i + 8);
         __m256 vcomp2 = _mm256_loadu_ps(comp + i + 16);
@@ -66,21 +57,17 @@ float block_cost_zsad_avx(const float* ref, const float* comp, int len)
         vsum_ref[1]  = _mm256_add_ps(vsum_ref[1], vref1);
         vsum_ref[2]  = _mm256_add_ps(vsum_ref[2], vref2);
         vsum_ref[3]  = _mm256_add_ps(vsum_ref[3], vref3);
-        
+
         vsum_comp[0] = _mm256_add_ps(vsum_comp[0], vcomp0);
         vsum_comp[1] = _mm256_add_ps(vsum_comp[1], vcomp1);
         vsum_comp[2] = _mm256_add_ps(vsum_comp[2], vcomp2);
         vsum_comp[3] = _mm256_add_ps(vsum_comp[3], vcomp3);
     }
 
-    __m256 vsum_ref_final  = _mm256_add_ps(
-        _mm256_add_ps(vsum_ref[0], vsum_ref[1]),
-        _mm256_add_ps(vsum_ref[2], vsum_ref[3])
-    );
-    __m256 vsum_comp_final = _mm256_add_ps(
-        _mm256_add_ps(vsum_comp[0], vsum_comp[1]),
-        _mm256_add_ps(vsum_comp[2], vsum_comp[3])
-    );
+    __m256 vsum_ref_final  = _mm256_add_ps(_mm256_add_ps(vsum_ref[0], vsum_ref[1]),
+                                           _mm256_add_ps(vsum_ref[2], vsum_ref[3]));
+    __m256 vsum_comp_final = _mm256_add_ps(_mm256_add_ps(vsum_comp[0], vsum_comp[1]),
+                                           _mm256_add_ps(vsum_comp[2], vsum_comp[3]));
 
     float sum_ref  = horizontal_sum_avx(vsum_ref_final);
     float sum_comp = horizontal_sum_avx(vsum_comp_final);
@@ -93,27 +80,27 @@ float block_cost_zsad_avx(const float* ref, const float* comp, int len)
     const float inv_len = 1.0f / len;
     const float mean_ref  = sum_ref  * inv_len;
     const float mean_comp = sum_comp * inv_len;
+    const float mean_diff_scalar = mean_ref - mean_comp;
 
-    const __m256 mean_diff = _mm256_set1_ps(mean_ref - mean_comp);
+    const __m256 mean_diff = _mm256_set1_ps(mean_diff_scalar);
     const __m256 sign_mask = _mm256_set1_ps(-0.0f);
 
-    __m256 vzsad[4] = {
-        _mm256_setzero_ps(), _mm256_setzero_ps(),
-        _mm256_setzero_ps(), _mm256_setzero_ps()
-    };
+    __m256 vzsad[4] = { _mm256_setzero_ps(), _mm256_setzero_ps(),
+                        _mm256_setzero_ps(), _mm256_setzero_ps() };
 
     i = 0;
-    for (; i + 32 <= len; i += 32) {
+    for (; i + 32 <= len; i += 32)
+    {
         if (i + PREFETCH_DISTANCE < len) {
-            _mm_prefetch(reinterpret_cast<const char*>(ref + i + PREFETCH_DISTANCE), _MM_HINT_T0);
+            _mm_prefetch(reinterpret_cast<const char*>(ref  + i + PREFETCH_DISTANCE), _MM_HINT_T0);
             _mm_prefetch(reinterpret_cast<const char*>(comp + i + PREFETCH_DISTANCE), _MM_HINT_T0);
         }
-        
+
         __m256 vref0  = _mm256_loadu_ps(ref + i);
         __m256 vref1  = _mm256_loadu_ps(ref + i + 8);
         __m256 vref2  = _mm256_loadu_ps(ref + i + 16);
         __m256 vref3  = _mm256_loadu_ps(ref + i + 24);
-        
+
         __m256 vcomp0 = _mm256_loadu_ps(comp + i);
         __m256 vcomp1 = _mm256_loadu_ps(comp + i + 8);
         __m256 vcomp2 = _mm256_loadu_ps(comp + i + 16);
@@ -135,20 +122,32 @@ float block_cost_zsad_avx(const float* ref, const float* comp, int len)
         vzsad[3] = _mm256_add_ps(vzsad[3], vabs3);
     }
 
-    __m256 vzsad_final = _mm256_add_ps(
-        _mm256_add_ps(vzsad[0], vzsad[1]),
-        _mm256_add_ps(vzsad[2], vzsad[3])
-    );
-
+    __m256 vzsad_final = _mm256_add_ps(_mm256_add_ps(vzsad[0], vzsad[1]),
+                                       _mm256_add_ps(vzsad[2], vzsad[3]));
     float total = horizontal_sum_avx(vzsad_final);
 
-    const float mean_diff_scalar = mean_ref - mean_comp;
-    for (; i < len; ++i) {
+    for (; i < len; ++i)
+    {
         float d = (ref[i] - comp[i]) - mean_diff_scalar;
         total += std::fabs(d);
     }
 
     return total;
+}
+
+// =============================================================
+// ===============  WRAPPER: calculate_zsad  ===============
+// =============================================================
+
+float calculate_zsad(const float* ref, const float* comp, int len)
+{
+    if (!ref || !comp || len <= 0)
+        return 0.0f;
+
+    // ✅ wrapper memanggil fungsi inti
+    float zsad_value = block_cost_zsad_avx(ref, comp, len);
+
+    return zsad_value;
 }
 
 // ============================================================================

@@ -115,6 +115,12 @@ namespace MotionMatching
             cv::multiply(planes[1], planes[1], planes[1]);
             cv::add(planes[0], planes[1], mag_sq_diff);
 
+            if (mag_sq_diff.rows > 0 && mag_sq_diff.cols > 0)
+            {
+                // Koefisien (0, 0) adalah DC (Mean Intensity Difference)
+                mag_sq_diff.at<float>(0, 0) = 0.0f; 
+            }
+
             const int meaningful_rows = std::min(opt_rows / 2, block1_gray.rows * 2);
             const int meaningful_cols = std::min(opt_cols / 2, block1_gray.cols * 2);
             cv::Rect roi_freq(0, 0, meaningful_cols, meaningful_rows);
@@ -282,8 +288,6 @@ namespace MotionMatching
                     float structure_weight = 1.0f;
                     
                     if (min_mag_sq < stab_epsilon) { // Area Datar (Gradien hampir nol)
-                         // PERUBAHAN C: Atur bobot struktur di area datar menjadi 1.0
-                         // Perbedaan struktural ditangani oleh NOISE_WEIGHT di atas
                          structure_weight = 1.0f; 
                     }
                     else if (mag1_sq > stab_epsilon && mag2_sq > stab_epsilon)

@@ -43,6 +43,67 @@ namespace MotionMetricsConfig
 //     std::chrono::time_point<std::chrono::high_resolution_clock> m_start;
 // };
 
+#include <vector>
+#include <algorithm>
+#include <cmath> // Untuk std::abs
+
+// Fungsi helper inline yang lebih robust menggunakan Median Matching
+static inline void equalize_tile_brightness(const cv::Mat &src, const cv::Mat &ref, cv::Mat &dst)
+{
+    // --- Langkah 1: Persiapan dan Ekstraksi Data ---
+    // Total jumlah piksel
+    const int num_pixels = src.rows * src.cols;
+    if (num_pixels < 20) {
+        // Jika terlalu kecil, kembali ke mean atau skip
+        src.copyTo(dst);
+        return;
+    }
+
+    // Gunakan buffer vector thread-local untuk data (lebih cepat di-sort)
+    // Untuk efisiensi, asumsikan 'src' dan 'ref' berukuran sama (tile)
+    std::vector<float> src_data(num_pixels);
+    std::vector<float> ref_data(num_pixels);
+
+    // Salin data piksel dari Mat ke vector
+    std::memcpy(src_data.data(), src.data, num_pixels * sizeof(float));
+    std::memcpy(ref_data.data(), ref.data, num_pixels * sizeof(float));
+    
+    // --- Langkah 2: Hitung Median (Robust Metric) ---
+    
+    // Temukan elemen median (lebih cepat dari sorting penuh)
+    auto src_median_it = src_data.begin() + num_pixels / 2;
+    std::nth_element(src_data.begin(), src_median_it, src_data.end());
+    float median_src = *src_median_it;
+
+    auto ref_median_it = ref_data.begin() + num_pixels / 2;
+    std::nth_element(ref_data.begin(), ref_median_it, ref_data.end());
+    float median_ref = *ref_median_it;
+
+    // --- Langkah 3: Hitung Gain ---
+    // Gunakan median sebagai metrik kecerahan yang robust
+    double gain = median_ref / (median_src + 1e-5);
+
+    // --- Langkah 4: Batasi dan Terapkan Gain ---
+    // Batasi gain agar tidak terlalu ekstrem
+    if (gain < 0.6) gain = 0.6; // Agak kurang agresif di batas bawah (noise)
+    if (gain > 1.8) gain = 1.8; // Agak kurang agresif di batas atas (clipping)
+
+    // Terapkan gain jika perubahannya signifikan
+    if (std::abs(gain - 1.0) > 0.01)
+    {
+        // Pastikan 'dst' memiliki ukuran yang sama dengan 'src'
+        if (dst.empty() || dst.size() != src.size()) {
+             dst.create(src.size(), src.type());
+        }
+        cv::multiply(src, gain, dst);
+    }
+    else
+    {
+        // Jika kecerahan sudah mirip, cukup copy
+        src.copyTo(dst);
+    }
+}
+
 extern "C"
 {
     void generate_weight_map_jit(
@@ -69,8 +130,8 @@ extern "C"
         // Adaptasi sensitivitas berdasarkan noise
         float adaptation_factor = 1.0f - std::min(global_estimated_noise_sigma / 0.1f, 1.0f);
 
-        const float MAX_SENSITIVITY_BOOST = 0.20f;
-        const float MAX_OFFSET_REDUCTION = 0.20f;
+        const float MAX_SENSITIVITY_BOOST = 0.00f;
+        const float MAX_OFFSET_REDUCTION = 0.00f;
 
         float current_aggression = adaptation_factor;
 
@@ -147,17 +208,22 @@ extern "C"
 #pragma omp parallel for schedule(dynamic)
                 for (int r_tile_fine = 0; r_tile_fine < num_tiles_h_fine; ++r_tile_fine)
                 {
-                    // *** PERUBAHAN: Tidak perlu buffer MBM untuk FFT di skala kasar ***
+                    // Buffer thread-local untuk tile yang dinormalisasi
+                    cv::Mat normalized_current_tile_fft;
+
                     for (int c_tile_fine = 0; c_tile_fine < num_tiles_w_fine; ++c_tile_fine)
                     {
                         cv::Rect roi_fine(c_tile_fine * tile_w_fine, r_tile_fine * tile_h_fine, tile_w_fine, tile_h_fine);
 
-                        // *** GUNAKAN FFT untuk skala kasar (lebih cepat & robust untuk pola global) ***
+                        // --- [MODIFIKASI 1: Normalisasi Lokal untuk FFT] ---
+                        // Kita samakan kecerahan tile saat ini dengan tile referensi
+                        equalize_tile_brightness(current_img_fine(roi_fine), ref_img_fine(roi_fine), normalized_current_tile_fft);
+
+                        // *** GUNAKAN FFT dengan tile yang sudah dinormalisasi ***
                         MotionMatching::TileMatchResult res = MotionMatching::calculate_tile_fft(
-                            current_img_fine(roi_fine), 
+                            normalized_current_tile_fft, // <-- GUNAKAN TILE TER-NORMALISASI
                             ref_img_fine(roi_fine),
-                            global_estimated_noise_sigma
-                        );
+                            global_estimated_noise_sigma);
 
                         float local_confidence_fine = res.success
                                                           ? MotionMatching::calculate_match_confidence(
@@ -211,8 +277,10 @@ extern "C"
 #pragma omp parallel
             {
                 cv::Mat local_weight_tile(tile_h_fine, tile_w_fine, CV_32FC1);
-                
-                // *** PERUBAHAN: Buffer MBM hanya untuk skala halus (MAD) ***
+
+                // Buffer thread-local untuk normalisasi agar aman dari race condition
+                cv::Mat normalized_current_tile_mad(tile_h_fine, tile_w_fine, CV_32FC1);
+
                 MotionMatching::MBMBuffers mbm_buffers_fine;
                 if (tile_h_fine > 0 && tile_w_fine > 0)
                 {
@@ -234,15 +302,23 @@ extern "C"
 
                         cv::Rect tile_roi(c, r, tile_w_fine, tile_h_fine);
 
-                        // *** GUNAKAN MAD (gradient+Laplacian) untuk skala halus ***
+                        // --- [MODIFIKASI 2: Normalisasi Lokal untuk MAD] ---
+                        // Pastikan ukuran buffer pas (terutama untuk tile di pinggir gambar)
+                        if (normalized_current_tile_mad.size() != tile_roi.size())
+                        {
+                            normalized_current_tile_mad.create(tile_roi.size(), CV_32FC1);
+                        }
+
+                        equalize_tile_brightness(current_image_gray(tile_roi), reference_image_gray(tile_roi), normalized_current_tile_mad);
+
+                        // *** GUNAKAN MAD dengan tile yang sudah dinormalisasi ***
                         MotionMatching::TileMatchResult mbm_result = MotionMatching::calculate_tile_mad(
-                            current_image_gray(tile_roi), 
+                            normalized_current_tile_mad, // <-- GUNAKAN TILE TER-NORMALISASI
                             reference_image_gray(tile_roi),
                             global_estimated_noise_sigma,
-                            GRADIENT_WEIGHT_FACTOR, 
-                            STABILITY_EPSILON, 
-                            mbm_buffers_fine
-                        );
+                            GRADIENT_WEIGHT_FACTOR,
+                            STABILITY_EPSILON,
+                            mbm_buffers_fine);
 
                         float confidence_fine = mbm_result.success
                                                     ? MotionMatching::calculate_match_confidence(

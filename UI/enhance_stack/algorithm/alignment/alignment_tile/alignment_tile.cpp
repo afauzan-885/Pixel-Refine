@@ -343,7 +343,7 @@ namespace OpticalFlowHelpers
                     {
                         const float *p_ref = ref_layer.ptr<float>(tile_y + r_tile, tile_x);
                         const float *p_comp = comp_layer.ptr<float>(test_y + r_tile, test_x);
-                        current_cost += block_cost_zsad_avx(p_ref, p_comp, tile_w);
+                        current_cost += calculate_zsad(p_ref, p_comp, tile_w);
                     }
                 }
 
@@ -433,7 +433,7 @@ namespace OpticalFlowHelpers
             {
                 const float *p_ref = ref_layer.ptr<float>(tile_y + r_tile, tile_x);
                 const float *p_comp = comp_layer.ptr<float>(test_y + r_tile, test_x);
-                current_cost += block_cost_zsad_avx(p_ref, p_comp, tile_w);
+                current_cost += calculate_zsad(p_ref, p_comp, tile_w);
             }
         }
 
