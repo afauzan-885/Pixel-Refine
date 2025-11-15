@@ -7,6 +7,9 @@
 #include <immintrin.h>
 #include <cmath>
 
+constexpr float NORMALIZATION_EPSILON = 1e-6f;
+constexpr float EPSILON_SQ            = NORMALIZATION_EPSILON * NORMALIZATION_EPSILON;
+
 // ============================================================================
 // OPTIMIZED: Zero-Mean SAD dengan AVX - Performa Maksimal, Akurasi Sama
 // ============================================================================
@@ -23,13 +26,143 @@ static inline float horizontal_sum_avx(__m256 v)
     return _mm_cvtss_f32(sums);
 }
 
+// ============================================================================
+// BARU: Zero-Mean Normalized Cross-Correlation (ZNCC) dengan AVX
+// ============================================================================
+
+static inline float block_cost_zncc_avx(const float* ref, const float* comp, int len)
+{
+    constexpr int PREFETCH_DISTANCE = 512; // bytes
+
+    // Akumulator (Ref, Comp, Ref^2, Comp^2, Ref*Comp)
+    __m256 vsum_ref[4]   = { _mm256_setzero_ps() };
+    __m256 vsum_comp[4]  = { _mm256_setzero_ps() };
+    __m256 vsum_ref_sq[4] = { _mm256_setzero_ps() };
+    __m256 vsum_comp_sq[4] = { _mm256_setzero_ps() };
+    __m256 vsum_cross[4] = { _mm256_setzero_ps() };
+
+    int i = 0;
+    for (; i + 32 <= len; i += 32)
+    {
+        if (i + PREFETCH_DISTANCE < len) {
+            _mm_prefetch(reinterpret_cast<const char*>(ref  + i + PREFETCH_DISTANCE), _MM_HINT_T0);
+            _mm_prefetch(reinterpret_cast<const char*>(comp + i + PREFETCH_DISTANCE), _MM_HINT_T0);
+        }
+
+        // Muat 4x8 float (32 float)
+        __m256 vref0  = _mm256_loadu_ps(ref + i);
+        __m256 vref1  = _mm256_loadu_ps(ref + i + 8);
+        __m256 vref2  = _mm256_loadu_ps(ref + i + 16);
+        __m256 vref3  = _mm256_loadu_ps(ref + i + 24);
+
+        __m256 vcomp0 = _mm256_loadu_ps(comp + i);
+        __m256 vcomp1 = _mm256_loadu_ps(comp + i + 8);
+        __m256 vcomp2 = _mm256_loadu_ps(comp + i + 16);
+        __m256 vcomp3 = _mm256_loadu_ps(comp + i + 24);
+
+        // Akumulasi Sum (Mean)
+        vsum_ref[0]  = _mm256_add_ps(vsum_ref[0], vref0);
+        vsum_comp[0] = _mm256_add_ps(vsum_comp[0], vcomp0);
+        // ... (Lakukan hal yang sama untuk vref1/vcomp1, vref2/vcomp2, vref3/vcomp3)
+
+        // Akumulasi Sum Squared (Variance) dan Cross Sum (Covariance)
+        vsum_ref_sq[0]  = _mm256_add_ps(vsum_ref_sq[0], _mm256_mul_ps(vref0, vref0));
+        vsum_comp_sq[0] = _mm256_add_ps(vsum_comp_sq[0], _mm256_mul_ps(vcomp0, vcomp0));
+        vsum_cross[0]   = _mm256_add_ps(vsum_cross[0], _mm256_mul_ps(vref0, vcomp0));
+        // ... (Lakukan hal yang sama untuk v1, v2, v3)
+
+        // Akumulasi untuk v1
+        vsum_ref[1]    = _mm256_add_ps(vsum_ref[1], vref1);
+        vsum_comp[1]   = _mm256_add_ps(vsum_comp[1], vcomp1);
+        vsum_ref_sq[1] = _mm256_add_ps(vsum_ref_sq[1], _mm256_mul_ps(vref1, vref1));
+        vsum_comp_sq[1] = _mm256_add_ps(vsum_comp_sq[1], _mm256_mul_ps(vcomp1, vcomp1));
+        vsum_cross[1]  = _mm256_add_ps(vsum_cross[1], _mm256_mul_ps(vref1, vcomp1));
+
+        // Akumulasi untuk v2
+        vsum_ref[2]    = _mm256_add_ps(vsum_ref[2], vref2);
+        vsum_comp[2]   = _mm256_add_ps(vsum_comp[2], vcomp2);
+        vsum_ref_sq[2] = _mm256_add_ps(vsum_ref_sq[2], _mm256_mul_ps(vref2, vref2));
+        vsum_comp_sq[2] = _mm256_add_ps(vsum_comp_sq[2], _mm256_mul_ps(vcomp2, vcomp2));
+        vsum_cross[2]  = _mm256_add_ps(vsum_cross[2], _mm256_mul_ps(vref2, vcomp2));
+        
+        // Akumulasi untuk v3
+        vsum_ref[3]    = _mm256_add_ps(vsum_ref[3], vref3);
+        vsum_comp[3]   = _mm256_add_ps(vsum_comp[3], vcomp3);
+        vsum_ref_sq[3] = _mm256_add_ps(vsum_ref_sq[3], _mm256_mul_ps(vref3, vref3));
+        vsum_comp_sq[3] = _mm256_add_ps(vsum_comp_sq[3], _mm256_mul_ps(vcomp3, vcomp3));
+        vsum_cross[3]  = _mm256_add_ps(vsum_cross[3], _mm256_mul_ps(vref3, vcomp3));
+    }
+
+    // Horizontal Summation AVX
+    auto h_sum = [](const __m256 v_array[]) {
+        __m256 vsum_final = _mm256_add_ps(_mm256_add_ps(v_array[0], v_array[1]),
+                                          _mm256_add_ps(v_array[2], v_array[3]));
+        return horizontal_sum_avx(vsum_final);
+    };
+
+    float sum_ref      = h_sum(vsum_ref);
+    float sum_comp     = h_sum(vsum_comp);
+    float sum_ref_sq   = h_sum(vsum_ref_sq);
+    float sum_comp_sq  = h_sum(vsum_comp_sq);
+    float sum_cross    = h_sum(vsum_cross);
+
+    // Residual Summation (Serial)
+    for (; i < len; ++i) {
+        sum_ref     += ref[i];
+        sum_comp    += comp[i];
+        sum_ref_sq  += ref[i] * ref[i];
+        sum_comp_sq += comp[i] * comp[i];
+        sum_cross   += ref[i] * comp[i];
+    }
+
+    // ========================================================================
+    // ZNCC Calculation
+    // ========================================================================
+
+    const float inv_len = 1.0f / static_cast<float>(len);
+    
+    // 1. Mean
+    const float mean_ref  = sum_ref  * inv_len;
+    const float mean_comp = sum_comp * inv_len;
+    
+    // 2. Variances (Numerator of ZNCC)
+    // Formula: Sum(R^2) - N * Mean(R)^2
+    float variance_ref  = sum_ref_sq  - static_cast<float>(len) * mean_ref * mean_ref;
+    float variance_comp = sum_comp_sq - static_cast<float>(len) * mean_comp * mean_comp;
+    
+    // 3. Covariance (Denominator of ZNCC)
+    // Formula: Sum(R*C) - N * Mean(R) * Mean(C)
+    float covariance    = sum_cross   - static_cast<float>(len) * mean_ref * mean_comp;
+
+    // Handle numerical errors/non-textured blocks
+    if (variance_ref < 0.0f) variance_ref = 0.0f;
+    if (variance_comp < 0.0f) variance_comp = 0.0f;
+
+    float std_prod = std::sqrt(variance_ref) * std::sqrt(variance_comp);
+    
+    float zncc_value = 0.0f;
+
+    if (std_prod > NORMALIZATION_EPSILON) {
+        // ZNCC = Covariance / (StdDev_R * StdDev_C)
+        zncc_value = covariance / std_prod;
+    }
+    
+    // ZNCC adalah metrik kecocokan: -1 (kecocokan buruk) hingga 1 (kecocokan sempurna)
+    // Cost = 1 - ZNCC. Nilai yang lebih kecil berarti biaya lebih rendah.
+    // Kita clamp ZNCC antara -1 dan 1.
+    zncc_value = std::min(1.0f, std::max(-1.0f, zncc_value));
+
+    return 1.0f - zncc_value;
+}
+
 // =============================================================
 // ===============  FUNGSI INTI: block_cost_zsad_avx  ================
 // =============================================================
 
-static inline float block_cost_zsad_avx(const float* ref, const float* comp, int len)
+static inline float block_cost_zmcl_avx(const float* ref, const float* comp, int len)
 {
-    constexpr int PREFETCH_DISTANCE = 512; // bytes
+    // Struktur loop Mean Calculation sama dengan ZSAD asli
+    constexpr int PREFETCH_DISTANCE = 512; 
 
     // Akumulator mean sementara
     __m256 vsum_ref[4]  = { _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps() };
@@ -38,6 +171,7 @@ static inline float block_cost_zsad_avx(const float* ref, const float* comp, int
     int i = 0;
     for (; i + 32 <= len; i += 32)
     {
+        // ... (Loop akumulasi Mean sama persis dengan ZSAD asli)
         if (i + PREFETCH_DISTANCE < len) {
             _mm_prefetch(reinterpret_cast<const char*>(ref  + i + PREFETCH_DISTANCE), _MM_HINT_T0);
             _mm_prefetch(reinterpret_cast<const char*>(comp + i + PREFETCH_DISTANCE), _MM_HINT_T0);
@@ -83,10 +217,13 @@ static inline float block_cost_zsad_avx(const float* ref, const float* comp, int
     const float mean_diff_scalar = mean_ref - mean_comp;
 
     const __m256 mean_diff = _mm256_set1_ps(mean_diff_scalar);
-    const __m256 sign_mask = _mm256_set1_ps(-0.0f);
+    // const __m256 sign_mask = _mm256_set1_ps(-0.0f); // Tidak perlu lagi
 
-    __m256 vzsad[4] = { _mm256_setzero_ps(), _mm256_setzero_ps(),
-                        _mm256_setzero_ps(), _mm256_setzero_ps() };
+    // --- BARU: Konstanta Charbonnier Loss ---
+    const __m256 v_epsilon_sq = _mm256_set1_ps(EPSILON_SQ); 
+
+    __m256 vcharb_sum[4] = { _mm256_setzero_ps(), _mm256_setzero_ps(),
+                             _mm256_setzero_ps(), _mm256_setzero_ps() };
 
     i = 0;
     for (; i + 32 <= len; i += 32)
@@ -106,50 +243,64 @@ static inline float block_cost_zsad_avx(const float* ref, const float* comp, int
         __m256 vcomp2 = _mm256_loadu_ps(comp + i + 16);
         __m256 vcomp3 = _mm256_loadu_ps(comp + i + 24);
 
+        // Zero-Mean Difference
         __m256 vdiff0 = _mm256_sub_ps(_mm256_sub_ps(vref0, vcomp0), mean_diff);
         __m256 vdiff1 = _mm256_sub_ps(_mm256_sub_ps(vref1, vcomp1), mean_diff);
         __m256 vdiff2 = _mm256_sub_ps(_mm256_sub_ps(vref2, vcomp2), mean_diff);
         __m256 vdiff3 = _mm256_sub_ps(_mm256_sub_ps(vref3, vcomp3), mean_diff);
 
-        __m256 vabs0 = _mm256_andnot_ps(sign_mask, vdiff0);
-        __m256 vabs1 = _mm256_andnot_ps(sign_mask, vdiff1);
-        __m256 vabs2 = _mm256_andnot_ps(sign_mask, vdiff2);
-        __m256 vabs3 = _mm256_andnot_ps(sign_mask, vdiff3);
+        // --- Perubahan Inti: Charbonnier Loss (sqrt(d^2 + eps^2)) ---
+        __m256 vdiff0_sq = _mm256_mul_ps(vdiff0, vdiff0);
+        __m256 vdiff1_sq = _mm256_mul_ps(vdiff1, vdiff1);
+        __m256 vdiff2_sq = _mm256_mul_ps(vdiff2, vdiff2);
+        __m256 vdiff3_sq = _mm256_mul_ps(vdiff3, vdiff3);
 
-        vzsad[0] = _mm256_add_ps(vzsad[0], vabs0);
-        vzsad[1] = _mm256_add_ps(vzsad[1], vabs1);
-        vzsad[2] = _mm256_add_ps(vzsad[2], vabs2);
-        vzsad[3] = _mm256_add_ps(vzsad[3], vabs3);
+        __m256 vcharb0 = _mm256_sqrt_ps(_mm256_add_ps(vdiff0_sq, v_epsilon_sq));
+        __m256 vcharb1 = _mm256_sqrt_ps(_mm256_add_ps(vdiff1_sq, v_epsilon_sq));
+        __m256 vcharb2 = _mm256_sqrt_ps(_mm256_add_ps(vdiff2_sq, v_epsilon_sq));
+        __m256 vcharb3 = _mm256_sqrt_ps(_mm256_add_ps(vdiff3_sq, v_epsilon_sq));
+
+        vcharb_sum[0] = _mm256_add_ps(vcharb_sum[0], vcharb0);
+        vcharb_sum[1] = _mm256_add_ps(vcharb_sum[1], vcharb1);
+        vcharb_sum[2] = _mm256_add_ps(vcharb_sum[2], vcharb2);
+        vcharb_sum[3] = _mm256_add_ps(vcharb_sum[3], vcharb3);
     }
 
-    __m256 vzsad_final = _mm256_add_ps(_mm256_add_ps(vzsad[0], vzsad[1]),
-                                       _mm256_add_ps(vzsad[2], vzsad[3]));
-    float total = horizontal_sum_avx(vzsad_final);
+    __m256 vcharb_final = _mm256_add_ps(_mm256_add_ps(vcharb_sum[0], vcharb_sum[1]),
+                                        _mm256_add_ps(vcharb_sum[2], vcharb_sum[3]));
+    float total = horizontal_sum_avx(vcharb_final);
 
+    // Residual Loop (menggunakan std::sqrt)
     for (; i < len; ++i)
     {
         float d = (ref[i] - comp[i]) - mean_diff_scalar;
-        total += std::fabs(d);
+        float d_sq = d * d;
+        // Charbonnier Loss
+        total += std::sqrt(d_sq + EPSILON_SQ); 
     }
 
     return total;
 }
 
 // =============================================================
-// ===============  WRAPPER: calculate_zsad  ===============
+// ===============  WRAPPER: calculate_zncc  ===============
 // =============================================================
 
-float calculate_zsad(const float* ref, const float* comp, int len)
+float calculate_zncc(const float* ref, const float* comp, int len)
 {
     if (!ref || !comp || len <= 0)
         return 0.0f;
 
-    // ✅ wrapper memanggil fungsi inti
-    float zsad_value = block_cost_zsad_avx(ref, comp, len);
+    // ✅ OPTIMASI: Ganti ZNCC (mahal) dengan ZMCL (cepat & robust)
+    // ZMCL (Charbonnier Loss) memberikan efisiensi yang lebih baik 
+    // sambil mempertahankan ketangguhan outlier yang Anda inginkan.
+    float zmcl_cost = block_cost_zmcl_avx(ref, comp, len);
 
-    return zsad_value;
+    // Kita harus menormalisasi ZMCL agar tidak didominasi oleh ukuran tile
+    const float tile_area_inv = 1.0f / static_cast<float>(len);
+    
+    return zmcl_cost * tile_area_inv;
 }
-
 // ============================================================================
 // OPTIMIZED: FFT-based cost dengan caching dan early termination
 // ============================================================================

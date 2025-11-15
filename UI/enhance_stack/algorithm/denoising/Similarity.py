@@ -9,7 +9,7 @@ import os
 from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
 from PySide6.QtCore import QThread, Signal, Qt
-from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (add_legend_heatmap, extract_all_metadata, 
+from UI.enhance_stack.algorithm.alignment.alignment_features.global_feature import (extract_all_metadata, 
                                                                                     gaussian_window, get_all_image_paths_for_single_process, load_images_from_paths, 
                                                                                     normalize_image, preprocess_in_python, resize_all_with_padding, save_image, setup_balanced_batching)
 from UI.enhance_stack.algorithm.denoising.extra_code.extra_algorithm import SimilarityFrequencyInterface, SimilaritySpatialInterface, perform_image_alignment
@@ -98,7 +98,7 @@ class SimilarityAlgorithm:
                     weight_of_each_image=False,
                     temporal_analysis_mode='one_pass',
                     enable_alignment=True,
-                    scale_down_factor: float = 1.0,  # <--- Tambahan baru
+                    scale_down_factor: float = 1.0,
                     **unused_kwargs):
 
         # --- LANGKAH 1: Inisialisasi dan Penentuan Resolusi Kerja ---
@@ -860,7 +860,7 @@ def _load_images_for_batch(data_source, batch_indices, stop_requested=None):
         batch_paths = data_source[batch_start:batch_end]
         batch_images = load_images_from_paths(batch_paths, stop_requested)
         if 'resize_all_with_padding' in globals():
-            batch_images, _ = resize_all_with_padding(batch_images, method="median")
+            batch_images, _ = resize_all_with_padding(batch_images, method="preserve")
             
     return batch_images
 
@@ -969,7 +969,7 @@ def main(db_path, update_progress=None, stop_requested=None,
             # Panggil fungsi resize_all_with_padding pada hasil-hasil batch
             processed_batches_results, final_shape = resize_all_with_padding(
                 processed_batches_results, 
-                method="median" # 'median' atau 'max' biasanya pilihan yang aman di sini
+                method="preserve"
             )
             print(f"Semua hasil batch disesuaikan ke ukuran target: {final_shape}")
             # --- AKHIR PENAMBAHAN KODE ---

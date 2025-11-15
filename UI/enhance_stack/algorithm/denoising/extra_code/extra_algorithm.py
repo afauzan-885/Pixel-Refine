@@ -418,6 +418,61 @@ def compute_flow_with_raft(ref_img, current_img, session):
 # ==============================================================================
 # === BAGIAN B: Fungsi Helper yang Sudah Anda Sediakan (sedikit disempurnakan)
 # ==============================================================================
+def scale_flow_guided(flow, guide_image, full_h, full_w, radius=5, eps=0.0003):
+    """
+    Scale optical flow dari resolusi kerja ke resolusi penuh menggunakan
+    Guided Filter untuk upsampling yang edge-aware.
+
+    Args:
+        flow (np.array): Flow field resolusi rendah dari C++.
+        guide_image (np.array): Gambar referensi resolusi penuh, digunakan sebagai panduan.
+        full_h (int): Tinggi target.
+        full_w (int): Lebar target.
+        radius (int): Radius untuk Guided Filter.
+        eps (float): Parameter regularisasi untuk Guided Filter.
+
+    Returns:
+        np.array: Flow field resolusi penuh yang telah disempurnakan.
+    """
+    work_h, work_w = flow.shape[:2]
+    
+    # 1. Siapkan Gambar Panduan (Guide Image)
+    # Pastikan guide image berukuran sama dengan output target dan dalam format yang benar.
+    if guide_image.shape[0] != full_h or guide_image.shape[1] != full_w:
+        guide_image = cv2.resize(guide_image, (full_w, full_h), interpolation=cv2.INTER_AREA)
+    
+    # Konversi ke grayscale dan float32 jika perlu
+    if guide_image.ndim == 3:
+        guide_image = cv2.cvtColor(guide_image, cv2.COLOR_BGR2GRAY)
+    if guide_image.dtype != np.float32:
+        guide_image = guide_image.astype(np.float32) / 255.0
+
+    # 2. Pisahkan Channel Flow X dan Y
+    flow_x = flow[:, :, 0]
+    flow_y = flow[:, :, 1]
+
+    # 3. Lakukan upsampling kasar terlebih dahulu sebagai input untuk Guided Filter
+    # Ini adalah 'p' dalam terminologi Guided Filter. INTER_LINEAR sudah cukup.
+    flow_x_upsampled_blurry = cv2.resize(flow_x, (full_w, full_h), interpolation=cv2.INTER_LINEAR)
+    flow_y_upsampled_blurry = cv2.resize(flow_y, (full_w, full_h), interpolation=cv2.INTER_LINEAR)
+
+    # 4. Terapkan Guided Filter untuk menyempurnakan upsampling
+    # Filter akan "memindahkan" detail (tepi) dari guide_image ke flow field.
+    flow_x_refined = cv2.ximgproc.guidedFilter(guide=guide_image, src=flow_x_upsampled_blurry, radius=radius, eps=eps)
+    flow_y_refined = cv2.ximgproc.guidedFilter(guide=guide_image, src=flow_y_upsampled_blurry, radius=radius, eps=eps)
+
+    # 5. Gabungkan kembali channel-channel yang sudah disempurnakan
+    flow_full = np.dstack((flow_x_refined, flow_y_refined))
+
+    # 6. KUNCI PENTING: Skalakan magnitudo flow, sama seperti sebelumnya.
+    # Nilai flow merepresentasikan pergeseran di resolusi kerja. Kita perlu
+    # mengonversinya menjadi pergeseran di resolusi penuh.
+    scale_y = full_h / work_h
+    scale_x = full_w / work_w
+    flow_full[:, :, 0] *= scale_x
+    flow_full[:, :, 1] *= scale_y
+    
+    return flow_full
 
 def scale_flow_to_full_res(flow, work_h, work_w, full_h, full_w):
     """Scale optical flow dari resolusi kerja ke resolusi penuh."""
@@ -428,7 +483,7 @@ def scale_flow_to_full_res(flow, work_h, work_w, full_h, full_w):
     flow_full[:, :, 1] *= scale_y
     return flow_full
 
-def warp_image_opencv(image, flow, interpolation=cv2.INTER_LINEAR, border_mode=cv2.BORDER_REFLECT_101):
+def warp_image_opencv(image, flow, interpolation=cv2.INTER_LANCZOS4, border_mode=cv2.BORDER_REFLECT_101):
     """Warp gambar menggunakan optical flow."""
     h, w = image.shape[:2]
     y_coords, x_coords = np.mgrid[0:h, 0:w].astype(np.float32)
@@ -457,15 +512,49 @@ def visualize_flow(flow):
     flow_bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
     return (flow_bgr * 255).astype(np.uint8)
 
+def save_aligned_image(aligned_img, index, backend_name, save_folder="save_align_image"):
+    """
+    Menyimpan gambar RGB yang telah diselaraskan ke folder output dengan normalisasi dinamis.
+    """
+    if aligned_img is None:
+        return
+
+    # Tangani nilai NaN atau Inf
+    aligned_img = np.nan_to_num(aligned_img)
+
+    # Normalisasi berdasarkan nilai maksimum aktual
+    max_val = np.max(aligned_img)
+    if max_val > 0:
+        norm_img = aligned_img / max_val
+    else:
+        norm_img = np.zeros_like(aligned_img)
+
+    # Konversi ke uint8
+    save_img = np.clip(norm_img * 255, 0, 255).astype(np.uint8)
+
+    # Buat folder jika belum ada
+    if not os.path.exists(save_folder):
+        os.makedirs(save_folder)
+
+    # Buat nama file
+    filename = f"aligned_{backend_name}_frame_{index:02d}.jpg"
+    output_path = os.path.join(save_folder, filename)
+
+    # Jangan konversi ke BGR — simpan langsung sebagai RGB
+    cv2.imwrite(output_path, save_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    print(f"  [Save] {filename} disimpan sebagai RGB.")
+
+
+
 def perform_image_alignment(images, reference_image_float, work_res_h, work_res_w,
                             tile_h, tile_w, ref_dtype, update_progress=None, stop_requested=None,
-                            use_raft=False, num_alignment_workers=2, visualization=False): # Ganti default 2 ke 4
+                            use_raft=False, num_alignment_workers=2, visualization=False,
+                            save_align_image=False): # <<< FLAG BARU DITAMBAHKAN
     """
     Menyelaraskan (align) gambar dengan manajemen sumber daya yang aman,
     menggunakan paralelisasi untuk RAFT (GPU) atau C++ (CPU/Legacy).
     """
     
-    # Tidak perlu lagi baris num_alignment_workers = alignment_worker
     num_images = len(images)
     if num_images <= 1:
         return True
@@ -484,9 +573,7 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
     n_layers = max(1, int(np.ceil(np.log2(log_arg))) if log_arg > 0 else 1)
 
 
-    # =================================================================
     # === BACKEND RAFT (GPU, multi-thread) ===
-    # =================================================================
     if use_raft:
         print(f"Memulai alignment menggunakan backend RAFT dengan {num_alignment_workers} worker paralel...")
 
@@ -557,7 +644,15 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
                         try:
                             idx, aligned_img = future.result()
                             if aligned_img is not None:
+                                # Tulis hasil alignment kembali ke list utama
                                 images[idx] = aligned_img
+                                
+                                # <<< INTEGRASI SAVE IMAGE C++ >>>
+                                if save_align_image:
+                                    # Panggil save_aligned_image di sini
+                                    save_aligned_image(aligned_img, idx, "CPP")
+                                # <<< AKHIR INTEGRASI >>>
+                                
                             else:
                                 print(f"Peringatan: Alignment RAFT gagal untuk gambar {i+1}.")
                         except Exception as e:
@@ -588,15 +683,14 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
             if update_progress: update_progress(0, error_msg)
             return False
             
-        # print(f"Memulai alignment menggunakan backend C++ (paralel, {num_alignment_workers} worker)...")
-
         try:
             # --- Fungsi untuk 1 tugas alignment C++ (dijalankan di worker) ---
             def process_single_alignment_cpp(i, 
                                              ref_work_ptr, work_res_h, work_res_w, 
                                              tile_h, tile_w, n_layers, 
                                              original_image, ref_dtype, 
-                                             ALIGN_LIB, stop_requested):
+                                             ALIGN_LIB, stop_requested,
+                                             full_res_reference_image): 
                 
                 if stop_requested and stop_requested():
                     return (i, None)
@@ -635,15 +729,14 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
                 
                 if flow_ptr:
                     try:
-                        # 3. Baca Flow dan Rescale
+                        # 3. Baca Flow dan Rescale (INI BAGIAN YANG DIUBAH)
                         flow_buf_cpp = np.empty((work_res_h, work_res_w, 2), dtype=np.float32)
-                        flow_buf_ptr_temp = flow_buf_cpp.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-
-                        # Salin data dari memori C++ ke buffer NumPy lokal thread
-                        ctypes.memmove(flow_buf_ptr_temp, flow_ptr, flow_buf_cpp.nbytes)
+                        ctypes.memmove(flow_buf_cpp.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), flow_ptr, flow_buf_cpp.nbytes)
                         
                         full_h, full_w = original_image.shape[:2]
-                        flow_full_res = scale_flow_to_full_res(flow_buf_cpp, work_res_h, work_res_w, full_h, full_w)
+                        
+                        # === GANTI PANGGILAN FUNGSI DI SINI ===
+                        flow_full_res = scale_flow_guided(flow_buf_cpp, full_res_reference_image, full_h, full_w)
 
                         if visualization:
                             flow_vis = visualize_flow(flow_full_res)
@@ -674,7 +767,7 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
 
                     # --- PENAMBAHAN JEDA DI SINI ---
                     if i > 1:
-                        time.sleep(2.0)
+                        time.sleep(0.1)
                     # ------------------------------
 
                     future = executor.submit(
@@ -683,7 +776,9 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
                         ref_work_ptr, work_res_h, work_res_w, 
                         tile_h, tile_w, n_layers, 
                         images[i], ref_dtype, 
-                        ALIGN_LIB, stop_requested
+                        ALIGN_LIB, stop_requested,
+                        # --- PASS PARAMETER BARU ---
+                        reference_image_float 
                     )
                     futures[future] = i
 
@@ -697,8 +792,13 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
                     try:
                         idx, aligned_img = future.result()
                         if aligned_img is not None:
-                            # Tulis hasil alignment kembali ke list utama
                             images[idx] = aligned_img
+                            
+                            # <<< INTEGRASI SAVE IMAGE RAFT >>>
+                            if save_align_image:
+                                save_aligned_image(aligned_img, idx, "RAFT")
+                            # <<< AKHIR INTEGRASI >>>
+                            
                         else:
                             # Jika worker gagal/dibatalkan, gunakan gambar asli
                             pass 

@@ -286,12 +286,8 @@ def save_align_to_folder(image, index, original_path, align_folder=None, load_co
     base_name = os.path.splitext(os.path.basename(original_path))[0]
     file_path = os.path.join(align_folder, f"{base_name}_align.tiff")
 
-    # =====================================================================
-    # === PERUBAHAN UTAMA: Mengadopsi logika penyimpanan dari save_image ===
-    # =====================================================================
     try:
-        # Tentukan parameter penyimpanan untuk TIFF tanpa kompresi (nilai 1)
-        # Sesuai dengan spesifikasi TIFF, 1 berarti tidak ada kompresi.
+        
         save_params = [cv2.IMWRITE_TIFF_COMPRESSION, 1]
         
         # Simpan gambar dengan parameter
@@ -332,24 +328,38 @@ def save_image(image, output_path, reference_image_path=None):
     Menyalin metadata orientasi dari gambar referensi menggunakan exiftool.
     """
     try:
-        # Tidak perlu .copy() jika gambar tidak akan dimodifikasi lagi
         image_to_save = image
-        
-        # [REVISI] Tentukan parameter penyimpanan berdasarkan ekstensi file
-        save_params = []
         ext = os.path.splitext(output_path)[1].lower()
-        if ext in ['.tif', '.tiff']:
-            save_params = [cv2.IMWRITE_TIFF_COMPRESSION, 1]
-
-        # Simpan gambar dengan parameter yang sudah ditentukan
-        success = cv2.imwrite(output_path, image_to_save, save_params)
+        success = False
         
+        if ext in ['.tif', '.tiff']:
+            try:
+                # 1. Konversi BGR (format dari cv2.rotate) kembali ke RGB jika perlu
+                # Kita asumsikan gambar yang masuk ke save_image adalah BGR jika berwarna 3-channel
+                if len(image_to_save.shape) == 3 and image_to_save.shape[2] >= 3:
+                     # Pastikan konversi kembali ke RGB untuk tifffile
+                     image_to_write_tifffile = cv2.cvtColor(image_to_save, cv2.COLOR_BGR2RGB)
+                else:
+                     image_to_write_tifffile = image_to_save
+                     
+                # 2. Gunakan tifffile untuk menyimpan tanpa kompresi
+                tifffile.imwrite(
+                    output_path, 
+                    image_to_write_tifffile, 
+                    compression=None
+                )
+                success = True
+            except Exception as e:
+                print(f"Error: Failed to save TIFF to '{output_path}': {e}")
+                success = False
+                
+        else:
+            # Jika bukan TIFF, gunakan cv2.imwrite seperti biasa
+            save_params = [] # Tidak ada parameter kompresi khusus untuk non-TIFF
+            success = cv2.imwrite(output_path, image_to_save, save_params)
+
         if not success:
-            print(f"Error: OpenCV gagal menyimpan gambar ke '{output_path}'")
-            # Coba lagi tanpa parameter jika gagal, sebagai fallback
-            success_fallback = cv2.imwrite(output_path, image_to_save)
-            if not success_fallback:
-                return None
+            return None
 
         # --- Bagian ExifTool tidak berubah ---
         if reference_image_path and os.path.exists(reference_image_path):
@@ -364,7 +374,7 @@ def save_image(image, output_path, reference_image_path=None):
                 ], check=True, capture_output=True)
             except (subprocess.CalledProcessError, FileNotFoundError) as e:
                 # Ini bukan error fatal, hanya peringatan
-                print(f"  Peringatan: Gagal menyalin metadata ke '{output_path}'. ExifTool mungkin tidak terpasang. Error: {e}")
+                print(f" Warning: Failed to copy metadata to '{output_path}'. ExifTool may not be installed. Error: {e}")
 
         return output_path
 
@@ -623,14 +633,21 @@ def resize_with_padding(img, target_size, pad_color=(0, 0, 0)):
                                  borderType=cv2.BORDER_CONSTANT, value=pad_color)
     return padded
 
-def resize_all_with_padding(images, method="median", verbose=False,
+def resize_all_with_padding(images, method="preserve", verbose=False,
                             pad_color=(0, 0, 0), return_original_sizes=False):
     """
     Resize + pad all images to the same size using letterbox strategy.
 
-    Returns:
-        By default: resized_images, (h, w)
-        If return_original_sizes=True: resized_images, (h, w), original_sizes
+    Args:
+        images (list): Daftar array gambar (NumPy).
+        method (str): Strategi penentuan ukuran target. Pilihan:
+            - "min"      : gunakan tinggi & lebar minimum dari semua gambar.
+            - "max"      : gunakan tinggi & lebar maksimum dari semua gambar.
+            - "median"   : gunakan median tinggi & lebar dari semua gambar.
+            - "preserve" : gunakan ukuran gambar pertama sebagai referensi.
+        verbose (bool): Jika True, cetak informasi proses.
+        pad_color (tuple): Warna padding (B, G, R).
+        return_original_sizes (bool): Jika True, juga kembalikan ukuran asli.
     """
     if not images:
         raise ValueError("Image list is empty")
@@ -660,11 +677,17 @@ def resize_all_with_padding(images, method="median", verbose=False,
     elif method == "median":
         target_h = sorted(h_list)[len(h_list) // 2]
         target_w = sorted(w_list)[len(w_list) // 2]
+    elif method == "preserve":
+        # Ambil ukuran gambar pertama sebagai referensi
+        target_h, target_w = original_sizes[0]
     else:
-        raise ValueError("Unsupported resize method. Use 'min', 'max', or 'median'.")
+        raise ValueError("Unsupported resize method. Use 'min', 'max', 'median', or 'preserve'.")
 
     if verbose:
         print(f"Resizing all images to {target_w}x{target_h} using method: {method}")
+
+    # --- di sini lanjutkan proses resize + padding sesuai target_h, target_w ---
+
 
     resized_images = []
     for img, (h, w) in zip(images, original_sizes):
@@ -1377,7 +1400,7 @@ def generate_balanced_batches(total_images, max_batch_size=10):
         yield (start_index, end_index)
         current_index = end_index
 
-def setup_balanced_batching(total_images, language_config, max_batch_size=8):
+def setup_balanced_batching(total_images, language_config, max_batch_size=12):
     """
     Menyiapkan seluruh logika batching, termasuk mencetak info ke konsol.
     

@@ -188,7 +188,7 @@ cv::Point2f subpixel_refinement(
             for (int r = 0; r < tile_h; ++r)
             {
                 const float* p_comp = comp_layer.ptr<float>(comp_y + r, comp_x);
-                total_cost += calculate_zsad(ref_rows[r], p_comp, tile_w);
+                total_cost += calculate_zncc(ref_rows[r], p_comp, tile_w);
             }
 
             if (total_cost < min_cost)

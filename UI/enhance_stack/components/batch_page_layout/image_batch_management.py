@@ -359,9 +359,9 @@ def convert_tiff_to_uncompressed(input_paths, output_folder):
             except (subprocess.CalledProcessError, FileNotFoundError, ValueError): pass
 
             image_corrected = numpy_image.copy()
-            if source_orientation == 3: image_corrected = cv2.rotate(numpy_image, cv2.ROTATE_180)
-            elif source_orientation == 6: image_corrected = cv2.rotate(numpy_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
-            elif source_orientation == 8: image_corrected = cv2.rotate(numpy_image, cv2.ROTATE_90_CLOCKWISE)
+            # if source_orientation == 3: image_corrected = cv2.rotate(numpy_image, cv2.ROTATE_180)
+            # elif source_orientation == 6: image_corrected = cv2.rotate(numpy_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            # elif source_orientation == 8: image_corrected = cv2.rotate(numpy_image, cv2.ROTATE_90_CLOCKWISE)
 
             saved_path = save_image(
                 image=image_corrected, 

@@ -499,7 +499,7 @@ def main(db_path, update_progress=None, stop_requested=None, single_process=None
     if not base_img_list or base_img_list[0] is None:
         raise RuntimeError("Base image gagal dimuat.")
     base_image_raw = base_img_list[0]
-    base_resized_list, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="median")
+    base_resized_list, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="preserve")
     base_image = base_resized_list[0]
 
     # Hapus referensi yang tidak perlu untuk membebaskan memori

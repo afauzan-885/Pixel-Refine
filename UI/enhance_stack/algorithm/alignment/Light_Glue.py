@@ -596,7 +596,7 @@ def main(db_path,
         num_workers = 1
     
     base_image_raw = base_img_list[0]
-    base_resized_list, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="median")
+    base_resized_list, (target_h, target_w) = resize_all_with_padding([base_image_raw], method="preserve")
     base_image = base_resized_list[0]
 
     del base_image_raw, base_resized_list, base_img_list

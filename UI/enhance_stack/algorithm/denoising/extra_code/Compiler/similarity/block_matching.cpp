@@ -27,26 +27,11 @@ namespace MotionMatching
                 return 0.0f;
 
             // =========================================================================
-            // --- LANGKAH 1: Zero-Mean Normalization (ZMN) untuk Robustness terhadap Flicker ---
+            // --- Hitung Median Absolute Difference (MeAD) ---
             // =========================================================================
-            
-            // Hitung rata-rata (mean) dari setiap blok
-            cv::Scalar mean1 = cv::mean(block1_gray);
-            cv::Scalar mean2 = cv::mean(block2_gray);
-            
-            // Kurangi mean dari setiap blok.
-            // cv::MatExpr (hasil dari operasi Mat - Scalar) digunakan untuk operasi cepat.
-            cv::Mat block1_zm = block1_gray - mean1[0];
-            cv::Mat block2_zm = block2_gray - mean2[0];
-            
-            // Hitung selisih absolut pada blok yang sudah dinormalisasi (Zero-Mean)
             cv::Mat diff;
-            cv::absdiff(block1_zm, block2_zm, diff);
-            
-            // =========================================================================
-            // --- LANGKAH 2: Hitung Median Absolute Difference (MeAD) ---
-            // =========================================================================
-            
+            cv::absdiff(block1_gray, block2_gray, diff);
+
             std::vector<float> diff_values;
             diff_values.reserve(total_pixels);
             
@@ -84,8 +69,8 @@ namespace MotionMatching
         static float calculate_fft_32f(const cv::Mat &block1_gray, const cv::Mat &block2_gray, float noise_sigma)
         {
             CV_Assert(block1_gray.size() == block2_gray.size() &&
-                      block1_gray.type() == CV_32FC1 &&
-                      block2_gray.type() == CV_32FC1);
+                    block1_gray.type() == CV_32FC1 &&
+                    block2_gray.type() == CV_32FC1);
 
             const int total_pixels = block1_gray.rows * block1_gray.cols;
             if (total_pixels == 0)
@@ -96,9 +81,9 @@ namespace MotionMatching
             int opt_cols = cv::getOptimalDFTSize(block1_gray.cols);
             cv::Mat padded1, padded2;
             cv::copyMakeBorder(block1_gray, padded1, 0, opt_rows - block1_gray.rows,
-                               0, opt_cols - block1_gray.cols, cv::BORDER_CONSTANT, cv::Scalar::all(0));
+                            0, opt_cols - block1_gray.cols, cv::BORDER_CONSTANT, cv::Scalar::all(0));
             cv::copyMakeBorder(block2_gray, padded2, 0, opt_rows - block2_gray.rows,
-                               0, opt_cols - block2_gray.cols, cv::BORDER_CONSTANT, cv::Scalar::all(0));
+                            0, opt_cols - block2_gray.cols, cv::BORDER_CONSTANT, cv::Scalar::all(0));
 
             cv::Mat fft1, fft2;
             cv::dft(padded1, fft1, cv::DFT_COMPLEX_OUTPUT);
@@ -117,8 +102,7 @@ namespace MotionMatching
 
             if (mag_sq_diff.rows > 0 && mag_sq_diff.cols > 0)
             {
-                // Koefisien (0, 0) adalah DC (Mean Intensity Difference)
-                mag_sq_diff.at<float>(0, 0) = 0.0f; 
+                mag_sq_diff.at<float>(0, 0) = 0.0f;
             }
 
             const int meaningful_rows = std::min(opt_rows / 2, block1_gray.rows * 2);
@@ -127,27 +111,31 @@ namespace MotionMatching
             cv::Mat mag_sq_diff_roi = mag_sq_diff(roi_freq);
             // ------------------------------------
 
-            // --- LOGIKA NOISE ADAPTIF DENGAN FAKTOR DINAMIS ---
+            // --- LOGIKA NOISE ADAPTIF BERBASIS FUNGSI DARI NOISE SIGMA ---
             const float optimal_elements = static_cast<float>(opt_rows * opt_cols);
             const float noise_sigma_sq = noise_sigma * noise_sigma;
             const float theoretical_noise_power_floor = noise_sigma_sq * optimal_elements;
 
-            // Dynamic Noise Floor Factor: Disesuaikan untuk Sensitivitas Kontras Rendah
-            // PENTING: Ambang batas noise yang lebih tinggi untuk normalisasi
-            const float normalized_noise = std::min(1.0f, noise_sigma / 0.13f); // DARI 0.05 MENJADI 0.10
-            const float min_factor = 3.0f;                                      // Lebih stabil saat noisy
-            const float max_factor = 6.0f;                                      // Lebih ketat saat bersih
-            const float dynamic_noise_floor_factor = max_factor - (max_factor - min_factor) * normalized_noise;
+            // Konstanta yang mendefinisikan perilaku faktor pengali.
+            // Ini adalah "heuristik tersembunyi" yang mendefinisikan bentuk fungsi kita.
+            const float MAX_CONFIDENCE_FACTOR = 8.0f; // Faktor saat noise mendekati nol (sangat ketat).
+            const float MIN_STABILITY_FACTOR = 2.5f;  // Faktor minimum untuk stabilitas pada noise sangat tinggi.
+            const float NOISE_SENSITIVITY = 50.0f;    // Seberapa cepat faktor menurun seiring meningkatnya noise.
+
+            // Hitung faktor secara langsung dari noise_sigma.
+            // Saat noise_sigma naik, faktor akan turun dari MAX_CONFIDENCE_FACTOR menuju MIN_STABILITY_FACTOR.
+            float noise_floor_factor = MAX_CONFIDENCE_FACTOR - NOISE_SENSITIVITY * noise_sigma;
+
+            // Pastikan faktor tidak pernah jatuh di bawah batas minimum stabilitas.
+            noise_floor_factor = std::max(MIN_STABILITY_FACTOR, noise_floor_factor);
 
             const float stability_constant = 1e-6f;
-            const float noise_threshold_sq = std::max(stability_constant, theoretical_noise_power_floor * dynamic_noise_floor_factor);
-
-            // Hitung weighted mean: bobot lebih tinggi pada frekuensi rendah
+            const float noise_threshold_sq = std::max(stability_constant, theoretical_noise_power_floor * noise_floor_factor);
+            
             float weighted_sum = 0.0f;
             float total_weight = 0.0f;
 
-            // FAKTOR PENURUNAN LINEAR: DILEMBUTKAN (Mempertahankan detail halus)
-            const float linear_decay_strength = 1.8f;
+            const float linear_decay_strength = 1.0f;
             const float max_row_val = static_cast<float>(mag_sq_diff_roi.rows);
             const float max_col_val = static_cast<float>(mag_sq_diff_roi.cols);
             const float row_decay_inv = (max_row_val > 0.0f) ? (1.0f / max_row_val) : 0.0f;
@@ -156,26 +144,20 @@ namespace MotionMatching
             for (int y = 0; y < mag_sq_diff_roi.rows; ++y)
             {
                 const float *__restrict diff_ptr = mag_sq_diff_roi.ptr<float>(y);
-
-                // Bobot menurun LINEAR
                 float radial_weight_linear = 1.0f - (linear_decay_strength * y * row_decay_inv);
                 float radial_weight = std::max(0.0f, radial_weight_linear);
 
-#pragma omp simd reduction(+ : weighted_sum, total_weight)
+        #pragma omp simd reduction(+ : weighted_sum, total_weight)
                 for (int x = 0; x < mag_sq_diff_roi.cols; ++x)
                 {
                     float col_weight_linear = 1.0f - (linear_decay_strength * x * col_decay_inv);
                     float col_weight = std::max(0.0f, col_weight_linear);
-
                     float pixel_weight = radial_weight * col_weight;
-
                     float pixel_mag_sq_diff = diff_ptr[x];
-
-                    // Soft Thresholding: Mengambil hanya sinyal di atas noise_floor
+                    
                     float final_diff_value = 0.0f;
                     if (pixel_mag_sq_diff >= noise_threshold_sq)
                     {
-                        // Soft Thresholding: Menghapus noise power yang terkandung dalam sinyal
                         final_diff_value = pixel_mag_sq_diff - noise_threshold_sq;
                     }
 
@@ -184,12 +166,9 @@ namespace MotionMatching
                 }
             }
 
-            // Normalisasi: Normalisasi terhadap ukuran blok ASLI (total_pixels)
             const float normalization_factor = static_cast<float>(total_pixels);
-
             float fft_mag_sq_score = (total_weight > 0) ? (weighted_sum / total_weight) : 0.0f;
 
-            // Normalisasi terhadap ukuran blok spasial
             if (normalization_factor > 0)
             {
                 fft_mag_sq_score /= normalization_factor;

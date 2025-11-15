@@ -188,25 +188,50 @@ class SinglePageLayout(QWidget):
              for tiff_path in tiff_files:
                   processed_tiff_path = tiff_path # Default pakai asli
                   needs_conversion = False
+                  compression = "unknown" # Inisialisasi variabel kompresi untuk logging
+                  
                   try:
+                      # Gunakan Pillow untuk membaca informasi
                       with Image.open(tiff_path) as img:
                            compression = img.info.get("compression", "none").lower()
+                           
+                           # --- TAMBAHKAN PESAN VERIFIKASI KOMPRESI DI SINI ---
+                           print(f"  TIFF File: {os.path.basename(tiff_path)} -> Detected Compression: {compression}")
+                           
                            # Cek kompresi yang perlu dikonversi
                            if compression in ["tiff_lzw", "tiff_zip", "packbits", "jpeg"]:
                                 needs_conversion = True
+                                
                   except (FileNotFoundError, UnidentifiedImageError, Exception) as e:
                        print(f"  TIFF Error reading info/opening: {os.path.basename(tiff_path)}, Error: {e}")
                        tiff_errors.append(f"{os.path.basename(tiff_path)} (Read Error)")
                        continue 
                    
                   if needs_conversion:
-                       print(f"  Converting compressed TIFF: {os.path.basename(tiff_path)}")
-                       converted = convert_tiff_to_uncompressed(tiff_path, output_folder)
-                       if converted:
+                       print(f"  Conversion triggered: {compression} needs decompressing.") # Pesan trigger konversi
+                       
+                       # Logic yang sudah diubah (menggunakan next() untuk generator)
+                       conversion_generator = convert_tiff_to_uncompressed([tiff_path], output_folder)
+                       conversion_successful = False
+                       try:
+                           success, result_path_or_error = next(conversion_generator)
+                           
+                           if success:
+                                converted = result_path_or_error
+                                conversion_successful = True
+                           else:
+                                converted = None
+                                tiff_errors.append(result_path_or_error)
+                                
+                       except StopIteration:
+                           print(f"  Conversion generator failed to produce output for: {os.path.basename(tiff_path)}")
+                           tiff_errors.append(f"{os.path.basename(tiff_path)} (No result generated)")
+                           converted = None
+
+                       if conversion_successful and converted:
                             processed_tiff_path = converted
                        else:
                             print(f"  Skipping TIFF due to conversion error: {os.path.basename(tiff_path)}")
-                            tiff_errors.append(f"{os.path.basename(tiff_path)} (Conversion Failed)")
                             continue # Skip jika konversi gagal
 
                   files_ready_for_import.append(processed_tiff_path) # Tambahkan path TIFF (asli atau konversi)

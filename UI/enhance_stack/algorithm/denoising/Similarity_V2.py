@@ -474,7 +474,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
                         if not batch_images:
                             print(language_config.SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED.format(current_batch_num))
                             continue 
-                        batch_images, new_size = resize_all_with_padding(batch_images, method="median")
+                        batch_images, new_size = resize_all_with_padding(batch_images, method="preserve")
                         print(language_config.START_IMAGE_ENHANCEMENT.format(len(batch_images)))
                         try:
                             batch_result = image_processor.similarity_mfnr(
@@ -535,7 +535,7 @@ def main(db_path, update_progress=None, stop_requested=None, batch_size=10,
                 batch_images = load_images_from_paths(batch_paths, stop_requested)
                 if stop_requested and stop_requested(): 
                     break
-                batch_images, new_size = resize_all_with_padding(batch_images, method="median")
+                batch_images, new_size = resize_all_with_padding(batch_images, method="preserve")
                         
                 if not batch_images:
                     print(language_config.SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED.format(current_batch_num))

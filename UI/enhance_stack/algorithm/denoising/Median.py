@@ -358,7 +358,7 @@ def main(db_path, update_progress=None, stop_requested=None,
                 batch_images = load_images_from_paths(batch_paths, stop_requested)
                 # Terapkan pra-pemrosesan jika perlu
                 if 'resize_all_with_padding' in globals():
-                    batch_images, _ = resize_all_with_padding(batch_images, method="median")
+                    batch_images, _ = resize_all_with_padding(batch_images, method="preserve")
 
             if stop_requested and stop_requested(): break
             if not batch_images:
