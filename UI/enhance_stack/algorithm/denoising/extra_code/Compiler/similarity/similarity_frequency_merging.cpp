@@ -22,7 +22,6 @@ namespace MotionMetricsConfig
 
 // =================================================================================
 // === FUNGSI HELPER BARU: ANALISIS PIRAMIDA BERBASIS FREKUENSI                  ===
-// === Diadopsi dari similarity_spatial_merging.cpp dan diadaptasi untuk DFT   ===
 // =================================================================================
 static cv::Mat generate_frequency_pyramid_guidance_map(
     const cv::Mat &current_image_gray_full,

@@ -130,6 +130,8 @@ static inline float compute_sad_with_bicubic_avx(
 // OPTIMIZATION 3: Main optimized subpixel refinement
 // ============================================================================
 
+constexpr int MAX_STACK_TILE_SIZE = 64; 
+
 cv::Point2f subpixel_refinement(
     const cv::Mat &ref_layer,
     const cv::Mat &comp_layer,
@@ -142,40 +144,61 @@ cv::Point2f subpixel_refinement(
     constexpr double MAX_CONFIDENCE_RESPONSE = 0.95; 
     constexpr float MAX_FINAL_SAD_PER_PIXEL = 0.05f;
     
-    // OPTIMIZATION 4: Pre-compute boundaries untuk avoid repeated checks
+    // Boundaries
     const int ref_max_x = ref_layer.cols - tile_w;
     const int ref_max_y = ref_layer.rows - tile_h;
     const int comp_max_x = comp_layer.cols - tile_w;
     const int comp_max_y = comp_layer.rows - tile_h;
     
-    // Early boundary check untuk reference tile
+    // Early boundary check
     if (x < 0 || y < 0 || x > ref_max_x || y > ref_max_y) {
         return cv::Point2f(static_cast<float>(dx), static_cast<float>(dy));
     }
 
     // =========================================================================
-    // STEP 1: Integer search 5x5 dengan ZSAD_AVX (OPTIMIZED)
+    // STEP 1: Integer search 3x3 (OPTIMIZED)
     // =========================================================================
     float min_cost = std::numeric_limits<float>::max();
     int best_integer_dx = dx;
     int best_integer_dy = dy;
     
-    // OPTIMIZATION 5: Pre-extract reference tile (cache-friendly)
-    std::vector<const float*> ref_rows(tile_h);
-    for (int r = 0; r < tile_h; ++r) {
-        ref_rows[r] = ref_layer.ptr<float>(y + r, x);
+    // OPTIMIZATION 5: Stack Array replacement for std::vector
+    const float* ref_rows_stack[MAX_STACK_TILE_SIZE];
+    
+    // Fallback jika tile terlalu besar (sangat jarang terjadi untuk refinement)
+    std::vector<const float*> ref_rows_heap;
+    const float** ref_rows_ptr; 
+    if (tile_h <= MAX_STACK_TILE_SIZE) {
+        for (int r = 0; r < tile_h; ++r) {
+            ref_rows_stack[r] = ref_layer.ptr<float>(y + r, x);
+        }
+        ref_rows_ptr = ref_rows_stack;
+    } else {
+        // Fallback ke Heap jika ukuran tile tidak wajar
+        ref_rows_heap.resize(tile_h);
+        for (int r = 0; r < tile_h; ++r) {
+            ref_rows_heap[r] = ref_layer.ptr<float>(y + r, x);
+        }
+        ref_rows_ptr = ref_rows_heap.data();
     }
 
-    // 5x5 search dengan boundary checks optimized
-    for (int ddy = -2; ddy <= 2; ++ddy)
+    // Pre-calculate stride untuk akses cepat comp_layer
+    const size_t comp_step = comp_layer.step1();
+
+    // 3x3 search (ddy: -1 to 1, ddx: -1 to 1)
+    for (int ddy = -1; ddy <= 1; ++ddy)
     {
         const int current_dy = dy + ddy;
         const int comp_y = y + current_dy;
         
-        // Early row boundary check
+        // Row boundary check
         if (comp_y < 0 || comp_y > comp_max_y) continue;
         
-        for (int ddx = -2; ddx <= 2; ++ddx)
+        // Ambil pointer baris pertama comp untuk current_dy
+        // Kita bisa menggeser pointer ini ke bawah menggunakan comp_step
+        const float* comp_row_ptr_base = comp_layer.ptr<float>(comp_y);
+
+        for (int ddx = -1; ddx <= 1; ++ddx)
         {
             const int current_dx = dx + ddx;
             const int comp_x = x + current_dx;
@@ -183,12 +206,20 @@ cv::Point2f subpixel_refinement(
             // Column boundary check
             if (comp_x < 0 || comp_x > comp_max_x) continue;
 
-            // OPTIMIZATION 6: Row-wise ZSAD dengan pre-cached pointers
+            // OPTIMIZATION 6: Row-wise ZSAD dengan Pointer Arithmetic
             float total_cost = 0.0f;
+            
+            // Manual loop tanpa memanggil .ptr() berulang kali
             for (int r = 0; r < tile_h; ++r)
             {
-                const float* p_comp = comp_layer.ptr<float>(comp_y + r, comp_x);
-                total_cost += calculate_zncc(ref_rows[r], p_comp, tile_w);
+                // Pointer reference sudah di-cache
+                const float* p_ref = ref_rows_ptr[r];
+                
+                // Pointer comp dihitung manual: base + (row * step) + offset_x
+                const float* p_comp = comp_row_ptr_base + (r * comp_step) + comp_x;
+                
+                // Fungsi kalkulasi cost eksternal (pastikan fungsi ini di-inline oleh compiler)
+                total_cost += calculate_fine_analysis(p_ref, p_comp, tile_w);
             }
 
             if (total_cost < min_cost)
@@ -232,8 +263,8 @@ cv::Point2f subpixel_refinement(
     // OPTIMIZATION 9: Reuse warp matrix (stack allocation)
     cv::Mat warp_matrix = cv::Mat::eye(2, 3, CV_32F);
     float* warp_ptr = warp_matrix.ptr<float>(0);
-    warp_ptr[2] = static_cast<float>(border);  // warp_matrix.at<float>(0, 2)
-    warp_ptr[5] = static_cast<float>(border);  // warp_matrix.at<float>(1, 2)
+    warp_ptr[2] = static_cast<float>(border);
+    warp_ptr[5] = static_cast<float>(border);
 
     try 
     {
@@ -264,7 +295,6 @@ cv::Point2f subpixel_refinement(
         
         // OPTIMIZATION 12: Early exit jika confidence sangat tinggi
         if (response >= MAX_CONFIDENCE_RESPONSE) {
-            // Skip validation jika ECC sangat yakin
             return refined_flow;
         }
         
@@ -287,7 +317,6 @@ cv::Point2f subpixel_refinement(
         // OPTIMIZATION 13: Skip validation jika shift sangat kecil
         const float shift_magnitude = std::sqrt(shift_x * shift_x + shift_y * shift_y);
         if (shift_magnitude < 0.1f) {
-            // Shift negligible, trust ECC result
             return final_flow;
         }
         

@@ -727,7 +727,7 @@ _CLAHE_CACHE = {}
 _SIGMOID_LUT_CACHE = {}  
 
 def estimate_noise_in_python(ref_image_gray_float: np.ndarray) -> float:
-    """Estimasi noise dengan minimal alokasi memori."""
+    """Estimasi noise dengan minimal alokasi memori. (TETAP SAMA)"""
     if ref_image_gray_float is None or ref_image_gray_float.size == 0:
         return 0.015
 
@@ -745,122 +745,42 @@ def estimate_noise_in_python(ref_image_gray_float: np.ndarray) -> float:
     estimated_sigma = mad_value * MAD_TO_SIGMA_FACTOR
     return float(np.clip(estimated_sigma, 0.001, 0.999))
 
+def apply_s_curve_float32(img: np.ndarray, strength: float = 4.0, pivot: float = 0.5):
+    """
+    S-Curve float32 dengan pivot.
+    Input: 0..255 float32
+    Output: float32 0..255
+    """
+    x = img / 255.0  # tetap float32
+
+    # sigmoid dengan pivot
+    y = 1.0 / (1.0 + np.exp(-strength * (x - pivot)))
+
+    return (y * 255.0).astype(np.float32)
+
+
 def preprocess_in_python(ref_image_float: np.ndarray,
-                         s_curve_contrast: float = 4.0,
+                         s_curve_contrast: float = 4.5,
+                         s_curve_pivot: float = 0.20,
                          use_raft: bool = False):
-    """Versi optimal untuk efisiensi CPU & memori, dengan adaptasi noise & kontrol agresi filter."""
+
     img = ref_image_float
     if img.dtype != np.float32:
         img = img.astype(np.float32, copy=False)
 
-    # === LANGKAH 0: Noise estimation ===
+    if s_curve_contrast > 0:
+        img = apply_s_curve_float32(img,
+                                    strength=s_curve_contrast,
+                                    pivot=s_curve_pivot)
+
     if not use_raft:
         if img.ndim == 3 and img.shape[2] > 1:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         else:
             gray = img
-        noise_sigma = estimate_noise_in_python(gray)
-        processed = gray.copy() if gray is img else gray
-    else:
-        processed = img
-        noise_sigma = 0.02
+        return gray.astype(np.float32)
 
-    # === LANGKAH 1: Denoising adaptif ===
-    median_denoise_used = False
-    if not use_raft and noise_sigma > 0.04:
-        if noise_sigma < 0.18:
-            norm_noise = np.clip((noise_sigma - 0.04) / (0.18 - 0.04), 0.0, 1.0)
-            d_sigma = 5 + 10 * norm_noise
-            r_sigma = (40 + 120 * norm_noise) / 255.0
-            diameter = 5 + int(4 * norm_noise)
-            processed = cv2.bilateralFilter(processed, diameter, r_sigma, d_sigma)
-        else:
-            # === Median denoising untuk noise tinggi ===
-            median_denoise_used = True
-            temp = processed
-            ksize = 3 if noise_sigma < 0.28 else 5
-            for _ in range(3):
-                np.clip(temp, 0.0, 1.0, out=temp)
-                temp_8u = (temp * 255).astype(np.uint8, copy=False)
-                temp_8u = cv2.medianBlur(temp_8u, ksize)
-                temp = temp_8u.astype(np.float32) / 255.0
-            processed = temp
-
-    # === LANGKAH 2: Micro-contrast ===
-    contrast_metric = float(np.std(processed))
-    low_c, high_c = 0.12, 0.20
-    aggression = 1.0 - np.clip((contrast_metric - low_c) / (high_c - low_c), 0.0, 1.0)
-    micro_th = 0.05
-    micro_strength = 1.0 - min(noise_sigma / micro_th, 1.0)
-
-    if micro_strength > 0.01:
-        blur_s = cv2.GaussianBlur(processed, (0, 0), sigmaX=0.8)
-        blur_l = cv2.GaussianBlur(processed, (0, 0), sigmaX=2.0)
-        detail = (processed - blur_s) + 0.6 * (processed - blur_l)
-        boost = (0.6 + 0.4 * aggression) * micro_strength
-        processed += boost * detail
-        np.clip(processed, 0.0, 1.0, out=processed)
-
-    # === LANGKAH 3: CLAHE ===
-    # Skip jika median denoising digunakan
-    if not median_denoise_used:
-        clip_limit = 0.6 + ((1.0 - min(noise_sigma / 0.12, 1.0)) ** 0.45 *
-                            (3.0 * (1.0 + 0.5 * aggression)))
-        if clip_limit > 0.61:
-            key = (int(clip_limit * 100), processed.ndim)
-            if key not in _CLAHE_CACHE:
-                _CLAHE_CACHE[key] = (
-                    cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8)),
-                    cv2.createCLAHE(clipLimit=clip_limit * 0.6, tileGridSize=(12, 12))
-                )
-            clahe1, clahe2 = _CLAHE_CACHE[key]
-
-            if processed.ndim == 3 and processed.shape[2] == 3:
-                ycrcb = cv2.cvtColor(processed, cv2.COLOR_BGR2YCrCb)
-                y = (ycrcb[:, :, 0] * 255).astype(np.uint8)
-                y = clahe1.apply(y)
-                if aggression > 0.5:
-                    y = clahe2.apply(y)
-                ycrcb[:, :, 0] = y.astype(np.float32) / 255.0
-                processed = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
-            else:
-                img_8u = (processed * 255).astype(np.uint8)
-                img_8u = clahe1.apply(img_8u)
-                if aggression > 0.5:
-                    img_8u = clahe2.apply(img_8u)
-                processed[:] = img_8u.astype(np.float32) / 255.0
-
-    # === LANGKAH 4: Laplacian detail ===
-    # Skip jika median denoising digunakan (untuk menghindari amplifikasi noise residu)
-    if not median_denoise_used:
-        lap = cv2.Laplacian(processed, cv2.CV_32F, ksize=3)
-        lap_strength = 0.15 * aggression * (1.0 - noise_sigma * 2.0)
-        processed += lap_strength * lap
-        np.clip(processed, 0.0, 1.0, out=processed)
-
-    # === LANGKAH 5: Gamma fix ===
-    mean_bright = float(np.mean(processed))
-    if mean_bright < 0.4:
-        gamma = max(1.0 - 0.3 * ((0.4 - mean_bright) * 2.5), 0.7)
-        np.power(processed, gamma, out=processed)
-        np.clip(processed, 0.0, 1.0, out=processed)
-
-    # === LANGKAH 6: S-curve (cache LUT) ===
-    adaptive_s = s_curve_contrast + (2.0 * aggression)
-    if adaptive_s not in _SIGMOID_LUT_CACHE:
-        x = np.linspace(0, 1, 256, dtype=np.float32)
-        sig = 1.0 / (1.0 + np.exp(-adaptive_s * (x - 0.5)))
-        low, high = sig[0], sig[-1]
-        lut = ((sig - low) / (high - low) * 255).astype(np.uint8)
-        _SIGMOID_LUT_CACHE[adaptive_s] = lut
-    else:
-        lut = _SIGMOID_LUT_CACHE[adaptive_s]
-
-    img_8u = (processed * 255).astype(np.uint8)
-    processed[:] = cv2.LUT(img_8u, lut).astype(np.float32) / 255.0
-
-    return processed, noise_sigma
-
+    return img.astype(np.float32)
 
 def estimate_noise_variance(gray_image, edge_threshold_low=70, dilate_kernel_size=4, min_flat_pixels_ratio=0.1):
     """
@@ -880,7 +800,6 @@ def estimate_noise_variance(gray_image, edge_threshold_low=70, dilate_kernel_siz
         return 0.0 # Atau nilai default yang sesuai
 
     # 1. Deteksi tepi untuk mengidentifikasi area non-datar
-    # Gunakan Canny. Threshold tinggi x 2 untuk high threshold adalah standar.
     edges = cv2.Canny(gray_image, edge_threshold_low, edge_threshold_low * 2)
     
     # 2. Dilatasi tepi untuk sedikit memperluas area non-datar
@@ -888,12 +807,11 @@ def estimate_noise_variance(gray_image, edge_threshold_low=70, dilate_kernel_siz
     dilated_edges = cv2.dilate(edges, kernel, iterations=1)
     
     # 3. Buat mask untuk area "datar" (piksel yang bukan bagian dari tepi yang diperluas)
-    flat_mask = (dilated_edges == 0).astype(np.bool_) # Ubah ke boolean mask
+    flat_mask = (dilated_edges == 0).astype(np.bool_)
     
     # Periksa apakah ada cukup piksel "datar"
     num_flat_pixels = np.sum(flat_mask)
     if num_flat_pixels < (gray_image.size * min_flat_pixels_ratio):
-        # print(f"Peringatan: Tidak ditemukan cukup piksel datar ({num_flat_pixels}/{gray_image.size * min_flat_pixels_ratio:.0f}). Estimasi noise mungkin kurang akurat.")
         laplacian_full = cv2.Laplacian(gray_image, cv2.CV_64F)
         return laplacian_full.var()
 
