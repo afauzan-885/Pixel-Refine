@@ -151,114 +151,119 @@ extern "C"
             stability_map_mat = cv::Mat(h_img, w_img, CV_32FC1, (void *)stability_map_ptr);
 
         // =================================================================================
-        // === TAHAP 1: ANALISIS SKALA KASAR (COARSE ANALYSIS - FFT)                   ===
+        // === TAHAP 1: ANALISIS SKALA KASAR (DYNAMIC DEEP PYRAMID)                    ===
         // =================================================================================
         
         const int tile_h_fine = tile_h;
         const int tile_w_fine = tile_w;
+        const int MIN_PYRAMID_DIM = 64; // Batas resolusi layer terkecil (agar FFT tetap valid)
 
-        // Tentukan jumlah level piramida
-        int num_pyramid_levels = 1;
-        if (h_img / 2 >= tile_h_fine && w_img / 2 >= tile_w_fine) {
-            num_pyramid_levels++;
-            if (h_img / 4 >= tile_h_fine && w_img / 4 >= tile_w_fine) {
-                num_pyramid_levels++;
-            }
-        }
-
-        // Bangun piramida
+        // 1. Bangun Piramida Dinamis (Bottom-Up: Fine -> Coarse)
         std::vector<cv::Mat> current_pyramid, reference_pyramid;
-        current_pyramid.reserve(num_pyramid_levels);
-        reference_pyramid.reserve(num_pyramid_levels);
-
+        
+        // Push Layer 0 (Original)
         current_pyramid.push_back(current_image_gray);
         reference_pyramid.push_back(reference_image_gray);
-        for (int i = 0; i < num_pyramid_levels - 1; ++i) {
+
+        // Buat layer berikutnya sampai batas dimensi tercapai
+        while (true) {
+            const cv::Mat& last_cur = current_pyramid.back();
+            // Cek apakah bisa dibagi 2 lagi?
+            // Kita berhenti jika layer berikutnya lebih kecil dari tile atau batas minimum
+            if (last_cur.rows / 2 < tile_h_fine || last_cur.cols / 2 < tile_w_fine ||
+                last_cur.rows / 2 < MIN_PYRAMID_DIM || last_cur.cols / 2 < MIN_PYRAMID_DIM) 
+            {
+                break;
+            }
+
             cv::Mat next_cur, next_ref;
             cv::pyrDown(current_pyramid.back(), next_cur);
             cv::pyrDown(reference_pyramid.back(), next_ref);
+            
             current_pyramid.push_back(next_cur);
             reference_pyramid.push_back(next_ref);
         }
 
-        std::reverse(current_pyramid.begin(), current_pyramid.end());
-        std::reverse(reference_pyramid.begin(), reference_pyramid.end());
+        // Sekarang kita punya piramida: [0:Fine, 1:Half, ..., N:Coarsest]
+        // Kita perlu memproses dari Coarsest -> Fine (Top-Down)
+        int max_level = current_pyramid.size() - 1;
 
-        cv::Mat guidance_map = cv::Mat(
-            current_pyramid[0].rows / tile_h_fine,
-            current_pyramid[0].cols / tile_w_fine,
-            CV_32FC1, cv::Scalar(1.0f));
+        // Inisialisasi Guidance Awal (untuk layer paling atas)
+        // Guidance awal = 1.0 (Netral)
+        // Ukuran grid guidance = ukuran layer paling atas dibagi ukuran tile
+        int top_grid_h = current_pyramid[max_level].rows / tile_h_fine;
+        int top_grid_w = current_pyramid[max_level].cols / tile_w_fine;
+        if (top_grid_h < 1) top_grid_h = 1;
+        if (top_grid_w < 1) top_grid_w = 1;
 
-        // Loop dari Skala Kasar -> Halus
-        for (int level = 0; level < num_pyramid_levels - 1; ++level)
+        cv::Mat guidance_map = cv::Mat::ones(top_grid_h, top_grid_w, CV_32FC1);
+
+        // Loop Top-Down (Dari Layer Terkasar -> Layer 1)
+        // Catatan: Layer 0 (Original) tidak diproses di sini, karena akan diproses di TAHAP 2 (MAD)
+        // Jadi kita loop dari max_level turun sampai level 1.
+        for (int level = max_level; level >= 1; --level)
         {
-            const cv::Mat &coarse_guidance_grid = guidance_map;
-            const cv::Mat &current_img_fine = current_pyramid[level + 1];
-            const cv::Mat &ref_img_fine = reference_pyramid[level + 1];
+            const cv::Mat &current_layer = current_pyramid[level];
+            const cv::Mat &ref_layer = reference_pyramid[level];
 
-            const int num_tiles_h = current_img_fine.rows / tile_h_fine;
-            const int num_tiles_w = current_img_fine.cols / tile_w_fine;
+            // Resize guidance map dari level sebelumnya (Coarser) agar cocok dengan grid level ini
+            const int num_tiles_h = current_layer.rows / tile_h_fine;
+            const int num_tiles_w = current_layer.cols / tile_w_fine;
+            
+            // Safety: Jika layer ini terlalu kecil (aneh tapi mungkin), skip
+            if (num_tiles_h == 0 || num_tiles_w == 0) continue;
 
-            if (num_tiles_h == 0 || num_tiles_w == 0) {
-                cv::resize(coarse_guidance_grid, guidance_map, 
-                       cv::Size(current_img_fine.cols / tile_w_fine, current_img_fine.rows / tile_h_fine),
-                       0, 0, cv::INTER_LINEAR);
-                continue;
+            cv::Mat upscaled_guidance;
+            if (level == max_level) {
+                // Level paling atas tidak punya parent, pakai ones
+                upscaled_guidance = guidance_map;
+            } else {
+                // Upscale guidance dari level (level+1) ke ukuran grid level ini
+                cv::resize(guidance_map, upscaled_guidance, cv::Size(num_tiles_w, num_tiles_h), 0, 0, cv::INTER_LINEAR);
             }
 
             cv::Mat current_confidence_grid(num_tiles_h, num_tiles_w, CV_32FC1);
 
     #pragma omp parallel
             {
-                // HAPUS: Buffer local_norm_tile tidak diperlukan lagi
-                // cv::Mat local_norm_tile; 
-                
     #pragma omp for schedule(dynamic)
                 for (int r_tile = 0; r_tile < num_tiles_h; ++r_tile)
                 {
                     for (int c_tile = 0; c_tile < num_tiles_w; ++c_tile)
                     {
                         cv::Rect roi(c_tile * tile_w_fine, r_tile * tile_h_fine, tile_w_fine, tile_h_fine);
-
-                        // --- MODIFIKASI DISINI ---
-                        // HAPUS: equalize_tile_brightness(...)
-                        // GANTI: Langsung gunakan current_img_fine(roi) ke dalam FFT
                         
+                        // Batas ROI safety check
+                        if (roi.x + roi.width > current_layer.cols) roi.width = current_layer.cols - roi.x;
+                        if (roi.y + roi.height > current_layer.rows) roi.height = current_layer.rows - roi.y;
+
                         MotionMatching::TileMatchResult res = MotionMatching::calculate_tile_fft(
-                            current_img_fine(roi), // Input RAW (tanpa ekualisasi)
-                            ref_img_fine(roi), 
+                            current_layer(roi), 
+                            ref_layer(roi), 
                             global_estimated_noise_sigma);
 
                         float local_confidence = res.success ? 
                             MotionMatching::calculate_match_confidence(res, global_estimated_noise_sigma, 
                                                 motion_sensitivity, noise_offset_factor) : 0.0f;
 
-                        // 2. Ambil Guidance (Tetap Sama)
-                        const int r_coarse = r_tile / 2;
-                        const int c_coarse = c_tile / 2;
-                        
-                        float max_neighbor_guidance = 0.0f;
-                        for (int dr = -1; dr <= 1; ++dr) {
-                            for (int dc = -1; dc <= 1; ++dc) {
-                                int nr = r_coarse + dr;
-                                int nc = c_coarse + dc;
-                                if (nr >= 0 && nr < coarse_guidance_grid.rows && nc >= 0 && nc < coarse_guidance_grid.cols)
-                                    max_neighbor_guidance = std::max(max_neighbor_guidance, coarse_guidance_grid.at<float>(nr, nc));
-                            }
-                        }
-                        if (max_neighbor_guidance == 0.0f && coarse_guidance_grid.empty()) max_neighbor_guidance = 1.0f;
+                        // Ambil nilai guidance dari map yang sudah di-upscale
+                        // Karena grid sudah resize, kita bisa ambil langsung di (r,c)
+                        float guidance_val = upscaled_guidance.at<float>(r_tile, c_tile);
 
-                        // 3. Fusi
-                        float combined_conf = local_confidence * max_neighbor_guidance;
-                        current_confidence_grid.at<float>(r_tile, c_tile) = combined_conf;
+                        // Fusi: Confidence Lokal * Guidance dari Atas
+                        current_confidence_grid.at<float>(r_tile, c_tile) = local_confidence * guidance_val;
                     }
                 }
             } // end omp parallel
 
+            // Simpan hasil level ini sebagai guidance untuk level di bawahnya
             guidance_map = current_confidence_grid;
         }
 
-        // Upscale guidance akhir
+        // --- FINALISASI GUIDANCE UNTUK TAHAP 2 ---
+        // Saat loop selesai di level 1, 'guidance_map' berisi grid confidence level 1.
+        // Kita perlu upscale ini ke ukuran PIXEL Penuh (Layer 0) untuk dipakai MAD.
+        
         cv::Mat final_guidance_map;
         if (!guidance_map.empty()) {
             cv::resize(guidance_map, final_guidance_map, cv::Size(w_img, h_img), 0, 0, cv::INTER_CUBIC);

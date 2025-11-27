@@ -16,26 +16,26 @@
 #include "cost_function.hpp"
 #include "refinement.hpp"
 
-// class SimpleTimer
-// {
-// public:
-//     SimpleTimer(const std::string &name)
-//         : m_name(name), m_start(std::chrono::high_resolution_clock::now())
-//     {
-//     }
+class SimpleTimer
+{
+public:
+    SimpleTimer(const std::string &name)
+        : m_name(name), m_start(std::chrono::high_resolution_clock::now())
+    {
+    }
 
-//     ~SimpleTimer()
-//     {
-//         auto end = std::chrono::high_resolution_clock::now();
-//         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - m_start);
-//         std::cout << "[C++ Timer] " << m_name << ": "
-//                   << duration.count() / 1000.0 << " ms" << std::endl;
-//     }
+    ~SimpleTimer()
+    {
+        auto end = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - m_start);
+        std::cout << "[C++ Timer] " << m_name << ": "
+                  << duration.count() / 1000.0 << " ms" << std::endl;
+    }
 
-// private:
-//     std::string m_name;
-//     std::chrono::time_point<std::chrono::high_resolution_clock> m_start;
-// };
+private:
+    std::string m_name;
+    std::chrono::time_point<std::chrono::high_resolution_clock> m_start;
+};
 
 // =========================================================================
 // === HELPER FUNCTIONS - Static Implementation ===
@@ -160,8 +160,8 @@ namespace AlignmentFlowHelpers
         std::vector<cv::Vec2f> &candidate_flows,
         int layer_index,
         int total_layers,
-        const cv::Mat &previous_level_flow, // Flow dari level LEBIH KASAR
-        const cv::Mat &current_flow,        // Flow dari level sebelumnya, SUDAH DI-UPSAMPLE
+        const cv::Mat &previous_level_flow, // Flow level kasar (belum di-upsample)
+        const cv::Mat &current_flow,        // Flow level ini (hasil upsample)
         int tile_center_y,
         int tile_center_x,
         int current_tile_h,
@@ -170,126 +170,73 @@ namespace AlignmentFlowHelpers
         using namespace ImageAlignmentConfig;
 
         candidate_flows.clear();
-        candidate_flows.reserve(15);
+        // Kita batasi kapasitas karena kita hanya ambil kandidat paling relevan
+        candidate_flows.reserve(8);
 
-        // === KASUS DASAR: Level paling kasar, hanya ada zero flow ===
+        // --- KASUS DASAR: Level paling kasar ---
         if (layer_index == total_layers - 1)
         {
             candidate_flows.emplace_back(0.0f, 0.0f);
             return;
         }
 
-        // === SUMBER KANDIDAT #1: Metal-Inspired Spatial Correction ===
+        // --- 1. PRIMARY CANDIDATE: Inherited Flow (Tebakan dari level sebelumnya) ---
+        // Ini adalah kandidat terkuat.
+        const cv::Vec2f &center_flow = current_flow.at<cv::Vec2f>(
+            tile_center_y + current_tile_h / 2,
+            tile_center_x + current_tile_w / 2);
+        candidate_flows.push_back(center_flow);
+
+        // --- 2. SPATIAL CANDIDATES (Tetangga) ---
+        // OPTIMASI: Hanya cek tetangga Kiri dan Atas.
+        // Alasan: Data tetangga ini biasanya sudah selesai diproses (kausalitas) 
+        // dan cukup untuk menangani pergerakan objek yang konsisten.
+        
+        // Jarak cek tetangga (gunakan ukuran tile penuh karena non-overlap)
+        const int step_x = current_tile_w;
+        const int step_y = current_tile_h;
+
+        // Cek Tetangga Kiri
+        int h_neighbor_x = tile_center_x - step_x;
+        if (h_neighbor_x >= 0)
         {
-            // 1a. Kandidat dari tile itu sendiri (tebakan awal terbaik)
-            // Menggunakan titik tengah tile
-            const cv::Vec2f &center_flow = current_flow.at<cv::Vec2f>(
-                tile_center_y + current_tile_h / 2,
-                tile_center_x + current_tile_w / 2);
-            candidate_flows.push_back(center_flow);
+            candidate_flows.push_back(current_flow.at<cv::Vec2f>(tile_center_y, h_neighbor_x));
+        }
 
-            // 1b. Kandidat dari tetangga horizontal dan vertikal
-            const int step_x = std::max(current_tile_w / 2, 1);
-            const int step_y = std::max(current_tile_h / 2, 1);
-            const int tile_grid_x = tile_center_x / step_x;
-            const int tile_grid_y = tile_center_y / step_y;
+        // Cek Tetangga Atas
+        int v_neighbor_y = tile_center_y - step_y;
+        if (v_neighbor_y >= 0)
+        {
+            candidate_flows.push_back(current_flow.at<cv::Vec2f>(v_neighbor_y, tile_center_x));
+        }
 
-            int dx_shift = (tile_grid_x % 2 == 0) ? -step_x : step_x;
-            int dy_shift = (tile_grid_y % 2 == 0) ? -step_y : dy_shift;
+        // --- 3. COARSE PROJECTION (Backup) ---
+        // Mengambil langsung dari raw previous level flow (jika ragu dengan hasil upsampling)
+        // Hanya dilakukan jika bukan di level paling halus untuk menghemat akses memori
+        if (layer_index > 0) 
+        {
+            // Mapping koordinat ke level kasar (koordinat / 2)
+            const int coarse_y = (tile_center_y + current_tile_h / 2) / 2;
+            const int coarse_x = (tile_center_x + current_tile_w / 2) / 2;
 
-            int h_neighbor_x = tile_center_x + dx_shift;
-            int v_neighbor_y = tile_center_y + dy_shift;
-
-            if (h_neighbor_x >= 0 && h_neighbor_x < current_flow.cols)
+            if (coarse_y >= 0 && coarse_y < previous_level_flow.rows &&
+                coarse_x >= 0 && coarse_x < previous_level_flow.cols)
             {
-                candidate_flows.push_back(current_flow.at<cv::Vec2f>(tile_center_y, h_neighbor_x));
-            }
-            if (v_neighbor_y >= 0 && v_neighbor_y < current_flow.rows)
-            {
-                candidate_flows.push_back(current_flow.at<cv::Vec2f>(v_neighbor_y, tile_center_x));
+                // Jangan lupa dikali faktor upscale (biasanya 2.0)
+                candidate_flows.emplace_back(previous_level_flow.at<cv::Vec2f>(coarse_y, coarse_x) * FLOW_UPSCALE_FACTOR);
             }
         }
 
-        // === SUMBER KANDIDAT #2: Propagasi dari Level Kasar (Optimasi) ===
-        // OPTIMASI: Hanya lakukan sampling 1x1 di level kasar, kecuali di level paling kasar kedua (L4)
-        {
-            const int coarse_y = static_cast<int>((tile_center_y + current_tile_h * 0.5f) * 0.5f);
-            const int coarse_x = static_cast<int>((tile_center_x + current_tile_w * 0.5f) * 0.5f);
-
-            const int max_row = previous_level_flow.rows;
-            const int max_col = previous_level_flow.cols;
-
-            const cv::Vec2f *flow_ptr = previous_level_flow.ptr<cv::Vec2f>(0);
-            const int flow_step = previous_level_flow.cols;
-
-            // Tentukan radius sampling
-            // Kita hanya ambil pusat (dr=0, dc=0) untuk menghemat cost,
-            // karena kandidat spatial (sumber #1) sudah cukup.
-            int dr_max = 0;
-            int dc_max = 0;
-
-            // Opsional: Jika Anda hanya ingin 3x3 search di level L4 (paling kasar kedua)
-            /*
-            if (layer_index == total_layers - 2) {
-                dr_max = 1;
-                dc_max = 1;
-            }
-            */
-
-            for (int dr = -dr_max; dr <= dr_max; ++dr)
-            {
-                const int ny = coarse_y + dr;
-                if (ny < 0 || ny >= max_row)
-                    continue;
-
-                for (int dc = -dc_max; dc <= dc_max; ++dc)
-                {
-                    const int nx = coarse_x + dc;
-                    if (nx >= 0 && nx < max_col)
-                    {
-                        const cv::Vec2f &prev_flow = flow_ptr[ny * flow_step + nx];
-                        candidate_flows.emplace_back(prev_flow * FLOW_UPSCALE_FACTOR);
-                    }
-                }
-            }
-        }
-
-        // === FINALISASI: Deduplikasi dan Fallback ===
-
-        // 1. Hapus kandidat duplikat
-        std::sort(candidate_flows.begin(), candidate_flows.end(),
-                  [](const cv::Vec2f &a, const cv::Vec2f &b)
-                  {
-                      if (a[0] != b[0])
-                          return a[0] < b[0];
-                      return a[1] < b[1];
-                  });
-        candidate_flows.erase(
-            std::unique(candidate_flows.begin(), candidate_flows.end()),
-            candidate_flows.end());
-
-        // 2. Fallback
+        // --- 4. Fallback (Jika kosong) ---
         if (candidate_flows.empty())
         {
-            // ... (Logika fallback tetap sama) ...
-            const cv::Vec2f center_flow = current_flow.at<cv::Vec2f>(
-                tile_center_y + current_tile_h / 2,
-                tile_center_x + current_tile_w / 2);
-
-            candidate_flows.emplace_back(center_flow);
-
-            const float cx = center_flow[0];
-            const float cy = center_flow[1];
-
-            candidate_flows.emplace_back(cx - 1, cy - 1);
-            candidate_flows.emplace_back(cx, cy - 1);
-            candidate_flows.emplace_back(cx + 1, cy - 1);
-            candidate_flows.emplace_back(cx - 1, cy);
-            candidate_flows.emplace_back(cx + 1, cy);
-            candidate_flows.emplace_back(cx - 1, cy + 1);
-            candidate_flows.emplace_back(cx, cy + 1);
-            candidate_flows.emplace_back(cx + 1, cy + 1);
+            candidate_flows.push_back(center_flow);
         }
+
+        // Deduplikasi sederhana (menghapus elemen berurutan yang sama)
+        // Tidak perlu sort mahal karena jumlah elemen sangat sedikit (< 6)
+        // Kita biarkan saja sedikit duplikasi demi kecepatan CPU, 
+        // karena cost calculation cache nanti akan menangani duplikasi integer.
     }
 
     // --- THREAD-LOCAL BUFFERS (Optimasi Cost Calculation) ---
@@ -762,77 +709,67 @@ namespace AlignmentFlowHelpers
         int total_layers,
         int tile_h, 
         int tile_w, 
-        float search_dist)
+        float base_search_dist)
     {
         using namespace ImageAlignmentConfig;
 
         const bool is_coarsest_layer = (layer_index == total_layers - 1);
         const bool is_finest_layer   = (layer_index == 0);                
-        const bool is_adaptive_mode  = (layer_index > 0); 
-
+        
         const int h_layer = ref_layer.rows;
         const int w_layer = ref_layer.cols;
 
+        // --- 1. Inisialisasi Flow ---
         cv::Mat flow;
-
-        // --- 1. Inisialisasi Flow (Sama seperti sebelumnya) ---
         if (is_coarsest_layer) flow = initializeCoarsestFlow(ref_layer);
         else flow = upsamplingFlow(previous_level_flow, ref_layer);
 
-        // --- 2. Konfigurasi Tile Size & Search Distance ---
-        int current_tile_h, current_tile_w;
-        float current_layer_search_dist;
+        // --- 2. Setup Tile Size ---
+        // Clamp tile size agar tidak lebih besar dari gambar layer saat ini
+        int current_tile_h = std::max(MIN_TILE_SIZE, std::min(tile_h, h_layer));
+        int current_tile_w = std::max(MIN_TILE_SIZE, std::min(tile_w, w_layer));
 
-        // LOGIKA BARU:
-        // Semua layer sekarang mencoba menggunakan ukuran tile input (tile_h, tile_w).
-        // Kita menggunakan std::min(..., h_layer) agar jika layer sangat kecil (coarsest),
-        // ukuran tile otomatis mengecil menyesuaikan ukuran layer tsb.
-        
-        current_tile_h = std::max(MIN_TILE_SIZE, std::min(tile_h, h_layer));
-        current_tile_w = std::max(MIN_TILE_SIZE, std::min(tile_w, w_layer));
+        // --- 3. OPTIMASI STEP (NON-OVERLAP) ---
+        // Menggunakan step sebesar ukuran tile. Mengurangi beban komputasi 75%.
+        int step_y = current_tile_h;
+        int step_x = current_tile_w;
 
-        if (is_finest_layer) 
-        {
-            // Layer paling halus: Search distance sempit (verifikasi 1x1)
-            current_layer_search_dist = 1.0f; 
-        }
-        else 
-        {
-            // Coarsest & Adaptive Layer: Search distance penuh
-            // Baik level paling atas maupun tengah sekarang pakai tile input
-            current_layer_search_dist = search_dist;
+        // --- 4. Adaptive Search Distance ---
+        // Layer halus radius kecil, layer kasar radius besar
+        float current_layer_search_dist = base_search_dist;
+        if (!is_coarsest_layer) {
+            // Rumus decay radius: makin halus layer, makin sempit pencarian
+            current_layer_search_dist = std::max(1.0f, base_search_dist / (1.5f * (total_layers - layer_index)));
         }
 
-        // Safety check standar
-        if (current_tile_h <= 0 || current_tile_w <= 0 || h_layer < current_tile_h || w_layer < current_tile_w)
-            return flow;
-
-        const bool use_overlap = is_adaptive_mode; 
-        int step_y = use_overlap ? std::max(current_tile_h / 2, 1) : current_tile_h;
-        int step_x = use_overlap ? std::max(current_tile_w / 2, 1) : current_tile_w;
         const float tile_area_inv = 1.0f / (float)(current_tile_h * current_tile_w);
 
+        // Struktur untuk menyimpan hasil per thread
+        // Kita simpan Rect dan Flow-nya untuk ditulis ulang nanti
         std::vector<std::vector<TileResult>> thread_results(omp_get_max_threads());
 
 #pragma omp parallel
         {
             int thread_id = omp_get_thread_num();
-
-            // Buffer lokal thread untuk menghindari alokasi berulang
+            
+            // Buffer lokal thread (reusable)
             std::vector<cv::Vec2f> temp_initial_flows; 
-            temp_initial_flows.reserve(20);
+            temp_initial_flows.reserve(10);
             
             std::vector<Candidate> temp_search_results; 
-            temp_search_results.reserve(32);
+            temp_search_results.reserve(16);
 
-            // Buffer Pixel (Ref & Comp)
+            // Buffer Pixel ZMCL (Flat vector)
             std::vector<float> local_ref_buffer(current_tile_h * current_tile_w);
             std::vector<float> local_comp_buffer(current_tile_h * current_tile_w);
 
-            // Cache untuk Integer Deduplication di Finest Layer
-            // Key: (dy << 16) | dx (asumsi offset tidak > 32rb pixel)
-            // Value: Cost
+            // Cache Cost Integer (Hanya dipakai di finest layer)
             std::map<uint32_t, float> integer_cost_cache;
+
+            // --- OPTIMASI EARLY EXIT ---
+            // Jika cost (MSE) di bawah nilai ini, hentikan pencarian kandidat lain.
+            // 0.002 adalah threshold empiris untuk "match yang sangat baik".
+            const float EARLY_EXIT_COST = 0.002f; 
 
 #pragma omp for schedule(dynamic)
             for (int y = 0; y <= h_layer - current_tile_h; y += step_y)
@@ -842,40 +779,39 @@ namespace AlignmentFlowHelpers
                     temp_initial_flows.clear();
                     temp_search_results.clear();
 
-                    // 1. Generate Candidates
+                    // 1. Dapatkan Kandidat
                     generateCandidateFlows(temp_initial_flows, layer_index, total_layers, previous_level_flow, flow, y, x, current_tile_h, current_tile_w);
 
-                    // 2. Evaluasi
+                    // 2. Evaluasi Kandidat
+                    
+                    // === JALUR CEPAT: FINEST LAYER (ZMCL/AVX Optimized) ===
                     if (is_finest_layer) 
                     {
-                        // === OPTIMASI FINEST LAYER ===
-                        
-                        // A. Copy Reference Tile SEKALI saja per tile
+                        // Copy Reference Tile SEKALI saja
                         copyTileToContiguousBuffer(ref_layer, y, x, current_tile_h, current_tile_w, local_ref_buffer);
-                        
                         integer_cost_cache.clear();
+
+                        float best_cost_so_far = std::numeric_limits<float>::max();
 
                         for (const auto &initial_vec : temp_initial_flows)
                         {
-                            // Rounding ke integer terdekat untuk akses pixel
+                            // Snap ke grid integer untuk cost calculation
                             int i_dx = static_cast<int>(std::round(initial_vec[0]));
                             int i_dy = static_cast<int>(std::round(initial_vec[1]));
-
-                            // Buat key unik untuk map (packing 2 int16 ke int32)
-                            // Offset flow relatif kecil, jadi aman di cast ke short
+                            
+                            // Key packing (int16 | int16 -> int32)
                             uint32_t key = (static_cast<uint16_t>(i_dy) << 16) | static_cast<uint16_t>(i_dx);
 
                             float cost;
                             auto it = integer_cost_cache.find(key);
 
                             if (it != integer_cost_cache.end()) {
-                                // Cache Hit: Gunakan cost yang sudah dihitung untuk koordinat ini
-                                cost = it->second;
+                                cost = it->second; // Cache Hit
                             } else {
-                                // Cache Miss: Hitung cost (Heavy AVX Op)
+                                // Cache Miss: Hitung Heavy Cost
                                 int test_y = y + i_dy;
                                 int test_x = x + i_dx;
-
+                                
                                 cost = calculateCostAtIntegerPos(
                                     local_ref_buffer, comp_layer, 
                                     test_y, test_x, 
@@ -883,137 +819,123 @@ namespace AlignmentFlowHelpers
                                     local_comp_buffer
                                 );
                                 
-                                // Normalisasi cost
                                 if (cost != std::numeric_limits<float>::max()) {
                                     cost *= tile_area_inv;
                                 }
-                                
                                 integer_cost_cache[key] = cost;
                             }
 
-                            // Simpan kandidat. Perhatikan: Flow tetap menggunakan 'initial_vec' (float)
-                            // meskipun cost dihitung berdasarkan posisi integer terdekat.
-                            // Ini memungkinkan kita mempertahankan presisi subpixel "tebakan" jika cost-nya bagus.
+                            // Simpan hasil
                             if (cost != std::numeric_limits<float>::max()) {
-                                Candidate cand;
-                                cand.flow = initial_vec; // Tetap simpan float
-                                cand.cost = cost;
-                                temp_search_results.push_back(cand);
+                                temp_search_results.push_back({initial_vec, cost});
+                                if (cost < best_cost_so_far) best_cost_so_far = cost;
                             }
+
+                            // CHECK EARLY EXIT
+                            // Jika kandidat pertama (Inherited Flow) sudah bagus, stop.
+                            if (best_cost_so_far < EARLY_EXIT_COST) break;
                         }
                     }
+                    // === JALUR STANDARD: COARSE LAYER ===
                     else
                     {
-                        // === SCALE 2 & 3: COARSE SEARCH ===
                         for (const auto &initial_vec : temp_initial_flows)
                         {
                             searchCoarseLevelDirect(ref_layer, comp_layer, y, x, current_tile_h, current_tile_w, initial_vec, current_layer_search_dist, temp_search_results);
+                            
+                            // Early exit untuk coarse search
+                            if (!temp_search_results.empty() && 
+                                (temp_search_results.front().cost * tile_area_inv) < EARLY_EXIT_COST) 
+                            {
+                                break;
+                            }
                         }
                     }
 
-                    // 3. Pilih kandidat terbaik
+                    // 3. Pilih Flow Terbaik
                     cv::Point2f chosen_flow;
                     if (!temp_search_results.empty())
                     {
-                        // Urutkan parsial untuk mendapatkan top candidates
-                        size_t keep_count = std::min(temp_search_results.size(), (size_t)5);
-                        std::partial_sort(temp_search_results.begin(), temp_search_results.begin() + keep_count, temp_search_results.end(),
+                        // Sederhanakan pemilihan: Ambil cost terendah (Min Element)
+                        // Kita skip logika spatial weighting kompleks di sini demi kecepatan
+                        auto best_it = std::min_element(temp_search_results.begin(), temp_search_results.end(),
                              [](const Candidate &a, const Candidate &b) { return a.cost < b.cost; });
                         
-                        temp_search_results.resize(keep_count);
-
-                        chosen_flow = selectBestCandidate(
-                            temp_search_results, flow, ref_layer, y, x, current_tile_h, current_tile_w);
+                        chosen_flow = best_it->flow;
                     }
                     else
                     {
+                        // Fallback ke nilai awal flow map jika search gagal
                         chosen_flow = flow.at<cv::Point2f>(y, x);
                     }
 
-                    // 4. Final Flow Assignment
-                    // Untuk finest layer, kita bypass subpixel refinement berat untuk performa
-                    cv::Point2f final_flow;
-                    if (is_finest_layer) {
-                        final_flow = chosen_flow;
-                    } else {
-                        final_flow = subpixel_refinement(
+                    // 4. Subpixel Refinement
+                    // SKIP untuk Finest Layer (boros waktu, gain visual minim di resolusi penuh)
+                    // SKIP untuk Coarsest Layer (akan di-handle RANSAC)
+                    if (!is_finest_layer && !is_coarsest_layer) {
+                        chosen_flow = subpixel_refinement(
                             ref_layer, comp_layer, x, y,
                             (int)std::round(chosen_flow.x), (int)std::round(chosen_flow.y),
                             current_tile_w, current_tile_h
                         );
                     }
 
-                    thread_results[thread_id].push_back({cv::Rect(x, y, current_tile_w, current_tile_h), final_flow});
+                    // Simpan hasil ke buffer thread
+                    thread_results[thread_id].push_back({cv::Rect(x, y, current_tile_w, current_tile_h), chosen_flow});
                 }
             }
-        } // End Parallel
+        } // End Parallel Region
 
-        // === REDUCE PHASE ===
+        // --- 5. REDUCE PHASE (Direct Assignment) ---
+        // Karena Non-Overlap, kita tidak perlu akumulasi weighted (add+div).
+        // Kita cukup menulis nilai flow ke matriks tujuan (reset dulu ke 0).
         
-        cv::Mat flow_accumulator = cv::Mat::zeros(h_layer, w_layer, CV_32FC2);
-        cv::Mat weight_accumulator = cv::Mat::zeros(h_layer, w_layer, CV_32FC1);
+        flow = cv::Mat::zeros(h_layer, w_layer, CV_32FC2);
 
+        // Iterasi hasil dari setiap thread
         for (const auto &results_from_one_thread : thread_results)
         {
             for (const auto &result : results_from_one_thread)
             {
-                const cv::Rect &tile_roi = result.roi;
-                const cv::Point2f &result_flow = result.flow;
+                // Menulis flow blok ke area ROI di Mat
+                // Menggunakan pointer arithmetic untuk kecepatan
+                const int rx = result.roi.x;
+                const int ry = result.roi.y;
+                const int rw = result.roi.width;
+                const int rh = result.roi.height;
+                const float fx = result.flow.x;
+                const float fy = result.flow.y;
 
-                cv::Mat weights;
-                if (use_overlap)
-                    weights = getGaussianWindow(tile_roi.height, tile_roi.width);
-                else
-                    weights = cv::Mat::ones(tile_roi.height, tile_roi.width, CV_32F);
+                // Pastikan batas aman (clipping)
+                int end_y = std::min(ry + rh, h_layer);
+                int end_x = std::min(rx + rw, w_layer);
 
-                const float *weight_data = weights.ptr<float>(0);
-
-                for (int r = 0; r < tile_roi.height; ++r)
-                {
-                    cv::Vec2f *p_flow_start = flow_accumulator.ptr<cv::Vec2f>(tile_roi.y + r) + tile_roi.x;
-                    float *p_weight_start = weight_accumulator.ptr<float>(tile_roi.y + r) + tile_roi.x;
-                    const float *p_weights_row = weight_data + r * tile_roi.width;
-
-#pragma omp simd
-                    for (int c = 0; c < tile_roi.width; ++c)
-                    {
-                        const float w = p_weights_row[c];
-                        p_flow_start[c][0] += result_flow.x * w;
-                        p_flow_start[c][1] += result_flow.y * w;
-                        p_weight_start[c] += w;
+                for(int r = ry; r < end_y; ++r) {
+                    cv::Vec2f* row_ptr = flow.ptr<cv::Vec2f>(r);
+                    for(int c = rx; c < end_x; ++c) {
+                        row_ptr[c][0] = fx;
+                        row_ptr[c][1] = fy;
                     }
                 }
             }
         }
 
-        cv::Vec2f *flow_ptr = flow_accumulator.ptr<cv::Vec2f>(0);
-        float *weight_ptr = weight_accumulator.ptr<float>(0);
-        const int total_pixels = h_layer * w_layer;
-
-#pragma omp parallel for simd
-        for (int p = 0; p < total_pixels; ++p)
-        {
-            if (weight_ptr[p] > NORMALIZATION_EPSILON)
-            {
-                const float inv_weight = 1.0f / weight_ptr[p];
-                flow_ptr[p][0] *= inv_weight;
-                flow_ptr[p][1] *= inv_weight;
-            }
-            else
-            {
-                flow_ptr[p][0] = 0.0f;
-                flow_ptr[p][1] = 0.0f;
-            }
-        }
-
-        flow = flow_accumulator;
-
-        // --- FINAL FILTERS ---
-        if (layer_index > 0)
-        {
+        // --- 6. POST-PROCESSING FILTERS ---
+        
+        // A. Smoothing Sambungan (De-blocking)
+        // Karena kita pakai non-overlap tiles, akan muncul efek kotak-kotak.
+        // Kita haluskan dengan filter cepat.
+        if (is_finest_layer) {
+            // Di layer akhir, gunakan Box Filter (sangat cepat, O(1))
+            // Kernel 5x5 cukup untuk menyamarkan batas tile
+            cv::boxFilter(flow, flow, -1, cv::Size(5, 5));
+        } else {
+            // Di layer coarse/medium, gunakan Median Blur untuk membuang outlier ekstrim
             cv::medianBlur(flow, flow, 5);
         }
 
+        // B. RANSAC (Hanya di level paling kasar)
+        // Untuk memastikan alignment global awal benar
         if (is_coarsest_layer)
         {
             RANSACOutlierRemoval(flow, layer_index, total_layers);
@@ -1049,7 +971,7 @@ extern "C"
 
         std::vector<cv::Mat> ref_pyramid, current_pyramid;
         {
-            // SimpleTimer pyramid_timer("Pyramid Generation"); // Opsional
+            SimpleTimer pyramid_timer("Pyramid Generation"); // Opsional
             ref_pyramid.reserve(n_layers);
             current_pyramid.reserve(n_layers);
 
@@ -1080,7 +1002,7 @@ extern "C"
         cv::Mat previous_level_flow;
 
         {
-            // SimpleTimer flow_levels_timer("Coarse-to-Fine Flow Processing");
+            SimpleTimer flow_levels_timer("Coarse-to-Fine Flow Processing");
 
             for (int i = static_cast<int>(ref_pyramid.size()) - 1; i >= 0; --i)
             {
@@ -1107,7 +1029,7 @@ extern "C"
         // === BAGIAN D: Finalisasi dan Pengembalian Data ===
         float *output_flow_data = nullptr;
         {
-            // SimpleTimer finalization_timer("Finalization & Data Copy");
+            SimpleTimer finalization_timer("Finalization & Data Copy");
             if (!flow.empty())
             {
                 if (!flow.isContinuous())

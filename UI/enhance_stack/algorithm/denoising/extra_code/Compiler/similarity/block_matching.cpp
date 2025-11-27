@@ -622,55 +622,34 @@ namespace MotionMatching
         float global_noise_sigma,
         float gradient_weight_factor,
         float stability_epsilon,
-        MBMBuffers &buffers)
+        MBMBuffers &buffers) // Parameter buffers jadi tidak terpakai, tapi dibiarkan utk kompatibilitas API
     {
         TileMatchResult result;
 
+        // 1. Validasi Dasar
         if (current_tile_gray.empty() || reference_tile_gray.empty() ||
             current_tile_gray.size() != reference_tile_gray.size())
         {
             result.success = false;
+            result.mad_score = 0.0f; // Safety
             return result;
         }
 
-        const int bh = current_tile_gray.rows;
-        const int bw = current_tile_gray.cols;
+        // 2. Langsung Gunakan Plain MAD (MeAD/Median Absolute Difference)
+        // Kita membuang percabangan 'use_plain_mad' dan kalkulasi gradien Scharr.
+        
+        // Optimasi Tambahan: Jika Anda yakin input sudah float, cast tidak perlu di dalam.
+        // Fungsi Internal::calculate_plain_mad_32f sudah efisien (menggunakan vector & nth_element).
+        
+        result.mad_score = Internal::calculate_plain_mad_32f(current_tile_gray, reference_tile_gray);
 
-        const bool use_plain_mad = (std::abs(gradient_weight_factor) < stability_epsilon || bh < 3 || bw < 3);
-
-        if (use_plain_mad)
-        {
-            result.mad_score = Internal::calculate_plain_mad_32f(current_tile_gray, reference_tile_gray);
-        }
-        else
-        {
-            CV_Assert(buffers.grad_x.rows >= bh && buffers.grad_x.cols >= bw);
-            CV_Assert(buffers.grad_y.rows >= bh && buffers.grad_y.cols >= bw);
-            CV_Assert(buffers.grad_mag_current.rows >= bh && buffers.grad_mag_current.cols >= bw);
-            CV_Assert(buffers.diff_workspace.rows >= bh && buffers.diff_workspace.cols >= bw);
-
-            cv::Rect roi(0, 0, bw, bh);
-            cv::Mat grad_x_current = buffers.grad_x(roi);
-            cv::Mat grad_y_current = buffers.grad_y(roi);
-            cv::Mat grad_x_ref = buffers.grad_mag_current(roi);
-            cv::Mat grad_y_ref = buffers.diff_workspace(roi);
-
-            cv::Scharr(current_tile_gray, grad_x_current, CV_32F, 1, 0);
-            cv::Scharr(current_tile_gray, grad_y_current, CV_32F, 0, 1);
-            cv::Scharr(reference_tile_gray, grad_x_ref, CV_32F, 1, 0);
-            cv::Scharr(reference_tile_gray, grad_y_ref, CV_32F, 0, 1);
-
-            cv::Mat abs_diff_block(cv::Size(bw, bh), CV_32FC1);
-            cv::absdiff(current_tile_gray, reference_tile_gray, abs_diff_block);
-
-            result.mad_score = Internal::calculate_hybrid_gradient_weighted_mad(
-                current_tile_gray, reference_tile_gray,
-                grad_x_current, grad_y_current,
-                grad_x_ref, grad_y_ref,
-                abs_diff_block,
-                global_noise_sigma, // Global noise sigma digunakan kembali
-                gradient_weight_factor, stability_epsilon);
-        }
+        // 3. Optional: Noise Weighting Sederhana (Jika Anda masih ingin adaptasi noise tanpa gradien)
+        // Kalau benar-benar ingin "Murni Plain MAD", lewati langkah ini.
+        // Tapi biasanya noise subtraction sederhana membantu stabilitas di area gelap.
+        /* 
+        float noise_floor = std::max(0.005f, global_noise_sigma * 0.2f);
+        result.mad_score = std::max(0.0f, result.mad_score - noise_floor); 
+        */
 
         result.success = true;
         return result;
