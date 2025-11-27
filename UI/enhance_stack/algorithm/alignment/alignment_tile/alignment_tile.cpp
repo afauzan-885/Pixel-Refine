@@ -1,6 +1,5 @@
 #include "alignment_tile.h"
 #include <opencv2/imgproc.hpp>
-#include <opencv2/ximgproc.hpp>
 #include <vector>
 #include <cmath>
 #include <numeric>
@@ -15,27 +14,6 @@
 #include "alignment_tile.h"
 #include "cost_function.hpp"
 #include "refinement.hpp"
-
-class SimpleTimer
-{
-public:
-    SimpleTimer(const std::string &name)
-        : m_name(name), m_start(std::chrono::high_resolution_clock::now())
-    {
-    }
-
-    ~SimpleTimer()
-    {
-        auto end = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - m_start);
-        std::cout << "[C++ Timer] " << m_name << ": "
-                  << duration.count() / 1000.0 << " ms" << std::endl;
-    }
-
-private:
-    std::string m_name;
-    std::chrono::time_point<std::chrono::high_resolution_clock> m_start;
-};
 
 // =========================================================================
 // === HELPER FUNCTIONS - Static Implementation ===
@@ -971,7 +949,7 @@ extern "C"
 
         std::vector<cv::Mat> ref_pyramid, current_pyramid;
         {
-            SimpleTimer pyramid_timer("Pyramid Generation"); // Opsional
+            // SimpleTimer pyramid_timer("Pyramid Generation"); // Opsional
             ref_pyramid.reserve(n_layers);
             current_pyramid.reserve(n_layers);
 
@@ -1002,7 +980,7 @@ extern "C"
         cv::Mat previous_level_flow;
 
         {
-            SimpleTimer flow_levels_timer("Coarse-to-Fine Flow Processing");
+            // SimpleTimer flow_levels_timer("Coarse-to-Fine Flow Processing");
 
             for (int i = static_cast<int>(ref_pyramid.size()) - 1; i >= 0; --i)
             {
@@ -1029,7 +1007,7 @@ extern "C"
         // === BAGIAN D: Finalisasi dan Pengembalian Data ===
         float *output_flow_data = nullptr;
         {
-            SimpleTimer finalization_timer("Finalization & Data Copy");
+            // SimpleTimer finalization_timer("Finalization & Data Copy");
             if (!flow.empty())
             {
                 if (!flow.isContinuous())
