@@ -1,12 +1,12 @@
 from PySide6.QtWidgets import QWidget, QHBoxLayout
-from UI.GenericUILibrary.selector_panel import SelectorPanel
-from UI.GenericUILibrary.workspace_layout import WorkspaceLayout
 from UI.enhance_stack.logic.database_manager import DatabaseManager
 
 # Import Stylesheet
+from UI.resources.GenericUILibrary.selector_panel import SelectorPanel
+from UI.resources.GenericUILibrary.workspace_layout import WorkspaceLayout
 from UI.resources.stylesheet.stylesheet import stylesheet_global_page
 
-class GenericPage(QWidget):
+class PanoramaGenericPage(QWidget):
     def __init__(self, database_manager: DatabaseManager, parent=None):
         super().__init__(parent)
         
@@ -40,7 +40,6 @@ class GenericPage(QWidget):
         self._populate_dummy_data()
 
     def _setup_controller_logic(self):
-        # ... (Logika sama seperti sebelumnya) ...
         self.selector.item_selected.connect(self._on_item_selected)
         self.selector.selection_cleared.connect(self._on_selection_cleared)
         self.selector.add_requested.connect(lambda name: self.selector.add_item("new", name))

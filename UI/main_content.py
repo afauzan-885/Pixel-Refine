@@ -2,7 +2,7 @@ from PySide6.QtWidgets import QStackedWidget, QWidget, QVBoxLayout, QLabel
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 
-from UI.GenericUILibrary.GenericPage import GenericPage
+from UI.PanoramaGenericPage import PanoramaGenericPage
 from UI.enhance_stack.logic.database_manager import DatabaseManager
 # from UI.panorama.PanoramaPage import PanoramaPage
 from UI.panorama.PanoramaPage import PanoramaPage
@@ -23,7 +23,7 @@ class Pages:
         ("Enhance Stack", "UI/resources/icon/enhance_stack.png", EnhanceStackPage),
         
         # --- PERUBAHAN DI SINI ---
-        (language_config.PANORAMA_SIDEBAR_LABEL, "UI/resources/icon/panorama.png", GenericPage),
+        (language_config.PANORAMA_SIDEBAR_LABEL, "UI/resources/icon/panorama.png", PanoramaGenericPage),
         # -------------------------
     ]
 
