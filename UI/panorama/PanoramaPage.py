@@ -1,48 +1,36 @@
-from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QHBoxLayout
-)
-from UI.enhance_stack.logic.database_manager import DatabaseManager
+from PySide6.QtWidgets import QMainWindow, QWidget, QHBoxLayout
 from UI.panorama.working_left_panel import WorkingLeftPanel
 from UI.panorama.working_right_panel import WorkingRightPanel
+# Asumsi stylesheet global tetap ada
 from UI.resources.stylesheet.stylesheet import stylesheet_global_page
 
 class PanoramaPage(QMainWindow):
-    def __init__(self, database_manager: DatabaseManager):
+    def __init__(self):
         super().__init__()
-        self.database_manager = database_manager
         
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        
-        main_layout = QHBoxLayout(central_widget)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
-
-        main_content = self._create_main_content()
-        main_layout.addWidget(main_content)
-        
-        self.setStyleSheet(stylesheet_global_page())
-
-    def _create_main_content(self):
-        """
-        Menghubungkan komponen modular dan mengatur komunikasi antar mereka.
-        """
-        content_widget = QWidget()
-        main_layout = QHBoxLayout(content_widget)
+        # Setup Central Widget
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QHBoxLayout(central)
         main_layout.setContentsMargins(15, 10, 15, 10)
         main_layout.setSpacing(10)
 
-        left_panel = WorkingLeftPanel(database_manager=self.database_manager)
-        right_panel = WorkingRightPanel(database_manager=self.database_manager)
+        # --- Inisialisasi Panel (Tanpa DB) ---
+        self.left_panel = WorkingLeftPanel()
+        self.right_panel = WorkingRightPanel()
         
-        right_panel.project_selection_changed.connect(left_panel.update_display_for_project)
-        right_panel.project_selection_cleared.connect(left_panel.clear_display)
-        left_panel.rename_project_requested.connect(right_panel.handle_rename_request)
-        right_panel.project_list_updated.connect(left_panel.on_project_existence_changed)
+        # --- Koneksi Antar Panel ---
+        # Kanan (List) -> Kiri (Display)
+        self.right_panel.project_selection_changed.connect(
+            self.left_panel.update_display_for_project
+        )
+        self.right_panel.project_selection_cleared.connect(
+            self.left_panel.clear_display
+        )
         
-        main_layout.addWidget(left_panel, 3)
-        main_layout.addWidget(right_panel, 1)
-
-        right_panel.load_projects_from_db()
-
-        return content_widget
+        # Layouting
+        main_layout.addWidget(self.left_panel, 3)
+        main_layout.addWidget(self.right_panel, 1)
+        
+        # Apply Stylesheet
+        self.setStyleSheet(stylesheet_global_page())
