@@ -479,15 +479,29 @@ def scale_flow_guided(flow, guide_image, full_h, full_w, radius=5, eps=0.0003):
     return flow_full
 
 def scale_flow_to_full_res(flow, work_h, work_w, full_h, full_w):
-    """Scale optical flow dari resolusi kerja ke resolusi penuh."""
+    """
+    Versi OPTIMASI: Scale optical flow dari resolusi kerja ke resolusi penuh.
+    Menggunakan INTER_LINEAR untuk kecepatan maksimal dengan akurasi yang cukup.
+    """
+    # Hitung faktor skala
+    scale_x = full_w / work_w
+    scale_y = full_h / work_w # Note: Pastikan pembagi sesuai (work_w untuk x, work_h untuk y)
+    # Koreksi baris di atas pada implementasi Anda sebelumnya mungkin terbalik/rancu,
+    # Standardnya: scale_y = full_h / work_h, scale_x = full_w / work_w
+    
     scale_y = full_h / work_h
     scale_x = full_w / work_w
-    flow_full = cv2.resize(flow, (full_w, full_h), interpolation=cv2.INTER_CUBIC)
-    flow_full[:, :, 0] *= scale_x
-    flow_full[:, :, 1] *= scale_y
+
+    # OPTIMASI 1: Gunakan INTER_LINEAR (Jauh lebih cepat dari CUBIC/LANCZOS)
+    flow_full = cv2.resize(flow, (full_w, full_h), interpolation=cv2.INTER_LINEAR)
+
+    # OPTIMASI 2: Perkalian vektor (Broadcasting) daripada slicing satu per satu
+    # Ini memanfaatkan instruksi SIMD pada CPU modern
+    flow_full *= np.array([scale_x, scale_y], dtype=np.float32)
+
     return flow_full
 
-def warp_image_opencv(image, flow, interpolation=cv2.INTER_LANCZOS4, border_mode=cv2.BORDER_REFLECT_101):
+def warp_image_opencv(image, flow, interpolation=cv2.INTER_CUBIC, border_mode=cv2.BORDER_REFLECT_101):
     """Warp gambar menggunakan optical flow."""
     h, w = image.shape[:2]
     y_coords, x_coords = np.mgrid[0:h, 0:w].astype(np.float32)
@@ -550,7 +564,7 @@ def save_aligned_image(aligned_img, index, backend_name, save_folder="save_align
 
 def perform_image_alignment(images, reference_image_float, work_res_h, work_res_w,
                             tile_h, tile_w, ref_dtype, update_progress=None, stop_requested=None,
-                            use_raft=False, num_alignment_workers=2, visualization=True,
+                            use_raft=False, num_alignment_workers=2, visualization=False,
                             save_align_image=False):
     """
     Menyelaraskan (align) gambar dengan manajemen sumber daya yang aman,
@@ -737,9 +751,9 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
                         
                         full_h, full_w = original_image.shape[:2]
                         
-                        # === GANTI PANGGILAN FUNGSI DI SINI ===
-                        flow_full_res = scale_flow_guided(flow_buf_cpp, full_res_reference_image, full_h, full_w)
-
+                        # BARU (Cepat & Akurat):
+                        flow_full_res = scale_flow_to_full_res(flow_buf_cpp, work_res_h, work_res_w, full_h, full_w)
+                        
                         if visualization:
                             flow_vis = visualize_flow(flow_full_res)
                             cv2.imwrite(f"flow_cpp_{i+1:02d}.jpg", flow_vis)
