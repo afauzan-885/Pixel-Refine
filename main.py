@@ -1,124 +1,136 @@
-import os
 import sys
 
-# Impor semua modul PySide6 yang dibutuhkan
+# ============================================================================
+# MVC ARCHITECTURE TOGGLE
+# Set to True to use new MVC architecture, False to use legacy code
+# ============================================================================
+USE_MVC_ARCHITECTURE = False  # Toggle this to test new vs old code
+# ============================================================================
+
+# Import PySide6 modules
 from PySide6.QtWidgets import (QApplication, QMainWindow, QHBoxLayout, QWidget, 
-                               QMessageBox, QSplashScreen, QLabel, 
-                               QVBoxLayout, QWidget)
+                               QStackedWidget, QLabel, QVBoxLayout, QPushButton)
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtCore import Qt
 
-# Impor modul-modul dari proyek Anda
-from UI.enhance_stack.logic.database_manager import DatabaseManager
-from UI.resources.animation.animation_manager import StackedWidgetAnimator
+# Import project modules
+from core import ApplicationManager, WindowConfig
+from UI.components import SplashScreen
 from UI.resources.animation.fade import fade_in
-from UI.resources.animation.loading.circular_progress import CircularProgress
-from UI.sidebar import Sidebar
-from UI.main_content import MainContent 
 import config
-from shutil import rmtree
 
-class SplashScreen(QSplashScreen):
-    """
-    Splash screen kustom yang menampilkan gambar, indikator progres melingkar,
-    dan label status.
-    """
-    # DIUBAH: Tambahkan parameter 'version_string' di konstruktor
-    def __init__(self, pixmap: QPixmap, version_string: str, flags=Qt.WindowType.WindowStaysOnTopHint):
-        super().__init__(pixmap, flags)
-        self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
+# Conditional imports based on architecture
+if USE_MVC_ARCHITECTURE:
+    # New MVC architecture
+    from UI.enhance_stack.views import EnhanceStackView
+else:
+    # Legacy architecture
+    from UI.sidebar import Sidebar
+    from UI.main_content import MainContent
 
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 10, 10, 15)
-        
-        main_layout.addStretch()
 
-        # Widget progres melingkar kustom
-        self.progress_indicator = CircularProgress(self)
-        self.progress_indicator.setFixedSize(120, 120) 
-        main_layout.addWidget(self.progress_indicator, alignment=Qt.AlignmentFlag.AlignCenter)
-
-        # Label untuk "LOADING..."
-        self.status_label = QLabel("L O A D I N G . . .", self)
-        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status_label.setStyleSheet("""
-            color: white; 
-            font-size: 14px;
-            font-weight: normal;
-            letter-spacing: 4px;
-            background-color: transparent;
-            padding-top: 5px;
-        """)
-        main_layout.addWidget(self.status_label, alignment=Qt.AlignmentFlag.AlignCenter)
-
-        # Label untuk pesan detail
-        self.detail_label = QLabel("", self)
-        self.detail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.detail_label.setStyleSheet("color: #DDDDDD; font-size: 11px; background-color: transparent;")
-        main_layout.addWidget(self.detail_label, alignment=Qt.AlignmentFlag.AlignCenter)
-        
-        # BARU: Spacer kecil untuk memberi jarak ke nomor versi
-        main_layout.addSpacing(10)
-
-        # BARU: Label untuk nomor versi
-        self.version_label = QLabel(version_string, self)
-        self.version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        # Dibuat lebih kecil dan redup agar elegan dan tidak mengganggu
-        self.version_label.setStyleSheet("""
-            color: #AAAAAA; 
-            font-size: 9px; 
-            background-color: transparent;
-        """)
-        main_layout.addWidget(self.version_label, alignment=Qt.AlignmentFlag.AlignCenter)
-
-    def update_status(self, message: str, value: int):
-        self.progress_indicator.setValue(value)
-        self.detail_label.setText(message) 
-        QApplication.processEvents()
-               
 class PixelRefineMain(QMainWindow):
     def __init__(self):
         """
-        Konstruktor __init__ dibuat sangat ringan.
-        Hanya memanggil parent dan menginisialisasi atribut.
+        Initialize main window.
+        Lightweight constructor that only initializes attributes.
         """
         super().__init__()
         self.main_content = None
         self.sidebar = None
-        self.database_manager = None
-        self.main_content_animator = None
+        self.app_manager = None
+        self.window_config = None
+        self.sidebar_buttons = []
 
-    def setup_ui_and_logic(self, splash: 'SplashScreen'):
-        splash.update_status("Loading database...", 10)
-        db_path = "pixel_refine_database.db" 
-        self.database_manager = DatabaseManager(db_path)
-        self.database_manager.create_database()
-
-        splash.update_status("Initializing animations...", 25)
-        self.main_content_animator = StackedWidgetAnimator(self)
-
-        splash.update_status("Setting up main window...", 40)
-        self.setWindowIcon(QIcon("UI/resources/image/Logo_Pixel_Refine.png"))
-        self.setWindowTitle(f"Pixel Refine - Version {config.APP_VERSION}")
+    def setup_ui_and_logic(self, splash: SplashScreen):
+        """Setup UI and application logic with progress updates."""
+        # Initialize application manager
+        splash.update_status("Initializing application...", 10)
+        self.app_manager = ApplicationManager(self)
         
-        # <<< PERUBAHAN DI SINI >>>
-        self._set_adaptive_window_size()
+        # Setup database
+        splash.update_status("Loading database...", 25)
+        database_manager = self.app_manager.initialize_database()
 
-        splash.update_status("Preparing temporary folders...", 55)
-        self.database_folder = "database" 
-        self.align_folder = os.path.join(self.database_folder, "align")
-        self.stack_folder = os.path.join(self.database_folder, "stack")
-        self.align_stitch_cache_folder = os.path.join(self.database_folder, "cache", "align_stitch")
+        # Setup animator
+        splash.update_status("Initializing animations...", 40)
+        main_content_animator = self.app_manager.setup_animator()
+
+        # Configure window
+        splash.update_status("Setting up main window...", 55)
+        self.setWindowIcon(QIcon("UI/resources/icon/enhance_stack.png"))
+        self.setWindowTitle(f"Pixel Refine - Version {config.APP_VERSION} {'(MVC)' if USE_MVC_ARCHITECTURE else '(Legacy)'}")
         
-        self.create_folders_if_needed()
-        # time.sleep(1.2) # HAPUS PADA VERSI PRODUKSI
+        self.window_config = WindowConfig(
+            app_aspect_ratio=1200 / 600,
+            min_screen_ratio=0.76,
+            abs_min_width=800,
+            abs_min_height=400
+        )
+        self.window_config.apply_to_window(self)
 
-        splash.update_status("Loading UI components...", 70)
-        self.main_content = MainContent(self.database_manager) 
-        self.sidebar = Sidebar(self.toggle_sidebar, self.switch_page)
-        # time.sleep(0.5) # HAPUS PADA VERSI PRODUKSI
+        # Prepare folders
+        splash.update_status("Preparing temporary folders...", 70)
+        self.app_manager.initialize_folders()
 
-        splash.update_status("Assembling UI layout...", 90)
+        # Load UI components based on architecture
+        splash.update_status("Loading UI components...", 85)
+        
+        if USE_MVC_ARCHITECTURE:
+            # New MVC architecture - simplified main content
+            self.main_content = QStackedWidget()
+            
+            # Add MVC-based enhance stack view
+            enhance_stack_view = EnhanceStackView(
+                db_path=self.app_manager.database_manager.db_path,
+                parent=self.main_content
+            )
+            self.main_content.addWidget(enhance_stack_view)
+            
+            # Add placeholders for other pages
+            panorama_placeholder = QLabel("Panorama Page\n(Legacy - Not Yet Migrated)")
+            panorama_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            panorama_placeholder.setStyleSheet("font-size: 14px; padding: 20px;")
+            self.main_content.addWidget(panorama_placeholder)
+            
+            settings_placeholder = QLabel("Settings Page\n(Legacy - Not Yet Migrated)")
+            settings_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            settings_placeholder.setStyleSheet("font-size: 14px; padding: 20px;")
+            self.main_content.addWidget(settings_placeholder)
+            
+            # Create simple MVC sidebar
+            self.sidebar = self._create_mvc_sidebar()
+            
+            print("\n" + "="*60)
+            print("✅ MVC ARCHITECTURE LOADED")
+            print("="*60)
+            print("📦 Models:")
+            print("   - ImageModel, BatchModel, AlgorithmConfig")
+            print("   - Repositories: Image, Batch, Panorama")
+            print("\n🎮 Controllers:")
+            print("   - SinglePageController")
+            print("   - BatchPageController")
+            print("   - ImageProcessingController")
+            print("   - ImportExportController")
+            print("\n🖼️  Views:")
+            print("   - EnhanceStackView (MVC-based)")
+            print("   - Panorama (Legacy - Not Migrated)")
+            print("   - Settings (Legacy - Not Migrated)")
+            print("="*60)
+            print("💡 Toggle USE_MVC_ARCHITECTURE in main.py to switch\n")
+        else:
+            # Legacy architecture
+            self.main_content = MainContent(database_manager)
+            self.sidebar = Sidebar(self.toggle_sidebar, self.switch_page)
+            print("\n" + "="*60)
+            print("⚠️  LEGACY ARCHITECTURE LOADED")
+            print("="*60)
+            print("Using original UI/main_content.py")
+            print("Set USE_MVC_ARCHITECTURE = True to use new MVC code")
+            print("="*60 + "\n")
+
+        # Assemble layout
+        splash.update_status("Assembling UI layout...", 95)
         self.main_layout = QHBoxLayout()
         self.main_layout.addWidget(self.sidebar)
         self.main_layout.addWidget(self.main_content)
@@ -129,126 +141,139 @@ class PixelRefineMain(QMainWindow):
         container = QWidget()
         container.setLayout(self.main_layout)
         self.setCentralWidget(container)
-        # time.sleep(0.3) # HAPUS PADA VERSI PRODUKSI
        
         splash.update_status("Finalizing...", 100)
         self.switch_page(0)
-        # time.sleep(0.3) # HAPUS PADA VERSI PRODUKSI
+    
+    def _create_mvc_sidebar(self):
+        """Create a simple sidebar for MVC mode."""
+        sidebar = QWidget()
+        sidebar.setStyleSheet("QWidget { background-color: #e0e0e0; color: #333; }")
+        sidebar.setFixedWidth(180)
         
-    def _set_adaptive_window_size(self):
-        """
-        Mengatur ukuran awal dan UKURAN MINIMUM jendela secara adaptif,
-        sehingga tidak bisa di-resize lebih kecil dari persentase layar yang ditentukan.
-        """
-        # --- Parameter Konfigurasi ---
-        # Aspek rasio yang diinginkan untuk aplikasi Anda (lebar / tinggi)
-        APP_ASPECT_RATIO = 1200 / 600  # Hasilnya 2.0
-
-        # Persentase layar yang akan menjadi UKURAN MINIMUM
-        MIN_SCREEN_RATIO = 0.76
-
-        # Ukuran minimum absolut (fallback untuk layar resolusi sangat rendah)
-        ABS_MIN_WIDTH = 800
-        ABS_MIN_HEIGHT = 400
-
-        # 1. Dapatkan geometri layar yang tersedia
-        screen_geom = QApplication.primaryScreen().availableGeometry()
+        layout = QVBoxLayout()
+        sidebar.setLayout(layout)
         
-        # 2. Tentukan area minimum di layar
-        min_safe_width = int(screen_geom.width() * MIN_SCREEN_RATIO)
-        min_safe_height = int(screen_geom.height() * MIN_SCREEN_RATIO)
+        # Toggle button (placeholder)
+        toggle_btn = QPushButton("☰")
+        toggle_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #c8d6e5;
+                border: none;
+                color: #333;
+                font-size: 18px;
+                padding: 5px;
+            }
+            QPushButton:hover {
+                background-color: #b2bec3;
+            }
+        """)
+        layout.addWidget(toggle_btn)
         
-        # 3. Hitung aspek rasio dari area minimum di layar
-        screen_aspect_ratio = min_safe_width / min_safe_height
-
-        # --- Logika "Fit Inside a Box" untuk Menentukan Ukuran Minimum Adaptif ---
-        if screen_aspect_ratio > APP_ASPECT_RATIO:
-            # Layar lebih LEBAR daripada aplikasi -> Tinggi menjadi pembatas
-            adaptive_min_height = min_safe_height
-            adaptive_min_width = int(adaptive_min_height * APP_ASPECT_RATIO)
-        else:
-            # Layar lebih TINGGI (atau sama) daripada aplikasi -> Lebar menjadi pembatas
-            adaptive_min_width = min_safe_width
-            adaptive_min_height = int(adaptive_min_width / APP_ASPECT_RATIO)
-
-        # 4. Tentukan ukuran minimum final: ambil yang lebih besar antara
-        #    hasil adaptif dan batas absolut.
-        final_min_width = max(ABS_MIN_WIDTH, adaptive_min_width)
-        final_min_height = max(ABS_MIN_HEIGHT, adaptive_min_height)
-
-        # 5. Atur UKURAN MINIMUM jendela
-        self.setMinimumSize(final_min_width, final_min_height)
+        # Navigation buttons
+        pages = [
+            ("Enhance Stack", "UI/resources/icon/enhance_stack.png"),
+            ("Panorama", "UI/resources/icon/panorama.png"),
+        ]
         
-        # 6. Atur UKURAN AWAL jendela sama dengan ukuran minimumnya
-        self.resize(final_min_width, final_min_height)
+        for idx, (text, icon_path) in enumerate(pages):
+            btn = QPushButton(text)
+            btn.setIcon(QIcon(icon_path))
+            btn.setCheckable(True)
+            btn.setStyleSheet("""
+                QPushButton {
+                    qproperty-iconSize: 24px;
+                    text-align: left;
+                    padding: 10px;
+                    border: none;
+                    color: #333;
+                    background-color: #e0e0e0;
+                }
+                QPushButton:hover {
+                    background-color: #dfe6e9;
+                }
+                QPushButton:checked {
+                    background-color: #74b9ff;
+                    color: white;
+                    font-weight: bold;
+                }
+            """)
+            # Use default argument to capture idx
+            btn.clicked.connect(lambda checked=False, i=idx: self.switch_page(i))
+            layout.addWidget(btn)
+            self.sidebar_buttons.append(btn)
         
-        # 7. Pusatkan jendela di tengah area layar yang tersedia
-        center_x = screen_geom.x() + (screen_geom.width() - final_min_width) / 2
-        center_y = screen_geom.y() + (screen_geom.height() - final_min_height) / 2
-        self.move(int(center_x), int(center_y))
+        layout.addStretch()
         
-    def create_folders_if_needed(self):
-        try:
-            os.makedirs(self.database_folder, exist_ok=True) 
-            os.makedirs(self.align_folder, exist_ok=True)
-            os.makedirs(self.stack_folder, exist_ok=True)
-        except OSError as e:
-            QMessageBox.critical(self, "Error", f"An error occurred while creating folders: {e}. The application will now close.")
-            sys.exit(1)
+        # Settings button
+        settings_btn = QPushButton("Settings")
+        settings_btn.setIcon(QIcon("UI/resources/icon/setting.png"))
+        settings_btn.setCheckable(True)
+        settings_btn.setStyleSheet("""
+            QPushButton {
+                qproperty-iconSize: 24px;
+                text-align: left;
+                padding: 10px;
+                border: none;
+                color: #333;
+                background-color: #e0e0e0;
+            }
+            QPushButton:hover {
+                background-color: #dfe6e9;
+            }
+            QPushButton:checked {
+                background-color: #74b9ff;
+                color: white;
+                font-weight: bold;
+            }
+        """)
+        settings_btn.clicked.connect(lambda: self.switch_page(2))
+        layout.addWidget(settings_btn)
+        self.sidebar_buttons.append(settings_btn)
+        
+        # Store buttons for switch_page to use
+        sidebar.side_buttons = self.sidebar_buttons
+        
+        return sidebar
 
     def closeEvent(self, event):
-        try:
-            # Hapus isi align_folder
-            if os.path.exists(self.align_folder):
-                for item in os.listdir(self.align_folder):
-                    item_path = os.path.join(self.align_folder, item)
-                    if os.path.isfile(item_path) or os.path.islink(item_path):
-                        os.unlink(item_path)
-                    elif os.path.isdir(item_path):
-                        rmtree(item_path)
-
-            # Hapus isi stack_folder
-            if os.path.exists(self.stack_folder):
-                for item in os.listdir(self.stack_folder):
-                    item_path = os.path.join(self.stack_folder, item)
-                    if os.path.isfile(item_path) or os.path.islink(item_path):
-                        os.unlink(item_path)
-                    elif os.path.isdir(item_path):
-                        rmtree(item_path)
-
-            # Hapus align_stitch_cache_folder
-            if os.path.exists(self.align_stitch_cache_folder):
-                rmtree(self.align_stitch_cache_folder)
-
-            # Hapus database\cache\render_tiles
-            render_tiles_folder = os.path.join("database", "cache", "render_tiles")
-            if os.path.exists(render_tiles_folder):
-                rmtree(render_tiles_folder)
-
-        except Exception as e:
-            QMessageBox.warning(self, "Error", f"An error occurred while deleting folder contents: {e}")
-        finally:
-            event.accept()
-
+        """Handle application close event."""
+        if self.app_manager:
+            self.app_manager.cleanup_folders()
+        event.accept()
 
     def switch_page(self, index):
-        if self.main_content is None: return
-        if not (0 <= index < self.main_content.count()): return
+        """Switch to a different page with fade animation."""
+        if self.main_content is None: 
+            return
+        if not (0 <= index < self.main_content.count()): 
+            return
         if index == self.main_content.currentIndex() and self.main_content.widget(index) is not None:
-             if self.sidebar: 
-                 for i, btn in enumerate(self.sidebar.side_buttons): btn.setChecked(i == index)
-             return
-        if self.sidebar:
-            for i, btn in enumerate(self.sidebar.side_buttons): btn.setChecked(i == index)
-        fade_in(self.main_content_animator, self.main_content, index, duration=250)
+            if USE_MVC_ARCHITECTURE:
+                for i, btn in enumerate(self.sidebar_buttons):
+                    btn.setChecked(i == index)
+            elif self.sidebar: 
+                for i, btn in enumerate(self.sidebar.side_buttons): 
+                    btn.setChecked(i == index)
+            return
+        
+        if USE_MVC_ARCHITECTURE:
+            for i, btn in enumerate(self.sidebar_buttons):
+                btn.setChecked(i == index)
+        elif self.sidebar:
+            for i, btn in enumerate(self.sidebar.side_buttons): 
+                btn.setChecked(i == index)
+        
+        fade_in(self.app_manager.animator, self.main_content, index, duration=250)
 
     def toggle_sidebar(self):
         pass
 
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     
-    # LANGKAH 1: Siapkan dan tampilkan Custom Splash Screen
+    # Setup and display custom splash screen
     screen_geometry = app.primaryScreen().geometry()
     original_pixmap = QPixmap("UI/resources/image/Logo_Pixel_Refine.png")
     
@@ -262,7 +287,6 @@ if __name__ == "__main__":
     app.processEvents()
     
     window = PixelRefineMain()
-    
     window.setup_ui_and_logic(splash)
 
     window.show()

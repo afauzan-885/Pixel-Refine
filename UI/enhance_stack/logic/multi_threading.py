@@ -143,13 +143,13 @@ class RawImageProcessingThread(BaseMultiThreading):
                     try:
                         with rawpy.imread(image_path) as raw:
                             # Pemrosesan dasar untuk mendapatkan array RGB 8-bit
-                            # gamma_setting = (2.222, 4.5)
-                            gamma_setting = (1,1)
+                            gamma_setting = (2.222, 4.5)
+                            # gamma_setting = (1,1)
                             img_array = raw.postprocess(
                                 demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,
                                 four_color_rgb=True,
                                 use_camera_wb=True,
-                                # no_auto_bright=True,
+                                no_auto_bright=True,
                                 gamma=gamma_setting,
                                 output_bps=8,
                                 output_color=rawpy.ColorSpace.sRGB,
