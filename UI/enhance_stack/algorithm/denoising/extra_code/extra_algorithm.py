@@ -422,61 +422,32 @@ def compute_flow_with_raft(ref_img, current_img, session):
 # ==============================================================================
 # === BAGIAN B: Fungsi Helper yang Sudah Anda Sediakan (sedikit disempurnakan)
 # ==============================================================================
-def scale_flow_guided(flow, guide_image, full_h, full_w, radius=5, eps=0.0003):
+def scale_flow(flow, work_h, work_w, full_h, full_w, ksize=5):
     """
-    Scale optical flow dari resolusi kerja ke resolusi penuh menggunakan
-    Guided Filter untuk upsampling yang edge-aware.
-
-    Args:
-        flow (np.array): Flow field resolusi rendah dari C++.
-        guide_image (np.array): Gambar referensi resolusi penuh, digunakan sebagai panduan.
-        full_h (int): Tinggi target.
-        full_w (int): Lebar target.
-        radius (int): Radius untuk Guided Filter.
-        eps (float): Parameter regularisasi untuk Guided Filter.
-
-    Returns:
-        np.array: Flow field resolusi penuh yang telah disempurnakan.
+    Scale flow dengan interpolasi linear biasa, lalu dihaluskan dengan Median Filter.
+    Cocok untuk menghilangkan noise 'salt-and-pepper' pada flow field.
     """
-    work_h, work_w = flow.shape[:2]
-    
-    # 1. Siapkan Gambar Panduan (Guide Image)
-    # Pastikan guide image berukuran sama dengan output target dan dalam format yang benar.
-    if guide_image.shape[0] != full_h or guide_image.shape[1] != full_w:
-        guide_image = cv2.resize(guide_image, (full_w, full_h), interpolation=cv2.INTER_AREA)
-    
-    # Konversi ke grayscale dan float32 jika perlu
-    if guide_image.ndim == 3:
-        guide_image = cv2.cvtColor(guide_image, cv2.COLOR_BGR2GRAY)
-    if guide_image.dtype != np.float32:
-        guide_image = guide_image.astype(np.float32) / 255.0
-
-    # 2. Pisahkan Channel Flow X dan Y
-    flow_x = flow[:, :, 0]
-    flow_y = flow[:, :, 1]
-
-    # 3. Lakukan upsampling kasar terlebih dahulu sebagai input untuk Guided Filter
-    # Ini adalah 'p' dalam terminologi Guided Filter. INTER_LINEAR sudah cukup.
-    flow_x_upsampled_blurry = cv2.resize(flow_x, (full_w, full_h), interpolation=cv2.INTER_LINEAR)
-    flow_y_upsampled_blurry = cv2.resize(flow_y, (full_w, full_h), interpolation=cv2.INTER_LINEAR)
-
-    # 4. Terapkan Guided Filter untuk menyempurnakan upsampling
-    # Filter akan "memindahkan" detail (tepi) dari guide_image ke flow field.
-    flow_x_refined = cv2.ximgproc.guidedFilter(guide=guide_image, src=flow_x_upsampled_blurry, radius=radius, eps=eps)
-    flow_y_refined = cv2.ximgproc.guidedFilter(guide=guide_image, src=flow_y_upsampled_blurry, radius=radius, eps=eps)
-
-    # 5. Gabungkan kembali channel-channel yang sudah disempurnakan
-    flow_full = np.dstack((flow_x_refined, flow_y_refined))
-
-    # 6. KUNCI PENTING: Skalakan magnitudo flow, sama seperti sebelumnya.
-    # Nilai flow merepresentasikan pergeseran di resolusi kerja. Kita perlu
-    # mengonversinya menjadi pergeseran di resolusi penuh.
-    scale_y = full_h / work_h
     scale_x = full_w / work_w
-    flow_full[:, :, 0] *= scale_x
-    flow_full[:, :, 1] *= scale_y
-    
-    return flow_full
+    scale_y = full_h / work_h
+
+    # 1. Resize (Interpolasi Biasa - Linear sangat cepat)
+    flow_full = cv2.resize(flow, (full_w, full_h), interpolation=cv2.INTER_LINEAR)
+
+    # 2. Skalakan nilainya
+    flow_full *= np.array([scale_x, scale_y], dtype=np.float32)
+
+    # 3. Median Filter
+    # MedianBlur OpenCV biasanya support 1, 3, atau 4 channel. 
+    # Optical flow punya 2 channel, jadi lebih aman dipisah dulu.
+    u = flow_full[..., 0]
+    v = flow_full[..., 1]
+
+    # ksize harus ganjil (3, 5, 7). Semakin besar, semakin halus tapi detail gerakan mikro bisa hilang.
+    # ksize=5 adalah keseimbangan yang bagus.
+    u_smooth = cv2.medianBlur(u, ksize)
+    v_smooth = cv2.medianBlur(v, ksize)
+
+    return np.dstack((u_smooth, v_smooth))
 
 def scale_flow_to_full_res(flow, work_h, work_w, full_h, full_w):
     """
@@ -745,14 +716,17 @@ def perform_image_alignment(images, reference_image_float, work_res_h, work_res_
                 
                 if flow_ptr:
                     try:
-                        # 3. Baca Flow dan Rescale (INI BAGIAN YANG DIUBAH)
+                        # 3. Baca Flow dan Rescale
                         flow_buf_cpp = np.empty((work_res_h, work_res_w, 2), dtype=np.float32)
                         ctypes.memmove(flow_buf_cpp.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), flow_ptr, flow_buf_cpp.nbytes)
                         
                         full_h, full_w = original_image.shape[:2]
                         
-                        # BARU (Cepat & Akurat):
-                        flow_full_res = scale_flow_to_full_res(flow_buf_cpp, work_res_h, work_res_w, full_h, full_w)
+                        # === PERUBAHAN DI SINI ===
+                        # Ganti scale_flow_to_full_res dengan scale_flow
+                        # ksize=5 cukup ampuh hilangkan noise tanpa merusak gerakan besar
+                        flow_full_res = scale_flow(flow_buf_cpp, work_res_h, work_res_w, full_h, full_w, ksize=5)
+                        # =========================
                         
                         if visualization:
                             flow_vis = visualize_flow(flow_full_res)

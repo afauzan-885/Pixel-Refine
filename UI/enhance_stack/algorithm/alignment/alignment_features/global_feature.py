@@ -163,9 +163,11 @@ def _prepare_image_array_from_raw(original_path):
         if not RAWPY_AVAILABLE: return None
         with rawpy.imread(original_path) as raw:
             gamma_setting = (2.222, 4.5)
+            # gamma_setting = (1,1)
             rgb = raw.postprocess(
                 demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,
                 use_camera_wb=True,
+                # no_auto_bright=True,
                 gamma=gamma_setting,
                 output_bps=16,
                 output_color=rawpy.ColorSpace.sRGB,
@@ -758,7 +760,6 @@ def apply_s_curve_float32(img: np.ndarray, strength: float = 4.0, pivot: float =
 
     return (y * 255.0).astype(np.float32)
 
-
 def preprocess_in_python(ref_image_float: np.ndarray,
                          s_curve_contrast: float = 4.5,
                          s_curve_pivot: float = 0.20,
@@ -767,11 +768,6 @@ def preprocess_in_python(ref_image_float: np.ndarray,
     img = ref_image_float
     if img.dtype != np.float32:
         img = img.astype(np.float32, copy=False)
-
-    if s_curve_contrast > 0:
-        img = apply_s_curve_float32(img,
-                                    strength=s_curve_contrast,
-                                    pivot=s_curve_pivot)
 
     if not use_raft:
         if img.ndim == 3 and img.shape[2] > 1:

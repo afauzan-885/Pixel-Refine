@@ -88,7 +88,7 @@ class SimilarityAlgorithm:
                 images.append(image)
         return images
     
-    def _apply_final_fusion_tiled(self, sum_img, sum_weight, ref_img, noise_sigma, tile_size=1024, padding=16):
+    def _apply_final_fusion_tiled(self, sum_img, sum_weight, ref_img, noise_sigma, tile_size=512, padding=16):
         """
         Menjalankan _apply_precision_structure_fusion secara Tiled & Paralel.
         Menghemat RAM drastis dan mempercepat proses akhir.
@@ -170,6 +170,123 @@ class SimilarityAlgorithm:
                     
         return final_output
     
+    def _apply_precision_structure_fusion(self, fused_img, weight_map, reference_img, base_noise_sigma):
+        """
+        Versi PENYEMPURNAAN: Smart Structure Fusion dengan 'Consistency Check'.
+        
+        Peta bobot hanya menjadi 'Saran', keputusan final diambil berdasarkan
+        analisis kemiripan struktur antara Fused vs Reference.
+        """
+        # 1. Konversi Tipe Data
+        fused = fused_img.astype(np.float32)
+        ref = reference_img.astype(np.float32)
+        
+        if ref.shape[:2] != fused.shape[:2]:
+            ref = cv2.resize(ref, (fused.shape[1], fused.shape[0]), interpolation=cv2.INTER_AREA)
+
+        # =====================================================================
+        # A. ANALISIS FREKUENSI (Tetap Menggunakan Parameter Favorit Anda)
+        # =====================================================================
+        k_radius = 3  
+        k_sigma = 0.5 
+        
+        # Blur Reference & Fused
+        mu_ref = cv2.GaussianBlur(ref, (k_radius, k_radius), k_sigma)
+        mu_fused = cv2.GaussianBlur(fused, (k_radius, k_radius), k_sigma)
+        
+        # Detail Kasar (High Frequency)
+        raw_detail_ref = ref - mu_ref
+        raw_detail_fused = fused - mu_fused
+
+        # Varians Reference (Kekayaan Tekstur)
+        ref_sq = ref * ref
+        mu_ref_sq = cv2.GaussianBlur(ref_sq, (k_radius, k_radius), k_sigma)
+        var_ref = mu_ref_sq - (mu_ref * mu_ref)
+        var_ref = np.maximum(var_ref, 0.0)
+
+        # =====================================================================
+        # B. MEMBUAT ULANG PETA KEPERCAYAAN (RE-EVALUASI BOBOT)
+        # =====================================================================
+        # Di sini kita tidak percaya buta pada weight_map.
+        
+        # 1. Peta Bobot Awal (Saran dari akumulasi)
+        w_map_expanded = weight_map[:, :, np.newaxis] if fused.ndim == 3 else weight_map
+        weight_factor = np.clip(w_map_expanded / 8.0, 0.0, 1.0) # 0.0 s/d 1.0
+        
+        # 2. Analisis KONSISTENSI STRUKTUR (Verifikasi Kebenaran)
+        # Kita cek apakah detail di Fused Image 'sejalan' dengan Reference Image.
+        # Jika Fused Image blur (karena misalignment) tapi Reference tajam, 
+        # maka similarity akan rendah.
+        
+        # Hitung dot product sederhana dari detail (Correlation)
+        # +1.0 : Detail identik (Sangat Bagus)
+        #  0.0 : Fused blur/flat (Kurang Bagus)
+        # -1.0 : Detail berlawanan/Ghosting (Buruk)
+        
+        # Normalisasi magnitude agar perbandingan adil
+        mag_ref = np.abs(raw_detail_ref) + 1e-6
+        mag_fused = np.abs(raw_detail_fused) + 1e-6
+        
+        # Peta Konsistensi (-1 s/d 1)
+        consistency_map = (raw_detail_ref * raw_detail_fused) / (mag_ref * mag_fused)
+        
+        # Mapping ke range 0.0 - 1.0 dengan bias ke arah positif
+        # Jika konsistensi > 0, kita mulai percaya. Jika < 0, tidak percaya.
+        structure_validity = np.clip((consistency_map + 0.2) * 1.5, 0.0, 1.0)
+        
+        # Jika gambar berwarna, ambil rata-rata validitas channel
+        if structure_validity.ndim == 3:
+            structure_validity = np.mean(structure_validity, axis=2, keepdims=True)
+
+        # 3. FINAL CONFIDENCE MASK
+        # Kepercayaan Akhir = (Saran Bobot) x (Verifikasi Struktur)
+        # Jadi meskipun bobot tinggi, kalau strukturnya ngaco/blur, confidence turun.
+        final_confidence = weight_factor * structure_validity
+
+        # =====================================================================
+        # C. ESTIMASI NOISE & WIENER
+        # =====================================================================
+        epsilon = 1e-6
+        base_noise_var = base_noise_sigma ** 2
+        
+        # Noise map tetap pakai weight map asli (karena ini hukum statistik jumlah sampel)
+        noise_var_map = base_noise_var / (w_map_expanded + epsilon)
+        local_noise_sigma = np.sqrt(noise_var_map)
+        
+        alpha = var_ref / (var_ref + noise_var_map + epsilon)
+
+        # =====================================================================
+        # D. STRUCTURE INJECTION (CLEAN)
+        # =====================================================================
+        
+        # Threshold 0.6 (Detail halus lolos)
+        shrinkage_threshold = 0.6 * local_noise_sigma 
+        
+        magnitude = np.abs(raw_detail_ref)
+        cleaned_detail_ref = np.sign(raw_detail_ref) * np.maximum(0, magnitude - shrinkage_threshold) * 1.1
+        
+        structure_injected_image = mu_fused + cleaned_detail_ref
+
+        # =====================================================================
+        # E. SHARPENING (Hanya jika Confidence VALID)
+        # =====================================================================
+        
+        # Sharpening 1.2
+        sharpened_fused = fused + (raw_detail_fused * 1.2)
+        
+        # =====================================================================
+        # F. FINAL MIXING
+        # =====================================================================
+        
+        # Masking keputusan akhir
+        # alpha menjamin kita hanya menajamkan area detail, bukan area flat.
+        decision_mask = final_confidence * alpha
+        
+        # Smooth blending
+        final_output = (structure_injected_image * (1.0 - decision_mask)) + (sharpened_fused * decision_mask)
+
+        return np.clip(final_output, 0.0, 1.0)
+    
     def _spatial_merging(self, images, ref_image_h, ref_image_w, ref_channels_buffer, ref_dtype,
                         reference_image_float, tile_size, overlap,
                         motion_sensitivity, noise_offset_factor,
@@ -179,7 +296,7 @@ class SimilarityAlgorithm:
                         num_workers=-1,
                         weight_of_each_image=False,
                         enable_alignment=True,
-                        scale_down_factor: float = 0.89,
+                        scale_down_factor: float = 1.0,
                         **unused_kwargs):
 
         # --- LANGKAH 1: Inisialisasi dan Resolusi Kerja ---
@@ -236,11 +353,6 @@ class SimilarityAlgorithm:
         # 0-30%: Init & Alignment
         # 30-100%: Merging
         pass_merge_range = (30, 100) 
-
-        # --- (PASS 1 DIHAPUS) ---
-        # Kita set stability_map ke None. 
-        # C++ interface harus bisa menangani nullptr/None untuk parameter ini.
-        stability_map = None 
 
         # --- LANGKAH 2: ALIGNMENT ---
         if enable_alignment and num_images > 1:
@@ -934,7 +1046,7 @@ def main(db_path, update_progress=None, stop_requested=None,
             extra_merging_params['freq_overlap_percent'] = general_settings.get("similarity_frequency_overlap_percent", 0.25)
             # extra_merging_params['num_workers'] = general_settings.get("similarity_spatial_num_workers", 2)
         
-        # --- 2. SETUP SUMBER DATA & PATH (MENGGUNAKAN HELPER) ---
+        # --- 2. SETUP SUMBER DATA & PATH ---
         data_source, image_paths, output_name_base, total_images = \
             _setup_data_source_and_paths(db_path, single_process, batch_id, image_processor)
 
