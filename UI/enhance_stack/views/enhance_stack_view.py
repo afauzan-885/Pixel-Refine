@@ -4,102 +4,115 @@ Main container for single and batch page views with controller integration.
 """
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QStackedWidget
-from PySide6.QtCore import Qt
-from controllers.single_page_controller import SinglePageController
-from controllers.batch_page_controller import BatchPageController
-from controllers.image_processing_controller import ImageProcessingController
-from controllers.import_export_controller import ImportExportController
+from UI.enhance_stack.views.top_bar import TopBar
+from UI.enhance_stack.views.single_page_view import SinglePageView
+from UI.enhance_stack.views.batch_page_view import BatchPageView
+from UI.resources.animation.animation_manager import (
+    SlideDirection,
+    StackedWidgetAnimator,
+)
+from UI.resources.animation.slide import slide
+from UI.resources.animation.toast.toast_manager import ToastManager
 
 
 class EnhanceStackView(QWidget):
     """
-    Main view for enhance stack feature.
-    Manages single and batch page views with MVC architecture.
+    Main view for enhance stack feature (MVC Architecture).
+    Manages single and batch page views with controllers.
     """
-    
+
     def __init__(self, db_path: str, parent=None):
         super().__init__(parent)
         self.db_path = db_path
-        
-        # Initialize controllers
-        self.single_controller = SinglePageController(db_path, self)
-        self.batch_controller = BatchPageController(db_path, self)
-        self.processing_controller = ImageProcessingController(self)
-        self.import_export_controller = ImportExportController(self)
-        
+
         self.setup_ui()
         self.connect_signals()
-    
+
     def setup_ui(self):
         """Setup the UI layout."""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Stacked widget for switching between single and batch views
+        layout.setSpacing(0)
+
+        # Animation and toast managers
+        self.animator = StackedWidgetAnimator(self)
+        self.toast_manager = ToastManager(self)
+
+        # Top bar with switch buttons
+        self.top_bar = TopBar()
+        layout.addWidget(self.top_bar)
+
+        # Stacked widget for single/batch pages
         self.stacked_widget = QStackedWidget()
-        layout.addWidget(self.stacked_widget)
-        
-        # For now, add placeholder widgets
-        # These will be replaced with actual SinglePageView and BatchPageView
-        from PySide6.QtWidgets import QLabel
-        
-        single_placeholder = QLabel("Single Page View (MVC)\nControllers initialized and ready")
-        single_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        single_placeholder.setStyleSheet("font-size: 16px; padding: 20px;")
-        
-        batch_placeholder = QLabel("Batch Page View (MVC)\nControllers initialized and ready")
-        batch_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        batch_placeholder.setStyleSheet("font-size: 16px; padding: 20px;")
-        
-        self.stacked_widget.addWidget(single_placeholder)
-        self.stacked_widget.addWidget(batch_placeholder)
-        
-        # Show single page by default
-        self.stacked_widget.setCurrentIndex(0)
-    
+        layout.addWidget(self.stacked_widget, 1)
+
+        # Create single page view (hybrid MVC)
+        self.single_page_view = SinglePageView(self.db_path, self)
+        self.stacked_widget.addWidget(self.single_page_view)
+
+        # Create batch page view (hybrid MVC)
+        self.batch_page_view = BatchPageView(self.db_path, self)
+        self.stacked_widget.addWidget(self.batch_page_view)
+
+        # Set initial page
+        self.stacked_widget.setCurrentWidget(self.single_page_view)
+        self.top_bar.left_stack.setCurrentIndex(0)
+        self.top_bar.right_stack.setCurrentIndex(0)
+
     def connect_signals(self):
-        """Connect controller signals to view slots."""
-        # Single page controller signals
-        self.single_controller.import_completed.connect(self.on_import_completed)
-        self.single_controller.import_error.connect(self.on_import_error)
-        
-        # Batch controller signals
-        self.batch_controller.batch_created.connect(self.on_batch_created)
-        self.batch_controller.batch_error.connect(self.on_batch_error)
-        
-        # Processing controller signals
-        self.processing_controller.workflow_completed.connect(self.on_workflow_completed)
-        self.processing_controller.workflow_error.connect(self.on_workflow_error)
-    
-    def switch_to_single_page(self):
-        """Switch to single page view."""
-        self.stacked_widget.setCurrentIndex(0)
-    
-    def switch_to_batch_page(self):
-        """Switch to batch page view."""
-        self.stacked_widget.setCurrentIndex(1)
-    
-    # Signal handlers
-    def on_import_completed(self, count: int):
-        """Handle import completion."""
-        print(f"Import completed: {count} images")
-    
-    def on_import_error(self, error: str):
-        """Handle import error."""
-        print(f"Import error: {error}")
-    
-    def on_batch_created(self, batch_id: int, batch_name: str):
-        """Handle batch creation."""
-        print(f"Batch created: {batch_name} (ID: {batch_id})")
-    
-    def on_batch_error(self, error: str):
-        """Handle batch error."""
-        print(f"Batch error: {error}")
-    
-    def on_workflow_completed(self, result_path: str):
-        """Handle workflow completion."""
-        print(f"Workflow completed: {result_path}")
-    
-    def on_workflow_error(self, error: str):
-        """Handle workflow error."""
-        print(f"Workflow error: {error}")
+        """Connect top bar signals and toast notifications."""
+        # Top bar switch buttons
+        self.top_bar.single_button.toggled.connect(self._handle_switch_request)
+        self.top_bar.batch_button.toggled.connect(self._handle_switch_request)
+
+        # Single page buttons
+        self.top_bar.single_page_import_button.clicked.connect(
+            self.single_page_view.handle_import_button
+        )
+        self.top_bar.single_page_delete_button.clicked.connect(
+            self.single_page_view.handle_delete_button
+        )
+
+        # Batch page buttons
+        self.top_bar.batch_page_import_button.clicked.connect(
+            self.batch_page_view.handle_batch_import_button
+        )
+        self.top_bar.batch_page_delete_button.clicked.connect(
+            self.batch_page_view.handle_delete_all_batches
+        )
+        self.top_bar.start_process_batch.clicked.connect(
+            self.batch_page_view.process_all_batches
+        )
+
+        # Connect batch layout toast to main toast manager
+        if hasattr(self.batch_page_view, "batch_layout"):
+            if hasattr(self.batch_page_view.batch_layout, "show_toast_requested"):
+                self.batch_page_view.batch_layout.show_toast_requested.connect(
+                    self.toast_manager.show
+                )
+
+    def _handle_switch_request(self):
+        """Handle switch between single and batch pages."""
+        if self.top_bar.single_button.isChecked():
+            target_widget = self.single_page_view
+            target_index = 0
+            slide_direction = SlideDirection.RIGHT
+        elif self.top_bar.batch_button.isChecked():
+            target_widget = self.batch_page_view
+            target_index = 1
+            slide_direction = SlideDirection.LEFT
+        else:
+            return
+
+        # Animate transition
+        slide(
+            self.animator,
+            self.stacked_widget,
+            target_widget,
+            slide_direction,
+            duration=400,
+        )
+
+        # Switch top bar stacks
+        self.top_bar.left_stack.setCurrentIndex(target_index)
+        self.top_bar.right_stack.setCurrentIndex(target_index)

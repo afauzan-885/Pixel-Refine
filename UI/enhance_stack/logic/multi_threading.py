@@ -149,7 +149,7 @@ class RawImageProcessingThread(BaseMultiThreading):
                                 demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,
                                 four_color_rgb=True,
                                 use_camera_wb=True,
-                                no_auto_bright=True,
+                                # no_auto_bright=True,
                                 gamma=gamma_setting,
                                 output_bps=8,
                                 output_color=rawpy.ColorSpace.sRGB,
