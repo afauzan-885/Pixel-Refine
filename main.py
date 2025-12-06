@@ -1,13 +1,12 @@
+"""
+Pixel Refine - Main Application Entry Point
+============================================
+This module initializes and runs the Pixel Refine application.
+"""
+
 import sys
 
-# ============================================================================
-# MVC ARCHITECTURE TOGGLE
-# Set to True to use new MVC architecture, False to use legacy code
-# ============================================================================
-USE_MVC_ARCHITECTURE = True  # Toggle this to test new vs old code
-# ============================================================================
-
-# Import PySide6 modules
+# PySide6 imports
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -15,30 +14,85 @@ from PySide6.QtWidgets import (
     QWidget,
     QStackedWidget,
     QLabel,
-    QVBoxLayout,
-    QPushButton,
+    QProxyStyle,
+    QStyle,
+    QToolTip,
 )
 from PySide6.QtGui import QIcon, QPixmap
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QObject, QEvent
 
-# Import project modules
-from core import ApplicationManager, WindowConfig
-from UI.components import SplashScreen
-from UI.resources.animation.fade import fade_in
+# Project imports
+from pixel_refine_desktop.core import ApplicationManager, WindowConfig
+from pixel_refine_desktop.ui.components.common import SplashScreen, Sidebar
+from pixel_refine_desktop.ui.resources.animations.fade import fade_in
+from pixel_refine_desktop.ui.views import EnhanceStackView
 import config
 from UI.settings.views.settings_view import SettingsView
 
-# Conditional imports based on architecture
-if USE_MVC_ARCHITECTURE:
-    # New MVC architecture
-    from UI.enhance_stack.views import EnhanceStackView
-else:
-    # Legacy architecture
-    from UI.sidebar import Sidebar
-    from UI.main_content import MainContent
+
+# ============================================================================
+# CUSTOM STYLES AND FILTERS
+# ============================================================================
+
+
+class CustomStyle(QProxyStyle):
+    """Custom style to set tooltip delay to 200ms."""
+
+    def styleHint(self, hint, option=None, widget=None, returnData=None):
+        if hint == QStyle.StyleHint.SH_ToolTip_WakeUpDelay:
+            return 200  # 200ms delay before tooltip appears
+        return super().styleHint(hint, option, widget, returnData)
+
+
+class ToolTipFilter(QObject):
+    """
+    Event filter to intercept tooltip events and wrap text using HTML
+    to ensure adaptive width based on font size (em units).
+    """
+
+    def eventFilter(self, obj, event):
+        """Filter tooltip events to add HTML formatting for word wrapping."""
+        if event.type() == QEvent.Type.ToolTip:
+            widget = obj
+            tooltip = widget.toolTip()
+
+            # Only process plain text tooltips (not already HTML)
+            if (
+                tooltip
+                and not tooltip.strip().startswith("<html>")
+                and not tooltip.strip().startswith("<p")
+            ):
+                # Escape HTML special characters to prevent injection
+                import html
+
+                escaped_tooltip = html.escape(tooltip)
+
+                # Convert newlines to <br> tags to preserve line breaks
+                formatted_text = escaped_tooltip.replace("\n", "<br>")
+
+                # Wrap in HTML with width in em units and preserve whitespace
+                # 25em ≈ 400px for 16px font, but adapts to font size
+                # white-space: pre-wrap preserves spaces and allows wrapping
+                formatted_tooltip = (
+                    f"<div style='width: 25em; text-align: left; white-space: pre-wrap;'>"
+                    f"{formatted_text}</div>"
+                )
+
+                # Show the tooltip manually with the formatted text
+                QToolTip.showText(event.globalPos(), formatted_tooltip, widget)
+                return True  # Event handled
+
+        return super().eventFilter(obj, event)
+
+
+# ============================================================================
+# MAIN WINDOW CLASS
+# ============================================================================
 
 
 class PixelRefineMain(QMainWindow):
+    """Main application window for Pixel Refine."""
+
     def __init__(self):
         """
         Initialize main window.
@@ -53,25 +107,50 @@ class PixelRefineMain(QMainWindow):
 
     def setup_ui_and_logic(self, splash: SplashScreen):
         """Setup UI and application logic with progress updates."""
-        # Initialize application manager
+        # Initialize core components
+        self._initialize_core_components(splash)
+
+        # Configure window properties
+        self._configure_window(splash)
+
+        # Load UI based on architecture
+        self._load_ui_components(splash)
+
+        # Assemble final layout
+        self._assemble_layout(splash)
+
+        # Finalize
+        splash.update_status("Finalizing...", 100)
+        self.switch_page(0)
+
+    def _initialize_core_components(self, splash: SplashScreen):
+        """Initialize core application components."""
+        # Application manager
         splash.update_status("Initializing application...", 10)
         self.app_manager = ApplicationManager(self)
 
-        # Setup database
-        splash.update_status("Loading database...", 25)
-        database_manager = self.app_manager.initialize_database()
+        # Database
+        splash.update_status("Loading database...", 20)
+        self.app_manager.initialize_database()
 
-        # Setup animator
-        splash.update_status("Initializing animations...", 40)
-        main_content_animator = self.app_manager.setup_animator()
+        # Animator
+        splash.update_status("Initializing animations...", 30)
+        self.app_manager.setup_animator()
 
-        # Configure window
-        splash.update_status("Setting up main window...", 55)
+        # Algorithms
+        splash.update_status("Loading algorithms...", 40)
+        algo_summary = self.app_manager.load_algorithms()
+        print(f"Loaded algorithms: {algo_summary}")
+
+    def _configure_window(self, splash: SplashScreen):
+        """Configure window properties and settings."""
+        splash.update_status("Setting up main window...", 50)
+
+        # Window icon and title
         self.setWindowIcon(QIcon("UI/resources/icon/enhance_stack.png"))
-        self.setWindowTitle(
-            f"Pixel Refine - Version {config.APP_VERSION} {'(MVC)' if USE_MVC_ARCHITECTURE else '(Legacy)'}"
-        )
+        self.setWindowTitle(f"Pixel Refine - Version {config.APP_VERSION}")
 
+        # Window configuration
         self.window_config = WindowConfig(
             app_aspect_ratio=1200 / 600,
             min_screen_ratio=0.76,
@@ -81,104 +160,94 @@ class PixelRefineMain(QMainWindow):
         self.window_config.apply_to_window(self)
 
         # Prepare folders
-        splash.update_status("Preparing temporary folders...", 70)
+        splash.update_status("Preparing temporary folders...", 60)
         self.app_manager.initialize_folders()
 
-        # Load UI components based on architecture
-        splash.update_status("Loading UI components...", 85)
+    def _load_ui_components(self, splash: SplashScreen):
+        """Load UI components."""
+        splash.update_status("Loading UI components...", 70)
+        self._load_mvc_architecture(splash)
 
-        if USE_MVC_ARCHITECTURE:
-            # New MVC architecture - simplified main content
-            self.main_content = QStackedWidget()
+    def _load_mvc_architecture(self, splash: SplashScreen):
+        """Load MVC architecture components."""
+        # Create main content stack
+        self.main_content = QStackedWidget()
 
-            # Add MVC-based enhance stack view
-            enhance_stack_view = EnhanceStackView(
-                db_path=self.app_manager.database_manager.db_path,
-                parent=self.main_content,
-            )
-            self.main_content.addWidget(enhance_stack_view)
+        # Enhance Stack View
+        splash.update_status("Initializing Enhance Stack View...", 75)
+        enhance_stack_view = EnhanceStackView(
+            db_path=self.app_manager.database_manager.db_path,
+            parent=self.main_content,
+        )
+        self.main_content.addWidget(enhance_stack_view)
 
-            # Add placeholders for other pages
-            panorama_placeholder = QLabel("Panorama Page\n(Legacy - Not Yet Migrated)")
-            panorama_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            panorama_placeholder.setStyleSheet("font-size: 14px; padding: 20px;")
-            self.main_content.addWidget(panorama_placeholder)
+        # Panorama placeholder
+        panorama_placeholder = QLabel("Panorama Page\n(To be migrated)")
+        panorama_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        panorama_placeholder.setStyleSheet("font-size: 14px; padding: 20px;")
+        self.main_content.addWidget(panorama_placeholder)
 
-            settings_view = SettingsView(
-                db_path=self.app_manager.database_manager.db_path,
-                parent=self.main_content,
-            )
-            self.main_content.addWidget(settings_view)
+        # Settings View
+        splash.update_status("Initializing Settings View...", 85)
+        settings_view = SettingsView(
+            db_path=self.app_manager.database_manager.db_path,
+            parent=self.main_content,
+        )
+        self.main_content.addWidget(settings_view)
 
-            # Create simple MVC sidebar
-            self.sidebar = self._create_mvc_sidebar()
+        # Sidebar
+        splash.update_status("Initializing Sidebar...", 90)
+        self.sidebar = self._create_sidebar()
 
-            print("\n" + "=" * 60)
-            print("✅ MVC ARCHITECTURE LOADED")
-            print("=" * 60)
-            print("📦 Models:")
-            print("   - ImageModel, BatchModel, AlgorithmConfig")
-            print("   - Repositories: Image, Batch, Panorama")
-            print("\n🎮 Controllers:")
-            print("   - SinglePageController")
-            print("   - BatchPageController")
-            print("   - ImageProcessingController")
-            print("   - ImportExportController")
-            print("\n🖼️  Views:")
-            print("   - EnhanceStackView (MVC-based)")
-            print("   - Panorama (Legacy - Not Migrated)")
-            print("   - SettingsView (MVC-based)")
-            print("=" * 60)
-            print("💡 Toggle USE_MVC_ARCHITECTURE in main.py to switch\n")
-        else:
-            # Legacy architecture
-            self.main_content = MainContent(database_manager)
-            self.sidebar = Sidebar(self.toggle_sidebar, self.switch_page)
-            print("\n" + "=" * 60)
-            print("⚠️  LEGACY ARCHITECTURE LOADED")
-            print("=" * 60)
-            print("Using original UI/main_content.py")
-            print("Set USE_MVC_ARCHITECTURE = True to use new MVC code")
-            print("=" * 60 + "\n")
+        # Print architecture info
+        self._print_info()
 
-        # Assemble layout
+    def _assemble_layout(self, splash: SplashScreen):
+        """Assemble the final UI layout."""
         splash.update_status("Assembling UI layout...", 95)
+
         self.main_layout = QHBoxLayout()
         self.main_layout.addWidget(self.sidebar)
-        self.main_layout.addWidget(self.main_content)
-        self.main_layout.setStretch(0, 1)
-        self.main_layout.setStretch(1, 4)
+        self.main_layout.addWidget(self.main_content, 1)  # Stretch factor
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
+
         container = QWidget()
         container.setLayout(self.main_layout)
         self.setCentralWidget(container)
 
-        splash.update_status("Finalizing...", 100)
-        self.switch_page(0)
-
-    def _create_mvc_sidebar(self):
+    def _create_sidebar(self):
         """Create sidebar using reusable component."""
-        from UI.components import Sidebar
-
-        # Define pages for sidebar
         pages = [
             ("Enhance Stack", "UI/resources/icon/enhance_stack.png"),
             ("Panorama", "UI/resources/icon/panorama.png"),
             ("Settings", "UI/resources/icon/setting.png"),
         ]
 
-        # Create sidebar with pages
         sidebar = Sidebar(pages=pages, parent=self)
-
-        # Connect signals
         sidebar.page_changed.connect(self.switch_page)
         sidebar.toggle_requested.connect(self.toggle_sidebar)
 
-        # Store buttons reference for switch_page compatibility
         self.sidebar_buttons = sidebar.side_buttons
-
         return sidebar
+
+    def _print_info(self):
+        """Print application architecture information to console."""
+        print("\n" + "=" * 60)
+        print("✅ PIXEL REFINE DESKTOP - MVC ARCHITECTURE")
+        print("=" * 60)
+        print("📦 Models:")
+        print("   - ImageModel, BatchModel, AlgorithmConfig")
+        print("   - Repositories: Image, Batch, Panorama")
+        print("\n🎮 Controllers:")
+        print("   - SinglePageController")
+        print("   - BatchPageController")
+        print("   - ImageProcessingController")
+        print("   - ImportExportController")
+        print("\n🖼️  Views:")
+        print("   - EnhanceStackView")
+        print("   - SettingsView")
+        print("=" * 60 + "\n")
 
     def closeEvent(self, event):
         """Handle application close event."""
@@ -192,35 +261,60 @@ class PixelRefineMain(QMainWindow):
             return
         if not (0 <= index < self.main_content.count()):
             return
+
+        # Check if already on the same page
         if (
             index == self.main_content.currentIndex()
             and self.main_content.widget(index) is not None
         ):
-            if USE_MVC_ARCHITECTURE:
-                for i, btn in enumerate(self.sidebar_buttons):
-                    btn.setChecked(i == index)
-            elif self.sidebar:
-                for i, btn in enumerate(self.sidebar.side_buttons):
-                    btn.setChecked(i == index)
+            self._update_sidebar_buttons(index)
             return
 
-        if USE_MVC_ARCHITECTURE:
-            for i, btn in enumerate(self.sidebar_buttons):
-                btn.setChecked(i == index)
-        elif self.sidebar:
-            for i, btn in enumerate(self.sidebar.side_buttons):
-                btn.setChecked(i == index)
-
+        # Update sidebar buttons and switch page
+        self._update_sidebar_buttons(index)
         fade_in(self.app_manager.animator, self.main_content, index, duration=250)
 
+    def _update_sidebar_buttons(self, index):
+        """Update sidebar button states."""
+        for i, btn in enumerate(self.sidebar_buttons):
+            btn.setChecked(i == index)
+
     def toggle_sidebar(self):
+        """Toggle sidebar visibility (placeholder for future implementation)."""
         pass
 
 
-if __name__ == "__main__":
+# ============================================================================
+# APPLICATION ENTRY POINT
+# ============================================================================
+
+
+def main():
+    """Main application entry point."""
+    # Create application
     app = QApplication(sys.argv)
 
-    # Setup and display custom splash screen
+    # Apply custom styles
+    app.setStyle(CustomStyle())
+
+    # Install adaptive tooltip filter
+    tooltip_filter = ToolTipFilter()
+    app.installEventFilter(tooltip_filter)
+
+    # Configure global tooltip stylesheet
+    app.setStyleSheet(
+        """
+        QToolTip {
+            border: 1px solid #333;
+            background-color: #2c3e50;
+            color: white;
+            padding: 5px;
+            border-radius: 3px;
+        }
+    """
+    )
+
+    # Setup splash screen
     screen_geometry = app.primaryScreen().geometry()
     original_pixmap = QPixmap("UI/resources/image/Logo_Pixel_Refine.png")
 
@@ -235,10 +329,17 @@ if __name__ == "__main__":
     splash.show()
     app.processEvents()
 
+    # Create and setup main window
     window = PixelRefineMain()
     window.setup_ui_and_logic(splash)
 
+    # Show main window and close splash
     window.show()
     splash.finish(window)
 
+    # Run application
     sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
