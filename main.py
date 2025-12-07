@@ -22,12 +22,15 @@ from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtCore import Qt, QObject, QEvent
 
 # Project imports
-from pixel_refine_desktop.core import ApplicationManager, WindowConfig
-from pixel_refine_desktop.ui.components.common import SplashScreen, Sidebar
-from pixel_refine_desktop.ui.resources.animations.fade import fade_in
-from pixel_refine_desktop.ui.views import EnhanceStackView
+from pixel_refine_desktop.app_core import ApplicationManager, WindowConfig
+from pixel_refine_desktop.ui import (
+    EnhanceStackView,
+    SettingsView,
+    Sidebar,
+    SplashScreen,
+    fade_in,
+)
 import config
-from UI.settings.views.settings_view import SettingsView
 
 
 # ============================================================================
@@ -147,7 +150,9 @@ class PixelRefineMain(QMainWindow):
         splash.update_status("Setting up main window...", 50)
 
         # Window icon and title
-        self.setWindowIcon(QIcon("UI/resources/icon/enhance_stack.png"))
+        self.setWindowIcon(
+            QIcon("pixel_refine_desktop/ui/resources/assets/icons/enhance_stack.png")
+        )
         self.setWindowTitle(f"Pixel Refine - Version {config.APP_VERSION}")
 
         # Window configuration
@@ -200,7 +205,7 @@ class PixelRefineMain(QMainWindow):
         self.sidebar = self._create_sidebar()
 
         # Print architecture info
-        self._print_info()
+        # self._print_info()
 
     def _assemble_layout(self, splash: SplashScreen):
         """Assemble the final UI layout."""
@@ -219,9 +224,12 @@ class PixelRefineMain(QMainWindow):
     def _create_sidebar(self):
         """Create sidebar using reusable component."""
         pages = [
-            ("Enhance Stack", "UI/resources/icon/enhance_stack.png"),
-            ("Panorama", "UI/resources/icon/panorama.png"),
-            ("Settings", "UI/resources/icon/setting.png"),
+            (
+                "Enhance Stack",
+                "pixel_refine_desktop/ui/resources/assets/icons/enhance_stack.png",
+            ),
+            ("Panorama", "pixel_refine_desktop/ui/resources/assets/icons/panorama.png"),
+            ("Settings", "pixel_refine_desktop/ui/resources/assets/icons/setting.png"),
         ]
 
         sidebar = Sidebar(pages=pages, parent=self)
@@ -231,23 +239,23 @@ class PixelRefineMain(QMainWindow):
         self.sidebar_buttons = sidebar.side_buttons
         return sidebar
 
-    def _print_info(self):
-        """Print application architecture information to console."""
-        print("\n" + "=" * 60)
-        print("✅ PIXEL REFINE DESKTOP - MVC ARCHITECTURE")
-        print("=" * 60)
-        print("📦 Models:")
-        print("   - ImageModel, BatchModel, AlgorithmConfig")
-        print("   - Repositories: Image, Batch, Panorama")
-        print("\n🎮 Controllers:")
-        print("   - SinglePageController")
-        print("   - BatchPageController")
-        print("   - ImageProcessingController")
-        print("   - ImportExportController")
-        print("\n🖼️  Views:")
-        print("   - EnhanceStackView")
-        print("   - SettingsView")
-        print("=" * 60 + "\n")
+    # def _print_info(self):
+    #     """Print application architecture information to console."""
+    #     print("\n" + "=" * 60)
+    #     print("✅ PIXEL REFINE DESKTOP - MVC ARCHITECTURE")
+    #     print("=" * 60)
+    #     print("📦 Models:")
+    #     print("   - ImageModel, BatchModel, AlgorithmConfig")
+    #     print("   - Repositories: Image, Batch, Panorama")
+    #     print("\n🎮 Controllers:")
+    #     print("   - SinglePageController")
+    #     print("   - BatchPageController")
+    #     print("   - ImageProcessingController")
+    #     print("   - ImportExportController")
+    #     print("\n🖼️  Views:")
+    #     print("   - EnhanceStackView")
+    #     print("   - SettingsView")
+    #     print("=" * 60 + "\n")
 
     def closeEvent(self, event):
         """Handle application close event."""
@@ -316,7 +324,9 @@ def main():
 
     # Setup splash screen
     screen_geometry = app.primaryScreen().geometry()
-    original_pixmap = QPixmap("UI/resources/image/Logo_Pixel_Refine.png")
+    original_pixmap = QPixmap(
+        "pixel_refine_desktop/ui/resources/assets/images/Logo_Pixel_Refine.png"
+    )
 
     splash_width = int(screen_geometry.width() * 0.25)
     scaled_pixmap = original_pixmap.scaledToWidth(

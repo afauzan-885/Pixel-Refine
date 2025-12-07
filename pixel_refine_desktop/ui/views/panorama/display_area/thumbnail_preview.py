@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 from PIL import Image, ImageOps
 from PIL.ImageQt import ImageQt
 
-from pixel_refine_desktop.core.logic.Zoomable_Handler import Zoomable
+from pixel_refine_desktop.enhance_stack.core.logic.Zoomable_Handler import Zoomable
 
 
 class ImagePreviewDialog(QDialog):
@@ -24,7 +24,7 @@ class ImagePreviewDialog(QDialog):
     def __init__(self, image_path, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Preview - {image_path}")
-        
+
         self.set_adaptive_initial_size()
 
         layout = QVBoxLayout(self)
@@ -43,8 +43,10 @@ class ImagePreviewDialog(QDialog):
             layout.removeWidget(self.view)
             self.view.deleteLater()
             layout.addWidget(error_label)
-            
-    def set_adaptive_initial_size(self, width_ratio: float = 0.3, height_ratio: float = 0.5):
+
+    def set_adaptive_initial_size(
+        self, width_ratio: float = 0.3, height_ratio: float = 0.5
+    ):
         """
         Mengatur ukuran dan posisi awal dialog agar relatif terhadap ukuran layar.
         """
@@ -65,13 +67,13 @@ class ImagePreviewDialog(QDialog):
 
         # 4. Atur ukuran dialog
         self.resize(dialog_width, dialog_height)
-        
+
         # 5. Pusatkan dialog di tengah layar
         # Hitung posisi x dan y agar jendela berada di tengah
         x = available_geometry.x() + (screen_width - dialog_width) / 2
         y = available_geometry.y() + (screen_height - dialog_height) / 2
         self.move(int(x), int(y))
-        
+
         # Atur ukuran minimum agar pengguna tidak bisa membuatnya terlalu kecil
         self.setMinimumSize(int(screen_width * 0.4), int(screen_height * 0.4))
 
@@ -107,4 +109,3 @@ class ImagePreviewDialog(QDialog):
         super().resizeEvent(event)
         if self.pixmap_item:
             self.view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
-            

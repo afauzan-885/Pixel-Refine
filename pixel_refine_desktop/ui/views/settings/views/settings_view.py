@@ -14,7 +14,9 @@ class SettingsView(SettingPage):
 
     def __init__(self, db_path: str, parent=None):
         # Create database manager
-        from pixel_refine_desktop.core.logic.database_manager import DatabaseManager
+        from pixel_refine_desktop.enhance_stack.core.logic.database_manager import (
+            DatabaseManager,
+        )
 
         database_manager = DatabaseManager(db_path)
 

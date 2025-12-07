@@ -9,5 +9,4 @@ This package contains the MVC components for the desktop version:
 - models: Data models and repositories
 """
 
-__version__ = "0.5.3"
 __author__ = "Akmal Fauzan"

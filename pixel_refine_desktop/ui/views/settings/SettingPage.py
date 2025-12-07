@@ -1,10 +1,13 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QTabWidget
 
-from pixel_refine_desktop.core.logic.database_manager import DatabaseManager
+from pixel_refine_desktop.enhance_stack.core.logic.database_manager import (
+    DatabaseManager,
+)
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from .General.GeneralSetting import general_page
 from .Perfomance.PerformancePage import performance_page
 from .Advance.AdvancePage import advance_page
+
 
 class SettingPage(QWidget):
     def __init__(self, database_manager: DatabaseManager):

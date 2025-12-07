@@ -128,7 +128,7 @@ DROPDOWN_BOX = """
                 border: 1px solid #d1d1d1;
             }
             QComboBox::down-arrow {
-                image: url('UI/resources/icon/menu-options.png');
+                image: url('pixel_refine_desktop/ui/resources/assets/icons/menu-options.png');
                 width: 24px;
                 height: 24px;
             }

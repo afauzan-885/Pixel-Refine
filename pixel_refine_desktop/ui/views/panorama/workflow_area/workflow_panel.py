@@ -238,19 +238,5 @@ class WorkflowPanel(QWidget):
         )
         self.tab_widget.setTabEnabled(
             2, self.latest_successful_stage in ["projected", "blended"]
-        )
-
-    def _update_preview_button_state(self):
-        """Mengubah HANYA ikon dan tooltip tombol preview."""
-        actions = {
-            0: {"icon": "UI/resources/icon/Align_Images.png", "tip": "Generate Alignment Preview"},
-            1: {"icon": "UI/resources/icon/Projection_crop.png", "tip": "Update Projection Preview"},
-            2: {"icon": "UI/resources/icon/Blending.png", "tip": "Update Blending Preview"},
-        }
-        action_info = actions.get(self.tab_widget.currentIndex())
-
-        if action_info:
-            self.preview_button.setText("")
-            self.preview_button.setIcon(QIcon(action_info["icon"]))
             self.preview_button.setIconSize(QSize(32, 32))
             self.preview_button.setToolTip(action_info["tip"])
