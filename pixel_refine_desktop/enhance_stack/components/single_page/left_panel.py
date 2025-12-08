@@ -4,12 +4,15 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
-    QComboBox,
     QStackedWidget,
     QPushButton,
     QButtonGroup,
 )
 from PySide6.QtCore import Qt
+
+# Import GenericUILibrary
+from pixel_refine_desktop.ui.resources.GenericUILibrary import FormGroup
+
 from pixel_refine_desktop.enhance_stack.models.algorithm_list import (
     get_algorithm_descriptions,
     get_algorithm_names,
@@ -21,7 +24,6 @@ from pixel_refine_desktop.enhance_stack.components.single_page.parameter_pages i
 )
 from pixel_refine_desktop.ui.resources.styles import stylesheet
 from pixel_refine_desktop.ui.resources.styles.stylesheet import (
-    DROPDOWN_BOX,
     SWITCH_BUTTON_ACTIVE_STYLE,
     SWITCH_BUTTON_DEFAULT_STYLE,
 )
@@ -36,7 +38,7 @@ class LeftPanel(QWidget):
     def initUI(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
+        layout.setSpacing(0)
         self.init_preview_panel(layout)
         self.init_parameter_panel(layout)
         self.setLayout(layout)
@@ -61,8 +63,10 @@ class LeftPanel(QWidget):
 
         left_dropdown_panel_widget = QWidget()
         left_dropdown_layout = QVBoxLayout(left_dropdown_panel_widget)
-        left_dropdown_layout.setContentsMargins(0, 0, 0, 0)
-        left_dropdown_layout.setSpacing(0)
+        left_dropdown_layout.setContentsMargins(0, 15, 0, 0)
+        left_dropdown_layout.setSpacing(
+            30
+        )  # Match spacing from similarity_parameter_settings (line 185)
 
         alignment_names = get_algorithm_names("alignment")
         alignment_descs = get_algorithm_descriptions("alignment")
@@ -87,6 +91,9 @@ class LeftPanel(QWidget):
             denoising_display_name, denoising_names, denoising_descs
         )
         left_dropdown_layout.addWidget(denoising_widget)
+
+        # Add stretch to prevent widgets from spreading vertically
+        left_dropdown_layout.addStretch()
         # left_dropdown_layout.addStretch()
 
         self.parameter_stack = QStackedWidget()
@@ -166,23 +173,19 @@ class LeftPanel(QWidget):
         self.on_switch_button_clicked(self.btn_show_alignment_params)
 
     def create_dropdown(self, label_text, items, tooltips):
-        section_layout = QVBoxLayout()
-        section_layout.setSpacing(0)
-        section_layout.setContentsMargins(2, 10, 10, 10)
-        label = QLabel(label_text)
-        label.setStyleSheet(stylesheet.LABEL_BOLD_STYLE)
-        dropdown = QComboBox()
-        for item, tooltip in zip(items, tooltips):
-            dropdown.addItem(item)
-            dropdown.setItemData(
-                dropdown.count() - 1, tooltip, Qt.ItemDataRole.ToolTipRole
-            )
-        dropdown.setStyleSheet(DROPDOWN_BOX)
-        section_layout.addWidget(label)
-        section_layout.addWidget(dropdown)
-        section_widget = QWidget()
-        section_widget.setLayout(section_layout)
-        return dropdown, section_widget
+        """Create dropdown using GenericUILibrary FormGroup"""
+        # Create FormGroup with select input
+        form_group = FormGroup(label=label_text, input_type="select")
+        form_group.add_options(items)
+
+        # Add tooltips to the internal QComboBox
+        combo = form_group.input  # Access internal QComboBox
+        for i, tooltip in enumerate(tooltips):
+            combo.setItemData(i, tooltip, Qt.ItemDataRole.ToolTipRole)
+
+        # Return the internal QComboBox and the FormGroup widget
+        # This maintains compatibility with existing code
+        return combo, form_group
 
     def handle_dropdown_change_for_source(self, source_category):
         """

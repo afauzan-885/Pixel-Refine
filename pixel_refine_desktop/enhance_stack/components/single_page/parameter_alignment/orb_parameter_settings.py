@@ -16,6 +16,7 @@ from PySide6.QtCore import Qt
 
 # Asumsikan ORBAlgorithm diimpor dengan benar
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.ORB import ORBAlgorithm
+from pixel_refine_desktop.ui.resources.GenericUILibrary import FormGroup
 
 # APPLY_BUTTON tidak diperlukan lagi
 from pixel_refine_desktop.ui.resources.styles.stylesheet import (
@@ -302,21 +303,17 @@ def get_orb_page():
         # Hubungkan ke auto-save
         sld.valueChanged.connect(save_current_settings)
 
-    # --- Pembuatan UI Combo Box (Transformation) ---
-    transformation_label = QLabel(language_config.ORB_TRANSFORMATION_LABEL)
-    transformation_label.setToolTip(language_config.ORB_TRANSFORMATION_DESCRIPTION)
-    transformation_label.setFont(get_default_font(10, QFont.Weight.Bold))
-    layout.addWidget(transformation_label)
-
-    transformation_combo = QComboBox()
-    transformation_combo.addItems(["homography", "affine"])
-    # Set nilai awal dari config UI
-    transformation_combo.setCurrentText(orb_config.get("transformation", "homography"))
-    transformation_combo.setStyleSheet(DROPDOWN_BOX)
-    layout.addWidget(transformation_combo)
-    combos["transformation"] = transformation_combo  # Simpan referensi
-    # Hubungkan ke auto-save
-    transformation_combo.currentIndexChanged.connect(save_current_settings)
+    # --- Pembuatan UI Combo Box (Transformation) - Using FormGroup ---
+    transformation_form = FormGroup(
+        label=language_config.ORB_TRANSFORMATION_LABEL, input_type="select"
+    )
+    transformation_form.input.setMaximumWidth(150)
+    transformation_form.add_options(["homography", "affine"])
+    transformation_form.set_value(orb_config.get("transformation", "homography"))
+    transformation_form.label.setToolTip(language_config.ORB_TRANSFORMATION_DESCRIPTION)
+    layout.addWidget(transformation_form)
+    combos["transformation"] = transformation_form.input
+    transformation_form.value_changed.connect(lambda _: save_current_settings())
 
     # --- Pembuatan UI Toggle Buttons (Keep Edges, Enable Cropping) ---
     toggles_layout_1 = QHBoxLayout()

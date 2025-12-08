@@ -17,6 +17,7 @@ from PySide6.QtCore import Qt
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.AKAZE import (
     AKAZEAlgorithm,
 )
+from pixel_refine_desktop.ui.resources.GenericUILibrary import FormGroup
 from pixel_refine_desktop.ui.resources.styles.stylesheet import (
     DROPDOWN_BOX,
     TOGGLE_BUTTON,
@@ -320,25 +321,17 @@ def get_akaze_page():
         value_labels[label_key] = val_lbl
         sld.valueChanged.connect(save_current_settings)
 
-    # --- UI Combo Box (Transformation) ---
-    transformation_label = QLabel(
-        language_config.ORB_TRANSFORMATION_LABEL
-    )  # Ganti jika ada label spesifik AKAZE
-    transformation_label.setToolTip(
-        language_config.ORB_TRANSFORMATION_DESCRIPTION
-    )  # Ganti jika ada tooltip spesifik AKAZE
-    transformation_label.setFont(get_default_font(10, QFont.Weight.Bold))
-    layout.addWidget(transformation_label)
-
-    transformation_combo = QComboBox()
-    transformation_combo.addItems(["homography", "affine"])
-    transformation_combo.setCurrentText(
-        akaze_config.get("transformation", "homography")
-    )  # Ambil dari akaze_config
-    transformation_combo.setStyleSheet(DROPDOWN_BOX)
-    layout.addWidget(transformation_combo)
-    combos["transformation"] = transformation_combo
-    transformation_combo.currentIndexChanged.connect(save_current_settings)
+    # --- UI Combo Box (Transformation) - Using FormGroup ---
+    transformation_form = FormGroup(
+        label=language_config.ORB_TRANSFORMATION_LABEL, input_type="select"
+    )
+    transformation_form.add_options(["homography", "affine"])
+    transformation_form.input.setMaximumWidth(150)
+    transformation_form.set_value(akaze_config.get("transformation", "homography"))
+    transformation_form.label.setToolTip(language_config.ORB_TRANSFORMATION_DESCRIPTION)
+    layout.addWidget(transformation_form)
+    combos["transformation"] = transformation_form.input
+    transformation_form.value_changed.connect(lambda _: save_current_settings())
 
     # --- UI Toggle Buttons (Keep Edges, Enable Cropping) ---
     toggles_layout_1 = QHBoxLayout()

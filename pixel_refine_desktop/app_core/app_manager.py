@@ -29,6 +29,17 @@ class ApplicationManager:
         Args:
             main_window: Reference to the main window instance
         """
+
+        # Auto-apply GenericUILibrary stylesheet
+        try:
+            from pixel_refine_desktop.ui.resources.GenericUILibrary import (
+                apply_stylesheet,
+            )
+
+            apply_stylesheet()
+        except Exception as e:
+            print(f"Note: Could not auto-apply GenericUILibrary stylesheet - {e}")
+
         self.main_window = main_window
         self.database_manager = None
         self.animator = None
