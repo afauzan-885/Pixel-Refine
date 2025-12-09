@@ -1,15 +1,17 @@
 import shutil
 import subprocess
+import os
+from PIL import Image, UnidentifiedImageError
+import tifffile
+
 from PySide6.QtWidgets import (
     QMessageBox,
     QVBoxLayout,
     QWidget,
     QFileDialog,
 )
-import os
-from PIL import Image, UnidentifiedImageError
 from PySide6.QtCore import Signal, Slot
-import tifffile
+
 from pixel_refine_desktop.enhance_stack.core.logic.ImagePreviewHandler import (
     ImagePreviewHandler,
 )
@@ -41,8 +43,6 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.Interpol
 
 from pixel_refine_desktop.enhance_stack.components.single_page.page_layout import (
     setup_main_layout,
-    setup_preview_panel,
-    setup_progress_section,
     setup_signals,
 )
 
@@ -76,19 +76,11 @@ class SinglePageLayout(QWidget):
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 5, 5, 5)
 
-        # ==================== LAYOUT APP ==================== #
         setup_main_layout(self, self.database_manager)
-        setup_progress_section(self)
-        setup_preview_panel(self)
-        if hasattr(self, "preview_scene") and hasattr(self, "preview_view"):
-            if isinstance(getattr(self, "preview_view", None), QWidget):
-                self.preview_handler = ImagePreviewHandler(
-                    self.preview_scene, self.preview_view, self
-                )
-            else:
-                print(
-                    "Error: preview_view is not a valid QWidget for ImagePreviewHandler."
-                )
+
+        if hasattr(self, "preview_handler"):
+            # preview_handler will be initialized separately if needed
+            pass
         else:
             print(
                 "Error: preview_scene or preview_view not found for ImagePreviewHandler."
@@ -98,20 +90,20 @@ class SinglePageLayout(QWidget):
                 "Layout Error",
                 "Preview panel components could not be initialized.",
             )
-        # ---------------------------------------------------------------------------
 
+        # ---------------------------------------------------------------------------
         setup_signals(self)  # Menghubungkan sinyal tombol proses/simpan
 
-        if self.preview_handler and hasattr(self, "right_panel"):
+        if self.preview_handler and hasattr(self, "workspace_panel"):
             try:
-                self.right_panel.previewImageRequested.connect(
+                self.workspace_panel.previewImageRequested.connect(
                     self.preview_handler.update_preview
                 )
-                self.right_panel.preloadRequested.connect(
-                    self.preview_handler.preload_low_res_images
-                )
-                if hasattr(self.right_panel, "imagesDropped"):
-                    self.right_panel.imagesDropped.connect(self.handle_dropped_images)
+
+                if hasattr(self.workspace_panel, "imagesDropped"):
+                    self.workspace_panel.imagesDropped.connect(
+                        self.handle_dropped_images
+                    )
 
             except AttributeError as e:
                 print(f"Error connecting signals: {e}")
@@ -119,9 +111,7 @@ class SinglePageLayout(QWidget):
                     self, "Signal Error", f"Could not connect preview signals: {e}"
                 )
             except TypeError as e:
-                print(
-                    f"Error connecting signals (TypeError): {e}"
-                )  # Misal jika slot tidak benar
+                print(f"Error connecting signals (TypeError): {e}")
                 QMessageBox.warning(
                     self,
                     "Signal Error",
@@ -131,11 +121,8 @@ class SinglePageLayout(QWidget):
             print(
                 "Warning: preview_handler not initialized, cannot connect preview signals."
             )
-        else:  # preview_handler ada, tapi right_panel tidak
-            print("Warning: right_panel not found, cannot connect preview signals.")
-        # ==================== LAYOUT APP ==================== #
-
-        # self.update_preview_enabled = True # Defaultnya aktif
+        else:  # preview_handler ada, tapi workspace_panel tidak
+            print("Warning: workspace_panel not found, cannot connect preview signals.")
 
     def resizeEvent(self, event):
         """Handles window resizing by calling the handler's resize method."""
@@ -236,9 +223,7 @@ class SinglePageLayout(QWidget):
             return
 
         # 3. Konversi TIFF (jika ada)
-        output_folder = (
-            "database/align/uncompressed_tiff"  # Pertimbangkan jadikan konstanta
-        )
+        output_folder = "database/align/uncompressed_tiff"
         try:
             os.makedirs(output_folder, exist_ok=True)
         except OSError as e:
@@ -264,14 +249,13 @@ class SinglePageLayout(QWidget):
             for tiff_path in tiff_files:
                 processed_tiff_path = tiff_path  # Default pakai asli
                 needs_conversion = False
-                compression = "unknown"  # Inisialisasi variabel kompresi untuk logging
+                compression = "unknown"
 
                 try:
                     # Gunakan Pillow untuk membaca informasi
                     with Image.open(tiff_path) as img:
                         compression = img.info.get("compression", "none").lower()
 
-                        # --- TAMBAHKAN PESAN VERIFIKASI KOMPRESI DI SINI ---
                         print(
                             f"  TIFF File: {os.path.basename(tiff_path)} -> Detected Compression: {compression}"
                         )
@@ -288,9 +272,7 @@ class SinglePageLayout(QWidget):
                     continue
 
                 if needs_conversion:
-                    print(
-                        f"  Conversion triggered: {compression} needs decompressing."
-                    )  # Pesan trigger konversi
+                    print(f"  Conversion triggered: {compression} needs decompressing.")
 
                     # Logic yang sudah diubah (menggunakan next() untuk generator)
                     conversion_generator = convert_tiff_to_uncompressed(
@@ -346,9 +328,6 @@ class SinglePageLayout(QWidget):
             return
 
         # 6. Proses Impor di Thread
-        # Pesan 'dominant format' mungkin tidak relevan lagi, gunakan pesan generik
-        # message = language_config.HANDLE_IMPORT_BUTTON_IMAGE_SELECTED.format(count=len(selected_files)) # Gunakan string generik
-        # QMessageBox.information(self, language_config.HANDLE_IMPORT_BUTTON_IMAGE_SELECTED, message)
         try:
             self.multi_thread_import_images = ImageImportThreading(
                 database_manager=self.database_manager,
@@ -358,7 +337,6 @@ class SinglePageLayout(QWidget):
             )
 
             # --- Koneksi Sinyal Thread ---
-            # Hubungkan ke slot yang sudah ada di kelas ini
             if hasattr(self, "update_progress_bar") and callable(
                 self.update_progress_bar
             ):
@@ -366,7 +344,6 @@ class SinglePageLayout(QWidget):
                     self.update_progress_bar
                 )
             else:
-                #  print("Warning: Slot 'update_progress_bar' not found.")
                 pass
 
             if hasattr(self, "on_import_complete") and callable(
@@ -376,7 +353,6 @@ class SinglePageLayout(QWidget):
                     self.on_import_complete
                 )
             else:
-                #  print("Warning: Slot 'on_import_complete' not found.")
                 pass
 
             # Tambahkan koneksi untuk error jika ada
@@ -396,7 +372,7 @@ class SinglePageLayout(QWidget):
 
     def handle_delete_button(self):
         """Function to delete images"""
-        selected_paths = self.right_panel.get_select_image_list()
+        selected_paths = self.workspace_panel.get_select_image_list()
         if not selected_paths:
             title, message = (
                 language_config.HANDLE_DELETE_BUTTON_IMAGE_NO_VALID_SELECTED
@@ -415,20 +391,17 @@ class SinglePageLayout(QWidget):
         )
         if reply == QMessageBox.StandardButton.Yes:
             self.database_manager.single_process_delete_path_images(selected_paths)
-            self.right_panel.remove_selected_images()
+            self.workspace_panel.remove_selected_images()
 
     def single_process_algorithm(self):
         """
         Fungsi untuk memproses algoritma berdasarkan pilihan dropdown.
         """
         try:
-            alignment_choice = self.left_panel.alignment_dropdown.currentText()
-            denoising_choice = (
-                self.left_panel.denoising_dropdown.currentText()
-            )  # Ambil pilihan denoising
-            super_resolution_choice = (
-                self.left_panel.super_resolution_dropdown.currentText()
-            )  # Ambil pilihan super resolution
+            # Ambil parameter dari Right Panel (Generic UI)
+            alignment_choice = self.workspace_panel.align_select.currentText()
+            denoising_choice = self.workspace_panel.denoise_select.currentText()
+            super_resolution_choice = self.workspace_panel.sr_select.currentText()
 
             # Jika tidak ada algoritma yang dipilih
             if (
@@ -519,9 +492,11 @@ class SinglePageLayout(QWidget):
             )
 
     def save_image(self):
-        """Menyimpan gambar hasil proses ke lokasi yang dipilih pengguna.
+        """
+        Menyimpan gambar hasil proses ke lokasi yang dipilih pengguna.
         Untuk TIFF, file akan disalin/dipindahkan. Untuk format lain, akan dikonversi.
-        Metadata asli dari gambar sumber akan coba diterapkan."""
+        Metadata asli dari gambar sumber akan coba diterapkan.
+        """
         folder_path = "database/stack"
 
         if not os.path.exists(folder_path):
@@ -564,9 +539,7 @@ class SinglePageLayout(QWidget):
         # Validasi format tujuan
         supported_save_formats = [".tif", ".tiff", ".jpg", ".jpeg", ".png"]
         if chosen_file_extension not in supported_save_formats:
-            if (
-                not chosen_file_extension and "TIFF (*.tif *.tiff)" in file_path
-            ):  # Heuristik sederhana
+            if not chosen_file_extension and "TIFF (*.tif *.tiff)" in file_path:
                 file_path += ".tif"
                 chosen_file_extension = ".tif"
             elif not chosen_file_extension and "JPEG (*.jpg *.jpeg)" in file_path:
@@ -656,18 +629,33 @@ class SinglePageLayout(QWidget):
 
     def update_progress_bar(self, value, images_left):
         """Memperbarui progress bar dan menampilkan jumlah gambar yang tersisa."""
-        self.progress_bar.setValue(value)
-        self.progress_bar.setFormat(
-            language_config.UPDATE_PROGRESS_BAR_STATUS.format(value, images_left)
-        )
+        if hasattr(self, "workspace_panel") and hasattr(
+            self.workspace_panel, "progress_bar"
+        ):
+            self.workspace_panel.progress_bar.setVisible(True)
+            self.workspace_panel.progress_bar.setValue(value)
+            self.workspace_panel.progress_bar.setFormat(
+                language_config.UPDATE_PROGRESS_BAR_STATUS.format(value, images_left)
+            )
 
     def on_import_complete(self, successful_images):
         """Called when the import process is complete."""
-        self.right_panel.load_image_paths()
+        # Reload current batch content to show new images
+        if hasattr(self, "workspace_panel") and self.workspace_panel.current_batch_id:
+            current_batch_id = self.workspace_panel.current_batch_id
+            if hasattr(self, "controller"):
+                batch = self.controller.get_batch(current_batch_id)
+                if batch:
+                    self.workspace_panel.load_batch(current_batch_id, batch.images)
+
         QMessageBox.information(
             self,
             language_config.ON_IMPORT_COMPLETE_STATUS,
             language_config.ON_IMPORT_COMPLETE_MESSAGES.format(successful_images),
         )
-        self.progress_bar.setValue(0)
-        self.progress_bar.setFormat("0%")
+        # Pastikan progress bar merujuk ke lokasi yang benar
+        if hasattr(self, "workspace_panel") and hasattr(
+            self.workspace_panel, "progress_bar"
+        ):
+            self.workspace_panel.progress_bar.setValue(0)
+            self.workspace_panel.progress_bar.setFormat("0%")

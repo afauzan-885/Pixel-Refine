@@ -238,5 +238,21 @@ class WorkflowPanel(QWidget):
         )
         self.tab_widget.setTabEnabled(
             2, self.latest_successful_stage in ["projected", "blended"]
-            self.preview_button.setIconSize(QSize(32, 32))
-            self.preview_button.setToolTip(action_info["tip"])
+        )
+        # If you want to set icon size and tooltip for preview_button, do it outside of setTabEnabled
+        # Example:
+        # self.preview_button.setIconSize(QSize(32, 32))
+        # self.preview_button.setToolTip("Preview the current stage")
+
+    def _update_preview_button_state(self):
+        """Memperbarui teks dan state preview button berdasarkan tab yang aktif."""
+        current_index = self.tab_widget.currentIndex()
+        
+        if current_index == 0:
+            self.preview_button.setText("Preview Alignment")
+        elif current_index == 1:
+            self.preview_button.setText("Preview Projection")
+        elif current_index == 2:
+            self.preview_button.setText("Preview Blending")
+        else:
+            self.preview_button.setText("Preview")

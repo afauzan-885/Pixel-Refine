@@ -1,9 +1,9 @@
 import multiprocessing
 import time
 import cv2, os
-from joblib import Parallel, delayed
 import numpy as np
 from scipy.linalg import sqrtm, inv
+from concurrent.futures import ThreadPoolExecutor
 
 
 class HybridContentAwareStitcher:
@@ -81,11 +81,10 @@ class HybridContentAwareStitcher:
         num_threads = multiprocessing.cpu_count()
         print(f"    - Menghitung radius ANMS dengan {num_threads} thread...")
 
-        # Jalankan perhitungan radius secara paralel
+        # Jalankan perhitungan radius secara paralel menggunakan ThreadPoolExecutor
         # Kita mulai dari i=1 karena titik terkuat (i=0) selalu memiliki radius tak terhingga
-        radii_list = Parallel(n_jobs=num_threads, backend='threading')(
-            delayed(calculate_radius_for_point)(i) for i in range(1, num_initial_points)
-        )
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            radii_list = list(executor.map(calculate_radius_for_point, range(1, num_initial_points)))
         
         # Gabungkan hasilnya. Ingat, titik pertama (i=0) memiliki radius tak terhingga.
         radii = np.array([np.inf] + radii_list)

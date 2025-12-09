@@ -30,6 +30,7 @@ from pixel_refine_desktop.ui import (
     SplashScreen,
     fade_in,
 )
+from pixel_refine_desktop.ui.views.panorama import PanoramaPage
 import config
 
 
@@ -186,11 +187,12 @@ class PixelRefineMain(QMainWindow):
         )
         self.main_content.addWidget(enhance_stack_view)
 
-        # Panorama placeholder
-        panorama_placeholder = QLabel("Panorama Page\n(To be migrated)")
-        panorama_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        panorama_placeholder.setStyleSheet("font-size: 14px; padding: 20px;")
-        self.main_content.addWidget(panorama_placeholder)
+        # Panorama Page
+        splash.update_status("Initializing Panorama Page...", 80)
+        panorama_page = PanoramaPage(
+            database_manager=self.app_manager.database_manager,
+        )
+        self.main_content.addWidget(panorama_page)
 
         # Settings View
         splash.update_status("Initializing Settings View...", 85)

@@ -1,270 +1,355 @@
-# File: left_panel.py
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QTabWidget,
+    QScrollArea,
     QLabel,
     QStackedWidget,
-    QPushButton,
-    QButtonGroup,
+    QProgressBar,
+    QGridLayout,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QPixmap
 
-# Import GenericUILibrary
-from pixel_refine_desktop.ui.resources.GenericUILibrary import FormGroup
+# Generic UI Library
+from pixel_refine_desktop.ui.resources.GenericUILibrary import (
+    ImageCard,
+    EmptyState,
+    FormGroup,
+    Button,
+    Theme,
+)
+from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 
+# Backend logic helper
 from pixel_refine_desktop.enhance_stack.models.algorithm_list import (
     get_algorithm_descriptions,
     get_algorithm_names,
     get_algorithm_options,
     get_category_display_name,
 )
-from pixel_refine_desktop.enhance_stack.components.single_page.parameter_pages import (
-    ParameterPages,
+
+# Thumbnail processor
+from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_processor import (
+    ThumbnailBatchProcessor,
+    create_thumbnail_placeholder,
+    display_thumbnail_in_layout,
 )
-from pixel_refine_desktop.ui.resources.styles import stylesheet
-from pixel_refine_desktop.ui.resources.styles.stylesheet import (
-    SWITCH_BUTTON_ACTIVE_STYLE,
-    SWITCH_BUTTON_DEFAULT_STYLE,
+
+# Zoomable preview
+from pixel_refine_desktop.enhance_stack.core.logic.Zoomable_Handler import Zoomable
+from pixel_refine_desktop.enhance_stack.core.logic.image_display_helper import (
+    display_image_in_zoomable,
+    ImageLoaderThread,
 )
-from pixel_refine_desktop.ui.views.settings.General.Language import language_config
+from PySide6.QtWidgets import QGraphicsScene
 
 
 class LeftPanel(QWidget):
-    def __init__(self):
+    """
+    Main Workspace Panel for Enhance Stack.
+    Contains:
+    1. Image Grid (Top) - Displays images in the selected batch.
+    2. Workflow Settings (Bottom) - Parameter configurations (Alignment, Denoising, etc).
+    """
+
+    # Signals
+    process_requested = Signal(dict)  # Emit settings dict
+    previewImageRequested = Signal(list)  # Emit list of image paths
+    imagesDropped = Signal(list)  # Added signal for drag and drop support if needed
+
+    def __init__(self, controller=None):
         super().__init__()
-        self.initUI()
+        self.controller = controller  # BatchPageController or similar
+        self.current_batch_id = None
+        self.thumbnail_processor = ThumbnailBatchProcessor(thumbnail_size=(128, 128))
+        self.thumbnail_threads = []
+        self.image_loader_thread = None
+        self._setup_ui()
 
-    def initUI(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        self.init_preview_panel(layout)
-        self.init_parameter_panel(layout)
-        self.setLayout(layout)
+        # Connect internal signal for view switching
+        self.previewImageRequested.connect(lambda _: self.show_preview())
 
-    def init_preview_panel(self, parent_layout):
-        self.preview_panel_widget = QWidget()
-        preview_panel_layout = QVBoxLayout(self.preview_panel_widget)
-        preview_panel_label = QLabel(language_config.PREVIEW_PANEL_LABEL)
-        preview_panel_layout.addWidget(preview_panel_label)
-        self.preview_panel_widget.setStyleSheet(stylesheet.PANEL_BACKGROUND_STYLE)
-        parent_layout.addWidget(self.preview_panel_widget)
+        # Accept drops for image import
+        self.setAcceptDrops(True)
 
-    def init_parameter_panel(self, parent_layout):
-        self.parameter_panel_widget = QWidget()
-        self.parameter_panel_widget.setMaximumHeight(300)
-        parameter_panel_outer_layout = QVBoxLayout(self.parameter_panel_widget)
-        parameter_panel_outer_layout.setContentsMargins(10, 10, 0, 0)
-        parameter_panel_outer_layout.setSpacing(0)
+    def _setup_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(10)
 
-        main_parameter_area_layout = QHBoxLayout()
-        main_parameter_area_layout.setSpacing(0)
+        # --- 1. Top Section: Image Display (Stacked: Grid vs Preview) ---
+        self.display_stack = QStackedWidget()
 
-        left_dropdown_panel_widget = QWidget()
-        left_dropdown_layout = QVBoxLayout(left_dropdown_panel_widget)
-        left_dropdown_layout.setContentsMargins(0, 15, 0, 0)
-        left_dropdown_layout.setSpacing(
-            30
-        )  # Match spacing from similarity_parameter_settings (line 185)
+        # Mode 0: Grid View & Empty State
+        self.grid_view_widget = QWidget()
+        grid_view_layout = QVBoxLayout(self.grid_view_widget)
+        grid_view_layout.setContentsMargins(0, 0, 0, 0)
 
-        alignment_names = get_algorithm_names("alignment")
-        alignment_descs = get_algorithm_descriptions("alignment")
-        alignment_display_name = get_category_display_name("alignment")
-        self.alignment_dropdown, alignment_widget = self.create_dropdown(
-            alignment_display_name, alignment_names, alignment_descs
+        # Grid Container
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+
+        self.grid_container = QWidget()
+        self.grid_layout = QHBoxLayout(self.grid_container)
+        self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.scroll_area.setWidget(self.grid_container)
+
+        # Empty State
+        self.empty_state = EmptyState(
+            title="No Batch Selected",
+            message="Select a batch from the list to view images.",
+            button_text="Create New Batch",
         )
-        left_dropdown_layout.addWidget(alignment_widget)
+        # Note: 'Create New Batch' logic needs to be connected if reachable,
+        # or we just rely on RightPanel. For now, button does nothing unless connected.
 
-        super_res_names = get_algorithm_names("super_resolution")
-        super_res_descs = get_algorithm_descriptions("super_resolution")
-        super_res_display_name = get_category_display_name("super_resolution")
-        self.super_resolution_dropdown, super_resolution_widget = self.create_dropdown(
-            super_res_display_name, super_res_names, super_res_descs
-        )
-        left_dropdown_layout.addWidget(super_resolution_widget)
+        self.empty_state.setVisible(True)
+        self.scroll_area.setVisible(False)
 
-        denoising_names = get_algorithm_names("denoising")
-        denoising_descs = get_algorithm_descriptions("denoising")
-        denoising_display_name = get_category_display_name("denoising")
-        self.denoising_dropdown, denoising_widget = self.create_dropdown(
-            denoising_display_name, denoising_names, denoising_descs
-        )
-        left_dropdown_layout.addWidget(denoising_widget)
+        grid_view_layout.addWidget(self.empty_state)
+        grid_view_layout.addWidget(self.scroll_area)
 
-        # Add stretch to prevent widgets from spreading vertically
-        left_dropdown_layout.addStretch()
-        # left_dropdown_layout.addStretch()
+        self.display_stack.addWidget(self.grid_view_widget)
 
-        self.parameter_stack = QStackedWidget()
-        parameter_pages = ParameterPages(self.parameter_stack)
-        self.setting_pages_map = parameter_pages.get_setting_pages_map()
-        if "default" not in self.setting_pages_map:
-            default_page = QWidget()
-            default_layout = QVBoxLayout(default_page)
-            default_label = QLabel("Select an algorithm to see its parameters.")
-            default_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            default_layout.addWidget(default_label)
-            default_page_index = self.parameter_stack.addWidget(default_page)
-            self.setting_pages_map["default"] = default_page_index
+        # Mode 1: Preview View
+        preview_wrapper = QWidget()
+        preview_wrapper_layout = QVBoxLayout(preview_wrapper)
+        preview_wrapper_layout.setContentsMargins(0, 0, 0, 0)
 
-        right_parameter_stack_widget = QWidget()
-        right_parameter_stack_layout = QVBoxLayout(right_parameter_stack_widget)
-        right_parameter_stack_layout.setContentsMargins(0, 0, 0, 0)
-        right_parameter_stack_layout.addWidget(self.parameter_stack)
+        # Back Button Header (layout tanpa wrapper widget)
+        back_header_layout = QHBoxLayout()
+        back_header_layout.setContentsMargins(0, 0, 0, 0)
 
-        main_parameter_area_layout.addWidget(left_dropdown_panel_widget, 1)
-        main_parameter_area_layout.addWidget(right_parameter_stack_widget, 2)
+        back_btn = Button("Back to Grid", variant="secondary")
+        back_btn.setFixedWidth(120)
+        back_btn.clicked.connect(self.show_grid)
+        back_header_layout.addWidget(back_btn)
+        back_header_layout.addStretch()
 
-        switch_button_panel_layout = QHBoxLayout()
-        switch_button_panel_layout.setSpacing(5)
+        preview_wrapper_layout.addLayout(back_header_layout)
 
-        self.btn_show_alignment_params = QPushButton("Alignment")
-        self.btn_show_super_res_params = QPushButton("Super Resolution")
-        self.btn_show_denoising_params = QPushButton("Denoising")
+        # Zoomable Preview View
+        self.preview_scene = QGraphicsScene()
+        self.zoomable_preview = Zoomable(self.preview_scene, self)
+        preview_wrapper_layout.addWidget(self.zoomable_preview)
 
-        self.parameter_switch_buttons_map = {
-            self.btn_show_alignment_params: "alignment",
-            # self.btn_show_super_res_params: "super_resolution",
-            self.btn_show_denoising_params: "denoising",
-        }
+        self.display_stack.addWidget(preview_wrapper)
 
-        self.switch_button_group = QButtonGroup(self)
-        self.switch_button_group.setExclusive(True)
+        # Add Stack to Main Layout (Flex 1)
+        main_layout.addWidget(self.display_stack, 1)
 
-        for btn, source_key in self.parameter_switch_buttons_map.items():
-            btn.setStyleSheet(
-                SWITCH_BUTTON_DEFAULT_STYLE
-            )  # Terapkan style default awal
-            btn.setCheckable(True)
-            btn.adjustSize()
+        # --- 2. Bottom Section: Workflow Tabs ---
+        self.tabs = QTabWidget()
+        self.tabs.setFixedHeight(250)
 
-            self.switch_button_group.addButton(btn)
-            switch_button_panel_layout.addWidget(btn)
+        # Tab 1: Alignment & Super Resolution
+        self.tabs.addTab(self._create_alignment_tab(), "Alignment & Resolution")
 
-        # Hubungkan sinyal dari QButtonGroup
-        self.switch_button_group.buttonClicked.connect(self.on_switch_button_clicked)
+        # Tab 2: Denoising
+        self.tabs.addTab(self._create_denoising_tab(), "Denoising")
 
-        switch_button_panel_layout.addWidget(self.btn_show_alignment_params)
-        # switch_button_panel_layout.addWidget(self.btn_show_super_res_params)
-        switch_button_panel_layout.addWidget(self.btn_show_denoising_params)
-        switch_button_panel_layout.addStretch()
+        main_layout.addWidget(self.tabs, 0)  # Fixed height
 
-        parameter_panel_outer_layout.addLayout(switch_button_panel_layout)
-        parameter_panel_outer_layout.addLayout(main_parameter_area_layout)
+        # --- 3. Process Section ---
+        action_layout = QVBoxLayout()
+        action_layout.setSpacing(5)
 
-        self.parameter_panel_widget.setLayout(parameter_panel_outer_layout)
-        self.parameter_panel_widget.setStyleSheet(stylesheet.PANEL_BACKGROUND_STYLE)
-        parent_layout.addWidget(self.parameter_panel_widget)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setVisible(False)
+        action_layout.addWidget(self.progress_bar)
 
-        # --- Hubungkan Sinyal Dropdown ---
-        self.alignment_dropdown.currentIndexChanged.connect(
-            lambda: self.handle_dropdown_change_for_source("alignment")
-        )
-        self.super_resolution_dropdown.currentIndexChanged.connect(
-            lambda: self.handle_dropdown_change_for_source("super_resolution")
-        )
-        self.denoising_dropdown.currentIndexChanged.connect(
-            lambda: self.handle_dropdown_change_for_source("denoising")
-        )
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        self.process_btn = Button("Start Processing", variant="primary")
+        self.process_btn.clicked.connect(self._on_process_clicked)
+        btn_layout.addWidget(self.process_btn)
 
-        # Inisialisasi tampilan awal
-        self.btn_show_alignment_params.setChecked(True)
-        self.on_switch_button_clicked(self.btn_show_alignment_params)
+        action_layout.addLayout(btn_layout)
 
-    def create_dropdown(self, label_text, items, tooltips):
-        """Create dropdown using GenericUILibrary FormGroup"""
-        # Create FormGroup with select input
-        form_group = FormGroup(label=label_text, input_type="select")
-        form_group.add_options(items)
+        main_layout.addLayout(action_layout)
 
-        # Add tooltips to the internal QComboBox
-        combo = form_group.input  # Access internal QComboBox
-        for i, tooltip in enumerate(tooltips):
-            combo.setItemData(i, tooltip, Qt.ItemDataRole.ToolTipRole)
+    def _create_alignment_tab(self):
+        """Create Alignment and Super Resolution settings tab."""
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        layout.setSpacing(20)
 
-        # Return the internal QComboBox and the FormGroup widget
-        # This maintains compatibility with existing code
-        return combo, form_group
+        # Group 1: Alignment
+        align_names = get_algorithm_names("alignment")
 
-    def handle_dropdown_change_for_source(self, source_category):
-        """
-        Dipanggil ketika salah satu dropdown utama berubah.
-        Ini akan mencoba menampilkan panel parameter yang sesuai DAN mengupdate tombol switch.
-        """
-        target_button = None
-        if source_category == "alignment":
-            target_button = self.btn_show_alignment_params
-        # elif source_category == "super_resolution":
-        #     target_button = self.btn_show_super_res_params
-        elif source_category == "denoising":
-            target_button = self.btn_show_denoising_params
+        self.align_form = FormGroup("Alignment Method", input_type="select")
+        self.align_form.add_options(align_names)
+        if align_names:
+            self.align_form.set_value(align_names[0])
 
-        block_sr_signals = False
-        block_den_signals = False
+        layout.addWidget(self.align_form)
+        self.align_select = self.align_form.input
 
-        if (
-            source_category == "denoising"
-            and self.denoising_dropdown.currentIndex() != 0
-        ):
-            if self.super_resolution_dropdown.currentIndex() != 0:
-                block_sr_signals = True
-                self.super_resolution_dropdown.blockSignals(True)
-                self.super_resolution_dropdown.setCurrentIndex(0)
-                self.super_resolution_dropdown.blockSignals(False)
-        elif (
-            source_category == "super_resolution"
-            and self.super_resolution_dropdown.currentIndex() != 0
-        ):
-            if self.denoising_dropdown.currentIndex() != 0:
-                block_den_signals = True
-                self.denoising_dropdown.blockSignals(True)
-                self.denoising_dropdown.setCurrentIndex(0)
-                self.denoising_dropdown.blockSignals(False)
+        # Group 2: Super Resolution
+        sr_names = get_algorithm_names("super_resolution")
 
-        if target_button:
-            if not target_button.isChecked():
-                target_button.setChecked(
-                    True
-                )  # Ini akan memanggil on_switch_button_clicked
-            else:
-                self.on_switch_button_clicked(target_button)
+        self.sr_form = FormGroup("Super Resolution", input_type="select")
+        self.sr_form.add_options(sr_names)
+        if sr_names:
+            self.sr_form.set_value(sr_names[0])
 
-    def on_switch_button_clicked(self, clicked_button):
-        source_key = self.parameter_switch_buttons_map.get(clicked_button)
-        if not source_key:
+        layout.addWidget(self.sr_form)
+        self.sr_select = self.sr_form.input
+
+        layout.addStretch()
+        return widget
+
+    def _create_denoising_tab(self):
+        """Create Denoising settings tab."""
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        layout.setSpacing(20)
+
+        # Group 1: Denoising
+        denoise_names = get_algorithm_names("denoising")
+
+        self.denoise_form = FormGroup("Denoising", input_type="select")
+        self.denoise_form.add_options(denoise_names)
+        if denoise_names:
+            self.denoise_form.set_value(denoise_names[0])
+
+        layout.addWidget(self.denoise_form)
+        self.denoise_select = self.denoise_form.input
+
+        layout.addStretch()
+        return widget
+
+    def show_grid(self):
+        """Switch to Grid View."""
+        self.display_stack.setCurrentIndex(0)
+
+    def show_preview(self):
+        """Switch to Preview View."""
+        self.display_stack.setCurrentIndex(1)
+
+    def load_batch(self, batch_id, images):
+        """Load images from a batch into the grid."""
+        self.current_batch_id = batch_id
+
+        # Clear existing
+        self._clear_grid()
+        self.thumbnail_processor.stop_all()
+
+        if not images:
+            self.empty_state.set_text("Empty Batch", "This batch has no images yet.")
+            self.empty_state.setVisible(True)
+            self.scroll_area.setVisible(False)
             return
 
-        for btn, key in self.parameter_switch_buttons_map.items():
-            is_active = btn == clicked_button
-            if is_active:
-                btn.setStyleSheet(SWITCH_BUTTON_ACTIVE_STYLE)
-            else:
-                btn.setStyleSheet(SWITCH_BUTTON_DEFAULT_STYLE)
+        self.empty_state.setVisible(False)
+        self.scroll_area.setVisible(True)
 
-        chosen_text = ""
-        dropdown_to_check = None
-        if source_key == "alignment":
-            dropdown_to_check = self.alignment_dropdown
-        elif source_key == "super_resolution":
-            dropdown_to_check = self.super_resolution_dropdown
-        elif source_key == "denoising":
-            dropdown_to_check = self.denoising_dropdown
+        # Populate Grid dengan thumbnail asinkron
+        for img in images:
+            card = ImageCard(card_id=str(img.id), size=120)
+            card.image_label.setText(f"Image {img.id}")
 
-        if dropdown_to_check:
-            chosen_text = dropdown_to_check.currentText()
+            # Store path untuk preview
+            card._image_path = img.path
+            card.double_clicked.connect(self._on_card_double_clicked)
 
-        is_none_selection = False
-        try:
-            options_for_key = get_algorithm_options(source_key)
-            if options_for_key:
-                is_none_selection = chosen_text == options_for_key[0]
-        except Exception:
-            is_none_selection = True
+            self.grid_layout.addWidget(card)
 
-        if chosen_text in self.setting_pages_map and not is_none_selection:
-            self.parameter_stack.setCurrentIndex(self.setting_pages_map[chosen_text])
+            # Process thumbnail asinkron
+            if hasattr(img, 'path') and img.path:
+                self._load_thumbnail_async(img.path, card)
+
+    def _load_thumbnail_async(self, image_path, card_widget):
+        """Load thumbnail asinkron untuk image card."""
+        def on_thumbnail_ready(q_image, path):
+            if not q_image.isNull() and card_widget is not None:
+                # Convert QImage to QPixmap dan display
+                pixmap = QPixmap.fromImage(q_image)
+                card_widget.set_image(pixmap)
+
+        self.thumbnail_processor.process_image(image_path, on_thumbnail_ready)
+
+    def _on_card_double_clicked(self, card_id):
+        """Handle double-click pada image card untuk preview."""
+        sender = self.sender()
+        if hasattr(sender, "_image_path"):
+            self._display_image_preview(sender._image_path)
+
+    def _display_image_preview(self, image_path):
+        """
+        Display single image preview di Zoomable view dengan full resolution.
+        Support untuk zoom in/out dan pan dengan mouse.
+        
+        Features:
+        - Async load image dari disk
+        - Full resolution preview
+        - Zoom in/out dengan mouse wheel
+        - Pan dengan drag (klik dan geser)
+        """
+        # Stop previous loader jika masih berjalan
+        if self.image_loader_thread and self.image_loader_thread.isRunning():
+            self.image_loader_thread.quit()
+            self.image_loader_thread.wait()
+
+        # Load dan display image di zoomable widget
+        self.image_loader_thread = display_image_in_zoomable(
+            self.zoomable_preview,
+            image_path
+        )
+
+        # Show preview view
+        self.show_preview()
+
+    def _clear_grid(self):
+        """Remove all widgets from grid layout."""
+        while self.grid_layout.count():
+            child = self.grid_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+
+    def remove_selected_images(self):
+        """Remove currently selected images from logic/view (Placeholder)."""
+        # In a real grid, iterate items and remove selected.
+        # Here we just clear for safety or need Logic impl
+        self._clear_grid()
+
+    def get_select_image_list(self):
+        """Get list of selected image paths."""
+        # Placeholder: GenericUI ImageCard doesn't have selection state tracking built-in easily exposed potentially
+        # Need to implement selection tracking in ImageCard or LeftPanel
+        # For now return all or dummy
+        return []
+
+    def _on_process_clicked(self):
+        """Collect settings and emit signal."""
+        settings = {
+            "alignment": self.align_select.currentText(),
+            "super_resolution": self.sr_select.currentText(),
+            "denoising": self.denoise_select.currentText(),
+        }
+        self.process_requested.emit(settings)
+
+    def load_image_paths(self):
+        """Refreshes the grid (used by on_import_complete)."""
+        # Logic to fetch latest from DB or similar. Only stub needed if called by single_page_layout
+        pass
+
+    # Drag and drop support
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.accept()
         else:
-            self.parameter_stack.setCurrentIndex(
-                self.setting_pages_map.get("default", 0)
-            )
+            event.ignore()
+
+    def dropEvent(self, event):
+        files = [u.toLocalFile() for u in event.mimeData().urls()]
+        if files:
+            self.imagesDropped.emit(files)
