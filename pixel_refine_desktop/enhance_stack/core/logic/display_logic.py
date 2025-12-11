@@ -1,0 +1,209 @@
+"""
+Display Logic - Core business logic untuk DisplayPanel.
+Handles: Grid management, thumbnail loading, preview display.
+Separated dari UI untuk better maintainability dan testability.
+"""
+
+from pathlib import Path
+from PySide6.QtGui import QPixmap, QImage
+
+# Thumbnail processor
+from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_processor import (
+    ThumbnailBatchProcessor,
+)
+
+# Image display helper
+from pixel_refine_desktop.enhance_stack.core.logic.image_display_helper import (
+    display_image_in_zoomable,
+    ImageLoaderThread,
+)
+
+
+class DisplayLogic:
+    """
+    Core logic untuk image display dan grid management.
+    
+    Responsibilities:
+    - Manage batch state
+    - Load thumbnails
+    - Handle preview display
+    - Manage grid items
+    """
+
+    def __init__(self):
+        """Initialize display logic."""
+        self.current_batch_id = None
+        self.current_images = []
+        self.thumbnail_processor = ThumbnailBatchProcessor(thumbnail_size=(128, 128))
+        self.image_loader_thread = None
+        self.last_preview_info = None
+        self.grid_items = {}  # Map card_id -> image info
+
+    def set_batch(self, batch_id, images):
+        """
+        Set current batch.
+        
+        Args:
+            batch_id: ID dari batch
+            images: List of image objects dengan .id dan .path attributes
+        """
+        self.current_batch_id = batch_id
+        self.current_images = images if images else []
+        self.grid_items.clear()
+
+    def get_batch_info(self):
+        """
+        Get current batch info.
+        
+        Returns:
+            dict: {'batch_id': int, 'images': list, 'count': int}
+        """
+        return {
+            'batch_id': self.current_batch_id,
+            'images': self.current_images,
+            'count': len(self.current_images) if self.current_images else 0
+        }
+
+    def is_batch_empty(self):
+        """
+        Check if current batch is empty.
+        
+        Returns:
+            bool: True jika batch kosong atau tidak ada batch
+        """
+        return not self.current_images
+
+    def load_thumbnail_async(self, image_path, callback):
+        """
+        Load thumbnail asinkron untuk image.
+        
+        Args:
+            image_path: Path ke image file
+            callback: Callable(QImage, str) - Called ketika thumbnail ready
+        """
+        def on_thumbnail_ready(q_image, path):
+            if callback and not q_image.isNull():
+                callback(q_image, path)
+
+        self.thumbnail_processor.process_image(image_path, on_thumbnail_ready)
+
+    def prepare_preview(self, image_path):
+        """
+        Prepare untuk preview display.
+        
+        Args:
+            image_path: Path ke image untuk di-preview
+            
+        Returns:
+            bool: True jika ready, False jika error
+        """
+        if not image_path or not Path(image_path).exists():
+            return False
+
+        self.last_preview_info = {
+            'image_path': image_path,
+            'timestamp': None
+        }
+        return True
+
+    def display_preview(self, zoomable_widget, image_path):
+        """
+        Display preview di zoomable widget.
+        
+        Args:
+            zoomable_widget: Zoomable widget untuk display
+            image_path: Path ke image
+            
+        Returns:
+            ImageLoaderThread: Thread yang loading image
+        """
+        # Stop previous loader jika masih berjalan
+        if self.image_loader_thread and self.image_loader_thread.isRunning():
+            self.image_loader_thread.quit()
+            self.image_loader_thread.wait()
+
+        # Load dan display image di zoomable widget
+        self.image_loader_thread = display_image_in_zoomable(
+            zoomable_widget,
+            image_path
+        )
+
+        return self.image_loader_thread
+
+    def register_grid_item(self, card_id, image_info):
+        """
+        Register card item untuk tracking.
+        
+        Args:
+            card_id: ID dari card
+            image_info: dict dengan image information
+        """
+        self.grid_items[card_id] = image_info
+
+    def unregister_grid_item(self, card_id):
+        """
+        Unregister card item.
+        
+        Args:
+            card_id: ID dari card
+        """
+        if card_id in self.grid_items:
+            del self.grid_items[card_id]
+
+    def get_grid_item_count(self):
+        """
+        Get jumlah items di grid.
+        
+        Returns:
+            int: Jumlah grid items
+        """
+        return len(self.grid_items)
+
+    def clear_all(self):
+        """Clear semua state dan stop background tasks."""
+        self.current_batch_id = None
+        self.current_images.clear()
+        self.grid_items.clear()
+        self.last_preview_info = None
+        self.thumbnail_processor.stop_all()
+
+        if self.image_loader_thread and self.image_loader_thread.isRunning():
+            self.image_loader_thread.quit()
+            self.image_loader_thread.wait()
+
+    def get_thumbnail_processor(self):
+        """
+        Get thumbnail processor instance.
+        
+        Returns:
+            ThumbnailBatchProcessor: Current thumbnail processor
+        """
+        return self.thumbnail_processor
+
+    def validate_image_path(self, image_path):
+        """
+        Validate image path.
+        
+        Args:
+            image_path: Path ke image
+            
+        Returns:
+            bool: True jika path valid
+        """
+        if not image_path:
+            return False
+
+        path = Path(image_path)
+        return path.exists() and path.is_file()
+
+    def get_selected_images(self):
+        """
+        Get list of selected images.
+        
+        Note: Requires selection tracking in ImageCard.
+        For now returns current batch.
+        
+        Returns:
+            list: List of selected image paths
+        """
+        return [img.path for img in self.current_images if hasattr(img, 'path')]

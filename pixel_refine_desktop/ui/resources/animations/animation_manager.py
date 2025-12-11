@@ -113,8 +113,12 @@ class StackedWidgetAnimator(QObject):
     ):
 
         # --- Pengecekan Awal yang Ketat ---
-        # Hentikan jika stack tidak valid atau sedang ada transisi aktif
-        if not stack_widget or stack_widget in self._active_transitions:
+        # Interupsi animasi yang sedang berjalan jika ada
+        if stack_widget in self._active_transitions:
+            self._interrupt_transition(stack_widget)
+
+        # Pastikan tidak ada transisi aktif sebelum lanjut
+        if stack_widget in self._active_transitions:
             return
 
         old_widget = stack_widget.currentWidget()
@@ -419,6 +423,61 @@ class StackedWidgetAnimator(QObject):
                 pass
 
         self._active_transitions.pop(stack_widget, None)
+
+    def _interrupt_transition(self, stack_widget):
+        """Force stop any active transition on the stack widget and cleanup."""
+        if stack_widget not in self._active_transitions:
+            return
+
+        data = self._active_transitions[stack_widget]
+
+        # Stop outgoing group
+        if "out_group" in data and data["out_group"]:
+            try:
+                if data["out_group"].state() == QParallelAnimationGroup.State.Running:
+                    data["out_group"].stop()
+            except RuntimeError:
+                pass  # Animation group already deleted
+
+        # Stop incoming group
+        if "in_group" in data and data["in_group"]:
+            try:
+                if data["in_group"].state() == QParallelAnimationGroup.State.Running:
+                    data["in_group"].stop()
+            except RuntimeError:
+                pass  # Animation group already deleted
+
+        # Cleanup active widgets manually since animations are stopped
+        old_widget = data["old_widget_ref"]() if data["old_widget_ref"] else None
+        new_widget = data["new_widget_ref"]()
+
+        if old_widget:
+            try:
+                old_widget.setGraphicsEffect(None)
+                old_widget.hide()
+            except RuntimeError:
+                pass
+
+        if new_widget:
+            try:
+                new_widget.setGraphicsEffect(None)
+                if new_widget.pos() != QPoint(0, 0):
+                    new_widget.move(0, 0)
+                new_widget.show()
+                # Ensure opacity is 1
+                opacity = new_widget.graphicsEffect()
+                if isinstance(opacity, QGraphicsOpacityEffect):
+                    opacity.setOpacity(1.0)
+            except RuntimeError:
+                pass
+
+        # Ensure stack is at new index
+        try:
+            stack_widget.setCurrentIndex(data["new_index"])
+        except RuntimeError:
+            pass
+
+        del self._active_transitions[stack_widget]
 
     # Metode validasi
     def _validate_target(self, stack_widget, target):

@@ -6,15 +6,10 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QMessageBox,
 )
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import Signal
 
 # Generic UI Library
-from pixel_refine_desktop.ui.resources.GenericUILibrary import (
-    ListGroup,
-    Button,
-    Theme,
-    EmptyState,
-)
+from pixel_refine_desktop.ui.resources.GenericUILibrary import ListGroup, Button
 
 
 class RightPanel(QWidget):
@@ -24,6 +19,7 @@ class RightPanel(QWidget):
     """
 
     batch_selected = Signal(int)  # Emits batch_id
+    batch_selection_cleared = Signal()  # Emits when no batch selected
 
     def __init__(self, controller=None):
         super().__init__()
@@ -42,13 +38,6 @@ class RightPanel(QWidget):
 
         self.new_btn = Button("New Batch", variant="primary")
         self.new_btn.clicked.connect(self._create_new_batch)
-        # Using stretch or specific size policy if needed for 50/50,
-        # but QHBoxLayout with equal widgets usually splits them if they expand.
-        # Generic Button usually hugs content, so let's set them to expand for 50/50.
-        # Assuming Button inherits QPushButton/QWidget, we can set size policy.
-        # However, for simplicity and ensuring they fill, we can add them to layout.
-        # To enforce 50/50, we can add them with stretch 1 each.
-
         action_layout.addWidget(self.new_btn, 1)
 
         self.del_btn = Button("Delete Batch", variant="danger")
@@ -56,13 +45,6 @@ class RightPanel(QWidget):
         action_layout.addWidget(self.del_btn, 1)
 
         main_layout.addLayout(action_layout)
-
-        # Header (Below buttons now)
-        header_label = QLabel("Batches")
-        header_label.setStyleSheet(
-            "font-size: 16px; font-weight: bold; margin-bottom: 5px;"
-        )
-        main_layout.addWidget(header_label)
 
         # Batch List
         self.list_group = ListGroup()
@@ -80,9 +62,6 @@ class RightPanel(QWidget):
         for batch in batches:
             self.list_group.add_item(batch.name, value=batch.id)
 
-        if self.list_group.count > 0:
-            self.list_group.select_first()
-
     def _create_new_batch(self):
         if not self.controller:
             return
@@ -92,7 +71,10 @@ class RightPanel(QWidget):
             batch_id = self.controller.create_batch(name)
             if batch_id:
                 self.list_group.add_item(name, value=batch_id)
-                # Auto select new item?
+                # Auto select new item untuk display di workspace
+                self.list_group.select_item_by_value(batch_id)
+                # Emit signal untuk load batch ke workspace
+                self.batch_selected.emit(batch_id)
 
     def _delete_batch(self):
         if not self.controller:
@@ -125,3 +107,6 @@ class RightPanel(QWidget):
             # We take the first one or emit specific logic.
             # Layout connected to 'batch_selected' which expects int.
             self.batch_selected.emit(int(selected_values[0]))
+        else:
+            # No batch selected - clear display
+            self.batch_selection_cleared.emit()

@@ -41,7 +41,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.Interpol
     running_interpolation,
 )
 
-from pixel_refine_desktop.enhance_stack.components.single_page.page_layout import (
+from pixel_refine_desktop.enhance_stack.components.batch_page_v2.page_layout import (
     setup_main_layout,
     setup_signals,
 )
@@ -63,66 +63,52 @@ from pixel_refine_desktop.ui.views.settings.General.Language import language_con
 from config import SUPPORTED_FORMATS
 
 
-class SinglePageLayout(QWidget):
+class BatchPageV2Layout(QWidget):
+    """Batch page layout v2 - Enhanced version with modular components."""
+
     process_clicked = Signal()
 
     def __init__(self, database_manager: DatabaseManager):
         super().__init__()
         self.database_manager = database_manager
-        self.preview_handler: ImagePreviewHandler | None = (
-            None  # Tambahkan atribut untuk handler
-        )
+        self.preview_handler: ImagePreviewHandler | None = None
 
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 5, 5, 5)
 
         setup_main_layout(self, self.database_manager)
-
-        if hasattr(self, "preview_handler"):
-            # preview_handler will be initialized separately if needed
-            pass
-        else:
-            print(
-                "Error: preview_scene or preview_view not found for ImagePreviewHandler."
-            )
-            QMessageBox.critical(
-                self,
-                "Layout Error",
-                "Preview panel components could not be initialized.",
-            )
-
-        # ---------------------------------------------------------------------------
         setup_signals(self)  # Menghubungkan sinyal tombol proses/simpan
 
-        if self.preview_handler and hasattr(self, "workspace_panel"):
-            try:
-                self.workspace_panel.previewImageRequested.connect(
-                    self.preview_handler.update_preview
-                )
+        # Connect workspace signals (optional, non-critical)
+        self._connect_workspace_signals()
 
-                if hasattr(self.workspace_panel, "imagesDropped"):
-                    self.workspace_panel.imagesDropped.connect(
-                        self.handle_dropped_images
+    def _connect_workspace_signals(self):
+        """
+        Gracefully attempt to connect preview signals if components are available.
+        This method fails silently if components are not initialized.
+        """
+        try:
+            # Try to find workspace_panel from parent layout
+            workspace_panel = None
+            if hasattr(self, "layout") and self.layout is not None:
+                for i in range(self.layout.count()):
+                    widget = self.layout.itemAt(i).widget()
+                    if widget and hasattr(widget, "left_panel"):
+                        workspace_panel = widget
+                        break
+
+            if workspace_panel and self.preview_handler:
+                try:
+                    workspace_panel.image_updated.connect(
+                        self.preview_handler.handle_image_update
                     )
-
-            except AttributeError as e:
-                print(f"Error connecting signals: {e}")
-                QMessageBox.warning(
-                    self, "Signal Error", f"Could not connect preview signals: {e}"
-                )
-            except TypeError as e:
-                print(f"Error connecting signals (TypeError): {e}")
-                QMessageBox.warning(
-                    self,
-                    "Signal Error",
-                    f"Could not connect preview signals due to type mismatch: {e}",
-                )
-        elif not self.preview_handler:
-            print(
-                "Warning: preview_handler not initialized, cannot connect preview signals."
-            )
-        else:  # preview_handler ada, tapi workspace_panel tidak
-            print("Warning: workspace_panel not found, cannot connect preview signals.")
+                except (TypeError, RuntimeError, AttributeError) as e:
+                    # Silently ignore - optional signal connection
+                    pass
+        except Exception as e:
+            # Catch all exceptions to prevent initialization failure
+            # This is non-critical functionality
+            pass
 
     def resizeEvent(self, event):
         """Handles window resizing by calling the handler's resize method."""
@@ -399,9 +385,16 @@ class SinglePageLayout(QWidget):
         """
         try:
             # Ambil parameter dari Right Panel (Generic UI)
-            alignment_choice = self.workspace_panel.align_select.currentText()
-            denoising_choice = self.workspace_panel.denoise_select.currentText()
-            super_resolution_choice = self.workspace_panel.sr_select.currentText()
+            # Correction: workspace_panel is LeftPanel, which contains algorithm_panel
+            alignment_choice = (
+                self.workspace_panel.algorithm_panel.align_select.currentText()
+            )
+            denoising_choice = (
+                self.workspace_panel.algorithm_panel.denoise_select.currentText()
+            )
+            super_resolution_choice = (
+                self.workspace_panel.algorithm_panel.sr_select.currentText()
+            )
 
             # Jika tidak ada algoritma yang dipilih
             if (

@@ -114,6 +114,16 @@ class ListGroup(QWidget):
         if self._list_widget.count() > 0:
             self._list_widget.setCurrentRow(0)
 
+    def select_item_by_value(self, value):
+        """Select item by its data value."""
+        for i in range(self._list_widget.count()):
+            item = self._list_widget.item(i)
+            if item.data(Qt.UserRole) == value:
+                item.setSelected(True)
+                self._list_widget.setCurrentItem(item)
+                return True
+        return False
+
     # --- Internals ---
 
     def _on_selection_change(self):

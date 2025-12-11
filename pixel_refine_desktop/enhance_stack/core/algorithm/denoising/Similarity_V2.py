@@ -17,7 +17,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
     resize_all_with_padding,
     save_image,
 )
-from pixel_refine_desktop.enhance_stack.components.single_page.parameter_denoising.similarity_v2_parameter_settings import (
+from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.similarity_v2_parameter_settings import (
     load_similarity_v2_config,
 )
 from pixel_refine_desktop.ui.resources.styles.stylesheet import PROGRESS_BAR

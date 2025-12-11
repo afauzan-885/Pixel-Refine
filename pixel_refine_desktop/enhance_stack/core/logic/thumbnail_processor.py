@@ -255,6 +255,8 @@ def display_thumbnail_in_layout(layout, q_image, image_path, display_size=(80, 8
 def stop_thumbnail_threads(threads):
     """
     Stop semua thumbnail threads dengan aman dan sinkron.
+    Lebih robust untuk menangani edge cases (deleted objects, etc).
+    Handles yang sudah dihapus dari C++ side silently untuk cleaner output.
     
     Args:
         threads: List of ThumbnailLoaderThread objects
@@ -264,17 +266,41 @@ def stop_thumbnail_threads(threads):
 
     # Phase 1: Request interruption dan disconnect signals
     for thread in threads:
-        if thread.isRunning():
+        try:
+            if thread is None:
+                continue
+            
             try:
-                thread.thumbnail_ready.disconnect()
-            except (TypeError, RuntimeError):
+                if thread.isRunning():
+                    try:
+                        thread.thumbnail_ready.disconnect()
+                    except (TypeError, RuntimeError):
+                        pass
+                    thread.requestInterruption()
+            except RuntimeError:
+                # Silently handle deleted objects - they're already gone
                 pass
-            thread.requestInterruption()
+                
+        except Exception:
+            # Silently ignore other errors
+            pass
 
     # Phase 2: Wait untuk semua thread finish
     for thread in threads:
-        if thread.isRunning():
-            thread.wait()
+        try:
+            if thread is None:
+                continue
+            
+            try:
+                if thread.isRunning():
+                    thread.wait(timeout=500)  # Shorter timeout
+            except RuntimeError:
+                # Silently handle - object already deleted
+                pass
+                
+        except Exception:
+            # Silently ignore
+            pass
 
     # Phase 3: Clear list
     threads.clear()
@@ -340,9 +366,23 @@ class ThumbnailBatchProcessor:
 
     def stop_all(self):
         """Stop semua threads dan clear."""
-        stop_thumbnail_threads(self.threads)
-        self.callbacks.clear()
+        try:
+            if self.threads:
+                stop_thumbnail_threads(self.threads)
+        except Exception:
+            # Silently handle - stop_thumbnail_threads is robust
+            pass
+        
+        try:
+            self.callbacks.clear()
+        except Exception:
+            # Silently ignore
+            pass
 
     def __del__(self):
         """Cleanup on deletion."""
-        self.stop_all()
+        try:
+            self.stop_all()
+        except Exception as e:
+            # Ignore errors di destructor untuk prevent exception spam
+            pass

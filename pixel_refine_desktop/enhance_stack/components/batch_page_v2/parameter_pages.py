@@ -1,20 +1,20 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QScrollArea
 from PySide6.QtCore import Qt
 
-from pixel_refine_desktop.enhance_stack.components.single_page.parameter_alignment.light_glue_parameter_settings import (
+from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.light_glue_parameter_settings import (
     get_light_glue_page,
 )
-from pixel_refine_desktop.enhance_stack.components.single_page.parameter_alignment.akaze_parameter_settings import (
+from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.akaze_parameter_settings import (
     get_akaze_page,
 )
 
-from pixel_refine_desktop.enhance_stack.components.single_page.parameter_alignment.farneback_parameter_settings import (
+from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.farneback_parameter_settings import (
     get_farneback_optical_flow_page,
 )
-from pixel_refine_desktop.enhance_stack.components.single_page.parameter_alignment.orb_parameter_settings import (
+from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.orb_parameter_settings import (
     get_orb_page,
 )
-from pixel_refine_desktop.enhance_stack.components.single_page.parameter_denoising.similarity_parameter_settings import (
+from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.similarity_parameter_settings import (
     get_similarity_settings_page,
 )
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config

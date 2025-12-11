@@ -29,7 +29,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.extr
 )
 from pixel_refine_desktop.ui.resources.styles.stylesheet import PROGRESS_BAR
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
-from pixel_refine_desktop.enhance_stack.components.single_page.parameter_denoising.similarity_parameter_settings import (
+from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.similarity_parameter_settings import (
     load_similarity_config,
 )
 

@@ -5,15 +5,15 @@ Reuses legacy UI components while connecting to MVC controllers.
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout
 from PySide6.QtCore import Slot, Signal
-from pixel_refine_desktop.enhance_stack.components.single_page.single_page_layout import (
-    SinglePageLayout,
+from pixel_refine_desktop.enhance_stack.components.batch_page_v2.batch_page_v2_layout import (
+    BatchPageV2Layout,
 )
 
 
-class SinglePageView(SinglePageLayout):
+class SinglePageView(BatchPageV2Layout):
     """
     Single page view with MVC architecture.
-    Inherits from legacy SinglePageLayout to reuse all UI and functionality.
+    Inherits from BatchPageV2Layout to reuse all UI and functionality.
     This is a pragmatic hybrid approach for complex refactoring.
     """
 
@@ -25,7 +25,7 @@ class SinglePageView(SinglePageLayout):
 
         database_manager = DatabaseManager(db_path)
 
-        # Initialize parent (legacy SinglePageLayout)
+        # Initialize parent (BatchPageV2Layout)
         super().__init__(database_manager)
 
         # Store db_path for future use

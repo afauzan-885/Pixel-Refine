@@ -36,7 +36,7 @@ from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
     ImageProcessingMultiThreading,
 )
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
-from pixel_refine_desktop.enhance_stack.components.single_page.parameter_alignment.light_glue_parameter_settings import (
+from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.light_glue_parameter_settings import (
     load_light_glue_config,
 )
 
