@@ -29,7 +29,7 @@ class ImageCard(QWidget):
         # Configure layout
         self.setFixedSize(size, size)
         self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(5, 5, 5, 5)
+        self.layout.setContentsMargins(10, 5, 5, 5)  # Left padding 10px
 
         # Image container
         theme = get_theme()

@@ -51,6 +51,11 @@ class RightPanel(QWidget):
         self.list_group.selection_changed.connect(self._on_selection_changed)
         main_layout.addWidget(self.list_group)
 
+        # Process All Batch Button
+        self.process_all_btn = Button("Process All Batch", variant="primary")
+        self.process_all_btn.clicked.connect(self._on_process_all_clicked)
+        main_layout.addWidget(self.process_all_btn)
+
     def _load_batches(self):
         """Load batches from controller."""
         if not self.controller:
@@ -110,3 +115,27 @@ class RightPanel(QWidget):
         else:
             # No batch selected - clear display
             self.batch_selection_cleared.emit()
+
+    def _on_process_all_clicked(self):
+        """Open BatchProcessDialog for batch processing."""
+        if not self.controller:
+            return
+
+        # Import here to avoid circular imports
+        from pixel_refine_desktop.enhance_stack.components.batch_page_v2.batch_process_dialog import (
+            BatchProcessDialog,
+        )
+
+        # Get all batches (you may need to adapt this based on your controller API)
+        batches = self.controller.get_all_batches()
+
+        if not batches:
+            QMessageBox.information(
+                self, "No Batches", "There are no batches available to process."
+            )
+            return
+
+        # BatchProcessDialog now expects BatchModel objects
+        # Pass self.parent() as batch_page_layout (may need adjustment)
+        dialog = BatchProcessDialog(batches, self.parent(), self)
+        dialog.exec()

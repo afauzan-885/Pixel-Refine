@@ -49,14 +49,26 @@ class ProgressBar(QWidget):
 
     value_changed = Signal(int)
 
-    def __init__(self, style="linear", variant="primary", show_label=True, parent=None):
+    def __init__(
+        self,
+        style="linear",
+        variant="primary",
+        show_label=True,
+        minimalist=False,
+        parent=None,
+    ):
         super().__init__(parent)
 
         self.style_type = style
         self.variant = variant
         self.show_label = show_label
+        self.minimalist = minimalist  # New minimalist mode
         self._value = 0
         self._max_value = 100
+
+        # Override show_label if minimalist
+        if self.minimalist:
+            self.show_label = False
 
         # Setup UI
         self._setup_ui()
@@ -95,7 +107,12 @@ class ProgressBar(QWidget):
                 self.progress_widget.setTextVisible(False)
                 self._apply_stylesheet()
 
-            self.progress_widget.setMinimumHeight(20)
+            # Set height based on minimalist mode
+            height = 4 if self.minimalist else 20
+            self.progress_widget.setMinimumHeight(height)
+            if self.minimalist:
+                self.progress_widget.setMaximumHeight(height)
+
             layout.addWidget(self.progress_widget)
 
             # Label
@@ -160,6 +177,20 @@ class ProgressBar(QWidget):
         self._max_value = max_value
         if hasattr(self.progress_widget, "setMaximum"):
             self.progress_widget.setMaximum(max_value)
+
+    # --- Compatibility Methods for QProgressBar replacement ---
+    def setValue(self, value):
+        """Alias for set_value for QProgressBar compatibility."""
+        self.set_value(value)
+
+    def setRange(self, min_val, max_val):
+        """Alias for set_max_value for QProgressBar compatibility."""
+        # Note: We currently assume min is always 0 in this component
+        self.set_max_value(max_val)
+
+    def setVisible(self, visible):
+        """Ensure setVisible works on the main widget."""
+        super().setVisible(visible)
 
     def animate_to(self, target_value, duration=1000):
         """Animate progress to target value"""

@@ -125,6 +125,9 @@ class LeftPanel(QWidget):
         """
         self.display_panel.load_batch(batch_id, images)
 
+        # Set current batch in algorithm panel for processing
+        self.algorithm_panel.set_current_batch(batch_id)
+
         # Show algorithm panel ONLY if there are images
         if images:
             slide(
