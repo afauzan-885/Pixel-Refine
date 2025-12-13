@@ -183,9 +183,9 @@ class AlgorithmPanel(QWidget):
 
     def _setup_ui(self):
         """Setup UI dengan two-column layout."""
+
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.setSpacing(10)
 
         # Two-column layout
         columns_layout = QHBoxLayout()
@@ -201,32 +201,40 @@ class AlgorithmPanel(QWidget):
 
         main_layout.addLayout(columns_layout)
 
-        # --- Progress Bar (Modern Minimalist) ---
+        # --- Progress Bar Container (Permanent Space) ---
+        self.progress_container = QWidget()
+        self.progress_container.setFixedHeight(4)  # Match minimalist bar height
+        self.progress_container.setStyleSheet("background-color: #FFFFFF;")
+
+        container_layout = QVBoxLayout(self.progress_container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(0)
+
         self.progress_bar = ModernProgressBar(
             style="linear", variant="primary", minimalist=True
         )
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        # self.progress_bar.setTextVisible(True) # Not needed for ModernProgressBar
         self.progress_bar.setVisible(False)
-        # self.progress_bar.setFixedHeight(20) # Handle internally by minimalist=True
-        main_layout.addWidget(self.progress_bar)
 
-        # Removed fixed height to prevent squashing UI elements
-        # self.setFixedHeight(187)
+        container_layout.addWidget(self.progress_bar)
+        main_layout.addWidget(self.progress_container)
 
     def _create_list_algorithm(self):
         """Create left column with algorithm selection."""
         widget = QWidget()
+        # widget.setObjectName("listAlgorithmStyle")
+        # widget.setStyleSheet("#listAlgorithmStyle { background-color: #FFFFFF; }")
         layout = QVBoxLayout(widget)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(10)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         # Header
-        header = QLabel("List Algorithm")
-        header.setStyleSheet("font-weight: bold; font-size: 12px;")
-        layout.addWidget(header)
+        # header = QLabel("List Algorithm")
+        # header.setObjectName("listAlgorithmWidget")
+        # header.setStyleSheet("font-weight: bold; font-size: 12px;")
+        # layout.addWidget(header)
 
         # Alignment FormGroup
         align_names = self.logic.get_algorithm_names("alignment")
@@ -275,8 +283,9 @@ class AlgorithmPanel(QWidget):
     def _create_parameter_algorithm(self):
         """Create right column for algorithm parameters."""
         widget = QWidget()
+        widget.setStyleSheet("background-color: #FFFFFF;")
         layout = QVBoxLayout(widget)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(10)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 

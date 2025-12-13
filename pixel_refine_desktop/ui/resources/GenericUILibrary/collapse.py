@@ -218,7 +218,7 @@ class AccordionItem(QFrame):
             QPushButton {
                 text-align: left;
                 padding: 10px;
-                background-color: #f0f0f0;
+                background-color: #FFFFFF;
                 border: none;
                 font-weight: bold;
             }

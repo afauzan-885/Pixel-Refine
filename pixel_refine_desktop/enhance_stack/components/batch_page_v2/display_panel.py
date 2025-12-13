@@ -59,14 +59,20 @@ class DisplayPanel(QWidget):
 
         # Setup Main Layout (Logic container)
         self.main_layout = QVBoxLayout(self)
-        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setContentsMargins(5, 8, 0, 5)
 
         # Internal Visual Container (Card-like appearance)
         self.display_container = Container(padding=5)
-
-        # Demo customization (Moved to inner container)
-        # self.display_container.setAttribute(Qt.WA_StyledBackground, True)
-        # self.display_container.setStyleSheet("background-color: #D9D8DA;") -> Removed as per request to clear header color
+        # White base layer - will show through transparent display_stack
+        self.display_container.setAttribute(Qt.WA_StyledBackground, True)
+        self.display_container.setObjectName("DisplayContainerBase")
+        self.display_container.setStyleSheet(
+            """
+            #DisplayContainerBase {
+                background-color: #FFFFFF;
+            }
+        """
+        )
 
         self.controller = controller
         self.logic = DisplayLogic()  # Business logic
@@ -91,6 +97,114 @@ class DisplayPanel(QWidget):
 
         # Initialize display state
         self.clear_display()
+
+    def _setup_ui(self):
+        """Setup UI dengan stacked widget untuk grid dan preview mode."""
+        self.display_container.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.display_container.main_layout.setSpacing(0)
+
+        # === SHARED HEADER ===
+        # Header ini berada di luar StackedWidget, sehingga selalu ada di atas.
+        # Kita bisa menambah tombol lain di sini di masa depan.
+        self.header_layout = QHBoxLayout()
+        self.header_layout.setContentsMargins(5, 5, 5, 5)
+        self.header_layout.setSpacing(5)
+
+        # Title Label (Optional, for context) or Spacer
+        self.header_title = QLabel("")
+        # Adaptive width - follows content length
+        self.header_title.setStyleSheet(
+            "font-weight: bold; font-size: 16px; color: #333; padding: 5px;"
+        )
+        # self.header_title.setContentsMargins(0, 0, 0, 10)
+        self.header_layout.addWidget(self.header_title)
+
+        self.header_layout.addStretch()
+
+        # Tools/Actions Area
+
+        # 1. Back to Grid Button (Visible only in Preview)
+        self.back_btn = Button("Back to Grid", variant="secondary")
+        self.back_btn.setFixedWidth(120)
+        self.back_btn.clicked.connect(self.show_grid)
+        self.back_btn.setVisible(False)  # Hidden by default
+        self.header_layout.addWidget(self.back_btn)
+
+        # 2. Import Images Button (Visible in Grid)
+        self.import_button = Button("Import Images", variant="secondary")
+        self.import_button.setFixedWidth(120)
+        self.import_button.clicked.connect(self.import_images)
+        self.import_button.setVisible(False)  # Hidden by default (controlled by logic)
+        self.header_layout.addWidget(self.import_button)
+
+        self.display_container.add_layout(self.header_layout)
+
+        # =====================================================================
+        # === CONTENT STACK ===
+        # =====================================================================
+
+        # Stacked Widget: Index 0 = Grid View, Index 1 = Preview View
+        self.display_stack = QStackedWidget()
+
+        # # Apply Card styling to the content stack ONLY, so header remains clean
+        # self.display_stack.setAttribute(Qt.WA_StyledBackground, True)
+        # self.display_stack.setAttribute(Qt.WA_StyledBackground, True)
+        # # Optional: Add padding/radius if needed to look like a card inside the panel
+        self.display_stack.setContentsMargins(
+            10, 10, 10, 10
+        )  # Margin for the white border effect
+        self.display_stack.setStyleSheet(
+            "background-color: transparent; border-radius: 2px;"
+        )
+
+        # --- INDEX 0: GRID VIEW ---
+        self.grid_view_widget = QWidget()
+        # Inner content gets a slightly darker background to make the white border visible
+        self.grid_view_widget.setStyleSheet(
+            "background-color: #F0F0F0; border-radius: 4px;"
+        )
+        grid_view_layout = QVBoxLayout(self.grid_view_widget)
+        grid_view_layout.setContentsMargins(
+            0, 0, 0, 0
+        )  # 10px margin for transparent background
+        grid_view_layout.setSpacing(0)
+        # Note: Local header removed.
+
+        # Content Stack: GridContainer vs Placeholder
+        self.grid_content_stack = QStackedWidget()
+        # Animator for grid content stack
+        self.grid_animator = StackedWidgetAnimator(self.grid_content_stack)
+
+        grid_view_layout.addWidget(self.grid_content_stack, 1)
+
+        # GridContainer dengan responsive columns
+        self.grid_container = GridContainer(
+            item_width=100, spacing=5, wrap_mode="vertical", column_mode="responsive"
+        )
+        self.grid_container.setStyleSheet("QScrollArea { border: none; }")
+        self.grid_content_stack.addWidget(self.grid_container)
+
+        self.display_stack.addWidget(self.grid_view_widget)
+
+        # --- INDEX 1: PREVIEW VIEW ---
+        preview_wrapper = QWidget()
+        preview_wrapper_layout = QVBoxLayout(preview_wrapper)
+        preview_wrapper_layout.setContentsMargins(10, 10, 10, 10)
+        preview_wrapper_layout.setSpacing(10)
+        # Note: Local header removed.
+
+        # Zoomable Preview View
+        self.preview_scene = QGraphicsScene()
+        self.zoomable_preview = Zoomable(self.preview_scene, self)
+        preview_wrapper_layout.addWidget(self.zoomable_preview)
+
+        self.display_stack.addWidget(preview_wrapper)
+
+        # Add Stack to Main Layout (via Container)
+        self.display_container.add_widget(self.display_stack)
+
+        # Add Container to Main Widget Layout
+        self.main_layout.addWidget(self.display_container)
 
     def _build_supported_extensions(self):
         """
@@ -136,7 +250,7 @@ class DisplayPanel(QWidget):
         """
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(5)
 
         # Top stretch untuk vertical centering
@@ -167,102 +281,6 @@ class DisplayPanel(QWidget):
         layout.addStretch()
 
         return container
-
-    def _setup_ui(self):
-        """Setup UI dengan stacked widget untuk grid dan preview mode."""
-        self.display_container.main_layout.setContentsMargins(0, 0, 0, 0)
-        self.display_container.main_layout.setSpacing(0)
-
-        # === SHARED HEADER ===
-        # Header ini berada di luar StackedWidget, sehingga selalu ada di atas.
-        # Kita bisa menambah tombol lain di sini di masa depan.
-        self.header_layout = QHBoxLayout()
-        self.header_layout.setContentsMargins(0, 0, 0, 10)
-        self.header_layout.setSpacing(5)
-
-        # Title Label (Optional, for context) or Spacer
-        self.header_title = QLabel("")
-        self.header_title.setStyleSheet(
-            "font-weight: bold; font-size: 16px; color: #333;"
-        )
-        self.header_layout.addWidget(self.header_title)
-
-        self.header_layout.addStretch()
-
-        # Tools/Actions Area
-
-        # 1. Back to Grid Button (Visible only in Preview)
-        self.back_btn = Button("Back to Grid", variant="secondary")
-        self.back_btn.setFixedWidth(120)
-        self.back_btn.clicked.connect(self.show_grid)
-        self.back_btn.setVisible(False)  # Hidden by default
-        self.header_layout.addWidget(self.back_btn)
-
-        # 2. Import Images Button (Visible in Grid)
-        self.import_button = Button("Import Images", variant="secondary")
-        self.import_button.setFixedWidth(120)
-        self.import_button.clicked.connect(self.import_images)
-        self.import_button.setVisible(False)  # Hidden by default (controlled by logic)
-        self.header_layout.addWidget(self.import_button)
-
-        self.display_container.add_layout(self.header_layout)
-
-        # =====================================================================
-        # === CONTENT STACK ===
-        # =====================================================================
-
-        # Stacked Widget: Index 0 = Grid View, Index 1 = Preview View
-        self.display_stack = QStackedWidget()
-
-        # Apply Card styling to the content stack ONLY, so header remains clean
-        self.display_stack.setAttribute(Qt.WA_StyledBackground, True)
-        # Optional: Add padding/radius if needed to look like a card inside the panel
-        self.display_stack.setStyleSheet(
-            "background-color: #D9D8DA; border-radius: 8px;"
-        )
-
-        # --- INDEX 0: GRID VIEW ---
-        self.grid_view_widget = QWidget()
-        grid_view_layout = QVBoxLayout(self.grid_view_widget)
-        grid_view_layout.setContentsMargins(0, 0, 0, 0)
-        grid_view_layout.setSpacing(10)
-        # Note: Local header removed.
-
-        # Content Stack: GridContainer vs Placeholder
-        self.grid_content_stack = QStackedWidget()
-        # Animator for grid content stack
-        self.grid_animator = StackedWidgetAnimator(self.grid_content_stack)
-
-        grid_view_layout.addWidget(self.grid_content_stack, 1)
-
-        # GridContainer dengan responsive columns
-        self.grid_container = GridContainer(
-            item_width=100, spacing=10, wrap_mode="vertical", column_mode="responsive"
-        )
-        self.grid_container.setStyleSheet("QScrollArea { border: none; }")
-        self.grid_content_stack.addWidget(self.grid_container)
-
-        self.display_stack.addWidget(self.grid_view_widget)
-
-        # --- INDEX 1: PREVIEW VIEW ---
-        preview_wrapper = QWidget()
-        preview_wrapper_layout = QVBoxLayout(preview_wrapper)
-        preview_wrapper_layout.setContentsMargins(0, 0, 0, 0)
-        preview_wrapper_layout.setSpacing(10)
-        # Note: Local header removed.
-
-        # Zoomable Preview View
-        self.preview_scene = QGraphicsScene()
-        self.zoomable_preview = Zoomable(self.preview_scene, self)
-        preview_wrapper_layout.addWidget(self.zoomable_preview)
-
-        self.display_stack.addWidget(preview_wrapper)
-
-        # Add Stack to Main Layout (via Container)
-        self.display_container.add_widget(self.display_stack)
-
-        # Add Container to Main Widget Layout
-        self.main_layout.addWidget(self.display_container)
 
     def _set_placeholder(self, widget):
         """

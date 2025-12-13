@@ -13,8 +13,14 @@ project_root = os.path.abspath(os.path.join(current_dir, "..", "..", "..", "..")
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar
-from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QTimer, Signal
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QProgressBar
+from PySide6.QtCore import (
+    Qt,
+    QEasingCurve,
+    QTimer,
+    Signal,
+    QVariantAnimation,
+)
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QLinearGradient
 
 # Try to import existing progress components
@@ -69,6 +75,12 @@ class ProgressBar(QWidget):
         # Override show_label if minimalist
         if self.minimalist:
             self.show_label = False
+
+        # Setup Animation (Smooth Transition)
+        self._animator = QVariantAnimation(self)
+        self._animator.setDuration(300)  # Default duration 300ms
+        self._animator.setEasingCurve(QEasingCurve.OutCubic)
+        self._animator.valueChanged.connect(self._update_display_value)
 
         # Setup UI
         self._setup_ui()
@@ -156,17 +168,56 @@ class ProgressBar(QWidget):
         """
         )
 
-    def set_value(self, value):
-        """Set progress value (0-100)"""
-        self._value = max(0, min(value, self._max_value))
+    def _update_display_value(self, value):
+        """Internal slot to update the display from animation"""
+        # We process 'value' which can be float from animation
+        int_value = int(value)
+
+        # Only update if changed or float precision matters?
+        # Standard progress is int.
 
         if hasattr(self.progress_widget, "setValue"):
-            self.progress_widget.setValue(self._value)
+            self.progress_widget.setValue(int_value)
 
         if self.show_label and hasattr(self, "label"):
-            self.label.setText(f"{self._value}%")
+            self.label.setText(f"{int_value}%")
 
-        self.value_changed.emit(self._value)
+        # Emit signal (optional: might want to emit only on final value or every step)
+        # self.value_changed.emit(int_value)
+
+    def set_value(self, value, smooth=True):
+        """
+        Set progress value (0-100)
+
+        Args:
+            value: Target value
+            smooth: If True, animate the change. If False, jump instantly.
+        """
+        target = max(0, min(value, self._max_value))
+
+        if smooth:
+            # Stop existing animation if running
+            if self._animator.state() == QVariantAnimation.State.Running:
+                self._animator.stop()
+
+            # Start from CURRENT displayed value (not stored _value if it differs)
+            current_displayed = 0
+            if hasattr(self.progress_widget, "value"):
+                current_displayed = self.progress_widget.value()
+
+            self._animator.setStartValue(current_displayed)
+            self._animator.setEndValue(target)
+            self._animator.start()
+
+            # Update internal state to target immediately?
+            # Usually setter represents the 'logical' state.
+            self._value = target
+            self.value_changed.emit(self._value)
+
+        else:
+            self._value = target
+            self._update_display_value(self._value)
+            self.value_changed.emit(self._value)
 
     def get_value(self):
         """Get current value"""
@@ -181,7 +232,7 @@ class ProgressBar(QWidget):
     # --- Compatibility Methods for QProgressBar replacement ---
     def setValue(self, value):
         """Alias for set_value for QProgressBar compatibility."""
-        self.set_value(value)
+        self.set_value(value, smooth=True)
 
     def setRange(self, min_val, max_val):
         """Alias for set_max_value for QProgressBar compatibility."""
@@ -193,38 +244,14 @@ class ProgressBar(QWidget):
         super().setVisible(visible)
 
     def animate_to(self, target_value, duration=1000):
-        """Animate progress to target value"""
-        from PySide6.QtCore import QTimer
-
-        start_value = self._value
-        steps = 30  # Number of animation steps
-        step_duration = duration // steps
-        value_increment = (target_value - start_value) / steps
-
-        self._animation_step = 0
-        self._animation_target = target_value
-        self._animation_start = start_value
-        self._animation_increment = value_increment
-
-        # Use timer for smooth animation
-        self._animation_timer = QTimer(self)
-        self._animation_timer.timeout.connect(self._update_animation)
-        self._animation_timer.start(step_duration)
-
-    def _update_animation(self):
-        """Update animation step"""
-        self._animation_step += 1
-
-        if self._animation_step >= 30:
-            # Animation complete
-            self.set_value(int(self._animation_target))
-            self._animation_timer.stop()
-        else:
-            # Update value
-            new_value = self._animation_start + (
-                self._animation_increment * self._animation_step
-            )
-            self.set_value(int(new_value))
+        """Legacy animate method - redirected to new smooth logic but with custom duration"""
+        self._animator.setDuration(duration)
+        self.set_value(target_value, smooth=True)
+        # Reset duration to default for future calls?
+        # Ideally, yes, but leaving it modified is also fine.
+        # Let's reset it to be safe or just use a separate logic?
+        # Actually reusing set_value is cleaner.
+        QTimer.singleShot(duration + 10, lambda: self._animator.setDuration(300))
 
 
 class CustomProgressBar(QWidget):
