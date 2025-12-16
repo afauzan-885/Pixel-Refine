@@ -26,7 +26,7 @@ class Sidebar(QWidget):
     page_changed = Signal(int)  # Emitted when page button is clicked
     toggle_requested = Signal()  # Emitted when toggle button is clicked
 
-    def __init__(self, pages: list = None, parent=None):
+    def __init__(self, pages: list | None = None, parent=None):
         """
         Initialize sidebar.
 
@@ -61,11 +61,6 @@ class Sidebar(QWidget):
 
     def _create_ui(self):
         """Create sidebar UI elements."""
-        # Toggle button
-        self.toggle_button = QPushButton("☰")
-        self.toggle_button.setStyleSheet(stylesheet.SIDEBAR_TOGGLE_BUTTON_STYLE)
-        self.toggle_button.clicked.connect(self.toggle_sidebar)
-        self.sidebar_layout.addWidget(self.toggle_button)
 
         # Separate pages into main and footer (settings)
         main_pages = []
@@ -128,17 +123,15 @@ class Sidebar(QWidget):
         target_expanded = not self.sidebar_expanded
         end_width = self.expanded_width if target_expanded else self.collapsed_width
 
-        # Update state and UI immediately
+        # Update state immediately
         self.sidebar_expanded = target_expanded
-        self.toggle_button.setText("☰" if target_expanded else "➡")
-
-        # No need to update button text since we're always icon-only
-        # Tooltips will always be available on hover
+        # Removed text update as button is external now
+        # self.toggle_button.setText("☰" if target_expanded else "➡")
 
         # Emit toggle signal
         self.toggle_requested.emit()
 
-        # Animate width using WidthAnimator (though width is same in both states now)
+        # Animate width using WidthAnimator (if needed, though width is same in both states now)
         self.width_animator.animate_width(
             target_widget=self,
             end_width=end_width,

@@ -4,7 +4,13 @@ Wraps legacy BatchPageLayout while connecting to MVC controllers.
 """
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout
-from pixel_refine_desktop.enhance_stack.components.batch_page import BatchPageLayout
+from PySide6.QtCore import Signal
+
+# from pixel_refine_desktop.enhance_stack.components.batch_page import BatchPageLayout # Legacy
+from pixel_refine_desktop.enhance_stack.components.batch_page_v2.page_layout import (
+    BatchPageV2Layout,
+)  # V2
+
 from pixel_refine_desktop.enhance_stack.controllers.batch_page_controller import (
     BatchPageController,
 )
@@ -16,15 +22,25 @@ from pixel_refine_desktop.enhance_stack.controllers.image_processing_controller 
 )
 
 
+from pixel_refine_desktop.enhance_stack.core.logic.database_manager import (
+    DatabaseManager,
+)
+
+
 class BatchPageView(QWidget):
     """
     Batch page view with MVC architecture.
     Wraps legacy BatchPageLayout but connects to controllers for business logic.
     """
 
+    page_changed = Signal(int)  # Forward global navigation
+
     def __init__(self, db_path: str, parent=None):
         super().__init__(parent)
         self.db_path = db_path
+
+        # Init Database Manager for V2 Layout
+        self.database_manager = DatabaseManager(db_path)
 
         # Initialize controllers
         self.batch_controller = BatchPageController(db_path, self)
@@ -35,14 +51,16 @@ class BatchPageView(QWidget):
         self.connect_controller_signals()
 
     def setup_ui(self):
-        """Setup UI using legacy BatchPageLayout."""
+        """Setup UI using V2 Layout."""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # Use legacy BatchPageLayout directly
-        # This is a pragmatic approach for complex UI
-        self.batch_layout = BatchPageLayout()
+        # Use V2 Layout
+        self.batch_layout = BatchPageV2Layout(self.database_manager)
         layout.addWidget(self.batch_layout)
+
+        # Connect Navigation
+        self.batch_layout.page_changed.connect(self.page_changed)
 
     def connect_controller_signals(self):
         """Connect controller signals to view updates."""
@@ -53,6 +71,7 @@ class BatchPageView(QWidget):
         self.batch_controller.batch_error.connect(self._on_batch_error)
 
         # Processing signals
+
         self.processing_controller.workflow_completed.connect(
             self._on_workflow_completed
         )

@@ -90,6 +90,7 @@ from .modals import (
     Toast,
     LoadingSpinner,
 )
+from .overlays import OverlayContainer, OverlayPosition
 
 # Grids and Galleries
 from .grids import GridContainer, GridItem, Gallery, ThumbnailGrid
@@ -158,6 +159,9 @@ __all__ = [
     "Overlay",
     "Toast",
     "LoadingSpinner",
+    # Overlays (New)
+    "OverlayContainer",
+    "OverlayPosition",
     # Grids
     "GridContainer",
     "GridItem",

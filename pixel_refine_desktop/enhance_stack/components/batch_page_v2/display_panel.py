@@ -13,16 +13,19 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
 )
-from PySide6.QtCore import Slot, Signal, Qt
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import Slot, Signal, Qt, QPoint
+from PySide6.QtGui import QPixmap, QColor
 
 # Generic UI Library
 from pixel_refine_desktop.ui.resources.GenericUILibrary import (
     ImageCard,
     Button,
     Container,
+    OverlayContainer,
+    OverlayPosition,
 )
 from pixel_refine_desktop.ui.resources.GenericUILibrary.grids import GridContainer
+from pixel_refine_desktop.ui.components.common.sidebar import Sidebar
 
 # Display logic
 from pixel_refine_desktop.enhance_stack.core.logic.display_logic import DisplayLogic
@@ -46,13 +49,15 @@ class DisplayPanel(QWidget):
     """
     Panel untuk menampilkan Grid images dan Preview.
     Menggunakan QStackedWidget untuk switch antara Grid View dan Preview View.
-    Struktur: DisplayPanel (Logic) -> Container (Visual) -> Header + Stack
+    Struktur: DisplayPanel (Logic) -> QStackedLayout (Overlay support)
+              -> Layer 0: Content Widget -> Container -> Header + Stack
+              -> Layer 1: Overlay Widget -> Floating Progress Bar
+              -> Layer 2: Sidebar Overlay
     """
 
     # Signals
-    images_to_import_selected = Signal(
-        list
-    )  # Emitted with list of file paths saat drop
+    images_to_import_selected = Signal(list)
+    page_changed = Signal(int)  # For global navigation
 
     def __init__(self, controller=None):
         super().__init__()
@@ -77,27 +82,20 @@ class DisplayPanel(QWidget):
         )
 
         self.controller = controller
-        self.logic = DisplayLogic()  # Business logic
+        self.logic = DisplayLogic()
         self.current_batch_id = None
-        self.selected_thumbnails = set()  # Track selected cards
-        self.last_selected_card_id = None  # Track untuk range select
-        self.all_cards = {}  # Map card_id -> card widget untuk range select
+        self.selected_thumbnails = set()
+        self.last_selected_card_id = None
+        self.all_cards = {}
 
-        # Build supported image extensions tuple dari config
         self.supported_extensions = self._build_supported_extensions()
-
-        # Reference ke right panel untuk access create_new_batch
         self.right_panel = None
-
-        # Track current placeholder widget helper
         self.placeholder_widget = None
 
         self._setup_ui()
+        self._setup_sidebar()  # New Sidebar Integration
 
-        # Accept drops for image import
         self.setAcceptDrops(True)
-
-        # Initialize display state
         self.clear_display()
 
     def _setup_ui(self):
@@ -106,37 +104,37 @@ class DisplayPanel(QWidget):
         self.display_container.main_layout.setSpacing(0)
 
         # === SHARED HEADER ===
-        # Header ini berada di luar StackedWidget, sehingga selalu ada di atas.
-        # Kita bisa menambah tombol lain di sini di masa depan.
         self.header_layout = QHBoxLayout()
         self.header_layout.setContentsMargins(5, 5, 5, 5)
         self.header_layout.setSpacing(5)
 
-        # Title Label (Optional, for context) or Spacer
+        # 0. Sidebar Toggle Button (New)
+        self.toggle_btn = Button("☰", variant="ghost")  # Minimalist style
+        self.toggle_btn.setFixedWidth(40)
+        self.toggle_btn.clicked.connect(self.toggle_sidebar)
+        self.header_layout.addWidget(self.toggle_btn)
+
+        # Title Label
         self.header_title = QLabel("")
-        # Adaptive width - follows content length
         self.header_title.setStyleSheet(
             "font-weight: bold; font-size: 16px; color: #333; padding: 5px;"
         )
-        # self.header_title.setContentsMargins(0, 0, 0, 10)
         self.header_layout.addWidget(self.header_title)
-
         self.header_layout.addStretch()
 
         # Tools/Actions Area
-
-        # 1. Back to Grid Button (Visible only in Preview)
+        # 1. Back to Grid Button
         self.back_btn = Button("Back to Grid", variant="secondary")
         self.back_btn.setFixedWidth(120)
         self.back_btn.clicked.connect(self.show_grid)
-        self.back_btn.setVisible(False)  # Hidden by default
+        self.back_btn.setVisible(False)
         self.header_layout.addWidget(self.back_btn)
 
-        # 2. Import Images Button (Visible in Grid)
+        # 2. Import Images Button
         self.import_button = Button("Import Images", variant="secondary")
         self.import_button.setFixedWidth(120)
         self.import_button.clicked.connect(self.import_images)
-        self.import_button.setVisible(False)  # Hidden by default (controlled by logic)
+        self.import_button.setVisible(False)
         self.header_layout.addWidget(self.import_button)
 
         self.display_container.add_layout(self.header_layout)
@@ -207,6 +205,161 @@ class DisplayPanel(QWidget):
 
         # Add Container to Main Widget Layout
         self.main_layout.addWidget(self.display_container)
+
+    def _setup_sidebar(self):
+        """Initialize Floating Sidebar."""
+        pages = [
+            (
+                "Enhance Stack",
+                "pixel_refine_desktop/ui/resources/assets/icons/enhance_stack.png",
+            ),
+            # ("Panorama", "pixel_refine_desktop/ui/resources/assets/icons/panorama.png"), # Removed
+            ("Settings", "pixel_refine_desktop/ui/resources/assets/icons/setting.png"),
+        ]
+
+        # Create Sidebar
+        # Parent must be self (DisplayPanel) to float relative to it
+        self.sidebar = Sidebar(pages=pages, parent=self)
+        self.sidebar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.sidebar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.sidebar.page_changed.connect(
+            self._handle_sidebar_navigation
+        )  # custom handler
+
+        # Wrap in OverlayContainer
+        # We want it to float on the LEFT
+        from PySide6.QtGui import QColor
+        from PySide6.QtCore import QPoint
+
+        self.sidebar_overlay = OverlayContainer(
+            parent=self.display_container,  # Anchor to the container logic
+            position=OverlayPosition.TOP_LEFT,
+            margin=5,
+            smart_positioning=False,  # We want it consistently on left
+            close_on_click_outside=True,
+            # Sidebar Visuals: Shadow Only (45 deg)
+            shadow_enabled=True,
+            shadow_blur_radius=20,
+            shadow_offset=QPoint(4, 4),  # 45 degrees approx (positive X, positive Y)
+            shadow_color=QColor(0, 0, 0, 80),
+        )
+        self.sidebar_overlay.set_content(self.sidebar)
+
+        # Setup Settings Overlay
+        self._setup_settings_overlay()
+
+        # Hidden by default
+        self.sidebar_overlay.hide()
+
+        # Set default active page (Enhance Stack)
+        self.sidebar.set_current_page(0)
+
+    def _setup_settings_overlay(self):
+        """Setup independent overlay for Settings View."""
+        from pixel_refine_desktop.ui.views.settings.views.settings_view import (
+            SettingsView,
+        )
+
+        # Create container centered
+        # Settings Visuals: Shadow 270 deg (Down), Blur 35%, Dim 25%
+        # Blur radius ~20px (approximation for 35% feel)
+        # Dim opacity 0.25
+        # Shadow Offset (0, 10) for 270 deg (Down)
+
+        # NOTE: Initial parent is self.display_container, but will be reparented to global window on show.
+        self.settings_overlay = OverlayContainer(
+            parent=self.display_container,  # Anchor initially
+            position=OverlayPosition.CENTER,
+            margin=20,  # Give some breathing room
+            smart_positioning=False,
+            close_on_click_outside=True,
+            # Visuals
+            dim_background=True,
+            dim_opacity=0.25,
+            blur_background=True,
+            blur_radius=20,  # 35% estimate
+            shadow_enabled=True,
+            shadow_blur_radius=30,
+            shadow_offset=QPoint(0, 8),  # Downwards (270 deg)
+            shadow_color=QColor(0, 0, 0, 100),
+        )
+
+        # Init Settings View
+        # Use controller's db_path if available
+        db_path = (
+            self.controller.db_path
+            if self.controller and hasattr(self.controller, "db_path")
+            else ":memory:"
+        )
+        self.settings_view = SettingsView(db_path, parent=self)
+
+        # Optimize settings view size for overlay
+        self.settings_view.setMinimumSize(600, 500)
+        self.settings_view.setStyleSheet("background-color: white; border-radius: 8px;")
+
+        self.settings_overlay.set_content(self.settings_view)
+        self.settings_overlay.hide()
+
+    def _handle_sidebar_navigation(self, index: int):
+        """
+        Handle navigation from sidebar.
+        Intercepts Settings (index 2) to show overlay.
+        Forwards others (0, 1) to main window.
+        """
+        # print(f"DEBUG: DisplayPanel navigation request: {index}")
+
+        # Adjust index check because list changed (Panorama removed)
+        # Old: [Enhance, Panorama, Settings] -> Settings = 2
+        # New: [Enhance, Settings] -> Settings = 1
+        # BUT: Sidebar logic emits index based on loop.
+        # So we need to check what index matches what.
+
+        # Case specific logic:
+        # If we removed Panorama from the list passed to Sidebar,
+        # then Settings is now at index 1.
+
+        if index == 1:  # Settings Index (Now at 1)
+            self.show_settings()
+            # Close sidebar for better UX (optional, but cleaner)
+            self.sidebar_overlay.hide()
+            # Reset sidebar selection to 0 (since we stay on page 0 contextually)
+            # This keeps the "Enhance Stack" highlighted even accessing Settings
+            self.sidebar.set_current_page(0)
+
+        elif index == 0:
+            self.page_changed.emit(index)
+            # Close sidebar for better UX
+            self.sidebar_overlay.hide()
+
+    def show_settings(self):
+        """Show settings overlay with FADE animation."""
+
+        # Reparent to global window to cover EVERYTHING (Left/Right panels too)
+        # Check if we have a top window
+        top_window = self.window()
+        if top_window and top_window != self:
+            # Reparent only if not already correct (optimization)
+            if self.settings_overlay.parent() != top_window:
+                self.settings_overlay.setParent(top_window)
+                # Force resize to window
+                self.settings_overlay.resize(top_window.size())
+                self.settings_overlay.move(0, 0)
+
+        # self.settings_overlay.show()
+        # self.settings_overlay.raise_()
+        self.settings_overlay.show()
+        self.settings_overlay.raise_()
+
+    def toggle_sidebar(self):
+        """Toggle floating sidebar visibility with animation."""
+        is_visible = self.sidebar_overlay.isVisible()
+        if is_visible:
+            # Hide with FADE
+            self.sidebar_overlay.hide()
+        else:
+            # Show with FADE
+            self.sidebar_overlay.show()
+            self.sidebar_overlay.raise_()
 
     def _build_supported_extensions(self):
         """

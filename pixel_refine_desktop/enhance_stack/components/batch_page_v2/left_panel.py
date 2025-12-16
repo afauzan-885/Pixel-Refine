@@ -47,6 +47,7 @@ class LeftPanel(QWidget):
     process_requested = Signal(dict)  # Emit settings dict
     previewImageRequested = Signal(list)  # Emit list of image paths
     imagesDropped = Signal(list)  # Drag and drop support
+    page_changed = Signal(int)  # Forward global navigation
 
     def __init__(self, controller=None):
         super().__init__()
@@ -60,11 +61,13 @@ class LeftPanel(QWidget):
     def _setup_ui(self):
         """Setup UI dengan DisplayPanel dan AlgorithmPanel menggunakan stacked widget."""
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setContentsMargins(5, 0, 0, 0)
         main_layout.setSpacing(10)
 
         # --- 1. Display Panel (Top) ---
         self.display_panel = DisplayPanel(controller=self.controller)
+        # Forward page changed signal from sidebar in display panel
+        self.display_panel.page_changed.connect(self.page_changed)
 
         # --- 2. Algorithm Panel (Bottom) dengan Stacked Widget untuk collapse/expand ---
         # Create stacked widget untuk algorithm panel animation

@@ -67,14 +67,16 @@ class BatchPageV2Layout(QWidget):
     """Batch page layout v2 - Enhanced version with modular components."""
 
     process_clicked = Signal()
+    page_changed = Signal(int)  # For global navigation forwarding
 
     def __init__(self, database_manager: DatabaseManager):
         super().__init__()
         self.database_manager = database_manager
         self.preview_handler: ImagePreviewHandler | None = None
+        self.workspace_panel = None  # Initialize workspace_panel
 
-        self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(0, 5, 5, 5)
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(0, 5, 5, 5)
 
         setup_main_layout(self, self.database_manager)
         setup_signals(self)  # Menghubungkan sinyal tombol proses/simpan
@@ -90,17 +92,18 @@ class BatchPageV2Layout(QWidget):
         try:
             # Try to find workspace_panel from parent layout
             workspace_panel = None
-            if hasattr(self, "layout") and self.layout is not None:
-                for i in range(self.layout.count()):
-                    widget = self.layout.itemAt(i).widget()
+            if self.layout() is not None:
+                for i in range(self.layout().count()):
+                    widget = self.layout().itemAt(i).widget()
                     if widget and hasattr(widget, "left_panel"):
                         workspace_panel = widget
+                        self.workspace_panel = workspace_panel  # Store reference
                         break
 
             if workspace_panel and self.preview_handler:
                 try:
                     workspace_panel.image_updated.connect(
-                        self.preview_handler.handle_image_update
+                        self.preview_handler.update_preview
                     )
                 except (TypeError, RuntimeError, AttributeError) as e:
                     # Silently ignore - optional signal connection
@@ -204,7 +207,7 @@ class BatchPageV2Layout(QWidget):
         if not valid_files_grouped:
             # Jika tidak ada file dengan format yang didukung sama sekali
             QMessageBox.information(
-                self, language_config.HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED
+                self, *language_config.HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED
             )
             return
 
@@ -358,6 +361,9 @@ class BatchPageV2Layout(QWidget):
 
     def handle_delete_button(self):
         """Function to delete images"""
+        if not self.workspace_panel:
+            return
+
         selected_paths = self.workspace_panel.get_select_image_list()
         if not selected_paths:
             title, message = (

@@ -103,10 +103,10 @@ class PixelRefineMain(QMainWindow):
         Lightweight constructor that only initializes attributes.
         """
         super().__init__()
-        self.main_content = None
-        self.sidebar = None
-        self.app_manager = None
-        self.window_config = None
+        self.main_content: QStackedWidget | None = None
+        self.sidebar: Sidebar | None = None
+        self.app_manager: ApplicationManager | None = None
+        self.window_config: WindowConfig | None = None
         self.sidebar_buttons = []
 
     def setup_ui_and_logic(self, splash: SplashScreen):
@@ -167,7 +167,8 @@ class PixelRefineMain(QMainWindow):
 
         # Prepare folders
         splash.update_status("Preparing temporary folders...", 60)
-        self.app_manager.initialize_folders()
+        if self.app_manager:
+            self.app_manager.initialize_folders()
 
     def _load_ui_components(self, splash: SplashScreen):
         """Load UI components."""
@@ -181,18 +182,24 @@ class PixelRefineMain(QMainWindow):
 
         # Enhance Stack View
         splash.update_status("Initializing Enhance Stack View...", 75)
+        if self.app_manager is None:
+            raise RuntimeError("App Manager not initialized")
+
         enhance_stack_view = EnhanceStackView(
             db_path=self.app_manager.database_manager.db_path,
             parent=self.main_content,
         )
         self.main_content.addWidget(enhance_stack_view)
 
+        # Connect navigation signal from EnhanceStackView
+        enhance_stack_view.page_changed.connect(self.switch_page)
+
         # Panorama Page
-        splash.update_status("Initializing Panorama Page...", 80)
-        panorama_page = PanoramaPage(
-            database_manager=self.app_manager.database_manager,
-        )
-        self.main_content.addWidget(panorama_page)
+        # splash.update_status("Initializing Panorama Page...", 80)
+        # panorama_page = PanoramaPage(
+        #     database_manager=self.app_manager.database_manager,
+        # )
+        # self.main_content.addWidget(panorama_page)
 
         # Settings View
         splash.update_status("Initializing Settings View...", 85)
@@ -202,9 +209,9 @@ class PixelRefineMain(QMainWindow):
         )
         self.main_content.addWidget(settings_view)
 
-        # Sidebar
-        splash.update_status("Initializing Sidebar...", 90)
-        self.sidebar = self._create_sidebar()
+        # Sidebar - REMOVED (Now internal to EnhanceStackView/DisplayPanel)
+        # splash.update_status("Initializing Sidebar...", 90)
+        # self.sidebar = self._create_sidebar()
 
         # Print architecture info
         # self._print_info()
@@ -214,7 +221,10 @@ class PixelRefineMain(QMainWindow):
         splash.update_status("Assembling UI layout...", 95)
 
         self.main_layout = QHBoxLayout()
-        self.main_layout.addWidget(self.sidebar)
+        # self.main_layout.addWidget(self.sidebar) # Removed global sidebar
+        if self.main_content is None:
+            raise RuntimeError("Main content stack not initialized")
+
         self.main_layout.addWidget(self.main_content, 1)  # Stretch factor
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
@@ -222,42 +232,6 @@ class PixelRefineMain(QMainWindow):
         container = QWidget()
         container.setLayout(self.main_layout)
         self.setCentralWidget(container)
-
-    def _create_sidebar(self):
-        """Create sidebar using reusable component."""
-        pages = [
-            (
-                "Enhance Stack",
-                "pixel_refine_desktop/ui/resources/assets/icons/enhance_stack.png",
-            ),
-            ("Panorama", "pixel_refine_desktop/ui/resources/assets/icons/panorama.png"),
-            ("Settings", "pixel_refine_desktop/ui/resources/assets/icons/setting.png"),
-        ]
-
-        sidebar = Sidebar(pages=pages, parent=self)
-        sidebar.page_changed.connect(self.switch_page)
-        sidebar.toggle_requested.connect(self.toggle_sidebar)
-
-        self.sidebar_buttons = sidebar.side_buttons
-        return sidebar
-
-    # def _print_info(self):
-    #     """Print application architecture information to console."""
-    #     print("\n" + "=" * 60)
-    #     print("✅ PIXEL REFINE DESKTOP - MVC ARCHITECTURE")
-    #     print("=" * 60)
-    #     print("📦 Models:")
-    #     print("   - ImageModel, BatchModel, AlgorithmConfig")
-    #     print("   - Repositories: Image, Batch, Panorama")
-    #     print("\n🎮 Controllers:")
-    #     print("   - SinglePageController")
-    #     print("   - BatchPageController")
-    #     print("   - ImageProcessingController")
-    #     print("   - ImportExportController")
-    #     print("\n🖼️  Views:")
-    #     print("   - EnhanceStackView")
-    #     print("   - SettingsView")
-    #     print("=" * 60 + "\n")
 
     def closeEvent(self, event):
         """Handle application close event."""
@@ -277,17 +251,11 @@ class PixelRefineMain(QMainWindow):
             index == self.main_content.currentIndex()
             and self.main_content.widget(index) is not None
         ):
-            self._update_sidebar_buttons(index)
             return
 
-        # Update sidebar buttons and switch page
-        self._update_sidebar_buttons(index)
-        fade_in(self.app_manager.animator, self.main_content, index, duration=250)
-
-    def _update_sidebar_buttons(self, index):
-        """Update sidebar button states."""
-        for i, btn in enumerate(self.sidebar_buttons):
-            btn.setChecked(i == index)
+        # Switch page
+        if self.app_manager:
+            fade_in(self.app_manager.animator, self.main_content, index, duration=250)
 
     def toggle_sidebar(self):
         """Toggle sidebar visibility (placeholder for future implementation)."""
