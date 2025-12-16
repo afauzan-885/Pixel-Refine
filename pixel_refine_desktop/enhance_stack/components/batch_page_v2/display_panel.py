@@ -64,7 +64,9 @@ class DisplayPanel(QWidget):
         # Internal Visual Container (Card-like appearance)
         self.display_container = Container(padding=5)
         # White base layer - will show through transparent display_stack
-        self.display_container.setAttribute(Qt.WA_StyledBackground, True)
+        self.display_container.setAttribute(
+            Qt.WidgetAttribute.WA_StyledBackground, True
+        )
         self.display_container.setObjectName("DisplayContainerBase")
         self.display_container.setStyleSheet(
             """
@@ -533,7 +535,7 @@ class DisplayPanel(QWidget):
         modifiers = event.modifiers()
 
         # Single Click - Toggle single item (clear others)
-        if modifiers == Qt.NoModifier:
+        if modifiers == Qt.KeyboardModifier.NoModifier:
             self._clear_selection()
             card_widget.toggle_selection()
             if card_widget.is_selected():
@@ -541,7 +543,7 @@ class DisplayPanel(QWidget):
             self.last_selected_card_id = card_id
 
         # Ctrl + Click - Add/Remove item (multi-select)
-        elif modifiers == Qt.ControlModifier:
+        elif modifiers == Qt.KeyboardModifier.ControlModifier:
             card_widget.toggle_selection()
             if card_widget.is_selected():
                 self.selected_thumbnails.add(card_id)
@@ -550,7 +552,7 @@ class DisplayPanel(QWidget):
             self.last_selected_card_id = card_id
 
         # Shift + Click - Select range (multi-select range)
-        elif modifiers == Qt.ShiftModifier:
+        elif modifiers == Qt.KeyboardModifier.ShiftModifier:
             if self.last_selected_card_id and self.last_selected_card_id != card_id:
                 self._select_range(self.last_selected_card_id, card_id)
             else:

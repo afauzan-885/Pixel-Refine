@@ -106,13 +106,15 @@ class LeftPanel(QWidget):
         self.display_panel.clear_display()
 
         # Hide algorithm panel dengan slide down animation
-        slide(
-            self.animator,
-            self.algorithm_stack,
-            self.empty_algorithm_widget,
-            SlideDirection.DOWN,
-            duration=400,
-        )
+        # Hide algorithm panel dengan slide down animation
+        if self.animator:
+            slide(
+                self.animator,
+                self.algorithm_stack,
+                self.empty_algorithm_widget,
+                SlideDirection.DOWN,
+                duration=400,
+            )
 
     def load_batch(self, batch_id, images):
         """
@@ -130,22 +132,24 @@ class LeftPanel(QWidget):
 
         # Show algorithm panel ONLY if there are images
         if images:
-            slide(
-                self.animator,
-                self.algorithm_stack,
-                self.algorithm_panel,
-                SlideDirection.UP,
-                duration=400,
-            )
+            if self.animator:
+                slide(
+                    self.animator,
+                    self.algorithm_stack,
+                    self.algorithm_panel,
+                    SlideDirection.UP,
+                    duration=400,
+                )
         else:
             # If batch is empty (no images), keep collapsed/collapse it
-            slide(
-                self.animator,
-                self.algorithm_stack,
-                self.empty_algorithm_widget,
-                SlideDirection.DOWN,
-                duration=400,
-            )
+            if self.animator:
+                slide(
+                    self.animator,
+                    self.algorithm_stack,
+                    self.empty_algorithm_widget,
+                    SlideDirection.DOWN,
+                    duration=400,
+                )
 
     def _forward_process_requested(self, settings):
         """Forward process_requested signal dari AlgorithmPanel."""

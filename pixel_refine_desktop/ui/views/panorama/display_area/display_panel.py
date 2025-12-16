@@ -128,12 +128,12 @@ class DisplayPanel(QWidget):
         self.display_stack.addWidget(self.grid_view_widget)
 
         # --- View 2: Tampilan Pemrosesan ---
-        processing_container = QWidget()
-        processing_layout = QVBoxLayout(processing_container)
+        self.processing_container = QWidget()
+        processing_layout = QVBoxLayout(self.processing_container)
         processing_layout.setContentsMargins(50, 50, 50, 50)
         self.processing_view = ProcessingView()
         processing_layout.addWidget(self.processing_view)
-        self.display_stack.addWidget(processing_container)
+        self.display_stack.addWidget(self.processing_container)
 
         # --- View 3: Tampilan Pratinjau (Zoomable) ---
         self.preview_view_widget = QWidget()
@@ -166,8 +166,7 @@ class DisplayPanel(QWidget):
     def show_processing_view(self, title: str):
         """Beralih ke tampilan progress dan mengatur judul awalnya."""
         self.processing_view.update_progress(title, 0)
-        processing_container = self.processing_view.parentWidget()
-        self.display_stack.setCurrentWidget(processing_container)
+        self.display_stack.setCurrentWidget(self.processing_container)
         self.import_button.setVisible(False)
         self.back_to_grid_button.setVisible(True)
         self.back_to_preview_button.setVisible(False)
@@ -346,10 +345,15 @@ class DisplayPanel(QWidget):
             return
 
         clicked_widget = self.sender()
+        if not isinstance(clicked_widget, QWidget):
+            return
         clicked_index = grid_layout.indexOf(clicked_widget)
 
         if event.button() == Qt.MouseButton.RightButton:
-            if not clicked_widget.is_selected():
+            if (
+                hasattr(clicked_widget, "is_selected")
+                and not clicked_widget.is_selected()
+            ):
                 self._clear_selection()
                 self._select_one_thumbnail(clicked_widget)
         elif modifiers & Qt.KeyboardModifier.ControlModifier:
@@ -385,21 +389,33 @@ class DisplayPanel(QWidget):
         start = min(self.last_clicked_index, end_index)
         end = max(self.last_clicked_index, end_index)
         self._clear_selection()
-        layout = self.scroll_area.widget().layout()
+        widget = self.scroll_area.widget()
+        if not widget:
+            return
+        layout = widget.layout()
+        if not layout:
+            return
         for i in range(start, end + 1):
-            widget = layout.itemAt(i).widget()
-            if isinstance(widget, ThumbnailWidget):
-                self._select_one_thumbnail(widget)
+            item = layout.itemAt(i)
+            if item and item.widget():
+                widget = item.widget()
+                if isinstance(widget, ThumbnailWidget):
+                    self._select_one_thumbnail(widget)
 
     def _select_all_images(self):
-        layout = self.scroll_area.widget().layout()
+        widget = self.scroll_area.widget()
+        if not widget:
+            return
+        layout = widget.layout()
         if not layout:
             return
         self._clear_selection()
         for i in range(layout.count()):
-            widget = layout.itemAt(i).widget()
-            if isinstance(widget, ThumbnailWidget):
-                self._select_one_thumbnail(widget)
+            item = layout.itemAt(i)
+            if item and item.widget():
+                widget = item.widget()
+                if isinstance(widget, ThumbnailWidget):
+                    self._select_one_thumbnail(widget)
 
     # --- 4c. Menu Konteks dan Interaksi Lainnya ---
 
@@ -461,7 +477,7 @@ class DisplayPanel(QWidget):
         """Mendeteksi double-click pada label judul untuk memulai rename."""
         if (
             watched == self.title_label
-            and event.type() == QEvent.MouseButtonDblClick
+            and event.type() == QEvent.Type.MouseButtonDblClick
             and self.project_id is not None
         ):
             self.rename_project_requested.emit(self.title_label.text())
@@ -482,10 +498,15 @@ class DisplayPanel(QWidget):
             return
 
         for i in range(layout.count()):
-            widget = layout.itemAt(i).widget()
-            if isinstance(widget, ThumbnailWidget) and widget.image_path == image_path:
-                widget.set_pixmap(QPixmap.fromImage(image))
-                break
+            item = layout.itemAt(i)
+            if item and item.widget():
+                widget = item.widget()
+                if (
+                    isinstance(widget, ThumbnailWidget)
+                    and widget.image_path == image_path
+                ):
+                    widget.set_pixmap(QPixmap.fromImage(image))
+                    break
 
     def _create_placeholder_widget(self, html_text):
         """Membuat widget label untuk ditampilkan saat grid kosong."""

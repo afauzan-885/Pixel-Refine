@@ -23,20 +23,21 @@ class ImageCard(QWidget):
     def __init__(self, card_id: str, size: int = 110, parent=None):
         super().__init__(parent)
         self.card_id = card_id
+        self._image_path = None  # Initialize to None to avoid AttributeError
         self._is_selected = False
         self._is_loading = True
 
         # Configure layout
         self.setFixedSize(size, size)
-        self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(10, 5, 5, 5)  # Left padding 10px
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(10, 5, 5, 5)  # Left padding 10px
 
         # Image container
         theme = get_theme()
         self.image_label = QLabel("Loading...")
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_label.setStyleSheet(f"color: {theme.text_secondary};")
-        self.layout.addWidget(self.image_label)
+        self.main_layout.addWidget(self.image_label)
 
         # Style
         self.setStyleSheet(
