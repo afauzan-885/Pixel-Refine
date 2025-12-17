@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QFileDialog,
     QLabel,
+    QComboBox,
+    QGraphicsScene,
 )
 from PySide6.QtCore import Slot, Signal, Qt, QPoint
 from PySide6.QtGui import QPixmap, QColor
@@ -25,6 +27,7 @@ from pixel_refine_desktop.ui.resources.GenericUILibrary import (
     OverlayPosition,
 )
 from pixel_refine_desktop.ui.resources.GenericUILibrary.grids import GridContainer
+from pixel_refine_desktop.ui.resources.GenericUILibrary.forms import FormGroup
 from pixel_refine_desktop.ui.components.common.sidebar import Sidebar
 
 # Display logic
@@ -105,8 +108,8 @@ class DisplayPanel(QWidget):
 
         # === SHARED HEADER ===
         self.header_layout = QHBoxLayout()
-        self.header_layout.setContentsMargins(5, 5, 5, 5)
-        self.header_layout.setSpacing(5)
+        self.header_layout.setContentsMargins(10, 5, 10, 0)
+        self.header_layout.setSpacing(10)
 
         # 0. Sidebar Toggle Button (New)
         self.toggle_btn = Button("☰", variant="ghost")  # Minimalist style
@@ -123,6 +126,42 @@ class DisplayPanel(QWidget):
         self.header_layout.addStretch()
 
         # Tools/Actions Area
+
+        # 0. Result Dropdown (Direct QComboBox for correct alignment)
+        self.result_selector = QComboBox()
+        self.result_selector.setFixedWidth(100)
+        # Customize styling for white dropdown
+        self.result_selector.setStyleSheet(
+            """
+            QComboBox {
+                background-color: #F8F9FA;
+                border: 1px solid #E0E0E0;
+                border-radius: 4px;
+                padding: 4px 8px;
+                color: #333333;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #666666;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #FFFFFF;
+                color: #333333;
+                selection-background-color: #E0E0E0;
+                selection-color: #000000;
+            }
+        """
+        )
+        self.result_selector.currentTextChanged.connect(self._on_result_changed)
+        self.result_selector.setVisible(False)
+        self.header_layout.addWidget(self.result_selector)
+
         # 1. Back to Grid Button
         self.back_btn = Button("Back to Grid", variant="secondary")
         self.back_btn.setFixedWidth(120)
@@ -130,7 +169,14 @@ class DisplayPanel(QWidget):
         self.back_btn.setVisible(False)
         self.header_layout.addWidget(self.back_btn)
 
-        # 2. Import Images Button
+        # 2. Preview Process Button (Shortcut from Grid)
+        self.preview_process_btn = Button("Preview Process", variant="primary")
+        self.preview_process_btn.setFixedWidth(140)
+        self.preview_process_btn.clicked.connect(self._on_preview_process_clicked)
+        self.preview_process_btn.setVisible(False)
+        self.header_layout.addWidget(self.preview_process_btn)
+
+        # 3. Import Images Button
         self.import_button = Button("Import Images", variant="secondary")
         self.import_button.setFixedWidth(120)
         self.import_button.clicked.connect(self.import_images)
@@ -146,10 +192,6 @@ class DisplayPanel(QWidget):
         # Stacked Widget: Index 0 = Grid View, Index 1 = Preview View
         self.display_stack = QStackedWidget()
 
-        # # Apply Card styling to the content stack ONLY, so header remains clean
-        # self.display_stack.setAttribute(Qt.WA_StyledBackground, True)
-        # self.display_stack.setAttribute(Qt.WA_StyledBackground, True)
-        # # Optional: Add padding/radius if needed to look like a card inside the panel
         self.display_stack.setContentsMargins(
             10, 10, 10, 10
         )  # Margin for the white border effect
@@ -191,9 +233,8 @@ class DisplayPanel(QWidget):
         preview_wrapper_layout = QVBoxLayout(preview_wrapper)
         preview_wrapper_layout.setContentsMargins(10, 10, 10, 10)
         preview_wrapper_layout.setSpacing(10)
-        # Note: Local header removed.
 
-        # Zoomable Preview View
+        # Zoomable Preview View (Directly added, no more stack or controls)
         self.preview_scene = QGraphicsScene()
         self.zoomable_preview = Zoomable(self.preview_scene, self)
         preview_wrapper_layout.addWidget(self.zoomable_preview)
@@ -268,16 +309,15 @@ class DisplayPanel(QWidget):
 
         # NOTE: Initial parent is self.display_container, but will be reparented to global window on show.
         self.settings_overlay = OverlayContainer(
-            parent=self.display_container,  # Anchor initially
+            parent=self.display_container,
             position=OverlayPosition.CENTER,
-            margin=20,  # Give some breathing room
+            margin=20,
             smart_positioning=False,
             close_on_click_outside=True,
-            # Visuals
             dim_background=True,
             dim_opacity=0.25,
             blur_background=True,
-            blur_radius=20,  # 35% estimate
+            blur_radius=15,  # 35% estimate
             shadow_enabled=True,
             shadow_blur_radius=30,
             shadow_offset=QPoint(0, 8),  # Downwards (270 deg)
@@ -306,17 +346,6 @@ class DisplayPanel(QWidget):
         Intercepts Settings (index 2) to show overlay.
         Forwards others (0, 1) to main window.
         """
-        # print(f"DEBUG: DisplayPanel navigation request: {index}")
-
-        # Adjust index check because list changed (Panorama removed)
-        # Old: [Enhance, Panorama, Settings] -> Settings = 2
-        # New: [Enhance, Settings] -> Settings = 1
-        # BUT: Sidebar logic emits index based on loop.
-        # So we need to check what index matches what.
-
-        # Case specific logic:
-        # If we removed Panorama from the list passed to Sidebar,
-        # then Settings is now at index 1.
 
         if index == 1:  # Settings Index (Now at 1)
             self.show_settings()
@@ -362,12 +391,7 @@ class DisplayPanel(QWidget):
             self.sidebar_overlay.raise_()
 
     def _build_supported_extensions(self):
-        """
-        Build tuple dari supported image extensions dari config.SUPPORTED_FORMATS.
 
-        Returns:
-            tuple: Semua extensions dalam format tuple (e.g., ('.jpg', '.jpeg', '.png', ...))
-        """
         extensions = []
         for format_name, ext_list in SUPPORTED_FORMATS.items():
             extensions.extend(ext_list)
@@ -736,12 +760,204 @@ class DisplayPanel(QWidget):
         if not self.logic.prepare_preview(image_path):
             return
 
+        # Explicitly HIDE result selector for single image preview (as requested)
+        self.result_selector.setVisible(False)
+
         self.logic.display_preview(self.zoomable_preview, image_path)
         self.show_preview()
+
+    def display_processed_result(self, image_path):
+        """
+        Display processed result image directly in preview.
+        Called by LeftPanel after algorithm processing.
+        """
+        import os
+
+        if os.path.exists(image_path):
+            self._display_image_preview(image_path)
+            print(f"[DisplayPanel] Showing processed result: {image_path}")
+        else:
+            print(f"[DisplayPanel] Error: Result file not found at {image_path}")
 
     # =========================================================================
     # === 4. PUBLIC HELPER METHODS ===
     # =========================================================================
+
+    def _on_preview_process_clicked(self):
+        """Handle 'Preview Process' button click from Grid."""
+        # Try to find last processed result for current batch
+        if not self.logic.current_images:
+            return
+
+        first_img_path = self.logic.current_images[0].path
+        results = self.logic.detect_processed_results(first_img_path)
+
+        if results:
+            # Default to first available result
+            self.display_processed_result(results[0]["path"])
+        else:
+            print("[DisplayPanel] No results found to preview.")
+
+    def _on_result_changed(self, value):
+        """Handle dropdown selection change."""
+        if hasattr(self, "current_results_map") and value in self.current_results_map:
+            path = self.current_results_map[value]
+            self.display_processed_result(path, update_dropdown=False)
+
+    def display_processed_result(self, image_path, update_dropdown=True):
+        """
+        Display processed result image in Compare Mode (Default).
+        Loads Original + Processed into ComparisonGraphicsItem.
+        """
+        import os
+        from PySide6.QtGui import QPixmap
+        from pixel_refine_desktop.enhance_stack.components.batch_page_v2.comparison_graphics_item import (
+            ComparisonGraphicsItem,
+        )
+
+        if not os.path.exists(image_path):
+            print(f"[DisplayPanel] Error: Result file not found at {image_path}")
+            return
+
+        # Initialize zoom states dict if not exists
+        if not hasattr(self, "zoom_states"):
+            self.zoom_states = {}
+
+        # SAVE current state if we are switching from another valid preview
+        if hasattr(self, "current_preview_path") and self.current_preview_path:
+            # Only save if we strictly have a scene items
+            if self.preview_scene.items():
+                self.zoom_states[self.current_preview_path] = (
+                    self.zoomable_preview.get_view_state()
+                )
+
+        self.current_preview_path = image_path
+        print(f"[DisplayPanel] Showing processed result (Compare Mode): {image_path}")
+
+        # 1. Clear Preview Scene
+        self.preview_scene.clear()
+
+        # 2. Determine Original Image
+        original_pixmap = None
+        if self.logic.current_images:
+            original_path = self.logic.current_images[0].path
+            if os.path.exists(original_path):
+                original_pixmap = QPixmap(original_path)
+
+        processed_pixmap = QPixmap(image_path)
+        item = None
+
+        if original_pixmap and processed_pixmap:
+            # 3. Create Comparison Item (Custom Graphics Item)
+            item = ComparisonGraphicsItem(original_pixmap, processed_pixmap)
+            self.preview_scene.addItem(item)
+            self.preview_scene.setSceneRect(item.boundingRect())
+
+            # Connect scroll/zoom to update (Force redraw for sticky labels)
+            # Use lambda to disconnect later or just rely on clear() wiping items
+            # Ideally disconnect previous to avoid stacking, but scene.clear() removes items,
+            # signals are on the VIEW. We need to be careful not to stack connections.
+            # Best way: try disconnect first
+            try:
+                self.zoomable_preview.horizontalScrollBar().valueChanged.disconnect(
+                    self.preview_scene.update
+                )
+                self.zoomable_preview.verticalScrollBar().valueChanged.disconnect(
+                    self.preview_scene.update
+                )
+            except Exception:
+                pass  # Not connected
+
+            self.zoomable_preview.horizontalScrollBar().valueChanged.connect(
+                self.preview_scene.update
+            )
+            self.zoomable_preview.verticalScrollBar().valueChanged.connect(
+                self.preview_scene.update
+            )
+
+        else:
+            # Fallback
+            self.logic.display_preview(self.zoomable_preview, image_path)
+            if self.preview_scene.items():
+                item = self.preview_scene.items()[0]
+
+        # RESTORE State or Fit to View
+        if image_path in self.zoom_states:
+            print(
+                f"[DisplayPanel] Restoring zoom state for {os.path.basename(image_path)}"
+            )
+            self.zoomable_preview.set_view_state(self.zoom_states[image_path])
+        else:
+            print(f"[DisplayPanel] First view, fitting to view")
+            # Reset first to ensure clean state then fit
+            self.zoomable_preview.reset_zoom()
+            self.zoomable_preview.zoom_to_fit()  # Uses scene rect
+
+        # 3. Update Dropdown logic
+        if update_dropdown and self.logic.current_images:
+            first_img_path = self.logic.current_images[0].path
+            results = self.logic.detect_processed_results(first_img_path)
+
+            self.current_results_map = {r["name"]: r["path"] for r in results}
+            options = [r["name"] for r in results]
+
+            block = self.result_selector.blockSignals(True)
+            self.result_selector.clear()
+            self.result_selector.addItems(options)
+
+            current_name = None
+            for name, path in self.current_results_map.items():
+                if os.path.normpath(path) == os.path.normpath(image_path):
+                    current_name = name
+                    break
+
+            if current_name:
+                self.result_selector.setCurrentText(current_name)
+
+            self.result_selector.blockSignals(block)
+
+        self.show_preview()
+
+    def check_result_availability(self):
+        """Check if results exist for current batch and update 'Preview Process' button."""
+        if not self.logic.current_images:
+            self.preview_process_btn.setVisible(False)
+            return
+
+        first_img_path = self.logic.current_images[0].path
+        results = self.logic.detect_processed_results(first_img_path)
+        self.preview_process_btn.setVisible(bool(results))
+
+    def show_grid(self):
+        """Switch ke Grid View."""
+        # Save state before exiting preview
+        if hasattr(self, "current_preview_path") and self.current_preview_path:
+            if hasattr(self, "zoomable_preview") and self.preview_scene.items():
+                if not hasattr(self, "zoom_states"):
+                    self.zoom_states = {}
+                self.zoom_states[self.current_preview_path] = (
+                    self.zoomable_preview.get_view_state()
+                )
+
+        self.display_stack.setCurrentIndex(0)
+
+        # Update Header buttons
+        self.back_btn.setVisible(False)
+        self.result_selector.setVisible(False)  # Hide dropdown
+        self.check_result_availability()  # Update preview button visibility
+
+        if self.current_batch_id:
+            self.import_button.setVisible(True)
+        else:
+            self.import_button.setVisible(False)
+
+    def show_preview(self):
+        """Switch ke Preview View."""
+        self.display_stack.setCurrentIndex(1)
+        self.back_btn.setVisible(True)
+        self.result_selector.setVisible(True)  # Show dropdown
+        self.import_button.setVisible(False)
+        self.preview_process_btn.setVisible(False)
 
     def remove_selected_images(self):
         """Remove currently selected images dari grid."""

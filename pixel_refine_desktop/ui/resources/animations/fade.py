@@ -1,39 +1,93 @@
-from PySide6.QtWidgets import QStackedWidget, QWidget
-from PySide6.QtCore import QEasingCurve
+from PySide6.QtWidgets import QStackedWidget, QWidget, QGraphicsOpacityEffect
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QTimer
 from .animation_manager import StackedWidgetAnimator, AnimationType
 
-def fade_in(animator: StackedWidgetAnimator,
-           stack_widget: QStackedWidget,
-           target,
-           duration: int = 300):
-    """ Melakukan transisi FADE. """
-    duration_out = int(duration * 0.4)
-    duration_in = int(duration * 0.6)
-    animator.transition_in(stack_widget, target,
-                           animation_type=AnimationType.FADE,
-                           duration_out=duration_out,
-                           duration_in=duration_in,
-                           curve_out=animator.DEFAULT_CURVE_OUT,
-                           curve_in=animator.DEFAULT_CURVE_IN)
-    
-def fade_out(animator: StackedWidgetAnimator,
-             widget: QWidget,
-             duration: int = 300, # Gunakan durasi default atau sesuaikan
-             curve: QEasingCurve.Type = QEasingCurve.Type.OutQuad, # Default curve
-             on_finished_callback=None):
+
+def fade_in(
+    animator: StackedWidgetAnimator,
+    target_widget: QWidget,
+    stack_widget: QStackedWidget = None,  # Opsional
+    duration: int = 300,
+):
     """
-    Memulai animasi fade-out (opacity 1.0 -> 0.0) pada sebuah widget
-    menggunakan instance animator yang diberikan.
+    Melakukan transisi FADE.
+    - Jika 'stack_widget' diisi: Melakukan transisi halaman stack.
+    - Jika 'stack_widget' None: Melakukan fade-in pada 'target_widget' biasa.
+    """
+
+    # === SKENARIO 1: Stacked Widget Transition ===
+    if stack_widget is not None:
+        duration_out = int(duration * 0.4)
+        duration_in = int(duration * 0.6)
+        animator.transition_in(
+            stack_widget,
+            target_widget,
+            animation_type=AnimationType.FADE,
+            duration_out=duration_out,
+            duration_in=duration_in,
+            curve_out=animator.DEFAULT_CURVE_OUT,
+            curve_in=animator.DEFAULT_CURVE_IN,
+        )
+        return
+
+    # === SKENARIO 2: Standalone Widget Fade In ===
+    if not target_widget:
+        return
+
+    # 1. Siapkan Opacity Effect
+    effect = target_widget.graphicsEffect()
+    if not isinstance(effect, QGraphicsOpacityEffect):
+        effect = QGraphicsOpacityEffect(target_widget)
+        target_widget.setGraphicsEffect(effect)
+
+    # 2. Mulai dari transparan (0.0) lalu tampilkan widget
+    effect.setOpacity(0.0)
+    target_widget.show()
+    target_widget.raise_()  # Opsional: angkat ke atas agar terlihat
+
+    # 3. Buat animasi manual (karena transition_in animator khusus stack)
+    anim = QPropertyAnimation(effect, b"opacity", target_widget)
+    anim.setDuration(duration)
+    anim.setStartValue(0.0)
+    anim.setEndValue(1.0)
+    anim.setEasingCurve(animator.DEFAULT_CURVE_IN)
+
+    # Cleanup referensi animasi setelah selesai agar tidak garbage collected terlalu dini
+    # Kita bisa simpan di animator._active_transitions sementara atau biarkan parent widget mengurusnya
+    # Di sini kita set parent anim ke target_widget agar aman.
+    anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
+
+def fade_out(
+    animator: StackedWidgetAnimator,
+    widget: QWidget,
+    duration: int = 300,
+    curve: QEasingCurve.Type = QEasingCurve.Type.OutQuad,
+    on_finished_callback=None,
+    hide_on_finish: bool = True,
+):  # Tambahan parameter
+    """
+    Memulai animasi fade-out.
 
     Args:
-        animator: Instance StackedWidgetAnimator yang akan menjalankan animasi.
-        widget: Widget yang akan dianimasikan.
-        duration: Durasi animasi dalam milidetik.
-        curve: Kurva easing yang akan digunakan.
-        on_finished_callback: Fungsi yang akan dipanggil setelah animasi selesai.
+        hide_on_finish (bool): Jika True, widget akan di-hide() setelah animasi selesai.
+                               Sangat penting untuk widget biasa agar tidak memblokir mouse.
     """
-    # Cukup panggil metode fade_out pada instance animator yang sebenarnya
-    animator.transition_out(widget=widget,
-                      duration=duration,
-                      curve=curve,
-                      on_finished_callback=on_finished_callback)
+
+    # Kita bungkus callback agar bisa melakukan hide() otomatis
+    def internal_callback():
+        if hide_on_finish and widget:
+            try:
+                widget.hide()
+            except RuntimeError:
+                pass  # Widget mungkin sudah dihapus
+
+        if on_finished_callback:
+            on_finished_callback()
+
+    animator.transition_out(
+        widget=widget,
+        duration=duration,
+        curve=curve,
+        on_finished_callback=internal_callback,
+    )

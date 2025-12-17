@@ -1,4 +1,17 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QStackedWidget
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QStackedWidget,
+    QSizePolicy,
+    QLayout,
+    QBoxLayout,
+)
+from PySide6.QtWidgets import (
+    QApplication,
+    QWidget as QWIDGETSIZE_MAX_SOURCE,
+)  # Hack to access constant if not direct
+
+
 from PySide6.QtCore import Signal, Slot
 
 # Panel components
@@ -62,7 +75,7 @@ class LeftPanel(QWidget):
         """Setup UI dengan DisplayPanel dan AlgorithmPanel menggunakan stacked widget."""
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(5, 0, 0, 0)
-        main_layout.setSpacing(10)
+        main_layout.setSpacing(0)
 
         # --- 1. Display Panel (Top) ---
         self.display_panel = DisplayPanel(controller=self.controller)
@@ -97,8 +110,66 @@ class LeftPanel(QWidget):
         main_layout.addWidget(self.algorithm_stack, 0)  # Fixed height
 
         # Connect signals
+        # Connect signals
         self.algorithm_panel.process_requested.connect(self._forward_process_requested)
+        self.algorithm_panel.processing_completed.connect(self._on_algorithm_completed)
         self.display_panel.images_to_import_selected.connect(self._on_images_imported)
+
+        # Ensure layout triggers on expand/collapse
+        self.algorithm_stack.currentChanged.connect(self._update_layout_responsive)
+
+    def resizeEvent(self, event):
+        """Handle resize to switch between fixed height and flex ratio for algorithm panel."""
+        super().resizeEvent(event)
+        self._update_layout_responsive()
+
+    def _update_layout_responsive(self):
+        """
+        Adjust layout based on height threshold.
+        - Height < 850px: Algorithm Panel fixed 230px (approx 30%)
+        - Height >= 850px: Algorithm Panel flex 50%
+        Only applies if Algo Panel is visible (not collapsed).
+        """
+        # If collapsed (showing empty widget), let stack handle height (0)
+        if self.algorithm_stack.currentWidget() == self.empty_algorithm_widget:
+            self.algorithm_stack.setMaximumHeight(16777215)  # Reset max
+            # Actually, standard stack behavior handles it if empty widget has max height 0
+            # But we might need to reset fixed height constraints from previous state
+            self.algorithm_stack.setFixedHeight(16777215)
+            self.algorithm_stack.setMinimumHeight(0)
+            self.algorithm_stack.updateGeometry()
+            return
+
+        current_height = self.height()
+        LARGE_HEIGHT_THRESHOLD = 850
+
+        # Access layout to change stretch
+        layout = self.layout()
+        if not layout or not isinstance(layout, QBoxLayout):
+            return
+
+        if current_height >= LARGE_HEIGHT_THRESHOLD:
+            # FLEX MODE (50-50)
+            # Reset fixed height constraint
+            self.algorithm_stack.setMinimumHeight(0)
+            self.algorithm_stack.setMaximumHeight(16777215)
+
+            # Set stretch factors: Display 1, Algo 1 (Equals 50/50 if spacing ignored)
+            # Note: addWidget(widget, stretch)
+            # We can't easily change stretch of existing items without remove/add or internal layout API
+            # But QVBoxLayout has setStretch(index, stretch)
+
+            layout.setStretch(0, 1)  # DisplayPanel
+            layout.setStretch(1, 1)  # AlgorithmStack
+
+        else:
+            # FIXED MODE (Small Screen) -> 230px
+            # Enforce fixed height
+            self.algorithm_stack.setFixedHeight(230)
+
+            # Set stretch so DisplayPanel takes all remaining space
+            layout.setStretch(0, 1)  # DisplayPanel
+            layout.setStretch(1, 0)  # AlgorithmStack (Fixed size)
 
     @Slot()
     def clear_display(self):
@@ -180,3 +251,73 @@ class LeftPanel(QWidget):
     def load_image_paths(self):
         """Refresh grid. Stub untuk compatibility."""
         pass
+
+    def _on_algorithm_completed(self, data):
+        """
+        Handle algorithm completion to display result.
+
+        Args:
+            data: dict containing 'batch_id' and 'settings'
+        """
+        import os
+        import glob
+
+        batch_id = data.get("batch_id")
+        settings = data.get("settings", {})
+
+        if not batch_id or not self.controller:
+            return
+
+        # Determine process type (Average, Median, Similarity)
+        # Check based on priority or what was likely run
+        denoising = settings.get("denoising")
+
+        process_suffix = None
+        if denoising in ["Average", "Median", "Similarity"]:
+            process_suffix = denoising.lower()
+
+        # If no relevant process found that produces a stack result, possibly skip
+        # Add others if needed (e.g. if Alignment produces a visualization?)
+        if not process_suffix:
+            return
+
+        # Get batch images to determine filename pattern
+        batch = self.controller.get_batch(batch_id)
+        if not batch or not batch.images:
+            return
+
+        first_image_path = batch.images[0].path
+        first_image_name = os.path.splitext(os.path.basename(first_image_path))[0]
+
+        # Safe name logic from Average.py:
+        # "".join(c for c in ref_name if c.isalnum() or c in ("_", "-")).rstrip()
+        output_name_safe = "".join(
+            c for c in first_image_name if c.isalnum() or c in ("_", "-")
+        ).rstrip()
+
+        # Construct expected path
+        # Pattern: database/stack/[safe_name]_[process].tif
+        # Note: We need absolute path. Assuming database is relative to CWD (root of execution)
+        # Or using self.controller.db_path's directory as base?
+        # Standard app runs from root, so 'database/stack' should work relative to CWD.
+
+        stack_dir = os.path.abspath("database/stack")
+        expected_filename = f"{output_name_safe}_{process_suffix}.tif"
+        expected_path = os.path.join(stack_dir, expected_filename)
+
+        # Fallback/Loose search if exact match fails (e.g. timestamp differences?)
+        # But try exact first.
+
+        if os.path.exists(expected_path):
+            self.display_panel.display_processed_result(expected_path)
+        else:
+            print(f"[LeftPanel] Result file not found: {expected_path}")
+
+            # Additional fallback: Check if ANY result exists and show that instead
+            # This helps if naming conventions drift
+            results = self.display_panel.logic.detect_processed_results(
+                first_image_path
+            )
+            if results:
+                print(f"[LeftPanel] Falling back to found result: {results[0]['path']}")
+                self.display_panel.display_processed_result(results[0]["path"])

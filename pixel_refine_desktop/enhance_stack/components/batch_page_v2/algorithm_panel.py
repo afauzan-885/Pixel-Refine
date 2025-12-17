@@ -175,6 +175,7 @@ class AlgorithmPanel(QWidget):
 
     # Signals
     process_requested = Signal(dict)  # Emit settings dict
+    processing_completed = Signal(dict)  # Emit completion data
 
     def __init__(self, controller=None):
         super().__init__()
@@ -308,6 +309,13 @@ class AlgorithmPanel(QWidget):
         self.set_process_enabled(True)
         self.hide_progress()
         print(f"Processing finished for batch {self.current_batch_id}")
+
+        # Emit completion signal with context
+        completion_data = {
+            "batch_id": self.current_batch_id,
+            "settings": self.get_settings(),
+        }
+        self.processing_completed.emit(completion_data)
 
     def set_current_batch(self, batch_id):
         """
