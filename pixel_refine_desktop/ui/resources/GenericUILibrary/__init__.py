@@ -20,11 +20,10 @@ Usage:
     btn.clicked.connect(on_click)
 """
 
-__version__ = "1.0.0"
-__author__ = "Pixel Refine Team"
+__version__ = "0.6.0"
+__author__ = "Akmal Fauzan"
 
 # Auto-apply stylesheet system
-import sys
 from PySide6.QtWidgets import QApplication
 
 _stylesheet_applied = False
@@ -47,7 +46,7 @@ def apply_stylesheet():
 
     try:
         app = QApplication.instance()
-        if app is not None:
+        if app is not None and isinstance(app, QApplication):
             from pixel_refine_desktop.ui.resources.styles.stylesheet import (
                 stylesheet_global_page,
             )
@@ -56,7 +55,10 @@ def apply_stylesheet():
             _stylesheet_applied = True
             print("✅ GenericUILibrary: stylesheet_global_page() applied")
         else:
-            print("⚠️ GenericUILibrary: QApplication not found")
+            if app is None:
+                print("⚠️ GenericUILibrary: QApplication not found")
+            else:
+                print(f"⚠️ GenericUILibrary: Instance is {type(app)}, not QApplication")
     except Exception as e:
         print(f"⚠️ GenericUILibrary: Could not apply stylesheet - {e}")
 
@@ -112,6 +114,9 @@ from .progress_bars import (
     IndeterminateProgress,
     ProgressGroup,
 )
+
+# Comparison
+from .comparison import ImageCompareItem, ImageCompareWidget
 
 # Theme
 from .theme import Theme
@@ -188,4 +193,7 @@ __all__ = [
     "ProgressGroup",
     # Theme
     "Theme",
+    # Comparison
+    "ImageCompareItem",
+    "ImageCompareWidget",
 ]

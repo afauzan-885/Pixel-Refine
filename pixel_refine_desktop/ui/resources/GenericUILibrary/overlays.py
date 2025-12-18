@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QApplication,
 )
 from PySide6.QtGui import QPainter, QColor, QPixmap, QMouseEvent
-from PySide6.QtCore import Qt, QEvent, QPoint, QRect, QTimer
+from PySide6.QtCore import Qt, QEvent, QPoint, QRect, QTimer, QSize
 
 
 class OverlayPosition:
@@ -39,9 +39,9 @@ class OverlayContainer(QWidget):
         smart_positioning=True,
         close_on_click_outside=False,
         dim_background=False,
-        dim_opacity=0.4,
+        dim_opacity=0.5,
         blur_background=False,
-        blur_radius=15,  # Default radius ditingkatkan agar lebih soft
+        blur_radius=10,  # Default radius ditingkatkan agar lebih soft
         shadow_enabled=False,
         shadow_blur_radius=20,
         shadow_color=QColor(0, 0, 0, 80),
@@ -61,6 +61,8 @@ class OverlayContainer(QWidget):
         self.shadow_blur_radius = shadow_blur_radius
         self.shadow_color = shadow_color
         self.shadow_offset = shadow_offset
+
+        self._is_capturing = False  # Re-entrancy guard
 
         self.setObjectName("OverlayContainer")
 
@@ -96,7 +98,7 @@ class OverlayContainer(QWidget):
             shadow.setOffset(self.shadow_offset)
             self.content_wrapper.setGraphicsEffect(shadow)
 
-        self._blurred_bg = None
+        self._bg_pixmap = None
 
         # Timer untuk menghandle resize agar tidak spam grab()
         self._resize_timer = QTimer(self)
@@ -107,6 +109,7 @@ class OverlayContainer(QWidget):
         if parent:
             self.setParent(parent)
             parent.installEventFilter(self)
+            self.content_wrapper.installEventFilter(self)  # Listen to content resize
             self._update_position()
 
     def set_content(self, widget):
@@ -127,109 +130,127 @@ class OverlayContainer(QWidget):
             self.raise_()
             self._update_position()
 
+    def setVisible(self, visible):
+        """
+        Zero-flicker capture: Grab background BEFORE becoming visible.
+        """
+        if visible and not self.isVisible():
+            self._update_position()
+            if self.is_modal and self.blur_background:
+                self._create_blurred_snapshot()
+
+        super().setVisible(visible)
+
     def showEvent(self, event):
         self._update_position()
         self.raise_()
-
-        if self.is_modal:
-            if self.parent():
-                self.resize(self.parent().size())
-                self.move(0, 0)
-
-            if self.blur_background:
-                # Capture blur slightly delayed to ensure UI is ready
-                QTimer.singleShot(10, self._capture_blur)
 
         if self.close_on_click_outside and not self.is_modal:
             window = self.window()
             if window:
                 window.installEventFilter(self)
+
         super().showEvent(event)
 
     def _capture_blur(self):
         """
-        Capture parent screenshot and apply TRUE Gaussian Blur.
-        Fixed: Prevents capturing self (ghosting).
+        Triggered primarily by parent resize events.
         """
-        parent = self.parent()
-        if not parent:
+        if self._is_capturing:
             return
 
-        # 1. HIDE SELF: Kunci untuk menghindari bug "Ghosting"
-        # Kita sembunyikan overlay agar parent.grab() hanya mengambil background asli.
+        self._is_capturing = True
         was_visible = self.isVisible()
-        self.setVisible(False)
 
-        # Force process events agar hide() benar-benar terjadi sebelum grab()
-        # (Opsional, tapi membantu di beberapa OS)
-        # QApplication.processEvents()
+        # If already visible, hide to capture what's behind
+        if was_visible:
+            self.hide()
+            QApplication.processEvents()
 
         try:
-            bg_pixmap = parent.grab()
+            self._create_blurred_snapshot()
         except Exception as e:
-            print(f"Capture failed: {e}")
+            print(f"Snapshot update failed: {e}")
+        finally:
             if was_visible:
-                self.setVisible(True)
+                self.show()
+            self._is_capturing = False
+            self.update()
+
+    def _create_blurred_snapshot(self):
+        """
+        Sequence: Snapshot -> Downscale -> Gaussian Blur (Smoothing)
+        """
+        parent = self.parent()
+        if not parent or not isinstance(parent, QWidget):
             return
 
-        # 2. RESTORE VISIBILITY
-        if was_visible:
-            self.setVisible(True)
+        try:
+            # 1. Snapshot
+            full_pixmap = parent.grab()
 
-        # 3. APPLY TRUE BLUR (Gaussian)
-        if self.blur_radius > 0:
-            self._blurred_bg = self._apply_gaussian_blur(bg_pixmap, self.blur_radius)
-        else:
-            self._blurred_bg = bg_pixmap
+            # 2. Downscale (Factor 4)
+            # FastTransformation is used; Gaussian blur will smooth the results.
+            scaled = full_pixmap.scaled(
+                full_pixmap.width() // 4,
+                full_pixmap.height() // 4,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.FastTransformation,
+            )
 
-        self.update()
+            # 3. Gaussian Blur (Smoothing)
+            if self.blur_radius > 0:
+                self._bg_pixmap = self._apply_gaussian_blur(scaled, self.blur_radius)
+            else:
+                self._bg_pixmap = scaled
+        except Exception as e:
+            print(f"Failed to create blurred snapshot: {e}")
 
     def _apply_gaussian_blur(self, pixmap, radius):
         """
-        Applies a high-quality Gaussian blur using QGraphicsBlurEffect.
+        Applies a high-quality Gaussian blur with padding to avoid edge artifacts.
         """
         if pixmap.isNull():
             return pixmap
 
-        # Optimization: Downscale sedikit (misal bagi 2) untuk performa
-        # jika gambarnya sangat besar (Full HD/4K).
-        # Blur radius perlu disesuaikan jika di-downscale.
-        scale_factor = 2
-        scaled_size = pixmap.size() / scale_factor
+        # Increase padding to allow the blur to "bleed" out, then crop it.
+        # This prevents the "fade-to-transparent" effect at the edges.
+        padding = int(radius * 1.5)
 
-        # Buat temporary graphics scene
-        scene = QGraphicsScene()
-        item = QGraphicsPixmapItem()
-
-        # Scale pixmap down untuk performa (optional, tapi sangat disarankan)
-        src_img = pixmap.scaled(
-            scaled_size,
-            Qt.AspectRatioMode.IgnoreAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
+        # 1. Create expanded pixmap
+        expanded_size = QSize(
+            pixmap.width() + padding * 2, pixmap.height() + padding * 2
         )
-        item.setPixmap(src_img)
+        expanded_pixmap = QPixmap(expanded_size)
+        expanded_pixmap.fill(Qt.GlobalColor.transparent)
 
-        # Apply Blur Effect
+        painter = QPainter(expanded_pixmap)
+        # Draw the original pixmap stretched slightly to fill the padding area.
+        # This provides "fake" border pixels for the blur to work with.
+        painter.drawPixmap(expanded_pixmap.rect(), pixmap)
+        painter.end()
+
+        # 2. Apply Blur Effect in a Scene
+        scene = QGraphicsScene()
+        item = QGraphicsPixmapItem(expanded_pixmap)
+
         blur = QGraphicsBlurEffect()
-        blur.setBlurRadius(
-            radius
-        )  # Radius tidak perlu dibagi scale karena kita ingin blur yang 'kuat'
+        blur.setBlurRadius(radius)
         blur.setBlurHints(QGraphicsBlurEffect.BlurHint.PerformanceHint)
         item.setGraphicsEffect(blur)
 
         scene.addItem(item)
 
-        # Render scene kembali ke pixmap
-        res_pixmap = QPixmap(scaled_size)
-        res_pixmap.fill(Qt.GlobalColor.transparent)
+        # 3. Render back to pixmap
+        blurred_expanded = QPixmap(expanded_size)
+        blurred_expanded.fill(Qt.GlobalColor.transparent)
 
-        painter = QPainter(res_pixmap)
+        painter = QPainter(blurred_expanded)
         scene.render(painter)
         painter.end()
 
-        # Tidak perlu upscale kembali di sini.
-        # Kita akan menggambarnya stretched di paintEvent (lebih efisien).
-        return res_pixmap
+        # 4. Crop back to original size
+        return blurred_expanded.copy(padding, padding, pixmap.width(), pixmap.height())
 
     def hideEvent(self, event):
         if self.close_on_click_outside and not self.is_modal:
@@ -246,11 +267,8 @@ class OverlayContainer(QWidget):
         painter = QPainter(self)
 
         # Draw Blurred BG
-        if self.blur_background and self._blurred_bg:
-            # Kita gambar blurred_bg memenuhi rect self.
-            # Karena _apply_gaussian_blur mungkin menghasilkan gambar lebih kecil (downscaled),
-            # kita biarkan drawPixmap melakukan stretching (smooth secara default).
-            painter.drawPixmap(self.rect(), self._blurred_bg)
+        if self.blur_background and self._bg_pixmap:
+            painter.drawPixmap(self.rect(), self._bg_pixmap)
 
         # Draw Dim
         if self.dim_background:
@@ -260,44 +278,64 @@ class OverlayContainer(QWidget):
 
     def mousePressEvent(self, event):
         if self.is_modal and self.close_on_click_outside:
-            local_pos = event.position().toPoint()
-            if not self.content_wrapper.geometry().contains(local_pos):
-                self.hide()
+            # Check what widget is under the mouse
+            pos = event.position().toPoint()
+            child = self.childAt(pos)
+
+            # If we clicked on content_wrapper or any of its descendants, don't hide
+            if child and (
+                child == self.content_wrapper
+                or self.content_wrapper.isAncestorOf(child)
+            ):
+                super().mousePressEvent(event)
                 return
+
+            # Otherwise, hide (clicked on background/dim area)
+            self.hide()
+            return
         super().mousePressEvent(event)
 
     def eventFilter(self, obj, event):
-        # Resize Logic
+        # 1. Parent Resize Logic
         if obj == self.parent() and event.type() == QEvent.Type.Resize:
             if self.is_modal:
                 self.resize(obj.size())
                 self.move(0, 0)
-
-                # Saat resize terjadi, hapus blur lama untuk mencegah
-                # gambar yang terdistorsi/ghosting
-                self._blurred_bg = None
-                self.update()  # Akan menampilkan background dimming polos sementara
-
-                # Trigger capture baru setelah resize selesai (debounce)
+                # DO NOT clear _bg_pixmap here to avoid flickering.
+                # The old pixmap will be stretched in paintEvent until the new one is captured.
+                self.update()
                 self._resize_timer.start()
 
             self._update_position()
             return False
 
-        # Global Click Logic (Non-Modal only)
+        # 2. Content Wrapper Resize Logic (Recentering)
+        if obj == self.content_wrapper and event.type() == QEvent.Type.Resize:
+            # If content size changed (e.g. Accordion expanded), we need to update our position
+            # to remain centered or correctly aligned.
+            QTimer.singleShot(0, self._update_position)
+            return False
+
+        # 3. Global Click Logic (Non-Modal only)
         if not self.is_modal and self.close_on_click_outside and self.isVisible():
             if event.type() == QEvent.Type.MouseButtonPress:
+                # Use widgetAt for much more robust hit detection
                 global_pos = (
                     event.globalPosition().toPoint()
                     if hasattr(event, "globalPosition")
                     else event.globalPos()
                 )
-                parent_widget = self.parent()
-                if isinstance(parent_widget, QWidget):
-                    local_pos = parent_widget.mapFromGlobal(global_pos)
-                    if not self.geometry().contains(local_pos):
-                        self.hide()
-                        return False
+
+                clicked_widget = QApplication.widgetAt(global_pos)
+
+                # If we clicked outside the overlay entirely
+                if (
+                    clicked_widget
+                    and not self.isAncestorOf(clicked_widget)
+                    and clicked_widget != self
+                ):
+                    self.hide()
+                    return False
 
         return super().eventFilter(obj, event)
 

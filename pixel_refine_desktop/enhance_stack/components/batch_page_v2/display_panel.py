@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Slot, Signal, Qt, QPoint
 from PySide6.QtGui import QPixmap, QColor
+import os
 
 # Generic UI Library
 from pixel_refine_desktop.ui.resources.GenericUILibrary import (
@@ -25,6 +26,7 @@ from pixel_refine_desktop.ui.resources.GenericUILibrary import (
     Container,
     OverlayContainer,
     OverlayPosition,
+    ImageCompareItem,
 )
 from pixel_refine_desktop.ui.resources.GenericUILibrary.grids import GridContainer
 from pixel_refine_desktop.ui.resources.GenericUILibrary.forms import FormGroup
@@ -239,6 +241,15 @@ class DisplayPanel(QWidget):
         self.zoomable_preview = Zoomable(self.preview_scene, self)
         preview_wrapper_layout.addWidget(self.zoomable_preview)
 
+        # Connect scroll/zoom to update (Force redraw for sticky labels in Comparison mode)
+        # This is safe to connect once here because the scene persists.
+        self.zoomable_preview.horizontalScrollBar().valueChanged.connect(
+            self.preview_scene.update
+        )
+        self.zoomable_preview.verticalScrollBar().valueChanged.connect(
+            self.preview_scene.update
+        )
+
         self.display_stack.addWidget(preview_wrapper)
 
         # Add Stack to Main Layout (via Container)
@@ -266,11 +277,6 @@ class DisplayPanel(QWidget):
         self.sidebar.page_changed.connect(
             self._handle_sidebar_navigation
         )  # custom handler
-
-        # Wrap in OverlayContainer
-        # We want it to float on the LEFT
-        from PySide6.QtGui import QColor
-        from PySide6.QtCore import QPoint
 
         self.sidebar_overlay = OverlayContainer(
             parent=self.display_container,  # Anchor to the container logic
@@ -315,9 +321,9 @@ class DisplayPanel(QWidget):
             smart_positioning=False,
             close_on_click_outside=True,
             dim_background=True,
-            dim_opacity=0.25,
+            dim_opacity=0.50,
             blur_background=True,
-            blur_radius=15,  # 35% estimate
+            blur_radius=5,  # 35% estimate
             shadow_enabled=True,
             shadow_blur_radius=30,
             shadow_offset=QPoint(0, 8),  # Downwards (270 deg)
@@ -766,19 +772,6 @@ class DisplayPanel(QWidget):
         self.logic.display_preview(self.zoomable_preview, image_path)
         self.show_preview()
 
-    def display_processed_result(self, image_path):
-        """
-        Display processed result image directly in preview.
-        Called by LeftPanel after algorithm processing.
-        """
-        import os
-
-        if os.path.exists(image_path):
-            self._display_image_preview(image_path)
-            print(f"[DisplayPanel] Showing processed result: {image_path}")
-        else:
-            print(f"[DisplayPanel] Error: Result file not found at {image_path}")
-
     # =========================================================================
     # === 4. PUBLIC HELPER METHODS ===
     # =========================================================================
@@ -809,12 +802,6 @@ class DisplayPanel(QWidget):
         Display processed result image in Compare Mode (Default).
         Loads Original + Processed into ComparisonGraphicsItem.
         """
-        import os
-        from PySide6.QtGui import QPixmap
-        from pixel_refine_desktop.enhance_stack.components.batch_page_v2.comparison_graphics_item import (
-            ComparisonGraphicsItem,
-        )
-
         if not os.path.exists(image_path):
             print(f"[DisplayPanel] Error: Result file not found at {image_path}")
             return
@@ -848,32 +835,18 @@ class DisplayPanel(QWidget):
         item = None
 
         if original_pixmap and processed_pixmap:
-            # 3. Create Comparison Item (Custom Graphics Item)
-            item = ComparisonGraphicsItem(original_pixmap, processed_pixmap)
+            # 3. Create Comparison Item (Reusable from GenericUILibrary)
+            item = ImageCompareItem(
+                original_pixmap,
+                processed_pixmap,
+                left_label="Asli",
+                right_label="Diproses",
+            )
             self.preview_scene.addItem(item)
             self.preview_scene.setSceneRect(item.boundingRect())
 
-            # Connect scroll/zoom to update (Force redraw for sticky labels)
-            # Use lambda to disconnect later or just rely on clear() wiping items
-            # Ideally disconnect previous to avoid stacking, but scene.clear() removes items,
-            # signals are on the VIEW. We need to be careful not to stack connections.
-            # Best way: try disconnect first
-            try:
-                self.zoomable_preview.horizontalScrollBar().valueChanged.disconnect(
-                    self.preview_scene.update
-                )
-                self.zoomable_preview.verticalScrollBar().valueChanged.disconnect(
-                    self.preview_scene.update
-                )
-            except Exception:
-                pass  # Not connected
-
-            self.zoomable_preview.horizontalScrollBar().valueChanged.connect(
-                self.preview_scene.update
-            )
-            self.zoomable_preview.verticalScrollBar().valueChanged.connect(
-                self.preview_scene.update
-            )
+            # NOTE: Scroll connections moved to _setup_ui to avoid RuntimeWarnings
+            # that occur when trying to disconnect non-existent connections.
 
         else:
             # Fallback
