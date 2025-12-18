@@ -11,8 +11,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QProgressBar,
+    QStackedWidget,
 )
-from PySide6.QtCore import Qt, Signal, QThread
+from PySide6.QtCore import Qt, Signal, QThread, Slot
 
 # Generic UI Library
 from pixel_refine_desktop.ui.resources.GenericUILibrary import (
@@ -23,12 +24,16 @@ from pixel_refine_desktop.ui.resources.GenericUILibrary import (
 from pixel_refine_desktop.ui.resources.GenericUILibrary.progress_bars import (
     ProgressBar as ModernProgressBar,
 )
-from pixel_refine_desktop.ui.resources.GenericUILibrary.progress_bars import (
-    ProgressBar as ModernProgressBar,
-)
 
 # Algorithm logic
 from pixel_refine_desktop.enhance_stack.core.logic.algorithm_logic import AlgorithmLogic
+
+# Animation support
+from pixel_refine_desktop.ui.resources.animations.animation_manager import (
+    StackedWidgetAnimator,
+    SlideDirection,
+)
+from pixel_refine_desktop.ui.resources.animations.slide import slide
 
 # Algorithms Imports
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.AKAZE import (
@@ -164,18 +169,18 @@ class AlgorithmPanel(QWidget):
     """
     Algorithm Panel untuk workflow settings dan parameter konfigurasi.
 
-    UI Layer - handles only presentation logic.
-    Business logic delegated to AlgorithmLogic.
-
     Features:
-    - Two-column layout: ParameterAlignment (left) and ParameterAlgorithm (right)
-    - Algorithm selection per category
-    - Process button dan progress tracking
+    - Adaptive layout using QStackedWidget for parameter sections
+    - Smooth horizontal animations (Slide)
+    - Auto-collapse integration via visibility signals
     """
 
     # Signals
     process_requested = Signal(dict)  # Emit settings dict
     processing_completed = Signal(dict)  # Emit completion data
+    visibility_state_changed = Signal(
+        bool
+    )  # Emit True if any parameter column is visible
 
     def __init__(self, controller=None):
         super().__init__()
@@ -183,31 +188,53 @@ class AlgorithmPanel(QWidget):
         self.logic = AlgorithmLogic()  # Business logic
         self.current_batch_id = None  # Track selected batch
         self.processor_thread = None
+        self._last_target_idx = -1  # Guard for redundant animations
         self._setup_ui()
 
     def _setup_ui(self):
-        """Setup UI dengan two-column layout."""
+        """Setup UI dengan adaptive parameter stack."""
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(5, 5, 0, 0)
 
-        # Two-column layout
-        columns_layout = QHBoxLayout()
-        columns_layout.setSpacing(20)
+        # --- CONTENT STACK for Parameters ---
+        self.param_stack = QStackedWidget()
+        self.param_animator = StackedWidgetAnimator(self.param_stack)
+        self.param_stack.setStyleSheet("background-color: transparent;")
 
-        # --- LEFT COLUMN: Parameter Alignment ---
-        left_column = self._create_parameter_alignment()
-        columns_layout.addWidget(left_column, stretch=1)
+        # Page 0: Alignment Only (100% width)
+        self.align_page = self._create_parameter_alignment()
+        self.param_stack.addWidget(self.align_page)
 
-        # --- RIGHT COLUMN: Parameter Algorithm (Other) ---
-        right_column = self._create_parameter_algorithm()
-        columns_layout.addWidget(right_column, stretch=1)
+        # Page 1: Algorithm Only (100% width)
+        self.algo_page = self._create_parameter_algorithm()
+        self.param_stack.addWidget(self.algo_page)
 
-        main_layout.addLayout(columns_layout)
+        # Page 2: Both
+        self.both_page = QWidget()
+        both_layout = QHBoxLayout(self.both_page)
+        both_layout.setContentsMargins(0, 0, 0, 0)
+        both_layout.setSpacing(20)
 
-        # --- Progress Bar (Restored) ---
+        # Create separate instances for the 'both' view
+        self.left_column_both = self._create_parameter_alignment()
+        self.right_column_both = self._create_parameter_algorithm()
+        both_layout.addWidget(self.left_column_both, stretch=1)
+        both_layout.addWidget(self.right_column_both, stretch=1)
+        self.param_stack.addWidget(self.both_page)
+
+        # Page 3: Empty (Initial/None)
+        self.empty_page = QWidget()
+        self.param_stack.addWidget(self.empty_page)
+
+        # Start at empty
+        self.param_stack.setCurrentIndex(3)
+
+        main_layout.addWidget(self.param_stack)
+
+        # --- Progress Bar ---
         self.progress_container = QWidget()
-        self.progress_container.setFixedHeight(4)  # Match minimalist bar height
+        self.progress_container.setFixedHeight(4)
         self.progress_container.setStyleSheet("background-color: #FFFFFF;")
 
         container_layout = QVBoxLayout(self.progress_container)
@@ -225,7 +252,7 @@ class AlgorithmPanel(QWidget):
         main_layout.addWidget(self.progress_container)
 
     def _create_parameter_alignment(self):
-        """Create left column for alignment parameters (formerly list algorithm)."""
+        """Create column for alignment parameters."""
         widget = QWidget()
         widget.setObjectName("paramAlignWidget")
         widget.setStyleSheet("#paramAlignWidget { background-color: #FFFFFF; }")
@@ -234,12 +261,10 @@ class AlgorithmPanel(QWidget):
         layout.setSpacing(10)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        # Header
         header = QLabel("Parameter Alignment")
         header.setStyleSheet("font-weight: bold; font-size: 12px;")
         layout.addWidget(header)
 
-        # Placeholder for future alignment parameters
         placeholder = QLabel("Alignment parameters will\nappear here")
         placeholder.setStyleSheet("color: #999; font-style: italic;")
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -249,7 +274,7 @@ class AlgorithmPanel(QWidget):
         return widget
 
     def _create_parameter_algorithm(self):
-        """Create right column for algorithm parameters."""
+        """Create column for algorithm parameters."""
         widget = QWidget()
         widget.setObjectName("paramAlgoWidget")
         widget.setStyleSheet("#paramAlgoWidget { background-color: #FFFFFF; }")
@@ -258,41 +283,52 @@ class AlgorithmPanel(QWidget):
         layout.setSpacing(10)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        # Header
         header = QLabel("Parameter Algorithm")
         header.setStyleSheet("font-weight: bold; font-size: 12px;")
         layout.addWidget(header)
 
-        # Placeholder for future parameters
         placeholder = QLabel("Parameters will appear here\nbased on selected algorithm")
         placeholder.setStyleSheet("color: #999; font-style: italic;")
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(placeholder)
 
-        # Process Button (moved here)
-        self.process_btn = Button("▶ Start", variant="primary")
+        # Process Button (Optimized size)
+        btn_container = QWidget()
+        btn_layout = QHBoxLayout(btn_container)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.process_btn = Button(
+            "▶ Start",
+            variant="primary",
+            bg_color="#2ECC71",
+            text_color="#FFFFFF",
+            hover_color="#28B463",
+        )
+        self.process_btn.setFixedWidth(180)  # Make it smaller and elegant
+        self.process_btn.setStyleSheet(
+            self.process_btn.styleSheet()
+            + """
+            QPushButton {
+                padding: 6px 12px;
+                font-size: 10pt;
+            }
+        """
+        )
+
         self.process_btn.clicked.connect(self._on_process_clicked)
-        layout.addWidget(self.process_btn)
+        btn_layout.addWidget(self.process_btn)
+        layout.addWidget(btn_container)
 
         layout.addStretch()
         return widget
 
     def _on_process_clicked(self):
-        """
-        Process based on selected batch_id.
-        Executes algorithms using AlgorithmProcessorThread.
-        """
         if not self.current_batch_id:
-            print("Warning: No batch selected for processing")
             return
-
         settings = self.logic.get_settings()
-
-        # Disable button during processing
         self.set_process_enabled(False)
         self.show_progress(0)
-
-        # Start processing thread
         self.processor_thread = AlgorithmProcessorThread(
             self.current_batch_id, settings, self
         )
@@ -301,16 +337,11 @@ class AlgorithmPanel(QWidget):
         self.processor_thread.start()
 
     def _on_progress_update(self, percent, message):
-        """Handle progress updates from thread."""
-        self.show_progress(percent)  # Updates logic state and local bar
+        self.show_progress(percent)
 
     def _on_processing_finished(self):
-        """Handle processing completion."""
         self.set_process_enabled(True)
         self.hide_progress()
-        print(f"Processing finished for batch {self.current_batch_id}")
-
-        # Emit completion signal with context
         completion_data = {
             "batch_id": self.current_batch_id,
             "settings": self.get_settings(),
@@ -318,55 +349,107 @@ class AlgorithmPanel(QWidget):
         self.processing_completed.emit(completion_data)
 
     def set_current_batch(self, batch_id):
-        """
-        Set the current batch ID for processing.
-
-        Args:
-            batch_id: ID of the selected batch
-        """
         self.current_batch_id = batch_id
 
     def get_settings(self):
-        """
-        Get current settings dari semua algorithm selections.
-        """
         return self.logic.get_settings()
 
     def update_settings(self, settings):
-        """
-        Receive updated settings from RightPanel.
-        """
+        """Receive updated settings from RightPanel and trigger adaptive UI."""
         self.logic.set_settings(settings)
-        # Here we could also update the parameter UI based on selected algorithms
+        self._update_adaptive_ui(settings)
+
+    def _update_adaptive_ui(self, settings):
+        """Update parameter stack with horizontal slide animation."""
+        alignment = str(settings.get("alignment", "")).strip()
+        denoising = str(settings.get("denoising", "")).strip()
+        super_res = str(settings.get("super_resolution", "")).strip()
+
+        none_values = [
+            "",
+            "None",
+            "No Alignment",
+            "No Denoising",
+            "No Super Resolution",
+        ]
+        is_align_active = alignment not in none_values
+        is_algo_active = (denoising not in none_values) or (
+            super_res not in none_values
+        )
+
+        # Map to stack indices: 0: Align, 1: Algo, 2: Both, 3: Empty
+        target_idx = 3
+        if is_align_active and is_algo_active:
+            target_idx = 2
+        elif is_align_active:
+            target_idx = 0
+        elif is_algo_active:
+            target_idx = 1
+
+        current_idx = self.param_stack.currentIndex()
+        if target_idx != current_idx:
+            # Skip if we already started an animation for this target
+            if self._last_target_idx == target_idx:
+                return
+            self._last_target_idx = target_idx
+
+            # User Specific Rules for horizontal push/pull effect:
+            # 1. Any -> Both (2): SLIDE_LEFT (expand to right)
+            # 2. Both (2) -> Algo Only (1): SLIDE_LEFT (push alignment out to left)
+            # 3. Both (2) -> Align Only (0): SLIDE_RIGHT (push algorithm out to right)
+            # 4. None (3) -> Any: Direction based on position or SLIDE_LEFT default
+
+            direction = SlideDirection.LEFT  # Default
+
+            if target_idx == 2:  # Moving to Both
+                direction = SlideDirection.LEFT
+            elif current_idx == 2:  # Moving FROM Both
+                if target_idx == 1:  # Moving to Algo Only
+                    direction = SlideDirection.LEFT
+                elif target_idx == 0:  # Moving to Align Only
+                    direction = SlideDirection.RIGHT
+            elif current_idx == 3:  # From Empty
+                direction = SlideDirection.LEFT
+            elif target_idx == 3:  # To Empty
+                direction = SlideDirection.DOWN
+            else:
+                # Switching single views
+                direction = (
+                    SlideDirection.LEFT
+                    if target_idx > current_idx
+                    else SlideDirection.RIGHT
+                )
+
+            slide(
+                self.param_animator,
+                self.param_stack,
+                self.param_stack.widget(target_idx),
+                direction,
+                duration=400,
+            )
+
+        # Notify LeftPanel about overall visibility (expanded/collapsed)
+        self.visibility_state_changed.emit(target_idx != 3)
 
     def set_settings(self, settings):
-        """
-        Set settings directly (legacy support).
-        """
         self.logic.set_settings(settings)
+        self._update_adaptive_ui(settings)
 
     def show_progress(self, value):
-        """
-        Update local logic progress state and UI.
-        """
         if 0 <= value <= 100:
             self.logic.set_progress(value)
             self.progress_bar.setVisible(True)
             self.progress_bar.setValue(value)
 
     def hide_progress(self):
-        """Update local logic state to stop and hide UI."""
         self.logic.stop_processing()
         self.progress_bar.setVisible(False)
         self.progress_bar.setValue(0)
 
     def set_process_enabled(self, enabled):
-        """
-        Enable/disable process button.
-        """
-        self.process_btn.setEnabled(enabled)
+        if hasattr(self, "process_btn"):
+            self.process_btn.setEnabled(enabled)
 
-    # Property to allow worker threads to access database_manager if needed
     @property
     def database_manager(self):
         if self.controller:

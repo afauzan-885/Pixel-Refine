@@ -323,7 +323,7 @@ class DisplayPanel(QWidget):
             dim_background=True,
             dim_opacity=0.50,
             blur_background=True,
-            blur_radius=5,  # 35% estimate
+            blur_radius=2,  # 35% estimate
             shadow_enabled=True,
             shadow_blur_radius=30,
             shadow_offset=QPoint(0, 8),  # Downwards (270 deg)

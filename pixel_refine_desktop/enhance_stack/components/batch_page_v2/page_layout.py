@@ -79,6 +79,10 @@ def setup_main_layout(layout_instance, database_manager: DatabaseManager):
         layout_instance.workspace_panel.algorithm_panel.update_settings
     )
 
+    # Initial Sync: Pastikan AlgorithmPanel sesuai dengan pilihan default di RightPanel
+    initial_settings = layout_instance.batch_panel.get_current_settings()
+    layout_instance.workspace_panel.algorithm_panel.update_settings(initial_settings)
+
     # Connect Page Navigation (Sidebar -> Main Window)
     if hasattr(layout_instance, "page_changed"):
         layout_instance.workspace_panel.page_changed.connect(

@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )  # Hack to access constant if not direct
 
 
-from PySide6.QtCore import Signal, Slot
+from PySide6.QtCore import Signal, Slot, QTimer
 
 # Panel components
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.display_panel import (
@@ -66,6 +66,7 @@ class LeftPanel(QWidget):
         super().__init__()
         self.controller = controller
         self.animator = None  # Will be initialized in _setup_ui
+        self._last_visibility = None  # Guard for redundant animations
         self._setup_ui()
 
         # Connect internal signal for view switching
@@ -97,10 +98,9 @@ class LeftPanel(QWidget):
             self.empty_algorithm_widget
         )  # Index 0 - collapsed
         self.algorithm_stack.addWidget(self.algorithm_panel)  # Index 1 - expanded
-
-        # Connect currentChanged to updateGeometry
+        # Connect signals for adaptivity
         self.algorithm_stack.currentChanged.connect(
-            lambda: self.algorithm_stack.updateGeometry()
+            lambda: QTimer.singleShot(0, self._update_layout_responsive)
         )
 
         self.algorithm_stack.setCurrentIndex(0)  # Start dengan collapsed
@@ -110,13 +110,14 @@ class LeftPanel(QWidget):
         main_layout.addWidget(self.algorithm_stack, 0)  # Fixed height
 
         # Connect signals
-        # Connect signals
         self.algorithm_panel.process_requested.connect(self._forward_process_requested)
         self.algorithm_panel.processing_completed.connect(self._on_algorithm_completed)
         self.display_panel.images_to_import_selected.connect(self._on_images_imported)
+        self.algorithm_panel.visibility_state_changed.connect(
+            self._handle_algorithm_panel_visibility
+        )
 
-        # Ensure layout triggers on expand/collapse
-        self.algorithm_stack.currentChanged.connect(self._update_layout_responsive)
+        # The connection is already made above with QTimer for safety
 
     def resizeEvent(self, event):
         """Handle resize to switch between fixed height and flex ratio for algorithm panel."""
@@ -146,6 +147,13 @@ class LeftPanel(QWidget):
         # Access layout to change stretch
         layout = self.layout()
         if not layout or not isinstance(layout, QBoxLayout):
+            return
+
+        # COLLAPSED state logic
+        if self.algorithm_stack.currentIndex() == 0:
+            self.algorithm_stack.setFixedHeight(0)
+            layout.setStretch(0, 1)
+            layout.setStretch(1, 0)
             return
 
         if current_height >= LARGE_HEIGHT_THRESHOLD:
@@ -178,15 +186,30 @@ class LeftPanel(QWidget):
         Forward ke DisplayPanel dan hide AlgorithmPanel dengan SLIDE_DOWN animation.
         """
         self.display_panel.clear_display()
+        self._handle_algorithm_panel_visibility(False)
 
-        # Hide algorithm panel dengan slide down animation
-        # Hide algorithm panel dengan slide down animation
-        if self.animator:
+    def _handle_algorithm_panel_visibility(self, visible):
+        """
+        Handle visibility changes from AlgorithmPanel.
+        Expand or collapse the panel with animation.
+        """
+        if self._last_visibility == visible:
+            return
+        self._last_visibility = visible
+
+        if not self.animator:
+            return
+
+        target_widget = self.algorithm_panel if visible else self.empty_algorithm_widget
+        direction = SlideDirection.UP if visible else SlideDirection.DOWN
+
+        # Only slide if the current widget is different
+        if self.algorithm_stack.currentWidget() != target_widget:
             slide(
                 self.animator,
                 self.algorithm_stack,
-                self.empty_algorithm_widget,
-                SlideDirection.DOWN,
+                target_widget,
+                direction,
                 duration=400,
             )
 
@@ -204,26 +227,11 @@ class LeftPanel(QWidget):
         # Set current batch in algorithm panel for processing
         self.algorithm_panel.set_current_batch(batch_id)
 
-        # Show algorithm panel ONLY if there are images
-        if images:
-            if self.animator:
-                slide(
-                    self.animator,
-                    self.algorithm_stack,
-                    self.algorithm_panel,
-                    SlideDirection.UP,
-                    duration=400,
-                )
-        else:
-            # If batch is empty (no images), keep collapsed/collapse it
-            if self.animator:
-                slide(
-                    self.animator,
-                    self.algorithm_stack,
-                    self.empty_algorithm_widget,
-                    SlideDirection.DOWN,
-                    duration=400,
-                )
+        # The visibility is now handled by _handle_algorithm_panel_visibility
+        # which will be triggered if the RightPanel emits settings or if we manually refresh.
+        # Check initial state:
+        current_settings = self.algorithm_panel.get_settings()
+        self.algorithm_panel._update_adaptive_ui(current_settings)
 
     def _forward_process_requested(self, settings):
         """Forward process_requested signal dari AlgorithmPanel."""

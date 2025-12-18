@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QMessageBox,
     QSplitter,
+    QScrollArea,
 )
 from PySide6.QtCore import Signal, Qt
 
@@ -15,7 +16,14 @@ from pixel_refine_desktop.ui.resources.GenericUILibrary import (
     Button,
     FormGroup,
 )
+
+from pixel_refine_desktop.enhance_stack.components.batch_page_v2.batch_process_dialog import (
+    BatchProcessDialog,
+)
 from pixel_refine_desktop.enhance_stack.core.logic.algorithm_logic import AlgorithmLogic
+from pixel_refine_desktop.ui.resources.animations.animation_manager import (
+    HeightAnimator,
+)
 
 
 class RightPanel(QWidget):
@@ -32,6 +40,8 @@ class RightPanel(QWidget):
         super().__init__()
         self.controller = controller  # Needs BatchPageController
         self.logic = AlgorithmLogic()
+        self.height_animator = HeightAnimator(self)
+        self._is_collapsed = True  # Track state for resize logic
         self._setup_ui()
         self._load_batches()
 
@@ -79,17 +89,30 @@ class RightPanel(QWidget):
         # ==========================
         self.algo_container = QWidget()
         algo_layout = QVBoxLayout(self.algo_container)
-        algo_layout.setContentsMargins(0, 10, 0, 0)  # Top padding near splitter
-        algo_layout.setSpacing(10)
+        algo_layout.setContentsMargins(0, 0, 0, 0)
+        algo_layout.setSpacing(5)
 
-        # Algorithm List Logic
-        algo_label = QLabel("AlgorithmList")
-        algo_label.setStyleSheet(
-            "font-weight: bold; margin-top: 5px; margin-bottom: 0px;"
+        # Algorithm List Logic Container (Scrollable Area)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        algo_layout.addWidget(algo_label)
 
-        # ScrollArea for Algo settings could be good, but assuming they fit for now.
+        self.scroll_content = QWidget()
+        self.scroll_content_layout = QVBoxLayout(self.scroll_content)
+        self.scroll_content_layout.setContentsMargins(
+            0, 5, 10, 5
+        )  # Margin for scrollbar space
+        self.scroll_content_layout.setSpacing(10)
+
+        algo_label = QLabel("Algorithm Settings")
+        algo_label.setStyleSheet(
+            "font-weight: bold; margin-top: 5px; margin-bottom: 5px;"
+        )
+        self.scroll_content_layout.addWidget(algo_label)
+
         # Alignment FormGroup
         align_names = self.logic.get_algorithm_names("alignment")
         self.align_form = FormGroup("Alignment", input_type="select")
@@ -97,7 +120,7 @@ class RightPanel(QWidget):
         if align_names:
             self.align_form.set_value(align_names[0])
         self.align_form.value_changed.connect(self._on_settings_changed)
-        algo_layout.addWidget(self.align_form)
+        self.scroll_content_layout.addWidget(self.align_form)
 
         # Super Resolution FormGroup
         sr_names = self.logic.get_algorithm_names("super_resolution")
@@ -106,7 +129,7 @@ class RightPanel(QWidget):
         if sr_names:
             self.sr_form.set_value(sr_names[0])
         self.sr_form.value_changed.connect(self._on_settings_changed)
-        algo_layout.addWidget(self.sr_form)
+        self.scroll_content_layout.addWidget(self.sr_form)
 
         # Denoising FormGroup
         denoise_names = self.logic.get_algorithm_names("denoising")
@@ -115,12 +138,15 @@ class RightPanel(QWidget):
         if denoise_names:
             self.denoise_form.set_value(denoise_names[0])
         self.denoise_form.value_changed.connect(self._on_settings_changed)
-        algo_layout.addWidget(self.denoise_form)
+        self.scroll_content_layout.addWidget(self.denoise_form)
 
-        # Spacer inside algo container to push content up if resized large
-        algo_layout.addStretch()
+        self.scroll_content_layout.addStretch()
+        self.scroll_area.setWidget(self.scroll_content)
 
-        # Process All Batch Button
+        # Add Scroll Area to Main Algo Layout
+        algo_layout.addWidget(self.scroll_area)
+
+        # Process All Batch Button (Fixed at bottom)
         self.process_all_btn = Button("Process All Batch", variant="primary")
         self.process_all_btn.clicked.connect(self._on_process_all_clicked)
         algo_layout.addWidget(self.process_all_btn)
@@ -138,48 +164,30 @@ class RightPanel(QWidget):
 
         main_layout.addWidget(self.splitter)
 
+        # Hide algo container initially until a batch is selected
+        self.algo_container.setFixedHeight(0)
+        self.algo_container.hide()
+
     def resizeEvent(self, event):
         """Handle resize to adjust splitter ratio based on screen state context."""
         super().resizeEvent(event)
 
-        # Responsive Logic:
-        # User defined:
-        # Default (Small/Normal) - Keep Default (let's say 50/50 or whatever splitter defaults to)
-        # Full Screen (Large) - 3:1 Ratio (Batch:Algo)
+        # If collapsed, force top widget to 100%
+        if self._is_collapsed:
+            self.splitter.setSizes([self.height(), 0])
+            return
 
-        # Heuristic for "Full Screen": Height > 800px or Width > 1400px?
-        # Or just check if windowState is Maximized?
-        # Since I can't easily check window state from here reliably without parent chain,
-        # I'll use a height threshold typical of maximized 1080p screens.
-
+        # Optimization for Large Displays (Maximised)
         current_height = self.height()
-
-        # Assuming "Full Screen" means a large working area.
-        # Let's say if height > 900px, we treat it as large mode.
         LARGE_MODE_THRESHOLD = 900
 
         if current_height > LARGE_MODE_THRESHOLD:
             # Calculate 3:1 ratio
-            # Total parts = 4.
-            # Top takes 3/4, Bottom takes 1/4
-            total = current_height
-            top_h = int(total * 0.75)
-            bottom_h = total - top_h
+            top_h = int(current_height * 0.75)
+            bottom_h = current_height - top_h
             self.splitter.setSizes([top_h, bottom_h])
         else:
-            # Default behavior / "Small"
-            # Maybe 1:1 or just let it be?
-            # User said "pertahankan rasion (gunakan default bawaan sekarang)"
-            # Default behavior for QSplitter is usually proportional or respected sizeHints.
-            # If we don't touch setSizes, it might drift.
-            # Let's enforcing a balanced 1:1 or 60:40 roughly if it was previously forced.
-            # However, if we only set it ONCE upon crossing threshold it's better.
-            # But continuous resizeEvent runs often.
-
-            # To be polite to the user's manual adjustment, we should strictly enforce only on significant mode changes?
-            # But the requirement is "saat ukuran aplikasi paling kecil pertahankan... saat full screen menggunakan rasio 3:1"
-            # It implies automatic snapping.
-
+            # For smaller screens, let splitter handle it or force 1:1 if needed
             pass
 
     def _on_settings_changed(self, _=None):
@@ -247,14 +255,50 @@ class RightPanel(QWidget):
 
             # Emit signal clearing selection if needed (handled by list group clearing usually)
 
+    def _calculate_algo_target_h(self):
+        """Calculate dynamic target height based on content but capped at 280px."""
+        # Force a layout update to get accurate sizeHint
+        # Use the stored layout reference directly
+        if self.scroll_content_layout:
+            self.scroll_content_layout.activate()
+        content_h = self.scroll_content.sizeHint().height()
+
+        # Add overhead for button and margins (approx 80px)
+        # Header (30) + Button (45) + Margins/Spacing (15)
+        total_h = content_h + 80
+
+        # Clamp between 150 and 280
+        return max(150, min(total_h, 280))
+
     def _on_selection_changed(self, selected_values):
+        from PySide6.QtCore import QTimer
+
         if selected_values:
-            # Assuming single selection for main app logic for now, but list group supports multiple.
-            # We take the first one or emit specific logic.
-            # Layout connected to 'batch_selected' which expects int.
+            self._is_collapsed = False
+            # Show algo container if a batch is selected with animation
+            target_h = self._calculate_algo_target_h()
+
+            self.height_animator.animate_height(self.algo_container, target_h)
+
+            # Sync splitter: set stretch so both are visible
+            self.splitter.setStretchFactor(0, 1)
+            self.splitter.setStretchFactor(1, 1)
+
+            # Emit selection
             self.batch_selected.emit(int(selected_values[0]))
         else:
-            # No batch selected - clear display
+            self._is_collapsed = True
+            # No batch selected - hide algo container with animation
+            self.height_animator.animate_height(self.algo_container, 0)
+
+            # Force splitter to expand top widget completely
+            self.splitter.setStretchFactor(1, 0)
+            self.splitter.setStretchFactor(0, 1)
+
+            # Post-animation sync (assuming 250ms duration)
+            # We DONT set size immediately here to allow the SLIDE.DOWN expansion feel.
+            QTimer.singleShot(300, lambda: self.splitter.setSizes([10000, 0]))
+
             self.batch_selection_cleared.emit()
 
     def _on_process_all_clicked(self):

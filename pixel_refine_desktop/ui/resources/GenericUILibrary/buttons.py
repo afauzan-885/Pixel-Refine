@@ -4,7 +4,8 @@ Provides reusable button components with variants and customization
 """
 
 from PySide6.QtWidgets import QPushButton, QWidget, QHBoxLayout, QVBoxLayout
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import Signal
+from . import theme
 
 
 class Button(QPushButton):
@@ -59,7 +60,6 @@ class Button(QPushButton):
 
     def _apply_custom_colors(self, bg_color=None, text_color=None, hover_color=None):
         """Apply custom colors via inline stylesheet"""
-        import theme
 
         theme_obj = theme.get_theme()
 
