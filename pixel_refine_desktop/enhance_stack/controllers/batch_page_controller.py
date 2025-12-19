@@ -136,6 +136,35 @@ class BatchPageController(QObject):
             self.batch_error.emit(f"Error deleting batch: {e}")
             return False
 
+    def update_batch_name(self, batch_id: int, new_name: str) -> bool:
+        """
+        Update the name of a batch.
+
+        Args:
+            batch_id: The ID of the batch to update.
+            new_name: The new name for the batch.
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        try:
+            # Basic validation
+            if not new_name or not new_name.strip():
+                self.batch_error.emit("Batch name cannot be empty.")
+                return False
+            if len(new_name) > 128:
+                self.batch_error.emit("Batch name cannot exceed 128 characters.")
+                return False
+
+            rows = self.batch_repo.update_name(batch_id, new_name.strip())
+            if rows > 0:
+                self.batch_updated.emit(batch_id)
+                return True
+            return False
+        except Exception as e:
+            self.batch_error.emit(f"Error updating batch name: {e}")
+            return False
+
     def add_images_to_batch(self, batch_id: int, image_paths: List[str]) -> int:
         """
         Add images to a batch.

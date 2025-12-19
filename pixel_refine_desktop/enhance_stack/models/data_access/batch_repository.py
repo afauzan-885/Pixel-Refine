@@ -92,6 +92,27 @@ class BatchRepository(BaseRepository):
         if rows > 0:
             print(f"Batch ID {batch_id} deleted successfully")
         return rows
+
+    def update_name(self, batch_id: int, new_name: str) -> int:
+        """
+        Update the name of a batch.
+
+        Args:
+            batch_id: The ID of the batch to update.
+            new_name: The new name for the batch.
+
+        Returns:
+            Number of rows updated (should be 1 on success).
+        """
+        query = "UPDATE batch_process SET batch_name = ? WHERE id = ?"
+        try:
+            rows = self.execute_update(query, (new_name, batch_id))
+            if rows > 0:
+                print(f"Batch ID {batch_id} renamed to '{new_name}'")
+            return rows
+        except Exception as e:
+            print(f"Error updating batch name for ID {batch_id}: {e}")
+            return 0
     
     def add_images(self, batch_id: int, image_paths: List[str]) -> int:
         """
