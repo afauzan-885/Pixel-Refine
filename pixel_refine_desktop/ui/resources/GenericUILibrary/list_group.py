@@ -24,6 +24,7 @@ class ListGroup(QWidget):
     # Signals
     selection_changed = Signal(list)  # emits list of selected values (data)
     item_double_clicked = Signal(object)  # emits value (data) of double clicked item
+    item_renamed = Signal(object, str)  # emits value (data) and new text
     delete_key_pressed = Signal()  # emits when delete key is pressed
 
     def __init__(self, parent=None):
@@ -48,6 +49,7 @@ class ListGroup(QWidget):
         # Forward signals
         self._list_widget.itemSelectionChanged.connect(self._on_selection_change)
         self._list_widget.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self._list_widget.itemChanged.connect(self._on_item_changed) # Signal for when item text is changed
         self._list_widget.installEventFilter(self)
 
     def _apply_styles(self):
@@ -89,6 +91,7 @@ class ListGroup(QWidget):
         """Add an item to the list. 'value' is hidden data associated with the item."""
         item = QListWidgetItem(text)
         item.setData(Qt.UserRole, value if value is not None else text)
+        item.setFlags(item.flags() | Qt.ItemIsEditable)  # Make item editable
         self._list_widget.addItem(item)
         return item
 
@@ -131,7 +134,13 @@ class ListGroup(QWidget):
         self.selection_changed.emit(values)
 
     def _on_item_double_clicked(self, item):
+        """Enter edit mode on double click."""
         self.item_double_clicked.emit(item.data(Qt.UserRole))
+        self._list_widget.editItem(item)
+
+    def _on_item_changed(self, item):
+        """Emit a signal when an item's text has been changed."""
+        self.item_renamed.emit(item.data(Qt.UserRole), item.text())
 
     def eventFilter(self, source, event):
         if source is self._list_widget and event.type() == QEvent.Type.KeyPress:

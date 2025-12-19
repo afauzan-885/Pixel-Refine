@@ -37,7 +37,7 @@ def setup_main_layout(layout_instance, database_manager: DatabaseManager):
     # LeftPanel class = Workspace logic (image grid + workflow settings)
     # RightPanel class = Batch List logic (batch management)
     layout_instance.workspace_panel = LeftPanel(layout_instance.controller)
-    layout_instance.batch_panel = RightPanel(layout_instance.controller)
+    layout_instance.batch_panel = RightPanel(layout_instance.controller, left_panel=layout_instance.workspace_panel)
 
     # Set right_panel reference di display_panel untuk "New Batch" button handler
     layout_instance.workspace_panel.display_panel.right_panel = (

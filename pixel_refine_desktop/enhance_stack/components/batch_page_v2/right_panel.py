@@ -36,9 +36,10 @@ class RightPanel(QWidget):
     batch_selection_cleared = Signal()  # Emits when no batch selected
     algorithm_settings_changed = Signal(dict)  # Emits new settings
 
-    def __init__(self, controller=None):
+    def __init__(self, controller=None, left_panel=None):
         super().__init__()
         self.controller = controller  # Needs BatchPageController
+        self.left_panel = left_panel
         self.logic = AlgorithmLogic()
         self.height_animator = HeightAnimator(self)
         self._is_collapsed = True  # Track state for resize logic
@@ -82,6 +83,7 @@ class RightPanel(QWidget):
         # Batch List
         self.list_group = ListGroup()
         self.list_group.selection_changed.connect(self._on_selection_changed)
+        self.list_group.item_renamed.connect(self._on_batch_renamed)
         batch_layout.addWidget(self.list_group)
 
         # ==========================
@@ -273,32 +275,43 @@ class RightPanel(QWidget):
     def _on_selection_changed(self, selected_values):
         from PySide6.QtCore import QTimer
 
-        if selected_values:
+        if not self.left_panel or not self.left_panel.display_panel:
+            return
+
+        # Case 1: Multiple items selected
+        if len(selected_values) > 1:
+            self._is_collapsed = True
+            self.height_animator.animate_height(self.algo_container, 0)
+            QTimer.singleShot(300, lambda: self.splitter.setSizes([10000, 0]))
+
+            selected_labels = self.list_group.get_selected_labels()
+            self.left_panel.display_panel.show_delete_confirmation(selected_values, selected_labels)
+
+        # Case 2: One item selected
+        elif len(selected_values) == 1:
             self._is_collapsed = False
-            # Show algo container if a batch is selected with animation
             target_h = self._calculate_algo_target_h()
-
             self.height_animator.animate_height(self.algo_container, target_h)
-
-            # Sync splitter: set stretch so both are visible
             self.splitter.setStretchFactor(0, 1)
             self.splitter.setStretchFactor(1, 1)
 
-            # Emit selection
-            self.batch_selected.emit(int(selected_values[0]))
+            batch_id = int(selected_values[0])
+            # Safely get the batch name from the selected item's label
+            selected_labels = self.list_group.get_selected_labels()
+            batch_name = selected_labels[0] if selected_labels else ""
+
+            self.left_panel.display_panel.set_header_title(f"Batch: {batch_name}")
+            self.batch_selected.emit(batch_id)
+
+        # Case 3: No items selected
         else:
             self._is_collapsed = True
-            # No batch selected - hide algo container with animation
             self.height_animator.animate_height(self.algo_container, 0)
-
-            # Force splitter to expand top widget completely
             self.splitter.setStretchFactor(1, 0)
             self.splitter.setStretchFactor(0, 1)
-
-            # Post-animation sync (assuming 250ms duration)
-            # We DONT set size immediately here to allow the SLIDE.DOWN expansion feel.
             QTimer.singleShot(300, lambda: self.splitter.setSizes([10000, 0]))
 
+            self.left_panel.display_panel.set_header_title("No batch selected")
             self.batch_selection_cleared.emit()
 
     def _on_process_all_clicked(self):
@@ -324,3 +337,15 @@ class RightPanel(QWidget):
         # Pass self.parent() as batch_page_layout (may need adjustment)
         dialog = BatchProcessDialog(batches, self.parent(), self)
         dialog.exec()
+
+    def _on_batch_renamed(self, batch_id, new_name):
+        """Handle batch rename from ListGroup."""
+        if not self.controller:
+            return
+
+        success = self.controller.update_batch_name(batch_id, new_name)
+
+        if not success:
+            # If update fails (e.g., validation error), reload batches to revert name
+            QMessageBox.warning(self, "Rename Failed", "Could not rename the batch. The name may be invalid or already in use.")
+            self._load_batches()
