@@ -48,8 +48,7 @@ class StackedWidgetAnimator(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # --- Hanya SATU dictionary untuk melacak semua state transisi ---
-        self._active_transitions = {}
+        self._animation_state = weakref.WeakKeyDictionary()
 
     def transition_out(
         self,
@@ -109,11 +108,8 @@ class StackedWidgetAnimator(QObject):
         curve_out: QEasingCurve.Type = DEFAULT_CURVE_OUT,
         curve_in: QEasingCurve.Type = DEFAULT_CURVE_IN,
     ):
-        if stack_widget in self._active_transitions:
+        if self._is_animating(stack_widget):
             self._interrupt_transition(stack_widget)
-
-        if stack_widget in self._active_transitions:
-            return
 
         old_widget = stack_widget.currentWidget()
         new_widget, new_index = self._validate_target(stack_widget, target)
@@ -126,7 +122,8 @@ class StackedWidgetAnimator(QObject):
             stack_widget.setCurrentIndex(new_index)
             return
 
-        self._active_transitions[stack_widget] = {
+        # --- Kunci diperoleh di sini ---
+        self._animation_state[stack_widget] = {
             "old_widget_ref": weakref.ref(old_widget) if old_widget else None,
             "new_widget_ref": weakref.ref(new_widget),
             "new_index": new_index,
@@ -136,17 +133,19 @@ class StackedWidgetAnimator(QObject):
         }
 
         if not old_widget:
+            # Langsung ke animasi masuk jika tidak ada widget lama
             self._on_animation_out_finished(weakref.ref(stack_widget))
             return
 
         try:
+            # Siapkan widget lama untuk transisi keluar
             effect = old_widget.graphicsEffect()
             if not isinstance(effect, QGraphicsOpacityEffect):
                 effect = QGraphicsOpacityEffect(old_widget)
                 old_widget.setGraphicsEffect(effect)
             effect.setOpacity(1.0)
         except RuntimeError:
-            del self._active_transitions[stack_widget]
+            self._clear_animation_state(stack_widget) # Gunakan helper baru
             return
 
         out_group = QParallelAnimationGroup(self)
@@ -169,15 +168,37 @@ class StackedWidgetAnimator(QObject):
             )
         )
 
-        if (
-            not (data := self._active_transitions.get(stack_widget))
-            or not data["old_widget_ref"]()
-        ):
-            del self._active_transitions[stack_widget]
+        state = self._animation_state.get(stack_widget)
+        if not state or not state["old_widget_ref"]():
+            self._clear_animation_state(stack_widget)
             return
 
-        self._active_transitions[stack_widget]["out_group"] = out_group
+        state["out_group"] = out_group
         out_group.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
+    def _is_animating(self, stack_widget: QStackedWidget) -> bool:
+        """Periksa apakah ada animasi yang sedang berlangsung di QStackedWidget."""
+        return stack_widget in self._animation_state
+
+    def _clear_animation_state(self, stack_widget: QStackedWidget):
+        """Hapus state animasi untuk QStackedWidget tertentu (melepas kunci)."""
+        self._animation_state.pop(stack_widget, None)
+
+    def _reset_widget_state(self, widget: QWidget, visible: bool = False):
+        """Atur ulang properti visual widget dengan aman."""
+        if not widget:
+            return
+        try:
+            if widget.graphicsEffect():
+                self._safe_remove_effect(widget)
+            widget.move(0, 0)
+            if visible:
+                widget.show()
+            else:
+                widget.hide()
+        except RuntimeError:
+             # Widget mungkin sudah tidak ada lagi
+            pass
 
     def _validate_target(self, stack_widget, target):
         target_widget = None
@@ -275,12 +296,16 @@ class StackedWidgetAnimator(QObject):
     @Slot(weakref.ref)
     def _on_animation_out_finished(self, stack_widget_ref: weakref.ref):
         stack_widget = stack_widget_ref()
-        if not stack_widget or not (data := self._active_transitions.get(stack_widget)):
+        if not stack_widget:
             return
 
-        old_widget = data["old_widget_ref"]() if data["old_widget_ref"] else None
-        new_widget = data["new_widget_ref"]()
-        new_index = data["new_index"]
+        state = self._animation_state.get(stack_widget)
+        if not state:
+            return
+
+        old_widget = state["old_widget_ref"]() if state["old_widget_ref"] else None
+        new_widget = state["new_widget_ref"]()
+        new_index = state["new_index"]
 
         if old_widget:
             try:
@@ -292,11 +317,11 @@ class StackedWidgetAnimator(QObject):
         if new_widget:
             try:
                 stack_widget.setCurrentIndex(new_index)
-                self._start_incoming_animation(stack_widget, new_widget, data)
+                self._start_incoming_animation(stack_widget, new_widget, state)
             except RuntimeError:
-                del self._active_transitions[stack_widget]
+                self._clear_animation_state(stack_widget)
         else:
-            del self._active_transitions[stack_widget]
+            self._clear_animation_state(stack_widget) # Kunci dilepas jika widget baru tidak ada
 
     def _start_incoming_animation(self, stack_widget, new_widget, data):
         try:
@@ -307,7 +332,7 @@ class StackedWidgetAnimator(QObject):
             effect.setOpacity(0.0)
             new_widget.show()
         except RuntimeError:
-            del self._active_transitions[stack_widget]
+            self._clear_animation_state(stack_widget)
             return
 
         in_group = QParallelAnimationGroup(self)
@@ -330,67 +355,59 @@ class StackedWidgetAnimator(QObject):
             )
         )
 
-        self._active_transitions[stack_widget]["in_group"] = in_group
+        state = self._animation_state.get(stack_widget)
+        if not state:
+             return  # Animasi diinterupsi
+        state["in_group"] = in_group
         in_group.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
     @Slot(weakref.ref)
     def _on_animation_in_finished(self, stack_widget_ref: weakref.ref):
         stack_widget = stack_widget_ref()
-        if not stack_widget:
+        if not stack_widget or not self._is_animating(stack_widget):
             return
 
         current_widget = stack_widget.currentWidget()
         if current_widget:
             try:
-                # Delay removal to prevent QPainter clashes
-                QTimer.singleShot(0, lambda: self._safe_remove_effect(current_widget))
+                # Atur ulang properti dengan aman
+                if current_widget.graphicsEffect():
+                     QTimer.singleShot(0, lambda w=current_widget: self._safe_remove_effect(w))
                 if current_widget.pos() != QPoint(0, 0):
-                    current_widget.move(0, 0)
+                    current_widget.move(0, 0) # Pastikan posisi akhir benar
             except RuntimeError:
-                pass
+                pass # Widget mungkin sudah dihapus
 
-        self._active_transitions.pop(stack_widget, None)
+        self._clear_animation_state(stack_widget)
 
     def _interrupt_transition(self, stack_widget):
-        if stack_widget not in self._active_transitions:
+        state = self._animation_state.get(stack_widget)
+        if not state:
             return
 
-        data = self._active_transitions[stack_widget]
-        if "out_group" in data and data["out_group"]:
-            try:
-                data["out_group"].stop()
-            except RuntimeError:
-                pass
-        if "in_group" in data and data["in_group"]:
-            try:
-                data["in_group"].stop()
-            except RuntimeError:
-                pass
+        # Hentikan semua animasi yang berjalan
+        for group_name in ["out_group", "in_group"]:
+            if group := state.get(group_name):
+                try:
+                    group.stop()
+                except RuntimeError:
+                    pass
 
-        old_widget = data["old_widget_ref"]() if data["old_widget_ref"] else None
-        new_widget = data["new_widget_ref"]()
-
+        # Atur ulang state widget lama dan baru dengan aman
+        old_widget = state["old_widget_ref"]() if state["old_widget_ref"] else None
         if old_widget:
-            try:
-                QTimer.singleShot(0, lambda: self._safe_remove_effect(old_widget))
-                old_widget.hide()
-            except RuntimeError:
-                pass
+            QTimer.singleShot(0, lambda w=old_widget: self._reset_widget_state(w))
 
+        new_widget = state["new_widget_ref"]()
         if new_widget:
+            QTimer.singleShot(0, lambda w=new_widget: self._reset_widget_state(w, visible=True))
             try:
-                QTimer.singleShot(0, lambda: self._safe_remove_effect(new_widget))
-                new_widget.move(0, 0)
-                new_widget.show()
+                 # Pastikan widget baru berada di atas setelah interupsi
+                stack_widget.setCurrentIndex(state["new_index"])
             except RuntimeError:
                 pass
 
-        try:
-            stack_widget.setCurrentIndex(data["new_index"])
-        except RuntimeError:
-            pass
-
-        del self._active_transitions[stack_widget]
+        self._clear_animation_state(stack_widget)
 
     def show_widget(
         self,

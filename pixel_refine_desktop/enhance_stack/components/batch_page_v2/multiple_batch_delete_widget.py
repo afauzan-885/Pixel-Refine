@@ -1,11 +1,13 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
 from PySide6.QtCore import Signal, Qt
 
+
 class MultipleBatchDeleteWidget(QWidget):
     """
     Widget to confirm deletion of multiple batches.
     Emits signals for yes/no actions.
     """
+
     yes_clicked = Signal()
     no_clicked = Signal()
 

@@ -256,9 +256,6 @@ class DisplayPanel(QWidget):
 
         self.display_stack.addWidget(preview_wrapper)
 
-        # --- INDEX 2: MULTIPLE BATCH DELETE CONFIRMATION ---
-        self._setup_delete_confirmation_widget()
-
         # Add Stack to Main Layout (via Container)
         self.display_container.add_widget(self.display_stack)
 
@@ -965,53 +962,6 @@ class DisplayPanel(QWidget):
             for cid in self.selected_thumbnails
             if cid in self.logic.grid_items
         ]
-
-    def set_header_title(self, text: str):
-        """Sets the text of the header title."""
-        self.header_title.setText(text)
-
-    def _setup_delete_confirmation_widget(self):
-        """Create and configure the delete confirmation widget."""
-        self.delete_confirmation_widget = MultipleBatchDeleteWidget()
-        self.display_stack.addWidget(self.delete_confirmation_widget)
-
-        # Connect signals
-        self.delete_confirmation_widget.no_clicked.connect(self.show_grid)
-        self.delete_confirmation_widget.yes_clicked.connect(
-            self._delete_confirmed_batches
-        )
-
-    def show_delete_confirmation(self, batch_ids: list, batch_names: list):
-        """
-        Switch to the delete confirmation view and pass batch info.
-
-        Args:
-            batch_ids: List of batch IDs to be deleted.
-            batch_names: List of batch names to display.
-        """
-        self._batch_ids_to_delete = batch_ids
-        self.delete_confirmation_widget.set_batch_info(batch_names)
-        self.display_stack.setCurrentIndex(2)  # Index 2 for delete confirmation
-
-        # Update header
-        self.set_header_title("Confirm Deletion")
-        self.back_btn.setVisible(False)
-        self.import_button.setVisible(False)
-        self.preview_process_btn.setVisible(False)
-        self.result_selector.setVisible(False)
-
-    def _delete_confirmed_batches(self):
-        """Handle the actual deletion after confirmation."""
-        if hasattr(self, "_batch_ids_to_delete") and self.controller:
-            for batch_id in self._batch_ids_to_delete:
-                self.controller.delete_batch(batch_id)
-
-            # Refresh the batch list in the right panel
-            if self.right_panel:
-                self.right_panel._load_batches()
-
-            self.show_grid()
-            self.clear_display()  # Go back to the initial state
 
     # =========================================================================
     # === 5. DRAG & DROP SUPPORT (Pola dari Panorama) ===
