@@ -49,7 +49,9 @@ class ListGroup(QWidget):
         # Forward signals
         self._list_widget.itemSelectionChanged.connect(self._on_selection_change)
         self._list_widget.itemDoubleClicked.connect(self._on_item_double_clicked)
-        self._list_widget.itemChanged.connect(self._on_item_changed) # Signal for when item text is changed
+        self._list_widget.itemChanged.connect(
+            self._on_item_changed
+        )  # Signal for when item text is changed
         self._list_widget.installEventFilter(self)
 
     def _apply_styles(self):
