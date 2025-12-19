@@ -213,7 +213,7 @@ class LeftPanel(QWidget):
                 duration=400,
             )
 
-    def load_batch(self, batch_id, images):
+    def load_batch(self, batch_id, images, batch_name=None):
         """
         Load batch images dan show AlgorithmPanel dengan SLIDE_UP animation.
         Forward ke DisplayPanel dan expand AlgorithmPanel.
@@ -221,8 +221,9 @@ class LeftPanel(QWidget):
         Args:
             batch_id: ID dari batch
             images: List of image objects
+            batch_name: Nama dari batch (optional)
         """
-        self.display_panel.load_batch(batch_id, images)
+        self.display_panel.load_batch(batch_id, images, batch_name)
 
         # Set current batch in algorithm panel for processing
         self.algorithm_panel.set_current_batch(batch_id)

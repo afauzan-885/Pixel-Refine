@@ -49,6 +49,9 @@ from pixel_refine_desktop.ui.resources.animations.slide import slide
 # Config untuk supported image formats
 from config import SUPPORTED_FORMATS
 
+# Import the new widget
+from .multiple_batch_delete_widget import MultipleBatchDeleteWidget
+
 
 class DisplayPanel(QWidget):
     """
@@ -89,6 +92,7 @@ class DisplayPanel(QWidget):
         self.controller = controller
         self.logic = DisplayLogic()
         self.current_batch_id = None
+        self.current_batch_name = None
         self.selected_thumbnails = set()
         self.last_selected_card_id = None
         self.all_cards = {}
@@ -251,6 +255,9 @@ class DisplayPanel(QWidget):
         )
 
         self.display_stack.addWidget(preview_wrapper)
+
+        # --- INDEX 2: MULTIPLE BATCH DELETE CONFIRMATION ---
+        self._setup_delete_confirmation_widget()
 
         # Add Stack to Main Layout (via Container)
         self.display_container.add_widget(self.display_stack)
@@ -516,19 +523,22 @@ class DisplayPanel(QWidget):
     # =========================================================================
 
     @Slot(int, list)
-    def load_batch(self, batch_id, images):
+    def load_batch(self, batch_id, images, batch_name=None):
         """
         Load batch images ke grid.
 
         Args:
             batch_id: ID dari batch
             images: List of image objects dengan .id dan .path attributes
+            batch_name: Nama dari batch (optional)
         """
         self.current_batch_id = batch_id
+        self.current_batch_name = batch_name
         self.logic.set_batch(batch_id, images)
 
         # Update Header Title
-        self.header_title.setText(f"Batch: {batch_id}")
+        display_name = batch_name if batch_name else str(batch_id)
+        self.header_title.setText(f"{display_name}")
         self._clear_grid()
         self.logic.get_thumbnail_processor().stop_all()
         self.selected_thumbnails.clear()
@@ -577,7 +587,8 @@ class DisplayPanel(QWidget):
         Reset ke state default dengan placeholder widget dan tombol "New Batch".
         """
         self.current_batch_id = None
-        self.header_title.setText("")  # Clear header title
+        self.current_batch_name = None
+        self.header_title.setText("No batch selected")  # Clear header title
         self.logic.clear_all()
         self._clear_grid()
         self.selected_thumbnails.clear()
@@ -941,7 +952,11 @@ class DisplayPanel(QWidget):
             self.selected_thumbnails.clear()
             # Reload batch untuk refresh grid
             if self.current_batch_id and self.logic.current_images:
-                self.load_batch(self.current_batch_id, self.logic.current_images)
+                self.load_batch(
+                    self.current_batch_id,
+                    self.logic.current_images,
+                    self.current_batch_name,
+                )
 
     def get_selected_image_list(self):
         """Get list of selected image paths."""
@@ -950,6 +965,53 @@ class DisplayPanel(QWidget):
             for cid in self.selected_thumbnails
             if cid in self.logic.grid_items
         ]
+
+    def set_header_title(self, text: str):
+        """Sets the text of the header title."""
+        self.header_title.setText(text)
+
+    def _setup_delete_confirmation_widget(self):
+        """Create and configure the delete confirmation widget."""
+        self.delete_confirmation_widget = MultipleBatchDeleteWidget()
+        self.display_stack.addWidget(self.delete_confirmation_widget)
+
+        # Connect signals
+        self.delete_confirmation_widget.no_clicked.connect(self.show_grid)
+        self.delete_confirmation_widget.yes_clicked.connect(
+            self._delete_confirmed_batches
+        )
+
+    def show_delete_confirmation(self, batch_ids: list, batch_names: list):
+        """
+        Switch to the delete confirmation view and pass batch info.
+
+        Args:
+            batch_ids: List of batch IDs to be deleted.
+            batch_names: List of batch names to display.
+        """
+        self._batch_ids_to_delete = batch_ids
+        self.delete_confirmation_widget.set_batch_info(batch_names)
+        self.display_stack.setCurrentIndex(2)  # Index 2 for delete confirmation
+
+        # Update header
+        self.set_header_title("Confirm Deletion")
+        self.back_btn.setVisible(False)
+        self.import_button.setVisible(False)
+        self.preview_process_btn.setVisible(False)
+        self.result_selector.setVisible(False)
+
+    def _delete_confirmed_batches(self):
+        """Handle the actual deletion after confirmation."""
+        if hasattr(self, "_batch_ids_to_delete") and self.controller:
+            for batch_id in self._batch_ids_to_delete:
+                self.controller.delete_batch(batch_id)
+
+            # Refresh the batch list in the right panel
+            if self.right_panel:
+                self.right_panel._load_batches()
+
+            self.show_grid()
+            self.clear_display()  # Go back to the initial state
 
     # =========================================================================
     # === 5. DRAG & DROP SUPPORT (Pola dari Panorama) ===

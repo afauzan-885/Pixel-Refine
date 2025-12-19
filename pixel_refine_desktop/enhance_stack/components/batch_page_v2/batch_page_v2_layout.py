@@ -645,7 +645,9 @@ class BatchPageV2Layout(QWidget):
             if hasattr(self, "controller"):
                 batch = self.controller.get_batch(current_batch_id)
                 if batch:
-                    self.workspace_panel.load_batch(current_batch_id, batch.images)
+                    self.workspace_panel.load_batch(
+                        current_batch_id, batch.images, batch.name
+                    )
 
         QMessageBox.information(
             self,

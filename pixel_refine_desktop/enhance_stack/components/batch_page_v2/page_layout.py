@@ -37,7 +37,9 @@ def setup_main_layout(layout_instance, database_manager: DatabaseManager):
     # LeftPanel class = Workspace logic (image grid + workflow settings)
     # RightPanel class = Batch List logic (batch management)
     layout_instance.workspace_panel = LeftPanel(layout_instance.controller)
-    layout_instance.batch_panel = RightPanel(layout_instance.controller)
+    layout_instance.batch_panel = RightPanel(
+        layout_instance.controller, left_panel=layout_instance.workspace_panel
+    )
 
     # Set right_panel reference di display_panel untuk "New Batch" button handler
     layout_instance.workspace_panel.display_panel.right_panel = (
@@ -94,7 +96,7 @@ def _load_batch_content(layout_instance, batch_id):
     """Helper to load batch content into workspace panel."""
     batch = layout_instance.controller.get_batch(batch_id)
     if batch:
-        layout_instance.workspace_panel.load_batch(batch_id, batch.images)
+        layout_instance.workspace_panel.load_batch(batch_id, batch.images, batch.name)
 
 
 def _handle_images_imported(layout_instance, file_paths):
@@ -129,7 +131,7 @@ def _handle_images_imported(layout_instance, file_paths):
             batch = layout_instance.controller.get_batch(current_batch_id)
             if batch:
                 layout_instance.workspace_panel.load_batch(
-                    current_batch_id, batch.images
+                    current_batch_id, batch.images, batch.name
                 )
 
             QMessageBox.information(
