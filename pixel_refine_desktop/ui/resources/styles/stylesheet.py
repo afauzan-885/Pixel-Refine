@@ -513,6 +513,14 @@ def stylesheet_global_page():
             QPushButton#deleteButton:hover {
                 background-color: #C0392B;
             }
+            QPushButton#importButton {
+                background-color: #0DCAF0;
+                color: white;
+                font-weight: bold;
+            }
+            QPushButton#importButton:hover {
+                background-color: #31D2F2;
+            }
             
             /* === Panel Tab Workflow === */
             QTabBar::tab {

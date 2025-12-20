@@ -8,17 +8,22 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QEvent
 
 from .theme import get_theme
+from .mixins import RealtimeMixin
 
 
-class ListGroup(QWidget):
+class ListGroup(QWidget, RealtimeMixin):
     """
     A friendly list component for displaying and managing lists of items.
     Wraps QListWidget with a simpler API and modern styling.
+    Supports real-time updates via RealtimeMixin.
 
     Usage:
         list_group = ListGroup()
         list_group.add_item("Item 1", value=1)
         list_group.selection_changed.connect(my_handler)
+
+        # Real-time binding
+        list_group.bind_store(my_store, "project_list")
     """
 
     # Signals
@@ -86,6 +91,72 @@ class ListGroup(QWidget):
             }}
         """
         )
+
+    # --- RealtimeMixin Implementation ---
+
+    def on_store_changed(self, key, value):
+        """Handle real-time updates from DataStore."""
+        if isinstance(value, list):
+            # Expecting list of dicts like [{"text": "Item 1", "value": 1}, ...]
+            # or list of strings ["Item 1", "Item 2"]
+            self.sync_items(value)
+
+    def sync_items(self, new_data_list):
+        """
+        Smart-update list items without clearing everything.
+        Preserves selection for items that still exist.
+        """
+        # Store current selection
+        selected_values = set(self.get_selected_values())
+
+        # Map current items by value
+        current_items = {}
+        for i in range(self._list_widget.count()):
+            item = self._list_widget.item(i)
+            val = item.data(Qt.UserRole)
+            current_items[val] = item
+
+        # New set of values
+        new_values = []
+        processed_data = []
+        for item_data in new_data_list:
+            if isinstance(item_data, dict):
+                text = item_data.get("text", "")
+                val = item_data.get("value", text)
+            else:
+                text = str(item_data)
+                val = item_data
+            new_values.append(val)
+            processed_data.append((text, val))
+
+        # 1. Remove items no longer in new data
+        for val in list(current_items.keys()):
+            if val not in new_values:
+                item = current_items.pop(val)
+                self._list_widget.takeItem(self._list_widget.row(item))
+
+        # 2. Add or reorder items
+        for i, (text, val) in enumerate(processed_data):
+            if val in current_items:
+                item = current_items[val]
+                # Update text if changed
+                if item.text() != text:
+                    item.setText(text)
+                # Ensure correct order
+                if self._list_widget.row(item) != i:
+                    self._list_widget.takeItem(self._list_widget.row(item))
+                    self._list_widget.insertItem(i, item)
+            else:
+                # Add new item
+                item = self.add_item(text, value=val)
+                # If newly added item is not at target index, move it
+                if self._list_widget.row(item) != i:
+                    self._list_widget.takeItem(self._list_widget.row(item))
+                    self._list_widget.insertItem(i, item)
+
+            # 3. Restore selection
+            if val in selected_values:
+                item.setSelected(True)
 
     # --- Friendly API ---
 

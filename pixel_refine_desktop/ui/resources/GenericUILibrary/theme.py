@@ -17,7 +17,7 @@ class Theme:
         self.success = "#2ECC71"  # Green
         self.danger = "#E74C3C"  # Red
         self.warning = "#F39C12"  # Orange
-        self.info = "#3498DB"  # Blue
+        self.info = "#0DCAF0"  # Bright Blue (Bootstrap 5 Info)
         self.light = "#ECF0F1"  # Light gray
         self.dark = "#2C3E50"  # Dark blue-gray
 
@@ -89,7 +89,7 @@ class Theme:
             "success": "#28B463",
             "danger": "#C0392B",
             "warning": "#E67E22",
-            "info": "#2980B9",
+            "info": "#31D2F2",
             "light": "#D5DBDB",
             "dark": "#1C2833",
         }

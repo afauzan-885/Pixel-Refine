@@ -22,6 +22,7 @@ from PySide6.QtCore import (
     QVariantAnimation,
 )
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QLinearGradient
+from .mixins import RealtimeMixin
 
 # Try to import existing progress components
 try:
@@ -37,9 +38,10 @@ except ImportError:
     CUSTOM_PROGRESS_AVAILABLE = False
 
 
-class ProgressBar(QWidget):
+class ProgressBar(QWidget, RealtimeMixin):
     """
-    Modern progress bar with multiple styles
+    Modern progress bar with multiple styles.
+    Supports real-time binding via RealtimeMixin.
 
     Styles:
     - linear: Standard horizontal bar
@@ -50,7 +52,7 @@ class ProgressBar(QWidget):
 
     Usage:
         progress = ProgressBar(style="animated", variant="primary")
-        progress.set_value(50)
+        progress.bind_store(store, "main_progress")
     """
 
     value_changed = Signal(int)
@@ -252,6 +254,13 @@ class ProgressBar(QWidget):
         # Let's reset it to be safe or just use a separate logic?
         # Actually reusing set_value is cleaner.
         QTimer.singleShot(duration + 10, lambda: self._animator.setDuration(300))
+
+    # --- RealtimeMixin Implementation ---
+
+    def on_store_changed(self, key, value):
+        """Update progress from DataStore."""
+        if isinstance(value, (int, float)):
+            self.set_value(int(value))
 
 
 class CustomProgressBar(QWidget):
@@ -487,14 +496,14 @@ class IndeterminateProgress(QWidget):
             )
 
 
-class ProgressGroup(QWidget):
+class ProgressGroup(QWidget, RealtimeMixin):
     """
-    Group of stacked progress bars
+    Group of stacked progress bars. Supports multi-key binding from Store.
 
     Usage:
         group = ProgressGroup()
-        group.add_progress("Task 1", 75, variant="success")
-        group.add_progress("Task 2", 50, variant="info")
+        group.add_progress("Task 1", label="task1")
+        group.bind_store(store) # Will react to any change in store
     """
 
     def __init__(self, parent=None):
@@ -505,6 +514,7 @@ class ProgressGroup(QWidget):
         self.layout.setSpacing(10)
 
         self.progress_bars = []
+        self.key_to_bar = {}  # Mapping for realtime updates
 
     def add_progress(self, label, value=0, variant="primary", style="linear"):
         """Add a progress bar to the group"""
@@ -539,7 +549,26 @@ class ProgressGroup(QWidget):
             }
         )
 
+        # Mapping for realtime use (can map by label or a specific ID)
+        self.key_to_bar[label] = progress
+
         return progress
+
+    # --- RealtimeMixin Implementation ---
+
+    def on_store_changed(self, key, value):
+        """
+        Handle multi-key updates.
+        If value is a dict, try updating multiple bars.
+        Otherwise, try to find a bar matching the key.
+        """
+        if isinstance(value, dict):
+            for k, v in value.items():
+                if k in self.key_to_bar:
+                    self.key_to_bar[k].set_value(v)
+        elif key in self.key_to_bar:
+            if isinstance(value, (int, float)):
+                self.key_to_bar[key].set_value(int(value))
 
     def update_progress(self, index, value):
         """Update progress bar value by index"""

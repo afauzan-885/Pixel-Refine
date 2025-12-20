@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QGraphicsScene,
 )
-from PySide6.QtCore import Slot, Signal, Qt, QPoint
+from PySide6.QtCore import Slot, Signal, Qt, QPoint, QSize
 from PySide6.QtGui import QPixmap, QColor
 import os
 
@@ -23,6 +23,7 @@ import os
 from pixel_refine_desktop.ui.resources.GenericUILibrary import (
     ImageCard,
     Button,
+    IconButton,
     Container,
     OverlayContainer,
     OverlayPosition,
@@ -176,8 +177,12 @@ class DisplayPanel(QWidget):
         self.header_layout.addWidget(self.back_btn)
 
         # 2. Preview Process Button (Shortcut from Grid)
-        self.preview_process_btn = Button("Preview Process", variant="primary")
-        self.preview_process_btn.setFixedWidth(140)
+        self.preview_process_btn = IconButton(
+            icon_path="pixel_refine_desktop/ui/resources/assets/icons/play-preview.png",
+            variant="primary",
+        )
+        self.preview_process_btn.setToolTip("Image Process")
+        self.preview_process_btn.setFixedWidth(40)
         self.preview_process_btn.clicked.connect(self._on_preview_process_clicked)
         self.preview_process_btn.setVisible(False)
         self.header_layout.addWidget(self.preview_process_btn)
@@ -237,7 +242,7 @@ class DisplayPanel(QWidget):
         # --- INDEX 1: PREVIEW VIEW ---
         preview_wrapper = QWidget()
         preview_wrapper_layout = QVBoxLayout(preview_wrapper)
-        preview_wrapper_layout.setContentsMargins(10, 10, 10, 10)
+        preview_wrapper_layout.setContentsMargins(0, 0, 0, 0)
         preview_wrapper_layout.setSpacing(10)
 
         # Zoomable Preview View (Directly added, no more stack or controls)
@@ -255,6 +260,53 @@ class DisplayPanel(QWidget):
         )
 
         self.display_stack.addWidget(preview_wrapper)
+
+        # --- FLOATING SAVE BUTTON (For Processed Results) ---
+        self.save_overlay = OverlayContainer(
+            parent=preview_wrapper,
+            position=OverlayPosition.BOTTOM_RIGHT,
+            margin=0,
+            shadow_enabled=True,
+        )
+        # 1. Inisialisasi seperti biasa
+        self.save_btn = IconButton(
+            text="",
+            icon_path="pixel_refine_desktop/ui/resources/assets/icons/image-save.png",
+            variant="secondary",
+            text_tooltip="Saving",
+            square_size=35,
+        )
+
+        # 2. PAKSA gaya via Stylesheet (Menghilangkan background & Memperbaiki Tooltip)
+        self.save_btn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: transparent !important;
+                border: none !important;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background-color: rgba(0, 0, 0, 10) !important; /* Efek hover halus */
+                border-radius: 4px;
+            }
+            QToolTip {
+                background-color: #FFF9C4; /* Kuning Kertas */
+                color: #202020;            /* Warna teks hitam agar terlihat */
+                border: 1px solid #D4C489;
+                padding: 2px;
+                border-radius: 3px;
+                font-family: sans-serif;
+            }
+        """
+        )
+
+        # 3. Pastikan ukuran icon pas di tengah kotak 35px
+        self.save_btn.setIconSize(QSize(24, 24))
+
+        # Lanjutkan sisa kodenya
+        self.save_btn.clicked.connect(self._on_save_clicked)
+        self.save_overlay.set_content(self.save_btn)
+        self.save_overlay.hide()
 
         # --- INDEX 2: MULTIPLE BATCH DELETE CONFIRMATION ---
         self._setup_delete_confirmation_widget()
@@ -779,6 +831,7 @@ class DisplayPanel(QWidget):
 
         # Explicitly HIDE result selector for single image preview (as requested)
         self.result_selector.setVisible(False)
+        self.save_overlay.hide()  # Hide save button for original image
 
         self.logic.display_preview(self.zoomable_preview, image_path)
         self.show_preview()
@@ -879,6 +932,9 @@ class DisplayPanel(QWidget):
 
         # 3. Update Dropdown logic
         if update_dropdown and self.logic.current_images:
+            # Show save button since we are displaying a result
+            self.save_overlay.show()
+            self.save_overlay.raise_()
             first_img_path = self.logic.current_images[0].path
             results = self.logic.detect_processed_results(first_img_path)
 
@@ -928,6 +984,7 @@ class DisplayPanel(QWidget):
         # Update Header buttons
         self.back_btn.setVisible(False)
         self.result_selector.setVisible(False)  # Hide dropdown
+        self.save_overlay.hide()  # Hide save button on grid
         self.check_result_availability()  # Update preview button visibility
 
         if self.current_batch_id:
@@ -970,6 +1027,33 @@ class DisplayPanel(QWidget):
     def set_header_title(self, text: str):
         """Sets the text of the header title."""
         self.header_title.setText(text)
+
+    def _on_save_clicked(self):
+        """Handle floating save button click."""
+        if hasattr(self, "current_preview_path") and self.current_preview_path:
+            import shutil
+
+            # Open save file dialog
+            filename = os.path.basename(self.current_preview_path)
+            save_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Processed Image",
+                filename,
+                "Images (*.png *.jpg *.tif *.tiff)",
+            )
+
+            if save_path:
+                try:
+                    shutil.copy2(self.current_preview_path, save_path)
+                    from PySide6.QtWidgets import QMessageBox
+
+                    QMessageBox.information(
+                        self, "Success", f"Image saved successfully to:\n{save_path}"
+                    )
+                except Exception as e:
+                    from PySide6.QtWidgets import QMessageBox
+
+                    QMessageBox.critical(self, "Error", f"Failed to save image: {e}")
 
     def _setup_delete_confirmation_widget(self):
         """Create and configure the delete confirmation widget."""

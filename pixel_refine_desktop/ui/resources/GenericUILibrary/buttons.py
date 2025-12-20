@@ -4,7 +4,8 @@ Provides reusable button components with variants and customization
 """
 
 from PySide6.QtWidgets import QPushButton, QWidget, QHBoxLayout, QVBoxLayout
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, QSize
+from PySide6.QtGui import QIcon
 from . import theme
 
 
@@ -111,7 +112,7 @@ class Button(QPushButton):
         self.style().polish(self)
 
 
-class IconButton(QPushButton):
+class IconButton(Button):
     """
     Button with icon support
 
@@ -121,9 +122,16 @@ class IconButton(QPushButton):
     """
 
     def __init__(
-        self, text="", icon=None, icon_path=None, variant="secondary", parent=None
+        self,
+        text="",
+        icon=None,
+        icon_path=None,
+        variant="secondary",
+        text_tooltip=None,
+        square_size=None,
+        parent=None,
     ):
-        super().__init__(text, parent)
+        super().__init__(text=text, variant=variant, parent=parent)
 
         if icon:
             self.setIcon(icon)
@@ -132,15 +140,34 @@ class IconButton(QPushButton):
 
             self.setIcon(QIcon(icon_path))
 
-        # Apply variant styling
-        if variant == "primary":
-            self.setObjectName("processButton")
-        elif variant == "danger":
-            self.setObjectName("deleteButton")
-        elif variant == "success":
-            self.setObjectName("addButton")
-        elif variant == "info":
-            self.setObjectName("importButton")
+        if square_size:
+
+            self.setFixedSize(square_size, square_size)
+            # 2px padding each side = 4px total reduction
+            self.setIconSize(QSize(square_size - 4, square_size - 4))
+            # Override default button padding to allow icon to fill space
+            self.setStyleSheet(self.styleSheet() + "QPushButton { padding: 0px; }")
+
+        if text_tooltip:
+            # Overriding the global QToolTip style for this specific button
+            tooltip_style = (
+                "QToolTip { "
+                "background-color: transparent; "
+                "color: transparent; "
+                "border: 1px solid #D4C489; "
+                "padding: 0px; "
+                "}"
+            )
+            self.setStyleSheet(self.styleSheet() + tooltip_style)
+
+            # 2px margin as requested by user
+            self.setToolTip(
+                f"<html><div style='width: 25em; text-align: left; white-space: pre-wrap; margin: 2px;'>"
+                f"{text_tooltip}</div></html>"
+            )
+
+        # Re-apply variant styling to ensure it's used
+        self._apply_custom_colors()
 
 
 class ButtonGroup(QWidget):

@@ -121,6 +121,10 @@ from .comparison import ImageCompareItem, ImageCompareWidget
 # Theme
 from .theme import Theme
 
+# Real-time Core
+from .store import DataStore, get_store
+from .mixins import RealtimeMixin
+
 # Define what's available when using "from GenericUILibrary import *"
 __all__ = [
     # Utility
@@ -196,4 +200,8 @@ __all__ = [
     # Comparison
     "ImageCompareItem",
     "ImageCompareWidget",
+    # Real-time
+    "DataStore",
+    "get_store",
+    "RealtimeMixin",
 ]

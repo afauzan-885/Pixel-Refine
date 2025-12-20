@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtWidgets import (
     QApplication,
-    QWidget as QWIDGETSIZE_MAX_SOURCE,
+    QWidget,
 )  # Hack to access constant if not direct
 
 

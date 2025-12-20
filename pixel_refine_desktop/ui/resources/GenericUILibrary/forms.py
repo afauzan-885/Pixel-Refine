@@ -18,22 +18,28 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QButtonGroup,
 )
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import Signal, Qt, Slot
+from .mixins import RealtimeMixin
 
 
-class FormGroup(QWidget):
+class FormGroup(QWidget, RealtimeMixin):
     """
-    Form group with label and input field
+    Form group with label and input field.
+    Supports real-time data binding via RealtimeMixin.
 
     Usage:
         form = FormGroup(label="Username", input_type="text")
-        form.value_changed.connect(on_change)
+        form.bind_store(store, "username")
     """
 
     value_changed = Signal(object)  # Emits the current value
 
-    def __init__(self, label="", input_type="text", placeholder="", parent=None):
+    def __init__(
+        self, label="", input_type="text", placeholder="", auto_sync=False, parent=None
+    ):
         super().__init__(parent)
+        self.input_type = input_type
+        self.auto_sync = auto_sync  # If True, UI changes update store automatically
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)  # Remove bottom margin
@@ -133,6 +139,9 @@ class FormGroup(QWidget):
 
         layout.addWidget(self.input)
 
+        # Connect internal signal for auto-sync
+        self.value_changed.connect(self._handle_internal_value_change)
+
         # Add stretch to keep label and input close together at the top
         # even if the widget is stretched vertically
         layout.addStretch()
@@ -166,6 +175,21 @@ class FormGroup(QWidget):
         """Add options to select input"""
         if isinstance(self.input, QComboBox):
             self.input.addItems(options)
+
+    # --- RealtimeMixin Implementation ---
+
+    def on_store_changed(self, key, value):
+        """Update UI value from Store."""
+        if value is not None:
+            # Block internal signal to prevent loop if auto_sync is on
+            self.blockSignals(True)
+            self.set_value(value)
+            self.blockSignals(False)
+
+    def _handle_internal_value_change(self, value):
+        """Handle value change from UI side."""
+        if self.auto_sync:
+            self.set_data(value)
 
 
 class Input(QLineEdit):
@@ -227,26 +251,27 @@ class Select(QComboBox):
         self.addItems(options)
 
 
-class Checkbox(QWidget):
+class Checkbox(QWidget, RealtimeMixin):
     """
-    Checkbox with label
+    Checkbox with label. Supports DataStore binding.
 
     Usage:
-        checkbox = Checkbox("Accept terms")
-        checkbox.toggled.connect(on_toggle)
+        cb = Checkbox("Option 1")
+        cb.bind_store(store, "option_1_enabled")
     """
 
     toggled = Signal(bool)
 
-    def __init__(self, text="", checked=False, parent=None):
+    def __init__(self, text="", checked=False, auto_sync=False, parent=None):
         super().__init__(parent)
+        self.auto_sync = auto_sync
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.checkbox = QCheckBox(text)
         self.checkbox.setChecked(checked)
-        self.checkbox.toggled.connect(self.toggled.emit)
+        self.checkbox.toggled.connect(self._on_internal_toggle)
 
         layout.addWidget(self.checkbox)
         layout.addStretch()
@@ -256,6 +281,18 @@ class Checkbox(QWidget):
 
     def set_checked(self, checked):
         self.checkbox.setChecked(checked)
+
+    # --- RealtimeMixin ---
+    def on_store_changed(self, key, value):
+        if isinstance(value, bool):
+            self.checkbox.blockSignals(True)
+            self.checkbox.setChecked(value)
+            self.checkbox.blockSignals(False)
+
+    def _on_internal_toggle(self, checked):
+        self.toggled.emit(checked)
+        if self.auto_sync:
+            self.set_data(checked)
 
 
 class Radio(QWidget):
@@ -289,19 +326,22 @@ class Radio(QWidget):
         self.radio.setChecked(checked)
 
 
-class RadioGroup(QWidget):
+class RadioGroup(QWidget, RealtimeMixin):
     """
-    Group of radio buttons
+    Group of radio buttons. Supports DataStore binding (index or text).
 
     Usage:
-        group = RadioGroup(options=["Option 1", "Option 2"])
-        group.selection_changed.connect(on_change)
+        group = RadioGroup(options=["A", "B"])
+        group.bind_store(store, "selected_mode")
     """
 
     selection_changed = Signal(int, str)  # index, text
 
-    def __init__(self, options=None, orientation="vertical", parent=None):
+    def __init__(
+        self, options=None, orientation="vertical", auto_sync=False, parent=None
+    ):
         super().__init__(parent)
+        self.auto_sync = auto_sync
 
         self.button_group = QButtonGroup(self)
         self.radios = []
@@ -312,6 +352,9 @@ class RadioGroup(QWidget):
             layout = QHBoxLayout(self)
 
         layout.setContentsMargins(0, 0, 0, 0)
+
+        # Connect internal signal
+        self.selection_changed.connect(self._on_internal_selection_change)
 
         if options:
             for i, option in enumerate(options):
@@ -347,6 +390,31 @@ class RadioGroup(QWidget):
         """Set selected option by index"""
         if 0 <= index < len(self.radios):
             self.radios[index].setChecked(True)
+
+    # --- RealtimeMixin ---
+    def on_store_changed(self, key, value):
+        if isinstance(value, int):
+            self._block_radios(True)
+            self.set_selected(value)
+            self._block_radios(False)
+        elif isinstance(value, str):
+            # Try find by text
+            for i, radio in enumerate(self.radios):
+                if radio.text() == value:
+                    self._block_radios(True)
+                    radio.setChecked(True)
+                    self._block_radios(False)
+                    break
+
+    def _block_radios(self, block):
+        for r in self.radios:
+            r.blockSignals(block)
+
+    def _on_internal_selection_change(self, index, text):
+        if self.auto_sync:
+            # We can sync either index or text. Preferring index for robustness,
+            # but usually it matches what's in the store.
+            self.set_data(index)
 
 
 class FormRow(QWidget):

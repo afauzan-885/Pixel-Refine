@@ -12,11 +12,13 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QFrame,
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtGui import QMouseEvent, QPainter, QPen, QColor
 
+from .mixins import RealtimeMixin
 
-class GridContainer(QScrollArea):
+
+class GridContainer(QScrollArea, RealtimeMixin):
     """
     Scrollable grid container for displaying items with wrap and responsive column support
 
@@ -38,8 +40,15 @@ class GridContainer(QScrollArea):
         # Columns auto-adjust based on available width
     """
 
-    def __init__(self, columns=4, spacing=10, wrap_mode='vertical', 
-                 column_mode='fixed', item_width=120, parent=None):
+    def __init__(
+        self,
+        columns=4,
+        spacing=10,
+        wrap_mode="vertical",
+        column_mode="fixed",
+        item_width=120,
+        parent=None,
+    ):
         super().__init__(parent)
 
         self.columns = columns
@@ -49,12 +58,12 @@ class GridContainer(QScrollArea):
         self.spacing = spacing
         self.setWidgetResizable(True)
         self.setObjectName("scrollArea")
-        
+
         # Set scrollbar policy based on wrap mode
-        if wrap_mode == 'vertical':
+        if wrap_mode == "vertical":
             self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        elif wrap_mode == 'horizontal':
+        elif wrap_mode == "horizontal":
             self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
@@ -68,25 +77,29 @@ class GridContainer(QScrollArea):
         self.setWidget(self.container)
 
         self.item_count = 0
-        
+
         # For responsive mode: store widgets for rebuild on resize
         self._stored_widgets = []
+
+        # ID-based mapping for smart updates
+        self._items_map = {}  # item_id -> widget
+        self.item_factory = None  # Function: (item_data) -> QWidget
 
     def add_item(self, widget):
         """Add item to grid based on wrap mode and column mode"""
         # Store widget for responsive mode
-        if self.column_mode == 'responsive':
+        if self.column_mode == "responsive":
             self._stored_widgets.append(widget)
-        
+
         # Calculate columns if responsive mode
-        if self.column_mode == 'responsive':
+        if self.column_mode == "responsive":
             self.columns = self._calculate_responsive_columns()
-        
-        if self.wrap_mode == 'vertical':
+
+        if self.wrap_mode == "vertical":
             # Vertical wrap: fill columns first, then rows
             row = self.item_count // self.columns
             col = self.item_count % self.columns
-        elif self.wrap_mode == 'horizontal':
+        elif self.wrap_mode == "horizontal":
             # Horizontal wrap: fill rows first, then columns
             col = self.item_count // self.columns
             row = self.item_count % self.columns
@@ -101,25 +114,25 @@ class GridContainer(QScrollArea):
     def _calculate_responsive_columns(self):
         """
         Calculate number of columns based on available width and item size.
-        
+
         Formula: (available_width - padding) / (item_width + spacing)
         """
         # Get available width dari scroll area
         available_width = self.viewport().width()
-        
+
         # Minimum width check
         if available_width <= 0:
             available_width = 800  # Default fallback
-        
+
         # Calculate: (width - left_margin - right_margin) / (item_width + spacing)
         padding = 10 + 10  # left + right margins
         usable_width = available_width - padding
-        
+
         # Columns = usable_width / (item_width + spacing)
         # But ensure minimum 1 column
         item_width_with_spacing = self.item_width + self.spacing
         columns = max(1, int(usable_width / item_width_with_spacing))
-        
+
         return columns
 
     def clear_items(self):
@@ -130,36 +143,114 @@ class GridContainer(QScrollArea):
                 item.widget().deleteLater()
         self.item_count = 0
         self._stored_widgets.clear()
+        self._items_map.clear()
+
+    # --- Realtime System ---
+
+    def on_store_changed(self, key, value):
+        """Handle real-time updates from DataStore."""
+        if isinstance(value, list):
+            # Expecting list of dicts like [{"id": "1", "label": "Image 1"}, ...]
+            self.sync_items(value)
+
+    def sync_items(self, new_data_list):
+        """
+        Smart-update grid items based on ID.
+        new_data_list: list of dicts with 'id' key.
+        """
+        new_ids = [str(item.get("id")) for item in new_data_list if "id" in item]
+
+        # 1. Remove items no longer in list
+        ids_to_remove = set(self._items_map.keys()) - set(new_ids)
+        for item_id in ids_to_remove:
+            widget = self._items_map.pop(item_id)
+            if widget in self._stored_widgets:
+                self._stored_widgets.remove(widget)
+            self.grid_layout.removeWidget(widget)
+            widget.deleteLater()
+
+        # 2. Add or Reorder
+        # Since QGridLayout is row/col based, it's easier to just re-layout everything
+        # if the order or set of items changed, but we keep the widget instances.
+
+        old_item_count = self.item_count
+        self.item_count = 0
+
+        # Temporary list of all widgets in new order
+        ordered_widgets = []
+
+        for item_data in new_data_list:
+            item_id = str(item_data.get("id"))
+            label = item_data.get("label", item_data.get("name", ""))
+
+            if item_id in self._items_map:
+                widget = self._items_map[item_id]
+                # Update label if it's a GridItem
+                if hasattr(widget, "set_label"):
+                    widget.set_label(label)
+            else:
+                # Use factory if available, else default to GridItem
+                if self.item_factory:
+                    widget = self.item_factory(item_data)
+                else:
+                    from .grids import GridItem  # Local import to avoid circular
+
+                    widget = GridItem(item_id, label)
+
+                self._items_map[item_id] = widget
+
+            ordered_widgets.append(widget)
+
+        # Clear layout (remove but don't delete)
+        while self.grid_layout.count():
+            self.grid_layout.takeAt(0)
+
+        # Reset stored widgets for responsive mode if needed
+        if self.column_mode == "responsive":
+            self._stored_widgets = ordered_widgets.copy()
+            self.columns = self._calculate_responsive_columns()
+
+        # Re-add in order
+        for widget in ordered_widgets:
+            if self.wrap_mode == "vertical":
+                row = self.item_count // self.columns
+                col = self.item_count % self.columns
+            else:
+                col = self.item_count // self.columns
+                row = self.item_count % self.columns
+
+            self.grid_layout.addWidget(widget, row, col)
+            self.item_count += 1
 
     def get_item_count(self):
         """Get number of items"""
         return self.item_count
-    
+
     def set_wrap_mode(self, mode):
         """
         Change wrap mode dynamically.
-        
+
         Args:
             mode: 'vertical' or 'horizontal'
         """
-        if mode in ('vertical', 'horizontal'):
+        if mode in ("vertical", "horizontal"):
             self.wrap_mode = mode
             self._rebuild_grid()
-    
+
     def set_column_mode(self, mode, item_width=None):
         """
         Change column mode dynamically.
-        
+
         Args:
             mode: 'fixed' or 'responsive'
             item_width: Item width for responsive calculation (if changing to responsive)
         """
-        if mode in ('fixed', 'responsive'):
+        if mode in ("fixed", "responsive"):
             self.column_mode = mode
             if item_width is not None:
                 self.item_width = item_width
             self._rebuild_grid()
-    
+
     def _rebuild_grid(self):
         """Rebuild grid layout with current settings"""
         # Store all widgets
@@ -168,27 +259,28 @@ class GridContainer(QScrollArea):
             item = self.grid_layout.takeAt(0)
             if item.widget():
                 widgets.append(item.widget())
-        
+
         # Also include any stored widgets from responsive mode
-        if self.column_mode == 'responsive' and self._stored_widgets:
+        if self.column_mode == "responsive" and self._stored_widgets:
             widgets = self._stored_widgets.copy()
-        
+
         # Reset counter
         self.item_count = 0
-        
+
         # Re-add all widgets with new layout
         for widget in widgets:
             self.add_item(widget)
-    
+
     def resizeEvent(self, event):
         """Handle resize event to recalculate responsive columns"""
         super().resizeEvent(event)
-        
+
         # If responsive mode, rebuild grid on resize
-        if self.column_mode == 'responsive' and self._stored_widgets:
+        if self.column_mode == "responsive" and self._stored_widgets:
             new_columns = self._calculate_responsive_columns()
             if new_columns != self.columns:
                 self._rebuild_grid()
+
 
 class GridItem(QWidget):
     """
@@ -366,7 +458,9 @@ class ThumbnailGrid(GridContainer):
 
     thumbnail_clicked = Signal(str)  # item_id
 
-    def __init__(self, columns=5, thumbnail_size=100, wrap_mode='vertical', parent=None):
+    def __init__(
+        self, columns=5, thumbnail_size=100, wrap_mode="vertical", parent=None
+    ):
         super().__init__(columns=columns, wrap_mode=wrap_mode, parent=parent)
 
         self.thumbnail_size = thumbnail_size
