@@ -47,6 +47,8 @@ class AdaptiveStackedWidget(QStackedWidget):
 
 
 class LeftPanel(QWidget):
+    display_panel: DisplayPanel
+    algorithm_panel: AlgorithmPanel
     """
     Main Workspace Panel untuk Enhance Stack.
     Orchestrator yang mengelola DisplayPanel dan AlgorithmPanel.
@@ -62,9 +64,10 @@ class LeftPanel(QWidget):
     imagesDropped = Signal(list)  # Drag and drop support
     page_changed = Signal(int)  # Forward global navigation
 
-    def __init__(self, controller=None):
+    def __init__(self, controller=None, store=None):
         super().__init__()
         self.controller = controller
+        self.store = store
         self.animator = None  # Will be initialized in _setup_ui
         self._last_visibility = None  # Guard for redundant animations
         self._setup_ui()
@@ -88,7 +91,9 @@ class LeftPanel(QWidget):
         self.algorithm_stack = AdaptiveStackedWidget()
         self.animator = StackedWidgetAnimator(self.algorithm_stack)
 
-        self.algorithm_panel = AlgorithmPanel(controller=self.controller)
+        self.algorithm_panel = AlgorithmPanel(
+            controller=self.controller, store=self.store
+        )
 
         # Empty widget sebagai default (untuk initial collapsed state)
         self.empty_algorithm_widget = QWidget()

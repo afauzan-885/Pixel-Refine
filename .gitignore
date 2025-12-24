@@ -14,6 +14,7 @@ nuitka-crash-report.xml
 check_db_order_v2.py
 view_images_list.py
 upx_compression.py
+nuitka_build.py
 # Ignore virtual environment directories
 venv/
 database/

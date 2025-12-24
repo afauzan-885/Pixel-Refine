@@ -1,3 +1,4 @@
+from __future__ import annotations
 import shutil
 import subprocess
 import os
@@ -7,10 +8,26 @@ import tifffile
 from PySide6.QtWidgets import (
     QMessageBox,
     QVBoxLayout,
+    QHBoxLayout,
     QWidget,
     QFileDialog,
 )
-from PySide6.QtCore import Signal, Slot
+from PySide6.QtCore import (
+    Qt,
+    Signal,
+    Slot,
+    QTimer,
+    QEvent,
+    QCoreApplication,
+    QSize,
+)
+
+# Generic UI Library
+from pixel_refine_desktop.ui.resources.GenericUILibrary.store import (
+    get_store,
+    DataStore,
+)
+
 
 from pixel_refine_desktop.enhance_stack.core.logic.ImagePreviewHandler import (
     ImagePreviewHandler,
@@ -61,6 +78,18 @@ from pixel_refine_desktop.enhance_stack.components.batch_page.image_batch_manage
 )
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from config import SUPPORTED_FORMATS
+from typing import TYPE_CHECKING, Optional, List
+
+if TYPE_CHECKING:
+    from pixel_refine_desktop.enhance_stack.components.batch_page_v2.left_panel import (
+        LeftPanel,
+    )
+    from pixel_refine_desktop.enhance_stack.components.batch_page_v2.right_panel import (
+        RightPanel,
+    )
+    from pixel_refine_desktop.enhance_stack.controllers.batch_page_controller import (
+        BatchPageController,
+    )
 
 
 class BatchPageV2Layout(QWidget):
@@ -73,7 +102,19 @@ class BatchPageV2Layout(QWidget):
         super().__init__()
         self.database_manager = database_manager
         self.preview_handler: ImagePreviewHandler | None = None
-        self.workspace_panel = None  # Initialize workspace_panel
+        self.workspace_panel: LeftPanel | None = None
+        self.batch_panel: RightPanel | None = None
+        self.controller: BatchPageController | None = None
+        self.single_page_layout: QHBoxLayout | None = None
+
+        # Initialize Centralized Data Store
+        self.store = get_store()  # Use global store or new instance
+        # If we want a dedicated one for this page:
+        # self.store = DataStore()
+
+        # Bind to settings file
+        json_path = os.path.join("database", "align", "batch_parameter.json")
+        self.store.bind_to_file(json_path)
 
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(0, 5, 5, 5)
@@ -91,23 +132,21 @@ class BatchPageV2Layout(QWidget):
         """
         try:
             # Try to find workspace_panel from parent layout
-            workspace_panel = None
-            if self.layout() is not None:
-                for i in range(self.layout().count()):
-                    widget = self.layout().itemAt(i).widget()
-                    if widget and hasattr(widget, "left_panel"):
-                        workspace_panel = widget
-                        self.workspace_panel = workspace_panel  # Store reference
-                        break
+            workspace_panel: Optional["LeftPanel"] = None
+            layout = self.layout()
+            if layout is not None:
+                for i in range(layout.count()):
+                    item = layout.itemAt(i)
+                    if item is not None:
+                        widget = item.widget()
+                        if widget and hasattr(widget, "display_panel"):
+                            workspace_panel = widget  # type: ignore
+                            self.workspace_panel = workspace_panel
+                            break
 
             if workspace_panel and self.preview_handler:
-                try:
-                    workspace_panel.image_updated.connect(
-                        self.preview_handler.update_preview
-                    )
-                except (TypeError, RuntimeError, AttributeError) as e:
-                    # Silently ignore - optional signal connection
-                    pass
+                # image_updated signal is no longer present in LeftPanel
+                pass
         except Exception as e:
             # Catch all exceptions to prevent initialization failure
             # This is non-critical functionality
@@ -385,21 +424,26 @@ class BatchPageV2Layout(QWidget):
             self.database_manager.single_process_delete_path_images(selected_paths)
             self.workspace_panel.remove_selected_images()
 
-    def single_process_algorithm(self):
+    def single_process_algorithm(self, batch_mode=False):
         """
         Fungsi untuk memproses algoritma berdasarkan pilihan dropdown.
+
+        Args:
+            batch_mode: If True, skip UI dialogs and previews (for background processing)
         """
         try:
-            # Ambil parameter dari Right Panel (Generic UI)
-            # Correction: workspace_panel is LeftPanel, which contains algorithm_panel
-            alignment_choice = (
-                self.workspace_panel.algorithm_panel.align_select.currentText()
-            )
-            denoising_choice = (
-                self.workspace_panel.algorithm_panel.denoise_select.currentText()
-            )
-            super_resolution_choice = (
-                self.workspace_panel.algorithm_panel.sr_select.currentText()
+            # Ambil parameter dari Right Panel (Generic UI) via AlgorithmPanel
+            if not self.workspace_panel or not hasattr(
+                self.workspace_panel, "algorithm_panel"
+            ):
+                return
+
+            algo_panel = self.workspace_panel.algorithm_panel
+            settings = algo_panel.logic.get_settings()
+            alignment_choice = settings.get("alignment", "No Alignment")
+            denoising_choice = settings.get("denoising", "No Denoising")
+            super_resolution_choice = settings.get(
+                "super_resolution", "No Super Resolution"
             )
 
             # Jika tidak ada algoritma yang dipilih
@@ -408,9 +452,12 @@ class BatchPageV2Layout(QWidget):
                 and denoising_choice == "No Denoising"
                 and super_resolution_choice == "No Super Resolution"
             ):
-                QMessageBox.warning(
-                    self, "Caution", language_config.PROCESS_ALGORITHM_PROCESS_SKIPPED
-                )
+                if not batch_mode:
+                    QMessageBox.warning(
+                        self,
+                        "Caution",
+                        language_config.PROCESS_ALGORITHM_PROCESS_SKIPPED,
+                    )
                 return
 
             # Proses untuk Alignment
@@ -428,22 +475,26 @@ class BatchPageV2Layout(QWidget):
                     denoising_choice != "No Denoising"
                     or super_resolution_choice != "No Super Resolution"
                 ):
-                    reply = QMessageBox.question(
-                        self,
-                        "Confirm",
-                        language_config.NO_ALIGNMENT_PROCESS,
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                        QMessageBox.StandardButton.No,
-                    )
-                    if reply == QMessageBox.StandardButton.No:
-                        return
+                    # In batch mode, skip confirmation dialog
+                    if not batch_mode:
+                        reply = QMessageBox.question(
+                            self,
+                            "Confirm",
+                            language_config.NO_ALIGNMENT_PROCESS,
+                            QMessageBox.StandardButton.Yes
+                            | QMessageBox.StandardButton.No,
+                            QMessageBox.StandardButton.No,
+                        )
+                        if reply == QMessageBox.StandardButton.No:
+                            return
                 else:
                     alignment_valid = False
-                    QMessageBox.warning(
-                        self,
-                        "Warning",
-                        f"The alignment algorithm option '{alignment_choice}' is not recognized.",
-                    )
+                    if not batch_mode:
+                        QMessageBox.warning(
+                            self,
+                            "Warning",
+                            f"The alignment algorithm option '{alignment_choice}' is not recognized.",
+                        )
                     return
 
             super_resolution_executed = False
@@ -452,7 +503,7 @@ class BatchPageV2Layout(QWidget):
             elif super_resolution_choice == "No Super Resolution":
                 pass
 
-            if super_resolution_executed:
+            if super_resolution_executed and not batch_mode:
                 latest_image_path = get_last_image("database/stack")
                 if latest_image_path:
                     dialog = ImageViewer(latest_image_path, self)
@@ -476,7 +527,7 @@ class BatchPageV2Layout(QWidget):
             elif denoising_choice == "No Denoising":
                 pass
 
-            if denoising_executed:
+            if denoising_executed and not batch_mode:
                 latest_image_path = get_last_image("database/stack")
                 if latest_image_path:
                     dialog = ImageViewer(latest_image_path, self)
@@ -489,6 +540,91 @@ class BatchPageV2Layout(QWidget):
             QMessageBox.critical(
                 self, "Error", language_config.RUN_ERROR_STATUS.format(error=e)
             )
+
+    def run_batch_for_id(self, batch_id):
+        """
+        Execute processing pipeline for a specific batch ID programmatically.
+        Used by BatchProcessingThread.
+
+        IMPORTANT: This method is called from a background thread, so it must NOT
+        perform any UI operations directly. All UI updates should be done via signals.
+
+        This version uses AlgorithmProcessorThread for proper threading control.
+        """
+        from PySide6.QtCore import QEventLoop
+        from pixel_refine_desktop.enhance_stack.core.logic.algorithm_processor import (
+            AlgorithmProcessorThread,
+        )
+
+        # Get current algorithm settings from the workspace panel
+        if not self.workspace_panel or not hasattr(
+            self.workspace_panel, "algorithm_panel"
+        ):
+            return
+
+        algo_panel = self.workspace_panel.algorithm_panel
+        settings = algo_panel.logic.get_settings()
+
+        # Create event loop to wait for thread completion
+        loop = QEventLoop()
+
+        # Create and configure the algorithm processor thread
+        processor = AlgorithmProcessorThread(
+            batch_id=batch_id,
+            settings=settings,
+            parent=self,
+            single_process=True,  # Run in single process mode for batch
+        )
+
+        # Connect finished signal to quit the event loop
+        processor.finished_processing.connect(loop.quit)
+        processor.error_occurred.connect(loop.quit)
+
+        # Start the thread and wait for completion
+        processor.start()
+        loop.exec()  # Block until thread finishes
+
+        # Clean up
+        processor.wait()
+
+    def get_files_in_stack_folder(self):
+        """Get list of files in the stack folder."""
+        folder_path = "database/stack"
+        if not os.path.exists(folder_path):
+            return []
+
+        # Return set of full paths efficiently
+        return [
+            os.path.join(folder_path, f)
+            for f in os.listdir(folder_path)
+            if os.path.isfile(os.path.join(folder_path, f))
+        ]
+
+    def _move_single_batch_result(self, source_file, target_folder):
+        """Move a processed file to target folder, handling naming."""
+        if not os.path.exists(target_folder):
+            try:
+                os.makedirs(target_folder)
+            except OSError:
+                return False
+
+        filename = os.path.basename(source_file)
+        target_path = os.path.join(target_folder, filename)
+
+        # Basic collision handling (append suffix)
+        if os.path.exists(target_path):
+            name, ext = os.path.splitext(filename)
+            counter = 1
+            while os.path.exists(target_path):
+                target_path = os.path.join(target_folder, f"{name}_{counter}{ext}")
+                counter += 1
+
+        try:
+            shutil.move(source_file, target_path)
+            return True
+        except Exception as e:
+            print(f"Error moving file: {e}")
+            return False
 
     def save_image(self):
         """
@@ -628,21 +764,20 @@ class BatchPageV2Layout(QWidget):
 
     def update_progress_bar(self, value, images_left):
         """Memperbarui progress bar dan menampilkan jumlah gambar yang tersisa."""
-        if hasattr(self, "workspace_panel") and hasattr(
-            self.workspace_panel, "progress_bar"
-        ):
-            self.workspace_panel.progress_bar.setVisible(True)
-            self.workspace_panel.progress_bar.setValue(value)
-            self.workspace_panel.progress_bar.setFormat(
-                language_config.UPDATE_PROGRESS_BAR_STATUS.format(value, images_left)
-            )
+        if self.workspace_panel and hasattr(self.workspace_panel, "algorithm_panel"):
+            algo_panel = self.workspace_panel.algorithm_panel
+            if hasattr(algo_panel, "progress_bar"):
+                algo_panel.progress_bar.setVisible(True)
+                algo_panel.progress_bar.setValue(value)
+                # text is not supported by minimalist ModernProgressBar
+                pass
 
     def on_import_complete(self, successful_images):
         """Called when the import process is complete."""
         # Reload current batch content to show new images
-        if hasattr(self, "workspace_panel") and self.workspace_panel.current_batch_id:
-            current_batch_id = self.workspace_panel.current_batch_id
-            if hasattr(self, "controller"):
+        if self.workspace_panel and hasattr(self.workspace_panel, "algorithm_panel"):
+            current_batch_id = self.workspace_panel.algorithm_panel.current_batch_id
+            if current_batch_id and self.controller:
                 batch = self.controller.get_batch(current_batch_id)
                 if batch:
                     self.workspace_panel.load_batch(
@@ -655,8 +790,17 @@ class BatchPageV2Layout(QWidget):
             language_config.ON_IMPORT_COMPLETE_MESSAGES.format(successful_images),
         )
         # Pastikan progress bar merujuk ke lokasi yang benar
-        if hasattr(self, "workspace_panel") and hasattr(
-            self.workspace_panel, "progress_bar"
-        ):
-            self.workspace_panel.progress_bar.setValue(0)
-            self.workspace_panel.progress_bar.setFormat("0%")
+        if self.workspace_panel and hasattr(self.workspace_panel, "algorithm_panel"):
+            algo_panel = self.workspace_panel.algorithm_panel
+            if hasattr(algo_panel, "progress_bar"):
+                algo_panel.progress_bar.setValue(0)
+
+    def on_import_error(self, error_message):
+        """Handle errors during image import."""
+        QMessageBox.critical(
+            self, "Import Error", f"An error occurred during import:\n{error_message}"
+        )
+        if self.workspace_panel and hasattr(self.workspace_panel, "algorithm_panel"):
+            algo_panel = self.workspace_panel.algorithm_panel
+            if hasattr(algo_panel, "progress_bar"):
+                algo_panel.progress_bar.setVisible(False)

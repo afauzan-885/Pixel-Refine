@@ -182,8 +182,8 @@ class PixelRefineMain(QMainWindow):
 
         # Enhance Stack View
         splash.update_status("Initializing Enhance Stack View...", 75)
-        if self.app_manager is None:
-            raise RuntimeError("App Manager not initialized")
+        if self.app_manager is None or self.app_manager.database_manager is None:
+            raise RuntimeError("App Manager or Database Manager not initialized")
 
         enhance_stack_view = EnhanceStackView(
             db_path=self.app_manager.database_manager.db_path,
@@ -203,6 +203,9 @@ class PixelRefineMain(QMainWindow):
 
         # Settings View
         splash.update_status("Initializing Settings View...", 85)
+        if self.app_manager is None or self.app_manager.database_manager is None:
+            raise RuntimeError("App Manager or Database Manager not initialized")
+
         settings_view = SettingsView(
             db_path=self.app_manager.database_manager.db_path,
             parent=self.main_content,
@@ -254,8 +257,9 @@ class PixelRefineMain(QMainWindow):
             return
 
         # Switch page
-        if self.app_manager:
-            fade_in(self.app_manager.animator, self.main_content, index, duration=250)
+        if self.app_manager and self.app_manager.animator:
+            # Note: fade_in parameter order is (animator, target_widget/index, stack_widget, duration)
+            fade_in(self.app_manager.animator, index, self.main_content, duration=250)
 
     def toggle_sidebar(self):
         """Toggle sidebar visibility (placeholder for future implementation)."""

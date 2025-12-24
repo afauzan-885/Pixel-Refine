@@ -11,9 +11,6 @@ from pathlib import Path
 from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 from PySide6.QtCore import Qt
 
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment import lightglue_safety
-
-lightglue_safety.install_delayed_patches()
 import h5py
 import onnxruntime as ort
 import urllib

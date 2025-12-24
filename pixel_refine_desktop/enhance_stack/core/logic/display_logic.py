@@ -5,7 +5,6 @@ Separated dari UI untuk better maintainability dan testability.
 """
 
 from pathlib import Path
-from PySide6.QtGui import QPixmap, QImage
 
 # Thumbnail processor
 from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_processor import (

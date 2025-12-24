@@ -34,6 +34,8 @@ class BatchPageController(QObject):
 
     reference_changed = Signal(int, str)  # (batch_id, image_path)
 
+    batch_selected = Signal(int)  # (batch_id) logic event
+
     def __init__(self, db_path: str, parent: Optional[QObject] = None):
         """
         Initialize controller.
@@ -248,3 +250,10 @@ class BatchPageController(QObject):
             Image count
         """
         return self.batch_repo.count_images_in_batch(batch_id)
+
+    def handle_batch_selected(self, batch_id: int):
+        """
+        Notify that a batch has been selected.
+        This signal is listened to by the RightPanel/Layout to switch context.
+        """
+        self.batch_selected.emit(batch_id)

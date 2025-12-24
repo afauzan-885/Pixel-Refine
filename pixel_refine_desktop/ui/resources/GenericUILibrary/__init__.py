@@ -97,6 +97,9 @@ from .overlays import OverlayContainer, OverlayPosition
 # Grids and Galleries
 from .grids import GridContainer, GridItem, Gallery, ThumbnailGrid
 
+# Tables
+from .tables import DataTable
+
 # Tabs
 from .tabs import TabContainer, TabPane, SimpleTabs
 
@@ -176,6 +179,8 @@ __all__ = [
     "GridItem",
     "Gallery",
     "ThumbnailGrid",
+    # Tables
+    "DataTable",
     # Tabs
     "TabContainer",
     "TabPane",

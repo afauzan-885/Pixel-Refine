@@ -10,20 +10,17 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
-    QProgressBar,
     QStackedWidget,
 )
-from PySide6.QtCore import Qt, Signal, QThread, Slot
+from PySide6.QtCore import QThread, Qt, Signal, QTimer
 
 # Generic UI Library
 from pixel_refine_desktop.ui.resources.GenericUILibrary import (
-    # Generic UI Library
     FormGroup,
     Button,
-)
-from pixel_refine_desktop.ui.resources.GenericUILibrary.progress_bars import (
     ProgressBar as ModernProgressBar,
 )
+from pixel_refine_desktop.ui.resources.GenericUILibrary.mixins import SyncMixin
 
 # Algorithm logic
 from pixel_refine_desktop.enhance_stack.core.logic.algorithm_logic import AlgorithmLogic
@@ -35,137 +32,13 @@ from pixel_refine_desktop.ui.resources.animations.animation_manager import (
 )
 from pixel_refine_desktop.ui.resources.animations.slide import slide
 
-# Algorithms Imports
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.AKAZE import (
-    running_akaze,
-)
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.Farneback_optical_flow import (
-    running_farneback_optical_flow,
-)
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.Light_Glue import (
-    running_light_glue,
-)
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.ORB import running_orb
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Average import (
-    running_average,
-)
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
-    running_median,
-)
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Similarity import (
-    running_similarity,
+# Import AlgorithmProcessorThread from core logic
+from pixel_refine_desktop.enhance_stack.core.logic.algorithm_processor import (
+    AlgorithmProcessorThread,
 )
 
 
-class AlgorithmProcessorThread(QThread):
-    """
-    Background thread to execute selected algorithms for a batch.
-    """
-
-    progress_update = Signal(int, str)
-    finished_processing = Signal()
-
-    def __init__(self, batch_id, settings, parent=None):
-        super().__init__(parent)
-        self.batch_id = batch_id
-        self.settings = settings
-        self.parent_panel = parent  # Reference to panel for context if needed
-
-    def run(self):
-        # Progress callback to emit signal
-        def progress_callback(percent, message=""):
-            self.progress_update.emit(percent, message)
-
-        # Define actions mapping (similar to CombinedPanel)
-        actions = {
-            "alignment": {
-                "Farneback Optical Flow": lambda: running_farneback_optical_flow(
-                    self.parent_panel,
-                    single_process=False,
-                    batch_id=self.batch_id,
-                    progress_callback=progress_callback,
-                ),
-                "AKAZE": lambda: running_akaze(
-                    self.parent_panel,
-                    single_process=False,
-                    batch_id=self.batch_id,
-                    progress_callback=progress_callback,
-                ),
-                "ORB": lambda: running_orb(
-                    self.parent_panel,
-                    single_process=False,
-                    batch_id=self.batch_id,
-                    progress_callback=progress_callback,
-                ),
-                "Light Glue": lambda: running_light_glue(
-                    self.parent_panel,
-                    single_process=False,
-                    batch_id=self.batch_id,
-                    progress_callback=progress_callback,
-                ),
-                "No Alignment": lambda: None,
-                "None": lambda: None,
-            },
-            "super_resolution": {
-                "No Super Resolution": lambda: None,
-                "None": lambda: None,
-            },
-            "denoising": {
-                "Average": lambda: running_average(
-                    self.parent_panel,
-                    single_process=False,
-                    batch_id=self.batch_id,
-                    progress_callback=progress_callback,
-                ),
-                "Median": lambda: running_median(
-                    self.parent_panel,
-                    single_process=False,
-                    batch_id=self.batch_id,
-                    progress_callback=progress_callback,
-                ),
-                "Similarity": lambda: running_similarity(
-                    self.parent_panel,
-                    single_process=False,
-                    batch_id=self.batch_id,
-                    progress_callback=progress_callback,
-                ),
-                "No Denoising": lambda: None,
-                "None": lambda: None,
-            },
-        }
-
-        # Execute selected algorithms
-        any_algorithm_executed = False
-        for category, selected_algo_name in self.settings.items():
-            if not selected_algo_name or selected_algo_name in [
-                "None",
-                "No Alignment",
-                "No Super Resolution",
-                "No Denoising",
-            ]:
-                continue
-
-            if category in actions and selected_algo_name in actions[category]:
-                print(
-                    f"[INFO] Executing '{selected_algo_name}' for batch_id: {self.batch_id}"
-                )
-                try:
-                    actions[category][selected_algo_name]()
-                    any_algorithm_executed = True
-                except Exception as e:
-                    print(f"[ERROR] Failed to execute {selected_algo_name}: {e}")
-            else:
-                print(
-                    f"[WARN] Algorithm '{selected_algo_name}' for category '{category}' not found in actions."
-                )
-
-        if not any_algorithm_executed:
-            print(f"[INFO] No algorithms were executed for batch_id: {self.batch_id}")
-
-        self.finished_processing.emit()
-
-
-class AlgorithmPanel(QWidget):
+class AlgorithmPanel(QWidget, SyncMixin):
     """
     Algorithm Panel untuk workflow settings dan parameter konfigurasi.
 
@@ -182,13 +55,24 @@ class AlgorithmPanel(QWidget):
         bool
     )  # Emit True if any parameter column is visible
 
-    def __init__(self, controller=None):
+    def __init__(self, controller=None, store=None):
         super().__init__()
         self.controller = controller
         self.logic = AlgorithmLogic()  # Business logic
         self.current_batch_id = None  # Track selected batch
         self.processor_thread = None
         self._last_target_idx = -1  # Guard for redundant animations
+
+        # Debounce timer for rapid setting changes
+        self._update_timer = QTimer(self)
+        self._update_timer.setSingleShot(True)
+        self._update_timer.timeout.connect(self._do_update_adaptive_ui)
+        self._pending_settings = None
+
+        # Real-time state binding
+        if store:
+            self.bind_store(store)
+
         self._setup_ui()
 
     def _setup_ui(self):
@@ -350,12 +234,79 @@ class AlgorithmPanel(QWidget):
 
     def set_current_batch(self, batch_id):
         self.current_batch_id = batch_id
+        self._update_timer.stop()
+        self._pending_settings = None
+
+        # Set scope for SyncMixin
+        self.set_scope(str(batch_id))
+
+        # Initial sync is handled automatically by SyncMixin when scope changes?
+        # No, we need to trigger it manually after scope change if we want immediate effect
+        self.on_store_changed(None, self.get_data())
 
     def get_settings(self):
         return self.logic.get_settings()
 
+    def _setup_bindings(self):
+        """Setup declarative bindings for the algorithm panel."""
+        # Note: AlgorithmPanel doesn't have direct input widgets to bind TO,
+        # but it has logic that needs to be triggered.
+        # We'll use virtual properties or just keep the simplified on_store_changed.
+        # Actually, for AlgorithmPanel, it's easier to just fix on_store_changed.
+        pass
+
+    def on_store_changed(self, key, value):
+        """React to store changes with fallback support."""
+        if not self.current_batch_id:
+            return
+
+        str_id = str(self.current_batch_id)
+
+        # 1. Handle scope-specific updates
+        if (
+            key is None
+            or key == str_id
+            or (isinstance(key, str) and key.startswith(f"{str_id}."))
+        ):
+            # Get data with fallbacks manually if not using add_binding
+            all_settings = self.get_data(str_id)
+            if not all_settings or not isinstance(all_settings, dict):
+                all_settings = {}
+
+            ui_settings = {
+                "alignment": (
+                    all_settings.get("alignment_algo", "No Alignment")
+                    if all_settings.get("checkbox_align_images", False)
+                    else "No Alignment"
+                ),
+                "super_resolution": (
+                    all_settings.get("super_resolution_algo", "No Super Resolution")
+                    if all_settings.get("checkbox_super_resolution", False)
+                    else "No Super Resolution"
+                ),
+                "denoising": (
+                    all_settings.get("denoising_algo", "No Denoising")
+                    if all_settings.get("checkbox_denoising", False)
+                    else "No Denoising"
+                ),
+            }
+            # Update the UI
+            self.update_settings(ui_settings)
+
     def update_settings(self, settings):
-        """Receive updated settings from RightPanel and trigger adaptive UI."""
+        """Receive updated settings and trigger adaptive UI with debounce."""
+        self.logic.set_settings(settings)
+        self._pending_settings = settings
+        self._update_timer.start(50)  # Small delay for state stability
+
+    def _do_update_adaptive_ui(self):
+        """Perform the actual UI update from debounced timer."""
+        if self._pending_settings:
+            self._update_adaptive_ui(self._pending_settings)
+            self._pending_settings = None
+
+    def update_settings_immediate(self, settings):
+        """Bypass debounce for immediate initialization."""
         self.logic.set_settings(settings)
         self._update_adaptive_ui(settings)
 

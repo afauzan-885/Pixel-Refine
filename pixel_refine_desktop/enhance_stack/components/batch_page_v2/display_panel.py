@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Display Panel Component - Rewritten dengan pola Panorama.
 Handles image grid dan full resolution preview dengan proper drag & drop support.
@@ -14,9 +16,11 @@ from PySide6.QtWidgets import (
     QLabel,
     QComboBox,
     QGraphicsScene,
+    QMenu,
 )
 from PySide6.QtCore import Slot, Signal, Qt, QPoint, QSize
-from PySide6.QtGui import QPixmap, QColor
+from typing import Optional, TYPE_CHECKING, Any
+from PySide6.QtGui import QPixmap, QColor, QAction
 import os
 
 # Generic UI Library
@@ -99,7 +103,11 @@ class DisplayPanel(QWidget):
         self.all_cards = {}
 
         self.supported_extensions = self._build_supported_extensions()
-        self.right_panel = None
+        if TYPE_CHECKING:
+            from pixel_refine_desktop.enhance_stack.components.batch_page_v2.right_panel import (
+                RightPanel,
+            )
+        self.right_panel: Any = None
         self.placeholder_widget = None
 
         self._setup_ui()
@@ -683,30 +691,6 @@ class DisplayPanel(QWidget):
             self.right_panel._create_new_batch()
 
     # =========================================================================
-    # === 2. PUBLIC METHODS UNTUK VIEW CONTROL ===
-    # =========================================================================
-
-    def show_grid(self):
-        """Switch ke Grid View."""
-        self.display_stack.setCurrentIndex(0)
-
-        # Update Header buttons
-        self.back_btn.setVisible(False)
-
-        if self.current_batch_id:
-            self.import_button.setVisible(True)
-        else:
-            self.import_button.setVisible(False)
-
-    def show_preview(self):
-        """Switch ke Preview View."""
-        self.display_stack.setCurrentIndex(1)
-
-        # Update Header buttons
-        self.back_btn.setVisible(True)
-        self.import_button.setVisible(False)
-
-    # =========================================================================
     # === 3. PRIVATE METHODS - GRID MANAGEMENT ===
     # =========================================================================
 
@@ -816,8 +800,124 @@ class DisplayPanel(QWidget):
             card_id: ID dari card yang di-click
         """
         sender = self.sender()
-        if hasattr(sender, "_image_path"):
-            self._display_image_preview(sender._image_path)
+        image_path = getattr(sender, "_image_path", None)
+        if image_path:
+            self._display_image_preview(image_path)
+
+    def _refresh_current_batch(self):
+        """Helper to re-load current batch settings from controller/db."""
+        if not self.current_batch_id or not self.controller:
+            return
+
+        batch = self.controller.get_batch(self.current_batch_id)
+        if batch:
+            self.load_batch(
+                self.current_batch_id, batch.images, self.current_batch_name
+            )
+
+    def keyPressEvent(self, event):
+        """Handle keyboard events (Delete key)."""
+        if event.key() == Qt.Key.Key_Delete:
+            self._handle_delete_action()
+        else:
+            super().keyPressEvent(event)
+
+    def contextMenuEvent(self, event):
+        """Handle right-click context menu pada area grid."""
+        # Hanya tampilkan menu jika di dalam Grid View dan ada batch terpilih
+        if self.display_stack.currentIndex() != 0 or not self.current_batch_id:
+            return
+
+        # Check if right click hits a card
+        card_under_mouse = None
+        for card_id, card in self.all_cards.items():
+            if card.underMouse():
+                card_under_mouse = card
+                break
+
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            """
+            QMenu {
+                background-color: #FFFFFF;
+                border: 1px solid #E0E0E0;
+                border-radius: 4px;
+                padding: 5px;
+            }
+            QMenu::item {
+                padding: 5px 25px 5px 20px;
+                border-radius: 2px;
+            }
+            QMenu::item:selected {
+                background-color: #F0F0F0;
+                color: #000000;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #E0E0E0;
+                margin: 5px 0px;
+            }
+        """
+        )
+
+        # 1. Select Reference Image (Only if exactly one card is right-clicked)
+        if card_under_mouse:
+            ref_path = card_under_mouse._image_path
+            action_ref = QAction("Select Reference Image", self)
+            action_ref.triggered.connect(lambda: self._set_as_reference(ref_path))
+            menu.addAction(action_ref)
+            menu.addSeparator()
+
+        # 2. Delete Selected Images
+        if self.selected_thumbnails:
+            action_del = QAction(
+                f"Delete Images ({len(self.selected_thumbnails)})", self
+            )
+            action_del.triggered.connect(self._handle_delete_action)
+            menu.addAction(action_del)
+
+        if not menu.isEmpty():
+            menu.exec(event.globalPos())
+
+    def _set_as_reference(self, image_path):
+        """Set image as reference via controller."""
+        if self.current_batch_id and self.controller:
+            if self.controller.set_reference_image(self.current_batch_id, image_path):
+                self._refresh_current_batch()
+
+    def _handle_delete_action(self):
+        """Handle deletion of selected images."""
+        if (
+            not self.selected_thumbnails
+            or not self.current_batch_id
+            or not self.controller
+        ):
+            return
+
+        from PySide6.QtWidgets import QMessageBox
+
+        reply = QMessageBox.question(
+            self,
+            "Hapus Gambar",
+            f"Apakah Anda yakin ingin menghapus {len(self.selected_thumbnails)} gambar yang dipilih dari batch ini?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            # Get paths for selected IDs
+            paths_to_remove = []
+            for cid in list(self.selected_thumbnails):
+                if cid in self.logic.grid_items:
+                    paths_to_remove.append(self.logic.grid_items[cid]["path"])
+
+            if paths_to_remove:
+                count = self.controller.remove_images_from_batch(
+                    self.current_batch_id, paths_to_remove
+                )
+                if count > 0:
+                    # Success, clear selection and refresh
+                    self.selected_thumbnails.clear()
+                    self._refresh_current_batch()
 
     def _display_image_preview(self, image_path):
         """

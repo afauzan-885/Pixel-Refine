@@ -209,7 +209,7 @@ class BatchRepository(BaseRepository):
             FROM batch_process_image bpi
             JOIN images i ON bpi.image_id_batch = i.id
             WHERE bpi.batch_id = ?
-            ORDER BY bpi.id
+            ORDER BY bpi.is_reference_batch DESC, bpi.id ASC
         """
         return self.execute_query(query, (batch_id,))
 

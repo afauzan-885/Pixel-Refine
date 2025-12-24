@@ -1,12 +1,18 @@
+from __future__ import annotations
+import os
 from PySide6.QtWidgets import (
     QHBoxLayout,
-    QProgressBar,
-    QPushButton,
     QWidget,
-    QVBoxLayout,
     QMessageBox,
 )
 from PySide6.QtCore import Qt
+from pixel_refine_desktop.ui.resources.GenericUILibrary.store import get_store
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # Use Any for layout_instance to avoid circularity noise
+    pass
+
 
 from pixel_refine_desktop.enhance_stack.core.logic.database_manager import (
     DatabaseManager,
@@ -23,7 +29,7 @@ from pixel_refine_desktop.enhance_stack.controllers.batch_page_controller import
 )
 
 
-def setup_main_layout(layout_instance, database_manager: DatabaseManager):
+def setup_main_layout(layout_instance: Any, database_manager: DatabaseManager):
     """
     Membuat layout utama dengan Workspace (Kiri) dan Batch List (Kanan).
     Menginisialisasi Controller dan menghubungkan sinyal antar panel.
@@ -36,12 +42,17 @@ def setup_main_layout(layout_instance, database_manager: DatabaseManager):
     # Init UI Panels
     # LeftPanel class = Workspace logic (image grid + workflow settings)
     # RightPanel class = Batch List logic (batch management)
-    layout_instance.workspace_panel = LeftPanel(layout_instance.controller)
+    layout_instance.workspace_panel = LeftPanel(
+        layout_instance.controller, store=layout_instance.store
+    )
     layout_instance.batch_panel = RightPanel(
-        layout_instance.controller, left_panel=layout_instance.workspace_panel
+        layout_instance.controller,
+        left_panel=layout_instance.workspace_panel,
+        store=layout_instance.store,
     )
 
     # Set right_panel reference di display_panel untuk "New Batch" button handler
+    # We use Any type to avoid assignment errors
     layout_instance.workspace_panel.display_panel.right_panel = (
         layout_instance.batch_panel
     )
@@ -74,11 +85,6 @@ def setup_main_layout(layout_instance, database_manager: DatabaseManager):
     # Connect Image Import Signal from DisplayPanel (Drag & Drop)
     layout_instance.workspace_panel.imagesDropped.connect(
         lambda paths: _handle_images_imported(layout_instance, paths)
-    )
-
-    # Connect Algorithm Settings Change (RightPanel -> AlgorithmPanel)
-    layout_instance.batch_panel.algorithm_settings_changed.connect(
-        layout_instance.workspace_panel.algorithm_panel.update_settings
     )
 
     # Initial Sync: Pastikan AlgorithmPanel sesuai dengan pilihan default di RightPanel
@@ -182,6 +188,13 @@ class BatchPageV2Layout(QWidget):
         self.controller = None
         self.workspace_panel = None
         self.batch_panel = None
+
+        # Initialize Centralized Data Store
+        self.store = get_store()
+
+        # Bind to settings file
+        json_path = os.path.join("database", "align", "batch_parameter.json")
+        self.store.bind_to_file(json_path)
 
         # Build UI
         setup_main_layout(self, database_manager)

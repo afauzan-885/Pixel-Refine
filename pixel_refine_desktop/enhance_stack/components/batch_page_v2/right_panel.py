@@ -8,7 +8,10 @@ from PySide6.QtWidgets import (
     QSplitter,
     QScrollArea,
 )
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import Signal, Qt, QTimer
+import json
+import os
+
 
 # Generic UI Library
 from pixel_refine_desktop.ui.resources.GenericUILibrary import (
@@ -16,6 +19,7 @@ from pixel_refine_desktop.ui.resources.GenericUILibrary import (
     Button,
     FormGroup,
 )
+from pixel_refine_desktop.ui.resources.GenericUILibrary.mixins import SyncMixin
 
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.batch_process_dialog import (
     BatchProcessDialog,
@@ -26,7 +30,7 @@ from pixel_refine_desktop.ui.resources.animations.animation_manager import (
 )
 
 
-class RightPanel(QWidget):
+class RightPanel(QWidget, SyncMixin):
     """
     Batch List Panel for Enhance Stack.
     Displays a list of Batches (Projects).
@@ -36,15 +40,120 @@ class RightPanel(QWidget):
     batch_selection_cleared = Signal()  # Emits when no batch selected
     algorithm_settings_changed = Signal(dict)  # Emits new settings
 
-    def __init__(self, controller=None, left_panel=None):
+    def __init__(self, controller=None, left_panel=None, store=None):
         super().__init__()
         self.controller = controller  # Needs BatchPageController
         self.left_panel = left_panel
         self.logic = AlgorithmLogic()
         self.height_animator = HeightAnimator(self)
         self._is_collapsed = True  # Track state for resize logic
+        self.current_batch_id = None  # Track active batch for JSON persistence
+        self._is_syncing = False  # Flag to avoid recursion during sync
+
+        # Debounce timer for rapid selection changes (Breathing Room)
+        self._selection_timer = QTimer(self)
+        self._selection_timer.setSingleShot(True)
+        self._selection_timer.timeout.connect(self._do_handle_selection)
+        self._pending_selection = None
+
+        # Real-time state binding
+        if store:
+            self.bind_store(store)
+
         self._setup_ui()
         self._load_batches()
+
+    def _get_json_path(self):
+        """Return absolute path to batch_parameter.json."""
+        return os.path.join("database", "align", "batch_parameter.json")
+
+    def _load_json_state(self):
+        """Read JSON state safely."""
+        path = self._get_json_path()
+        if os.path.exists(path):
+            try:
+                with open(path, "r") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError) as e:
+                print(f"[RightPanel] Error loading JSON: {e}")
+        return {}
+
+    def _save_json_state(self, all_data):
+        """Write JSON state safely."""
+        path = self._get_json_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                json.dump(all_data, f, indent=4)
+        except IOError as e:
+            print(f"[RightPanel] Error saving JSON: {e}")
+
+    def on_store_changed(self, key, value):
+        """React to store changes (SyncMixin handles bindings)."""
+        if self._is_syncing:
+            return
+
+        # 1. Let SyncMixin handle declarative bindings (dropdowns)
+        super().on_store_changed(key, value)
+
+        # 2. Additional logic for batch-wide state changes
+        if self.current_batch_id:
+            str_id = str(self.current_batch_id)
+            if key is None or key == str_id:
+                # Refresh entire UI state from store
+                self.algorithm_settings_changed.emit(self.get_current_settings())
+
+    def _load_batch_settings(self, batch_id):
+        """
+        Load settings for specific batch from store.
+        Uses SyncMixin scope to automate updates.
+        """
+        self.current_batch_id = batch_id
+
+        # Set scope for all bindings to this batch
+        self.set_scope(str(batch_id))
+
+        # Trigger immediate refresh for all bindings in this scope
+        # (SyncMixin.on_store_changed(None, ...) handles this)
+        self.on_store_changed(None, self.get_data())
+
+        # Emit signal for adaptive UI (AlgorithmPanel)
+        self._on_settings_changed(save_to_store=False)
+
+    def _save_batch_settings(self):
+        """Save current UI values to store under the current batch scope."""
+        if not self.current_batch_id:
+            return
+
+        str_id = str(self.current_batch_id)
+        settings = {
+            "alignment_algo": self.align_form.get_value(),
+            "super_resolution_algo": self.sr_form.get_value(),
+            "denoising_algo": self.denoise_form.get_value(),
+            "checkbox_align_images": self.align_form.get_value()
+            not in ["None", "No Alignment"],
+            "checkbox_super_resolution": self.sr_form.get_value()
+            not in ["None", "No Super Resolution"],
+            "checkbox_denoising": self.denoise_form.get_value()
+            not in ["None", "No Denoising"],
+        }
+
+        # Save to store
+        # Use silent_set to update individual keys within the scope efficiently
+        # This prevents the "625.625" nesting issue if str_id was misused
+        self._store.update_bulk(
+            {
+                f"{str_id}.alignment_algo": settings["alignment_algo"],
+                f"{str_id}.super_resolution_algo": settings["super_resolution_algo"],
+                f"{str_id}.denoising_algo": settings["denoising_algo"],
+                f"{str_id}.checkbox_align_images": settings["checkbox_align_images"],
+                f"{str_id}.checkbox_super_resolution": settings[
+                    "checkbox_super_resolution"
+                ],
+                f"{str_id}.checkbox_denoising": settings["checkbox_denoising"],
+            },
+            save=True,
+        )
 
     def _setup_ui(self):
         main_layout = QVBoxLayout(self)
@@ -124,6 +233,9 @@ class RightPanel(QWidget):
         self.align_form.value_changed.connect(self._on_settings_changed)
         self.scroll_content_layout.addWidget(self.align_form)
 
+        # Declarative Bindings: Link to Store via SyncMixin
+        self.add_binding("alignment_algo", self.align_form, fallback="No Alignment")
+
         # Super Resolution FormGroup
         sr_names = self.logic.get_algorithm_names("super_resolution")
         self.sr_form = FormGroup("Super Resolution", input_type="select")
@@ -132,6 +244,9 @@ class RightPanel(QWidget):
             self.sr_form.set_value(sr_names[0])
         self.sr_form.value_changed.connect(self._on_settings_changed)
         self.scroll_content_layout.addWidget(self.sr_form)
+        self.add_binding(
+            "super_resolution_algo", self.sr_form, fallback="No Super Resolution"
+        )
 
         # Denoising FormGroup
         denoise_names = self.logic.get_algorithm_names("denoising")
@@ -141,6 +256,7 @@ class RightPanel(QWidget):
             self.denoise_form.set_value(denoise_names[0])
         self.denoise_form.value_changed.connect(self._on_settings_changed)
         self.scroll_content_layout.addWidget(self.denoise_form)
+        self.add_binding("denoising_algo", self.denoise_form, fallback="No Denoising")
 
         self.scroll_content_layout.addStretch()
         self.scroll_area.setWidget(self.scroll_content)
@@ -192,16 +308,25 @@ class RightPanel(QWidget):
             # For smaller screens, let splitter handle it or force 1:1 if needed
             pass
 
-    def _on_settings_changed(self, _=None):
-        """Emit current settings."""
+    def _on_settings_changed(self, save_to_store=True):
+        """Emit current settings and optionally save to persistence."""
         settings = {
             "alignment": self.align_form.get_value() or "",
             "super_resolution": self.sr_form.get_value() or "",
             "denoising": self.denoise_form.get_value() or "",
         }
+
+        # 1. Emit realtime signal for UI adaptation
         self.algorithm_settings_changed.emit(settings)
-        # Also update local logic state if needed (though RightPanel is mainly selection UI)
-        self.logic.set_settings(settings)
+
+        # 2. Update local logic
+        # settings is Dict[str, str], which is compatible with Dict[str, Optional[str]]
+        self.logic.set_settings(settings)  # type: ignore
+        # Note: logic.set_settings returns bool, but we ignore it here
+
+        # 3. Save to Store if triggered by user interaction
+        if save_to_store and self.current_batch_id is not None:
+            self._save_batch_settings()
 
     def get_current_settings(self):
         """Public accessor for settings."""
@@ -273,7 +398,17 @@ class RightPanel(QWidget):
         return max(150, min(total_h, 280))
 
     def _on_selection_changed(self, selected_values):
-        from PySide6.QtCore import QTimer
+        """Buffer selection change to prevent UI lag during rapid clicking."""
+        self._pending_selection = selected_values
+        self._selection_timer.start(100)  # 300ms breathing room
+
+    def _do_handle_selection(self):
+        """Actual logic for handling batch selection after debounce."""
+        if self._pending_selection is None:
+            return
+
+        selected_values = self._pending_selection
+        self._pending_selection = None
 
         if not self.left_panel or not self.left_panel.display_panel:
             return
@@ -298,6 +433,11 @@ class RightPanel(QWidget):
             self.splitter.setStretchFactor(1, 1)
 
             batch_id = int(selected_values[0])
+            self.current_batch_id = batch_id  # Update tracking ID
+
+            # Load settings from JSON for this batch
+            self._load_batch_settings(batch_id)
+
             # Safely get the batch name from the selected item's label
             selected_labels = self.list_group.get_selected_labels()
             batch_name = selected_labels[0] if selected_labels else ""
@@ -314,6 +454,7 @@ class RightPanel(QWidget):
             QTimer.singleShot(300, lambda: self.splitter.setSizes([10000, 0]))
 
             self.left_panel.display_panel.set_header_title("No batch selected")
+            self.current_batch_id = None  # Clear tracking
             self.batch_selection_cleared.emit()
 
     def _on_process_all_clicked(self):
