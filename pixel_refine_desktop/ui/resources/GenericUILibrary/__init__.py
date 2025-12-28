@@ -126,7 +126,7 @@ from .theme import Theme
 
 # Real-time Core
 from .store import DataStore, get_store
-from .mixins import RealtimeMixin
+from .mixins import RealtimeMixin, SyncMixin
 
 # Define what's available when using "from GenericUILibrary import *"
 __all__ = [
@@ -209,4 +209,5 @@ __all__ = [
     "DataStore",
     "get_store",
     "RealtimeMixin",
+    "SyncMixin",
 ]

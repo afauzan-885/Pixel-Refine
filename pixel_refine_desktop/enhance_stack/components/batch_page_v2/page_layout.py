@@ -21,6 +21,7 @@ from pixel_refine_desktop.ui.views.settings.General.Language import language_con
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.left_panel import (
     LeftPanel,
 )
+from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import BatchImageImportThreading
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.right_panel import (
     RightPanel,
 )
@@ -106,19 +107,13 @@ def _load_batch_content(layout_instance, batch_id):
 
 
 def _handle_images_imported(layout_instance, file_paths):
-    """
-    Handle imported images dari drag & drop.
-    Add images ke current batch di database.
-
-    Args:
-        layout_instance: BatchPageV2Layout instance
-        file_paths: List of image file paths dari drop
-    """
     if not file_paths:
         return
 
-    # Get current batch ID dari display panel
-    current_batch_id = layout_instance.workspace_panel.display_panel.current_batch_id
+    # Get current batch ID
+    display_panel = layout_instance.workspace_panel.display_panel
+    current_batch_id = display_panel.current_batch_id
+    
     if not current_batch_id:
         QMessageBox.warning(
             layout_instance,
@@ -127,35 +122,47 @@ def _handle_images_imported(layout_instance, file_paths):
         )
         return
 
+    # --- PERBAIKAN: GUNAKAN THREADING ---
     try:
-        # Add images ke batch di database
-        count = layout_instance.controller.add_images_to_batch(
-            current_batch_id, file_paths
+        # Buat instance thread import khusus batch
+        # Simpan reference di layout_instance agar tidak terkena garbage collection
+        layout_instance.import_worker = BatchImageImportThreading(
+            database_manager=layout_instance.database_manager,
+            image_paths=file_paths,
+            batch_id=current_batch_id,
+            batch_size=5,  # Batch kecil agar update UI lebih sering
+            delay_ms=10    # Delay tipis agar UI punya waktu bernapas
         )
-        if count > 0:
-            # Reload batch untuk display updated images
-            batch = layout_instance.controller.get_batch(current_batch_id)
-            if batch:
-                layout_instance.workspace_panel.load_batch(
-                    current_batch_id, batch.images, batch.name
-                )
 
-            QMessageBox.information(
-                layout_instance,
-                "Images Added",
-                f"Successfully added {count} image(s) to batch.",
+        # 1. Hubungkan ke fungsi add_single_image_to_grid (Real-time update)
+        layout_instance.import_worker.image_added_signal.connect(
+            display_panel.add_single_image_to_grid
+        )
+
+        # 2. Hubungkan progress bar (jika ada di algorithm panel)
+        if hasattr(layout_instance.workspace_panel.algorithm_panel, "progress_bar"):
+            prog_bar = layout_instance.workspace_panel.algorithm_panel.progress_bar
+            prog_bar.setVisible(True)
+            layout_instance.import_worker.progress_signal.connect(
+                lambda val, left: prog_bar.setValue(val)
             )
-        else:
-            QMessageBox.warning(
-                layout_instance,
-                "No Images Added",
-                "Could not add images. They may already exist in the batch.",
-            )
+
+        # 3. Handler saat selesai (Tanpa QMessageBox)
+        def on_finished(total):
+            if hasattr(layout_instance.workspace_panel.algorithm_panel, "progress_bar"):
+                layout_instance.workspace_panel.algorithm_panel.progress_bar.setVisible(False)
+            print(f"Successfully imported {total} images to batch {current_batch_id}")
+
+        layout_instance.import_worker.completion_signal.connect(on_finished)
+
+        # 4. Jalankan thread
+        layout_instance.import_worker.start()
+
     except Exception as e:
         QMessageBox.critical(
             layout_instance,
-            "Database Error",
-            f"Failed to add images to batch: {str(e)}",
+            "Import Error",
+            f"Failed to start background import: {str(e)}",
         )
 
 

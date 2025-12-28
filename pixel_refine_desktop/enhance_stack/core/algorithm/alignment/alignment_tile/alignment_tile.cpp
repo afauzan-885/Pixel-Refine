@@ -375,7 +375,9 @@ namespace AlignmentFlowHelpers
             std::vector<float>& comp_buf)
     {
         // Parameter Threshold Adaptive
-        constexpr float ADAPTIVE_THRESHOLD = 0.05f; 
+        constexpr float ADAPTIVE_THRESHOLD = 0.05f;
+        constexpr float REFINEMENT_QUALITY_THRESHOLD = 0.01f; // Cost threshold untuk apply refinement
+        constexpr float MIN_COST_RANGE = 0.001f;  // Minimum cost range untuk meaningful parabolic fit
 
         const int h_layer = ref_layer.rows;
         const int w_layer = ref_layer.cols;
@@ -418,43 +420,145 @@ namespace AlignmentFlowHelpers
             return true;
         };
 
-        // --- PHASE 1: Cek Center ---
+        // --- PHASE 1: Collect 9-point costs untuk cache-based parabolic refinement ---
+        // Array untuk menyimpan 9 costs dalam layout row-major:
+        // [-1,-1] [0,-1] [1,-1]
+        // [-1, 0] [0, 0] [1, 0]
+        // [-1, 1] [0, 1] [1, 1]
+        float costs_3x3[9];
+        int cost_idx = 0;
         float best_cost = std::numeric_limits<float>::max();
-        evaluate_offset(center_dx, center_dy, best_cost);
-        
         int best_dx = center_dx;
         int best_dy = center_dy;
 
-        // Normalisasi cost agar thresholding konsisten
-        float normalized_current_cost = best_cost * tile_area_inv;
-
-        // --- PHASE 2: Adaptive Correction (Cross Search) ---
-        // Hanya dijalankan jika hasil center kurang memuaskan
-        if (normalized_current_cost > ADAPTIVE_THRESHOLD)
+        for (int ddy = -1; ddy <= 1; ++ddy)
         {
-            // Pola Cross (Atas, Bawah, Kiri, Kanan)
-            const int neighbors[4][2] = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
-
-            // Loop unrolling hint untuk compiler (opsional, tapi bagus)
-            #pragma unroll
-            for (int i = 0; i < 4; ++i) {
-                int check_dx = center_dx + neighbors[i][0];
-                int check_dy = center_dy + neighbors[i][1];
+            for (int ddx = -1; ddx <= 1; ++ddx)
+            {
+                int check_dx = center_dx + ddx;
+                int check_dy = center_dy + ddy;
                 float neighbor_cost;
 
-                // Evaluasi tetangga
                 if (evaluate_offset(check_dx, check_dy, neighbor_cost)) {
+                    costs_3x3[cost_idx] = neighbor_cost * tile_area_inv;
+                    
                     if (neighbor_cost < best_cost) {
                         best_cost = neighbor_cost;
                         best_dx = check_dx;
                         best_dy = check_dy;
                     }
+                } else {
+                    costs_3x3[cost_idx] = std::numeric_limits<float>::max();
                 }
+                cost_idx++;
+            }
+        }
+
+        const float center_cost = costs_3x3[4]; // [0,0]
+        const float normalized_center_cost = center_cost;
+
+        // --- PHASE 2: Conditional Cache-Based Parabolic Refinement ---
+        // Hanya apply jika: ada room untuk improvement dan ada signal yang cukup
+        cv::Point2f final_flow = cv::Point2f(static_cast<float>(best_dx), static_cast<float>(best_dy));
+
+        // Count valid costs dan hitung cost range
+        float cost_min = std::numeric_limits<float>::max();
+        float cost_max = -std::numeric_limits<float>::max();
+        int valid_costs = 0;
+
+        for (int i = 0; i < 9; ++i) {
+            if (costs_3x3[i] != std::numeric_limits<float>::max()) {
+                cost_min = std::min(cost_min, costs_3x3[i]);
+                cost_max = std::max(cost_max, costs_3x3[i]);
+                valid_costs++;
+            }
+        }
+
+        float cost_range = cost_max - cost_min;
+
+        // --- LIGHTWEIGHT OUTLIER FILTERING ---
+        // Calculate mean & std dari valid costs
+        float cost_sum = 0.0f;
+        for (int i = 0; i < 9; ++i) {
+            if (costs_3x3[i] != std::numeric_limits<float>::max()) {
+                cost_sum += costs_3x3[i];
+            }
+        }
+        float cost_mean = (valid_costs > 0) ? cost_sum / valid_costs : 0.0f;
+
+        // Calculate standard deviation
+        float cost_sq_sum = 0.0f;
+        for (int i = 0; i < 9; ++i) {
+            if (costs_3x3[i] != std::numeric_limits<float>::max()) {
+                float diff = costs_3x3[i] - cost_mean;
+                cost_sq_sum += diff * diff;
+            }
+        }
+        float cost_std = (valid_costs > 1) ? std::sqrt(cost_sq_sum / (valid_costs - 1)) : 0.0f;
+
+        // Mark extreme outliers sebagai invalid (> mean + 2*sigma)
+        float outlier_threshold = cost_mean + 2.0f * cost_std;
+        int filtered_valid_costs = 0;
+        for (int i = 0; i < 9; ++i) {
+            if (costs_3x3[i] != std::numeric_limits<float>::max() && costs_3x3[i] > outlier_threshold) {
+                costs_3x3[i] = std::numeric_limits<float>::max();
+            } else if (costs_3x3[i] != std::numeric_limits<float>::max()) {
+                filtered_valid_costs++;
+            }
+        }
+
+        // Refinement condition: 
+        // 1. Sufficient valid costs untuk parabolic fit (after filtering)
+        // 2. Center cost > threshold (ada room untuk improvement)
+        // 3. Sufficient cost range (signal yang jelas)
+        if (filtered_valid_costs >= 5 && normalized_center_cost > REFINEMENT_QUALITY_THRESHOLD && cost_range > MIN_COST_RANGE)
+        {
+            // Parabolic fitting using CACHED costs (no new function calls!)
+            float left_cost = costs_3x3[3];   // [-1,0]
+            float right_cost = costs_3x3[5];  // [1,0]
+            float top_cost = costs_3x3[1];    // [0,-1]
+            float bottom_cost = costs_3x3[7]; // [0,1]
+
+            // Only proceed if cardinal neighbors are valid (not filtered as outliers)
+            if (left_cost != std::numeric_limits<float>::max() && 
+                right_cost != std::numeric_limits<float>::max() &&
+                top_cost != std::numeric_limits<float>::max() && 
+                bottom_cost != std::numeric_limits<float>::max())
+            {
+                // X-direction parabolic fit (gunakan left, center, right)
+                float delta_x = 0.0f;
+                {
+                    float c_coeff = (right_cost + left_cost - 2.0f * center_cost) / 2.0f;
+                    if (std::fabs(c_coeff) > 1e-6f) {
+                        float b_coeff = (right_cost - left_cost) / 2.0f;
+                        delta_x = -b_coeff / (2.0f * c_coeff);
+                        // Clamp untuk mencegah outlier
+                        delta_x = std::max(-0.5f, std::min(0.5f, delta_x));
+                    }
+                }
+
+                // Y-direction parabolic fit (gunakan top, center, bottom)
+                float delta_y = 0.0f;
+                {
+                    float c_coeff = (bottom_cost + top_cost - 2.0f * center_cost) / 2.0f;
+                    if (std::fabs(c_coeff) > 1e-6f) {
+                        float b_coeff = (bottom_cost - top_cost) / 2.0f;
+                        delta_y = -b_coeff / (2.0f * c_coeff);
+                        // Clamp untuk mencegah outlier
+                        delta_y = std::max(-0.5f, std::min(0.5f, delta_y));
+                    }
+                }
+
+                // Apply refined offset
+                final_flow = cv::Point2f(
+                    static_cast<float>(best_dx) + delta_x,
+                    static_cast<float>(best_dy) + delta_y
+                );
             }
         }
 
         // Output Result
-        out_candidate.flow = cv::Point2f(static_cast<float>(best_dx), static_cast<float>(best_dy));
+        out_candidate.flow = final_flow;
         out_candidate.cost = best_cost * tile_area_inv; 
         
         return true;
@@ -463,7 +567,6 @@ namespace AlignmentFlowHelpers
     static inline cv::Point2f selectBestCandidate(
         const std::vector<Candidate> &candidates,
         const cv::Mat &guide_flow, // Ganti nama biar jelas (ini upsampled flow)
-        const cv::Mat &ref_layer,  // Parameter ini jadi TIDAK DIPAKAI (Hapus Sobel)
         int tile_y, int tile_x,
         int tile_h, int tile_w)
     {
@@ -522,12 +625,7 @@ namespace AlignmentFlowHelpers
         const float avg_x = avg_neigh[0];
         const float avg_y = avg_neigh[1];
 
-        // --- 3. Hitung Lambda (Weight) secara Ringan ---
-        // Kita ganti logika Sobel+Exp dengan logika Linear sederhana.
-        
-        // Logika: Semakin besar variance tetangga, semakin kita JANGAN percaya tetangga (Lambda kecil).
-        // Semakin jelek cost appearance (nilai besar), semakin kita BUTUH tetangga (Lambda besar).
-        
+        // --- 3. Hitung Lambda (Weight) secara Ringan ---    
         float variance = sum_sq_diff * inv_count;
         
         // Base lambda
@@ -591,26 +689,35 @@ namespace AlignmentFlowHelpers
         flow_vectors.clear();
         flow_vectors.reserve(flow.total() / 4);
 
-        const float min_magnitude = std::max(0.1f,
-                                             static_cast<float>(std::min(flow.rows, flow.cols)) * 0.001f);
+        const float min_magnitude_for_ransac = std::max(0.2f,
+                                                        static_cast<float>(std::min(flow.rows, flow.cols)) * 0.002f); // Increased min_magnitude
 
-        // Collect valid flow vectors
+        // Collect valid flow vectors and calculate their magnitudes
+        std::vector<float> magnitudes;
         for (int r = 0; r < flow.rows; ++r)
         {
             const cv::Vec2f *row_ptr = flow.ptr<cv::Vec2f>(r);
             for (int c = 0; c < flow.cols; ++c)
             {
                 const cv::Vec2f &vec = row_ptr[c];
-                if (cv::norm(vec) > min_magnitude)
+                float mag = cv::norm(vec);
+                if (mag > min_magnitude_for_ransac)
+                {
                     flow_vectors.emplace_back(vec[0], vec[1]);
+                    magnitudes.push_back(mag);
+                }
             }
         }
 
         if (flow_vectors.size() <= 12)
             return;
 
+        // Calculate adaptive distance_threshold
+        std::sort(magnitudes.begin(), magnitudes.end());
+        float median_magnitude = magnitudes[magnitudes.size() / 2];
+        const float distance_threshold = std::max(1.0f, median_magnitude * 0.2f); // 20% of median magnitude, min 1.0f
+
         // RANSAC parameters
-        const float distance_threshold = 1.2f;
         const int min_inliers_needed = static_cast<int>(flow_vectors.size() * 0.5);
         const int max_iterations = std::min(100, static_cast<int>(flow_vectors.size()));
         const int early_stop_threshold = static_cast<int>(flow_vectors.size() * 0.8);
@@ -622,7 +729,7 @@ namespace AlignmentFlowHelpers
         for (int iter = 0; iter < max_iterations && max_inliers < early_stop_threshold; ++iter)
         {
             const int rand_idx = cv::theRNG().uniform(0, static_cast<int>(flow_vectors.size()));
-            const cv::Point2f &hypothesis_flow = flow_vectors[rand_idx];
+            const cv::Point2f hypothesis_flow = flow_vectors[rand_idx];
 
             int current_inliers = 0;
             cv::Vec2f inlier_sum(0, 0);
@@ -646,6 +753,235 @@ namespace AlignmentFlowHelpers
 
         if (max_inliers > min_inliers_needed)
             flow.setTo(cv::Scalar(best_global_flow[0], best_global_flow[1]));
+    }
+
+    /**
+     * Spatial/Local RANSAC untuk final flow post-processing (OPTIMIZED)
+     * Adaptive window processing dengan early termination untuk low-variance regions
+     */
+    static void spatialLocalRANSACCleanup(
+        cv::Mat &flow,
+        int window_size = 96,           // Larger window = fewer windows = faster
+        float overlap_ratio = 0.25f)    // Reduced overlap untuk speed (less blending overhead)
+    {
+        if (flow.empty() || flow.type() != CV_32FC2)
+            return;
+
+        const int h = flow.rows;
+        const int w = flow.cols;
+        const int step = static_cast<int>(window_size * (1.0f - overlap_ratio));
+        
+        // --- OPTIMIZATION 1: Pre-allocate Gaussian kernel once ---
+        static thread_local cv::Mat gaussian_kernel_cached;
+        static thread_local int cached_window_size = 0;
+        
+        if (cached_window_size != window_size) {
+            cv::Mat kernel_1d = cv::getGaussianKernel(window_size, window_size * 0.3f, CV_32F);
+            gaussian_kernel_cached = kernel_1d * kernel_1d.t();
+            cached_window_size = window_size;
+        }
+        const cv::Mat &weight_kernel = gaussian_kernel_cached;
+
+        // Output flow (in-place blending buffer)
+        cv::Mat cleaned_flow = cv::Mat::zeros(flow.size(), CV_32FC2);
+        cv::Mat weight_accumulator = cv::Mat::zeros(flow.size(), CV_32F);
+
+        // --- OPTIMIZATION 2: Thread-local buffers ---
+        const int max_pixels = window_size * window_size;
+        static thread_local std::vector<float> magnitudes_buffer;
+        if (magnitudes_buffer.capacity() < max_pixels) {
+            magnitudes_buffer.reserve(max_pixels);
+        }
+
+        // Process setiap window
+        for (int wy = 0; wy <= h - window_size; wy += step)
+        {
+            for (int wx = 0; wx <= w - window_size; wx += step)
+            {
+                cv::Rect window_roi(wx, wy, window_size, window_size);
+                cv::Mat window_flow = flow(window_roi);
+
+                // --- OPTIMIZATION 3: Use fixed array + early variance check ---
+                magnitudes_buffer.clear();
+                float mag_sum = 0.0f;
+                
+                // Single pass: collect magnitudes & sum
+                for (int r = 0; r < window_size; ++r)
+                {
+                    const cv::Vec2f* row_ptr = window_flow.ptr<cv::Vec2f>(r);
+                    for (int c = 0; c < window_size; ++c)
+                    {
+                        const cv::Vec2f& f = row_ptr[c];
+                        float mag = std::sqrt(f[0]*f[0] + f[1]*f[1]);  // Manual sqrt faster than cv::norm
+                        magnitudes_buffer.push_back(mag);
+                        mag_sum += mag;
+                    }
+                }
+
+                // Early exit: skip RANSAC jika flow field sangat uniform (variance kecil)
+                float mag_mean = mag_sum / magnitudes_buffer.size();
+                float mag_variance = 0.0f;
+                for (float mag : magnitudes_buffer) {
+                    float diff = mag - mag_mean;
+                    mag_variance += diff * diff;
+                }
+                mag_variance /= magnitudes_buffer.size();
+
+                // --- OPTIMIZATION 4: Skip RANSAC untuk low-variance windows (common case) ---
+                // Jika variance sangat kecil, flow sudah clean, skip processing
+                if (mag_variance < 0.1f) {
+                    // Ultra-fast path: just copy original dengan full weight
+                    for (int r = 0; r < window_size; ++r)
+                    {
+                        const float* w_row = weight_kernel.ptr<float>(r);
+                        const cv::Vec2f* src_row = window_flow.ptr<cv::Vec2f>(r);
+                        cv::Vec2f* out_row = cleaned_flow.ptr<cv::Vec2f>(wy + r, wx);
+                        float* acc_row = weight_accumulator.ptr<float>(wy + r, wx);
+
+                        for (int c = 0; c < window_size; ++c)
+                        {
+                            float weight = w_row[c];
+                            out_row[c][0] += src_row[c][0] * weight;
+                            out_row[c][1] += src_row[c][1] * weight;
+                            acc_row[c] += weight;
+                        }
+                    }
+                    continue;  // Skip to next window
+                }
+
+                // Calculate adaptive distance threshold
+                std::nth_element(magnitudes_buffer.begin(), 
+                                magnitudes_buffer.begin() + magnitudes_buffer.size()/2,
+                                magnitudes_buffer.end());
+                float median_magnitude = magnitudes_buffer[magnitudes_buffer.size() / 2];
+                float distance_threshold = std::max(1.0f, median_magnitude * 0.25f);
+
+                // --- OPTIMIZATION 5: Adaptive RANSAC iterations based on variance ---
+                int max_iterations;
+                if (mag_variance < 1.0f) {
+                    max_iterations = 10;  // Low variance, fewer iterations needed
+                } else if (mag_variance < 5.0f) {
+                    max_iterations = 20;  // Medium variance
+                } else {
+                    max_iterations = 30;  // High variance (increased dari 50)
+                }
+                
+                const int min_inliers_needed = static_cast<int>(window_size * window_size * 0.4f);  // Increased threshold
+
+                // RANSAC untuk window
+                cv::Vec2f best_local_flow(0, 0);
+                int max_inliers = 0;
+
+                // --- OPTIMIZATION 6: Pre-collect flow vectors only if needed (delayed allocation) ---
+                std::vector<cv::Point2f> flow_vectors;
+                flow_vectors.reserve(max_pixels);
+
+                for (int r = 0; r < window_size; ++r)
+                {
+                    const cv::Vec2f* row_ptr = window_flow.ptr<cv::Vec2f>(r);
+                    for (int c = 0; c < window_size; ++c)
+                    {
+                        const cv::Vec2f& f = row_ptr[c];
+                        flow_vectors.emplace_back(f[0], f[1]);
+                    }
+                }
+
+                // RANSAC loop
+                for (int iter = 0; iter < max_iterations && max_inliers < min_inliers_needed; ++iter)
+                {
+                    const int rand_idx = cv::theRNG().uniform(0, static_cast<int>(flow_vectors.size()));
+                    const cv::Point2f &hypothesis_flow = flow_vectors[rand_idx];
+
+                    int current_inliers = 0;
+                    float inlier_sum_x = 0.0f;
+                    float inlier_sum_y = 0.0f;
+
+                    // --- OPTIMIZATION 7: Unroll inner loop for better vectorization ---
+                    for (const auto &vec : flow_vectors)
+                    {
+                        float dx = vec.x - hypothesis_flow.x;
+                        float dy = vec.y - hypothesis_flow.y;
+                        float dist_sq = dx*dx + dy*dy;  // Use squared distance (faster than sqrt)
+                        
+                        if (dist_sq < distance_threshold * distance_threshold)
+                        {
+                            current_inliers++;
+                            inlier_sum_x += vec.x;
+                            inlier_sum_y += vec.y;
+                        }
+                    }
+
+                    if (current_inliers > max_inliers)
+                    {
+                        max_inliers = current_inliers;
+                        float inv_count = 1.0f / static_cast<float>(current_inliers);
+                        best_local_flow = cv::Vec2f(inlier_sum_x * inv_count, inlier_sum_y * inv_count);
+                    }
+                }
+
+                // Apply cleaned flow ke output dengan Gaussian weighting
+                if (max_inliers > min_inliers_needed)
+                {
+                    // RANSAC success: use cleaned flow
+                    for (int r = 0; r < window_size; ++r)
+                    {
+                        const float* w_row = weight_kernel.ptr<float>(r);
+                        cv::Vec2f* out_row = cleaned_flow.ptr<cv::Vec2f>(wy + r, wx);
+                        float* acc_row = weight_accumulator.ptr<float>(wy + r, wx);
+
+                        for (int c = 0; c < window_size; ++c)
+                        {
+                            float weight = w_row[c];
+                            out_row[c][0] += best_local_flow[0] * weight;
+                            out_row[c][1] += best_local_flow[1] * weight;
+                            acc_row[c] += weight;
+                        }
+                    }
+                }
+                else
+                {
+                    // RANSAC failed: use original dengan reduced weight
+                    for (int r = 0; r < window_size; ++r)
+                    {
+                        const float* w_row = weight_kernel.ptr<float>(r);
+                        const cv::Vec2f* src_row = window_flow.ptr<cv::Vec2f>(r);
+                        cv::Vec2f* out_row = cleaned_flow.ptr<cv::Vec2f>(wy + r, wx);
+                        float* acc_row = weight_accumulator.ptr<float>(wy + r, wx);
+
+                        for (int c = 0; c < window_size; ++c)
+                        {
+                            float weight = w_row[c] * 0.3f;  // Further reduced weight
+                            out_row[c][0] += src_row[c][0] * weight;
+                            out_row[c][1] += src_row[c][1] * weight;
+                            acc_row[c] += weight;
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- OPTIMIZATION 8: Fast normalization kernel ---
+        for (int r = 0; r < h; ++r)
+        {
+            cv::Vec2f* out_row = cleaned_flow.ptr<cv::Vec2f>(r);
+            float* acc_row = weight_accumulator.ptr<float>(r);
+
+            for (int c = 0; c < w; ++c)
+            {
+                float weight = acc_row[c];
+                if (weight > 1e-6f) {
+                    float inv_weight = 1.0f / weight;
+                    out_row[c][0] *= inv_weight;
+                    out_row[c][1] *= inv_weight;
+                } else {
+                    // Keep original if no weight accumulated (shouldn't happen)
+                    out_row[c] = flow.at<cv::Vec2f>(r, c);
+                }
+            }
+        }
+
+        // Copy cleaned flow back to original
+        cleaned_flow.copyTo(flow);
     }
 
     static inline float calculateCostAtIntegerPos(
@@ -699,8 +1035,8 @@ namespace AlignmentFlowHelpers
 
         // --- 1. Inisialisasi Flow ---
         cv::Mat flow;
-        if (is_coarsest_layer) flow = initializeCoarsestFlow(ref_layer);
-        else flow = upsamplingFlow(previous_level_flow, ref_layer);
+        if (is_coarsest_layer) flow = AlignmentFlowHelpers::initializeCoarsestFlow(ref_layer);
+        else flow = AlignmentFlowHelpers::upsamplingFlow(previous_level_flow, ref_layer);
 
         // --- 2. Setup Tile Size ---
         // Clamp tile size agar tidak lebih besar dari gambar layer saat ini
@@ -758,7 +1094,7 @@ namespace AlignmentFlowHelpers
                     temp_search_results.clear();
 
                     // 1. Dapatkan Kandidat
-                    generateCandidateFlows(temp_initial_flows, layer_index, total_layers, previous_level_flow, flow, y, x, current_tile_h, current_tile_w);
+                    AlignmentFlowHelpers::generateCandidateFlows(temp_initial_flows, layer_index, total_layers, previous_level_flow, flow, y, x, current_tile_h, current_tile_w);
 
                     // 2. Evaluasi Kandidat
                     
@@ -766,7 +1102,7 @@ namespace AlignmentFlowHelpers
                     if (is_finest_layer) 
                     {
                         // Copy Reference Tile SEKALI saja
-                        copyTileToContiguousBuffer(ref_layer, y, x, current_tile_h, current_tile_w, local_ref_buffer);
+                        AlignmentFlowHelpers::copyTileToContiguousBuffer(ref_layer, y, x, current_tile_h, current_tile_w, local_ref_buffer);
                         integer_cost_cache.clear();
 
                         float best_cost_so_far = std::numeric_limits<float>::max();
@@ -790,7 +1126,7 @@ namespace AlignmentFlowHelpers
                                 int test_y = y + i_dy;
                                 int test_x = x + i_dx;
                                 
-                                cost = calculateCostAtIntegerPos(
+                                cost = AlignmentFlowHelpers::calculateCostAtIntegerPos(
                                     local_ref_buffer, comp_layer, 
                                     test_y, test_x, 
                                     current_tile_h, current_tile_w, 
@@ -819,7 +1155,7 @@ namespace AlignmentFlowHelpers
                     {
                         for (const auto &initial_vec : temp_initial_flows)
                         {
-                            searchCoarseLevelDirect(ref_layer, comp_layer, y, x, current_tile_h, current_tile_w, initial_vec, current_layer_search_dist, temp_search_results);
+                            AlignmentFlowHelpers::searchCoarseLevelDirect(ref_layer, comp_layer, y, x, current_tile_h, current_tile_w, initial_vec, current_layer_search_dist, temp_search_results);
                             
                             // Early exit untuk coarse search
                             if (!temp_search_results.empty() && 
@@ -834,12 +1170,8 @@ namespace AlignmentFlowHelpers
                     cv::Point2f chosen_flow;
                     if (!temp_search_results.empty())
                     {
-                        // Sederhanakan pemilihan: Ambil cost terendah (Min Element)
-                        // Kita skip logika spatial weighting kompleks di sini demi kecepatan
-                        auto best_it = std::min_element(temp_search_results.begin(), temp_search_results.end(),
-                             [](const Candidate &a, const Candidate &b) { return a.cost < b.cost; });
-                        
-                        chosen_flow = best_it->flow;
+                        chosen_flow = AlignmentFlowHelpers::selectBestCandidate(
+                            temp_search_results, flow, y, x, current_tile_h, current_tile_w);
                     }
                     else
                     {
@@ -914,9 +1246,9 @@ namespace AlignmentFlowHelpers
 
         // B. RANSAC (Hanya di level paling kasar)
         // Untuk memastikan alignment global awal benar
-        if (is_coarsest_layer)
+        if (layer_index >= total_layers - 2)
         {
-            RANSACOutlierRemoval(flow, layer_index, total_layers);
+            AlignmentFlowHelpers::RANSACOutlierRemoval(flow, layer_index, total_layers);
         }
 
         return flow;
@@ -1003,6 +1335,13 @@ extern "C"
         }
 
         flow = std::move(previous_level_flow);
+
+        // === BAGIAN C.5: Post-Processing - Spatial/Local RANSAC Cleanup ===
+        // Membersihkan flow field dengan local RANSAC per window
+        // window_size=64, overlap=50% (step=32)
+        {
+            AlignmentFlowHelpers::spatialLocalRANSACCleanup(flow, 64, 0.5f);
+        }
 
         // === BAGIAN D: Finalisasi dan Pengembalian Data ===
         float *output_flow_data = nullptr;

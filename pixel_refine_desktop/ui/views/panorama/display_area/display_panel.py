@@ -20,7 +20,9 @@ from PySide6.QtGui import QPixmap, QColor
 import os
 
 # Generic UI Library
-from pixel_refine_desktop.enhance_stack.components.batch_page_v2.multiple_batch_delete_widget import MultipleBatchDeleteWidget
+from pixel_refine_desktop.enhance_stack.components.batch_page_v2.multiple_batch_delete_widget import (
+    MultipleBatchDeleteWidget,
+)
 from pixel_refine_desktop.ui.resources.GenericUILibrary import (
     ImageCard,
     Button,
@@ -84,7 +86,7 @@ class DisplayPanel(QWidget):
         self.display_container.setStyleSheet(
             """
             #DisplayContainerBase {
-                background-color: #FFFFFF;
+                background-color: #333;
             }
         """
         )
@@ -208,7 +210,7 @@ class DisplayPanel(QWidget):
         self.grid_view_widget = QWidget()
         # Inner content gets a slightly darker background to make the white border visible
         self.grid_view_widget.setStyleSheet(
-            "background-color: #F0F0F0; border-radius: 4px;"
+            "background-color: #333; border-radius: 4px;"
         )
         grid_view_layout = QVBoxLayout(self.grid_view_widget)
         grid_view_layout.setContentsMargins(
@@ -257,7 +259,6 @@ class DisplayPanel(QWidget):
 
         # --- INDEX 2: MULTIPLE BATCH DELETE CONFIRMATION ---
         self._setup_delete_confirmation_widget()
-
 
         # Add Stack to Main Layout (via Container)
         self.display_container.add_widget(self.display_stack)
@@ -969,7 +970,9 @@ class DisplayPanel(QWidget):
 
         # Connect signals
         self.delete_confirmation_widget.no_clicked.connect(self.show_grid)
-        self.delete_confirmation_widget.yes_clicked.connect(self._delete_confirmed_batches)
+        self.delete_confirmation_widget.yes_clicked.connect(
+            self._delete_confirmed_batches
+        )
 
     def show_delete_confirmation(self, batch_ids: list, batch_names: list):
         """
@@ -981,7 +984,7 @@ class DisplayPanel(QWidget):
         """
         self._batch_ids_to_delete = batch_ids
         self.delete_confirmation_widget.set_batch_info(batch_names)
-        self.display_stack.setCurrentIndex(2) # Index 2 for delete confirmation
+        self.display_stack.setCurrentIndex(2)  # Index 2 for delete confirmation
 
         # Update header
         self.set_header_title("Confirm Deletion")
@@ -990,19 +993,18 @@ class DisplayPanel(QWidget):
         self.preview_process_btn.setVisible(False)
         self.result_selector.setVisible(False)
 
-
     def _delete_confirmed_batches(self):
         """Handle the actual deletion after confirmation."""
-        if hasattr(self, '_batch_ids_to_delete') and self.controller:
+        if hasattr(self, "_batch_ids_to_delete") and self.controller:
             for batch_id in self._batch_ids_to_delete:
                 self.controller.delete_batch(batch_id)
-            
+
             # Refresh the batch list in the right panel
             if self.right_panel:
                 self.right_panel._load_batches()
 
             self.show_grid()
-            self.clear_display() # Go back to the initial state
+            self.clear_display()  # Go back to the initial state
 
     # =========================================================================
     # === 5. DRAG & DROP SUPPORT (Pola dari Panorama) ===

@@ -16,9 +16,9 @@ from PySide6.QtWidgets import (
     QLabel,
     QComboBox,
     QGraphicsScene,
-    QMenu,
+    QMenu
 )
-from PySide6.QtCore import Slot, Signal, Qt, QPoint, QSize
+from PySide6.QtCore import Slot, Signal, Qt, QPoint, QSize, QThread, QObject, QTimer
 from typing import Optional, TYPE_CHECKING, Any
 from PySide6.QtGui import QPixmap, QColor, QAction
 import os
@@ -56,6 +56,29 @@ from config import SUPPORTED_FORMATS
 
 # Import the new widget
 from .multiple_batch_delete_widget import MultipleBatchDeleteWidget
+
+
+class ImageDeletionWorker(QObject):
+    """Worker untuk menghapus gambar di thread terpisah tanpa freeze UI."""
+    finished = Signal(int)  # Signal dengan count gambar yang dihapus
+    error = Signal(str)     # Signal dengan error message
+
+    def __init__(self, controller, batch_id, paths_to_remove):
+        super().__init__()
+        self.controller = controller
+        self.batch_id = batch_id
+        self.paths_to_remove = paths_to_remove
+
+    def run(self):
+        """Perform deletion di thread terpisah."""
+        try:
+            count = self.controller.remove_images_from_batch(
+                self.batch_id,
+                self.paths_to_remove
+            )
+            self.finished.emit(count)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class DisplayPanel(QWidget):
@@ -120,6 +143,24 @@ class DisplayPanel(QWidget):
         """Setup UI dengan stacked widget untuk grid dan preview mode."""
         self.display_container.main_layout.setContentsMargins(0, 0, 0, 0)
         self.display_container.main_layout.setSpacing(0)
+        
+        # --- Tambahkan Drop Overlay (Letakkan setelah display_stack) ---
+        self.drop_overlay = QLabel(self)
+        self.drop_overlay.setObjectName("DropOverlay")
+        self.drop_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.drop_overlay.setHidden(True) # Sembunyi secara default
+        
+        # Styling Overlay (Background semi-transparan dan teks putih besar)
+        self.drop_overlay.setStyleSheet("""
+            #DropOverlay {
+                background-color: rgba(46, 204, 113, 180); /* Hijau transparan */
+                color: white;
+                font-size: 24px;
+                font-weight: bold;
+                border-radius: 10px;
+                margin: 20px;
+            }
+        """)
 
         # === SHARED HEADER ===
         self.header_layout = QHBoxLayout()
@@ -804,6 +845,20 @@ class DisplayPanel(QWidget):
         if image_path:
             self._display_image_preview(image_path)
 
+    def _select_all_images(self):
+        """Select all images in the current batch."""
+        # Clear current selection first
+        self._clear_selection()
+
+        # Select all cards
+        for card_id, card in self.all_cards.items():
+            card.select()
+            self.selected_thumbnails.add(card_id)
+
+        # Update last selected to the last card
+        if self.all_cards:
+            self.last_selected_card_id = list(self.all_cards.keys())[-1]
+
     def _refresh_current_batch(self):
         """Helper to re-load current batch settings from controller/db."""
         if not self.current_batch_id or not self.controller:
@@ -816,9 +871,11 @@ class DisplayPanel(QWidget):
             )
 
     def keyPressEvent(self, event):
-        """Handle keyboard events (Delete key)."""
+        """Handle keyboard events (Delete key and Ctrl+A)."""
         if event.key() == Qt.Key.Key_Delete:
             self._handle_delete_action()
+        elif event.modifiers() == Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_A:
+            self._select_all_images()
         else:
             super().keyPressEvent(event)
 
@@ -886,7 +943,7 @@ class DisplayPanel(QWidget):
                 self._refresh_current_batch()
 
     def _handle_delete_action(self):
-        """Handle deletion of selected images."""
+        """Handle deletion of selected images dengan real-time UI updates."""
         if (
             not self.selected_thumbnails
             or not self.current_batch_id
@@ -904,20 +961,128 @@ class DisplayPanel(QWidget):
         )
 
         if reply == QMessageBox.StandardButton.Yes:
-            # Get paths for selected IDs
+            # Get paths for selected IDs and prepare cards to remove
             paths_to_remove = []
+            cards_to_remove = []
+
             for cid in list(self.selected_thumbnails):
                 if cid in self.logic.grid_items:
                     paths_to_remove.append(self.logic.grid_items[cid]["path"])
+                    if cid in self.all_cards:
+                        cards_to_remove.append((cid, self.all_cards[cid]))
 
             if paths_to_remove:
-                count = self.controller.remove_images_from_batch(
-                    self.current_batch_id, paths_to_remove
-                )
-                if count > 0:
-                    # Success, clear selection and refresh
-                    self.selected_thumbnails.clear()
-                    self._refresh_current_batch()
+                # Start deletion dengan real-time UI updates
+                self._delete_images_realtime(paths_to_remove, cards_to_remove)
+
+    def _delete_images_realtime(self, paths_to_remove, cards_to_remove):
+        """Delete images dengan efek sequential vanishing (100ms per gambar)."""
+        
+        # 1. Jalankan proses Database SEGERA di background thread (Heavy Lifting)
+        # Kita tidak perlu menunggu animasi selesai untuk mulai menghapus di DB
+        self.deletion_thread = QThread()
+        self.deletion_worker = ImageDeletionWorker(
+            self.controller,
+            self.current_batch_id,
+            paths_to_remove
+        )
+        self.deletion_worker.moveToThread(self.deletion_thread)
+        self.deletion_thread.started.connect(self.deletion_worker.run)
+        self.deletion_worker.finished.connect(self._on_deletion_finished)
+        self.deletion_worker.error.connect(self._on_deletion_error)
+        self.deletion_worker.finished.connect(self.deletion_thread.quit)
+        self.deletion_thread.start()
+
+        # 2. Siapkan antrean untuk manipulasi UI
+        self._removal_queue = list(cards_to_remove)
+        
+        # 3. Buat Timer untuk menghapus satu per satu dari UI
+        self._ui_removal_timer = QTimer(self)
+        self._ui_removal_timer.timeout.connect(self._process_sequential_removal)
+        self._ui_removal_timer.start(100) # Jeda 100ms antar gambar
+
+    def _process_sequential_removal(self):
+        """Slot untuk menghapus satu widget setiap 100ms."""
+        if not hasattr(self, "_removal_queue") or not self._removal_queue:
+            self._ui_removal_timer.stop()
+            # SETELAH SEMUA HILANG: Rapikan tata letak grid sekali saja
+            self.grid_container.item_count = len(self.grid_container._stored_widgets)
+            self.grid_container._rebuild_grid()
+            return
+
+        # Ambil satu item dari depan antrean
+        card_id, card_widget = self._removal_queue.pop(0)
+
+        try:
+            # Hapus dari list tracking internal GridContainer
+            if card_widget in self.grid_container._stored_widgets:
+                self.grid_container._stored_widgets.remove(card_widget)
+            
+            # Hapus dari tracking DisplayPanel
+            if card_id in self.all_cards:
+                del self.all_cards[card_id]
+            if card_id in self.selected_thumbnails:
+                self.selected_thumbnails.discard(card_id)
+            
+            # Unregister dari logika
+            self.logic.unregister_grid_item(card_id)
+
+            # MANIPULASI VISUAL: Sembunyikan dan hapus widget
+            card_widget.hide() # Membuatnya langsung hilang dari mata
+            card_widget.deleteLater() # Hapus dari memori secara aman
+            
+        except Exception as e:
+            print(f"Error vanishing card {card_id}: {e}")
+            
+    @Slot(str)
+    def add_single_image_to_grid(self, image_path):
+        """Menambah satu thumbnail ke grid secara real-time."""
+        # Buat dummy object agar kompatibel dengan logic Anda
+        class DummyImg:
+            def __init__(self, path):
+                self.path = path
+                self.id = os.path.basename(path) # ID sementara
+
+        img = DummyImg(image_path)
+        
+        card = ImageCard(card_id=str(img.id), size=100)
+        card._image_path = img.path
+        card.double_clicked.connect(self._on_card_double_clicked)
+        card.clicked.connect(lambda cid, event, c=card: self._on_card_clicked(cid, event, c))
+
+        self.grid_container.add_item(card)
+        self.all_cards[str(img.id)] = card
+        self.logic.register_grid_item(str(img.id), {"path": img.path})
+        self._load_thumbnail_async(img.path, card)
+        
+        # Pastikan grid container pindah dari placeholder jika sebelumnya kosong
+        if self.grid_content_stack.currentWidget() != self.grid_container:
+            self._set_placeholder(None)
+
+    def _on_deletion_finished(self, count):
+        """Handle completion of image deletion."""
+        if count > 0:
+            print(f"[DisplayPanel] Berhasil menghapus {count} gambar")
+            # Refresh batch untuk ensure consistency dengan backend
+            self._refresh_current_batch()
+        else:
+            # Jika deletion gagal, show error
+            QMessageBox.warning(
+                self,
+                "Peringatan",
+                "Beberapa gambar tidak dapat dihapus. Silakan coba lagi."
+            )
+
+    def _on_deletion_error(self, error_message):
+        """Handle error during image deletion."""
+        QMessageBox.critical(
+            self,
+            "Error",
+            f"Gagal menghapus gambar:\n{error_message}"
+        )
+        # Refresh batch untuk ensure UI consistency
+        self._refresh_current_batch()
+
 
     def _display_image_preview(self, image_path):
         """
@@ -1199,42 +1364,39 @@ class DisplayPanel(QWidget):
             self.clear_display()  # Go back to the initial state
 
     # =========================================================================
-    # === 5. DRAG & DROP SUPPORT (Pola dari Panorama) ===
+    # === 5. DRAG & DROP SUPPORT ===
     # =========================================================================
 
+    # Overide resizeEvent untuk memastikan overlay selalu menutupi area display
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'drop_overlay'):
+            self.drop_overlay.resize(self.size())
+
     def dragEnterEvent(self, event):
-        """Accept drag enter event jika ada image files dalam supported formats."""
         if not self.current_batch_id:
             event.ignore()
             return
 
         if event.mimeData().hasUrls():
-            # Validate bahwa ada image files dalam supported formats
-            has_images = any(
-                url.toLocalFile().lower().endswith(self.supported_extensions)
-                for url in event.mimeData().urls()
-                if url.isLocalFile()
-            )
-            if has_images:
+            # Hitung jumlah file yang sedang di-hover
+            file_count = len([url for url in event.mimeData().urls() if url.isLocalFile()])
+            
+            if file_count > 0:
                 event.acceptProposedAction()
-                self.setStyleSheet(self.styleSheet() + "; border: 2px dashed #4CAF50;")
-            else:
-                event.ignore()
+                # Tampilkan overlay dan update teks
+                self.drop_overlay.setText(f"Jatuhkan {file_count} gambar di sini")
+                self.drop_overlay.show()
+                self.drop_overlay.raise_() # Pastikan di paling atas
         else:
             event.ignore()
 
     def dragLeaveEvent(self, event):
-        """Reset style saat drag leave."""
-        self.setStyleSheet(
-            self.styleSheet().replace("; border: 2px dashed #4CAF50;", "")
-        )
+        self.drop_overlay.hide()
         event.accept()
 
     def dropEvent(self, event):
-        """
-        Handle drop event untuk image import.
-        Emit signal dengan file paths untuk parent widget.
-        """
+        self.drop_overlay.hide()
         if not self.current_batch_id:
             event.ignore()
             return

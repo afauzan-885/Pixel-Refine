@@ -364,39 +364,31 @@ class BatchPageV2Layout(QWidget):
                 delay_ms=25,
             )
 
-            # --- Koneksi Sinyal Thread ---
-            if hasattr(self, "update_progress_bar") and callable(
-                self.update_progress_bar
-            ):
-                self.multi_thread_import_images.progress_signal.connect(
-                    self.update_progress_bar
-                )
-            else:
-                pass
-
-            if hasattr(self, "on_import_complete") and callable(
-                self.on_import_complete
-            ):
-                self.multi_thread_import_images.completion_signal.connect(
-                    self.on_import_complete
-                )
-            else:
-                pass
-
-            # Tambahkan koneksi untuk error jika ada
-            if hasattr(self.multi_thread_import_images, "error_signal") and hasattr(
-                self, "on_import_error"
-            ):
-                self.multi_thread_import_images.error_signal.connect(
-                    self.on_import_error
+            # KONEKSI REAL-TIME:
+            # Setiap 1 gambar selesai di-import thread, langsung muncul di DisplayPanel
+            if self.workspace_panel and hasattr(self.workspace_panel, "display_panel"):
+                self.multi_thread_import_images.image_added_signal.connect(
+                    self.workspace_panel.display_panel.add_single_image_to_grid
                 )
 
-            # Mulai thread
+            # ... (koneksi sinyal progress lainnya) ...
             self.multi_thread_import_images.start()
+
         except Exception as e:
-            QMessageBox.critical(
-                self, "Threading Error", f"Could not start the import process:\n{e}"
-            )
+            QMessageBox.critical(self, "Error", f"Gagal memulai impor: {e}")
+
+    def on_import_complete(self, successful_images):
+        """Dijalankan saat semua proses impor selesai."""
+        # HILANGKAN Dialog Konfirmasi (QMessageBox) agar UI tidak terjeda.
+        
+        # Pastikan progress bar disembunyikan
+        if self.workspace_panel and hasattr(self.workspace_panel, "algorithm_panel"):
+            algo_panel = self.workspace_panel.algorithm_panel
+            if hasattr(algo_panel, "progress_bar"):
+                algo_panel.progress_bar.setValue(0)
+                algo_panel.progress_bar.setVisible(True)
+        
+        print(f"Impor selesai: {successful_images} gambar berhasil dimasukkan.")
 
     def handle_delete_button(self):
         """Function to delete images"""
@@ -771,30 +763,7 @@ class BatchPageV2Layout(QWidget):
                 algo_panel.progress_bar.setValue(value)
                 # text is not supported by minimalist ModernProgressBar
                 pass
-
-    def on_import_complete(self, successful_images):
-        """Called when the import process is complete."""
-        # Reload current batch content to show new images
-        if self.workspace_panel and hasattr(self.workspace_panel, "algorithm_panel"):
-            current_batch_id = self.workspace_panel.algorithm_panel.current_batch_id
-            if current_batch_id and self.controller:
-                batch = self.controller.get_batch(current_batch_id)
-                if batch:
-                    self.workspace_panel.load_batch(
-                        current_batch_id, batch.images, batch.name
-                    )
-
-        QMessageBox.information(
-            self,
-            language_config.ON_IMPORT_COMPLETE_STATUS,
-            language_config.ON_IMPORT_COMPLETE_MESSAGES.format(successful_images),
-        )
-        # Pastikan progress bar merujuk ke lokasi yang benar
-        if self.workspace_panel and hasattr(self.workspace_panel, "algorithm_panel"):
-            algo_panel = self.workspace_panel.algorithm_panel
-            if hasattr(algo_panel, "progress_bar"):
-                algo_panel.progress_bar.setValue(0)
-
+            
     def on_import_error(self, error_message):
         """Handle errors during image import."""
         QMessageBox.critical(

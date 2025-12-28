@@ -20,6 +20,8 @@ class Theme:
         self.info = "#0DCAF0"  # Bright Blue (Bootstrap 5 Info)
         self.light = "#ECF0F1"  # Light gray
         self.dark = "#2C3E50"  # Dark blue-gray
+        self.ghost = "transparent"
+        self.outline = "transparent"
 
         # Background colors
         self.bg_primary = "#FFFFFF"  # White
@@ -77,6 +79,8 @@ class Theme:
             "info": self.info,
             "light": self.light,
             "dark": self.dark,
+            "ghost": self.ghost,
+            "outline": self.outline,
         }
         return variant_map.get(variant, self.secondary)
 
@@ -92,6 +96,8 @@ class Theme:
             "info": "#31D2F2",
             "light": "#D5DBDB",
             "dark": "#1C2833",
+            "ghost": "rgba(0, 0, 0, 0.05)",
+            "outline": "rgba(0, 0, 0, 0.05)",
         }
         return color_map.get(variant, "#7F8C8D")
 
@@ -285,5 +291,54 @@ def create_scrollbar_style(theme=None):
         }}
         QScrollBar::add-page, QScrollBar::sub-page {{
             background: none;
+        }}
+    """
+
+
+def create_checkbox_style(theme=None):
+    """Create a premium checkbox stylesheet (Smaller, Blue, Circular)"""
+    if theme is None:
+        theme = get_theme()
+
+    # Blue color from user reference
+    brand_blue = "#2BC7BD"
+    border_color = "#E8EDF2"
+
+    return f"""
+        QCheckBox {{
+            spacing: 12px;
+            font-size: 11pt;
+            color: #333333;
+        }}
+        QCheckBox::indicator {{
+            width: 15px;
+            height: 15px;
+            border-radius: 8px; /* Circular */
+            border: 1px solid {border_color};
+            background-color: #FFFFFF;
+        }}
+        QCheckBox::indicator:hover {{
+            border-color: {brand_blue};
+            background-color: #F8F9FA;
+        }}
+        QCheckBox::indicator:checked {{
+            background-color: {brand_blue};
+            border-color: {brand_blue};
+            /* Center dot SVG */
+            image: url(data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgMjQgMjQiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iNSIgZmlsbD0id2hpdGUiLz48L3N2Zz4=);
+        }}
+        QCheckBox::indicator:checked:hover {{
+            background-color: #005A9E;
+            border-color: #005A9E;
+        }}
+        QCheckBox:focus {{
+            color: {brand_blue};
+        }}
+        QCheckBox:disabled {{
+            color: #AAAAAA;
+        }}
+        QCheckBox::indicator:disabled {{
+            background-color: #F0F0F0;
+            border-color: {border_color};
         }}
     """

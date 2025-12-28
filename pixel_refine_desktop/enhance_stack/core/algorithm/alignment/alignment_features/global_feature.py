@@ -763,7 +763,8 @@ def apply_s_curve_float32(img: np.ndarray, strength: float = 4.0, pivot: float =
 def preprocess_in_python(ref_image_float: np.ndarray,
                          s_curve_contrast: float = 4.5,
                          s_curve_pivot: float = 0.20,
-                         use_raft: bool = False):
+                         use_raft: bool = False,
+                         use_sharpen: bool = False): # Tambahkan parameter ini
 
     img = ref_image_float
     if img.dtype != np.float32:
@@ -774,6 +775,13 @@ def preprocess_in_python(ref_image_float: np.ndarray,
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         else:
             gray = img
+        
+        # Logika Laplacian hanya dijalankan jika use_sharpen=True
+        if use_sharpen:
+            laplacian = cv2.Laplacian(gray, cv2.CV_32F, ksize=3)
+            gray = gray - (0.3 * laplacian)
+            gray = np.clip(gray, 0.0, 1.0)
+
         return gray.astype(np.float32)
 
     return img.astype(np.float32)

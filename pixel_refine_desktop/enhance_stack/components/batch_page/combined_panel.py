@@ -40,9 +40,10 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Similarity import (
     running_similarity,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Similarity_V2 import (
-    running_similarity_v2,
-)
+
+# from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Similarity_V2 import (
+#     running_similarity_v2,
+# )
 from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.Interpolation import (
     running_interpolation,
 )

@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Signal, Qt, Slot
 from .mixins import RealtimeMixin
+from .theme import create_checkbox_style
 
 
 class FormGroup(QWidget, RealtimeMixin):
@@ -272,6 +273,8 @@ class Checkbox(QWidget, RealtimeMixin):
         self.checkbox = QCheckBox(text)
         self.checkbox.setChecked(checked)
         self.checkbox.toggled.connect(self._on_internal_toggle)
+
+        self.checkbox.setStyleSheet(create_checkbox_style())
 
         layout.addWidget(self.checkbox)
         layout.addStretch()

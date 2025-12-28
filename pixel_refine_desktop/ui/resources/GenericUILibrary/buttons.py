@@ -68,22 +68,29 @@ class Button(QPushButton):
         if not bg_color:
             bg_color = theme_obj.get_variant_color(self.variant)
         if not text_color:
-            text_color = (
-                "#FFFFFF"
-                if self.variant in ["primary", "success", "danger", "info"]
-                else "#333333"
-            )
+            if self.variant in ["primary", "success", "danger", "info", "dark"]:
+                text_color = theme_obj.text_white
+            elif self.variant == "ghost":
+                text_color = theme_obj.primary
+            else:
+                text_color = theme_obj.text_primary
+
         if not hover_color:
             hover_color = theme_obj.get_variant_hover_color(self.variant)
+
+        # Border logic for outline
+        border = (
+            f"2px solid {theme_obj.primary}" if self.variant == "outline" else "none"
+        )
 
         style = f"""
             QPushButton {{
                 background-color: {bg_color};
                 color: {text_color};
-                border: none;
-                border-radius: 5px;
+                border: {border};
+                border-radius: {theme_obj.radius_md}px;
                 padding: 8px 16px;
-                font-size: 11pt;
+                font-size: {theme_obj.font_md};
                 font-weight: bold;
             }}
             QPushButton:hover {{
@@ -92,6 +99,10 @@ class Button(QPushButton):
             QPushButton:pressed {{
                 background-color: {hover_color};
                 padding: 9px 15px 7px 17px;
+            }}
+            QPushButton:disabled {{
+                background-color: {theme_obj.bg_secondary};
+                color: {theme_obj.text_muted};
             }}
         """
         self.setStyleSheet(style)

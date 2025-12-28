@@ -450,7 +450,7 @@ class SimilarityAlgorithm:
         # --- LANGKAH 3: MAIN MERGING ---
 
         # 1. Preprocess Global Reference
-        ref_gray_preprocessed = preprocess_in_python(reference_image_float)
+        ref_gray_preprocessed = preprocess_in_python(reference_image_float, use_sharpen=False)
         ref_noise_sigma = estimate_noise_in_python(ref_gray_preprocessed)
         ref_work_res_pass2 = cv2.resize(
             ref_gray_preprocessed,
@@ -494,7 +494,7 @@ class SimilarityAlgorithm:
 
                 # Preprocessing
                 curr_float = normalize_image(image_orig, ref_dtype)
-                curr_preproc = preprocess_in_python(curr_float, use_raft=False)
+                curr_preproc = preprocess_in_python(curr_float, use_raft=False, use_sharpen=False)
 
                 # Resize ke buffer yang sudah ada (dst)
                 cv2.resize(
