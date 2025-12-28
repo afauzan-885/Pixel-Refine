@@ -1,3 +1,4 @@
+from typing import Optional
 from PySide6.QtWidgets import QStackedWidget, QWidget, QGraphicsOpacityEffect
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QTimer
 from .animation_manager import StackedWidgetAnimator, AnimationType
@@ -6,7 +7,7 @@ from .animation_manager import StackedWidgetAnimator, AnimationType
 def fade_in(
     animator: StackedWidgetAnimator,
     target_widget: QWidget,
-    stack_widget: QStackedWidget = None,  # Opsional
+    stack_widget: Optional[QStackedWidget] = None,  # Opsional
     duration: int = 300,
 ):
     """
@@ -35,10 +36,13 @@ def fade_in(
         return
 
     # 1. Siapkan Opacity Effect
-    effect = target_widget.graphicsEffect()
-    if not isinstance(effect, QGraphicsOpacityEffect):
-        effect = QGraphicsOpacityEffect(target_widget)
-        target_widget.setGraphicsEffect(effect)
+    try:
+        effect = target_widget.graphicsEffect()
+        if not isinstance(effect, QGraphicsOpacityEffect):
+            effect = QGraphicsOpacityEffect(target_widget)
+            target_widget.setGraphicsEffect(effect)
+    except RuntimeError:
+        return  # Widget sudah dihapus dari C++ side
 
     # 2. Mulai dari transparan (0.0) lalu tampilkan widget
     effect.setOpacity(0.0)
@@ -73,6 +77,10 @@ def fade_out(
         hide_on_finish (bool): Jika True, widget akan di-hide() setelah animasi selesai.
                                Sangat penting untuk widget biasa agar tidak memblokir mouse.
     """
+    if not widget or not widget.isVisible() or not widget.isEnabled():
+        if on_finished_callback:
+            on_finished_callback()
+        return
 
     # Kita bungkus callback agar bisa melakukan hide() otomatis
     def internal_callback():

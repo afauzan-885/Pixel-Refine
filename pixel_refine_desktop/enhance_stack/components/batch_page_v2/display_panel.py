@@ -1,4 +1,7 @@
 from __future__ import annotations
+import shutil
+
+from pixel_refine_desktop.ui.views.settings.views.settings_view import SettingsView
 
 """
 Display Panel Component - Rewritten dengan pola Panorama.
@@ -8,6 +11,7 @@ Adapted from: pixel_refine_desktop/ui/views/panorama/display_area/display_panel.
 """
 
 from PySide6.QtWidgets import (
+    QMessageBox,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -16,9 +20,21 @@ from PySide6.QtWidgets import (
     QLabel,
     QComboBox,
     QGraphicsScene,
-    QMenu
+    QMenu,
 )
-from PySide6.QtCore import Slot, Signal, Qt, QPoint, QSize, QThread, QObject, QTimer
+from PySide6.QtCore import (
+    Slot,
+    Signal,
+    Qt,
+    QPoint,
+    QSize,
+    QThread,
+    QObject,
+    QTimer,
+    QRect,
+    QPropertyAnimation,
+    QEasingCurve,
+)
 from typing import Optional, TYPE_CHECKING, Any
 from PySide6.QtGui import QPixmap, QColor, QAction
 import os
@@ -39,6 +55,7 @@ from pixel_refine_desktop.ui.components.common.sidebar import Sidebar
 
 # Display logic
 from pixel_refine_desktop.enhance_stack.core.logic.display_logic import DisplayLogic
+from pixel_refine_desktop.enhance_stack.core.logic import display_manager
 
 # Zoomable preview
 from pixel_refine_desktop.enhance_stack.core.logic.Zoomable_Handler import Zoomable
@@ -50,6 +67,7 @@ from pixel_refine_desktop.ui.resources.animations.animation_manager import (
     SlideDirection,
 )
 from pixel_refine_desktop.ui.resources.animations.slide import slide
+from pixel_refine_desktop.ui.resources.animations.fade import fade_out, fade_in
 
 # Config untuk supported image formats
 from config import SUPPORTED_FORMATS
@@ -60,8 +78,9 @@ from .multiple_batch_delete_widget import MultipleBatchDeleteWidget
 
 class ImageDeletionWorker(QObject):
     """Worker untuk menghapus gambar di thread terpisah tanpa freeze UI."""
+
     finished = Signal(int)  # Signal dengan count gambar yang dihapus
-    error = Signal(str)     # Signal dengan error message
+    error = Signal(str)  # Signal dengan error message
 
     def __init__(self, controller, batch_id, paths_to_remove):
         super().__init__()
@@ -73,8 +92,7 @@ class ImageDeletionWorker(QObject):
         """Perform deletion di thread terpisah."""
         try:
             count = self.controller.remove_images_from_batch(
-                self.batch_id,
-                self.paths_to_remove
+                self.batch_id, self.paths_to_remove
             )
             self.finished.emit(count)
         except Exception as e:
@@ -124,6 +142,10 @@ class DisplayPanel(QWidget):
         self.selected_thumbnails = set()
         self.last_selected_card_id = None
         self.all_cards = {}
+        self.current_preview_path = None
+        self.current_results_map = {}
+        self.zoom_states = {}
+        self.selection_anchor_id = None
 
         self.supported_extensions = self._build_supported_extensions()
         if TYPE_CHECKING:
@@ -133,8 +155,15 @@ class DisplayPanel(QWidget):
         self.right_panel: Any = None
         self.placeholder_widget = None
 
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._setup_ui()
         self._setup_sidebar()  # New Sidebar Integration
+
+        # Lazy loading timer
+        self.lazy_load_timer = QTimer(self)
+        self.lazy_load_timer.setSingleShot(True)
+        self.lazy_load_timer.setInterval(100)  # 100ms debounce
+        self.lazy_load_timer.timeout.connect(self._check_visible_cards)
 
         self.setAcceptDrops(True)
         self.clear_display()
@@ -143,15 +172,16 @@ class DisplayPanel(QWidget):
         """Setup UI dengan stacked widget untuk grid dan preview mode."""
         self.display_container.main_layout.setContentsMargins(0, 0, 0, 0)
         self.display_container.main_layout.setSpacing(0)
-        
+
         # --- Tambahkan Drop Overlay (Letakkan setelah display_stack) ---
         self.drop_overlay = QLabel(self)
         self.drop_overlay.setObjectName("DropOverlay")
         self.drop_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.drop_overlay.setHidden(True) # Sembunyi secara default
-        
+        self.drop_overlay.setHidden(True)  # Sembunyi secara default
+
         # Styling Overlay (Background semi-transparan dan teks putih besar)
-        self.drop_overlay.setStyleSheet("""
+        self.drop_overlay.setStyleSheet(
+            """
             #DropOverlay {
                 background-color: rgba(46, 204, 113, 180); /* Hijau transparan */
                 color: white;
@@ -160,7 +190,8 @@ class DisplayPanel(QWidget):
                 border-radius: 10px;
                 margin: 20px;
             }
-        """)
+        """
+        )
 
         # === SHARED HEADER ===
         self.header_layout = QHBoxLayout()
@@ -279,11 +310,20 @@ class DisplayPanel(QWidget):
 
         grid_view_layout.addWidget(self.grid_content_stack, 1)
 
-        # GridContainer dengan responsive columns
+        # GridContainer dengan responsive columns (Matched to ImageCard size 110)
         self.grid_container = GridContainer(
-            item_width=100, spacing=5, wrap_mode="vertical", column_mode="responsive"
+            item_width=110, spacing=10, wrap_mode="vertical", column_mode="responsive"
         )
         self.grid_container.setStyleSheet("QScrollArea { border: none; }")
+
+        # Connect scroll signals for Lazy Loading
+        self.grid_container.verticalScrollBar().valueChanged.connect(
+            self._on_scroll_changed
+        )
+        self.grid_container.verticalScrollBar().rangeChanged.connect(
+            self._on_scroll_changed
+        )
+
         self.grid_content_stack.addWidget(self.grid_container)
 
         self.display_stack.addWidget(self.grid_view_widget)
@@ -411,9 +451,6 @@ class DisplayPanel(QWidget):
 
     def _setup_settings_overlay(self):
         """Setup independent overlay for Settings View."""
-        from pixel_refine_desktop.ui.views.settings.views.settings_view import (
-            SettingsView,
-        )
 
         # Create container centered
         # Settings Visuals: Shadow 270 deg (Down), Blur 35%, Dim 25%
@@ -619,6 +656,58 @@ class DisplayPanel(QWidget):
                 duration=300,
             )
 
+    # --- LAZY LOADING SYSTEM ---
+
+    def _on_scroll_changed(self):
+        """Triggered when scrollbar moves or range changes."""
+        if not self.lazy_load_timer.isActive():
+            self.lazy_load_timer.start()
+
+    def _check_visible_cards(self):
+        """Mendeteksi kartu mana yang berada di viewport dan memuat thumbnail-nya (Reinforced)."""
+        if not self.all_cards or self.grid_container.isHidden():
+            return
+
+        # Ambil state scroll hanyak sekali untuk efisiensi
+        v_scroll = self.grid_container.verticalScrollBar()
+        scroll_y = v_scroll.value()
+        viewport_h = self.grid_container.viewport().height()
+
+        # Buffer muat: 500px (sekitar 5 baris)
+        load_min = scroll_y - 500
+        load_max = scroll_y + viewport_h + 500
+
+        # Buffer lepas: 2000px (sangat luas agar tidak menghilang prematur)
+        unload_min = scroll_y - 2000
+        unload_max = scroll_y + viewport_h + 2000
+
+        # Iterasi semua kartu
+        for card_id, card in self.all_cards.items():
+            try:
+                geom = card.geometry()
+                # Jika widget belum memiliki ukuran (saat proses layout), abaikan dulu
+                if geom.width() <= 0:
+                    continue
+
+                y_top = geom.top()
+                y_bottom = geom.bottom()
+
+                # 1. Cek apakah masuk area muat
+                if y_bottom >= load_min and y_top <= load_max:
+                    if (
+                        card._is_loading or not card.has_image()
+                    ) and not card._is_fetching:
+                        card._is_fetching = True
+                        self._load_thumbnail_async(card._image_path, card)
+
+                # 2. Cek apakah jauh di luar area pandang untuk dilepaskan
+                elif y_bottom < unload_min or y_top > unload_max:
+                    if card.has_image():
+                        card.unload_image()
+
+            except (RuntimeError, AttributeError):
+                continue
+
     # =========================================================================
     # === 1. PUBLIC SLOTS UNTUK MEMUAT DATA ===
     # =========================================================================
@@ -637,14 +726,19 @@ class DisplayPanel(QWidget):
         self.current_batch_name = batch_name
         self.logic.set_batch(batch_id, images)
 
-        # Update Header Title
-        display_name = batch_name if batch_name else str(batch_id)
-        self.header_title.setText(f"{display_name}")
+        # Update Header Title segera dengan jumlah gambar yang akan dimuat
+        self._update_header_title(count=len(images))
+
         self._clear_grid()
         self.logic.get_thumbnail_processor().stop_all()
         self.selected_thumbnails.clear()
         self.all_cards.clear()
         self.last_selected_card_id = None
+        self.selection_anchor_id = None
+
+        # Check if batch is empty
+        # Update Header Title (Setelah state dibersihkan, agar count akurat)
+        self._update_header_title(count=len(images))
 
         # Check if batch is empty
         if self.logic.is_batch_empty():
@@ -661,13 +755,12 @@ class DisplayPanel(QWidget):
         if self.grid_content_stack.currentWidget() != self.grid_container:
             self._set_placeholder(None)
 
-        # Populate Grid dengan thumbnail asinkron
-        for img in self.logic.current_images:
-            if not hasattr(img, "id") or not hasattr(img, "path"):
-                continue
+        # Start Batch Update di GridContainer (menghindari rebuild layout setiap kali item ditambah)
+        self.grid_container.set_batch_update(True)
 
-            card = ImageCard(card_id=str(img.id), size=100)
-            card.image_label.setText(f"Image {img.id}")
+        # Populate items
+        for img in images:
+            card = ImageCard(card_id=str(img.id), size=110)
             card._image_path = img.path
             card.double_clicked.connect(self._on_card_double_clicked)
             card.clicked.connect(
@@ -677,7 +770,14 @@ class DisplayPanel(QWidget):
             self.grid_container.add_item(card)
             self.all_cards[str(img.id)] = card  # Store reference untuk range select
             self.logic.register_grid_item(str(img.id), {"path": img.path})
-            self._load_thumbnail_async(img.path, card)
+
+            # JANGAN panggil _load_thumbnail_async di sini (Lazy Loading akan menanganinya)
+
+        # Matikan Batch Update (ini akan melakukan rebuild grid 1x secara efisien)
+        self.grid_container.set_batch_update(False)
+
+        # Trigger pengecekan visibilitas pertama kali
+        QTimer.singleShot(200, self._check_visible_cards)
 
         self.show_grid()
 
@@ -689,12 +789,13 @@ class DisplayPanel(QWidget):
         """
         self.current_batch_id = None
         self.current_batch_name = None
-        self.header_title.setText("No batch selected")  # Clear header title
+        self._update_header_title()  # Clear header title
         self.logic.clear_all()
         self._clear_grid()
         self.selected_thumbnails.clear()
         self.all_cards.clear()
         self.last_selected_card_id = None
+        self.selection_anchor_id = None
 
         # Hide import button saat no batch selected
         self.import_button.setVisible(False)
@@ -788,6 +889,19 @@ class DisplayPanel(QWidget):
                 pixmap = QPixmap.fromImage(q_image)
                 card_widget.set_image(pixmap)
 
+                # Reinforced Fade-In: Gunakan property internal widget jika ada
+                if hasattr(card_widget, "opacity"):
+                    # Gunakan QPropertyAnimation langsung pada widget
+                    anim = QPropertyAnimation(card_widget, b"opacity", self)
+                    anim.setDuration(400)
+                    anim.setStartValue(0.0)
+                    anim.setEndValue(1.0)
+                    anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+                    anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+                else:
+                    # Fallback ke sistem standar jika bukan ImageCard
+                    fade_in(self.grid_animator, card_widget, duration=300)
+
         self.logic.load_thumbnail_async(image_path, on_thumbnail_ready)
 
     def _on_card_clicked(self, card_id, event, card_widget):
@@ -812,6 +926,7 @@ class DisplayPanel(QWidget):
             if card_widget.is_selected():
                 self.selected_thumbnails.add(card_id)
             self.last_selected_card_id = card_id
+            self.selection_anchor_id = card_id
 
         # Ctrl + Click - Add/Remove item (multi-select)
         elif modifiers == Qt.KeyboardModifier.ControlModifier:
@@ -821,17 +936,23 @@ class DisplayPanel(QWidget):
             else:
                 self.selected_thumbnails.discard(card_id)
             self.last_selected_card_id = card_id
+            self.selection_anchor_id = card_id
 
         # Shift + Click - Select range (multi-select range)
         elif modifiers == Qt.KeyboardModifier.ShiftModifier:
-            if self.last_selected_card_id and self.last_selected_card_id != card_id:
-                self._select_range(self.last_selected_card_id, card_id)
+            if self.selection_anchor_id and self.selection_anchor_id != card_id:
+                self._clear_selection()
+                self._select_range(self.selection_anchor_id, card_id)
+                self.last_selected_card_id = card_id
             else:
                 # Jika belum ada last_selected, treat seperti single click
                 self._clear_selection()
                 card_widget.select()
                 self.selected_thumbnails.add(card_id)
                 self.last_selected_card_id = card_id
+                self.selection_anchor_id = card_id
+
+        self.setFocus()
 
     def _on_card_double_clicked(self, card_id):
         """
@@ -857,7 +978,13 @@ class DisplayPanel(QWidget):
 
         # Update last selected to the last card
         if self.all_cards:
-            self.last_selected_card_id = list(self.all_cards.keys())[-1]
+            last_id = list(self.all_cards.keys())[-1]
+            self.last_selected_card_id = last_id
+            self.selection_anchor_id = (
+                list(self.all_cards.keys())[0]
+                if not self.selection_anchor_id
+                else self.selection_anchor_id
+            )
 
     def _refresh_current_batch(self):
         """Helper to re-load current batch settings from controller/db."""
@@ -871,13 +998,106 @@ class DisplayPanel(QWidget):
             )
 
     def keyPressEvent(self, event):
-        """Handle keyboard events (Delete key and Ctrl+A)."""
-        if event.key() == Qt.Key.Key_Delete:
+        """Handle keyboard events (Delete key, Ctrl+A, and Arrow navigation)."""
+        key = event.key()
+        modifiers = event.modifiers()
+
+        if key == Qt.Key.Key_Delete:
             self._handle_delete_action()
-        elif event.modifiers() == Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_A:
+        elif modifiers == Qt.KeyboardModifier.ControlModifier and key == Qt.Key.Key_A:
             self._select_all_images()
+        elif key in (
+            Qt.Key.Key_Left,
+            Qt.Key.Key_Right,
+            Qt.Key.Key_Up,
+            Qt.Key.Key_Down,
+        ):
+            shift_held = modifiers == Qt.KeyboardModifier.ShiftModifier
+            self._navigate_selection(key, shift_held)
+        elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._handle_enter_press()
         else:
             super().keyPressEvent(event)
+
+    def _handle_enter_press(self):
+        """Handle Enter key to show preview for single selection."""
+        if self.display_stack.currentIndex() != 0:
+            return
+
+        if len(self.selected_thumbnails) == 1:
+            card_id = list(self.selected_thumbnails)[0]
+            if card_id in self.all_cards:
+                card = self.all_cards[card_id]
+                image_path = getattr(card, "_image_path", None)
+                if image_path:
+                    self._display_image_preview(image_path)
+
+    def _navigate_selection(self, key, shift_held):
+        """
+        Gunakan tombol panah untuk navigasi di dalam grid.
+
+        Args:
+            key: Qt.Key_... value
+            shift_held: Boolean, true jika tombol Shift ditekan
+        """
+        # Hanya bekerja jika kita berada di grid view dan memiliki batch
+        if self.display_stack.currentIndex() != 0 or not self.current_batch_id:
+            return
+
+        if not self.all_cards:
+            return
+
+        card_ids_in_order = list(self.all_cards.keys())
+        total_items = len(card_ids_in_order)
+
+        # 1. Tentukan starting point (Indeks fokus saat ini)
+        current_id = self.last_selected_card_id
+        if not current_id or current_id not in card_ids_in_order:
+            # Jika belum ada yang terpilih, mulai dari item pertama
+            current_id = card_ids_in_order[0]
+            current_idx = 0
+        else:
+            current_idx = card_ids_in_order.index(current_id)
+
+        # 2. Hitung target index berdasarkan kolom grid
+        columns = self.grid_container.columns
+        new_idx = current_idx
+
+        if key == Qt.Key.Key_Left:
+            new_idx = max(0, current_idx - 1)
+        elif key == Qt.Key.Key_Right:
+            new_idx = min(total_items - 1, current_idx + 1)
+        elif key == Qt.Key.Key_Up:
+            new_idx = max(0, current_idx - columns)
+        elif key == Qt.Key.Key_Down:
+            new_idx = min(total_items - 1, current_idx + columns)
+
+        if new_idx == current_idx:
+            return  # Tidak berpindah
+
+        new_id = card_ids_in_order[new_idx]
+        new_card = self.all_cards[new_id]
+
+        # 3. Lakukan Seleksi
+        if shift_held:
+            # Gunakan anchor (Id pertama yang diklik secara normal)
+            if not self.selection_anchor_id:
+                self.selection_anchor_id = current_id
+
+            self._clear_selection()
+            self._select_range(self.selection_anchor_id, new_id)
+        else:
+            # Seleksi tunggal (Normal navigation)
+            self._clear_selection()
+            new_card.select()
+            self.selected_thumbnails.add(new_id)
+            self.selection_anchor_id = new_id
+
+        # Simpan last selected untuk navigasi berikutnya
+        self.last_selected_card_id = new_id
+
+        # 4. Scroll ke widget target agar terlihat
+        self.grid_container.ensureWidgetVisible(new_card)
 
     def contextMenuEvent(self, event):
         """Handle right-click context menu pada area grid."""
@@ -951,8 +1171,6 @@ class DisplayPanel(QWidget):
         ):
             return
 
-        from PySide6.QtWidgets import QMessageBox
-
         reply = QMessageBox.question(
             self,
             "Hapus Gambar",
@@ -977,14 +1195,12 @@ class DisplayPanel(QWidget):
 
     def _delete_images_realtime(self, paths_to_remove, cards_to_remove):
         """Delete images dengan efek sequential vanishing (100ms per gambar)."""
-        
+
         # 1. Jalankan proses Database SEGERA di background thread (Heavy Lifting)
         # Kita tidak perlu menunggu animasi selesai untuk mulai menghapus di DB
         self.deletion_thread = QThread()
         self.deletion_worker = ImageDeletionWorker(
-            self.controller,
-            self.current_batch_id,
-            paths_to_remove
+            self.controller, self.current_batch_id, paths_to_remove
         )
         self.deletion_worker.moveToThread(self.deletion_thread)
         self.deletion_thread.started.connect(self.deletion_worker.run)
@@ -995,18 +1211,17 @@ class DisplayPanel(QWidget):
 
         # 2. Siapkan antrean untuk manipulasi UI
         self._removal_queue = list(cards_to_remove)
-        
+
         # 3. Buat Timer untuk menghapus satu per satu dari UI
         self._ui_removal_timer = QTimer(self)
         self._ui_removal_timer.timeout.connect(self._process_sequential_removal)
-        self._ui_removal_timer.start(100) # Jeda 100ms antar gambar
+        self._ui_removal_timer.start(100)  # Jeda 100ms antar gambar
 
     def _process_sequential_removal(self):
         """Slot untuk menghapus satu widget setiap 100ms."""
         if not hasattr(self, "_removal_queue") or not self._removal_queue:
             self._ui_removal_timer.stop()
-            # SETELAH SEMUA HILANG: Rapikan tata letak grid sekali saja
-            self.grid_container.item_count = len(self.grid_container._stored_widgets)
+            # SETELAH SEMUA HILANG: Rapikan tata letak grid secara cerdas (Reinforced)
             self.grid_container._rebuild_grid()
             return
 
@@ -1017,44 +1232,57 @@ class DisplayPanel(QWidget):
             # Hapus dari list tracking internal GridContainer
             if card_widget in self.grid_container._stored_widgets:
                 self.grid_container._stored_widgets.remove(card_widget)
-            
+
             # Hapus dari tracking DisplayPanel
             if card_id in self.all_cards:
                 del self.all_cards[card_id]
             if card_id in self.selected_thumbnails:
                 self.selected_thumbnails.discard(card_id)
-            
+
             # Unregister dari logika
             self.logic.unregister_grid_item(card_id)
 
-            # MANIPULASI VISUAL: Sembunyikan dan hapus widget
-            card_widget.hide() # Membuatnya langsung hilang dari mata
-            card_widget.deleteLater() # Hapus dari memori secara aman
-            
+            # MANIPULASI VISUAL: Sembunyikan dan hapus widget dengan animasi fade out yang smooth
+            fade_out(
+                self.grid_animator,
+                card_widget,
+                duration=300,
+                on_finished_callback=card_widget.deleteLater,
+            )
+
+            # Update header count
+            self._update_header_title()
+
         except Exception as e:
             print(f"Error vanishing card {card_id}: {e}")
-            
+
     @Slot(str)
     def add_single_image_to_grid(self, image_path):
         """Menambah satu thumbnail ke grid secara real-time."""
+
         # Buat dummy object agar kompatibel dengan logic Anda
         class DummyImg:
             def __init__(self, path):
                 self.path = path
-                self.id = os.path.basename(path) # ID sementara
+                self.id = os.path.basename(path)  # ID sementara
 
         img = DummyImg(image_path)
-        
-        card = ImageCard(card_id=str(img.id), size=100)
+
+        card = ImageCard(card_id=str(img.id), size=110)
         card._image_path = img.path
         card.double_clicked.connect(self._on_card_double_clicked)
-        card.clicked.connect(lambda cid, event, c=card: self._on_card_clicked(cid, event, c))
+        card.clicked.connect(
+            lambda cid, event, c=card: self._on_card_clicked(cid, event, c)
+        )
 
         self.grid_container.add_item(card)
         self.all_cards[str(img.id)] = card
         self.logic.register_grid_item(str(img.id), {"path": img.path})
         self._load_thumbnail_async(img.path, card)
-        
+
+        # Update header count
+        self._update_header_title()
+
         # Pastikan grid container pindah dari placeholder jika sebelumnya kosong
         if self.grid_content_stack.currentWidget() != self.grid_container:
             self._set_placeholder(None)
@@ -1070,19 +1298,14 @@ class DisplayPanel(QWidget):
             QMessageBox.warning(
                 self,
                 "Peringatan",
-                "Beberapa gambar tidak dapat dihapus. Silakan coba lagi."
+                "Beberapa gambar tidak dapat dihapus. Silakan coba lagi.",
             )
 
     def _on_deletion_error(self, error_message):
         """Handle error during image deletion."""
-        QMessageBox.critical(
-            self,
-            "Error",
-            f"Gagal menghapus gambar:\n{error_message}"
-        )
+        QMessageBox.critical(self, "Error", f"Gagal menghapus gambar:\n{error_message}")
         # Refresh batch untuk ensure UI consistency
         self._refresh_current_batch()
-
 
     def _display_image_preview(self, image_path):
         """
@@ -1131,97 +1354,7 @@ class DisplayPanel(QWidget):
         Display processed result image in Compare Mode (Default).
         Loads Original + Processed into ComparisonGraphicsItem.
         """
-        if not os.path.exists(image_path):
-            print(f"[DisplayPanel] Error: Result file not found at {image_path}")
-            return
-
-        # Initialize zoom states dict if not exists
-        if not hasattr(self, "zoom_states"):
-            self.zoom_states = {}
-
-        # SAVE current state if we are switching from another valid preview
-        if hasattr(self, "current_preview_path") and self.current_preview_path:
-            # Only save if we strictly have a scene items
-            if self.preview_scene.items():
-                self.zoom_states[self.current_preview_path] = (
-                    self.zoomable_preview.get_view_state()
-                )
-
-        self.current_preview_path = image_path
-        print(f"[DisplayPanel] Showing processed result (Compare Mode): {image_path}")
-
-        # 1. Clear Preview Scene
-        self.preview_scene.clear()
-
-        # 2. Determine Original Image
-        original_pixmap = None
-        if self.logic.current_images:
-            original_path = self.logic.current_images[0].path
-            if os.path.exists(original_path):
-                original_pixmap = QPixmap(original_path)
-
-        processed_pixmap = QPixmap(image_path)
-        item = None
-
-        if original_pixmap and processed_pixmap:
-            # 3. Create Comparison Item (Reusable from GenericUILibrary)
-            item = ImageCompareItem(
-                original_pixmap,
-                processed_pixmap,
-                left_label="Asli",
-                right_label="Diproses",
-            )
-            self.preview_scene.addItem(item)
-            self.preview_scene.setSceneRect(item.boundingRect())
-
-            # NOTE: Scroll connections moved to _setup_ui to avoid RuntimeWarnings
-            # that occur when trying to disconnect non-existent connections.
-
-        else:
-            # Fallback
-            self.logic.display_preview(self.zoomable_preview, image_path)
-            if self.preview_scene.items():
-                item = self.preview_scene.items()[0]
-
-        # RESTORE State or Fit to View
-        if image_path in self.zoom_states:
-            print(
-                f"[DisplayPanel] Restoring zoom state for {os.path.basename(image_path)}"
-            )
-            self.zoomable_preview.set_view_state(self.zoom_states[image_path])
-        else:
-            print(f"[DisplayPanel] First view, fitting to view")
-            # Reset first to ensure clean state then fit
-            self.zoomable_preview.reset_zoom()
-            self.zoomable_preview.zoom_to_fit()  # Uses scene rect
-
-        # 3. Update Dropdown logic
-        if update_dropdown and self.logic.current_images:
-            # Show save button since we are displaying a result
-            self.save_overlay.show()
-            self.save_overlay.raise_()
-            first_img_path = self.logic.current_images[0].path
-            results = self.logic.detect_processed_results(first_img_path)
-
-            self.current_results_map = {r["name"]: r["path"] for r in results}
-            options = [r["name"] for r in results]
-
-            block = self.result_selector.blockSignals(True)
-            self.result_selector.clear()
-            self.result_selector.addItems(options)
-
-            current_name = None
-            for name, path in self.current_results_map.items():
-                if os.path.normpath(path) == os.path.normpath(image_path):
-                    current_name = name
-                    break
-
-            if current_name:
-                self.result_selector.setCurrentText(current_name)
-
-            self.result_selector.blockSignals(block)
-
-        self.show_preview()
+        display_manager.display_processed_result(self, image_path, update_dropdown)
 
     def check_result_availability(self):
         """Check if results exist for current batch and update 'Preview Process' button."""
@@ -1293,10 +1426,25 @@ class DisplayPanel(QWidget):
         """Sets the text of the header title."""
         self.header_title.setText(text)
 
+    def _update_header_title(self, count=None):
+        """Helper to update header title with batch name and image count."""
+        if not self.current_batch_id:
+            self.header_title.setText("No batch selected")
+            return
+
+        display_name = (
+            self.current_batch_name
+            if self.current_batch_name
+            else str(self.current_batch_id)
+        )
+
+        # Prioritaskan parameter count jika diberikan, jika tidak gunakan jumlah kartu saat ini
+        actual_count = count if count is not None else len(self.all_cards)
+        self.header_title.setText(f"{display_name}: ({actual_count} image)")
+
     def _on_save_clicked(self):
         """Handle floating save button click."""
         if hasattr(self, "current_preview_path") and self.current_preview_path:
-            import shutil
 
             # Open save file dialog
             filename = os.path.basename(self.current_preview_path)
@@ -1310,13 +1458,11 @@ class DisplayPanel(QWidget):
             if save_path:
                 try:
                     shutil.copy2(self.current_preview_path, save_path)
-                    from PySide6.QtWidgets import QMessageBox
 
                     QMessageBox.information(
                         self, "Success", f"Image saved successfully to:\n{save_path}"
                     )
                 except Exception as e:
-                    from PySide6.QtWidgets import QMessageBox
 
                     QMessageBox.critical(self, "Error", f"Failed to save image: {e}")
 
@@ -1370,7 +1516,7 @@ class DisplayPanel(QWidget):
     # Overide resizeEvent untuk memastikan overlay selalu menutupi area display
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self, 'drop_overlay'):
+        if hasattr(self, "drop_overlay"):
             self.drop_overlay.resize(self.size())
 
     def dragEnterEvent(self, event):
@@ -1380,14 +1526,16 @@ class DisplayPanel(QWidget):
 
         if event.mimeData().hasUrls():
             # Hitung jumlah file yang sedang di-hover
-            file_count = len([url for url in event.mimeData().urls() if url.isLocalFile()])
-            
+            file_count = len(
+                [url for url in event.mimeData().urls() if url.isLocalFile()]
+            )
+
             if file_count > 0:
                 event.acceptProposedAction()
                 # Tampilkan overlay dan update teks
                 self.drop_overlay.setText(f"Jatuhkan {file_count} gambar di sini")
                 self.drop_overlay.show()
-                self.drop_overlay.raise_() # Pastikan di paling atas
+                self.drop_overlay.raise_()  # Pastikan di paling atas
         else:
             event.ignore()
 

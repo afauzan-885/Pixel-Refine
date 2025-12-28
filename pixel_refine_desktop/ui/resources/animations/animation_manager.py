@@ -4,11 +4,14 @@ from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
     QWidget,
     QApplication,
+    QLabel,
 )
 from PySide6.QtCore import (
     QObject,
     QPropertyAnimation,
     QEasingCurve,
+    QSequentialAnimationGroup,
+    Qt,
     Slot,
     QParallelAnimationGroup,
     QPoint,
@@ -49,6 +52,7 @@ class StackedWidgetAnimator(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._animation_state = weakref.WeakKeyDictionary()
+        self._standalone_anims = weakref.WeakKeyDictionary()  # Tracking per-widget
 
     def transition_out(
         self,
@@ -67,17 +71,48 @@ class StackedWidgetAnimator(QObject):
                 QTimer.singleShot(0, on_finished_callback)
             return
 
-        try:
-            opacity_effect = widget.graphicsEffect()
-            if not isinstance(opacity_effect, QGraphicsOpacityEffect):
-                opacity_effect = QGraphicsOpacityEffect(widget)
-                widget.setGraphicsEffect(opacity_effect)
-            opacity_effect.setOpacity(1.0)
-        except RuntimeError:
+        target_widget = widget_ref()
+        if target_widget is None:
             if on_finished_callback and callable(on_finished_callback):
-                QTimer.singleShot(0, on_finished_callback)
+                on_finished_callback()
             return
 
+        parent = target_widget.parentWidget()
+        if not parent:
+            if on_finished_callback and callable(on_finished_callback):
+                on_finished_callback()
+            return
+
+        # --- STRATEGI GHOSTING PIXMAP ---
+        # 1. Ambil snapshot widget asli
+        try:
+            pixmap = target_widget.grab()
+            geom = target_widget.geometry()
+        except RuntimeError:
+            if on_finished_callback and callable(on_finished_callback):
+                on_finished_callback()
+            return
+
+        # 2. Buat widget "Hantu" (Ghost) di parent yang sama
+        ghost = QLabel(parent)
+        ghost.setPixmap(pixmap)
+        ghost.setGeometry(geom)
+        ghost.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+        # 3. Siapkan effect pada Ghost
+        opacity_effect = QGraphicsOpacityEffect(ghost)
+        ghost.setGraphicsEffect(opacity_effect)
+        opacity_effect.setOpacity(1.0)
+        ghost.show()
+        ghost.raise_()
+
+        # 4. Sembunyikan widget asli SEGERA untuk menghindari konflik QPainter
+        try:
+            target_widget.hide()
+        except RuntimeError:
+            pass
+
+        # 5. Jalankan animasi pada Ghost
         anim = QPropertyAnimation(opacity_effect, b"opacity", self)
         anim.setDuration(duration)
         anim.setStartValue(1.0)
@@ -85,13 +120,10 @@ class StackedWidgetAnimator(QObject):
         anim.setEasingCurve(curve)
 
         def on_anim_finished():
-            w = widget_ref()
-            if w:
-                try:
-                    # Delay removal to prevent QPainter clashes
-                    QTimer.singleShot(0, lambda: self._safe_remove_effect(w))
-                except RuntimeError:
-                    pass
+            try:
+                ghost.deleteLater()
+            except RuntimeError:
+                pass
             if on_finished_callback and callable(on_finished_callback):
                 on_finished_callback()
 
@@ -145,7 +177,7 @@ class StackedWidgetAnimator(QObject):
                 old_widget.setGraphicsEffect(effect)
             effect.setOpacity(1.0)
         except RuntimeError:
-            self._clear_animation_state(stack_widget) # Gunakan helper baru
+            self._clear_animation_state(stack_widget)  # Gunakan helper baru
             return
 
         out_group = QParallelAnimationGroup(self)
@@ -197,7 +229,7 @@ class StackedWidgetAnimator(QObject):
             else:
                 widget.hide()
         except RuntimeError:
-             # Widget mungkin sudah tidak ada lagi
+            # Widget mungkin sudah tidak ada lagi
             pass
 
     def _validate_target(self, stack_widget, target):
@@ -321,7 +353,9 @@ class StackedWidgetAnimator(QObject):
             except RuntimeError:
                 self._clear_animation_state(stack_widget)
         else:
-            self._clear_animation_state(stack_widget) # Kunci dilepas jika widget baru tidak ada
+            self._clear_animation_state(
+                stack_widget
+            )  # Kunci dilepas jika widget baru tidak ada
 
     def _start_incoming_animation(self, stack_widget, new_widget, data):
         try:
@@ -357,7 +391,7 @@ class StackedWidgetAnimator(QObject):
 
         state = self._animation_state.get(stack_widget)
         if not state:
-             return  # Animasi diinterupsi
+            return  # Animasi diinterupsi
         state["in_group"] = in_group
         in_group.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
@@ -372,11 +406,13 @@ class StackedWidgetAnimator(QObject):
             try:
                 # Atur ulang properti dengan aman
                 if current_widget.graphicsEffect():
-                     QTimer.singleShot(0, lambda w=current_widget: self._safe_remove_effect(w))
+                    QTimer.singleShot(
+                        0, lambda w=current_widget: self._safe_remove_effect(w)
+                    )
                 if current_widget.pos() != QPoint(0, 0):
-                    current_widget.move(0, 0) # Pastikan posisi akhir benar
+                    current_widget.move(0, 0)  # Pastikan posisi akhir benar
             except RuntimeError:
-                pass # Widget mungkin sudah dihapus
+                pass  # Widget mungkin sudah dihapus
 
         self._clear_animation_state(stack_widget)
 
@@ -400,9 +436,11 @@ class StackedWidgetAnimator(QObject):
 
         new_widget = state["new_widget_ref"]()
         if new_widget:
-            QTimer.singleShot(0, lambda w=new_widget: self._reset_widget_state(w, visible=True))
+            QTimer.singleShot(
+                0, lambda w=new_widget: self._reset_widget_state(w, visible=True)
+            )
             try:
-                 # Pastikan widget baru berada di atas setelah interupsi
+                # Pastikan widget baru berada di atas setelah interupsi
                 stack_widget.setCurrentIndex(state["new_index"])
             except RuntimeError:
                 pass
@@ -473,6 +511,110 @@ class StackedWidgetAnimator(QObject):
             widget.setGraphicsEffect(None)  # type: ignore
         except (RuntimeError, AttributeError):
             pass
+
+
+class WidgetLifecycleAnimator(QObject):
+    """
+    Animator khusus untuk siklus hidup widget (Delete/Remove).
+    Memisahkan logika 'penghancuran' dari logika navigasi StackedWidget.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._active_animations = []  # Menyimpan referensi agar tidak di-GC
+
+    def animate_delete(
+        self,
+        widget: QWidget,
+        duration: int = 400,
+        use_drop_effect: bool = True,
+        drop_distance: int = 50,
+        on_finished_callback=None,
+    ):
+        if not widget:
+            return
+
+        # 1. Setup Opacity
+        effect = widget.graphicsEffect()
+        if not isinstance(effect, QGraphicsOpacityEffect):
+            effect = QGraphicsOpacityEffect(widget)
+            widget.setGraphicsEffect(effect)
+        effect.setOpacity(1.0)
+
+        # 2. Setup Geometry Sequence
+        # Kunci tinggi widget agar saat animasi drop, layout tidak langsung snap
+        current_h = widget.height()
+        widget.setMinimumHeight(current_h)
+        widget.setMaximumHeight(current_h)
+
+        # Durasi dibagi: Fase Visual (Jatuh & Fade) -> Fase Struktural (Collapse)
+        dur_visual = int(duration * 0.7)
+        dur_collapse = int(duration * 0.3)
+
+        # --- FASE 1: VISUAL (Parallel) ---
+        visual_group = QParallelAnimationGroup()
+
+        # A. Fade Out
+        anim_fade = QPropertyAnimation(effect, b"opacity")
+        anim_fade.setDuration(dur_visual)
+        anim_fade.setStartValue(1.0)
+        anim_fade.setEndValue(0.0)
+        anim_fade.setEasingCurve(QEasingCurve.Type.InQuad)  # Fade makin cepat di akhir
+        visual_group.addAnimation(anim_fade)
+
+        # B. Drop Down (Efek Jatuh)
+        if use_drop_effect:
+            start_pos = widget.pos()
+            end_pos = QPoint(start_pos.x(), start_pos.y() + drop_distance)
+
+            anim_pos = QPropertyAnimation(widget, b"pos")
+            anim_pos.setDuration(dur_visual)
+            anim_pos.setStartValue(start_pos)
+            anim_pos.setEndValue(end_pos)
+
+            # QEasingCurve.InBack memberikan efek "ancang-ancang" ke atas sedikit
+            # sebelum jatuh ke bawah, memberikan kesan berat/gravitasi.
+            anim_pos.setEasingCurve(QEasingCurve.Type.InBack)
+            visual_group.addAnimation(anim_pos)
+
+        # --- FASE 2: STRUKTURAL (Collapse) ---
+        # Menyusutkan tinggi ke 0 agar layout menutup
+        collapse_group = QParallelAnimationGroup()
+
+        anim_min = QPropertyAnimation(widget, b"minimumHeight")
+        anim_min.setDuration(dur_collapse)
+        anim_min.setStartValue(current_h)
+        anim_min.setEndValue(0)
+        anim_min.setEasingCurve(QEasingCurve.Type.OutQuad)
+
+        anim_max = QPropertyAnimation(widget, b"maximumHeight")
+        anim_max.setDuration(dur_collapse)
+        anim_max.setStartValue(current_h)
+        anim_max.setEndValue(0)
+        anim_max.setEasingCurve(QEasingCurve.Type.OutQuad)
+
+        collapse_group.addAnimation(anim_min)
+        collapse_group.addAnimation(anim_max)
+
+        # --- GABUNGKAN DALAM URUTAN ---
+        sequence = QSequentialAnimationGroup(self)
+        sequence.addAnimation(visual_group)
+        sequence.addAnimation(collapse_group)
+
+        # --- CLEANUP ---
+        def on_done():
+            if on_finished_callback:
+                on_finished_callback()
+            if widget:
+                widget.deleteLater()
+            # Hapus referensi animasi dari list internal
+            if sequence in self._active_animations:
+                self._active_animations.remove(sequence)
+
+        sequence.finished.connect(on_done)
+
+        # Simpan referensi dan jalankan
+        self._active_animations.append(sequence)
 
 
 class WidthAnimator(QObject):

@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QFrame,
 )
-from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtCore import QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QMouseEvent, QPainter, QPen, QColor
 
 from .mixins import RealtimeMixin
@@ -72,7 +72,9 @@ class GridContainer(QScrollArea, RealtimeMixin):
         self.grid_layout = QGridLayout(self.container)
         self.grid_layout.setContentsMargins(10, 10, 10, 10)
         self.grid_layout.setSpacing(spacing)
-        self.grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.grid_layout.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+        )
 
         self.setWidget(self.container)
 
@@ -84,6 +86,7 @@ class GridContainer(QScrollArea, RealtimeMixin):
         # ID-based mapping for smart updates
         self._items_map = {}  # item_id -> widget
         self.item_factory = None  # Function: (item_data) -> QWidget
+        self._is_batch_updating = False
 
     def add_item(self, widget):
         """Add item to grid based on wrap mode and column mode"""
@@ -91,59 +94,98 @@ class GridContainer(QScrollArea, RealtimeMixin):
         if self.column_mode == "responsive":
             self._stored_widgets.append(widget)
 
-        # Calculate columns if responsive mode
-        if self.column_mode == "responsive":
+        # Calculate columns if responsive mode AND not in batch update
+        if self.column_mode == "responsive" and not self._is_batch_updating:
+            old_cols = self.columns
             self.columns = self._calculate_responsive_columns()
+            if old_cols != self.columns and self.item_count > 0:
+                # If columns changed, we MUST rebuild to avoid overlapping items
+                self._rebuild_grid()
+                return  # Rebuild managed the addition
 
-        if self.wrap_mode == "vertical":
-            # Vertical wrap: fill columns first, then rows
-            row = self.item_count // self.columns
-            col = self.item_count % self.columns
-        elif self.wrap_mode == "horizontal":
-            # Horizontal wrap: fill rows first, then columns
-            col = self.item_count // self.columns
-            row = self.item_count % self.columns
-        else:
-            # Default to vertical
-            row = self.item_count // self.columns
-            col = self.item_count % self.columns
-
-        self.grid_layout.addWidget(widget, row, col)
-        self.item_count += 1
+        # Reinforced addition
+        if self._is_widget_alive(widget):
+            self._add_to_layout_grid(widget)
 
     def _calculate_responsive_columns(self):
         """
         Calculate number of columns based on available width and item size.
-
-        Formula: (available_width - padding) / (item_width + spacing)
         """
-        # Get available width dari scroll area
-        available_width = self.viewport().width()
+        viewport = self.viewport()
+        if not viewport:
+            return self.columns
 
-        # Minimum width check
-        if available_width <= 0:
-            available_width = 800  # Default fallback
+        available_width = viewport.width()
 
-        # Calculate: (width - left_margin - right_margin) / (item_width + spacing)
-        padding = 10 + 10  # left + right margins
+        # Debounce/Init handling
+        if available_width <= 100:
+            parent_scroll = self.parentWidget()
+            if isinstance(parent_scroll, QWidget) and parent_scroll.width() > 100:
+                available_width = parent_scroll.width()
+            else:
+                available_width = 800
+
+        # Ambil margin dari layout secara dinamis
+        m = self.grid_layout.contentsMargins()
+        padding = m.left() + m.right()
         usable_width = available_width - padding
 
-        # Columns = usable_width / (item_width + spacing)
-        # But ensure minimum 1 column
-        item_width_with_spacing = self.item_width + self.spacing
-        columns = max(1, int(usable_width / item_width_with_spacing))
+        spacing = self.spacing or 0
+        item_width_with_spacing = self.item_width + spacing
 
+        # Formula cerdas: (Width_tersedia + satu_spacing) / (Lebar_item + satu_spacing)
+        # Ini karena item terakhir tidak butuh spacing di kanannya.
+        if item_width_with_spacing <= 0:
+            return 4
+
+        columns = max(1, int((usable_width + spacing) / item_width_with_spacing))
         return columns
 
+    def _is_widget_alive(self, widget):
+        """Reinforced check for PySide6 C++ objects."""
+        if widget is None:
+            return False
+        try:
+            _ = widget.parent()
+            return True
+        except (RuntimeError, AttributeError):
+            return False
+
+    def remove_item(self, widget, rebuild=True):
+        """Safe removal of tracking widget."""
+        if widget in self._stored_widgets:
+            self._stored_widgets.remove(widget)
+        try:
+            self.grid_layout.removeWidget(widget)
+        except (RuntimeError, AttributeError):
+            pass
+        if rebuild and not self._is_batch_updating:
+            self._rebuild_grid()
+
     def clear_items(self):
-        """Clear all items"""
+        """Clear all items and reset state safely."""
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
             if item.widget():
-                item.widget().deleteLater()
+                try:
+                    item.widget().deleteLater()
+                except RuntimeError:
+                    pass
         self.item_count = 0
         self._stored_widgets.clear()
         self._items_map.clear()
+
+        # Jika responsive, hitung ulang kolom segera agar tidak stuck di default lama
+        if self.column_mode == "responsive":
+            self.columns = self._calculate_responsive_columns()
+        else:
+            self.columns = 4  # Fallback for fixed mode if not specified
+
+    def set_batch_update(self, active: bool):
+        """Enable or disable batch update mode to optimize bulk additions."""
+        self._is_batch_updating = active
+        if not active:
+            self._rebuild_grid()
 
     # --- Realtime System ---
 
@@ -252,34 +294,74 @@ class GridContainer(QScrollArea, RealtimeMixin):
             self._rebuild_grid()
 
     def _rebuild_grid(self):
-        """Rebuild grid layout with current settings"""
-        # Store all widgets
-        widgets = []
+        """Rebuild grid layout with current settings (Full Width Reinforced)"""
+        # 1. Pastikan jumlah kolom terbaru sebelum mengisi ulang
+        if self.column_mode == "responsive":
+            self.columns = self._calculate_responsive_columns()
+
+        # 2. Filter widget yang masih hidup
+        self._stored_widgets = [
+            w for w in self._stored_widgets if self._is_widget_alive(w)
+        ]
+        valid_widgets = self._stored_widgets.copy()
+
+        # 3. Kosongkan layout tanpa menghapus widget nya
         while self.grid_layout.count():
-            item = self.grid_layout.takeAt(0)
-            if item.widget():
-                widgets.append(item.widget())
+            self.grid_layout.takeAt(0)
 
-        # Also include any stored widgets from responsive mode
-        if self.column_mode == "responsive" and self._stored_widgets:
-            widgets = self._stored_widgets.copy()
-
-        # Reset counter
+        # 4. Susun ulang
         self.item_count = 0
+        for widget in valid_widgets:
+            if self._is_widget_alive(widget):
+                try:
+                    self._add_to_layout_grid(widget)
+                except RuntimeError:
+                    continue
 
-        # Re-add all widgets with new layout
-        for widget in widgets:
-            self.add_item(widget)
+    def _add_to_layout_grid(self, widget):
+        """Helper internal untuk addWidget dengan penghitungan row/col (Heavy-Duty)."""
+        if not self._is_widget_alive(widget):
+            return
+
+        if self.wrap_mode == "vertical":
+            # Cegah pembagian dengan nol
+            cols = max(1, self.columns)
+            row = self.item_count // cols
+            col = self.item_count % cols
+        else:
+            rows = max(1, self.columns)
+            col = self.item_count // rows
+            row = self.item_count % rows
+
+        try:
+            self.grid_layout.addWidget(widget, row, col)
+            self.item_count += 1
+        except RuntimeError:
+            # Proteksi terakhir jika widget mati tepat saat ditambahkan
+            pass
 
     def resizeEvent(self, event):
         """Handle resize event to recalculate responsive columns"""
         super().resizeEvent(event)
 
-        # If responsive mode, rebuild grid on resize
-        if self.column_mode == "responsive" and self._stored_widgets:
+        # If responsive mode AND not in batch update, check if rebuild needed
+        if (
+            self.column_mode == "responsive"
+            and self._stored_widgets
+            and not self._is_batch_updating
+        ):
             new_columns = self._calculate_responsive_columns()
             if new_columns != self.columns:
-                self._rebuild_grid()
+                # Debounce: Hanya rebuild setelah resize selesai
+                if not hasattr(self, "_resize_timer"):
+
+                    self._resize_timer = QTimer(self)
+                    self._resize_timer.setSingleShot(True)
+                    self._resize_timer.setInterval(150)  # 150ms debounce
+                    self._resize_timer.timeout.connect(self._rebuild_grid)
+
+                if not self._resize_timer.isActive():
+                    self._resize_timer.start()
 
 
 class GridItem(QWidget):
@@ -307,7 +389,7 @@ class GridItem(QWidget):
 
         # Visual placeholder
         self.visual_box = QLabel(label)
-        self.visual_box.setAlignment(Qt.AlignCenter)
+        self.visual_box.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.visual_box.setWordWrap(True)
         self.visual_box.setStyleSheet(
             """
@@ -347,14 +429,14 @@ class GridItem(QWidget):
 
         if self._is_selected:
             painter = QPainter(self)
-            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
             # Blue highlight border
             border_pen = QPen(QColor(0, 120, 215))
             border_pen.setWidth(3)
 
             painter.setPen(border_pen)
-            painter.setBrush(Qt.NoBrush)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
 
             rect = self.rect().adjusted(2, 2, -2, -2)
             painter.drawRoundedRect(rect, 4, 4)
@@ -459,7 +541,7 @@ class ThumbnailGrid(GridContainer):
     thumbnail_clicked = Signal(str)  # item_id
 
     def __init__(
-        self, columns=5, thumbnail_size=100, wrap_mode="vertical", parent=None
+        self, columns=5, thumbnail_size=110, wrap_mode="vertical", parent=None
     ):
         super().__init__(columns=columns, wrap_mode=wrap_mode, parent=parent)
 
