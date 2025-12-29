@@ -2,6 +2,9 @@ from typing import Optional
 from PySide6.QtWidgets import QStackedWidget, QWidget, QGraphicsOpacityEffect
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QTimer
 from .animation_manager import StackedWidgetAnimator, AnimationType
+from pixel_refine_desktop.enhance_stack.core.logic.process_manager import (
+    is_widget_alive,
+)
 
 
 def fade_in(
@@ -84,14 +87,22 @@ def fade_out(
 
     # Kita bungkus callback agar bisa melakukan hide() otomatis
     def internal_callback():
-        if hide_on_finish and widget:
+        if hide_on_finish and is_widget_alive(widget):
             try:
                 widget.hide()
             except RuntimeError:
                 pass  # Widget mungkin sudah dihapus
 
         if on_finished_callback:
-            on_finished_callback()
+            try:
+                # If the callback is a method, check if its instance is still alive
+                if hasattr(on_finished_callback, "__self__"):
+                    cb_obj = on_finished_callback.__self__
+                    if isinstance(cb_obj, QWidget) and not is_widget_alive(cb_obj):
+                        return
+                on_finished_callback()
+            except RuntimeError:
+                pass
 
     animator.transition_out(
         widget=widget,

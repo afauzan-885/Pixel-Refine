@@ -53,9 +53,20 @@ from pixel_refine_desktop.ui.resources.GenericUILibrary.grids import GridContain
 from pixel_refine_desktop.ui.resources.GenericUILibrary.forms import FormGroup
 from pixel_refine_desktop.ui.components.common.sidebar import Sidebar
 
-# Display logic
+# Logic
 from pixel_refine_desktop.enhance_stack.core.logic.display_logic import DisplayLogic
 from pixel_refine_desktop.enhance_stack.core.logic import display_manager
+from pixel_refine_desktop.enhance_stack.core.logic.process_manager import (
+    ProcessManager,
+    ProcessManager,
+    is_widget_alive,
+)
+from pixel_refine_desktop.enhance_stack.core.logic.selection_manager import (
+    SelectionManager,
+)
+from pixel_refine_desktop.enhance_stack.core.logic.deletion_manager import (
+    DeletionManager,
+)
 
 # Zoomable preview
 from pixel_refine_desktop.enhance_stack.core.logic.Zoomable_Handler import Zoomable
@@ -68,35 +79,17 @@ from pixel_refine_desktop.ui.resources.animations.animation_manager import (
 )
 from pixel_refine_desktop.ui.resources.animations.slide import slide
 from pixel_refine_desktop.ui.resources.animations.fade import fade_out, fade_in
+from pixel_refine_desktop.ui.resources.animations.toast.toast_manager import (
+    ToastManager,
+    ToastPosition,
+    ToastAnimation,
+)
 
 # Config untuk supported image formats
 from config import SUPPORTED_FORMATS
 
 # Import the new widget
 from .multiple_batch_delete_widget import MultipleBatchDeleteWidget
-
-
-class ImageDeletionWorker(QObject):
-    """Worker untuk menghapus gambar di thread terpisah tanpa freeze UI."""
-
-    finished = Signal(int)  # Signal dengan count gambar yang dihapus
-    error = Signal(str)  # Signal dengan error message
-
-    def __init__(self, controller, batch_id, paths_to_remove):
-        super().__init__()
-        self.controller = controller
-        self.batch_id = batch_id
-        self.paths_to_remove = paths_to_remove
-
-    def run(self):
-        """Perform deletion di thread terpisah."""
-        try:
-            count = self.controller.remove_images_from_batch(
-                self.batch_id, self.paths_to_remove
-            )
-            self.finished.emit(count)
-        except Exception as e:
-            self.error.emit(str(e))
 
 
 class DisplayPanel(QWidget):
@@ -137,15 +130,34 @@ class DisplayPanel(QWidget):
 
         self.controller = controller
         self.logic = DisplayLogic()
+        # Managers
+        self.selection_manager = SelectionManager(self)
+        self.deletion_manager = DeletionManager(self)
+        self.deletion_manager.deletion_finished.connect(self._on_deletion_finished)
+        self.deletion_manager.deletion_error.connect(self._on_deletion_error)
+
+        # State
         self.current_batch_id = None
         self.current_batch_name = None
-        self.selected_thumbnails = set()
-        self.last_selected_card_id = None
-        self.all_cards = {}
+        self.total_image_count = 0
+        self.all_cards = {}  # Map card_id -> ImageCard widget
+
+        # NOTE: Selection and Deletion state moved to managers
+        # self.selected_thumbnails, self.active_deletions etc are now in managers.
+
+        # Restoring missing attributes
         self.current_preview_path = None
         self.current_results_map = {}
         self.zoom_states = {}
-        self.selection_anchor_id = None
+        self.active_import_batches = set()
+        self.toast = ToastManager(self)
+        self.total_image_count = (
+            0  # To track total images independently of UI population
+        )
+        self.active_import_batches = (
+            set()
+        )  # Track which batches are currently importing
+        self.active_deletions = {}  # {batch_id: [paths]} for resume logic
 
         self.supported_extensions = self._build_supported_extensions()
         if TYPE_CHECKING:
@@ -726,22 +738,48 @@ class DisplayPanel(QWidget):
         self.current_batch_name = batch_name
         self.logic.set_batch(batch_id, images)
 
+        # Set exact count tracked from backend data
+        # START ZOMBIE LOGIC: If we have pending deletions, we need to add them to the grid
+        # so they can fade out properly.
+        current_images_ids = {str(img.id) for img in images}
+
+        pending_zombies = []
+        if batch_id in self.active_deletions:
+            for path in self.active_deletions[batch_id]:
+                idx = os.path.basename(path)
+                if idx not in current_images_ids:
+                    # Create a zombie image object
+                    class ZombieImg:
+                        def __init__(self, p):
+                            self.path = p
+                            self.id = os.path.basename(p)
+
+                    pending_zombies.append(ZombieImg(path))
+
+        # Merge real images with zombies for visual consistency
+        # Zombies go first? Or last? Doesn't matter much for deletion, but maybe last.
+        # However, to maintain index stability, let's append.
+        visual_images = list(images) + pending_zombies
+
+        self.total_image_count = len(visual_images)
+
         # Update Header Title segera dengan jumlah gambar yang akan dimuat
-        self._update_header_title(count=len(images))
+        self._update_header_title()
+
+        # 0. Cancel any existing processes/animations for previous state
+        ProcessManager.instance().cancel_context("display_populate")
+        ProcessManager.instance().cancel_context("display_sequential_removal")
+        self.grid_animator.stop_all()
+        self.logic.get_thumbnail_processor().stop_all()
 
         self._clear_grid()
-        self.logic.get_thumbnail_processor().stop_all()
-        self.selected_thumbnails.clear()
-        self.all_cards.clear()
-        self.last_selected_card_id = None
-        self.selection_anchor_id = None
+        self.grid_container.set_batch_update(True)
 
-        # Check if batch is empty
         # Update Header Title (Setelah state dibersihkan, agar count akurat)
-        self._update_header_title(count=len(images))
+        self._update_header_title(count=self.total_image_count)
 
-        # Check if batch is empty
-        if self.logic.is_batch_empty():
+        # Check if batch is empty (visually)
+        if not visual_images:
             # Show empty state but keep import button visible in header
             self.import_button.setVisible(True)
             self._show_empty_batch_state()
@@ -755,31 +793,68 @@ class DisplayPanel(QWidget):
         if self.grid_content_stack.currentWidget() != self.grid_container:
             self._set_placeholder(None)
 
-        # Start Batch Update di GridContainer (menghindari rebuild layout setiap kali item ditambah)
-        self.grid_container.set_batch_update(True)
+        # Resume deletion simulation if there are pending deletions for this batch
+        self.deletion_manager.resume_deletion_simulation(batch_id)
 
-        # Populate items
-        for img in images:
-            card = ImageCard(card_id=str(img.id), size=110)
-            card._image_path = img.path
-            card.double_clicked.connect(self._on_card_double_clicked)
-            card.clicked.connect(
-                lambda cid, event, c=card: self._on_card_clicked(cid, event, c)
+        # Prepare incremental population to avoid UI freeze
+        self._populate_queue = list(visual_images)
+        if hasattr(self, "_populate_timer") and self._populate_timer.isActive():
+            self._populate_timer.stop()
+
+        self._populate_timer = QTimer(self)
+        self._populate_timer.timeout.connect(self._process_incremental_population)
+
+        # Register to ProcessManager
+        ProcessManager.instance().register_timer(
+            "display_populate", self._populate_timer
+        )
+
+        # Start population: 10 images per 30ms (Smooth & Fast)
+        self._populate_timer.start(30)
+
+    def _process_incremental_population(self):
+        """Slots to add images to grid in chunks to avoid UI hang."""
+        if not hasattr(self, "_populate_queue") or not self._populate_queue:
+            self._populate_timer.stop()
+            self.grid_container.set_batch_update(False)
+            # Final check for thumbnails
+            self._check_visible_cards()
+            return
+
+        # Add 10 images per tick
+        CHUNK_SIZE = 15
+        for _ in range(CHUNK_SIZE):
+            if not self._populate_queue:
+                break
+
+            img = self._populate_queue.pop(0)
+
+            # Check if this is a Zombie (pending deletion)
+            # Assumption: Zombie object created in load_batch has a distinct attribute or we check path
+            is_zombie = (
+                hasattr(img, "__class__") and img.__class__.__name__ == "ZombieImg"
             )
 
+            card = ImageCard(card_id=str(img.id), size=110)
+            card._image_path = img.path
+
+            if not is_zombie:
+                card.double_clicked.connect(self._on_card_double_clicked)
+                card.clicked.connect(
+                    lambda cid, event, c=card: self._on_card_clicked(cid, event, c)
+                )
+
+            self.all_cards[str(img.id)] = card
             self.grid_container.add_item(card)
-            self.all_cards[str(img.id)] = card  # Store reference untuk range select
-            self.logic.register_grid_item(str(img.id), {"path": img.path})
 
-            # JANGAN panggil _load_thumbnail_async di sini (Lazy Loading akan menanganinya)
+            if not is_zombie:
+                self.logic.register_grid_item(str(img.id), {"path": img.path})
+            else:
+                # ZOMBIE LOGIC: Immediately queue for removal via Manager (resuming stream)
+                self.deletion_manager.queue_zombie_card(str(img.id), card)
 
-        # Matikan Batch Update (ini akan melakukan rebuild grid 1x secara efisien)
-        self.grid_container.set_batch_update(False)
-
-        # Trigger pengecekan visibilitas pertama kali
-        QTimer.singleShot(200, self._check_visible_cards)
-
-        self.show_grid()
+        # Update progress header
+        self._update_header_title()
 
     @Slot()
     def clear_display(self):
@@ -789,13 +864,18 @@ class DisplayPanel(QWidget):
         """
         self.current_batch_id = None
         self.current_batch_name = None
+
+        # 0. Cancel all pending populations and removals
+        ProcessManager.instance().cancel_context("display_populate")
+        ProcessManager.instance().cancel_context("display_sequential_removal")
+
         self._update_header_title()  # Clear header title
         self.logic.clear_all()
         self._clear_grid()
-        self.selected_thumbnails.clear()
+        self.selection_manager.clear()
         self.all_cards.clear()
-        self.last_selected_card_id = None
-        self.selection_anchor_id = None
+        # self.last_selected_card_id = None # Handled by manager
+        # self.selection_anchor_id = None # Handled by manager
 
         # Hide import button saat no batch selected
         self.import_button.setVisible(False)
@@ -838,42 +918,17 @@ class DisplayPanel(QWidget):
 
     def _clear_grid(self):
         """Remove all widgets from grid container."""
+        # Tambahan: Hentikan semua animasi yang berjalan pada grid sebelum clear
+        self.grid_animator.stop_all()
         self.grid_container.clear_items()
 
     def _clear_selection(self):
-        """Deselect semua cards."""
-        for card_id in list(self.selected_thumbnails):
-            if card_id in self.all_cards:
-                self.all_cards[card_id].deselect()
-        self.selected_thumbnails.clear()
+        """Deselect semua cards via Manager."""
+        self.selection_manager.clear_selection()
 
     def _select_range(self, start_card_id, end_card_id):
-        """
-        Select range antara dua cards.
-
-        Args:
-            start_card_id: ID card awal range
-            end_card_id: ID card akhir range
-        """
-        # Get urutan dari grid untuk determine range
-        card_ids_in_order = list(self.all_cards.keys())
-
-        try:
-            start_idx = card_ids_in_order.index(start_card_id)
-            end_idx = card_ids_in_order.index(end_card_id)
-        except ValueError:
-            return  # Invalid IDs
-
-        # Normalize indices untuk ascending order
-        if start_idx > end_idx:
-            start_idx, end_idx = end_idx, start_idx
-
-        # Select semua cards dalam range
-        for i in range(start_idx, end_idx + 1):
-            card_id = card_ids_in_order[i]
-            if card_id in self.all_cards:
-                self.all_cards[card_id].select()
-                self.selected_thumbnails.add(card_id)
+        """Select range via Manager."""
+        self.selection_manager.select_range(start_card_id, end_card_id)
 
     def _load_thumbnail_async(self, image_path, card_widget):
         """
@@ -885,7 +940,11 @@ class DisplayPanel(QWidget):
         """
 
         def on_thumbnail_ready(q_image, path):
-            if card_widget is not None and not q_image.isNull():
+            if (
+                card_widget is not None
+                and is_widget_alive(card_widget)
+                and not q_image.isNull()
+            ):
                 pixmap = QPixmap.fromImage(q_image)
                 card_widget.set_image(pixmap)
 
@@ -905,54 +964,8 @@ class DisplayPanel(QWidget):
         self.logic.load_thumbnail_async(image_path, on_thumbnail_ready)
 
     def _on_card_clicked(self, card_id, event, card_widget):
-        """
-        Handle click pada image card untuk selection dengan multi-select support.
-
-        - Single Click: Toggle selection single item
-        - Ctrl + Click: Add/remove individual item (multi-select)
-        - Shift + Click: Select range dari last selected ke current
-
-        Args:
-            card_id: ID dari card
-            event: QMouseEvent dari click
-            card_widget: Card widget reference
-        """
-        modifiers = event.modifiers()
-
-        # Single Click - Toggle single item (clear others)
-        if modifiers == Qt.KeyboardModifier.NoModifier:
-            self._clear_selection()
-            card_widget.toggle_selection()
-            if card_widget.is_selected():
-                self.selected_thumbnails.add(card_id)
-            self.last_selected_card_id = card_id
-            self.selection_anchor_id = card_id
-
-        # Ctrl + Click - Add/Remove item (multi-select)
-        elif modifiers == Qt.KeyboardModifier.ControlModifier:
-            card_widget.toggle_selection()
-            if card_widget.is_selected():
-                self.selected_thumbnails.add(card_id)
-            else:
-                self.selected_thumbnails.discard(card_id)
-            self.last_selected_card_id = card_id
-            self.selection_anchor_id = card_id
-
-        # Shift + Click - Select range (multi-select range)
-        elif modifiers == Qt.KeyboardModifier.ShiftModifier:
-            if self.selection_anchor_id and self.selection_anchor_id != card_id:
-                self._clear_selection()
-                self._select_range(self.selection_anchor_id, card_id)
-                self.last_selected_card_id = card_id
-            else:
-                # Jika belum ada last_selected, treat seperti single click
-                self._clear_selection()
-                card_widget.select()
-                self.selected_thumbnails.add(card_id)
-                self.last_selected_card_id = card_id
-                self.selection_anchor_id = card_id
-
-        self.setFocus()
+        """Handle click via Manager."""
+        self.selection_manager.handle_card_clicked(card_id, event, card_widget)
 
     def _on_card_double_clicked(self, card_id):
         """
@@ -967,24 +980,8 @@ class DisplayPanel(QWidget):
             self._display_image_preview(image_path)
 
     def _select_all_images(self):
-        """Select all images in the current batch."""
-        # Clear current selection first
-        self._clear_selection()
-
-        # Select all cards
-        for card_id, card in self.all_cards.items():
-            card.select()
-            self.selected_thumbnails.add(card_id)
-
-        # Update last selected to the last card
-        if self.all_cards:
-            last_id = list(self.all_cards.keys())[-1]
-            self.last_selected_card_id = last_id
-            self.selection_anchor_id = (
-                list(self.all_cards.keys())[0]
-                if not self.selection_anchor_id
-                else self.selection_anchor_id
-            )
+        """Select all via Manager."""
+        self.selection_manager.select_all()
 
     def _refresh_current_batch(self):
         """Helper to re-load current batch settings from controller/db."""
@@ -1024,8 +1021,8 @@ class DisplayPanel(QWidget):
         if self.display_stack.currentIndex() != 0:
             return
 
-        if len(self.selected_thumbnails) == 1:
-            card_id = list(self.selected_thumbnails)[0]
+        if len(self.selection_manager.selected_thumbnails) == 1:
+            card_id = list(self.selection_manager.selected_thumbnails)[0]
             if card_id in self.all_cards:
                 card = self.all_cards[card_id]
                 image_path = getattr(card, "_image_path", None)
@@ -1033,71 +1030,8 @@ class DisplayPanel(QWidget):
                     self._display_image_preview(image_path)
 
     def _navigate_selection(self, key, shift_held):
-        """
-        Gunakan tombol panah untuk navigasi di dalam grid.
-
-        Args:
-            key: Qt.Key_... value
-            shift_held: Boolean, true jika tombol Shift ditekan
-        """
-        # Hanya bekerja jika kita berada di grid view dan memiliki batch
-        if self.display_stack.currentIndex() != 0 or not self.current_batch_id:
-            return
-
-        if not self.all_cards:
-            return
-
-        card_ids_in_order = list(self.all_cards.keys())
-        total_items = len(card_ids_in_order)
-
-        # 1. Tentukan starting point (Indeks fokus saat ini)
-        current_id = self.last_selected_card_id
-        if not current_id or current_id not in card_ids_in_order:
-            # Jika belum ada yang terpilih, mulai dari item pertama
-            current_id = card_ids_in_order[0]
-            current_idx = 0
-        else:
-            current_idx = card_ids_in_order.index(current_id)
-
-        # 2. Hitung target index berdasarkan kolom grid
-        columns = self.grid_container.columns
-        new_idx = current_idx
-
-        if key == Qt.Key.Key_Left:
-            new_idx = max(0, current_idx - 1)
-        elif key == Qt.Key.Key_Right:
-            new_idx = min(total_items - 1, current_idx + 1)
-        elif key == Qt.Key.Key_Up:
-            new_idx = max(0, current_idx - columns)
-        elif key == Qt.Key.Key_Down:
-            new_idx = min(total_items - 1, current_idx + columns)
-
-        if new_idx == current_idx:
-            return  # Tidak berpindah
-
-        new_id = card_ids_in_order[new_idx]
-        new_card = self.all_cards[new_id]
-
-        # 3. Lakukan Seleksi
-        if shift_held:
-            # Gunakan anchor (Id pertama yang diklik secara normal)
-            if not self.selection_anchor_id:
-                self.selection_anchor_id = current_id
-
-            self._clear_selection()
-            self._select_range(self.selection_anchor_id, new_id)
-        else:
-            # Seleksi tunggal (Normal navigation)
-            self._clear_selection()
-            new_card.select()
-            self.selected_thumbnails.add(new_id)
-            self.selection_anchor_id = new_id
-
-        # Simpan last selected untuk navigasi berikutnya
-        self.last_selected_card_id = new_id
-
-        # 4. Scroll ke widget target agar terlihat
-        self.grid_container.ensureWidgetVisible(new_card)
+        """Navigate via Manager."""
+        self.selection_manager.navigate_selection(key, shift_held)
 
     def contextMenuEvent(self, event):
         """Handle right-click context menu pada area grid."""
@@ -1146,9 +1080,10 @@ class DisplayPanel(QWidget):
             menu.addSeparator()
 
         # 2. Delete Selected Images
-        if self.selected_thumbnails:
+        if self.selection_manager.selected_thumbnails:
             action_del = QAction(
-                f"Delete Images ({len(self.selected_thumbnails)})", self
+                f"Delete Images ({len(self.selection_manager.selected_thumbnails)})",
+                self,
             )
             action_del.triggered.connect(self._handle_delete_action)
             menu.addAction(action_del)
@@ -1163,110 +1098,68 @@ class DisplayPanel(QWidget):
                 self._refresh_current_batch()
 
     def _handle_delete_action(self):
-        """Handle deletion of selected images dengan real-time UI updates."""
-        if (
-            not self.selected_thumbnails
-            or not self.current_batch_id
-            or not self.controller
-        ):
-            return
-
-        reply = QMessageBox.question(
-            self,
-            "Hapus Gambar",
-            f"Apakah Anda yakin ingin menghapus {len(self.selected_thumbnails)} gambar yang dipilih dari batch ini?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        """Handle deletion via Manager."""
+        self.deletion_manager.request_deletion(
+            self.selection_manager.get_selected_ids()
         )
 
-        if reply == QMessageBox.StandardButton.Yes:
-            # Get paths for selected IDs and prepare cards to remove
-            paths_to_remove = []
-            cards_to_remove = []
+    @Slot(int, str, str)
+    def add_single_image_to_grid(self, batch_id, batch_name, image_path):
+        """
+        Menambah satu thumbnail ke grid secara real-time.
+        Mendukung logika Toast tingkat lanjut untuk background imports.
+        """
+        # 1. Background Import Logic
+        if batch_id != self.current_batch_id:
+            # Task: Jika proses import hanya satu batch yang sedang memprosesnya maka tampilkan pesan spesifik name
+            # Jika ada dua atau lebih batch_id, tampilkan jumlah global
 
-            for cid in list(self.selected_thumbnails):
-                if cid in self.logic.grid_items:
-                    paths_to_remove.append(self.logic.grid_items[cid]["path"])
-                    if cid in self.all_cards:
-                        cards_to_remove.append((cid, self.all_cards[cid]))
+            active_count = len(self.active_import_batches)
 
-            if paths_to_remove:
-                # Start deletion dengan real-time UI updates
-                self._delete_images_realtime(paths_to_remove, cards_to_remove)
+            # Jika batch ini belum tercatat (misal start signal miss), catat sementara
+            if batch_id not in self.active_import_batches:
+                self.active_import_batches.add(batch_id)
+                active_count += 1
 
-    def _delete_images_realtime(self, paths_to_remove, cards_to_remove):
-        """Delete images dengan efek sequential vanishing (100ms per gambar)."""
+            message = ""
+            if active_count > 1:
+                # > 1 batch importing
+                message = (
+                    f"Background Import: Sedang menambahkan di {active_count} batch..."
+                )
+            else:
+                # Single batch importing
+                message = f"Background Import: Sedang menambahkan gambar ke batch {batch_name}..."
 
-        # 1. Jalankan proses Database SEGERA di background thread (Heavy Lifting)
-        # Kita tidak perlu menunggu animasi selesai untuk mulai menghapus di DB
-        self.deletion_thread = QThread()
-        self.deletion_worker = ImageDeletionWorker(
-            self.controller, self.current_batch_id, paths_to_remove
-        )
-        self.deletion_worker.moveToThread(self.deletion_thread)
-        self.deletion_thread.started.connect(self.deletion_worker.run)
-        self.deletion_worker.finished.connect(self._on_deletion_finished)
-        self.deletion_worker.error.connect(self._on_deletion_error)
-        self.deletion_worker.finished.connect(self.deletion_thread.quit)
-        self.deletion_thread.start()
-
-        # 2. Siapkan antrean untuk manipulasi UI
-        self._removal_queue = list(cards_to_remove)
-
-        # 3. Buat Timer untuk menghapus satu per satu dari UI
-        self._ui_removal_timer = QTimer(self)
-        self._ui_removal_timer.timeout.connect(self._process_sequential_removal)
-        self._ui_removal_timer.start(100)  # Jeda 100ms antar gambar
-
-    def _process_sequential_removal(self):
-        """Slot untuk menghapus satu widget setiap 100ms."""
-        if not hasattr(self, "_removal_queue") or not self._removal_queue:
-            self._ui_removal_timer.stop()
-            # SETELAH SEMUA HILANG: Rapikan tata letak grid secara cerdas (Reinforced)
-            self.grid_container._rebuild_grid()
-            return
-
-        # Ambil satu item dari depan antrean
-        card_id, card_widget = self._removal_queue.pop(0)
-
-        try:
-            # Hapus dari list tracking internal GridContainer
-            if card_widget in self.grid_container._stored_widgets:
-                self.grid_container._stored_widgets.remove(card_widget)
-
-            # Hapus dari tracking DisplayPanel
-            if card_id in self.all_cards:
-                del self.all_cards[card_id]
-            if card_id in self.selected_thumbnails:
-                self.selected_thumbnails.discard(card_id)
-
-            # Unregister dari logika
-            self.logic.unregister_grid_item(card_id)
-
-            # MANIPULASI VISUAL: Sembunyikan dan hapus widget dengan animasi fade out yang smooth
-            fade_out(
-                self.grid_animator,
-                card_widget,
-                duration=300,
-                on_finished_callback=card_widget.deleteLater,
+            # Gunakan show_progress untuk update text tanpa spam animasi
+            self.toast.show_progress(
+                message,
+                # Duration ignored by show_progress
+                position=None,  # Default pos
+                animation=None,
             )
+            # Karena ini toast manager lama yang mungkin tidak support flag is_progress_update di show_message,
+            # kita gunakan show_message biasa yang akan replace text
+            # TAPI wait, user minta logika "hilangkan tampilan toastnya" saat masuk batch
+            return
 
-            # Update header count
-            self._update_header_title()
+        # 2. Logic Tambah ke Grid (Current Batch)
+        # Jika masuk ke sini, artinya batch_id == current_batch_id.
+        # User minta: "saat berada di dalam batch_id yang sedang memproses impor maka hilangkan tampilan toastnya"
+        # Kita bisa panggil hide() untuk memastikan toast background hilang
+        self.toast.hide()
 
-        except Exception as e:
-            print(f"Error vanishing card {card_id}: {e}")
-
-    @Slot(str)
-    def add_single_image_to_grid(self, image_path):
-        """Menambah satu thumbnail ke grid secara real-time."""
-
-        # Buat dummy object agar kompatibel dengan logic Anda
+        # Buat dummy object agar kompatibel dengan logic
         class DummyImg:
             def __init__(self, path):
                 self.path = path
                 self.id = os.path.basename(path)  # ID sementara
 
         img = DummyImg(image_path)
+
+        # Cek jika sudah ada (safety)
+        if str(img.id) in self.all_cards:
+            return
 
         card = ImageCard(card_id=str(img.id), size=110)
         card._image_path = img.path
@@ -1280,8 +1173,14 @@ class DisplayPanel(QWidget):
         self.logic.register_grid_item(str(img.id), {"path": img.path})
         self._load_thumbnail_async(img.path, card)
 
+        # Increment total count
+        self.total_image_count += 1
+
         # Update header count
         self._update_header_title()
+
+        # Check for active deletions to resume
+        self.deletion_manager.resume_deletion_simulation(batch_id)
 
         # Pastikan grid container pindah dari placeholder jika sebelumnya kosong
         if self.grid_content_stack.currentWidget() != self.grid_container:
@@ -1290,11 +1189,10 @@ class DisplayPanel(QWidget):
     def _on_deletion_finished(self, count):
         """Handle completion of image deletion."""
         if count > 0:
-            print(f"[DisplayPanel] Berhasil menghapus {count} gambar")
-            # Refresh batch untuk ensure consistency dengan backend
+            msg = f"Berhasil menghapus {count} gambar."
+            self.toast.show_message(msg, duration=3000)
             self._refresh_current_batch()
         else:
-            # Jika deletion gagal, show error
             QMessageBox.warning(
                 self,
                 "Peringatan",
@@ -1303,8 +1201,9 @@ class DisplayPanel(QWidget):
 
     def _on_deletion_error(self, error_message):
         """Handle error during image deletion."""
-        QMessageBox.critical(self, "Error", f"Gagal menghapus gambar:\n{error_message}")
-        # Refresh batch untuk ensure UI consistency
+        self.toast.show_message(
+            f"Gagal menghapus gambar: {error_message}", duration=4000
+        )
         self._refresh_current_batch()
 
     def _display_image_preview(self, image_path):
@@ -1323,6 +1222,21 @@ class DisplayPanel(QWidget):
 
         self.logic.display_preview(self.zoomable_preview, image_path)
         self.show_preview()
+
+    @Slot(int)
+    def on_batch_import_started(self, batch_id):
+        """Slot to mark a batch as actively importing."""
+        self.active_import_batches.add(batch_id)
+
+    @Slot(int)
+    def on_batch_import_finished(self, batch_id):
+        """Slot to mark a batch as finished importing."""
+        if batch_id in self.active_import_batches:
+            self.active_import_batches.remove(batch_id)
+
+        # Jika tidak ada lagi import yang berjalan, hide toast
+        if not self.active_import_batches:
+            self.toast.hide()
 
     # =========================================================================
     # === 4. PUBLIC HELPER METHODS ===
@@ -1399,13 +1313,12 @@ class DisplayPanel(QWidget):
         self.preview_process_btn.setVisible(False)
 
     def remove_selected_images(self):
-        """Remove currently selected images dari grid."""
-        if self.selected_thumbnails:
-            for card_id in list(self.selected_thumbnails):
+        """Remove currently selected images dari grid via Logic."""
+        if self.selection_manager.selected_thumbnails:
+            for card_id in list(self.selection_manager.selected_thumbnails):
                 # Remove dari logic
                 self.logic.unregister_grid_item(card_id)
-            self.selected_thumbnails.clear()
-            # Reload batch untuk refresh grid
+            self.selection_manager.selected_thumbnails.clear()
             # Reload batch untuk refresh grid
             if self.current_batch_id and self.logic.current_images:
                 self.load_batch(
@@ -1418,7 +1331,7 @@ class DisplayPanel(QWidget):
         """Get list of selected image paths."""
         return [
             self.logic.grid_items[cid]["path"]
-            for cid in self.selected_thumbnails
+            for cid in self.selection_manager.selected_thumbnails
             if cid in self.logic.grid_items
         ]
 
@@ -1438,8 +1351,8 @@ class DisplayPanel(QWidget):
             else str(self.current_batch_id)
         )
 
-        # Prioritaskan parameter count jika diberikan, jika tidak gunakan jumlah kartu saat ini
-        actual_count = count if count is not None else len(self.all_cards)
+        # Prioritaskan parameter count jika diberikan, jika tidak gunakan total_image_count
+        actual_count = count if count is not None else self.total_image_count
         self.header_title.setText(f"{display_name}: ({actual_count} image)")
 
     def _on_save_clicked(self):
