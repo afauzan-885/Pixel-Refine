@@ -91,7 +91,10 @@ def fade_out(
                 pass  # Widget mungkin sudah dihapus
 
         if on_finished_callback:
-            on_finished_callback()
+            try:
+                on_finished_callback()
+            except RuntimeError:
+                pass
 
     animator.transition_out(
         widget=widget,

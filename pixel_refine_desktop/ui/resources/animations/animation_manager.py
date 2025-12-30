@@ -125,7 +125,10 @@ class StackedWidgetAnimator(QObject):
             except RuntimeError:
                 pass
             if on_finished_callback and callable(on_finished_callback):
-                on_finished_callback()
+                try:
+                    on_finished_callback()
+                except RuntimeError:
+                    pass
 
         anim.finished.connect(on_anim_finished)
         anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)

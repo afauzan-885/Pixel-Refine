@@ -316,20 +316,24 @@ class RawImageProcessingThread(BaseMultiThreading):
 
 
 class ImageImportThreading(BaseMultiThreading):
-    # Tambahkan sinyal baru untuk mengirim data item yang baru saja di-import
-    image_added_signal = Signal(str)  # Mengirim path gambar
+    # Tambahkan sinyal baru untuk mengirim data item yang baru saja di-import: (int batch_id, str path)
+    image_added_signal = Signal(int, str)
 
-    def __init__(self, database_manager, image_paths, batch_size, delay_ms):
+    def __init__(self, database_manager, image_paths, batch_size, delay_ms, batch_id=0):
+        self.batch_id = batch_id
+
         def import_task(image_path):
             database_manager.single_process_save_image_path(image_path)
-            self.image_added_signal.emit(image_path)  # Emit setiap kali 1 file selesai
+            self.image_added_signal.emit(
+                self.batch_id, image_path
+            )  # Emit dengan batch_id
 
         super().__init__(import_task, image_paths, batch_size, delay_ms)
 
 
 class BatchImageImportThreading(BaseMultiThreading):
-    # Tambahkan sinyal ini
-    image_added_signal = Signal(str)
+    # Tambahkan sinyal ini: (int batch_id, str path)
+    image_added_signal = Signal(int, str)
 
     def __init__(self, database_manager, image_paths, batch_id, batch_size, delay_ms):
         self.batch_id = batch_id
@@ -340,8 +344,8 @@ class BatchImageImportThreading(BaseMultiThreading):
             self.database_manager.batch_process_save_image_path(
                 self.batch_id, [image_path]
             )
-            # Kirim sinyal ke UI setelah satu gambar masuk DB
-            self.image_added_signal.emit(image_path)
+            # Kirim sinyal ke UI setelah satu gambar masuk DB dengan batch_id
+            self.image_added_signal.emit(self.batch_id, image_path)
 
         super().__init__(import_task, image_paths, batch_size, delay_ms)
 
