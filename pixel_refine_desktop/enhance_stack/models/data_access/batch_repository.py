@@ -74,7 +74,7 @@ class BatchRepository(BaseRepository):
             List of tuples (id, batch_name)
         """
         query = "SELECT id, batch_name FROM batch_process ORDER BY id"
-        return self.execute_query(query)
+        return self.execute_query(query, fetch_one=False)
 
     def delete(self, batch_id: int) -> int:
         """
@@ -211,7 +211,7 @@ class BatchRepository(BaseRepository):
             WHERE bpi.batch_id = ?
             ORDER BY bpi.is_reference_batch DESC, bpi.id ASC
         """
-        return self.execute_query(query, (batch_id,))
+        return self.execute_query(query, (batch_id,), fetch_one=False)
 
     def set_reference_image(self, batch_id: int, image_path: str) -> bool:
         """
@@ -306,7 +306,7 @@ class BatchRepository(BaseRepository):
             WHERE batch_id = ? AND image_id_batch = ?
         """
         result = self.execute_query(query, (batch_id, image_id), fetch_one=True)
-        return result and result[0] == 1
+        return bool(result and result[0] == 1)
 
     def has_reference_image(self, batch_id: int) -> bool:
         """

@@ -117,7 +117,7 @@ class ThumbnailLoaderThread(QThread):
             if pil_thumb:
                 result_image = self._convert_to_qimage(pil_thumb)
                 # Save to cache
-                result_image.save(cache_path, b"JPG", 85)
+                result_image.save(cache_path, None, 85)
 
         finally:
             _thumbnail_semaphore.release()

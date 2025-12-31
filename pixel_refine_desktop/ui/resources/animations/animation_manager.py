@@ -57,6 +57,9 @@ class StackedWidgetAnimator(QObject):
         super().__init__(parent)
         self._animation_state = weakref.WeakKeyDictionary()
         self._standalone_anims = weakref.WeakKeyDictionary()  # Tracking per-widget
+        self._active_widgets = (
+            weakref.WeakKeyDictionary()
+        )  # Track widgets currently animating
 
     def transition_out(
         self,
@@ -68,7 +71,19 @@ class StackedWidgetAnimator(QObject):
         """
         Animator fade-out mandiri yang aman.
         """
-        widget_ref = weakref.ref(widget) if widget else None
+        if not widget:
+            return
+
+        # Batalakan animasi sebelumnya jika ada pada widget yang sama
+        if widget in self._active_widgets:
+            old_anim = self._active_widgets[widget]
+            try:
+                if old_anim and old_anim.state() == QPropertyAnimation.State.Running:
+                    old_anim.stop()
+            except:
+                pass
+
+        widget_ref = weakref.ref(widget)
 
         if not widget_ref or not widget_ref():
             if on_finished_callback and callable(on_finished_callback):
@@ -88,11 +103,31 @@ class StackedWidgetAnimator(QObject):
             return
 
         # --- STRATEGI GHOSTING PIXMAP ---
+        # 0. Safety: Jika widget tidak visible, jangan repot-repot grab (hindari QPainter error)
+        try:
+            if (
+                not target_widget.isVisible()
+                or target_widget.width() <= 0
+                or target_widget.height() <= 0
+            ):
+                if on_finished_callback and callable(on_finished_callback):
+                    on_finished_callback()
+                return
+        except RuntimeError:
+            return
+
         # 1. Ambil snapshot widget asli
         try:
             pixmap = target_widget.grab()
             geom = target_widget.geometry()
-        except RuntimeError:
+            if pixmap.isNull():
+                raise RuntimeError("Grab failed")
+        except (RuntimeError, Exception):
+            # Fallback jika grab gagal: langsung hide dan jalankan callback
+            try:
+                target_widget.hide()
+            except:
+                pass
             if on_finished_callback and callable(on_finished_callback):
                 on_finished_callback()
             return
@@ -143,6 +178,7 @@ class StackedWidgetAnimator(QObject):
                     pass
 
         anim.finished.connect(on_anim_finished)
+        self._active_widgets[target_widget] = anim
         anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
     def transition_in(

@@ -30,7 +30,7 @@ class ImageDeletionWorker(QObject):
             removed_count = 0
             if self.controller:
                 # Assuming batch_delete_images returns count
-                removed_count = self.controller.batch_delete_images(
+                removed_count = self.controller.remove_images_from_batch(
                     self.batch_id, self.paths_to_remove
                 )
             self.finished.emit(removed_count, self.batch_id)
@@ -110,9 +110,13 @@ class DeletionManager(QObject):
         worker.finished.connect(self._on_worker_finished)
         worker.error.connect(self._on_worker_error)
 
+        # Proper Cleanup Chain
         worker.finished.connect(self.deletion_thread.quit)
         worker.finished.connect(worker.deleteLater)
         self.deletion_thread.finished.connect(self.deletion_thread.deleteLater)
+
+        # Keep strong reference to prevent GC
+        self._current_worker = worker
 
         # Register thread
         ProcessManager.instance().register_thread(
@@ -160,6 +164,18 @@ class DeletionManager(QObject):
         card_id, card_widget = self.removal_queue.pop(0)
 
         if not is_widget_alive(card_widget):
+            self.deletion_finished.emit(0)  # Emit finish if widget dead (safety)
+            return
+
+        # STRICT SAFETY CHECK: Abort if batch changed mid-process
+        # This restores "robust handling in extreme conditional" logic
+        current_batch_id = self.panel.current_batch_id
+        if not current_batch_id:
+            # Batch closed/invalid, stop everything
+            if self.ui_removal_timer:
+                self.ui_removal_timer.stop()
+            self.active_deletions.clear()
+            self.removal_queue.clear()
             return
 
         try:
@@ -195,7 +211,7 @@ class DeletionManager(QObject):
                 self.panel.total_image_count = 0
             self.panel._update_header_title()  # Call internal method or public if available
 
-            # 4. Update Active Deletions State
+            # 4. Update Active Deletions State (Only remove if empty)
             current_batch = self.panel.current_batch_id
             if current_batch in self.active_deletions:
                 remaining = self.active_deletions[current_batch]
@@ -204,7 +220,13 @@ class DeletionManager(QObject):
                     p for p in remaining if os.path.basename(p) != card_id
                 ]
                 if not self.active_deletions[current_batch]:
+                    # Only delete key if truly empty to avoid premature 'Resume' logic failure
                     del self.active_deletions[current_batch]
+
+                    # If this was the last item for this batch, finish up gracefully
+                    if not self.removal_queue:
+                        if self.ui_removal_timer:
+                            self.ui_removal_timer.stop()
 
         except Exception as e:
             print(f"Error vanishing card {card_id}: {e}")

@@ -4,7 +4,7 @@ Provides common database connection and transaction management.
 """
 
 import sqlite3
-from typing import Optional
+from typing import Optional, overload, Any, List, Union, Literal
 from contextlib import contextmanager
 
 
@@ -80,7 +80,24 @@ class BaseRepository:
                 conn.rollback()
                 raise
 
-    def execute_query(self, query: str, params: tuple = (), fetch_one: bool = False):
+    @overload
+    def execute_query(
+        self, query: str, params: tuple = (), fetch_one: Literal[True] = True
+    ) -> Optional[tuple]: ...
+
+    @overload
+    def execute_query(
+        self, query: str, params: tuple = (), fetch_one: Literal[False] = False
+    ) -> List[tuple]: ...
+
+    @overload
+    def execute_query(
+        self, query: str, params: tuple = (), fetch_one: bool = False
+    ) -> Union[Optional[tuple], List[tuple]]: ...
+
+    def execute_query(
+        self, query: str, params: tuple = (), fetch_one: bool = False
+    ) -> Any:
         """
         Execute a SELECT query and return results.
 
@@ -155,7 +172,7 @@ class BaseRepository:
             True if column exists, False otherwise
         """
         query = f"PRAGMA table_info({table_name})"
-        columns = self.execute_query(query)
+        columns = self.execute_query(query, fetch_one=False)
         column_names = [col[1] for col in columns]
         return column_name in column_names
 
