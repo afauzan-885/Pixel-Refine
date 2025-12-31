@@ -247,7 +247,7 @@ class ToastManager(QObject):
                 actual_animation, final_pos, final_size
             )
             if self._opacity_effect:
-                self._toast_label.setGraphicsEffect(None)
+                self._toast_label.setGraphicsEffect(None)  # type: ignore
                 self._opacity_effect = None
 
         self._toast_label.setGeometry(QRect(initial_pos, final_size))
@@ -295,7 +295,7 @@ class ToastManager(QObject):
             self._toast_label.hide()
             # Hapus efek grafis jika ada sebelum menghapus label
             if self._toast_label.graphicsEffect():
-                self._toast_label.setGraphicsEffect(None)  # Hapus referensi
+                self._toast_label.setGraphicsEffect(None)  # type: ignore  # Hapus referensi
             self._toast_label.deleteLater()
         self._toast_label = None
         self._opacity_effect = None  # Pastikan efek juga dibersihkan
@@ -416,7 +416,7 @@ class ToastManager(QObject):
             if (
                 self._opacity_effect
             ):  # Hapus efek opacity jika ada dari toast sebelumnya
-                self._toast_label.setGraphicsEffect(None)
+                self._toast_label.setGraphicsEffect(None)  # type: ignore
                 self._opacity_effect = None
 
         # Terapkan posisi awal dan ukuran

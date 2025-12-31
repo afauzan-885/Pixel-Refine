@@ -9,11 +9,74 @@ Mirrored dari panorama/working_left_panel.py untuk consistency.
 
 import os
 from PySide6.QtWidgets import QGraphicsScene
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QObject, QMutex, QMutexLocker, QThread
 from PySide6.QtGui import QPixmap
 
 # Generic UI Library
 from pixel_refine_desktop.ui.resources.GenericUILibrary import ImageCompareItem
+
+
+class DisplayThreadManager(QObject):
+    """
+    Singleton Manager for handling Display-related threads (e.g. Thumbnails).
+    Prevents 'QThread destroyed while thread is still running' errors by
+    holding strong references until finished() signal is emitted.
+    """
+
+    _instance = None
+
+    @classmethod
+    def instance(cls):
+        if not cls._instance:
+            cls._instance = DisplayThreadManager()
+        return cls._instance
+
+    def __init__(self):
+        super().__init__()
+        self._active_threads = set()  # Strong references
+        self._mutex = QMutex()
+
+    def register_thread(self, thread: QThread):
+        """
+        Register a thread to safely manage its lifecycle.
+        Pass ownership logic to this manager until the thread finishes.
+        """
+        if not thread:
+            return
+
+        with QMutexLocker(self._mutex):
+            self._active_threads.add(thread)
+
+        # Connect finished signal to cleanup
+        # Using lambda with bound method keeps 'self' alive (Singleton)
+        thread.finished.connect(lambda: self._cleanup_thread(thread))
+
+        # Also clean up if thread is already finished (race condition safety)
+        if thread.isFinished():
+            self._cleanup_thread(thread)
+
+    def _cleanup_thread(self, thread):
+        """Remove thread from active set, allowing it to be GC'd."""
+        with QMutexLocker(self._mutex):
+            if thread in self._active_threads:
+                self._active_threads.discard(thread)
+
+    def stop_all_threads(self):
+        """
+        Request interruption for all managed threads.
+        NON-BLOCKING: Does not wait for threads to finish, keeps UI responsive.
+        Threads will be cleaned up automatically when they finish in background.
+        """
+        with QMutexLocker(self._mutex):
+            # Create a copy to iterate safely
+            threads = list(self._active_threads)
+
+        for thread in threads:
+            if isinstance(thread, QThread) and thread.isRunning():
+                thread.requestInterruption()
+                thread.quit()
+                # Do NOT wait() here to avoid freezing UI.
+                # Do NOT clear from _active_threads here immediately.
 
 
 def clear_grid_display(

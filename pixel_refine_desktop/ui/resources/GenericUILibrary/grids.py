@@ -384,8 +384,8 @@ class GridItem(QWidget):
 
         self.setFixedSize(size, size)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(5, 5, 5, 5)
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(5, 5, 5, 5)
 
         # Visual placeholder
         self.visual_box = QLabel(label)
@@ -400,7 +400,7 @@ class GridItem(QWidget):
         """
         )
 
-        layout.addWidget(self.visual_box)
+        self.main_layout.addWidget(self.visual_box)
 
     def set_selected(self, selected):
         """Set selection state"""
@@ -414,14 +414,23 @@ class GridItem(QWidget):
 
     def set_content(self, widget):
         """Replace visual box with custom widget"""
-        self.visual_box.setParent(None)
+        if self.visual_box:
+            try:
+                self.visual_box.setParent(None)
+            except RuntimeError:
+                pass
+
         self.visual_box = widget
-        self.layout().addWidget(widget)
+        if self.main_layout and widget:
+            self.main_layout.addWidget(widget)
 
     def set_label(self, label):
         """Set label text"""
-        if isinstance(self.visual_box, QLabel):
-            self.visual_box.setText(label)
+        if self.visual_box and isinstance(self.visual_box, QLabel):
+            try:
+                self.visual_box.setText(label)
+            except RuntimeError:
+                pass
 
     def paintEvent(self, event):
         """Draw selection border"""

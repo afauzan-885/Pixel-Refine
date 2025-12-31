@@ -190,6 +190,8 @@ class LeftPanel(QWidget):
         Clear display saat tidak ada batch yang dipilih.
         Forward ke DisplayPanel dan hide AlgorithmPanel dengan SLIDE_DOWN animation.
         """
+        if self.animator:
+            self.animator.stop_all()
         self.display_panel.clear_display()
         self._handle_algorithm_panel_visibility(False)
 
@@ -228,6 +230,8 @@ class LeftPanel(QWidget):
             images: List of image objects
             batch_name: Nama dari batch (optional)
         """
+        if self.animator:
+            self.animator.stop_all()
         self.display_panel.load_batch(batch_id, images, batch_name)
 
         # Set current batch in algorithm panel for processing

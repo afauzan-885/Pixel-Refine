@@ -21,13 +21,16 @@ from pixel_refine_desktop.ui.views.settings.General.Language import language_con
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.left_panel import (
     LeftPanel,
 )
-from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import BatchImageImportThreading
+from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
+    BatchImageImportThreading,
+)
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.right_panel import (
     RightPanel,
 )
 from pixel_refine_desktop.enhance_stack.controllers.batch_page_controller import (
     BatchPageController,
 )
+from pixel_refine_desktop.enhance_stack.core.logic.process_manager import ProcessManager
 
 
 def setup_main_layout(layout_instance: Any, database_manager: DatabaseManager):
@@ -101,6 +104,9 @@ def setup_main_layout(layout_instance: Any, database_manager: DatabaseManager):
 
 def _load_batch_content(layout_instance, batch_id):
     """Helper to load batch content into workspace panel."""
+    # We no longer cancel batch_import here to allow background completion
+    # ProcessManager.instance().cancel_context("batch_import")
+
     batch = layout_instance.controller.get_batch(batch_id)
     if batch:
         layout_instance.workspace_panel.load_batch(batch_id, batch.images, batch.name)
@@ -113,7 +119,7 @@ def _handle_images_imported(layout_instance, file_paths):
     # Get current batch ID
     display_panel = layout_instance.workspace_panel.display_panel
     current_batch_id = display_panel.current_batch_id
-    
+
     if not current_batch_id:
         QMessageBox.warning(
             layout_instance,
@@ -124,14 +130,21 @@ def _handle_images_imported(layout_instance, file_paths):
 
     # --- PERBAIKAN: GUNAKAN THREADING ---
     try:
+        # Get batch name for info
+        batch_name = "batch"
+        batch = layout_instance.controller.get_batch(current_batch_id)
+        if batch:
+            batch_name = batch.name
+
         # Buat instance thread import khusus batch
         # Simpan reference di layout_instance agar tidak terkena garbage collection
         layout_instance.import_worker = BatchImageImportThreading(
             database_manager=layout_instance.database_manager,
             image_paths=file_paths,
             batch_id=current_batch_id,
+            batch_name=batch_name,
             batch_size=5,  # Batch kecil agar update UI lebih sering
-            delay_ms=10    # Delay tipis agar UI punya waktu bernapas
+            delay_ms=10,  # Delay tipis agar UI punya waktu bernapas
         )
 
         # 1. Hubungkan ke fungsi add_single_image_to_grid (Real-time update)
@@ -150,13 +163,27 @@ def _handle_images_imported(layout_instance, file_paths):
         # 3. Handler saat selesai (Tanpa QMessageBox)
         def on_finished(total):
             if hasattr(layout_instance.workspace_panel.algorithm_panel, "progress_bar"):
-                layout_instance.workspace_panel.algorithm_panel.progress_bar.setVisible(False)
+                layout_instance.workspace_panel.algorithm_panel.progress_bar.setVisible(
+                    False
+                )
+            # Show final toast
+            display_panel.toast.show_message(
+                f"Selesai mengimpor {total} gambar ke {batch_name}.", duration=3000
+            )
             print(f"Successfully imported {total} images to batch {current_batch_id}")
+            # Notify DisplayPanel about finish
+            display_panel.on_batch_import_finished(current_batch_id)
 
         layout_instance.import_worker.completion_signal.connect(on_finished)
 
-        # 4. Jalankan thread
+        # 4. Notify DisplayPanel about start & Jalankan thread
+        display_panel.on_batch_import_started(current_batch_id)
         layout_instance.import_worker.start()
+
+        # Register to ProcessManager for safe cancellation on batch switch
+        ProcessManager.instance().register_thread(
+            "batch_import", layout_instance.import_worker
+        )
 
     except Exception as e:
         QMessageBox.critical(

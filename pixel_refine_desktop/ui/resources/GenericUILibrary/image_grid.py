@@ -92,13 +92,19 @@ class ImageCard(QWidget):
         """Select this card."""
         if not self._is_selected:
             self._is_selected = True
-            self.update()  # Trigger repaint for overlay
+            try:
+                self.update()  # Trigger repaint for overlay
+            except RuntimeError:
+                pass
 
     def deselect(self):
         """Deselect this card."""
         if self._is_selected:
             self._is_selected = False
-            self.update()
+            try:
+                self.update()
+            except RuntimeError:
+                pass
 
     def toggle_selection(self):
         """Toggle selection state."""

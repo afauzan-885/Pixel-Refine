@@ -263,6 +263,7 @@ def process_and_start_batch_import(batch_page_layout, image_paths: list):
                 database_manager=db_manager,
                 image_paths=files_to_import_chunk,
                 batch_id=target_batch_id,
+                batch_name=target_batch_name,
                 batch_size=CHUNK_SIZE,  # Gunakan CHUNK_SIZE atau nilai lain
                 delay_ms=25,
             )

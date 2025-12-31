@@ -19,6 +19,10 @@ from PySide6.QtCore import (
     QTimer,
 )
 
+from pixel_refine_desktop.enhance_stack.core.logic.process_manager import (
+    is_widget_alive,
+)
+
 from enum import Enum, auto
 
 
@@ -121,11 +125,19 @@ class StackedWidgetAnimator(QObject):
 
         def on_anim_finished():
             try:
-                ghost.deleteLater()
+                if is_widget_alive(ghost):
+                    ghost.deleteLater()
             except RuntimeError:
                 pass
+
+            # Check if callback is still valid to run
             if on_finished_callback and callable(on_finished_callback):
                 try:
+                    # If the callback is a method of a widget, check if widget is alive
+                    if hasattr(on_finished_callback, "__self__"):
+                        cb_obj = on_finished_callback.__self__
+                        if isinstance(cb_obj, QWidget) and not is_widget_alive(cb_obj):
+                            return
                     on_finished_callback()
                 except RuntimeError:
                     pass
@@ -218,6 +230,11 @@ class StackedWidgetAnimator(QObject):
     def _clear_animation_state(self, stack_widget: QStackedWidget):
         """Hapus state animasi untuk QStackedWidget tertentu (melepas kunci)."""
         self._animation_state.pop(stack_widget, None)
+
+    def stop_all(self):
+        """Hentikan semua animasi transisi di semua stacked widget."""
+        for stack_widget in list(self._animation_state.keys()):
+            self._interrupt_transition(stack_widget)
 
     def _reset_widget_state(self, widget: QWidget, visible: bool = False):
         """Atur ulang properti visual widget dengan aman."""
@@ -606,10 +623,26 @@ class WidgetLifecycleAnimator(QObject):
 
         # --- CLEANUP ---
         def on_done():
+            # Check callback safety first
             if on_finished_callback:
-                on_finished_callback()
-            if widget:
-                widget.deleteLater()
+                try:
+                    if hasattr(on_finished_callback, "__self__"):
+                        cb_obj = on_finished_callback.__self__
+                        if isinstance(cb_obj, QWidget) and not is_widget_alive(cb_obj):
+                            pass
+                        else:
+                            on_finished_callback()
+                    else:
+                        on_finished_callback()
+                except RuntimeError:
+                    pass
+
+            if is_widget_alive(widget):
+                try:
+                    widget.deleteLater()
+                except RuntimeError:
+                    pass
+
             # Hapus referensi animasi dari list internal
             if sequence in self._active_animations:
                 self._active_animations.remove(sequence)
@@ -618,6 +651,16 @@ class WidgetLifecycleAnimator(QObject):
 
         # Simpan referensi dan jalankan
         self._active_animations.append(sequence)
+        sequence.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
+    def stop_all(self):
+        """Hentikan paksa semua animasi yang sedang berjalan."""
+        for seq in list(self._active_animations):
+            try:
+                seq.stop()
+            except RuntimeError:
+                pass
+        self._active_animations.clear()
 
 
 class WidthAnimator(QObject):
