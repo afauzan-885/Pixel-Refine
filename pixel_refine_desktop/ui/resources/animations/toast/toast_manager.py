@@ -93,8 +93,8 @@ class ToastWidget(QFrame):
 
         # --- ISI KONTEN ---
         content_layout = QHBoxLayout(self.content_frame)
-        content_layout.setContentsMargins(0, 0, int(20 * 1.3), 0)
-        content_layout.setSpacing(int(15 * 1.3))
+        content_layout.setContentsMargins(0, 0, int(20 * 1.0), 0)
+        content_layout.setSpacing(int(15 * 1.0))
 
         self.accent_line = QFrame()
         self.accent_line.setFixedWidth(4)
@@ -117,7 +117,6 @@ class ToastWidget(QFrame):
         content_layout.addWidget(self.label, 1)
         wrapper_layout.addWidget(self.content_frame)
 
-        self.animator = StackedWidgetAnimator(self)
         self._is_blinking = False
 
     def setText(self, text: str):
@@ -140,23 +139,12 @@ class ToastWidget(QFrame):
             self.accent_line.show()
 
     def _run_blink_cycle(self):
-        if not self._is_blinking:
-            return
-        # Gunakan fade_out pada komponen internal (accent_line), bukan seluruh toast
-        fade_out(
-            self.animator,
-            self.accent_line,
-            duration=100,
-            curve=QEasingCurve.Type.InOutSine,
-            hide_on_finish=False,
-            on_finished_callback=self._on_blink_fade_out_complete,
-        )
+        """Blinking disabled - no animation."""
+        pass
 
     def _on_blink_fade_out_complete(self):
-        if not self._is_blinking:
-            return
-        fade_in(self.animator, self.accent_line, duration=800)
-        QTimer.singleShot(800, self._run_blink_cycle)
+        """Blinking disabled - no animation."""
+        pass
 
 
 class ToastManager(QObject):
@@ -168,6 +156,7 @@ class ToastManager(QObject):
         self._hide_anim: QPropertyAnimation | None = None
         self._close_timer: QTimer | None = None
         self._current_animation_type: ToastAnimation = ToastAnimation.FADE
+        self.animator = StackedWidgetAnimator(self)
 
     # --- Konfigurasi Default ---
     default_duration = 3000
@@ -192,7 +181,7 @@ class ToastManager(QObject):
 
     @Slot(str)
     def show_progress(self, message: str, position=None, animation=None):
-        self._show(message, None, position, animation, True)
+        self._show(message, 0, position, animation, True)
 
     @Slot()
     def hide(self):
@@ -206,9 +195,7 @@ class ToastManager(QObject):
         if not parent:
             return
 
-        actual_position = (
-            ToastPosition.BOTTOM_RIGHT
-        )  # Sesuai permintaan Anda sebelumnya
+        actual_position = ToastPosition.BOTTOM_RIGHT
         actual_animation = (
             animation if animation is not None else self.default_animation
         )
@@ -216,18 +203,29 @@ class ToastManager(QObject):
 
         self._clear_running_operations()
 
-        # Update jika sedang Progress
+        # Update jika sedang Progress dan widget sudah ada
         if is_progress_update and self._toast_label and self._toast_label.isVisible():
             self._toast_label.setText(message)
             self._toast_label.set_blinking(True)
             self._toast_label.adjustSize()
 
+            # Recalculate geometry untuk text baru
             final_pos, final_size = self._calculate_geometry(actual_position)
-            if final_pos:
+            if final_pos and final_size:
+                # Jika animasi slide, kita mungkin perlu animasi smooth move,
+                # tapi setGeometry langsung cukup untuk update text progress
                 self._toast_label.setGeometry(QRect(final_pos, final_size))
+
+            # PENTING: Jika update progress, jangan restart timer close jika modenya infinite
+            if duration != 0 and duration is not None:
+                # Jika user memaksa durasi pada update progress
+                self._close_timer = QTimer(self)
+                self._close_timer.setSingleShot(True)
+                self._close_timer.timeout.connect(self.hide)
+                self._close_timer.start(duration)
             return
 
-        # Buat Toast Baru
+        # Buat Toast Baru (Logic lama tetap sama)
         self._cleanup_toast_widget()
         self._toast_label = ToastWidget(message, parent)
         self._toast_label.label.setFont(self.default_font)
@@ -235,7 +233,7 @@ class ToastManager(QObject):
         self._toast_label.adjustSize()
 
         final_pos, final_size = self._calculate_geometry(actual_position)
-        if not final_pos:
+        if not final_pos or not final_size:
             return
 
         # Set Posisi Awal
@@ -255,38 +253,21 @@ class ToastManager(QObject):
             self._start_slide_in_animation(final_pos)
 
         # Setup Auto Close Timer
-        if duration is not None:
+        # MODIFIKASI: Hanya start timer jika duration > 0. Jika 0, toast persistent.
+        if duration is not None and duration > 0:
             self._close_timer = QTimer(self)
             self._close_timer.setSingleShot(True)
             self._close_timer.timeout.connect(self.hide)
             self._close_timer.start(duration)
 
     def _start_fade_in_animation(self):
+        """Langsung tampilkan toast tanpa animasi."""
         if self._toast_label:
-            fade_in(
-                self._toast_label.animator,
-                self._toast_label,
-                duration=self.default_fade_duration,
-            )
+            self._toast_label.show()
 
     def _start_fade_out_animation(self):
-        """Menggunakan fade.py untuk animasi keluar."""
-        # CEK HANYA _toast_label, jangan cek _opacity_effect lagi
-        if not self._toast_label:
-            self._on_hide_animation_finished()
-            return
-
-        # Panggil fungsi fade_out dari script fade.py
-        # Fungsi ini akan secara otomatis mencari/membuat QGraphicsOpacityEffect
-        # pada ToastWidgetWrapper Anda tanpa perlu Anda simpan di Manager.
-        fade_out(
-            animator=self._toast_label.animator,
-            widget=self._toast_label,
-            duration=self.default_fade_duration,
-            curve=self.default_hide_easing_curve,
-            hide_on_finish=False,
-            on_finished_callback=self._on_hide_animation_finished,
-        )
+        """Langsung sembunyikan toast tanpa animasi."""
+        self._on_hide_animation_finished()
 
     def _start_slide_in_animation(self, target_pos):
         if not self._toast_label:
@@ -345,6 +326,8 @@ class ToastManager(QObject):
 
     def _cleanup_toast_widget(self):
         if self._toast_label:
+            # Pastikan ghost dihapus sebelum widget asli dihancurkan
+            self.animator.stop_for_widget(self._toast_label)
             self._toast_label.hide()
             self._toast_label.deleteLater()
             self._toast_label = None

@@ -24,29 +24,38 @@ class DatabaseManager:
     # --- 1. Initialization & Setup ---
 
     def _get_connection(self):
-        """Establishes a database connection and enables foreign keys."""
+        """Establishes a database connection with High-Performance settings."""
         try:
             conn = sqlite3.connect(self.db_path)
-            conn.execute("PRAGMA foreign_keys = ON;")  # Ensure foreign keys are enabled
+
+            # --- OPTIMASI HDD ---
+            # WAL Mode: Write-Ahead Logging. Menulis jauh lebih cepat di HDD, concurrency lebih baik.
+            conn.execute("PRAGMA journal_mode=WAL;")
+
+            # Synchronous NORMAL: Mengurangi fsync(), trade-off keamanan vs kecepatan yang sangat worth it untuk desktop app.
+            conn.execute("PRAGMA synchronous=NORMAL;")
+
+            # Cache Size: Memperbesar cache in-memory (-64000 page = ~64MB)
+            conn.execute("PRAGMA cache_size=-64000;")
+
+            # Foreign Keys tetap ON
+            conn.execute("PRAGMA foreign_keys = ON;")
+
             return conn
         except sqlite3.Error as e:
             print(f"Database connection error to {self.db_path}: {e}")
-            raise  # Re-raise the exception for calling code to handle
+            raise
 
     def _add_column_if_not_exists(self, cursor, table_name, column_name, column_def):
-        """Helper to add a column if it doesn't exist."""
         cursor.execute(f"PRAGMA table_info({table_name})")
         columns = [info[1] for info in cursor.fetchall()]
         if column_name not in columns:
-            print(f"Adding column '{column_name}' to table '{table_name}'...")
             try:
                 cursor.execute(
                     f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}"
                 )
-                print(f"Column '{column_name}' added successfully.")
-            except sqlite3.Error as e:
-                print(f"Error adding column {column_name} to {table_name}: {e}")
-                # Decide if this is critical - maybe raise? For now, just print.
+            except sqlite3.Error:
+                pass
 
     def create_database(self):
         """
@@ -237,7 +246,7 @@ class DatabaseManager:
         except sqlite3.Error as e:
             print(f"Database error while creating new panorama project: {e}")
             return None
-        
+
     def get_images_for_project(self, project_id):
         """
         Mengambil semua path gambar yang terkait dengan project_id tertentu,
@@ -255,13 +264,16 @@ class DatabaseManager:
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute("""
+                cursor.execute(
+                    """
                     SELECT i.path
                     FROM panorama_project_images AS ppi
                     JOIN images AS i ON ppi.image_id = i.id
                     WHERE ppi.project_id = ?
                     ORDER BY ppi.image_order ASC; 
-                """, (project_id,))
+                """,
+                    (project_id,),
+                )
                 # Menggunakan list comprehension untuk mendapatkan hasil yang bersih
                 paths = [row[0] for row in cursor.fetchall()]
                 return paths
@@ -376,7 +388,12 @@ class DatabaseManager:
             bool: True jika berhasil, False jika gagal.
         """
         # Validasi untuk mencegah SQL Injection, meskipun kita tidak menggunakan f-string di sini
-        allowed_keys = ["align_algorithm", "feature_detector", "projection_type", "blending_method"]
+        allowed_keys = [
+            "align_algorithm",
+            "feature_detector",
+            "projection_type",
+            "blending_method",
+        ]
         if setting_key not in allowed_keys:
             print(f"Error: Invalid setting key '{setting_key}'")
             return False
@@ -812,100 +829,82 @@ class DatabaseManager:
 
     def batch_process_delete_selected_images(self, batch_id, image_paths_to_delete):
         """
-        Deletes links for selected image paths from a specific batch.
-        It removes the mapping in 'batch_process_image' for the given
-        batch_id and image paths. If a reference image is deleted,
-        it attempts to set a new reference for that batch.
-
-        Args:
-            batch_id: The ID of the batch from which images should be removed.
-            image_paths_to_delete: A list of image file paths to remove from the batch.
-
-        Returns:
-            The number of image links successfully deleted from the batch.
-            Returns -1 on a major database error.
+        ULTRA OPTIMIZED DELETE:
+        1. Menggunakan 'Blind Bulk Delete' dengan sub-query untuk kecepatan maksimal.
+        2. Memperbaiki Reference (Reference Repair) hanya SEKALI di akhir transaksi.
+        3. Menangani limit variabel SQLite dengan chunking internal.
         """
         if not image_paths_to_delete:
             return 0
 
-        deleted_count = 0
-
-        placeholders = ",".join("?" * len(image_paths_to_delete))
-        sql_get_image_info = f"""
-            SELECT i.id, bpi.is_reference_batch, bpi.id AS bpi_id
-            FROM images i
-            JOIN batch_process_image bpi ON i.id = bpi.image_id_batch
-            WHERE bpi.batch_id = ? AND i.path IN ({placeholders})
-        """
-        sql_delete_link = "DELETE FROM batch_process_image WHERE id = ?"
-        sql_find_new_ref = (
-            "SELECT id FROM batch_process_image WHERE batch_id = ? ORDER BY id LIMIT 1"
-        )
-        sql_set_ref = (
-            "UPDATE batch_process_image SET is_reference_batch = 1 WHERE id = ?"
-        )
+        # Limit aman variabel SQLite (biasanya 999). Kita pakai 500.
+        CHUNK_SIZE = 500
+        total_deleted = 0
 
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                try:
-                    params = [batch_id] + image_paths_to_delete
-                    cursor.execute(sql_get_image_info, params)
-                    images_info_to_delete = cursor.fetchall()
 
-                    if not images_info_to_delete:
-                        print(
-                            f"No images from the provided list found in batch ID {batch_id}."
+                # --- TAHAP 1: DELETE (Tanpa Cek ID/Reference dulu) ---
+                # Kita looping hanya untuk memecah limit variabel SQL,
+                # bukan logic Python.
+
+                for i in range(0, len(image_paths_to_delete), CHUNK_SIZE):
+                    chunk_paths = image_paths_to_delete[i : i + CHUNK_SIZE]
+
+                    # Buat placeholders (?, ?, ?)
+                    placeholders = ",".join("?" * len(chunk_paths))
+
+                    # Query Maut: Hapus link di batch_process_image
+                    # dimana image_id cocok dengan path yang ada di tabel images.
+                    # Ini menghilangkan kebutuhan 'SELECT id FROM images' terpisah.
+                    sql_bulk_delete = f"""
+                        DELETE FROM batch_process_image 
+                        WHERE batch_id = ? 
+                        AND image_id_batch IN (
+                            SELECT id FROM images WHERE path IN ({placeholders})
                         )
-                        return 0
+                    """
 
-                    was_any_ref_deleted = False
-                    for image_id, is_ref, bpi_id_to_delete in images_info_to_delete:
-                        cursor.execute(sql_delete_link, (bpi_id_to_delete,))
-                        if cursor.rowcount > 0:
-                            deleted_count += 1
-                            if is_ref == 1:
-                                was_any_ref_deleted = True
+                    # Params: batch_id + list path
+                    params = [batch_id] + chunk_paths
 
-                    if was_any_ref_deleted:
-                        cursor.execute(
-                            "SELECT COUNT(*) FROM batch_process_image WHERE batch_id = ?",
-                            (batch_id,),
-                        )
-                        remaining_count = cursor.fetchone()[0]
-                        if remaining_count > 0:
-                            cursor.execute(
-                                "UPDATE batch_process_image SET is_reference_batch = 0 WHERE batch_id = ?",
-                                (batch_id,),
-                            )
-                            cursor.execute(sql_find_new_ref, (batch_id,))
-                            new_ref_result = cursor.fetchone()
-                            if new_ref_result:
-                                new_ref_bpi_id = new_ref_result[0]
-                                cursor.execute(sql_set_ref, (new_ref_bpi_id,))
-                                print(
-                                    f"A reference image was deleted from batch {batch_id}. New reference set for bpi.id: {new_ref_bpi_id}."
-                                )
+                    cursor.execute(sql_bulk_delete, params)
+                    total_deleted += cursor.rowcount
 
-                    conn.commit()
-                    if deleted_count > 0:
-                        print(
-                            f"Successfully removed {deleted_count} image(s) from batch ID {batch_id}."
-                        )
-                    else:
-                        print(
-                            f"No images were removed from batch ID {batch_id} (either not found in batch or already removed)."
-                        )
-                    return deleted_count
+                # --- TAHAP 2: REPAIR REFERENCE (Hanya Sekali) ---
+                # Cek apakah batch ini kehilangan referensinya?
+                # (Lebih cepat cek count ref=1 daripada cek logic per gambar)
 
-                except sqlite3.Error as e:
-                    print(
-                        f"Database error during selected image deletion from batch {batch_id}: {e}"
+                if total_deleted > 0:
+                    cursor.execute(
+                        "SELECT 1 FROM batch_process_image WHERE batch_id = ? AND is_reference_batch = 1 LIMIT 1",
+                        (batch_id,),
                     )
-                    conn.rollback()
-                    return -1
+                    has_reference = cursor.fetchone()
+
+                    if not has_reference:
+                        # Jika tidak ada referensi (mungkin terhapus),
+                        # tunjuk gambar terlama (ID terkecil) jadi referensi baru.
+                        sql_fix_ref = """
+                            UPDATE batch_process_image 
+                            SET is_reference_batch = 1 
+                            WHERE id = (
+                                SELECT id FROM batch_process_image 
+                                WHERE batch_id = ? 
+                                ORDER BY id ASC 
+                                LIMIT 1
+                            )
+                        """
+                        cursor.execute(sql_fix_ref, (batch_id,))
+                        # Jika rowcount > 0, berarti referensi baru berhasil diset.
+                        # Jika 0, berarti batch kosong (semua gambar habis), tidak perlu ref.
+
+                conn.commit()
+                return total_deleted
+
         except sqlite3.Error as e:
-            print(f"Database connection error during selected image deletion: {e}")
+            print(f"DB Ultra-Delete Error: {e}")
             return -1
 
     def delete_all_batches(self):
@@ -1111,56 +1110,37 @@ class DatabaseManager:
             return False
 
     def single_process_delete_path_images(self, image_paths):
-        deleted_count = 0
+        # Optimasi ringan: Bulk delete untuk single process juga
         if not image_paths:
             return 0
-        placeholders = ",".join("?" for _ in image_paths)
-        sql_get_ids_to_delete = f"""
-            SELECT spi.image_id_single, spi.is_reference
-            FROM single_process_image spi
-            JOIN images i ON spi.image_id_single = i.id
-            WHERE i.path IN ({placeholders})
-        """
-        sql_delete_link = "DELETE FROM single_process_image WHERE image_id_single = ?"
-        sql_find_new_ref = (
-            "SELECT image_id_single FROM single_process_image ORDER BY id LIMIT 1"
-        )
-        sql_set_ref = (
-            "UPDATE single_process_image SET is_reference = 1 WHERE image_id_single = ?"
-        )
+        placeholders = ",".join("?" * len(image_paths))
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                try:
-                    cursor.execute(sql_get_ids_to_delete, image_paths)
-                    items_to_delete = cursor.fetchall()
-                    if not items_to_delete:
-                        return 0
-                    was_ref_deleted = False
-                    ids_to_delete = []
-                    for img_id, is_ref in items_to_delete:
-                        ids_to_delete.append(img_id)
-                        if is_ref == 1:
-                            was_ref_deleted = True
-                    for img_id in ids_to_delete:
-                        cursor.execute(sql_delete_link, (img_id,))
-                        deleted_count += cursor.rowcount
-                    if was_ref_deleted:
-                        cursor.execute("SELECT COUNT(*) FROM single_process_image")
-                        if cursor.fetchone()[0] > 0:
-                            cursor.execute(sql_find_new_ref)
-                            new_ref_result = cursor.fetchone()
-                            if new_ref_result:
-                                cursor.execute(sql_set_ref, (new_ref_result[0],))
+                sql_get = f"SELECT spi.image_id_single, spi.is_reference FROM single_process_image spi JOIN images i ON spi.image_id_single = i.id WHERE i.path IN ({placeholders})"
+                cursor.execute(sql_get, image_paths)
+                rows = cursor.fetchall()
+                if not rows:
+                    return 0
 
-                    conn.commit()
-                    return deleted_count
-                except sqlite3.Error as e:
-                    print(f"Database error during single process delete: {e}")
-                    conn.rollback()
-                    return -1
-        except sqlite3.Error as e:
-            print(f"Database connection error during single process delete: {e}")
+                ids = [r[0] for r in rows]
+                ref_del = any(r[1] == 1 for r in rows)
+
+                pl_del = ",".join("?" * len(ids))
+                cursor.execute(
+                    f"DELETE FROM single_process_image WHERE image_id_single IN ({pl_del})",
+                    ids,
+                )
+                cnt = cursor.rowcount
+
+                if ref_del:
+                    cursor.execute(
+                        "UPDATE single_process_image SET is_reference = 1 WHERE id = (SELECT id FROM single_process_image ORDER BY id LIMIT 1)"
+                    )
+
+                conn.commit()
+                return cnt
+        except sqlite3.Error:
             return -1
 
     # --- 4.b Single Process Retrieval ---

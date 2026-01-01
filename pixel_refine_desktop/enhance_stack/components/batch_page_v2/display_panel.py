@@ -11,6 +11,7 @@ Adapted from: pixel_refine_desktop/ui/views/panorama/display_area/display_panel.
 """
 
 from PySide6.QtWidgets import (
+    QGraphicsOpacityEffect,
     QMessageBox,
     QWidget,
     QVBoxLayout,
@@ -66,6 +67,9 @@ from pixel_refine_desktop.enhance_stack.core.logic.selection_manager import (
 )
 from pixel_refine_desktop.enhance_stack.core.logic.deletion_manager import (
     DeletionManager,
+)
+from pixel_refine_desktop.enhance_stack.core.logic.import_manager import (
+    ImportManager,
 )
 
 # Zoomable preview
@@ -140,6 +144,7 @@ class DisplayPanel(QWidget):
         self.deletion_manager = DeletionManager(self)
         self.deletion_manager.deletion_finished.connect(self._on_deletion_finished)
         self.deletion_manager.deletion_error.connect(self._on_deletion_error)
+        self.import_manager = ImportManager(self)
 
         # State
         self.current_batch_id = None
@@ -154,14 +159,10 @@ class DisplayPanel(QWidget):
         self.current_preview_path = None
         self.current_results_map = {}
         self.zoom_states = {}
-        self.active_import_batches = set()
         self.toast = ToastManager(self)
         self.total_image_count = (
             0  # To track total images independently of UI population
         )
-        self.active_import_batches = (
-            set()
-        )  # Track which batches are currently importing
         self.active_deletions = {}  # {batch_id: [paths]} for resume logic
 
         self.supported_extensions = self._build_supported_extensions()
@@ -175,6 +176,11 @@ class DisplayPanel(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._setup_ui()
         self._setup_sidebar()  # New Sidebar Integration
+
+        # Connect Thumbnail Progress
+        self.logic.get_thumbnail_processor().progress_updated.connect(
+            self._on_thumbnail_progress
+        )
 
         # Lazy loading timer
         self.lazy_load_timer = QTimer(self)
@@ -291,7 +297,7 @@ class DisplayPanel(QWidget):
         # 3. Import Images Button
         self.import_button = Button("Import Images", variant="secondary")
         self.import_button.setFixedWidth(120)
-        self.import_button.clicked.connect(self.import_images)
+        self.import_button.clicked.connect(self.import_manager.import_images)
         self.import_button.setVisible(False)
         self.header_layout.addWidget(self.import_button)
 
@@ -569,21 +575,6 @@ class DisplayPanel(QWidget):
             extensions.extend(ext_list)
         return tuple(extensions)
 
-    def _build_file_filter(self):
-        """
-        Build file filter string untuk QFileDialog dari config.SUPPORTED_FORMATS.
-
-        Returns:
-            str: File filter string (e.g., "Images (*.jpg *.jpeg *.png ...)")
-        """
-        all_extensions = []
-        for format_name, ext_list in SUPPORTED_FORMATS.items():
-            all_extensions.extend(ext_list)
-
-        # Create filter string: "Images (*.jpg *.jpeg *.png ...)"
-        ext_string = " ".join([f"*{ext}" for ext in all_extensions])
-        return f"Images ({ext_string})"
-
     def _create_placeholder_widget(
         self, html_text="", button_text=None, on_button_click=None
     ):
@@ -685,49 +676,49 @@ class DisplayPanel(QWidget):
             self.lazy_load_timer.start()
 
     def _check_visible_cards(self):
-        """Mendeteksi kartu mana yang berada di viewport dan memuat thumbnail-nya (Reinforced)."""
+        """Mendeteksi kartu yang terlihat di viewport dan memuat thumbnail-nya secara lazy."""
         if not self.all_cards or self.grid_container.isHidden():
             return
 
-        # Ambil state scroll hanyak sekali untuk efisiensi
-        v_scroll = self.grid_container.verticalScrollBar()
-        scroll_y = v_scroll.value()
-        viewport_h = self.grid_container.viewport().height()
+        # 1. Dapatkan area yang terlihat (viewport)
+        viewport = self.grid_container.viewport()
+        visible_region = viewport.rect()
 
-        # Buffer muat: 500px (sekitar 5 baris)
-        load_min = scroll_y - 500
-        load_max = scroll_y + viewport_h + 500
+        # Buffer untuk smooth scrolling (opsional: tambahkan margin ke visible_region)
+        to_load = []
 
-        # Buffer lepas: 2000px (sangat luas agar tidak menghilang prematur)
-        unload_min = scroll_y - 2000
-        unload_max = scroll_y + viewport_h + 2000
-
-        # Iterasi semua kartu
         for card_id, card in self.all_cards.items():
             try:
-                geom = card.geometry()
-                # Jika widget belum memiliki ukuran (saat proses layout), abaikan dulu
-                if geom.width() <= 0:
-                    continue
+                # Periksa apakah kartu terlihat di dalam viewport
+                # Map card top-left ke koordinat viewport
+                card_pos = card.mapTo(viewport, QPoint(0, 0))
+                card_rect = QRect(card_pos, card.size())
 
-                y_top = geom.top()
-                y_bottom = geom.bottom()
-
-                # 1. Cek apakah masuk area muat
-                if y_bottom >= load_min and y_top <= load_max:
+                if visible_region.intersects(card_rect):
+                    # Kartu terlihat, cek apakah perlu dimuat
                     if (
                         card._is_loading or not card.has_image()
                     ) and not card._is_fetching:
                         card._is_fetching = True
-                        self._load_thumbnail_async(card._image_path, card)
-
-                # 2. Cek apakah jauh di luar area pandang untuk dilepaskan
-                elif y_bottom < unload_min or y_top > unload_max:
-                    if card.has_image():
-                        card.unload_image()
-
-            except (RuntimeError, AttributeError):
+                        to_load.append((card._image_path, card))
+                else:
+                    # Kartu tidak terlihat, kita bisa mengosongkan memori jika perlu
+                    # card.unload_image() # Opsional: Aktifkan jika ingin sangat hemat RAM
+                    pass
+            except Exception:
                 continue
+
+        # 2. PROSES LOAD (Hanya yang terlihat)
+        if to_load:
+            pairs = []
+            for path, card in to_load:
+
+                def make_callback(c):
+                    return lambda q_img, p: self._on_thumbnail_ready(q_img, p, c)
+
+                pairs.append((path, make_callback(card)))
+
+            self.logic.load_thumbnails_bulk_async(pairs)
 
     # =========================================================================
     # === 1. PUBLIC SLOTS UNTUK MEMUAT DATA ===
@@ -741,6 +732,9 @@ class DisplayPanel(QWidget):
         self.current_preview_path = None
         self.current_batch_id = batch_id
         self.current_batch_name = batch_name
+
+        # Hide old batch toast
+        self.toast.hide()
         self.logic.set_batch(batch_id, images)
 
         # Set exact count tracked from backend data
@@ -775,7 +769,13 @@ class DisplayPanel(QWidget):
         ProcessManager.instance().cancel_context("display_populate")
         ProcessManager.instance().cancel_context("display_sequential_removal")
         self.grid_animator.stop_all()
-        self.logic.get_thumbnail_processor().stop_all()
+
+        # Stop & Flush batch sebelumnya, lalu siapkan stats untuk batch baru (Toast Fix)
+        # Sembunyikan toast batch lama secara eksplisit - User Request: "Pindah batch hilangkan saja"
+        self.toast.hide()
+        processor = self.logic.get_thumbnail_processor()
+        processor.stop_all()
+        processor.reset_stats(self.current_batch_id, self.total_image_count)
 
         self._clear_grid()
         self.grid_container.set_batch_update(True)
@@ -849,14 +849,17 @@ class DisplayPanel(QWidget):
                     lambda cid, event, c=card: self._on_card_clicked(cid, event, c)
                 )
 
-            self.all_cards[str(img.id)] = card
-            self.grid_container.add_item(card)
-
-            if not is_zombie:
+                self.all_cards[str(img.id)] = card
+                self.grid_container.add_item(card)
                 self.logic.register_grid_item(str(img.id), {"path": img.path})
             else:
+                self.all_cards[str(img.id)] = card
+                self.grid_container.add_item(card)
                 # ZOMBIE LOGIC: Immediately queue for removal via Manager (resuming stream)
                 self.deletion_manager.queue_zombie_card(str(img.id), card)
+
+        # TRIGER PEMUATAN THUMBNAIL DINAMIS (Toast Fix: Mulai sekarang, jangan tunggu beres semua)
+        self._check_visible_cards()
 
         # Update progress header
         self._update_header_title()
@@ -869,6 +872,9 @@ class DisplayPanel(QWidget):
         """
         self.current_batch_id = None
         self.current_batch_name = None
+
+        # Hide any active toast when batch is unselected
+        self.toast.hide()
 
         # 0. Cancel all pending populations and removals
         ProcessManager.instance().cancel_context("display_populate")
@@ -936,42 +942,83 @@ class DisplayPanel(QWidget):
         """Select range via Manager."""
         self.selection_manager.select_range(start_card_id, end_card_id)
 
+    def _is_widget_in_viewport(self, widget):
+        """
+        Cek apakah widget berada di dalam viewport GridContainer.
+        Digunakan untuk optimasi animasi (Viewport-Aware Animation).
+        """
+        if not is_widget_alive(widget) or not widget.isVisible():
+            return False
+
+        try:
+            # Akses viewport dari QScrollArea di dalam GridContainer
+            viewport = self.grid_container.viewport()
+            if not viewport:
+                return False
+
+            # Ambil area yang terlihat (0,0, w, h)
+            visible_rect = viewport.rect()
+
+            # Map posisi widget (local) ke posisi viewport
+            # mapTo(parent, pos) sangat akurat untuk nested widget
+            widget_pos = widget.mapTo(viewport, QPoint(0, 0))
+            widget_rect = QRect(widget_pos, widget.size())
+
+            # Cek apakah kotak widget bersinggungan dengan kotak viewport
+            return visible_rect.intersects(widget_rect)
+        except Exception:
+            return False
+
     def _load_thumbnail_async(self, image_path, card_widget):
         """
-        Load thumbnail asinkron untuk image card.
-
-        Args:
-            image_path: Path ke image file
-            card_widget: ImageCard widget untuk display thumbnail
+        Load thumbnail asinkron untuk image card dengan Viewport-Aware Animation.
         """
+        self.logic.load_thumbnail_async(
+            image_path, lambda img, p: self._on_thumbnail_ready(img, p, card_widget)
+        )
 
-        def on_thumbnail_ready(q_image, path):
-            if (
-                card_widget is not None
-                and is_widget_alive(card_widget)
-                and not q_image.isNull()
-            ):
-                pixmap = QPixmap.fromImage(q_image)
-                card_widget.set_image(pixmap)
+    def _on_thumbnail_ready(self, q_image, path, card_widget):
+        """Callback when thumbnail is ready, updates card with animation."""
+        if card_widget is not None and is_widget_alive(card_widget):
+            # Selalu panggil set_image untuk membersihkan status loading
+            # Jika q_image null, ImageCard akan menampilkan placeholder '!'
+            pixmap = QPixmap.fromImage(q_image) if not q_image.isNull() else QPixmap()
+            card_widget.set_image(pixmap)
 
-                # Reinforced Fade-In: Gunakan property internal widget jika ada
-                if hasattr(card_widget, "opacity"):
-                    # Gunakan QPropertyAnimation langsung pada widget
-                    anim = QPropertyAnimation(card_widget, b"opacity", self)
-                    anim.setDuration(400)
-                    anim.setStartValue(0.0)
-                    anim.setEndValue(1.0)
-                    anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-                    anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
-                else:
-                    # Fallback ke sistem standar jika bukan ImageCard
-                    fade_in(self.grid_animator, card_widget, duration=300)
+            # Sembunyikan progress jika sudah dimuat (mencegah double fetch)
+            card_widget._is_fetching = False
 
-        self.logic.load_thumbnail_async(image_path, on_thumbnail_ready)
+            # LOGIKA BARU: Cek Viewport untuk optimasi animasi
+            is_visible = self._is_widget_in_viewport(card_widget)
+            fade_in(
+                self.grid_animator,
+                card_widget,
+                duration=300,
+                skip_animation_if_not_visible=not is_visible,
+            )
 
     def _on_card_clicked(self, card_id, event, card_widget):
         """Handle click via Manager."""
         self.selection_manager.handle_card_clicked(card_id, event, card_widget)
+
+    def _on_thumbnail_progress(self, batch_id, decode_pct, save_pct):
+        """Update toast progress for thumbnail creation and saving."""
+        # 1. ISOLASI BATCH: Hanya update jika batch_id cocok dengan tampilan aktif
+        if str(batch_id) != str(self.current_batch_id):
+            return
+
+        # 2. Hanya tampilkan jika proses cukup besar
+        if decode_pct >= 100 and save_pct >= 100:
+            # Selesai: Tampilkan pesan sukses singkat
+            self.toast.show_message(
+                "Semua thumbnail berhasil diproses dan disimpan.",
+                duration=3000,
+                position=ToastPosition.BOTTOM_RIGHT,
+            )
+        else:
+            # Sedang Berjalan: Gunakan format dari user
+            msg = f"Membuat {decode_pct}% - Menyimpan {save_pct}%"
+            self.toast.show_progress(msg, position=ToastPosition.BOTTOM_RIGHT)
 
     def _on_card_double_clicked(self, card_id):
         """
@@ -1109,107 +1156,31 @@ class DisplayPanel(QWidget):
             self.selection_manager.get_selected_ids()
         )
 
+    @Slot(int)
+    def on_batch_import_started(self, batch_id):
+        """Delegate to ImportManager."""
+        self.import_manager.on_batch_import_started(batch_id)
+
+    @Slot(int)
+    def on_batch_import_finished(self, batch_id):
+        """Delegate to ImportManager."""
+        self.import_manager.on_batch_import_finished(batch_id)
+
     @Slot(int, str, str)
     def add_single_image_to_grid(self, batch_id, batch_name, image_path):
-        """
-        Menambah satu thumbnail ke grid secara real-time.
-        Mendukung logika Toast tingkat lanjut untuk background imports.
-        """
-        # 1. Background Import Logic
-        if batch_id != self.current_batch_id:
-            # Task: Jika proses import hanya satu batch yang sedang memprosesnya maka tampilkan pesan spesifik name
-            # Jika ada dua atau lebih batch_id, tampilkan jumlah global
-
-            active_count = len(self.active_import_batches)
-
-            # Jika batch ini belum tercatat (misal start signal miss), catat sementara
-            if batch_id not in self.active_import_batches:
-                self.active_import_batches.add(batch_id)
-                active_count += 1
-
-            message = ""
-            if active_count > 1:
-                # > 1 batch importing
-                message = (
-                    f"Background Import: Sedang menambahkan di {active_count} batch..."
-                )
-            else:
-                # Single batch importing
-                message = f"Background Import: Sedang menambahkan gambar ke batch {batch_name}..."
-
-            # Gunakan show_progress untuk update text tanpa spam animasi
-            self.toast.show_progress(
-                message,
-                # Duration ignored by show_progress
-                position=None,  # Default pos
-                animation=None,
-            )
-            # Karena ini toast manager lama yang mungkin tidak support flag is_progress_update di show_message,
-            # kita gunakan show_message biasa yang akan replace text
-            # TAPI wait, user minta logika "hilangkan tampilan toastnya" saat masuk batch
-            return
-
-        # 2. Logic Tambah ke Grid (Current Batch)
-        # Jika masuk ke sini, artinya batch_id == current_batch_id.
-        # User minta: "saat berada di dalam batch_id yang sedang memproses impor maka hilangkan tampilan toastnya"
-        # Kita bisa panggil hide() untuk memastikan toast background hilang
-        self.toast.hide()
-
-        # Buat dummy object agar kompatibel dengan logic
-        class DummyImg:
-            def __init__(self, path):
-                self.path = path
-                self.id = os.path.basename(path)  # ID sementara
-
-        img = DummyImg(image_path)
-
-        # Cek jika sudah ada (safety)
-        if str(img.id) in self.all_cards:
-            return
-
-        card = ImageCard(card_id=str(img.id), size=110)
-        card._image_path = img.path
-        card.double_clicked.connect(self._on_card_double_clicked)
-        card.clicked.connect(
-            lambda cid, event, c=card: self._on_card_clicked(cid, event, c)
-        )
-
-        self.grid_container.add_item(card)
-        self.all_cards[str(img.id)] = card
-        self.logic.register_grid_item(str(img.id), {"path": img.path})
-        self._load_thumbnail_async(img.path, card)
-
-        # Increment total count
-        self.total_image_count += 1
-
-        # Update header count
-        self._update_header_title()
-
-        # Check for active deletions to resume
-        self.deletion_manager.resume_deletion_simulation(batch_id)
-
-        # Pastikan grid container pindah dari placeholder jika sebelumnya kosong
-        if self.grid_content_stack.currentWidget() != self.grid_container:
-            self._set_placeholder(None)
+        """Delegate to ImportManager."""
+        self.import_manager.add_single_image_to_grid(batch_id, batch_name, image_path)
 
     def _on_deletion_finished(self, count):
         """Handle completion of image deletion."""
-        if count > 0:
-            msg = f"Berhasil menghapus {count} gambar."
-            self.toast.show_message(msg, duration=3000)
-            self._refresh_current_batch()
-        else:
-            QMessageBox.warning(
-                self,
-                "Peringatan",
-                "Beberapa gambar tidak dapat dihapus. Silakan coba lagi.",
-            )
+        # Refresh current batch settings from DB if needed
+        # (Though DeletionManager now handles UI removal progressively)
+        self._refresh_current_batch()
 
     def _on_deletion_error(self, error_message):
         """Handle error during image deletion."""
-        self.toast.show_message(
-            f"Gagal menghapus gambar: {error_message}", duration=4000
-        )
+        # No need to show toast here, DeletionManager does it.
+        # Just refresh to be safe.
         self._refresh_current_batch()
 
     def _display_image_preview(self, image_path):
@@ -1228,21 +1199,6 @@ class DisplayPanel(QWidget):
 
         self.logic.display_preview(self.zoomable_preview, image_path)
         self.show_preview()
-
-    @Slot(int)
-    def on_batch_import_started(self, batch_id):
-        """Slot to mark a batch as actively importing."""
-        self.active_import_batches.add(batch_id)
-
-    @Slot(int)
-    def on_batch_import_finished(self, batch_id):
-        """Slot to mark a batch as finished importing."""
-        if batch_id in self.active_import_batches:
-            self.active_import_batches.remove(batch_id)
-
-        # Jika tidak ada lagi import yang berjalan, hide toast
-        if not self.active_import_batches:
-            self.toast.hide()
 
     # =========================================================================
     # === 4. PUBLIC HELPER METHODS ===
@@ -1488,22 +1444,3 @@ class DisplayPanel(QWidget):
                 event.ignore()
         else:
             event.ignore()
-
-    @Slot()
-    def import_images(self):
-        """
-        Membuka dialog file untuk impor gambar dengan format dari config.SUPPORTED_FORMATS.
-        Mirip dengan panorama page import_images method.
-        """
-        if not self.current_batch_id:
-            return
-
-        # Build file filter string dari supported formats
-        file_filter = self._build_file_filter()
-
-        # Open file dialog untuk select multiple images
-        paths, _ = QFileDialog.getOpenFileNames(self, "Select Images", "", file_filter)
-
-        if paths:
-            # Emit signal dengan selected file paths
-            self.images_to_import_selected.emit(paths)

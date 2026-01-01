@@ -46,12 +46,16 @@ class StackedWidgetAnimator(QObject):
     """
     Animator yang TAHAN BANTING dan SELF-HEALING untuk QStackedWidget.
     Dirancang untuk menangani penghapusan widget di tengah animasi dengan aman.
+    PLUS: Anti-QPainter Error dengan throttling dan safe grab.
     """
 
     DEFAULT_DURATION_OUT = 150
     DEFAULT_DURATION_IN = 250
     DEFAULT_CURVE_OUT = QEasingCurve.Type.OutQuad
     DEFAULT_CURVE_IN = QEasingCurve.Type.InQuad
+
+    # Throttling untuk mencegah QPainter error pada animasi massal
+    MAX_CONCURRENT_ANIMATIONS = 50
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -60,6 +64,155 @@ class StackedWidgetAnimator(QObject):
         self._active_widgets = (
             weakref.WeakKeyDictionary()
         )  # Track widgets currently animating
+        self._all_ghosts = []  # Strong refs for final cleanup
+        self._animation_queue = []  # Queue untuk animasi yang ditunda
+        self._concurrent_count = 0  # Counter animasi aktif
+
+        self.destroyed.connect(self._on_animator_destroyed)
+
+    def _on_animator_destroyed(self):
+        """Final cleanup of all ghosts when animator is destroyed."""
+        for ghost in self._all_ghosts:
+            try:
+                if is_widget_alive(ghost):
+                    ghost.hide()
+                    ghost.deleteLater()
+            except:
+                pass
+        self._all_ghosts.clear()
+
+    def stop_for_widget(self, widget: QWidget):
+        """Public method to stop animations for a specific widget and delete its ghost."""
+        if not widget or widget not in self._active_widgets:
+            return
+
+        old_data = self._active_widgets[widget]
+        try:
+            if isinstance(old_data, tuple):
+                old_anim, old_ghost = old_data
+                if old_anim and old_anim.state() == QPropertyAnimation.State.Running:
+                    old_anim.stop()
+                if is_widget_alive(old_ghost):
+                    old_ghost.hide()
+                    old_ghost.deleteLater()
+                    if old_ghost in self._all_ghosts:
+                        self._all_ghosts.remove(old_ghost)
+        except:
+            pass
+        self._active_widgets.pop(widget, None)
+
+    def _safe_grab(self, widget: QWidget, max_retries: int = 3):
+        """
+        Safely grab widget pixmap dengan retry mechanism.
+        Returns (pixmap, geometry) tuple atau (None, None) jika gagal.
+        """
+        for attempt in range(max_retries):
+            try:
+                # Pastikan widget visible dan punya ukuran
+                if (
+                    not widget.isVisible()
+                    or widget.width() <= 0
+                    or widget.height() <= 0
+                ):
+                    return None, None
+
+                # Tunggu sebentar jika bukan attempt pertama
+                if attempt > 0:
+                    QTimer.singleShot(attempt * 5, lambda: None)
+                    QApplication.processEvents()
+
+                pixmap = widget.grab()
+                geom = widget.geometry()
+
+                if not pixmap.isNull():
+                    return pixmap, geom
+
+            except (RuntimeError, Exception) as e:
+                if attempt == max_retries - 1:
+                    # Last attempt failed
+                    return None, None
+                continue
+
+        return None, None
+
+    def _direct_fade_out(
+        self,
+        widget: QWidget,
+        duration: int,
+        curve: QEasingCurve.Type,
+        on_finished_callback=None,
+    ):
+        """
+        Fallback animasi fade-out TANPA grab (direct opacity).
+        Digunakan ketika grab() gagal atau untuk mencegah QPainter error.
+        """
+        if not is_widget_alive(widget):
+            if on_finished_callback:
+                QTimer.singleShot(0, on_finished_callback)
+            return
+
+        try:
+            # Setup opacity effect
+            effect = widget.graphicsEffect()
+            if not isinstance(effect, QGraphicsOpacityEffect):
+                effect = QGraphicsOpacityEffect(widget)
+                widget.setGraphicsEffect(effect)
+            effect.setOpacity(1.0)
+
+            # Animasi langsung pada widget asli
+            anim = QPropertyAnimation(effect, b"opacity", self)
+            anim.setDuration(duration)
+            anim.setStartValue(1.0)
+            anim.setEndValue(0.0)
+            anim.setEasingCurve(curve)
+
+            def on_anim_finished():
+                try:
+                    if is_widget_alive(widget):
+                        widget.hide()
+                except RuntimeError:
+                    pass
+
+                if on_finished_callback and callable(on_finished_callback):
+                    try:
+                        if hasattr(on_finished_callback, "__self__"):
+                            cb_obj = on_finished_callback.__self__
+                            if isinstance(cb_obj, QWidget) and not is_widget_alive(
+                                cb_obj
+                            ):
+                                return
+                        on_finished_callback()
+                    except RuntimeError:
+                        pass
+
+                # Decrement counter
+                self._concurrent_count = max(0, self._concurrent_count - 1)
+                self._process_animation_queue()
+
+            anim.finished.connect(on_anim_finished)
+            anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
+        except (RuntimeError, Exception):
+            # Jika semua gagal, langsung hide
+            try:
+                widget.hide()
+            except:
+                pass
+            if on_finished_callback:
+                QTimer.singleShot(0, on_finished_callback)
+
+    def _can_start_animation(self) -> bool:
+        """Check apakah masih bisa start animasi baru (throttle check)."""
+        return self._concurrent_count < self.MAX_CONCURRENT_ANIMATIONS
+
+    def _process_animation_queue(self):
+        """Process queued animations jika ada slot tersedia."""
+        while self._animation_queue and self._can_start_animation():
+            queued_item = self._animation_queue.pop(0)
+            # Unpack dan jalankan
+            widget, duration, curve, callback = queued_item
+            if is_widget_alive(widget):
+                self._execute_transition_out(widget, duration, curve, callback)
 
     def transition_out(
         self,
@@ -69,67 +222,87 @@ class StackedWidgetAnimator(QObject):
         on_finished_callback=None,
     ):
         """
-        Animator fade-out mandiri yang aman.
+        Animator fade-out mandiri yang aman dengan throttling dan queue.
         """
         if not widget:
             return
 
-        # Batalakan animasi sebelumnya jika ada pada widget yang sama
+        # Check throttle - jika penuh, masukkan ke queue
+        if not self._can_start_animation():
+            self._animation_queue.append(
+                (widget, duration, curve, on_finished_callback)
+            )
+            return
+
+        # Eksekusi langsung
+        self._execute_transition_out(widget, duration, curve, on_finished_callback)
+
+    def _execute_transition_out(
+        self,
+        widget: QWidget,
+        duration: int,
+        curve: QEasingCurve.Type,
+        on_finished_callback=None,
+    ):
+        """
+        Internal executor untuk transition_out dengan safe grab dan fallback.
+        """
+        if not widget:
+            return
+
+        # Increment counter
+        self._concurrent_count += 1
+
+        # Batalkan animasi sebelumnya jika ada pada widget yang sama
         if widget in self._active_widgets:
-            old_anim = self._active_widgets[widget]
+            old_data = self._active_widgets[widget]
             try:
-                if old_anim and old_anim.state() == QPropertyAnimation.State.Running:
-                    old_anim.stop()
+                if isinstance(old_data, tuple):
+                    old_anim, old_ghost = old_data
+                    if (
+                        old_anim
+                        and old_anim.state() == QPropertyAnimation.State.Running
+                    ):
+                        old_anim.stop()
+                    if is_widget_alive(old_ghost):
+                        old_ghost.hide()
+                        old_ghost.deleteLater()
             except:
                 pass
+            del self._active_widgets[widget]
 
         widget_ref = weakref.ref(widget)
 
         if not widget_ref or not widget_ref():
             if on_finished_callback and callable(on_finished_callback):
                 QTimer.singleShot(0, on_finished_callback)
+            self._concurrent_count = max(0, self._concurrent_count - 1)
+            self._process_animation_queue()
             return
 
         target_widget = widget_ref()
         if target_widget is None:
             if on_finished_callback and callable(on_finished_callback):
                 on_finished_callback()
+            self._concurrent_count = max(0, self._concurrent_count - 1)
+            self._process_animation_queue()
             return
 
         parent = target_widget.parentWidget()
         if not parent:
             if on_finished_callback and callable(on_finished_callback):
                 on_finished_callback()
+            self._concurrent_count = max(0, self._concurrent_count - 1)
+            self._process_animation_queue()
             return
 
-        # --- STRATEGI GHOSTING PIXMAP ---
-        # 0. Safety: Jika widget tidak visible, jangan repot-repot grab (hindari QPainter error)
-        try:
-            if (
-                not target_widget.isVisible()
-                or target_widget.width() <= 0
-                or target_widget.height() <= 0
-            ):
-                if on_finished_callback and callable(on_finished_callback):
-                    on_finished_callback()
-                return
-        except RuntimeError:
-            return
+        # --- STRATEGI SAFE GRAB dengan FALLBACK ---
+        # Coba grab dengan retry, jika gagal gunakan direct fade
+        pixmap, geom = self._safe_grab(target_widget)
 
-        # 1. Ambil snapshot widget asli
-        try:
-            pixmap = target_widget.grab()
-            geom = target_widget.geometry()
-            if pixmap.isNull():
-                raise RuntimeError("Grab failed")
-        except (RuntimeError, Exception):
-            # Fallback jika grab gagal: langsung hide dan jalankan callback
-            try:
-                target_widget.hide()
-            except:
-                pass
-            if on_finished_callback and callable(on_finished_callback):
-                on_finished_callback()
+        if pixmap is None or geom is None:
+            # FALLBACK: Gunakan direct fade tanpa ghost
+            self._direct_fade_out(target_widget, duration, curve, on_finished_callback)
             return
 
         # 2. Buat widget "Hantu" (Ghost) di parent yang sama
@@ -144,6 +317,7 @@ class StackedWidgetAnimator(QObject):
         opacity_effect.setOpacity(1.0)
         ghost.show()
         ghost.raise_()
+        self._all_ghosts.append(ghost)
 
         # 4. Sembunyikan widget asli SEGERA untuk menghindari konflik QPainter
         try:
@@ -159,8 +333,14 @@ class StackedWidgetAnimator(QObject):
         anim.setEasingCurve(curve)
 
         def on_anim_finished():
+            # Cleanup entry from tracking
+            if target_widget in self._active_widgets:
+                del self._active_widgets[target_widget]
+
             try:
                 if is_widget_alive(ghost):
+                    if ghost in self._all_ghosts:
+                        self._all_ghosts.remove(ghost)
                     ghost.deleteLater()
             except RuntimeError:
                 pass
@@ -177,8 +357,12 @@ class StackedWidgetAnimator(QObject):
                 except RuntimeError:
                     pass
 
+            # Decrement counter dan process queue
+            self._concurrent_count = max(0, self._concurrent_count - 1)
+            self._process_animation_queue()
+
         anim.finished.connect(on_anim_finished)
-        self._active_widgets[target_widget] = anim
+        self._active_widgets[target_widget] = (anim, ghost)
         anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
     def transition_in(
@@ -269,8 +453,13 @@ class StackedWidgetAnimator(QObject):
 
     def stop_all(self):
         """Hentikan semua animasi transisi di semua stacked widget."""
+        # 1. Hentikan transisi QStackedWidget (in-progress)
         for stack_widget in list(self._animation_state.keys()):
             self._interrupt_transition(stack_widget)
+
+        # 2. Hentikan semua animasi Ghost (out-progress)
+        for widget in list(self._active_widgets.keys()):
+            self.stop_for_widget(widget)
 
     def _reset_widget_state(self, widget: QWidget, visible: bool = False):
         """Atur ulang properti visual widget dengan aman."""

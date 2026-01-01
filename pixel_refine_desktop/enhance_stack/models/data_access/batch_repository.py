@@ -116,7 +116,7 @@ class BatchRepository(BaseRepository):
 
     def add_images(self, batch_id: int, image_paths: List[str]) -> int:
         """
-        Add images to a batch.
+        Add multiple images to a batch using optimized bulk operations.
 
         Args:
             batch_id: Batch ID
@@ -125,44 +125,60 @@ class BatchRepository(BaseRepository):
         Returns:
             Number of images successfully added
         """
+        if not image_paths:
+            return 0
+
         added_count = 0
+        try:
+            with self.get_cursor() as cursor:
+                # 1. Cek apakah batch sudah punya referensi
+                cursor.execute(
+                    "SELECT 1 FROM batch_process_image WHERE batch_id = ? AND is_reference_batch = 1 LIMIT 1",
+                    (batch_id,),
+                )
+                has_reference = cursor.fetchone() is not None
 
-        # Check if batch has reference image
-        has_reference = self.has_reference_image(batch_id)
+                for image_path in image_paths:
+                    # 2. Get or create image ID (ImageRepository.get_or_create uses its own logic)
+                    # Tetap gunakan repo untuk konsistensi, tapi di dalam transaksi bapak
+                    image_id = self.image_repo.get_or_create(image_path)
 
-        for image_path in image_paths:
-            # Get or create image ID
-            image_id = self.image_repo.get_or_create(image_path)
+                    # 3. Cek apakah sudah terhubung (untuk menghindari UNIQUE constraint error)
+                    cursor.execute(
+                        "SELECT 1 FROM batch_process_image WHERE batch_id = ? AND image_id_batch = ? LIMIT 1",
+                        (batch_id, image_id),
+                    )
+                    if cursor.fetchone():
+                        continue
 
-            # Check if already linked
-            if self.is_image_in_batch(batch_id, image_id):
-                continue
+                    # 4. Tentukan apakah ini jadi referensi
+                    is_reference = 0
+                    if not has_reference:
+                        is_reference = 1
+                        has_reference = True
 
-            # Determine if this should be reference
-            is_reference = 0
-            if not has_reference:
-                is_reference = 1
-                has_reference = True
+                    # 5. Insert
+                    cursor.execute(
+                        """
+                        INSERT INTO batch_process_image (batch_id, image_id_batch, is_reference_batch)
+                        VALUES (?, ?, ?)
+                        """,
+                        (batch_id, image_id, is_reference),
+                    )
+                    added_count += 1
 
-            # Add to batch
-            query = """
-                INSERT INTO batch_process_image (batch_id, image_id_batch, is_reference_batch)
-                VALUES (?, ?, ?)
-            """
-            try:
-                self.execute_update(query, (batch_id, image_id, is_reference))
-                added_count += 1
-            except Exception as e:
-                print(f"Error adding image {image_path} to batch {batch_id}: {e}")
+            if added_count > 0:
+                print(f"Bulk added {added_count} images to batch ID {batch_id}")
 
-        if added_count > 0:
-            print(f"Added {added_count} images to batch ID {batch_id}")
+            return added_count
 
-        return added_count
+        except Exception as e:
+            print(f"Error in optimized bulk add_images: {e}")
+            return 0
 
     def remove_images(self, batch_id: int, image_paths: List[str]) -> int:
         """
-        Remove images from a batch.
+        Remove images from a batch using optimized bulk deletion.
 
         Args:
             batch_id: Batch ID
@@ -171,28 +187,63 @@ class BatchRepository(BaseRepository):
         Returns:
             Number of images removed
         """
+        if not image_paths:
+            return 0
+
         removed_count = 0
+        was_reference_removed = False
 
-        for image_path in image_paths:
-            image = self.image_repo.get_by_path(image_path)
-            if not image:
-                continue
+        try:
+            with self.get_cursor() as cursor:
+                # 1. Ambil ID gambar dari path
+                placeholders = ",".join("?" for _ in image_paths)
+                cursor.execute(
+                    f"SELECT id FROM images WHERE path IN ({placeholders})", image_paths
+                )
+                image_ids = [row[0] for row in cursor.fetchall()]
 
-            image_id = image[0]
+                if not image_ids:
+                    return 0
 
-            # Check if this was the reference image
-            was_reference = self.is_reference_image(batch_id, image_id)
+                # 2. Periksa apakah salah satu dari gambar ini adalah referensi sebelum dihapus
+                id_placeholders = ",".join("?" for _ in image_ids)
+                cursor.execute(
+                    f"SELECT 1 FROM batch_process_image WHERE batch_id = ? AND is_reference_batch = 1 AND image_id_batch IN ({id_placeholders})",
+                    [batch_id] + image_ids,
+                )
+                was_reference_removed = cursor.fetchone() is not None
 
-            # Remove from batch
-            query = "DELETE FROM batch_process_image WHERE batch_id = ? AND image_id_batch = ?"
-            rows = self.execute_update(query, (batch_id, image_id))
-            removed_count += rows
+                # 3. Hapus hubungan di batch_process_image secara massal
+                cursor.execute(
+                    f"DELETE FROM batch_process_image WHERE batch_id = ? AND image_id_batch IN ({id_placeholders})",
+                    [batch_id] + image_ids,
+                )
+                removed_count = cursor.rowcount
 
-            # If reference was removed, set new reference
-            if was_reference and rows > 0:
-                self._set_new_reference(batch_id)
+                # 4. Jika referensi dihapus, cari referensi baru secara otomatis
+                if was_reference_removed and removed_count > 0:
+                    cursor.execute(
+                        "SELECT id FROM batch_process_image WHERE batch_id = ? ORDER BY id LIMIT 1",
+                        (batch_id,),
+                    )
+                    new_ref_result = cursor.fetchone()
+                    if new_ref_result:
+                        cursor.execute(
+                            "UPDATE batch_process_image SET is_reference_batch = 1 WHERE id = ?",
+                            (new_ref_result[0],),
+                        )
+                        print(
+                            f"New reference set for batch ID {batch_id} inside transaction"
+                        )
 
-        return removed_count
+            if removed_count > 0:
+                print(f"Bulk removed {removed_count} images from batch ID {batch_id}")
+
+            return removed_count
+
+        except Exception as e:
+            print(f"Error in optimized bulk remove_images: {e}")
+            return 0
 
     def get_batch_images(self, batch_id: int) -> List[Tuple[int, str, bool]]:
         """

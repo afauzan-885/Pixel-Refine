@@ -80,12 +80,32 @@ class DisplayLogic:
             image_path: Path ke image file
             callback: Callable(QImage, str) - Called ketika thumbnail ready
         """
+        self.thumbnail_processor.add_to_stats(1)
+        self.thumbnail_processor.process_image(image_path, callback)
 
-        def on_thumbnail_ready(q_image, path):
-            if callback and not q_image.isNull():
-                callback(q_image, path)
+    def load_thumbnails_bulk_async(self, path_callback_pairs: list):
+        """
+        Load multiple thumbnails in bulk for maximum efficiency.
+        path_callback_pairs: list of (image_path, callback)
+        """
+        if not path_callback_pairs:
+            return
 
-        self.thumbnail_processor.process_image(image_path, on_thumbnail_ready)
+        image_paths = [p for p, c in path_callback_pairs]
+
+        # Mapping path -> multiple callbacks (just in case)
+        path_to_callbacks = {}
+        for path, callback in path_callback_pairs:
+            if path not in path_to_callbacks:
+                path_to_callbacks[path] = []
+            path_to_callbacks[path].append(callback)
+
+        def bulk_callback(q_image, path):
+            if path in path_to_callbacks:
+                for cb in path_to_callbacks[path]:
+                    cb(q_image, path)
+
+        self.thumbnail_processor.process_batch(image_paths, bulk_callback)
 
     def prepare_preview(self, image_path):
         """
