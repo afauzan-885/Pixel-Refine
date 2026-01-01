@@ -102,6 +102,9 @@ class DeletionManager(QObject):
         self.ui_removal_timer.setSingleShot(True)
         self.ui_removal_timer.timeout.connect(self._process_one_item)
 
+        self.total_to_remove = 0
+        self.removed_count = 0
+
         self._current_worker = None
 
     def _is_widget_in_viewport(self, widget):
@@ -244,8 +247,11 @@ class DeletionManager(QObject):
                     paths_to_remove.append(self.panel.logic.grid_items[cid]["path"])
 
             if paths_to_remove:
+                self.total_to_remove = len(paths_to_remove)
+                self.removed_count = 0
+
                 self.panel.toast.show_progress(
-                    f"Menghapus {len(paths_to_remove)} gambar...",
+                    f"Menghapus gambar {0}%",
                     position=ToastPosition.BOTTOM_RIGHT,
                 )
                 self.start_deletion_process(paths_to_remove)
@@ -296,6 +302,15 @@ class DeletionManager(QObject):
         # Pancing timer jika sedang diam
         if items_added and not self.ui_removal_timer.isActive():
             self._process_one_item()
+
+        # Update Toast dengan persentase
+        self.removed_count += len(deleted_ids)
+        if self.total_to_remove > 0:
+            pct = int((self.removed_count / self.total_to_remove) * 100)
+            if pct < 100:
+                self.panel.toast.show_progress(
+                    f"Menghapus gambar {pct}%", position=ToastPosition.BOTTOM_RIGHT
+                )
 
     def _on_worker_finished(self, count, batch_id):
         self.deletion_finished.emit(count)

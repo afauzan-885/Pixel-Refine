@@ -220,7 +220,6 @@ class BatchRepository(BaseRepository):
                 )
                 removed_count = cursor.rowcount
 
-                # 4. Jika referensi dihapus, cari referensi baru secara otomatis
                 if was_reference_removed and removed_count > 0:
                     cursor.execute(
                         "SELECT id FROM batch_process_image WHERE batch_id = ? ORDER BY id LIMIT 1",
@@ -238,6 +237,17 @@ class BatchRepository(BaseRepository):
 
             if removed_count > 0:
                 print(f"Bulk removed {removed_count} images from batch ID {batch_id}")
+
+                # --- SINKRONISASI CACHE FILE ---
+                try:
+                    from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_processor import (
+                        get_thumbnail_repo,
+                    )
+
+                    thumb_repo = get_thumbnail_repo()
+                    thumb_repo.delete_thumbnails(image_paths)
+                except Exception as e:
+                    print(f"[BatchRepo] Warning: File cache cleanup failed: {e}")
 
             return removed_count
 

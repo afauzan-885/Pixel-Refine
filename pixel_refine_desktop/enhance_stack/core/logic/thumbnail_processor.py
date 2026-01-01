@@ -65,6 +65,7 @@ class ThumbnailWorkerSignals(QObject):
     """Signals for the ThumbnailWorker because QRunnable is not a QObject."""
 
     thumbnail_ready = Signal(QImage, str)
+    all_thumbnails_processed = Signal()  # Dipicu jika BulkWorker selesai (Fix GC)
 
 
 class ThumbnailWorker(QRunnable):
@@ -119,10 +120,6 @@ class ThumbnailWorker(QRunnable):
             if not cached_image.isNull():
                 if not self._should_abort():
                     result_image = cached_image
-                    try:
-                        self.signals.thumbnail_ready.emit(result_image, self.image_path)
-                    except (RuntimeError, AttributeError):
-                        pass
                 return
 
             if self._should_abort():
@@ -193,6 +190,7 @@ class ThumbnailBulkWorker(QRunnable):
             if self._should_abort():
                 return
 
+            q_img_to_emit = QImage()
             try:
                 # 1. Process image (Decoding)
                 # Kita tidak cek SQLite di sini karena process_batch sudah melakukan bulk check.
@@ -201,17 +199,11 @@ class ThumbnailBulkWorker(QRunnable):
                 if self._should_abort():
                     return
 
-                # 2. Convert and Emit
+                # 2. Convert to QImage
                 if pil_thumb:
-                    q_img = convert_pil_to_qimage(pil_thumb)
-                    if not self._should_abort():
-                        # Selalu emit meskipun null agar progress terupdate
-                        self._safe_emit(q_img, path)
+                    q_img_to_emit = convert_pil_to_qimage(pil_thumb)
                 else:
                     print(f"[ThumbnailBulkWorker] Failed to decode image: {path}")
-                    # Jika gagal, kirim sinyal null agar UI bisa berhenti loading
-                    if not self._should_abort():
-                        self._safe_emit(QImage(), path)
 
             except Exception as e:
                 # Jangan print error jika penyebabnya adalah shutdown
@@ -219,7 +211,18 @@ class ThumbnailBulkWorker(QRunnable):
                     print(
                         f"[ThumbnailBulkWorker] Critical error processing {path}: {e}"
                     )
-                    self._safe_emit(QImage(), path)
+            finally:
+                # Always emit a signal for this path, even if it's an empty QImage
+                # This ensures the UI can update its state (e.g., remove loading spinner)
+                if not self._should_abort():
+                    self._safe_emit(q_img_to_emit, path)
+
+        # Emit final signal to help with GC cleanup
+        if hasattr(self, "signals") and self.signals:
+            try:
+                self.signals.all_thumbnails_processed.emit()
+            except (RuntimeError, AttributeError):
+                pass
 
     def _safe_emit(self, q_image, path):
         """Emisi sinyal dengan perlindungan terhadap shutdown."""
@@ -409,8 +412,12 @@ class ThumbnailBatchProcessor(QObject):
         self.decoded_count = 0
         self.total_to_save = 0
         self.saved_count = 0
-        self.path_to_batch = {}  # image_path -> batch_id
+        self.path_to_batch = {}  # Tracking context
+        self._active_workers = (
+            set()
+        )  # Proteksi agar worker tidak kena GC (Fix Loading Abadi)
 
+        # Performance tuning
         # Timer untuk melakukan bulk save ke disk saat idle
         self.flush_timer = QTimer()
         self.flush_timer.setSingleShot(True)
@@ -461,6 +468,13 @@ class ThumbnailBatchProcessor(QObject):
             lambda img, path: self._on_thumbnail_ready(img, path)
         )
 
+        # Proteksi GC: Simpan referensi worker
+        self._active_workers.add(worker)
+        # Hapus referensi setelah selesai (apapun hasilnya)
+        worker.signals.thumbnail_ready.connect(
+            lambda: self._active_workers.discard(worker)
+        )
+
         # Start in global pool
         QThreadPool.globalInstance().start(worker)
 
@@ -469,7 +483,6 @@ class ThumbnailBatchProcessor(QObject):
         self.current_batch_id = str(batch_id)
         self.total_to_process = total_count
         self.decoded_count = 0
-        self.total_to_save = total_count
         self.saved_count = 0
         self.path_to_batch.clear()  # Clear tracking context for efficiency
         self._emit_progress()
@@ -544,6 +557,17 @@ class ThumbnailBatchProcessor(QObject):
                     lambda img, path: self._on_thumbnail_ready(img, path)
                 )
 
+                # Proteksi GC: Simpan referensi worker (Fix "Loading 2%")
+                self._active_workers.add(bulk_worker)
+
+                # Gunakan wrapper untuk disconnect/discard saat batch ini selesai diproses oleh worker ini
+                # Kita tidak bisa pakai satu sinyal untuk hapus, karena bulk emit banyak.
+                # Namun QRunnable di pool akan hancur setelah run() selesai.
+                # Idealnya ada sinyal 'finished'. Karena tidak ada, kita bisa buat di signals.
+                bulk_worker.signals.all_thumbnails_processed.connect(
+                    lambda: self._active_workers.discard(bulk_worker)
+                )
+
                 QThreadPool.globalInstance().start(bulk_worker)
 
     def _on_thumbnail_ready(self, q_image, image_path):
@@ -569,7 +593,13 @@ class ThumbnailBatchProcessor(QObject):
             if not is_success:
                 # Jika gagal, anggap "tersimpan" (tidak perlu simpan) agar progress save juga naik
                 self.saved_count += 1
-            self._emit_progress()
+
+            # --- PROGRESS SYNC FIX ---
+            # Jika sudah mencapai akhir, paksa flush agar status mencapai 100% tanpa nunggu timer
+            if self.decoded_count >= self.total_to_process:
+                self.flush_to_disk()
+            else:
+                self._emit_progress()
 
         # Selalu jalankan callback agar UI berhenti menunjukkan loading
         if image_path in self.callbacks:
@@ -613,7 +643,7 @@ class ThumbnailBatchProcessor(QObject):
             chunk_size = 100
 
         print(
-            f"[ThumbnailProcessor] DEFERRED SAVE: Writing {total_count} thumbnails to SQLite using chunk_size: {chunk_size}"
+            f"[ThumbnailProcessor] DEFERRED SAVE: Writing {total_count} thumbnails to Cache using chunk_size: {chunk_size}"
         )
 
         repo = get_thumbnail_repo()

@@ -1011,14 +1011,28 @@ class DisplayPanel(QWidget):
         if decode_pct >= 100 and save_pct >= 100:
             # Selesai: Tampilkan pesan sukses singkat
             self.toast.show_message(
-                "Semua thumbnail berhasil diproses dan disimpan.",
+                "Semua thumbnail berhasil diproses.",
                 duration=3000,
                 position=ToastPosition.BOTTOM_RIGHT,
             )
+        elif decode_pct == 0 and save_pct == 0:
+            # Belum mulai atau kosong
+            pass
         else:
-            # Sedang Berjalan: Gunakan format dari user
-            msg = f"Membuat {decode_pct}% - Menyimpan {save_pct}%"
-            self.toast.show_progress(msg, position=ToastPosition.BOTTOM_RIGHT)
+            # Sedang Berjalan:
+            # CEK CACHING: Jika sejak awal sudah 100% tanpa perlu dekoding (L1/L2 hits)
+            # Karena _update_progress dipanggil setelah process_batch (yang mengupdate hits)
+            # Jika progres langsung tinggi tanpa interaksi worker, kita anggap caching.
+            is_pure_cache = decode_pct >= 100  # Jika dari L1/L2 hits langsung 100%
+
+            if is_pure_cache:
+                msg = "Caching berhasil"
+                self.toast.show_message(
+                    msg, duration=2000, position=ToastPosition.BOTTOM_RIGHT
+                )
+            else:
+                msg = f"Membuat {decode_pct}% - Menyimpan {save_pct}%"
+                self.toast.show_progress(msg, position=ToastPosition.BOTTOM_RIGHT)
 
     def _on_card_double_clicked(self, card_id):
         """
