@@ -80,7 +80,6 @@ class DisplayLogic:
             image_path: Path ke image file
             callback: Callable(QImage, str) - Called ketika thumbnail ready
         """
-        self.thumbnail_processor.add_to_stats(1)
         self.thumbnail_processor.process_image(image_path, callback)
 
     def load_thumbnails_bulk_async(self, path_callback_pairs: list):
@@ -103,7 +102,8 @@ class DisplayLogic:
         def bulk_callback(q_image, path):
             if path in path_to_callbacks:
                 for cb in path_to_callbacks[path]:
-                    cb(q_image, path)
+                    if cb:
+                        cb(q_image, path)
 
         self.thumbnail_processor.process_batch(image_paths, bulk_callback)
 

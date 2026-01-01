@@ -393,6 +393,8 @@ class ThumbnailBatchProcessor(QObject):
 
     # Signal untuk melaporkan progress ke UI: (batch_id, persentase_decode, persentase_save)
     progress_updated = Signal(str, int, int)
+    # Signal untuk melaporkan progres pemeriksaan awal (cek disk/cache)
+    check_progress = Signal(str, int)
 
     def __init__(self, thumbnail_size=(128, 128), max_concurrent=4):
         """
@@ -416,6 +418,11 @@ class ThumbnailBatchProcessor(QObject):
         self._active_workers = (
             set()
         )  # Proteksi agar worker tidak kena GC (Fix Loading Abadi)
+        self._in_flight = set()  # Track items currently being processed/fetched
+        self._processed_paths = (
+            set()
+        )  # Track paths already counted towards decoded_count
+        self._persisted_paths = set()  # Track paths already counted towards saved_count
 
         # Performance tuning
         # Timer untuk melakukan bulk save ke disk saat idle
@@ -456,7 +463,15 @@ class ThumbnailBatchProcessor(QObject):
                 callback(cached_image, image_path)
                 return
 
+            # Cek apakah sudah sedang diproses (in-flight)
+            if image_path in self._in_flight:
+                self.callbacks[image_path] = callback
+                return
+
             self.callbacks[image_path] = callback
+
+        # Mark as in-flight
+        self._in_flight.add(image_path)
 
         # 3. GENERATE (Spawn via QThreadPool to avoid handle leak)
         worker = ThumbnailWorker(
@@ -485,6 +500,9 @@ class ThumbnailBatchProcessor(QObject):
         self.decoded_count = 0
         self.saved_count = 0
         self.path_to_batch.clear()  # Clear tracking context for efficiency
+        self._in_flight.clear()
+        self._processed_paths.clear()
+        self._persisted_paths.clear()
         self._emit_progress()
 
     def process_batch(self, image_paths, callback=None):
@@ -505,9 +523,14 @@ class ThumbnailBatchProcessor(QObject):
                 if callback:
                     callback(self.ram_cache[path], path)
 
-                # Update progress even for cache hits
-                self.decoded_count += 1
-                self.saved_count += 1
+                # Update progress even for cache hits (Avoid double counting)
+                if path not in self._processed_paths:
+                    self._processed_paths.add(path)
+                    self.decoded_count += 1
+
+                if path not in self._persisted_paths:
+                    self._persisted_paths.add(path)
+                    self.saved_count += 1
             else:
                 remaining_paths.append(path)
 
@@ -517,7 +540,22 @@ class ThumbnailBatchProcessor(QObject):
 
         # 2. BULK LOAD DARI SQLite (L2) - Menggunakan Bulk Read Dinamis
         repo = get_thumbnail_repo()
-        cached_thumbnails = repo.get_thumbnails_bulk(remaining_paths)
+
+        # Emit initial check progress (0%)
+        self.check_progress.emit(self.current_batch_id, 0)
+
+        # Split remaining into hits and misses with incremental progress emission
+        batch_size = 50  # Process in small chunks for progress feedback
+        cached_thumbnails = {}
+
+        for i in range(0, len(remaining_paths), batch_size):
+            chunk = remaining_paths[i : i + batch_size]
+            hits = repo.get_thumbnails_bulk(chunk)
+            cached_thumbnails.update(hits)
+
+            # Emit progress percentage
+            pct = int(((i + len(chunk)) / len(remaining_paths)) * 100)
+            self.check_progress.emit(self.current_batch_id, pct)
 
         final_to_process = []
         for path in remaining_paths:
@@ -527,13 +565,27 @@ class ThumbnailBatchProcessor(QObject):
                 if callback:
                     callback(img, path)
 
-                # Update progress for L2 hits
-                self.decoded_count += 1
-                self.saved_count += 1
+                # Update progress for L2 hits (Avoid double counting)
+                if path not in self._processed_paths:
+                    self._processed_paths.add(path)
+                    self.decoded_count += 1
+
+                if path not in self._persisted_paths:
+                    self._persisted_paths.add(path)
+                    self.saved_count += 1
             else:
-                final_to_process.append(path)
-                if callback:
-                    self.callbacks[path] = callback
+                # Cek apakah sedang dalam antrean (in-flight)
+                if path not in self._in_flight:
+                    final_to_process.append(path)
+                    if callback:
+                        self.callbacks[path] = callback
+                else:
+                    # Jika in-flight, cukup tambahkan callback jika ada
+                    if callback:
+                        self.callbacks[path] = callback
+
+        # Final check progress (100%)
+        self.check_progress.emit(self.current_batch_id, 100)
 
         # Emit progress after cache checks
         self._emit_progress()
@@ -548,6 +600,11 @@ class ThumbnailBatchProcessor(QObject):
 
             for i in range(0, len(final_to_process), chunk_size):
                 chunk = final_to_process[i : i + chunk_size]
+
+                # Mark as in-flight
+                for p in chunk:
+                    self._in_flight.add(p)
+
                 bulk_worker = ThumbnailBulkWorker(
                     chunk, self, self.current_batch_id, self.thumbnail_size
                 )
@@ -574,6 +631,10 @@ class ThumbnailBatchProcessor(QObject):
         """Internal callback saat dekoding gambar selesai."""
         is_success = not q_image.isNull()
 
+        # Remove from in-flight tracker
+        if image_path in self._in_flight:
+            self._in_flight.discard(image_path)
+
         if is_success:
             # Simpan ke RAM Cache (L1)
             self.ram_cache[image_path] = q_image
@@ -589,15 +650,20 @@ class ThumbnailBatchProcessor(QObject):
 
         # Progress tracking: Selalu update agar progress mencapai 100%
         if self.path_to_batch.get(image_path) == self.current_batch_id:
-            self.decoded_count += 1
+            if image_path not in self._processed_paths:
+                self._processed_paths.add(image_path)
+                self.decoded_count += 1
+
             if not is_success:
-                # Jika gagal, anggap "tersimpan" (tidak perlu simpan) agar progress save juga naik
-                self.saved_count += 1
+                if image_path not in self._persisted_paths:
+                    self._persisted_paths.add(image_path)
+                    self.saved_count += 1
 
             # --- PROGRESS SYNC FIX ---
             # Jika sudah mencapai akhir, paksa flush agar status mencapai 100% tanpa nunggu timer
             if self.decoded_count >= self.total_to_process:
-                self.flush_to_disk()
+                if self.pending_save_queue:
+                    self.flush_to_disk()
             else:
                 self._emit_progress()
 
@@ -650,8 +716,12 @@ class ThumbnailBatchProcessor(QObject):
         for i in range(0, total_count, chunk_size):
             chunk = data_to_save[i : i + chunk_size]
             repo.save_thumbnails_bulk(chunk)
-            # Update saved count per chunk
-            self.saved_count += len(chunk)
+
+            # Update saved count (Avoid double counting)
+            for path, img in chunk:
+                if path not in self._persisted_paths:
+                    self._persisted_paths.add(path)
+                    self.saved_count += 1
             self._emit_progress()
 
         print(f"[ThumbnailProcessor] Deferred save complete.")

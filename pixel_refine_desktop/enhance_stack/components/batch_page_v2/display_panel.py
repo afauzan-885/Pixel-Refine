@@ -181,6 +181,9 @@ class DisplayPanel(QWidget):
         self.logic.get_thumbnail_processor().progress_updated.connect(
             self._on_thumbnail_progress
         )
+        self.logic.get_thumbnail_processor().check_progress.connect(
+            self._on_thumbnail_check_progress
+        )
 
         # Lazy loading timer
         self.lazy_load_timer = QTimer(self)
@@ -350,6 +353,8 @@ class DisplayPanel(QWidget):
         self.grid_container.verticalScrollBar().rangeChanged.connect(
             self._on_scroll_changed
         )
+
+        # Connect Selection Change
 
         self.grid_content_stack.addWidget(self.grid_container)
 
@@ -794,6 +799,18 @@ class DisplayPanel(QWidget):
         self.import_button.setVisible(True)
         self.show_grid()
 
+        # Trigger Background Sync untuk seluruh batch (Progres Toast Akurat)
+        # Ambil semua path gambar murni (abaikan zombies jika ada)
+        real_paths = [img.path for img in images if hasattr(img, "path")]
+        if real_paths:
+            # Gunakan QTimer agar tidak memblokir render awal grid
+            QTimer.singleShot(
+                100,
+                lambda: self.logic.load_thumbnails_bulk_async(
+                    [(p, None) for p in real_paths]
+                ),
+            )
+
         # Switch back to grid container using animation helper
         if self.grid_content_stack.currentWidget() != self.grid_container:
             self._set_placeholder(None)
@@ -857,9 +874,6 @@ class DisplayPanel(QWidget):
                 self.grid_container.add_item(card)
                 # ZOMBIE LOGIC: Immediately queue for removal via Manager (resuming stream)
                 self.deletion_manager.queue_zombie_card(str(img.id), card)
-
-        # TRIGER PEMUATAN THUMBNAIL DINAMIS (Toast Fix: Mulai sekarang, jangan tunggu beres semua)
-        self._check_visible_cards()
 
         # Update progress header
         self._update_header_title()
@@ -978,24 +992,13 @@ class DisplayPanel(QWidget):
         )
 
     def _on_thumbnail_ready(self, q_image, path, card_widget):
-        """Callback when thumbnail is ready, updates card with animation."""
+        """Callback when thumbnail is ready, updates card directly (No Fade-In)."""
         if card_widget is not None and is_widget_alive(card_widget):
-            # Selalu panggil set_image untuk membersihkan status loading
-            # Jika q_image null, ImageCard akan menampilkan placeholder '!'
-            pixmap = QPixmap.fromImage(q_image) if not q_image.isNull() else QPixmap()
-            card_widget.set_image(pixmap)
+            # Kirim QImage langsung (Pixel-Perfect) guna menghindari bug gambar terpotong
+            card_widget.set_image(q_image)
 
             # Sembunyikan progress jika sudah dimuat (mencegah double fetch)
             card_widget._is_fetching = False
-
-            # LOGIKA BARU: Cek Viewport untuk optimasi animasi
-            is_visible = self._is_widget_in_viewport(card_widget)
-            fade_in(
-                self.grid_animator,
-                card_widget,
-                duration=300,
-                skip_animation_if_not_visible=not is_visible,
-            )
 
     def _on_card_clicked(self, card_id, event, card_widget):
         """Handle click via Manager."""
@@ -1016,23 +1019,25 @@ class DisplayPanel(QWidget):
                 position=ToastPosition.BOTTOM_RIGHT,
             )
         elif decode_pct == 0 and save_pct == 0:
-            # Belum mulai atau kosong
+            # Skip atau biarkan checking message yang handle
             pass
         else:
-            # Sedang Berjalan:
-            # CEK CACHING: Jika sejak awal sudah 100% tanpa perlu dekoding (L1/L2 hits)
-            # Karena _update_progress dipanggil setelah process_batch (yang mengupdate hits)
-            # Jika progres langsung tinggi tanpa interaksi worker, kita anggap caching.
-            is_pure_cache = decode_pct >= 100  # Jika dari L1/L2 hits langsung 100%
+            # Update progress: "Membuat X% - Menyimpan Y%"
+            message = f"Membuat {decode_pct}% - Menyimpan {save_pct}%"
+            self.toast.show_progress(message, position=ToastPosition.BOTTOM_RIGHT)
 
-            if is_pure_cache:
-                msg = "Caching berhasil"
-                self.toast.show_message(
-                    msg, duration=2000, position=ToastPosition.BOTTOM_RIGHT
-                )
-            else:
-                msg = f"Membuat {decode_pct}% - Menyimpan {save_pct}%"
-                self.toast.show_progress(msg, position=ToastPosition.BOTTOM_RIGHT)
+    def _on_thumbnail_check_progress(self, batch_id, percentage):
+        """Update toast for initial cache checking phase."""
+        if str(batch_id) != str(self.current_batch_id):
+            return
+
+        if percentage < 100:
+            self.toast.show_progress(
+                f"Cek thumbnail {percentage}%", position=ToastPosition.BOTTOM_RIGHT
+            )
+        else:
+            # Cek selesai
+            pass
 
     def _on_card_double_clicked(self, card_id):
         """
