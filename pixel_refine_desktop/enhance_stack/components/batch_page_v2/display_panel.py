@@ -150,6 +150,7 @@ class DisplayPanel(QWidget):
         self.current_batch_id = None
         self.total_image_count = 0
         self._success_toast_shown = False
+        self._is_checking_thumbnails = False  # Toast sequencing flag
         self.current_batch_name = None
         self.total_image_count = 0
         self.all_cards = {}  # Map card_id -> ImageCard widget
@@ -182,9 +183,6 @@ class DisplayPanel(QWidget):
         # Connect Thumbnail Progress
         self.logic.get_thumbnail_processor().progress_updated.connect(
             self._on_thumbnail_progress
-        )
-        self.logic.get_thumbnail_processor().check_progress.connect(
-            self._on_thumbnail_check_progress
         )
 
         # Lazy loading timer
@@ -1030,36 +1028,36 @@ class DisplayPanel(QWidget):
         if str(batch_id) != str(self.current_batch_id):
             return
 
-        # 2. Hanya tampilkan jika proses cukup besar
+        # 3. Toast Sequencing Check - REMOVED as requested
+        # if self._is_checking_thumbnails:
+        # return
+
         if decode_pct >= 100 and save_pct >= 100:
             if not self._success_toast_shown:
                 # Selesai: Tampilkan pesan sukses singkat
+                # Use single_mode=True here too if we want to clear the "Making" toast instantly?
+                # Usually standard message doesn't support single_mode param in my update?
+                # Lets check ToastManager.show_message signature. Yes I added it.
                 self.toast.show_message(
                     "Semua thumbnail berhasil diproses.",
                     duration=3000,
                     position=ToastPosition.BOTTOM_RIGHT,
+                    priority="NORMAL",
+                    single_mode=True,  # Clear previous process status
                 )
                 self._success_toast_shown = True
         elif decode_pct == 0 and save_pct == 0:
-            # Skip atau biarkan checking message yang handle
             pass
         else:
             # Update progress: "Membuat X% - Menyimpan Y%"
             message = f"Membuat {decode_pct}% - Menyimpan {save_pct}%"
-            self.toast.show_progress(message, position=ToastPosition.BOTTOM_RIGHT)
-
-    def _on_thumbnail_check_progress(self, batch_id, percentage):
-        """Update toast for initial cache checking phase."""
-        if str(batch_id) != str(self.current_batch_id):
-            return
-
-        if percentage < 100:
             self.toast.show_progress(
-                f"Cek thumbnail {percentage}%", position=ToastPosition.BOTTOM_RIGHT
+                message,
+                position=ToastPosition.BOTTOM_RIGHT,
+                priority="NORMAL",
+                category="thumbnail_process",
+                single_mode=True,  # FORCE SINGLE MODE to prevent chaining/stacking!
             )
-        else:
-            # Cek selesai
-            pass
 
     def _on_card_double_clicked(self, card_id):
         """

@@ -253,6 +253,7 @@ class DeletionManager(QObject):
                 self.panel.toast.show_progress(
                     f"Menghapus gambar {0}%",
                     position=ToastPosition.BOTTOM_RIGHT,
+                    category="deletion_progress",
                 )
                 self.start_deletion_process(paths_to_remove)
 
@@ -309,7 +310,9 @@ class DeletionManager(QObject):
             pct = int((self.removed_count / self.total_to_remove) * 100)
             if pct < 100:
                 self.panel.toast.show_progress(
-                    f"Menghapus gambar {pct}%", position=ToastPosition.BOTTOM_RIGHT
+                    f"Menghapus gambar {pct}%",
+                    position=ToastPosition.BOTTOM_RIGHT,
+                    category="deletion_progress",
                 )
 
     def _on_worker_finished(self, count, batch_id):
@@ -324,6 +327,7 @@ class DeletionManager(QObject):
                 f"Berhasil menghapus {count} gambar.",
                 duration=3000,
                 position=ToastPosition.BOTTOM_RIGHT,
+                priority="HIGH",
             )
         else:
             self.panel.toast.hide()
@@ -334,6 +338,7 @@ class DeletionManager(QObject):
             f"Gagal menghapus gambar: {message}",
             duration=4000,
             position=ToastPosition.BOTTOM_RIGHT,
+            priority="URGENT",
         )
 
     # --- Method Legacy/Helper Lainnya ---

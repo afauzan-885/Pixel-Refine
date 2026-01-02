@@ -1,6 +1,9 @@
-# UI/resources/toast_manager.py  (atau lokasi lain yang sesuai)
-
 import weakref
+from enum import Enum, auto
+from dataclasses import dataclass
+from typing import List, Optional
+import time
+
 from PySide6.QtWidgets import (
     QWidget,
     QLabel,
@@ -21,14 +24,12 @@ from PySide6.QtCore import (
     QPoint,
     QRect,
     QSize,
+    Property,
+    QParallelAnimationGroup,
 )
 from PySide6.QtGui import QFont, QColor
-from enum import Enum, auto
-
-from pixel_refine_desktop.ui.resources.animations.fade import fade_in, fade_out
 from pixel_refine_desktop.ui.resources.animations.animation_manager import (
-    StackedWidgetAnimator,
-    AnimationType,
+    WidgetLifecycleAnimator,
 )
 
 
@@ -40,7 +41,6 @@ class ToastPosition(Enum):
     TOP_LEFT = auto()
     TOP_RIGHT = auto()
     CENTER = auto()
-    # Tambahkan posisi lain jika perlu
 
 
 class ToastAnimation(Enum):
@@ -49,52 +49,91 @@ class ToastAnimation(Enum):
     SLIDE_FROM_TOP = auto()
     SLIDE_FROM_LEFT = auto()
     SLIDE_FROM_RIGHT = auto()
-    # Tambahkan animasi lain jika perlu (misal FADE_AND_SLIDE)
+
+
+class ToastPriority(Enum):
+    URGENT = 3
+    HIGH = 2
+    NORMAL = 1
+    LOW = 0
 
 
 class ToastWidget(QFrame):
-    def __init__(self, message: str, parent: QWidget | None = None):
+    def __init__(
+        self,
+        message: str,
+        priority: ToastPriority,
+        category: str | None = None,
+        parent: QWidget | None = None,
+    ):
         super().__init__(parent)
+        self.priority = priority
+        self.category = category
+        self.timestamp = time.time()
         self.setObjectName("ToastWidgetWrapper")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setStyleSheet(
+            "background: transparent;"
+        )  # Pastikan wrapper benar-benar transparan
 
         # Layout Wrapper
         wrapper_layout = QVBoxLayout(self)
-        # Margin 20px sudah cukup aman agar shadow tidak terpotong saat nempel
-        wrapper_layout.setContentsMargins(20, 20, 20, 20)
+        wrapper_layout.setContentsMargins(
+            20, 10, 20, 10
+        )  # Reduced vertical margin for stacking
         wrapper_layout.setSpacing(0)
 
         # --- CONTAINER DALAM ---
         self.content_frame = QFrame()
         self.content_frame.setObjectName("ToastContent")
+
+        # Color based on priority
+        border_color = "#ECEDED"
+        accent_color = "#7DDA58"  # NORMAL (Green)
+
+        if priority == ToastPriority.URGENT:
+            accent_color = "#FF4B4B"  # Red
+            border_color = "#FFCDCD"
+        elif priority == ToastPriority.HIGH:
+            accent_color = "#FFA500"  # Orange
+            border_color = "#FFE0B2"
+        elif priority == ToastPriority.LOW:
+            accent_color = "#A0A0A0"  # Grey
+
+        # User request: "warna backgroundnya transparant"
+        # Kita ubah ke rgba dengan alpha channel agar semi-transparent (Glass effect)
+        # Jika user ingin 100% transparan, ganti 240 menjadi 0.
+        # Namun untuk readability shadow, 240 (95%) atau 230 (90%) lebih baik untuk 'look' transparan tapi tetap solid.
+        # User bilang "pada widget untuk shadow", ini refer ke content frame.
+        # Kita set ke TRANSPARAN murni jika itu yang diminta, tapi text shadow harus kuat.
+        # Asumsi safety: Gunakan background semi-transparan (Glass) yang terlihat "transparan" tapi tetap bacaable.
+        # Kalau benar-benar transparent, shadow akan mengikuti TEXT dan LINE, bukan KOTAK.
+        # Jika user mau kotak bayangan tapi tengah bolong, itu aneh.
+        # Kemungkinan besar user melihat 'kotak putih' dan ingin itu transparan.
+
         self.content_frame.setStyleSheet(
-            """
-            #ToastContent {
-                background-color: #FCFEFF; 
-                border: 1px solid #ECEDED;
+            f"""
+            #ToastContent {{
+                background-color: rgba(252, 254, 255, 235); 
+                border: 1px solid {border_color};
                 border-radius: 4px; 
-            }
-        """
+            }}
+            """
         )
 
-        # --- SHADOW SETUP (Disesuaikan agar menempel) ---
+        # --- SHADOW SETUP ---
         shadow = QGraphicsDropShadowEffect(self.content_frame)
-
-        # Blur radius 25-30 membuat shadow terlihat lembut tapi tidak "terbang"
         shadow.setBlurRadius(25)
-
-        # Offset Y kecil (4-6) membuat shadow terlihat menempel di bawah toast
         shadow.setXOffset(0)
         shadow.setYOffset(4)
-
-        # Hitam 70% (179)
         shadow.setColor(QColor(0, 0, 0, 179))
         self.content_frame.setGraphicsEffect(shadow)
 
         # --- ISI KONTEN ---
         content_layout = QHBoxLayout(self.content_frame)
-        content_layout.setContentsMargins(0, 0, int(20 * 1.0), 0)
-        content_layout.setSpacing(int(15 * 1.0))
+        # Compact margins
+        content_layout.setContentsMargins(0, 0, 10, 0)
+        content_layout.setSpacing(15)
 
         self.accent_line = QFrame()
         self.accent_line.setFixedWidth(4)
@@ -102,7 +141,7 @@ class ToastWidget(QFrame):
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding
         )
         self.accent_line.setStyleSheet(
-            "background-color: #7DDA58; border-top-left-radius: 2px; border-bottom-left-radius: 2px;"
+            f"background-color: {accent_color}; border-top-left-radius: 2px; border-bottom-left-radius: 2px;"
         )
 
         self.label = QLabel(message)
@@ -117,57 +156,32 @@ class ToastWidget(QFrame):
         content_layout.addWidget(self.label, 1)
         wrapper_layout.addWidget(self.content_frame)
 
-        self._is_blinking = False
-
-    def setText(self, text: str):
-        self.label.setText(text)
+        # self.setFixedSize(self.sizeHint()) # Initial size
 
     def text(self) -> str:
         return self.label.text()
 
+    def setText(self, text: str):
+        self.label.setText(text)
+        self.adjustSize()
+
+    # Blinking support (simplified)
     def set_blinking(self, active: bool):
-        if active:
-            if not self._is_blinking:
-                self._is_blinking = True
-                self._run_blink_cycle()
-        else:
-            self._is_blinking = False
-            # Reset opacity accent line jika perlu
-            effect = self.accent_line.graphicsEffect()
-            if isinstance(effect, QGraphicsOpacityEffect):
-                effect.setOpacity(1.0)
-            self.accent_line.show()
-
-    def _run_blink_cycle(self):
-        """Blinking disabled - no animation."""
-        pass
-
-    def _on_blink_fade_out_complete(self):
-        """Blinking disabled - no animation."""
-        pass
+        pass  # Optional impl
 
 
 class ToastManager(QObject):
     def __init__(self, parent: QWidget):
         super().__init__(parent)
         self._parent_ref = weakref.ref(parent)
-        self._toast_label: ToastWidget | None = None
-        self._show_anim: QPropertyAnimation | None = None
-        self._hide_anim: QPropertyAnimation | None = None
-        self._close_timer: QTimer | None = None
-        self._current_animation_type: ToastAnimation = ToastAnimation.FADE
-        self.animator = StackedWidgetAnimator(self)
-
-    # --- Konfigurasi Default ---
-    default_duration = 3000
-    default_font = QFont("Inter", 13)
-    default_fade_duration = 200
-    default_slide_duration = 400
-    default_show_easing_curve = QEasingCurve.Type.OutCubic
-    default_hide_easing_curve = QEasingCurve.Type.InCubic
-    default_vertical_margin = 25
-    default_horizontal_margin = 25
-    default_animation = ToastAnimation.FADE
+        self._active_toasts: List[ToastWidget] = []
+        self._timers = {}  # widget -> QTimer
+        self._last_update_time = {}  # category -> time (For throttling)
+        self.max_toasts = 5
+        self._last_update_time = {}  # category -> time (For throttling)
+        self.max_toasts = 5
+        self.spacing = 5
+        self.lifecycle_animator = WidgetLifecycleAnimator(self)
 
     @property
     def parent_widget(self) -> QWidget | None:
@@ -175,262 +189,301 @@ class ToastManager(QObject):
 
     # --- API Publik ---
     @Slot(str)
-    def show_message(self, message: str, duration=None, position=None, animation=None):
-        actual_duration = duration if duration is not None else self.default_duration
-        self._show(message, actual_duration, position, animation, False)
+    def show_message(
+        self,
+        message: str,
+        duration=3000,
+        position=ToastPosition.BOTTOM_RIGHT,
+        animation=ToastAnimation.SLIDE_FROM_BOTTOM,
+        priority: str = "NORMAL",
+        category: str | None = None,
+        single_mode: bool = False,
+    ):
+        """
+        Menampilkan pesan toast baru.
+        Allowed priorities: "URGENT", "HIGH", "NORMAL", "LOW"
+        Args:
+            category: ID unik (string) untuk identifikasi toast ini agar bisa di-update (reusable).
+                      Jika None, dianggap toast transient (sekali lewat).
+        """
+        # Convert string priority to Enum
+        try:
+            prio_enum = ToastPriority[priority.upper()]
+        except KeyError:
+            prio_enum = ToastPriority.NORMAL
+
+        self._add_toast(
+            message, duration, position, animation, prio_enum, category, single_mode
+        )
 
     @Slot(str)
-    def show_progress(self, message: str, position=None, animation=None):
-        self._show(message, 0, position, animation, True)
+    def show_progress(
+        self,
+        message: str,
+        category: str,  # REQUIRED NOW
+        position=ToastPosition.BOTTOM_RIGHT,
+        animation=None,
+        priority: str = "HIGH",
+        single_mode: bool = False,
+        bypass_throttle: bool = False,
+    ):
+        target_toast = None
+        current_time = time.time()
+
+        if category:
+            # THROTTLING (Peredam Spawning)
+            # Batasi update visual maksimal 20fps (setiap 0.05 detik)
+            last_time = self._last_update_time.get(category, 0)
+
+            # General Logic: Use explicit bypass argument instead of hardcoded strings
+            if not bypass_throttle and (current_time - last_time) < 0.15:
+                # Skip update ini untuk menghemat resource
+                return
+
+            self._last_update_time[category] = current_time
+
+            for t in self._active_toasts:
+                if t.category == category:
+                    target_toast = t
+                    break
+
+        # EXCLUSIVE/SINGLE MODE LOGIC:
+        if single_mode:
+            # Drop everyone else except target (if exists)
+            to_remove = []
+            for t in self._active_toasts:
+                if t != target_toast:
+                    to_remove.append(t)
+            for t in to_remove:
+                self._remove_toast(t)
+
+        if target_toast:
+            # 1. CLEANUP (Aggressive)
+            # Remove any lingering overlays immediately
+            for child in target_toast.children():
+                if (
+                    isinstance(child, QLabel)
+                    and child.objectName() == "SnapshotOverlay"
+                ):
+                    child.hide()
+                    child.deleteLater()
+
+            # 2. CAPTURE GEOMETRY (For Smooth Resize)
+            old_geo = target_toast.geometry()
+
+            # NOTE: User requested to DISABLE visible snapshot overlay to prevent ghosting.
+            # "overlaynya tidak terlihat agar tidak menimbulkan ghosting"
+            # We skip creating the SnapshotOverlay but keep the geometry freeze-and-animate
+            # so the box still resizes smoothly (just updated text appears instantly).
+
+            # 3. Update Content & Recalculate SizeHint
+            target_toast.setText(message)
+            target_toast.adjustSize()
+
+            # 4. Freeze Visual State (paksakan tetap di ukuran lama utk awal animasi)
+            target_toast.setGeometry(old_geo)
+
+            # 5. Trigger Global Reposition (animates resize/move)
+            self._reposition_toasts()
+
+            # No fade animation needed since overlay is gone.
+        else:
+            self.show_message(
+                message,
+                duration=0,
+                position=position,
+                priority=priority,
+                category=category,
+                single_mode=single_mode,
+            )
 
     @Slot()
     def hide(self):
-        if self._close_timer and self._close_timer.isActive():
-            self._close_timer.stop()
-        self._start_hide_animation()
+        """Hide all or specific? Default implementation hides all for compatibility."""
+        # For multi-stack, typically we don't 'hide all' frequently.
+        # But if called without args, maybe remove the oldest? or all?
+        # Let's remove ALL for safety/reset.
+        while self._active_toasts:
+            self._remove_toast(self._active_toasts[0])
 
-    # --- Logika Inti ---
-    def _show(self, message, duration, position, animation, is_progress_update):
+    @Slot(str)
+    def hide_specific(self, message_substring: str):
+        """Hide toast containing specific text."""
+        to_remove = []
+        for t in self._active_toasts:
+            if message_substring in t.text():
+                to_remove.append(t)
+        for t in to_remove:
+            self._remove_toast(t)
+
+    @Slot(str)
+    def hide_category(self, category: str):
+        """Hide all toasts with specific category."""
+        to_remove = []
+        for t in self._active_toasts:
+            if t.category == category:
+                to_remove.append(t)
+        for t in to_remove:
+            self._remove_toast(t)
+
+    # --- Core Logic ---
+    def _add_toast(
+        self,
+        message,
+        duration,
+        position,
+        animation,
+        priority: ToastPriority,
+        category: str | None = None,
+        single_mode: bool = False,
+    ):
         parent = self.parent_widget
         if not parent:
             return
 
-        actual_position = ToastPosition.BOTTOM_RIGHT
-        actual_animation = (
-            animation if animation is not None else self.default_animation
+        # EXCLUSIVE MODE (Create New): Remove all others first
+        if single_mode:
+            while self._active_toasts:
+                # Check if we accidentally found same category inside list?
+                # Logic above handles update, so here means we are creating NEW.
+                # So wipe everything.
+                self._remove_toast(self._active_toasts[0])
+
+        # PERFORMANCE GUARD:
+        # Jika category diberikan, cek apakah sudah ada toast dengan category sama.
+        # Jika ada, update teksnya & reset timer, jangan buat baru (duplicate).
+        if category:
+            for t in self._active_toasts:
+                if t.category == category:
+                    t.setText(message)
+                    # Reset timer to extend duration? Or keep as is?
+                    # Generally new message = reset duration.
+                    if t in self._timers:
+                        self._timers[t].start(duration)
+                    return
+
+        # 1. Create Widget
+        toast = ToastWidget(message, priority, category, parent)
+        toast.adjustSize()
+        toast.show()
+
+        # 2. Add to list
+        self._active_toasts.append(toast)
+
+        # 3. Sort List (Priority DESC, Timestamp DESC (Newest First for Tie-Break))
+        # Logic: Highest priority first. If same priority, newest (biggest timestamp) first.
+        # Tapi tunggu, untuk visual stack Bottom-Up:
+        # Posisi paling bawah (y terbesar) biasanya adalah Slot 0 (Prime).
+        # Jadi kita ingin item Paling Penting & Paling Baru ada di index 0 list ini
+        # (jika index 0 dipetakan ke posisi paling bawah).
+
+        self._active_toasts.sort(
+            key=lambda t: (t.priority.value, t.timestamp), reverse=True
         )
-        self._current_animation_type = actual_animation
 
-        self._clear_running_operations()
+        # 4. Enforce Limit (Remove lowest priority / oldest if > max)
+        if len(self._active_toasts) > self.max_toasts:
+            # Remove last item (Lowest priority/Oldest)
+            removed = self._active_toasts.pop()
+            removed.hide()
+            removed.deleteLater()
 
-        # Update jika sedang Progress dan widget sudah ada
-        if is_progress_update and self._toast_label and self._toast_label.isVisible():
-            self._toast_label.setText(message)
-            self._toast_label.set_blinking(True)
-            self._toast_label.adjustSize()
+        # 5. Animate Entry (Slide In to calculated position)
+        # Kita hitung target posisi nanti di _reposition, tapi untuk animasi masuk
+        # kita butuh posisi awal offscreen.
 
-            # Recalculate geometry untuk text baru
-            final_pos, final_size = self._calculate_geometry(actual_position)
-            if final_pos and final_size:
-                # Jika animasi slide, kita mungkin perlu animasi smooth move,
-                # tapi setGeometry langsung cukup untuk update text progress
-                self._toast_label.setGeometry(QRect(final_pos, final_size))
+        # Trigger reposition for ALL toasts (shifting existing ones, placing new one)
+        self._reposition_toasts()
 
-            # PENTING: Jika update progress, jangan restart timer close jika modenya infinite
-            if duration != 0 and duration is not None:
-                # Jika user memaksa durasi pada update progress
-                self._close_timer = QTimer(self)
-                self._close_timer.setSingleShot(True)
-                self._close_timer.timeout.connect(self.hide)
-                self._close_timer.start(duration)
+        # 6. Setup Auto-Close Timer
+        if duration and duration > 0:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda: self._remove_toast(toast))
+            timer.start(duration)
+            self._timers[toast] = timer
+
+    def _remove_toast(self, toast: ToastWidget):
+        if toast not in self._active_toasts:
             return
 
-        # Buat Toast Baru (Logic lama tetap sama)
-        self._cleanup_toast_widget()
-        self._toast_label = ToastWidget(message, parent)
-        self._toast_label.label.setFont(self.default_font)
-        self._toast_label.set_blinking(is_progress_update)
-        self._toast_label.adjustSize()
+        # Remove timer
+        if toast in self._timers:
+            self._timers[toast].stop()
+            del self._timers[toast]
 
-        final_pos, final_size = self._calculate_geometry(actual_position)
-        if not final_pos or not final_size:
-            return
+        # Animasi Keluar (Delegated to WidgetLifecycleAnimator)
+        self._active_toasts.remove(toast)
 
-        # Set Posisi Awal
-        initial_pos = final_pos
-        if actual_animation != ToastAnimation.FADE:
-            initial_pos = self._get_offscreen_start_pos(
-                actual_animation, final_pos, final_size
-            )
-
-        self._toast_label.setGeometry(QRect(initial_pos, final_size))
-        self._toast_label.show()
-
-        # Jalankan Animasi Masuk
-        if actual_animation == ToastAnimation.FADE:
-            self._start_fade_in_animation()
-        else:
-            self._start_slide_in_animation(final_pos)
-
-        # Setup Auto Close Timer
-        # MODIFIKASI: Hanya start timer jika duration > 0. Jika 0, toast persistent.
-        if duration is not None and duration > 0:
-            self._close_timer = QTimer(self)
-            self._close_timer.setSingleShot(True)
-            self._close_timer.timeout.connect(self.hide)
-            self._close_timer.start(duration)
-
-    def _start_fade_in_animation(self):
-        """Langsung tampilkan toast tanpa animasi."""
-        if self._toast_label:
-            self._toast_label.show()
-
-    def _start_fade_out_animation(self):
-        """Langsung sembunyikan toast tanpa animasi."""
-        self._on_hide_animation_finished()
-
-    def _start_slide_in_animation(self, target_pos):
-        if not self._toast_label:
-            return
-        self._show_anim = QPropertyAnimation(self._toast_label, b"pos", self)
-        self._show_anim.setDuration(self.default_slide_duration)
-        self._show_anim.setEndValue(target_pos)
-        self._show_anim.setEasingCurve(self.default_show_easing_curve)
-        self._show_anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
-
-    def _start_slide_out_animation(self):
-        if not self._toast_label:
-            return
-        target_pos = self._get_offscreen_start_pos(
-            self._current_animation_type,
-            self._toast_label.pos(),
-            self._toast_label.size(),
+        # Uses the shared animation logic for consistent Slide Down + Fade
+        self.lifecycle_animator.animate_delete(
+            widget=toast, duration=300, use_drop_effect=True, drop_distance=30
         )
-        self._hide_anim = QPropertyAnimation(self._toast_label, b"pos", self)
-        self._hide_anim.setDuration(self.default_slide_duration)
-        self._hide_anim.setEndValue(target_pos)
-        self._hide_anim.setEasingCurve(self.default_hide_easing_curve)
-        self._hide_anim.finished.connect(self._on_hide_animation_finished)
-        self._hide_anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
-    def _start_hide_animation(self):
-        """Memutuskan jenis animasi hide yang digunakan."""
-        if not self._toast_label:
-            return
+        # Shift sisanya
+        self._reposition_toasts()
 
-        # Hentikan animasi show yang mungkin sedang berjalan
-        if (
-            self._show_anim
-            and self._show_anim.state() == QPropertyAnimation.State.Running
-        ):
-            self._show_anim.stop()
-        self._show_anim = None
-
-        if self._current_animation_type == ToastAnimation.FADE:
-            self._start_fade_out_animation()
-        else:
-            self._start_slide_out_animation()
-
-    def _on_hide_animation_finished(self):
-        self._cleanup_toast_widget()
-
-    def _clear_running_operations(self):
-        if self._close_timer:
-            self._close_timer.stop()
-        if self._show_anim:
-            self._show_anim.stop()
-        if self._hide_anim:
-            self._hide_anim.stop()
-        self._show_anim = None
-        self._hide_anim = None
-
-    def _cleanup_toast_widget(self):
-        if self._toast_label:
-            # Pastikan ghost dihapus sebelum widget asli dihancurkan
-            self.animator.stop_for_widget(self._toast_label)
-            self._toast_label.hide()
-            self._toast_label.deleteLater()
-            self._toast_label = None
-
-    def _calculate_geometry(
-        self, position: ToastPosition
-    ) -> tuple[QPoint | None, QSize | None]:
-        """Menghitung posisi akhir (top-left) dan ukuran toast."""
-        parent = self.parent_widget
-        if not self._toast_label or not parent:
-            return None, None
-
-        parent_width = parent.width()
-        parent_height = parent.height()
-
-        # Fallback jika parent belum di-layout
-        if parent_width <= 0 or parent_height <= 0:
-            parent_size_hint = parent.sizeHint()
-            parent_width = max(parent_width, parent_size_hint.width())
-            parent_height = max(parent_height, parent_size_hint.height())
-            if parent_width <= 0 or parent_height <= 0:
-                print("Warning: Could not determine parent size for toast positioning.")
-                return None, None
-
-        # Dapatkan ukuran toast (adjustSize sudah dipanggil)
-        toast_size = self._toast_label.sizeHint()
-        toast_width = toast_size.width()
-        toast_height = toast_size.height()
-        if toast_width <= 0 or toast_height <= 0:
-            margins = self._toast_label.contentsMargins()
-            fm = self._toast_label.fontMetrics()
-            text_width = fm.horizontalAdvance(self._toast_label.text())
-            text_height = fm.height()
-            text_width = fm.horizontalAdvance(self._toast_label.text())
-            text_height = fm.height()
-            # Scaled up padding (+30%)
-            padding_v = int(15 * 2 * 1.3)
-            # Left (0) + Right (26) + Spacing (19.5) + AccentWidth (4)
-            padding_h = int(20 * 1.3) + int(15 * 1.3) + 4
-            toast_width = text_width + padding_h + margins.left() + margins.right()
-            toast_height = text_height + padding_v + margins.top() + margins.bottom()
-            if toast_width <= 0 or toast_height <= 0:
-                print("Warning: Could not determine toast size.")
-                return None, None
-
-        h_margin = self.default_horizontal_margin
-        v_margin = self.default_vertical_margin
-
-        match position:
-            case ToastPosition.BOTTOM_CENTER:
-                x = (parent_width - toast_width) // 2
-                y = parent_height - toast_height - v_margin
-            case ToastPosition.TOP_CENTER:
-                x = (parent_width - toast_width) // 2
-                y = v_margin
-            case ToastPosition.BOTTOM_LEFT:
-                x = h_margin
-                y = parent_height - toast_height - v_margin
-            case ToastPosition.BOTTOM_RIGHT:
-                x = parent_width - toast_width - h_margin
-                y = parent_height - toast_height - v_margin
-            case ToastPosition.TOP_LEFT:
-                x = h_margin
-                y = v_margin
-            case ToastPosition.TOP_RIGHT:
-                x = parent_width - toast_width - h_margin
-                y = v_margin
-            case ToastPosition.CENTER:
-                x = (parent_width - toast_width) // 2
-                y = (parent_height - toast_height) // 2
-            case _:
-                print(
-                    f"Warning: Invalid ToastPosition '{position}'. Defaulting to BOTTOM_CENTER."
-                )
-                x = (parent_width - toast_width) // 2
-                y = parent_height - toast_height - v_margin
-
-        x = max(0, x)
-        y = max(0, y)
-
-        return QPoint(x, y), QSize(toast_width, toast_height)
-
-    def _get_offscreen_start_pos(
-        self, animation_type: ToastAnimation, final_pos: QPoint, toast_size: QSize
-    ) -> QPoint:
-        """Menentukan posisi awal di luar layar untuk animasi slide."""
+    def _reposition_toasts(self):
+        """Mengatur ulang posisi semua toast berdasarkan urutan di list."""
         parent = self.parent_widget
         if not parent:
-            return final_pos  # Fallback
+            return
 
-        parent_height = parent.height()
-        parent_width = parent.width()
-        toast_height = toast_size.height()
-        toast_width = toast_size.width()
+        parent_rect = parent.rect()
+        base_x = 0
+        current_y = 0
 
-        match animation_type:
-            case ToastAnimation.SLIDE_FROM_BOTTOM:
-                return QPoint(final_pos.x(), parent_height)
-            case ToastAnimation.SLIDE_FROM_TOP:
-                return QPoint(final_pos.x(), -toast_height)
-            case ToastAnimation.SLIDE_FROM_LEFT:
-                return QPoint(-toast_width, final_pos.y())
-            case ToastAnimation.SLIDE_FROM_RIGHT:
-                return QPoint(parent_width, final_pos.y())
-            case _:
-                return final_pos
+        # Kita asumsikan Stack selalu di BOTTOM_RIGHT sesuai request user sebelumnya
+        # Tapi bisa diadaptasi. Defaulting to Bottom-Right stack logic.
+
+        # Base anchor point: Bottom Right with margin
+        margin_x = 25
+        margin_y = 25
+
+        bottom_y = parent_rect.height() - margin_y
+        right_x = parent_rect.width() - margin_x
+
+        # Iterate sorted list (Index 0 = Bottom-most / Prime)
+        # Iterate sorted list (Index 0 = Bottom-most / Prime)
+        for i, toast in enumerate(self._active_toasts):
+            # FIX TRUNCATION: Use sizeHint() because actual width() might be
+            # frozen to old size by geometry animation logic in show_progress.
+            hint = toast.sizeHint()
+            t_width = hint.width()
+            t_height = hint.height()
+
+            target_x = right_x - t_width
+            target_y = bottom_y - t_height
+
+            # Update base for next item (stacking UP)
+            bottom_y = target_y - self.spacing
+
+            # Animasi pergeseran ke target posisi
+            # Animasi pergeseran ke target posisi (GEOMETRY ANIMATION: Pos + Size)
+            target_geo = QRect(int(target_x), int(target_y), t_width, t_height)
+
+            if toast.pos().isNull():
+                # First show: start slightly below (Slide Up effect)
+                toast.setGeometry(int(target_x), int(target_y) + 50, t_width, t_height)
+                toast.setWindowOpacity(0)
+
+            # Create animation for smooth stack shift & resize
+            anim = QPropertyAnimation(toast, b"geometry", self)
+            anim.setDuration(400)
+            anim.setStartValue(toast.geometry())
+            anim.setEndValue(target_geo)
+            # Menggunakan Curve OutExpo seperti di slide.py
+            anim.setEasingCurve(QEasingCurve.Type.OutExpo)
+
+            # Animasi Opacity untuk entry
+            if toast.windowOpacity() == 0:
+                anim_op = QPropertyAnimation(toast, b"windowOpacity", self)
+                anim_op.setDuration(300)
+                anim_op.setStartValue(0.0)
+                anim_op.setEndValue(1.0)
+                anim_op.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
+            anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
+            # Keep ref to prevent GC if needed, though parent ownership helps
+            setattr(toast, f"_pos_anim_{time.time()}", anim)

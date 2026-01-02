@@ -80,7 +80,12 @@ class ImportManager(QObject):
                 if active_count > 1
                 else f"Background Import: Menambahkan ke {batch_name}..."
             )
-            self.panel.toast.show_progress(message, position=ToastPosition.BOTTOM_RIGHT)
+            self.panel.toast.show_progress(
+                message,
+                category="import_progress",
+                position=ToastPosition.BOTTOM_RIGHT,
+                single_mode=True,
+            )
             return
 
         # 2. Logic Tambah ke Grid (Current Batch)
@@ -129,7 +134,9 @@ class ImportManager(QObject):
         # MODIFIKASI: Gunakan show_progress (Persistent / Duration 0)
         # Toast ini TIDAK akan hilang sampai kita panggil show_message/hide nanti.
         self.panel.toast.show_progress(
-            "Mengimpor...", position=ToastPosition.BOTTOM_RIGHT
+            "Mengimpor...",
+            category="import_progress",
+            position=ToastPosition.BOTTOM_RIGHT,
         )
 
         # Emit signal
@@ -144,11 +151,13 @@ class ImportManager(QObject):
         # Jika tidak ada lagi import yang berjalan di batch manapun
         if not self.active_import_batches:
             # MODIFIKASI: Tampilkan pesan "Selesai" dengan durasi 3 detik
-            # Ini akan menggantikan pesan "Sedang mengimport..." lalu fade out otomatis.
+            self.panel.toast.hide_category("import_progress")
+
             self.panel.toast.show_message(
                 "Proses import selesai.",
                 duration=3000,
                 position=ToastPosition.BOTTOM_RIGHT,
+                single_mode=True,
             )
 
         # Emit signal

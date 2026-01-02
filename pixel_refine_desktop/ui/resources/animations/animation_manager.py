@@ -54,7 +54,7 @@ class StackedWidgetAnimator(QObject):
     DEFAULT_CURVE_OUT = QEasingCurve.Type.OutQuad
     DEFAULT_CURVE_IN = QEasingCurve.Type.InQuad
 
-    # Throttling untuk mencegah QPainter error pada animasi massal
+    DEFAULT_CURVE_IN = QEasingCurve.Type.InQuad
     MAX_CONCURRENT_ANIMATIONS = 50
 
     def __init__(self, parent=None):
@@ -767,6 +767,32 @@ class WidgetLifecycleAnimator(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._active_animations = []  # Menyimpan referensi agar tidak di-GC
+        self._ghosts = []  # Keep ghosts alive
+
+    def _safe_grab(self, widget: QWidget, max_retries: int = 3):
+        """Safely grab widget pixmap."""
+        for attempt in range(max_retries):
+            try:
+                if (
+                    not widget.isVisible()
+                    or widget.width() <= 0
+                    or widget.height() <= 0
+                ):
+                    return None, None
+                if attempt > 0:
+                    QApplication.processEvents()
+
+                # Check for existing painters
+                # Note: We can't easily check internal painter state, but try/except handles it.
+
+                pixmap = widget.grab()
+                geom = widget.geometry()
+
+                if not pixmap.isNull():
+                    return pixmap, geom
+            except:
+                continue
+        return None, None
 
     def animate_delete(
         self,
@@ -779,104 +805,87 @@ class WidgetLifecycleAnimator(QObject):
         if not widget:
             return
 
-        # 1. Setup Opacity
-        effect = widget.graphicsEffect()
-        if not isinstance(effect, QGraphicsOpacityEffect):
-            effect = QGraphicsOpacityEffect(widget)
-            widget.setGraphicsEffect(effect)
+        # STRATEGI BARU: GHOST / SNAPSHOT MODE
+        # Alih-alih menganimasikan widget asli (yang kompleks dan mungkin sedang repainting),
+        # kita ambil screenshot (grab), buat label palsu (Ghost), sembunyikan widget asli,
+        # lalu animasikan Ghost tersebut. Ini MENGHILANGKAN QPainter error.
+
+        parent = widget.parentWidget()
+        pixmap, geom = self._safe_grab(widget)
+
+        if not pixmap or not geom or not parent:
+            # Fallback jika gagal grab: Hide langsung
+            widget.hide()
+            widget.deleteLater()
+            if on_finished_callback:
+                on_finished_callback()
+            return
+
+        # 1. HIDE Widget Asli SEGERA (Stop QPainter Errors)
+        widget.hide()
+        # Kita trigger deleteLater nanti setelah animasi ghost selesai,
+        # atau sekarang? Jika sekarang, mungkin aman, tapi callback butuh ref?
+        # Lebih aman delete di akhir.
+
+        # 2. Buat Ghost
+        ghost = QLabel(parent)
+        ghost.setPixmap(pixmap)
+        ghost.setGeometry(geom)
+        # FIX: Pastikan Ghost Label transparan agar tidak ada border/background putih di balik pixmap
+        ghost.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        ghost.setStyleSheet("background: transparent;")
+        ghost.show()
+        ghost.raise_()
+        self._ghosts.append(ghost)
+
+        # 3. Setup Animasi pada Ghost
+        # Setup Effect pada Ghost (bukan widget asli)
+        effect = QGraphicsOpacityEffect(ghost)
+        ghost.setGraphicsEffect(effect)
         effect.setOpacity(1.0)
 
-        # 2. Setup Geometry Sequence
-        # Kunci tinggi widget agar saat animasi drop, layout tidak langsung snap
-        current_h = widget.height()
-        widget.setMinimumHeight(current_h)
-        widget.setMaximumHeight(current_h)
-
-        # Durasi dibagi: Fase Visual (Jatuh & Fade) -> Fase Struktural (Collapse)
-        dur_visual = int(duration * 0.7)
-        dur_collapse = int(duration * 0.3)
-
-        # --- FASE 1: VISUAL (Parallel) ---
-        visual_group = QParallelAnimationGroup()
+        group = QParallelAnimationGroup()
 
         # A. Fade Out
         anim_fade = QPropertyAnimation(effect, b"opacity")
-        anim_fade.setDuration(dur_visual)
+        anim_fade.setDuration(duration)
         anim_fade.setStartValue(1.0)
         anim_fade.setEndValue(0.0)
-        anim_fade.setEasingCurve(QEasingCurve.Type.InQuad)  # Fade makin cepat di akhir
-        visual_group.addAnimation(anim_fade)
+        anim_fade.setEasingCurve(QEasingCurve.Type.InQuad)
+        group.addAnimation(anim_fade)
 
-        # B. Drop Down (Efek Jatuh)
+        # B. Drop Down
         if use_drop_effect:
-            start_pos = widget.pos()
-            end_pos = QPoint(start_pos.x(), start_pos.y() + drop_distance)
+            target_geo = QRect(
+                geom.x(), geom.y() + drop_distance, geom.width(), geom.height()
+            )
+            anim_geo = QPropertyAnimation(ghost, b"geometry")
+            anim_geo.setDuration(duration)
+            anim_geo.setStartValue(geom)
+            anim_geo.setEndValue(target_geo)
+            anim_geo.setEasingCurve(QEasingCurve.Type.InBack)
+            group.addAnimation(anim_geo)
 
-            anim_pos = QPropertyAnimation(widget, b"pos")
-            anim_pos.setDuration(dur_visual)
-            anim_pos.setStartValue(start_pos)
-            anim_pos.setEndValue(end_pos)
+        # C. Cleanup
+        def cleanup():
+            if ghost in self._ghosts:
+                self._ghosts.remove(ghost)
+            try:
+                ghost.deleteLater()
+                widget.deleteLater()  # Delete widget asli di sini
+            except RuntimeError:
+                pass
 
-            # QEasingCurve.InBack memberikan efek "ancang-ancang" ke atas sedikit
-            # sebelum jatuh ke bawah, memberikan kesan berat/gravitasi.
-            anim_pos.setEasingCurve(QEasingCurve.Type.InBack)
-            visual_group.addAnimation(anim_pos)
-
-        # --- FASE 2: STRUKTURAL (Collapse) ---
-        # Menyusutkan tinggi ke 0 agar layout menutup
-        collapse_group = QParallelAnimationGroup()
-
-        anim_min = QPropertyAnimation(widget, b"minimumHeight")
-        anim_min.setDuration(dur_collapse)
-        anim_min.setStartValue(current_h)
-        anim_min.setEndValue(0)
-        anim_min.setEasingCurve(QEasingCurve.Type.OutQuad)
-
-        anim_max = QPropertyAnimation(widget, b"maximumHeight")
-        anim_max.setDuration(dur_collapse)
-        anim_max.setStartValue(current_h)
-        anim_max.setEndValue(0)
-        anim_max.setEasingCurve(QEasingCurve.Type.OutQuad)
-
-        collapse_group.addAnimation(anim_min)
-        collapse_group.addAnimation(anim_max)
-
-        # --- GABUNGKAN DALAM URUTAN ---
-        sequence = QSequentialAnimationGroup(self)
-        sequence.addAnimation(visual_group)
-        sequence.addAnimation(collapse_group)
-
-        # --- CLEANUP ---
-        def on_done():
-            # Check callback safety first
             if on_finished_callback:
-                try:
-                    if hasattr(on_finished_callback, "__self__"):
-                        cb_obj = on_finished_callback.__self__
-                        if isinstance(cb_obj, QWidget) and not is_widget_alive(cb_obj):
-                            pass
-                        else:
-                            on_finished_callback()
-                    else:
-                        on_finished_callback()
-                except RuntimeError:
-                    pass
+                on_finished_callback()
 
-            if is_widget_alive(widget):
-                try:
-                    widget.deleteLater()
-                except RuntimeError:
-                    pass
+            # Remove anim ref
+            if group in self._active_animations:
+                self._active_animations.remove(group)
 
-            # Hapus referensi animasi dari list internal
-            if sequence in self._active_animations:
-                self._active_animations.remove(sequence)
-
-        sequence.finished.connect(on_done)
-
-        # Simpan referensi dan jalankan
-        self._active_animations.append(sequence)
-        sequence.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+        group.finished.connect(cleanup)
+        self._active_animations.append(group)
+        group.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
     def stop_all(self):
         """Hentikan paksa semua animasi yang sedang berjalan."""
