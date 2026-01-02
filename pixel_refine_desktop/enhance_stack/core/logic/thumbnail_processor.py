@@ -430,6 +430,10 @@ class ThumbnailBatchProcessor(QObject):
         self.flush_timer.setSingleShot(True)
         self.flush_timer.timeout.connect(self.flush_to_disk)
 
+        # Track last emitted progress to avoid redundancy
+        self._last_emit_decode = -1
+        self._last_emit_save = -1
+
         # Config QThreadPool (Defaults to 4 for balance)
         QThreadPool.globalInstance().setMaxThreadCount(max_concurrent)
 
@@ -503,6 +507,8 @@ class ThumbnailBatchProcessor(QObject):
         self._in_flight.clear()
         self._processed_paths.clear()
         self._persisted_paths.clear()
+        self._last_emit_decode = -1
+        self._last_emit_save = -1
         self._emit_progress()
 
     def process_batch(self, image_paths, callback=None):
@@ -684,7 +690,11 @@ class ThumbnailBatchProcessor(QObject):
         decode_pct = min(100, decode_pct)
         save_pct = min(100, save_pct)
 
-        self.progress_updated.emit(self.current_batch_id, decode_pct, save_pct)
+        # Only emit if values changed
+        if decode_pct != self._last_emit_decode or save_pct != self._last_emit_save:
+            self._last_emit_decode = decode_pct
+            self._last_emit_save = save_pct
+            self.progress_updated.emit(self.current_batch_id, decode_pct, save_pct)
 
     def flush_to_disk(self):
         """

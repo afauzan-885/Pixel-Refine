@@ -148,6 +148,8 @@ class DisplayPanel(QWidget):
 
         # State
         self.current_batch_id = None
+        self.total_image_count = 0
+        self._success_toast_shown = False
         self.current_batch_name = None
         self.total_image_count = 0
         self.all_cards = {}  # Map card_id -> ImageCard widget
@@ -190,6 +192,12 @@ class DisplayPanel(QWidget):
         self.lazy_load_timer.setSingleShot(True)
         self.lazy_load_timer.setInterval(100)  # 100ms debounce
         self.lazy_load_timer.timeout.connect(self._check_visible_cards)
+
+        # Staged load timer (Extreme Optimization for Massive Batch)
+        self.staged_load_timer = QTimer(self)
+        self.staged_load_timer.setSingleShot(True)
+        self.staged_load_timer.setInterval(3000)  # 3s "breathing room"
+        self.staged_load_timer.timeout.connect(self._start_background_sync)
 
         # Connect internal proxy signals
         # self._worker_finished_proxy_signal.connect(self._on_worker_finished)
@@ -766,6 +774,7 @@ class DisplayPanel(QWidget):
         visual_images = list(images) + pending_zombies
 
         self.total_image_count = len(visual_images)
+        self._success_toast_shown = False
 
         # Update Header Title segera dengan jumlah gambar yang akan dimuat
         self._update_header_title()
@@ -799,17 +808,9 @@ class DisplayPanel(QWidget):
         self.import_button.setVisible(True)
         self.show_grid()
 
-        # Trigger Background Sync untuk seluruh batch (Progres Toast Akurat)
-        # Ambil semua path gambar murni (abaikan zombies jika ada)
-        real_paths = [img.path for img in images if hasattr(img, "path")]
-        if real_paths:
-            # Gunakan QTimer agar tidak memblokir render awal grid
-            QTimer.singleShot(
-                100,
-                lambda: self.logic.load_thumbnails_bulk_async(
-                    [(p, None) for p in real_paths]
-                ),
-            )
+        # Trigger Background Sync ditunda (Staged Loading)
+        self.staged_load_timer.stop()
+        self._real_paths_for_sync = [img.path for img in images if hasattr(img, "path")]
 
         # Switch back to grid container using animation helper
         if self.grid_content_stack.currentWidget() != self.grid_container:
@@ -839,8 +840,12 @@ class DisplayPanel(QWidget):
         if not hasattr(self, "_populate_queue") or not self._populate_queue:
             self._populate_timer.stop()
             self.grid_container.set_batch_update(False)
-            # Final check for thumbnails
+            # Final check for thumbnails (Prioritas Viewport Selesai)
             self._check_visible_cards()
+
+            # Start "Breathing Room" timer sebelum sinkronisasi latar belakang masif
+            if hasattr(self, "_real_paths_for_sync") and self._real_paths_for_sync:
+                self.staged_load_timer.start()
             return
 
         # Add 10 images per tick
@@ -877,6 +882,21 @@ class DisplayPanel(QWidget):
 
         # Update progress header
         self._update_header_title()
+
+        # Prioritaskan viewport secara agresif selama populasi (agar gambar muncul cepat)
+        if len(self._populate_queue) % 3 == 0:  # Tiap 3 ticks
+            self._check_visible_cards()
+
+    def _start_background_sync(self):
+        """Picu sinkronisasi latar belakang setelah jeda bernapas berakhir."""
+        if hasattr(self, "_real_paths_for_sync") and self._real_paths_for_sync:
+            print(
+                f"[DisplayPanel] Background Sync Stage started for {len(self._real_paths_for_sync)} images."
+            )
+            self.logic.load_thumbnails_bulk_async(
+                [(p, None) for p in self._real_paths_for_sync]
+            )
+            self._real_paths_for_sync = []  # Clear memory
 
     @Slot()
     def clear_display(self):
@@ -1012,12 +1032,14 @@ class DisplayPanel(QWidget):
 
         # 2. Hanya tampilkan jika proses cukup besar
         if decode_pct >= 100 and save_pct >= 100:
-            # Selesai: Tampilkan pesan sukses singkat
-            self.toast.show_message(
-                "Semua thumbnail berhasil diproses.",
-                duration=3000,
-                position=ToastPosition.BOTTOM_RIGHT,
-            )
+            if not self._success_toast_shown:
+                # Selesai: Tampilkan pesan sukses singkat
+                self.toast.show_message(
+                    "Semua thumbnail berhasil diproses.",
+                    duration=3000,
+                    position=ToastPosition.BOTTOM_RIGHT,
+                )
+                self._success_toast_shown = True
         elif decode_pct == 0 and save_pct == 0:
             # Skip atau biarkan checking message yang handle
             pass
