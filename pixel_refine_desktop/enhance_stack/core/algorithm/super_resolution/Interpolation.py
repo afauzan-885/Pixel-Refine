@@ -77,6 +77,7 @@ class InterpolationAlgorithm:
                 FROM batch_process_image
                 JOIN images ON batch_process_image.image_id_batch = images.id
                 WHERE batch_process_image.batch_id = ?
+                ORDER BY batch_process_image.is_reference_batch DESC, images.path ASC
             """,
                 (batch_id,),
             )

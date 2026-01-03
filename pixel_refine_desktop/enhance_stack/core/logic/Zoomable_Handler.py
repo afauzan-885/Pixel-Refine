@@ -140,11 +140,10 @@ class Zoomable(QGraphicsView):
             pass
 
     def reset_zoom(self):
-        """Mengembalikan zoom ke level default (100%)."""
-        if self._zoom_level != 0:
-            # Reset transformasi matrix ke identitas
-            self.resetTransform()
-            self._zoom_level = 0
+        """Mengembalikan zoom ke level default (100%) dan membersihkan transform."""
+        # Reset transformasi matrix ke identitas
+        self.resetTransform()
+        self._zoom_level = 0
 
     def zoom_to_fit(self, rect=None):
         """Fit the given rect (or scene rect) into the view."""

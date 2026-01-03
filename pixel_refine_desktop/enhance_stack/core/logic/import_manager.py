@@ -11,6 +11,12 @@ from pixel_refine_desktop.ui.resources.GenericUILibrary import ImageCard
 from config import SUPPORTED_FORMATS
 
 
+from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
+    BatchImageImportThreading,
+)
+from pixel_refine_desktop.enhance_stack.core.logic.process_manager import ProcessManager
+
+
 class ImportManager(QObject):
     """
     Manager untuk menangani semua logika import gambar.
@@ -162,3 +168,52 @@ class ImportManager(QObject):
 
         # Emit signal
         self.import_finished.emit(batch_id)
+
+    def handle_batch_import(self, controller, database_manager, file_paths, batch_id):
+        """
+        Handle the background import process for a batch.
+        Extracted from page_layout.py.
+        """
+        if not file_paths:
+            return
+
+        try:
+            # Get batch name for info
+            batch_name = "batch"
+            batch = controller.get_batch(batch_id)
+            if batch:
+                batch_name = batch.name
+
+            # Buat instance thread import khusus batch
+            import_worker = BatchImageImportThreading(
+                database_manager=database_manager,
+                image_paths=file_paths,
+                batch_id=batch_id,
+                batch_name=batch_name,
+                batch_size=5,
+                delay_ms=10,
+            )
+
+            # Connect signals
+            import_worker.image_added_signal.connect(self.add_single_image_to_grid)
+
+            # Progress bar handling (if needed, but usually handled via toast now)
+            # Actually page_layout had some progress bar logic for the algorithm panel
+
+            def local_on_finished(total):
+                self.on_batch_import_finished(batch_id)
+
+            import_worker.completion_signal.connect(local_on_finished)
+
+            # Start import
+            self.on_batch_import_started(batch_id)
+            import_worker.start()
+
+            # Register to ProcessManager
+            ProcessManager.instance().register_thread("batch_import", import_worker)
+
+            return import_worker
+
+        except Exception as e:
+            print(f"[ImportManager] Critical error during import: {e}")
+            raise e

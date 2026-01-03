@@ -599,10 +599,10 @@ class ThumbnailBatchProcessor(QObject):
         # 3. SPAWN BULK GENERATOR (Chunked processing for high performance)
         if final_to_process:
             chunk_size = 20
-            print(
-                f"[ThumbnailProcessor] L1 hits, L2 hits: {len(image_paths)-len(final_to_process)}, "
-                f"Decoding {len(final_to_process)} in chunks of {chunk_size}"
-            )
+            # print(
+            #     f"[ThumbnailProcessor] L1 hits, L2 hits: {len(image_paths)-len(final_to_process)}, "
+            #     f"Decoding {len(final_to_process)} in chunks of {chunk_size}"
+            # )
 
             for i in range(0, len(final_to_process), chunk_size):
                 chunk = final_to_process[i : i + chunk_size]
@@ -718,9 +718,9 @@ class ThumbnailBatchProcessor(QObject):
         elif total_count >= 500:
             chunk_size = 100
 
-        print(
-            f"[ThumbnailProcessor] DEFERRED SAVE: Writing {total_count} thumbnails to Cache using chunk_size: {chunk_size}"
-        )
+        # print(
+        #     f"[ThumbnailProcessor] DEFERRED SAVE: Writing {total_count} thumbnails to Cache using chunk_size: {chunk_size}"
+        # )
 
         repo = get_thumbnail_repo()
         for i in range(0, total_count, chunk_size):
@@ -734,7 +734,7 @@ class ThumbnailBatchProcessor(QObject):
                     self.saved_count += 1
             self._emit_progress()
 
-        print(f"[ThumbnailProcessor] Deferred save complete.")
+        # print(f"[ThumbnailProcessor] Deferred save complete.")
 
     def stop_all(self):
         """Stop semua background tasks dan pastikan data tersimpan."""

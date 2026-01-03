@@ -10,6 +10,9 @@ import os
 from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
 from PySide6.QtCore import QThread, Signal, Qt
+from pixel_refine_desktop.enhance_stack.core.algorithm.base_worker import (
+    BaseAlgorithmWorker,
+)
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
     estimate_noise_in_python,
     extract_all_metadata,
@@ -34,44 +37,6 @@ from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoi
 )
 
 
-class ThreadWorker(QThread):
-    progress_updated = Signal(int, str)
-    finished = Signal()
-    error_occurred = Signal(str)
-
-    def __init__(self, db_path, single_process=True, batch_id=None):
-        super().__init__()
-        self.db_path = db_path
-        self.single_process = single_process
-        self.batch_id = batch_id
-        self.stop_requested = False
-
-    def run(self):
-        try:
-
-            def update_progress(progress, message):
-                self.progress_updated.emit(progress, message)
-
-            def is_stop_requested():
-                return self.stop_requested
-
-            main(
-                self.db_path,
-                update_progress=update_progress,
-                stop_requested=is_stop_requested,
-                single_process=self.single_process,
-                batch_id=self.batch_id,
-            )
-
-            self.finished.emit()
-        except Exception as e:
-            print(f"Error: {str(e)}")
-            self.error_occurred.emit(str(e))
-
-    def stop(self):
-        self.stop_requested = True
-
-
 class SimilarityAlgorithm:
     def __init__(self, db_path, hdf5_path=None):
         self.db_path = db_path
@@ -94,6 +59,7 @@ class SimilarityAlgorithm:
                 FROM batch_process_image
                 JOIN images ON batch_process_image.image_id_batch = images.id
                 WHERE batch_process_image.batch_id = ?
+                ORDER BY batch_process_image.is_reference_batch DESC, images.path ASC
             """,
                 (batch_id,),
             )
@@ -185,7 +151,7 @@ class SimilarityAlgorithm:
 
         # Eksekusi Paralel
         # Gunakan max_workers sesuai core CPU, tapi jangan terlalu banyak agar tidak overhead
-        max_threads = max(2, os.cpu_count() - 1)
+        max_threads = max(2, (os.cpu_count() or 4) - 1)
 
         with ThreadPoolExecutor(max_workers=max_threads) as executor:
             futures = [executor.submit(process_single_tile, t) for t in tasks]
@@ -450,7 +416,9 @@ class SimilarityAlgorithm:
         # --- LANGKAH 3: MAIN MERGING ---
 
         # 1. Preprocess Global Reference
-        ref_gray_preprocessed = preprocess_in_python(reference_image_float, use_sharpen=False)
+        ref_gray_preprocessed = preprocess_in_python(
+            reference_image_float, use_sharpen=False
+        )
         ref_noise_sigma = estimate_noise_in_python(ref_gray_preprocessed)
         ref_work_res_pass2 = cv2.resize(
             ref_gray_preprocessed,
@@ -494,7 +462,9 @@ class SimilarityAlgorithm:
 
                 # Preprocessing
                 curr_float = normalize_image(image_orig, ref_dtype)
-                curr_preproc = preprocess_in_python(curr_float, use_raft=False, use_sharpen=False)
+                curr_preproc = preprocess_in_python(
+                    curr_float, use_raft=False, use_sharpen=False
+                )
 
                 # Resize ke buffer yang sudah ada (dst)
                 cv2.resize(
@@ -622,7 +592,11 @@ class SimilarityAlgorithm:
                     finished_count += 1
 
                     if update_progress:
-                        if use_overall_progress:
+                        if (
+                            use_overall_progress
+                            and total_overall_images is not None
+                            and total_overall_images > 0
+                        ):
                             cur_ov = images_processed_so_far + finished_count
                             update_progress(
                                 int(
@@ -1234,14 +1208,15 @@ class SimilarityAlgorithm:
 
         # --- Unpack results aman ---
         if weight_of_each_image:
-            (
-                final_image_normalized,
-                final_weight_map,
-                processed_frames,
-                individual_maps,
-            ) = results
+            final_image_normalized = results[0]
+            final_weight_map = results[1]
+            processed_frames = results[2]
+            individual_maps = results[3]
         else:
-            final_image_normalized, final_weight_map, processed_frames = results
+            final_image_normalized = results[0]
+            final_weight_map = results[1]
+            processed_frames = results[2]
+            individual_maps = []
             individual_maps = []
 
         # --- Stop_requested setelah proses tapi sebelum semua frame selesai ---
@@ -1260,7 +1235,11 @@ class SimilarityAlgorithm:
             return final_img_output, final_weight_map, all_final_weight_maps_to_return
 
         # --- Finalisasi output ---
-        if processed_frames > 0 and final_image_normalized is not None:
+        if (
+            processed_frames is not None
+            and processed_frames > 0
+            and final_image_normalized is not None
+        ):
             all_final_weight_maps_to_return = individual_maps
 
             # Simpan weight map jika diminta
@@ -1361,7 +1340,11 @@ def _load_images_for_batch(data_source, batch_indices, stop_requested=None):
         batch_paths = data_source[batch_start:batch_end]
         batch_images = load_images_from_paths(batch_paths, stop_requested)
         if "resize_all_with_padding" in globals():
-            batch_images, _ = resize_all_with_padding(batch_images, method="preserve")
+            resize_res = resize_all_with_padding(
+                batch_images, method="preserve", stop_requested=stop_requested
+            )
+            if resize_res and resize_res[0]:
+                batch_images = resize_res[0]
 
     return batch_images
 
@@ -1529,10 +1512,18 @@ def main(
         if processed_batches_results:
 
             # Panggil fungsi resize_all_with_padding pada hasil-hasil batch
-            processed_batches_results, final_shape = resize_all_with_padding(
-                processed_batches_results, method="preserve"
-            )
-            print(f"Semua hasil batch disesuaikan ke ukuran target: {final_shape}")
+            if processed_batches_results:
+                resize_res = resize_all_with_padding(
+                    processed_batches_results,
+                    method="preserve",
+                    stop_requested=stop_requested,
+                )
+                if resize_res and resize_res[0]:
+                    processed_batches_results = resize_res[0]
+                    final_shape = resize_res[1]
+                    print(
+                        f"Semua hasil batch disesuaikan ke ukuran target: {final_shape}"
+                    )
             # --- AKHIR PENAMBAHAN KODE ---
 
             if len(processed_batches_results) > 1:
@@ -1610,7 +1601,11 @@ def main(
 
 
 def running_similarity(
-    parent=None, single_process=None, batch_id=None, progress_callback=None
+    parent=None,
+    single_process=None,
+    batch_id=None,
+    progress_callback=None,
+    stop_callback=None,
 ):
 
     # ==========================================================
@@ -1621,6 +1616,7 @@ def running_similarity(
             main(
                 db_path="pixel_refine_database.db",
                 update_progress=progress_callback,
+                stop_requested=stop_callback,
                 single_process=False,
                 batch_id=batch_id,
             )
@@ -1655,8 +1651,11 @@ def running_similarity(
     layout.addWidget(progress_bar)
 
     # Inisialisasi thread worker
-    worker = ThreadWorker(
-        "pixel_refine_database.db", single_process=single_process, batch_id=batch_id
+    worker = BaseAlgorithmWorker(
+        main,
+        "pixel_refine_database.db",
+        single_process=single_process,
+        batch_id=batch_id,
     )
     progress_bar_instance = progress_bar  # Pass progress_bar to main
     # Menghubungkan signal worker ke fungsi pembaruan UI
@@ -1710,12 +1709,6 @@ def running_similarity(
 
     dialog.closeEvent = on_dialog_close
     worker.start()
-    main(
-        "pixel_refine_database.db",
-        update_progress=worker.progress_updated.emit,
-        stop_requested=worker.stop_requested,
-        progress_bar=progress_bar_instance,
-    )
     dialog.exec()
 
 

@@ -15,6 +15,11 @@ from PySide6.QtGui import QPixmap
 # Generic UI Library
 from pixel_refine_desktop.ui.resources.GenericUILibrary import ImageCompareItem
 
+# Image loading helper for RAW support
+from pixel_refine_desktop.enhance_stack.core.logic.image_display_helper import (
+    load_and_display_image,
+)
+
 
 class DisplayThreadManager(QObject):
     """
@@ -176,18 +181,70 @@ def display_processed_result(display_panel, image_path, update_dropdown=True):
     # 1. Clear Preview Scene
     display_panel.preview_scene.clear()
 
-    # 2. Determine Original Image
+    # 2. Determine Original Image - Use helper that supports RAW files
     original_pixmap = None
+    original_path = None
     if display_panel.logic.current_images:
         original_path = display_panel.logic.current_images[0].path
+        print(f"[DisplayManager] Original image path: {original_path}")
         if os.path.exists(original_path):
-            original_pixmap = QPixmap(original_path)
+            # Use load_and_display_image with caching enabled for reference
+            original_pixmap = load_and_display_image(
+                original_path,
+                max_width=4000,  # Reasonable size for comparison
+                max_height=4000,
+                is_reference=True,
+                batch_id=display_panel.current_batch_id,
+            )
+            if original_pixmap is None or original_pixmap.isNull():
+                print(
+                    f"[DisplayManager] WARNING: Failed to load original pixmap from {original_path}"
+                )
+                original_pixmap = None
+            else:
+                print(
+                    f"[DisplayManager] Original pixmap loaded successfully: {original_pixmap.width()}x{original_pixmap.height()}"
+                )
+        else:
+            print(
+                f"[DisplayManager] WARNING: Original image file not found: {original_path}"
+            )
 
-    processed_pixmap = QPixmap(image_path)
+    # Load processed image - Use helper for consistency
+    processed_pixmap = load_and_display_image(
+        image_path, max_width=4000, max_height=4000
+    )
+    if processed_pixmap is None or processed_pixmap.isNull():
+        print(
+            f"[DisplayManager] WARNING: Failed to load processed pixmap from {image_path}"
+        )
+        processed_pixmap = None
+    else:
+        print(
+            f"[DisplayManager] Processed pixmap loaded successfully: {processed_pixmap.width()}x{processed_pixmap.height()}"
+        )
+
     item = None
 
     if original_pixmap and processed_pixmap:
+        # --- FIX: Scale Original to Match Processed (1:1 Comparison) ---
+        # Checks if dimensions differ (e.g. upscaling)
+        if (
+            original_pixmap.width() != processed_pixmap.width()
+            or original_pixmap.height() != processed_pixmap.height()
+        ):
+            print(
+                f"[DisplayManager] Scaling original ({original_pixmap.width()}x{original_pixmap.height()}) "
+                f"to match processed ({processed_pixmap.width()}x{processed_pixmap.height()})"
+            )
+            original_pixmap = original_pixmap.scaled(
+                processed_pixmap.size(),
+                Qt.AspectRatioMode.IgnoreAspectRatio,  # Match exact size
+                Qt.TransformationMode.SmoothTransformation,
+            )
+
         # 3. Create Comparison Item (Reusable from GenericUILibrary)
+        print(f"[DisplayManager] Creating ImageCompareItem for comparison mode")
         item = ImageCompareItem(
             original_pixmap,
             processed_pixmap,
@@ -196,14 +253,23 @@ def display_processed_result(display_panel, image_path, update_dropdown=True):
         )
         display_panel.preview_scene.addItem(item)
         display_panel.preview_scene.setSceneRect(item.boundingRect())
+        print(f"[DisplayManager] Comparison mode activated successfully")
     else:
         # Fallback
+        print(
+            f"[DisplayManager] WARNING: Falling back to single image display (original_pixmap={original_pixmap is not None}, processed_pixmap={processed_pixmap is not None})"
+        )
         display_panel.logic.display_preview(display_panel.zoomable_preview, image_path)
         if display_panel.preview_scene.items():
             item = display_panel.preview_scene.items()[0]
 
     # RESTORE State or Fit to View
-    if image_path in display_panel.zoom_states:
+    # For comparison mode, always fit to view on first display (ignore saved state)
+    # This ensures the full comparison is visible when first shown
+    if image_path in display_panel.zoom_states and not (
+        original_pixmap and processed_pixmap
+    ):
+        # Only restore zoom state for single image view, not comparison mode
         print(
             f"[DisplayManager] Restoring zoom state for {os.path.basename(image_path)}"
         )
@@ -211,7 +277,13 @@ def display_processed_result(display_panel, image_path, update_dropdown=True):
             display_panel.zoom_states[image_path]
         )
     else:
-        print(f"[DisplayManager] First view, fitting to view")
+        # Always fit to view for comparison mode or first view
+        if original_pixmap and processed_pixmap:
+            print(
+                f"[DisplayManager] Comparison mode: fitting to view (ignoring saved zoom state)"
+            )
+        else:
+            print(f"[DisplayManager] First view, fitting to view")
         # Reset first to ensure clean state then fit
         display_panel.zoomable_preview.reset_zoom()
         display_panel.zoomable_preview.zoom_to_fit()  # Uses scene rect
@@ -242,4 +314,4 @@ def display_processed_result(display_panel, image_path, update_dropdown=True):
 
         display_panel.result_selector.blockSignals(block)
 
-    display_panel.show_preview()
+    display_panel.show_preview(show_dropdown=True)

@@ -7,6 +7,7 @@ MODEL_CONFIG = {
 }
 PYTHON_INTERPRETER = "venv/Scripts/python.exe"
 CACHE_DIR = "database/cache/thumbnails"
+COMPARISON_CACHE_DIR = "database/cache/comparison"
 CONFIG_DIR = os.path.join("database", "setting")
 
 ALGORITHM_PARAMETER_SETTINGS_FILE = os.path.join(

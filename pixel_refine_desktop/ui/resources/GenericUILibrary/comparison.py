@@ -87,14 +87,47 @@ class ImageCompareItem(QGraphicsObject):
                 visible_rect = scene_viewport_rect.intersected(self.boundingRect())
 
         font = painter.font()
-        font.setPointSizeF(14 * adaptive_scale)
+        # Initial target size
+        target_point_size = 14 * adaptive_scale
+
+        # --- ADAPTIVE SIZING FIX ---
+        # Ensure labels don't overwhelm the visible area (or image scaling)
+        # We calculate limits in item space
+        max_h = visible_rect.height() * 0.10  # Max 15% of visible height
+        max_w = visible_rect.width() * 0.20  # Max 35% of visible width per label
+
+        # Estimate heights
+        # 1 point ~= 1.333 pixels (approx, depends on DPI but good enough for relative limit)
+        # Using simple heuristic: line height ~ 1.5 * point_size
+        estimated_line_height = target_point_size * 1.5
+
+        scale_factor = 1.0
+        if estimated_line_height > max_h:
+            scale_factor = max_h / estimated_line_height
+
+        final_point_size = target_point_size * scale_factor
+
+        # Check width roughly (assuming average char width is 0.6 * point size)
+        # "Processed" is roughly 9 chars.
+        estimated_width = 9 * (final_point_size * 0.6)
+        if estimated_width > max_w:
+            width_scale = max_w / estimated_width
+            final_point_size *= width_scale
+
+        # Minimum readability clamp relative to adaptive scale won't help if we specifically want to shrink
+        # But let's prevent it from disappearing completely?
+        # User asked for it to shrink, so we let it shrink.
+
+        font.setPointSizeF(final_point_size)
         font.setBold(True)
         painter.setFont(font)
 
         # Helper to draw text with background
         def draw_label(text, x, y, align_right=False):
             metrics = painter.fontMetrics()
-            padding = 10 * adaptive_scale
+            padding = 10 * adaptive_scale * scale_factor  # Scale padding too
+            if padding < 2:
+                padding = 2  # Min padding
 
             text_w = metrics.horizontalAdvance(text)
             text_h = metrics.height()
@@ -112,7 +145,7 @@ class ImageCompareItem(QGraphicsObject):
             # Background
             painter.setBrush(QBrush(QColor(0, 0, 0, 150)))
             painter.setPen(Qt.PenStyle.NoPen)
-            border_radius = 4 * adaptive_scale
+            border_radius = 4 * adaptive_scale * scale_factor
             painter.drawRoundedRect(rect, border_radius, border_radius)
 
             # Text
@@ -120,18 +153,21 @@ class ImageCompareItem(QGraphicsObject):
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 
         # Margin from viewport edges
-        margin = 20 * adaptive_scale
+        margin = 20 * adaptive_scale * scale_factor  # Scale margin too
+        if margin < 5:
+            margin = 5
+
         top_y = visible_rect.top() + margin
         top_y = max(top_y, 0 + margin)
 
         # Left Side Label
         left_label_x = visible_rect.left() + margin
-        if left_label_x < (split_x - 10 * adaptive_scale):
+        if left_label_x < (split_x - 10 * adaptive_scale * scale_factor):
             draw_label(self.left_label, left_label_x, top_y)
 
         # Right Side Label
         right_label_x = visible_rect.right() - margin
-        if right_label_x > (split_x + 10 * adaptive_scale):
+        if right_label_x > (split_x + 10 * adaptive_scale * scale_factor):
             draw_label(self.right_label, right_label_x, top_y, align_right=True)
 
     def mousePressEvent(self, event):

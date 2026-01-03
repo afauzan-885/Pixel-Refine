@@ -79,6 +79,9 @@ class AlgorithmProcessorThread(QThread):
                     self.progress_update.emit(percent, message)
 
             # Define actions mapping
+            def get_stop_cb():
+                return self._is_cancelled
+
             actions = {
                 "alignment": {
                     "Farneback Optical Flow": lambda: running_farneback_optical_flow(
@@ -86,24 +89,28 @@ class AlgorithmProcessorThread(QThread):
                         single_process=self.single_process,
                         batch_id=self.batch_id,
                         progress_callback=progress_callback,
+                        stop_callback=get_stop_cb,
                     ),
                     "AKAZE": lambda: running_akaze(
                         self.parent_panel,
                         single_process=self.single_process,
                         batch_id=self.batch_id,
                         progress_callback=progress_callback,
+                        stop_callback=get_stop_cb,
                     ),
                     "ORB": lambda: running_orb(
                         self.parent_panel,
                         single_process=self.single_process,
                         batch_id=self.batch_id,
                         progress_callback=progress_callback,
+                        stop_callback=get_stop_cb,
                     ),
                     "Light Glue": lambda: running_light_glue(
                         self.parent_panel,
                         single_process=self.single_process,
                         batch_id=self.batch_id,
                         progress_callback=progress_callback,
+                        stop_callback=get_stop_cb,
                     ),
                     "No Alignment": lambda: None,
                     "None": lambda: None,
@@ -118,18 +125,21 @@ class AlgorithmProcessorThread(QThread):
                         single_process=self.single_process,
                         batch_id=self.batch_id,
                         progress_callback=progress_callback,
+                        stop_callback=get_stop_cb,
                     ),
                     "Median": lambda: running_median(
                         self.parent_panel,
                         single_process=self.single_process,
                         batch_id=self.batch_id,
                         progress_callback=progress_callback,
+                        stop_callback=get_stop_cb,
                     ),
                     "Similarity": lambda: running_similarity(
                         self.parent_panel,
                         single_process=self.single_process,
                         batch_id=self.batch_id,
                         progress_callback=progress_callback,
+                        stop_callback=get_stop_cb,
                     ),
                     "No Denoising": lambda: None,
                     "None": lambda: None,
@@ -176,5 +186,4 @@ class AlgorithmProcessorThread(QThread):
             print(f"[ERROR] {error_msg}")
             self.error_occurred.emit(error_msg)
         finally:
-            if self._is_running:
-                self.finished_processing.emit()
+            self.finished_processing.emit()

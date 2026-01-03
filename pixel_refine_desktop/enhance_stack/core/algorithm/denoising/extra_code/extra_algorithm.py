@@ -695,8 +695,8 @@ def perform_image_alignment(
     stop_requested=None,
     use_raft=False,
     num_alignment_workers=2,
-    visualization=True,
-    save_align_image=True,
+    visualization=False,
+    save_align_image=False,
 ):
     """
     Menyelaraskan (align) gambar dengan manajemen sumber daya yang aman,

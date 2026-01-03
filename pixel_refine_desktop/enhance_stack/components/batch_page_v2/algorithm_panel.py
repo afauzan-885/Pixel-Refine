@@ -62,12 +62,19 @@ class AlgorithmPanel(QWidget, SyncMixin):
         self.current_batch_id = None  # Track selected batch
         self.processor_thread = None
         self._last_target_idx = -1  # Guard for redundant animations
+        self._all_process_buttons = []  # Track all instances for dual-mode sync
 
         # Debounce timer for rapid setting changes
         self._update_timer = QTimer(self)
         self._update_timer.setSingleShot(True)
         self._update_timer.timeout.connect(self._do_update_adaptive_ui)
         self._pending_settings = None
+        self._is_processing = False
+
+        # Timer for 1s delay before Cancel becomes active
+        self._cancel_delay_timer = QTimer(self)
+        self._cancel_delay_timer.setSingleShot(True)
+        self._cancel_delay_timer.timeout.connect(self._enable_cancel_button)
 
         # Real-time state binding
         if store:
@@ -202,6 +209,7 @@ class AlgorithmPanel(QWidget, SyncMixin):
 
         self.process_btn.clicked.connect(self._on_process_clicked)
         btn_layout.addWidget(self.process_btn)
+        self._all_process_buttons.append(self.process_btn)  # Track instance
         layout.addWidget(btn_container)
 
         layout.addStretch()
@@ -210,8 +218,19 @@ class AlgorithmPanel(QWidget, SyncMixin):
     def _on_process_clicked(self):
         if not self.current_batch_id:
             return
+
+        # If already processing, this button is now "Cancel"
+        if self._is_processing:
+            self._on_cancel_requested()
+            return
+
         settings = self.logic.get_settings()
-        self.set_process_enabled(False)
+
+        # 1. State lock
+        self._is_processing = True
+        self._update_all_buttons(enabled=False, text="⏳ Waiting...")
+
+        # 2. Start Processing
         self.show_progress(0)
         self.processor_thread = AlgorithmProcessorThread(
             self.current_batch_id, settings, self
@@ -220,11 +239,60 @@ class AlgorithmPanel(QWidget, SyncMixin):
         self.processor_thread.finished_processing.connect(self._on_processing_finished)
         self.processor_thread.start()
 
+        # 3. Start timer for Cancel button (1s delay)
+        self._cancel_delay_timer.start(1000)
+
+    def _enable_cancel_button(self):
+        """Called 1s after Start to turn button into Cancel."""
+        if self._is_processing:
+            self._update_all_buttons(
+                enabled=True,
+                text="✖ Cancel",
+                variant="danger",
+                bg="#E74C3C",
+                hover="#C0392B",
+            )
+
+    def _on_cancel_requested(self):
+        """Handle cancellation logic."""
+        if self.processor_thread and self.processor_thread.isRunning():
+            print(
+                f"[AlgorithmPanel] Cancellation requested for batch {self.current_batch_id}"
+            )
+            self.processor_thread.stop()
+            # Button feedback
+            self._update_all_buttons(enabled=False, text="🛑 Stopping...")
+            # We don't reset state here, wait for finished_processing signal
+
+    def _update_all_buttons(
+        self, enabled=None, text=None, variant=None, bg=None, hover=None
+    ):
+        """Helper to sync all process button instances."""
+        for btn in self._all_process_buttons:
+            try:
+                if enabled is not None:
+                    btn.setEnabled(enabled)
+                if text is not None:
+                    btn.setText(text)
+                if variant is not None:
+                    btn.variant = variant
+                if bg or hover:
+                    btn._apply_custom_colors(bg_color=bg, hover_color=hover)
+                elif variant == "primary":
+                    # Force reset to default primary theme
+                    btn._apply_custom_colors(bg_color="#2ECC71", hover_color="#28B463")
+            except RuntimeError:
+                continue  # Widget might be deleted
+
     def _on_progress_update(self, percent, message):
         self.show_progress(percent)
 
     def _on_processing_finished(self):
-        self.set_process_enabled(True)
+        self._is_processing = False
+        self._cancel_delay_timer.stop()
+
+        self._update_all_buttons(enabled=True, text="▶ Start", variant="primary")
+
         self.hide_progress()
         completion_data = {
             "batch_id": self.current_batch_id,

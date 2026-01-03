@@ -71,6 +71,16 @@ from pixel_refine_desktop.enhance_stack.core.logic.deletion_manager import (
 from pixel_refine_desktop.enhance_stack.core.logic.import_manager import (
     ImportManager,
 )
+from pixel_refine_desktop.enhance_stack.core.logic.grid_manager import GridManager
+from pixel_refine_desktop.enhance_stack.core.logic.ui_state_manager import (
+    UIStateManager,
+)
+from pixel_refine_desktop.enhance_stack.core.logic.drag_drop_handler import (
+    DragDropHandler,
+)
+from pixel_refine_desktop.enhance_stack.core.logic.context_menu_handler import (
+    ContextMenuHandler,
+)
 
 # Zoomable preview
 from pixel_refine_desktop.enhance_stack.core.logic.Zoomable_Handler import Zoomable
@@ -139,12 +149,17 @@ class DisplayPanel(QWidget):
 
         self.controller = controller
         self.logic = DisplayLogic()
+
         # Managers
         self.selection_manager = SelectionManager(self)
         self.deletion_manager = DeletionManager(self)
         self.deletion_manager.deletion_finished.connect(self._on_deletion_finished)
         self.deletion_manager.deletion_error.connect(self._on_deletion_error)
         self.import_manager = ImportManager(self)
+        self.grid_manager = GridManager(self)
+        self.ui_state_manager = UIStateManager(self)
+        self.drag_drop_handler = DragDropHandler(self)
+        self.context_menu_handler = ContextMenuHandler(self)
 
         # State
         self.current_batch_id = None
@@ -152,29 +167,22 @@ class DisplayPanel(QWidget):
         self._success_toast_shown = False
         self._is_checking_thumbnails = False  # Toast sequencing flag
         self.current_batch_name = None
-        self.total_image_count = 0
         self.all_cards = {}  # Map card_id -> ImageCard widget
-
-        # NOTE: Selection and Deletion state moved to managers
-        # self.selected_thumbnails, self.active_deletions etc are now in managers.
 
         # Restoring missing attributes
         self.current_preview_path = None
         self.current_results_map = {}
         self.zoom_states = {}
         self.toast = ToastManager(self)
-        self.total_image_count = (
-            0  # To track total images independently of UI population
-        )
         self.active_deletions = {}  # {batch_id: [paths]} for resume logic
-
-        self.supported_extensions = self._build_supported_extensions()
-        if TYPE_CHECKING:
-            from pixel_refine_desktop.enhance_stack.components.batch_page_v2.right_panel import (
-                RightPanel,
-            )
         self.right_panel: Any = None
         self.placeholder_widget = None
+
+        # Watchdog: Self-healing for blank page detection
+        self.recovery_timer = QTimer(self)
+        self.recovery_timer.setSingleShot(True)
+        self.recovery_timer.setInterval(800)  # 0.8s tolerance
+        self.recovery_timer.timeout.connect(self._verify_display_integrity)
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._setup_ui()
@@ -190,12 +198,6 @@ class DisplayPanel(QWidget):
         self.lazy_load_timer.setSingleShot(True)
         self.lazy_load_timer.setInterval(100)  # 100ms debounce
         self.lazy_load_timer.timeout.connect(self._check_visible_cards)
-
-        # Staged load timer (Extreme Optimization for Massive Batch)
-        self.staged_load_timer = QTimer(self)
-        self.staged_load_timer.setSingleShot(True)
-        self.staged_load_timer.setInterval(3000)  # 3s "breathing room"
-        self.staged_load_timer.timeout.connect(self._start_background_sync)
 
         # Connect internal proxy signals
         # self._worker_finished_proxy_signal.connect(self._on_worker_finished)
@@ -579,105 +581,17 @@ class DisplayPanel(QWidget):
             self.sidebar_overlay.show()
             self.sidebar_overlay.raise_()
 
-    def _build_supported_extensions(self):
-
-        extensions = []
-        for format_name, ext_list in SUPPORTED_FORMATS.items():
-            extensions.extend(ext_list)
-        return tuple(extensions)
-
     def _create_placeholder_widget(
         self, html_text="", button_text=None, on_button_click=None
     ):
-        """
-        Membuat widget placeholder untuk ditampilkan saat grid kosong.
-        Mengikuti pattern dari panorama dengan flexible layout.
-
-        Args:
-            html_text: Text HTML untuk ditampilkan
-            button_text: Text untuk tombol (optional)
-            on_button_click: Callback untuk button click (optional)
-
-        Returns:
-            QWidget: Container dengan layout stretch + label + button (jika ada)
-        """
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(5, 5, 5, 5)
-        layout.setSpacing(5)
-
-        # Top stretch untuk vertical centering
-        layout.addStretch()
-
-        # Text label
-        if html_text:
-            label = QLabel(html_text)
-            label.setTextFormat(Qt.TextFormat.RichText)
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            label.setWordWrap(True)
-            label.setStyleSheet("QLabel { color: #888; font-size: 14px; }")
-            layout.addWidget(label)
-
-        # Button (jika ada)
-        if button_text and on_button_click:
-            btn = Button(button_text, variant="secondary")
-            btn.setFixedWidth(120)
-            btn.clicked.connect(on_button_click)
-
-            btn_layout = QHBoxLayout()
-            btn_layout.addStretch()
-            btn_layout.addWidget(btn)
-            btn_layout.addStretch()
-            layout.addLayout(btn_layout)
-
-        # Bottom stretch untuk vertical centering
-        layout.addStretch()
-
-        return container
+        """Delegate to UIStateManager."""
+        return self.ui_state_manager.create_placeholder_widget(
+            html_text, button_text, on_button_click
+        )
 
     def _set_placeholder(self, widget):
-        """
-        Set placeholder widget in stack.
-        Safely removes previous placeholder if exists.
-
-        Args:
-            widget: Generic widget/container to show
-        """
-        # Remove old placeholder if exists and is different from new widget
-        if self.placeholder_widget and self.placeholder_widget != widget:
-            try:
-                self.grid_content_stack.removeWidget(self.placeholder_widget)
-                self.placeholder_widget.deleteLater()
-            except RuntimeError:
-                pass  # Widget already deleted
-            self.placeholder_widget = None
-
-        # Add and show new placeholder
-        if widget:
-            self.placeholder_widget = widget
-            self.grid_content_stack.addWidget(widget)
-            # Slide UP for showing placeholder (contextual: usually happens on clear or load empty)
-            # Or use FADE if slide feels weird. But user asked for slide.
-            # Logic: If coming from content -> Placeholder: Slide DOWN (Emptying)
-            # If coming from another placeholder -> Placeholder: Slide LEFT/RIGHT?
-            # Let's assume Grid -> Placeholder = Slide DOWN (Content leaves)
-            slide(
-                self.grid_animator,
-                self.grid_content_stack,
-                widget,
-                SlideDirection.DOWN,
-                duration=300,
-            )
-        else:
-            # If default none, show grid
-            # Placeholder -> Grid = Slide UP (Content arrives)
-            slide(
-                self.grid_animator,
-                self.grid_content_stack,
-                self.grid_container,
-                SlideDirection.UP,
-                duration=300,
-            )
+        """Delegate to UIStateManager."""
+        self.ui_state_manager.set_placeholder(widget)
 
     # --- LAZY LOADING SYSTEM ---
 
@@ -687,39 +601,11 @@ class DisplayPanel(QWidget):
             self.lazy_load_timer.start()
 
     def _check_visible_cards(self):
-        """Mendeteksi kartu yang terlihat di viewport dan memuat thumbnail-nya secara lazy."""
-        if not self.all_cards or self.grid_container.isHidden():
-            return
+        """Delegate to DisplayLogic for lazy loading."""
+        to_load = self.logic.check_visible_cards(
+            self.all_cards, self.grid_container, lambda: self.grid_container.viewport()
+        )
 
-        # 1. Dapatkan area yang terlihat (viewport)
-        viewport = self.grid_container.viewport()
-        visible_region = viewport.rect()
-
-        # Buffer untuk smooth scrolling (opsional: tambahkan margin ke visible_region)
-        to_load = []
-
-        for card_id, card in self.all_cards.items():
-            try:
-                # Periksa apakah kartu terlihat di dalam viewport
-                # Map card top-left ke koordinat viewport
-                card_pos = card.mapTo(viewport, QPoint(0, 0))
-                card_rect = QRect(card_pos, card.size())
-
-                if visible_region.intersects(card_rect):
-                    # Kartu terlihat, cek apakah perlu dimuat
-                    if (
-                        card._is_loading or not card.has_image()
-                    ) and not card._is_fetching:
-                        card._is_fetching = True
-                        to_load.append((card._image_path, card))
-                else:
-                    # Kartu tidak terlihat, kita bisa mengosongkan memori jika perlu
-                    # card.unload_image() # Opsional: Aktifkan jika ingin sangat hemat RAM
-                    pass
-            except Exception:
-                continue
-
-        # 2. PROSES LOAD (Hanya yang terlihat)
         if to_load:
             pairs = []
             for path, card in to_load:
@@ -727,9 +613,9 @@ class DisplayPanel(QWidget):
                 def make_callback(c):
                     return lambda q_img, p: self._on_thumbnail_ready(q_img, p, c)
 
-                pairs.append((path, make_callback(card)))
+                pairs.append((path, card, make_callback))
 
-            self.logic.load_thumbnails_bulk_async(pairs)
+            self.logic.load_visible_thumbnails(pairs)
 
     # =========================================================================
     # === 1. PUBLIC SLOTS UNTUK MEMUAT DATA ===
@@ -778,9 +664,7 @@ class DisplayPanel(QWidget):
         self._update_header_title()
 
         # 0. Cancel any existing processes/animations for previous state
-        ProcessManager.instance().cancel_context("display_populate")
-        ProcessManager.instance().cancel_context("display_sequential_removal")
-        self.grid_animator.stop_all()
+        self._reset_population_state()
 
         # Stop & Flush batch sebelumnya, lalu siapkan stats untuk batch baru (Toast Fix)
         # Sembunyikan toast batch lama secara eksplisit - User Request: "Pindah batch hilangkan saja"
@@ -798,6 +682,7 @@ class DisplayPanel(QWidget):
         # Check if batch is empty (visually)
         if not visual_images:
             # Show empty state but keep import button visible in header
+            self.grid_container.set_batch_update(False)
             self.import_button.setVisible(True)
             self._show_empty_batch_state()
             self.show_grid()
@@ -806,9 +691,13 @@ class DisplayPanel(QWidget):
         self.import_button.setVisible(True)
         self.show_grid()
 
+        # Start Watchdog timer
+        self.recovery_timer.start()
+
         # Trigger Background Sync ditunda (Staged Loading)
-        self.staged_load_timer.stop()
+        self.grid_manager.stop_staged_timer()
         self._real_paths_for_sync = [img.path for img in images if hasattr(img, "path")]
+        self.grid_manager.set_sync_paths(self._real_paths_for_sync)
 
         # Switch back to grid container using animation helper
         if self.grid_content_stack.currentWidget() != self.grid_container:
@@ -817,84 +706,8 @@ class DisplayPanel(QWidget):
         # Resume deletion simulation if there are pending deletions for this batch
         self.deletion_manager.resume_deletion_simulation(batch_id)
 
-        # Prepare incremental population to avoid UI freeze
-        self._populate_queue = list(visual_images)
-        if hasattr(self, "_populate_timer") and self._populate_timer.isActive():
-            self._populate_timer.stop()
-
-        self._populate_timer = QTimer(self)
-        self._populate_timer.timeout.connect(self._process_incremental_population)
-
-        # Register to ProcessManager
-        ProcessManager.instance().register_timer(
-            "display_populate", self._populate_timer
-        )
-
-        # Start population: 10 images per 30ms (Smooth & Fast)
-        self._populate_timer.start(30)
-
-    def _process_incremental_population(self):
-        """Slots to add images to grid in chunks to avoid UI hang."""
-        if not hasattr(self, "_populate_queue") or not self._populate_queue:
-            self._populate_timer.stop()
-            self.grid_container.set_batch_update(False)
-            # Final check for thumbnails (Prioritas Viewport Selesai)
-            self._check_visible_cards()
-
-            # Start "Breathing Room" timer sebelum sinkronisasi latar belakang masif
-            if hasattr(self, "_real_paths_for_sync") and self._real_paths_for_sync:
-                self.staged_load_timer.start()
-            return
-
-        # Add 10 images per tick
-        CHUNK_SIZE = 15
-        for _ in range(CHUNK_SIZE):
-            if not self._populate_queue:
-                break
-
-            img = self._populate_queue.pop(0)
-
-            # Check if this is a Zombie (pending deletion)
-            # Assumption: Zombie object created in load_batch has a distinct attribute or we check path
-            is_zombie = (
-                hasattr(img, "__class__") and img.__class__.__name__ == "ZombieImg"
-            )
-
-            card = ImageCard(card_id=str(img.id), size=110)
-            card._image_path = img.path
-
-            if not is_zombie:
-                card.double_clicked.connect(self._on_card_double_clicked)
-                card.clicked.connect(
-                    lambda cid, event, c=card: self._on_card_clicked(cid, event, c)
-                )
-
-                self.all_cards[str(img.id)] = card
-                self.grid_container.add_item(card)
-                self.logic.register_grid_item(str(img.id), {"path": img.path})
-            else:
-                self.all_cards[str(img.id)] = card
-                self.grid_container.add_item(card)
-                # ZOMBIE LOGIC: Immediately queue for removal via Manager (resuming stream)
-                self.deletion_manager.queue_zombie_card(str(img.id), card)
-
-        # Update progress header
-        self._update_header_title()
-
-        # Prioritaskan viewport secara agresif selama populasi (agar gambar muncul cepat)
-        if len(self._populate_queue) % 3 == 0:  # Tiap 3 ticks
-            self._check_visible_cards()
-
-    def _start_background_sync(self):
-        """Picu sinkronisasi latar belakang setelah jeda bernapas berakhir."""
-        if hasattr(self, "_real_paths_for_sync") and self._real_paths_for_sync:
-            print(
-                f"[DisplayPanel] Background Sync Stage started for {len(self._real_paths_for_sync)} images."
-            )
-            self.logic.load_thumbnails_bulk_async(
-                [(p, None) for p in self._real_paths_for_sync]
-            )
-            self._real_paths_for_sync = []  # Clear memory
+        # Delegate incremental population to GridManager
+        self.grid_manager.populate_grid_incremental(visual_images)
 
     @Slot()
     def clear_display(self):
@@ -905,21 +718,19 @@ class DisplayPanel(QWidget):
         self.current_batch_id = None
         self.current_batch_name = None
 
+        # Stop watchdog
+        self.recovery_timer.stop()
+
         # Hide any active toast when batch is unselected
         self.toast.hide()
 
-        # 0. Cancel all pending populations and removals
-        ProcessManager.instance().cancel_context("display_populate")
-        ProcessManager.instance().cancel_context("display_sequential_removal")
+        # 0. Cancel and reset
+        self._reset_population_state()
 
         self._update_header_title()  # Clear header title
         # self._update_cross_batch_toast()  # Check other batches
         self.logic.clear_all()
         self._clear_grid()
-        self.selection_manager.clear()
-        self.all_cards.clear()
-        # self.last_selected_card_id = None # Handled by manager
-        # self.selection_anchor_id = None # Handled by manager
 
         # Hide import button saat no batch selected
         self.import_button.setVisible(False)
@@ -938,15 +749,100 @@ class DisplayPanel(QWidget):
 
         self.show_grid()
 
+    def _verify_display_integrity(self):
+        """
+        Watchdog logic: Detects if the DisplayPanel is in an inconsistent visual state.
+        Checks grid emptiness, stack indices, and stuck rendering flags.
+        """
+        if not self.current_batch_id:
+            return
+
+        # 1. Gather health metrics
+        should_have_images = self.total_image_count > 0
+        actual_grid_count = self.grid_container.get_item_count()
+        is_grid_empty = actual_grid_count == 0
+        is_batch_update_stuck = self.grid_container._is_batch_updating
+
+        # Stack check: 0 = Grid, 1 = Preview, 2 = Bulk Delete
+        current_view_index = self.display_stack.currentIndex()
+        current_content_index = self.grid_content_stack.currentIndex()
+
+        # 2. Check for "Blank State" (Batch loaded but UI is at placeholder or wrong stack)
+        is_view_stuck = (
+            should_have_images
+            and current_view_index != 0
+            and not self.current_preview_path
+        )
+        is_content_stuck = should_have_images and current_content_index != 0
+
+        needs_healing = (
+            (should_have_images and is_grid_empty)
+            or is_batch_update_stuck
+            or is_view_stuck
+            or is_content_stuck
+        )
+
+        if needs_healing:
+            # print(
+            #     f"[Watchdog] Deep healing triggered for batch {self.current_batch_id}"
+            # )
+            # print(
+            #     f"[Watchdog] Metrics: img_count={self.total_image_count}, grid_items={actual_grid_count}"
+            # )
+            # print(
+            #     f"[Watchdog] States: update_stuck={is_batch_update_stuck}, view_idx={current_view_index}, content_idx={current_content_index}"
+            # )
+
+            # --- HARD RESET DISPLAY PANEL VISUALS ---
+
+            # A. Release locks
+            self.grid_container.set_batch_update(False)
+
+            # B. Force correct stack indices
+            if current_view_index != 0 and not self.current_preview_path:
+                self.show_grid()
+
+            if current_content_index != 0:
+                self._set_placeholder(None)  # Force back to grid index 0
+
+            # C. If grid is still empty, perform logic re-sync
+            if is_grid_empty:
+                images = self.logic.current_images or []
+                if len(images) > 0:
+                    # print(
+                    #     "[Watchdog] Content vanished. Performing full logic re-sync..."
+                    # )
+                    # Stop current population and re-trigger
+                    self._reset_population_state()
+                    self._clear_grid()
+                    # We use a slightly safer delay for the re-trigger
+                    QTimer.singleShot(
+                        50,
+                        lambda: self.load_batch(
+                            self.current_batch_id, images, self.current_batch_name
+                        ),
+                    )
+                else:
+                    # Case where logic itself thinks there are no images, but header says otherwise
+                    # print(
+                    #     "[Watchdog] Warning: Logic state desync (logic thinks 0 images)."
+                    # )
+                    # Optionally re-fetch from controller if possible, but 0 images is a valid state too
+                    pass
+
+    def _reset_population_state(self):
+        """Unified method to stop all pending populating tasks and clear tracking."""
+        ProcessManager.instance().cancel_context("display_populate")
+        ProcessManager.instance().cancel_context("display_sequential_removal")
+        self.grid_animator.stop_all()
+        self.all_cards.clear()
+        self.selection_manager.clear()
+        self.logic.grid_items.clear()
+        self.grid_manager.stop_staged_timer()
+
     def _show_empty_batch_state(self):
-        """
-        Show empty state ketika batch dipilih tapi belum ada images.
-        Display pesan informatif + tombol untuk import images langsung.
-        """
-        # Create placeholder dengan "Browse Images" button
-        placeholder_html = "<p>Drag and drop images ke sini,<br>atau gunakan tombol di atas untuk memilih dari folder.</p>"
-        placeholder = self._create_placeholder_widget(html_text=placeholder_html)
-        self._set_placeholder(placeholder)
+        """Delegate to UIStateManager."""
+        self.ui_state_manager.show_empty_batch_state()
 
     def _create_new_batch(self):
         """
@@ -961,10 +857,8 @@ class DisplayPanel(QWidget):
     # =========================================================================
 
     def _clear_grid(self):
-        """Remove all widgets from grid container."""
-        # Tambahan: Hentikan semua animasi yang berjalan pada grid sebelum clear
-        self.grid_animator.stop_all()
-        self.grid_container.clear_items()
+        """Delegate to GridManager."""
+        self.grid_manager.clear_grid()
 
     def _clear_selection(self):
         """Deselect semua cards via Manager."""
@@ -975,31 +869,8 @@ class DisplayPanel(QWidget):
         self.selection_manager.select_range(start_card_id, end_card_id)
 
     def _is_widget_in_viewport(self, widget):
-        """
-        Cek apakah widget berada di dalam viewport GridContainer.
-        Digunakan untuk optimasi animasi (Viewport-Aware Animation).
-        """
-        if not is_widget_alive(widget) or not widget.isVisible():
-            return False
-
-        try:
-            # Akses viewport dari QScrollArea di dalam GridContainer
-            viewport = self.grid_container.viewport()
-            if not viewport:
-                return False
-
-            # Ambil area yang terlihat (0,0, w, h)
-            visible_rect = viewport.rect()
-
-            # Map posisi widget (local) ke posisi viewport
-            # mapTo(parent, pos) sangat akurat untuk nested widget
-            widget_pos = widget.mapTo(viewport, QPoint(0, 0))
-            widget_rect = QRect(widget_pos, widget.size())
-
-            # Cek apakah kotak widget bersinggungan dengan kotak viewport
-            return visible_rect.intersects(widget_rect)
-        except Exception:
-            return False
+        """Delegate to GridManager."""
+        return self.grid_manager.is_widget_in_viewport(widget)
 
     def _load_thumbnail_async(self, image_path, card_widget):
         """
@@ -1028,16 +899,9 @@ class DisplayPanel(QWidget):
         if str(batch_id) != str(self.current_batch_id):
             return
 
-        # 3. Toast Sequencing Check - REMOVED as requested
-        # if self._is_checking_thumbnails:
-        # return
-
         if decode_pct >= 100 and save_pct >= 100:
             if not self._success_toast_shown:
                 # Selesai: Tampilkan pesan sukses singkat
-                # Use single_mode=True here too if we want to clear the "Making" toast instantly?
-                # Usually standard message doesn't support single_mode param in my update?
-                # Lets check ToastManager.show_message signature. Yes I added it.
                 self.toast.show_message(
                     "Semua thumbnail berhasil diproses.",
                     duration=3000,
@@ -1066,10 +930,17 @@ class DisplayPanel(QWidget):
         Args:
             card_id: ID dari card yang di-click
         """
-        sender = self.sender()
-        image_path = getattr(sender, "_image_path", None)
-        if image_path:
-            self._display_image_preview(image_path)
+        # Better robustness: gunakan card_id untuk mencari path di logic
+        if card_id in self.logic.grid_items:
+            image_path = self.logic.grid_items[card_id].get("path")
+            if image_path:
+                self._display_image_preview(image_path)
+        else:
+            # Fallback (sekadar berjaga-jaga)
+            sender = self.sender()
+            image_path = getattr(sender, "_image_path", None)
+            if image_path:
+                self._display_image_preview(image_path)
 
     def _select_all_images(self):
         """Select all via Manager."""
@@ -1109,85 +980,32 @@ class DisplayPanel(QWidget):
             super().keyPressEvent(event)
 
     def _handle_enter_press(self):
-        """Handle Enter key to show preview for single selection."""
-        if self.display_stack.currentIndex() != 0:
-            return
-
-        if len(self.selection_manager.selected_thumbnails) == 1:
-            card_id = list(self.selection_manager.selected_thumbnails)[0]
-            if card_id in self.all_cards:
-                card = self.all_cards[card_id]
-                image_path = getattr(card, "_image_path", None)
-                if image_path:
-                    self._display_image_preview(image_path)
+        """Delegate to SelectionManager."""
+        image_path = self.selection_manager.handle_enter_press()
+        if image_path:
+            self._display_image_preview(image_path)
 
     def _navigate_selection(self, key, shift_held):
         """Navigate via Manager."""
         self.selection_manager.navigate_selection(key, shift_held)
 
     def contextMenuEvent(self, event):
-        """Handle right-click context menu pada area grid."""
-        # Hanya tampilkan menu jika di dalam Grid View dan ada batch terpilih
+        """Delegate to ContextMenuHandler."""
+        # Only show menu if in Grid View and batch is selected
         if self.display_stack.currentIndex() != 0 or not self.current_batch_id:
             return
 
-        # Check if right click hits a card
-        card_under_mouse = None
-        for card_id, card in self.all_cards.items():
-            if card.underMouse():
-                card_under_mouse = card
-                break
+        # Find card under mouse
+        card_under_mouse = self.context_menu_handler.find_card_under_mouse()
 
-        menu = QMenu(self)
-        menu.setStyleSheet(
-            """
-            QMenu {
-                background-color: #FFFFFF;
-                border: 1px solid #E0E0E0;
-                border-radius: 4px;
-                padding: 5px;
-            }
-            QMenu::item {
-                padding: 5px 25px 5px 20px;
-                border-radius: 2px;
-            }
-            QMenu::item:selected {
-                background-color: #F0F0F0;
-                color: #000000;
-            }
-            QMenu::separator {
-                height: 1px;
-                background: #E0E0E0;
-                margin: 5px 0px;
-            }
-        """
-        )
-
-        # 1. Select Reference Image (Only if exactly one card is right-clicked)
-        if card_under_mouse:
-            ref_path = card_under_mouse._image_path
-            action_ref = QAction("Select Reference Image", self)
-            action_ref.triggered.connect(lambda: self._set_as_reference(ref_path))
-            menu.addAction(action_ref)
-            menu.addSeparator()
-
-        # 2. Delete Selected Images
-        if self.selection_manager.selected_thumbnails:
-            action_del = QAction(
-                f"Delete Images ({len(self.selection_manager.selected_thumbnails)})",
-                self,
-            )
-            action_del.triggered.connect(self._handle_delete_action)
-            menu.addAction(action_del)
-
+        # Create and show menu
+        menu = self.context_menu_handler.create_context_menu(card_under_mouse)
         if not menu.isEmpty():
             menu.exec(event.globalPos())
 
     def _set_as_reference(self, image_path):
-        """Set image as reference via controller."""
-        if self.current_batch_id and self.controller:
-            if self.controller.set_reference_image(self.current_batch_id, image_path):
-                self._refresh_current_batch()
+        """Delegate to ContextMenuHandler."""
+        self.context_menu_handler.set_as_reference(image_path)
 
     def _handle_delete_action(self):
         """Handle deletion via Manager."""
@@ -1237,7 +1055,7 @@ class DisplayPanel(QWidget):
         self.save_overlay.hide()  # Hide save button for original image
 
         self.logic.display_preview(self.zoomable_preview, image_path)
-        self.show_preview()
+        self.show_preview(show_dropdown=False)
 
     # =========================================================================
     # === 4. PUBLIC HELPER METHODS ===
@@ -1305,11 +1123,11 @@ class DisplayPanel(QWidget):
         else:
             self.import_button.setVisible(False)
 
-    def show_preview(self):
+    def show_preview(self, show_dropdown=True):
         """Switch ke Preview View."""
         self.display_stack.setCurrentIndex(1)
         self.back_btn.setVisible(True)
-        self.result_selector.setVisible(True)  # Show dropdown
+        self.result_selector.setVisible(show_dropdown)  # Only show if requested
         self.import_button.setVisible(False)
         self.preview_process_btn.setVisible(False)
 
@@ -1341,20 +1159,10 @@ class DisplayPanel(QWidget):
         self.header_title.setText(text)
 
     def _update_header_title(self, count=None):
-        """Helper to update header title with batch name and image count."""
-        if not self.current_batch_id:
-            self.header_title.setText("No batch selected")
-            return
-
-        display_name = (
-            self.current_batch_name
-            if self.current_batch_name
-            else str(self.current_batch_id)
+        """Delegate to UIStateManager."""
+        self.ui_state_manager.update_header_title(
+            self.current_batch_id, self.current_batch_name, count
         )
-
-        # Prioritaskan parameter count jika diberikan, jika tidak gunakan total_image_count
-        actual_count = count if count is not None else self.total_image_count
-        self.header_title.setText(f"{display_name}: ({actual_count} image)")
 
     def _on_save_clicked(self):
         """Handle floating save button click."""
@@ -1434,22 +1242,17 @@ class DisplayPanel(QWidget):
             self.drop_overlay.resize(self.size())
 
     def dragEnterEvent(self, event):
-        if not self.current_batch_id:
-            event.ignore()
-            return
+        """Delegate to DragDropHandler."""
+        should_accept, file_count = self.drag_drop_handler.handle_drag_enter(
+            event.mimeData()
+        )
 
-        if event.mimeData().hasUrls():
-            # Hitung jumlah file yang sedang di-hover
-            file_count = len(
-                [url for url in event.mimeData().urls() if url.isLocalFile()]
-            )
-
-            if file_count > 0:
-                event.acceptProposedAction()
-                # Tampilkan overlay dan update teks
-                self.drop_overlay.setText(f"Jatuhkan {file_count} gambar di sini")
-                self.drop_overlay.show()
-                self.drop_overlay.raise_()  # Pastikan di paling atas
+        if should_accept:
+            event.acceptProposedAction()
+            # Show overlay and update text
+            self.drop_overlay.setText(f"Jatuhkan {file_count} gambar di sini")
+            self.drop_overlay.show()
+            self.drop_overlay.raise_()
         else:
             event.ignore()
 
@@ -1458,28 +1261,16 @@ class DisplayPanel(QWidget):
         event.accept()
 
     def dropEvent(self, event):
+        """Delegate to DragDropHandler."""
         self.drop_overlay.hide()
-        if not self.current_batch_id:
-            event.ignore()
-            return
 
-        self.setStyleSheet(
-            self.styleSheet().replace("; border: 2px dashed #4CAF50;", "")
+        should_accept, valid_files = self.drag_drop_handler.handle_drop(
+            event.mimeData()
         )
 
-        if event.mimeData().hasUrls():
-            # Filter valid image files dalam supported formats
-            valid_files = [
-                url.toLocalFile()
-                for url in event.mimeData().urls()
-                if url.isLocalFile()
-                and url.toLocalFile().lower().endswith(self.supported_extensions)
-            ]
-            if valid_files:
-                # Emit signal untuk parent widget handle
-                self.images_to_import_selected.emit(valid_files)
-                event.acceptProposedAction()
-            else:
-                event.ignore()
+        if should_accept:
+            # Emit signal for parent widget to handle
+            self.images_to_import_selected.emit(valid_files)
+            event.acceptProposedAction()
         else:
             event.ignore()

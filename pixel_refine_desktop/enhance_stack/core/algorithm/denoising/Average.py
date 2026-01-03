@@ -1,5 +1,8 @@
 import traceback
 import cv2
+from pixel_refine_desktop.enhance_stack.core.algorithm.base_worker import (
+    BaseAlgorithmWorker,
+)
 import numpy as np
 import sqlite3
 import os
@@ -16,44 +19,6 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
 )
 from pixel_refine_desktop.ui.resources.styles.stylesheet import PROGRESS_BAR
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
-
-
-class ThreadWorker(QThread):
-    progress_updated = Signal(int, str)
-    finished = Signal()
-    error_occurred = Signal(str)
-
-    def __init__(self, db_path, single_process=True, batch_id=None):
-        super().__init__()
-        self.db_path = db_path
-        self.single_process = single_process
-        self.batch_id = batch_id
-        self.stop_requested = False
-
-    def run(self):
-        try:
-
-            def update_progress(progress, message):
-                self.progress_updated.emit(progress, message)
-
-            def is_stop_requested():
-                return self.stop_requested
-
-            main(
-                self.db_path,
-                update_progress=update_progress,
-                stop_requested=is_stop_requested,
-                single_process=self.single_process,
-                batch_id=self.batch_id,
-            )
-
-            self.finished.emit()
-        except Exception as e:
-            print(f"Error terjadi: {str(e)}")
-            self.error_occurred.emit(str(e))
-
-    def stop(self):
-        self.stop_requested = True
 
 
 class AverageAlgorithm:
@@ -77,6 +42,7 @@ class AverageAlgorithm:
                 FROM batch_process_image
                 JOIN images ON batch_process_image.image_id_batch = images.id
                 WHERE batch_process_image.batch_id = ?
+                ORDER BY batch_process_image.is_reference_batch DESC, images.path ASC
             """,
                 (batch_id,),
             )
@@ -281,10 +247,12 @@ def main(
             else:  # Sumbernya adalah list path
                 batch_paths = data_source[batch_start:batch_end]
                 batch_images = load_images_from_paths(batch_paths, stop_requested)
-                if "resize_all_with_padding" in globals():
-                    batch_images, _ = resize_all_with_padding(
-                        batch_images, method="preserve"
+                if batch_images and "resize_all_with_padding" in globals():
+                    resize_res = resize_all_with_padding(
+                        batch_images, method="preserve", stop_requested=stop_requested
                     )
+                    if resize_res and resize_res[0]:
+                        batch_images = resize_res[0]
 
             if stop_requested and stop_requested():
                 break
@@ -395,7 +363,11 @@ def main(
 
 
 def running_average(
-    parent=None, single_process=None, batch_id=None, progress_callback=None
+    parent=None,
+    single_process=None,
+    batch_id=None,
+    progress_callback=None,
+    stop_callback=None,
 ):
     # ==========================================================
     # KONDISI 1: MODE BATCH (TANPA GUI)
@@ -405,6 +377,7 @@ def running_average(
             main(
                 db_path="pixel_refine_database.db",
                 update_progress=progress_callback,
+                stop_requested=stop_callback,
                 single_process=False,
                 batch_id=batch_id,
             )
@@ -439,8 +412,11 @@ def running_average(
     layout.addWidget(progress_bar)
 
     # Inisialisasi thread worker
-    worker = ThreadWorker(
-        "pixel_refine_database.db", single_process=single_process, batch_id=batch_id
+    worker = BaseAlgorithmWorker(
+        main,
+        "pixel_refine_database.db",
+        single_process=single_process,
+        batch_id=batch_id,
     )
     # Menghubungkan signal worker ke fungsi pembaruan UI
     worker.progress_updated.connect(

@@ -11,6 +11,9 @@ import os
 import concurrent.futures
 from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
+from pixel_refine_desktop.enhance_stack.core.algorithm.base_worker import (
+    BaseAlgorithmWorker,
+)
 
 from PySide6.QtCore import Qt
 
@@ -53,6 +56,7 @@ class FarnebackAlgorithm:
                 FROM batch_process_image
                 JOIN images ON batch_process_image.image_id_batch = images.id
                 WHERE batch_process_image.batch_id = ?
+                ORDER BY batch_process_image.is_reference_batch DESC, images.path ASC
             """,
                 (batch_id,),
             )
@@ -614,9 +618,14 @@ def main(
     if not base_img_list or base_img_list[0] is None:
         raise RuntimeError("Base image gagal dimuat.")
     base_image_raw = base_img_list[0]
-    base_resized_list, (target_h, target_w) = resize_all_with_padding(
-        [base_image_raw], method="preserve"
+    resize_res = resize_all_with_padding(
+        [base_image_raw], method="preserve", stop_requested=stop_requested
     )
+    if not resize_res or not resize_res[0]:
+        raise RuntimeError("Gagal melakukan resize pada gambar referensi.")
+
+    base_resized_list = resize_res[0]
+    target_h, target_w = resize_res[1]
     base_image = base_resized_list[0]
 
     # Hapus referensi yang tidak perlu untuk membebaskan memori
@@ -713,7 +722,11 @@ def main(
 
 
 def running_farneback_optical_flow(
-    parent=None, single_process=None, batch_id=None, progress_callback=None
+    parent=None,
+    single_process=None,
+    batch_id=None,
+    progress_callback=None,
+    stop_callback=None,
 ):
 
     # ==========================================================
@@ -724,6 +737,7 @@ def running_farneback_optical_flow(
             main(
                 db_path="pixel_refine_database.db",
                 update_progress=progress_callback,
+                stop_requested=stop_callback,
                 single_process=False,
                 batch_id=batch_id,
             )
@@ -770,7 +784,7 @@ def running_farneback_optical_flow(
     )
     layout.addWidget(progress_bar)
 
-    worker = ImageProcessingMultiThreading(
+    worker = BaseAlgorithmWorker(
         main,
         "pixel_refine_database.db",
         single_process=single_process,

@@ -19,16 +19,18 @@ from PIL import Image
 
 try:
     import rawpy
+
     RAWPY_AVAILABLE = True
 except ImportError:
     RAWPY_AVAILABLE = False
-    
+
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 
 
 # =========================================================================
 # === 2. MANAJEMEN DATA & I/O (Database, File, Metadata)
 # =========================================================================
+
 
 def get_all_image_paths_for_single_process(db_path: str) -> list:
     """
@@ -51,9 +53,9 @@ def get_all_image_paths_for_single_process(db_path: str) -> list:
                     i.path ASC
             """
             cursor.execute(sql_query)
-            
+
             all_rows = cursor.fetchall()
-            
+
             valid_image_paths = []
             ids_to_delete = []
 
@@ -66,36 +68,40 @@ def get_all_image_paths_for_single_process(db_path: str) -> list:
                     # Jika file tidak ada, tandai ID-nya untuk dihapus
                     print(f"Path not found, marking for deletion from DB: {image_path}")
                     ids_to_delete.append(image_id)
-            
+
             # --- Pembersihan Database (jika ada yang perlu dihapus) ---
             if ids_to_delete:
-                print(f"Deleting {len(ids_to_delete)} invalid entries from the database...")
+                print(
+                    f"Deleting {len(ids_to_delete)} invalid entries from the database..."
+                )
                 # Buat placeholder string, misal: (?, ?, ?)
-                placeholders = ', '.join(['?'] * len(ids_to_delete))
-                
+                placeholders = ", ".join(["?"] * len(ids_to_delete))
+
                 # Hapus dari tabel relasi terlebih dahulu
                 cursor.execute(
                     f"DELETE FROM single_process_image WHERE image_id_single IN ({placeholders})",
-                    ids_to_delete
+                    ids_to_delete,
                 )
-                
+
                 # Kemudian hapus dari tabel utama 'images'
                 cursor.execute(
-                    f"DELETE FROM images WHERE id IN ({placeholders})",
-                    ids_to_delete
+                    f"DELETE FROM images WHERE id IN ({placeholders})", ids_to_delete
                 )
-                
-                conn.commit() # Simpan perubahan
-            
+
+                conn.commit()  # Simpan perubahan
+
             return valid_image_paths
 
     except sqlite3.Error as e:
         print(f"Database error in get_all_image_paths_for_single_process: {e}")
-        return [] 
-    except Exception as e:
-        print(f"An unexpected error occurred in get_all_image_paths_for_single_process: {e}")
         return []
-        
+    except Exception as e:
+        print(
+            f"An unexpected error occurred in get_all_image_paths_for_single_process: {e}"
+        )
+        return []
+
+
 def get_all_image_paths_for_batch_process(db_path, batch_id):
     """
     Mengambil semua path gambar untuk batch ID tertentu, memvalidasi,
@@ -105,16 +111,19 @@ def get_all_image_paths_for_batch_process(db_path, batch_id):
         with sqlite3.connect(db_path) as conn:
             cursor = conn.cursor()
             # Ambil path dan ID
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT images.id, images.path 
                 FROM batch_process_image
                 JOIN images ON batch_process_image.image_id_batch = images.id
                 WHERE batch_process_image.batch_id = ?
-                ORDER BY images.path ASC
-            """, (batch_id,))
-            
+                ORDER BY batch_process_image.is_reference_batch DESC, images.path ASC
+            """,
+                (batch_id,),
+            )
+
             all_rows = cursor.fetchall()
-            
+
             valid_image_paths = []
             ids_to_delete = []
 
@@ -128,39 +137,44 @@ def get_all_image_paths_for_batch_process(db_path, batch_id):
 
             # --- Pembersihan Database ---
             if ids_to_delete:
-                print(f"Deleting {len(ids_to_delete)} invalid entries from the database...")
-                placeholders = ', '.join(['?'] * len(ids_to_delete))
-                
+                print(
+                    f"Deleting {len(ids_to_delete)} invalid entries from the database..."
+                )
+                placeholders = ", ".join(["?"] * len(ids_to_delete))
+
                 # Hapus dari tabel relasi `batch_process_image`
                 # Kita perlu memastikan kita hanya menghapus untuk batch_id yang relevan
                 # dan image_id yang tidak valid
                 for image_id in ids_to_delete:
                     cursor.execute(
                         "DELETE FROM batch_process_image WHERE batch_id = ? AND image_id_batch = ?",
-                        (batch_id, image_id)
+                        (batch_id, image_id),
                     )
 
                 # Hapus dari tabel `images`
                 cursor.execute(
-                    f"DELETE FROM images WHERE id IN ({placeholders})",
-                    ids_to_delete
+                    f"DELETE FROM images WHERE id IN ({placeholders})", ids_to_delete
                 )
-                
+
                 conn.commit()
 
             return valid_image_paths
-            
+
     except sqlite3.Error as e:
         print(f"Database error in get_all_image_paths_for_batch_process: {e}")
         return []
     except Exception as e:
-        print(f"An unexpected error occurred in get_all_image_paths_for_batch_process: {e}")
+        print(
+            f"An unexpected error occurred in get_all_image_paths_for_batch_process: {e}"
+        )
         return []
+
 
 def _prepare_image_array_from_raw(original_path):
     # Fungsi ini tidak berubah
     try:
-        if not RAWPY_AVAILABLE: return None
+        if not RAWPY_AVAILABLE:
+            return None
         with rawpy.imread(original_path) as raw:
             gamma_setting = (2.222, 4.5)
             # gamma_setting = (1,1)
@@ -172,8 +186,9 @@ def _prepare_image_array_from_raw(original_path):
                 output_bps=16,
                 output_color=rawpy.ColorSpace.sRGB,
                 highlight_mode=rawpy.HighlightMode.Blend,
+                user_flip=0,  # [FIX] Disable auto-rotation for processing consistency
             )
-        if rgb.flags['WRITEABLE']:
+        if rgb.flags["WRITEABLE"]:
             bgr = rgb
             b_channel = bgr[:, :, 0].copy()
             bgr[:, :, 0] = bgr[:, :, 2]
@@ -182,14 +197,29 @@ def _prepare_image_array_from_raw(original_path):
     except Exception as e:
         print(f"Error membaca RAW file {original_path}: {e}")
         return None
-     
+
+
 def load_images_from_paths(image_paths, stop_requested=None):
     images = []
-    raw_extensions = {'.dng', '.cr2', '.nef', '.arw', '.orf', '.rw2', '.pef', '.srw'}
+    raw_extensions = {".dng", ".cr2", ".nef", ".arw", ".orf", ".rw2", ".pef", ".srw"}
     num_threads = 3
 
     raw_futures = []
     standard_futures = []
+
+    def _load_standard_with_orientation(path):
+        try:
+            from PIL import Image, ImageOps
+
+            with Image.open(path) as img:
+                img = ImageOps.exif_transpose(img)
+                if img.mode in ("RGBA", "LA", "P"):
+                    img = img.convert("RGB")
+                img_np = np.array(img)
+                return cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+        except Exception as e:
+            print(f"Error loading standard image {path} with PIL: {e}")
+            return cv2.imread(path, cv2.IMREAD_UNCHANGED)
 
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
         for path in image_paths:
@@ -210,8 +240,12 @@ def load_images_from_paths(image_paths, stop_requested=None):
 
         # Ambil hasil dari gambar RAW
         for future in as_completed(raw_futures):
+            # Cek pembatalan SEBELUM menunggu hasil
             if stop_requested and stop_requested():
-                break
+                # Shutdown executor secepat mungkin (Tersedia di Python 3.9+)
+                executor.shutdown(wait=False, cancel_futures=True)
+                return images
+
             try:
                 img = future.result()
                 if img is not None:
@@ -221,8 +255,11 @@ def load_images_from_paths(image_paths, stop_requested=None):
 
         # Ambil hasil dari gambar biasa
         for future in as_completed(standard_futures):
+            # Cek pembatalan SEBELUM menunggu hasil
             if stop_requested and stop_requested():
-                break
+                executor.shutdown(wait=False, cancel_futures=True)
+                return images
+
             try:
                 img = future.result()
                 if img is not None:
@@ -231,6 +268,7 @@ def load_images_from_paths(image_paths, stop_requested=None):
                 print(f"Error loading standard image: {e}")
 
     return images
+
 
 def save_to_hdf5(h5f, dataset_name, cropped, metadata=None):
     """
@@ -251,7 +289,9 @@ def save_to_hdf5(h5f, dataset_name, cropped, metadata=None):
 
     num_threads = os.cpu_count() or 4
     total_items = cropped.shape[0]
-    chunk_size = total_items // num_threads if total_items >= num_threads else total_items
+    chunk_size = (
+        total_items // num_threads if total_items >= num_threads else total_items
+    )
     # Gunakan multithreading untuk menulis dataset secara paralel
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
         futures = []
@@ -266,63 +306,79 @@ def save_to_hdf5(h5f, dataset_name, cropped, metadata=None):
 
     if metadata is not None:
         # Simpan metadata sebagai atribut (dalam format JSON)
-        dset.attrs['metadata'] = json.dumps(metadata)
-              
-def save_align_to_folder(image, index, original_path, align_folder=None, load_config_func=None):
+        dset.attrs["metadata"] = json.dumps(metadata)
+
+
+def save_align_to_folder(
+    image, index, original_path, align_folder=None, load_config_func=None
+):
     """
     Menyimpan gambar dalam format TIFF ke folder yang ditentukan,
     kemudian mengembalikan metadata dari file asli ke file output menggunakan exiftool.
     [MODIFIED] Menggunakan logika penyimpanan yang lebih robust dengan kontrol kompresi.
     """
-    
+
     # Gunakan nilai default dari config jika align_folder tidak diberikan
     if align_folder is None:
         if load_config_func is None:
-            raise ValueError("Fungsi konfigurasi harus diberikan jika align_folder tidak diatur.")
+            raise ValueError(
+                "Fungsi konfigurasi harus diberikan jika align_folder tidak diatur."
+            )
         config = load_config_func()
         align_folder = config.get("align_folder")
 
     os.makedirs(align_folder, exist_ok=True)
-    
+
     # Ambil nama file tanpa ekstensi dari original_path
     base_name = os.path.splitext(os.path.basename(original_path))[0]
     file_path = os.path.join(align_folder, f"{base_name}_align.tiff")
 
     try:
-        
+
         save_params = [cv2.IMWRITE_TIFF_COMPRESSION, 1]
-        
+
         # Simpan gambar dengan parameter
         success = cv2.imwrite(file_path, image, save_params)
-        
+
         if not success:
-            print(f"Peringatan: OpenCV gagal menyimpan TIFF dengan parameter ke '{file_path}'. Mencoba lagi tanpa parameter.")
+            print(
+                f"Peringatan: OpenCV gagal menyimpan TIFF dengan parameter ke '{file_path}'. Mencoba lagi tanpa parameter."
+            )
             # Coba lagi tanpa parameter sebagai fallback
             success_fallback = cv2.imwrite(file_path, image)
             if not success_fallback:
                 print(f"FATAL: Gagal total menyimpan gambar ke '{file_path}'")
-                return None # Hentikan proses jika penyimpanan gagal total
+                return None  # Hentikan proses jika penyimpanan gagal total
     except Exception as e:
         print(f"FATAL: Terjadi error saat menyimpan gambar ke '{file_path}': {e}")
         return None
     # =====================================================================
-    
+
     # Logika multithreading untuk exiftool tidak berubah, karena sudah benar
     try:
         num_threads = os.cpu_count() or 4
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             future = executor.submit(
                 subprocess.run,
-                ["exiftool", "-overwrite_original", "-TagsFromFile", original_path, file_path],
+                [
+                    "exiftool",
+                    "-overwrite_original",
+                    "-TagsFromFile",
+                    original_path,
+                    file_path,
+                ],
                 check=True,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                stderr=subprocess.DEVNULL,
             )
-            future.result() # Tunggu hingga proses selesai
+            future.result()  # Tunggu hingga proses selesai
     except Exception as e:
-        print(f"Peringatan: Gagal menyalin metadata ke {file_path}. ExifTool mungkin tidak terpasang. Error: {e}")
-    
+        print(
+            f"Peringatan: Gagal menyalin metadata ke {file_path}. ExifTool mungkin tidak terpasang. Error: {e}"
+        )
+
     return file_path
+
 
 def save_image(image, output_path, reference_image_path=None):
     """
@@ -333,31 +389,29 @@ def save_image(image, output_path, reference_image_path=None):
         image_to_save = image
         ext = os.path.splitext(output_path)[1].lower()
         success = False
-        
-        if ext in ['.tif', '.tiff']:
+
+        if ext in [".tif", ".tiff"]:
             try:
                 # 1. Konversi BGR (format dari cv2.rotate) kembali ke RGB jika perlu
                 # Kita asumsikan gambar yang masuk ke save_image adalah BGR jika berwarna 3-channel
                 if len(image_to_save.shape) == 3 and image_to_save.shape[2] >= 3:
-                     # Pastikan konversi kembali ke RGB untuk tifffile
-                     image_to_write_tifffile = cv2.cvtColor(image_to_save, cv2.COLOR_BGR2RGB)
+                    # Pastikan konversi kembali ke RGB untuk tifffile
+                    image_to_write_tifffile = cv2.cvtColor(
+                        image_to_save, cv2.COLOR_BGR2RGB
+                    )
                 else:
-                     image_to_write_tifffile = image_to_save
-                     
+                    image_to_write_tifffile = image_to_save
+
                 # 2. Gunakan tifffile untuk menyimpan tanpa kompresi
-                tifffile.imwrite(
-                    output_path, 
-                    image_to_write_tifffile, 
-                    compression=None
-                )
+                tifffile.imwrite(output_path, image_to_write_tifffile, compression=None)
                 success = True
             except Exception as e:
                 print(f"Error: Failed to save TIFF to '{output_path}': {e}")
                 success = False
-                
+
         else:
             # Jika bukan TIFF, gunakan cv2.imwrite seperti biasa
-            save_params = [] # Tidak ada parameter kompresi khusus untuk non-TIFF
+            save_params = []  # Tidak ada parameter kompresi khusus untuk non-TIFF
             success = cv2.imwrite(output_path, image_to_save, save_params)
 
         if not success:
@@ -366,17 +420,24 @@ def save_image(image, output_path, reference_image_path=None):
         # --- Bagian ExifTool tidak berubah ---
         if reference_image_path and os.path.exists(reference_image_path):
             try:
-                # Salin metadata dari referensi (termasuk Orientation)
-                subprocess.run([
-                    "exiftool",
-                    "-q",
-                    "-overwrite_original",
-                    "-TagsFromFile", reference_image_path,
-                    output_path
-                ], check=True, capture_output=True)
+                # Salin metadata dari referensi
+                subprocess.run(
+                    [
+                        "exiftool",
+                        "-q",
+                        "-overwrite_original",
+                        "-TagsFromFile",
+                        reference_image_path,
+                        output_path,
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
             except (subprocess.CalledProcessError, FileNotFoundError) as e:
                 # Ini bukan error fatal, hanya peringatan
-                print(f" Warning: Failed to copy metadata to '{output_path}'. ExifTool may not be installed. Error: {e}")
+                print(
+                    f" Warning: Failed to copy metadata to '{output_path}'. ExifTool may not be installed. Error: {e}"
+                )
 
         return output_path
 
@@ -385,6 +446,7 @@ def save_image(image, output_path, reference_image_path=None):
         traceback.print_exc()
         return None
 
+
 def save_special_jpg_and_png(
     img_np: np.ndarray,
     dst_path: str,
@@ -392,7 +454,7 @@ def save_special_jpg_and_png(
     # --- Parameter Kompresi Baru ---
     quality: int = 98,
     optimize: bool = True,
-    png_compress_level: int = 8
+    png_compress_level: int = 8,
 ) -> str:
     """
     Mengkonversi array NumPy, menerapkan rotasi, dan menyimpannya ke JPG/PNG
@@ -410,7 +472,7 @@ def save_special_jpg_and_png(
             else:
                 with Image.open(reference_image_path) as ref_img:
                     orientation = ref_img.getexif().get(274, 1)
-                
+
                 if orientation == 3:
                     img_np = cv2.rotate(img_np, cv2.ROTATE_180)
                 elif orientation == 6:
@@ -422,69 +484,80 @@ def save_special_jpg_and_png(
 
     # Konversi tipe data jika perlu (tetap sama)
     image_to_save = img_np
-    if image_to_save.dtype == 'uint16':
-        image_to_save = (image_to_save / 256).astype('uint8')
-    
+    if image_to_save.dtype == "uint16":
+        image_to_save = (image_to_save / 256).astype("uint8")
+
     img = Image.fromarray(image_to_save)
-    
+
     file_ext = os.path.splitext(dst_path)[1].lower()
 
     # --- Logika Penyimpanan yang Ditingkatkan ---
-    if file_ext in ['.jpg', '.jpeg']:
+    if file_ext in [".jpg", ".jpeg"]:
         save_kwargs = {
-            'quality': quality,
-            'optimize': True,
-            'progressive': True  # Membuat JPG dimuat secara bertahap, kadang bisa sedikit lebih kecil
+            "quality": quality,
+            "optimize": True,
+            "progressive": True,  # Membuat JPG dimuat secara bertahap, kadang bisa sedikit lebih kecil
         }
         # Mengaktifkan Chroma Subsampling untuk ukuran file yang jauh lebih kecil
         if optimize:
             # '4:2:0' adalah standar untuk web dan sangat efisien.
             # Kode asli Anda menggunakan `subsampling=0` ('4:4:4') yang menjaga semua info warna.
-            save_kwargs['subsampling'] = '4:2:0' 
+            save_kwargs["subsampling"] = "4:2:0"
         else:
             # Jika tidak mau subsampling, samakan seperti kode asli Anda
-            save_kwargs['subsampling'] = 0
+            save_kwargs["subsampling"] = 0
 
         img.save(dst_path, **save_kwargs)
 
-    elif file_ext == '.png':
+    elif file_ext == ".png":
         img.save(
             dst_path,
             optimize=True,
-            compress_level=png_compress_level # Level 0 (tanpa kompresi) hingga 9 (maksimal)
+            compress_level=png_compress_level,  # Level 0 (tanpa kompresi) hingga 9 (maksimal)
         )
     else:
         # Fallback untuk format lain
         img.save(dst_path)
 
-
     # Logika menyalin metadata (tetap sama)
     if reference_image_path and os.path.exists(reference_image_path):
         try:
             subprocess.run(
-                ["exiftool", "-overwrite_original", "-TagsFromFile", reference_image_path, dst_path],
-                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                [
+                    "exiftool",
+                    "-overwrite_original",
+                    "-TagsFromFile",
+                    reference_image_path,
+                    dst_path,
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             subprocess.run(
                 ["exiftool", "-overwrite_original", "-Orientation=1", dst_path],
-                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
         except (subprocess.CalledProcessError, FileNotFoundError):
             pass
-    
+
     return dst_path
+
 
 def extract_exif(image_path):
     """
     Mengambil metadata EXIF dari file gambar menggunakan exifread.
     Mengembalikan dictionary dengan data EXIF dan path file.
     """
-    with open(image_path, 'rb') as f:
+    with open(image_path, "rb") as f:
         tags = exifread.process_file(f, details=False)
     # Ubah setiap value ke string agar dapat di-serialisasi ke JSON
     exif_data = {tag: str(value) for tag, value in tags.items()}
     exif_data["file"] = image_path
     return exif_data
+
 
 def extract_all_metadata(image_paths, metadata_file="metadata.json"):
     """
@@ -498,7 +571,7 @@ def extract_all_metadata(image_paths, metadata_file="metadata.json"):
             metadata_list.append(metadata)
         except Exception as e:
             print(f"Failed to extract metadata from {path}: {e}")
-    
+
     # Jika file sudah ada, muat data yang sudah tersimpan
     if os.path.exists(metadata_file):
         try:
@@ -509,14 +582,14 @@ def extract_all_metadata(image_paths, metadata_file="metadata.json"):
             existing_data = []
     else:
         existing_data = []
-    
+
     # Tambahkan metadata baru ke data yang sudah ada
     existing_data.extend(metadata_list)
-    
+
     # Simpan kembali ke file JSON dengan penulisan indent agar mudah dibaca
     with open(metadata_file, "w") as f:
         json.dump(existing_data, f, indent=4)
-    
+
     return existing_data
 
 
@@ -524,32 +597,46 @@ def extract_all_metadata(image_paths, metadata_file="metadata.json"):
 # === 3. PRA-PEMROSESAN & UTILITAS GAMBAR
 # =========================================================================
 
-def prepare_gray(img):
-        if img is None: raise ValueError("Input image is None.")
-        if img.ndim == 3 and img.shape[2] == 3: gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        elif img.ndim == 3 and img.shape[2] == 4: gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY) # Tambahkan handle BGRA
-        elif img.ndim == 2: gray = img
-        else:
-            raise ValueError(f"Invalid image dimensions/channels: {img.shape}")
 
-        if gray.dtype != np.uint8:
-            max_val = np.max(gray)
-            if gray.dtype == np.float32 or gray.dtype == np.float64:
-                 if max_val <= 1.0 and np.min(gray) >= 0:
-                     gray_norm = (gray * 255.0).astype(np.uint8)
-                 else:
-                     if gray.dtype == np.uint16:
-                         gray_norm = (gray / 256.0).astype(np.uint8) # Asumsi 16-bit ke 8-bit
-                     elif gray.dtype == np.int16:
-                          gray_norm = ((gray / 256.0) + 128).astype(np.uint8) # Perkiraan kasar
-                     else:
-                         gray_norm = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-            elif gray.dtype == np.uint16:
-                 gray_norm = (gray / 256.0).astype(np.uint8)
+def prepare_gray(img):
+    if img is None:
+        raise ValueError("Input image is None.")
+    if img.ndim == 3 and img.shape[2] == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    elif img.ndim == 3 and img.shape[2] == 4:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)  # Tambahkan handle BGRA
+    elif img.ndim == 2:
+        gray = img
+    else:
+        raise ValueError(f"Invalid image dimensions/channels: {img.shape}")
+
+    if gray.dtype != np.uint8:
+        max_val = np.max(gray)
+        if gray.dtype == np.float32 or gray.dtype == np.float64:
+            if max_val <= 1.0 and np.min(gray) >= 0:
+                gray_norm = (gray * 255.0).astype(np.uint8)
             else:
-                 gray_norm = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-            return gray_norm
-        return gray
+                if gray.dtype == np.uint16:
+                    gray_norm = (gray / 256.0).astype(
+                        np.uint8
+                    )  # Asumsi 16-bit ke 8-bit
+                elif gray.dtype == np.int16:
+                    gray_norm = ((gray / 256.0) + 128).astype(
+                        np.uint8
+                    )  # Perkiraan kasar
+                else:
+                    gray_norm = cv2.normalize(
+                        gray, None, 0, 255, cv2.NORM_MINMAX
+                    ).astype(np.uint8)
+        elif gray.dtype == np.uint16:
+            gray_norm = (gray / 256.0).astype(np.uint8)
+        else:
+            gray_norm = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(
+                np.uint8
+            )
+        return gray_norm
+    return gray
+
 
 def prepare_image(image, grayscale=False, use_clahe=True):
     """
@@ -570,13 +657,13 @@ def prepare_image(image, grayscale=False, use_clahe=True):
 
     if grayscale:
         processed_image = prepare_gray(image)
-        
+
         if use_clahe:
             try:
                 clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(3, 3))
                 processed_image = clahe.apply(processed_image)
             except Exception:
-                pass 
+                pass
 
     else:
         if image.dtype == np.uint8:
@@ -588,9 +675,13 @@ def prepare_image(image, grayscale=False, use_clahe=True):
             if max_val <= 1.0 and min_val >= 0.0:
                 processed_image = (image * 255).astype(np.uint8)
             else:
-                processed_image = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                processed_image = cv2.normalize(
+                    image, None, 0, 255, cv2.NORM_MINMAX
+                ).astype(np.uint8)
         else:
-            processed_image = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            processed_image = cv2.normalize(
+                image, None, 0, 255, cv2.NORM_MINMAX
+            ).astype(np.uint8)
 
         if processed_image.ndim == 2:
             final_image = cv2.cvtColor(processed_image, cv2.COLOR_GRAY2BGR)
@@ -598,7 +689,7 @@ def prepare_image(image, grayscale=False, use_clahe=True):
             final_image = cv2.cvtColor(processed_image, cv2.COLOR_BGRA2BGR)
         else:
             final_image = processed_image
-            
+
         if use_clahe:
             try:
                 lab = cv2.cvtColor(final_image, cv2.COLOR_BGR2LAB)
@@ -610,9 +701,10 @@ def prepare_image(image, grayscale=False, use_clahe=True):
             except Exception:
                 pass
         else:
-            processed_image = final_image 
-    
+            processed_image = final_image
+
     return processed_image
+
 
 def resize_with_padding(img, target_size, pad_color=(0, 0, 0)):
     h, w = img.shape[:2]
@@ -631,12 +723,26 @@ def resize_with_padding(img, target_size, pad_color=(0, 0, 0)):
     top, bottom = delta_h // 2, delta_h - delta_h // 2
     left, right = delta_w // 2, delta_w - delta_w // 2
 
-    padded = cv2.copyMakeBorder(resized, top, bottom, left, right,
-                                 borderType=cv2.BORDER_CONSTANT, value=pad_color)
+    padded = cv2.copyMakeBorder(
+        resized,
+        top,
+        bottom,
+        left,
+        right,
+        borderType=cv2.BORDER_CONSTANT,
+        value=pad_color,
+    )
     return padded
 
-def resize_all_with_padding(images, method="preserve", verbose=False,
-                            pad_color=(0, 0, 0), return_original_sizes=False):
+
+def resize_all_with_padding(
+    images,
+    method="preserve",
+    verbose=False,
+    pad_color=(0, 0, 0),
+    return_original_sizes=False,
+    stop_requested=None,
+):
     """
     Resize + pad all images to the same size using letterbox strategy.
 
@@ -683,16 +789,22 @@ def resize_all_with_padding(images, method="preserve", verbose=False,
         # Ambil ukuran gambar pertama sebagai referensi
         target_h, target_w = original_sizes[0]
     else:
-        raise ValueError("Unsupported resize method. Use 'min', 'max', 'median', or 'preserve'.")
+        raise ValueError(
+            "Unsupported resize method. Use 'min', 'max', 'median', or 'preserve'."
+        )
 
     if verbose:
         print(f"Resizing all images to {target_w}x{target_h} using method: {method}")
 
     # --- di sini lanjutkan proses resize + padding sesuai target_h, target_w ---
 
-
     resized_images = []
     for img, (h, w) in zip(images, original_sizes):
+        if stop_requested and stop_requested():
+            if return_original_sizes:
+                return [], None, []
+            return [], None
+
         if h == target_h and w == target_w:
             resized_images.append(img)
         else:
@@ -703,30 +815,33 @@ def resize_all_with_padding(images, method="preserve", verbose=False,
     result = (resized_images, (target_h, target_w))
     return result if not return_original_sizes else (*result, original_sizes)
 
+
 @lru_cache(maxsize=3200)
-def gaussian_window(size, sigma_scale=1/6): 
-        """Menghasilkan jendela Gaussian 2D [0, 1] float32 C-contiguous."""
-        rows, cols = size
-        if rows <= 0 or cols <= 0:
-            return np.zeros((0, 0), dtype=np.float32)
-        sigma_y = max(rows * sigma_scale, 1e-6)
-        sigma_x = max(cols * sigma_scale, 1e-6)
-        y = np.arange(0, rows, 1, float) - (rows - 1) / 2
-        x = np.arange(0, cols, 1, float) - (cols - 1) / 2
-        gaussian_y = np.exp(-y**2 / (2 * sigma_y**2 + 1e-12))
-        gaussian_x = np.exp(-x**2 / (2 * sigma_x**2 + 1e-12))
-        window = np.outer(gaussian_y, gaussian_x)
-        max_val = window.max()
-        if max_val > 1e-6:
-             window = window / max_val
-        else:
-             window = np.zeros_like(window)
-        return np.ascontiguousarray(window.astype(np.float32))
-    
-# ================= Replikasi Fungsi C++ untuk Estimasi Noise & Pra-pemrosesan Gambar Referensi =================  
+def gaussian_window(size, sigma_scale=1 / 6):
+    """Menghasilkan jendela Gaussian 2D [0, 1] float32 C-contiguous."""
+    rows, cols = size
+    if rows <= 0 or cols <= 0:
+        return np.zeros((0, 0), dtype=np.float32)
+    sigma_y = max(rows * sigma_scale, 1e-6)
+    sigma_x = max(cols * sigma_scale, 1e-6)
+    y = np.arange(0, rows, 1, float) - (rows - 1) / 2
+    x = np.arange(0, cols, 1, float) - (cols - 1) / 2
+    gaussian_y = np.exp(-(y**2) / (2 * sigma_y**2 + 1e-12))
+    gaussian_x = np.exp(-(x**2) / (2 * sigma_x**2 + 1e-12))
+    window = np.outer(gaussian_y, gaussian_x)
+    max_val = window.max()
+    if max_val > 1e-6:
+        window = window / max_val
+    else:
+        window = np.zeros_like(window)
+    return np.ascontiguousarray(window.astype(np.float32))
+
+
+# ================= Replikasi Fungsi C++ untuk Estimasi Noise & Pra-pemrosesan Gambar Referensi =================
 MAD_TO_SIGMA_FACTOR = 1.4826
 _CLAHE_CACHE = {}
-_SIGMOID_LUT_CACHE = {}  
+_SIGMOID_LUT_CACHE = {}
+
 
 def estimate_noise_in_python(ref_image_gray_float: np.ndarray) -> float:
     """Estimasi noise dengan minimal alokasi memori. (TETAP SAMA)"""
@@ -747,6 +862,7 @@ def estimate_noise_in_python(ref_image_gray_float: np.ndarray) -> float:
     estimated_sigma = mad_value * MAD_TO_SIGMA_FACTOR
     return float(np.clip(estimated_sigma, 0.001, 0.999))
 
+
 def apply_s_curve_float32(img: np.ndarray, strength: float = 4.0, pivot: float = 0.5):
     """
     S-Curve float32 dengan pivot.
@@ -760,11 +876,14 @@ def apply_s_curve_float32(img: np.ndarray, strength: float = 4.0, pivot: float =
 
     return (y * 255.0).astype(np.float32)
 
-def preprocess_in_python(ref_image_float: np.ndarray,
-                         s_curve_contrast: float = 4.5,
-                         s_curve_pivot: float = 0.20,
-                         use_raft: bool = False,
-                         use_sharpen: bool = False): # Tambahkan parameter ini
+
+def preprocess_in_python(
+    ref_image_float: np.ndarray,
+    s_curve_contrast: float = 4.5,
+    s_curve_pivot: float = 0.20,
+    use_raft: bool = False,
+    use_sharpen: bool = False,
+):  # Tambahkan parameter ini
 
     img = ref_image_float
     if img.dtype != np.float32:
@@ -775,7 +894,7 @@ def preprocess_in_python(ref_image_float: np.ndarray,
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         else:
             gray = img
-        
+
         # Logika Laplacian hanya dijalankan jika use_sharpen=True
         if use_sharpen:
             laplacian = cv2.Laplacian(gray, cv2.CV_32F, ksize=3)
@@ -786,7 +905,10 @@ def preprocess_in_python(ref_image_float: np.ndarray,
 
     return img.astype(np.float32)
 
-def estimate_noise_variance(gray_image, edge_threshold_low=70, dilate_kernel_size=4, min_flat_pixels_ratio=0.1):
+
+def estimate_noise_variance(
+    gray_image, edge_threshold_low=70, dilate_kernel_size=4, min_flat_pixels_ratio=0.1
+):
     """
     Memperkirakan tingkat noise dalam gambar dengan menghitung varians Laplacian
     hanya pada area gambar yang dianggap "datar" (tidak ada tepi atau tekstur yang kuat).
@@ -801,18 +923,18 @@ def estimate_noise_variance(gray_image, edge_threshold_low=70, dilate_kernel_siz
         float: Varians noise yang diestimasi.
     """
     if gray_image is None or gray_image.size == 0:
-        return 0.0 # Atau nilai default yang sesuai
+        return 0.0  # Atau nilai default yang sesuai
 
     # 1. Deteksi tepi untuk mengidentifikasi area non-datar
     edges = cv2.Canny(gray_image, edge_threshold_low, edge_threshold_low * 2)
-    
+
     # 2. Dilatasi tepi untuk sedikit memperluas area non-datar
     kernel = np.ones((dilate_kernel_size, dilate_kernel_size), np.uint8)
     dilated_edges = cv2.dilate(edges, kernel, iterations=1)
-    
+
     # 3. Buat mask untuk area "datar" (piksel yang bukan bagian dari tepi yang diperluas)
     flat_mask = (dilated_edges == 0).astype(np.bool_)
-    
+
     # Periksa apakah ada cukup piksel "datar"
     num_flat_pixels = np.sum(flat_mask)
     if num_flat_pixels < (gray_image.size * min_flat_pixels_ratio):
@@ -821,13 +943,16 @@ def estimate_noise_variance(gray_image, edge_threshold_low=70, dilate_kernel_siz
 
     # 4. Hitung Laplacian dari gambar asli
     laplacian_output = cv2.Laplacian(gray_image, cv2.CV_64F)
-    
+
     # 5. Hitung varians hanya pada piksel yang dianggap "datar"
     variance = laplacian_output[flat_mask].var()
-    
+
     return variance
 
-def get_adaptive_bilateral(noise_level, min_noise, max_noise, min_d, max_d, min_sigma, max_sigma):
+
+def get_adaptive_bilateral(
+    noise_level, min_noise, max_noise, min_d, max_d, min_sigma, max_sigma
+):
     """
     Menghitung parameter untuk filter bilateral secara dinamis berdasarkan tingkat noise.
     """
@@ -848,11 +973,12 @@ def get_adaptive_bilateral(noise_level, min_noise, max_noise, min_d, max_d, min_
     d = int(round(calculated_d))
     if d % 2 == 0:
         d += 1
-    
+
     # Sigma bisa dibulatkan ke integer terdekat
     sigma = int(round(calculated_sigma))
-    
+
     return d, sigma, sigma
+
 
 def normalize_image(image, dtype, out=None):
     """
@@ -896,10 +1022,11 @@ def normalize_image(image, dtype, out=None):
         if out.shape != img_float.shape or out.dtype != np.float32:
             out.resize(img_float.shape, refcheck=False)
             out[:] = np.zeros_like(img_float, dtype=np.float32)
-        np.copyto(out, img_float, casting='unsafe')
+        np.copyto(out, img_float, casting="unsafe")
         return out
 
     return img_float
+
 
 # =========================================================================
 # === 4. LOGIKA INTI ALIGNMENT & FITUR
@@ -907,9 +1034,9 @@ def normalize_image(image, dtype, out=None):
 def deduplicate_keypoints(mkptsL, mkptsR, scores, image_shape, distance_thresh=10):
     """
     Menghilangkan duplikat keypoint yang mungkin muncul dari area tumpang tindih.
-    
+
     Hanya keypoint dengan skor kepercayaan tertinggi dalam radius tertentu yang dipertahankan.
-    
+
     Args:
         mkptsL, mkptsR: Array keypoint yang cocok.
         scores: Skor kepercayaan untuk setiap pasangan match.
@@ -929,35 +1056,39 @@ def deduplicate_keypoints(mkptsL, mkptsR, scores, image_shape, distance_thresh=1
             mkptsL = mkptsL.reshape(-1, 2)
             mkptsR = mkptsR.reshape(-1, 2)
         else:
-            raise ValueError(f"Input mkptsL harus berbentuk (N, 2), tetapi ditemukan {mkptsL.shape}")
-            
+            raise ValueError(
+                f"Input mkptsL harus berbentuk (N, 2), tetapi ditemukan {mkptsL.shape}"
+            )
+
     h, w = image_shape[:2]
     cols = int(w / distance_thresh)
     rows = int(h / distance_thresh)
-    
+
     grid = {}
-    
+
     sorted_indices = np.argsort(scores)[::-1]
 
     kept_indices = []
-    
+
     for idx in sorted_indices:
-        pt = mkptsL[idx]  
-        
+        pt = mkptsL[idx]
+
         grid_col = int(pt[0] / distance_thresh)
         grid_row = int(pt[1] / distance_thresh)
-        
+
         is_duplicate = False
         for r_offset in range(-1, 2):
             for c_offset in range(-1, 2):
                 cell_key = (grid_row + r_offset, grid_col + c_offset)
                 if cell_key in grid:
-                    if np.linalg.norm(pt - grid[cell_key]) < distance_thresh: # SEKARANG: Menghitung jarak Euclidean yang benar
+                    if (
+                        np.linalg.norm(pt - grid[cell_key]) < distance_thresh
+                    ):  # SEKARANG: Menghitung jarak Euclidean yang benar
                         is_duplicate = True
                         break
             if is_duplicate:
                 break
-        
+
         if not is_duplicate:
             kept_indices.append(idx)
             grid[(grid_row, grid_col)] = pt
@@ -965,97 +1096,137 @@ def deduplicate_keypoints(mkptsL, mkptsR, scores, image_shape, distance_thresh=1
     dedup_mkptsL = mkptsL[kept_indices]
     dedup_mkptsR = mkptsR[kept_indices]
     dedup_scores = scores[kept_indices]
-    
+
     return dedup_mkptsL, dedup_mkptsR, dedup_scores
 
+
 def do_warp_and_crop(image, matrix, pad, w, h, transformation_type):
-        """
-        Menerapkan padding, warping, dan cropping untuk menjaga tepi gambar.
-        """
-        try:
-            # Terapkan padding ke gambar asli
-            padded_image = cv2.copyMakeBorder(image, pad, pad, pad, pad, cv2.BORDER_REFLECT)
-            
-            target_w_padded = padded_image.shape[1]
-            target_h_padded = padded_image.shape[0]
-            
-            interpolation_flag = cv2.INTER_LANCZOS4
+    """
+    Menerapkan padding, warping, dan cropping untuk menjaga tepi gambar.
+    """
+    try:
+        # Terapkan padding ke gambar asli
+        padded_image = cv2.copyMakeBorder(image, pad, pad, pad, pad, cv2.BORDER_REFLECT)
 
-            # Lakukan warping pada gambar yang sudah di-padding
-            if transformation_type == 'homography':
-                compensated_padded = cv2.warpPerspective(padded_image, matrix, (target_w_padded, target_h_padded), flags=interpolation_flag, borderMode=cv2.BORDER_REFLECT)
+        target_w_padded = padded_image.shape[1]
+        target_h_padded = padded_image.shape[0]
+
+        interpolation_flag = cv2.INTER_LANCZOS4
+
+        # Lakukan warping pada gambar yang sudah di-padding
+        if transformation_type == "homography":
+            compensated_padded = cv2.warpPerspective(
+                padded_image,
+                matrix,
+                (target_w_padded, target_h_padded),
+                flags=interpolation_flag,
+                borderMode=cv2.BORDER_REFLECT,
+            )
+        else:
+            compensated_padded = cv2.warpAffine(
+                padded_image,
+                matrix,
+                (target_w_padded, target_h_padded),
+                flags=interpolation_flag,
+                borderMode=cv2.BORDER_REFLECT,
+            )
+
+        # Lakukan cropping untuk kembali ke ukuran gambar asli
+        # Pemeriksaan keamanan jika hasil warp lebih kecil dari yang diharapkan
+        if (
+            pad + h > compensated_padded.shape[0]
+            or pad + w > compensated_padded.shape[1]
+        ):
+            # Fallback: warp langsung tanpa menjaga tepi jika cropping tidak memungkinkan
+            if transformation_type == "homography":
+                return cv2.warpPerspective(
+                    image,
+                    matrix,
+                    (w, h),
+                    flags=cv2.INTER_CUBIC,
+                    borderMode=cv2.BORDER_CONSTANT,
+                )
             else:
-                compensated_padded = cv2.warpAffine(padded_image, matrix, (target_w_padded, target_h_padded), flags=interpolation_flag, borderMode=cv2.BORDER_REFLECT)
+                return cv2.warpAffine(
+                    image,
+                    matrix,
+                    (w, h),
+                    flags=cv2.INTER_CUBIC,
+                    borderMode=cv2.BORDER_CONSTANT,
+                )
+        else:
+            return compensated_padded[pad : pad + h, pad : pad + w]
 
-            # Lakukan cropping untuk kembali ke ukuran gambar asli
-            # Pemeriksaan keamanan jika hasil warp lebih kecil dari yang diharapkan
-            if pad + h > compensated_padded.shape[0] or pad + w > compensated_padded.shape[1]:
-                 # Fallback: warp langsung tanpa menjaga tepi jika cropping tidak memungkinkan
-                 if transformation_type == 'homography':
-                     return cv2.warpPerspective(image, matrix, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT)
-                 else:
-                     return cv2.warpAffine(image, matrix, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT)
-            else:
-                 return compensated_padded[pad:pad+h, pad:pad+w]
+    except (cv2.error, Exception):
+        return None
 
-        except (cv2.error, Exception):
-            return None
 
 def calculate_crop_parameters(matrix, w, h, transformation_type):
-        """
-        Fungsi statis untuk menghitung parameter padding yang diperlukan.
-        
-        Args:
-            matrix (np.ndarray): Matriks transformasi (2x3 untuk affine, 3x3 untuk homography).
-            w (int): Lebar gambar asli.
-            h (int): Tinggi gambar asli.
-            transformation_type (str): Tipe transformasi ('affine', 'homography', dll.).
+    """
+    Fungsi statis untuk menghitung parameter padding yang diperlukan.
 
-        Returns:
-            int: Nilai padding seragam yang diperlukan, atau None jika terjadi kesalahan.
-        """
-        corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(-1, 1, 2)
-        try:
-            if transformation_type == 'homography':
-                if matrix.shape != (3, 3): return None
-                transformed_corners = cv2.perspectiveTransform(corners, matrix)
-            else: # affine, similarity, euclidean
-                if matrix.shape != (2, 3): return None
-                transformed_corners = cv2.transform(corners, matrix)
+    Args:
+        matrix (np.ndarray): Matriks transformasi (2x3 untuk affine, 3x3 untuk homography).
+        w (int): Lebar gambar asli.
+        h (int): Tinggi gambar asli.
+        transformation_type (str): Tipe transformasi ('affine', 'homography', dll.).
 
-            if transformed_corners is None:
+    Returns:
+        int: Nilai padding seragam yang diperlukan, atau None jika terjadi kesalahan.
+    """
+    corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(
+        -1, 1, 2
+    )
+    try:
+        if transformation_type == "homography":
+            if matrix.shape != (3, 3):
                 return None
+            transformed_corners = cv2.perspectiveTransform(corners, matrix)
+        else:  # affine, similarity, euclidean
+            if matrix.shape != (2, 3):
+                return None
+            transformed_corners = cv2.transform(corners, matrix)
 
-            transformed_corners = transformed_corners.reshape(-1, 2)
-            min_x, min_y = transformed_corners.min(axis=0)
-            max_x, max_y = transformed_corners.max(axis=0)
-            
-            # Hitung padding yang diperlukan untuk setiap sisi
-            pad_x = max(0, int(np.ceil(max_x - w)))
-            pad_y = max(0, int(np.ceil(max_y - h)))
-            pad_left = max(0, int(np.ceil(-min_x)))
-            pad_top = max(0, int(np.ceil(-min_y)))
-
-            # Gunakan nilai padding terbesar untuk memastikan semua tepi masuk
-            pad = max(pad_x, pad_y, pad_left, pad_top)
-            return pad
-
-        except Exception:
+        if transformed_corners is None:
             return None
-    
+
+        transformed_corners = transformed_corners.reshape(-1, 2)
+        min_x, min_y = transformed_corners.min(axis=0)
+        max_x, max_y = transformed_corners.max(axis=0)
+
+        # Hitung padding yang diperlukan untuk setiap sisi
+        pad_x = max(0, int(np.ceil(max_x - w)))
+        pad_y = max(0, int(np.ceil(max_y - h)))
+        pad_left = max(0, int(np.ceil(-min_x)))
+        pad_top = max(0, int(np.ceil(-min_y)))
+
+        # Gunakan nilai padding terbesar untuk memastikan semua tepi masuk
+        pad = max(pad_x, pad_y, pad_left, pad_top)
+        return pad
+
+    except Exception:
+        return None
+
 
 # =========================================================================
 # === 5. LOGIKA CROPPING GLOBAL
 # =========================================================================
 
+
 def compute_transform_bounds(transform, w, h, transformation_type):
     i, base_points, target_points = transform
-    corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(-1, 1, 2)
+    corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(
+        -1, 1, 2
+    )
 
-    if transformation_type == 'homography':
-        matrix, mask = cv2.findHomography(np.array(base_points), np.array(target_points), cv2.RANSAC)
+    if transformation_type == "homography":
+        matrix, mask = cv2.findHomography(
+            np.array(base_points), np.array(target_points), cv2.RANSAC
+        )
     else:
-        matrix, mask = cv2.estimateAffine2D(np.array(base_points), np.array(target_points), method=cv2.RANSAC)
+        matrix, mask = cv2.estimateAffine2D(
+            np.array(base_points), np.array(target_points), method=cv2.RANSAC
+        )
 
     # Debugging jumlah keypoint dan inlier
     if matrix is None or mask is None:
@@ -1067,7 +1238,7 @@ def compute_transform_bounds(transform, w, h, transformation_type):
         # print(f"[DEBUG] Transform #{i}: total points = {total_points}, inliers = {inlier_count}")
 
     # Transform corners
-    if transformation_type == 'homography':
+    if transformation_type == "homography":
         transformed_corners = cv2.perspectiveTransform(corners, matrix)
     else:
         transformed_corners = cv2.transform(corners, matrix)
@@ -1078,15 +1249,22 @@ def compute_transform_bounds(transform, w, h, transformation_type):
 
     return min_xy, max_xy
 
-def compute_global_crop(all_transforms, total_images, w, h, transformation_type='homography'):
-    global_min_x = float('inf')
-    global_min_y = float('inf')
-    global_max_x = -float('inf')
-    global_max_y = -float('inf')
+
+def compute_global_crop(
+    all_transforms, total_images, w, h, transformation_type="homography"
+):
+    global_min_x = float("inf")
+    global_min_y = float("inf")
+    global_max_x = -float("inf")
+    global_max_y = -float("inf")
 
     with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = [executor.submit(compute_transform_bounds, transform, w, h, transformation_type)
-                   for transform in all_transforms]
+        futures = [
+            executor.submit(
+                compute_transform_bounds, transform, w, h, transformation_type
+            )
+            for transform in all_transforms
+        ]
 
         for future in futures:
             result = future.result()
@@ -1112,19 +1290,27 @@ def compute_global_crop(all_transforms, total_images, w, h, transformation_type=
 
     return crop_x, crop_y, crop_w, crop_h
 
+
 def crop_image(image, crop_bounds):
     """Melakukan cropping pada gambar sesuai batas crop yang diberikan."""
     crop_x, crop_y, crop_w, crop_h = crop_bounds
-    return image[crop_y:crop_y+crop_h, crop_x:crop_x+crop_w]
+    return image[crop_y : crop_y + crop_h, crop_x : crop_x + crop_w]
 
 
 # =========================================================================
 # === 6. PENYEMPURNAAN & PASCA-PEMROSESAN (Opsional)
 # =========================================================================
 
-def add_legend_heatmap(img, norm_values, labels=("Static (High Weight)", "Moving (Low Weight)"),
-                       font_scale_info=1.7, thickness_info=2,
-                       font_scale_label=1.2, thickness_label=2):
+
+def add_legend_heatmap(
+    img,
+    norm_values,
+    labels=("Static (High Weight)", "Moving (Low Weight)"),
+    font_scale_info=1.7,
+    thickness_info=2,
+    font_scale_label=1.2,
+    thickness_label=2,
+):
     h, w = img.shape[:2]
     legend_width = 1000
     legend_height = 500
@@ -1150,11 +1336,13 @@ def add_legend_heatmap(img, norm_values, labels=("Static (High Weight)", "Moving
     step_width = legend_width // num_steps
     for i in range(num_steps):
         val = int((i / (num_steps - 1)) * 255)
-        color = cv2.applyColorMap(np.array([[val]], dtype=np.uint8), cv2.COLORMAP_JET)[0, 0]
+        color = cv2.applyColorMap(np.array([[val]], dtype=np.uint8), cv2.COLORMAP_JET)[
+            0, 0
+        ]
         x_start = i * step_width
         x_end = (i + 1) * step_width if i < num_steps - 1 else legend_width
         legend_bar[:, x_start:x_end] = color
-    img[y0 + 5: y0 + 5 + bar_height, x0: x0 + legend_width] = legend_bar
+    img[y0 + 5 : y0 + 5 + bar_height, x0 : x0 + legend_width] = legend_bar
 
     # Font dan warna
     font = cv2.FONT_HERSHEY_SIMPLEX
@@ -1162,11 +1350,27 @@ def add_legend_heatmap(img, norm_values, labels=("Static (High Weight)", "Moving
 
     # Label kiri dan kanan di bawah color bar, dengan padding 50px
     label_y = y0 + 5 + bar_height + bar_padding
-    cv2.putText(img, labels[0], (x0, label_y),
-                font, font_scale_label, text_color, thickness_label, cv2.LINE_AA)
+    cv2.putText(
+        img,
+        labels[0],
+        (x0, label_y),
+        font,
+        font_scale_label,
+        text_color,
+        thickness_label,
+        cv2.LINE_AA,
+    )
     text_size = cv2.getTextSize(labels[1], font, font_scale_label, thickness_label)[0]
-    cv2.putText(img, labels[1], (x0 + legend_width - text_size[0], label_y),
-                font, font_scale_label, text_color, thickness_label, cv2.LINE_AA)
+    cv2.putText(
+        img,
+        labels[1],
+        (x0 + legend_width - text_size[0], label_y),
+        font,
+        font_scale_label,
+        text_color,
+        thickness_label,
+        cv2.LINE_AA,
+    )
 
     # Statistik
     high_thresh = 0.7
@@ -1178,7 +1382,7 @@ def add_legend_heatmap(img, norm_values, labels=("Static (High Weight)", "Moving
     info_lines = [
         f"High: {percent_high:.1f}%",
         f"Low: {percent_low:.1f}%",
-        f"Avg: {mean_val:.3f}"
+        f"Avg: {mean_val:.3f}",
     ]
 
     # Hitung tinggi font untuk spacing otomatis (berdasarkan font info)
@@ -1188,15 +1392,30 @@ def add_legend_heatmap(img, norm_values, labels=("Static (High Weight)", "Moving
     # Tampilkan statistik di bawah label dengan tambahan jarak
     for i, line in enumerate(info_lines):
         y_text = label_y + label_info_spacing + line_spacing * (i + 1)
-        cv2.putText(img, line, (x0, y_text),
-                    font, font_scale_info, text_color, thickness_info, cv2.LINE_AA)
+        cv2.putText(
+            img,
+            line,
+            (x0, y_text),
+            font,
+            font_scale_info,
+            text_color,
+            thickness_info,
+            cv2.LINE_AA,
+        )
 
     return img
 
-def temporal_consistency_refinement(weight_map_sum, temporal_mean, temporal_std, 
-                                           save_temporal_std_path=None,
-                                           max_boost=2.0, min_boost=0.5,
-                                           num_iterations=10, ksize=5):
+
+def temporal_consistency_refinement(
+    weight_map_sum,
+    temporal_mean,
+    temporal_std,
+    save_temporal_std_path=None,
+    max_boost=2.0,
+    min_boost=0.5,
+    num_iterations=10,
+    ksize=5,
+):
     """
     Versi refinement yang hemat memori. Menerima statistik yang sudah dihitung
     secara online (mean, std) daripada list peta bobot yang besar, sehingga
@@ -1204,12 +1423,13 @@ def temporal_consistency_refinement(weight_map_sum, temporal_mean, temporal_std,
     """
     # Metrik stabilitas: rasio mean terhadap standar deviasi
     stability_score = temporal_mean / (temporal_std + 1e-6)
-    
+
     # Gunakan persentil untuk ketahanan terhadap outlier
     p50_stability = np.percentile(stability_score, 50)
     p84_stability = np.percentile(stability_score, 84)
     std_equivalent = p84_stability - p50_stability
-    if std_equivalent < 1e-6: std_equivalent = 1.0
+    if std_equivalent < 1e-6:
+        std_equivalent = 1.0
 
     # --- LANGKAH 2: Hitung Faktor Penskalaan Awal ---
     delta = stability_score - p50_stability
@@ -1220,8 +1440,7 @@ def temporal_consistency_refinement(weight_map_sum, temporal_mean, temporal_std,
     refined_scaling_factors = scaling_factors
     for i in range(num_iterations):
         refined_scaling_factors = cv2.medianBlur(
-            refined_scaling_factors.astype(np.float32),
-            ksize=ksize
+            refined_scaling_factors.astype(np.float32), ksize=ksize
         )
 
     # --- LANGKAH 4: Terapkan Faktor Penskalaan Akhir secara In-place ---
@@ -1233,21 +1452,31 @@ def temporal_consistency_refinement(weight_map_sum, temporal_mean, temporal_std,
             min_std, max_std = np.min(temporal_std), np.max(temporal_std)
             if (max_std - min_std) > 1e-8:
                 norm_std = (temporal_std - min_std) / (max_std - min_std)
-                heatmap_color = cv2.applyColorMap((norm_std * 255).astype(np.uint8), cv2.COLORMAP_JET)
+                heatmap_color = cv2.applyColorMap(
+                    (norm_std * 255).astype(np.uint8), cv2.COLORMAP_JET
+                )
                 heatmap_with_legend = add_legend_heatmap(
                     heatmap_color,
                     norm_values=norm_std,
-                    labels=("Static (Low Std)", "Moving (High Std)")
+                    labels=("Static (Low Std)", "Moving (High Std)"),
                 )
                 os.makedirs(os.path.dirname(save_temporal_std_path), exist_ok=True)
                 cv2.imwrite(save_temporal_std_path, heatmap_with_legend)
         except Exception as e:
             print(f"Gagal menyimpan heatmap stabilitas temporal: {e}")
 
-def compute_optical_flow_images_multithreaded(base_gray, target_gray, process_func, num_blocks=(3, 3), overlap_ratio=0.3, use_gpu=False):
+
+def compute_optical_flow_images_multithreaded(
+    base_gray,
+    target_gray,
+    process_func,
+    num_blocks=(3, 3),
+    overlap_ratio=0.3,
+    use_gpu=False,
+):
     """
     Membagi gambar menjadi blok-blok dan memprosesnya secara paralel menggunakan fungsi yang diberikan.
-    
+
     Parameters:
       - base_gray: gambar grayscale untuk citra dasar.
       - target_gray: gambar grayscale untuk citra target.
@@ -1260,32 +1489,32 @@ def compute_optical_flow_images_multithreaded(base_gray, target_gray, process_fu
     blocks_x, blocks_y = num_blocks
     block_w = w // blocks_x
     block_h = h // blocks_y
-    
+
     result_full = np.zeros((h, w, 2), dtype=np.float32)
-    
+
     def process_block(x, y, bw, bh):
         overlap_x = int(bw * overlap_ratio)
         overlap_y = int(bh * overlap_ratio)
-        
+
         roi_x_start = max(0, x - overlap_x)
         roi_y_start = max(0, y - overlap_y)
         roi_x_end = min(w, x + bw + overlap_x)
         roi_y_end = min(h, y + bh + overlap_y)
-        
+
         if use_gpu:
             roi_base = base_gray.get()[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
             roi_target = target_gray.get()[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
         else:
             roi_base = base_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
             roi_target = target_gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
-        
+
         result_block = process_func(roi_base, roi_target)
-        
+
         offset_x = x - roi_x_start
         offset_y = y - roi_y_start
         h_block, w_block, _ = result_block.shape
-        result_full[y:y+h_block, x:x+w_block, :] = result_block
-    
+        result_full[y : y + h_block, x : x + w_block, :] = result_block
+
     with ThreadPoolExecutor(max_workers=blocks_x * blocks_y) as executor:
         futures = []
         for i in range(blocks_x):
@@ -1295,14 +1524,16 @@ def compute_optical_flow_images_multithreaded(base_gray, target_gray, process_fu
                 bw = block_w if i < blocks_x - 1 else w - x
                 bh = block_h if j < blocks_y - 1 else h - y
                 futures.append(executor.submit(process_block, x, y, bw, bh))
-        
+
         wait(futures)
-    
+
     return result_full
+
 
 # =========================================================================
 # === 7. LOGIKA PIPELINE & EKSEKUSI
 # =========================================================================
+
 
 def generate_balanced_batches(total_images, max_batch_size=10):
     """Sebuah generator yang menghasilkan indeks (awal, akhir) untuk setiap batch."""
@@ -1322,10 +1553,11 @@ def generate_balanced_batches(total_images, max_batch_size=10):
         yield (start_index, end_index)
         current_index = end_index
 
+
 def setup_balanced_batching(total_images, language_config, max_batch_size=12):
     """
     Menyiapkan seluruh logika batching, termasuk mencetak info ke konsol.
-    
+
     Fungsi ini menyembunyikan semua kompleksitas dan mengembalikan rencana batching
     yang siap digunakan oleh perulangan di fungsi `main`.
 
@@ -1335,12 +1567,12 @@ def setup_balanced_batching(total_images, language_config, max_batch_size=12):
         max_batch_size (int): Ukuran maksimum per batch.
 
     Returns:
-        list: Sebuah daftar tuple [(start1, end1), (start2, end2), ...] 
+        list: Sebuah daftar tuple [(start1, end1), (start2, end2), ...]
               yang merupakan rencana eksekusi batch. Mengembalikan list kosong jika
               tidak ada gambar.
     """
     if total_images <= 0:
-        return [] # Kembalikan list kosong jika tidak ada gambar
+        return []  # Kembalikan list kosong jika tidak ada gambar
 
     # 1. Panggil generator untuk membuat rencana batch
     batch_plan = list(generate_balanced_batches(total_images, max_batch_size))
@@ -1349,17 +1581,27 @@ def setup_balanced_batching(total_images, language_config, max_batch_size=12):
     # 2. Lakukan semua printing di sini untuk menjaga `main` tetap bersih
     print(language_config.NUMBER_OF_IMAGES_TO_BE_PROCESSED.format(total_images))
     print(language_config.NUMBER_OF_BATCHES_TO_BE_PROCESSED.format(total_batches))
-    
+
     # Buat string distribusi yang mudah dibaca
     distribusi_str = ", ".join([f"{end-start}" for start, end in batch_plan])
     # print(f"  -> Rencana distribusi gambar per batch: [{distribusi_str}]")
 
     # 3. Kembalikan rencana yang sudah jadi
-    return batch_plan        
+    return batch_plan
 
-def run_pipeline_non_crop(processor, image_paths, base_image, target_dims, 
-                           update_progress, stop_requested, save_align, align_folder, h5_file_handle,
-                           num_workers):
+
+def run_pipeline_non_crop(
+    processor,
+    image_paths,
+    base_image,
+    target_dims,
+    update_progress,
+    stop_requested,
+    save_align,
+    align_folder,
+    h5_file_handle,
+    num_workers,
+):
     """
     Pipeline sederhana dan tangguh menggunakan Thread Pool dengan progress bar real-time.
     Setiap thread memproses satu gambar, dan thread utama mengupdate progress saat masing-masing selesai.
@@ -1372,78 +1614,93 @@ def run_pipeline_non_crop(processor, image_paths, base_image, target_dims,
     # Kunci untuk operasi yang tidak thread-safe (HANYA HDF5)
     # progress_lock tidak lagi diperlukan karena progress di-handle oleh thread utama.
     h5_lock = threading.Lock()
-    
+
     # --- Simpan base image dulu ---
     # Progress dimulai dari 1 karena base image sudah ada
     if update_progress:
-        update_progress(1, total_images_in_stack, language_config.IMAGE_PROCESS_IN_PROGRESS.format(1, total_images_in_stack))
-        
+        update_progress(
+            1,
+            total_images_in_stack,
+            language_config.IMAGE_PROCESS_IN_PROGRESS.format(1, total_images_in_stack),
+        )
+
     if save_align:
         save_align_to_folder(base_image, 0, image_paths[0], align_folder)
     if h5_file_handle:
         with h5_lock:
-            save_to_hdf5(h5_file_handle, "image_0", base_image, extract_exif(image_paths[0]))
+            save_to_hdf5(
+                h5_file_handle, "image_0", base_image, extract_exif(image_paths[0])
+            )
 
     # --- Fungsi Worker Tunggal (LOGIKA PROGRESS DIHAPUS) ---
     def process_image_task(i, path):
         # Pemeriksaan stop_requested tetap penting
         if stop_requested and stop_requested():
             return
-        
+
         try:
             # 1. Muat & Resize
             img_list = load_images_from_paths([path], stop_requested=stop_requested)
             if not img_list or img_list[0] is None:
                 return
             target_image = resize_with_padding(img_list[0], target_dims)
-            
+
             # 2. Hitung Motion
             base_pts, target_pts = processor.calculate_global_motion(
                 base_image, target_image, stop_requested=stop_requested
             )
-            
+
             # 3. Kompensasi & Simpan
             if base_pts is not None and target_pts is not None:
-                compensated = processor.compensate_motion(target_image, base_pts, target_pts)
+                compensated = processor.compensate_motion(
+                    target_image, base_pts, target_pts
+                )
                 if compensated is not None:
                     if save_align:
                         save_align_to_folder(compensated, i, path, align_folder)
                     if h5_file_handle:
                         with h5_lock:
-                            save_to_hdf5(h5_file_handle, f"image_{i}", compensated, extract_exif(path))
+                            save_to_hdf5(
+                                h5_file_handle,
+                                f"image_{i}",
+                                compensated,
+                                extract_exif(path),
+                            )
         except Exception as e:
             # Penting untuk menangkap exception di sini agar bisa di-raise di thread utama
             print(f"⚠️ Error processing image {i} ({os.path.basename(path)}): {e}")
-            raise # Melempar kembali exception agar future.result() bisa menangkapnya
+            raise  # Melempar kembali exception agar future.result() bisa menangkapnya
         finally:
             # Cleanup RAM tetap di sini
             gc.collect()
 
     # --- Eksekusi Menggunakan Pola "as_completed" ---
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        
+
         tasks_to_process = image_paths[1:]
-        
+
         # Buat dictionary untuk melacak future
         future_to_path = {
             executor.submit(process_image_task, i, path): path
             for i, path in enumerate(tasks_to_process, start=1)
         }
-        
+
         # Inisialisasi progress. 1 untuk base image.
         completed_count = 1
 
         # Loop ini akan berjalan setiap kali sebuah tugas selesai
         for future in as_completed(future_to_path):
             if stop_requested and stop_requested():
-                break # Keluar dari loop jika diminta berhenti
+                break  # Keluar dari loop jika diminta berhenti
 
             path = future_to_path[future]
             try:
                 # Panggil .result() untuk memeriksa apakah ada exception di dalam thread
                 future.result()
             except Exception as exc:
-                print(f"Task for {os.path.basename(path)} generated an exception: {exc}")
+                print(
+                    f"Task for {os.path.basename(path)} generated an exception: {exc}"
+                )
 
             # Update progress di sini, di thread utama!
             completed_count += 1
@@ -1451,13 +1708,25 @@ def run_pipeline_non_crop(processor, image_paths, base_image, target_dims,
                 update_progress(
                     completed_count,
                     total_images_in_stack,
-                    language_config.IMAGE_PROCESS_IN_PROGRESS.format(completed_count, total_images_in_stack)
-                )         
+                    language_config.IMAGE_PROCESS_IN_PROGRESS.format(
+                        completed_count, total_images_in_stack
+                    ),
+                )
 
-def run_pipeline_global_crop(processor, image_paths, base_image, target_dims, 
-                             update_progress, stop_requested, transformation_type,
-                             save_align, align_folder, h5_file_handle,
-                             num_workers):
+
+def run_pipeline_global_crop(
+    processor,
+    image_paths,
+    base_image,
+    target_dims,
+    update_progress,
+    stop_requested,
+    transformation_type,
+    save_align,
+    align_folder,
+    h5_file_handle,
+    num_workers,
+):
     """
     Alur global crop:
       Stage 1 (paralel & hemat RAM) -> hitung transform
@@ -1469,9 +1738,13 @@ def run_pipeline_global_crop(processor, image_paths, base_image, target_dims,
 
     # --- TAHAP 1: Hitung transform (0% -> 50%) ---
     all_transforms = _run_transform_calculation_stage(
-        processor, images_to_process_for_transforms, base_image, target_dims,
-        update_progress, stop_requested,
-        num_workers=num_workers
+        processor,
+        images_to_process_for_transforms,
+        base_image,
+        target_dims,
+        update_progress,
+        stop_requested,
+        num_workers=num_workers,
     )
     if not all_transforms:
         print("Transform calculation failed for all images. Aborting global crop.")
@@ -1479,14 +1752,18 @@ def run_pipeline_global_crop(processor, image_paths, base_image, target_dims,
 
     if len(all_transforms) < len(images_to_process_for_transforms):
         failed_count = len(images_to_process_for_transforms) - len(all_transforms)
-        print(f"Warning: Could not calculate transforms for {failed_count} image(s). Continuing with the successful ones.")
+        print(
+            f"Warning: Could not calculate transforms for {failed_count} image(s). Continuing with the successful ones."
+        )
 
     if update_progress:
         update_progress(50, 100, "Computing global crop bounds...")
 
     crop_bounds = compute_global_crop(
         [(item[0], item[2], item[3]) for item in all_transforms],
-        total_images_in_stack, base_image.shape[1], base_image.shape[0],
+        total_images_in_stack,
+        base_image.shape[1],
+        base_image.shape[0],
         transformation_type=transformation_type,
     )
     if crop_bounds is None:
@@ -1494,17 +1771,30 @@ def run_pipeline_global_crop(processor, image_paths, base_image, target_dims,
 
     # --- TAHAP 3: Apply & Save (50% -> 100%) ---
     _run_apply_and_save_stage(
-        processor, all_transforms, crop_bounds, target_dims,
-        update_progress, stop_requested,
-        save_align, align_folder,
+        processor,
+        all_transforms,
+        crop_bounds,
+        target_dims,
+        update_progress,
+        stop_requested,
+        save_align,
+        align_folder,
         h5_file_handle,
-        base_image, image_paths[0],
-        num_workers=num_workers
+        base_image,
+        image_paths[0],
+        num_workers=num_workers,
     )
-    
-def _run_transform_calculation_stage(processor, image_paths, base_image, target_dims, 
-                                     update_progress, stop_requested,
-                                     num_workers):
+
+
+def _run_transform_calculation_stage(
+    processor,
+    image_paths,
+    base_image,
+    target_dims,
+    update_progress,
+    stop_requested,
+    num_workers,
+):
     """Tahap 1 yang disederhanakan: Menghitung transformasi secara paralel."""
     import os
 
@@ -1515,16 +1805,18 @@ def _run_transform_calculation_stage(processor, image_paths, base_image, target_
 
     # --- Fungsi Worker Tunggal ---
     def calculate_transform_task(i, path):
-        if stop_requested and stop_requested(): return None
+        if stop_requested and stop_requested():
+            return None
         try:
             img_list = load_images_from_paths([path], stop_requested=stop_requested)
-            if not img_list or img_list[0] is None: return None
-            
+            if not img_list or img_list[0] is None:
+                return None
+
             target_image = resize_with_padding(img_list[0], target_dims)
             base_pts, target_pts = processor.calculate_global_motion(
                 base_image, target_image, stop_requested=stop_requested
             )
-            
+
             if base_pts is not None and target_pts is not None:
                 return (i, path, base_pts, target_pts)
         except Exception as e:
@@ -1533,8 +1825,10 @@ def _run_transform_calculation_stage(processor, image_paths, base_image, target_
 
     # --- Eksekusi dan Kumpulkan Hasil ---
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        future_to_task = {executor.submit(calculate_transform_task, i, path): i 
-                          for i, path in enumerate(image_paths, start=1)}
+        future_to_task = {
+            executor.submit(calculate_transform_task, i, path): i
+            for i, path in enumerate(image_paths, start=1)
+        }
 
         results_received = 0
         for future in as_completed(future_to_task):
@@ -1545,61 +1839,83 @@ def _run_transform_calculation_stage(processor, image_paths, base_image, target_
             results_received += 1
             if result:
                 all_transforms.append(result)
-            
+
             if update_progress:
                 percent = (results_received / num_to_process) * 50
-                status = language_config.RUN_PROCESS_TRANSFORMATION.format(results_received, num_to_process)
+                status = language_config.RUN_PROCESS_TRANSFORMATION.format(
+                    results_received, num_to_process
+                )
                 update_progress(int(percent), 100, status)
 
     all_transforms.sort(key=lambda x: x[0])
     return all_transforms
 
-def _run_apply_and_save_stage(processor, temp_transforms, crop_bounds, target_dims,
-                              update_progress, stop_requested,
-                              save_align, align_folder,
-                              h5_file_handle,
-                              base_image, base_image_path,
-                              num_workers):
+
+def _run_apply_and_save_stage(
+    processor,
+    temp_transforms,
+    crop_bounds,
+    target_dims,
+    update_progress,
+    stop_requested,
+    save_align,
+    align_folder,
+    h5_file_handle,
+    base_image,
+    base_image_path,
+    num_workers,
+):
     """Tahap 3 yang disederhanakan: Menerapkan transformasi dan menyimpan secara paralel."""
 
     h5_lock = threading.Lock()
     progress_lock = threading.Lock()
 
-    tasks = [(0, base_image_path, None, None, base_image)] + \
-            [(i, path, base_pts, target_pts, None) for i, path, base_pts, target_pts in temp_transforms]
-    
+    tasks = [(0, base_image_path, None, None, base_image)] + [
+        (i, path, base_pts, target_pts, None)
+        for i, path, base_pts, target_pts in temp_transforms
+    ]
+
     num_to_save = len(tasks)
     completed_counter = {"count": 0}
-    
+
     # --- Fungsi Worker Tunggal ---
     def apply_and_save_task(task_data):
         i, path, base_pts, target_pts, image_data = task_data
-        if stop_requested and stop_requested(): return
+        if stop_requested and stop_requested():
+            return
 
         try:
             # 1. Muat gambar jika diperlukan
             if image_data is None:
                 img_list = load_images_from_paths([path], stop_requested=stop_requested)
-                if not img_list or img_list[0] is None: return
+                if not img_list or img_list[0] is None:
+                    return
                 image_data = resize_with_padding(img_list[0], target_dims)
 
             # 2. Proses: Kompensasi & Crop
             processed_image = None
-            if i > 0: # Target image
+            if i > 0:  # Target image
                 if base_pts is not None and target_pts is not None:
-                    compensated = processor.compensate_motion(image_data, base_pts, target_pts)
+                    compensated = processor.compensate_motion(
+                        image_data, base_pts, target_pts
+                    )
                     if compensated is not None:
                         processed_image = crop_image(compensated, crop_bounds)
-            else: # Base image
+            else:  # Base image
                 processed_image = crop_image(image_data, crop_bounds)
-            
+
             # 3. Simpan
             if processed_image is not None:
                 if save_align:
                     save_align_to_folder(processed_image, i, path, align_folder)
                 if h5_file_handle:
                     with h5_lock:
-                        save_to_hdf5(h5_file_handle, f"image_{i}", processed_image, extract_exif(path))
+                        save_to_hdf5(
+                            h5_file_handle,
+                            f"image_{i}",
+                            processed_image,
+                            extract_exif(path),
+                        )
         except Exception as e:
             print(f"⚠️ Apply/Save error {i} ({os.path.basename(path)}): {e}")
         finally:
@@ -1609,12 +1925,16 @@ def _run_apply_and_save_stage(processor, temp_transforms, crop_bounds, target_di
                 count = completed_counter["count"]
                 if update_progress:
                     percent = 50 + (count / num_to_save) * 50
-                    status = language_config.RUN_SAVING_TRANSFORMATION.format(count, num_to_save)
+                    status = language_config.RUN_SAVING_TRANSFORMATION.format(
+                        count, num_to_save
+                    )
                     update_progress(int(percent), 100, status)
-            
+
             del image_data
-            if 'processed_image' in locals(): del processed_image
-            if 'compensated' in locals(): del compensated
+            if "processed_image" in locals():
+                del processed_image
+            if "compensated" in locals():
+                del compensated
             gc.collect()
 
     # --- Eksekusi Menggunakan ThreadPoolExecutor ---
@@ -1622,5 +1942,4 @@ def _run_apply_and_save_stage(processor, temp_transforms, crop_bounds, target_di
         for task in tasks:
             if stop_requested and stop_requested():
                 break
-            executor.submit(apply_and_save_task, task)     
-               
+            executor.submit(apply_and_save_task, task)

@@ -10,8 +10,10 @@ import os
 from pathlib import Path
 from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 from PySide6.QtCore import Qt
-
 import h5py
+from pixel_refine_desktop.enhance_stack.core.algorithm.base_worker import (
+    BaseAlgorithmWorker,
+)
 import onnxruntime as ort
 import urllib
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
@@ -723,9 +725,14 @@ def main(
         num_workers = 1
 
     base_image_raw = base_img_list[0]
-    base_resized_list, (target_h, target_w) = resize_all_with_padding(
-        [base_image_raw], method="preserve"
+    resize_res = resize_all_with_padding(
+        [base_image_raw], method="preserve", stop_requested=stop_requested
     )
+    if not resize_res or not resize_res[0]:
+        raise RuntimeError("Gagal melakukan resize pada gambar referensi.")
+
+    base_resized_list = resize_res[0]
+    target_h, target_w = resize_res[1]
     base_image = base_resized_list[0]
 
     del base_image_raw, base_resized_list, base_img_list
@@ -777,7 +784,11 @@ def main(
 
 
 def running_light_glue(
-    parent=None, single_process=None, batch_id=None, progress_callback=None
+    parent=None,
+    single_process=None,
+    batch_id=None,
+    progress_callback=None,
+    stop_callback=None,
 ):
 
     # ==========================================================
@@ -788,6 +799,7 @@ def running_light_glue(
             main(
                 db_path="pixel_refine_database.db",
                 update_progress=progress_callback,
+                stop_requested=stop_callback,
                 single_process=False,
                 batch_id=batch_id,
             )
@@ -834,7 +846,7 @@ def running_light_glue(
     )
     layout.addWidget(progress_bar)
 
-    worker = ImageProcessingMultiThreading(
+    worker = BaseAlgorithmWorker(
         main,
         "pixel_refine_database.db",
         single_process=single_process,

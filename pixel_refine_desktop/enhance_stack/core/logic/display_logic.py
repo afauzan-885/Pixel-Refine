@@ -272,3 +272,60 @@ class DisplayLogic:
                 results.append({"name": display_name, "path": os.path.abspath(path)})
 
         return sorted(results, key=lambda x: x["name"])
+
+    def check_visible_cards(self, all_cards, grid_container, viewport_getter):
+        """
+        Detect cards visible in viewport and load their thumbnails lazily.
+
+        Args:
+            all_cards: Dict of card_id -> ImageCard
+            grid_container: GridContainer widget
+            viewport_getter: Callable that returns viewport widget
+
+        Returns:
+            List of (path, card) tuples to load
+        """
+        if not all_cards or grid_container.isHidden():
+            return []
+
+        # Get visible area (viewport)
+        viewport = viewport_getter()
+        visible_region = viewport.rect()
+
+        to_load = []
+
+        for card_id, card in all_cards.items():
+            try:
+                # Check if card is visible in viewport
+                from PySide6.QtCore import QPoint, QRect
+
+                card_pos = card.mapTo(viewport, QPoint(0, 0))
+                card_rect = QRect(card_pos, card.size())
+
+                if visible_region.intersects(card_rect):
+                    # Card is visible, check if needs loading
+                    if (
+                        card._is_loading or not card.has_image()
+                    ) and not card._is_fetching:
+                        card._is_fetching = True
+                        to_load.append((card._image_path, card))
+            except Exception:
+                continue
+
+        return to_load
+
+    def load_visible_thumbnails(self, to_load_pairs):
+        """
+        Load thumbnails for visible cards.
+
+        Args:
+            to_load_pairs: List of (path, card, callback_maker) tuples
+        """
+        if not to_load_pairs:
+            return
+
+        pairs = []
+        for path, card, callback_maker in to_load_pairs:
+            pairs.append((path, callback_maker(card)))
+
+        self.load_thumbnails_bulk_async(pairs)

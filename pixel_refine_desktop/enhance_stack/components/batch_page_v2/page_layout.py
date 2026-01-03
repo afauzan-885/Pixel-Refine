@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QMessageBox,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from pixel_refine_desktop.ui.resources.GenericUILibrary.store import get_store
 from typing import TYPE_CHECKING, Any
 
@@ -113,10 +113,9 @@ def _load_batch_content(layout_instance, batch_id):
 
 
 def _handle_images_imported(layout_instance, file_paths):
-    if not file_paths:
-        return
-
-    # Get current batch ID
+    """
+    Delegates image import handling to ImportManager.
+    """
     display_panel = layout_instance.workspace_panel.display_panel
     current_batch_id = display_panel.current_batch_id
 
@@ -128,31 +127,18 @@ def _handle_images_imported(layout_instance, file_paths):
         )
         return
 
-    # --- PERBAIKAN: GUNAKAN THREADING ---
     try:
-        # Get batch name for info
-        batch_name = "batch"
-        batch = layout_instance.controller.get_batch(current_batch_id)
-        if batch:
-            batch_name = batch.name
-
-        # Buat instance thread import khusus batch
-        # Simpan reference di layout_instance agar tidak terkena garbage collection
-        layout_instance.import_worker = BatchImageImportThreading(
-            database_manager=layout_instance.database_manager,
-            image_paths=file_paths,
-            batch_id=current_batch_id,
-            batch_name=batch_name,
-            batch_size=5,  # Batch kecil agar update UI lebih sering
-            delay_ms=10,  # Delay tipis agar UI punya waktu bernapas
+        # Use ImportManager's logic instead of manual threading setup here
+        layout_instance.import_worker = (
+            display_panel.import_manager.handle_batch_import(
+                controller=layout_instance.controller,
+                database_manager=layout_instance.database_manager,
+                file_paths=file_paths,
+                batch_id=current_batch_id,
+            )
         )
 
-        # 1. Hubungkan ke fungsi add_single_image_to_grid (Real-time update)
-        layout_instance.import_worker.image_added_signal.connect(
-            display_panel.add_single_image_to_grid
-        )
-
-        # 2. Hubungkan progress bar (jika ada di algorithm panel)
+        # Connect specific UI elements if needed (e.g. algorithm panel progress bar)
         if hasattr(layout_instance.workspace_panel.algorithm_panel, "progress_bar"):
             prog_bar = layout_instance.workspace_panel.algorithm_panel.progress_bar
             prog_bar.setVisible(True)
@@ -160,30 +146,10 @@ def _handle_images_imported(layout_instance, file_paths):
                 lambda val, left: prog_bar.setValue(val)
             )
 
-        # 3. Handler saat selesai (Tanpa QMessageBox)
-        def on_finished(total):
-            if hasattr(layout_instance.workspace_panel.algorithm_panel, "progress_bar"):
-                layout_instance.workspace_panel.algorithm_panel.progress_bar.setVisible(
-                    False
-                )
-            # Show final toast
-            display_panel.toast.show_message(
-                f"Selesai mengimpor {total} gambar ke {batch_name}.", duration=3000
+            # Hide progress bar when done
+            layout_instance.import_worker.completion_signal.connect(
+                lambda _: prog_bar.setVisible(False)
             )
-            print(f"Successfully imported {total} images to batch {current_batch_id}")
-            # Notify DisplayPanel about finish
-            display_panel.on_batch_import_finished(current_batch_id)
-
-        layout_instance.import_worker.completion_signal.connect(on_finished)
-
-        # 4. Notify DisplayPanel about start & Jalankan thread
-        display_panel.on_batch_import_started(current_batch_id)
-        layout_instance.import_worker.start()
-
-        # Register to ProcessManager for safe cancellation on batch switch
-        ProcessManager.instance().register_thread(
-            "batch_import", layout_instance.import_worker
-        )
 
     except Exception as e:
         QMessageBox.critical(
@@ -199,9 +165,6 @@ def setup_signals(layout_instance):
 
     if hasattr(layout_instance, "save_as_button"):
         layout_instance.save_as_button.clicked.connect(layout_instance.save_image)
-
-
-from PySide6.QtCore import Signal
 
 
 class BatchPageV2Layout(QWidget):

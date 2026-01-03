@@ -1,3 +1,5 @@
+from .quick_batch_dialog import QuickBatchDialog
+from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -25,6 +27,10 @@ from pixel_refine_desktop.enhance_stack.components.batch_page_v2.batch_process_d
     BatchProcessDialog,
 )
 from pixel_refine_desktop.enhance_stack.core.logic.algorithm_logic import AlgorithmLogic
+from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
+from pixel_refine_desktop.enhance_stack.core.logic.batch_selection_handler import (
+    BatchSelectionHandler,
+)
 from pixel_refine_desktop.ui.resources.animations.animation_manager import (
     HeightAnimator,
 )
@@ -46,6 +52,7 @@ class RightPanel(QWidget, SyncMixin):
         self.left_panel = left_panel
         self.logic = AlgorithmLogic()
         self.height_animator = HeightAnimator(self)
+        self.selection_handler = BatchSelectionHandler(self)
         self._is_collapsed = True  # Track state for resize logic
         self.current_batch_id = None  # Track active batch for JSON persistence
         self._is_syncing = False  # Flag to avoid recursion during sync
@@ -62,31 +69,6 @@ class RightPanel(QWidget, SyncMixin):
 
         self._setup_ui()
         self._load_batches()
-
-    def _get_json_path(self):
-        """Return absolute path to batch_parameter.json."""
-        return os.path.join("database", "align", "batch_parameter.json")
-
-    def _load_json_state(self):
-        """Read JSON state safely."""
-        path = self._get_json_path()
-        if os.path.exists(path):
-            try:
-                with open(path, "r") as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, IOError) as e:
-                print(f"[RightPanel] Error loading JSON: {e}")
-        return {}
-
-    def _save_json_state(self, all_data):
-        """Write JSON state safely."""
-        path = self._get_json_path()
-        try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w") as f:
-                json.dump(all_data, f, indent=4)
-        except IOError as e:
-            print(f"[RightPanel] Error saving JSON: {e}")
 
     def on_store_changed(self, key, value):
         """React to store changes (SyncMixin handles bindings)."""
@@ -122,10 +104,9 @@ class RightPanel(QWidget, SyncMixin):
 
     def _save_batch_settings(self):
         """Save current UI values to store under the current batch scope."""
-        if not self.current_batch_id:
+        if not self.current_batch_id or not self._store:
             return
 
-        str_id = str(self.current_batch_id)
         settings = {
             "alignment_algo": self.align_form.get_value(),
             "super_resolution_algo": self.sr_form.get_value(),
@@ -138,21 +119,9 @@ class RightPanel(QWidget, SyncMixin):
             not in ["None", "No Denoising"],
         }
 
-        # Save to store
-        # Use silent_set to update individual keys within the scope efficiently
-        # This prevents the "625.625" nesting issue if str_id was misused
-        self._store.update_bulk(
-            {
-                f"{str_id}.alignment_algo": settings["alignment_algo"],
-                f"{str_id}.super_resolution_algo": settings["super_resolution_algo"],
-                f"{str_id}.denoising_algo": settings["denoising_algo"],
-                f"{str_id}.checkbox_align_images": settings["checkbox_align_images"],
-                f"{str_id}.checkbox_super_resolution": settings[
-                    "checkbox_super_resolution"
-                ],
-                f"{str_id}.checkbox_denoising": settings["checkbox_denoising"],
-            },
-            save=True,
+        # Use logic module to update store
+        batch_parameter_manager.update_batch_settings(
+            self._store, self.current_batch_id, settings
         )
 
     def _setup_ui(self):
@@ -347,15 +316,41 @@ class RightPanel(QWidget, SyncMixin):
         if not self.controller:
             return
 
-        name, ok = QInputDialog.getText(self, "New Batch", "Enter batch name:")
-        if ok and name:
-            batch_id = self.controller.create_batch(name)
-            if batch_id:
-                self.list_group.add_item(name, value=batch_id)
-                # Auto select new item untuk display di workspace
-                self.list_group.select_item_by_value(batch_id)
-                # Emit signal untuk load batch ke workspace
-                self.batch_selected.emit(batch_id)
+        # 1. Load preferences from batch_parameter.json
+        all_params = batch_parameter_manager.load_json_state()
+        quick_create_enabled = all_params.get("quick_batch_creation", False)
+
+        # 2. Generate default name
+        all_batches = self.controller.get_all_batches()
+        next_index = len(all_batches) + 1
+        default_name = f"Batch {next_index}"
+
+        name = default_name
+        should_save_preference = False
+
+        # 3. Decision: Show Dialog or Quick Create
+        if not quick_create_enabled:
+            dialog = QuickBatchDialog(default_name=default_name, parent=self)
+            if dialog.exec():
+                name, skip_next = dialog.get_data()
+                if not name:
+                    name = default_name
+
+                if skip_next:
+                    # Save preference to JSON
+                    all_params["quick_batch_creation"] = True
+                    batch_parameter_manager.save_json_state(data=all_params)
+            else:
+                return  # User cancelled
+
+        # 4. Create Batch
+        batch_id = self.controller.create_batch(name)
+        if batch_id:
+            self.list_group.add_item(name, value=batch_id)
+            # Auto select new item untuk display di workspace
+            self.list_group.select_item_by_value(batch_id)
+            # Emit signal untuk load batch ke workspace
+            self.batch_selected.emit(batch_id)
 
     def _delete_batch(self):
         if not self.controller:
@@ -400,72 +395,33 @@ class RightPanel(QWidget, SyncMixin):
     def _on_selection_changed(self, selected_values):
         """Buffer selection change to prevent UI lag during rapid clicking."""
         self._pending_selection = selected_values
-        self._selection_timer.start(100)  # 300ms breathing room
+        self._selection_timer.start(150)  # 200ms breathing room
+
+    def set_collapsed_state(self, collapsed):
+        """Update internal collapsed state and animate height."""
+        self._is_collapsed = collapsed
+        if collapsed:
+            self.height_animator.animate_height(self.algo_container, 0)
 
     def _do_handle_selection(self):
-        """Actual logic for handling batch selection after debounce."""
+        """Delegate handling to logical selection_handler."""
         if self._pending_selection is None:
             return
 
         selected_values = self._pending_selection
         self._pending_selection = None
 
-        if not self.left_panel or not self.left_panel.display_panel:
-            return
-
-        # Case 1: Multiple items selected
-        if len(selected_values) > 1:
-            self._is_collapsed = True
-            self.height_animator.animate_height(self.algo_container, 0)
-            QTimer.singleShot(300, lambda: self.splitter.setSizes([10000, 0]))
-
-            selected_labels = self.list_group.get_selected_labels()
-            self.left_panel.display_panel.show_delete_confirmation(
-                selected_values, selected_labels
-            )
-
-        # Case 2: One item selected
-        elif len(selected_values) == 1:
-            self._is_collapsed = False
-            target_h = self._calculate_algo_target_h()
-            self.height_animator.animate_height(self.algo_container, target_h)
-            self.splitter.setStretchFactor(0, 1)
-            self.splitter.setStretchFactor(1, 1)
-
-            batch_id = int(selected_values[0])
-            self.current_batch_id = batch_id  # Update tracking ID
-
-            # Load settings from JSON for this batch
-            self._load_batch_settings(batch_id)
-
-            # Safely get the batch name from the selected item's label
-            selected_labels = self.list_group.get_selected_labels()
-            batch_name = selected_labels[0] if selected_labels else ""
-
-            self.left_panel.display_panel.set_header_title(f"Batch: {batch_name}")
-            self.batch_selected.emit(batch_id)
-
-        # Case 3: No items selected
-        else:
-            self._is_collapsed = True
-            self.height_animator.animate_height(self.algo_container, 0)
-            self.splitter.setStretchFactor(1, 0)
-            self.splitter.setStretchFactor(0, 1)
-            QTimer.singleShot(300, lambda: self.splitter.setSizes([10000, 0]))
-
-            self.left_panel.display_panel.set_header_title("No batch selected")
-            self.current_batch_id = None  # Clear tracking
-            self.batch_selection_cleared.emit()
+        self.selection_handler.handle_selection(selected_values)
 
     def _on_process_all_clicked(self):
         """Open BatchProcessDialog for batch processing."""
         if not self.controller:
             return
 
-        # Import here to avoid circular imports
-        from pixel_refine_desktop.enhance_stack.components.batch_page_v2.batch_process_dialog import (
-            BatchProcessDialog,
-        )
+        # # Import here to avoid circular imports
+        # from pixel_refine_desktop.enhance_stack.components.batch_page_v2.batch_process_dialog import (
+        #     BatchProcessDialog,
+        # )
 
         # Get all batches (you may need to adapt this based on your controller API)
         batches = self.controller.get_all_batches()

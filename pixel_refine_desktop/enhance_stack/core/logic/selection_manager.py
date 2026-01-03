@@ -172,3 +172,33 @@ class SelectionManager(QObject):
 
     def get_selected_ids(self):
         return list(self.selected_thumbnails)
+
+    def handle_enter_press(self):
+        """
+        Handle Enter key to show preview for single selection.
+
+        Returns:
+            str or None: Image path to preview, or None if not applicable
+        """
+        if self.panel.display_stack.currentIndex() != 0:
+            return None
+
+        if len(self.selected_thumbnails) == 1:
+            card_id = list(self.selected_thumbnails)[0]
+            if card_id in self.panel.all_cards:
+                card = self.panel.all_cards[card_id]
+                image_path = getattr(card, "_image_path", None)
+                return image_path
+
+        return None
+
+    def handle_delete_key(self):
+        """
+        Handle Delete key press.
+
+        Returns:
+            list: List of selected card IDs to delete
+        """
+        if self.selected_thumbnails:
+            return self.get_selected_ids()
+        return []
