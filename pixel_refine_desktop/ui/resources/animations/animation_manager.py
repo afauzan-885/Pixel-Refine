@@ -1,10 +1,12 @@
 import weakref
+from typing import Callable, List, Optional
 from PySide6.QtWidgets import (
     QStackedWidget,
     QGraphicsOpacityEffect,
     QWidget,
     QApplication,
     QLabel,
+    QListWidget,
 )
 from PySide6.QtCore import (
     QObject,
@@ -374,6 +376,7 @@ class StackedWidgetAnimator(QObject):
         duration_in: int = DEFAULT_DURATION_IN,
         curve_out: QEasingCurve.Type = DEFAULT_CURVE_OUT,
         curve_in: QEasingCurve.Type = DEFAULT_CURVE_IN,
+        on_mid_transition: Optional[Callable] = None,
     ):
         if self._is_animating(stack_widget):
             self._interrupt_transition(stack_widget)
@@ -381,11 +384,13 @@ class StackedWidgetAnimator(QObject):
         old_widget = stack_widget.currentWidget()
         new_widget, new_index = self._validate_target(stack_widget, target)
 
-        if not new_widget or old_widget == new_widget:
+        if not new_widget:
             return
 
         # Skip animation if not visible (startup)
         if not stack_widget.isVisible():
+            if on_mid_transition:
+                on_mid_transition()
             stack_widget.setCurrentIndex(new_index)
             return
 
@@ -397,6 +402,7 @@ class StackedWidgetAnimator(QObject):
             "animation_type": animation_type,
             "duration_in": duration_in,
             "curve_in": curve_in,
+            "on_mid_transition": on_mid_transition,
         }
 
         if not old_widget:
@@ -593,6 +599,10 @@ class StackedWidgetAnimator(QObject):
 
         if new_widget:
             try:
+                # Execute mid-transition logic (e.g., updating content before sliding in)
+                if state.get("on_mid_transition"):
+                    state["on_mid_transition"]()
+
                 stack_widget.setCurrentIndex(new_index)
                 self._start_incoming_animation(stack_widget, new_widget, state)
             except RuntimeError:
@@ -756,6 +766,130 @@ class StackedWidgetAnimator(QObject):
             widget.setGraphicsEffect(None)  # type: ignore
         except (RuntimeError, AttributeError):
             pass
+
+    # --- LIST REORDER ANIMATION ---
+
+    def animate_list_reorder(
+        self,
+        list_widget: QListWidget,
+        start_idx: int,
+        target_idx: int,
+        duration: int = 400,
+        start_delay: int = 0,
+        overlay_to_remove: QWidget = None,
+    ):
+        """
+        Animate a cascading reorder in a QListWidget.
+        Shows ghosts immediately to cover the UI 'jump', then animates movement.
+        """
+        if start_idx == target_idx or start_idx < 0 or target_idx < 0:
+            return
+
+        min_idx = min(start_idx, target_idx)
+        max_idx = max(start_idx, target_idx)
+        ghosts = []
+
+        # Remove the pre-move snapshot overlay if provided
+        if overlay_to_remove:
+            overlay_to_remove.deleteLater()
+        affected_indices = list(range(min_idx, max_idx + 1))
+
+        def get_item_rect(idx):
+            item = list_widget.item(idx)
+            if not item:
+                return QRect()
+            rect = list_widget.visualItemRect(item)
+            parent = list_widget.parentWidget() or list_widget
+            return QRect(list_widget.mapTo(parent, rect.topLeft()), rect.size())
+
+        # Pre-calculate heights
+        moving_item_rect = get_item_rect(target_idx)
+        if moving_item_rect.isEmpty():
+            return
+
+        moving_item_height = moving_item_rect.height()
+        anim_group = QParallelAnimationGroup(self)
+
+        # 1. Capture snapshots and setup ghosts
+        for idx in affected_indices:
+            item = list_widget.item(idx)
+            if not item:
+                continue
+            item_widget = list_widget.itemWidget(item)
+            rect = get_item_rect(idx)
+            if rect.isEmpty():
+                continue
+
+            # GRAB BEFORE HIDING
+            if item_widget and is_widget_alive(item_widget):
+                pixmap = item_widget.grab()
+            else:
+                pixmap = list_widget.grab(list_widget.visualItemRect(item))
+
+            ghost = QLabel(list_widget.parentWidget())
+            ghost.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            ghost.setPixmap(pixmap)
+            ghost.setFixedSize(rect.size())
+
+            # Apply transparency to ghost (100% opaque as requested)
+            ghost_opacity = QGraphicsOpacityEffect(ghost)
+            ghost.setGraphicsEffect(ghost_opacity)
+            ghost_opacity.setOpacity(1.0)
+
+            # Determine "Old" Position to animate FROM
+            old_y = rect.y()
+            if idx == target_idx:
+                old_rect = get_item_rect(start_idx)
+                old_y = old_rect.y()
+            else:
+                if start_idx > target_idx:  # Moving UP
+                    old_y = rect.y() - moving_item_height
+                else:  # Moving DOWN
+                    old_y = rect.y() + moving_item_height
+
+            ghost.move(rect.x(), old_y)
+            ghost.show()
+            ghost.raise_()
+            ghosts.append(ghost)
+
+            # 2. HIDE THE REAL ITEM WIDGET SURGICALLY
+            if item_widget:
+                # Use opacity effect to hide without reflow
+                eff = QGraphicsOpacityEffect(item_widget)
+                item_widget.setGraphicsEffect(eff)
+                eff.setOpacity(0.0)
+
+            # 3. SETUP ANIMATION
+            anim = QPropertyAnimation(ghost, b"pos")
+            anim.setDuration(duration)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            anim.setStartValue(QPoint(rect.x(), old_y))
+            anim.setEndValue(rect.topLeft())
+            anim_group.addAnimation(anim)
+
+        def on_finished():
+            for g in ghosts:
+                g.deleteLater()
+            for idx in affected_indices:
+                item = list_widget.item(idx)
+                if item:
+                    iw = list_widget.itemWidget(item)
+                    if iw:
+                        iw.setGraphicsEffect(None)  # Remove opacity effect
+                        iw.setVisible(True)
+
+        anim_group.finished.connect(on_finished)
+
+        # Execute animation: Ghosts are shown immediately, movement starts after delay
+        if start_delay > 0:
+            QTimer.singleShot(
+                start_delay,
+                lambda: anim_group.start(
+                    QPropertyAnimation.DeletionPolicy.DeleteWhenStopped
+                ),
+            )
+        else:
+            anim_group.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
 
 class WidgetLifecycleAnimator(QObject):
@@ -963,14 +1097,3 @@ class HeightAnimator(QObject):
             widget.setMaximumHeight(16777215)
         else:
             widget.setFixedHeight(0)
-
-    def _safe_remove_effect(self, widget: QWidget):
-        """Safely remove graphics effect on the next event loop cycle."""
-        if not widget:
-            return
-        try:
-            # Using casting to any if possible or just ignoring lint
-            # In PySide6, None is explicitly accepted to remove effect.
-            widget.setGraphicsEffect(None)  # type: ignore
-        except (RuntimeError, AttributeError):
-            pass

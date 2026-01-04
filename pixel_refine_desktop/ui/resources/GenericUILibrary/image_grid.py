@@ -133,7 +133,7 @@ class ImageCard(QWidget):
 
         if self._is_loading:
             painter.setPen(QColor(theme.text_secondary))
-            painter.drawText(content_rect, Qt.AlignmentFlag.AlignCenter, "Loading...")
+            painter.drawText(content_rect, Qt.AlignmentFlag.AlignCenter, "Loading..")
         elif self._image:
             # Gunakan drawImage langsung dengan SmoothTransformation
             # Ini mengatasi bug gambar terpotong saat lazy loading/scroll

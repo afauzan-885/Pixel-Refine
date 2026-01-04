@@ -350,8 +350,6 @@ def display_thumbnail_in_layout(
 
     # Apply fade animation if provided
     if animator:
-        # fade_in expects (animator, target_widget, stack_widget=None)
-        # We want standalone fade in for the label
         fade_in(animator, thumb_label)
 
 

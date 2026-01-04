@@ -15,6 +15,7 @@ from pixel_refine_desktop.ui.resources.animations.animation_manager import (
     StackedWidgetAnimator,
 )
 from pixel_refine_desktop.enhance_stack.models.algorithm_list import ALGORITHM_DATA
+import config
 
 
 class ApplicationManager:
@@ -54,6 +55,7 @@ class ApplicationManager:
         self.render_tiles_folder = os.path.join(
             self.database_folder, "cache", "render_tiles"
         )
+        self.comparison_cache_folder = config.COMPARISON_CACHE_DIR
 
     def initialize_database(
         self, db_path: str = "pixel_refine_database.db"
@@ -109,6 +111,7 @@ class ApplicationManager:
             os.makedirs(self.database_folder, exist_ok=True)
             os.makedirs(self.align_folder, exist_ok=True)
             os.makedirs(self.stack_folder, exist_ok=True)
+            os.makedirs(self.comparison_cache_folder, exist_ok=True)
         except OSError as e:
             QMessageBox.critical(
                 self.main_window,
@@ -148,6 +151,15 @@ class ApplicationManager:
             # Remove render_tiles_folder
             if os.path.exists(self.render_tiles_folder):
                 rmtree(self.render_tiles_folder)
+
+            # Remove comparison_cache contents
+            if os.path.exists(self.comparison_cache_folder):
+                for item in os.listdir(self.comparison_cache_folder):
+                    item_path = os.path.join(self.comparison_cache_folder, item)
+                    if os.path.isfile(item_path) or os.path.islink(item_path):
+                        os.unlink(item_path)
+                    elif os.path.isdir(item_path):
+                        rmtree(item_path)
 
         except Exception as e:
             QMessageBox.warning(

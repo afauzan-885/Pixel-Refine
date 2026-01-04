@@ -51,6 +51,11 @@ from pixel_refine_desktop.ui.resources.GenericUILibrary import (
     ImageCompareItem,
 )
 from pixel_refine_desktop.ui.resources.GenericUILibrary.grids import GridContainer
+from pixel_refine_desktop.ui.resources.animations.slide import slide
+from pixel_refine_desktop.ui.resources.animations.animation_manager import (
+    SlideDirection,
+    StackedWidgetAnimator,
+)
 from pixel_refine_desktop.ui.resources.GenericUILibrary.forms import FormGroup
 from pixel_refine_desktop.ui.components.common.sidebar import Sidebar
 
@@ -177,12 +182,6 @@ class DisplayPanel(QWidget):
         self.active_deletions = {}  # {batch_id: [paths]} for resume logic
         self.right_panel: Any = None
         self.placeholder_widget = None
-
-        # Watchdog: Self-healing for blank page detection
-        self.recovery_timer = QTimer(self)
-        self.recovery_timer.setSingleShot(True)
-        self.recovery_timer.setInterval(800)  # 0.8s tolerance
-        self.recovery_timer.timeout.connect(self._verify_display_integrity)
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._setup_ui()
@@ -690,11 +689,6 @@ class DisplayPanel(QWidget):
 
         self.import_button.setVisible(True)
         self.show_grid()
-
-        # Start Watchdog timer
-        self.recovery_timer.start()
-
-        # Trigger Background Sync ditunda (Staged Loading)
         self.grid_manager.stop_staged_timer()
         self._real_paths_for_sync = [img.path for img in images if hasattr(img, "path")]
         self.grid_manager.set_sync_paths(self._real_paths_for_sync)
@@ -716,10 +710,6 @@ class DisplayPanel(QWidget):
         Reset ke state default dengan placeholder widget dan tombol "New Batch".
         """
         self.current_batch_id = None
-        self.current_batch_name = None
-
-        # Stop watchdog
-        self.recovery_timer.stop()
 
         # Hide any active toast when batch is unselected
         self.toast.hide()
@@ -749,86 +739,7 @@ class DisplayPanel(QWidget):
 
         self.show_grid()
 
-    def _verify_display_integrity(self):
-        """
-        Watchdog logic: Detects if the DisplayPanel is in an inconsistent visual state.
-        Checks grid emptiness, stack indices, and stuck rendering flags.
-        """
-        if not self.current_batch_id:
-            return
-
-        # 1. Gather health metrics
-        should_have_images = self.total_image_count > 0
-        actual_grid_count = self.grid_container.get_item_count()
-        is_grid_empty = actual_grid_count == 0
-        is_batch_update_stuck = self.grid_container._is_batch_updating
-
-        # Stack check: 0 = Grid, 1 = Preview, 2 = Bulk Delete
-        current_view_index = self.display_stack.currentIndex()
-        current_content_index = self.grid_content_stack.currentIndex()
-
-        # 2. Check for "Blank State" (Batch loaded but UI is at placeholder or wrong stack)
-        is_view_stuck = (
-            should_have_images
-            and current_view_index != 0
-            and not self.current_preview_path
-        )
-        is_content_stuck = should_have_images and current_content_index != 0
-
-        needs_healing = (
-            (should_have_images and is_grid_empty)
-            or is_batch_update_stuck
-            or is_view_stuck
-            or is_content_stuck
-        )
-
-        if needs_healing:
-            # print(
-            #     f"[Watchdog] Deep healing triggered for batch {self.current_batch_id}"
-            # )
-            # print(
-            #     f"[Watchdog] Metrics: img_count={self.total_image_count}, grid_items={actual_grid_count}"
-            # )
-            # print(
-            #     f"[Watchdog] States: update_stuck={is_batch_update_stuck}, view_idx={current_view_index}, content_idx={current_content_index}"
-            # )
-
-            # --- HARD RESET DISPLAY PANEL VISUALS ---
-
-            # A. Release locks
-            self.grid_container.set_batch_update(False)
-
-            # B. Force correct stack indices
-            if current_view_index != 0 and not self.current_preview_path:
-                self.show_grid()
-
-            if current_content_index != 0:
-                self._set_placeholder(None)  # Force back to grid index 0
-
-            # C. If grid is still empty, perform logic re-sync
-            if is_grid_empty:
-                images = self.logic.current_images or []
-                if len(images) > 0:
-                    # print(
-                    #     "[Watchdog] Content vanished. Performing full logic re-sync..."
-                    # )
-                    # Stop current population and re-trigger
-                    self._reset_population_state()
-                    self._clear_grid()
-                    # We use a slightly safer delay for the re-trigger
-                    QTimer.singleShot(
-                        50,
-                        lambda: self.load_batch(
-                            self.current_batch_id, images, self.current_batch_name
-                        ),
-                    )
-                else:
-                    # Case where logic itself thinks there are no images, but header says otherwise
-                    # print(
-                    #     "[Watchdog] Warning: Logic state desync (logic thinks 0 images)."
-                    # )
-                    # Optionally re-fetch from controller if possible, but 0 images is a valid state too
-                    pass
+        pass
 
     def _reset_population_state(self):
         """Unified method to stop all pending populating tasks and clear tracking."""

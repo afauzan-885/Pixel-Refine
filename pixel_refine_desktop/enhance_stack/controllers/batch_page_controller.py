@@ -129,14 +129,44 @@ class BatchPageController(QObject):
             True if successful, False otherwise
         """
         try:
+            # 1. Get image paths for thumbnail cleanup
+            batch = self.get_batch(batch_id)
+            image_paths = []
+            if batch:
+                image_paths = [img.path for img in batch.images]
+
+            # 2. Delete from database
             rows = self.batch_repo.delete(batch_id)
+
             if rows > 0:
+                # 3. Cleanup thumbnails on disk
+                if image_paths:
+                    try:
+                        from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_processor import (
+                            get_thumbnail_repo,
+                        )
+
+                        thumb_repo = get_thumbnail_repo()
+                        thumb_repo.delete_thumbnails(image_paths)
+                    except Exception as e:
+                        print(f"[BatchController] Thumbnail cleanup warning: {e}")
+
                 self.batch_deleted.emit(batch_id)
                 return True
             return False
         except Exception as e:
             self.batch_error.emit(f"Error deleting batch: {e}")
             return False
+
+    def reorder_batches(self, batch_ids: List[int]) -> bool:
+        """
+        Reorder batches in the database.
+        """
+        success = self.batch_repo.update_batch_order(batch_ids)
+        if success:
+            # No specific signal needed if view reloads, but good for sync
+            self.batch_updated.emit(-1)  # Special ID for global update
+        return success
 
     def update_batch_name(self, batch_id: int, new_name: str) -> bool:
         """

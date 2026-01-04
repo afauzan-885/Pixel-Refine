@@ -1,5 +1,6 @@
 from PySide6.QtWidgets import QStackedWidget
 from PySide6.QtCore import QEasingCurve
+from typing import Callable, Optional
 
 # Import kelas Animator dan Enum dari lokasi yang benar
 from .animation_manager import (
@@ -16,6 +17,7 @@ def slide(
     direction: SlideDirection,
     duration: int = 400,
     curve: QEasingCurve.Type = QEasingCurve.Type.OutExpo,
+    on_mid_transition: Optional[Callable] = None,
 ):  # Kurva bisa jadi parameter preset
     """Melakukan transisi SLIDE + FADE."""
     anim_type = AnimationType.FADE  # Default
@@ -41,4 +43,5 @@ def slide(
         duration_in=duration_in,
         curve_out=curve_out_slide,
         curve_in=curve_in_slide,
+        on_mid_transition=on_mid_transition,
     )

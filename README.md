@@ -1,8 +1,8 @@
-<p align="center"><img src="UI/resources/image/Logo_Pixel_Refine.png" width="200" alt="Logo Pixel Refine"></p>
+<p align="center"><img src="pixel_refine_desktop\ui\resources\assets\images\Logo_Pixel_Refine.png" width="200" alt="Logo Pixel Refine"></p>
 
 <h2 align="center"> Pixel Refine </h2>
 <p align="center">
-A computational photography tool, inspired by Gcam, Raw+ Kandao, Burst.photo, and PhotoAcute 3.
+A computational photography tool.
 </p>
 
 ---
@@ -36,7 +36,6 @@ It was created to address the shortcomings of:
 ## 🛠️ Algorithms
 
 ### **1. Alignment**
-- **Farneback Optical Flow** → Pixel-level precision, but weaker against large movements.  
 - **AKAZE** → Robust for large differences and deformation.  
 - **ORB (Oriented FAST & Rotated BRIEF)** → Fast, good general purpose, less robust for large variations.  
 - **LightGlue** → State-of-the-art deep learning based alignment, **stronger than AKAZE**, but requires more memory.
@@ -46,7 +45,7 @@ It was created to address the shortcomings of:
 
 ### **3. Denoising**
 - **Average** → Reduces noise by averaging frames.  
-- **Median** → Preserves edges while removing noise.  
+- **Median** → Removes moving objects while removing noise.  
 - **Similarity (Custom)** → Detail-preserving denoising based on pixel similarity, robust against large movements.
 
 ---
@@ -94,9 +93,10 @@ To process **16 images at 12MP resolution**, the minimum requirements specs are:
 | Component | Requirement |
 |-----------|-------------|
 | **Display** | 1280 × 720 |
-| **RAM** | 4 GB |
-| **Storage** | 2 GB free space (temporary files) |
+| **RAM** | 6 GB |
+| **Storage** | 3 GB free space (temporary files) |
 | **CPU** | Dual Core / 4 Threads @ 2.5 GHz |
+| **GPU** | MX150 (Vram 2 GB) |
 | **OS** | Windows 10 (Windows 7/8 not tested) |
 
 ---

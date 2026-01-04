@@ -9,8 +9,12 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QSplitter,
     QScrollArea,
+    QMenu,
 )
 from PySide6.QtCore import Signal, Qt, QTimer
+from pixel_refine_desktop.ui.resources.animations.animation_manager import (
+    StackedWidgetAnimator,
+)
 import json
 import os
 
@@ -62,6 +66,7 @@ class RightPanel(QWidget, SyncMixin):
         self._selection_timer.setSingleShot(True)
         self._selection_timer.timeout.connect(self._do_handle_selection)
         self._pending_selection = None
+        self._move_mode = False  # Track if we are in reorder 'Keyboard Move' mode
 
         # Real-time state binding
         if store:
@@ -159,9 +164,16 @@ class RightPanel(QWidget, SyncMixin):
         batch_layout.addLayout(action_layout)
 
         # Batch List
-        self.list_group = ListGroup()
+        self.list_group = ListGroup(reordering=True)
         self.list_group.selection_changed.connect(self._on_selection_changed)
         self.list_group.item_renamed.connect(self._on_batch_renamed)
+        self.list_group.delete_key_pressed.connect(self._delete_batch)
+        self.list_group.items_reordered.connect(self._on_batches_reordered)
+        # Enable context menu for Move mode
+        self.list_group.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list_group.customContextMenuRequested.connect(
+            self._show_batch_context_menu
+        )
         batch_layout.addWidget(self.list_group)
 
         # ==========================
@@ -320,10 +332,14 @@ class RightPanel(QWidget, SyncMixin):
         all_params = batch_parameter_manager.load_json_state()
         quick_create_enabled = all_params.get("quick_batch_creation", False)
 
-        # 2. Generate default name
+        # 2. Generate default name (Robust check for uniqueness)
         all_batches = self.controller.get_all_batches()
-        next_index = len(all_batches) + 1
-        default_name = f"Batch {next_index}"
+        existing_names = {b.name for b in all_batches}
+
+        index = 1
+        while f"Batch {index}" in existing_names:
+            index += 1
+        default_name = f"Batch {index}"
 
         name = default_name
         should_save_preference = False
@@ -348,6 +364,7 @@ class RightPanel(QWidget, SyncMixin):
         if batch_id:
             self.list_group.add_item(name, value=batch_id)
             # Auto select new item untuk display di workspace
+            self.list_group.reordering_animation = True
             self.list_group.select_item_by_value(batch_id)
             # Emit signal untuk load batch ke workspace
             self.batch_selected.emit(batch_id)
@@ -452,3 +469,38 @@ class RightPanel(QWidget, SyncMixin):
                 "Could not rename the batch. The name may be invalid or already in use.",
             )
             self._load_batches()
+
+    def _on_batches_reordered(
+        self, batch_ids, direction=None, start_idx=-1, target_idx=-1
+    ):
+        """Handle reordering from ListGroup (Drag & Drop)."""
+        if self.controller:
+            self.controller.reorder_batches(batch_ids)
+
+        # Native Cascading Animation is now handled inside ListGroup
+        pass
+
+    def _show_batch_context_menu(self, pos):
+        """Show context menu for batch items."""
+        if not self.list_group.get_selected_values():
+            return
+
+        menu = QMenu(self)
+        move_act = menu.addAction("Move batch")
+        move_act.setCheckable(True)
+        # Check if list_group is actually in move mode to reflect current state
+        move_act.setChecked(self.list_group._move_mode)
+        move_act.triggered.connect(self._toggle_move_mode)
+
+        menu.addSeparator()
+        del_act = menu.addAction("Delete Batch")
+        del_act.triggered.connect(self._delete_batch)
+
+        menu.exec_(self.list_group.mapToGlobal(pos))
+
+    def _toggle_move_mode(self):
+        # Sync from list_group state if possible, or toggle locally
+        self._move_mode = not self.list_group._move_mode
+        self.list_group.set_move_mode(self._move_mode)
+        if not self._move_mode:
+            self._load_batches()  # Refresh style and order to be safe

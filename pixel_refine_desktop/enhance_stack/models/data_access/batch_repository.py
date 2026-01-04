@@ -18,6 +18,11 @@ class BatchRepository(BaseRepository):
         super().__init__(db_path)
         self.image_repo = ImageRepository(db_path)
 
+        # Ensure order_index exists for custom reordering
+        self.add_column_if_not_exists(
+            "batch_process", "order_index", "INTEGER DEFAULT 0"
+        )
+
     def create(self, batch_name: str) -> Optional[int]:
         """
         Create a new batch.
@@ -29,9 +34,16 @@ class BatchRepository(BaseRepository):
             Batch ID if successful, None if batch name already exists
         """
         try:
-            query = "INSERT INTO batch_process (batch_name) VALUES (?)"
-            batch_id = self.execute_update(query, (batch_name,))
-            print(f"Batch '{batch_name}' created with ID: {batch_id}")
+            # Get max order_index to put new batch at the end
+            max_order_query = "SELECT MAX(order_index) FROM batch_process"
+            max_order_res = self.execute_query(max_order_query, fetch_one=True)
+            next_order = (max_order_res[0] or 0) + 1 if max_order_res else 1
+
+            query = "INSERT INTO batch_process (batch_name, order_index) VALUES (?, ?)"
+            batch_id = self.execute_update(query, (batch_name, next_order))
+            print(
+                f"Batch '{batch_name}' created with ID: {batch_id} at order {next_order}"
+            )
             return batch_id
         except Exception as e:
             # Batch name already exists
@@ -73,8 +85,26 @@ class BatchRepository(BaseRepository):
         Returns:
             List of tuples (id, batch_name)
         """
-        query = "SELECT id, batch_name FROM batch_process ORDER BY id"
+        query = (
+            "SELECT id, batch_name FROM batch_process ORDER BY order_index ASC, id ASC"
+        )
         return self.execute_query(query, fetch_one=False)
+
+    def update_batch_order(self, batch_ids: List[int]) -> bool:
+        """
+        Update order_index for a list of batches.
+        """
+        try:
+            with self.get_cursor() as cursor:
+                for index, batch_id in enumerate(batch_ids):
+                    cursor.execute(
+                        "UPDATE batch_process SET order_index = ? WHERE id = ?",
+                        (index, batch_id),
+                    )
+            return True
+        except Exception as e:
+            print(f"Error updating batch order: {e}")
+            return False
 
     def delete(self, batch_id: int) -> int:
         """
