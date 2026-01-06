@@ -38,23 +38,17 @@ def load_similarity_config():
         "similarity_merging_type": "spatial",
         "use_multi_core": True,
         "spatial_params": {
-            "similarity_spatial_tile_size": 24,
+            "similarity_spatial_tile_size": 16,
             "similarity_spatial_motion_sensitivity": 150.0,
             "similarity_spatial_noise_mad_offset_factor": 0.10,
             "similarity_spatial_overlap_percent": 0.35,
-            "similarity_spatial_num_workers": 2,  # [PENAMBAHAN] Default ke 'Auto' (-1)
-        },
-        "frequency_params": {
-            "similarity_frequency_c_wiener_factor": 8.0,
-            "similarity_frequency_tile_size": 32,
-            "similarity_frequency_overlap_percent": 0.35,
+            "similarity_spatial_num_workers": 1,  # [PENAMBAHAN] Default ke 'Auto' (-1)
         },
     }
     final_config = {
         "similarity_merging_type": defaults["similarity_merging_type"],
         "use_multi_core": defaults["use_multi_core"],
         **defaults["spatial_params"],
-        **defaults["frequency_params"],
     }
     try:
         if os.path.exists(ALGORITHM_PARAMETER_SETTINGS_FILE):
@@ -82,16 +76,6 @@ def load_similarity_config():
                 else:
                     for key, value in defaults["spatial_params"].items():
                         final_config[key] = loaded_similarity_section.get(key, value)
-                if "frequency_params" in loaded_similarity_section and isinstance(
-                    loaded_similarity_section["frequency_params"], dict
-                ):
-                    for key, value in defaults["frequency_params"].items():
-                        final_config[key] = loaded_similarity_section[
-                            "frequency_params"
-                        ].get(key, value)
-                else:
-                    for key, value in defaults["frequency_params"].items():
-                        final_config[key] = loaded_similarity_section.get(key, value)
                 return final_config
     except (IOError, json.JSONDecodeError) as e:
         print(f"Error loading Similarity config: {e}. Using defaults.")
@@ -118,7 +102,7 @@ def save_similarity_v1_config(config_to_save):
         ),
         "use_multi_core": config_to_save.get("use_multi_core", True),
         "spatial_params": {},
-        "frequency_params": {},
+        "spatial_params": {},
     }
     spatial_keys = [
         "similarity_spatial_tile_size",
@@ -131,14 +115,6 @@ def save_similarity_v1_config(config_to_save):
     for key in spatial_keys:
         if key in config_to_save:
             similarity_section_to_save["spatial_params"][key] = config_to_save[key]
-    frequency_keys = [
-        "similarity_frequency_c_wiener_factor",
-        "similarity_frequency_tile_size",
-        "similarity_frequency_overlap_percent",
-    ]
-    for key in frequency_keys:
-        if key in config_to_save:
-            similarity_section_to_save["frequency_params"][key] = config_to_save[key]
     all_params_file["Similarity"] = similarity_section_to_save
     try:
         with open(config_filename, "w") as f:
@@ -204,9 +180,6 @@ def get_similarity_settings_page():
         "similarity_spatial_noise_mad_offset_factor": 0.25,
         "similarity_spatial_overlap_percent": 0.38,
         "similarity_spatial_num_workers": 2,  # [PENAMBAHAN] Default UI
-        "similarity_frequency_c_wiener_factor": 8.0,
-        "similarity_frequency_tile_size": 32,
-        "similarity_frequency_overlap_percent": 0.35,
     }
 
     page_widget = QWidget()
@@ -225,27 +198,7 @@ def get_similarity_settings_page():
     widgets = {}
     c_locale = QLocale(QLocale.Language.C, QLocale.Country.AnyCountry)
 
-    merging_type_button = QToolButton()
-    merging_type_button.setCheckable(True)
-    initial_merging_type = sim_v1_config.get("similarity_merging_type", "spatial")
-    merging_type_button.setChecked(initial_merging_type == "spatial")
-    merging_type_button.setFont(get_default_font(10, QFont.Weight.Bold))
-    merging_type_button.setStyleSheet(
-        TOGGLE_BUTTON.replace("#FF0000", "#00C900")
-        + " QToolButton { min-width: 150px; }"
-        + " QToolButton:hover:!checked { background-color: #079F07; }"
-    )
-    merging_type_button.setSizePolicy(
-        QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-    )
-    merging_type_button_layout = QHBoxLayout()
-    merging_type_button_layout.addWidget(
-        merging_type_button, 0, Qt.AlignmentFlag.AlignCenter
-    )
-
-    main_page_layout.addLayout(merging_type_button_layout)
-    main_page_layout.addSpacing(20)
-    widgets["merging_type_button"] = merging_type_button
+    # widgets["merging_type_button"] = merging_type_button # No longer needed
 
     # --- Kontainer Utama untuk Parameter SPASIAL ---
     spatial_params_outer_container = QWidget()
@@ -431,138 +384,12 @@ def get_similarity_settings_page():
 
     spatial_container_main_layout.addStretch(1)
 
-    # Frekuensi Parameter
-    frequency_params_outer_container = QWidget()
-    frequency_container_main_layout = QVBoxLayout(frequency_params_outer_container)
-    frequency_container_main_layout.setContentsMargins(0, 0, 0, 0)
-    frequency_container_main_layout.setSpacing(20)  # Jarak vertikal antar grup
-
-    # --- Grup 1: Tile Size (Frequency) - Using FormGroup ---
-    tile_size_fq_form = FormGroup(
-        label=getattr(
-            language_config, "TILE_SIZE_LABEL_FREQUENCY", "Tile Size (Frequency):"
-        ),
-        input_type="select",
-    )
-    tile_size_fq_form.add_options([str(s) for s in tile_options_int])
-    tile_size_fq_form.set_value(
-        str(sim_v1_config.get("similarity_frequency_tile_size", 16))
-    )
-    tile_size_fq_form.label.setToolTip(
-        getattr(language_config, "TILE_SIZE_DESCRIPTION_FREQUENCY", "...")
-    )
-    tile_size_fq_form.input.setMaximumWidth(150)
-    widgets["tile_combo_frequency"] = tile_size_fq_form.input
-    frequency_container_main_layout.addWidget(tile_size_fq_form)
-
-    # --- Grup 2: Overlap (Frequency) ---
-    overlap_fq_group_widget = QWidget()
-    overlap_fq_layout = QVBoxLayout(overlap_fq_group_widget)
-    overlap_fq_layout.setContentsMargins(0, 0, 0, 0)
-    overlap_fq_layout.setSpacing(5)
-
-    overlap_label_text_fq_obj = QLabel(
-        getattr(language_config, "OVERLAP_LABEL_FREQUENCY", "Overlap % (Frequency):")
-    )
-    overlap_label_text_fq_obj.setFont(get_default_font(10, QFont.Weight.Bold))
-    overlap_label_text_fq_obj.setToolTip(
-        getattr(language_config, "OVERLAP_DESCRIPTION_FREQUENCY", "...")
-    )
-    overlap_fq_layout.addWidget(overlap_label_text_fq_obj)
-
-    initial_overlap_percent_fq = int(
-        round(sim_v1_config.get("similarity_frequency_overlap_percent", 0.25) * 100)
-    )
-    overlap_validator_fq = QIntValidator(0, 90)
-    overlap_fq_field_layout, slider_ov_fq, input_ov_fq = (
-        create_slider_input_field_layout(
-            0,
-            90,
-            initial_overlap_percent_fq,
-            str(initial_overlap_percent_fq),
-            1.0,
-            lambda v, m=1, loc=c_locale: str(int(v)),
-            overlap_validator_fq,
-            c_locale,
-            is_overlap=True,
-        )
-    )
-    overlap_fq_layout.addLayout(overlap_fq_field_layout)
-    widgets["overlap_slider_frequency"] = slider_ov_fq
-    widgets["overlap_input_frequency"] = input_ov_fq
-    frequency_container_main_layout.addWidget(overlap_fq_group_widget)
-
-    # --- Grup 3: C Wiener Factor (Frequency) ---
-    c_wiener_group_widget = QWidget()
-    c_wiener_layout = QVBoxLayout(c_wiener_group_widget)
-    c_wiener_layout.setContentsMargins(0, 0, 0, 0)
-    c_wiener_layout.setSpacing(5)
-
-    c_wiener_label_obj = QLabel(
-        getattr(language_config, "C_WIENER_FACTOR_LABEL", "C Wiener Factor:")
-    )
-    c_wiener_label_obj.setFont(get_default_font(10, QFont.Weight.Bold))
-    c_wiener_label_obj.setToolTip(
-        getattr(language_config, "C_WIENER_FACTOR_DESCRIPTION", "...")
-    )
-    c_wiener_layout.addWidget(c_wiener_label_obj)
-
-    initial_c_wiener = sim_v1_config.get("similarity_frequency_c_wiener_factor", 5.0)
-    c_wiener_multiplier = 10.0
-    c_wiener_slider_min, c_wiener_slider_max = 1, 200
-    c_wiener_validator = QDoubleValidator(0.1, 20.0, 1)
-    c_wiener_validator.setNotation(QDoubleValidator.Notation.StandardNotation)
-    c_wiener_field_layout, slider_cw, input_cw = create_slider_input_field_layout(
-        0,
-        0,
-        int(round(initial_c_wiener * c_wiener_multiplier)),
-        c_locale.toString(initial_c_wiener, "f", 1),
-        c_wiener_multiplier,
-        lambda v, m=c_wiener_multiplier, loc=c_locale: loc.toString(v / m, "f", 1),
-        c_wiener_validator,
-        c_locale,
-        slider_min_val=c_wiener_slider_min,
-        slider_max_val=c_wiener_slider_max,
-    )
-    c_wiener_layout.addLayout(c_wiener_field_layout)
-    widgets["c_wiener_factor_slider"] = slider_cw
-    widgets["c_wiener_factor_input"] = input_cw
-
-    frequency_container_main_layout.addWidget(c_wiener_group_widget)
-
-    # Tombol Reset untuk Frequency
-    reset_frequency_button = QPushButton(
-        getattr(
-            language_config,
-            "RESET_FREQUENCY_DEFAULTS_BUTTON",
-            "Reset Frequency Defaults",
-        )
-    )
-    reset_frequency_button.setStyleSheet(APPLY_BUTTON)
-    reset_frequency_button.setMinimumHeight(28)
-
-    reset_freq_row_layout = QHBoxLayout()
-    reset_freq_row_layout.setContentsMargins(0, 0, 0, 0)
-
-    reset_freq_row_layout.addStretch(1)
-    reset_freq_row_layout.addWidget(reset_frequency_button)
-
-    frequency_container_main_layout.addSpacing(0)
-    frequency_container_main_layout.addLayout(reset_freq_row_layout)
-
-    widgets["reset_frequency_button"] = reset_frequency_button
-
-    frequency_container_main_layout.addStretch(1)
-
     main_page_layout.addWidget(spatial_params_outer_container)
-    main_page_layout.addWidget(frequency_params_outer_container)
 
     def save_current_settings_v1():
         settings_to_save_flat = {}
         try:
-            settings_to_save_flat["similarity_merging_type"] = (
-                "spatial" if widgets["merging_type_button"].isChecked() else "frequency"
-            )
+            settings_to_save_flat["similarity_merging_type"] = "spatial"
             settings_to_save_flat["similarity_spatial_tile_size"] = int(
                 widgets["tile_combo_spatial"].currentText()
             )
@@ -580,15 +407,6 @@ def get_similarity_settings_page():
             ov_sp_percent = int(widgets["overlap_input_spatial"].text())
             settings_to_save_flat["similarity_spatial_overlap_percent"] = (
                 ov_sp_percent / 100.0
-            )
-            cw_val, _ = c_locale.toDouble(widgets["c_wiener_factor_input"].text())
-            settings_to_save_flat["similarity_frequency_c_wiener_factor"] = cw_val
-            settings_to_save_flat["similarity_frequency_tile_size"] = int(
-                widgets["tile_combo_frequency"].currentText()
-            )
-            ov_fq_percent = int(widgets["overlap_input_frequency"].text())
-            settings_to_save_flat["similarity_frequency_overlap_percent"] = (
-                ov_fq_percent / 100.0
             )
         except ValueError as e:
             print(f"Error parsing settings: {e}")
@@ -608,46 +426,8 @@ def get_similarity_settings_page():
         )
         save_similarity_v1_config(settings_to_save_flat)
 
-    def update_merging_mode_ui(is_spatial):
-        if is_spatial:
-            merging_type_button.setText(
-                getattr(
-                    language_config,
-                    "SIMILARITY_MERGING_TYPE_SPATIAL_LABEL",
-                    "Mode: Spatial Merging",
-                )
-            )
-            merging_type_button.setToolTip(
-                getattr(
-                    language_config,
-                    "SIMILARITY_MERGING_TYPE_SPATIAL_DESC",
-                    "Spatial domain processing.",
-                )
-            )
-            spatial_params_outer_container.setVisible(True)
-            frequency_params_outer_container.setVisible(False)
-        else:
-            merging_type_button.setText(
-                getattr(
-                    language_config,
-                    "SIMILARITY_MERGING_TYPE_FREQUENCY_LABEL",
-                    "Mode: Frequency Merging",
-                )
-            )
-            merging_type_button.setToolTip(
-                getattr(
-                    language_config,
-                    "SIMILARITY_MERGING_TYPE_FREQUENCY_DESC",
-                    "Frequency domain processing.",
-                )
-            )
-            spatial_params_outer_container.setVisible(False)
-            frequency_params_outer_container.setVisible(True)
-        save_current_settings_v1()
-
-    merging_type_button.toggled.connect(update_merging_mode_ui)
-
-    update_merging_mode_ui(initial_merging_type == "spatial")
+    spatial_params_outer_container.setVisible(True)
+    save_current_settings_v1()
 
     def setup_slider_input_connections(
         slider,
@@ -737,21 +517,6 @@ def get_similarity_settings_page():
     setup_slider_input_connections(
         slider_ov_sp, input_ov_sp, 1.0, 0, 90, c_locale, 0, False
     )
-    setup_slider_input_connections(
-        slider_cw,
-        input_cw,
-        c_wiener_multiplier,
-        0.1,
-        20.0,
-        c_locale,
-        1,
-        True,
-        c_wiener_slider_min,
-        c_wiener_slider_max,
-    )
-    setup_slider_input_connections(
-        slider_ov_fq, input_ov_fq, 1.0, 0, 90, c_locale, 0, False
-    )
 
     def reset_spatial_defaults():
         defaults = original_v1_ui_defaults
@@ -784,23 +549,7 @@ def get_similarity_settings_page():
         )
         save_current_settings_v1()
 
-    def reset_frequency_defaults():
-        defaults = original_v1_ui_defaults
-        default_cw = defaults.get("similarity_frequency_c_wiener_factor", 5.0)
-        widgets["c_wiener_factor_slider"].setValue(
-            int(round(default_cw * c_wiener_multiplier))
-        )
-        widgets["tile_combo_frequency"].setCurrentText(
-            str(defaults.get("similarity_frequency_tile_size", 16))
-        )
-        default_ov_ratio_fq = defaults.get("similarity_frequency_overlap_percent", 0.25)
-        widgets["overlap_slider_frequency"].setValue(
-            int(round(default_ov_ratio_fq * 100))
-        )
-        save_current_settings_v1()
-
     widgets["reset_spatial_button"].clicked.connect(reset_spatial_defaults)
-    widgets["reset_frequency_button"].clicked.connect(reset_frequency_defaults)
     widgets["num_workers_combo_spatial"].currentIndexChanged.connect(
         save_current_settings_v1
     )
@@ -815,13 +564,6 @@ def get_similarity_settings_page():
     widgets["noise_mad_offset_input"].editingFinished.connect(save_current_settings_v1)
     widgets["overlap_slider_spatial"].sliderReleased.connect(save_current_settings_v1)
     widgets["overlap_input_spatial"].editingFinished.connect(save_current_settings_v1)
-    widgets["c_wiener_factor_slider"].sliderReleased.connect(save_current_settings_v1)
-    widgets["c_wiener_factor_input"].editingFinished.connect(save_current_settings_v1)
-    widgets["tile_combo_frequency"].currentIndexChanged.connect(
-        save_current_settings_v1
-    )
-    widgets["overlap_slider_frequency"].sliderReleased.connect(save_current_settings_v1)
-    widgets["overlap_input_frequency"].editingFinished.connect(save_current_settings_v1)
 
     main_page_layout.addStretch(1)
     scroll = QScrollArea()

@@ -30,157 +30,62 @@ static inline float horizontal_sum_avx(__m256 v)
 // Versi FMA + Tail Optimization
 static inline float block_cost_zmcl_avx(const float* ref, const float* comp, int len)
 {
-    // --- PASS 1: MEAN CALCULATION ---
-    __m256 vsum_ref[4]  = { _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps() };
-    __m256 vsum_comp[4] = { _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps() };
-
+    // --- PASS 1: MEAN DIFFERENCE CALCULATION ---
+    // Zero-mean alignment requires (ref - mean_ref) - (comp - mean_comp)
+    // yang setara dengan (ref - comp) - (mean_ref - mean_comp).
+    // Jadi kita cukup hitung mean dari (ref - comp).
+    __m256 vsum_diff = _mm256_setzero_ps();
     int i = 0;
+
+    // Unroll 16 for throughput
+    for (; i + 16 <= len; i += 16) {
+        __m256 d0 = _mm256_sub_ps(_mm256_loadu_ps(ref + i), _mm256_loadu_ps(comp + i));
+        __m256 d1 = _mm256_sub_ps(_mm256_loadu_ps(ref + i + 8), _mm256_loadu_ps(comp + i + 8));
+        vsum_diff = _mm256_add_ps(vsum_diff, _mm256_add_ps(d0, d1));
+    }
     
-    // 1.a Main Loop (Unroll 32)
-    for (; i + 32 <= len; i += 32)
-    {
-        // Load Ref
-        __m256 r0 = _mm256_loadu_ps(ref + i);
-        __m256 r1 = _mm256_loadu_ps(ref + i + 8);
-        __m256 r2 = _mm256_loadu_ps(ref + i + 16);
-        __m256 r3 = _mm256_loadu_ps(ref + i + 24);
-
-        // Load Comp
-        __m256 c0 = _mm256_loadu_ps(comp + i);
-        __m256 c1 = _mm256_loadu_ps(comp + i + 8);
-        __m256 c2 = _mm256_loadu_ps(comp + i + 16);
-        __m256 c3 = _mm256_loadu_ps(comp + i + 24);
-
-        // Accumulate
-        vsum_ref[0] = _mm256_add_ps(vsum_ref[0], r0);
-        vsum_ref[1] = _mm256_add_ps(vsum_ref[1], r1);
-        vsum_ref[2] = _mm256_add_ps(vsum_ref[2], r2);
-        vsum_ref[3] = _mm256_add_ps(vsum_ref[3], r3);
-
-        vsum_comp[0] = _mm256_add_ps(vsum_comp[0], c0);
-        vsum_comp[1] = _mm256_add_ps(vsum_comp[1], c1);
-        vsum_comp[2] = _mm256_add_ps(vsum_comp[2], c2);
-        vsum_comp[3] = _mm256_add_ps(vsum_comp[3], c3);
-    }
-
-    // Collapse Accumulators Pass 1
-    __m256 vsum_ref_final  = _mm256_add_ps(_mm256_add_ps(vsum_ref[0], vsum_ref[1]),
-                                           _mm256_add_ps(vsum_ref[2], vsum_ref[3]));
-    __m256 vsum_comp_final = _mm256_add_ps(_mm256_add_ps(vsum_comp[0], vsum_comp[1]),
-                                           _mm256_add_ps(vsum_comp[2], vsum_comp[3]));
-
-    float sum_ref  = horizontal_sum_avx(vsum_ref_final);
-    float sum_comp = horizontal_sum_avx(vsum_comp_final);
-
-    // 1.b Intermediate Loop (Handle sisa block 8)
-    // Ini penting agar tidak jatuh ke scalar loop terlalu banyak
+    // Sisa block 8
     for (; i + 8 <= len; i += 8) {
-        __m256 r = _mm256_loadu_ps(ref + i);
-        __m256 c = _mm256_loadu_ps(comp + i);
-        // Kita simpan ke accumulator lokal scalar via hsum nanti, 
-        // atau update vsum_ref_final (lebih mudah update sum scalar langsung untuk pass ini)
-        sum_ref += horizontal_sum_avx(r);
-        sum_comp += horizontal_sum_avx(c);
+        vsum_diff = _mm256_add_ps(vsum_diff, _mm256_sub_ps(_mm256_loadu_ps(ref + i), _mm256_loadu_ps(comp + i)));
     }
 
-    // 1.c Scalar Loop (Handle sisa < 8)
-    // Variable 'temp_i' untuk Pass 2 nanti
-    int start_residual = i; 
+    float sum_diff = horizontal_sum_avx(vsum_diff);
     for (int k = i; k < len; ++k) {
-        sum_ref  += ref[k];
-        sum_comp += comp[k];
+        sum_diff += (ref[k] - comp[k]);
     }
 
-    const float inv_len = 1.0f / static_cast<float>(len);
-    const float mean_diff_scalar = (sum_ref - sum_comp) * inv_len;
+    const float mean_diff = sum_diff / static_cast<float>(len);
+    const __m256 v_mean_diff = _mm256_set1_ps(mean_diff);
+    const __m256 v_eps2 = _mm256_set1_ps(EPSILON_SQ);
 
-    // Persiapkan konstanta untuk Pass 2
-    const __m256 v_mean_diff = _mm256_set1_ps(mean_diff_scalar);
-    const __m256 v_epsilon_sq = _mm256_set1_ps(EPSILON_SQ); 
-
-    // --- PASS 2: CHARBONNIER COST (FMA OPTIMIZED) ---
-    __m256 vcharb_sum[4] = { _mm256_setzero_ps(), _mm256_setzero_ps(),
-                             _mm256_setzero_ps(), _mm256_setzero_ps() };
-
+    // --- PASS 2: CHARBONNIER ACCUMULATION ---
+    // Cost = sum( sqrt( ((r-c) - mean_diff)^2 + eps^2 ) )
+    __m256 vcost = _mm256_setzero_ps();
     i = 0;
-    // 2.a Main Loop (Unroll 32)
-    for (; i + 32 <= len; i += 32)
-    {
-        // Load Ref & Comp
-        __m256 r0 = _mm256_loadu_ps(ref + i);
-        __m256 r1 = _mm256_loadu_ps(ref + i + 8);
-        __m256 r2 = _mm256_loadu_ps(ref + i + 16);
-        __m256 r3 = _mm256_loadu_ps(ref + i + 24);
 
-        __m256 c0 = _mm256_loadu_ps(comp + i);
-        __m256 c1 = _mm256_loadu_ps(comp + i + 8);
-        __m256 c2 = _mm256_loadu_ps(comp + i + 16);
-        __m256 c3 = _mm256_loadu_ps(comp + i + 24);
+    // Unroll 16 to hide SQRT latency (SQRT is pipelined on modern CPUs)
+    for (; i + 16 <= len; i += 16) {
+        // Load & Diff
+        __m256 d0 = _mm256_sub_ps(_mm256_sub_ps(_mm256_loadu_ps(ref + i), _mm256_loadu_ps(comp + i)), v_mean_diff);
+        __m256 d1 = _mm256_sub_ps(_mm256_sub_ps(_mm256_loadu_ps(ref + i + 8), _mm256_loadu_ps(comp + i + 8)), v_mean_diff);
 
-        // Diff = (R - C) - MeanDiff
-        // Kita gabung R-C dulu, baru subtract mean
-        __m256 d0 = _mm256_sub_ps(_mm256_sub_ps(r0, c0), v_mean_diff);
-        __m256 d1 = _mm256_sub_ps(_mm256_sub_ps(r1, c1), v_mean_diff);
-        __m256 d2 = _mm256_sub_ps(_mm256_sub_ps(r2, c2), v_mean_diff);
-        __m256 d3 = _mm256_sub_ps(_mm256_sub_ps(r3, c3), v_mean_diff);
-
-        // Charbonnier Core: sqrt(d^2 + eps^2)
-        // OPTIMASI: Menggunakan FMA (Fused Multiply Add) -> result = (a * b) + c
-        // X = d*d + eps_sq
-        __m256 x0 = _mm256_fmadd_ps(d0, d0, v_epsilon_sq);
-        __m256 x1 = _mm256_fmadd_ps(d1, d1, v_epsilon_sq);
-        __m256 x2 = _mm256_fmadd_ps(d2, d2, v_epsilon_sq);
-        __m256 x3 = _mm256_fmadd_ps(d3, d3, v_epsilon_sq);
-
-        // Approximation 1/sqrt(x)
-        __m256 inv_sqrt0 = _mm256_rsqrt_ps(x0);
-        __m256 inv_sqrt1 = _mm256_rsqrt_ps(x1);
-        __m256 inv_sqrt2 = _mm256_rsqrt_ps(x2);
-        __m256 inv_sqrt3 = _mm256_rsqrt_ps(x3);
-
-        // sqrt(x) = x * 1/sqrt(x)
-        vcharb_sum[0] = _mm256_add_ps(vcharb_sum[0], _mm256_mul_ps(x0, inv_sqrt0));
-        vcharb_sum[1] = _mm256_add_ps(vcharb_sum[1], _mm256_mul_ps(x1, inv_sqrt1));
-        vcharb_sum[2] = _mm256_add_ps(vcharb_sum[2], _mm256_mul_ps(x2, inv_sqrt2));
-        vcharb_sum[3] = _mm256_add_ps(vcharb_sum[3], _mm256_mul_ps(x3, inv_sqrt3));
+        // Core Charbonnier: sqrt(d^2 + eps^2)
+        // Menggunakan SQRTPS langsung (lebih sedikit instruksi daripada RSQRT + MUL)
+        __m256 x0 = _mm256_fmadd_ps(d0, d0, v_eps2);
+        __m256 x1 = _mm256_fmadd_ps(d1, d1, v_eps2);
+        
+        vcost = _mm256_add_ps(vcost, _mm256_add_ps(_mm256_sqrt_ps(x0), _mm256_sqrt_ps(x1)));
     }
 
-    // Accumulate Main Loop Results
-    __m256 vfinal = _mm256_add_ps(_mm256_add_ps(vcharb_sum[0], vcharb_sum[1]),
-                                  _mm256_add_ps(vcharb_sum[2], vcharb_sum[3]));
-    float total_cost = horizontal_sum_avx(vfinal);
-
-    // 2.b Intermediate Loop (Handle sisa block 8)
-    // OPTIMASI: Mencegah bottleneck di scalar loop
-    for (; i + 8 <= len; i += 8)
-    {
-        __m256 r = _mm256_loadu_ps(ref + i);
-        __m256 c = _mm256_loadu_ps(comp + i);
-        __m256 d = _mm256_sub_ps(_mm256_sub_ps(r, c), v_mean_diff);
-        
-        // FMA + Rsqrt logic
-        __m256 x = _mm256_fmadd_ps(d, d, v_epsilon_sq);
-        __m256 inv_sq = _mm256_rsqrt_ps(x);
-        __m256 res = _mm256_mul_ps(x, inv_sq);
-        
-        total_cost += horizontal_sum_avx(res);
+    for (; i + 8 <= len; i += 8) {
+        __m256 d = _mm256_sub_ps(_mm256_sub_ps(_mm256_loadu_ps(ref + i), _mm256_loadu_ps(comp + i)), v_mean_diff);
+        vcost = _mm256_add_ps(vcost, _mm256_sqrt_ps(_mm256_fmadd_ps(d, d, v_eps2)));
     }
 
-    // 2.c Scalar Loop (Handle sisa < 8)
-    // Menggunakan SSE scalar intrinsics untuk single value square root jika memungkinkan,
-    // atau biarkan compiler mengoptimasi FPU.
-    for (; i < len; ++i)
-    {
-        float d = (ref[i] - comp[i]) - mean_diff_scalar;
-        // Compiler modern akan mengubah ini menjadi FMADD scalar jika flag aktif
-        float x = d * d + EPSILON_SQ; 
-        
-        // Menggunakan intrinsik SSE rsqrt scalar
-        __m128 sx = _mm_set_ss(x);
-        __m128 sinv = _mm_rsqrt_ss(sx);
-        float f_inv = _mm_cvtss_f32(sinv);
-        
-        total_cost += x * f_inv;
+    float total_cost = horizontal_sum_avx(vcost);
+    for (; i < len; ++i) {
+        float d = (ref[i] - comp[i]) - mean_diff;
+        total_cost += std::sqrt(d * d + EPSILON_SQ);
     }
 
     return total_cost;

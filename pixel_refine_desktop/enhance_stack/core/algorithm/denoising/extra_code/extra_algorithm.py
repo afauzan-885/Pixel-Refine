@@ -121,130 +121,6 @@ class SimilaritySpatialInterface:
         )
 
 
-class SimilarityFrequencyInterface:
-    """Membungkus pemanggilan fungsi C++ untuk similarity_mfnr_v2 (Frequency Merging)."""
-
-    def __init__(self, lib_path):
-        """
-        Memuat library C++, mendefinisikan argtypes, dan menyimpan objek clib.
-        """
-        if not os.path.exists(lib_path):
-            raise FileNotFoundError(f"Shared library not found: {lib_path}")
-        try:
-            self.clib = ctypes.CDLL(lib_path)
-            self._define_argtypes()
-        except OSError as e:
-            raise OSError(f"Error loading shared library {lib_path}: {e}")
-        except AttributeError as e:
-            raise AttributeError(
-                f"Function not found in DLL or error setting argtypes. Did you compile C++ correctly? Error: {e}"
-            )
-
-    def _define_argtypes(self):
-        """Mendefinisikan argtypes untuk semua fungsi C++ yang digunakan."""
-
-        # --- Definisi untuk accumulate_frame_weighted_jit ---
-        self.clib.accumulate_frame_weighted_jit.restype = None
-        self.clib.accumulate_frame_weighted_jit.argtypes = [
-            np.ctypeslib.ndpointer(
-                dtype=np.float32, ndim=3, flags="C_CONTIGUOUS"
-            ),  # 0: final_image_sum
-            np.ctypeslib.ndpointer(
-                dtype=np.float32, ndim=2, flags="C_CONTIGUOUS"
-            ),  # 1: weight_map_sum
-            np.ctypeslib.ndpointer(
-                dtype=np.float32, ndim=3, flags="C_CONTIGUOUS"
-            ),  # 2: current_image
-            np.ctypeslib.ndpointer(
-                dtype=np.float32, ndim=3, flags="C_CONTIGUOUS"
-            ),  # 3: reference_image
-            np.ctypeslib.ndpointer(
-                dtype=np.float32, ndim=2, flags="C_CONTIGUOUS"
-            ),  # 4: base_window
-            np.ctypeslib.ndpointer(
-                dtype=np.int32, ndim=1, flags="C_CONTIGUOUS"
-            ),  # 5: row_starts
-            np.ctypeslib.ndpointer(
-                dtype=np.int32, ndim=1, flags="C_CONTIGUOUS"
-            ),  # 6: col_starts
-            ctypes.c_int,  # 7: num_row_starts
-            ctypes.c_int,  # 8: num_col_starts
-            ctypes.c_int,
-            ctypes.c_int,  # 9, 10: tile_h, tile_w
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,  # 11, 12, 13: h_img, w_img, channels
-            ctypes.c_int,
-            ctypes.c_int,  # 14, 15: block_h, block_w
-            ctypes.c_float,  # 16: dft_wiener_c_factor
-            ctypes.c_float,  # 17: estimated_noise_sigma_for_block (BARU)
-        ]
-
-        # --- Definisi untuk fungsi normalisasi ---
-        self.clib.normalize_accumulated_image_jit.restype = None
-        self.clib.normalize_accumulated_image_jit.argtypes = [
-            np.ctypeslib.ndpointer(
-                dtype=np.float32, ndim=3, flags="C_CONTIGUOUS"
-            ),  # final_image_ptr
-            np.ctypeslib.ndpointer(
-                dtype=np.float32, ndim=2, flags="C_CONTIGUOUS"
-            ),  # weight_map_sum_ptr
-            ctypes.c_int,  # h
-            ctypes.c_int,  # w
-            ctypes.c_int,  # channels
-        ]
-
-    # MODIFIKASI: Menambahkan noise_sigma ke parameter fungsi Python
-    def call_accumulate_frame_weighted(
-        self,
-        clib_instance,
-        final_image_sum,
-        weight_map_sum,
-        current_image_float,
-        reference_image_float,
-        base_window,
-        row_starts,
-        col_starts,
-        tile_h,
-        tile_w,
-        h_ref,
-        w_ref,
-        channels_buffer,
-        block_h,
-        block_w,
-        dft_wiener_c_factor,
-        ref_noise_sigma,
-    ):  # <--- ARGUMEN BARU
-
-        clib_instance.accumulate_frame_weighted_jit(
-            final_image_sum,
-            weight_map_sum,
-            current_image_float,
-            reference_image_float,
-            base_window,
-            row_starts,
-            col_starts,
-            len(row_starts),
-            len(col_starts),
-            tile_h,
-            tile_w,
-            h_ref,
-            w_ref,
-            channels_buffer,
-            block_h,
-            block_w,
-            ctypes.c_float(dft_wiener_c_factor),
-            ctypes.c_float(ref_noise_sigma),  # <--- Meneruskan noise sigma
-        )
-
-    def call_normalize_accumulated(
-        self, lib, final_image_sum, weight_map_sum, h, w, channels
-    ):
-        lib.normalize_accumulated_image_jit(
-            final_image_sum, weight_map_sum, h, w, channels
-        )
-
-
 ALIGN_LIB = None
 try:
     lib_path = os.path.join("pixel_refine_desktop", "ui", "data", "alignment_tile.dll")
@@ -708,7 +584,9 @@ def perform_image_alignment(
         return True
 
     # --- Preprocessing referensi (Dilakukan 1x di thread utama) ---
-    ref_preprocessed_cpp = preprocess_in_python(reference_image_float, use_raft=False)
+    ref_preprocessed_cpp = preprocess_in_python(
+        reference_image_float, use_raft=False, use_sharpen=True
+    )
     ref_work_gray_cpp = cv2.resize(
         ref_preprocessed_cpp, (work_res_w, work_res_h), interpolation=cv2.INTER_LINEAR
     ).astype(np.float32)

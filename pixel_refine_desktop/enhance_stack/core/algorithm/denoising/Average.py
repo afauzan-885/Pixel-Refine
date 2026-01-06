@@ -1,5 +1,6 @@
 import traceback
 import cv2
+import gc
 from pixel_refine_desktop.enhance_stack.core.algorithm.base_worker import (
     BaseAlgorithmWorker,
 )
@@ -14,6 +15,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
     get_all_image_paths_for_single_process,
     load_images_from_paths,
     resize_all_with_padding,
+    resize_with_padding,
     save_image,
     setup_balanced_batching,
 )
@@ -227,8 +229,12 @@ def main(
         total_batches = len(batch_plan)
         # print(language_config.NUMBER_OF_BATCHES_TO_BE_PROCESSED.format(total_batches))
 
-        processed_batches_results = []
-        images_processed_count = 0
+        sum_accumulator = None
+        total_count_processed = 0
+
+        # Penanda ukuran target dan bit-depth untuk konsistensi data
+        target_shape = None
+        reference_dtype = None
 
         for batch_num, (batch_start, batch_end) in enumerate(batch_plan, 1):
             if stop_requested and stop_requested():
@@ -246,13 +252,17 @@ def main(
                     batch_images = [np.array(h5f[key]) for key in keys]
             else:  # Sumbernya adalah list path
                 batch_paths = data_source[batch_start:batch_end]
+                # Gunakan load_images_from_paths karena lebih tangguh untuk berbagai format
                 batch_images = load_images_from_paths(batch_paths, stop_requested)
-                if batch_images and "resize_all_with_padding" in globals():
-                    resize_res = resize_all_with_padding(
-                        batch_images, method="preserve", stop_requested=stop_requested
+
+                # Setup awal dari gambar pertama (referensi)
+                if batch_images and target_shape is None:
+                    first_img = batch_images[0]
+                    target_shape = (first_img.shape[1], first_img.shape[0])  # (w, h)
+                    reference_dtype = first_img.dtype
+                    print(
+                        f"  -> Reference detect: {target_shape[0]}x{target_shape[1]}, Depth: {reference_dtype}"
                     )
-                    if resize_res and resize_res[0]:
-                        batch_images = resize_res[0]
 
             if stop_requested and stop_requested():
                 break
@@ -264,66 +274,78 @@ def main(
                 )
                 continue
 
-            print(language_config.START_IMAGE_ENHANCEMENT.format(len(batch_images)))
+            # --- PROSES AKUMULASI KUMULATIF SATU-TAHAP ---
+            num_in_batch = len(batch_images)
+            gc_threshold = max(1, int(num_in_batch * 0.7))
 
-            batch_result = image_processor.average_stack(
-                batch_images,
-                update_progress=update_progress,
-                stop_requested=stop_requested,
-                total_overall_images=total_images,
-                images_processed_so_far=images_processed_count,
-            )
+            for i in range(num_in_batch):
+                if stop_requested and stop_requested():
+                    break
 
-            if batch_result is not None:
-                processed_batches_results.append(batch_result)
-                images_processed_count += len(batch_images)
-            else:
-                print("Batch processing failed or returned None.")
+                current_img = batch_images[i]
+                if current_img is None:
+                    continue
+
+                # Validasi dimensi dan resize jika perlu
+                if (current_img.shape[1], current_img.shape[0]) != target_shape:
+                    current_img = resize_with_padding(current_img, target_shape)
+
+                # Inisialisasi accumulator hny sekali
+                if sum_accumulator is None:
+                    sum_accumulator = current_img.astype(np.float32)
+                else:
+                    # Akumulasi langsung ke float32 (Single Stage)
+                    sum_accumulator += current_img.astype(np.float32)
+
+                total_count_processed += 1
+
+                # Update progress UI
+                if update_progress:
+                    progress_val = int((total_count_processed / total_images) * 98)
+                    msg = language_config.IMAGE_PROCESS_IN_PROGRESS.format(
+                        total_count_processed, total_images
+                    )
+                    update_progress(progress_val, msg)
+
+                # --- STRATEGI GC ELEGAN (Refill Memory) ---
+                # Hapus referensi gambar dari list segera setelah variabel accumulator memegangnya
+                batch_images[i] = None
+
+                # GC setiap 70% proses batch atau di akhir batch
+                if (i + 1) >= gc_threshold or (i + 1) == num_in_batch:
+                    gc.collect()
+
+            # Cleanup total untuk batch ini
+            del batch_images
+            gc.collect()
 
         if stop_requested and stop_requested():
             if update_progress and progress_bar:
                 update_progress(progress_bar.value(), "Proses dibatalkan.")
             return
 
-        if not processed_batches_results:
+        if sum_accumulator is None or total_count_processed == 0:
             if update_progress:
                 update_progress(100, language_config.DATA_FAILED_COMPLETION_CREATED)
             return
 
-        print(
-            f"\n--- {language_config.STARTING_ENHANCEMENT} ({len(processed_batches_results)} batch results) ---"
-        )
-
-        fine_tuning_start_progress = 95
-        fine_tuning_end_progress = 99
-
-        def fine_tuning_update_progress(inner_progress, message):
-            """Callback untuk memetakan progress 0-100 dari stacking final ke rentang 95-99%."""
-            mapped_progress = fine_tuning_start_progress + int(
-                (inner_progress / 100.0)
-                * (fine_tuning_end_progress - fine_tuning_start_progress)
-            )
-            if update_progress:
-                if not (stop_requested and stop_requested()):
-                    update_progress(
-                        mapped_progress, language_config.ENHANCEMENT.format(message)
-                    )
-
+        # --- FINALISASI RATA-RATA & PRESERVASI BIT-DEPTH ---
         if update_progress:
-            update_progress(
-                fine_tuning_start_progress, language_config.STARTING_ENHANCEMENT
-            )
+            update_progress(99, "Finalisasi...")
 
-        final_result = image_processor.average_stack(
-            processed_batches_results,
-            update_progress=fine_tuning_update_progress,
-            stop_requested=stop_requested,
-        )
+        average_image_float = sum_accumulator / total_count_processed
 
-        if stop_requested and stop_requested():
-            if update_progress and progress_bar:
-                update_progress(progress_bar.value(), "Proses dibatalkan.")
-            return
+        # Gunakan bit-depth asli dari referensi untuk clipping yang akurat
+        if reference_dtype is None:
+            # Fallback jika gagal deteksi di awal
+            reference_dtype = np.uint8
+
+        max_val = np.iinfo(reference_dtype).max
+        final_result = np.clip(average_image_float, 0, max_val).astype(reference_dtype)
+
+        # Bebaskan memori accumulator
+        del sum_accumulator
+        gc.collect()
 
         if final_result is not None:
             ref_path_for_save = image_paths[0] if image_paths else None
@@ -340,8 +362,9 @@ def main(
             if update_progress:
                 update_progress(100, final_message)
 
-            # Cleanup
+            # Cleanup temp files jika ada
             if not single_process and batch_id is not None:
+                align_dir = os.path.join("database", "align")
                 batch_hdf5_path = os.path.join(
                     align_dir, f"aligned_image_batch_{batch_id}.h5"
                 )

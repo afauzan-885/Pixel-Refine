@@ -26,7 +26,6 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
     setup_balanced_batching,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.extra_algorithm import (
-    SimilarityFrequencyInterface,
     SimilaritySpatialInterface,
     perform_image_alignment,
 )
@@ -314,6 +313,7 @@ class SimilarityAlgorithm:
         weight_of_each_image=False,
         enable_alignment=True,
         scale_down_factor: float = 1.0,
+        return_raw=False,
         **unused_kwargs,
     ):
 
@@ -637,11 +637,19 @@ class SimilarityAlgorithm:
             del task_queue, result_queue, consumer_weight_full_buf
             gc.collect()
 
-        # --- LANGKAH 4: Normalisasi Akhir ---
+        # --- LANGKAH 4: Normalisasi Akhir atau Return Raw ---
         if stop_requested and stop_requested():
             return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
 
         if processed_frames_spatial > 0:
+            # Jika return_raw aktif, kita kembalikan akumulator mentah untuk ditumpuk nanti
+            if return_raw:
+                return (
+                    final_image_sum_full_res,
+                    weight_map_sum_full_res,
+                    processed_frames_spatial,
+                )
+
             try:
                 if update_progress:
                     update_progress(95, "Finalizing with Parallel Precision Fusion...")
@@ -693,303 +701,6 @@ class SimilarityAlgorithm:
 
         return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
 
-    def _frequency_merging(
-        self,
-        images,
-        ref_image_h,
-        ref_image_w,
-        ref_channels_buffer,
-        ref_dtype,
-        reference_image_float,
-        freq_c_wiener_factor,
-        freq_tile_size,
-        freq_overlap_percent,
-        update_progress=None,
-        stop_requested=None,
-        total_overall_images=None,
-        images_processed_so_far=0,
-        lib_path="pixel_refine_desktop/ui/data/similarity_frequency_merging.dll",
-        refinement_algorithm="none",
-        optical_flows=None,
-        temporal_consistency=True,
-        save_temporal_std_path=None,
-        weight_of_each_image=False,
-        # --- Parameter Alignment dari Spatial Merging ---
-        enable_alignment=True,
-        num_workers=2,
-        # -----------------------------------------------
-        **unused_kwargs,
-    ):
-
-        if not images:
-            return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
-
-        num_images = len(images)
-        if num_images == 0:
-            return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
-
-        tile_h, tile_w = map(int, freq_tile_size)
-        step_y = max(int(tile_h * (1 - freq_overlap_percent)), 1)
-        step_x = max(int(tile_w * (1 - freq_overlap_percent)), 1)
-
-        # Range progress bar: 0-95
-        progress_cap_percent_start = 10  # Ruang untuk noise estimation/alignment
-        progress_cap_percent = 95
-
-        _, ref_noise_sigma = preprocess_in_python(reference_image_float)
-        # Pastikan sigma positif, fallback ke nilai aman jika gagal
-        ref_noise_sigma = max(ref_noise_sigma, 1e-6)
-
-        c_interface = None
-
-        def compute_starts(ref_size, tile_size, step_size):
-            if ref_size >= tile_size:
-                starts_temp = np.arange(0, ref_size - tile_size + 1, step_size)
-                if ref_size > tile_size and (
-                    starts_temp.size == 0 or starts_temp[-1] != ref_size - tile_size
-                ):
-                    starts_list = np.append(starts_temp, ref_size - tile_size)
-                elif ref_size == tile_size:
-                    starts_list = np.array([0])
-                else:
-                    starts_list = starts_temp
-            else:
-                starts_list = np.array([0])
-
-            return np.ascontiguousarray(np.unique(starts_list.astype(np.int32)))
-
-        # --- LANGKAH 1: Inisialisasi Tile ---
-        row_starts = compute_starts(ref_image_h, tile_h, step_y)
-        col_starts = compute_starts(ref_image_w, tile_w, step_x)
-
-        # --- LANGKAH 2: PROSES ALIGNMENT (Dicopy dari _spatial_merging) ---
-        if enable_alignment and num_images > 1:
-            if update_progress:
-                update_progress(5, "Memulai proses alignment gambar...")
-
-            # Di frequency merging, alignment biasanya dilakukan pada resolusi penuh
-            align_h, align_w = ref_image_h, ref_image_w
-            align_tile_h, align_tile_w = (
-                tile_h,
-                tile_w,
-            )  # Menggunakan ukuran tile frekuensi
-
-            try:
-                alignment_success = perform_image_alignment(
-                    images,
-                    reference_image_float,
-                    align_h,
-                    align_w,
-                    align_tile_h,
-                    align_tile_w,
-                    ref_dtype,
-                    update_progress,
-                    stop_requested,
-                    num_alignment_workers=num_workers,
-                )
-            except Exception as e:
-                # Handle kegagalan alignment tanpa harus menghentikan seluruh proses
-                alignment_success = False
-                if update_progress:
-                    update_progress(
-                        10, f"Peringatan: Alignment gagal secara teknis: {e}"
-                    )
-
-            if alignment_success:
-                if update_progress:
-                    update_progress(
-                        progress_cap_percent_start,
-                        "Alignment selesai, melanjutkan ke frequency merging...",
-                    )
-            else:
-                if stop_requested and stop_requested():
-                    return (
-                        (None, None, 0, []) if weight_of_each_image else (None, None, 0)
-                    )
-
-                # Jika hanya gagal (bukan dibatalkan), kita bisa lanjutkan dengan gambar asli.
-                if update_progress:
-                    update_progress(
-                        progress_cap_percent_start,
-                        "Alignment gagal atau dibatalkan, menggunakan gambar asli...",
-                    )
-
-        # --- LANGKAH 3: Lanjutkan ke Merging Frekuensi ---
-
-        final_image_sum = np.zeros(
-            (ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32, order="C"
-        )
-        weight_map_sum = np.zeros(
-            (ref_image_h, ref_image_w), dtype=np.float32, order="C"
-        )
-
-        base_window = gaussian_window(freq_tile_size)
-
-        first_image = images[0]
-        if not isinstance(first_image, np.ndarray):
-            # Cek ulang setelah alignment, jika gambar pertama dihapus/diubah.
-            # Biasanya alignment mempertahankan array atau menggantinya dengan array yang selaras.
-            pass
-
-        orig_h, orig_w = ref_image_h, ref_image_w  # Gunakan resolusi referensi
-
-        valid_images = []
-        for i, image_orig in enumerate(images):
-            if not isinstance(image_orig, np.ndarray):
-                continue
-            # Cek dimensi (Alignment harusnya sudah memastikan dimensi seragam)
-            num_ch_orig = image_orig.shape[2] if image_orig.ndim == 3 else 1
-            if num_ch_orig != ref_channels_buffer:
-                continue
-            valid_images.append((i, image_orig))
-
-        if not valid_images:
-            return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
-
-        try:
-            c_interface = SimilarityFrequencyInterface(lib_path)
-        except (FileNotFoundError, OSError, AttributeError) as e:
-            raise RuntimeError(f"Gagal C++ interface _frequency_merging: {e}")
-
-        if temporal_consistency:
-            weight_maps_all = []
-        if weight_of_each_image:
-            weight_maps_per_image = []
-
-        accumulated_weight_map, prev_weight_map_for_standard = None, None
-        processed_frames_freq = 0
-        block_h_cxx, block_w_cxx = tile_h, tile_w
-
-        accumulated_weight_map, prev_weight_map_for_standard = None, None
-        processed_frames_freq = 0
-        block_h_cxx, block_w_cxx = tile_h, tile_w
-
-        if total_overall_images and total_overall_images > 0:
-            progress_factor = progress_cap_percent / total_overall_images
-            use_overall_progress = True
-        else:
-            progress_factor = progress_cap_percent / len(valid_images)
-            use_overall_progress = False
-
-        for idx, (original_idx, image_orig) in enumerate(valid_images):
-            if update_progress:
-                if use_overall_progress:
-                    current_img_overall = images_processed_so_far + original_idx + 1
-                    prog_val = int(current_img_overall * progress_factor)
-                    msg_val = language_config.IMAGE_PROCESS_IN_PROGRESS.format(
-                        current_img_overall, total_overall_images
-                    )
-                else:
-                    prog_val = int((idx + 1) * progress_factor)
-                    msg_val = language_config.ANALYZING_IMAGE.format(
-                        idx + 1, len(valid_images)
-                    )
-                update_progress(prog_val, msg_val)
-
-            if stop_requested and stop_requested():
-                break
-
-            try:
-                current_image_float = normalize_image(image_orig, ref_dtype)
-                if current_image_float.shape[2] != ref_channels_buffer:
-                    continue
-            except Exception:
-                continue
-
-            weight_map_sum_before_this_frame = weight_map_sum.copy()
-
-            try:
-                c_interface.call_accumulate_frame_weighted(
-                    c_interface.clib,
-                    final_image_sum,
-                    weight_map_sum,
-                    current_image_float,
-                    reference_image_float,
-                    base_window,
-                    row_starts,
-                    col_starts,
-                    tile_h,
-                    tile_w,
-                    ref_image_h,
-                    ref_image_w,
-                    ref_channels_buffer,
-                    block_h_cxx,
-                    block_w_cxx,
-                    freq_c_wiener_factor,
-                    ref_noise_sigma,  # <--- ARGUMEN BARU
-                )
-
-                temp_weight_map = weight_map_sum - weight_map_sum_before_this_frame
-
-                map_for_refinement = temp_weight_map
-
-                # Lakukan penyempurnaan (refinement) menggunakan peta bobot yang sudah dipilih
-                if (
-                    refinement_algorithm == "optical_flow"
-                    and optical_flows is not None
-                    and original_idx < len(optical_flows)
-                ):
-                    if accumulated_weight_map is None:
-                        refined_weight = map_for_refinement
-                    else:
-                        pass
-                        # refined_weight = ml_driven_refinement(map_for_refinement, accumulated_weight_map, optical_flows[original_idx])
-                    accumulated_weight_map = refined_weight.copy()
-                elif refinement_algorithm == "standard":
-                    # refined_weight = standard_refinement(map_for_refinement, prev_weight_map_for_standard, reference_image_float)
-                    prev_weight_map_for_standard = refined_weight.copy()
-                else:
-                    refined_weight = map_for_refinement
-
-                weight_map_sum = weight_map_sum_before_this_frame + refined_weight
-
-                if weight_of_each_image:
-                    weight_maps_per_image.append(refined_weight.copy())
-
-                if temporal_consistency:
-                    weight_maps_all.append(refined_weight.copy())
-
-                processed_frames_freq += 1
-
-            except Exception as e_cxx:
-                print(
-                    f"Warning: C++ accumulation failed for frame {original_idx+1}: {e_cxx}"
-                )
-                continue
-
-        if processed_frames_freq > 0:
-            try:
-                c_interface.call_normalize_accumulated(
-                    c_interface.clib,
-                    final_image_sum,
-                    weight_map_sum,
-                    ref_image_h,
-                    ref_image_w,
-                    ref_channels_buffer,
-                )
-
-                # --- [DINONAKTIFKAN SEMENTARA] ---
-                # if temporal_consistency:
-                #     temporal_consistency_refinement(weight_maps_all, weight_map_sum, save_temporal_std_path=save_temporal_std_path)
-
-                return (
-                    (
-                        final_image_sum,
-                        weight_map_sum,
-                        processed_frames_freq,
-                        weight_maps_per_image,
-                    )
-                    if weight_of_each_image
-                    else (final_image_sum, weight_map_sum, processed_frames_freq)
-                )
-
-            except Exception as e_norm:
-                raise RuntimeError(
-                    f"{language_config.NORMALIZATION_FAILED.format(e_norm)} (frequency merging)"
-                )
-        else:
-            return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
-
     def similarity_mnfr(
         self,
         images,
@@ -1006,6 +717,8 @@ class SimilarityAlgorithm:
         images_processed_so_far=0,
         save_temporal_std_path=None,
         weight_of_each_image=False,
+        ref_image_override=None,
+        return_raw=False,
         **merging_kwargs,
     ):
         """
@@ -1016,7 +729,9 @@ class SimilarityAlgorithm:
             raise ValueError(language_config.IMAGE_DATA_MUST_BE_VALID)
 
         try:
-            ref_image = images[0]
+            ref_image = (
+                ref_image_override if ref_image_override is not None else images[0]
+            )
             if not isinstance(ref_image, np.ndarray):
                 raise TypeError(language_config.IMAGE_DATA_MUST_BE_VALID)
 
@@ -1059,6 +774,7 @@ class SimilarityAlgorithm:
             "total_overall_images": total_overall_images,
             "images_processed_so_far": images_processed_so_far,
             "weight_of_each_image": weight_of_each_image,
+            "return_raw": return_raw,
         }
         common_call_args.update(merging_kwargs)
 
@@ -1127,74 +843,12 @@ class SimilarityAlgorithm:
                 }
             )
             results = self._spatial_merging(**common_call_args)
-
-        elif merging_type == "frequency":
-            default_freq_tile_val, default_freq_overlap, default_freq_c_wiener = (
-                24,
-                0.20,
-                5.0,
-            )
-            default_freq_lib_path = common_call_args.get(
-                "lib_path_freq",
-                common_call_args.get(
-                    "lib_path",
-                    "pixel_refine_desktop/ui/data/similarity_frequency_merging.dll",
-                ),
-            )
-            current_freq_c_wiener = common_call_args.get(
-                "freq_c_wiener_factor", default_freq_c_wiener
-            )
-            current_freq_tile_size_input = common_call_args.get(
-                "freq_tile_size", default_freq_tile_val
-            )
-            current_freq_overlap = common_call_args.get(
-                "freq_overlap_percent", default_freq_overlap
-            )
-
-            if isinstance(current_freq_tile_size_input, int):
-                current_freq_tile_size_tuple = (
-                    current_freq_tile_size_input,
-                    current_freq_tile_size_input,
-                )
-            elif (
-                isinstance(current_freq_tile_size_input, (list, tuple))
-                and len(current_freq_tile_size_input) == 2
-            ):
-                current_freq_tile_size_tuple = tuple(
-                    map(int, current_freq_tile_size_input)
-                )
-            else:
-                current_freq_tile_size_tuple = (
-                    default_freq_tile_val,
-                    default_freq_tile_val,
-                )
-
-            common_call_args.update(
-                {
-                    "freq_c_wiener_factor": current_freq_c_wiener,
-                    "freq_tile_size": current_freq_tile_size_tuple,
-                    "freq_overlap_percent": current_freq_overlap,
-                    "lib_path": default_freq_lib_path,
-                    # "num_workers": current_num_workers,
-                    "temporal_consistency": True,
-                    "save_temporal_std_path": save_temporal_std_path,
-                }
-            )
-
-            # Hapus parameter spatial agar tidak kacau
-            for key_to_remove in [
-                "tile_size",
-                "overlap",
-                "motion_sensitivity",
-                "noise_offset_factor",
-            ]:
-                common_call_args.pop(key_to_remove, None)
-
-            results = self._frequency_merging(**common_call_args)
+            if return_raw:
+                return results
 
         else:
             raise ValueError(
-                f"Unsupported merging_type: {merging_type}. Choose 'spatial' or 'frequency'."
+                f"Unsupported merging_type: {merging_type}. Merging type must be 'spatial'."
             )
 
         # --- Jika tidak ada hasil karena stop_requested() ---
@@ -1216,7 +870,6 @@ class SimilarityAlgorithm:
             final_image_normalized = results[0]
             final_weight_map = results[1]
             processed_frames = results[2]
-            individual_maps = []
             individual_maps = []
 
         # --- Stop_requested setelah proses tapi sebelum semua frame selesai ---
@@ -1396,17 +1049,6 @@ def main(
             if custom_lib_path:
                 extra_merging_params["lib_path"] = custom_lib_path
 
-        elif merging_type_from_settings == "frequency":
-            extra_merging_params["freq_c_wiener_factor"] = general_settings.get(
-                "similarity_frequency_c_wiener_factor", 5.0
-            )
-            tile_val_fq = general_settings.get("similarity_frequency_tile_size", 16)
-            extra_merging_params["freq_tile_size"] = tile_val_fq
-            extra_merging_params["freq_overlap_percent"] = general_settings.get(
-                "similarity_frequency_overlap_percent", 0.25
-            )
-            # extra_merging_params['num_workers'] = general_settings.get("similarity_spatial_num_workers", 2)
-
         # --- 2. SETUP SUMBER DATA & PATH ---
         data_source, image_paths, output_name_base, total_images = (
             _setup_data_source_and_paths(
@@ -1446,15 +1088,31 @@ def main(
             print(language_config.OUTPUT_SAVE_WEIGHT_MAP.format(weight_map_output_path))
 
         # --- 4. PERENCANAAN BATCH (UMUM) ---
-        batch_plan = setup_balanced_batching(total_images, language_config)
+        # Gunakan max_batch_size=8 untuk menjaga RAM tetap aman
+        batch_plan = setup_balanced_batching(
+            total_images, language_config, max_batch_size=8
+        )
         if not batch_plan:
             if update_progress:
                 update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
             return
         total_batches = len(batch_plan)
 
-        # --- 5. PROSES INTI PER BATCH ---
-        processed_batches_results = []
+        # Muat gambar referensi (Frame #1) untuk dipertahankan sepanjang proses
+        reference_image_list = _load_images_for_batch(
+            data_source, (0, 1), stop_requested
+        )
+        if reference_image_list and len(reference_image_list) > 0:
+            reference_image = reference_image_list[0]
+        else:
+            if update_progress:
+                update_progress(0, language_config.FIRST_IMAGE_CANNOT_BE_OBTAINED)
+            return
+
+        # --- 5. PROSES INTI PER BATCH & AKUMULASI STREAMING ---
+        global_sum_img = None
+        global_sum_weight = None
+        global_total_frames = 0
         images_processed_count = 0
 
         for batch_num, (batch_start, batch_end) in enumerate(batch_plan, 1):
@@ -1470,6 +1128,11 @@ def main(
                 data_source, (batch_start, batch_end), stop_requested
             )
 
+            # Tambahkan kembali reference frame (Frame #1) jika tidak ada (untuk batch > 1)
+            # karena _load_images_for_batch memuat range indeks [start:end]
+            if batch_start > 0:
+                batch_images_list.insert(0, reference_image)
+
             if stop_requested and stop_requested():
                 break
             if not batch_images_list:
@@ -1480,7 +1143,8 @@ def main(
                 )
                 continue
 
-            batch_result_img, _, _ = image_processor.similarity_mnfr(
+            # Raw accumulation: Kembalikan sum_img dan sum_weight mentah
+            batch_raw_res = image_processor.similarity_mnfr(
                 images=batch_images_list,
                 merging_type=merging_type_from_settings,
                 tile_size=spatial_tile_size_arg,
@@ -1491,78 +1155,74 @@ def main(
                 stop_requested=stop_requested,
                 total_overall_images=total_images,
                 images_processed_so_far=images_processed_count,
-                weight_of_each_image=False,  # Tidak lagi membutuhkan peta bobot individual
+                weight_of_each_image=False,
+                ref_image_override=reference_image,
+                return_raw=True,
                 **extra_merging_params,
             )
 
             if stop_requested and stop_requested():
                 break
 
-            if batch_result_img is not None:
-                processed_batches_results.append(batch_result_img)
-                images_processed_count += len(batch_images_list)
+            if batch_raw_res is not None and len(batch_raw_res) == 3:
+                batch_sum_img, batch_sum_weight, batch_processed_frames = batch_raw_res
+
+                if global_sum_img is None:
+                    global_sum_img = batch_sum_img
+                    global_sum_weight = batch_sum_weight
+                else:
+                    global_sum_img += batch_sum_img
+                    global_sum_weight += batch_sum_weight
+
+                global_total_frames += batch_processed_frames
+                # Update progress based on actual images processed in source data
+                images_processed_count += batch_end - batch_start
+
+            # Paksa cleanup memori setiap akhir batch
+            del batch_images_list
+            gc.collect()
 
         if stop_requested and stop_requested():
             if update_progress and progress_bar:
                 update_progress(progress_bar.value(), "Proses Dibatalkan.")
             return
 
-        # --- 6. PENGGABUNGAN AKHIR / FINE-TUNING ---
+        # --- 6. PENGGABUNGAN AKHIR (PRECISION STRUCTURE FUSION) ---
         final_result_img = None
-        if processed_batches_results:
+        if global_sum_img is not None and global_total_frames > 0:
+            if update_progress:
+                update_progress(95, "Finalizing with Parallel Precision Fusion...")
 
-            # Panggil fungsi resize_all_with_padding pada hasil-hasil batch
-            if processed_batches_results:
-                resize_res = resize_all_with_padding(
-                    processed_batches_results,
-                    method="preserve",
-                    stop_requested=stop_requested,
-                )
-                if resize_res and resize_res[0]:
-                    processed_batches_results = resize_res[0]
-                    final_shape = resize_res[1]
-                    print(
-                        f"Semua hasil batch disesuaikan ke ukuran target: {final_shape}"
-                    )
-            # --- AKHIR PENAMBAHAN KODE ---
+            # Hitung estimasi noise dari referensi sebelum fusi akhir
+            ref_gray_preproc = preprocess_in_python(
+                normalize_image(reference_image, reference_image.dtype),
+                use_sharpen=False,
+            )
+            ref_noise_sigma = estimate_noise_in_python(ref_gray_preproc)
 
-            if len(processed_batches_results) > 1:
-                fine_tuning_start_progress, fine_tuning_end_progress = 95, 99
+            # Satu kali proses fusi struktur presisi menggunakan akumulator global
+            final_result_normalized = image_processor._apply_final_fusion_tiled(
+                sum_img=global_sum_img,
+                sum_weight=global_sum_weight,
+                ref_img=normalize_image(reference_image, reference_image.dtype),
+                noise_sigma=ref_noise_sigma,
+                tile_size=1024,
+                padding=16,
+            )
 
-                def fine_tuning_update_progress(inner_progress, message):
-                    mapped_progress = fine_tuning_start_progress + int(
-                        (inner_progress / 100.0)
-                        * (fine_tuning_end_progress - fine_tuning_start_progress)
-                    )
-                    if update_progress and not (stop_requested and stop_requested()):
-                        update_progress(
-                            mapped_progress, language_config.ENHANCEMENT.format(message)
-                        )
+            # Kawal konversi bit-depth agar konsisten
+            dtype_ref = reference_image.dtype
+            max_val = np.iinfo(dtype_ref).max
+            final_result_img = np.clip(
+                final_result_normalized * max_val, 0, max_val
+            ).astype(dtype_ref)
 
-                if update_progress:
-                    update_progress(
-                        fine_tuning_start_progress, language_config.STARTING_ENHANCEMENT
-                    )
-
-                final_result_img, _, _ = image_processor.similarity_mnfr(
-                    images=processed_batches_results,
-                    merging_type=merging_type_from_settings,
-                    tile_size=spatial_tile_size_arg,
-                    overlap=spatial_overlap_arg,
-                    motion_sensitivity=spatial_motion_sensitivity_arg,
-                    noise_offset_factor=spatial_noise_offset_factor_arg,
-                    update_progress=fine_tuning_update_progress,
-                    stop_requested=stop_requested,
-                    save_weight_map_path=(
-                        weight_map_output_path if save_final_weight_map else None
-                    ),
-                    total_overall_images=len(processed_batches_results),
-                    images_processed_so_far=0,
-                    weight_of_each_image=False,
-                    **extra_merging_params,
-                )
-            else:
-                final_result_img = processed_batches_results[0]
+            # Bebaskan memori
+            del global_sum_img, global_sum_weight, final_result_normalized
+            gc.collect()
+        else:
+            if not stop_requested or not stop_requested():
+                print("Gagal mengumpulkan data fusi streaming dari batch.")
 
         # --- 7. PENYIMPANAN HASIL AKHIR & PEMBERSIHAN ---
         if final_result_img is not None:

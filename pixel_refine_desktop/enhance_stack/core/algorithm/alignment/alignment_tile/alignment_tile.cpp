@@ -15,6 +15,22 @@
 #include "cost_function.hpp"
 #include "refinement.hpp"
 
+#include "refinement.hpp"
+
+// =========================================================================
+// === PROFILING UTILS ===
+// =========================================================================
+struct SimpleTimer {
+    std::string name;
+    std::chrono::high_resolution_clock::time_point start;
+    SimpleTimer(const std::string& n) : name(n), start(std::chrono::high_resolution_clock::now()) {}
+    ~SimpleTimer() {
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> elapsed = end - start;
+        std::cout << "[C++ Timer] " << name << ": " << elapsed.count() << " ms" << std::endl;
+    }
+};
+
 // =========================================================================
 // === HELPER FUNCTIONS - Static Implementation ===
 // =========================================================================
@@ -92,41 +108,14 @@ namespace AlignmentFlowHelpers
     {
         using namespace ImageAlignmentConfig;
 
-        // --- LANGKAH 1: PRE-PROCESSING GAMBAR PEMANDU (GUIDE IMAGE) ---
-        cv::Mat guide_image_8u;
-        if (ref_layer.channels() > 1)
-        {
-            cv::cvtColor(ref_layer, guide_image_8u, cv::COLOR_BGR2GRAY);
-        }
-        else
-        {
-            // Konversi langsung, HILANGKAN equalizeHist
-            ref_layer.convertTo(guide_image_8u, CV_8U);
-        }
-
-        // --- LANGKAH 2: UPSAMPLING KASAR PADA FLOW ---
-        std::vector<cv::Mat> flow_channels;
-        cv::split(previous_level_flow, flow_channels);
-
-        cv::Mat flow_x_upsampled, flow_y_upsampled;
-        // PENGGANTIAN: Gunakan INTER_LINEAR untuk upsampling yang lebih baik daripada NEAREST
-        cv::resize(flow_channels[0], flow_x_upsampled, ref_layer.size(), 0, 0, cv::INTER_LINEAR);
-        cv::resize(flow_channels[1], flow_y_upsampled, ref_layer.size(), 0, 0, cv::INTER_LINEAR);
-
-        // --- LANGKAH 3: TERAPKAN SMOOTHING CEPAT (Pengganti Guided Filter) ---
-        cv::Mat flow_x_smoothed, flow_y_smoothed;
-        const int kernel_size = 3;
-
-        // Gunakan Median Blur (cepat dan efektif menghilangkan noise upsampling)
-        cv::medianBlur(flow_x_upsampled, flow_x_smoothed, kernel_size);
-        cv::medianBlur(flow_y_upsampled, flow_y_smoothed, kernel_size);
-
-        // --- LANGKAH 4 & 5: GABUNGKAN DAN SCALE ---
-        std::vector<cv::Mat> smoothed_channels = {flow_x_smoothed, flow_y_smoothed};
         cv::Mat flow_upsampled;
-        cv::merge(smoothed_channels, flow_upsampled);
+        // OPTIMIZATION: Use INTER_LINEAR directly on CV_32FC2.
+        // This provides smoothed upsampling in a single pass, 
+        // avoiding the need for manual split/boxFilter/merge.
+        cv::resize(previous_level_flow, flow_upsampled, ref_layer.size(), 0, 0, cv::INTER_LINEAR);
 
-        flow_upsampled *= FLOW_UPSCALE_FACTOR; // Biasanya 2.0
+        // Scale flow vectors by the upscale factor
+        flow_upsampled *= FLOW_UPSCALE_FACTOR; // 2.0f
 
         return flow_upsampled;
     }
@@ -761,64 +750,62 @@ namespace AlignmentFlowHelpers
      */
     static void spatialLocalRANSACCleanup(
         cv::Mat &flow,
-        int window_size = 96,           // Larger window = fewer windows = faster
-        float overlap_ratio = 0.25f)    // Reduced overlap untuk speed (less blending overhead)
+        int window_size = 64,           // Adaptive window size
+        float overlap_ratio = 0.0f)     // OPTIMIZATION: Zero overlap removes blending overhead
     {
         if (flow.empty() || flow.type() != CV_32FC2)
             return;
 
         const int h = flow.rows;
         const int w = flow.cols;
-        const int step = static_cast<int>(window_size * (1.0f - overlap_ratio));
         
-        // --- OPTIMIZATION 1: Pre-allocate Gaussian kernel once ---
-        static thread_local cv::Mat gaussian_kernel_cached;
-        static thread_local int cached_window_size = 0;
-        
-        if (cached_window_size != window_size) {
-            cv::Mat kernel_1d = cv::getGaussianKernel(window_size, window_size * 0.3f, CV_32F);
-            gaussian_kernel_cached = kernel_1d * kernel_1d.t();
-            cached_window_size = window_size;
-        }
-        const cv::Mat &weight_kernel = gaussian_kernel_cached;
+        // Jika overlap 0, kita gunakan step = window_size (Non-overlapping blocks)
+        const int step = (overlap_ratio > 0.0f) ? 
+                         static_cast<int>(window_size * (1.0f - overlap_ratio)) : 
+                         window_size;
 
-        // Output flow (in-place blending buffer)
-        cv::Mat cleaned_flow = cv::Mat::zeros(flow.size(), CV_32FC2);
-        cv::Mat weight_accumulator = cv::Mat::zeros(flow.size(), CV_32F);
+        // --- PHASE 1: PREPARE JOBS ---
+        struct WindowJob { int wx, wy; };
+        std::vector<WindowJob> jobs;
+        jobs.reserve((h / step + 1) * (w / step + 1));
 
-        // --- OPTIMIZATION 2: Thread-local buffers ---
-        const int max_pixels = window_size * window_size;
-        static thread_local std::vector<float> magnitudes_buffer;
-        if (magnitudes_buffer.capacity() < max_pixels) {
-            magnitudes_buffer.reserve(max_pixels);
+        for (int wy = 0; wy <= h - window_size; wy += step) {
+            for (int wx = 0; wx <= w - window_size; wx += step) {
+                jobs.push_back({wx, wy});
+            }
         }
 
-        // Process setiap window
-        for (int wy = 0; wy <= h - window_size; wy += step)
+        #pragma omp parallel
         {
-            for (int wx = 0; wx <= w - window_size; wx += step)
-            {
+            // Thread-local buffers
+            const int max_pixels = window_size * window_size;
+            std::vector<float> magnitudes_buffer;
+            magnitudes_buffer.reserve(max_pixels / 4); // Subsampled
+            
+            std::vector<cv::Point2f> flow_vectors;
+            flow_vectors.reserve(max_pixels / 4); // Subsampled
+
+            #pragma omp for schedule(dynamic)
+            for (int i = 0; i < (int)jobs.size(); ++i) {
+                const int wx = jobs[i].wx;
+                const int wy = jobs[i].wy;
+                
                 cv::Rect window_roi(wx, wy, window_size, window_size);
                 cv::Mat window_flow = flow(window_roi);
 
-                // --- OPTIMIZATION 3: Use fixed array + early variance check ---
+                // --- 1. Quick Variance check (Subsampled) ---
                 magnitudes_buffer.clear();
                 float mag_sum = 0.0f;
-                
-                // Single pass: collect magnitudes & sum
-                for (int r = 0; r < window_size; ++r)
-                {
+                for (int r = 0; r < window_size; r += 2) {
                     const cv::Vec2f* row_ptr = window_flow.ptr<cv::Vec2f>(r);
-                    for (int c = 0; c < window_size; ++c)
-                    {
+                    for (int c = 0; c < window_size; c += 2) {
                         const cv::Vec2f& f = row_ptr[c];
-                        float mag = std::sqrt(f[0]*f[0] + f[1]*f[1]);  // Manual sqrt faster than cv::norm
+                        float mag = std::sqrt(f[0]*f[0] + f[1]*f[1]); 
                         magnitudes_buffer.push_back(mag);
                         mag_sum += mag;
                     }
                 }
 
-                // Early exit: skip RANSAC jika flow field sangat uniform (variance kecil)
                 float mag_mean = mag_sum / magnitudes_buffer.size();
                 float mag_variance = 0.0f;
                 for (float mag : magnitudes_buffer) {
@@ -827,161 +814,64 @@ namespace AlignmentFlowHelpers
                 }
                 mag_variance /= magnitudes_buffer.size();
 
-                // --- OPTIMIZATION 4: Skip RANSAC untuk low-variance windows (common case) ---
-                // Jika variance sangat kecil, flow sudah clean, skip processing
-                if (mag_variance < 0.1f) {
-                    // Ultra-fast path: just copy original dengan full weight
-                    for (int r = 0; r < window_size; ++r)
-                    {
-                        const float* w_row = weight_kernel.ptr<float>(r);
-                        const cv::Vec2f* src_row = window_flow.ptr<cv::Vec2f>(r);
-                        cv::Vec2f* out_row = cleaned_flow.ptr<cv::Vec2f>(wy + r, wx);
-                        float* acc_row = weight_accumulator.ptr<float>(wy + r, wx);
+                // Skip RANSAC for low variance (Sangat umum di area statis/langit)
+                if (mag_variance < 0.5f) continue; 
 
-                        for (int c = 0; c < window_size; ++c)
-                        {
-                            float weight = w_row[c];
-                            out_row[c][0] += src_row[c][0] * weight;
-                            out_row[c][1] += src_row[c][1] * weight;
-                            acc_row[c] += weight;
-                        }
-                    }
-                    continue;  // Skip to next window
-                }
-
-                // Calculate adaptive distance threshold
-                std::nth_element(magnitudes_buffer.begin(), 
-                                magnitudes_buffer.begin() + magnitudes_buffer.size()/2,
-                                magnitudes_buffer.end());
+                // --- 2. RANSAC ---
+                std::nth_element(magnitudes_buffer.begin(), magnitudes_buffer.begin() + magnitudes_buffer.size()/2, magnitudes_buffer.end());
                 float median_magnitude = magnitudes_buffer[magnitudes_buffer.size() / 2];
                 float distance_threshold = std::max(1.0f, median_magnitude * 0.25f);
+                float dist_thresh_sq = distance_threshold * distance_threshold;
 
-                // --- OPTIMIZATION 5: Adaptive RANSAC iterations based on variance ---
-                int max_iterations;
-                if (mag_variance < 1.0f) {
-                    max_iterations = 10;  // Low variance, fewer iterations needed
-                } else if (mag_variance < 5.0f) {
-                    max_iterations = 20;  // Medium variance
-                } else {
-                    max_iterations = 30;  // High variance (increased dari 50)
-                }
-                
-                const int min_inliers_needed = static_cast<int>(window_size * window_size * 0.4f);  // Increased threshold
-
-                // RANSAC untuk window
-                cv::Vec2f best_local_flow(0, 0);
-                int max_inliers = 0;
-
-                // --- OPTIMIZATION 6: Pre-collect flow vectors only if needed (delayed allocation) ---
-                std::vector<cv::Point2f> flow_vectors;
-                flow_vectors.reserve(max_pixels);
-
-                for (int r = 0; r < window_size; ++r)
-                {
+                flow_vectors.clear();
+                for (int r = 0; r < window_size; r += 2) {
                     const cv::Vec2f* row_ptr = window_flow.ptr<cv::Vec2f>(r);
-                    for (int c = 0; c < window_size; ++c)
-                    {
+                    for (int c = 0; c < window_size; c += 2) {
                         const cv::Vec2f& f = row_ptr[c];
                         flow_vectors.emplace_back(f[0], f[1]);
                     }
                 }
 
-                // RANSAC loop
-                for (int iter = 0; iter < max_iterations && max_inliers < min_inliers_needed; ++iter)
-                {
-                    const int rand_idx = cv::theRNG().uniform(0, static_cast<int>(flow_vectors.size()));
-                    const cv::Point2f &hypothesis_flow = flow_vectors[rand_idx];
+                cv::Vec2f best_local_flow(0, 0);
+                int max_inliers = 0;
+                const int num_vectors = (int)flow_vectors.size();
+                const int min_inliers_needed = static_cast<int>(num_vectors * 0.4f);
+                const int max_iterations = (mag_variance > 5.0f) ? 25 : 12;
+
+                for (int iter = 0; iter < max_iterations && max_inliers < min_inliers_needed; ++iter) {
+                    const int rand_idx = cv::theRNG().uniform(0, num_vectors);
+                    const cv::Point2f &hypothesis = flow_vectors[rand_idx];
 
                     int current_inliers = 0;
-                    float inlier_sum_x = 0.0f;
-                    float inlier_sum_y = 0.0f;
+                    float in_sum_x = 0.0f, in_sum_y = 0.0f;
 
-                    // --- OPTIMIZATION 7: Unroll inner loop for better vectorization ---
-                    for (const auto &vec : flow_vectors)
-                    {
-                        float dx = vec.x - hypothesis_flow.x;
-                        float dy = vec.y - hypothesis_flow.y;
-                        float dist_sq = dx*dx + dy*dy;  // Use squared distance (faster than sqrt)
-                        
-                        if (dist_sq < distance_threshold * distance_threshold)
-                        {
+                    for (const auto &v : flow_vectors) {
+                        float dx = v.x - hypothesis.x;
+                        float dy = v.y - hypothesis.y;
+                        if ((dx*dx + dy*dy) < dist_thresh_sq) {
                             current_inliers++;
-                            inlier_sum_x += vec.x;
-                            inlier_sum_y += vec.y;
+                            in_sum_x += v.x; in_sum_y += v.y;
                         }
                     }
 
-                    if (current_inliers > max_inliers)
-                    {
+                    if (current_inliers > max_inliers) {
                         max_inliers = current_inliers;
-                        float inv_count = 1.0f / static_cast<float>(current_inliers);
-                        best_local_flow = cv::Vec2f(inlier_sum_x * inv_count, inlier_sum_y * inv_count);
+                        float inv = 1.0f / (float)current_inliers;
+                        best_local_flow = cv::Vec2f(in_sum_x * inv, in_sum_y * inv);
                     }
                 }
 
-                // Apply cleaned flow ke output dengan Gaussian weighting
-                if (max_inliers > min_inliers_needed)
-                {
-                    // RANSAC success: use cleaned flow
-                    for (int r = 0; r < window_size; ++r)
-                    {
-                        const float* w_row = weight_kernel.ptr<float>(r);
-                        cv::Vec2f* out_row = cleaned_flow.ptr<cv::Vec2f>(wy + r, wx);
-                        float* acc_row = weight_accumulator.ptr<float>(wy + r, wx);
-
-                        for (int c = 0; c < window_size; ++c)
-                        {
-                            float weight = w_row[c];
-                            out_row[c][0] += best_local_flow[0] * weight;
-                            out_row[c][1] += best_local_flow[1] * weight;
-                            acc_row[c] += weight;
-                        }
-                    }
-                }
-                else
-                {
-                    // RANSAC failed: use original dengan reduced weight
-                    for (int r = 0; r < window_size; ++r)
-                    {
-                        const float* w_row = weight_kernel.ptr<float>(r);
-                        const cv::Vec2f* src_row = window_flow.ptr<cv::Vec2f>(r);
-                        cv::Vec2f* out_row = cleaned_flow.ptr<cv::Vec2f>(wy + r, wx);
-                        float* acc_row = weight_accumulator.ptr<float>(wy + r, wx);
-
-                        for (int c = 0; c < window_size; ++c)
-                        {
-                            float weight = w_row[c] * 0.3f;  // Further reduced weight
-                            out_row[c][0] += src_row[c][0] * weight;
-                            out_row[c][1] += src_row[c][1] * weight;
-                            acc_row[c] += weight;
+                // --- 3. Apply Directly (Zero Overlap logic) ---
+                if (max_inliers > min_inliers_needed) {
+                    for (int r = 0; r < window_size; ++r) {
+                        cv::Vec2f* row_ptr = window_flow.ptr<cv::Vec2f>(r);
+                        for (int c = 0; c < window_size; ++c) {
+                            row_ptr[c] = best_local_flow;
                         }
                     }
                 }
             }
         }
-
-        // --- OPTIMIZATION 8: Fast normalization kernel ---
-        for (int r = 0; r < h; ++r)
-        {
-            cv::Vec2f* out_row = cleaned_flow.ptr<cv::Vec2f>(r);
-            float* acc_row = weight_accumulator.ptr<float>(r);
-
-            for (int c = 0; c < w; ++c)
-            {
-                float weight = acc_row[c];
-                if (weight > 1e-6f) {
-                    float inv_weight = 1.0f / weight;
-                    out_row[c][0] *= inv_weight;
-                    out_row[c][1] *= inv_weight;
-                } else {
-                    // Keep original if no weight accumulated (shouldn't happen)
-                    out_row[c] = flow.at<cv::Vec2f>(r, c);
-                }
-            }
-        }
-
-        // Copy cleaned flow back to original
-        cleaned_flow.copyTo(flow);
     }
 
     static inline float calculateCostAtIntegerPos(
@@ -1033,10 +923,17 @@ namespace AlignmentFlowHelpers
         const int h_layer = ref_layer.rows;
         const int w_layer = ref_layer.cols;
 
+        // Timer per layer components
+        SimpleTimer layer_timer("Layer " + std::to_string(layer_index) + " Processing");
+
         // --- 1. Inisialisasi Flow ---
         cv::Mat flow;
-        if (is_coarsest_layer) flow = AlignmentFlowHelpers::initializeCoarsestFlow(ref_layer);
-        else flow = AlignmentFlowHelpers::upsamplingFlow(previous_level_flow, ref_layer);
+        {
+             // Timer khusus Upsampling
+             SimpleTimer upsample_timer("Layer " + std::to_string(layer_index) + " Upsampling");
+             if (is_coarsest_layer) flow = AlignmentFlowHelpers::initializeCoarsestFlow(ref_layer);
+             else flow = AlignmentFlowHelpers::upsamplingFlow(previous_level_flow, ref_layer);
+        }
 
         // --- 2. Setup Tile Size ---
         // Clamp tile size agar tidak lebih besar dari gambar layer saat ini
@@ -1052,20 +949,21 @@ namespace AlignmentFlowHelpers
         // Layer halus radius kecil, layer kasar radius besar
         float current_layer_search_dist = base_search_dist;
         if (!is_coarsest_layer) {
-            // Rumus decay radius: makin halus layer, makin sempit pencarian
-            current_layer_search_dist = std::max(1.0f, base_search_dist / (1.5f * (total_layers - layer_index)));
+            // OPTIMASI: Faster decay (2.0 instead of 1.5) untuk mengurangi search area
+            current_layer_search_dist = std::max(1.0f, base_search_dist / (2.0f * (total_layers - layer_index)));
         }
 
         const float tile_area_inv = 1.0f / (float)(current_tile_h * current_tile_w);
 
-        // Struktur untuk menyimpan hasil per thread
-        // Kita simpan Rect dan Flow-nya untuk ditulis ulang nanti
-        std::vector<std::vector<TileResult>> thread_results(omp_get_max_threads());
+        // OPTIMIZATION: DIRECT WRITE (Eliminate Serial Copy Phase)
+        // Kita butuh matriks tujuan terpisah agar tidak race condition saat membaca neighbor (flow)
+        // Gunakan Zeros (seperti logic original) bukan Clone, untuk hemat bandwidth.
+        cv::Mat refined_flow = cv::Mat::zeros(h_layer, w_layer, CV_32FC2);
 
+        {
+             SimpleTimer search_timer("Layer " + std::to_string(layer_index) + " Search Phase");
 #pragma omp parallel
         {
-            int thread_id = omp_get_thread_num();
-            
             // Buffer lokal thread (reusable)
             std::vector<cv::Vec2f> temp_initial_flows; 
             temp_initial_flows.reserve(10);
@@ -1078,12 +976,15 @@ namespace AlignmentFlowHelpers
             std::vector<float> local_comp_buffer(current_tile_h * current_tile_w);
 
             // Cache Cost Integer (Hanya dipakai di finest layer)
-            std::map<uint32_t, float> integer_cost_cache;
+            // OPTIMIZATION: Linear search vector is faster than std::map for small N (< 20)
+            struct CacheItem { uint32_t key; float val; };
+            std::vector<CacheItem> integer_cost_cache;
+            integer_cost_cache.reserve(16);
 
             // --- OPTIMASI EARLY EXIT ---
             // Jika cost (MSE) di bawah nilai ini, hentikan pencarian kandidat lain.
-            // 0.002 adalah threshold empiris untuk "match yang sangat baik".
-            const float EARLY_EXIT_COST = 0.002f; 
+            // Increased from 0.005f to 0.008f for faster exit in flat/good regions
+            const float EARLY_EXIT_COST = 0.008f; 
 
 #pragma omp for schedule(dynamic)
             for (int y = 0; y <= h_layer - current_tile_h; y += step_y)
@@ -1116,12 +1017,17 @@ namespace AlignmentFlowHelpers
                             // Key packing (int16 | int16 -> int32)
                             uint32_t key = (static_cast<uint16_t>(i_dy) << 16) | static_cast<uint16_t>(i_dx);
 
-                            float cost;
-                            auto it = integer_cost_cache.find(key);
+                            float cost = -1.0f;
+                            
+                            // Linear Search
+                            for(const auto& item : integer_cost_cache) {
+                                if(item.key == key) {
+                                    cost = item.val;
+                                    break;
+                                }
+                            }
 
-                            if (it != integer_cost_cache.end()) {
-                                cost = it->second; // Cache Hit
-                            } else {
+                            if (cost < 0.0f) {
                                 // Cache Miss: Hitung Heavy Cost
                                 int test_y = y + i_dy;
                                 int test_x = x + i_dx;
@@ -1136,7 +1042,7 @@ namespace AlignmentFlowHelpers
                                 if (cost != std::numeric_limits<float>::max()) {
                                     cost *= tile_area_inv;
                                 }
-                                integer_cost_cache[key] = cost;
+                                integer_cost_cache.push_back({key, cost});
                             }
 
                             // Simpan hasil
@@ -1168,15 +1074,20 @@ namespace AlignmentFlowHelpers
 
                     // 3. Pilih Flow Terbaik
                     cv::Point2f chosen_flow;
-                    if (!temp_search_results.empty())
-                    {
-                        chosen_flow = AlignmentFlowHelpers::selectBestCandidate(
-                            temp_search_results, flow, y, x, current_tile_h, current_tile_w);
-                    }
-                    else
+                    if (temp_search_results.empty())
                     {
                         // Fallback ke nilai awal flow map jika search gagal
                         chosen_flow = flow.at<cv::Point2f>(y, x);
+                    }
+                    else if (temp_search_results.size() == 1)
+                    {
+                        // OPTIMASI: Fast path untuk single candidate (skip expensive spatial analysis)
+                        chosen_flow = temp_search_results[0].flow;
+                    }
+                    else
+                    {
+                        chosen_flow = AlignmentFlowHelpers::selectBestCandidate(
+                            temp_search_results, flow, y, x, current_tile_h, current_tile_w);
                     }
 
                     // 4. Subpixel Refinement
@@ -1190,58 +1101,42 @@ namespace AlignmentFlowHelpers
                         );
                     }
 
-                    // Simpan hasil ke buffer thread
-                    thread_results[thread_id].push_back({cv::Rect(x, y, current_tile_w, current_tile_h), chosen_flow});
-                }
-            }
-        } // End Parallel Region
+                    // 5. DIRECT WRITE TO OUTPUT MATRIX (Safe because no overlap)
+                    int end_y = std::min(y + current_tile_h, h_layer);
+                    int end_x = std::min(x + current_tile_w, w_layer);
 
-        // --- 5. REDUCE PHASE (Direct Assignment) ---
-        // Karena Non-Overlap, kita tidak perlu akumulasi weighted (add+div).
-        // Kita cukup menulis nilai flow ke matriks tujuan (reset dulu ke 0).
-        
-        flow = cv::Mat::zeros(h_layer, w_layer, CV_32FC2);
-
-        // Iterasi hasil dari setiap thread
-        for (const auto &results_from_one_thread : thread_results)
-        {
-            for (const auto &result : results_from_one_thread)
-            {
-                // Menulis flow blok ke area ROI di Mat
-                // Menggunakan pointer arithmetic untuk kecepatan
-                const int rx = result.roi.x;
-                const int ry = result.roi.y;
-                const int rw = result.roi.width;
-                const int rh = result.roi.height;
-                const float fx = result.flow.x;
-                const float fy = result.flow.y;
-
-                // Pastikan batas aman (clipping)
-                int end_y = std::min(ry + rh, h_layer);
-                int end_x = std::min(rx + rw, w_layer);
-
-                for(int r = ry; r < end_y; ++r) {
-                    cv::Vec2f* row_ptr = flow.ptr<cv::Vec2f>(r);
-                    for(int c = rx; c < end_x; ++c) {
-                        row_ptr[c][0] = fx;
-                        row_ptr[c][1] = fy;
+                    for (int ry = y; ry < end_y; ++ry) {
+                        cv::Vec2f* out_ptr = refined_flow.ptr<cv::Vec2f>(ry);
+                        for (int rx = x; rx < end_x; ++rx) {
+                            out_ptr[rx][0] = chosen_flow.x;
+                            out_ptr[rx][1] = chosen_flow.y;
+                        }
                     }
                 }
             }
-        }
+        } // End Parallel Region
+        } // End Search Timer Scope
+
+        // Update flow ke hasil yang sudah di-refine
+        flow = refined_flow;
+
+        // --- 5. REDUCE PHASE (REMOVED - INTEGRATED TO PARALLEL LOOP ABOVE) ---
+        // (Waktu komputasi yang sebelumnya 60ms kini menyatu dengan search phase)
+
 
         // --- 6. POST-PROCESSING FILTERS ---
-        
+        SimpleTimer filter_timer("Layer " + std::to_string(layer_index) + " Filtering");
+
         // A. Smoothing Sambungan (De-blocking)
         // Karena kita pakai non-overlap tiles, akan muncul efek kotak-kotak.
         // Kita haluskan dengan filter cepat.
         if (is_finest_layer) {
             // Di layer akhir, gunakan Box Filter (sangat cepat, O(1))
-            // Kernel 5x5 cukup untuk menyamarkan batas tile
-            cv::boxFilter(flow, flow, -1, cv::Size(5, 5));
+            // Kernel 3x3 cukup (Reduced from 5x5)
+            cv::boxFilter(flow, flow, -1, cv::Size(3, 3));
         } else {
-            // Di layer coarse/medium, gunakan Median Blur untuk membuang outlier ekstrim
-            cv::medianBlur(flow, flow, 5);
+            // OPTIMASI: Kernel 3x3 lebih cepat (vs 5x5) dan masih efektif
+            cv::medianBlur(flow, flow, 3);
         }
 
         // B. RANSAC (Hanya di level paling kasar)
@@ -1265,7 +1160,7 @@ extern "C"
         const float *ref_work_data, const float *current_work_data,
         int work_h, int work_w, int tile_h, int tile_w, int n_layers, float search_dist)
     {
-        // SimpleTimer overall_timer("TOTAL FLOW COMPUTATION");
+        SimpleTimer overall_timer("TOTAL FLOW COMPUTATION");
         // n_layers = 3; 
         using namespace ImageAlignmentConfig;
 
@@ -1281,7 +1176,7 @@ extern "C"
 
         std::vector<cv::Mat> ref_pyramid, current_pyramid;
         {
-            // SimpleTimer pyramid_timer("Pyramid Generation"); // Opsional
+            SimpleTimer pyramid_timer("Pyramid Generation"); // Opsional
             ref_pyramid.reserve(n_layers);
             current_pyramid.reserve(n_layers);
 
@@ -1312,7 +1207,7 @@ extern "C"
         cv::Mat previous_level_flow;
 
         {
-            // SimpleTimer flow_levels_timer("Coarse-to-Fine Flow Processing");
+            SimpleTimer flow_levels_timer("Coarse-to-Fine Flow Processing");
 
             for (int i = static_cast<int>(ref_pyramid.size()) - 1; i >= 0; --i)
             {
@@ -1338,24 +1233,42 @@ extern "C"
 
         // === BAGIAN C.5: Post-Processing - Spatial/Local RANSAC Cleanup ===
         // Membersihkan flow field dengan local RANSAC per window
-        // window_size=64, overlap=50% (step=32)
+        // window_size=64, overlap=25% (step=48) -> Reduced overlap for speed
         {
-            AlignmentFlowHelpers::spatialLocalRANSACCleanup(flow, 64, 0.5f);
+            SimpleTimer ransac_timer("Spatial RANSAC Cleanup");
+            // OPTIMIZATION: Reduce overlap (0.25 -> 0.1) for speed
+            AlignmentFlowHelpers::spatialLocalRANSACCleanup(flow, 64, 0.1f);
         }
 
         // === BAGIAN D: Finalisasi dan Pengembalian Data ===
         float *output_flow_data = nullptr;
         {
-            // SimpleTimer finalization_timer("Finalization & Data Copy");
+            SimpleTimer finalization_timer("Finalization & Data Copy");
             if (!flow.empty())
             {
-                if (!flow.isContinuous())
-                    flow = flow.clone();
+                // OPTIMIZATION: Pastikan continuous agar copy cepat
+                if (!flow.isContinuous()) flow = flow.clone();
 
-                const size_t data_size = flow.total() * flow.elemSize();
+                const size_t total_pixels = flow.total();
+                const size_t data_size = total_pixels * flow.elemSize();
                 output_flow_data = static_cast<float *>(malloc(data_size));
+                
                 if (output_flow_data)
-                    std::memcpy(output_flow_data, flow.data, data_size);
+                {
+                    // OPTIMIZATION: Parallel copy using OpenMP
+                    // memcpy biasa bersifat serial. Parallel copy bisa lebih cepat 
+                    // menembus limit bandwidth memori pada gambar resolusi tinggi (12MP+).
+                    const int rows = flow.rows;
+                    const int cols = flow.cols;
+                    const size_t row_size_bytes = cols * flow.elemSize();
+
+                    #pragma omp parallel for
+                    for (int r = 0; r < rows; ++r) {
+                        const uchar* src_ptr = flow.ptr<uchar>(r);
+                        uchar* dst_ptr = reinterpret_cast<uchar*>(output_flow_data) + (size_t)r * row_size_bytes;
+                        std::memcpy(dst_ptr, src_ptr, row_size_bytes);
+                    }
+                }
             }
         }
 

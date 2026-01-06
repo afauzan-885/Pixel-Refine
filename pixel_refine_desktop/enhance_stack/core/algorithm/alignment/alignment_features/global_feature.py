@@ -179,13 +179,13 @@ def _prepare_image_array_from_raw(original_path):
             gamma_setting = (2.222, 4.5)
             # gamma_setting = (1,1)
             rgb = raw.postprocess(
-                demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,
+                demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,  # pyright: ignore[reportAttributeAccessIssue]
                 use_camera_wb=True,
                 # no_auto_bright=True,
                 gamma=gamma_setting,
                 output_bps=16,
-                output_color=rawpy.ColorSpace.sRGB,
-                highlight_mode=rawpy.HighlightMode.Blend,
+                output_color=rawpy.ColorSpace.sRGB,  # pyright: ignore[reportAttributeAccessIssue]
+                highlight_mode=rawpy.HighlightMode.Blend,  # pyright: ignore[reportAttributeAccessIssue]
                 user_flip=0,  # [FIX] Disable auto-rotation for processing consistency
             )
         if rgb.flags["WRITEABLE"]:
@@ -879,8 +879,6 @@ def apply_s_curve_float32(img: np.ndarray, strength: float = 4.0, pivot: float =
 
 def preprocess_in_python(
     ref_image_float: np.ndarray,
-    s_curve_contrast: float = 4.5,
-    s_curve_pivot: float = 0.20,
     use_raft: bool = False,
     use_sharpen: bool = False,
 ):  # Tambahkan parameter ini
@@ -895,11 +893,16 @@ def preprocess_in_python(
         else:
             gray = img
 
-        # Logika Laplacian hanya dijalankan jika use_sharpen=True
+        # Logika Penajaman & Kontras
         if use_sharpen:
-            laplacian = cv2.Laplacian(gray, cv2.CV_32F, ksize=3)
-            gray = gray - (0.3 * laplacian)
+            # 1. Pengurangan Kontras 30%
+            # Rumus sederhana: (pixel - 0.5) * contrast + 0.5
+            # 0.7 berarti 70% dari kontras asli (pengurangan 30%)
+            gray = (gray - 0.5) * 0.7 + 0.5
             gray = np.clip(gray, 0.0, 1.0)
+
+            # Scharr filter dihapus sesuai permintaan
+            # Tidak ada penajaman tambahan dilakukan di sini
 
         return gray.astype(np.float32)
 
@@ -1554,7 +1557,7 @@ def generate_balanced_batches(total_images, max_batch_size=10):
         current_index = end_index
 
 
-def setup_balanced_batching(total_images, language_config, max_batch_size=12):
+def setup_balanced_batching(total_images, language_config, max_batch_size=8):
     """
     Menyiapkan seluruh logika batching, termasuk mencetak info ke konsol.
 
