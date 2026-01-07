@@ -1,357 +1,393 @@
-#include <cmath>
-#include <vector>
-#include <limits>
-#include <iostream>
-#include <chrono>
-#include <string>
+#include "block_matching.hpp"
+#include "spatial_merging.hpp"
 #include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <iostream>
+#include <limits>
 #include <numeric>
 #include <omp.h>
 #include <opencv2/core.hpp>
-#include <opencv2/imgproc.hpp>
 #include <opencv2/core/utility.hpp>
-#include "block_matching.hpp"
-#include "spatial_merging.hpp"
-
-namespace MotionMetricsConfig
-{
-    constexpr float STABILITY_EPSILON = 1e-6f;
-    constexpr float CONFIDENCE_EPSILON = 1e-6f;
-    constexpr float GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD = 1e-6f;
-    constexpr float GRADIENT_WEIGHT_FACTOR = 1.3f;
-    constexpr float MAD_TO_SIGMA_FACTOR = 1.4826f;
-}
-
-// class SimpleTimer
-// {
-// public:
-//     SimpleTimer(const std::string &name)
-//         : m_name(name), m_start(std::chrono::high_resolution_clock::now())
-//     {
-//     }
-
-//     ~SimpleTimer()
-//     {
-//         auto end = std::chrono::high_resolution_clock::now();
-//         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - m_start);
-//         std::cout << "[C++ Timer] " << m_name << ": "
-//                   << duration.count() / 1000.0 << " ms" << std::endl;
-//     }
-
-// private:
-//     std::string m_name;
-//     std::chrono::time_point<std::chrono::high_resolution_clock> m_start;
-// };
-
+#include <opencv2/imgproc.hpp>
+#include <string>
 #include <vector>
-#include <algorithm>
-#include <cmath> // Untuk std::abs
 
 // Fungsi helper inline yang lebih robust menggunakan Median Matching
-static inline void equalize_tile_brightness(const cv::Mat &src, const cv::Mat &ref, cv::Mat &dst)
-{
-    // --- Langkah 1: Persiapan dan Ekstraksi Data ---
-    // Total jumlah piksel
-    const int num_pixels = src.rows * src.cols;
-    if (num_pixels < 20) {
-        // Jika terlalu kecil, kembali ke mean atau skip
-        src.copyTo(dst);
-        return;
+// OPTIMIZED: Uses pre-allocated buffers to avoid std::vector re-allocation
+static inline void
+equalize_tile_brightness_optimized(const cv::Mat &src, const cv::Mat &ref,
+                                   cv::Mat &dst, std::vector<float> &buf_src,
+                                   std::vector<float> &buf_ref) {
+  // --- Langkah 1: Persiapan dan Ekstraksi Data ---
+  const int num_pixels = src.rows * src.cols;
+  if (num_pixels < 20) {
+    src.copyTo(dst);
+    return;
+  }
+
+  // Resize buffer hanya jika perlu (capacity dipertahankan)
+  if (buf_src.size() < num_pixels)
+    buf_src.resize(num_pixels);
+  if (buf_ref.size() < num_pixels)
+    buf_ref.resize(num_pixels);
+
+  // Salin data piksel (contiguous copy)
+  if (src.isContinuous()) {
+    std::memcpy(buf_src.data(), src.ptr<float>(0), num_pixels * sizeof(float));
+  } else {
+    // Fallback untuk non-continuous (ROI)
+    const int w = src.cols;
+    for (int r = 0; r < src.rows; ++r) {
+      std::memcpy(buf_src.data() + r * w, src.ptr<float>(r), w * sizeof(float));
     }
+  }
 
-    // Gunakan buffer vector thread-local untuk data (lebih cepat di-sort)
-    // Untuk efisiensi, asumsikan 'src' dan 'ref' berukuran sama (tile)
-    std::vector<float> src_data(num_pixels);
-    std::vector<float> ref_data(num_pixels);
-
-    // Salin data piksel dari Mat ke vector
-    std::memcpy(src_data.data(), src.data, num_pixels * sizeof(float));
-    std::memcpy(ref_data.data(), ref.data, num_pixels * sizeof(float));
-    
-    // --- Langkah 2: Hitung Median (Robust Metric) ---
-    
-    // Temukan elemen median (lebih cepat dari sorting penuh)
-    auto src_median_it = src_data.begin() + num_pixels / 2;
-    std::nth_element(src_data.begin(), src_median_it, src_data.end());
-    float median_src = *src_median_it;
-
-    auto ref_median_it = ref_data.begin() + num_pixels / 2;
-    std::nth_element(ref_data.begin(), ref_median_it, ref_data.end());
-    float median_ref = *ref_median_it;
-
-    // --- Langkah 3: Hitung Gain ---
-    // Gunakan median sebagai metrik kecerahan yang robust
-    double gain = median_ref / (median_src + 1e-5);
-
-    // --- Langkah 4: Batasi dan Terapkan Gain ---
-    // Batasi gain agar tidak terlalu ekstrem
-    if (gain < 0.6) gain = 0.6; // Agak kurang agresif di batas bawah (noise)
-    if (gain > 1.8) gain = 1.8; // Agak kurang agresif di batas atas (clipping)
-
-    // Terapkan gain jika perubahannya signifikan
-    if (std::abs(gain - 1.0) > 0.01)
-    {
-        // Pastikan 'dst' memiliki ukuran yang sama dengan 'src'
-        if (dst.empty() || dst.size() != src.size()) {
-             dst.create(src.size(), src.type());
-        }
-        cv::multiply(src, gain, dst);
+  if (ref.isContinuous()) {
+    std::memcpy(buf_ref.data(), ref.ptr<float>(0), num_pixels * sizeof(float));
+  } else {
+    const int w = ref.cols;
+    for (int r = 0; r < ref.rows; ++r) {
+      std::memcpy(buf_ref.data() + r * w, ref.ptr<float>(r), w * sizeof(float));
     }
-    else
-    {
-        // Jika kecerahan sudah mirip, cukup copy
-        src.copyTo(dst);
+  }
+
+  // --- Langkah 2: Hitung Median (Robust Metric) ---
+  // Gunakan pointer range buffer yang valid
+  auto src_begin = buf_src.begin();
+  auto src_end = buf_src.begin() + num_pixels;
+  auto ref_begin = buf_ref.begin();
+  auto ref_end = buf_ref.begin() + num_pixels;
+
+  auto src_median_it = src_begin + num_pixels / 2;
+  std::nth_element(src_begin, src_median_it, src_end);
+  float median_src = *src_median_it;
+
+  auto ref_median_it = ref_begin + num_pixels / 2;
+  std::nth_element(ref_begin, ref_median_it, ref_end);
+  float median_ref = *ref_median_it;
+
+  // --- Langkah 3: Hitung Gain ---
+  double gain = median_ref / (median_src + 1e-5);
+
+  // --- Langkah 4: Batasi dan Terapkan Gain ---
+  if (gain < 0.6)
+    gain = 0.6;
+  if (gain > 1.8)
+    gain = 1.8;
+
+  if (std::abs(gain - 1.0) > 0.01) {
+    if (dst.empty() || dst.size() != src.size()) {
+      dst.create(src.size(), src.type());
     }
+    // cv::multiply overhead is small for contiguous, but here we keep it for
+    // simplicity can be optimized to AVX loop if needed, but gain is global
+    // scalar.
+    cv::multiply(src, gain, dst);
+  } else {
+    src.copyTo(dst);
+  }
 }
 
-extern "C"
+// FAST ACCUMULATION KERNEL (AVX-Friendly)
+// Menggantikan cv::add untuk ROI kecil. Jauh lebih cepat karena:
+// 1. Tidak ada overhead validasi ROI/Type OpenCV
+// 2. Loop sederhana yang mudah di-autovectorize oleh compiler
+// 3. Cache friendly
+static inline void
+accumulate_tile(cv::Mat &accum_map,         // Global map (CV_32FC1)
+                const cv::Mat &tile_weight, // Local tile weight (CV_32FC1)
+                const cv::Rect &roi)        // Region to accumulate
 {
-    // Struktur data bantu untuk manajemen memori thread-local yang efisien
-    struct ThreadBuffers {
-        cv::Mat normalized_tile;
-        MotionMatching::MBMBuffers mad_buffers;
-        
-        void ensureSize(int h, int w) {
-            if (normalized_tile.empty() || normalized_tile.rows != h || normalized_tile.cols != w) {
-                normalized_tile.create(h, w, CV_32FC1);
-            }
-            if (mad_buffers.diff_workspace.empty() || mad_buffers.diff_workspace.rows != h || mad_buffers.diff_workspace.cols != w) {
-                mad_buffers.diff_workspace.create(h, w, CV_32FC1);
-                mad_buffers.grad_x.create(h, w, CV_32F);
-                mad_buffers.grad_y.create(h, w, CV_32F);
-                mad_buffers.grad_mag_current.create(h, w, CV_32FC1);
-            }
-        }
-    };
+  const int h = roi.height;
+  const int w = roi.width;
 
-     void generate_weight_map_jit(
-        float *weight_map_sum_ptr,
-        const float *current_image_ptr,
-        const float *reference_image_ptr,
-        const float *base_window_ptr,
-        const float *stability_map_ptr,
-        const int *row_starts, const int *col_starts,
-        int num_row_starts, int num_col_starts,
-        int tile_h, int tile_w,
-        int h_img, int w_img, int channels,
-        float motion_sensitivity,
-        float noise_offset_factor,
-        float precomputed_ref_noise_sigma)
-    {
-        using namespace MotionMetricsConfig;
+  // Pointer akses
+  // Accum map mungkin besar, jadi kita pakai stride
+  size_t accum_step = accum_map.step1();
+  size_t tile_step = tile_weight.step1();
 
-        if (!weight_map_sum_ptr) return;
+  float *accum_ptr_base = accum_map.ptr<float>(roi.y) + roi.x;
+  const float *tile_ptr_base = tile_weight.ptr<float>(0);
 
-        float global_estimated_noise_sigma = precomputed_ref_noise_sigma;
+  for (int r = 0; r < h; ++r) {
+    float *dst_row = accum_ptr_base + r * accum_step;
+    const float *src_row = tile_ptr_base + r * tile_step;
 
-        cv::Mat current_image_gray(h_img, w_img, CV_32FC1, (void *)current_image_ptr);
-        cv::Mat reference_image_gray(h_img, w_img, CV_32FC1, (void *)reference_image_ptr);
-        cv::Mat stability_map_mat;
-        if (stability_map_ptr != nullptr)
-            stability_map_mat = cv::Mat(h_img, w_img, CV_32FC1, (void *)stability_map_ptr);
+// Auto-vectorized loop
+#pragma omp simd
+    for (int c = 0; c < w; ++c) {
+      dst_row[c] += src_row[c];
+    }
+  }
+}
 
-        // =================================================================================
-        // === TAHAP 1: ANALISIS SKALA KASAR (DYNAMIC DEEP PYRAMID)                    ===
-        // =================================================================================
-        
-        const int tile_h_fine = tile_h;
-        const int tile_w_fine = tile_w;
-        const int MIN_PYRAMID_DIM = 64; // Batas resolusi layer terkecil (agar FFT tetap valid)
+namespace MotionMetricsConfig {
+constexpr float STABILITY_EPSILON = 1e-6f;
+constexpr float CONFIDENCE_EPSILON = 1e-6f;
+constexpr float GLOBAL_ACCUMULATION_WEIGHT_THRESHOLD = 1e-6f;
+constexpr float GRADIENT_WEIGHT_FACTOR = 1.0f;
+constexpr float MAD_TO_SIGMA_FACTOR = 1.4826f;
+} // namespace MotionMetricsConfig
 
-        // 1. Bangun Piramida Dinamis (Bottom-Up: Fine -> Coarse)
-        std::vector<cv::Mat> current_pyramid, reference_pyramid;
-        
-        // Push Layer 0 (Original)
-        current_pyramid.push_back(current_image_gray);
-        reference_pyramid.push_back(reference_image_gray);
+// =========================================================================
+// === PROFILING UTILS ===
+// =========================================================================
+struct SimpleTimer {
+  std::string name;
+  std::chrono::high_resolution_clock::time_point start;
+  SimpleTimer(const std::string &n)
+      : name(n), start(std::chrono::high_resolution_clock::now()) {}
+  ~SimpleTimer() {
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> elapsed = end - start;
+    // std::cout << "[C++ Timer] " << name << ": " << elapsed.count() << " ms"
+    //           << std::endl;
+  }
+};
 
-        // Buat layer berikutnya sampai batas dimensi tercapai
-        while (true) {
-            const cv::Mat& last_cur = current_pyramid.back();
-            // Cek apakah bisa dibagi 2 lagi?
-            // Kita berhenti jika layer berikutnya lebih kecil dari tile atau batas minimum
-            if (last_cur.rows / 2 < tile_h_fine || last_cur.cols / 2 < tile_w_fine ||
-                last_cur.rows / 2 < MIN_PYRAMID_DIM || last_cur.cols / 2 < MIN_PYRAMID_DIM) 
-            {
-                break;
-            }
+extern "C" {
+// Struktur data bantu untuk manajemen memori thread-local yang efisien
+struct ThreadBuffers {
+  cv::Mat normalized_tile;
+  MotionMatching::MBMBuffers mad_buffers;
+  // Buffers untuk Equalization
+  std::vector<float> eq_buf_src;
+  std::vector<float> eq_buf_ref;
 
-            cv::Mat next_cur, next_ref;
-            cv::pyrDown(current_pyramid.back(), next_cur);
-            cv::pyrDown(reference_pyramid.back(), next_ref);
-            
-            current_pyramid.push_back(next_cur);
-            reference_pyramid.push_back(next_ref);
-        }
+  void ensureSize(int h, int w) {
+    if (normalized_tile.empty() || normalized_tile.rows != h ||
+        normalized_tile.cols != w) {
+      normalized_tile.create(h, w, CV_32FC1);
+    }
+    if (mad_buffers.diff_workspace.empty() ||
+        mad_buffers.diff_workspace.rows != h ||
+        mad_buffers.diff_workspace.cols != w) {
+      mad_buffers.diff_workspace.create(h, w, CV_32FC1);
+      mad_buffers.grad_x.create(h, w, CV_32F);
+      mad_buffers.grad_y.create(h, w, CV_32F);
+      mad_buffers.grad_mag_current.create(h, w, CV_32FC1);
+    }
+  }
+};
 
-        // Sekarang kita punya piramida: [0:Fine, 1:Half, ..., N:Coarsest]
-        // Kita perlu memproses dari Coarsest -> Fine (Top-Down)
-        int max_level = current_pyramid.size() - 1;
+void generate_weight_map_jit(
+    float *weight_map_sum_ptr, const float *current_image_ptr,
+    const float *reference_image_ptr, const float *base_window_ptr,
+    const float *stability_map_ptr, const int *row_starts,
+    const int *col_starts, int num_row_starts, int num_col_starts, int tile_h,
+    int tile_w, int h_img, int w_img, int channels, float motion_sensitivity,
+    float noise_offset_factor, float precomputed_ref_noise_sigma) {
+  using namespace MotionMetricsConfig;
 
-        // Inisialisasi Guidance Awal (untuk layer paling atas)
-        // Guidance awal = 1.0 (Netral)
-        // Ukuran grid guidance = ukuran layer paling atas dibagi ukuran tile
-        int top_grid_h = current_pyramid[max_level].rows / tile_h_fine;
-        int top_grid_w = current_pyramid[max_level].cols / tile_w_fine;
-        if (top_grid_h < 1) top_grid_h = 1;
-        if (top_grid_w < 1) top_grid_w = 1;
+  SimpleTimer total_timer("Total generate_weight_map_jit");
 
-        cv::Mat guidance_map = cv::Mat::ones(top_grid_h, top_grid_w, CV_32FC1);
+  if (!weight_map_sum_ptr)
+    return;
 
-        // Loop Top-Down (Dari Layer Terkasar -> Layer 1)
-        // Catatan: Layer 0 (Original) tidak diproses di sini, karena akan diproses di TAHAP 2 (MAD)
-        // Jadi kita loop dari max_level turun sampai level 1.
-        for (int level = max_level; level >= 1; --level)
-        {
-            const cv::Mat &current_layer = current_pyramid[level];
-            const cv::Mat &ref_layer = reference_pyramid[level];
+  float global_estimated_noise_sigma = precomputed_ref_noise_sigma;
 
-            // Resize guidance map dari level sebelumnya (Coarser) agar cocok dengan grid level ini
-            const int num_tiles_h = current_layer.rows / tile_h_fine;
-            const int num_tiles_w = current_layer.cols / tile_w_fine;
-            
-            // Safety: Jika layer ini terlalu kecil (aneh tapi mungkin), skip
-            if (num_tiles_h == 0 || num_tiles_w == 0) continue;
+  cv::Mat current_image_gray(h_img, w_img, CV_32FC1, (void *)current_image_ptr);
+  cv::Mat reference_image_gray(h_img, w_img, CV_32FC1,
+                               (void *)reference_image_ptr);
+  cv::Mat stability_map_mat;
+  if (stability_map_ptr != nullptr)
+    stability_map_mat =
+        cv::Mat(h_img, w_img, CV_32FC1, (void *)stability_map_ptr);
 
-            cv::Mat upscaled_guidance;
-            if (level == max_level) {
-                // Level paling atas tidak punya parent, pakai ones
-                upscaled_guidance = guidance_map;
-            } else {
-                // Upscale guidance dari level (level+1) ke ukuran grid level ini
-                cv::resize(guidance_map, upscaled_guidance, cv::Size(num_tiles_w, num_tiles_h), 0, 0, cv::INTER_LINEAR);
-            }
+  const int tile_h_fine = tile_h;
+  const int tile_w_fine = tile_w;
+  cv::Mat final_guidance_map; // Declared once here
 
-            cv::Mat current_confidence_grid(num_tiles_h, num_tiles_w, CV_32FC1);
+  // ---------------------------------------------------------------------------------
+  // PHASE 1: DYNAMIC PYRAMID & GUIDANCE
+  // ---------------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------------
+  // PHASE 1: SMART SIMPLIFIED GUIDANCE (Hybrid Gradient)
+  // ---------------------------------------------------------------------------------
+  {
+    SimpleTimer phase1_timer("Phase 1: Smart Simplified Guidance");
 
-    #pragma omp parallel
-            {
-    #pragma omp for schedule(dynamic)
-                for (int r_tile = 0; r_tile < num_tiles_h; ++r_tile)
-                {
-                    for (int c_tile = 0; c_tile < num_tiles_w; ++c_tile)
-                    {
-                        cv::Rect roi(c_tile * tile_w_fine, r_tile * tile_h_fine, tile_w_fine, tile_h_fine);
-                        
-                        // Batas ROI safety check
-                        if (roi.x + roi.width > current_layer.cols) roi.width = current_layer.cols - roi.x;
-                        if (roi.y + roi.height > current_layer.rows) roi.height = current_layer.rows - roi.y;
+    // 1. Downscale to coarse resolution (Target ~512px width/height or 1/4
+    // size) Using 1/4 size is faster and sufficient for guidance
+    int coarse_w = std::max(64, w_img / 4);
+    int coarse_h = std::max(64, h_img / 4);
 
-                        MotionMatching::TileMatchResult res = MotionMatching::calculate_tile_fft(
-                            current_layer(roi), 
-                            ref_layer(roi), 
-                            global_estimated_noise_sigma);
+    cv::Mat current_coarse, reference_coarse;
+    cv::resize(current_image_gray, current_coarse, cv::Size(coarse_w, coarse_h),
+               0, 0, cv::INTER_AREA);
+    cv::resize(reference_image_gray, reference_coarse,
+               cv::Size(coarse_w, coarse_h), 0, 0, cv::INTER_AREA);
 
-                        float local_confidence = res.success ? 
-                            MotionMatching::calculate_match_confidence(res, global_estimated_noise_sigma, 
-                                                motion_sensitivity, noise_offset_factor) : 0.0f;
+    // 2. Coarse Grid Processing
+    int coarse_tile_w = std::max(8, tile_w_fine / 4);
+    int coarse_tile_h = std::max(8, tile_h_fine / 4);
 
-                        // Ambil nilai guidance dari map yang sudah di-upscale
-                        // Karena grid sudah resize, kita bisa ambil langsung di (r,c)
-                        float guidance_val = upscaled_guidance.at<float>(r_tile, c_tile);
+    int num_tiles_h = current_coarse.rows / coarse_tile_h;
+    int num_tiles_w = current_coarse.cols / coarse_tile_w;
 
-                        // Fusi: Confidence Lokal * Guidance dari Atas
-                        current_confidence_grid.at<float>(r_tile, c_tile) = local_confidence * guidance_val;
-                    }
-                }
-            } // end omp parallel
+    cv::Mat coarse_confidence_map(num_tiles_h, num_tiles_w, CV_32FC1);
 
-            // Simpan hasil level ini sebagai guidance untuk level di bawahnya
-            guidance_map = current_confidence_grid;
-        }
-
-        // --- FINALISASI GUIDANCE UNTUK TAHAP 2 ---
-        // Saat loop selesai di level 1, 'guidance_map' berisi grid confidence level 1.
-        // Kita perlu upscale ini ke ukuran PIXEL Penuh (Layer 0) untuk dipakai MAD.
-        
-        cv::Mat final_guidance_map;
-        if (!guidance_map.empty()) {
-            cv::resize(guidance_map, final_guidance_map, cv::Size(w_img, h_img), 0, 0, cv::INTER_CUBIC);
-        } else {
-            final_guidance_map = cv::Mat::ones(h_img, w_img, CV_32FC1);
-        }
-
-        // =================================================================================
-        // === TAHAP 2: ANALISIS SKALA HALUS (FINE ANALYSIS - MAD) (TETAP SAMA)        ===
-        // =================================================================================
-
-        cv::Mat weight_map_sum_mat(h_img, w_img, CV_32FC1, weight_map_sum_ptr);
-        weight_map_sum_mat.setTo(0.0f);
-
-        const int NUM_LOCKS = omp_get_max_threads() * 8; 
-        std::vector<omp_lock_t> locks(NUM_LOCKS);
-        for(int i=0; i<NUM_LOCKS; i++) omp_init_lock(&locks[i]);
-
+// Thread-local buffers for calculate_tile_mad
 #pragma omp parallel
-        {
-            ThreadBuffers t_bufs;
-            t_bufs.ensureSize(tile_h_fine, tile_w_fine);
-            
-            cv::Mat local_weight_tile(tile_h_fine, tile_w_fine, CV_32FC1);
-            cv::Mat base_window_tile_mat(tile_h_fine, tile_w_fine, CV_32FC1, const_cast<float *>(base_window_ptr));
+    {
+      MotionMatching::MBMBuffers local_bufs;
+      local_bufs.diff_workspace.create(coarse_tile_h, coarse_tile_w, CV_32FC1);
+      local_bufs.grad_x.create(coarse_tile_h, coarse_tile_w, CV_32F);
+      local_bufs.grad_y.create(coarse_tile_h, coarse_tile_w, CV_32F);
+      local_bufs.grad_mag_current.create(coarse_tile_h, coarse_tile_w,
+                                         CV_32FC1);
 
 #pragma omp for collapse(2) schedule(dynamic)
-            for (int i = 0; i < num_row_starts; i++)
-            {
-                for (int j = 0; j < num_col_starts; j++)
-                {
-                    int r = row_starts[i];
-                    int c = col_starts[j];
+      for (int r = 0; r < num_tiles_h; ++r) {
+        for (int c = 0; c < num_tiles_w; ++c) {
+          cv::Rect roi(c * coarse_tile_w, r * coarse_tile_h, coarse_tile_w,
+                       coarse_tile_h);
 
-                    int curr_h = std::min(tile_h_fine, h_img - r);
-                    int curr_w = std::min(tile_w_fine, w_img - c);
-                    if (curr_h <= 0 || curr_w <= 0) continue;
+          // Boundary check
+          if (roi.x + roi.width > current_coarse.cols)
+            roi.width = current_coarse.cols - roi.x;
+          if (roi.y + roi.height > current_coarse.rows)
+            roi.height = current_coarse.rows - roi.y;
 
-                    cv::Rect valid_roi(c, r, curr_w, curr_h);
+          if (roi.width <= 0 || roi.height <= 0)
+            continue;
 
-                    MotionMatching::TileMatchResult mbm_result = MotionMatching::calculate_tile_mad(
-                        current_image_gray(valid_roi), 
-                        reference_image_gray(valid_roi),
-                        global_estimated_noise_sigma,
-                        GRADIENT_WEIGHT_FACTOR,
-                        STABILITY_EPSILON,
-                        t_bufs.mad_buffers);
+          // CRITICAL: Use Hybrid Gradient MAD (calculate_tile_mad) instead of
+          // FFT This captures structure even at low resolution
+          MotionMatching::TileMatchResult res =
+              MotionMatching::calculate_tile_mad(
+                  current_coarse(roi), reference_coarse(roi),
+                  global_estimated_noise_sigma, GRADIENT_WEIGHT_FACTOR,
+                  STABILITY_EPSILON, local_bufs);
 
-                    float confidence_fine = mbm_result.success ? 
-                        MotionMatching::calculate_match_confidence(mbm_result, global_estimated_noise_sigma,
-                                                                motion_sensitivity, noise_offset_factor) : 0.0f;
+          float conf = 0.0f;
+          if (res.success) {
+            // Calculate confidence from MAD score
+            // Reuse the helper function available in namespace or defining new
+            // logic MotionMatching::calculate_match_confidence is static helper
+            // in this file? It's static member of MotionMatching? No, it was
+            // static function in this file. Let's use the
+            // MotionMatching::calculate_match_confidence if accessible or
+            // reimplement simple one.
 
-                    float guidance_val = static_cast<float>(cv::mean(final_guidance_map(valid_roi))[0]);
-                    float final_conf = confidence_fine * guidance_val;
-                    
-                    if (!stability_map_mat.empty()) {
-                        float stab_val = stability_map_mat.at<float>(r + curr_h/2, c + curr_w/2);
-                        final_conf *= stab_val;
-                    }
-
-                    if (final_conf < 1e-6f) continue;
-
-                    if (curr_w == tile_w_fine && curr_h == tile_h_fine) {
-                        cv::multiply(base_window_tile_mat, final_conf, local_weight_tile);
-                    } else {
-                        cv::Mat partial_window = base_window_tile_mat(cv::Rect(0,0,curr_w,curr_h));
-                        cv::multiply(partial_window, final_conf, local_weight_tile(cv::Rect(0,0,curr_w,curr_h)));
-                    }
-
-                    int lock_idx = (r * NUM_LOCKS) / h_img;
-                    if (lock_idx >= NUM_LOCKS) lock_idx = NUM_LOCKS - 1;
-
-                    omp_set_lock(&locks[lock_idx]);
-                    
-                    int next_lock_idx = ((r + curr_h) * NUM_LOCKS) / h_img;
-                    bool double_lock = (next_lock_idx != lock_idx && next_lock_idx < NUM_LOCKS);
-                    if (double_lock) omp_set_lock(&locks[next_lock_idx]);
-
-                    cv::add(weight_map_sum_mat(valid_roi), 
-                            (curr_w == tile_w_fine && curr_h == tile_h_fine) ? local_weight_tile : local_weight_tile(cv::Rect(0,0,curr_w,curr_h)), 
-                            weight_map_sum_mat(valid_roi));
-
-                    if (double_lock) omp_unset_lock(&locks[next_lock_idx]);
-                    omp_unset_lock(&locks[lock_idx]);
-                }
-            }
+            // Re-implementing simplified confidence for Coarse Phase
+            float val = res.mad_score;
+            float sigma = std::max(1e-6f, global_estimated_noise_sigma);
+            float diff_ratio = val / sigma;
+            float adjusted = std::max(0.0f, diff_ratio - noise_offset_factor);
+            float exponent = adjusted * motion_sensitivity *
+                             0.5f; // reduced sensitivity for coarse
+            if (exponent > 20.0f)
+              conf = 0.0f;
+            else
+              conf = 1.0f / (1.0f + std::exp(exponent - 2.0f));
+          }
+          coarse_confidence_map.at<float>(r, c) = conf;
         }
-
-        for(int i=0; i<NUM_LOCKS; i++) omp_destroy_lock(&locks[i]);
+      }
     }
+
+    // 3. Upscale to Full Resolution
+    cv::resize(coarse_confidence_map, final_guidance_map,
+               cv::Size(w_img, h_img), 0, 0, cv::INTER_CUBIC);
+  }
+
+  // ---------------------------------------------------------------------------------
+  // PHASE 2: FINE ANALYSIS (MAD)
+  // ---------------------------------------------------------------------------------
+  {
+    SimpleTimer phase2_timer("Phase 2: Fine Analysis (MAD) Parallel");
+
+    cv::Mat weight_map_sum_mat(h_img, w_img, CV_32FC1, weight_map_sum_ptr);
+    weight_map_sum_mat.setTo(0.0f);
+
+    // const int NUM_LOCKS = omp_get_max_threads() * 8; // REMOVED: No longer
+    // needed std::vector<omp_lock_t> locks(NUM_LOCKS); for (int i = 0; i <
+    // NUM_LOCKS; i++)
+    //   omp_init_lock(&locks[i]);
+
+#pragma omp parallel
+    {
+      ThreadBuffers t_bufs;
+      t_bufs.ensureSize(tile_h_fine, tile_w_fine);
+
+      cv::Mat local_weight_tile(tile_h_fine, tile_w_fine, CV_32FC1);
+      cv::Mat base_window_tile_mat(tile_h_fine, tile_w_fine, CV_32FC1,
+                                   const_cast<float *>(base_window_ptr));
+
+      for (int pass = 0; pass < 4; ++pass) {
+        int pass_row_mod = pass / 2;
+        int pass_col_mod = pass % 2;
+
+#pragma omp for collapse(2) schedule(dynamic)
+        for (int i = 0; i < num_row_starts; i++) {
+          for (int j = 0; j < num_col_starts; j++) {
+            if (i % 2 != pass_row_mod || j % 2 != pass_col_mod)
+              continue;
+
+            int r = row_starts[i];
+            int c = col_starts[j];
+
+            int curr_h = std::min(tile_h_fine, h_img - r);
+            int curr_w = std::min(tile_w_fine, w_img - c);
+            if (curr_h <= 0 || curr_w <= 0)
+              continue;
+
+            cv::Rect valid_roi(c, r, curr_w, curr_h);
+
+            MotionMatching::TileMatchResult mbm_result =
+                MotionMatching::calculate_tile_mad(
+                    current_image_gray(valid_roi),
+                    reference_image_gray(valid_roi),
+                    global_estimated_noise_sigma, GRADIENT_WEIGHT_FACTOR,
+                    STABILITY_EPSILON, t_bufs.mad_buffers);
+
+            float confidence_fine =
+                mbm_result.success
+                    ? MotionMatching::calculate_match_confidence(
+                          mbm_result, global_estimated_noise_sigma,
+                          motion_sensitivity, noise_offset_factor)
+                    : 0.0f;
+
+            // UPDATED: Sample from FULL RES final_guidance_map
+            // Use center point of tile
+            int center_x = std::min(c + curr_w / 2, w_img - 1);
+            int center_y = std::min(r + curr_h / 2, h_img - 1);
+            float guidance_val =
+                final_guidance_map.at<float>(center_y, center_x);
+
+            float final_conf = confidence_fine * guidance_val;
+
+            if (!stability_map_mat.empty()) {
+              float stab_val = stability_map_mat.at<float>(center_y, center_x);
+              final_conf *= stab_val;
+            }
+
+            if (final_conf < 1e-6f)
+              continue;
+
+            if (curr_w == tile_w_fine && curr_h == tile_h_fine) {
+              cv::multiply(base_window_tile_mat, final_conf, local_weight_tile);
+            } else {
+              cv::Mat partial_window =
+                  base_window_tile_mat(cv::Rect(0, 0, curr_w, curr_h));
+              cv::multiply(partial_window, final_conf,
+                           local_weight_tile(cv::Rect(0, 0, curr_w, curr_h)));
+            }
+
+            accumulate_tile(
+                weight_map_sum_mat,
+                (curr_w == tile_w_fine && curr_h == tile_h_fine)
+                    ? local_weight_tile
+                    : local_weight_tile(cv::Rect(0, 0, curr_w, curr_h)),
+                valid_roi);
+          }
+        }
+      }
+    }
+    // for (int i = 0; i < NUM_LOCKS; i++) omp_destroy_lock(&locks[i]); //
+    // REMOVED
+  }
 }
+} // extern "C"

@@ -924,13 +924,11 @@ namespace AlignmentFlowHelpers
         const int w_layer = ref_layer.cols;
 
         // Timer per layer components
-        SimpleTimer layer_timer("Layer " + std::to_string(layer_index) + " Processing");
 
         // --- 1. Inisialisasi Flow ---
         cv::Mat flow;
         {
              // Timer khusus Upsampling
-             SimpleTimer upsample_timer("Layer " + std::to_string(layer_index) + " Upsampling");
              if (is_coarsest_layer) flow = AlignmentFlowHelpers::initializeCoarsestFlow(ref_layer);
              else flow = AlignmentFlowHelpers::upsamplingFlow(previous_level_flow, ref_layer);
         }
@@ -961,7 +959,6 @@ namespace AlignmentFlowHelpers
         cv::Mat refined_flow = cv::Mat::zeros(h_layer, w_layer, CV_32FC2);
 
         {
-             SimpleTimer search_timer("Layer " + std::to_string(layer_index) + " Search Phase");
 #pragma omp parallel
         {
             // Buffer lokal thread (reusable)
@@ -1124,8 +1121,8 @@ namespace AlignmentFlowHelpers
         // (Waktu komputasi yang sebelumnya 60ms kini menyatu dengan search phase)
 
 
+
         // --- 6. POST-PROCESSING FILTERS ---
-        SimpleTimer filter_timer("Layer " + std::to_string(layer_index) + " Filtering");
 
         // A. Smoothing Sambungan (De-blocking)
         // Karena kita pakai non-overlap tiles, akan muncul efek kotak-kotak.
@@ -1160,7 +1157,6 @@ extern "C"
         const float *ref_work_data, const float *current_work_data,
         int work_h, int work_w, int tile_h, int tile_w, int n_layers, float search_dist)
     {
-        SimpleTimer overall_timer("TOTAL FLOW COMPUTATION");
         // n_layers = 3; 
         using namespace ImageAlignmentConfig;
 
@@ -1176,7 +1172,6 @@ extern "C"
 
         std::vector<cv::Mat> ref_pyramid, current_pyramid;
         {
-            SimpleTimer pyramid_timer("Pyramid Generation"); // Opsional
             ref_pyramid.reserve(n_layers);
             current_pyramid.reserve(n_layers);
 
@@ -1207,7 +1202,6 @@ extern "C"
         cv::Mat previous_level_flow;
 
         {
-            SimpleTimer flow_levels_timer("Coarse-to-Fine Flow Processing");
 
             for (int i = static_cast<int>(ref_pyramid.size()) - 1; i >= 0; --i)
             {
@@ -1235,7 +1229,6 @@ extern "C"
         // Membersihkan flow field dengan local RANSAC per window
         // window_size=64, overlap=25% (step=48) -> Reduced overlap for speed
         {
-            SimpleTimer ransac_timer("Spatial RANSAC Cleanup");
             // OPTIMIZATION: Reduce overlap (0.25 -> 0.1) for speed
             AlignmentFlowHelpers::spatialLocalRANSACCleanup(flow, 64, 0.1f);
         }
@@ -1243,7 +1236,6 @@ extern "C"
         // === BAGIAN D: Finalisasi dan Pengembalian Data ===
         float *output_flow_data = nullptr;
         {
-            SimpleTimer finalization_timer("Finalization & Data Copy");
             if (!flow.empty())
             {
                 // OPTIMIZATION: Pastikan continuous agar copy cepat

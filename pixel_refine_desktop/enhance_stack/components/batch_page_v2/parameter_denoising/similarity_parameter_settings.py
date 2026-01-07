@@ -39,9 +39,9 @@ def load_similarity_config():
         "use_multi_core": True,
         "spatial_params": {
             "similarity_spatial_tile_size": 16,
-            "similarity_spatial_motion_sensitivity": 150.0,
-            "similarity_spatial_noise_mad_offset_factor": 0.10,
-            "similarity_spatial_overlap_percent": 0.35,
+            "similarity_spatial_motion_sensitivity": 100.0,
+            "similarity_spatial_noise_mad_offset_factor": 0.12,
+            "similarity_spatial_overlap_percent": 0.30,
             "similarity_spatial_num_workers": 1,  # [PENAMBAHAN] Default ke 'Auto' (-1)
         },
     }

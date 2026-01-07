@@ -585,7 +585,7 @@ def perform_image_alignment(
 
     # --- Preprocessing referensi (Dilakukan 1x di thread utama) ---
     ref_preprocessed_cpp = preprocess_in_python(
-        reference_image_float, use_raft=False, use_sharpen=True
+        reference_image_float, use_raft=False, use_sharpen=False
     )
     ref_work_gray_cpp = cv2.resize(
         ref_preprocessed_cpp, (work_res_w, work_res_h), interpolation=cv2.INTER_LINEAR

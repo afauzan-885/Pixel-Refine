@@ -460,7 +460,7 @@ class SimilarityAlgorithm:
                     task_queue.task_done()
                     continue
 
-                # Preprocessing
+                # Preprocessing (ORIGINAL ORDER)
                 curr_float = normalize_image(image_orig, ref_dtype)
                 curr_preproc = preprocess_in_python(
                     curr_float, use_raft=False, use_sharpen=False
@@ -1031,19 +1031,19 @@ def main(
         extra_merging_params = {}
 
         if merging_type_from_settings == "spatial":
-            tile_val_sp = general_settings.get("similarity_spatial_tile_size", 24)
+            tile_val_sp = general_settings.get("similarity_spatial_tile_size", 16)
             spatial_tile_size_arg = (tile_val_sp, tile_val_sp)
             spatial_overlap_arg = general_settings.get(
-                "similarity_spatial_overlap_percent", 0.6
+                "similarity_spatial_overlap_percent", 0.3
             )
             spatial_motion_sensitivity_arg = general_settings.get(
-                "similarity_spatial_motion_sensitivity", 110.0
+                "similarity_spatial_motion_sensitivity", 1.0
             )
             spatial_noise_offset_factor_arg = general_settings.get(
-                "similarity_spatial_noise_mad_offset_factor", 0.3
+                "similarity_spatial_noise_mad_offset_factor", 1.0
             )
             extra_merging_params["similarity_spatial_num_workers"] = (
-                general_settings.get("similarity_spatial_num_workers", -1)
+                general_settings.get("similarity_spatial_num_workers", 1)
             )  # Default -1 (Auto)
             custom_lib_path = general_settings.get("similarity_lib_path")
             if custom_lib_path:
