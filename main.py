@@ -33,6 +33,14 @@ from pixel_refine_desktop.ui import (
 from pixel_refine_desktop.ui.views.panorama import PanoramaPage
 import config
 
+# import taichi as ti
+
+# Initialize Taichi globally
+# try:
+#     ti.init(arch=ti.gpu, offline_cache=True)
+# except Exception as e:
+#     print(f"Taichi initialization failed: {e}")
+
 
 # ============================================================================
 # CUSTOM STYLES AND FILTERS

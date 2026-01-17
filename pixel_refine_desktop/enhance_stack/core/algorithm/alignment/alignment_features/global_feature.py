@@ -170,42 +170,94 @@ def get_all_image_paths_for_batch_process(db_path, batch_id):
         return []
 
 
-def _prepare_image_array_from_raw(original_path):
+def _prepare_image_array_from_raw(
+    original_path, linear_mode=False, generate_ref_proxy=False
+):
     # Fungsi ini tidak berubah
     try:
         if not RAWPY_AVAILABLE:
             return None
         with rawpy.imread(original_path) as raw:
-            gamma_setting = (2.222, 4.5)
-            # gamma_setting = (1,1)
-            rgb = raw.postprocess(
-                demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,  # pyright: ignore[reportAttributeAccessIssue]
-                use_camera_wb=True,
-                # no_auto_bright=True,
-                gamma=gamma_setting,
-                output_bps=16,
-                output_color=rawpy.ColorSpace.sRGB,  # pyright: ignore[reportAttributeAccessIssue]
-                highlight_mode=rawpy.HighlightMode.Blend,  # pyright: ignore[reportAttributeAccessIssue]
-                user_flip=0,  # [FIX] Disable auto-rotation for processing consistency
-            )
+            if linear_mode:
+                # LINEAR DNG MODE (Gamma 1.0, 16-bit, No Auto Brightness)
+                # output_color=rawpy.ColorSpace.sRGB means it applies the ColorMatrix to convert CameraRGB -> sRGB Primaries
+                # but with gamma=(1,1) it keeps the tone curve LINEAR.
+                rgb = raw.postprocess(
+                    demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,
+                    use_camera_wb=True,
+                    no_auto_bright=True,  # Important for Linear
+                    gamma=(1, 1),  # Linear Gamma
+                    output_bps=16,
+                    # [REVERTED] Use sRGB for Linear DNG (Demosaiced)
+                    output_color=rawpy.ColorSpace.sRGB,
+                    highlight_mode=rawpy.HighlightMode.Blend,
+                    user_flip=0,
+                )
+
+                # [DUAL CONVERSION] Jika requested, generate GT Proxy (Standard Look)
+                # Hanya untuk Reference Analysis
+                gt_proxy = None
+                if generate_ref_proxy:
+                    gamma_setting = (2.222, 4.5)
+                    proxy_raw = raw.postprocess(
+                        demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,
+                        use_camera_wb=True,
+                        # no_auto_bright=True, # Default False (Auto Brightness ON)
+                        gamma=gamma_setting,  # [GT PROXY] Needs sRGB Gamma (2.22, 4.5)
+                        output_bps=16,  # User requested 16 bit GT
+                        # [GT PROXY] Needs sRGB Color Space for valid brightness fitting
+                        output_color=rawpy.ColorSpace.sRGB,
+                        highlight_mode=rawpy.HighlightMode.Blend,  # Corrected
+                        user_flip=0,
+                    )
+                    # Convert to BGR
+                    if proxy_raw.flags["WRITEABLE"]:
+                        bgr_proxy = proxy_raw
+                        b_channel_p = bgr_proxy[:, :, 0].copy()
+                        bgr_proxy[:, :, 0] = bgr_proxy[:, :, 2]
+                        bgr_proxy[:, :, 2] = b_channel_p
+                        gt_proxy = bgr_proxy
+
+            else:
+                # STANDARD MODE (Gamma 2.222, Auto Brightness optional but usually on by default if not specified)
+                gamma_setting = (2.222, 4.5)
+                rgb = raw.postprocess(
+                    demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,  # pyright: ignore[reportAttributeAccessIssue]
+                    use_camera_wb=True,
+                    # no_auto_bright=True,
+                    gamma=gamma_setting,
+                    output_bps=16,
+                    output_color=rawpy.ColorSpace.sRGB,  # pyright: ignore[reportAttributeAccessIssue]
+                    highlight_mode=rawpy.HighlightMode.Blend,  # pyright: ignore[reportAttributeAccessIssue]
+                    user_flip=0,  # [FIX] Disable auto-rotation for processing consistency
+                )
+
         if rgb.flags["WRITEABLE"]:
             bgr = rgb
             b_channel = bgr[:, :, 0].copy()
             bgr[:, :, 0] = bgr[:, :, 2]
             bgr[:, :, 2] = b_channel
+
+            if generate_ref_proxy and "gt_proxy" in locals() and gt_proxy is not None:
+                return (bgr, gt_proxy)
+
             return bgr
     except Exception as e:
         print(f"Error membaca RAW file {original_path}: {e}")
         return None
 
 
-def load_images_from_paths(image_paths, stop_requested=None):
+def load_images_from_paths(
+    image_paths, stop_requested=None, linear_mode=False, capture_ref_proxy=False
+):
     images = []
     raw_extensions = {".dng", ".cr2", ".nef", ".arw", ".orf", ".rw2", ".pef", ".srw"}
     num_threads = 3
 
     raw_futures = []
     standard_futures = []
+
+    gt_proxy_result = None
 
     def _load_standard_with_orientation(path):
         try:
@@ -222,16 +274,26 @@ def load_images_from_paths(image_paths, stop_requested=None):
             return cv2.imread(path, cv2.IMREAD_UNCHANGED)
 
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        for path in image_paths:
+        for idx_path, path in enumerate(image_paths):
             if stop_requested and stop_requested():
                 break
 
             _, ext = os.path.splitext(path)
             ext = ext.lower()
 
+            # Check if this is the first image and we want proxy
+            generate_proxy = capture_ref_proxy and (idx_path == 0)
+
             if ext in raw_extensions:
                 if os.path.exists(path):
-                    future = executor.submit(_prepare_image_array_from_raw, path)
+                    future = executor.submit(
+                        _prepare_image_array_from_raw,
+                        path,
+                        linear_mode,
+                        generate_ref_proxy=generate_proxy,  # Kwargs passed if function accepts it
+                        # Note: _prepare_image_array_from_raw accepts *args or specific arg
+                        # We updated it to accept generate_ref_proxy name
+                    )
                     raw_futures.append(future)
             else:
                 if os.path.exists(path):
@@ -240,24 +302,34 @@ def load_images_from_paths(image_paths, stop_requested=None):
 
         # Ambil hasil dari gambar RAW
         for future in as_completed(raw_futures):
-            # Cek pembatalan SEBELUM menunggu hasil
             if stop_requested and stop_requested():
-                # Shutdown executor secepat mungkin (Tersedia di Python 3.9+)
                 executor.shutdown(wait=False, cancel_futures=True)
+                # Return partial or empty
+                if capture_ref_proxy:
+                    return images, None
                 return images
 
             try:
-                img = future.result()
-                if img is not None:
-                    images.append(img)
+                res = future.result()
+                if res is not None:
+                    # Check if tuple (dual return)
+                    if isinstance(res, tuple):
+                        img, proxy = res
+                        images.append(img)
+                        # We assume only one proxy is generated (from first image)
+                        if gt_proxy_result is None:
+                            gt_proxy_result = proxy
+                    else:
+                        images.append(res)
             except Exception as e:
                 print(f"Error loading RAW image: {e}")
 
-        # Ambil hasil dari gambar biasa
+        # Ambil hasil dari gambar Standard
         for future in as_completed(standard_futures):
-            # Cek pembatalan SEBELUM menunggu hasil
             if stop_requested and stop_requested():
                 executor.shutdown(wait=False, cancel_futures=True)
+                if capture_ref_proxy:
+                    return images, None
                 return images
 
             try:
@@ -266,6 +338,9 @@ def load_images_from_paths(image_paths, stop_requested=None):
                     images.append(img)
             except Exception as e:
                 print(f"Error loading standard image: {e}")
+
+    if capture_ref_proxy:
+        return images, gt_proxy_result
 
     return images
 
@@ -445,6 +520,140 @@ def save_image(image, output_path, reference_image_path=None):
         print(f"Error fatal saat menyimpan gambar ke '{output_path}': {e}")
         traceback.print_exc()
         return None
+
+
+def calculate_scale_from_gt_proxy(linear_img, gt_proxy, ref_dtype=np.uint16):
+    """
+    Menghitung faktor skala optimal untuk `to_gamma_proxy` dengan membandingkan
+    Green Channel dari Linear Image (RAW Space) dengan Green Channel dari GT Proxy (sRGB).
+
+    Args:
+        linear_img: Gambar Linear (Main Image), BGR.
+        gt_proxy: Gambar Ground Truth dari rawpy (sRGB), BGR.
+        ref_dtype: Tipe data referensi (uint16/uint8).
+
+    Returns:
+        float: Faktor skala (scale) yang optimal.
+    """
+    # 1. Pastikan input float32 [0, 1]
+    if linear_img.dtype == np.uint16:
+        l_img = linear_img.astype(np.float32) / 65535.0
+    elif linear_img.dtype == np.uint8:
+        l_img = linear_img.astype(np.float32) / 255.0
+    else:
+        l_img = linear_img
+
+    if gt_proxy.dtype == np.uint16:
+        g_img = gt_proxy.astype(np.float32) / 65535.0
+    elif gt_proxy.dtype == np.uint8:
+        g_img = gt_proxy.astype(np.float32) / 255.0
+    else:
+        g_img = gt_proxy
+
+    # 2. Ambil Green Channel (Index 1) untuk perbandingan brightness
+    # Mengurangi dampak perbedaan Color Matrix pada R/B
+    if l_img.ndim == 3:
+        l_green = l_img[:, :, 1]
+    else:
+        l_green = l_img
+
+    if g_img.ndim == 3:
+        g_green = g_img[:, :, 1]
+    else:
+        g_green = g_img
+
+    target_mean = np.mean(g_green)
+
+    # 3. Binary Search untuk mencari Scale
+    # Range pencarian: 0.1x sampai 20.0x exposure
+    min_scale = 0.1
+    max_scale = 50.0
+    best_scale = 1.0
+    min_diff = float("inf")
+
+    # Gamma params default
+    gamma_pow = 2.22
+    slope = 4.5
+    cutoff = 0.018
+
+    # Fungsi bantu hitung mean setelah gamma
+    def get_mean_after_gamma(s):
+        # Apply scale + gamma curve (vectorized)
+        scaled = l_green * s
+        # Clip
+        scaled = np.clip(scaled, 0.0, 1.0)
+        # Gamma
+        res = np.where(
+            scaled < cutoff,
+            scaled * slope,
+            1.099 * np.power(scaled, 1.0 / gamma_pow) - 0.099,
+        )
+        return np.mean(res)
+
+    # Iterasi (misal 15 iterasi binary search cukup presisi)
+    for _ in range(15):
+        mid = (min_scale + max_scale) / 2
+        curr_mean = get_mean_after_gamma(mid)
+
+        if curr_mean < target_mean:
+            min_scale = mid
+        else:
+            max_scale = mid
+
+    best_scale = (min_scale + max_scale) / 2
+    print(
+        f" [Smart Proxy] Fitted Scale: {best_scale:.4f} (Target Mean: {target_mean:.4f})"
+    )
+    return best_scale
+
+
+def save_linear_dng(image, output_path, reference_image_path):
+    """
+    Menyimpan gambar sebagai Linear DNG (RGB) dengan kompresi Deflate.
+    """
+    if image.dtype != np.uint16:
+        # Konversi ke 16-bit uint
+        image_uint16 = (image * 65535).astype(np.uint16)
+    else:
+        image_uint16 = image
+
+    # Pastikan RGB (tifffile expects RGB)
+    if image_uint16.ndim == 3 and image_uint16.shape[2] == 3:
+        # Convert BGR (OpenCV) -> RGB
+        image_to_save = cv2.cvtColor(image_uint16, cv2.COLOR_BGR2RGB)
+    else:
+        image_to_save = image_uint16
+
+    # 1. Simpan sebagai TIFF Kompresi (Deflate/Zlib)
+    # compression='zlib' biasanya kompatibel dengan DNG deflate
+    tifffile.imwrite(output_path, image_to_save, compression="zlib")
+
+    # 2. Inject DNG Tags dengan ExifTool
+    # Kita menggunakan tag dari Reference Image, tapi override beberapa hal penting
+    if reference_image_path and os.path.exists(reference_image_path):
+        subprocess.run(
+            [
+                "exiftool",
+                "-q",
+                "-overwrite_original",
+                "-TagsFromFile",
+                reference_image_path,
+                "-all:all",  # Copy all tags
+                "-SubfileType=0",  # Full resolution image
+                "-PhotometricInterpretation=LinearRaw",  # 34892
+                "-Orientation=1",  # Reset orientation
+                "-Compression=Deflate",  # [CRITICAL] Set metadata Compression=8 (Deflate)
+                "-DefaultScale=1.0",
+                "-BlackLevel=0",  # Data sudah bersih
+                "-WhiteLevel=65535",  # Full range
+                output_path,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    return output_path
 
 
 def save_special_jpg_and_png(
@@ -889,7 +1098,9 @@ def preprocess_in_python(
 
     if not use_raft:
         if img.ndim == 3 and img.shape[2] > 1:
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            # gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            # [MODIFIED] Gunakan Green Channel (Index 1) untuk alignment yang lebih tajam pada RAW Bayer
+            gray = img[:, :, 1]
         else:
             gray = img
 
@@ -1029,6 +1240,110 @@ def normalize_image(image, dtype, out=None):
         return out
 
     return img_float
+
+
+def calculate_scale_from_gt_proxy(linear_img, gt_proxy, ref_dtype=np.uint16):
+    """
+    Menghitung scale factor optimal dengan membandingkan Linear input dengan GT Proxy (sRGB result dari rawpy).
+    Tujuannya mencari S sedemikian rupa sehingga mean(to_gamma_proxy(Linear * S)) mendekati mean(GT Proxy).
+    """
+    # Normalize inputs
+    if linear_img.dtype not in (np.float32, np.float64):
+        lin_sample = normalize_image(linear_img, ref_dtype)
+    else:
+        lin_sample = linear_img
+
+    if gt_proxy.dtype not in (np.float32, np.float64):
+        # GT Proxy biasanya uint8 atau uint16. Normalize ke 0-1
+        gt_sample = normalize_image(gt_proxy, gt_proxy.dtype)
+    else:
+        gt_sample = gt_proxy
+
+    # Sampling untuk kecepatan (Center Crop or Stride)
+    # Stride 10 cukup cepat dan representatif
+    vals_lin = (
+        lin_sample[::10, ::10, 1] if lin_sample.ndim == 3 else lin_sample[::10, ::10]
+    )
+    vals_gt = gt_sample[::10, ::10, 1] if gt_sample.ndim == 3 else gt_sample[::10, ::10]
+
+    target_mean = np.mean(vals_gt)
+    current_mean_lin = np.mean(vals_lin)
+
+    if current_mean_lin <= 1e-9:
+        return 1.0  # Hindari divisi nol
+
+    S = 1.0
+    for _ in range(5):
+        # Prediksi brightness dengan scale saat ini
+        predicted_proxy = to_gamma_proxy(vals_lin, scale=S)
+        pred_mean = np.mean(predicted_proxy)
+
+        if pred_mean <= 1e-9:
+            S *= 2.0
+            continue
+
+        ratio = target_mean / pred_mean
+
+        # Update rule: S_new = S_old * (ratio ^ (1/gamma_approx))
+        S *= np.power(ratio, 2.0)
+
+        # Clamp S to sane range
+        S = np.clip(S, 0.1, 1000.0)
+
+        if abs(ratio - 1.0) < 0.01:
+            break
+
+    return float(S)
+
+
+def calculate_auto_scale(linear_img_float, target_mean=0.25):
+    """
+    Menghitung scale factor agar rata-rata brightness mendekati target_mean.
+    Digunakan untuk normalisasi brightness referensi sebelum estimasi gamma proxy.
+    linear_img_float: HxWx3 (Linear RGB) atau HxW (Gray), range 0.0-1.0
+    """
+    if linear_img_float.ndim == 3:
+        # Gunakan Green channel sebagai representasi luminance paling akurat untuk RAW
+        vals = linear_img_float[:, :, 1]
+    else:
+        vals = linear_img_float
+
+    # Gunakan mean (cepat & cukup akurat untuk auto-exposure sederhana)
+    avg_val = np.mean(vals)
+
+    if avg_val <= 1e-6:
+        return 1.0
+
+    scale = target_mean / avg_val
+
+    # Batasi scale agar tidak meledakkan noise ekstrem
+    scale = np.clip(scale, 1.0, 100.0)
+
+    return float(scale)
+
+
+def to_gamma_proxy(linear_img, scale=1.0, gamma_pow=2.22, slope=4.5, cutoff=0.018):
+    """
+    Konversi Linear [0,1] ke Gamma Proxy [0,1] untuk Alignment.
+    Menggunakan parameter tuning manual: Scale, Gamma, Slope, Cutoff.
+    """
+    # 1. Exposure Scaling (Manual / Auto-calculated passed as scale)
+    # Gunakan in-place multiplication jika memungkinkan untuk hemat RAM, tapi hati-hati reference changes.
+    # np.clip returns new array, safe.
+    img = np.clip(linear_img * scale, 0.0, 1.0)
+
+    # 2. Gamma Curve (BT.709 Style with custom params)
+    # y = s * x               if x < cutoff
+    # y = (1+a) * x^(1/g) - a if x >= cutoff
+    # Dimana 'a' (offset) implisit menjadi 0.099 seperti Rec.709 standar atau sebaiknya dihitung agar continue?
+    # User function: 1.099 * pow(...) - 0.099 implies a=0.099.
+
+    res = np.where(
+        img < cutoff, img * slope, 1.099 * np.power(img, 1.0 / gamma_pow) - 0.099
+    )
+
+    # Pastikan output float32 valid
+    return np.clip(res, 0.0, 1.0).astype(np.float32)
 
 
 # =========================================================================

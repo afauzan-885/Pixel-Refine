@@ -13,7 +13,26 @@ import onnxruntime as ort
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
     normalize_image,
     preprocess_in_python,
+    to_gamma_proxy,
 )
+
+# --- TAICHI IMPORT ---
+TAICHI_IMPORT_ERROR = None
+try:
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_tile.alignment_tile_taichi import (
+        set_reference_hybrid_taichi,
+        compute_alignment_and_warp_hybrid_taichi,
+        clear_taichi_cache,
+        TAICHI_AVAILABLE,
+    )
+except ImportError as e:
+    TAICHI_AVAILABLE = False
+    TAICHI_IMPORT_ERROR = str(e)
+    print(f"Warning: Could not import Taichi alignment module: {e}")
+except Exception as e:
+    TAICHI_AVAILABLE = False
+    TAICHI_IMPORT_ERROR = str(e)
+    print(f"Warning: Error importing Taichi module: {e}")
 
 
 class SimilaritySpatialInterface:
@@ -465,32 +484,6 @@ def scale_flow(flow, work_h, work_w, full_h, full_w, ksize=5):
     return np.dstack((u_smooth, v_smooth))
 
 
-def scale_flow_to_full_res(flow, work_h, work_w, full_h, full_w):
-    """
-    Versi OPTIMASI: Scale optical flow dari resolusi kerja ke resolusi penuh.
-    Menggunakan INTER_LINEAR untuk kecepatan maksimal dengan akurasi yang cukup.
-    """
-    # Hitung faktor skala
-    scale_x = full_w / work_w
-    scale_y = (
-        full_h / work_w
-    )  # Note: Pastikan pembagi sesuai (work_w untuk x, work_h untuk y)
-    # Koreksi baris di atas pada implementasi Anda sebelumnya mungkin terbalik/rancu,
-    # Standardnya: scale_y = full_h / work_h, scale_x = full_w / work_w
-
-    scale_y = full_h / work_h
-    scale_x = full_w / work_w
-
-    # OPTIMASI 1: Gunakan INTER_LINEAR (Jauh lebih cepat dari CUBIC/LANCZOS)
-    flow_full = cv2.resize(flow, (full_w, full_h), interpolation=cv2.INTER_LINEAR)
-
-    # OPTIMASI 2: Perkalian vektor (Broadcasting) daripada slicing satu per satu
-    # Ini memanfaatkan instruksi SIMD pada CPU modern
-    flow_full *= np.array([scale_x, scale_y], dtype=np.float32)
-
-    return flow_full
-
-
 def warp_image_opencv(
     image, flow, interpolation=cv2.INTER_CUBIC, border_mode=cv2.BORDER_REFLECT_101
 ):
@@ -569,23 +562,39 @@ def perform_image_alignment(
     ref_dtype,
     update_progress=None,
     stop_requested=None,
-    use_raft=False,
-    num_alignment_workers=2,
+    optical_flow_type="alignment_tile",
+    num_alignment_workers=1,
     visualization=False,
-    save_align_image=False,
+    save_align_image=True,
+    progress_start=30,
+    progress_end=40,
+    **kwargs,
 ):
     """
-    Menyelaraskan (align) gambar dengan manajemen sumber daya yang aman,
-    menggunakan paralelisasi untuk RAFT (GPU) atau C++ (CPU/Legacy).
+    Menyelaraskan (align) gambar dengan manajemen sumber daya yang aman.
+    Supported types: 'raft', 'alignment_tile', 'farneback'
     """
 
     num_images = len(images)
     if num_images <= 1:
         return True
 
+    is_linear_mode = kwargs.get("is_linear_mode", False)
+    proxy_scale = kwargs.get("proxy_scale", 1.0)  # [AUTO-SCALE]
+
+    # Check for GPU alignment flag
+    use_taichi_gpu = kwargs.get("alignment_tile_gpu", True)
+    if use_taichi_gpu and not TAICHI_AVAILABLE:
+        error_msg = f"Warning: alignment_tile_gpu=True but Taichi is not available. Falling back to C++."
+        if TAICHI_IMPORT_ERROR:
+            error_msg += f" Reason: {TAICHI_IMPORT_ERROR}"
+        print(error_msg)
+        use_taichi_gpu = False
+
     # --- Preprocessing referensi (Dilakukan 1x di thread utama) ---
+    # Note: Farneback & Tile alignment use grayscale. Raft uses color.
     ref_preprocessed_cpp = preprocess_in_python(
-        reference_image_float, use_raft=False, use_sharpen=False
+        reference_image_float, use_raft=(optical_flow_type == "raft"), use_sharpen=False
     )
     ref_work_gray_cpp = cv2.resize(
         ref_preprocessed_cpp, (work_res_w, work_res_h), interpolation=cv2.INTER_LINEAR
@@ -600,7 +609,7 @@ def perform_image_alignment(
     n_layers = max(1, int(np.ceil(np.log2(log_arg))) if log_arg > 0 else 1)
 
     # === BACKEND RAFT (GPU, multi-thread) ===
-    if use_raft:
+    if optical_flow_type == "raft":
         print(
             f"Memulai alignment menggunakan backend RAFT dengan {num_alignment_workers} worker paralel..."
         )
@@ -626,9 +635,19 @@ def perform_image_alignment(
                         return (i, None)
 
                     current_img_float = normalize_image(original_image, ref_dtype)
-                    current_full_color_raft = np.clip(
-                        current_img_float * 255, 0, 255
-                    ).astype(np.uint8)
+
+                    # [PROXY LOGIC] Gunakan Gamma Proxy untuk RAFT alignment di Linear Mode
+                    if is_linear_mode:
+                        current_img_float_proxy = to_gamma_proxy(
+                            current_img_float, scale=proxy_scale
+                        )
+                        current_full_color_raft = np.clip(
+                            current_img_float_proxy * 255, 0, 255
+                        ).astype(np.uint8)
+                    else:
+                        current_full_color_raft = np.clip(
+                            current_img_float * 255, 0, 255
+                        ).astype(np.uint8)
 
                     flow_full_res = compute_flow_raft(
                         ref_full_color_raft,
@@ -690,7 +709,7 @@ def perform_image_alignment(
                                 # <<< INTEGRASI SAVE IMAGE C++ >>>
                                 if save_align_image:
                                     # Panggil save_aligned_image di sini
-                                    save_aligned_image(aligned_img, idx, "CPP")
+                                    save_aligned_image(aligned_img, idx, "RAFT")
                                 # <<< AKHIR INTEGRASI >>>
 
                             else:
@@ -702,9 +721,13 @@ def perform_image_alignment(
 
                         processed_count += 1
                         if update_progress:
-                            progress = 30 + (processed_count / (num_images - 1)) * 10
+                            prog_fraction = processed_count / (num_images - 1)
+                            current_msg_progress = int(
+                                progress_start
+                                + prog_fraction * (progress_end - progress_start)
+                            )
                             update_progress(
-                                int(progress),
+                                current_msg_progress,
                                 f"Alignment gambar {processed_count}/{num_images - 1} (RAFT)...",
                             )
 
@@ -719,9 +742,131 @@ def perform_image_alignment(
             return False
 
     # =================================================================
-    # === BACKEND C++ (grayscale legacy) - PARALEL ===
+    # === BACKEND FARNEBACK (CPU, OpenCV) - PARALEL ===
     # =================================================================
-    else:
+    elif optical_flow_type == "farneback":
+        print(f"Memulai alignment menggunakan Farneback Optical Flow...")
+        try:
+            # Menggunakan referensi grayscale yang sudah dipreprocess
+            # Tetapi Farneback butuh uint8 0-255 biasanya lebih robust
+            ref_gray_8u = np.clip(ref_preprocessed_cpp * 255.0, 0, 255).astype(np.uint8)
+
+            def process_single_alignment_farneback(
+                i,
+                original_image,
+                ref_gray_8u,
+                ref_dtype,
+                stop_requested=None,
+            ):
+                if stop_requested and stop_requested():
+                    return (i, None)
+
+                # Preprocess current image to grayscale
+                current_img_float = normalize_image(original_image, ref_dtype)
+
+                # [PROXY LOGIC] Gunakan Gamma Proxy untuk Alignment di Linear Mode
+                if is_linear_mode:
+                    current_img_float_proxy = to_gamma_proxy(
+                        current_img_float, scale=proxy_scale
+                    )
+                    current_preproc = preprocess_in_python(
+                        current_img_float_proxy, use_raft=False, use_sharpen=False
+                    )
+                else:
+                    current_preproc = preprocess_in_python(
+                        current_img_float, use_raft=False, use_sharpen=False
+                    )
+
+                current_gray_8u = np.clip(current_preproc * 255.0, 0, 255).astype(
+                    np.uint8
+                )
+
+                # Ensure same size (just in case)
+                if current_gray_8u.shape != ref_gray_8u.shape:
+                    current_gray_8u = cv2.resize(
+                        current_gray_8u, (ref_gray_8u.shape[1], ref_gray_8u.shape[0])
+                    )
+
+                # Farneback Settings
+                flow = cv2.calcOpticalFlowFarneback(
+                    prev=ref_gray_8u,
+                    next=current_gray_8u,
+                    flow=None,
+                    pyr_scale=0.5,
+                    levels=3,
+                    winsize=15,
+                    iterations=3,
+                    poly_n=5,
+                    poly_sigma=1.2,
+                    flags=0,
+                )
+
+                aligned_img = warp_image_opencv(original_image, flow)
+
+                if visualization:
+                    flow_vis = visualize_flow(flow)
+                    cv2.imwrite(f"flow_farneback_{i+1:02d}.jpg", flow_vis)
+
+                return (i, aligned_img)
+
+            processed_count = 0
+            # Menggunakan ThreadPool untuk IO/OpenCV work
+            with ThreadPoolExecutor(max_workers=num_alignment_workers) as executor:
+                futures = {}
+                for i in range(1, num_images):
+                    if stop_requested and stop_requested():
+                        return False
+
+                    future = executor.submit(
+                        process_single_alignment_farneback,
+                        i,
+                        images[i],
+                        ref_gray_8u,
+                        ref_dtype,
+                        stop_requested,
+                    )
+                    futures[future] = i
+
+                for future in as_completed(futures):
+                    i = futures[future]
+                    try:
+                        idx, aligned_img = future.result()
+                        if aligned_img is not None:
+                            images[idx] = aligned_img
+                            if save_align_image:
+                                save_aligned_image(aligned_img, idx, "FARNEBACK")
+                        else:
+                            print(
+                                f"Warning: Farneback alignment returned None for image {i}"
+                            )
+                    except Exception as e:
+                        print(f"Error in Farneback worker: {e}")
+                        traceback.print_exc()
+
+                    processed_count += 1
+                    if update_progress:
+                        prog_fraction = processed_count / (num_images - 1)
+                        current_msg_progress = int(
+                            progress_start
+                            + prog_fraction * (progress_end - progress_start)
+                        )
+                        update_progress(
+                            current_msg_progress,
+                            f"Alignment gambar {processed_count}/{num_images - 1} (Farneback)...",
+                        )
+
+            print("✅ Alignment Farneback selesai.")
+            return True
+
+        except Exception as e:
+            print(f"Error kritis selama Farneback: {e}")
+            traceback.print_exc()
+            return False
+
+    # =================================================================
+    # === BACKEND C++ (alignment_tile) - PARALEL ===
+    # =================================================================
+    elif optical_flow_type == "alignment_tile":
         if ALIGN_LIB is None:
             error_msg = "Error: Backend C++ dipilih tetapi library 'alignment_tile.dll' tidak tersedia."
             print(error_msg)
@@ -730,6 +875,17 @@ def perform_image_alignment(
             return False
 
         try:
+            # === PRE-CACHE TAICHI REFERENCE ===
+            if use_taichi_gpu and TAICHI_AVAILABLE:
+                set_reference_hybrid_taichi(
+                    reference_image_float,
+                    work_h=work_res_h,
+                    work_w=work_res_w,
+                    is_linear=is_linear_mode,
+                    proxy_scale=proxy_scale,
+                    use_sharpen=True,
+                )
+
             # --- Fungsi untuk 1 tugas alignment C++ (dijalankan di worker) ---
             def process_single_alignment_cpp(
                 i,
@@ -750,41 +906,67 @@ def perform_image_alignment(
                     return (i, None)
 
                 flow_ptr = None
-
-                # Buffer lokal yang harus dibersihkan setelah digunakan
+                current_preprocessed_cpp = None
+                current_img_float = None
                 current_work_gray_cpp = None
 
                 try:
-                    # 1. Preprocess Gambar Saat Ini
-                    current_img_float = normalize_image(original_image, ref_dtype)
-                    current_preprocessed_cpp = preprocess_in_python(
-                        current_img_float, use_raft=False
-                    )
-                    current_work_gray_cpp = cv2.resize(
-                        current_preprocessed_cpp,
-                        (work_res_w, work_res_h),
-                        interpolation=cv2.INTER_LINEAR,
-                    ).astype(np.float32)
+                    if use_taichi_gpu and TAICHI_AVAILABLE:
+                        # --- HYBRID GPU/CPU PATH ---
+                        warped_image = compute_alignment_and_warp_hybrid_taichi(
+                            original_image,  # Original color image
+                            tile_h,
+                            tile_w,
+                            n_layers,
+                            ALIGN_LIB,
+                            is_linear=is_linear_mode,
+                            proxy_scale=proxy_scale,
+                            use_sharpen=True,
+                            search_dist=2.0,
+                        )
+                        return (i, warped_image)
+                    else:
+                        # --- C++ DLL PATH ---
+                        current_img_float = normalize_image(original_image, ref_dtype)
+                        if is_linear_mode:
+                            current_img_float_proxy = to_gamma_proxy(
+                                current_img_float, scale=proxy_scale
+                            )
+                            current_preprocessed_cpp = preprocess_in_python(
+                                current_img_float_proxy, use_raft=False
+                            )
+                        else:
+                            current_preprocessed_cpp = preprocess_in_python(
+                                current_img_float, use_raft=False
+                            )
 
-                    current_work_gray_cpp = np.ascontiguousarray(current_work_gray_cpp)
-                    current_work_ptr = current_work_gray_cpp.ctypes.data_as(
-                        ctypes.POINTER(ctypes.c_float)
-                    )
+                        current_work_gray_cpp = cv2.resize(
+                            current_preprocessed_cpp,
+                            (work_res_w, work_res_h),
+                            interpolation=cv2.INTER_LINEAR,
+                        ).astype(np.float32)
 
-                    # 2. Panggil fungsi C++
-                    flow_ptr = ALIGN_LIB.compute_alignment_flow(
-                        ref_work_ptr,
-                        current_work_ptr,
-                        work_res_h,
-                        work_res_w,
-                        tile_h,
-                        tile_w,
-                        n_layers,
-                        2.0,
-                    )
+                        current_work_gray_cpp = np.ascontiguousarray(
+                            current_work_gray_cpp
+                        )
+                        current_work_ptr = current_work_gray_cpp.ctypes.data_as(
+                            ctypes.POINTER(ctypes.c_float)
+                        )
+
+                        flow_ptr = ALIGN_LIB.compute_alignment_flow(
+                            ref_work_ptr,
+                            current_work_ptr,
+                            work_res_h,
+                            work_res_w,
+                            tile_h,
+                            tile_w,
+                            n_layers,
+                            2.0,
+                        )
 
                 except Exception as e:
                     print(f"Error C++ setup/call for image {i+1}: {e}")
+                    traceback.print_exc()
                     return (i, None)
 
                 finally:
@@ -833,11 +1015,6 @@ def perform_image_alignment(
 
                     except Exception as e:
                         print(f"Error processing flow result for image {i+1}: {e}")
-                    finally:
-                        # 5. Pastikan C++ free memori yang dialokasikan
-                        if flow_ptr:
-                            ALIGN_LIB.free_flow_memory(flow_ptr)
-
                 return (i, aligned_img)
 
             # --- Jalankan paralel dengan ThreadPoolExecutor ---
@@ -903,18 +1080,35 @@ def perform_image_alignment(
                         )
 
                     if update_progress:
-                        progress = 30 + (processed_count / (num_images - 1)) * 10
+                        # Hitung progress dalam range yang diberikan
+                        prog_fraction = processed_count / (num_images - 1)
+                        current_msg_progress = int(
+                            progress_start
+                            + prog_fraction * (progress_end - progress_start)
+                        )
                         update_progress(
-                            int(progress),
+                            current_msg_progress,
                             f"Alignment gambar {processed_count}/{num_images - 1} (C++)...",
                         )
 
                     gc.collect()
 
-            # print("✅ Alignment C++ paralel selesai.")
+            # Clean up Taichi VRAM
+            if use_taichi_gpu:
+                try:
+                    clear_taichi_cache()
+                    print("[Taichi] VRAM cache cleared.")
+                except:
+                    pass
+
             return True
 
         except Exception as e:
+            if use_taichi_gpu:
+                try:
+                    clear_taichi_cache()
+                except:
+                    pass
             print(f"Error fatal di luar blok alignment C++ utama: {e}")
             traceback.print_exc()
             return False
