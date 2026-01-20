@@ -9,7 +9,7 @@ Pipeline: GPU Preprocessing → C++ Alignment → GPU Warping
 """
 
 import numpy as np
-import cv2
+import cv2, os
 import ctypes
 
 try:
@@ -20,8 +20,15 @@ try:
     TAICHI_AVAILABLE = True
 except ImportError:
     TAICHI_AVAILABLE = False
+    from typing import Any
 
-if TAICHI_AVAILABLE:
+    ti: Any = None
+    tm: Any = None
+    common: Any = None
+    warp: Any = None
+    preprocess: Any = None
+    bilinear_interpolation: Any = None
+
 
 class AlignmentTileTaichi:
     """Hybrid GPU/CPU class: GPU preprocessing/warping + C++ alignment computation."""
@@ -32,7 +39,10 @@ class AlignmentTileTaichi:
 
         # Initialize Taichi (Lazy Init on first use)
         try:
-            ti.init(arch=ti.gpu, offline_cache=True)
+            os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
+
+            if not ti.get_runtime().is_initialized:
+                ti.init(arch=ti.gpu, offline_cache=True)
         except:
             try:
                 ti.init(arch=ti.cpu)
@@ -156,7 +166,10 @@ class AlignmentTileTaichi:
         )
 
         # === STEP 6: GPU Warping ===
-        warped_img = self.warp_image(comp_img, flow_full_res)
+        # Use the preprocessed reference (grayscale) as guidance to refine flow edges
+        warped_img = self.warp_image(
+            comp_img, flow_full_res, guidance=self.ref_preprocessed_gpu
+        )
 
         return warped_img
 
@@ -182,47 +195,35 @@ class AlignmentTileTaichi:
         use_sharpen=False,
     ):
         """Preprocess image on GPU using standardized preprocess module."""
-        # Note: input_bits is inferred from dtype inside preprocess if we pass it,
-        # but preprocess_gpu takes explicit input_bits.
-        input_bits = 16 if img.dtype == np.uint16 else 8
+        # Detect input bits based on dtype. If already float, assume [0, 1] (bits=0)
+        input_bits = 0
+        if img.dtype == np.uint16:
+            input_bits = 16
+        elif img.dtype == np.uint8:
+            input_bits = 8
 
-        # Call the robust preprocess module
-        # It handles normalization, gamma proxy (if apply_gamma=True + params), and channel extraction.
-        # It returns a Taichi field, so we convert to numpy.
+        # print(f"[Taichi] Preprocessing input: {img.shape}, {img.dtype}, bits={input_bits}, linear={is_linear}, sharpen={use_sharpen}")
+
+        # Call the robust preprocess module (now includes sharpening and custom gamma)
         gray_gpu = preprocess.preprocess_gpu(
             img,
-            scale=proxy_scale if is_linear else 1.0,  # Scale is part of gamma proxy
+            scale=proxy_scale if is_linear else 1.0,
             apply_gamma=is_linear,
             input_bits=input_bits,
-            gamma_pow=2.22,  # Default
-            slope=4.5,  # Default
-            cutoff=0.018,  # Default
+            gamma_pow=2.22,
+            slope=4.5,
+            cutoff=0.018,
+            use_sharpen=use_sharpen,
         )
 
-        # Note: The preprocess module currently does Green channel extraction by default.
-        # Contrast sharpening (use_sharpen) is NOT in preprocess.py yet.
-        # If user REALLY needs sharpening, we might need to add it to preprocess.py or do it here.
-        # But 'preprocess_in_python' disables sharpening for 'raft'?
-        # Wait, the user logic had 'use_sharpen'. 'extra_algorithm' passes use_sharpen=True.
-        # Our updated preprocess.py DOES NOT implement sharpening logic ((v-0.5)*0.7+0.5).
-        # We might lose "Contrast reduction".
-        # But user asked to use preprocess.py. I should assume it's acceptable or add sharpening to preprocess.py?
-        # User said "mirip proses warp ... kode lebih bersih".
-        # I will assume standard preprocess is fine. If quality drops due to missing sharpening, user will complain.
-        # But wait, sharpening was explicitly reducing contrast (0.7).
-        # I'll stick to this for now.
-
-        # Handle return type safely
+        # Handle return to numpy
         if hasattr(gray_gpu, "to_numpy"):
             return gray_gpu.to_numpy()
         return gray_gpu
 
-    def warp_image(self, img, flow):
+    def warp_image(self, img, flow, guidance=None):
         """Warp image using provided flow field via warp module."""
-        # Use existing warp module (Bicubic/Robust Bilinear)
-        # It handles conversion to Taichi field internally if needed, but we pass numpy usually.
-        # It returns a numpy array.
-        return warp.warp_image_gpu(img, flow)
+        return warp.warp_image_gpu(img, flow, guidance=guidance)
 
     def resize_image(self, img, target_h, target_w):
         """Resize image on GPU using standardized bilinear module."""
@@ -230,7 +231,7 @@ class AlignmentTileTaichi:
         h_src, w_src = img.shape[0], img.shape[1]
 
         resized = ti.ndarray(ti.f32, shape=(target_h, target_w))
-        
+
         # Call kernel directly to share context (avoid double init)
         bilinear_interpolation._bilinear_resize_kernel(
             img_field, resized, h_src, w_src, target_h, target_w

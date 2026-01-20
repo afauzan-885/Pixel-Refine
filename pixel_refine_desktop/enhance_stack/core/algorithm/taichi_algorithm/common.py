@@ -13,8 +13,10 @@ try:
     TAICHI_AVAILABLE = True
 except ImportError:
     TAICHI_AVAILABLE = False
-    ti = None
-    tm = None
+    from typing import Any
+
+    ti: Any = None
+    tm: Any = None
 
 if TAICHI_AVAILABLE:
 

@@ -102,48 +102,45 @@ if TAICHI_AVAILABLE:
         use_guidance: int,
     ):
         for y, x in ti.ndrange(h, w):
-            # Joint Bilateral Upsampling for Flow
-            # We smooth the flow based on the Reference Image structure
-            # to align flow boundaries with object boundaries.
-
             u_final, v_final = 0.0, 0.0
 
             if use_guidance:
-                # 3x3 Window weighted by Reference intensity difference
+                # Joint Bilateral Refinement
+                # We use a 5x5 window to smooth flow while respecting reference edges.
                 total_w = 0.0
                 sum_u = 0.0
                 sum_v = 0.0
-
                 center_val = ref[y, x]
 
-                # Small window sufficient for local refinement
-                for dy in range(-1, 2):
-                    for dx in range(-1, 2):
+                # Refinement Window (5x5)
+                # sigma_r = 0.1 (intensity)
+                # sigma_s = 1.0 (spatial)
+                for dy in range(-2, 3):
+                    for dx in range(-2, 3):
                         ny, nx = y + dy, x + dx
                         if 0 <= ny < h and 0 <= nx < w:
-                            # Spatial weight (simple box/gaussian)
-                            w_s = 1.0  # Box is fine for 3x3
+                            # Spatial weight (Gaussian)
+                            dist_sq = float(dx * dx + dy * dy)
+                            w_s = ti.exp(-dist_sq / 2.0)
 
-                            # Range weight (intensity difference)
-                            # sigma_r approx 0.1 for 0-1 range
+                            # Range weight (Intensity Similarity)
                             diff = ti.abs(ref[ny, nx] - center_val)
-                            w_r = ti.exp(-(diff * diff) / 0.01)  # sigma_r = 0.1
+                            w_r = ti.exp(-(diff * diff) / 0.02)  # sigma_r approx 0.1
 
                             w_curr = w_s * w_r
-
                             sum_u += flow[ny, nx, 0] * w_curr
                             sum_v += flow[ny, nx, 1] * w_curr
                             total_w += w_curr
 
-                if total_w > 0:
-                    u_final = x + sum_u / total_w
-                    v_final = y + sum_v / total_w
+                if total_w > 1e-6:
+                    u_final = float(x) + sum_u / total_w
+                    v_final = float(y) + sum_v / total_w
                 else:
-                    u_final = x + flow[y, x, 0]
-                    v_final = y + flow[y, x, 1]
+                    u_final = float(x) + flow[y, x, 0]
+                    v_final = float(y) + flow[y, x, 1]
             else:
-                u_final = x + flow[y, x, 0]
-                v_final = y + flow[y, x, 1]
+                u_final = float(x) + flow[y, x, 0]
+                v_final = float(y) + flow[y, x, 1]
 
             dst[y, x] = sample_bicubic(src, u_final, v_final, h, w)
 
@@ -164,27 +161,32 @@ if TAICHI_AVAILABLE:
                 total_w = 0.0
                 sum_u = 0.0
                 sum_v = 0.0
-                center_val = ref[y, x]  # Ref is usually single channel intensity
+                center_val = ref[y, x]
 
-                for dy in range(-1, 2):
-                    for dx in range(-1, 2):
+                for dy in range(-2, 3):
+                    for dx in range(-2, 3):
                         ny, nx = y + dy, x + dx
                         if 0 <= ny < h and 0 <= nx < w:
-                            diff = ti.abs(ref[ny, nx] - center_val)
-                            w_r = ti.exp(-(diff * diff) / 0.01)
-                            sum_u += flow[ny, nx, 0] * w_r
-                            sum_v += flow[ny, nx, 1] * w_r
-                            total_w += w_r
+                            dist_sq = float(dx * dx + dy * dy)
+                            w_s = ti.exp(-dist_sq / 2.0)
 
-                if total_w > 0:
-                    u_final = x + sum_u / total_w
-                    v_final = y + sum_v / total_w
+                            diff = ti.abs(ref[ny, nx] - center_val)
+                            w_r = ti.exp(-(diff * diff) / 0.02)
+
+                            w_curr = w_s * w_r
+                            sum_u += flow[ny, nx, 0] * w_curr
+                            sum_v += flow[ny, nx, 1] * w_curr
+                            total_w += w_curr
+
+                if total_w > 1e-6:
+                    u_final = float(x) + sum_u / total_w
+                    v_final = float(y) + sum_v / total_w
                 else:
-                    u_final = x + flow[y, x, 0]
-                    v_final = y + flow[y, x, 1]
+                    u_final = float(x) + flow[y, x, 0]
+                    v_final = float(y) + flow[y, x, 1]
             else:
-                u_final = x + flow[y, x, 0]
-                v_final = y + flow[y, x, 1]
+                u_final = float(x) + flow[y, x, 0]
+                v_final = float(y) + flow[y, x, 1]
 
             for c in ti.static(range(3)):
                 dst[y, x, c] = sample_bicubic_3ch(src, u_final, v_final, h, w, c)

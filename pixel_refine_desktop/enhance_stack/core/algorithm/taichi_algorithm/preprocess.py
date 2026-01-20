@@ -30,30 +30,30 @@ if TAICHI_AVAILABLE:
         scale_factor: float,
         apply_gamma: int,
         input_bits: int,
+        use_sharpen: int,
+        gamma_pow: float,
+        slope: float,
+        cutoff: float,
     ):
         """
-        Fused Kernel: Normalize -> Gamma -> Resize (Bilinear) -> Gray
-        Optimized for minimal memory bandwidth.
+        Fused Kernel: Normalize -> Gamma -> Resize (Bilinear) -> Gray -> Sharpen
+        Matches OpenCV mapping: (i + 0.5) * scale - 0.5
         """
-        # Pre-calculate scaling
-        MAX_VAL = float((1 << input_bits) - 1)
-
         # Grid Stride Loop over Destination
         for i, j in ti.ndrange(dst_h, dst_w):
-            # 1. Coordinate Mapping (Dst -> Src)
-            # Using floating point coordinates for bilinear
-            # Ratio for resizing
-            u = i * (float(src_h) / float(dst_h))
-            v = j * (float(src_w) / float(dst_w))
+            # 1. Coordinate Mapping (Dst -> Src) - Centered Mapping
+            # Avoids precision issues with integers (i * scale)
+            u = (float(i) + 0.5) * (float(src_h) / float(dst_h)) - 0.5
+            v = (float(j) + 0.5) * (float(src_w) / float(dst_w)) - 0.5
+
+            # Epsilon to handle extreme edges
+            u = tm.clamp(u, 0.0, float(src_h - 1))
+            v = tm.clamp(v, 0.0, float(src_w - 1))
 
             y0 = int(ti.floor(u))
             x0 = int(ti.floor(v))
             y1 = tm.clamp(y0 + 1, 0, src_h - 1)
             x1 = tm.clamp(x0 + 1, 0, src_w - 1)
-
-            # Clamp coordinates (just in case)
-            y0 = tm.clamp(y0, 0, src_h - 1)
-            x0 = tm.clamp(x0, 0, src_w - 1)
 
             wy = u - float(y0)
             wx = v - float(x0)
@@ -64,38 +64,40 @@ if TAICHI_AVAILABLE:
             pixel_10 = tm.vec3(src[y1, x0, 0], src[y1, x0, 1], src[y1, x0, 2])
             pixel_11 = tm.vec3(src[y1, x1, 0], src[y1, x1, 1], src[y1, x1, 2])
 
-            val_top = pixel_00 * (1.0 - wx) + pixel_01 * wx
-            val_bot = pixel_10 * (1.0 - wx) + pixel_11 * wx
-            val_interp = val_top * (1.0 - wy) + val_bot * wy
+            val_interp = (
+                pixel_00 * (1.0 - wx) * (1.0 - wy)
+                + pixel_01 * wx * (1.0 - wy)
+                + pixel_10 * (1.0 - wx) * wy
+                + pixel_11 * wx * wy
+            )
 
             # 3. Normalize & Apply Gamma/Scale
-            val_norm = val_interp / MAX_VAL
-            val_scaled = val_norm * scale_factor
+            val_norm = val_interp
+            if input_bits > 0:
+                MAX_VAL = float((1 << input_bits) - 1)
+                val_norm = val_interp / MAX_VAL
 
-            res_rgb = val_scaled
+            # Exposure Scale
+            res_rgb = val_norm * scale_factor
+
             if apply_gamma:
-                # Full Gamma Proxy Logic (matches global_feature.py / to_gamma_proxy)
-                # Apply per-channel
+                # 100% Consistent with to_gamma_proxy: Clip BEFORE Gamma
                 for c in ti.static(range(3)):
-                    v = res_rgb[c]
-                    if v < 0.018:  # Hardcoded cutoff for now or pass as arg?
-                        res_rgb[c] = v * 4.5
+                    v_val = tm.clamp(res_rgb[c], 0.0, 1.0)
+                    if v_val < cutoff:
+                        res_rgb[c] = v_val * slope
                     else:
-                        res_rgb[c] = 1.099 * tm.pow(v, 1.0 / 2.22) - 0.099
+                        res_rgb[c] = 1.099 * tm.pow(v_val, 1.0 / gamma_pow) - 0.099
 
-            # 4. Grayscale (Green Channel Priority for Alignment or Standard?)
-            # Validated with global_feature.py: uses Green channel (index 1) for alignment
-            # We hardcode Green for now to match legacy behavior, or we rely on user input?
-            # User wants "clean code". Let's use Green Channel for now as it's critical for alignment.
-            # gray = 0.299*R + 0.587*G + 0.114*B (Standard)
-            # gray = G (Alignment)
-
-            # Since this module is general 'preprocess', enforcing Green might break other usages?
-            # But currently it's only used for alignment?
-            # Let's stick to Green to ensure quality doesn't drop.
+            # 4. Grayscale (Green Channel Priority for Alignment)
             gray = res_rgb[1]  # Green only
 
-            dst_gray[i, j] = gray
+            # 5. Logika Penajaman & Kontras (Consistent with preprocess_in_python)
+            if use_sharpen:
+                # 30% contrast reduction: (pixel - 0.5) * 0.7 + 0.5
+                gray = (gray - 0.5) * 0.7 + 0.5
+
+            dst_gray[i, j] = tm.clamp(gray, 0.0, 1.0)
 
 
 def preprocess_gpu(
@@ -110,9 +112,11 @@ def preprocess_gpu(
     gamma_pow=2.22,
     slope=4.5,
     cutoff=0.018,
+    use_sharpen=False,
 ):
     """
     End-to-end GPU preprocessing with Fusion.
+    Supported steps: Normalization, Gamma-Proxy, Bilinear Resize, Green Extraction, Sharpening.
     """
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
@@ -124,18 +128,13 @@ def preprocess_gpu(
     tw = target_w if target_w is not None else w
 
     # OOM Guard Trigger (Adaptive)
-    # Check if we should tile based on VRAM
     from . import oom_guard
 
     if enable_tiling and isinstance(image, np.ndarray) and oom_guard.should_tile(image):
-        # Dynamically import to avoid circular dependency at top level if needed, but import inside func is safer
-
-        # Note: preprocess changes shape if target is set. oom_guard handles it.
-        # But preprocess changes channels (3 -> 1). oom_guard sniffing handles it.
         return oom_guard.execute_tiled(
             preprocess_gpu,
             image,
-            overlap=32,  # small overlap for bilinear interp
+            overlap=32,
             scale=scale,
             apply_gamma=apply_gamma,
             target_h=target_h,
@@ -143,6 +142,10 @@ def preprocess_gpu(
             input_bits=input_bits,
             buffer_provider=buffer_provider,
             enable_tiling=False,  # PREVENT RECURSION
+            gamma_pow=gamma_pow,
+            slope=slope,
+            cutoff=cutoff,
+            use_sharpen=use_sharpen,
         )
 
     # Upload/Ensure field
@@ -155,7 +158,19 @@ def preprocess_gpu(
 
     # Run Fused Kernel
     _fused_preprocess_kernel(
-        src_gpu, gray_gpu, h, w, th, tw, scale, int(apply_gamma), input_bits
+        src_gpu,
+        gray_gpu,
+        h,
+        w,
+        th,
+        tw,
+        scale,
+        int(apply_gamma),
+        input_bits,
+        int(use_sharpen),
+        float(gamma_pow),
+        float(slope),
+        float(cutoff),
     )
 
     if src_is_temp:
