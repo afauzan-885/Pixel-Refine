@@ -20,6 +20,84 @@ except ImportError:
 
 if TAICHI_AVAILABLE:
 
+    # --- Interpolation Utilities ---
+    @ti.func
+    def cubic_weight(x: float) -> float:
+        """Catmull-Rom spline weight function."""
+        x = ti.abs(x)
+        res = 0.0
+        if x <= 1.0:
+            res = 1.5 * x * x * x - 2.5 * x * x + 1.0
+        elif x < 2.0:
+            res = -0.5 * x * x * x + 2.5 * x * x - 4.0 * x + 2.0
+        return res
+
+    @ti.func
+    def bilinear_at(img: ti.types.ndarray(), x: float, y: float) -> float:
+        """Bilinear interpolation at fractional coordinates with edge clamping."""
+        h, w = img.shape[0], img.shape[1]
+        ix = int(ti.floor(x))
+        iy = int(ti.floor(y))
+
+        # Clamp to bounds
+        ix0 = tm.clamp(ix, 0, w - 1)
+        iy0 = tm.clamp(iy, 0, h - 1)
+        ix1 = tm.clamp(ix + 1, 0, w - 1)
+        iy1 = tm.clamp(iy + 1, 0, h - 1)
+
+        fx = x - float(ix)
+        fy = y - float(iy)
+
+        v00 = img[iy0, ix0]
+        v01 = img[iy0, ix1]
+        v10 = img[iy1, ix0]
+        v11 = img[iy1, ix1]
+
+        top = v00 * (1.0 - fx) + v01 * fx
+        bottom = v10 * (1.0 - fx) + v11 * fx
+        return top * (1.0 - fy) + bottom * fy
+
+    @ti.func
+    def bicubic_at(img: ti.types.ndarray(), x: float, y: float) -> float:
+        """Bicubic interpolation at fractional coordinates using Catmull-Rom spline."""
+        h, w = img.shape[0], img.shape[1]
+        # Boundary check - fallback to bilinear for edges
+        res = 0.0
+        if x < 1.0 or y < 1.0 or x >= float(w - 2) or y >= float(h - 2):
+            res = bilinear_at(img, x, y)
+        else:
+            ix = int(ti.floor(x))
+            iy = int(ti.floor(y))
+            fx = x - float(ix)
+            fy = y - float(iy)
+
+            # Pre-compute weights
+            wx = ti.Vector(
+                [
+                    cubic_weight(fx + 1.0),
+                    cubic_weight(fx),
+                    cubic_weight(1.0 - fx),
+                    cubic_weight(2.0 - fx),
+                ]
+            )
+            wy = ti.Vector(
+                [
+                    cubic_weight(fy + 1.0),
+                    cubic_weight(fy),
+                    cubic_weight(1.0 - fy),
+                    cubic_weight(2.0 - fy),
+                ]
+            )
+
+            # 4x4 interpolation
+            for j in ti.static(range(4)):
+                row_sum = 0.0
+                row_iy = iy - 1 + j
+                for i in ti.static(range(4)):
+                    row_sum += img[row_iy, ix - 1 + i] * wx[i]
+                res += row_sum * wy[j]
+        return res
+
     @ti.kernel
     def _copy_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray()):
         for I in ti.grouped(src):

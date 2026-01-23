@@ -2,8 +2,6 @@
 Refinement - Taichi GPU Implementation
 ======================================
 GPU-accelerated subpixel refinement functions for optical flow.
-
-Matching C++ API: refinement.cpp
 """
 
 import numpy as np
@@ -12,11 +10,20 @@ try:
     import taichi as ti
     import taichi.math as tm
 
+    try:
+        from ...taichi_algorithm import common
+    except (ImportError, ValueError):
+        # Fallback for standalone script execution
+        from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm import (
+            common,
+        )
+
     TAICHI_AVAILABLE = True
 except ImportError:
     TAICHI_AVAILABLE = False
     ti = None
     tm = None
+    common = None
 
 # ============================================================================
 # Constants
@@ -29,147 +36,6 @@ MAX_STACK_TILE_SIZE = 64
 # ============================================================================
 
 if TAICHI_AVAILABLE:
-
-    @ti.func
-    def _cubic_weight(x: float) -> float:
-        """
-        Catmull-Rom spline weight function.
-        Matching C++ cubic_weight().
-        """
-        x = ti.abs(x)
-        result = 0.0
-        if x <= 1.0:
-            result = 1.5 * x * x * x - 2.5 * x * x + 1.0
-        elif x < 2.0:
-            result = -0.5 * x * x * x + 2.5 * x * x - 4.0 * x + 2.0
-        return result
-
-    @ti.func
-    def _bilinear_at(
-        img: ti.types.ndarray(), x: float, y: float, h: int, w: int
-    ) -> float:
-        """Bilinear interpolation at fractional coordinates."""
-        ix = int(ti.floor(x))
-        iy = int(ti.floor(y))
-
-        if ix < 0 or iy < 0 or ix >= w - 1 or iy >= h - 1:
-            # Clamp to edge
-            ix = tm.clamp(ix, 0, w - 1)
-            iy = tm.clamp(iy, 0, h - 1)
-            return img[iy, ix]
-
-        fx = x - float(ix)
-        fy = y - float(iy)
-
-        v00 = img[iy, ix]
-        v01 = img[iy, ix + 1]
-        v10 = img[iy + 1, ix]
-        v11 = img[iy + 1, ix + 1]
-
-        top = v00 * (1.0 - fx) + v01 * fx
-        bottom = v10 * (1.0 - fx) + v11 * fx
-
-        return top * (1.0 - fy) + bottom * fy
-
-    @ti.func
-    def _bicubic_at(
-        img: ti.types.ndarray(), x: float, y: float, h: int, w: int
-    ) -> float:
-        """
-        Bicubic interpolation at fractional coordinates.
-        Matching C++ bicubic_at_optimized().
-        """
-        # Boundary check - fallback to bilinear for edges
-        if x < 1.0 or y < 1.0 or x >= float(w - 2) or y >= float(h - 2):
-            return _bilinear_at(img, x, y, h, w)
-
-        # Integer and fractional parts
-        ix = int(ti.floor(x))
-        iy = int(ti.floor(y))
-        fx = x - float(ix)
-        fy = y - float(iy)
-
-        # Pre-compute weights
-        wx0 = _cubic_weight(fx + 1.0)
-        wx1 = _cubic_weight(fx)
-        wx2 = _cubic_weight(1.0 - fx)
-        wx3 = _cubic_weight(2.0 - fx)
-
-        wy0 = _cubic_weight(fy + 1.0)
-        wy1 = _cubic_weight(fy)
-        wy2 = _cubic_weight(1.0 - fy)
-        wy3 = _cubic_weight(2.0 - fy)
-
-        # 4x4 neighborhood interpolation
-        result = 0.0
-        base_x = ix - 1
-
-        # Row 0 (iy - 1)
-        row_sum = (
-            img[iy - 1, base_x] * wx0
-            + img[iy - 1, base_x + 1] * wx1
-            + img[iy - 1, base_x + 2] * wx2
-            + img[iy - 1, base_x + 3] * wx3
-        )
-        result += row_sum * wy0
-
-        # Row 1 (iy)
-        row_sum = (
-            img[iy, base_x] * wx0
-            + img[iy, base_x + 1] * wx1
-            + img[iy, base_x + 2] * wx2
-            + img[iy, base_x + 3] * wx3
-        )
-        result += row_sum * wy1
-
-        # Row 2 (iy + 1)
-        row_sum = (
-            img[iy + 1, base_x] * wx0
-            + img[iy + 1, base_x + 1] * wx1
-            + img[iy + 1, base_x + 2] * wx2
-            + img[iy + 1, base_x + 3] * wx3
-        )
-        result += row_sum * wy2
-
-        # Row 3 (iy + 2)
-        row_sum = (
-            img[iy + 2, base_x] * wx0
-            + img[iy + 2, base_x + 1] * wx1
-            + img[iy + 2, base_x + 2] * wx2
-            + img[iy + 2, base_x + 3] * wx3
-        )
-        result += row_sum * wy3
-
-        return result
-
-    @ti.kernel
-    def _compute_sad_bicubic_kernel(
-        ref_layer: ti.types.ndarray(),
-        comp_layer: ti.types.ndarray(),
-        cost_out: ti.types.ndarray(),
-        tile_x: int,
-        tile_y: int,
-        flow_x: float,
-        flow_y: float,
-        tile_w: int,
-        tile_h: int,
-        h: int,
-        w: int,
-    ):
-        """
-        Compute SAD with bicubic interpolation.
-        Matching C++ compute_sad_with_bicubic_avx().
-        """
-        sad_total = 0.0
-
-        for r, c in ti.ndrange(tile_h, tile_w):
-            ref_val = ref_layer[tile_y + r, tile_x + c]
-            comp_x = float(tile_x + c) + flow_x
-            comp_y = float(tile_y + r) + flow_y
-            comp_val = _bicubic_at(comp_layer, comp_x, comp_y, h, w)
-            sad_total += ti.abs(ref_val - comp_val)
-
-        cost_out[0] = sad_total / float(tile_w * tile_h)
 
     @ti.kernel
     def _parabolic_refinement_kernel(
@@ -257,6 +123,73 @@ if TAICHI_AVAILABLE:
         result_out[0] = float(dx) + delta_x
         result_out[1] = float(dy) + delta_y
         result_out[2] = confidence
+
+    @ti.kernel
+    def _bicubic_subpixel_refinement_kernel(
+        ref_layer: ti.types.ndarray(),
+        comp_layer: ti.types.ndarray(),
+        result_out: ti.types.ndarray(),
+        tile_x: int,
+        tile_y: int,
+        dx: float,
+        dy: float,
+        tile_w: int,
+        tile_h: int,
+        h: int,
+        w: int,
+    ):
+        """
+        Subpixel refinement using iterative bicubic sampling.
+        Performs a local grid search for higher precision.
+        """
+        best_vx = dx
+        best_vy = dy
+        best_cost = 1e10
+
+        # Initial step for local refinement (e.g. 0.5 pixel)
+        step = 0.5
+
+        # 3 iterations of local grid search (±step)
+        for _ in ti.static(range(4)):
+            best_local_vx = best_vx
+            best_local_vy = best_vy
+
+            for ddy in ti.static(range(-1, 2)):
+                for ddx in ti.static(range(-1, 2)):
+                    vx = best_vx + float(ddx) * step
+                    vy = best_vy + float(ddy) * step
+
+                    # Boundary check for tile center
+                    if not (
+                        tile_x + vx < 1.0
+                        or tile_y + vy < 1.0
+                        or tile_x + vx + tile_w > w - 2
+                        or tile_y + vy + tile_h > h - 2
+                    ):
+                        # Evaluate SAD cost at (vx, vy) using bicubic interpolation
+                        total_cost = 0.0
+                        for r, c in ti.ndrange(tile_h, tile_w):
+                            ref_val = ref_layer[tile_y + r, tile_x + c]
+                            comp_val = common.bicubic_at(
+                                comp_layer,
+                                float(tile_x + c) + vx,
+                                float(tile_y + r) + vy,
+                            )
+                            total_cost += ti.abs(ref_val - comp_val)
+
+                        cost = total_cost / float(tile_w * tile_h)
+                        if cost < best_cost:
+                            best_cost = cost
+                            best_local_vx = vx
+                            best_local_vy = vy
+
+            best_vx = best_local_vx
+            best_vy = best_local_vy
+            step *= 0.5  # Reduce step size for next iteration
+
+        result_out[0] = best_vx
+        result_out[1] = best_vy
+        result_out[2] = 0.9  # High confidence for bicubic
 
     @ti.kernel
     def _integer_search_3x3_kernel(
@@ -413,11 +346,11 @@ def subpixel_refinement(
     )
 
     search_res = search_result.to_numpy()
-    best_dx = int(search_res[0])
-    best_dy = int(search_res[1])
+    best_dx = float(search_res[0])
+    best_dy = float(search_res[1])
 
-    # Step 2: Parabolic refinement
-    _parabolic_refinement_kernel(
+    # Step 2: Bicubic Iterative Refinement (Higher precision)
+    _bicubic_subpixel_refinement_kernel(
         ref_gpu, comp_gpu, refine_result, x, y, best_dx, best_dy, tile_w, tile_h, h, w
     )
 

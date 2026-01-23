@@ -11,7 +11,6 @@ Pipeline: Coarse-to-Fine Pyramid → Tile Matching → RANSAC Cleanup
 print("[DEBUG] Loading compute_flow.py (Updated: ZMCL Cost + Fix Imports)")
 
 import numpy as np
-import cv2
 
 try:
     import taichi as ti
@@ -25,8 +24,6 @@ except ImportError:
 
 # Import cost function helpers (GPU-compatible)
 from .cost_function import (
-    calculate_fine_analysis_gpu,
-    calculate_simple_cost_gpu,
     compute_zmcl_cost,
 )
 
@@ -59,13 +56,13 @@ except ImportError:
 class ImageAlignmentConfig:
     """Configuration constants matching C++ namespace."""
 
-    GAUSSIAN_CACHE_SIZE = 256
     NORMALIZATION_EPSILON = 1e-6
+    EPSILON_SQ = 1e-12
+    GRADIENT_WEIGHT_FACTOR = 1.4
+    SENSITIVITY = 150.0
+    STAB_EPSILON = 1e-6
     FLOW_UPSCALE_FACTOR = 2.0
     MIN_TILE_SIZE = 8
-    MIN_PYRAMID_LAYER_SIZE = 32
-    EARLY_EXIT_COST = 0.008
-
     MIN_PYRAMID_LAYER_SIZE = 32
     EARLY_EXIT_COST = 0.008
 
@@ -75,105 +72,6 @@ class ImageAlignmentConfig:
 # ============================================================================
 
 if TAICHI_AVAILABLE:
-
-    @ti.func
-    def _fast_tanh(x: float) -> float:
-        """Fast tanh approximation."""
-        result = 0.0
-        if x >= 3.0:
-            result = 1.0
-        elif x <= -3.0:
-            result = -1.0
-        else:
-            x2 = x * x
-            result = x * (27.0 + x2) / (27.0 + 9.0 * x2)
-        return result
-
-    @ti.func
-    def _compute_zmcl_cost(
-        ref: ti.types.ndarray(),
-        comp: ti.types.ndarray(),
-        y_ref: int,
-        x_ref: int,
-        y_comp: int,
-        x_comp: int,
-        h: int,
-        w: int,
-        tile_h: int,
-        tile_w: int,
-    ) -> float:
-        """
-        Compute Zero-Mean Correlation-Like (ZMCL) cost for a tile.
-        Matches C++ calculate_fine_analysis / block_cost_zmcl_avx.
-        """
-        eps_sq = ImageAlignmentConfig.EPSILON_SQ
-        gradient_weight_factor = ImageAlignmentConfig.GRADIENT_WEIGHT_FACTOR
-        sensitivity = ImageAlignmentConfig.SENSITIVITY
-        stab_epsilon = ImageAlignmentConfig.STAB_EPSILON
-
-        # Pass 1: Compute mean difference
-        sum_diff = 0.0
-        for r, c in ti.ndrange(tile_h, tile_w):
-            val_ref = ref[y_ref + r, x_ref + c]
-            val_comp = comp[y_comp + r, x_comp + c]
-            sum_diff += val_ref - val_comp
-
-        mean_diff = sum_diff / float(tile_h * tile_w)
-
-        # Pass 2: Compute weighted cost
-        total_cost = 0.0
-        for r, c in ti.ndrange(tile_h, tile_w):
-            row_ref = y_ref + r
-            col_ref = x_ref + c
-            row_comp = y_comp + r
-            col_comp = x_comp + c
-
-            # Gradient calculation (2D central difference, clamped)
-            # Replicates simplified gradient logic from C++
-
-            # Ref Gradient
-            gx1 = 0.0
-            gy1 = 0.0
-            if col_ref > 0 and col_ref < w - 1:
-                gx1 = ref[row_ref, col_ref + 1] - ref[row_ref, col_ref - 1]
-            if row_ref > 0 and row_ref < h - 1:
-                gy1 = ref[row_ref + 1, col_ref] - ref[row_ref - 1, col_ref]
-
-            # Comp Gradient
-            gx2 = 0.0
-            gy2 = 0.0
-            if col_comp > 0 and col_comp < w - 1:
-                gx2 = comp[row_comp, col_comp + 1] - comp[row_comp, col_comp - 1]
-            if row_comp > 0 and row_comp < h - 1:
-                gy2 = comp[row_comp + 1, col_comp] - comp[row_comp - 1, col_comp]
-
-            # Gradient magnitude
-            mag1_sq = gx1 * gx1 + gy1 * gy1
-            mag2_sq = gx2 * gx2 + gy2 * gy2
-            min_mag_sq = ti.min(mag1_sq, mag2_sq)
-
-            # Structure weight
-            structure_weight = 1.0
-            if (
-                min_mag_sq > stab_epsilon
-                and mag1_sq > stab_epsilon
-                and mag2_sq > stab_epsilon
-            ):
-                dot = gx1 * gx2 + gy1 * gy2
-                cos_sim = dot / ti.sqrt(mag1_sq * mag2_sq)
-                score = ti.max(cos_sim, 0.0) * ti.sqrt(min_mag_sq)
-                structure_weight = 1.0 + gradient_weight_factor * _fast_tanh(
-                    score * sensitivity
-                )
-
-            # Zero-mean Charbonnier
-            val_ref = ref[row_ref, col_ref]
-            val_comp = comp[row_comp, col_comp]
-            diff = (val_ref - val_comp) - mean_diff
-
-            total_cost += ti.sqrt(diff * diff + eps_sq) * structure_weight
-
-        return total_cost / float(tile_h * tile_w)
 
     @ti.kernel
     def _initialize_coarsest_flow_kernel(
@@ -383,10 +281,6 @@ if TAICHI_AVAILABLE:
 # ============================================================================
 
 
-def initialize_coarsest_flow(h: int, w: int) -> np.ndarray:
-    return np.zeros((h, w, 2), dtype=np.float32)
-
-
 def process_single_layer(
     ref_layer: np.ndarray,
     comp_layer: np.ndarray,
@@ -531,35 +425,6 @@ def process_single_layer(
             filtered_flow_gpu, threshold=3.0, n_iterations=10
         )
         common.release_temp_buffer(filtered_flow_gpu)
-        return ransac_out_gpu
-    else:
-        return filtered_flow_gpu
-
-    # 6. Post-processing filters (GPU)
-    # Median filter for noise removal (3x3)
-    # Replacing cv2.medianBlur with Taichi implementation
-    # We can filter in-place or use a ping-pong buffer. median_filter_flow handles simple cases.
-
-    # Create a temp buffer for filtering if needed, or rely on internal if library handles it.
-    # The library median_filter_flow creates a temp buffer if dst is None, returning a new field (or numpy).
-    # We want to keep it on GPU.
-
-    filtered_flow_gpu = ti.ndarray(ti.f32, shape=(h, w, 2))
-
-    from ...taichi_algorithm.median_filter import median_filter_flow
-
-    median_filter_flow(
-        src=refined_flow_gpu, dst=filtered_flow_gpu, kernel_size=3, enable_tiling=False
-    )
-
-    # 7. RANSAC for coarse layers (GPU)
-    if layer_index >= total_layers - 2:
-        # GPU Ransac
-        # ransac_flow_cleanup returns a NEW field/numpy or modifies in place?
-        # Checked code: allocates output_gpu. Returns output_gpu.
-        ransac_out_gpu = ransac_flow_cleanup(
-            filtered_flow_gpu, threshold=3.0, n_iterations=10
-        )
         return ransac_out_gpu
     else:
         return filtered_flow_gpu

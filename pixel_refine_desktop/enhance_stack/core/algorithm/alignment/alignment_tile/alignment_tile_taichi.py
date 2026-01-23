@@ -37,7 +37,7 @@ except ImportError:
 
 @ti.data_oriented
 class AlignmentTileTaichi:
-    """Hybrid GPU/CPU class: GPU preprocessing/warping + C++ alignment computation."""
+    """GPU-accelerated alignment pipeline using Taichi."""
 
     def __init__(self, use_gpu=True):
         if not TAICHI_AVAILABLE:
@@ -49,16 +49,10 @@ class AlignmentTileTaichi:
         # Initialize Taichi (Lazy Init on first use)
         try:
             os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
-
-            # Try specific high-performance backends first
-            # Note: ti.gpu includes cuda, vulkan, metal, opengl
             try:
-                # This will raise if already initialized with different arch, or warn if same.
-                # If not initialized, it will try to init.
                 ti.init(arch=ti.gpu, offline_cache=True)
             except Exception as e:
                 if "already initialized" in str(e).lower():
-                    # If already initialized, we assume it's fine (or we can't change it easily)
                     pass
                 else:
                     print(f"[Taichi] WARN: GPU init failed: {e}")
@@ -70,12 +64,11 @@ class AlignmentTileTaichi:
                             pass
                         else:
                             raise ex
-
         except Exception as e:
             print(f"[Taichi] ERROR: Init failed entirely: {e}")
 
-        self.ref_preprocessed_gpu: np.ndarray | None = None
-        self.ref_work_res: np.ndarray | None = None
+        self.ref_preprocessed_gpu: any = None
+        self.ref_work_res: any = None
         self.work_h: int = 0
         self.work_w: int = 0
 
@@ -89,29 +82,25 @@ class AlignmentTileTaichi:
         use_sharpen=False,
     ):
         """
-        Set reference image for hybrid pipeline.
-        Preprocesses on GPU and caches for C++ backend.
+        Set reference image for the alignment pipeline.
+        Preprocesses on GPU and caches pre-resized work resolution image.
         """
         # 1. Preprocess reference on GPU (full resolution)
         self.ref_preprocessed_gpu = self.preprocess_image(
             ref_img, is_linear, proxy_scale, use_sharpen
         )
 
-        # 2. Resize to work resolution on GPU to avoid download/error
-        # Calculate shapes
+        # 2. Resize to work resolution on GPU to avoid download
         full_h, full_w = self.ref_preprocessed_gpu.shape[:2]
 
-        # Use pooled buffer for work resolution reference
         self.ref_work_res = common.get_temp_buffer(
             (work_h, work_w), ti.f32, buffer_provider="pool"
         )
 
-        # Perform resize on GPU using shared bilinear kernel
         bilinear_interpolation._bilinear_resize_kernel(
             self.ref_preprocessed_gpu, self.ref_work_res, full_h, full_w, work_h, work_w
         )
 
-        # NOTE: ref_work_res is now a Taichi Field (not numpy)
         self.work_h = work_h
         self.work_w = work_w
 
@@ -128,26 +117,10 @@ class AlignmentTileTaichi:
         search_dist=2.0,
     ):
         """
-        Hybrid pipeline: GPU Preprocessing → C++ Alignment → GPU Warping
-
-        Args:
-            comp_img: Original comparison image (uint8/uint16)
-            tile_h, tile_w: Tile size for C++ alignment
-            n_layers: Number of pyramid layers for C++ backend
-            align_lib: C++ library handle (ctypes.CDLL)
-            is_linear: Whether image is in linear color space
-            proxy_scale: Gamma proxy scale for linear images
-            use_sharpen: Whether to apply contrast reduction
-            search_dist: Search distance for C++ alignment
-
-        Returns:
-            Warped image (same dtype as input)
+        Complete Alignment & Warp Pipeline: GPU Preprocess → GPU Alignment → GPU Warp.
         """
         if self.ref_work_res is None:
             raise RuntimeError("Reference not set. Call set_reference_hybrid first.")
-
-        if align_lib is None:
-            raise RuntimeError("C++ alignment library not provided.")
 
         # === STEP 1: GPU Preprocessing ===
         comp_preprocessed_gpu = self.preprocess_image(
@@ -168,6 +141,7 @@ class AlignmentTileTaichi:
             self.work_w,
         )
 
+        # === STEP 3: Taichi Alignment ===
         flow_gpu = compute_alignment_flow(
             self.ref_work_res, comp_work_res, tile_h, tile_w, n_layers, search_dist
         )
@@ -178,10 +152,9 @@ class AlignmentTileTaichi:
         if flow_gpu is None:
             raise RuntimeError("Taichi alignment failed to compute flow.")
 
-        # === STEP 5: Scale flow to full resolution (GPU) ===
+        # === STEP 4: Scale flow to full resolution (GPU) ===
         full_h, full_w = comp_img.shape[:2]
 
-        # Allocate full res flow buffer
         flow_full_gpu = common.get_temp_buffer(
             (full_h, full_w, 2), ti.f32, buffer_provider="pool"
         )
@@ -194,9 +167,7 @@ class AlignmentTileTaichi:
         # Release low res flow
         common.release_temp_buffer(flow_gpu)
 
-        # === STEP 6: GPU Warping ===
-        # Use the preprocessed reference (grayscale) as guidance to refine flow edges
-        # Guidance is already on GPU (self.ref_preprocessed_gpu)
+        # === STEP 5: GPU Warping ===
         warped_img = self.warp_image(
             comp_img, flow_full_gpu, guidance=self.ref_preprocessed_gpu
         )
@@ -301,63 +272,7 @@ class AlignmentTileTaichi:
         return resized.to_numpy()
 
 
-# --- Compatibility Wrappers ---
-
-_GLOBAL_PROCESSOR = None
-
-
-def set_reference_hybrid_taichi(
-    ref_img,
-    work_h,
-    work_w,
-    is_linear=False,
-    proxy_scale=1.0,
-    use_sharpen=False,
-):
-    """Set reference for hybrid GPU/CPU pipeline."""
-    global _GLOBAL_PROCESSOR
-    if _GLOBAL_PROCESSOR is None:
-        _GLOBAL_PROCESSOR = AlignmentTileTaichi()
-
-    _GLOBAL_PROCESSOR.set_reference_hybrid(
-        ref_img, work_h, work_w, is_linear, proxy_scale, use_sharpen
-    )
-
-
-def compute_alignment_and_warp_hybrid_taichi(
-    comp_img,
-    tile_h,
-    tile_w,
-    n_layers,
-    align_lib,
-    is_linear=False,
-    proxy_scale=1.0,
-    use_sharpen=False,
-    search_dist=2.0,
-):
-    """
-    Hybrid pipeline wrapper: GPU Preprocessing → C++ Alignment → GPU Warping
-
-    Must call set_reference_hybrid_taichi first.
-    """
-    global _GLOBAL_PROCESSOR
-    if _GLOBAL_PROCESSOR is None:
-        raise RuntimeError(
-            "Processor not initialized. Call set_reference_hybrid_taichi first."
-        )
-
-    return _GLOBAL_PROCESSOR.compute_alignment_and_warp_hybrid(
-        comp_img,
-        tile_h,
-        tile_w,
-        n_layers,
-        align_lib,
-        is_linear,
-        proxy_scale,
-        use_sharpen,
-        search_dist,
-    )
-
+# --- Global Instance & Safe Access ---
 
 _GLOBAL_PROCESSOR = None
 

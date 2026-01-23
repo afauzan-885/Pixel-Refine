@@ -277,20 +277,6 @@ if TAICHI_AVAILABLE:
 
         cost_out[0] = total_cost / float(h * w)
 
-    @ti.kernel
-    def _block_cost_simple_kernel(
-        ref: ti.types.ndarray(),
-        comp: ti.types.ndarray(),
-        cost_out: ti.types.ndarray(),
-        h: int,
-        w: int,
-    ):
-        """Simple SAD cost for fast coarse search."""
-        total = 0.0
-        for r, c in ti.ndrange(h, w):
-            total += ti.abs(ref[r, c] - comp[r, c])
-        cost_out[0] = total / float(h * w)
-
 
 # ============================================================================
 # Python API (matching C++ function signatures)
@@ -359,13 +345,3 @@ def calculate_fine_analysis_gpu(
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
     _block_cost_zmcl_2d_kernel(ref_gpu, comp_gpu, cost_out_gpu, h, w)
-
-
-def calculate_simple_cost_gpu(ref_gpu, comp_gpu, cost_out_gpu, h: int, w: int) -> None:
-    """
-    GPU-native simple SAD cost for fast coarse search.
-    Result written to cost_out_gpu[0].
-    """
-    if not TAICHI_AVAILABLE:
-        raise ImportError("Taichi not available")
-    _block_cost_simple_kernel(ref_gpu, comp_gpu, cost_out_gpu, h, w)
