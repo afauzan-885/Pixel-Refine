@@ -35,6 +35,83 @@ except Exception as e:
     print(f"Warning: Error importing Taichi module: {e}")
 
 
+import threading
+import queue
+
+# Global worker instance
+_TAICHI_WORKER = None
+
+
+class TaichiBatchWorker(threading.Thread):
+    """
+    Persistent Daemon Thread for Taichi operations.
+    Initializes Taichi ONCE and executes jobs to avoid startup overhead.
+    """
+
+    def __init__(self):
+        super().__init__(name="TaichiWorkerThread", daemon=True)
+        self.task_queue = queue.Queue()
+        self.result_queue = queue.Queue()
+        self.running = True
+        self.start()
+
+    def run(self):
+        # 1. Initialize Taichi exactly once in this persistent thread
+        try:
+            print("[TaichiWorker] Initializing Taichi runtime...")
+            # Lazy import to avoid circular dependency issues if any
+            import taichi as ti
+
+            # Use offline cache if possible, reasonable memory limit
+            try:
+                # Force GPU and allow shared memory
+                os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
+                ti.init(arch=ti.gpu, offline_cache=True, device_memory_GB=4.0)
+            except Exception as e:
+                if "already initialized" not in str(e):
+                    print(f"[TaichiWorker] Init error: {e}")
+            print("[TaichiWorker] Ready.")
+        except Exception as e:
+            print(f"[TaichiWorker] Critical startup error: {e}")
+
+        # 2. Loop for jobs
+        while self.running:
+            try:
+                task = self.task_queue.get()
+                if task is None:  # Sentinel
+                    break
+
+                func, args, kwargs = task
+                try:
+                    # Execute the function in THIS thread context
+                    # The function should capture all necessary data
+                    result = func(*args, **kwargs)
+                    self.result_queue.put((True, result))
+                except Exception as e:
+                    print(f"[TaichiWorker] Job failed: {e}")
+                    traceback.print_exc()
+                    self.result_queue.put((False, e))
+                finally:
+                    self.task_queue.task_done()
+            except Exception as e:
+                print(f"[TaichiWorker] Loop error: {e}")
+
+    def submit_and_wait(self, func, *args, **kwargs):
+        """Submit a job and block until completion."""
+        self.task_queue.put((func, args, kwargs))
+        success, result = self.result_queue.get()
+        if not success:
+            raise result
+        return result
+
+
+def get_taichi_worker():
+    global _TAICHI_WORKER
+    if _TAICHI_WORKER is None:
+        _TAICHI_WORKER = TaichiBatchWorker()
+    return _TAICHI_WORKER
+
+
 class SimilaritySpatialInterface:
     """
     Membungkus pemanggilan fungsi C++ yang telah dioptimalkan.
@@ -608,6 +685,12 @@ def perform_image_alignment(
     log_arg = min(work_res_h, work_res_w) / min_layer_res if min_layer_res > 0 else 1
     n_layers = max(1, int(np.ceil(np.log2(log_arg))) if log_arg > 0 else 1)
 
+    # Force single worker for Taichi GPU to prevent CUDA context issues
+    if use_taichi_gpu:
+        if num_alignment_workers > 1:
+            print("[Info] Forcing single-threaded execution for Taichi GPU alignment.")
+        num_alignment_workers = 1
+
     # === BACKEND RAFT (GPU, multi-thread) ===
     if optical_flow_type == "raft":
         print(
@@ -875,17 +958,6 @@ def perform_image_alignment(
             return False
 
         try:
-            # === PRE-CACHE TAICHI REFERENCE ===
-            if use_taichi_gpu and TAICHI_AVAILABLE:
-                set_reference_hybrid_taichi(
-                    reference_image_float,
-                    work_h=work_res_h,
-                    work_w=work_res_w,
-                    is_linear=is_linear_mode,
-                    proxy_scale=proxy_scale,
-                    use_sharpen=True,
-                )
-
             # --- Fungsi untuk 1 tugas alignment C++ (dijalankan di worker) ---
             def process_single_alignment_cpp(
                 i,
@@ -1017,88 +1089,156 @@ def perform_image_alignment(
                         print(f"Error processing flow result for image {i+1}: {e}")
                 return (i, aligned_img)
 
-            # --- Jalankan paralel dengan ThreadPoolExecutor ---
-            with ThreadPoolExecutor(max_workers=num_alignment_workers) as executor:
-                futures = {}
-                processed_count = 0
+            # --- Execution Strategy: Sequential (GPU) vs Parallel (CPU) ---
+            # --- Execution Strategy: Sequential (GPU) vs Parallel (CPU) ---
+            if use_taichi_gpu:
+                # GPU PATH: Execution via Persistent Worker Thread
+                print("[Info] Offloading Taichi Alignment to Persistent Worker...")
 
-                # Kirim tugas ke executor (Mulai dari indeks 1, karena indeks 0 adalah referensi)
-                for i in range(1, num_images):
-                    if stop_requested and stop_requested():
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        return False
+                def _run_gpu_alignment_loop():
+                    # 0. Setup Reference on the SAME thread
+                    if use_taichi_gpu and TAICHI_AVAILABLE:
+                        set_reference_hybrid_taichi(
+                            reference_image_float,
+                            work_h=work_res_h,
+                            work_w=work_res_w,
+                            is_linear=is_linear_mode,
+                            proxy_scale=proxy_scale,
+                            use_sharpen=True,
+                        )
+                    local_processed_count = 0
+                    for i in range(1, num_images):
+                        if stop_requested and stop_requested():
+                            return False
 
-                    # --- PENAMBAHAN JEDA DI SINI ---
-                    if i > 1:
-                        time.sleep(0.1)
-                    # ------------------------------
+                        # Direct call (no future)
+                        # NOTE: We can't access outer scope variables that change unless we're careful.
+                        # But 'images' is a list, mutable, so safe.
+                        # progress update calls are safe (thread-safe Qt signal usually, or callback)
 
-                    future = executor.submit(
-                        process_single_alignment_cpp,
-                        i,
-                        ref_work_ptr,
-                        work_res_h,
-                        work_res_w,
-                        tile_h,
-                        tile_w,
-                        n_layers,
-                        images[i],
-                        ref_dtype,
-                        ALIGN_LIB,
-                        stop_requested,
-                        # --- PASS PARAMETER BARU ---
-                        reference_image_float,
-                    )
-                    futures[future] = i
+                        idx, aligned_img = process_single_alignment_cpp(
+                            i,
+                            ref_work_ptr,
+                            work_res_h,
+                            work_res_w,
+                            tile_h,
+                            tile_w,
+                            n_layers,
+                            images[i],
+                            ref_dtype,
+                            ALIGN_LIB,
+                            stop_requested,
+                            reference_image_float,
+                        )
 
-                # Kumpulkan hasil (di thread utama)
-                for future in as_completed(futures):
-                    i = futures[future]
-                    if stop_requested and stop_requested():
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        return False
-
-                    try:
-                        idx, aligned_img = future.result()
                         if aligned_img is not None:
                             images[idx] = aligned_img
-
-                            # <<< INTEGRASI SAVE IMAGE RAFT >>>
                             if save_align_image:
                                 save_aligned_image(aligned_img, idx, "RAFT")
-                            # <<< AKHIR INTEGRASI >>>
 
-                        else:
-                            # Jika worker gagal/dibatalkan, gunakan gambar asli
-                            pass
+                        local_processed_count += 1
+
+                        if update_progress:
+                            prog_fraction = local_processed_count / (num_images - 1)
+                            current_msg_progress = int(
+                                progress_start
+                                + prog_fraction * (progress_end - progress_start)
+                            )
+                            # This callback might pump Qt event loop, but we are in background thread.
+                            # Should be fine if it uses signals.
+                            update_progress(
+                                current_msg_progress,
+                                f"Alignment gambar {local_processed_count}/{num_images - 1} (Taichi-GPU)...",
+                            )
+
+                        # Manual memory management suggestion for heavy GPU loops
+                        if i % 5 == 0:
+                            gc.collect()
+                    return True
+
+                # Submit to persistent thread and wait
+                worker = get_taichi_worker()
+                success = worker.submit_and_wait(_run_gpu_alignment_loop)
+
+                # if stop_requested happened inside, result is False
+                if success is False:
+                    return False
+
+                # No ti.reset() here! We keep it alive.
+
+            else:
+                # CPU PATH: Parallel execution with ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=num_alignment_workers) as executor:
+                    futures = {}
+                    processed_count = 0
+
+                    # Kirim tugas ke executor
+                    for i in range(1, num_images):
+                        if stop_requested and stop_requested():
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            return False
+
+                        if i > 1:
+                            time.sleep(0.1)
+
+                        future = executor.submit(
+                            process_single_alignment_cpp,
+                            i,
+                            ref_work_ptr,
+                            work_res_h,
+                            work_res_w,
+                            tile_h,
+                            tile_w,
+                            n_layers,
+                            images[i],
+                            ref_dtype,
+                            ALIGN_LIB,
+                            stop_requested,
+                            reference_image_float,
+                        )
+                        futures[future] = i
+
+                    # Kumpulkan hasil
+                    for future in as_completed(futures):
+                        i = futures[future]
+                        if stop_requested and stop_requested():
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            return False
+
+                        try:
+                            idx, aligned_img = future.result()
+                            if aligned_img is not None:
+                                images[idx] = aligned_img
+                                if save_align_image:
+                                    save_aligned_image(aligned_img, idx, "RAFT")
+                        except Exception as e:
+                            print(
+                                f"❌ Worker C++ gagal untuk gambar {i+1} (saat fetch result): {e}"
+                            )
 
                         processed_count += 1
+                        if update_progress:
+                            prog_fraction = processed_count / (num_images - 1)
+                            current_msg_progress = int(
+                                progress_start
+                                + prog_fraction * (progress_end - progress_start)
+                            )
+                            update_progress(
+                                current_msg_progress,
+                                f"Alignment gambar {processed_count}/{num_images - 1} (C++)...",
+                            )
 
-                    except Exception as e:
-                        print(
-                            f"❌ Worker C++ gagal untuk gambar {i+1} (saat fetch result): {e}"
-                        )
-
-                    if update_progress:
-                        # Hitung progress dalam range yang diberikan
-                        prog_fraction = processed_count / (num_images - 1)
-                        current_msg_progress = int(
-                            progress_start
-                            + prog_fraction * (progress_end - progress_start)
-                        )
-                        update_progress(
-                            current_msg_progress,
-                            f"Alignment gambar {processed_count}/{num_images - 1} (C++)...",
-                        )
-
-                    gc.collect()
+                        gc.collect()
 
             # Clean up Taichi VRAM
             if use_taichi_gpu:
                 try:
-                    clear_taichi_cache()
-                    print("[Taichi] VRAM cache cleared.")
-                except:
+                    # Execute cleanup on the SAME thread that created the context
+                    worker = get_taichi_worker()
+                    worker.submit_and_wait(clear_taichi_cache)
+                    print("[Taichi] VRAM cache cleared via worker.")
+                except Exception as e:
+                    print(f"[Taichi] Warning: Failed to clear VRAM cache: {e}")
                     pass
 
             return True
@@ -1106,7 +1246,8 @@ def perform_image_alignment(
         except Exception as e:
             if use_taichi_gpu:
                 try:
-                    clear_taichi_cache()
+                    worker = get_taichi_worker()
+                    worker.submit_and_wait(clear_taichi_cache)
                 except:
                     pass
             print(f"Error fatal di luar blok alignment C++ utama: {e}")

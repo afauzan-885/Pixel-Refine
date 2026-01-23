@@ -104,9 +104,8 @@ def get_temp_buffer(shape, dtype, buffer_provider=None):
 
     # If buffer_provider is our cache, use it
     if buffer_provider == "pool":
-        # NOTE: DISABLED POOLING due to backend instability (shape mismatch on reuse)
-        # return _GLOBAL_CACHE.get_buffer(shape, dtype)
-        pass
+        # ENABLED POOLING
+        return _GLOBAL_CACHE.get_buffer(shape, dtype)
 
     if buffer_provider and buffer_provider != "pool":
         return buffer_provider(shape, dtype)
@@ -119,9 +118,8 @@ def release_temp_buffer(buf):
     """Return buffer to pool if applicable."""
     if buf is None:
         return
-    # NOTE: DISABLED POOLING
-    # _GLOBAL_CACHE.release_buffer(buf)
-    pass
+    # ENABLED POOLING
+    _GLOBAL_CACHE.release_buffer(buf)
 
 
 def cleanup_cache():

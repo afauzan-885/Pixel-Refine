@@ -1,5 +1,6 @@
 import numpy as np
 import cv2
+import threading
 
 try:
     import taichi as ti
@@ -190,11 +191,20 @@ def calculate_hybrid_gradient_mad(
 @ti.data_oriented
 class TaichiSpatialMerger:
     def __init__(self):
+        # Store init thread
+        self.init_thread_id = threading.get_ident()
+
         # Configure Taichi offline cache for "Instant Run"
         try:
+            # Try to grab context or init
             ti.init(arch=ti.gpu, offline_cache=True)
-        except:
-            ti.init(arch=ti.cpu)
+        except Exception as e:
+            if "already initialized" not in str(e).lower():
+                print(f"[Similarity] Init warning: {e}")
+                try:
+                    ti.init(arch=ti.cpu)
+                except:
+                    pass
 
         # Track last image size for buffer reuse
         self._last_img_size = None
@@ -713,6 +723,18 @@ def compute_spatial_merging_taichi(
     precomputed_ref_noise_sigma,
 ):
     global instance
+    current_tid = threading.get_ident()
+
+    if instance is not None:
+        if instance.init_thread_id != current_tid:
+            print(
+                f"[Similarity] Thread mismatch (Init: {instance.init_thread_id}, Curr: {current_tid}). Recreating instance..."
+            )
+            instance = None
+            # We assume Alignment step already reset runtime if needed.
+            # If not, we could try ti.reset(), but that's aggressive here.
+            # We just recreate the class to re-bind to current runtime/thread.
+
     if instance is None:
         instance = TaichiSpatialMerger()
 

@@ -11,6 +11,11 @@ Pipeline: GPU Preprocessing → C++ Alignment → GPU Warping
 import numpy as np
 import cv2, os
 import ctypes
+import threading
+
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_tile.compute_flow import (
+    compute_alignment_flow,
+)
 
 try:
     import taichi as ti
@@ -30,6 +35,7 @@ except ImportError:
     bilinear_interpolation: Any = None
 
 
+@ti.data_oriented
 class AlignmentTileTaichi:
     """Hybrid GPU/CPU class: GPU preprocessing/warping + C++ alignment computation."""
 
@@ -37,17 +43,36 @@ class AlignmentTileTaichi:
         if not TAICHI_AVAILABLE:
             raise ImportError("Taichi is not installed or available.")
 
+        # Store init thread to detect context mismatches
+        self.init_thread_id = threading.get_ident()
+
         # Initialize Taichi (Lazy Init on first use)
         try:
             os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
 
-            if not ti.get_runtime().is_initialized:
-                ti.init(arch=ti.gpu, offline_cache=True)
-        except:
+            # Try specific high-performance backends first
+            # Note: ti.gpu includes cuda, vulkan, metal, opengl
             try:
-                ti.init(arch=ti.cpu)
-            except:
-                pass
+                # This will raise if already initialized with different arch, or warn if same.
+                # If not initialized, it will try to init.
+                ti.init(arch=ti.gpu, offline_cache=True)
+            except Exception as e:
+                if "already initialized" in str(e).lower():
+                    # If already initialized, we assume it's fine (or we can't change it easily)
+                    pass
+                else:
+                    print(f"[Taichi] WARN: GPU init failed: {e}")
+                    print("[Taichi] Fallback to CPU...")
+                    try:
+                        ti.init(arch=ti.cpu)
+                    except Exception as ex:
+                        if "already initialized" in str(ex).lower():
+                            pass
+                        else:
+                            raise ex
+
+        except Exception as e:
+            print(f"[Taichi] ERROR: Init failed entirely: {e}")
 
         self.ref_preprocessed_gpu: np.ndarray | None = None
         self.ref_work_res: np.ndarray | None = None
@@ -72,12 +97,21 @@ class AlignmentTileTaichi:
             ref_img, is_linear, proxy_scale, use_sharpen
         )
 
-        # 2. Resize to work resolution for C++ backend
-        self.ref_work_res = cv2.resize(
-            self.ref_preprocessed_gpu, (work_w, work_h), interpolation=cv2.INTER_LINEAR
-        ).astype(np.float32)
+        # 2. Resize to work resolution on GPU to avoid download/error
+        # Calculate shapes
+        full_h, full_w = self.ref_preprocessed_gpu.shape[:2]
 
-        self.ref_work_res = np.ascontiguousarray(self.ref_work_res)
+        # Use pooled buffer for work resolution reference
+        self.ref_work_res = common.get_temp_buffer(
+            (work_h, work_w), ti.f32, buffer_provider="pool"
+        )
+
+        # Perform resize on GPU using shared bilinear kernel
+        bilinear_interpolation._bilinear_resize_kernel(
+            self.ref_preprocessed_gpu, self.ref_work_res, full_h, full_w, work_h, work_w
+        )
+
+        # NOTE: ref_work_res is now a Taichi Field (not numpy)
         self.work_h = work_h
         self.work_w = work_w
 
@@ -120,72 +154,104 @@ class AlignmentTileTaichi:
             comp_img, is_linear, proxy_scale, use_sharpen
         )
 
-        # === STEP 2: Resize to work resolution for C++ ===
-        comp_work_res = cv2.resize(
+        # === STEP 2: Resize to work resolution for Alignment ===
+        comp_work_res = common.get_temp_buffer(
+            (self.work_h, self.work_w), ti.f32, buffer_provider="pool"
+        )
+
+        bilinear_interpolation._bilinear_resize_kernel(
             comp_preprocessed_gpu,
-            (int(self.work_w), int(self.work_h)),
-            interpolation=cv2.INTER_LINEAR,
-        ).astype(np.float32)
-        comp_work_res = np.ascontiguousarray(comp_work_res)
-
-        # === STEP 3: C++ Backend Alignment Computation ===
-        ref_work_ptr = self.ref_work_res.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-        comp_work_ptr = comp_work_res.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-
-        flow_ptr = align_lib.compute_alignment_flow(
-            ref_work_ptr,
-            comp_work_ptr,
+            comp_work_res,
+            comp_preprocessed_gpu.shape[0],
+            comp_preprocessed_gpu.shape[1],
             self.work_h,
             self.work_w,
-            tile_h,
-            tile_w,
-            n_layers,
-            search_dist,
         )
 
-        if not flow_ptr:
-            raise RuntimeError("C++ alignment failed to compute flow.")
-
-        # === STEP 4: Read flow from C++ memory ===
-        flow_work_res = np.empty(
-            (int(self.work_h), int(self.work_w), 2), dtype=np.float32
-        )
-        ctypes.memmove(
-            flow_work_res.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-            flow_ptr,
-            flow_work_res.nbytes,
+        flow_gpu = compute_alignment_flow(
+            self.ref_work_res, comp_work_res, tile_h, tile_w, n_layers, search_dist
         )
 
-        # Free C++ memory
-        align_lib.free_flow_memory(flow_ptr)
+        # Release comp aligned buffer
+        common.release_temp_buffer(comp_work_res)
 
-        # === STEP 5: Scale flow to full resolution ===
+        if flow_gpu is None:
+            raise RuntimeError("Taichi alignment failed to compute flow.")
+
+        # === STEP 5: Scale flow to full resolution (GPU) ===
         full_h, full_w = comp_img.shape[:2]
-        flow_full_res = self._scale_flow_to_full_res(
-            flow_work_res, self.work_h, self.work_w, full_h, full_w
+
+        # Allocate full res flow buffer
+        flow_full_gpu = common.get_temp_buffer(
+            (full_h, full_w, 2), ti.f32, buffer_provider="pool"
         )
+
+        scale_x = full_w / self.work_w
+        scale_y = full_h / self.work_h
+
+        self._resize_flow_gpu(flow_gpu, flow_full_gpu, scale_x, scale_y)
+
+        # Release low res flow
+        common.release_temp_buffer(flow_gpu)
 
         # === STEP 6: GPU Warping ===
         # Use the preprocessed reference (grayscale) as guidance to refine flow edges
+        # Guidance is already on GPU (self.ref_preprocessed_gpu)
         warped_img = self.warp_image(
-            comp_img, flow_full_res, guidance=self.ref_preprocessed_gpu
+            comp_img, flow_full_gpu, guidance=self.ref_preprocessed_gpu
         )
+
+        # Release full res flow
+        common.release_temp_buffer(flow_full_gpu)
 
         return warped_img
 
-    def _scale_flow_to_full_res(self, flow, work_h, work_w, full_h, full_w):
-        """Scale flow from work resolution to full resolution."""
-        scale_x = full_w / work_w
-        scale_y = full_h / work_h
+    @ti.kernel
+    def _resize_flow_kernel(
+        self,
+        src: ti.types.ndarray(),
+        dst: ti.types.ndarray(),
+        scale_x: float,
+        scale_y: float,
+    ):
+        # Simple bilinear resize + value scaling for (H, W, 2) flow fields
+        for y, x in ti.ndrange(dst.shape[0], dst.shape[1]):
+            # Normalized coordinates
+            u = (x + 0.5) / float(dst.shape[1])  # horizontal
+            v = (y + 0.5) / float(dst.shape[0])  # vertical
 
-        # Resize flow field
-        flow_full = cv2.resize(flow, (full_w, full_h), interpolation=cv2.INTER_LINEAR)
+            # Map to src pixel coords
+            src_x = u * float(src.shape[1]) - 0.5
+            src_y = v * float(src.shape[0]) - 0.5
 
-        # Scale flow values
-        flow_full[:, :, 0] *= scale_x  # dx
-        flow_full[:, :, 1] *= scale_y  # dy
+            x0 = int(ti.floor(src_x))
+            y0 = int(ti.floor(src_y))
+            fx = src_x - x0
+            fy = src_y - y0
 
-        return flow_full
+            # Clamp indices
+            x0 = ti.max(0, ti.min(x0, src.shape[1] - 2))
+            y0 = ti.max(0, ti.min(y0, src.shape[0] - 2))
+            x1 = x0 + 1
+            y1 = y0 + 1
+
+            # Sample each channel
+            for c in ti.static(range(2)):
+                v00 = src[y0, x0, c]
+                v10 = src[y0, x1, c]
+                v01 = src[y1, x0, c]
+                v11 = src[y1, x1, c]
+
+                top = v00 * (1 - fx) + v10 * fx
+                bottom = v01 * (1 - fx) + v11 * fx
+                val = top * (1 - fy) + bottom * fy
+
+                # Apply scaling factor based on channel
+                scale = scale_x if c == 0 else scale_y
+                dst[y, x, c] = val * scale
+
+    def _resize_flow_gpu(self, src_flow, dst_flow, scale_x, scale_y):
+        self._resize_flow_kernel(src_flow, dst_flow, scale_x, scale_y)
 
     def preprocess_image(
         self,
@@ -194,17 +260,14 @@ class AlignmentTileTaichi:
         proxy_scale=1.0,
         use_sharpen=False,
     ):
-        """Preprocess image on GPU using standardized preprocess module."""
-        # Detect input bits based on dtype. If already float, assume [0, 1] (bits=0)
+        """Preprocess image on GPU returns GPU field."""
         input_bits = 0
         if img.dtype == np.uint16:
             input_bits = 16
         elif img.dtype == np.uint8:
             input_bits = 8
 
-        # print(f"[Taichi] Preprocessing input: {img.shape}, {img.dtype}, bits={input_bits}, linear={is_linear}, sharpen={use_sharpen}")
-
-        # Call the robust preprocess module (now includes sharpening and custom gamma)
+        # Call the robust preprocess module
         gray_gpu = preprocess.preprocess_gpu(
             img,
             scale=proxy_scale if is_linear else 1.0,
@@ -216,9 +279,7 @@ class AlignmentTileTaichi:
             use_sharpen=use_sharpen,
         )
 
-        # Handle return to numpy
-        if hasattr(gray_gpu, "to_numpy"):
-            return gray_gpu.to_numpy()
+        # Optimized: Return GPU handle directly, NO to_numpy()
         return gray_gpu
 
     def warp_image(self, img, flow, guidance=None):
@@ -298,6 +359,99 @@ def compute_alignment_and_warp_hybrid_taichi(
     )
 
 
+_GLOBAL_PROCESSOR = None
+
+
+def _get_safe_processor():
+    global _GLOBAL_PROCESSOR
+    current_tid = threading.get_ident()
+
+    if _GLOBAL_PROCESSOR is not None:
+        if _GLOBAL_PROCESSOR.init_thread_id != current_tid:
+            print(
+                f"[Taichi] Thread Mismatch! (Init: {_GLOBAL_PROCESSOR.init_thread_id}, Curr: {current_tid}). Resetting Runtime..."
+            )
+            _GLOBAL_PROCESSOR = None
+            try:
+                # Cleanup internal cache before reset to drop stale references
+                if common is not None:
+                    common.cleanup_cache()
+                ti.reset()
+            except:
+                pass
+
+    if _GLOBAL_PROCESSOR is None:
+        _GLOBAL_PROCESSOR = AlignmentTileTaichi()
+
+    return _GLOBAL_PROCESSOR
+
+
+def set_reference_hybrid_taichi(
+    ref_img,
+    work_h,
+    work_w,
+    is_linear=False,
+    proxy_scale=1.0,
+    use_sharpen=False,
+):
+    """Set reference for hybrid GPU/CPU pipeline."""
+    try:
+        proc = _get_safe_processor()
+        proc.set_reference_hybrid(
+            ref_img, work_h, work_w, is_linear, proxy_scale, use_sharpen
+        )
+    except RuntimeError as e:
+        if "CUDA_ERROR_INVALID_CONTEXT" in str(e):
+            print("[Taichi] Invalid Context detected. Forcing reset and retry...")
+            global _GLOBAL_PROCESSOR
+            _GLOBAL_PROCESSOR = None
+            try:
+                if common is not None:
+                    common.cleanup_cache()
+                ti.reset()
+            except:
+                pass
+
+            # Retry once
+            proc = _get_safe_processor()
+            proc.set_reference_hybrid(
+                ref_img, work_h, work_w, is_linear, proxy_scale, use_sharpen
+            )
+        else:
+            raise e
+
+
+def compute_alignment_and_warp_hybrid_taichi(
+    comp_img,
+    tile_h,
+    tile_w,
+    n_layers,
+    align_lib,
+    is_linear=False,
+    proxy_scale=1.0,
+    use_sharpen=False,
+    search_dist=2.0,
+):
+    """
+    Hybrid pipeline wrapper: GPU Preprocessing → C++ Alignment → GPU Warping
+
+    Must call set_reference_hybrid_taichi first.
+    """
+    # Note: We use existing processor which must have reference set
+    proc = _get_safe_processor()
+    return proc.compute_alignment_and_warp_hybrid(
+        comp_img,
+        tile_h,
+        tile_w,
+        n_layers,
+        align_lib,
+        is_linear,
+        proxy_scale,
+        use_sharpen,
+        search_dist,
+    )
+
+
 def preprocess_image_taichi(
     img,
     is_linear=False,
@@ -305,29 +459,20 @@ def preprocess_image_taichi(
     use_sharpen=False,
 ):
     """Preprocess image wrapper."""
-    global _GLOBAL_PROCESSOR
-    if _GLOBAL_PROCESSOR is None:
-        _GLOBAL_PROCESSOR = AlignmentTileTaichi()
-
-    return _GLOBAL_PROCESSOR.preprocess_image(img, is_linear, proxy_scale, use_sharpen)
+    proc = _get_safe_processor()
+    return proc.preprocess_image(img, is_linear, proxy_scale, use_sharpen)
 
 
 def warp_image_taichi(img, flow):
     """Warp image wrapper."""
-    global _GLOBAL_PROCESSOR
-    if _GLOBAL_PROCESSOR is None:
-        _GLOBAL_PROCESSOR = AlignmentTileTaichi()
-
-    return _GLOBAL_PROCESSOR.warp_image(img, flow)
+    proc = _get_safe_processor()
+    return proc.warp_image(img, flow)
 
 
 def resize_image_taichi(img, target_h, target_w):
     """Resize image wrapper."""
-    global _GLOBAL_PROCESSOR
-    if _GLOBAL_PROCESSOR is None:
-        _GLOBAL_PROCESSOR = AlignmentTileTaichi()
-
-    return _GLOBAL_PROCESSOR.resize_image(img, target_h, target_w)
+    proc = _get_safe_processor()
+    return proc.resize_image(img, target_h, target_w)
 
 
 def clear_taichi_cache():

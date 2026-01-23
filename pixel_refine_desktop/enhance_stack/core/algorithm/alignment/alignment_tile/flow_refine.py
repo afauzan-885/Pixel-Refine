@@ -10,7 +10,7 @@ import numpy as np
 try:
     import taichi as ti
     import taichi.math as tm
-    from . import common
+    from ...taichi_algorithm import common
 
     TAICHI_AVAILABLE = True
 except ImportError:
