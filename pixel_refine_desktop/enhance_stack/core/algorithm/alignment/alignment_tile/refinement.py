@@ -289,25 +289,23 @@ if TAICHI_AVAILABLE:
                 comp_y = tile_y + test_dy
 
                 # Boundary check
-                if (
+                if not (
                     comp_x < 0
                     or comp_y < 0
                     or comp_x + tile_w > w
                     or comp_y + tile_h > h
                 ):
-                    continue
+                    # Compute SAD
+                    total_cost = 0.0
+                    for r, c in ti.ndrange(tile_h, tile_w):
+                        ref_val = ref_layer[tile_y + r, tile_x + c]
+                        comp_val = comp_layer[comp_y + r, comp_x + c]
+                        total_cost += ti.abs(ref_val - comp_val)
 
-                # Compute SAD
-                total_cost = 0.0
-                for r, c in ti.ndrange(tile_h, tile_w):
-                    ref_val = ref_layer[tile_y + r, tile_x + c]
-                    comp_val = comp_layer[comp_y + r, comp_x + c]
-                    total_cost += ti.abs(ref_val - comp_val)
-
-                if total_cost < min_cost:
-                    min_cost = total_cost
-                    best_dx = test_dx
-                    best_dy = test_dy
+                    if total_cost < min_cost:
+                        min_cost = total_cost
+                        best_dx = test_dx
+                        best_dy = test_dy
 
         result_out[0] = float(best_dx)
         result_out[1] = float(best_dy)

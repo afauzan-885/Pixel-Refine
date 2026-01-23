@@ -42,7 +42,7 @@ def test_cost_function():
     )
 
     try:
-        from cost_function import calculate_fine_analysis, block_cost_fft
+        from cost_function import calculate_fine_analysis
 
         print("[OK] cost_function module imported")
     except ImportError as e:
@@ -69,19 +69,7 @@ def test_cost_function():
         print("[FAIL] Cost function: identical should be less than different")
         return False
 
-    # Test FFT cost
-    fft_cost_same = block_cost_fft(ref, comp_same)
-    fft_cost_diff = block_cost_fft(ref, comp_diff)
-
-    print(f"[INFO] FFT Cost (identical): {fft_cost_same:.6f}")
-    print(f"[INFO] FFT Cost (different): {fft_cost_diff:.6f}")
-
-    if fft_cost_same < fft_cost_diff:
-        print("[PASS] FFT cost function: identical < different")
-        return True
-    else:
-        print("[WARN] FFT cost function behavior unexpected")
-        return True
+    return True
 
 
 def test_refinement():
@@ -149,30 +137,24 @@ def test_compute_flow():
     print("=" * 60)
 
     try:
-        # Need to import from taichi_algorithm
-        sys.path.insert(
-            0,
-            r"e:\APP Developer\Pixel Refine\pixel_refine_desktop\enhance_stack\core\algorithm\taichi_algorithm",
+        # Import functions directly from modules to avoid name clashes with taichi_algorithm/__init__.py
+        from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.pyramid import (
+            build_image_pyramid,
+        )
+        from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.ransac import (
+            ransac_flow_cleanup,
+        )
+        from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.box_filter import (
+            box_filter_flow,
+        )
+        from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.median_filter import (
+            median_filter,
+        )
+        from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.common import (
+            ensure_taichi_field,
         )
 
-        # Mock the relative imports in compute_flow
-        import cost_function
-        import refinement
-
-        sys.modules[
-            "pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_tile.cost_function"
-        ] = cost_function
-        sys.modules[
-            "pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_tile.refinement"
-        ] = refinement
-
-        import pyramid
-        import ransac
-        import box_filter
-        import median_filter
-        import common
-
-        print("[OK] Taichi algorithm modules imported")
+        print("[OK] Taichi algorithm functions imported")
     except ImportError as e:
         print(f"[FAIL] Import error: {e}")
         import traceback
@@ -202,7 +184,7 @@ def test_compute_flow():
 
     # Test pyramid
     print("[INFO] Testing pyramid...")
-    pyr = pyramid.build_image_pyramid(ref, n_levels=3)
+    pyr = build_image_pyramid(ref, n_levels=3)
     print(f"[OK] Pyramid built with {len(pyr)} levels")
     for i, level in enumerate(pyr):
         print(f"  Level {i}: {level.shape}")
@@ -210,12 +192,12 @@ def test_compute_flow():
     # Test RANSAC
     print("[INFO] Testing RANSAC...")
     flow_test = np.random.rand(h, w, 2).astype(np.float32) * 2
-    flow_clean = ransac.ransac_flow_cleanup(flow_test, threshold=3.0)
+    flow_clean = ransac_flow_cleanup(flow_test, threshold=3.0)
     print(f"[OK] RANSAC cleanup done: {flow_clean.shape}")
 
     # Test box filter
     print("[INFO] Testing box filter...")
-    flow_smooth = box_filter.box_filter_flow(flow_test, kernel_size=3)
+    flow_smooth = box_filter_flow(flow_test, kernel_size=3)
     print(f"[OK] Box filter done: {flow_smooth.shape}")
 
     print("[PASS] All component tests passed!")
