@@ -98,6 +98,46 @@ if TAICHI_AVAILABLE:
                 res += row_sum * wy[j]
         return res
 
+    @ti.func
+    def sample_green_normalized(
+        img: ti.types.ndarray(), u: float, v: float, h: int, w: int, bits: int
+    ) -> float:
+        """
+        Sample the GREEN channel from a 3-channel image and normalize it.
+        Supports on-the-fly normalization from uint16 or other bit depths.
+        """
+        val = bilinear_at_3ch(img, u, v, h, w, 1)  # Channel 1 is Green
+        norm_factor = 1.0
+        if bits > 0:
+            norm_factor = float((1 << bits) - 1)
+        return val / norm_factor
+
+    @ti.func
+    def bilinear_at_3ch(
+        img: ti.types.ndarray(), x: float, y: float, h: int, w: int, c: int
+    ) -> float:
+        """Bilinear interpolation for a specific channel of a 3-channel image."""
+        ix = int(ti.floor(x))
+        iy = int(ti.floor(y))
+
+        # Clamp to bounds
+        ix0 = tm.clamp(ix, 0, w - 1)
+        iy0 = tm.clamp(iy, 0, h - 1)
+        ix1 = tm.clamp(ix + 1, 0, w - 1)
+        iy1 = tm.clamp(iy + 1, 0, h - 1)
+
+        fx = x - float(ix)
+        fy = y - float(iy)
+
+        v00 = float(img[iy0, ix0, c])
+        v01 = float(img[iy0, ix1, c])
+        v10 = float(img[iy1, ix0, c])
+        v11 = float(img[iy1, ix1, c])
+
+        top = v00 * (1.0 - fx) + v01 * fx
+        bottom = v10 * (1.0 - fx) + v11 * fx
+        return top * (1.0 - fy) + bottom * fy
+
     @ti.kernel
     def _copy_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray()):
         for I in ti.grouped(src):
@@ -222,25 +262,26 @@ def ensure_taichi_field(arr, dtype=None, shape=None, buffer_provider=None):
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
-    if isinstance(arr, np.ndarray):
-        if dtype is None:
-            dtype = ti.f32  # Default
-        if shape is None:
-            shape = arr.shape
-
-        field = get_temp_buffer(shape, dtype, buffer_provider)
-
-        # Sanity check for pooled buffers (if pooling were enabled)
-        if field.shape != shape:
-            release_temp_buffer(field)
-            field = ti.ndarray(dtype=dtype, shape=shape)
-
         # Ensure contiguous array for Taichi compatibility and dtype match
-        # This prevents crashes when passing sliced arrays (e.g. img[:,:,0])
         arr_contiguous = np.ascontiguousarray(arr)
-        if dtype == ti.f32 and arr_contiguous.dtype != np.float32:
-            arr_contiguous = arr_contiguous.astype(np.float32)
 
+        # Mapping numpy dtypes to ti dtypes for better VRAM utilization
+        actual_ti_dtype = dtype
+        if actual_ti_dtype is None:
+            if arr_contiguous.dtype == np.uint16:
+                actual_ti_dtype = ti.u16
+            elif arr_contiguous.dtype == np.uint8:
+                actual_ti_dtype = ti.u8
+            else:
+                actual_ti_dtype = ti.f32
+
+        # If we explicitly asked for f32 but have ints, cast them
+        if actual_ti_dtype == ti.f32 and arr_contiguous.dtype != np.float32:
+            arr_contiguous = arr_contiguous.astype(np.float32)
+        elif actual_ti_dtype == ti.u16 and arr_contiguous.dtype != np.uint16:
+            arr_contiguous = arr_contiguous.astype(np.uint16)
+
+        field = get_temp_buffer(shape, actual_ti_dtype, buffer_provider)
         field.from_numpy(arr_contiguous)
         return field, True
 

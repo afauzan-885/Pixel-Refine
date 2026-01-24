@@ -135,7 +135,6 @@ if TAICHI_AVAILABLE:
                         continue
 
                     # Calculate ZMCL Cost (Robust)
-                    # Use imported compute_zmcl_cost
                     cost = compute_zmcl_cost(
                         ref_layer,
                         comp_layer,
@@ -153,6 +152,12 @@ if TAICHI_AVAILABLE:
                         best_cost = cost
                         best_dx = init_dx + dx
                         best_dy = init_dy + dy
+
+                    # Early Exit: If cost is extremely low, we likely found a perfect match
+                    if best_cost < ImageAlignmentConfig.EARLY_EXIT_COST:
+                        break
+                if best_cost < ImageAlignmentConfig.EARLY_EXIT_COST:
+                    break
 
             # Write result
             for r, c in ti.ndrange(tile_h, tile_w):
@@ -236,44 +241,139 @@ if TAICHI_AVAILABLE:
 
                     cost_idx += 1
 
-            # Parabolic refinement
-            center_cost = costs[4]
-            left_cost = costs[3]
-            right_cost = costs[5]
-            top_cost = costs[1]
-            bottom_cost = costs[7]
+            # Soft-Argmin / Cost-Weighted Refinement
+            # Instead of just parabolic fitting, we use a weighted average of candidates
+            # based on their costs. This is more robust to noise than local fitting.
 
             final_dx = float(best_dx)
             final_dy = float(best_dy)
 
-            # Only refine if neighbors are valid
-            if (
-                left_cost < 1e9
-                and right_cost < 1e9
-                and top_cost < 1e9
-                and bottom_cost < 1e9
-            ):
-                # X-direction parabolic fit
-                c_coeff_x = (right_cost + left_cost - 2.0 * center_cost) / 2.0
-                if ti.abs(c_coeff_x) > 1e-6:
-                    b_coeff_x = (right_cost - left_cost) / 2.0
-                    delta_x = -b_coeff_x / (2.0 * c_coeff_x)
-                    delta_x = tm.clamp(delta_x, -0.5, 0.5)
-                    final_dx = float(best_dx) + delta_x
+            # Find min and max cost in 3x3 to normalize weights
+            min_c = 1e10
+            max_c = -1e10
+            for i in ti.static(range(9)):
+                if costs[i] < min_c:
+                    min_c = costs[i]
+                if costs[i] > max_c and costs[i] < 1e9:
+                    max_c = costs[i]
 
-                # Y-direction parabolic fit
-                c_coeff_y = (bottom_cost + top_cost - 2.0 * center_cost) / 2.0
-                if ti.abs(c_coeff_y) > 1e-6:
-                    b_coeff_y = (bottom_cost - top_cost) / 2.0
-                    delta_y = -b_coeff_y / (2.0 * c_coeff_y)
-                    delta_y = tm.clamp(delta_y, -0.5, 0.5)
-                    final_dy = float(best_dy) + delta_y
+            if max_c > min_c:
+                sum_w = 0.0
+                sum_dx = 0.0
+                sum_dy = 0.0
+
+                # We use a sharp exponential weighting (Soft-Argmin)
+                # k factor determines how much we trust the best candidate
+                k = 50.0
+
+                idx = 0
+                for ddy in ti.static(range(-1, 2)):
+                    for ddx in ti.static(range(-1, 2)):
+                        c_val = costs[idx]
+                        if c_val < 1e9:
+                            # Weight = exp(-k * (cost - min_cost) / (max_cost - min_cost))
+                            # Normalized to prevent overflow/underflow
+                            weight = ti.exp(
+                                -k * (c_val - min_c) / (ti.max(max_c - min_c, 1e-6))
+                            )
+                            sum_w += weight
+                            sum_dx += weight * float(init_dx + ddx)
+                            sum_dy += weight * float(init_dy + ddy)
+                        idx += 1
+
+                if sum_w > 1e-6:
+                    final_dx = sum_dx / sum_w
+                    final_dy = sum_dy / sum_w
 
             # Write result
             for r, c in ti.ndrange(tile_h, tile_w):
                 if y + r < h and x + c < w:
                     refined_flow[y + r, x + c, 0] = final_dx
                     refined_flow[y + r, x + c, 1] = final_dy
+
+    @ti.kernel
+    def _iterative_subpixel_refinement_kernel(
+        ref_layer: ti.types.ndarray(),
+        comp_layer: ti.types.ndarray(),
+        flow: ti.types.ndarray(),
+        refined_flow: ti.types.ndarray(),
+        h: int,
+        w: int,
+        tile_h: int,
+        tile_w: int,
+        max_iters: int,
+    ):
+        """
+        Precise iterative subpixel refinement using bicubic interpolation.
+        Minimizes SAD/MSE logic using local gradient approximation.
+        """
+        step_y = tile_h
+        step_x = tile_w
+
+        for tile_y, tile_x in ti.ndrange(
+            (h - tile_h + 1) // step_y, (w - tile_w + 1) // step_x
+        ):
+            y = tile_y * step_y
+            x = tile_x * step_x
+
+            # Get initial flow guess
+            center_y = y + tile_h // 2
+            center_x = x + tile_w // 2
+            curr_dx = flow[center_y, center_x, 0]
+            curr_dy = flow[center_y, center_x, 1]
+
+            # Iterative optimization (Gauss-Newton)
+            for _ in range(max_iters):
+                sum_gv2_x = 0.0
+                sum_gv2_y = 0.0
+                sum_diff_gv_x = 0.0
+                sum_diff_gv_y = 0.0
+
+                # Use consistent stride to reduce GPU load (1/4 sampling)
+                stride = 2
+
+                for ir, ic in ti.ndrange(tile_h // stride, tile_w // stride):
+                    r = ir * stride
+                    c = ic * stride
+                    ref_val = ref_layer[y + r, x + c]
+                    tx = float(x + c) + curr_dx
+                    ty = float(y + r) + curr_dy
+
+                    comp_val = common.bicubic_at(comp_layer, tx, ty)
+
+                    # Finite difference for local gradient on comp_layer
+                    eps = 0.2
+                    gv_x = (
+                        common.bilinear_at(comp_layer, tx + eps, ty)
+                        - common.bilinear_at(comp_layer, tx - eps, ty)
+                    ) / (2.0 * eps)
+                    gv_y = (
+                        common.bilinear_at(comp_layer, tx, ty + eps)
+                        - common.bilinear_at(comp_layer, tx, ty - eps)
+                    ) / (2.0 * eps)
+
+                    diff = comp_val - ref_val
+                    sum_gv2_x += gv_x * gv_x
+                    sum_gv2_y += gv_y * gv_y
+                    sum_diff_gv_x += diff * gv_x
+                    sum_diff_gv_y += diff * gv_y
+
+                # update step
+                alpha = 0.6  # Damping factor
+                if sum_gv2_x > 1e-6:
+                    curr_dx -= alpha * sum_diff_gv_x / sum_gv2_x
+                if sum_gv2_y > 1e-6:
+                    curr_dy -= alpha * sum_diff_gv_y / sum_gv2_y
+
+                # Stability clamp
+                curr_dx = tm.clamp(curr_dx, -50.0, 50.0)
+                curr_dy = tm.clamp(curr_dy, -50.0, 50.0)
+
+            # Write high-precision result
+            for r, c in ti.ndrange(tile_h, tile_w):
+                if y + r < h and x + c < w:
+                    refined_flow[y + r, x + c, 0] = curr_dx
+                    refined_flow[y + r, x + c, 1] = curr_dy
 
 
 # ============================================================================
@@ -357,12 +457,17 @@ def process_single_layer(
     current_tile_w = max(ImageAlignmentConfig.MIN_TILE_SIZE, min(tile_w, w))
 
     # 3. Adaptive search distance
+    # Adaptive Search: Use a wider search for coarse layers, and progressively tighter
+    # but more focused search for finer layers.
     if is_coarsest_layer:
         current_search_dist = int(base_search_dist)
     else:
-        current_search_dist = max(
-            1, int(base_search_dist / (2.0 * (total_layers - layer_index)))
-        )
+        # Base factor + decay based on layer depth
+        depth_factor = 1.0 / (2.0 ** (total_layers - layer_index - 1))
+        current_search_dist = max(1, int(base_search_dist * depth_factor))
+
+        # Optional: could further reduce search_dist if previous level confidence was high
+        # For now, keeping it robustly tied to pyramid depth.
 
     # Allocate refined flow
     refined_flow_gpu = common.get_temp_buffer((h, w, 2), ti.f32, buffer_provider="pool")
@@ -380,6 +485,21 @@ def process_single_layer(
             w,
             current_tile_h,
             current_tile_w,
+        )
+
+        # Iterative Refinement Pass for maximum precision
+        # Reuse flow_gpu as input (copy from refined_flow_gpu)
+        common.copy_field(refined_flow_gpu, flow_gpu)
+        _iterative_subpixel_refinement_kernel(
+            ref_gpu,
+            comp_gpu,
+            flow_gpu,
+            refined_flow_gpu,
+            h,
+            w,
+            current_tile_h,
+            current_tile_w,
+            max_iters=2,  # 2 iterations is faster and sufficient for most use cases
         )
     else:
         _search_coarse_level_kernel(
@@ -511,23 +631,30 @@ def compute_alignment_flow(
         ref_layer = ref_pyramid[i]
         comp_layer = current_pyramid[i]
 
+        prev_flow = flow_gpu
         flow_gpu = process_single_layer(
             ref_layer,
             comp_layer,
-            flow_gpu,
+            prev_flow,
             i,
             actual_layers,
             tile_h,
             tile_w,
             search_dist,
         )
+        # BUGFIX: Release the previous level flow buffer now that upsample is done
+        if prev_flow is not None:
+            common.release_temp_buffer(prev_flow)
 
     # Final post-processing: Spatial local RANSAC cleanup
     # Perform on GPU before download
     if flow_gpu is not None:
+        old_flow = flow_gpu
         flow_gpu = ransac_flow_cleanup_local(
-            flow_gpu, block_size=64, threshold=2.0, n_iterations=5
+            old_flow, block_size=64, threshold=2.0, n_iterations=5
         )
+        # BUGFIX: Release the flow buffer used as input to RANSAC
+        common.release_temp_buffer(old_flow)
         # Optimization: Return GPU handle instead of numpy
         # Cleanup
         for i in range(1, len(ref_pyramid)):

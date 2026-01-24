@@ -93,28 +93,35 @@ if TAICHI_AVAILABLE:
 
     @ti.kernel
     def _warp_kernel_guided(
-        src: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        src: ti.types.ndarray(ndim=2),
         flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
         dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
-        ref: ti.types.ndarray(dtype=ti.f32, ndim=2),  # Guidance Image
+        ref: ti.types.ndarray(),  # Guidance Image (can be 2D or 3D)
         h: int,
         w: int,
         use_guidance: int,
+        bits: int,
     ):
         for y, x in ti.ndrange(h, w):
             u_final, v_final = 0.0, 0.0
 
             if use_guidance:
                 # Joint Bilateral Refinement
-                # We use a 5x5 window to smooth flow while respecting reference edges.
                 total_w = 0.0
                 sum_u = 0.0
                 sum_v = 0.0
-                center_val = ref[y, x]
+
+                # Sample center value (Virtual Grayscale)
+                center_val = 0.0
+                if ti.static(len(ref.shape) == 2):
+                    center_val = ref[y, x]
+                else:
+                    norm_factor = 1.0
+                    if bits > 0:
+                        norm_factor = float((1 << bits) - 1)
+                    center_val = float(ref[y, x, 1]) / norm_factor
 
                 # Refinement Window (5x5)
-                # sigma_r = 0.1 (intensity)
-                # sigma_s = 1.0 (spatial)
                 for dy in range(-2, 3):
                     for dx in range(-2, 3):
                         ny, nx = y + dy, x + dx
@@ -124,8 +131,17 @@ if TAICHI_AVAILABLE:
                             w_s = ti.exp(-dist_sq / 2.0)
 
                             # Range weight (Intensity Similarity)
-                            diff = ti.abs(ref[ny, nx] - center_val)
-                            w_r = ti.exp(-(diff * diff) / 0.02)  # sigma_r approx 0.1
+                            val_neighbor = 0.0
+                            if ti.static(len(ref.shape) == 2):
+                                val_neighbor = ref[ny, nx]
+                            else:
+                                norm_factor = 1.0
+                                if bits > 0:
+                                    norm_factor = float((1 << bits) - 1)
+                                val_neighbor = float(ref[ny, nx, 1]) / norm_factor
+
+                            diff = ti.abs(val_neighbor - center_val)
+                            w_r = ti.exp(-(diff * diff) / 0.02)
 
                             w_curr = w_s * w_r
                             sum_u += flow[ny, nx, 0] * w_curr
@@ -146,13 +162,14 @@ if TAICHI_AVAILABLE:
 
     @ti.kernel
     def _warp_kernel_guided_3ch(
-        src: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        src: ti.types.ndarray(ndim=3),
         flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
         dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        ref: ti.types.ndarray(dtype=ti.f32, ndim=2),  # Guidance (Grayscale)
+        ref: ti.types.ndarray(),  # Guidance (Grayscale or 3-ch)
         h: int,
         w: int,
         use_guidance: int,
+        bits: int,
     ):
         for y, x in ti.ndrange(h, w):
             u_final, v_final = 0.0, 0.0
@@ -161,7 +178,16 @@ if TAICHI_AVAILABLE:
                 total_w = 0.0
                 sum_u = 0.0
                 sum_v = 0.0
-                center_val = ref[y, x]
+
+                # Sample center value (Virtual Grayscale)
+                center_val = 0.0
+                if ti.static(len(ref.shape) == 2):
+                    center_val = ref[y, x]
+                else:
+                    norm_factor = 1.0
+                    if bits > 0:
+                        norm_factor = float((1 << bits) - 1)
+                    center_val = float(ref[y, x, 1]) / norm_factor
 
                 for dy in range(-2, 3):
                     for dx in range(-2, 3):
@@ -170,7 +196,17 @@ if TAICHI_AVAILABLE:
                             dist_sq = float(dx * dx + dy * dy)
                             w_s = ti.exp(-dist_sq / 2.0)
 
-                            diff = ti.abs(ref[ny, nx] - center_val)
+                            # Range weight (Intensity Similarity)
+                            val_neighbor = 0.0
+                            if ti.static(len(ref.shape) == 2):
+                                val_neighbor = ref[ny, nx]
+                            else:
+                                norm_factor = 1.0
+                                if bits > 0:
+                                    norm_factor = float((1 << bits) - 1)
+                                val_neighbor = float(ref[ny, nx, 1]) / norm_factor
+
+                            diff = ti.abs(val_neighbor - center_val)
                             w_r = ti.exp(-(diff * diff) / 0.02)
 
                             w_curr = w_s * w_r
@@ -217,15 +253,27 @@ if TAICHI_AVAILABLE:
         use_guidance = 0
         guidance_gpu = None
         guidance_is_temp = False
+        bits = 0
 
         if guidance is not None:
             use_guidance = 1
+            # Automatic bit depth detection for normalization (Supports NumPy and Taichi)
+            g_dtype = getattr(guidance, "dtype", None)
+            if g_dtype in [np.uint16, ti.u16]:
+                bits = 16
+            elif g_dtype in [np.uint8, ti.u8]:
+                bits = 8
+            elif g_dtype in [np.float32, ti.f32]:
+                bits = 0
+            else:
+                bits = 0  # Default to no normalization for unknown (usually float)
+
+            # Note: We allow ensure_taichi_field to keep u16 if provided
             guidance_gpu, guidance_is_temp = common.ensure_taichi_field(
-                guidance, dtype=ti.f32, buffer_provider=buffer_provider
+                guidance, buffer_provider=buffer_provider
             )
         else:
-            # Create a dummy 1x1 buffer to satisfy kernel signature (Taichi requirement)
-            # Won't be accessed if use_guidance=0
+            # Create a dummy 1x1 buffer
             guidance_gpu = common.get_temp_buffer((1, 1), ti.f32, buffer_provider)
             guidance_is_temp = True
 
@@ -239,11 +287,11 @@ if TAICHI_AVAILABLE:
 
         if channels == 1:
             _warp_kernel_guided(
-                src_gpu, flow_gpu, dst_gpu, guidance_gpu, h, w, use_guidance
+                src_gpu, flow_gpu, dst_gpu, guidance_gpu, h, w, use_guidance, bits
             )
         else:
             _warp_kernel_guided_3ch(
-                src_gpu, flow_gpu, dst_gpu, guidance_gpu, h, w, use_guidance
+                src_gpu, flow_gpu, dst_gpu, guidance_gpu, h, w, use_guidance, bits
             )
 
         # Cleanup

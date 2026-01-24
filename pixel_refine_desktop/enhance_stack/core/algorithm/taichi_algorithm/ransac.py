@@ -253,6 +253,7 @@ def ransac_flow_cleanup(
     flow,  # Can be np.ndarray or ti.ndarray
     threshold: float = 3.0,
     n_iterations: int = 10,
+    buffer_provider="pool",
 ):
     """
     RANSAC-based outlier removal for optical flow.
@@ -263,17 +264,17 @@ def ransac_flow_cleanup(
 
     h, w = flow.shape[:2]
 
-    # Check if input is already on GPU
+    # Handle Input
     is_numpy = isinstance(flow, np.ndarray)
     flow_gpu = flow
     if is_numpy:
-        flow_gpu = ti.ndarray(dtype=ti.f32, shape=(h, w, 2))
+        flow_gpu = common.get_temp_buffer((h, w, 2), ti.f32, buffer_provider)
         flow_gpu.from_numpy(flow.astype(np.float32))
 
-    # Allocate buffers on GPU
-    inlier_mask = ti.ndarray(dtype=ti.i32, shape=(h, w))
-    mean_out = ti.ndarray(dtype=ti.f32, shape=(2,))
-    output_gpu = ti.ndarray(dtype=ti.f32, shape=(h, w, 2))
+    # Allocate buffers on GPU via pool
+    inlier_mask = common.get_temp_buffer((h, w), ti.i32, buffer_provider)
+    mean_out = common.get_temp_buffer((2,), ti.f32, buffer_provider)
+    output_gpu = common.get_temp_buffer((h, w, 2), ti.f32, buffer_provider)
 
     # Step 1: Initial model
     _compute_mean_flow_kernel(flow_gpu, mean_out, h, w)
@@ -305,8 +306,17 @@ def ransac_flow_cleanup(
         flow_gpu, inlier_mask, best_model_x, best_model_y, output_gpu, h, w
     )
 
+    # Release temporary buffers
+    common.release_temp_buffer(inlier_mask)
+    common.release_temp_buffer(mean_out)
+
     if is_numpy:
-        return output_gpu.to_numpy()
+        result = output_gpu.to_numpy()
+        common.release_temp_buffer(flow_gpu)
+        common.release_temp_buffer(output_gpu)
+        return result
+
+    # If input was not numpy, we return the GPU buffer (it's up to caller to release it)
     return output_gpu
 
 

@@ -66,7 +66,8 @@ class TaichiBatchWorker(threading.Thread):
             try:
                 # Force GPU and allow shared memory
                 os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
-                ti.init(arch=ti.gpu, offline_cache=True, device_memory_GB=4.0)
+                # Reduce reservation to 2GB to leave room for OS on 4GB-8GB GPUs
+                ti.init(arch=ti.gpu, offline_cache=True, device_memory_GB=2.0)
             except Exception as e:
                 if "already initialized" not in str(e):
                     print(f"[TaichiWorker] Init error: {e}")
@@ -1154,6 +1155,9 @@ def perform_image_alignment(
                         # Manual memory management suggestion for heavy GPU loops
                         if i % 5 == 0:
                             gc.collect()
+
+                        # Give system time to breathe (prevent TDR and UI freeze)
+                        time.sleep(0.05)
                     return True
 
                 # Submit to persistent thread and wait

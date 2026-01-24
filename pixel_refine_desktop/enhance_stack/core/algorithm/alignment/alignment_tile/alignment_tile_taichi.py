@@ -49,28 +49,54 @@ class AlignmentTileTaichi:
         # Initialize Taichi (Lazy Init on first use)
         try:
             os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
+            # Check if already initialized to avoid redundant logs/overhead
+            is_initialized = False
             try:
-                ti.init(arch=ti.gpu, offline_cache=True)
-            except Exception as e:
-                if "already initialized" in str(e).lower():
-                    pass
-                else:
-                    print(f"[Taichi] WARN: GPU init failed: {e}")
-                    print("[Taichi] Fallback to CPU...")
-                    try:
-                        ti.init(arch=ti.cpu)
-                    except Exception as ex:
-                        if "already initialized" in str(ex).lower():
-                            pass
-                        else:
-                            raise ex
+                if ti.lang.impl.get_runtime().prog is not None:
+                    is_initialized = True
+            except:
+                pass
+
+            if not is_initialized:
+                try:
+                    ti.init(arch=ti.gpu, offline_cache=True, device_memory_GB=2.0)
+                except Exception as e:
+                    if "already initialized" in str(e).lower():
+                        pass
+                    else:
+                        print(f"[Taichi] WARN: GPU init failed: {e}")
+                        print("[Taichi] Fallback to CPU...")
+                        try:
+                            ti.init(arch=ti.cpu)
+                        except Exception as ex:
+                            if "already initialized" in str(ex).lower():
+                                pass
+                            else:
+                                raise ex
+            else:
+                # Already initialized, continue using existing context
+                pass
         except Exception as e:
             print(f"[Taichi] ERROR: Init failed entirely: {e}")
 
-        self.ref_preprocessed_gpu: any = None
+        # Store references to avoid garbage collection
+        self.ref_img_gpu: any = None
         self.ref_work_res: any = None
         self.work_h: int = 0
         self.work_w: int = 0
+
+    def clear_data(self):
+        """Release image buffers without destroying the processor object or Taichi context."""
+        if self.ref_img_gpu is not None:
+            common.release_temp_buffer(self.ref_img_gpu)
+            self.ref_img_gpu = None
+        if self.ref_work_res is not None:
+            common.release_temp_buffer(self.ref_work_res)
+            self.ref_work_res = None
+        self.work_h = 0
+        self.work_w = 0
+        # Explicitly clear the buffer cache to free all VRAM while keeping kernels
+        common.cleanup_cache()
 
     def set_reference_hybrid(
         self,
@@ -82,23 +108,45 @@ class AlignmentTileTaichi:
         use_sharpen=False,
     ):
         """
-        Set reference image for the alignment pipeline.
-        Preprocesses on GPU and caches pre-resized work resolution image.
+        Set reference image. Uploads 16-bit original to GPU for guidance
+        and creates a low-res version for alignment.
         """
-        # 1. Preprocess reference on GPU (full resolution)
-        self.ref_preprocessed_gpu = self.preprocess_image(
-            ref_img, is_linear, proxy_scale, use_sharpen
+        # 1. Upload original reference to GPU (uint16/uint8)
+        # ensure_taichi_field with dtype=None will pick native u16 if available
+        self.ref_img_gpu, _ = common.ensure_taichi_field(
+            ref_img, buffer_provider="pool"
         )
 
-        # 2. Resize to work resolution on GPU to avoid download
-        full_h, full_w = self.ref_preprocessed_gpu.shape[:2]
-
+        # 2. Resize to work resolution on GPU for alignment (1-channel flow compute)
+        # We use a specialized kernel that extract Green while resizing
         self.ref_work_res = common.get_temp_buffer(
             (work_h, work_w), ti.f32, buffer_provider="pool"
         )
 
-        bilinear_interpolation._bilinear_resize_kernel(
-            self.ref_preprocessed_gpu, self.ref_work_res, full_h, full_w, work_h, work_w
+        full_h, full_w = ref_img.shape[:2]
+
+        # Correct bit detection: float=0, u16=16, u8=8
+        input_bits = 0
+        if ref_img.dtype == np.uint16:
+            input_bits = 16
+        elif ref_img.dtype == np.uint8:
+            input_bits = 8
+
+        # Use fused kernel to get low-res grayscale for alignment
+        preprocess._fused_preprocess_kernel(
+            self.ref_img_gpu,
+            self.ref_work_res,
+            full_h,
+            full_w,
+            work_h,
+            work_w,
+            proxy_scale if is_linear else 1.0,
+            int(is_linear),
+            input_bits,
+            int(use_sharpen),
+            2.22,
+            4.5,
+            0.018,  # default gamma params
         )
 
         self.work_h = work_h
@@ -117,44 +165,61 @@ class AlignmentTileTaichi:
         search_dist=2.0,
     ):
         """
-        Complete Alignment & Warp Pipeline: GPU Preprocess → GPU Alignment → GPU Warp.
+        Modified Pipeline:
+        1. Upload Comp (Original)
+        2. Create Comp Work Res (Low-res Gray)
+        3. Alignment (Compute Flow)
+        4. Warp (Guided by Original Ref)
         """
         if self.ref_work_res is None:
             raise RuntimeError("Reference not set. Call set_reference_hybrid first.")
 
-        # === STEP 1: GPU Preprocessing ===
-        comp_preprocessed_gpu = self.preprocess_image(
-            comp_img, is_linear, proxy_scale, use_sharpen
-        )
+        # === STEP 1: Upload Original ===
+        comp_img_gpu, _ = common.ensure_taichi_field(comp_img, buffer_provider="pool")
 
-        # === STEP 2: Resize to work resolution for Alignment ===
+        # === STEP 2: Create low-res version for Alignment ===
         comp_work_res = common.get_temp_buffer(
             (self.work_h, self.work_w), ti.f32, buffer_provider="pool"
         )
 
-        bilinear_interpolation._bilinear_resize_kernel(
-            comp_preprocessed_gpu,
+        full_h, full_w = comp_img.shape[:2]
+
+        # Correct bit detection: float=0, u16=16, u8=8
+        input_bits = 0
+        if comp_img.dtype == np.uint16:
+            input_bits = 16
+        elif comp_img.dtype == np.uint8:
+            input_bits = 8
+
+        preprocess._fused_preprocess_kernel(
+            comp_img_gpu,
             comp_work_res,
-            comp_preprocessed_gpu.shape[0],
-            comp_preprocessed_gpu.shape[1],
+            full_h,
+            full_w,
             self.work_h,
             self.work_w,
+            proxy_scale if is_linear else 1.0,
+            int(is_linear),
+            input_bits,
+            int(use_sharpen),
+            2.22,
+            4.5,
+            0.018,
         )
 
         # === STEP 3: Taichi Alignment ===
-        flow_gpu = compute_alignment_flow(
+        flow_low_gpu = compute_alignment_flow(
             self.ref_work_res, comp_work_res, tile_h, tile_w, n_layers, search_dist
         )
 
-        # Release comp aligned buffer
+        # Release comp aligned buffer (low res)
         common.release_temp_buffer(comp_work_res)
 
-        if flow_gpu is None:
+        if flow_low_gpu is None:
+            common.release_temp_buffer(comp_img_gpu)
             raise RuntimeError("Taichi alignment failed to compute flow.")
 
         # === STEP 4: Scale flow to full resolution (GPU) ===
-        full_h, full_w = comp_img.shape[:2]
-
         flow_full_gpu = common.get_temp_buffer(
             (full_h, full_w, 2), ti.f32, buffer_provider="pool"
         )
@@ -162,15 +227,22 @@ class AlignmentTileTaichi:
         scale_x = full_w / self.work_w
         scale_y = full_h / self.work_h
 
-        self._resize_flow_gpu(flow_gpu, flow_full_gpu, scale_x, scale_y)
+        self._resize_flow_gpu(flow_low_gpu, flow_full_gpu, scale_x, scale_y)
 
         # Release low res flow
-        common.release_temp_buffer(flow_gpu)
+        common.release_temp_buffer(flow_low_gpu)
 
-        # === STEP 5: GPU Warping ===
+        # === STEP 5: GPU Warping (Directly from Original) ===
+        # We pass self.ref_img_gpu as guidance!
         warped_img = self.warp_image(
-            comp_img, flow_full_gpu, guidance=self.ref_preprocessed_gpu
+            comp_img_gpu, flow_full_gpu, guidance=self.ref_img_gpu
         )
+
+        # Release Resources
+        common.release_temp_buffer(comp_img_gpu)
+        common.release_temp_buffer(flow_full_gpu)
+
+        return warped_img
 
         # Release full res flow
         common.release_temp_buffer(flow_full_gpu)
@@ -391,8 +463,18 @@ def resize_image_taichi(img, target_h, target_w):
 
 
 def clear_taichi_cache():
-    """Clear global processor cache."""
+    """Clear global processor data but keep the object and kernels alive."""
     global _GLOBAL_PROCESSOR
-    _GLOBAL_PROCESSOR = None
-    if TAICHI_AVAILABLE:
-        common.cleanup_cache()
+    # Important: Do NOT set _GLOBAL_PROCESSOR to None here.
+    # We want to reuse the object and its compiled kernels in VRAM.
+    if _GLOBAL_PROCESSOR is not None:
+        try:
+            _GLOBAL_PROCESSOR.clear_data()
+            print("[Taichi] VRAM data cleared (Kernels persistent).")
+        except Exception as e:
+            print(f"[Taichi] Error clearing data: {e}")
+            _GLOBAL_PROCESSOR = None  # Fallback: force recreation if clearing failed
+    else:
+        # If it was already None, just ensure cache is clean
+        if TAICHI_AVAILABLE:
+            common.cleanup_cache()
