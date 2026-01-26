@@ -30,7 +30,8 @@ from pixel_refine_desktop.ui import (
     SplashScreen,
     fade_in,
 )
-from pixel_refine_desktop.ui.views.panorama import PanoramaPage
+
+# from pixel_refine_desktop.ui.views.panorama import PanoramaPage
 import config
 
 # import taichi as ti

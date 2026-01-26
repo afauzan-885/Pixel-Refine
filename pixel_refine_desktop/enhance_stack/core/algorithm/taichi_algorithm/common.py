@@ -302,7 +302,7 @@ def to_numpy_if_needed(field, was_numpy, out=None):
     """
     if was_numpy:
         if out is not None:
-            field.to_numpy(out)
+            out[:] = field.to_numpy()
             return out
         return field.to_numpy()
     return field

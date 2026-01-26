@@ -1,12 +1,18 @@
+import os
+
+os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import gc
 import queue
 import threading
+import functools
 import traceback
-import cv2
+import sys
 import numpy as np
+import cv2
 import sqlite3
-import os
+import sqlite3
 from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
 from PySide6.QtCore import QThread, Signal, Qt
@@ -33,18 +39,29 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.extra_algorithm import (
     SimilaritySpatialInterface,
     perform_image_alignment,
+    get_taichi_worker,
 )
 
 # --- TAICHI SPATIAL IMPORT ---
 try:
-    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.similarity_spatial_taichi import (
-        compute_spatial_merging_taichi,
+    from ..taichi_algorithm.taichi_worker import (
+        clear_vram,
+        get_taichi_worker,
+        ti_thread,
+        create_taichi_ndarray,
+        download_taichi_ndarray,
+    )
+    from .extra_code.compute_similarity import (
+        generate_weight_map_taichi,
+        accumulate_spatial_merging_taichi,
     )
 
     TAICHI_SPATIAL_AVAILABLE = True
 except ImportError:
     TAICHI_SPATIAL_AVAILABLE = False
-    print("Warning: Could not import Taichi spatial merging module.")
+    print(
+        "Warning: Could not import Taichi spatial merging module (compute_similarity)."
+    )
 except Exception as e:
     TAICHI_SPATIAL_AVAILABLE = False
     print(f"Warning: Error importing Taichi spatial module: {e}")
@@ -349,7 +366,6 @@ class SimilarityAlgorithm:
         num_images = len(images)
         work_res_h, work_res_w = ref_image_h, ref_image_w
         TARGET_MP = 12.5 * 1e6
-
         # --- COSTUM PROGRESS CALCULATION (GLOBAL SCOPE) MOVED UP ---
         use_overall_progress = total_overall_images and total_overall_images > 0
         if use_overall_progress:
@@ -617,136 +633,180 @@ class SimilarityAlgorithm:
             final_num_workers = max(1, min((os.cpu_count() or 2) // 2, 8))
 
         # Check GPU Flag
-        use_taichi_spatial = unused_kwargs.get("spatial_merging_gpu", False)
-        if use_taichi_spatial and not TAICHI_SPATIAL_AVAILABLE:
+        use_taichi_gpu = unused_kwargs.get("similarity_merging_gpu", True)
+        if use_taichi_gpu and not TAICHI_SPATIAL_AVAILABLE:
             print(
-                "Warning: spatial_merging_gpu=True but Taichi not available. Falling back to C++."
+                "Warning: similarity_merging_gpu=True but Taichi not available. Falling back to C++."
             )
-            use_taichi_spatial = False
+            use_taichi_gpu = False
 
         # Jika GPU aktif, kita skip Threading Producer-Consumer yang ribet ini
         # Dan langsung panggil Taichi (yang internalnya sudah parallel GPU)
-        if use_taichi_spatial:
-            # --- TAICHI GPU PATH ---
+        if use_taichi_gpu:
+            # --- TAICHI GPU PATH (OPTIMIZED: STAYS ON GPU) ---
             processed_frames_spatial = 0
-            try:
-                for i, img_orig in enumerate(images):
-                    if stop_requested and stop_requested():
-                        break
 
-                    if img_orig is None:
-                        continue
+            def _run_gpu_spatial_merging():
+                # Internal references
+                nonlocal processed_frames_spatial
+                _sum_gpu = None
+                _weight_sum_full_gpu = None
+                _base_window_gpu = None
+                _ref_work_gpu = None
+                _rows_gpu = None
+                _cols_gpu = None
+                _weight_work_gpu = None
 
-                    # Preprocessing (Sama seperti CPU)
-                    curr_float = normalize_image(img_orig, ref_dtype)
-                    if is_linear_mode:
-                        curr_float_proxy = to_gamma_proxy(curr_float, scale=proxy_scale)
-                        curr_preproc = preprocess_in_python(
-                            curr_float_proxy, use_raft=False, use_sharpen=False
-                        )
-                    else:
-                        curr_preproc = preprocess_in_python(
-                            curr_float, use_raft=False, use_sharpen=False
-                        )
-
-                    # Resize current to work resolution
-                    curr_work_gray = cv2.resize(
-                        curr_preproc,
-                        (work_res_w, work_res_h),
-                        interpolation=cv2.INTER_AREA,
+                try:
+                    # 1. Pre-allocate/Upload Persistent Buffers to GPU
+                    _sum_gpu = create_taichi_ndarray(final_image_sum_full_res)
+                    _weight_sum_full_gpu = create_taichi_ndarray(
+                        weight_map_sum_full_res
                     )
 
-                    # Call Taichi
-                    # Note: Taichi function takes numpy arrays.
-                    # We accumulate directly into weight_map_sum_full_res? NO.
-                    # Taichi operates on work resolution (tile based).
-                    # The C++ logic: generate_weight_map_jit returns a weight map for THIS image.
-                    # Then CPU accumulates it.
-                    # Optimization: Can Taichi return the weight map and we accumulate on CPU?
-                    # Yes, to match the Python structure where images are loaded sequentially to save RAM.
-                    # Loading ALL images to GPU at once might OOM.
-                    # So we process 1 by 1.
+                    _base_window_gpu = create_taichi_ndarray(base_window)
+                    _ref_work_gpu = create_taichi_ndarray(ref_work_res_pass2)
+                    _rows_gpu = create_taichi_ndarray(row_starts)
+                    _cols_gpu = create_taichi_ndarray(col_starts)
 
-                    # Panggil Taichi untuk generate weight map Image ini
-                    # Pass Reference Processed (ref_work_res_pass2)
-
-                    weight_map_work_res = compute_spatial_merging_taichi(
-                        curr_work_gray,
-                        ref_work_res_pass2,
-                        base_window,
-                        row_starts,
-                        col_starts,
-                        tile_h,
-                        tile_w,
-                        motion_sensitivity,
-                        noise_offset_factor,
-                        ref_noise_sigma,
+                    # Reusable buffer for per-frame weight map (work resolution)
+                    _weight_work_gpu = create_taichi_ndarray(
+                        np.zeros((work_res_h, work_res_w), dtype=np.float32)
                     )
 
-                    # Accumulate Result (Same as Consumer Thread logic)
-                    # 1. Resize Weight Map ke Buffer Full Res
-                    # Taichi return float32 directly (unlike C++ JIT using uint16 transport)
-                    # so we can use it directly.
+                    for i, img_orig in enumerate(images):
+                        if stop_requested and stop_requested():
+                            break
 
-                    cv2.resize(
-                        weight_map_work_res,
-                        (ref_image_w, ref_image_h),
-                        dst=consumer_weight_full_buf,
-                        interpolation=cv2.INTER_LINEAR,
-                    )
+                        if img_orig is None:
+                            continue
 
-                    # 2. Accumulate
-                    norm_img = normalize_image(img_orig, ref_dtype)
-                    if (norm_img.shape[0] != ref_image_h) or (
-                        norm_img.shape[1] != ref_image_w
-                    ):
-                        norm_img = cv2.resize(
-                            norm_img,
-                            (ref_image_w, ref_image_h),
+                        # Preprocessing (CPU tasks inside the worker thread is fine)
+                        curr_float = normalize_image(img_orig, ref_dtype)
+
+                        # Ensure size matches reference
+                        if (curr_float.shape[0] != ref_image_h) or (
+                            curr_float.shape[1] != ref_image_w
+                        ):
+                            curr_float = cv2.resize(
+                                curr_float,
+                                (ref_image_w, ref_image_h),
+                                interpolation=cv2.INTER_AREA,
+                            )
+
+                        # Weight calculation preparation (Proxy if linear)
+                        if is_linear_mode:
+                            curr_float_proxy = to_gamma_proxy(
+                                curr_float, scale=proxy_scale
+                            )
+                            curr_preproc = preprocess_in_python(
+                                curr_float_proxy, use_raft=False, use_sharpen=False
+                            )
+                        else:
+                            curr_preproc = preprocess_in_python(
+                                curr_float, use_raft=False, use_sharpen=False
+                            )
+
+                        # Resize to work resolution for weight map analysis
+                        curr_work_gray = cv2.resize(
+                            curr_preproc,
+                            (work_res_w, work_res_h),
                             interpolation=cv2.INTER_AREA,
                         )
 
-                    np.multiply(
-                        norm_img,
-                        consumer_weight_full_buf[:, :, np.newaxis],
-                        out=norm_img,
-                    )
-
-                    final_image_sum_full_res += norm_img
-                    weight_map_sum_full_res += consumer_weight_full_buf
-
-                    del norm_img, weight_map_work_res
-                    images[i] = None  # Free RAM
-                    processed_frames_spatial += 1
-
-                    # Update Progress
-                    if update_progress:
-                        prog_fraction = (i + 1) / num_images
-                        current_val = int(
-                            pass_merge_range[0]
-                            + prog_fraction
-                            * (pass_merge_range[1] - pass_merge_range[0])
+                        # Step A: Generate Weight Map on GPU
+                        generate_weight_map_taichi(
+                            current_image=curr_work_gray,
+                            reference_image=_ref_work_gpu,
+                            weight_map_sum=_weight_work_gpu,
+                            base_window=_base_window_gpu,
+                            stability_map=None,
+                            row_starts=_rows_gpu,
+                            col_starts=_cols_gpu,
+                            tile_h=tile_h,
+                            tile_w=tile_w,
+                            noise_sigma=ref_noise_sigma,
+                            motion_sensitivity=motion_sensitivity,
+                            noise_offset_factor=noise_offset_factor,
+                            equalize_brightness=False,
+                            buffer_provider="pool",
                         )
-                        if use_overall_progress:
-                            cur_ov = images_processed_so_far + (i + 1)
-                            update_progress(
-                                current_val,
-                                language_config.IMAGE_PROCESS_IN_PROGRESS.format(
-                                    cur_ov, total_overall_images
-                                ),
-                            )
-                        else:
-                            update_progress(
-                                current_val,
-                                f"Merging frames (GPU): {i + 1}/{num_images}",
-                            )
 
-            except Exception as e:
-                print(f"Error executing Taichi Spatial Merging: {e}")
-                import traceback
+                        # Step B: Accumulate result directly on GPU
+                        accumulate_spatial_merging_taichi(
+                            current_image_full=curr_float,
+                            weight_map_work=_weight_work_gpu,
+                            final_image_sum=_sum_gpu,
+                            weight_map_sum_full=_weight_sum_full_gpu,
+                        )
 
-                traceback.print_exc()
-                return None, None, 0  # Fail safely
+                        images[i] = None  # Free RAM
+                        processed_frames_spatial += 1
+
+                        # Update Progress
+                        if update_progress:
+                            prog_fraction = (i + 1) / num_images
+                            current_val = int(
+                                pass_merge_range[0]
+                                + prog_fraction
+                                * (pass_merge_range[1] - pass_merge_range[0])
+                            )
+                            if use_overall_progress:
+                                cur_ov = images_processed_so_far + (i + 1)
+                                update_progress(
+                                    current_val,
+                                    language_config.IMAGE_PROCESS_IN_PROGRESS.format(
+                                        cur_ov, total_overall_images
+                                    ),
+                                )
+                            else:
+                                update_progress(
+                                    current_val,
+                                    f"Spatial Merging: {i+1}/{num_images} (GPU)",
+                                )
+
+                        # Give OS and UI some air - prevents total GPU lockout
+                        import time
+
+                        time.sleep(0.01)
+
+                    # Final Download
+                    download_taichi_ndarray(_sum_gpu, out=final_image_sum_full_res)
+                    download_taichi_ndarray(
+                        _weight_sum_full_gpu, out=weight_map_sum_full_res
+                    )
+                    return True
+
+                except Exception as e:
+                    print(f"Error executing optimized Taichi Spatial Merging: {e}")
+                    import traceback
+
+                    traceback.print_exc()
+                    return False
+                finally:
+                    # Cleanup GPU buffers
+                    _sum_gpu = None
+                    _weight_sum_full_gpu = None
+                    _base_window_gpu = None
+                    _ref_work_gpu = None
+                    _rows_gpu = None
+                    _cols_gpu = None
+                    _weight_work_gpu = None
+
+                    try:
+                        from ..taichi_algorithm.taichi_worker import clear_vram
+
+                        clear_vram()
+                    except:
+                        pass
+
+            # Submit and wait once
+            worker = get_taichi_worker()
+            success = worker.submit(_run_gpu_spatial_merging)
+            if not success:
+                return None, None, 0
+
+            # Continue to final normalization
 
         else:
             # --- C++ DLL PATH (EXISTING THREADED IMPLEMENTATION) ---

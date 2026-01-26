@@ -8,8 +8,12 @@ This module provides a hybrid pipeline:
 Pipeline: GPU Preprocessing → C++ Alignment → GPU Warping
 """
 
+import os
+
+os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
+
 import numpy as np
-import cv2, os
+import cv2
 import ctypes
 import threading
 
@@ -18,6 +22,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_tile.
 )
 
 try:
+    from ...taichi_algorithm.taichi_worker import ti_thread
     import taichi as ti
     import taichi.math as tm
     from ...taichi_algorithm import common, warp, preprocess, bilinear_interpolation
@@ -43,41 +48,9 @@ class AlignmentTileTaichi:
         if not TAICHI_AVAILABLE:
             raise ImportError("Taichi is not installed or available.")
 
-        # Store init thread to detect context mismatches
+        # Thread management is now handled by @ti_thread decorator on wrappers.
+        # No manual ti.init here to avoid context conflicts.
         self.init_thread_id = threading.get_ident()
-
-        # Initialize Taichi (Lazy Init on first use)
-        try:
-            os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
-            # Check if already initialized to avoid redundant logs/overhead
-            is_initialized = False
-            try:
-                if ti.lang.impl.get_runtime().prog is not None:
-                    is_initialized = True
-            except:
-                pass
-
-            if not is_initialized:
-                try:
-                    ti.init(arch=ti.gpu, offline_cache=True, device_memory_GB=2.0)
-                except Exception as e:
-                    if "already initialized" in str(e).lower():
-                        pass
-                    else:
-                        print(f"[Taichi] WARN: GPU init failed: {e}")
-                        print("[Taichi] Fallback to CPU...")
-                        try:
-                            ti.init(arch=ti.cpu)
-                        except Exception as ex:
-                            if "already initialized" in str(ex).lower():
-                                pass
-                            else:
-                                raise ex
-            else:
-                # Already initialized, continue using existing context
-                pass
-        except Exception as e:
-            print(f"[Taichi] ERROR: Init failed entirely: {e}")
 
         # Store references to avoid garbage collection
         self.ref_img_gpu: any = None
@@ -351,28 +324,13 @@ _GLOBAL_PROCESSOR = None
 
 def _get_safe_processor():
     global _GLOBAL_PROCESSOR
-    current_tid = threading.get_ident()
-
-    if _GLOBAL_PROCESSOR is not None:
-        if _GLOBAL_PROCESSOR.init_thread_id != current_tid:
-            print(
-                f"[Taichi] Thread Mismatch! (Init: {_GLOBAL_PROCESSOR.init_thread_id}, Curr: {current_tid}). Resetting Runtime..."
-            )
-            _GLOBAL_PROCESSOR = None
-            try:
-                # Cleanup internal cache before reset to drop stale references
-                if common is not None:
-                    common.cleanup_cache()
-                ti.reset()
-            except:
-                pass
-
+    # current_tid check is removed because @ti_thread ensures we are in the correct thread
     if _GLOBAL_PROCESSOR is None:
         _GLOBAL_PROCESSOR = AlignmentTileTaichi()
-
     return _GLOBAL_PROCESSOR
 
 
+@ti_thread
 def set_reference_hybrid_taichi(
     ref_img,
     work_h,
@@ -408,6 +366,7 @@ def set_reference_hybrid_taichi(
             raise e
 
 
+@ti_thread
 def compute_alignment_and_warp_hybrid_taichi(
     comp_img,
     tile_h,
@@ -439,6 +398,7 @@ def compute_alignment_and_warp_hybrid_taichi(
     )
 
 
+@ti_thread
 def preprocess_image_taichi(
     img,
     is_linear=False,
@@ -450,18 +410,21 @@ def preprocess_image_taichi(
     return proc.preprocess_image(img, is_linear, proxy_scale, use_sharpen)
 
 
+@ti_thread
 def warp_image_taichi(img, flow):
     """Warp image wrapper."""
     proc = _get_safe_processor()
     return proc.warp_image(img, flow)
 
 
+@ti_thread
 def resize_image_taichi(img, target_h, target_w):
     """Resize image wrapper."""
     proc = _get_safe_processor()
     return proc.resize_image(img, target_h, target_w)
 
 
+@ti_thread
 def clear_taichi_cache():
     """Clear global processor data but keep the object and kernels alive."""
     global _GLOBAL_PROCESSOR

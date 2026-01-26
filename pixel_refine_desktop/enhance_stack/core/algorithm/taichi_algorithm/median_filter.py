@@ -61,6 +61,54 @@ if TAICHI_AVAILABLE:
             dst[y, x, 0] = vals_x[4]
             dst[y, x, 1] = vals_y[4]
 
+    @ti.kernel
+    def _confidence_weighted_median_flow_kernel(
+        src: ti.types.ndarray(),
+        conf: ti.types.ndarray(),
+        dst: ti.types.ndarray(),
+        h: int,
+        w: int,
+    ):
+        """
+        Specialized Median Filter that prioritizes high-confidence neighbors.
+        Helps propagate flow from textured areas into flat/ambiguous areas.
+        """
+        for y, x in ti.ndrange(h, w):
+            # We use a 5x5 window for better propagation in flat areas
+            # For each pixel, we collect neighbors and their confidence
+            vals_x = ti.Vector([0.0] * 25)
+            vals_y = ti.Vector([0.0] * 25)
+            weights = ti.Vector([0.0] * 25)
+
+            idx = 0
+            for dy in ti.static(range(-2, 3)):
+                for dx in ti.static(range(-2, 3)):
+                    ny, nx = tm.clamp(y + dy, 0, h - 1), tm.clamp(x + dx, 0, w - 1)
+                    vals_x[idx] = src[ny, nx, 0]
+                    vals_y[idx] = src[ny, nx, 1]
+                    weights[idx] = conf[ny, nx]
+                    idx += 1
+
+            # Sort by confidence to find the most 'trusted' neighbors
+            # (Simple bubble sort for the small window)
+            for i in ti.static(range(25)):
+                for j in ti.static(range(i + 1, 25)):
+                    if weights[j] > weights[i]:
+                        weights[i], weights[j] = weights[j], weights[i]
+                        vals_x[i], vals_x[j] = vals_x[j], vals_x[i]
+                        vals_y[i], vals_y[j] = vals_y[j], vals_y[i]
+
+            # Result is the median of the top 13 most confident neighbors
+            # This ensures we ignore noisy outliers in low-confidence areas
+            sum_x = 0.0
+            sum_y = 0.0
+            for i in ti.static(range(13)):
+                sum_x += vals_x[i]
+                sum_y += vals_y[i]
+
+            dst[y, x, 0] = sum_x / 13.0
+            dst[y, x, 1] = sum_y / 13.0
+
 
 def median_filter(
     src, dst=None, kernel_size: int = 3, buffer_provider="pool", enable_tiling=True
@@ -142,5 +190,37 @@ def median_filter_flow(
 
     if src_is_temp:
         common.release_temp_buffer(src_gpu)
+
+    return common.to_numpy_if_needed(dst_gpu, src_is_temp and dst is None)
+
+
+def confidence_weighted_median_filter_flow(
+    src, confidence, dst=None, buffer_provider="pool"
+):
+    """
+    Apply confidence-weighted regularization to the flow field.
+    """
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
+
+    h, w = src.shape[:2]
+    src_gpu, src_is_temp = common.ensure_taichi_field(
+        src, dtype=ti.f32, buffer_provider=buffer_provider
+    )
+    conf_gpu, conf_is_temp = common.ensure_taichi_field(
+        confidence, dtype=ti.f32, buffer_provider=buffer_provider
+    )
+
+    if dst is not None:
+        dst_gpu = dst
+    else:
+        dst_gpu = common.get_temp_buffer((h, w, 2), ti.f32, buffer_provider)
+
+    _confidence_weighted_median_flow_kernel(src_gpu, conf_gpu, dst_gpu, h, w)
+
+    if src_is_temp:
+        common.release_temp_buffer(src_gpu)
+    if conf_is_temp:
+        common.release_temp_buffer(conf_gpu)
 
     return common.to_numpy_if_needed(dst_gpu, src_is_temp and dst is None)

@@ -135,6 +135,8 @@ if TAICHI_AVAILABLE:
 
         return total_cost / float(tile_h * tile_w)
 
+        return total_cost / float(tile_h * tile_w)
+
     @ti.kernel
     def _compute_mean_diff_kernel(
         ref: ti.types.ndarray(),

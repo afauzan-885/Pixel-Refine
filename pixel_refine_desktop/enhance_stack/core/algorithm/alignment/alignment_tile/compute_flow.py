@@ -8,8 +8,6 @@ Matching C++ API: alignment_tile.cpp
 Pipeline: Coarse-to-Fine Pyramid → Tile Matching → RANSAC Cleanup
 """
 
-print("[DEBUG] Loading compute_flow.py (Updated: ZMCL Cost + Fix Imports)")
-
 import numpy as np
 
 try:
@@ -23,27 +21,23 @@ except ImportError:
     tm = None
 
 # Import cost function helpers (GPU-compatible)
-from .cost_function import (
-    compute_zmcl_cost,
-)
+from .cost_function import compute_zmcl_cost
 
 # Import submodule functions directly to avoid package-level shadowing
 try:
     from ...taichi_algorithm.pyramid import (
-        build_image_pyramid,
         build_image_pyramid_gpu,
-        upsample_flow,
         upsample_flow_gpu,
     )
     from ...taichi_algorithm.ransac import (
-        ransac_flow_cleanup,
         ransac_flow_cleanup_local,
+        ransac_flow_cleanup_motion_aware,
     )
-    from ...taichi_algorithm.box_filter import box_filter_flow
     from ...taichi_algorithm.median_filter import median_filter_flow
 
     # common might be useful
     from ...taichi_algorithm import common
+    from ...taichi_algorithm.taichi_worker import ti_thread
 
     TAICHI_MODULES_AVAILABLE = True
 except ImportError:
@@ -96,10 +90,7 @@ if TAICHI_AVAILABLE:
         tile_w: int,
         search_dist: int,
     ):
-        """
-        Coarse level tile matching with grid search.
-        Now uses ZMCL cost instead of simple SAD.
-        """
+        """Coarse level tile matching using ZMCL cost."""
         step_y = tile_h
         step_x = tile_w
 
@@ -115,7 +106,6 @@ if TAICHI_AVAILABLE:
             init_dx = int(ti.round(flow[center_y, center_x, 0]))
             init_dy = int(ti.round(flow[center_y, center_x, 1]))
 
-            # Grid search
             best_cost = 1e10
             best_dx = init_dx
             best_dy = init_dy
@@ -125,7 +115,6 @@ if TAICHI_AVAILABLE:
                     test_y = y + init_dy + dy
                     test_x = x + init_dx + dx
 
-                    # Boundary check
                     if (
                         test_y < 0
                         or test_x < 0
@@ -134,7 +123,6 @@ if TAICHI_AVAILABLE:
                     ):
                         continue
 
-                    # Calculate ZMCL Cost (Robust)
                     cost = compute_zmcl_cost(
                         ref_layer,
                         comp_layer,
@@ -153,12 +141,6 @@ if TAICHI_AVAILABLE:
                         best_dx = init_dx + dx
                         best_dy = init_dy + dy
 
-                    # Early Exit: If cost is extremely low, we likely found a perfect match
-                    if best_cost < ImageAlignmentConfig.EARLY_EXIT_COST:
-                        break
-                if best_cost < ImageAlignmentConfig.EARLY_EXIT_COST:
-                    break
-
             # Write result
             for r, c in ti.ndrange(tile_h, tile_w):
                 if y + r < h and x + c < w:
@@ -176,12 +158,9 @@ if TAICHI_AVAILABLE:
         tile_h: int,
         tile_w: int,
     ):
-        """
-        Fine level tile matching with 9-point search + parabolic refinement.
-        Now uses ZMCL cost instead of SAD.
-        """
-        step_y = tile_h
-        step_x = tile_w
+        """Fine level tile matching (matching C++ processFineLayer)."""
+        step_y = tile_h // 2
+        step_x = tile_w // 2
 
         for tile_y, tile_x in ti.ndrange(
             (h - tile_h + 1) // step_y, (w - tile_w + 1) // step_x
@@ -189,26 +168,20 @@ if TAICHI_AVAILABLE:
             y = tile_y * step_y
             x = tile_x * step_x
 
-            # Get initial flow
             center_y = y + tile_h // 2
             center_x = x + tile_w // 2
             init_dx = int(ti.round(flow[center_y, center_x, 0]))
             init_dy = int(ti.round(flow[center_y, center_x, 1]))
 
-            # 9-point search
-            costs = ti.Vector([0.0] * 9)
             best_cost = 1e10
-            best_dx = init_dx
-            best_dy = init_dy
+            final_dx = float(init_dx)
+            final_dy = float(init_dy)
 
-            cost_idx = 0
-            for ddy in ti.static(range(-1, 2)):
-                for ddx in ti.static(range(-1, 2)):
-                    check_dx = init_dx + ddx
-                    check_dy = init_dy + ddy
-
-                    test_y = y + check_dy
-                    test_x = x + check_dx
+            # Local 3x3 search around current guess
+            for dy in range(-1, 2):
+                for dx in range(-1, 2):
+                    test_y = y + init_dy + dy
+                    test_x = x + init_dx + dx
 
                     if (
                         test_y < 0
@@ -216,74 +189,25 @@ if TAICHI_AVAILABLE:
                         or test_y + tile_h > h
                         or test_x + tile_w > w
                     ):
-                        costs[cost_idx] = 1e10
-                    else:
-                        # ZMCL Cost
-                        # Use imported compute_zmcl_cost
-                        cost = compute_zmcl_cost(
-                            ref_layer,
-                            comp_layer,
-                            y,
-                            x,
-                            test_y,
-                            test_x,
-                            h,
-                            w,
-                            tile_h,
-                            tile_w,
-                        )
-                        costs[cost_idx] = cost
+                        continue
 
-                        if cost < best_cost:
-                            best_cost = cost
-                            best_dx = check_dx
-                            best_dy = check_dy
+                    cost = compute_zmcl_cost(
+                        ref_layer,
+                        comp_layer,
+                        y,
+                        x,
+                        test_y,
+                        test_x,
+                        h,
+                        w,
+                        tile_h,
+                        tile_w,
+                    )
 
-                    cost_idx += 1
-
-            # Soft-Argmin / Cost-Weighted Refinement
-            # Instead of just parabolic fitting, we use a weighted average of candidates
-            # based on their costs. This is more robust to noise than local fitting.
-
-            final_dx = float(best_dx)
-            final_dy = float(best_dy)
-
-            # Find min and max cost in 3x3 to normalize weights
-            min_c = 1e10
-            max_c = -1e10
-            for i in ti.static(range(9)):
-                if costs[i] < min_c:
-                    min_c = costs[i]
-                if costs[i] > max_c and costs[i] < 1e9:
-                    max_c = costs[i]
-
-            if max_c > min_c:
-                sum_w = 0.0
-                sum_dx = 0.0
-                sum_dy = 0.0
-
-                # We use a sharp exponential weighting (Soft-Argmin)
-                # k factor determines how much we trust the best candidate
-                k = 50.0
-
-                idx = 0
-                for ddy in ti.static(range(-1, 2)):
-                    for ddx in ti.static(range(-1, 2)):
-                        c_val = costs[idx]
-                        if c_val < 1e9:
-                            # Weight = exp(-k * (cost - min_cost) / (max_cost - min_cost))
-                            # Normalized to prevent overflow/underflow
-                            weight = ti.exp(
-                                -k * (c_val - min_c) / (ti.max(max_c - min_c, 1e-6))
-                            )
-                            sum_w += weight
-                            sum_dx += weight * float(init_dx + ddx)
-                            sum_dy += weight * float(init_dy + ddy)
-                        idx += 1
-
-                if sum_w > 1e-6:
-                    final_dx = sum_dx / sum_w
-                    final_dy = sum_dy / sum_w
+                    if cost < best_cost:
+                        best_cost = cost
+                        final_dx = float(init_dx + dx)
+                        final_dy = float(init_dy + dy)
 
             # Write result
             for r, c in ti.ndrange(tile_h, tile_w):
@@ -303,10 +227,7 @@ if TAICHI_AVAILABLE:
         tile_w: int,
         max_iters: int,
     ):
-        """
-        Precise iterative subpixel refinement using bicubic interpolation.
-        Minimizes SAD/MSE logic using local gradient approximation.
-        """
+        """Iterative subpixel refinement using Gauss-Newton optimization."""
         step_y = tile_h
         step_x = tile_w
 
@@ -322,16 +243,14 @@ if TAICHI_AVAILABLE:
             curr_dx = flow[center_y, center_x, 0]
             curr_dy = flow[center_y, center_x, 1]
 
-            # Iterative optimization (Gauss-Newton)
+            # Optimization Loop
             for _ in range(max_iters):
                 sum_gv2_x = 0.0
                 sum_gv2_y = 0.0
                 sum_diff_gv_x = 0.0
                 sum_diff_gv_y = 0.0
 
-                # Use consistent stride to reduce GPU load (1/4 sampling)
                 stride = 2
-
                 for ir, ic in ti.ndrange(tile_h // stride, tile_w // stride):
                     r = ir * stride
                     c = ic * stride
@@ -358,8 +277,8 @@ if TAICHI_AVAILABLE:
                     sum_diff_gv_x += diff * gv_x
                     sum_diff_gv_y += diff * gv_y
 
-                # update step
-                alpha = 0.6  # Damping factor
+                # Simple GN Update (alpha damping = 0.5)
+                alpha = 0.5
                 if sum_gv2_x > 1e-6:
                     curr_dx -= alpha * sum_diff_gv_x / sum_gv2_x
                 if sum_gv2_y > 1e-6:
@@ -369,7 +288,7 @@ if TAICHI_AVAILABLE:
                 curr_dx = tm.clamp(curr_dx, -50.0, 50.0)
                 curr_dy = tm.clamp(curr_dy, -50.0, 50.0)
 
-            # Write high-precision result
+            # Write result
             for r, c in ti.ndrange(tile_h, tile_w):
                 if y + r < h and x + c < w:
                     refined_flow[y + r, x + c, 0] = curr_dx
@@ -393,7 +312,6 @@ def process_single_layer(
 ) -> any:  # Returns ti.ndarray (GPU)
     """
     Process tile matching for a single pyramid layer.
-    Keeps data on GPU to minimize transfer overhead.
     """
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
@@ -403,78 +321,48 @@ def process_single_layer(
 
     h, w = ref_layer.shape[:2]
 
-    # 4. Upload Images to GPU (Must happen per layer as they come from CPU pyramid)
-    # Optimization: Use pooled buffers, or use existing GPU fields if provided
+    # Upload images to GPU if needed
     ref_gpu = None
     comp_gpu = None
     ref_is_temp = False
     comp_is_temp = False
 
-    # Check if inputs are Taichi fields (duck typing)
-    if (
-        hasattr(ref_layer, "dtype")
-        and hasattr(ref_layer, "shape")
-        and not isinstance(ref_layer, np.ndarray)
-    ):
+    if hasattr(ref_layer, "shape") and not isinstance(ref_layer, np.ndarray):
         ref_gpu = ref_layer
     else:
         ref_gpu = common.get_temp_buffer((h, w), ti.f32, buffer_provider="pool")
         ref_gpu.from_numpy(np.ascontiguousarray(ref_layer, dtype=np.float32))
         ref_is_temp = True
 
-    if (
-        hasattr(comp_layer, "dtype")
-        and hasattr(comp_layer, "shape")
-        and not isinstance(comp_layer, np.ndarray)
-    ):
+    if hasattr(comp_layer, "shape") and not isinstance(comp_layer, np.ndarray):
         comp_gpu = comp_layer
     else:
         comp_gpu = common.get_temp_buffer((h, w), ti.f32, buffer_provider="pool")
         comp_gpu.from_numpy(np.ascontiguousarray(comp_layer, dtype=np.float32))
         comp_is_temp = True
 
-    # 1. Initialize/Upsample flow (ON GPU)
-    # This buffer will be returned (conceptually), but we need a target for upsample
+    # 1. Initialize/Upsample flow
     flow_gpu = common.get_temp_buffer((h, w, 2), ti.f32, buffer_provider="pool")
 
     if is_coarsest_layer:
-        # Zero initialization
         _initialize_coarsest_flow_kernel(flow_gpu, h, w)
     else:
-        # GPU Upsample
         if previous_flow_gpu is None:
             _initialize_coarsest_flow_kernel(flow_gpu, h, w)
         else:
-            # Upsample from previous level (smaller) to current (larger)
             upsample_flow_gpu(
                 src_gpu=previous_flow_gpu,
                 dst_gpu=flow_gpu,
                 scale=ImageAlignmentConfig.FLOW_UPSCALE_FACTOR,
             )
 
-    # 2. Clamp tile size
+    # 2. Match
     current_tile_h = max(ImageAlignmentConfig.MIN_TILE_SIZE, min(tile_h, h))
     current_tile_w = max(ImageAlignmentConfig.MIN_TILE_SIZE, min(tile_w, w))
 
-    # 3. Adaptive search distance
-    # Adaptive Search: Use a wider search for coarse layers, and progressively tighter
-    # but more focused search for finer layers.
-    if is_coarsest_layer:
-        current_search_dist = int(base_search_dist)
-    else:
-        # Base factor + decay based on layer depth
-        depth_factor = 1.0 / (2.0 ** (total_layers - layer_index - 1))
-        current_search_dist = max(1, int(base_search_dist * depth_factor))
-
-        # Optional: could further reduce search_dist if previous level confidence was high
-        # For now, keeping it robustly tied to pyramid depth.
-
-    # Allocate refined flow
     refined_flow_gpu = common.get_temp_buffer((h, w, 2), ti.f32, buffer_provider="pool")
-    # Initialize refined flow with current guess
     _initialize_coarsest_flow_kernel(refined_flow_gpu, h, w)
 
-    # 5. Tile matching
     if is_finest_layer:
         _search_fine_level_kernel(
             ref_gpu,
@@ -487,8 +375,7 @@ def process_single_layer(
             current_tile_w,
         )
 
-        # Iterative Refinement Pass for maximum precision
-        # Reuse flow_gpu as input (copy from refined_flow_gpu)
+        # Subpixel Refinement
         common.copy_field(refined_flow_gpu, flow_gpu)
         _iterative_subpixel_refinement_kernel(
             ref_gpu,
@@ -499,9 +386,13 @@ def process_single_layer(
             w,
             current_tile_h,
             current_tile_w,
-            max_iters=2,  # 2 iterations is faster and sufficient for most use cases
+            max_iters=5,
         )
     else:
+        # Coarse layers: use search_dist
+        depth_factor = 1.0 / (2.0 ** (total_layers - layer_index - 1))
+        current_search_dist = max(1, int(base_search_dist * depth_factor))
+
         _search_coarse_level_kernel(
             ref_gpu,
             comp_gpu,
@@ -514,35 +405,33 @@ def process_single_layer(
             current_search_dist,
         )
 
-    # Release input images and initial flow (intermediate)
-    common.release_temp_buffer(ref_gpu)
-    common.release_temp_buffer(comp_gpu)
+    # Cleanup
+    if ref_is_temp:
+        common.release_temp_buffer(ref_gpu)
+    if comp_is_temp:
+        common.release_temp_buffer(comp_gpu)
     common.release_temp_buffer(flow_gpu)
 
-    # 6. Post-processing filters (GPU)
-    # Create temp filtering buffer
+    # 3. Post-process
     filtered_flow_gpu = common.get_temp_buffer(
         (h, w, 2), ti.f32, buffer_provider="pool"
     )
-
-    from ...taichi_algorithm.median_filter import median_filter_flow
-
     median_filter_flow(
         src=refined_flow_gpu, dst=filtered_flow_gpu, kernel_size=3, enable_tiling=False
     )
-
-    # Release refined_flow as we now have filtered result
     common.release_temp_buffer(refined_flow_gpu)
 
-    # 7. RANSAC for coarse layers (GPU)
-    if layer_index >= total_layers - 2:
-        # GPU Ransac
-        # ransac_flow_cleanup might allocate its own buffers.
-        # We should check if it uses pool? It creates ti.ndarray internally in current impl.
-        # Ideally ransac should also use pool, but let's assume it returns a new valid buffer.
-        # To strictly use pool, we might need to modify ransac, but for now let's reuse what we can.
-        ransac_out_gpu = ransac_flow_cleanup(
-            filtered_flow_gpu, threshold=3.0, n_iterations=10
+    # 4. RANSAC
+    if layer_index >= 2:
+        threshold = max(1.5, 4.0 - (layer_index * 0.8))
+        iterations = max(5, 15 - (layer_index * 2))
+        motion_threshold = max(1.5, 2.5 - (layer_index * 0.3))
+
+        ransac_out_gpu = ransac_flow_cleanup_motion_aware(
+            filtered_flow_gpu,
+            threshold=threshold,
+            motion_threshold=motion_threshold,
+            n_iterations=iterations,
         )
         common.release_temp_buffer(filtered_flow_gpu)
         return ransac_out_gpu
@@ -550,6 +439,7 @@ def process_single_layer(
         return filtered_flow_gpu
 
 
+@ti_thread
 def compute_alignment_flow(
     ref_work_data: np.ndarray,
     current_work_data: np.ndarray,
@@ -557,55 +447,17 @@ def compute_alignment_flow(
     tile_w: int = 16,
     n_layers: int = 3,
     search_dist: float = 2.0,
-) -> np.ndarray:
+    return_confidence: bool = False,
+) -> any:
     """
-    Compute alignment flow between reference and comparison images.
-    Matching C++ compute_alignment_flow().
-
-    Args:
-        ref_work_data: Reference image (H, W) float32 grayscale
-        current_work_data: Comparison image (H, W) float32 grayscale
-        tile_h, tile_w: Tile size for matching
-        n_layers: Number of pyramid layers
-        search_dist: Base search distance
-
-    Returns:
-        Flow field (H, W, 2) with (dx, dy) per pixel
+    Compute alignment flow - Stable Version.
     """
-    if not TAICHI_AVAILABLE:
-        raise ImportError("Taichi not available")
+    if not TAICHI_AVAILABLE or not TAICHI_MODULES_AVAILABLE:
+        raise ImportError("Taichi not ready")
 
-    if not TAICHI_MODULES_AVAILABLE:
-        raise ImportError("Taichi algorithm modules not available")
+    ref_gpu, ref_is_temp = common.ensure_taichi_field(ref_work_data, dtype=ti.f32)
+    comp_gpu, comp_is_temp = common.ensure_taichi_field(current_work_data, dtype=ti.f32)
 
-    # 1. Prepare Inputs on GPU
-    # Check if inputs are already taichi fields
-    ref_is_temp = False
-    if (
-        hasattr(ref_work_data, "dtype")
-        and hasattr(ref_work_data, "shape")
-        and not isinstance(ref_work_data, np.ndarray)
-    ):
-        ref_gpu = ref_work_data
-    else:
-        # Upload
-        ref_gpu, ref_is_temp = common.ensure_taichi_field(ref_work_data, dtype=ti.f32)
-
-    comp_is_temp = False
-    if (
-        hasattr(current_work_data, "dtype")
-        and hasattr(current_work_data, "shape")
-        and not isinstance(current_work_data, np.ndarray)
-    ):
-        comp_gpu = current_work_data
-    else:
-        comp_gpu, comp_is_temp = common.ensure_taichi_field(
-            current_work_data, dtype=ti.f32
-        )
-
-    work_h, work_w = ref_gpu.shape[:2]
-
-    # 2. Build Pyramids on GPU
     ref_pyramid = build_image_pyramid_gpu(
         ref_gpu,
         n_levels=n_layers,
@@ -617,24 +469,14 @@ def compute_alignment_flow(
         min_size=ImageAlignmentConfig.MIN_PYRAMID_LAYER_SIZE,
     )
 
-    # Actual number of layers (may be less due to min_size)
     actual_layers = min(len(ref_pyramid), len(current_pyramid))
-
-    # Coarse-to-fine processing
-    # Coarse-to-fine processing
     flow_gpu = None
 
-    # We need to hold reference to the result of each layer
-    # flow_gpu will be updated in each iteration
-
     for i in range(actual_layers - 1, -1, -1):
-        ref_layer = ref_pyramid[i]
-        comp_layer = current_pyramid[i]
-
         prev_flow = flow_gpu
         flow_gpu = process_single_layer(
-            ref_layer,
-            comp_layer,
+            ref_pyramid[i],
+            current_pyramid[i],
             prev_flow,
             i,
             actual_layers,
@@ -642,45 +484,30 @@ def compute_alignment_flow(
             tile_w,
             search_dist,
         )
-        # BUGFIX: Release the previous level flow buffer now that upsample is done
         if prev_flow is not None:
             common.release_temp_buffer(prev_flow)
 
-    # Final post-processing: Spatial local RANSAC cleanup
-    # Perform on GPU before download
+    # Final cleanup
     if flow_gpu is not None:
         old_flow = flow_gpu
         flow_gpu = ransac_flow_cleanup_local(
-            old_flow, block_size=64, threshold=2.0, n_iterations=5
+            old_flow, block_size=64, threshold=2.0, n_iterations=3
         )
-        # BUGFIX: Release the flow buffer used as input to RANSAC
         common.release_temp_buffer(old_flow)
-        # Optimization: Return GPU handle instead of numpy
-        # Cleanup
-        for i in range(1, len(ref_pyramid)):
-            common.release_temp_buffer(ref_pyramid[i])
-        for i in range(1, len(current_pyramid)):
-            common.release_temp_buffer(current_pyramid[i])
 
-        if ref_is_temp:
-            common.release_temp_buffer(ref_gpu)
-        if comp_is_temp:
-            common.release_temp_buffer(comp_gpu)
+    for i in range(1, len(ref_pyramid)):
+        common.release_temp_buffer(ref_pyramid[i])
+    for i in range(1, len(current_pyramid)):
+        common.release_temp_buffer(current_pyramid[i])
 
-        return flow_gpu
-    else:
-        # Fallback for empty pyramid (unlikely)
-        # Manually create a GPU buffer of zeros to match return type
-        flow_gpu = common.get_temp_buffer(
-            (work_h, work_w, 2), ti.f32, buffer_provider="pool"
-        )
-        _initialize_coarsest_flow_kernel(flow_gpu, work_h, work_w)
-        return flow_gpu
+    if ref_is_temp:
+        common.release_temp_buffer(ref_gpu)
+    if comp_is_temp:
+        common.release_temp_buffer(comp_gpu)
+
+    return flow_gpu
 
 
 def free_flow_memory(flow_data):
-    """
-    Free flow memory (Python version - no-op, handled by GC).
-    Matching C++ free_flow_memory().
-    """
+    """Free flow memory (no-op in Python)."""
     pass

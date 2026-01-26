@@ -1,9 +1,12 @@
+import os
+
+os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
+
 import concurrent
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import ctypes
 import gc
 import math
-import os
 import time
 import traceback
 import cv2
@@ -38,79 +41,17 @@ except Exception as e:
 import threading
 import queue
 
-# Global worker instance
-_TAICHI_WORKER = None
-
-
-class TaichiBatchWorker(threading.Thread):
-    """
-    Persistent Daemon Thread for Taichi operations.
-    Initializes Taichi ONCE and executes jobs to avoid startup overhead.
-    """
-
-    def __init__(self):
-        super().__init__(name="TaichiWorkerThread", daemon=True)
-        self.task_queue = queue.Queue()
-        self.result_queue = queue.Queue()
-        self.running = True
-        self.start()
-
-    def run(self):
-        # 1. Initialize Taichi exactly once in this persistent thread
-        try:
-            print("[TaichiWorker] Initializing Taichi runtime...")
-            # Lazy import to avoid circular dependency issues if any
-            import taichi as ti
-
-            # Use offline cache if possible, reasonable memory limit
-            try:
-                # Force GPU and allow shared memory
-                os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
-                # Reduce reservation to 2GB to leave room for OS on 4GB-8GB GPUs
-                ti.init(arch=ti.gpu, offline_cache=True, device_memory_GB=2.0)
-            except Exception as e:
-                if "already initialized" not in str(e):
-                    print(f"[TaichiWorker] Init error: {e}")
-            print("[TaichiWorker] Ready.")
-        except Exception as e:
-            print(f"[TaichiWorker] Critical startup error: {e}")
-
-        # 2. Loop for jobs
-        while self.running:
-            try:
-                task = self.task_queue.get()
-                if task is None:  # Sentinel
-                    break
-
-                func, args, kwargs = task
-                try:
-                    # Execute the function in THIS thread context
-                    # The function should capture all necessary data
-                    result = func(*args, **kwargs)
-                    self.result_queue.put((True, result))
-                except Exception as e:
-                    print(f"[TaichiWorker] Job failed: {e}")
-                    traceback.print_exc()
-                    self.result_queue.put((False, e))
-                finally:
-                    self.task_queue.task_done()
-            except Exception as e:
-                print(f"[TaichiWorker] Loop error: {e}")
-
-    def submit_and_wait(self, func, *args, **kwargs):
-        """Submit a job and block until completion."""
-        self.task_queue.put((func, args, kwargs))
-        success, result = self.result_queue.get()
-        if not success:
-            raise result
-        return result
+# --- TAICHI WORKER (CENTRALIZED) ---
+from ...taichi_algorithm.taichi_worker import ti_thread, _get_worker
 
 
 def get_taichi_worker():
-    global _TAICHI_WORKER
-    if _TAICHI_WORKER is None:
-        _TAICHI_WORKER = TaichiBatchWorker()
-    return _TAICHI_WORKER
+    """Compatibility wrapper for centralized Taichi worker."""
+    worker = _get_worker()
+    # Add compatibility method if needed inside Similarity.py
+    if not hasattr(worker, "submit_and_wait"):
+        worker.submit_and_wait = worker.submit
+    return worker
 
 
 class SimilaritySpatialInterface:

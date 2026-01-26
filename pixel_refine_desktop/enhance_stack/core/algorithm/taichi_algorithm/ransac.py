@@ -129,6 +129,62 @@ if TAICHI_AVAILABLE:
                 output[y, x, 0] = model_x
                 output[y, x, 1] = model_y
 
+    # ===== MOTION-AWARE RANSAC KERNELS =====
+    @ti.kernel
+    def _detect_local_motion_kernel(
+        flow: ti.types.ndarray(),
+        motion_mask: ti.types.ndarray(),
+        global_dx: float,
+        global_dy: float,
+        threshold: float,
+        h: int,
+        w: int,
+    ):
+        """
+        Detect pixels with motion significantly different from global motion.
+        motion_mask: 1 = local motion (protect), 0 = global motion (allow RANSAC)
+        """
+        for y, x in ti.ndrange(h, w):
+            dx = flow[y, x, 0] - global_dx
+            dy = flow[y, x, 1] - global_dy
+            deviation = ti.sqrt(dx * dx + dy * dy)
+
+            if deviation > threshold:
+                motion_mask[y, x] = 1  # Local motion - protect from RANSAC
+            else:
+                motion_mask[y, x] = 0  # Global motion - allow RANSAC
+
+    @ti.kernel
+    def _selective_ransac_apply_kernel(
+        flow: ti.types.ndarray(),
+        motion_mask: ti.types.ndarray(),
+        inlier_mask: ti.types.ndarray(),
+        model_x: float,
+        model_y: float,
+        output: ti.types.ndarray(),
+        h: int,
+        w: int,
+    ):
+        """
+        Apply RANSAC result only to global motion regions.
+        Local motion regions keep their original flow.
+        """
+        for y, x in ti.ndrange(h, w):
+            if motion_mask[y, x] == 1:
+                # Local motion - keep original flow (moving objects)
+                output[y, x, 0] = flow[y, x, 0]
+                output[y, x, 1] = flow[y, x, 1]
+            else:
+                # Global motion - apply RANSAC
+                if inlier_mask[y, x] == 1:
+                    # Inlier: keep original
+                    output[y, x, 0] = flow[y, x, 0]
+                    output[y, x, 1] = flow[y, x, 1]
+                else:
+                    # Outlier: replace with model
+                    output[y, x, 0] = model_x
+                    output[y, x, 1] = model_y
+
     # --- LOCAL RANSAC KERNELS (MOVED HERE TO FIX SCOPE) ---
     @ti.kernel
     def _local_ransac_init_means(
@@ -317,6 +373,96 @@ def ransac_flow_cleanup(
         return result
 
     # If input was not numpy, we return the GPU buffer (it's up to caller to release it)
+    return output_gpu
+
+
+def ransac_flow_cleanup_motion_aware(
+    flow,  # Can be np.ndarray or ti.ndarray
+    threshold: float = 3.0,
+    motion_threshold: float = 2.0,
+    n_iterations: int = 10,
+    buffer_provider="pool",
+):
+    """
+    Motion-aware RANSAC: Preserves local motion while cleaning global outliers.
+
+    Args:
+        flow: Input flow field
+        threshold: RANSAC inlier threshold for global motion
+        motion_threshold: Deviation threshold to classify local vs global motion
+        n_iterations: Number of RANSAC iterations
+        buffer_provider: Buffer allocation strategy
+
+    Returns:
+        Cleaned flow with local motion preserved
+    """
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
+
+    h, w = flow.shape[:2]
+
+    # Handle Input
+    is_numpy = isinstance(flow, np.ndarray)
+    flow_gpu = flow
+    if is_numpy:
+        flow_gpu = common.get_temp_buffer((h, w, 2), ti.f32, buffer_provider)
+        flow_gpu.from_numpy(flow.astype(np.float32))
+
+    # Allocate buffers
+    motion_mask = common.get_temp_buffer((h, w), ti.i32, buffer_provider)
+    inlier_mask = common.get_temp_buffer((h, w), ti.i32, buffer_provider)
+    mean_out = common.get_temp_buffer((2,), ti.f32, buffer_provider)
+    output_gpu = common.get_temp_buffer((h, w, 2), ti.f32, buffer_provider)
+
+    # Step 1: Compute global motion (median - robust to outliers)
+    # For GPU efficiency, we use mean as approximation to median
+    _compute_mean_flow_kernel(flow_gpu, mean_out, h, w)
+    mean_out_np = mean_out.to_numpy()
+    global_dx, global_dy = float(mean_out_np[0]), float(mean_out_np[1])
+
+    # Step 2: Detect local motion regions
+    _detect_local_motion_kernel(
+        flow_gpu, motion_mask, global_dx, global_dy, motion_threshold, h, w
+    )
+
+    # Step 3: Run RANSAC on global motion regions
+    model_x, model_y = global_dx, global_dy
+    best_inlier_count = 0
+    best_model_x, best_model_y = model_x, model_y
+
+    for _ in range(n_iterations):
+        inlier_count = _count_inliers_kernel(
+            flow_gpu, model_x, model_y, threshold, inlier_mask, h, w
+        )
+
+        if inlier_count > best_inlier_count:
+            best_inlier_count = inlier_count
+            best_model_x, best_model_y = model_x, model_y
+
+        _compute_inlier_mean_kernel(flow_gpu, inlier_mask, mean_out, h, w)
+        mean_out_np = mean_out.to_numpy()
+        model_x, model_y = float(mean_out_np[0]), float(mean_out_np[1])
+
+    # Step 4: Final pass and selective apply
+    _count_inliers_kernel(
+        flow_gpu, best_model_x, best_model_y, threshold, inlier_mask, h, w
+    )
+    _selective_ransac_apply_kernel(
+        flow_gpu, motion_mask, inlier_mask, best_model_x, best_model_y, output_gpu, h, w
+    )
+
+    # Release temporary buffers
+    common.release_temp_buffer(motion_mask)
+    common.release_temp_buffer(inlier_mask)
+    common.release_temp_buffer(mean_out)
+
+    if is_numpy:
+        result = output_gpu.to_numpy()
+        common.release_temp_buffer(flow_gpu)
+        common.release_temp_buffer(output_gpu)
+        return result
+
+    # If input was not numpy, return GPU buffer
     return output_gpu
 
 
