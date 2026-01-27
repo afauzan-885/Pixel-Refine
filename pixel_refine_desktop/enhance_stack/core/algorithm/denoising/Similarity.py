@@ -42,6 +42,11 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.extr
     get_taichi_worker,
 )
 
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.compute_similarity import (
+    generate_weight_map_taichi,
+    accumulate_spatial_merging_taichi,
+)
+
 # --- TAICHI SPATIAL IMPORT ---
 try:
     from ..taichi_algorithm.taichi_worker import (
@@ -50,10 +55,6 @@ try:
         ti_thread,
         create_taichi_ndarray,
         download_taichi_ndarray,
-    )
-    from .extra_code.compute_similarity import (
-        generate_weight_map_taichi,
-        accumulate_spatial_merging_taichi,
     )
 
     TAICHI_SPATIAL_AVAILABLE = True
@@ -358,11 +359,6 @@ class SimilarityAlgorithm:
 
         # --- LANGKAH 1: Inisialisasi dan Resolusi Kerja ---
         tile_h, tile_w = map(int, tile_size)
-        try:
-            c_interface = SimilaritySpatialInterface(lib_path)
-        except (FileNotFoundError, OSError, AttributeError) as e:
-            raise RuntimeError(f"Gagal memuat C++ interface_spatial_merging: {e}")
-
         num_images = len(images)
         work_res_h, work_res_w = ref_image_h, ref_image_w
         TARGET_MP = 12.5 * 1e6
@@ -810,6 +806,11 @@ class SimilarityAlgorithm:
 
         else:
             # --- C++ DLL PATH (EXISTING THREADED IMPLEMENTATION) ---
+            try:
+                c_interface = SimilaritySpatialInterface(lib_path)
+            except (FileNotFoundError, OSError, AttributeError) as e:
+                raise RuntimeError(f"Gagal memuat C++ interface_spatial_merging: {e}")
+
             task_queue = queue.Queue()
             result_queue = queue.Queue(maxsize=final_num_workers * 2)
 

@@ -5,6 +5,7 @@ Shared functions for buffer management, type checking, and common operations.
 """
 
 import numpy as np
+import threading
 
 try:
     import taichi as ti
@@ -167,18 +168,20 @@ class BufferCache:
     def __init__(self):
         self._pool = {}  # Key: (shape, dtype) -> List[ti.ndarray]
         self._active_allocations = 0
+        self._lock = threading.Lock()
 
     def get_buffer(self, shape, dtype):
         key = (tuple(shape), dtype)
-        if key not in self._pool:
-            self._pool[key] = []
+        with self._lock:
+            if key not in self._pool:
+                self._pool[key] = []
 
-        if self._pool[key]:
-            # Pop from pool
-            return self._pool[key].pop()
+            if self._pool[key]:
+                # Pop from pool
+                return self._pool[key].pop()
 
-        # Allocate new
-        self._active_allocations += 1
+            # Allocate new
+            self._active_allocations += 1
         return ti.ndarray(dtype=dtype, shape=shape)
 
     def release_buffer(self, buf):
@@ -190,15 +193,17 @@ class BufferCache:
         dtype = buf.dtype
         key = (tuple(shape), dtype)
 
-        if key not in self._pool:
-            self._pool[key] = []
+        with self._lock:
+            if key not in self._pool:
+                self._pool[key] = []
 
-        self._pool[key].append(buf)
+            self._pool[key].append(buf)
 
     def clear(self):
         """Release all held buffers and reset pool."""
-        self._pool.clear()
-        self._active_allocations = 0
+        with self._lock:
+            self._pool.clear()
+            self._active_allocations = 0
 
 
 # Global pool instance

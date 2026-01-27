@@ -28,9 +28,10 @@ class SimilarityConfig:
 
 if TAICHI_AVAILABLE:
 
-        else:
-            x2 = x * x
-            res = x * (27.0 + x2) / (27.0 + 9.0 * x2)
+    @ti.func
+    def fast_tanh(x: float) -> float:
+        x2 = x * x
+        res = x * (27.0 + x2) / (27.0 + 9.0 * x2)
         return res
 
     @ti.func
