@@ -128,9 +128,9 @@ if TAICHI_AVAILABLE:
         for y, x in ti.ndrange(h, w):
             val = src[y, x]
             if ti.static(target_dtype == ti.u16):
-                dst[y, x] = int(tm.clamp(val, 0.0, 65535.0))
+                dst[y, x] = ti.cast(tm.clamp(val, 0.0, 65535.0), ti.u16)
             elif ti.static(target_dtype == ti.u8):
-                dst[y, x] = int(tm.clamp(val, 0.0, 255.0))
+                dst[y, x] = ti.cast(tm.clamp(val, 0.0, 255.0), ti.u8)
             else:
                 dst[y, x] = val
 
@@ -147,9 +147,9 @@ if TAICHI_AVAILABLE:
             for c in ti.static(range(3)):
                 val = src[y, x, c]
                 if ti.static(target_dtype == ti.u16):
-                    dst[y, x, c] = int(tm.clamp(val, 0.0, 65535.0))
+                    dst[y, x, c] = ti.cast(tm.clamp(val, 0.0, 65535.0), ti.u16)
                 elif ti.static(target_dtype == ti.u8):
-                    dst[y, x, c] = int(tm.clamp(val, 0.0, 255.0))
+                    dst[y, x, c] = ti.cast(tm.clamp(val, 0.0, 255.0), ti.u8)
                 else:
                     dst[y, x, c] = val
 
