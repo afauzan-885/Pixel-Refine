@@ -1,11 +1,12 @@
 """
 Compute Flow - Taichi GPU Implementation
 =========================================
-GPU-accelerated tile-based optical flow computation.
+Pure GPU-accelerated tile-based optical flow computation.
 
 Matching C++ API: alignment_tile.cpp
 
-Pipeline: Coarse-to-Fine Pyramid → Tile Matching → RANSAC Cleanup
+Pipeline: Coarse-to-Fine Pyramid → Tile Matching → Median Filter
+Note: All pyramid processing stays on GPU to minimize CPU-GPU transfer overhead.
 """
 
 import numpy as np
@@ -301,8 +302,8 @@ if TAICHI_AVAILABLE:
 
 
 def process_single_layer(
-    ref_layer: np.ndarray,
-    comp_layer: np.ndarray,
+    ref_layer_gpu,  # ti.ndarray (GPU buffer from pyramid)
+    comp_layer_gpu,  # ti.ndarray (GPU buffer from pyramid)
     previous_flow_gpu,  # ti.ndarray or None
     layer_index: int,
     total_layers: int,
@@ -312,6 +313,8 @@ def process_single_layer(
 ) -> any:  # Returns ti.ndarray (GPU)
     """
     Process tile matching for a single pyramid layer.
+    All inputs are assumed to be GPU buffers (ti.ndarray) from build_image_pyramid_gpu.
+    This eliminates CPU-GPU transfer overhead.
     """
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
@@ -319,27 +322,11 @@ def process_single_layer(
     is_coarsest_layer = layer_index == total_layers - 1
     is_finest_layer = layer_index == 0
 
-    h, w = ref_layer.shape[:2]
+    h, w = ref_layer_gpu.shape[:2]
 
-    # Upload images to GPU if needed
-    ref_gpu = None
-    comp_gpu = None
-    ref_is_temp = False
-    comp_is_temp = False
-
-    if hasattr(ref_layer, "shape") and not isinstance(ref_layer, np.ndarray):
-        ref_gpu = ref_layer
-    else:
-        ref_gpu = common.get_temp_buffer((h, w), ti.f32, buffer_provider="pool")
-        ref_gpu.from_numpy(np.ascontiguousarray(ref_layer, dtype=np.float32))
-        ref_is_temp = True
-
-    if hasattr(comp_layer, "shape") and not isinstance(comp_layer, np.ndarray):
-        comp_gpu = comp_layer
-    else:
-        comp_gpu = common.get_temp_buffer((h, w), ti.f32, buffer_provider="pool")
-        comp_gpu.from_numpy(np.ascontiguousarray(comp_layer, dtype=np.float32))
-        comp_is_temp = True
+    # Direct GPU usage - inputs are already GPU buffers from pyramid
+    ref_gpu = ref_layer_gpu
+    comp_gpu = comp_layer_gpu
 
     # 1. Initialize/Upsample flow
     flow_gpu = common.get_temp_buffer((h, w, 2), ti.f32, buffer_provider="pool")
@@ -405,14 +392,10 @@ def process_single_layer(
             current_search_dist,
         )
 
-    # Cleanup
-    if ref_is_temp:
-        common.release_temp_buffer(ref_gpu)
-    if comp_is_temp:
-        common.release_temp_buffer(comp_gpu)
+    # No cleanup of ref_gpu/comp_gpu - they're owned by pyramid
     common.release_temp_buffer(flow_gpu)
 
-    # 3. Post-process
+    # 3. Post-process (median filter only, no RANSAC)
     filtered_flow_gpu = common.get_temp_buffer(
         (h, w, 2), ti.f32, buffer_provider="pool"
     )
@@ -421,22 +404,8 @@ def process_single_layer(
     )
     common.release_temp_buffer(refined_flow_gpu)
 
-    # 4. RANSAC
-    if layer_index >= 2:
-        threshold = max(1.5, 4.0 - (layer_index * 0.8))
-        iterations = max(5, 15 - (layer_index * 2))
-        motion_threshold = max(1.5, 2.5 - (layer_index * 0.3))
-
-        ransac_out_gpu = ransac_flow_cleanup_motion_aware(
-            filtered_flow_gpu,
-            threshold=threshold,
-            motion_threshold=motion_threshold,
-            n_iterations=iterations,
-        )
-        common.release_temp_buffer(filtered_flow_gpu)
-        return ransac_out_gpu
-    else:
-        return filtered_flow_gpu
+    # Return raw flow without RANSAC cleanup
+    return filtered_flow_gpu
 
 
 @ti_thread
@@ -487,13 +456,7 @@ def compute_alignment_flow(
         if prev_flow is not None:
             common.release_temp_buffer(prev_flow)
 
-    # Final cleanup
-    if flow_gpu is not None:
-        old_flow = flow_gpu
-        flow_gpu = ransac_flow_cleanup_local(
-            old_flow, block_size=64, threshold=2.0, n_iterations=3
-        )
-        common.release_temp_buffer(old_flow)
+    # No final RANSAC cleanup - return raw flow
 
     for i in range(1, len(ref_pyramid)):
         common.release_temp_buffer(ref_pyramid[i])

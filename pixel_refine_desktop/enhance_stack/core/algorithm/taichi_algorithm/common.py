@@ -267,30 +267,36 @@ def ensure_taichi_field(arr, dtype=None, shape=None, buffer_provider=None):
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
-        # Ensure contiguous array for Taichi compatibility and dtype match
-        arr_contiguous = np.ascontiguousarray(arr)
+    # Check if already a Taichi field (GPU buffer)
+    if hasattr(arr, "shape") and not isinstance(arr, np.ndarray):
+        return arr, False  # Already GPU, no upload needed
 
-        # Mapping numpy dtypes to ti dtypes for better VRAM utilization
-        actual_ti_dtype = dtype
-        if actual_ti_dtype is None:
-            if arr_contiguous.dtype == np.uint16:
-                actual_ti_dtype = ti.u16
-            elif arr_contiguous.dtype == np.uint8:
-                actual_ti_dtype = ti.u8
-            else:
-                actual_ti_dtype = ti.f32
+    # Upload numpy to GPU
+    arr_contiguous = np.ascontiguousarray(arr)
 
-        # If we explicitly asked for f32 but have ints, cast them
-        if actual_ti_dtype == ti.f32 and arr_contiguous.dtype != np.float32:
-            arr_contiguous = arr_contiguous.astype(np.float32)
-        elif actual_ti_dtype == ti.u16 and arr_contiguous.dtype != np.uint16:
-            arr_contiguous = arr_contiguous.astype(np.uint16)
+    # Mapping numpy dtypes to ti dtypes for better VRAM utilization
+    actual_ti_dtype = dtype
+    if actual_ti_dtype is None:
+        if arr_contiguous.dtype == np.uint16:
+            actual_ti_dtype = ti.u16
+        elif arr_contiguous.dtype == np.uint8:
+            actual_ti_dtype = ti.u8
+        else:
+            actual_ti_dtype = ti.f32
 
-        field = get_temp_buffer(shape, actual_ti_dtype, buffer_provider)
-        field.from_numpy(arr_contiguous)
-        return field, True
+    # If we explicitly asked for f32 but have ints, cast them
+    if actual_ti_dtype == ti.f32 and arr_contiguous.dtype != np.float32:
+        arr_contiguous = arr_contiguous.astype(np.float32)
+    elif actual_ti_dtype == ti.u16 and arr_contiguous.dtype != np.uint16:
+        arr_contiguous = arr_contiguous.astype(np.uint16)
 
-    return arr, False
+    # Use shape from arr if not provided
+    if shape is None:
+        shape = arr_contiguous.shape
+
+    field = get_temp_buffer(shape, actual_ti_dtype, buffer_provider)
+    field.from_numpy(arr_contiguous)
+    return field, True
 
 
 def to_numpy_if_needed(field, was_numpy, out=None):

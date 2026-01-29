@@ -91,6 +91,68 @@ if TAICHI_AVAILABLE:
             col_results[0], col_results[1], col_results[2], col_results[3], dy
         )
 
+    # --- Dtype Conversion Kernels ---
+
+    @ti.kernel
+    def _convert_to_f32_kernel(
+        src: ti.types.ndarray(ndim=2),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        h: int,
+        w: int,
+    ):
+        """Convert u16/u8 to f32 (single channel)."""
+        for y, x in ti.ndrange(h, w):
+            dst[y, x] = float(src[y, x])
+
+    @ti.kernel
+    def _convert_to_f32_kernel_3ch(
+        src: ti.types.ndarray(ndim=3),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        h: int,
+        w: int,
+    ):
+        """Convert u16/u8 to f32 (3 channels)."""
+        for y, x in ti.ndrange(h, w):
+            for c in ti.static(range(3)):
+                dst[y, x, c] = float(src[y, x, c])
+
+    @ti.kernel
+    def _convert_from_f32_kernel(
+        src: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        dst: ti.types.ndarray(ndim=2),
+        h: int,
+        w: int,
+        target_dtype: ti.template(),
+    ):
+        """Convert f32 back to u16/u8 with clamping (single channel)."""
+        for y, x in ti.ndrange(h, w):
+            val = src[y, x]
+            if ti.static(target_dtype == ti.u16):
+                dst[y, x] = int(tm.clamp(val, 0.0, 65535.0))
+            elif ti.static(target_dtype == ti.u8):
+                dst[y, x] = int(tm.clamp(val, 0.0, 255.0))
+            else:
+                dst[y, x] = val
+
+    @ti.kernel
+    def _convert_from_f32_kernel_3ch(
+        src: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        dst: ti.types.ndarray(ndim=3),
+        h: int,
+        w: int,
+        target_dtype: ti.template(),
+    ):
+        """Convert f32 back to u16/u8 with clamping (3 channels)."""
+        for y, x in ti.ndrange(h, w):
+            for c in ti.static(range(3)):
+                val = src[y, x, c]
+                if ti.static(target_dtype == ti.u16):
+                    dst[y, x, c] = int(tm.clamp(val, 0.0, 65535.0))
+                elif ti.static(target_dtype == ti.u8):
+                    dst[y, x, c] = int(tm.clamp(val, 0.0, 255.0))
+                else:
+                    dst[y, x, c] = val
+
     @ti.kernel
     def _warp_kernel_guided(
         src: ti.types.ndarray(ndim=2),
@@ -237,18 +299,33 @@ if TAICHI_AVAILABLE:
         Args:
             guidance: Optional single-channel reference image (H, W).
                      If provided, flow is smoothed respecting guidance edges.
+
+        Note:
+            Preserves source dtype (u16/u8/f32). Computation uses f32 internally
+            for precision, then converts back to source dtype.
         """
         if not TAICHI_AVAILABLE:
             raise ImportError("Taichi not available")
 
         h, w = src.shape[:2]
 
+        # Preserve source dtype - don't force f32 conversion
         src_gpu, src_is_temp = common.ensure_taichi_field(
-            src, dtype=ti.f32, buffer_provider=buffer_provider
+            src, buffer_provider=buffer_provider  # Keep native dtype
         )
         flow_gpu, flow_is_temp = common.ensure_taichi_field(
             flow, dtype=ti.f32, buffer_provider=buffer_provider
         )
+
+        # Detect source dtype for output preservation
+        src_dtype = getattr(src, "dtype", None)
+        src_ti_dtype = ti.f32  # Default
+        if hasattr(src_gpu, "dtype"):
+            src_ti_dtype = src_gpu.dtype
+        elif src_dtype == np.uint16:
+            src_ti_dtype = ti.u16
+        elif src_dtype == np.uint8:
+            src_ti_dtype = ti.u8
 
         use_guidance = 0
         guidance_gpu = None
@@ -279,22 +356,64 @@ if TAICHI_AVAILABLE:
 
         channels = 1 if len(src_gpu.shape) == 2 else src_gpu.shape[2]
 
-        if dst is None:
-            shape = (h, w) if channels == 1 else (h, w, 3)
-            dst_gpu = common.get_temp_buffer(shape, ti.f32, buffer_provider)
-        else:
-            dst_gpu = dst
+        # Create intermediate f32 buffer for computation
+        shape = (h, w) if channels == 1 else (h, w, 3)
+        dst_f32_gpu = common.get_temp_buffer(shape, ti.f32, buffer_provider)
 
+        # Convert src to f32 for computation if needed
+        if src_ti_dtype != ti.f32:
+            src_f32_gpu = common.get_temp_buffer(src_gpu.shape, ti.f32, buffer_provider)
+            # Simple copy with dtype conversion
+            if channels == 1:
+                _convert_to_f32_kernel(src_gpu, src_f32_gpu, h, w)
+            else:
+                _convert_to_f32_kernel_3ch(src_gpu, src_f32_gpu, h, w)
+        else:
+            src_f32_gpu = src_gpu
+
+        # Perform warping in f32
         if channels == 1:
             _warp_kernel_guided(
-                src_gpu, flow_gpu, dst_gpu, guidance_gpu, h, w, use_guidance, bits
+                src_f32_gpu,
+                flow_gpu,
+                dst_f32_gpu,
+                guidance_gpu,
+                h,
+                w,
+                use_guidance,
+                bits,
             )
         else:
             _warp_kernel_guided_3ch(
-                src_gpu, flow_gpu, dst_gpu, guidance_gpu, h, w, use_guidance, bits
+                src_f32_gpu,
+                flow_gpu,
+                dst_f32_gpu,
+                guidance_gpu,
+                h,
+                w,
+                use_guidance,
+                bits,
             )
 
+        # Convert back to original dtype if needed
+        if dst is None:
+            if src_ti_dtype != ti.f32:
+                dst_gpu = common.get_temp_buffer(shape, src_ti_dtype, buffer_provider)
+                if channels == 1:
+                    _convert_from_f32_kernel(dst_f32_gpu, dst_gpu, h, w, src_ti_dtype)
+                else:
+                    _convert_from_f32_kernel_3ch(
+                        dst_f32_gpu, dst_gpu, h, w, src_ti_dtype
+                    )
+                common.release_temp_buffer(dst_f32_gpu)
+            else:
+                dst_gpu = dst_f32_gpu
+        else:
+            dst_gpu = dst
+
         # Cleanup
+        if src_ti_dtype != ti.f32 and src_f32_gpu != src_gpu:
+            common.release_temp_buffer(src_f32_gpu)
         if src_is_temp:
             common.release_temp_buffer(src_gpu)
         if flow_is_temp:
