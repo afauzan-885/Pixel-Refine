@@ -1,7 +1,27 @@
 """
-Preprocess - Taichi GPU Implementation
-=======================================
-GPU-accelerated preprocessing: Normalization, Gamma-Proxy, and Resize.
+Preprocessing - Modular Taichi GPU Implementation
+=======================================================
+Modular GPU-accelerated preprocessing functions matching CPU API.
+
+Functions:
+- normalize_image_gpu: Normalize u16/u8/f32 to [0,1] float32
+- to_gamma_proxy_gpu: Linear → Gamma conversion (BT.709)
+- preprocess_in_python_gpu: Extract green + optional contrast reduction
+- preprocess_pipeline_gpu: Unified pipeline with minimal transfers
+
+Usage Examples:
+    # Individual functions
+    normalized = normalize_image_gpu(image_u16)
+    gamma = to_gamma_proxy_gpu(normalized, scale=1.0)
+    gray = preprocess_in_python_gpu(gamma, use_sharpen=True)
+
+    # Unified pipeline (optimized)
+    result = preprocess_pipeline_gpu(
+        image_u16,
+        normalize=True,
+        apply_gamma=True,
+        extract_green=True,
+    )
 """
 
 import numpy as np
@@ -16,164 +36,411 @@ except ImportError:
     TAICHI_AVAILABLE = False
     ti = None
     tm = None
+    common = None
+
+
+# ============================================================================
+# Normalization Kernels
+# ============================================================================
 
 if TAICHI_AVAILABLE:
 
     @ti.kernel
-    def _fused_preprocess_kernel(
-        src: ti.types.ndarray(),
-        dst_gray: ti.types.ndarray(),
-        src_h: int,
-        src_w: int,
-        dst_h: int,
-        dst_w: int,
-        scale_factor: float,
-        apply_gamma: int,
-        input_bits: int,
-        use_sharpen: int,
-        gamma_pow: float,
-        slope: float,
-        cutoff: float,
+    def _normalize_kernel_2d(
+        src: ti.types.ndarray(ndim=2),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        h: int,
+        w: int,
+        scale: float,
     ):
-        """
-        Fused Kernel: Normalize -> Gamma -> Resize (Bilinear) -> Gray -> Sharpen
-        Matches OpenCV mapping: (i + 0.5) * scale - 0.5
-        """
-        # Grid Stride Loop over Destination
-        for i, j in ti.ndrange(dst_h, dst_w):
-            # 1. Coordinate Mapping (Dst -> Src) - Centered Mapping
-            # Avoids precision issues with integers (i * scale)
-            u = (float(i) + 0.5) * (float(src_h) / float(dst_h)) - 0.5
-            v = (float(j) + 0.5) * (float(src_w) / float(dst_w)) - 0.5
+        """Normalize grayscale (2D) to RGB (3D) float32."""
+        for y, x in ti.ndrange(h, w):
+            val = float(src[y, x]) / scale
+            dst[y, x, 0] = val
+            dst[y, x, 1] = val
+            dst[y, x, 2] = val
 
-            # Epsilon to handle extreme edges
-            u = tm.clamp(u, 0.0, float(src_h - 1))
-            v = tm.clamp(v, 0.0, float(src_w - 1))
-
-            y0 = int(ti.floor(u))
-            x0 = int(ti.floor(v))
-            y1 = tm.clamp(y0 + 1, 0, src_h - 1)
-            x1 = tm.clamp(x0 + 1, 0, src_w - 1)
-
-            wy = u - float(y0)
-            wx = v - float(x0)
-
-            # 2. Fetch & Interpolate on Raw Data
-            pixel_00 = tm.vec3(src[y0, x0, 0], src[y0, x0, 1], src[y0, x0, 2])
-            pixel_01 = tm.vec3(src[y0, x1, 0], src[y0, x1, 1], src[y0, x1, 2])
-            pixel_10 = tm.vec3(src[y1, x0, 0], src[y1, x0, 1], src[y1, x0, 2])
-            pixel_11 = tm.vec3(src[y1, x1, 0], src[y1, x1, 1], src[y1, x1, 2])
-
-            val_interp = (
-                pixel_00 * (1.0 - wx) * (1.0 - wy)
-                + pixel_01 * wx * (1.0 - wy)
-                + pixel_10 * (1.0 - wx) * wy
-                + pixel_11 * wx * wy
-            )
-
-            # 3. Normalize & Apply Gamma/Scale
-            val_norm = val_interp
-            if input_bits > 0:
-                MAX_VAL = float((1 << input_bits) - 1)
-                val_norm = val_interp / MAX_VAL
-
-            # Exposure Scale
-            res_rgb = val_norm * scale_factor
-
-            if apply_gamma:
-                # 100% Consistent with to_gamma_proxy: Clip BEFORE Gamma
-                for c in ti.static(range(3)):
-                    v_val = tm.clamp(res_rgb[c], 0.0, 1.0)
-                    if v_val < cutoff:
-                        res_rgb[c] = v_val * slope
-                    else:
-                        res_rgb[c] = 1.099 * tm.pow(v_val, 1.0 / gamma_pow) - 0.099
-
-            # 4. Grayscale (Green Channel Priority for Alignment)
-            gray = res_rgb[1]  # Green only
-
-            # 5. Logika Penajaman & Kontras (Consistent with preprocess_in_python)
-            if use_sharpen:
-                # 30% contrast reduction: (pixel - 0.5) * 0.7 + 0.5
-                gray = (gray - 0.5) * 0.7 + 0.5
-
-            dst_gray[i, j] = tm.clamp(gray, 0.0, 1.0)
+    @ti.kernel
+    def _normalize_kernel_3d(
+        src: ti.types.ndarray(ndim=3),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        h: int,
+        w: int,
+        scale: float,
+    ):
+        """Normalize RGB (3D) to float32."""
+        for y, x in ti.ndrange(h, w):
+            for c in ti.static(range(3)):
+                dst[y, x, c] = float(src[y, x, c]) / scale
 
 
-def preprocess_gpu(
-    image,
-    scale=1.0,
-    apply_gamma=False,
-    target_h=None,
-    target_w=None,
-    input_bits=16,
-    buffer_provider="pool",
-    enable_tiling=True,
-    gamma_pow=2.22,
-    slope=4.5,
-    cutoff=0.018,
-    use_sharpen=False,
-):
+def normalize_image_gpu(image, dtype=None, out=None, buffer_provider="pool"):
     """
-    End-to-end GPU preprocessing with Fusion.
-    Supported steps: Normalization, Gamma-Proxy, Bilinear Resize, Green Extraction, Sharpening.
+    GPU version of normalize_image.
+    Normalize image to range [0, 1] float32.
+
+    Args:
+        image: Input array (numpy or taichi), grayscale (2D) or RGB (3D)
+        dtype: Original dtype (auto-detected if None)
+        out: Optional output buffer (GPU or will be created)
+        buffer_provider: Buffer pool provider
+
+    Returns:
+        ti.ndarray (GPU buffer) with shape (H, W, 3) and dtype float32
     """
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
-    h, w = image.shape[:2]
+    # Auto-detect dtype
+    if dtype is None:
+        dtype = getattr(image, "dtype", np.float32)
 
-    # Default Target
-    th = target_h if target_h is not None else h
-    tw = target_w if target_w is not None else w
+    # Determine scale
+    if np.issubdtype(dtype, np.integer):
+        scale = float(np.iinfo(dtype).max)
+    elif np.issubdtype(dtype, np.floating):
+        scale = 1.0
+    else:
+        raise TypeError(f"Unsupported dtype for normalization: {dtype}")
 
-    # OOM Guard Trigger (Adaptive)
-    from . import oom_guard
-
-    if enable_tiling and isinstance(image, np.ndarray) and oom_guard.should_tile(image):
-        return oom_guard.execute_tiled(
-            preprocess_gpu,
-            image,
-            overlap=32,
-            scale=scale,
-            apply_gamma=apply_gamma,
-            target_h=target_h,
-            target_w=target_w,
-            input_bits=input_bits,
-            buffer_provider=buffer_provider,
-            enable_tiling=False,  # PREVENT RECURSION
-            gamma_pow=gamma_pow,
-            slope=slope,
-            cutoff=cutoff,
-            use_sharpen=use_sharpen,
-        )
-
-    # Upload/Ensure field
+    # Upload to GPU if needed
     src_gpu, src_is_temp = common.ensure_taichi_field(
-        image, dtype=ti.f32, buffer_provider=buffer_provider
+        image, buffer_provider=buffer_provider
     )
 
-    # Destination Buffer
-    gray_gpu = common.get_temp_buffer((th, tw), ti.f32, buffer_provider)
+    h, w = src_gpu.shape[:2]
+    is_grayscale = len(src_gpu.shape) == 2
 
-    # Run Fused Kernel
-    _fused_preprocess_kernel(
-        src_gpu,
-        gray_gpu,
-        h,
-        w,
-        th,
-        tw,
-        scale,
-        int(apply_gamma),
-        input_bits,
-        int(use_sharpen),
-        float(gamma_pow),
-        float(slope),
-        float(cutoff),
-    )
+    # Create output buffer
+    if out is None:
+        dst_gpu = common.get_temp_buffer((h, w, 3), ti.f32, buffer_provider)
+    else:
+        dst_gpu = out
 
+    # Run normalization kernel
+    if is_grayscale:
+        _normalize_kernel_2d(src_gpu, dst_gpu, h, w, scale)
+    else:
+        _normalize_kernel_3d(src_gpu, dst_gpu, h, w, scale)
+
+    # Cleanup
     if src_is_temp:
         common.release_temp_buffer(src_gpu)
 
-    return gray_gpu
+    return dst_gpu
+
+
+# ============================================================================
+# Gamma Conversion Kernels
+# ============================================================================
+
+if TAICHI_AVAILABLE:
+
+    @ti.kernel
+    def _gamma_kernel_2d(
+        src: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        h: int,
+        w: int,
+        scale: float,
+        gamma_pow: float,
+        slope: float,
+        cutoff: float,
+    ):
+        """Apply gamma curve to grayscale image."""
+        for y, x in ti.ndrange(h, w):
+            val = tm.clamp(src[y, x] * scale, 0.0, 1.0)
+            if val < cutoff:
+                dst[y, x] = val * slope
+            else:
+                dst[y, x] = 1.099 * tm.pow(val, 1.0 / gamma_pow) - 0.099
+
+    @ti.kernel
+    def _gamma_kernel_3d(
+        src: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        h: int,
+        w: int,
+        scale: float,
+        gamma_pow: float,
+        slope: float,
+        cutoff: float,
+    ):
+        """Apply gamma curve to RGB image."""
+        for y, x in ti.ndrange(h, w):
+            for c in ti.static(range(3)):
+                val = tm.clamp(src[y, x, c] * scale, 0.0, 1.0)
+                if val < cutoff:
+                    dst[y, x, c] = val * slope
+                else:
+                    dst[y, x, c] = 1.099 * tm.pow(val, 1.0 / gamma_pow) - 0.099
+
+
+def to_gamma_proxy_gpu(
+    linear_img,
+    scale=1.0,
+    gamma_pow=2.22,
+    slope=4.5,
+    cutoff=0.018,
+    out=None,
+    buffer_provider="pool",
+):
+    """
+    GPU version of to_gamma_proxy.
+    Convert Linear [0,1] to Gamma Proxy [0,1] for alignment.
+
+    Args:
+        linear_img: Input linear image (GPU buffer or numpy)
+        scale: Exposure scaling factor
+        gamma_pow: Gamma power (default 2.22 for BT.709)
+        slope: Linear slope for dark values
+        cutoff: Transition point between linear and gamma
+        out: Optional output buffer
+        buffer_provider: Buffer pool provider
+
+    Returns:
+        ti.ndarray (GPU buffer) with gamma-corrected values
+    """
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
+
+    # Upload to GPU if needed
+    src_gpu, src_is_temp = common.ensure_taichi_field(
+        linear_img, dtype=ti.f32, buffer_provider=buffer_provider
+    )
+
+    h, w = src_gpu.shape[:2]
+    is_grayscale = len(src_gpu.shape) == 2
+
+    # Create output buffer
+    if out is None:
+        shape = (h, w) if is_grayscale else (h, w, 3)
+        dst_gpu = common.get_temp_buffer(shape, ti.f32, buffer_provider)
+    else:
+        dst_gpu = out
+
+    # Run gamma kernel
+    if is_grayscale:
+        _gamma_kernel_2d(src_gpu, dst_gpu, h, w, scale, gamma_pow, slope, cutoff)
+    else:
+        _gamma_kernel_3d(src_gpu, dst_gpu, h, w, scale, gamma_pow, slope, cutoff)
+
+    # Cleanup
+    if src_is_temp:
+        common.release_temp_buffer(src_gpu)
+
+    return dst_gpu
+
+
+# ============================================================================
+# Preprocessing (Green Extraction + Sharpen) Kernels
+# ============================================================================
+
+if TAICHI_AVAILABLE:
+
+    @ti.kernel
+    def _extract_green_kernel(
+        src: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        h: int,
+        w: int,
+        use_sharpen: int,
+    ):
+        """Extract green channel with optional contrast reduction."""
+        for y, x in ti.ndrange(h, w):
+            gray = src[y, x, 1]  # Green channel (index 1)
+
+            if use_sharpen:
+                # 30% contrast reduction: (pixel - 0.5) * 0.7 + 0.5
+                gray = (gray - 0.5) * 0.7 + 0.5
+
+            dst[y, x] = tm.clamp(gray, 0.0, 1.0)
+
+    @ti.kernel
+    def _extract_green_kernel_2d(
+        src: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        h: int,
+        w: int,
+        use_sharpen: int,
+    ):
+        """Process grayscale with optional contrast reduction."""
+        for y, x in ti.ndrange(h, w):
+            gray = src[y, x]
+
+            if use_sharpen:
+                # 30% contrast reduction
+                gray = (gray - 0.5) * 0.7 + 0.5
+
+            dst[y, x] = tm.clamp(gray, 0.0, 1.0)
+
+
+def preprocess_in_python_gpu(
+    ref_image_float,
+    use_raft=False,
+    use_sharpen=False,
+    out=None,
+    buffer_provider="pool",
+):
+    """
+    GPU version of preprocess_in_python.
+    Extract green channel with optional contrast reduction.
+
+    Args:
+        ref_image_float: Input image (GPU buffer or numpy), float32
+        use_raft: If True, return as-is (for RAFT compatibility)
+        use_sharpen: If True, apply 30% contrast reduction
+        out: Optional output buffer
+        buffer_provider: Buffer pool provider
+
+    Returns:
+        ti.ndarray (GPU buffer) grayscale float32
+    """
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
+
+    # Upload to GPU if needed
+    src_gpu, src_is_temp = common.ensure_taichi_field(
+        ref_image_float, dtype=ti.f32, buffer_provider=buffer_provider
+    )
+
+    h, w = src_gpu.shape[:2]
+    is_rgb = len(src_gpu.shape) == 3 and src_gpu.shape[2] > 1
+
+    # If use_raft, return as-is
+    if use_raft:
+        if src_is_temp:
+            return src_gpu
+        else:
+            # Need to copy to avoid modifying original
+            dst_gpu = common.get_temp_buffer(src_gpu.shape, ti.f32, buffer_provider)
+            common.copy_field(src_gpu, dst_gpu)
+            return dst_gpu
+
+    # Create output buffer (grayscale)
+    if out is None:
+        dst_gpu = common.get_temp_buffer((h, w), ti.f32, buffer_provider)
+    else:
+        dst_gpu = out
+
+    # Extract green or process grayscale
+    if is_rgb:
+        _extract_green_kernel(src_gpu, dst_gpu, h, w, int(use_sharpen))
+    else:
+        _extract_green_kernel_2d(src_gpu, dst_gpu, h, w, int(use_sharpen))
+
+    # Cleanup
+    if src_is_temp:
+        common.release_temp_buffer(src_gpu)
+
+    return dst_gpu
+
+
+# ============================================================================
+# Unified Pipeline Function
+# ============================================================================
+
+
+def preprocess_pipeline_gpu(
+    image,
+    normalize=True,
+    apply_gamma=False,
+    extract_green=True,
+    use_sharpen=False,
+    use_raft=False,
+    scale=1.0,
+    gamma_pow=2.22,
+    slope=4.5,
+    cutoff=0.018,
+    dtype=None,
+    buffer_provider="pool",
+    return_numpy=False,
+):
+    """
+    Unified GPU preprocessing pipeline with minimal CPU-GPU transfers.
+
+    Pipeline: Normalize → Gamma → Extract Green → Sharpen
+
+    Args:
+        image: Input image (numpy or GPU buffer)
+        normalize: Apply normalization (u16/u8 → f32 [0,1])
+        apply_gamma: Apply gamma correction (linear → gamma)
+        extract_green: Extract green channel (RGB → grayscale)
+        use_sharpen: Apply contrast reduction (30%)
+        use_raft: Return as-is for RAFT (skips green extraction)
+        scale: Exposure scaling factor
+        gamma_pow: Gamma power
+        slope: Linear slope
+        cutoff: Gamma transition point
+        dtype: Original dtype (auto-detected if None)
+        buffer_provider: Buffer pool provider
+        return_numpy: If True, download to numpy array
+
+    Returns:
+        GPU buffer (ti.ndarray) or numpy array if return_numpy=True
+    """
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
+
+    current_gpu = None
+
+    # Step 1: Normalize
+    if normalize:
+        current_gpu = normalize_image_gpu(
+            image, dtype=dtype, buffer_provider=buffer_provider
+        )
+    else:
+        current_gpu, _ = common.ensure_taichi_field(
+            image, dtype=ti.f32, buffer_provider=buffer_provider
+        )
+
+    # Step 2: Gamma
+    if apply_gamma:
+        prev_gpu = current_gpu
+        current_gpu = to_gamma_proxy_gpu(
+            prev_gpu,
+            scale=scale,
+            gamma_pow=gamma_pow,
+            slope=slope,
+            cutoff=cutoff,
+            buffer_provider=buffer_provider,
+        )
+        common.release_temp_buffer(prev_gpu)
+
+    # Step 3: Extract Green / Preprocess
+    if extract_green or use_sharpen:
+        prev_gpu = current_gpu
+        current_gpu = preprocess_in_python_gpu(
+            prev_gpu,
+            use_raft=use_raft,
+            use_sharpen=use_sharpen,
+            buffer_provider=buffer_provider,
+        )
+        if prev_gpu != current_gpu:
+            common.release_temp_buffer(prev_gpu)
+
+    # Return
+    if return_numpy:
+        result = current_gpu.to_numpy()
+        common.release_temp_buffer(current_gpu)
+        return result
+    else:
+        return current_gpu
+
+
+# ============================================================================
+# Fallback for non-Taichi environments
+# ============================================================================
+if not TAICHI_AVAILABLE:
+
+    def normalize_image_gpu(*args, **kwargs):
+        raise ImportError("Taichi not available")
+
+    def to_gamma_proxy_gpu(*args, **kwargs):
+        raise ImportError("Taichi not available")
+
+    def preprocess_in_python_gpu(*args, **kwargs):
+        raise ImportError("Taichi not available")
+
+    def preprocess_pipeline_gpu(*args, **kwargs):
+        raise ImportError("Taichi not available")

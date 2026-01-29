@@ -431,21 +431,19 @@ def preprocess_pipeline_gpu(
     else:
         return current_gpu
 
-
-# ============================================================================
-# Fallback for non-Taichi environments
-# ============================================================================
-
 else:
+    # ============================================================================
+    # Fallback for non-Taichi environments
+    # ============================================================================
 
-    def normalize_image_gpu(*args, **kwargs):
-        raise ImportError("Taichi not available")
+def normalize_image_gpu(*args, **kwargs):
+    raise ImportError("Taichi not available")
 
-    def to_gamma_proxy_gpu(*args, **kwargs):
-        raise ImportError("Taichi not available")
+def to_gamma_proxy_gpu(*args, **kwargs):
+    raise ImportError("Taichi not available")
 
-    def preprocess_in_python_gpu(*args, **kwargs):
-        raise ImportError("Taichi not available")
+def preprocess_in_python_gpu(*args, **kwargs):
+    raise ImportError("Taichi not available")
 
-    def preprocess_pipeline_gpu(*args, **kwargs):
-        raise ImportError("Taichi not available")
+def preprocess_pipeline_gpu(*args, **kwargs):
+    raise ImportError("Taichi not available")

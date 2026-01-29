@@ -39,6 +39,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.extra_algorithm import (
     SimilaritySpatialInterface,
     perform_image_alignment,
+    perform_alignment_gpu,
     get_taichi_worker,
 )
 
@@ -443,8 +444,6 @@ class SimilarityAlgorithm:
                 update_progress(p_align_start, "Memulai proses alignment...")
 
             # [PROXY LOGIC] Gunakan Proxy (Gamma 2.2) untuk Alignment jika Linear Mode
-            # [PROXY LOGIC] Gunakan Proxy (Gamma 2.2) untuk Alignment jika Linear Mode
-            # Agar fitur optik flow lebih jelas
             is_linear_mode = unused_kwargs.get("is_linear_mode", False)
 
             align_ref_input = reference_image_float
@@ -454,38 +453,50 @@ class SimilarityAlgorithm:
                     reference_image_float, scale=proxy_scale
                 )
 
-            # perform_image_alignment dipanggil dengan Reference sesuai mode
-            alignment_success = perform_image_alignment(
-                images,
-                align_ref_input,
-                work_res_h,
-                work_res_w,
-                tile_h,
-                tile_w,
-                ref_dtype,
-                update_progress,
-                stop_requested,
-                optical_flow_type=unused_kwargs.get(
-                    "optical_flow_type", "alignment_tile"
-                ),
-                num_alignment_workers=num_workers,
-                progress_start=p_align_start,
-                progress_end=p_align_end,
-                # [OPTIONAL] Kirim flag linear ke fungsi alignment jika dia perlu tahu untuk per-image proxy
-                # Tapi perform_image_alignment iterasi images. Kita harus update perform_image_alignment
-                # atau perform_image_alignment harus handle proxy generation internal?
-                # STEP INI HANYA MENGUBAH REFERENCE. Images lain tetap dikirim raw.
-                # Kita perlu logic proxy internal di perform_image_alignment atau
-                # kita biarkan alignment memakai Raw tapi Reference gammatized?
-                # Alignment butuh Source dan Ref. Kalau Ref Gamma, Source Linear -> Mismatch!
-                # JADI: perform_image_alignment PERLU dimodifikasi juga untuk generate proxy per image
-                # jika is_linear_mode aktif.
-                # Namun di Implementation Plan saya tulis logic di Similarity.py
-                # Tapi perform_image_alignment ada di extra_algorithm.py
-                # SEMENTARA: Kita pass flag is_linear_mode ke kwargs perform_image_alignment (nanti kita update extra_algorithm)
-                is_linear_mode=is_linear_mode,
-                proxy_scale=proxy_scale,
-            )
+            # Check GPU alignment flag
+            alignment_tile_gpu = unused_kwargs.get("alignment_tile_gpu", True)
+
+            # Conditional GPU/CPU execution
+            if alignment_tile_gpu:
+                # GPU PATH: Use dedicated GPU function
+                alignment_success = perform_alignment_gpu(
+                    images,
+                    align_ref_input,
+                    work_res_h,
+                    work_res_w,
+                    tile_h,
+                    tile_w,
+                    ref_dtype,
+                    update_progress,
+                    stop_requested,
+                    num_alignment_workers=num_workers,
+                    save_align_image=True,
+                    progress_start=p_align_start,
+                    progress_end=p_align_end,
+                    is_linear_mode=is_linear_mode,
+                    proxy_scale=proxy_scale,
+                )
+            else:
+                # CPU PATH: Use traditional function (C++ DLL / RAFT / Farneback)
+                alignment_success = perform_image_alignment(
+                    images,
+                    align_ref_input,
+                    work_res_h,
+                    work_res_w,
+                    tile_h,
+                    tile_w,
+                    ref_dtype,
+                    update_progress,
+                    stop_requested,
+                    optical_flow_type=unused_kwargs.get(
+                        "optical_flow_type", "alignment_tile"
+                    ),
+                    num_alignment_workers=num_workers,
+                    progress_start=p_align_start,
+                    progress_end=p_align_end,
+                    is_linear_mode=is_linear_mode,
+                    proxy_scale=proxy_scale,
+                )
 
             if alignment_success:
                 if update_progress:

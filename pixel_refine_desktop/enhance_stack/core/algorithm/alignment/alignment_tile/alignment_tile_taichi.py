@@ -98,29 +98,46 @@ class AlignmentTileTaichi:
 
         full_h, full_w = ref_img.shape[:2]
 
-        # Correct bit detection: float=0, u16=16, u8=8
-        input_bits = 0
-        if ref_img.dtype == np.uint16:
-            input_bits = 16
-        elif ref_img.dtype == np.uint8:
-            input_bits = 8
+        # Use modular pipeline to get low-res grayscale for alignment
+        # First normalize and apply gamma if needed
+        temp_normalized = preprocess.normalize_image_gpu(
+            ref_img, dtype=ref_img.dtype, buffer_provider="pool"
+        )
 
-        # Use fused kernel to get low-res grayscale for alignment
-        preprocess._fused_preprocess_kernel(
-            self.ref_img_gpu,
+        if is_linear:
+            temp_gamma = preprocess.to_gamma_proxy_gpu(
+                temp_normalized,
+                scale=proxy_scale,
+                gamma_pow=2.22,
+                slope=4.5,
+                cutoff=0.018,
+                buffer_provider="pool",
+            )
+            common.release_temp_buffer(temp_normalized)
+        else:
+            temp_gamma = temp_normalized
+
+        # Extract green and resize
+        temp_green = preprocess.preprocess_in_python_gpu(
+            temp_gamma,
+            use_raft=False,
+            use_sharpen=use_sharpen,
+            buffer_provider="pool",
+        )
+        common.release_temp_buffer(temp_gamma)
+
+        # Resize to work resolution
+        from ...taichi_algorithm import bilinear_interpolation
+
+        bilinear_interpolation._bilinear_resize_kernel(
+            temp_green,
             self.ref_work_res,
-            full_h,
-            full_w,
+            temp_green.shape[0],
+            temp_green.shape[1],
             work_h,
             work_w,
-            proxy_scale if is_linear else 1.0,
-            int(is_linear),
-            input_bits,
-            int(use_sharpen),
-            2.22,
-            4.5,
-            0.018,  # default gamma params
         )
+        common.release_temp_buffer(temp_green)
 
         self.work_h = work_h
         self.work_w = work_w
@@ -157,28 +174,45 @@ class AlignmentTileTaichi:
 
         full_h, full_w = comp_img.shape[:2]
 
-        # Correct bit detection: float=0, u16=16, u8=8
-        input_bits = 0
-        if comp_img.dtype == np.uint16:
-            input_bits = 16
-        elif comp_img.dtype == np.uint8:
-            input_bits = 8
+        # Use modular pipeline for preprocessing
+        temp_normalized = preprocess.normalize_image_gpu(
+            comp_img, dtype=comp_img.dtype, buffer_provider="pool"
+        )
 
-        preprocess._fused_preprocess_kernel(
-            comp_img_gpu,
+        if is_linear:
+            temp_gamma = preprocess.to_gamma_proxy_gpu(
+                temp_normalized,
+                scale=proxy_scale,
+                gamma_pow=2.22,
+                slope=4.5,
+                cutoff=0.018,
+                buffer_provider="pool",
+            )
+            common.release_temp_buffer(temp_normalized)
+        else:
+            temp_gamma = temp_normalized
+
+        # Extract green
+        temp_green = preprocess.preprocess_in_python_gpu(
+            temp_gamma,
+            use_raft=False,
+            use_sharpen=use_sharpen,
+            buffer_provider="pool",
+        )
+        common.release_temp_buffer(temp_gamma)
+
+        # Resize to work resolution
+        from ...taichi_algorithm import bilinear_interpolation
+
+        bilinear_interpolation._bilinear_resize_kernel(
+            temp_green,
             comp_work_res,
-            full_h,
-            full_w,
+            temp_green.shape[0],
+            temp_green.shape[1],
             self.work_h,
             self.work_w,
-            proxy_scale if is_linear else 1.0,
-            int(is_linear),
-            input_bits,
-            int(use_sharpen),
-            2.22,
-            4.5,
-            0.018,
         )
+        common.release_temp_buffer(temp_green)
 
         # === STEP 3: Taichi Alignment ===
         flow_low_gpu = compute_alignment_flow(
@@ -277,22 +311,24 @@ class AlignmentTileTaichi:
         use_sharpen=False,
     ):
         """Preprocess image on GPU returns GPU field."""
-        input_bits = 0
-        if img.dtype == np.uint16:
-            input_bits = 16
-        elif img.dtype == np.uint8:
-            input_bits = 8
+        # Determine dtype for normalization
+        dtype = img.dtype
 
-        # Call the robust preprocess module
-        gray_gpu = preprocess.preprocess_gpu(
+        # Use modular pipeline
+        gray_gpu = preprocess.preprocess_pipeline_gpu(
             img,
-            scale=proxy_scale if is_linear else 1.0,
+            normalize=True,
             apply_gamma=is_linear,
-            input_bits=input_bits,
+            extract_green=True,
+            use_sharpen=use_sharpen,
+            use_raft=False,
+            scale=proxy_scale if is_linear else 1.0,
             gamma_pow=2.22,
             slope=4.5,
             cutoff=0.018,
-            use_sharpen=use_sharpen,
+            dtype=dtype,
+            buffer_provider="pool",
+            return_numpy=False,  # Return GPU buffer
         )
 
         # Optimized: Return GPU handle directly, NO to_numpy()
