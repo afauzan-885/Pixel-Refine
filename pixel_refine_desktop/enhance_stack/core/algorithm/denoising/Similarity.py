@@ -1,5 +1,10 @@
 import os
 
+from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.taichi_worker import (
+    cleanup_taichi,
+    TAICHI_AVAILABLE,
+)
+
 os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -26,7 +31,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
     get_all_image_paths_for_single_process,
     load_images_from_paths,
     normalize_image,
-    preprocess_in_python,
+    # preprocess_in_python,  # REMOVED - now using preprocess.preprocess_in_python_gpu
     resize_all_with_padding,
     save_image,
     setup_balanced_batching,
@@ -35,6 +40,12 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
     calculate_scale_from_gt_proxy,  # [SMART PROXY]
     save_linear_dng,  # [LINEAR DNG]
     # to_gamma_proxy, # Replaced/Updated
+)
+from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm import (
+    preprocess,
+)
+from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.bilinear_interpolation import (
+    bilinear_resize,  # Smart API: auto-detects GPU/CPU
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.extra_algorithm import (
     SimilaritySpatialInterface,
@@ -525,15 +536,19 @@ class SimilarityAlgorithm:
             )
             # print("  [Linear Mode] Using Gamma Proxy for Weight Calculation Reference.")
 
-        ref_gray_preprocessed = preprocess_in_python(
+        ref_gray_preprocessed_gpu = preprocess.preprocess_in_python_gpu(
             ref_for_weight_calc, use_sharpen=False
         )
-        ref_noise_sigma = estimate_noise_in_python(ref_gray_preprocessed)
-        ref_work_res_pass2 = cv2.resize(
-            ref_gray_preprocessed,
-            (work_res_w, work_res_h),
-            interpolation=cv2.INTER_AREA,
+
+        # Convert to NumPy ONLY for noise estimation (CPU operation)
+        ref_noise_sigma = estimate_noise_in_python(ref_gray_preprocessed_gpu.to_numpy())
+
+        # Smart resize: stays on GPU automatically!
+        ref_work_res_pass2_gpu = bilinear_resize(
+            ref_gray_preprocessed_gpu, work_res_h, work_res_w
         )
+        # Convert to NumPy only at the end when needed
+        ref_work_res_pass2 = ref_work_res_pass2_gpu.to_numpy()
 
         # Stability map untuk C++ tetap None karena Pass 1 dihapus
         stability_map_work_res = None
@@ -576,21 +591,19 @@ class SimilarityAlgorithm:
                 # Hanya untuk weight map calculation, tidak disimpan ke list
                 if is_linear_mode:
                     curr_float_proxy = to_gamma_proxy(curr_float, scale=proxy_scale)
-                    curr_preproc = preprocess_in_python(
+                    curr_preproc_gpu = preprocess.preprocess_in_python_gpu(
                         curr_float_proxy, use_raft=False, use_sharpen=False
                     )
                 else:
-                    curr_preproc = preprocess_in_python(
+                    curr_preproc_gpu = preprocess.preprocess_in_python_gpu(
                         curr_float, use_raft=False, use_sharpen=False
                     )
 
-                # Resize ke buffer yang sudah ada (dst)
-                cv2.resize(
-                    curr_preproc,
-                    (work_res_w, work_res_h),
-                    dst=curr_work_gray,
-                    interpolation=cv2.INTER_AREA,
+                # Smart resize: stays on GPU, then convert for buffer assignment
+                curr_work_gray_gpu = bilinear_resize(
+                    curr_preproc_gpu, work_res_h, work_res_w
                 )
+                curr_work_gray = curr_work_gray_gpu.to_numpy()
                 local_curr_work_res[:, :, 0] = curr_work_gray
 
                 # Bersihkan weight map buffer sebelum dipakai ulang
@@ -706,13 +719,15 @@ class SimilarityAlgorithm:
                             curr_float_proxy = to_gamma_proxy(
                                 curr_float, scale=proxy_scale
                             )
-                            curr_preproc = preprocess_in_python(
+                            curr_preproc_gpu = preprocess.preprocess_in_python_gpu(
                                 curr_float_proxy, use_raft=False, use_sharpen=False
                             )
+                            curr_preproc = curr_preproc_gpu.to_numpy()
                         else:
-                            curr_preproc = preprocess_in_python(
+                            curr_preproc_gpu = preprocess.preprocess_in_python_gpu(
                                 curr_float, use_raft=False, use_sharpen=False
                             )
+                            curr_preproc = curr_preproc_gpu.to_numpy()
 
                         # Resize to work resolution for weight map analysis
                         curr_work_gray = cv2.resize(
@@ -1243,6 +1258,14 @@ class SimilarityAlgorithm:
                 dtype_ref, copy=False
             )
 
+            # [SMART LIFECYCLE] Cleanup Taichi before returning
+            try:
+                if TAICHI_AVAILABLE:
+                    cleanup_taichi(mode="cache")
+                    print("[Taichi] Pipeline selesai - VRAM cache cleared.")
+            except Exception as e:
+                print(f"[Taichi] Warning: Failed to clear cache: {e}")
+
             return final_img_output, final_weight_map, all_final_weight_maps_to_return
 
         else:
@@ -1252,6 +1275,14 @@ class SimilarityAlgorithm:
                 if channels_ref_orig == 1
                 else (h_ref, w_ref, channels_ref_orig)
             )
+            # [SMART LIFECYCLE] Cleanup Taichi before returning
+            try:
+                if TAICHI_AVAILABLE:
+                    cleanup_taichi(mode="cache")
+                    print("[Taichi] Pipeline selesai - VRAM cache cleared.")
+            except Exception as e:
+                print(f"[Taichi] Warning: Failed to clear cache: {e}")
+
             return np.zeros(out_shape_fb, dtype=dtype_ref), None, []
 
 
@@ -1647,10 +1678,11 @@ def main(
             # Hitung estimasi noise dari referensi sebelum fusi akhir
             # Jika Linear Mode, reference_image adalah Linear. Kita butuh Proxy untuk estimasi noise structure?
             # Sebenarnya estimate_noise_in_python bekerja pada grayscale, jadi aman di-normalize.
-            ref_gray_preproc = preprocess_in_python(
+            ref_gray_preproc_gpu = preprocess.preprocess_in_python_gpu(
                 normalize_image(reference_image, reference_image.dtype),
                 use_sharpen=False,
             )
+            ref_gray_preproc = ref_gray_preproc_gpu.to_numpy()
             ref_noise_sigma = estimate_noise_in_python(ref_gray_preproc)
 
             # --- 7. PENYIMPANAN HASIL AKHIR & PEMBERSIHAN ---

@@ -1086,38 +1086,10 @@ def apply_s_curve_float32(img: np.ndarray, strength: float = 4.0, pivot: float =
     return (y * 255.0).astype(np.float32)
 
 
-def preprocess_in_python(
-    ref_image_float: np.ndarray,
-    use_raft: bool = False,
-    use_sharpen: bool = False,
-):  # Tambahkan parameter ini
-
-    img = ref_image_float
-    if img.dtype != np.float32:
-        img = img.astype(np.float32, copy=False)
-
-    if not use_raft:
-        if img.ndim == 3 and img.shape[2] > 1:
-            # gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            # [MODIFIED] Gunakan Green Channel (Index 1) untuk alignment yang lebih tajam pada RAW Bayer
-            gray = img[:, :, 1]
-        else:
-            gray = img
-
-        # Logika Penajaman & Kontras
-        if use_sharpen:
-            # 1. Pengurangan Kontras 30%
-            # Rumus sederhana: (pixel - 0.5) * contrast + 0.5
-            # 0.7 berarti 70% dari kontras asli (pengurangan 30%)
-            gray = (gray - 0.5) * 0.7 + 0.5
-            gray = np.clip(gray, 0.0, 1.0)
-
-            # Scharr filter dihapus sesuai permintaan
-            # Tidak ada penajaman tambahan dilakukan di sini
-
-        return gray.astype(np.float32)
-
-    return img.astype(np.float32)
+# preprocess_in_python has been moved to:
+# pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.preprocess
+# Use: preprocess.preprocess_in_python_gpu() instead
+# This provides automatic GPU/CPU fallback with identical API
 
 
 def estimate_noise_variance(

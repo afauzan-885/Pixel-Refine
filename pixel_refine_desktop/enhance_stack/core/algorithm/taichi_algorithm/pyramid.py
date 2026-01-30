@@ -6,12 +6,13 @@ try:
     import taichi as ti
     import taichi.math as tm
     from . import common
+    from .taichi_worker import ti_thread, TAICHI_AVAILABLE
 
-    TAICHI_AVAILABLE = True
 except ImportError:
     TAICHI_AVAILABLE = False
     ti = None
     tm = None
+    ti_thread = lambda f: f  # No-op in case of no Taichi
 
 MIN_PYRAMID_SIZE = 32
 
@@ -72,6 +73,7 @@ if TAICHI_AVAILABLE:
             dst[r, c, 1] = res[1] * scale_y
 
 
+@ti_thread
 def build_image_pyramid(
     image: np.ndarray, n_levels: int = 4, min_size: int = MIN_PYRAMID_SIZE
 ) -> list:
@@ -89,6 +91,7 @@ def build_image_pyramid(
     return [level.to_numpy() for level in pyramid_gpu]
 
 
+@ti_thread
 def build_image_pyramid_gpu(
     image_gpu,
     n_levels: int = 4,
@@ -115,6 +118,7 @@ def build_image_pyramid_gpu(
     return pyramid
 
 
+@ti_thread
 def upsample_flow(
     flow: np.ndarray,
     target_h: int,
@@ -141,6 +145,7 @@ def upsample_flow(
     return res
 
 
+@ti_thread
 def upsample_flow_gpu(
     src_gpu,
     dst_gpu,

@@ -15,8 +15,11 @@ import onnxruntime as ort
 
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
     normalize_image,
-    preprocess_in_python,
+    # preprocess_in_python,  # REMOVED - now using preprocess.preprocess_in_python_gpu
     to_gamma_proxy,
+)
+from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm import (
+    preprocess,
 )
 
 # --- TAICHI IMPORT ---
@@ -706,12 +709,14 @@ def perform_alignment_gpu(
         if not success:
             return False
 
-        # Cleanup GPU cache
-        try:
-            worker.submit_and_wait(clear_taichi_cache)
-            print("[Taichi] VRAM cache cleared.")
-        except Exception as e:
-            print(f"[Taichi] Warning: Failed to clear VRAM cache: {e}")
+        # [SMART LIFECYCLE] Do NOT clear Taichi cache here!
+        # Preprocessing in merging stage still needs Taichi context.
+        # Cache will be cleared at the end of entire pipeline.
+        # try:
+        #     worker.submit_and_wait(clear_taichi_cache)
+        #     print("[Taichi] VRAM cache cleared.")
+        # except Exception as e:
+        #     print(f"[Taichi] Warning: Failed to clear VRAM cache: {e}")
 
         print("✅ GPU Alignment selesai.")
         return True
@@ -762,7 +767,7 @@ def perform_image_alignment(
 
     # --- Preprocessing referensi (Dilakukan 1x di thread utama) ---
     # Note: Farneback & Tile alignment use grayscale. Raft uses color.
-    ref_preprocessed_cpp = preprocess_in_python(
+    ref_preprocessed_cpp = preprocess.preprocess_in_python_gpu(
         reference_image_float, use_raft=(optical_flow_type == "raft"), use_sharpen=False
     )
     ref_work_gray_cpp = cv2.resize(
@@ -938,11 +943,11 @@ def perform_image_alignment(
                     current_img_float_proxy = to_gamma_proxy(
                         current_img_float, scale=proxy_scale
                     )
-                    current_preproc = preprocess_in_python(
+                    current_preproc = preprocess.preprocess_in_python_gpu(
                         current_img_float_proxy, use_raft=False, use_sharpen=False
                     )
                 else:
-                    current_preproc = preprocess_in_python(
+                    current_preproc = preprocess.preprocess_in_python_gpu(
                         current_img_float, use_raft=False, use_sharpen=False
                     )
 
@@ -1075,11 +1080,11 @@ def perform_image_alignment(
                         current_img_float_proxy = to_gamma_proxy(
                             current_img_float, scale=proxy_scale
                         )
-                        current_preprocessed_cpp = preprocess_in_python(
+                        current_preprocessed_cpp = preprocess.preprocess_in_python_gpu(
                             current_img_float_proxy, use_raft=False
                         )
                     else:
-                        current_preprocessed_cpp = preprocess_in_python(
+                        current_preprocessed_cpp = preprocess.preprocess_in_python_gpu(
                             current_img_float, use_raft=False
                         )
 

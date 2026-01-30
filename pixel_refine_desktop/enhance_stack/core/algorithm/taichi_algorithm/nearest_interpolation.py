@@ -1,29 +1,7 @@
-"""Nearest Interpolation - Taichi GPU"""
-
 import numpy as np
-
-try:
-    import taichi as ti
-    import taichi.math as tm
-
-    TAICHI_AVAILABLE = True
-except ImportError:
-    TAICHI_AVAILABLE = False
-    ti = None
-    tm = None
-
-_initialized = False
-
-
-def _ensure_init():
-    global _initialized
-    if not _initialized and TAICHI_AVAILABLE:
-        try:
-            ti.init(arch=ti.gpu, offline_cache=True)
-        except:
-            ti.init(arch=ti.cpu)
-        _initialized = True
-
+import taichi as ti
+import taichi.math as tm
+from .taichi_worker import ti_thread, TAICHI_AVAILABLE
 
 if TAICHI_AVAILABLE:
 
@@ -37,7 +15,6 @@ if TAICHI_AVAILABLE:
         w_dst: int,
     ):
         for r, c in ti.ndrange(h_dst, w_dst):
-            # Nearest neighbor logic: center of pixel projection
             y_src = (r + 0.5) * (float(h_src) / float(h_dst))
             x_src = (c + 0.5) * (float(w_src) / float(w_dst))
 
@@ -50,12 +27,39 @@ if TAICHI_AVAILABLE:
             dst[r, c] = src[y, x]
 
 
-def nearest_resize(src: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
+def nearest_resize(src, target_h: int, target_w: int, dst=None):
+    """
+    Smart nearest resize API that auto-detects input type and returns appropriate output.
+    All Taichi operations are synchronized via @ti_thread.
+    """
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
-    _ensure_init()
-    h_src, w_src = src.shape[:2]
-    src_f32 = np.ascontiguousarray(src, dtype=np.float32)
-    dst = np.zeros((target_h, target_w), dtype=np.float32)
-    _nearest_resize_kernel(src_f32, dst, h_src, w_src, target_h, target_w)
-    return dst
+
+    # Detect input type
+    is_taichi_input = hasattr(src, "to_numpy")
+
+    @ti_thread
+    def _run_gpu_nearest_resize(src_data, h_dst, w_dst, dst_data=None):
+        h_src, w_src = src_data.shape[:2]
+
+        # Determine output buffer
+        if dst_data is None:
+            if is_taichi_input:
+                dst_data = ti.ndarray(dtype=ti.f32, shape=(h_dst, w_dst))
+            else:
+                dst_data = np.zeros((h_dst, w_dst), dtype=np.float32)
+
+        # Ensure contiguous if NumPy
+        data_to_pass = src_data
+        if not is_taichi_input:
+            data_to_pass = np.ascontiguousarray(src_data, dtype=np.float32)
+
+        _nearest_resize_kernel(data_to_pass, dst_data, h_src, w_src, h_dst, w_dst)
+        return dst_data
+
+    return _run_gpu_nearest_resize(src, target_h, target_w, dst)
+
+
+# Legacy alias
+def nearest_resize_gpu(src_gpu, target_h: int, target_w: int, dst_gpu=None):
+    return nearest_resize(src_gpu, target_h, target_w, dst_gpu)

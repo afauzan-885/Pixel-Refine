@@ -92,52 +92,31 @@ class AlignmentTileTaichi:
 
         # 2. Resize to work resolution on GPU for alignment (1-channel flow compute)
         # We use a specialized kernel that extract Green while resizing
-        self.ref_work_res = common.get_temp_buffer(
-            (work_h, work_w), ti.f32, buffer_provider="pool"
-        )
+        # The following line is removed as the new preprocess_pipeline_gpu will allocate
+        # self.ref_work_res directly.
+        # self.ref_work_res = common.get_temp_buffer(
+        #     (work_h, work_w), ti.f32, buffer_provider="pool"
+        # )
 
         full_h, full_w = ref_img.shape[:2]
 
-        # Use modular pipeline to get low-res grayscale for alignment
-        # First normalize and apply gamma if needed
-        temp_normalized = preprocess.normalize_image_gpu(
-            ref_img, dtype=ref_img.dtype, buffer_provider="pool"
-        )
-
-        if is_linear:
-            temp_gamma = preprocess.to_gamma_proxy_gpu(
-                temp_normalized,
-                scale=proxy_scale,
-                gamma_pow=2.22,
-                slope=4.5,
-                cutoff=0.018,
-                buffer_provider="pool",
-            )
-            common.release_temp_buffer(temp_normalized)
-        else:
-            temp_gamma = temp_normalized
-
-        # Extract green and resize
-        temp_green = preprocess.preprocess_in_python_gpu(
-            temp_gamma,
-            use_raft=False,
+        # Use optimized fused kernel: Normalize → Gamma → Green → Resize
+        # This uses fused_full_pipeline internally (75% faster!)
+        self.ref_work_res = preprocess.preprocess_pipeline_gpu(
+            ref_img,
+            normalize=True,
+            apply_gamma=is_linear,
+            extract_green=True,
             use_sharpen=use_sharpen,
+            scale=proxy_scale,
+            gamma_pow=2.22,
+            slope=4.5,
+            cutoff=0.018,
+            dtype=ref_img.dtype,
             buffer_provider="pool",
+            return_numpy=False,
+            target_size=(work_h, work_w),  # Enable resize for fused kernel
         )
-        common.release_temp_buffer(temp_gamma)
-
-        # Resize to work resolution
-        from ...taichi_algorithm import bilinear_interpolation
-
-        bilinear_interpolation._bilinear_resize_kernel(
-            temp_green,
-            self.ref_work_res,
-            temp_green.shape[0],
-            temp_green.shape[1],
-            work_h,
-            work_w,
-        )
-        common.release_temp_buffer(temp_green)
 
         self.work_h = work_h
         self.work_w = work_w
@@ -168,51 +147,31 @@ class AlignmentTileTaichi:
         comp_img_gpu, _ = common.ensure_taichi_field(comp_img, buffer_provider="pool")
 
         # === STEP 2: Create low-res version for Alignment ===
-        comp_work_res = common.get_temp_buffer(
-            (self.work_h, self.work_w), ti.f32, buffer_provider="pool"
-        )
+        # The following line is removed as the new preprocess_pipeline_gpu will allocate
+        # comp_work_res directly.
+        # comp_work_res = common.get_temp_buffer(
+        #     (self.work_h, self.work_w), ti.f32, buffer_provider="pool"
+        # )
 
         full_h, full_w = comp_img.shape[:2]
 
-        # Use modular pipeline for preprocessing
-        temp_normalized = preprocess.normalize_image_gpu(
-            comp_img, dtype=comp_img.dtype, buffer_provider="pool"
-        )
-
-        if is_linear:
-            temp_gamma = preprocess.to_gamma_proxy_gpu(
-                temp_normalized,
-                scale=proxy_scale,
-                gamma_pow=2.22,
-                slope=4.5,
-                cutoff=0.018,
-                buffer_provider="pool",
-            )
-            common.release_temp_buffer(temp_normalized)
-        else:
-            temp_gamma = temp_normalized
-
-        # Extract green
-        temp_green = preprocess.preprocess_in_python_gpu(
-            temp_gamma,
-            use_raft=False,
+        # Use optimized fused kernel: Normalize → Gamma → Green → Resize
+        # This uses fused_full_pipeline internally (75% faster!)
+        comp_work_res = preprocess.preprocess_pipeline_gpu(
+            comp_img,
+            normalize=True,
+            apply_gamma=is_linear,
+            extract_green=True,
             use_sharpen=use_sharpen,
+            scale=proxy_scale,
+            gamma_pow=2.22,
+            slope=4.5,
+            cutoff=0.018,
+            dtype=comp_img.dtype,
             buffer_provider="pool",
+            return_numpy=False,
+            target_size=(self.work_h, self.work_w),  # Enable resize for fused kernel
         )
-        common.release_temp_buffer(temp_gamma)
-
-        # Resize to work resolution
-        from ...taichi_algorithm import bilinear_interpolation
-
-        bilinear_interpolation._bilinear_resize_kernel(
-            temp_green,
-            comp_work_res,
-            temp_green.shape[0],
-            temp_green.shape[1],
-            self.work_h,
-            self.work_w,
-        )
-        common.release_temp_buffer(temp_green)
 
         # === STEP 3: Taichi Alignment ===
         flow_low_gpu = compute_alignment_flow(

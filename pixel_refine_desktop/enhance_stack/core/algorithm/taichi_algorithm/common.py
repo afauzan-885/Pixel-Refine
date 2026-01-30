@@ -10,14 +10,15 @@ import threading
 try:
     import taichi as ti
     import taichi.math as tm
+    from .taichi_worker import ti_thread, TAICHI_AVAILABLE
 
-    TAICHI_AVAILABLE = True
 except ImportError:
     TAICHI_AVAILABLE = False
     from typing import Any
 
     ti: Any = None
     tm: Any = None
+    ti_thread = lambda f: f  # No-op in case of no Taichi
 
 if TAICHI_AVAILABLE:
 
@@ -210,6 +211,7 @@ class BufferCache:
 _GLOBAL_CACHE = BufferCache()
 
 
+@ti_thread
 def get_temp_buffer(shape, dtype, buffer_provider=None):
     """
     Get a temporary Taichi field/ndarray, optionally from a buffer provider.
@@ -250,6 +252,7 @@ def cleanup_cache():
     _GLOBAL_CACHE.clear()
 
 
+@ti_thread
 def ensure_taichi_field(arr, dtype=None, shape=None, buffer_provider=None):
     """
     Ensure the input is a Taichi field/ndarray.
@@ -299,6 +302,7 @@ def ensure_taichi_field(arr, dtype=None, shape=None, buffer_provider=None):
     return field, True
 
 
+@ti_thread
 def to_numpy_if_needed(field, was_numpy, out=None):
     """
     Convert back to numpy if the original input was numpy, or if explicitly requested.
@@ -319,6 +323,7 @@ def to_numpy_if_needed(field, was_numpy, out=None):
     return field
 
 
+@ti_thread
 def copy_field(src, dst):
     """Copy contents of src field/ndarray to dst."""
     if not TAICHI_AVAILABLE:
@@ -326,6 +331,7 @@ def copy_field(src, dst):
     _copy_kernel(src, dst)
 
 
+@ti_thread
 def extract_channel(src, dst, channel):
     """Extract a specific channel from src (H,W,C) to dst (H,W)."""
     if not TAICHI_AVAILABLE:
@@ -333,6 +339,7 @@ def extract_channel(src, dst, channel):
     _extract_channel_kernel(src, dst, channel)
 
 
+@ti_thread
 def insert_channel(src, dst, channel):
     """Insert dst (H,W) into src (H,W,C) at valid channel index."""
     if not TAICHI_AVAILABLE:

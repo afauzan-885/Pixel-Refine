@@ -164,18 +164,63 @@ def ti_thread(func):
     return wrapper
 
 
+def cleanup_taichi(mode="cache"):
+    """
+    Declarative API for Taichi cleanup operations.
+
+    Args:
+        mode (str): Cleanup mode
+            - "cache": Clear buffer cache only (fast, keeps context alive)
+            - "memory": Clear cache + force GC (moderate)
+            - "full": Full reset including Taichi context (slow, use sparingly)
+
+    Returns:
+        bool: True if cleanup succeeded
+    """
+
+    def _cleanup_impl():
+        try:
+            from . import common
+
+            if mode == "cache":
+                # Fast: Only clear buffer pool
+                common.cleanup_cache()
+                return True
+
+            elif mode == "memory":
+                # Moderate: Clear cache + GC
+                common.cleanup_cache()
+                import gc
+
+                gc.collect()
+                return True
+
+            elif mode == "full":
+                # Slow: Full reset (use only when necessary)
+                common.cleanup_cache()
+                import gc
+
+                gc.collect()
+                if TAICHI_AVAILABLE:
+                    try:
+                        ti.reset()
+                    except:
+                        pass
+                return True
+            else:
+                print(f"[TaichiWorker] Unknown cleanup mode: {mode}")
+                return False
+
+        except Exception as e:
+            print(f"[TaichiWorker] Cleanup failed: {e}")
+            return False
+
+    return _get_worker().submit(_cleanup_impl)
+
+
 def clear_vram():
-    """Submit a cache cleanup task to the worker thread."""
-
-    def _cleanup():
-        from . import common
-
-        common.cleanup_cache()
-        import gc
-
-        gc.collect()
-
-    return _get_worker().submit(_cleanup)
+    """Submit a cache cleanup task to the worker thread (legacy API)."""
+    return cleanup_taichi(mode="cache")
 
 
 @ti_thread

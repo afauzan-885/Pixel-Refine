@@ -20,12 +20,13 @@ try:
         pyramid,
         bicubic_interpolation,
     )
+    from ...taichi_algorithm.taichi_worker import ti_thread, TAICHI_AVAILABLE
 
-    TAICHI_AVAILABLE = True
 except ImportError:
     TAICHI_AVAILABLE = False
     ti = None
     tm = None
+    ti_thread = lambda f: f  # No-op in case of no Taichi
 
 # To satisfy type checkers when TAICHI_AVAILABLE is False
 _ti: Any = ti
@@ -202,6 +203,7 @@ if TAICHI_AVAILABLE and _ti is not None:
 
     # --- INTERFACE FUNCTIONS ---
 
+    @ti_thread
     def generate_weight_map_taichi(
         current_image,
         reference_image,
@@ -297,6 +299,7 @@ if TAICHI_AVAILABLE and _ti is not None:
             if curr_is_temp:
                 common.release_temp_buffer(curr_gpu)
 
+    @ti_thread
     def accumulate_spatial_merging_taichi(
         current_image_full,
         weight_map_work,

@@ -1,28 +1,9 @@
 """Bilinear Interpolation - Taichi GPU"""
 
 import numpy as np
-
-try:
-    import taichi as ti
-    import taichi.math as tm
-
-    TAICHI_AVAILABLE = True
-except ImportError:
-    TAICHI_AVAILABLE = False
-    ti = None
-    tm = None
-
-_initialized = False
-
-
-def _ensure_init():
-    global _initialized
-    if not _initialized and TAICHI_AVAILABLE:
-        try:
-            ti.init(arch=ti.gpu, offline_cache=True)
-        except:
-            ti.init(arch=ti.cpu)
-        _initialized = True
+import taichi as ti
+import taichi.math as tm
+from .taichi_worker import ti_thread, TAICHI_AVAILABLE
 
 
 if TAICHI_AVAILABLE:
@@ -56,15 +37,72 @@ if TAICHI_AVAILABLE:
             dst[r, c] = tm.mix(r1, r2, wy)
 
 
-def bilinear_resize(src: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
+def bilinear_resize(src, target_h: int, target_w: int, dst=None):
+    """
+    Smart resize API that auto-detects input type and returns appropriate output.
+    All Taichi operations are synchronized via @ti_thread.
+
+    Intelligence:
+    - If input is Taichi ndarray (GPU) -> returns Taichi ndarray (GPU)
+    - If input is NumPy array (CPU) -> returns NumPy array (CPU)
+
+    This allows seamless usage without worrying about GPU/CPU conversions!
+
+    Args:
+        src: Input image - can be NumPy array OR Taichi ndarray
+        target_h: Target height
+        target_w: Target width
+        dst: Optional pre-allocated output buffer (must match input type)
+
+    Returns:
+        Resized image in the same format as input (NumPy or Taichi)
+
+    Examples:
+        >>> # CPU path (NumPy → NumPy)
+        >>> img_np = np.random.rand(100, 100).astype(np.float32)
+        >>> resized_np = bilinear_resize(img_np, 50, 50)
+        >>> type(resized_np)  # numpy.ndarray
+
+        >>> # GPU path (Taichi → Taichi)
+        >>> img_gpu = ti.ndarray(dtype=ti.f32, shape=(100, 100))
+        >>> resized_gpu = bilinear_resize(img_gpu, 50, 50)
+        >>> type(resized_gpu)  # taichi.lang.ndarray.ScalarNdarray
+    """
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
-    _ensure_init()
-    h_src, w_src = src.shape[:2]
-    src_f32 = np.ascontiguousarray(src, dtype=np.float32)
-    dst = np.zeros((target_h, target_w), dtype=np.float32)
-    _bilinear_resize_kernel(src_f32, dst, h_src, w_src, target_h, target_w)
-    return dst
+
+    # Detect input type
+    is_taichi_input = hasattr(src, "to_numpy")
+
+    @ti_thread
+    def _run_gpu_resize(src_data, h_dst, w_dst, dst_data=None):
+        h_src, w_src = src_data.shape[:2]
+
+        # Determine output buffer
+        if dst_data is None:
+            if is_taichi_input:
+                dst_data = ti.ndarray(dtype=ti.f32, shape=(h_dst, w_dst))
+            else:
+                dst_data = np.zeros((h_dst, w_dst), dtype=np.float32)
+
+        # Ensure contiguous if NumPy
+        data_to_pass = src_data
+        if not is_taichi_input:
+            data_to_pass = np.ascontiguousarray(src_data, dtype=np.float32)
+
+        _bilinear_resize_kernel(data_to_pass, dst_data, h_src, w_src, h_dst, w_dst)
+        return dst_data
+
+    return _run_gpu_resize(src, target_h, target_w, dst)
+
+
+# Legacy alias for backward compatibility
+def bilinear_resize_gpu(src_gpu, target_h: int, target_w: int, dst_gpu=None):
+    """
+    DEPRECATED: Use bilinear_resize() instead.
+    This function is kept for backward compatibility only.
+    """
+    return bilinear_resize(src_gpu, target_h, target_w, dst_gpu)
 
 
 def bilinear_upsample_2x(src: np.ndarray) -> np.ndarray:
