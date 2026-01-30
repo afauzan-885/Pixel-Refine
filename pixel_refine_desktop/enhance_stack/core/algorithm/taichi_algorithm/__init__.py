@@ -7,9 +7,14 @@ import taichi as ti
 from . import common
 
 # --- Underlying Implementations ---
-from .bilinear_interpolation import bilinear_resize
+from .bilinear_interpolation import bilinear_resize, sample_at_bilinear
 from .nearest_interpolation import nearest_resize
-from .bicubic_interpolation import bicubic_resize
+from .bicubic_interpolation import (
+    bicubic_resize,
+    sample_at_bicubic,
+    sample_at,
+    cubic_hermite,
+)
 from .box_filter import box_filter_2d
 from .median_filter import median_filter
 from .gaussian import gaussian_blur as _gaussian_blur_impl
@@ -21,7 +26,7 @@ from .bilateral_grid import bilateral_grid_filter
 # --- Constants ---
 INTER_LINEAR = 1
 INTER_NEAREST = 0  # Not implemented yet, placeholder
-INTER_CUBIC = 2  # Not implemented yet, placeholder
+INTER_CUBIC = 2  # Bicubic interpolation (Catmull-Rom)
 
 
 # --- Helper: Universal Channel Handler ---
@@ -292,6 +297,12 @@ __all__ = [
     "laplacian",
     "bilateral",
     "ransac",
+    # Bicubic Interpolation APIs
+    "sample_at_bicubic",  # High-level: Point-wise bicubic sampling
+    "sample_at",  # Alias for sample_at_bicubic (backward compatibility)
+    "cubic_hermite",  # Low-level: Catmull-Rom spline function
+    # Bilinear Interpolation APIs
+    "sample_at_bilinear",  # High-level: Point-wise bilinear sampling (faster)
     # Exposing underlying still valid if needed, but primary API is above
     "bilateral_grid_filter",
 ]

@@ -127,6 +127,41 @@ def example_resize_modes():
     )
 
 
+def example_point_sampling():
+    """
+    Demonstrate point-wise sampling with bicubic and bilinear.
+    """
+    print("\n===============================================================")
+    print(" 3. Point-wise Sampling (Bicubic & Bilinear)")
+    print("===============================================================")
+
+    # Create test image
+    img_gray = np.random.rand(100, 100).astype(np.float32)
+    img_rgb = np.random.rand(100, 100, 3).astype(np.float32)
+
+    print("Scenario: Sample at fractional coordinates")
+
+    # Bicubic sampling (high quality)
+    print("\n→ Bicubic Sampling (High Quality):")
+    value_bicubic = ta.sample_at_bicubic(img_gray, x=10.5, y=20.3)
+    print(f"   Grayscale sample at (10.5, 20.3): {value_bicubic:.4f}")
+
+    green_bicubic = ta.sample_at_bicubic(img_rgb, x=10.5, y=20.3, channel=1)
+    print(f"   Green channel sample at (10.5, 20.3): {green_bicubic:.4f}")
+
+    # Bilinear sampling (faster)
+    print("\n→ Bilinear Sampling (Faster):")
+    value_bilinear = ta.sample_at_bilinear(img_gray, x=10.5, y=20.3)
+    print(f"   Grayscale sample at (10.5, 20.3): {value_bilinear:.4f}")
+
+    green_bilinear = ta.sample_at_bilinear(img_rgb, x=10.5, y=20.3, channel=1)
+    print(f"   Green channel sample at (10.5, 20.3): {green_bilinear:.4f}")
+
+    print("\nUse Cases:")
+    print("   ✓ Bicubic: High-quality warping, subpixel alignment")
+    print("   ✓ Bilinear: Real-time processing, fast transforms")
+
+
 def example_channel_manipulation():
     """
     Demonstrate processing specific channels.
@@ -202,6 +237,7 @@ def run_all_examples():
     examples = [
         example_filters,
         example_resize_modes,
+        example_point_sampling,
         example_channel_manipulation,
         example_advanced_algorithms,
     ]
