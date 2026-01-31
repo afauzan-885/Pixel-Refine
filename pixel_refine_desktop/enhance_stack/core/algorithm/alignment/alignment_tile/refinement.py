@@ -349,9 +349,19 @@ def subpixel_refinement(
     best_dx = float(search_res[0])
     best_dy = float(search_res[1])
 
-    # Step 2: Bicubic Iterative Refinement (Higher precision)
-    _bicubic_subpixel_refinement_kernel(
-        ref_gpu, comp_gpu, refine_result, x, y, best_dx, best_dy, tile_w, tile_h, h, w
+    # Step 2: Parabolic Refinement (Faster than Bicubic)
+    _parabolic_refinement_kernel(
+        ref_gpu,
+        comp_gpu,
+        refine_result,
+        x,
+        y,
+        int(best_dx),
+        int(best_dy),
+        tile_w,
+        tile_h,
+        h,
+        w,
     )
 
     result = refine_result.to_numpy()
@@ -384,5 +394,6 @@ def subpixel_refinement_gpu(
         ref_gpu, comp_gpu, search_result_gpu, x, y, dx, dy, tile_w, tile_h, h, w
     )
 
-    # Note: For full GPU-native, caller should read search_result and call parabolic
-    # This version does integer search only for efficiency in pipeline
+    # Note: Full GPU-native subpixel refinement would require a wrapper kernel
+    # to avoid CPU-GPU sync for best_dx/dy.
+    # For now, we perform the integer search which is the most expensive part on GPU.

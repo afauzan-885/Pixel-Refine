@@ -63,16 +63,15 @@ class _TaichiWorker(threading.Thread):
             return
 
         try:
-            # Reduce reservation to 2GB to leave room for OS/UI
-            # Fallback chain: CUDA -> CPU
+            # Try Vulkan first as requested by the user
             try:
-                ti.init(arch=ti.gpu, offline_cache=True, device_memory_GB=2.0)
+                ti.init(arch=ti.vulkan, offline_cache=True, device_memory_GB=2.0)
             except Exception:
+                # Fallback to GPU (CUDA/Metal) -> CPU
                 try:
+                    ti.init(arch=ti.gpu, offline_cache=True, device_memory_GB=2.0)
+                except Exception:
                     ti.init(arch=ti.cpu)
-                except Exception as e:
-                    self.init_error = str(e)
-                    return
 
             self.initialized = True
         except Exception as e:
