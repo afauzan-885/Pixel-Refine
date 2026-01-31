@@ -7,6 +7,7 @@ try:
     import taichi as ti
     import taichi.math as tm
     from . import common
+    from .taichi_worker import ti_thread
 
     TAICHI_AVAILABLE = True
 except ImportError:
@@ -110,6 +111,7 @@ if TAICHI_AVAILABLE:
             dst[y, x, 1] = sum_y / 13.0
 
 
+@ti_thread
 def median_filter(
     src, dst=None, kernel_size: int = 3, buffer_provider="pool", enable_tiling=True
 ):
@@ -152,6 +154,7 @@ def median_filter(
     return common.to_numpy_if_needed(dst_gpu, src_is_temp and dst is None)
 
 
+@ti_thread
 def median_filter_flow(
     src, dst=None, kernel_size: int = 3, buffer_provider="pool", enable_tiling=True
 ):
@@ -194,6 +197,7 @@ def median_filter_flow(
     return common.to_numpy_if_needed(dst_gpu, src_is_temp and dst is None)
 
 
+@ti_thread
 def confidence_weighted_median_filter_flow(
     src, confidence, dst=None, buffer_provider="pool"
 ):

@@ -159,6 +159,39 @@ if TAICHI_AVAILABLE:
         for I in ti.grouped(src):
             dst[I, channel] = src[I]
 
+    @ti.kernel
+    def _absdiff_kernel(
+        src1: ti.types.ndarray(), src2: ti.types.ndarray(), dst: ti.types.ndarray()
+    ):
+        for I in ti.grouped(src1):
+            dst[I] = ti.abs(src1[I] - src2[I])
+
+    @ti.kernel
+    def _cvt_color_rgb_to_gray_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray()):
+        for i, j in dst:
+            r = src[i, j, 0]
+            g = src[i, j, 1]
+            b = src[i, j, 2]
+            # OpenCV formula: Y = 0.299*R + 0.587*G + 0.114*B
+            dst[i, j] = 0.299 * r + 0.587 * g + 0.114 * b
+
+    @ti.kernel
+    def _cvt_color_bgr_to_gray_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray()):
+        for i, j in dst:
+            b = src[i, j, 0]
+            g = src[i, j, 1]
+            r = src[i, j, 2]
+            # OpenCV formula: Y = 0.299*R + 0.587*G + 0.114*B
+            dst[i, j] = 0.299 * r + 0.587 * g + 0.114 * b
+
+    @ti.kernel
+    def _cvt_color_gray_to_rgb_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray()):
+        for i, j in src:
+            val = src[i, j]
+            dst[i, j, 0] = val
+            dst[i, j, 1] = val
+            dst[i, j, 2] = val
+
 
 class BufferCache:
     """
@@ -239,6 +272,7 @@ def get_temp_buffer(shape, dtype, buffer_provider=None):
     return ti.ndarray(dtype=dtype, shape=shape)
 
 
+@ti_thread
 def release_temp_buffer(buf):
     """Return buffer to pool if applicable."""
     if buf is None:
@@ -324,24 +358,437 @@ def to_numpy_if_needed(field, was_numpy, out=None):
 
 
 @ti_thread
-def copy_field(src, dst):
-    """Copy contents of src field/ndarray to dst."""
+def _copy_field_lowlevel(src, dst):
+    """Low-level copy (requires pre-allocated dst)."""
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
     _copy_kernel(src, dst)
 
 
 @ti_thread
-def extract_channel(src, dst, channel):
-    """Extract a specific channel from src (H,W,C) to dst (H,W)."""
+def _extract_channel_lowlevel(src, dst, channel):
+    """Low-level extract (requires pre-allocated dst)."""
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
     _extract_channel_kernel(src, dst, channel)
 
 
 @ti_thread
-def insert_channel(src, dst, channel):
-    """Insert dst (H,W) into src (H,W,C) at valid channel index."""
+def _insert_channel_lowlevel(src, dst, channel):
+    """Low-level insert (requires pre-allocated dst)."""
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
     _insert_channel_kernel(src, dst, channel)
+
+
+# --- High-Level OpenCV-Compatible Channel Operations ---
+
+
+@ti_thread
+def split(img):
+    """
+    Split multi-channel image into tuple of single-channel images.
+
+    OpenCV-compatible: Same as cv2.split()
+
+    **Full GPU Pipeline Support:**
+    - If input is Taichi field → returns tuple of Taichi fields
+    - If input is NumPy array → returns tuple of NumPy arrays
+
+    Args:
+        img: Multi-channel image (H, W, C) - NumPy or Taichi field
+
+    Returns:
+        Tuple of single-channel images (ch0, ch1, ch2, ...)
+        Same type as input
+
+    Example:
+        >>> # NumPy workflow
+        >>> b, g, r = ta.split(rgb_img)
+        >>> # Same as: b, g, r = cv2.split(rgb_img)
+
+        >>> # GPU workflow (ZERO COPY!)
+        >>> b_gpu, g_gpu, r_gpu = ta.split(rgb_gpu)
+        >>> # All channels stay on GPU!
+    """
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
+
+    # Detect input type
+    is_taichi_input = hasattr(img, "to_numpy")
+
+    # Get shape
+    if is_taichi_input:
+        shape = img.shape
+    else:
+        shape = img.shape
+    h, w = shape[:2]
+    c = shape[2] if len(shape) == 3 else 1
+
+    channels = []
+
+    if c == 1:
+        # Single channel short-circuit
+        return (copy(img),)
+
+    if is_taichi_input:
+        # GPU workflow - all on GPU
+        for ch_idx in range(c):
+            ch_field = get_temp_buffer((h, w), ti.f32)
+            _extract_channel_lowlevel(img, ch_field, ch_idx)
+            channels.append(ch_field)
+    else:
+        # NumPy workflow - upload once, extract all, download
+        img_gpu, img_is_temp = ensure_taichi_field(img, dtype=ti.f32)
+
+        for ch_idx in range(c):
+            ch_gpu = get_temp_buffer((h, w), ti.f32)
+            _extract_channel_lowlevel(img_gpu, ch_gpu, ch_idx)
+            ch_array = ch_gpu.to_numpy()
+            release_temp_buffer(ch_gpu)
+            channels.append(ch_array)
+
+        if img_is_temp:
+            release_temp_buffer(img_gpu)
+
+    return tuple(channels)
+
+
+@ti_thread
+def merge(channels):
+    """
+    Merge separate channels into multi-channel image.
+
+    OpenCV-compatible: Same as cv2.merge()
+
+    **Full GPU Pipeline Support:**
+    - If input channels are Taichi fields → returns Taichi field
+    - If input channels are NumPy arrays → returns NumPy array
+
+    Args:
+        channels: List or tuple of single-channel images (H, W)
+
+    Returns:
+        Multi-channel image (H, W, C)
+        Same type as input channels
+
+    Example:
+        >>> # NumPy workflow
+        >>> rgb = ta.merge([b, g, r])
+        >>> # Same as: rgb = cv2.merge([b, g, r])
+
+        >>> # GPU workflow (ZERO COPY!)
+        >>> rgb_gpu = ta.merge([b_gpu, g_gpu, r_gpu])
+        >>> # Result stays on GPU!
+    """
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
+
+    if not channels:
+        raise ValueError("channels list cannot be empty")
+
+    if len(channels) == 1:
+        # Single channel short-circuit
+        return copy(channels[0])
+
+    # Detect input type from first channel
+    first_ch = channels[0]
+    is_taichi_input = hasattr(first_ch, "to_numpy")
+
+    # Get shape
+    shape_2d = first_ch.shape[:2]
+    h, w = shape_2d
+    num_channels = len(channels)
+
+    # Validate shapes
+    for i, ch in enumerate(channels):
+        if ch.shape[:2] != shape_2d:
+            raise ValueError(
+                f"Channel {i} has shape {ch.shape[:2]}, expected {shape_2d}"
+            )
+
+    # Create output
+    if is_taichi_input:
+        # GPU workflow
+        merged = ti.ndarray(dtype=ti.f32, shape=(h, w, num_channels))
+        for ch_idx, ch_field in enumerate(channels):
+            _insert_channel_lowlevel(ch_field, merged, ch_idx)
+        return merged
+    else:
+        # NumPy workflow
+        merged_np = np.zeros((h, w, num_channels), dtype=np.float32)
+        merged_gpu = ti.ndarray(dtype=ti.f32, shape=(h, w, num_channels))
+
+        for ch_idx, ch_array in enumerate(channels):
+            ch_gpu, _ = ensure_taichi_field(ch_array, dtype=ti.f32)
+            _insert_channel_lowlevel(ch_gpu, merged_gpu, ch_idx)
+
+        merged_np = merged_gpu.to_numpy()
+        return merged_np
+
+
+@ti_thread
+def extract_channel(img, ch):
+    """
+    Extract single channel from multi-channel image.
+
+    OpenCV-compatible: Same as cv2.extractChannel()
+
+    **Full GPU Pipeline Support:**
+    - If input is Taichi field → returns Taichi field
+    - If input is NumPy array → returns NumPy array
+
+    Args:
+        img: Multi-channel image (H, W, C) - NumPy or Taichi field
+        ch: Channel index (0, 1, 2, ...)
+
+    Returns:
+        Single-channel image (H, W)
+        Same type as input
+
+    Example:
+        >>> # NumPy workflow
+        >>> green = ta.extract_channel(rgb, ch=1)
+        >>> # Same as: green = cv2.extractChannel(rgb, 1)
+
+        >>> # GPU workflow (ZERO COPY!)
+        >>> green_gpu = ta.extract_channel(rgb_gpu, ch=1)
+        >>> # Result stays on GPU!
+    """
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
+
+    # Detect input type
+    is_taichi_input = hasattr(img, "to_numpy")
+
+    shape = img.shape
+    h, w = shape[:2]
+    c = shape[2] if len(shape) == 3 else 1
+
+    if ch >= c:
+        raise ValueError(
+            f"Channel index {ch} out of bounds for image with {c} channels"
+        )
+
+    if c == 1 and ch == 0:
+        return copy(img)
+
+    if is_taichi_input:
+        # GPU workflow
+        ch_field = get_temp_buffer((h, w), ti.f32)
+        _extract_channel_lowlevel(img, ch_field, ch)
+        return ch_field
+    else:
+        # NumPy workflow
+        img_gpu, img_is_temp = ensure_taichi_field(img, dtype=ti.f32)
+        ch_gpu = get_temp_buffer((h, w), ti.f32)
+        _extract_channel_lowlevel(img_gpu, ch_gpu, ch)
+        res = ch_gpu.to_numpy()
+        release_temp_buffer(ch_gpu)
+        if img_is_temp:
+            release_temp_buffer(img_gpu)
+        return res
+
+
+@ti_thread
+def insert_channel(src, dst, ch):
+    """
+    Insert single channel into multi-channel image (in-place).
+
+    OpenCV-compatible: Same as cv2.insertChannel()
+
+    **Full GPU Pipeline Support:**
+    - Works with both NumPy and Taichi field inputs
+    - Modifies dst in-place
+
+    Args:
+        src: Single-channel image (H, W) - NumPy or Taichi field
+        dst: Multi-channel image (H, W, C) - modified in-place
+        ch: Channel index (0, 1, 2, ...)
+
+    Example:
+        >>> # NumPy workflow
+        >>> ta.insert_channel(green_modified, rgb, ch=1)
+        >>> # Same as: cv2.insertChannel(green_modified, rgb, 1)
+
+        >>> # GPU workflow (in-place on GPU!)
+        >>> ta.insert_channel(green_gpu, rgb_gpu, ch=1)
+    """
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
+
+    # Detect input types
+    is_src_taichi = hasattr(src, "to_numpy")
+    is_dst_taichi = hasattr(dst, "to_numpy")
+
+    shape_dst = dst.shape
+    c_dst = shape_dst[2] if len(shape_dst) == 3 else 1
+
+    if ch >= c_dst:
+        raise ValueError(
+            f"Channel index {ch} out of bounds for destination with {c_dst} channels"
+        )
+
+    if c_dst == 1 and ch == 0:
+        # Simple copy/assignment for single channel
+        if is_dst_taichi:
+            _copy_field_lowlevel(src, dst)
+        else:
+            dst[:] = src
+        return
+
+    if is_src_taichi and is_dst_taichi:
+        # Both on GPU - direct operation
+        _insert_channel_lowlevel(src, dst, ch)
+    elif not is_src_taichi and not is_dst_taichi:
+        # Both NumPy - need GPU round-trip
+        src_gpu, _ = ensure_taichi_field(src, dtype=ti.f32)
+        dst_gpu, _ = ensure_taichi_field(dst, dtype=ti.f32)
+        _insert_channel_lowlevel(src_gpu, dst_gpu, ch)
+        # Copy back to NumPy
+        dst[:] = dst_gpu.to_numpy()
+    else:
+        raise ValueError(
+            "src and dst must be the same type (both NumPy or both Taichi)"
+        )
+
+
+@ti_thread
+def copy(img):
+    """
+    Copy image (auto-allocates output).
+
+    NumPy-compatible: Same as img.copy()
+
+    **Full GPU Pipeline Support:**
+    - If input is Taichi field → returns Taichi field
+    - If input is NumPy array → returns NumPy array
+
+    Args:
+        img: Input image - NumPy or Taichi field
+
+    Returns:
+        Copy of image - same type as input
+
+    Example:
+        >>> # NumPy workflow
+        >>> img_copy = ta.copy(img)
+        >>> # Same as: img_copy = img.copy()
+
+        >>> # GPU workflow (ZERO COPY!)
+        >>> img_gpu_copy = ta.copy(img_gpu)
+        >>> # Copy happens on GPU!
+    """
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
+
+    # Detect input type
+    is_taichi_input = hasattr(img, "to_numpy")
+
+    if is_taichi_input:
+        # GPU workflow
+        img_copy = ti.ndarray(dtype=ti.f32, shape=img.shape)
+        _copy_field_lowlevel(img, img_copy)
+        return img_copy
+    else:
+        # NumPy workflow - just use NumPy's copy
+        return img.copy()
+
+
+# --- Color Conversion Const ---
+COLOR_BGR2GRAY = 6
+COLOR_RGB2GRAY = 7
+COLOR_GRAY2BGR = 8
+COLOR_GRAY2RGB = 8  # Gray to BGR/RGB is identical for grayscale
+
+
+@ti_thread
+def cvtColor(src, code, dst=None):
+    """
+    Convert image color space.
+    OpenCV-compatible: Same as cv2.cvtColor()
+
+    Supported codes:
+        - COLOR_BGR2GRAY
+        - COLOR_RGB2GRAY
+        - COLOR_GRAY2BGR
+        - COLOR_GRAY2RGB
+    """
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
+
+    is_taichi_input = hasattr(src, "to_numpy")
+    src_gpu, src_is_temp = ensure_taichi_field(src, dtype=ti.f32)
+    h, w = src_gpu.shape[:2]
+
+    # Handle output shape
+    if code in [COLOR_BGR2GRAY, COLOR_RGB2GRAY]:
+        out_shape = (h, w)
+    else:
+        out_shape = (h, w, 3)
+
+    if dst is None:
+        dst_gpu = get_temp_buffer(out_shape, ti.f32)
+    else:
+        # If dst provided, ensure it's on GPU for the kernel
+        dst_gpu, _ = ensure_taichi_field(dst, dtype=ti.f32)
+
+    if code == COLOR_BGR2GRAY:
+        _cvt_color_bgr_to_gray_kernel(src_gpu, dst_gpu)
+    elif code == COLOR_RGB2GRAY:
+        _cvt_color_rgb_to_gray_kernel(src_gpu, dst_gpu)
+    elif code in [COLOR_GRAY2BGR, COLOR_GRAY2RGB]:
+        _cvt_color_gray_to_rgb_kernel(src_gpu, dst_gpu)
+    else:
+        raise ValueError(f"Unsupported color conversion code: {code}")
+
+    # Cleanup temp src
+    if src_is_temp:
+        release_temp_buffer(src_gpu)
+
+    # Handle back to numpy if needed
+    if not is_taichi_input:
+        res = dst_gpu.to_numpy()
+        release_temp_buffer(dst_gpu)
+        if dst is not None:
+            dst[:] = res
+            return dst
+        return res
+
+    return dst_gpu
+
+
+@ti_thread
+def absdiff(src1, src2, dst=None):
+    """
+    Calculate absolute difference between two images.
+    OpenCV-compatible: Same as cv2.absdiff()
+    """
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
+
+    is_taichi_input = hasattr(src1, "to_numpy")
+    src1_gpu, s1_temp = ensure_taichi_field(src1, dtype=ti.f32)
+    src2_gpu, s2_temp = ensure_taichi_field(src2, dtype=ti.f32)
+
+    if dst is None:
+        dst_gpu = get_temp_buffer(src1_gpu.shape, ti.f32)
+    else:
+        dst_gpu, _ = ensure_taichi_field(dst, dtype=ti.f32)
+
+    _absdiff_kernel(src1_gpu, src2_gpu, dst_gpu)
+
+    if s1_temp:
+        release_temp_buffer(src1_gpu)
+    if s2_temp:
+        release_temp_buffer(src2_gpu)
+
+    if not is_taichi_input:
+        res = dst_gpu.to_numpy()
+        release_temp_buffer(dst_gpu)
+        if dst is not None:
+            dst[:] = res
+            return dst
+        return res
+
+    return dst_gpu

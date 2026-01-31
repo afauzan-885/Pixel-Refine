@@ -11,6 +11,7 @@ try:
     import taichi as ti
     import taichi.math as tm
     from . import common
+    from .taichi_worker import ti_thread
 
     TAICHI_AVAILABLE = True
 except ImportError:
@@ -200,6 +201,7 @@ def compute_gaussian_weights(sigma, radius):
     return weights
 
 
+@ti_thread
 def gaussian_blur(
     src,
     dst=None,
@@ -222,34 +224,31 @@ def gaussian_blur(
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
-    # Determine radius
-    if kernel_size is None:
+    # --- OpenCV Parity Logic ---
+    # If sigma is 0 or negative, it must be calculated from kernel_size
+    # If kernel_size is 0 or None, it must be calculated from sigma
+
+    if sigma <= 0 and kernel_size is not None:
+        # sigma = 0.3*((ksize-1)*0.5 - 1) + 0.8
+        sigma = 0.3 * ((kernel_size - 1) * 0.5 - 1) + 0.8
+        if sigma <= 0:
+            sigma = 1.0  # Fallback
+
+    if kernel_size is None or kernel_size <= 0:
+        # radius = ceil(3*sigma) is our convention,
+        # OpenCV uses a slightly different heuristic but this is close.
         radius = int(np.ceil(3 * sigma))
+        kernel_size = 2 * radius + 1
     else:
         radius = kernel_size // 2
-
-    # OOM Guard Trigger
-    from . import oom_guard
-
-    if enable_tiling and isinstance(src, np.ndarray) and oom_guard.should_tile(src):
-
-        # Overlap must be at least radius
-        return oom_guard.execute_tiled(
-            gaussian_blur,
-            src,
-            overlap=max(radius + 1, 64),
-            dst=dst,
-            sigma=sigma,
-            kernel_size=kernel_size,
-            buffer_provider=buffer_provider,
-            enable_tiling=False,
-        )
 
     if radius < 1:
         # No blur needed
         if dst is not None:
-            # If dst provided, copy src to dst? For now just return src
-            pass
+            if hasattr(src, "to_numpy") and hasattr(dst, "to_numpy"):
+                common._copy_field_lowlevel(src, dst)
+            else:
+                dst[:] = src
         return src
 
     h, w = src.shape[:2]

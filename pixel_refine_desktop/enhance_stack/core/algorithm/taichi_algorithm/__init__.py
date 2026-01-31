@@ -4,7 +4,16 @@
 
 import numpy as np
 import taichi as ti
+
+# --- Core Imports ---
 from . import common
+from .common import (
+    split,
+    merge,
+    extract_channel,
+    insert_channel,
+    copy,
+)
 
 # --- Underlying Implementations ---
 from .bilinear_interpolation import bilinear_resize, sample_at_bilinear
@@ -15,7 +24,7 @@ from .bicubic_interpolation import (
     sample_at,
     cubic_hermite,
 )
-from .box_filter import box_filter_2d
+from .box_filter import box_filter, box_filter_2d
 from .median_filter import median_filter
 from .gaussian import gaussian_blur as _gaussian_blur_impl
 from .gradients import sobel as _sobel_impl
@@ -25,8 +34,14 @@ from .bilateral_grid import bilateral_grid_filter
 
 # --- Constants ---
 INTER_LINEAR = 1
-INTER_NEAREST = 0  # Not implemented yet, placeholder
-INTER_CUBIC = 2  # Bicubic interpolation (Catmull-Rom)
+INTER_NEAREST = 0
+INTER_CUBIC = 2
+
+# Color Constants
+COLOR_BGR2GRAY = common.COLOR_BGR2GRAY
+COLOR_RGB2GRAY = common.COLOR_RGB2GRAY
+COLOR_GRAY2BGR = common.COLOR_GRAY2BGR
+COLOR_GRAY2RGB = common.COLOR_GRAY2RGB
 
 
 # --- Helper: Universal Channel Handler ---
@@ -39,12 +54,10 @@ def _process_generic(func, src, *args, **kwargs):
         # Try to handle as generic sequence if needed, but usually we expect numpy/taichi
         pass
 
-    # Detect shape
     shape = src.shape
-    is_multichannel = len(shape) == 3 and shape[2] > 1
-
-    if not is_multichannel:
-        # Single channel or 2D: Call directly
+    is_3d = len(shape) == 3
+    if not is_3d:
+        # 2D case: Call directly
         return func(src, *args, **kwargs)
 
     # --- Multi-Channel Handling ---
@@ -69,8 +82,8 @@ def _process_generic(func, src, *args, **kwargs):
     ch_buf_out = common.get_temp_buffer((h, w), ti.f32)
 
     for c in range(c_count):
-        # Extract
-        common.extract_channel(src_gpu, ch_buf_in, c)
+        # Extract (use low-level function)
+        common._extract_channel_lowlevel(src_gpu, ch_buf_in, c)
 
         # Process
         # We pass 'dst=ch_buf_out' if the func supports it to avoid alloc
@@ -79,16 +92,6 @@ def _process_generic(func, src, *args, **kwargs):
         # Verify specific functions key args.
 
         # We'll rely on func returning a result, or writing to passed dst.
-        # Safest is to call func(ch_buf_in, ...) and catch return.
-
-        # However, we need to pass kwargs.
-        # Some funcs like median_filter have optional dst?
-        # median_filter(src, kernel_size, ..) -> returns result (numpy if input numpy, field if field)
-        # If we pass field, it returns field (or numpy if we don't say otherwise?)
-        # median_filter implementation:
-        #   return common.to_numpy_if_needed(dst_gpu, src_is_temp)
-        # If input is field, src_is_temp is False (usually), so it returns field.
-
         res = func(ch_buf_in, *args, dst=ch_buf_out, **kwargs)
 
         # The result might be 'ch_buf_out' or a new buffer if func ignored dst.
@@ -104,7 +107,8 @@ def _process_generic(func, src, *args, **kwargs):
         # Here src_is_temp (inside func) will be False because we pass an existing field 'ch_buf_in'.
         # So it returns field (likely `res` is `ch_buf_out`).
 
-        common.insert_channel(res, dst_gpu, c)
+        # Insert back (use low-level function)
+        common._insert_channel_lowlevel(res, dst_gpu, c)
 
     # Cleanup temps
     common.release_temp_buffer(ch_buf_in)
@@ -119,95 +123,60 @@ def _process_generic(func, src, *args, **kwargs):
 # --- Public API Wrappers ---
 
 
-def resize(src, dsize, interpolation=INTER_LINEAR):
+def resize(src, dsize, interpolation=INTER_LINEAR, dst=None):
     """
-    Resize image.
+    Resize image with full GPU pipeline support.
+    OpenCV-compatible: Same as cv2.resize()
+
     Args:
         src: Input image (H, W) or (H, W, C).
         dsize: Tuple (width, height). NOTE: OpenCV uses (width, height).
-        interpolation: INTER_LINEAR (default).
+        interpolation: INTER_LINEAR (default), INTER_CUBIC.
+        dst: Optional output buffer.
     """
     target_w, target_h = dsize
-    # bilinear_resize takes (src, h, w) - our implementation uses (src, target_h, target_w)
-    # We need to wrap it to match arg order and handle channels.
 
-    # We create a lambda/partial to adapt arguments for _process_generic
-    def _call_resize(img_field, dst=None):
-        # bilinear_resize internal: _bilinear_resize_kernel(src, dst, ...)
-        # The python wrapper returns a new numpy array usually.
-        # We need a field-to-field version for _process_generic to work fully on GPU.
-        # bilinear_interpolation.py implementation mainly targets Numpy->Numpy.
-        # We might need to expose a field-based resize there or handle it here.
-        # The existing 'bilinear_resize' in bilinear_interpolation.py :
-        #   src_f32 = np.ascontiguousarray(src)... _bilinear_resize_kernel(...)
-        # It strictly expects numpy! we need to fix that or handle here.
-        pass
-
-    # Since bilinear_interpolation.py is currently CPU->GPU->CPU strict (it calls np.ascontiguousarray),
-    # we cannot easily use _process_generic which assumes Fields.
-    # We should Update bilinear_interpolation.py or just use a simpler approach here for now?
-    # User wants "Universal support".
-
-    # Let's fix bilinear_interpolation.py to be friendly to fields?
-    # Or just write a quick 3D wrapper that works on Numpy since resize usually changes shape anyway.
-
-    # If generic 3D resize for numpy:
-    h, w = src.shape[:2]
-    is_3d = len(src.shape) == 3 and src.shape[2] > 1
-
-    # Select function based on interpolation
-    if interpolation == INTER_NEAREST:
-        func = nearest_resize
-    elif interpolation == INTER_CUBIC:
-        func = bicubic_resize
+    if interpolation == INTER_CUBIC:
+        return bicubic_resize(src, target_h, target_w)
+    elif interpolation == INTER_NEAREST:
+        return nearest_resize(src, target_h, target_w)
     else:
-        func = bilinear_resize
-
-    if is_3d:
-        # Simple Numpy loop for resize since output shape is different
-        c1 = func(src[:, :, 0], target_h, target_w)
-        res = np.zeros((target_h, target_w, src.shape[2]), dtype=c1.dtype)
-        res[:, :, 0] = c1
-        for c in range(1, src.shape[2]):
-            res[:, :, c] = func(src[:, :, c], target_h, target_w)
-        return res
-    else:
-        return func(src, target_h, target_w)
+        return bilinear_resize(src, target_h, target_w, dst=dst)
 
 
-def median(src, ksize):
+def median(src, ksize, dst=None):
     """
     Apply Median filter.
-    Args:
-        src: Input image.
-        ksize: Kernel size (integer). Currently supports 3.
+    OpenCV-compatible: Same as cv2.medianBlur()
     """
-    return _process_generic(median_filter, src, kernel_size=ksize)
+    # Median implementation might still need 3D support in its kernel
+    # If not supported, _process_generic handles it.
+    return _process_generic(median_filter, src, kernel_size=ksize, dst=dst)
 
 
-def gaussian(src, ksize, sigmaX):
+def gaussian(src, ksize, sigmaX=0, sigmaY=0, dst=None):
     """
     Apply Gaussian Blur.
+    OpenCV-compatible: Same as cv2.GaussianBlur()
+
     Args:
         src: Input image.
-        ksize: Tuple (ksize_w, ksize_h) or int. (Ignored if sigma provided in Taichi impl usually, but we accept it).
-        sigmaX: Standard deviation.
+        ksize: Tuple (w, h) or int.
+        sigmaX: Standard deviation in X.
+        sigmaY: Standard deviation in Y (ignored for now, uses sigmaX).
+        dst: Optional output buffer.
     """
-    # Taichi impl takes 'sigma'.
-    return _process_generic(_gaussian_blur_impl, src, sigma=sigmaX)
+    ks = ksize[0] if isinstance(ksize, tuple) else ksize
+    return _gaussian_blur_impl(src, dst=dst, sigma=sigmaX, kernel_size=ks)
 
 
-def box(src, ksize):
+def box(src, ksize, dst=None):
     """
-    Apply Box Filter (Blur).
+    Apply Box Filter (mean blur).
+    OpenCV-compatible: Same as cv2.blur() or cv2.boxFilter()
     """
-    # Taichi impl 'box_filter_2d(src, kernel_size)'
-    # Check if ksize is tuple or int
-    ks = ksize
-    if isinstance(ksize, tuple):
-        ks = ksize[0]  # Assume square for now as underlying impl supports square radius
-
-    return _process_generic(box_filter_2d, src, kernel_size=ks)
+    ks = ksize[0] if isinstance(ksize, tuple) else ksize
+    return box_filter(src, dst=dst, kernel_size=ks)
 
 
 def sobel(src, dx, dy, ksize=3):
@@ -285,10 +254,18 @@ def ransac(flow, threshold=3.0):
     return ransac_flow_cleanup(flow, threshold=threshold)
 
 
+# --- Core Utilities ---
+cvtColor = common.cvtColor
+absdiff = common.absdiff
+
 __all__ = [
     "INTER_LINEAR",
     "INTER_NEAREST",
     "INTER_CUBIC",
+    "COLOR_BGR2GRAY",
+    "COLOR_RGB2GRAY",
+    "COLOR_GRAY2BGR",
+    "COLOR_GRAY2RGB",
     "resize",
     "median",
     "gaussian",
@@ -297,12 +274,18 @@ __all__ = [
     "laplacian",
     "bilateral",
     "ransac",
+    "cvtColor",
+    "absdiff",
     # Bicubic Interpolation APIs
-    "sample_at_bicubic",  # High-level: Point-wise bicubic sampling
-    "sample_at",  # Alias for sample_at_bicubic (backward compatibility)
-    "cubic_hermite",  # Low-level: Catmull-Rom spline function
+    "sample_at_bicubic",
+    "sample_at",
+    "cubic_hermite",
     # Bilinear Interpolation APIs
-    "sample_at_bilinear",  # High-level: Point-wise bilinear sampling (faster)
-    # Exposing underlying still valid if needed, but primary API is above
-    "bilateral_grid_filter",
+    "sample_at_bilinear",
+    # Channel Operations
+    "split",
+    "merge",
+    "extract_channel",
+    "insert_channel",
+    "copy",
 ]

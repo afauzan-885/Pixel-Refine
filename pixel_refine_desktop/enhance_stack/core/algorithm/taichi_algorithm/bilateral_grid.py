@@ -12,6 +12,7 @@ try:
     import taichi as ti
     import taichi.math as tm
     from . import common
+    from .taichi_worker import ti_thread
 
     TAICHI_AVAILABLE = True
 except ImportError:
@@ -153,6 +154,7 @@ if TAICHI_AVAILABLE:
             )
 
 
+@ti_thread
 def bilateral_grid_filter(
     img,
     dst=None,
@@ -259,7 +261,7 @@ def bilateral_grid_filter(
         # Original kernel: 'lum = img[i,j]', then 'img[i,j] = result'. In-place.
 
         # We'll copy src to dst, then run kernel on dst inplace.
-        common.copy_field(src_gpu, dst_gpu)
+        common._copy_field_lowlevel(src_gpu, dst_gpu)
 
         _bilateral_grid_kernel(
             dst_gpu,
@@ -299,7 +301,7 @@ def bilateral_grid_filter(
 
         for c in range(3):
             # Extract channel
-            common.extract_channel(src_gpu, temp_ch, c)
+            common._extract_channel_lowlevel(src_gpu, temp_ch, c)
 
             # Filter
             _bilateral_grid_kernel(
@@ -317,7 +319,7 @@ def bilateral_grid_filter(
             )
 
             # Insert back
-            common.insert_channel(temp_ch, dst_gpu, c)
+            common._insert_channel_lowlevel(temp_ch, dst_gpu, c)
 
     # Cleanup
     if src_is_temp:
