@@ -103,9 +103,20 @@ class _TaichiWorker(threading.Thread):
                 print(f"[TaichiWorker] Critical Loop Error: {e}")
 
     def submit(self, func, *args, **kwargs):
-        """Submit a job and wait for results (Thread-safe, synchronous)."""
+        """Submit a job and wait for results (Thread-safe, non-blocking for UI)."""
         future = self.submit_async(func, *args, **kwargs)
-        return future.result()
+
+        # If we are in the Main Thread, we must YIELD to avoid Windows "Not Responding"
+        is_main = threading.current_thread() is threading.main_thread()
+
+        if is_main:
+            # Polling wait with small sleeps allows the GIL to switch and UI to breathe
+            while not future.done():
+                time.sleep(0.001)
+            return future.result()
+        else:
+            # Worker or side threads can block normally
+            return future.result()
 
     def submit_and_wait(self, func, *args, **kwargs):
         """Alias for submit() for backward compatibility."""

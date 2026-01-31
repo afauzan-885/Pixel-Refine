@@ -129,13 +129,18 @@ def get_safe_tile_size(channels=3, safety_factor=0.8):
     max_side = (max_side // 128) * 128
 
     # Clamp
-    return max(
-        2048, min(max_side, 8192)
-    )  # Cap at 8K to avoid texture limits/driver timeouts
+    # Clamp to smaller sizes for better UI responsiveness on single-GPU desktops
+    # 1024-1536 is the "sweet spot" for MX150/Internal GPU fluid display.
+    return max(768, min(max_side, 1536))
 
 
 def execute_tiled(
-    func, src: np.ndarray, overlap: int = 64, tile_size: int = None, **kwargs
+    func,
+    src: np.ndarray,
+    overlap: int = 64,
+    tile_size=None,
+    progress_callback=None,
+    **kwargs,
 ):
     """
     Execute a Taichi function on a large image using tiling.
@@ -225,6 +230,9 @@ def execute_tiled(
     x_steps = math.ceil(w / tile_size)
     y_steps = math.ceil(h / tile_size)
 
+    total_tiles = x_steps * y_steps
+    tiles_done = 0
+
     for y_i in range(y_steps):
         for x_i in range(x_steps):
             # 1. Define Core Tile (The area we want to WRITE)
@@ -277,6 +285,14 @@ def execute_tiled(
                 else:
                     crop = tile_res[rel_y_start:rel_y_end, rel_x_start:rel_x_end]
                     out_buffers[buffer_idx][y_start:y_end, x_start:x_end] = crop
+
+            # 5. Progress Signaling
+            tiles_done += 1
+            if progress_callback:
+                try:
+                    progress_callback(tiles_done / total_tiles)
+                except:
+                    pass
 
             # Cleanup explicitly if possible?
             # The loop scope should handle it in Python, but we can trust the GC.

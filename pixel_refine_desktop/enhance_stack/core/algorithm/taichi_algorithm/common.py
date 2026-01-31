@@ -365,6 +365,18 @@ def _copy_field_lowlevel(src, dst):
     _copy_kernel(src, dst)
 
 
+# Public API wrapper for copy_field
+def copy_field(src, dst):
+    """
+    Copy Taichi field from src to dst (in-place).
+
+    Args:
+        src: Source Taichi field
+        dst: Destination Taichi field (must be pre-allocated with same shape)
+    """
+    _copy_field_lowlevel(src, dst)
+
+
 @ti_thread
 def _extract_channel_lowlevel(src, dst, channel):
     """Low-level extract (requires pre-allocated dst)."""

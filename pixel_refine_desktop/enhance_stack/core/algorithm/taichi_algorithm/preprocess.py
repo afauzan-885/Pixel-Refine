@@ -391,8 +391,12 @@ if TAICHI_AVAILABLE:
 
             # Step 2: Sample green channel with bilinear interpolation
             # Extract green (channel 1) during sampling
-            is_rgb = len(src.shape) == 3
-            if is_rgb:
+            v00 = 0.0
+            v10 = 0.0
+            v01 = 0.0
+            v11 = 0.0
+
+            if ti.static(len(src.shape) == 3):
                 v00 = float(src[y0, x0, 1])
                 v10 = float(src[y0, x1, 1])
                 v01 = float(src[y1, x0, 1])
@@ -535,8 +539,8 @@ if TAICHI_AVAILABLE:
         """Fused kernel: Normalize → Gamma → Extract Green"""
         for y, x in ti.ndrange(h, w):
             # Extract green channel
-            is_rgb = len(src.shape) == 3
-            if is_rgb:
+            green = 0.0
+            if ti.static(len(src.shape) == 3):
                 green = float(src[y, x, 1])
             else:
                 green = float(src[y, x])
@@ -646,8 +650,8 @@ if TAICHI_AVAILABLE:
         """Fused kernel: Gamma → Extract Green"""
         for y, x in ti.ndrange(h, w):
             # Extract green channel
-            is_rgb = len(src.shape) == 3
-            if is_rgb:
+            green = 0.0
+            if ti.static(len(src.shape) == 3):
                 green = src[y, x, 1]
             else:
                 green = src[y, x]
@@ -881,11 +885,10 @@ def preprocess_pipeline_gpu(
 
         prev_gpu = current_gpu
         dst_h, dst_w = target_size
-        current_gpu = common.get_temp_buffer((dst_h, dst_w), ti.f32, buffer_provider)
 
-        src_h, src_w = prev_gpu.shape[:2]
-        bilinear_interpolation._bilinear_resize_kernel(
-            prev_gpu, current_gpu, src_h, src_w, dst_h, dst_w
+        # Use public API which handles kernel selection and threading
+        current_gpu = bilinear_interpolation.bilinear_resize(
+            prev_gpu, dst_h, dst_w, dst=None
         )
         common.release_temp_buffer(prev_gpu)
 

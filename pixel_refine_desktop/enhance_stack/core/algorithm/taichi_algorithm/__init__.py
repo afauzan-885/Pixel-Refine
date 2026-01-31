@@ -31,6 +31,8 @@ from .gradients import sobel as _sobel_impl
 from .gradients import laplacian as _laplacian_impl
 from .ransac import ransac_flow_cleanup
 from .bilateral_grid import bilateral_grid_filter
+from .pyramid import build_image_pyramid, build_image_pyramid_gpu, upsample_flow
+from .warp import warp_image_gpu
 
 # --- Constants ---
 INTER_LINEAR = 1
@@ -276,6 +278,12 @@ __all__ = [
     "ransac",
     "cvtColor",
     "absdiff",
+    # Pyramid APIs
+    "build_image_pyramid",
+    "build_image_pyramid_gpu",
+    "upsample_flow",
+    # Warp APIs
+    "warp_image_gpu",
     # Bicubic Interpolation APIs
     "sample_at_bicubic",
     "sample_at",
