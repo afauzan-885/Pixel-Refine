@@ -3,6 +3,7 @@ import os
 from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.taichi_worker import (
     cleanup_taichi,
     TAICHI_AVAILABLE,
+    release_taichi_ndarray,
 )
 
 os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
@@ -67,6 +68,7 @@ try:
         ti_thread,
         create_taichi_ndarray,
         download_taichi_ndarray,
+        release_taichi_ndarray,
     )
 
     TAICHI_SPATIAL_AVAILABLE = True
@@ -481,7 +483,7 @@ class SimilarityAlgorithm:
                     update_progress,
                     stop_requested,
                     num_alignment_workers=num_workers,
-                    save_align_image=True,
+                    save_align_image=False,
                     progress_start=p_align_start,
                     progress_end=p_align_end,
                     is_linear_mode=is_linear_mode,
@@ -525,6 +527,15 @@ class SimilarityAlgorithm:
 
         # --- LANGKAH 3: MAIN MERGING ---
 
+        # Check GPU Flag
+        # Merging GPU: Aktifkan secara default untuk percepatan loop frame
+        use_taichi_gpu = unused_kwargs.get("similarity_merging_gpu", True)
+        if use_taichi_gpu and not TAICHI_SPATIAL_AVAILABLE:
+            print(
+                "Warning: similarity_merging_gpu=True but Taichi not available. Falling back to C++."
+            )
+            use_taichi_gpu = False
+
         # [PROXY LOGIC] Preprocess Global Reference untuk Weight Map
         is_linear_mode = unused_kwargs.get("is_linear_mode", False)
 
@@ -547,8 +558,10 @@ class SimilarityAlgorithm:
         ref_work_res_pass2_gpu = bilinear_resize(
             ref_gray_preprocessed_gpu, work_res_h, work_res_w
         )
-        # Convert to NumPy only at the end when needed
-        ref_work_res_pass2 = ref_work_res_pass2_gpu.to_numpy()
+        # Convert to NumPy only if needed for CPU path
+        ref_work_res_pass2 = None
+        if not use_taichi_gpu:
+            ref_work_res_pass2 = ref_work_res_pass2_gpu.to_numpy()
 
         # Stability map untuk C++ tetap None karena Pass 1 dihapus
         stability_map_work_res = None
@@ -652,14 +665,6 @@ class SimilarityAlgorithm:
         else:
             final_num_workers = max(1, min((os.cpu_count() or 2) // 2, 8))
 
-        # Check GPU Flag
-        use_taichi_gpu = unused_kwargs.get("similarity_merging_gpu", True)
-        if use_taichi_gpu and not TAICHI_SPATIAL_AVAILABLE:
-            print(
-                "Warning: similarity_merging_gpu=True but Taichi not available. Falling back to C++."
-            )
-            use_taichi_gpu = False
-
         # Jika GPU aktif, kita skip Threading Producer-Consumer yang ribet ini
         # Dan langsung panggil Taichi (yang internalnya sudah parallel GPU)
         if use_taichi_gpu:
@@ -685,7 +690,7 @@ class SimilarityAlgorithm:
                     )
 
                     _base_window_gpu = create_taichi_ndarray(base_window)
-                    _ref_work_gpu = create_taichi_ndarray(ref_work_res_pass2)
+                    _ref_work_gpu = ref_work_res_pass2_gpu  # Already on GPU!
                     _rows_gpu = create_taichi_ndarray(row_starts)
                     _cols_gpu = create_taichi_ndarray(col_starts)
 
@@ -701,44 +706,38 @@ class SimilarityAlgorithm:
                         if img_orig is None:
                             continue
 
-                        # Preprocessing (CPU tasks inside the worker thread is fine)
-                        curr_float = normalize_image(img_orig, ref_dtype)
+                        # 1. Normalize directly on GPU
+                        curr_full_gpu = preprocess.normalize_image_gpu(
+                            img_orig, dtype=ref_dtype, buffer_provider="pool"
+                        )
 
-                        # Ensure size matches reference
-                        if (curr_float.shape[0] != ref_image_h) or (
-                            curr_float.shape[1] != ref_image_w
+                        # 2. Ensure size matches reference on GPU if needed
+                        if (curr_full_gpu.shape[0] != ref_image_h) or (
+                            curr_full_gpu.shape[1] != ref_image_w
                         ):
-                            curr_float = cv2.resize(
-                                curr_float,
-                                (ref_image_w, ref_image_h),
-                                interpolation=cv2.INTER_AREA,
+                            # Resize on GPU
+                            new_full = bilinear_resize(
+                                curr_full_gpu,
+                                ref_image_h,
+                                ref_image_w,
                             )
+                            release_taichi_ndarray(curr_full_gpu)
+                            curr_full_gpu = new_full
 
-                        # Weight calculation preparation (Proxy if linear)
-                        if is_linear_mode:
-                            curr_float_proxy = to_gamma_proxy(
-                                curr_float, scale=proxy_scale
-                            )
-                            curr_preproc_gpu = preprocess.preprocess_in_python_gpu(
-                                curr_float_proxy, use_raft=False, use_sharpen=False
-                            )
-                            curr_preproc = curr_preproc_gpu.to_numpy()
-                        else:
-                            curr_preproc_gpu = preprocess.preprocess_in_python_gpu(
-                                curr_float, use_raft=False, use_sharpen=False
-                            )
-                            curr_preproc = curr_preproc_gpu.to_numpy()
-
-                        # Resize to work resolution for weight map analysis
-                        curr_work_gray = cv2.resize(
-                            curr_preproc,
-                            (work_res_w, work_res_h),
-                            interpolation=cv2.INTER_AREA,
+                        # 3. Preprocess for Weight Map (Gamma, Green, Resize) in ONE fused kernel
+                        curr_work_gray_gpu = preprocess.preprocess_pipeline_gpu(
+                            curr_full_gpu,
+                            normalize=False,  # already done
+                            apply_gamma=is_linear_mode,
+                            extract_green=True,
+                            target_size=(work_res_h, work_res_w),
+                            scale=proxy_scale,
+                            buffer_provider="pool",
                         )
 
                         # Step A: Generate Weight Map on GPU
                         generate_weight_map_taichi(
-                            current_image=curr_work_gray,
+                            current_image=curr_work_gray_gpu,
                             reference_image=_ref_work_gpu,
                             weight_map_sum=_weight_work_gpu,
                             base_window=_base_window_gpu,
@@ -754,15 +753,28 @@ class SimilarityAlgorithm:
                             buffer_provider="pool",
                         )
 
+                        # Cleanup intermediate per-frame GPU buffers
+                        if curr_work_gray_gpu:
+                            release_taichi_ndarray(curr_work_gray_gpu)
+
                         # Step B: Accumulate result directly on GPU
                         accumulate_spatial_merging_taichi(
-                            current_image_full=curr_float,
+                            current_image_full=curr_full_gpu,
                             weight_map_work=_weight_work_gpu,
                             final_image_sum=_sum_gpu,
                             weight_map_sum_full=_weight_sum_full_gpu,
+                            buffer_provider="pool",
                         )
 
-                        images[i] = None  # Free RAM
+                        # Cleanup final frame buffer
+                        if curr_full_gpu:
+                            release_taichi_ndarray(curr_full_gpu)
+
+                        # Explicitly release aligned image if it's a Taichi object
+                        if img_orig is not None and hasattr(img_orig, "to_numpy"):
+                            release_taichi_ndarray(img_orig)
+
+                        images[i] = None  # Free RAM/Context
                         processed_frames_spatial += 1
 
                         # Update Progress
@@ -792,7 +804,7 @@ class SimilarityAlgorithm:
 
                         time.sleep(0.01)
 
-                    # Final Download
+                    # Final Download (RESTORED TO SAFE VERSION)
                     download_taichi_ndarray(_sum_gpu, out=final_image_sum_full_res)
                     download_taichi_ndarray(
                         _weight_sum_full_gpu, out=weight_map_sum_full_res
@@ -988,13 +1000,14 @@ class SimilarityAlgorithm:
                 # Fungsi ini akan menangani Normalisasi (Divide) DAN Structure Fusion
                 # secara bertahap (per kotak) untuk menghemat memori.
 
+                # --- CPU Tiled Fusion (RESTORED TO SAFE VERSION) ---
                 final_image = self._apply_final_fusion_tiled(
                     sum_img=final_image_sum_full_res,
                     sum_weight=weight_map_sum_full_res,
                     ref_img=ref_full_float,
                     noise_sigma=ref_noise_sigma,
-                    tile_size=512,  # Ukuran tile (sesuaikan dengan RAM, 1024 aman)
-                    padding=16,  # Padding untuk Gaussian Blur overlap
+                    tile_size=512,
+                    padding=16,
                 )
 
                 # Return result
@@ -1023,7 +1036,19 @@ class SimilarityAlgorithm:
                     out=fallback_img,
                     where=valid_mask[:, :, np.newaxis],
                 )
-                return (fallback_img, weight_map_sum_full_res, processed_frames_spatial)
+                if weight_of_each_image:
+                    return (
+                        fallback_img,
+                        weight_map_sum_full_res,
+                        processed_frames_spatial,
+                        [],
+                    )
+                else:
+                    return (
+                        fallback_img,
+                        weight_map_sum_full_res,
+                        processed_frames_spatial,
+                    )
 
         return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
 

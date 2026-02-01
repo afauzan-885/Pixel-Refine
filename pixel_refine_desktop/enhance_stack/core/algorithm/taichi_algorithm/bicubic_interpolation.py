@@ -47,7 +47,7 @@ if TAICHI_AVAILABLE:
             dst[r, c] = val
 
 
-def bicubic_resize(src, target_h: int, target_w: int, dst=None):
+def bicubic_resize(src, target_h: int, target_w: int, dst=None, buffer_provider="pool"):
     """
     Smart bicubic resize API that auto-detects input type and returns appropriate output.
 
@@ -62,6 +62,7 @@ def bicubic_resize(src, target_h: int, target_w: int, dst=None):
         target_h: Target height
         target_w: Target width
         dst: Optional pre-allocated output buffer
+        buffer_provider: Pool provider for GPU allocations
 
     Returns:
         Resized image (same type as input unless dst is provided)
@@ -69,34 +70,52 @@ def bicubic_resize(src, target_h: int, target_w: int, dst=None):
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
+    from . import common
+
     # Detect input type
     is_taichi_input = hasattr(src, "to_numpy")
 
     @ti_thread
     def _run_gpu_bicubic_resize(src_data, h_dst, w_dst, dst_data=None):
-        h_src, w_src = src_data.shape[:2]
+        src_gpu, src_is_temp = common.ensure_taichi_field(
+            src_data, dtype=ti.f32, buffer_provider=buffer_provider
+        )
+        h_src, w_src = src_gpu.shape[:2]
 
-        # Prepare source data for GPU
-        if is_taichi_input:
-            # Already on GPU - use directly (ZERO COPY!)
-            src_gpu = src_data
-        else:
-            # NumPy input - need to upload to GPU
-            src_gpu = np.ascontiguousarray(src_data, dtype=np.float32)
+        is_3d = len(src_gpu.shape) == 3
+        c_count = src_gpu.shape[2] if is_3d else 1
 
         # Determine output buffer
         if dst_data is None:
             if is_taichi_input:
-                # Input is GPU → output should be GPU field
-                dst_data = ti.ndarray(dtype=ti.f32, shape=(h_dst, w_dst))
+                # Input is GPU → output should be GPU field from pool
+                shape = (h_dst, w_dst, c_count) if is_3d else (h_dst, w_dst)
+                dst_gpu = common.get_temp_buffer(shape, ti.f32, buffer_provider)
             else:
                 # Input is NumPy → output will be NumPy (allocated as temp GPU buffer)
-                dst_data = np.zeros((h_dst, w_dst), dtype=np.float32)
+                dst_gpu = np.zeros((h_dst, w_dst), dtype=np.float32)
+        else:
+            dst_gpu, _ = common.ensure_taichi_field(
+                dst_data, dtype=ti.f32, buffer_provider=buffer_provider
+            )
 
         # Run kernel (works with both NumPy and Taichi fields)
-        _bicubic_resize_kernel(src_gpu, dst_data, h_src, w_src, h_dst, w_dst)
+        _bicubic_resize_kernel(src_gpu, dst_gpu, h_src, w_src, h_dst, w_dst)
 
-        return dst_data
+        # Cleanup temp src
+        if src_is_temp:
+            common.release_temp_buffer(src_gpu)
+
+        if not is_taichi_input:
+            # If input was NumPy, dst_gpu is likely NumPy or result was written to NumPy
+            # If dst_gpu is a field, we need to download it
+            if hasattr(dst_gpu, "to_numpy"):
+                res = dst_gpu.to_numpy()
+                common.release_temp_buffer(dst_gpu)
+                return res
+            return dst_gpu
+
+        return dst_gpu
 
     return _run_gpu_bicubic_resize(src, target_h, target_w, dst)
 

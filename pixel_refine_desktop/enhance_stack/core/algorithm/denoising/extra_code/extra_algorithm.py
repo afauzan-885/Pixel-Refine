@@ -709,14 +709,12 @@ def perform_alignment_gpu(
         if not success:
             return False
 
-        # [SMART LIFECYCLE] Do NOT clear Taichi cache here!
-        # Preprocessing in merging stage still needs Taichi context.
-        # Cache will be cleared at the end of entire pipeline.
-        # try:
-        #     worker.submit_and_wait(clear_taichi_cache)
-        #     print("[Taichi] VRAM cache cleared.")
-        # except Exception as e:
-        #     print(f"[Taichi] Warning: Failed to clear VRAM cache: {e}")
+        # [SMART LIFECYCLE] Reclaim VRAM after alignment
+        try:
+            worker.submit_and_wait(clear_taichi_cache)
+            # print("[Taichi] Alignment VRAM reclaimed.")
+        except Exception as e:
+            print(f"[Taichi] Warning: Failed to reclaim alignment VRAM: {e}")
 
         print("✅ GPU Alignment selesai.")
         return True

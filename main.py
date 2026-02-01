@@ -5,6 +5,10 @@ This module initializes and runs the Pixel Refine application.
 """
 
 import sys
+import os
+
+# Disable CUDA Async Malloc for Taichi stability before any other imports
+os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
 
 # PySide6 imports
 from PySide6.QtWidgets import (

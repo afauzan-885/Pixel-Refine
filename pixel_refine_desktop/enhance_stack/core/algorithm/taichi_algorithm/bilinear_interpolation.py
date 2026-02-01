@@ -69,7 +69,7 @@ if TAICHI_AVAILABLE:
             dst[r, c, ch] = tm.mix(r1, r2, wy)
 
 
-def bilinear_resize(src, target_h: int, target_w: int, dst=None):
+def bilinear_resize(src, target_h: int, target_w: int, dst=None, buffer_provider="pool"):
     """
     Smart bilinear resize API that auto-detects input type and returns appropriate output.
 
@@ -98,7 +98,7 @@ def bilinear_resize(src, target_h: int, target_w: int, dst=None):
 
     @ti_thread
     def _run_gpu_resize(src_data, h_dst, w_dst, dst_data=None):
-        src_gpu, src_is_temp = ensure_taichi_field(src_data, dtype=ti.f32)
+        src_gpu, src_is_temp = ensure_taichi_field(src_data, dtype=ti.f32, buffer_provider=buffer_provider)
         h_src, w_src = src_gpu.shape[:2]
 
         is_3d = len(src_gpu.shape) == 3
@@ -107,10 +107,10 @@ def bilinear_resize(src, target_h: int, target_w: int, dst=None):
         # Determine output buffer
         if dst_data is None:
             out_shape = (h_dst, w_dst, c_count) if is_3d else (h_dst, w_dst)
-            dst_gpu = get_temp_buffer(out_shape, ti.f32)
+            dst_gpu = get_temp_buffer(out_shape, ti.f32, buffer_provider)
         else:
             # If dst provided, ensure it's on GPU for kernel
-            dst_gpu, _ = ensure_taichi_field(dst_data, dtype=ti.f32)
+            dst_gpu, _ = ensure_taichi_field(dst_data, dtype=ti.f32, buffer_provider=buffer_provider)
 
         # Run appropriate kernel
         if is_3d:

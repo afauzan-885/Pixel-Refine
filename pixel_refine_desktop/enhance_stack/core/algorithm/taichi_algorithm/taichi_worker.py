@@ -63,15 +63,26 @@ class _TaichiWorker(threading.Thread):
             return
 
         try:
-            # Try Vulkan first as requested by the user
+            # Optimization: Pre-calculate CPU thread limit to avoid UI starvation
+            import multiprocessing
+
+            num_cores = multiprocessing.cpu_count()
+            # Leave at least 2 cores for OS/UI if possible, minimum 1 thread
+            reserved_cores = 2 if num_cores > 4 else 1
+            ti_cpu_threads = max(1, num_cores - reserved_cores)
+
+            # Reduce reservation to 2GB to leave room for OS/UI
+            # Fallback chain: GPU -> CPU
             try:
-                ti.init(arch=ti.vulkan, offline_cache=True, device_memory_GB=2.0)
+                # Use ti.gpu (CUDA/Vulkan/Metal)
+                ti.init(arch=ti.gpu, offline_cache=True, device_memory_GB=2.0)
             except Exception:
-                # Fallback to GPU (CUDA/Metal) -> CPU
                 try:
-                    ti.init(arch=ti.gpu, offline_cache=True, device_memory_GB=2.0)
-                except Exception:
-                    ti.init(arch=ti.cpu)
+                    # Limit CPU threads to keep UI responsive on fallback
+                    ti.init(arch=ti.cpu, cpu_max_num_threads=ti_cpu_threads)
+                except Exception as e:
+                    self.init_error = str(e)
+                    return
 
             self.initialized = True
         except Exception as e:
@@ -95,8 +106,10 @@ class _TaichiWorker(threading.Thread):
                 finally:
                     self.task_queue.task_done()
 
-                # Yield to OS - prevents UI/GIL starvation
-                time.sleep(0.001)
+                # Yield to OS is implicitly handled by blocking task_queue.get()
+                # and when the worker thread finishes a task and waits for the next one.
+                # Removing explicit sleep to maximize task throughput.
+                pass
 
             except Exception as e:
                 print(f"[TaichiWorker] Critical Loop Error: {e}")
@@ -144,6 +157,20 @@ class _TaichiWorker(threading.Thread):
 # --- Singleton Instance ---
 _GLOBAL_TI_WORKER = None
 _INIT_LOCK = threading.Lock()
+_CACHED_COMMON = None
+
+
+def _get_common_module():
+    """Lazily import and cache the common module."""
+    global _CACHED_COMMON
+    if _CACHED_COMMON is None:
+        try:
+            from . import common
+
+            _CACHED_COMMON = common
+        except ImportError:
+            pass
+    return _CACHED_COMMON
 
 
 def _get_worker():
@@ -190,16 +217,18 @@ def cleanup_taichi(mode="cache"):
 
     def _cleanup_impl():
         try:
-            from . import common
+            common_mod = _get_common_module()
+            if not common_mod:
+                return False
 
             if mode == "cache":
                 # Fast: Only clear buffer pool
-                common.cleanup_cache()
+                common_mod.cleanup_cache()
                 return True
 
             elif mode == "memory":
                 # Moderate: Clear cache + GC
-                common.cleanup_cache()
+                common_mod.cleanup_cache()
                 import gc
 
                 gc.collect()
@@ -207,7 +236,7 @@ def cleanup_taichi(mode="cache"):
 
             elif mode == "full":
                 # Slow: Full reset (use only when necessary)
-                common.cleanup_cache()
+                common_mod.cleanup_cache()
                 import gc
 
                 gc.collect()
@@ -258,9 +287,13 @@ def create_taichi_ndarray(arr, dtype=None, use_pool=False):
 
     # Use pool if requested, else allocate new
     if use_pool:
-        from . import common
-
-        field = common.get_temp_buffer(arr.shape, ti_dtype, buffer_provider="pool")
+        common_mod = _get_common_module()
+        if common_mod:
+            field = common_mod.get_temp_buffer(
+                arr.shape, ti_dtype, buffer_provider="pool"
+            )
+        else:
+            field = ti.ndarray(dtype=ti_dtype, shape=arr.shape)
     else:
         field = ti.ndarray(dtype=ti_dtype, shape=arr.shape)
 
@@ -278,6 +311,7 @@ def download_taichi_ndarray(field, out=None):
     return field.to_numpy()
 
 
+@ti_thread
 def release_taichi_ndarray(field):
     """
     Release a Taichi ndarray back to the pool.
@@ -286,8 +320,8 @@ def release_taichi_ndarray(field):
     if field is None:
         return
     try:
-        from . import common
-
-        common.release_temp_buffer(field)
+        common_mod = _get_common_module()
+        if common_mod:
+            common_mod.release_temp_buffer(field)
     except:
         pass

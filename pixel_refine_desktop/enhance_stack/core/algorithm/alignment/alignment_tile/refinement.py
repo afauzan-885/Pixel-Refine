@@ -37,8 +37,57 @@ MAX_STACK_TILE_SIZE = 64
 
 if TAICHI_AVAILABLE:
 
+    @ti.func
+    def _get_zmcl_cost(
+        ref_layer: ti.types.ndarray(),
+        comp_layer: ti.types.ndarray(),
+        tile_x: int,
+        tile_y: int,
+        test_dx: int,
+        test_dy: int,
+        tile_w: int,
+        tile_h: int,
+    ) -> float:
+        """Helper to compute ZMCL cost for a tile shift."""
+        sum_diff = 0.0
+        for r, c in ti.ndrange(tile_h, tile_w):
+            val_ref = ref_layer[tile_y + r, tile_x + c]
+            val_comp = comp_layer[tile_y + test_dy + r, tile_x + test_dx + c]
+            sum_diff += val_ref - val_comp
+        mean_diff = sum_diff / float(tile_h * tile_w)
+
+        total_cost = 0.0
+        eps_sq = 1e-12
+        for r, c in ti.ndrange(tile_h, tile_w):
+            diff = (
+                ref_layer[tile_y + r, tile_x + c]
+                - comp_layer[tile_y + test_dy + r, tile_x + test_dx + c]
+            ) - mean_diff
+            total_cost += ti.sqrt(diff * diff + eps_sq)
+        return total_cost / float(tile_h * tile_w)
+
+    @ti.func
+    def _get_sad_cost(
+        ref_layer: ti.types.ndarray(),
+        comp_layer: ti.types.ndarray(),
+        tile_x: int,
+        tile_y: int,
+        test_dx: int,
+        test_dy: int,
+        tile_w: int,
+        tile_h: int,
+    ) -> float:
+        """Helper to compute SAD cost for a tile shift."""
+        total_cost = 0.0
+        for r, c in ti.ndrange(tile_h, tile_w):
+            total_cost += ti.abs(
+                ref_layer[tile_y + r, tile_x + c]
+                - comp_layer[tile_y + test_dy + r, tile_x + test_dx + c]
+            )
+        return total_cost / float(tile_h * tile_w)
+
     @ti.kernel
-    def _parabolic_refinement_kernel(
+    def _subpixel_refinement_parabolic_kernel(
         ref_layer: ti.types.ndarray(),
         comp_layer: ti.types.ndarray(),
         result_out: ti.types.ndarray(),
@@ -52,67 +101,90 @@ if TAICHI_AVAILABLE:
         w: int,
     ):
         """
-        Parabolic fitting on 3x3 grid for subpixel refinement.
-        Matching C++ parabolic_refinement().
-
-        result_out: [refined_dx, refined_dy, confidence]
+        Integrated Subpixel Refinement:
+        1. 3x3 Integer search using ZMCL cost.
+        2. 3x3 Parabolic fitting using SAD cost around the best integer position.
+        Matching C++ logic flow.
         """
-        tile_area_inv = 1.0 / float(tile_w * tile_h)
+        # Step 1: Integer search (3x3 ZMCL)
+        min_cost = 1e10
+        best_dx = dx
+        best_dy = dy
 
-        # Evaluate 9 points on 3x3 grid
-        costs = ti.Vector([0.0] * 9)  # Row-major: [-1,-1], [0,-1], [1,-1], ...
-
-        eval_idx = 0
         for ddy in ti.static(range(-1, 2)):
             for ddx in ti.static(range(-1, 2)):
                 test_dx = dx + ddx
                 test_dy = dy + ddy
 
-                # Boundary check
+                if (
+                    tile_x + test_dx >= 0
+                    and tile_y + test_dy >= 0
+                    and tile_x + test_dx + tile_w <= w
+                    and tile_y + test_dy + tile_h <= h
+                ):
+                    cost = _get_zmcl_cost(
+                        ref_layer,
+                        comp_layer,
+                        tile_x,
+                        tile_y,
+                        test_dx,
+                        test_dy,
+                        tile_w,
+                        tile_h,
+                    )
+                    if cost < min_cost:
+                        min_cost = cost
+                        best_dx = test_dx
+                        best_dy = test_dy
+
+        # Step 2: Parabolic Refinement using SAD (3x3 grid around best_dx, best_dy)
+        costs = ti.Vector([0.0] * 9)
+        eval_idx = 0
+        for ddy in ti.static(range(-1, 2)):
+            for ddx in ti.static(range(-1, 2)):
+                test_dx = best_dx + ddx
+                test_dy = best_dy + ddy
+
                 if (
                     tile_x + test_dx < 0
                     or tile_y + test_dy < 0
                     or tile_x + test_dx + tile_w > w
                     or tile_y + test_dy + tile_h > h
                 ):
-                    costs[eval_idx] = 1e10  # Large cost for out-of-bounds
+                    costs[eval_idx] = 1e10
                 else:
-                    # Calculate SAD cost
-                    total_cost = 0.0
-                    for r, c in ti.ndrange(tile_h, tile_w):
-                        ref_val = ref_layer[tile_y + r, tile_x + c]
-                        comp_val = comp_layer[
-                            tile_y + test_dy + r, tile_x + test_dx + c
-                        ]
-                        total_cost += ti.abs(ref_val - comp_val)
-                    costs[eval_idx] = total_cost * tile_area_inv
-
+                    costs[eval_idx] = _get_sad_cost(
+                        ref_layer,
+                        comp_layer,
+                        tile_x,
+                        tile_y,
+                        test_dx,
+                        test_dy,
+                        tile_w,
+                        tile_h,
+                    )
                 eval_idx += 1
 
-        # Parabolic fitting
-        center_cost = costs[4]  # [0, 0]
-        left_cost = costs[3]  # [-1, 0]
-        right_cost = costs[5]  # [1, 0]
-        top_cost = costs[1]  # [0, -1]
-        bottom_cost = costs[7]  # [0, 1]
+        # Parabolic fitting on the SAD surface
+        center_cost = costs[4]
+        left_cost = costs[3]
+        right_cost = costs[5]
+        top_cost = costs[1]
+        bottom_cost = costs[7]
 
-        # X-direction fit
         delta_x = 0.0
         c_coeff_x = (right_cost + left_cost - 2.0 * center_cost) / 2.0
         if ti.abs(c_coeff_x) > 1e-6:
             b_coeff_x = (right_cost - left_cost) / 2.0
-            delta_x = -b_coeff_x / (2.0 * c_coeff_x)
-            delta_x = tm.clamp(delta_x, -0.5, 0.5)
+            delta_x = tm.clamp(-b_coeff_x / (2.0 * c_coeff_x), -0.5, 0.5)
 
-        # Y-direction fit
         delta_y = 0.0
         c_coeff_y = (bottom_cost + top_cost - 2.0 * center_cost) / 2.0
         if ti.abs(c_coeff_y) > 1e-6:
             b_coeff_y = (bottom_cost - top_cost) / 2.0
-            delta_y = -b_coeff_y / (2.0 * c_coeff_y)
-            delta_y = tm.clamp(delta_y, -0.5, 0.5)
+            delta_y = tm.clamp(-b_coeff_y / (2.0 * c_coeff_y), -0.5, 0.5)
 
-        # Compute confidence from curvature
+        # Confidence based on curvature (matching C++)
         curvature = ti.max(ti.abs(c_coeff_x), ti.abs(c_coeff_y))
         confidence = 0.5
         if curvature > 1e-6:
@@ -120,8 +192,8 @@ if TAICHI_AVAILABLE:
                 0.1 + (ti.log(curvature) / ti.log(10.0) + 3.0) * 0.2, 0.1, 0.9
             )
 
-        result_out[0] = float(dx) + delta_x
-        result_out[1] = float(dy) + delta_y
+        result_out[0] = float(best_dx) + delta_x
+        result_out[1] = float(best_dy) + delta_y
         result_out[2] = confidence
 
     @ti.kernel
@@ -191,59 +263,6 @@ if TAICHI_AVAILABLE:
         result_out[1] = best_vy
         result_out[2] = 0.9  # High confidence for bicubic
 
-    @ti.kernel
-    def _integer_search_3x3_kernel(
-        ref_layer: ti.types.ndarray(),
-        comp_layer: ti.types.ndarray(),
-        result_out: ti.types.ndarray(),
-        tile_x: int,
-        tile_y: int,
-        dx: int,
-        dy: int,
-        tile_w: int,
-        tile_h: int,
-        h: int,
-        w: int,
-    ):
-        """
-        3x3 integer search around initial position.
-        result_out: [best_dx, best_dy, min_cost]
-        """
-        min_cost = 1e10
-        best_dx = dx
-        best_dy = dy
-
-        for ddy in ti.static(range(-1, 2)):
-            for ddx in ti.static(range(-1, 2)):
-                test_dx = dx + ddx
-                test_dy = dy + ddy
-
-                comp_x = tile_x + test_dx
-                comp_y = tile_y + test_dy
-
-                # Boundary check
-                if not (
-                    comp_x < 0
-                    or comp_y < 0
-                    or comp_x + tile_w > w
-                    or comp_y + tile_h > h
-                ):
-                    # Compute SAD
-                    total_cost = 0.0
-                    for r, c in ti.ndrange(tile_h, tile_w):
-                        ref_val = ref_layer[tile_y + r, tile_x + c]
-                        comp_val = comp_layer[comp_y + r, comp_x + c]
-                        total_cost += ti.abs(ref_val - comp_val)
-
-                    if total_cost < min_cost:
-                        min_cost = total_cost
-                        best_dx = test_dx
-                        best_dy = test_dy
-
-        result_out[0] = float(best_dx)
-        result_out[1] = float(best_dy)
-        result_out[2] = min_cost / float(tile_w * tile_h)
-
 
 # ============================================================================
 # Python API (matching C++ function signatures)
@@ -288,15 +307,7 @@ def parabolic_refinement(
     ref_gpu.from_numpy(np.ascontiguousarray(ref_layer, dtype=np.float32))
     comp_gpu.from_numpy(np.ascontiguousarray(comp_layer, dtype=np.float32))
 
-    _parabolic_refinement_kernel(
-        ref_gpu, comp_gpu, result_out, x, y, dx, dy, tile_w, tile_h, h, w
-    )
-
-    result = result_out.to_numpy()
-    refined_flow = (result[0], result[1])
-    confidence = result[2]
-
-    return refined_flow, confidence
+    return (result[0], result[1]), result[2]
 
 
 def subpixel_refinement(
@@ -332,39 +343,12 @@ def subpixel_refinement(
     if x < 0 or y < 0 or x + tile_w > w or y + tile_h > h:
         return (float(dx), float(dy))
 
-    ref_gpu = ti.ndarray(ti.f32, shape=(h, w))
-    comp_gpu = ti.ndarray(ti.f32, shape=(h, w))
-    search_result = ti.ndarray(ti.f32, shape=(3,))
-    refine_result = ti.ndarray(ti.f32, shape=(3,))
-
-    ref_gpu.from_numpy(np.ascontiguousarray(ref_layer, dtype=np.float32))
-    comp_gpu.from_numpy(np.ascontiguousarray(comp_layer, dtype=np.float32))
-
-    # Step 1: Integer 3x3 search
-    _integer_search_3x3_kernel(
-        ref_gpu, comp_gpu, search_result, x, y, dx, dy, tile_w, tile_h, h, w
+    # Combined Integer Search + Parabolic Refinement in one kernel
+    _subpixel_refinement_parabolic_kernel(
+        ref_gpu, comp_gpu, result_out, x, y, dx, dy, tile_w, tile_h, h, w
     )
 
-    search_res = search_result.to_numpy()
-    best_dx = float(search_res[0])
-    best_dy = float(search_res[1])
-
-    # Step 2: Parabolic Refinement (Faster than Bicubic)
-    _parabolic_refinement_kernel(
-        ref_gpu,
-        comp_gpu,
-        refine_result,
-        x,
-        y,
-        int(best_dx),
-        int(best_dy),
-        tile_w,
-        tile_h,
-        h,
-        w,
-    )
-
-    result = refine_result.to_numpy()
+    result = result_out.to_numpy()
     return (result[0], result[1])
 
 
@@ -389,11 +373,17 @@ def subpixel_refinement_gpu(
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
-    # Step 1: Integer search
-    _integer_search_3x3_kernel(
-        ref_gpu, comp_gpu, search_result_gpu, x, y, dx, dy, tile_w, tile_h, h, w
+    # Integrated subpixel refinement
+    _subpixel_refinement_parabolic_kernel(
+        ref_gpu,
+        comp_gpu,
+        refine_result_gpu,
+        x,
+        y,
+        dx,
+        dy,
+        tile_w,
+        tile_h,
+        h,
+        w,
     )
-
-    # Note: Full GPU-native subpixel refinement would require a wrapper kernel
-    # to avoid CPU-GPU sync for best_dx/dy.
-    # For now, we perform the integer search which is the most expensive part on GPU.

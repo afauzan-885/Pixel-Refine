@@ -18,9 +18,14 @@ try:
     from ...taichi_algorithm import (
         common,
         pyramid,
-        bicubic_interpolation,
+        bilinear_resize,
+        bicubic_resize,
     )
-    from ...taichi_algorithm.taichi_worker import ti_thread, TAICHI_AVAILABLE
+    from ...taichi_algorithm.taichi_worker import (
+        ti_thread,
+        TAICHI_AVAILABLE,
+        release_taichi_ndarray,
+    )
 
 except ImportError:
     TAICHI_AVAILABLE = False
@@ -141,19 +146,44 @@ if TAICHI_AVAILABLE and _ti is not None:
                     center_y = int(_ti.min(r + curr_h // 2, h - 1))
                     center_x = int(_ti.min(c + curr_w // 2, w - 1))
 
-                    final_conf = conf_fine
-                    if use_guidance == 1:
-                        final_conf *= guidance_map[center_y, center_x]
-
+                    tile_stability_factor = 1.0
                     if use_stability == 1:
-                        final_conf *= stability_map[center_y, center_x]
+                        tile_stability_factor = stability_map[center_y, center_x]
 
-                    if final_conf >= 1e-6:
-                        # 4. Global Accumulation (Equivalent to C++ accumulate_tile)
+                    if conf_fine * tile_stability_factor >= 1e-6:
+                        # 4. Global Accumulation with Per-Pixel Refinement
                         for dr, dc in _ti.ndrange(curr_h, curr_w):
-                            weight_map_sum[r + dr, c + dc] += (
-                                base_window[dr, dc] * final_conf
+                            yy, xx = r + dr, c + dc
+
+                            # A. Per-pixel guidance for better boundary handling (instead of per-tile)
+                            pixel_guidance = 1.0
+                            if use_guidance == 1:
+                                pixel_guidance = guidance_map[yy, xx]
+
+                                                        # B. Adaptive Local Consistency Veto (The "Breakthrough")
+                            # If individual pixel diff exceeds noise significantly, we suppress it.
+                            # Threshold lowered to 2.5x noise for better sensitivity in difficult areas.
+                            diff = _ti.abs(current[yy, xx] - reference[yy, xx])
+                            local_veto = 1.0
+                            veto_threshold = noise_sigma * 2.5
+                            if diff > veto_threshold:
+                                # Dampening becomes more aggressive if guidance also suggests mismatch
+                                dampening_factor = 1.6 + 1.0 * (1.0 - pixel_guidance)
+                                local_veto = _ti.exp(
+                                    -(diff / _ti.max(1e-6, noise_sigma) - 2.5) * dampening_factor
+                                )
+
+                            # C. Combine everything
+                            pixel_weight = (
+                                base_window[dr, dc]
+                                * conf_fine
+                                * pixel_guidance
+                                * local_veto
+                                * tile_stability_factor
                             )
+
+                            if pixel_weight >= 1e-8:
+                                weight_map_sum[yy, xx] += pixel_weight
 
     @_ti.kernel
     def _equalize_brightness_kernel(
@@ -209,16 +239,16 @@ if TAICHI_AVAILABLE and _ti is not None:
         reference_image,
         weight_map_sum,
         base_window,
-        stability_map=None,
-        row_starts=None,
-        col_starts=None,
-        tile_h=64,
-        tile_w=64,
-        noise_sigma=0.01,
-        motion_sensitivity=10.0,
-        noise_offset_factor=1.5,
-        equalize_brightness=False,
-        buffer_provider="pool",
+        stability_map,
+        row_starts,
+        col_starts,
+        tile_h,
+        tile_w,
+        noise_sigma,
+        motion_sensitivity,
+        noise_offset_factor,
+        equalize_brightness,
+        buffer_provider,
         **kwargs,
     ):
         """
@@ -251,20 +281,54 @@ if TAICHI_AVAILABLE and _ti is not None:
                 )
                 _equalize_brightness_kernel(curr_gpu, ref_gpu, analysis_input, h, w)
 
-            # 4. Hierarchical / Pass-based Analysis
-            use_stability = 1 if stability_map is not None else 0
-            use_guidance = 0  # Can be enabled if guidance map is provided
+            # 4. Phase 1: Coarse Analysis for Guidance Map
+            use_guidance = 1
+            coarse_w = max(64, w // 4)
+            coarse_h = max(64, h // 4)
 
-            # Dummy buffers for optional ndarrays (Taichi kernels require valid objects)
+            # Downsample to coarse resolution
+            curr_coarse = bilinear_resize(analysis_input, coarse_h, coarse_w, buffer_provider=buffer_provider)
+            ref_coarse = bilinear_resize(ref_gpu, coarse_h, coarse_w, buffer_provider=buffer_provider)
+
+            # Coarse confidence calculation
+            coarse_tile_w = max(8, tile_w // 4)
+            coarse_tile_h = max(8, tile_h // 4)
+            num_tiles_h = coarse_h // coarse_tile_h
+            num_tiles_w = coarse_w // coarse_tile_w
+
+            coarse_conf_gpu = common.get_temp_buffer(
+                (num_tiles_h, num_tiles_w), _ti.f32, buffer_provider
+            )
+
+            _phase1_coarse_analysis(
+                curr_coarse,
+                ref_coarse,
+                coarse_conf_gpu,
+                coarse_tile_h,
+                coarse_tile_w,
+                coarse_h,
+                coarse_w,
+                noise_sigma,
+                motion_sensitivity,
+                noise_offset_factor,
+            )
+
+            # Upsample coarse confidence to full resolution for Phase 2 guidance
+            # Use Bicubic for smoother transitions and better boundary accuracy
+            guidance_gpu = bicubic_resize(coarse_conf_gpu, h, w, buffer_provider=buffer_provider)
+
+            # Cleanup Phase 1 temp buffers
+            release_taichi_ndarray(curr_coarse)
+            release_taichi_ndarray(ref_coarse)
+            common.release_temp_buffer(coarse_conf_gpu)
+
+            # 5. Phase 2: Fine Analysis (Sliding Window MAD)
+            use_stability = 1 if stability_map is not None else 0
+
+            # Dummy buffer for stability if None
             if stability_map is None:
                 dummy_gpu = common.get_temp_buffer((1, 1), _ti.f32, buffer_provider)
                 stability_map = dummy_gpu
-
-            guidance_gpu = dummy_gpu
-            if guidance_gpu is stability_map and use_guidance == 0:
-                pass  # Already using dummy
-            elif guidance_gpu is None:
-                guidance_gpu = common.get_temp_buffer((1, 1), _ti.f32, buffer_provider)
 
             for pass_idx in range(4):
                 _phase2_fine_analysis(
@@ -305,7 +369,7 @@ if TAICHI_AVAILABLE and _ti is not None:
         weight_map_work,
         final_image_sum,
         weight_map_sum_full,
-        buffer_provider="pool",
+        buffer_provider,
     ):
         """
         Accumulates a frame into the global sum using its processed weight map.
