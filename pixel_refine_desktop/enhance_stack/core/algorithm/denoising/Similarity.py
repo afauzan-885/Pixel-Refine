@@ -1,12 +1,6 @@
 import os
 
-from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.taichi_worker import (
-    cleanup_taichi,
-    TAICHI_AVAILABLE,
-    release_taichi_ndarray,
-)
-
-os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
+print("!!! [DEBUG] Similarity.py Module Loading... !!!")
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import gc
@@ -40,46 +34,25 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
     calculate_auto_scale,
     calculate_scale_from_gt_proxy,  # [SMART PROXY]
     save_linear_dng,  # [LINEAR DNG]
+    preprocess_in_python,
     # to_gamma_proxy, # Replaced/Updated
-)
-from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm import (
-    preprocess,
-)
-from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.bilinear_interpolation import (
-    bilinear_resize,  # Smart API: auto-detects GPU/CPU
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.extra_algorithm import (
     SimilaritySpatialInterface,
     perform_image_alignment,
     perform_alignment_gpu,
     get_taichi_worker,
+    process_in_cpu,
+    process_in_gpu,
 )
 
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.compute_similarity import (
-    generate_weight_map_taichi,
-    accumulate_spatial_merging_taichi,
+
+# --- TAICHI SPATIAL DETECTION ---
+from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.taichi_worker import (
+    TAICHI_AVAILABLE as TAICHI_SPATIAL_AVAILABLE,
 )
 
-# --- TAICHI SPATIAL IMPORT ---
-try:
-    from ..taichi_algorithm.taichi_worker import (
-        clear_vram,
-        get_taichi_worker,
-        ti_thread,
-        create_taichi_ndarray,
-        download_taichi_ndarray,
-        release_taichi_ndarray,
-    )
-
-    TAICHI_SPATIAL_AVAILABLE = True
-except ImportError:
-    TAICHI_SPATIAL_AVAILABLE = False
-    print(
-        "Warning: Could not import Taichi spatial merging module (compute_similarity)."
-    )
-except Exception as e:
-    TAICHI_SPATIAL_AVAILABLE = False
-    print(f"Warning: Error importing Taichi spatial module: {e}")
+print(f"[DEBUG] TAICHI_SPATIAL_AVAILABLE detected as: {TAICHI_SPATIAL_AVAILABLE}")
 
 from pixel_refine_desktop.ui.resources.styles.stylesheet import PROGRESS_BAR
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
@@ -367,7 +340,8 @@ class SimilarityAlgorithm:
         scale_down_factor: float = 1.0,
         return_raw=False,
         is_linear_mode=False,
-        proxy_scale=1.0,  # [AUTO-SCALE]
+        proxy_scale=1.0,
+        process_in=None,
         **unused_kwargs,
     ):
 
@@ -401,6 +375,12 @@ class SimilarityAlgorithm:
         p_merge_end = int(scope_start + scope_width * 0.95)
 
         pass_merge_range = (p_merge_start, p_merge_end)
+
+        # Initialize return variables to prevent UnboundLocalError
+        processed_frames_spatial = 0
+        final_image_sum_full_res = None
+        weight_map_sum_full_res = None
+        ref_noise_sigma = 0.0
 
         # --- Logika Scale Down ---
         if scale_down_factor != 1.0:
@@ -438,539 +418,112 @@ class SimilarityAlgorithm:
             row_starts.size == 0 or row_starts[-1] != work_res_h - tile_h
         ):
             row_starts = np.append(row_starts, work_res_h - tile_h)
+        row_starts = np.ascontiguousarray(np.unique(row_starts).astype(np.int32))
 
         col_starts = np.arange(0, work_res_w - tile_w + 1, step_x, dtype=np.int32)
         if work_res_w > tile_w and (
             col_starts.size == 0 or col_starts[-1] != work_res_w - tile_w
         ):
             col_starts = np.append(col_starts, work_res_w - tile_w)
-
-        # Paksa cast ke int32 secara eksplisit
-        row_starts = np.ascontiguousarray(np.unique(row_starts).astype(np.int32))
         col_starts = np.ascontiguousarray(np.unique(col_starts).astype(np.int32))
 
-        use_overall_progress = total_overall_images and total_overall_images > 0
+        # Execution Path (GPU/CPU)
+        if process_in is None or process_in == "auto":
+            process_in = "gpu"
 
-        # --- LANGKAH 2: ALIGNMENT ---
-        if enable_alignment and num_images > 1:
-            if update_progress:
-                update_progress(p_align_start, "Memulai proses alignment...")
+        print(f"[DEBUG] _spatial_merging active mode: {process_in}")
 
-            # [PROXY LOGIC] Gunakan Proxy (Gamma 2.2) untuk Alignment jika Linear Mode
-            is_linear_mode = unused_kwargs.get("is_linear_mode", False)
+        if process_in == "gpu":
+            # [MODIFIED] Local import to prevent any Taichi initialization in CPU path
+            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.compute_similarity import (
+                generate_weight_map_taichi,
+                accumulate_spatial_merging_taichi,
+            )
 
-            align_ref_input = reference_image_float
-            if is_linear_mode:
-                # Gunakan fungsi to_gamma_proxy yang sudah updated dengan Fixed Scale 2.26
-                align_ref_input = to_gamma_proxy(
-                    reference_image_float, scale=proxy_scale
+            if not TAICHI_SPATIAL_AVAILABLE:
+                print(
+                    "Warning: GPU requested but Taichi Spatial not available. Falling back to CPU."
                 )
-
-            # Check GPU alignment flag
-            alignment_tile_gpu = unused_kwargs.get("alignment_tile_gpu", True)
-
-            # Conditional GPU/CPU execution
-            if alignment_tile_gpu:
-                # GPU PATH: Use dedicated GPU function
-                alignment_success = perform_alignment_gpu(
-                    images,
-                    align_ref_input,
-                    work_res_h,
-                    work_res_w,
-                    tile_h,
-                    tile_w,
-                    ref_dtype,
-                    update_progress,
-                    stop_requested,
-                    num_alignment_workers=num_workers,
-                    save_align_image=False,
-                    progress_start=p_align_start,
-                    progress_end=p_align_end,
-                    is_linear_mode=is_linear_mode,
-                    proxy_scale=proxy_scale,
-                )
+                process_in = "cpu"
             else:
-                # CPU PATH: Use traditional function (C++ DLL / RAFT / Farneback)
-                alignment_success = perform_image_alignment(
-                    images,
-                    align_ref_input,
-                    work_res_h,
-                    work_res_w,
-                    tile_h,
-                    tile_w,
-                    ref_dtype,
-                    update_progress,
-                    stop_requested,
-                    optical_flow_type=unused_kwargs.get(
-                        "optical_flow_type", "alignment_tile"
-                    ),
-                    num_alignment_workers=num_workers,
-                    progress_start=p_align_start,
-                    progress_end=p_align_end,
-                    is_linear_mode=is_linear_mode,
-                    proxy_scale=proxy_scale,
-                )
-
-            if alignment_success:
-                if update_progress:
-                    update_progress(p_align_end, "Alignment selesai.")
-            else:
-                if stop_requested and stop_requested():
-                    return None, None, None
-                if update_progress:
-                    update_progress(
-                        p_merge_start, "Alignment gagal/skip, lanjut merging..."
-                    )
-        else:
-            if update_progress:
-                update_progress(p_merge_start, "Alignment dinonaktifkan.")
-
-        # --- LANGKAH 3: MAIN MERGING ---
-
-        # Check GPU Flag
-        # Merging GPU: Aktifkan secara default untuk percepatan loop frame
-        use_taichi_gpu = unused_kwargs.get("similarity_merging_gpu", True)
-        if use_taichi_gpu and not TAICHI_SPATIAL_AVAILABLE:
-            print(
-                "Warning: similarity_merging_gpu=True but Taichi not available. Falling back to C++."
-            )
-            use_taichi_gpu = False
-
-        # [PROXY LOGIC] Preprocess Global Reference untuk Weight Map
-        is_linear_mode = unused_kwargs.get("is_linear_mode", False)
-
-        # Base untuk weight calculation
-        ref_for_weight_calc = reference_image_float
-        if is_linear_mode:
-            ref_for_weight_calc = to_gamma_proxy(
-                reference_image_float, scale=proxy_scale
-            )
-            # print("  [Linear Mode] Using Gamma Proxy for Weight Calculation Reference.")
-
-        ref_gray_preprocessed_gpu = preprocess.preprocess_in_python_gpu(
-            ref_for_weight_calc, use_sharpen=False
-        )
-
-        # Convert to NumPy ONLY for noise estimation (CPU operation)
-        ref_noise_sigma = estimate_noise_in_python(ref_gray_preprocessed_gpu.to_numpy())
-
-        # Smart resize: stays on GPU automatically!
-        ref_work_res_pass2_gpu = bilinear_resize(
-            ref_gray_preprocessed_gpu, work_res_h, work_res_w
-        )
-        # Convert to NumPy only if needed for CPU path
-        ref_work_res_pass2 = None
-        if not use_taichi_gpu:
-            ref_work_res_pass2 = ref_work_res_pass2_gpu.to_numpy()
-
-        # Stability map untuk C++ tetap None karena Pass 1 dihapus
-        stability_map_work_res = None
-
-        # --- Producer: Generate Weight Map ---
-        def weight_map_producer(task_queue, result_queue, images_list_ref):
-            # Pre-allocate buffer lokal per thread
-            local_curr_work_res = np.empty(
-                (work_res_h, work_res_w, 1), dtype=np.float32
-            )
-            curr_work_gray = np.empty((work_res_h, work_res_w), dtype=np.float32)
-            weight_map_work_res = np.zeros(
-                (work_res_h, work_res_w), dtype=np.float32, order="C"
-            )
-
-            while True:
-                try:
-                    item = task_queue.get(timeout=0.1)
-                except queue.Empty:
-                    if stop_requested and stop_requested():
-                        break
-                    continue
-
-                if item is None:  # Signal stop
-                    task_queue.task_done()
-                    break
-
-                image_index = item
-                image_orig = images_list_ref[image_index]
-
-                if image_orig is None:
-                    result_queue.put((image_index, None))
-                    task_queue.task_done()
-                    continue
-
-                # Preprocessing (ORIGINAL ORDER)
-                curr_float = normalize_image(image_orig, ref_dtype)
-
-                # [PROXY LOGIC] Konversi ke Proxy Gamma sebelum Preprocessing
-                # Hanya untuk weight map calculation, tidak disimpan ke list
-                if is_linear_mode:
-                    curr_float_proxy = to_gamma_proxy(curr_float, scale=proxy_scale)
-                    curr_preproc_gpu = preprocess.preprocess_in_python_gpu(
-                        curr_float_proxy, use_raft=False, use_sharpen=False
-                    )
-                else:
-                    curr_preproc_gpu = preprocess.preprocess_in_python_gpu(
-                        curr_float, use_raft=False, use_sharpen=False
-                    )
-
-                # Smart resize: stays on GPU, then convert for buffer assignment
-                curr_work_gray_gpu = bilinear_resize(
-                    curr_preproc_gpu, work_res_h, work_res_w
-                )
-                curr_work_gray = curr_work_gray_gpu.to_numpy()
-                local_curr_work_res[:, :, 0] = curr_work_gray
-
-                # Bersihkan weight map buffer sebelum dipakai ulang
-                weight_map_work_res.fill(0)
-
-                # Panggil C++ dengan proxy input
-                c_interface.call_generate_weight_map_jit(
-                    weight_map_sum=weight_map_work_res,
-                    current_image=local_curr_work_res,
-                    reference_image_processed=ref_work_res_pass2,  # Ini sudah proxy
-                    base_window=base_window,
-                    stability_map=stability_map_work_res,
-                    row_starts=row_starts,
-                    col_starts=col_starts,
+                (
+                    processed_frames_spatial,
+                    final_image_sum_full_res,
+                    weight_map_sum_full_res,
+                    ref_noise_sigma,
+                ) = process_in_gpu(
+                    images=images,
+                    reference_image_float=reference_image_float,
+                    ref_image_h=ref_image_h,
+                    ref_image_w=ref_image_w,
+                    ref_channels_buffer=ref_channels_buffer,
+                    ref_dtype=ref_dtype,
+                    work_res_h=work_res_h,
+                    work_res_w=work_res_w,
                     tile_h=tile_h,
                     tile_w=tile_w,
-                    h=work_res_h,
-                    w=work_res_w,
-                    channels=1,
+                    row_starts=row_starts,
+                    col_starts=col_starts,
+                    base_window=base_window,
                     motion_sensitivity=motion_sensitivity,
                     noise_offset_factor=noise_offset_factor,
-                    precomputed_ref_noise_sigma=ref_noise_sigma,
+                    update_progress=update_progress,
+                    stop_requested=stop_requested,
+                    pass_merge_range=pass_merge_range,
+                    p_align_start=p_align_start,
+                    p_align_end=p_align_end,
+                    p_merge_start=p_merge_start,
+                    is_linear_mode=is_linear_mode,
+                    proxy_scale=proxy_scale,
+                    images_processed_so_far=images_processed_so_far,
+                    total_overall_images=total_overall_images,
+                    enable_alignment=enable_alignment,
+                    num_images=num_images,  # Pass num_images for alignment check
+                    num_workers=num_workers,  # Pass num_workers for alignment
+                    **unused_kwargs,
                 )
 
-                # Clip dan konversi ke uint16 untuk hemat bandwidth queue
-                np.clip(weight_map_work_res, 0.0, 1.0, out=weight_map_work_res)
-                weight_map_uint16 = (weight_map_work_res * 65535.0).astype(np.uint16)
+        if process_in == "cpu":
+            (
+                processed_frames_spatial,
+                final_image_sum_full_res,
+                weight_map_sum_full_res,
+                ref_noise_sigma,
+            ) = process_in_cpu(
+                images=images,
+                reference_image_float=reference_image_float,
+                ref_image_h=ref_image_h,
+                ref_image_w=ref_image_w,
+                ref_channels_buffer=ref_channels_buffer,
+                ref_dtype=ref_dtype,
+                work_res_h=work_res_h,
+                work_res_w=work_res_w,
+                tile_h=tile_h,
+                tile_w=tile_w,
+                row_starts=row_starts,
+                col_starts=col_starts,
+                base_window=base_window,
+                motion_sensitivity=motion_sensitivity,
+                noise_offset_factor=noise_offset_factor,
+                num_workers=num_workers,
+                update_progress=update_progress,
+                stop_requested=stop_requested,
+                pass_merge_range=pass_merge_range,
+                p_align_start=p_align_start,
+                p_align_end=p_align_end,
+                p_merge_start=p_merge_start,
+                is_linear_mode=is_linear_mode,
+                proxy_scale=proxy_scale,
+                images_processed_so_far=images_processed_so_far,
+                total_overall_images=total_overall_images,
+                lib_path=lib_path,
+                enable_alignment=enable_alignment,
+                num_images=num_images,  # Pass num_images for alignment check
+                **unused_kwargs,
+            )
 
-                result_queue.put((image_index, weight_map_uint16))
-                task_queue.task_done()
-
-        # --- Setup Threading ---
-        final_image_sum_full_res = np.zeros(
-            (ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32
-        )
-        weight_map_sum_full_res = np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
-
-        # Buffer reusable untuk Consumer (Thread Utama)
-        consumer_weight_full_buf = np.zeros(
-            (ref_image_h, ref_image_w), dtype=np.float32
-        )
-
-        processed_frames_spatial = 0
-        if num_workers > 0:
-            final_num_workers = num_workers
-        else:
-            final_num_workers = max(1, min((os.cpu_count() or 2) // 2, 8))
-
-        # Jika GPU aktif, kita skip Threading Producer-Consumer yang ribet ini
-        # Dan langsung panggil Taichi (yang internalnya sudah parallel GPU)
-        if use_taichi_gpu:
-            # --- TAICHI GPU PATH (OPTIMIZED: STAYS ON GPU) ---
-            processed_frames_spatial = 0
-
-            def _run_gpu_spatial_merging():
-                # Internal references
-                nonlocal processed_frames_spatial
-                _sum_gpu = None
-                _weight_sum_full_gpu = None
-                _base_window_gpu = None
-                _ref_work_gpu = None
-                _rows_gpu = None
-                _cols_gpu = None
-                _weight_work_gpu = None
-
-                try:
-                    # 1. Pre-allocate/Upload Persistent Buffers to GPU
-                    _sum_gpu = create_taichi_ndarray(final_image_sum_full_res)
-                    _weight_sum_full_gpu = create_taichi_ndarray(
-                        weight_map_sum_full_res
-                    )
-
-                    _base_window_gpu = create_taichi_ndarray(base_window)
-                    _ref_work_gpu = ref_work_res_pass2_gpu  # Already on GPU!
-                    _rows_gpu = create_taichi_ndarray(row_starts)
-                    _cols_gpu = create_taichi_ndarray(col_starts)
-
-                    # Reusable buffer for per-frame weight map (work resolution)
-                    _weight_work_gpu = create_taichi_ndarray(
-                        np.zeros((work_res_h, work_res_w), dtype=np.float32)
-                    )
-
-                    for i, img_orig in enumerate(images):
-                        if stop_requested and stop_requested():
-                            break
-
-                        if img_orig is None:
-                            continue
-
-                        # 1. Normalize directly on GPU
-                        curr_full_gpu = preprocess.normalize_image_gpu(
-                            img_orig, dtype=ref_dtype, buffer_provider="pool"
-                        )
-
-                        # 2. Ensure size matches reference on GPU if needed
-                        if (curr_full_gpu.shape[0] != ref_image_h) or (
-                            curr_full_gpu.shape[1] != ref_image_w
-                        ):
-                            # Resize on GPU
-                            new_full = bilinear_resize(
-                                curr_full_gpu,
-                                ref_image_h,
-                                ref_image_w,
-                            )
-                            release_taichi_ndarray(curr_full_gpu)
-                            curr_full_gpu = new_full
-
-                        # 3. Preprocess for Weight Map (Gamma, Green, Resize) in ONE fused kernel
-                        curr_work_gray_gpu = preprocess.preprocess_pipeline_gpu(
-                            curr_full_gpu,
-                            normalize=False,  # already done
-                            apply_gamma=is_linear_mode,
-                            extract_green=True,
-                            target_size=(work_res_h, work_res_w),
-                            scale=proxy_scale,
-                            buffer_provider="pool",
-                        )
-
-                        # Step A: Generate Weight Map on GPU
-                        generate_weight_map_taichi(
-                            current_image=curr_work_gray_gpu,
-                            reference_image=_ref_work_gpu,
-                            weight_map_sum=_weight_work_gpu,
-                            base_window=_base_window_gpu,
-                            stability_map=None,
-                            row_starts=_rows_gpu,
-                            col_starts=_cols_gpu,
-                            tile_h=tile_h,
-                            tile_w=tile_w,
-                            noise_sigma=ref_noise_sigma,
-                            motion_sensitivity=motion_sensitivity,
-                            noise_offset_factor=noise_offset_factor,
-                            equalize_brightness=False,
-                            buffer_provider="pool",
-                        )
-
-                        # Cleanup intermediate per-frame GPU buffers
-                        if curr_work_gray_gpu:
-                            release_taichi_ndarray(curr_work_gray_gpu)
-
-                        # Step B: Accumulate result directly on GPU
-                        accumulate_spatial_merging_taichi(
-                            current_image_full=curr_full_gpu,
-                            weight_map_work=_weight_work_gpu,
-                            final_image_sum=_sum_gpu,
-                            weight_map_sum_full=_weight_sum_full_gpu,
-                            buffer_provider="pool",
-                        )
-
-                        # Cleanup final frame buffer
-                        if curr_full_gpu:
-                            release_taichi_ndarray(curr_full_gpu)
-
-                        # Explicitly release aligned image if it's a Taichi object
-                        if img_orig is not None and hasattr(img_orig, "to_numpy"):
-                            release_taichi_ndarray(img_orig)
-
-                        images[i] = None  # Free RAM/Context
-                        processed_frames_spatial += 1
-
-                        # Update Progress
-                        if update_progress:
-                            prog_fraction = (i + 1) / num_images
-                            current_val = int(
-                                pass_merge_range[0]
-                                + prog_fraction
-                                * (pass_merge_range[1] - pass_merge_range[0])
-                            )
-                            if use_overall_progress:
-                                cur_ov = images_processed_so_far + (i + 1)
-                                update_progress(
-                                    current_val,
-                                    language_config.IMAGE_PROCESS_IN_PROGRESS.format(
-                                        cur_ov, total_overall_images
-                                    ),
-                                )
-                            else:
-                                update_progress(
-                                    current_val,
-                                    f"Spatial Merging: {i+1}/{num_images} (GPU)",
-                                )
-
-                        # Give OS and UI some air - prevents total GPU lockout
-                        import time
-
-                        time.sleep(0.01)
-
-                    # Final Download (RESTORED TO SAFE VERSION)
-                    download_taichi_ndarray(_sum_gpu, out=final_image_sum_full_res)
-                    download_taichi_ndarray(
-                        _weight_sum_full_gpu, out=weight_map_sum_full_res
-                    )
-                    return True
-
-                except Exception as e:
-                    print(f"Error executing optimized Taichi Spatial Merging: {e}")
-                    import traceback
-
-                    traceback.print_exc()
-                    return False
-                finally:
-                    # Cleanup GPU buffers
-                    _sum_gpu = None
-                    _weight_sum_full_gpu = None
-                    _base_window_gpu = None
-                    _ref_work_gpu = None
-                    _rows_gpu = None
-                    _cols_gpu = None
-                    _weight_work_gpu = None
-
-                    try:
-                        from ..taichi_algorithm.taichi_worker import clear_vram
-
-                        clear_vram()
-                    except:
-                        pass
-
-            # Submit and wait once
-            worker = get_taichi_worker()
-            success = worker.submit(_run_gpu_spatial_merging)
-            if not success:
-                return None, None, 0
-
-            # Continue to final normalization
-
-        else:
-            # --- C++ DLL PATH (EXISTING THREADED IMPLEMENTATION) ---
-            try:
-                c_interface = SimilaritySpatialInterface(lib_path)
-            except (FileNotFoundError, OSError, AttributeError) as e:
-                raise RuntimeError(f"Gagal memuat C++ interface_spatial_merging: {e}")
-
-            task_queue = queue.Queue()
-            result_queue = queue.Queue(maxsize=final_num_workers * 2)
-
-            threads = [
-                threading.Thread(
-                    target=weight_map_producer, args=(task_queue, result_queue, images)
-                )
-                for _ in range(final_num_workers)
-            ]
-
-            for t in threads:
-                t.start()
-
-            for i in range(num_images):
-                task_queue.put(i)
-
-            for _ in range(final_num_workers):
-                task_queue.put(None)
-
-            finished_count = 0
-            gc_trigger_count = 0
-            gc_threshold = max(5, final_num_workers * 2)
-
-            try:
-                while finished_count < num_images:
-                    if stop_requested and stop_requested():
-                        break
-
-                    try:
-                        image_index, weight_map_uint16 = result_queue.get(timeout=0.1)
-                        result_queue.task_done()
-
-                        if weight_map_uint16 is not None:
-                            image_orig = images[image_index]
-                            if image_orig is not None:
-                                # 1. Konversi & 2. Resize Weight Map ke Buffer Full Res
-                                weight_map_work_float = weight_map_uint16.astype(
-                                    np.float32
-                                ) * (1.0 / 65535.0)
-
-                                cv2.resize(
-                                    weight_map_work_float,
-                                    (ref_image_w, ref_image_h),
-                                    dst=consumer_weight_full_buf,
-                                    interpolation=cv2.INTER_LINEAR,
-                                )
-
-                                # 3. Normalize & 4. Akumulasi In-place
-                                norm_img = normalize_image(image_orig, ref_dtype)
-
-                                # Pastikan dimensi sama dengan reference (buffer akumulator)
-                                if (norm_img.shape[0] != ref_image_h) or (
-                                    norm_img.shape[1] != ref_image_w
-                                ):
-                                    norm_img = cv2.resize(
-                                        norm_img,
-                                        (ref_image_w, ref_image_h),
-                                        interpolation=cv2.INTER_AREA,
-                                    )
-                                np.multiply(
-                                    norm_img,
-                                    consumer_weight_full_buf[:, :, np.newaxis],
-                                    out=norm_img,
-                                )
-
-                                final_image_sum_full_res += norm_img
-                                weight_map_sum_full_res += consumer_weight_full_buf
-
-                                del norm_img, weight_map_work_float
-                                images[image_index] = None  # Free memory
-
-                                processed_frames_spatial += 1
-                                gc_trigger_count += 1
-                                if gc_trigger_count >= gc_threshold:
-                                    gc.collect()
-                                    gc_trigger_count = 0
-
-                        finished_count += 1
-
-                        if update_progress:
-                            # Logic Global Simplified:
-                            # Kita sudah menghitung pass_merge_range yang SANGAT SPESIFIK untuk stack ini (relatif tdp Global).
-                            # Jadi kita cukup interpolasi linear 0-1 (finished/num) ke range tersebut.
-                            prog_fraction = finished_count / num_images
-                            current_val = int(
-                                pass_merge_range[0]
-                                + prog_fraction
-                                * (pass_merge_range[1] - pass_merge_range[0])
-                            )
-
-                            if use_overall_progress:
-                                cur_ov = images_processed_so_far + finished_count
-                                update_progress(
-                                    current_val,
-                                    language_config.IMAGE_PROCESS_IN_PROGRESS.format(
-                                        cur_ov, total_overall_images
-                                    ),
-                                )
-                            else:
-                                update_progress(
-                                    current_val,
-                                    f"Merging frames: {finished_count}/{num_images}",
-                                )
-
-                    except queue.Empty:
-                        if not any(t.is_alive() for t in threads):
-                            break
-                        continue
-
-            finally:
-                if stop_requested and stop_requested():
-                    while not task_queue.empty():
-                        try:
-                            task_queue.get_nowait()
-                        except:
-                            pass
-
-                for t in threads:
-                    t.join(timeout=1.0)
-
-                del task_queue, result_queue
-                gc.collect()
+        if final_image_sum_full_res is None:
+            return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
 
         # --- LANGKAH 4: Normalisasi Akhir atau Return Raw ---
         if stop_requested and stop_requested():
@@ -993,7 +546,7 @@ class SimilarityAlgorithm:
                     )
 
                 # Pastikan reference full res tersedia dalam float32
-                ref_full_float = normalize_image(reference_image_float, ref_dtype)
+                ref_full_float = reference_image_float
 
                 # --- PERUBAHAN UTAMA DI SINI ---
                 # Kita panggil fungsi Tiled.
@@ -1028,14 +581,17 @@ class SimilarityAlgorithm:
             except Exception as e:
                 print(f"Critical error in final stage: {e}")
                 # Fallback darurat: Normalisasi global biasa tanpa struktur
-                valid_mask = weight_map_sum_full_res > 1e-6
-                fallback_img = np.zeros_like(final_image_sum_full_res)
-                np.divide(
-                    final_image_sum_full_res,
-                    weight_map_sum_full_res[:, :, np.newaxis],
-                    out=fallback_img,
-                    where=valid_mask[:, :, np.newaxis],
-                )
+                if weight_map_sum_full_res is not None:
+                    valid_mask = np.asarray(weight_map_sum_full_res) > 1e-6
+                    fallback_img = np.zeros_like(final_image_sum_full_res)
+                    np.divide(
+                        final_image_sum_full_res,
+                        weight_map_sum_full_res[:, :, np.newaxis],
+                        out=fallback_img,
+                        where=valid_mask[:, :, np.newaxis],
+                    )
+                else:
+                    fallback_img = np.zeros_like(final_image_sum_full_res)
                 if weight_of_each_image:
                     return (
                         fallback_img,
@@ -1222,16 +778,12 @@ class SimilarityAlgorithm:
             return np.zeros(out_shape_fb, dtype=dtype_ref), None, []
 
         # --- Unpack results aman ---
-        if weight_of_each_image:
-            final_image_normalized = results[0]
-            final_weight_map = results[1]
-            processed_frames = results[2]
-            individual_maps = results[3]
-        else:
-            final_image_normalized = results[0]
-            final_weight_map = results[1]
-            processed_frames = results[2]
-            individual_maps = []
+        final_image_normalized = results[0]
+        final_weight_map = results[1]
+        processed_frames = results[2]
+
+        # Safe access to individual_maps if it exists (length 4)
+        individual_maps = results[3] if len(results) > 3 else []
 
         # --- Stop_requested setelah proses tapi sebelum semua frame selesai ---
         if (
@@ -1283,14 +835,6 @@ class SimilarityAlgorithm:
                 dtype_ref, copy=False
             )
 
-            # [SMART LIFECYCLE] Cleanup Taichi before returning
-            try:
-                if TAICHI_AVAILABLE:
-                    cleanup_taichi(mode="cache")
-                    print("[Taichi] Pipeline selesai - VRAM cache cleared.")
-            except Exception as e:
-                print(f"[Taichi] Warning: Failed to clear cache: {e}")
-
             return final_img_output, final_weight_map, all_final_weight_maps_to_return
 
         else:
@@ -1300,13 +844,6 @@ class SimilarityAlgorithm:
                 if channels_ref_orig == 1
                 else (h_ref, w_ref, channels_ref_orig)
             )
-            # [SMART LIFECYCLE] Cleanup Taichi before returning
-            try:
-                if TAICHI_AVAILABLE:
-                    cleanup_taichi(mode="cache")
-                    print("[Taichi] Pipeline selesai - VRAM cache cleared.")
-            except Exception as e:
-                print(f"[Taichi] Warning: Failed to clear cache: {e}")
 
             return np.zeros(out_shape_fb, dtype=dtype_ref), None, []
 
@@ -1491,11 +1028,11 @@ def main(
         )
         output_path = os.path.join(
             output_folder_stack,
-            f"{output_name_base_safe}_similarity_{merging_type_from_settings}.tif",
+            f"{output_name_base_safe}_similarity.tif",
         )
         weight_map_output_path = os.path.join(
             output_folder_stack,
-            f"{output_name_base_safe}_similarity_{merging_type_from_settings}_weight_map.png",
+            f"{output_name_base_safe}_similarity_weight_map.png",
         )
         print(language_config.OUTPUT_IMAGE_TO_BE_SAVED.format(output_path))
         if save_final_weight_map:
@@ -1667,7 +1204,6 @@ def main(
                 save_temporal_std_path=None,  # Tidak perlu simpan intermediate std map
                 **extra_merging_params,
             )
-
             if stop_requested and stop_requested():
                 break
 
@@ -1682,6 +1218,9 @@ def main(
                     global_sum_weight += batch_sum_weight
 
                 global_total_frames += batch_processed_frames
+                print(
+                    f"[DEBUG] Accumulated frames: {global_total_frames} (Batch added: {batch_processed_frames})"
+                )
                 # Update progress based on actual images processed in source data
                 images_processed_count += batch_end - batch_start
 
@@ -1703,12 +1242,10 @@ def main(
             # Hitung estimasi noise dari referensi sebelum fusi akhir
             # Jika Linear Mode, reference_image adalah Linear. Kita butuh Proxy untuk estimasi noise structure?
             # Sebenarnya estimate_noise_in_python bekerja pada grayscale, jadi aman di-normalize.
-            ref_gray_preproc_gpu = preprocess.preprocess_in_python_gpu(
-                normalize_image(reference_image, reference_image.dtype),
-                use_sharpen=False,
+            # [MODIFIED] Menggunakan preprocess_in_python (CPU)
+            ref_gray_preproc, ref_noise_sigma = preprocess_in_python(
+                normalize_image(reference_image, reference_image.dtype)
             )
-            ref_gray_preproc = ref_gray_preproc_gpu.to_numpy()
-            ref_noise_sigma = estimate_noise_in_python(ref_gray_preproc)
 
             # --- 7. PENYIMPANAN HASIL AKHIR & PEMBERSIHAN ---
             final_result_normalized = image_processor._apply_final_fusion_tiled(

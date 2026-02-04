@@ -284,6 +284,7 @@ def preprocess_in_python_gpu(
     use_sharpen=False,
     out=None,
     buffer_provider="pool",
+    return_numpy=False,
 ):
     """
     GPU version of preprocess_in_python.
@@ -295,9 +296,10 @@ def preprocess_in_python_gpu(
         use_sharpen: If True, apply 30% contrast reduction
         out: Optional output buffer
         buffer_provider: Buffer pool provider
+        return_numpy: If True, download to numpy array
 
     Returns:
-        ti.ndarray (GPU buffer) grayscale float32
+        ti.ndarray (GPU buffer) grayscale float32 or numpy array
     """
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
@@ -313,12 +315,17 @@ def preprocess_in_python_gpu(
     # If use_raft, return as-is
     if use_raft:
         if src_is_temp:
-            return src_gpu
+            dst_gpu = src_gpu
         else:
             # Need to copy to avoid modifying original
             dst_gpu = common.get_temp_buffer(src_gpu.shape, ti.f32, buffer_provider)
             common.copy_field(src_gpu, dst_gpu)
-            return dst_gpu
+
+        if return_numpy:
+            result = dst_gpu.to_numpy()
+            common.release_temp_buffer(dst_gpu)
+            return result
+        return dst_gpu
 
     # Create output buffer (grayscale)
     if out is None:
@@ -336,7 +343,13 @@ def preprocess_in_python_gpu(
     if src_is_temp:
         common.release_temp_buffer(src_gpu)
 
-    return dst_gpu
+    # Return
+    if return_numpy:
+        result = dst_gpu.to_numpy()
+        common.release_temp_buffer(dst_gpu)
+        return result
+    else:
+        return dst_gpu
 
 
 # ============================================================================
@@ -962,6 +975,7 @@ if not TAICHI_AVAILABLE:
         use_raft=False,
         use_sharpen=False,
         buffer_provider="pool",
+        return_numpy=False,
     ):
         """
         CPU fallback: Extract green channel and apply sharpening.
