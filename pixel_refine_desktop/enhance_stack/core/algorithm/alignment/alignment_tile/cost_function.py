@@ -135,6 +135,110 @@ if TAICHI_AVAILABLE:
 
         return total_cost / float(tile_h * tile_w)
 
+    @ti.func
+    def compute_zmsad_cost(
+        ref: ti.types.ndarray(),
+        comp: ti.types.ndarray(),
+        y_ref: int,
+        x_ref: int,
+        y_comp: int,
+        x_comp: int,
+        tile_h: int,
+        tile_w: int,
+    ) -> float:
+        """
+        Compute Zero-Mean Sum of Absolute Differences (ZMSAD) cost.
+        Extremely fast and robust to uniform illumination changes.
+        """
+        # Pass 1: Compute mean difference
+        sum_diff = 0.0
+        for r, c in ti.ndrange(tile_h, tile_w):
+            sum_diff += ref[y_ref + r, x_ref + c] - comp[y_comp + r, x_comp + c]
+
+        mean_diff = sum_diff / float(tile_h * tile_w)
+
+        # Pass 2: Sum of Absolute Differences with mean subtraction
+        total_abs_diff = 0.0
+        for r, c in ti.ndrange(tile_h, tile_w):
+            diff = (
+                ref[y_ref + r, x_ref + c] - comp[y_comp + r, x_comp + c]
+            ) - mean_diff
+            total_abs_diff += ti.abs(diff)
+
+        return total_abs_diff / float(tile_h * tile_w)
+
+    @ti.func
+    def compute_zmcl_cost_precalc(
+        ref: ti.types.ndarray(),
+        comp: ti.types.ndarray(),
+        gx_ref: ti.types.ndarray(),
+        gy_ref: ti.types.ndarray(),
+        gx_comp: ti.types.ndarray(),
+        gy_comp: ti.types.ndarray(),
+        y_ref: int,
+        x_ref: int,
+        y_comp: int,
+        x_comp: int,
+        tile_h: int,
+        tile_w: int,
+    ) -> float:
+        """
+        Compute Zero-Mean Correlation-Like (ZMCL) cost using PRE-CALCULATED gradients.
+        """
+        eps_sq = EPSILON_SQ
+        gradient_weight_factor = GRADIENT_WEIGHT_FACTOR
+        sensitivity = SENSITIVITY
+        stab_epsilon = STAB_EPSILON
+
+        # Pass 1: Compute mean difference
+        sum_diff = 0.0
+        for r, c in ti.ndrange(tile_h, tile_w):
+            val_ref = ref[y_ref + r, x_ref + c]
+            val_comp = comp[y_comp + r, x_comp + c]
+            sum_diff += val_ref - val_comp
+
+        mean_diff = sum_diff / float(tile_h * tile_w)
+
+        # Pass 2: Compute weighted cost
+        total_cost = 0.0
+        for r, c in ti.ndrange(tile_h, tile_w):
+            row_ref = y_ref + r
+            col_ref = x_ref + c
+            row_comp = y_comp + r
+            col_comp = x_comp + c
+
+            # Use pre-calculated gradients
+            gx1 = gx_ref[row_ref, col_ref]
+            gy1 = gy_ref[row_ref, col_ref]
+            gx2 = gx_comp[row_comp, col_comp]
+            gy2 = gy_comp[row_comp, col_comp]
+
+            # Gradient magnitude
+            mag1_sq = gx1 * gx1 + gy1 * gy1
+            mag2_sq = gx2 * gx2 + gy2 * gy2
+            min_mag_sq = ti.min(mag1_sq, mag2_sq)
+
+            # Structure weight
+            structure_weight = 1.0
+            if (
+                min_mag_sq > stab_epsilon
+                and mag1_sq > stab_epsilon
+                and mag2_sq > stab_epsilon
+            ):
+                dot = gx1 * gx2 + gy1 * gy2
+                cos_sim = dot / ti.sqrt(mag1_sq * mag2_sq)
+                score = ti.max(cos_sim, 0.0) * ti.sqrt(min_mag_sq)
+                structure_weight = 1.0 + gradient_weight_factor * _fast_tanh(
+                    score * sensitivity
+                )
+
+            # Zero-mean Charbonnier
+            val_ref = ref[row_ref, col_ref]
+            val_comp = comp[row_comp, col_comp]
+            diff = (val_ref - val_comp) - mean_diff
+
+            total_cost += ti.sqrt(diff * diff + eps_sq) * structure_weight
+
         return total_cost / float(tile_h * tile_w)
 
     @ti.kernel

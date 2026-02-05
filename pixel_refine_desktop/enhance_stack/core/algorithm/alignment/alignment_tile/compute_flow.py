@@ -10,6 +10,7 @@ Note: All pyramid processing stays on GPU to minimize CPU-GPU transfer overhead.
 """
 
 import numpy as np
+import time
 
 try:
     import taichi as ti
@@ -22,7 +23,7 @@ except ImportError:
     tm = None
 
 # Import cost function helpers (GPU-compatible)
-from .cost_function import compute_zmcl_cost
+from . import cost_function
 
 # Import submodule functions directly to avoid package-level shadowing
 try:
@@ -69,6 +70,26 @@ class ImageAlignmentConfig:
 if TAICHI_AVAILABLE:
 
     @ti.kernel
+    def _compute_gradients_kernel(
+        img: ti.types.ndarray(),
+        gx: ti.types.ndarray(),
+        gy: ti.types.ndarray(),
+        h: int,
+        w: int,
+    ):
+        """Compute 2D gradients using central difference."""
+        for r, c in ti.ndrange(h, w):
+            if c > 0 and c < w - 1:
+                gx[r, c] = (img[r, c + 1] - img[r, c - 1]) * 0.5
+            else:
+                gx[r, c] = 0.0
+
+            if r > 0 and r < h - 1:
+                gy[r, c] = (img[r + 1, c] - img[r - 1, c]) * 0.5
+            else:
+                gy[r, c] = 0.0
+
+    @ti.kernel
     def _initialize_coarsest_flow_kernel(
         flow: ti.types.ndarray(),
         h: int,
@@ -91,7 +112,7 @@ if TAICHI_AVAILABLE:
         tile_w: int,
         search_dist: int,
     ):
-        """Coarse level tile matching using ZMCL cost."""
+        """Coarse level tile matching using ZMSAD cost."""
         step_y = tile_h
         step_x = tile_w
 
@@ -124,15 +145,13 @@ if TAICHI_AVAILABLE:
                     ):
                         continue
 
-                    cost = compute_zmcl_cost(
+                    cost = cost_function.compute_zmsad_cost(
                         ref_layer,
                         comp_layer,
                         y,
                         x,
                         test_y,
                         test_x,
-                        h,
-                        w,
                         tile_h,
                         tile_w,
                     )
@@ -159,7 +178,7 @@ if TAICHI_AVAILABLE:
         tile_h: int,
         tile_w: int,
     ):
-        """Fine level tile matching (matching C++ processFineLayer)."""
+        """Fine level tile matching using ZMSAD cost."""
         step_y = tile_h // 2
         step_x = tile_w // 2
 
@@ -192,15 +211,13 @@ if TAICHI_AVAILABLE:
                     ):
                         continue
 
-                    cost = compute_zmcl_cost(
+                    cost = cost_function.compute_zmsad_cost(
                         ref_layer,
                         comp_layer,
                         y,
                         x,
                         test_y,
                         test_x,
-                        h,
-                        w,
                         tile_h,
                         tile_w,
                     )
@@ -222,6 +239,8 @@ if TAICHI_AVAILABLE:
         comp_layer: ti.types.ndarray(),
         flow: ti.types.ndarray(),
         refined_flow: ti.types.ndarray(),
+        gx_comp: ti.types.ndarray(),
+        gy_comp: ti.types.ndarray(),
         h: int,
         w: int,
         tile_h: int,
@@ -261,16 +280,9 @@ if TAICHI_AVAILABLE:
 
                     comp_val = common.bicubic_at(comp_layer, tx, ty)
 
-                    # Finite difference for local gradient on comp_layer
-                    eps = 0.2
-                    gv_x = (
-                        common.bilinear_at(comp_layer, tx + eps, ty)
-                        - common.bilinear_at(comp_layer, tx - eps, ty)
-                    ) / (2.0 * eps)
-                    gv_y = (
-                        common.bilinear_at(comp_layer, tx, ty + eps)
-                        - common.bilinear_at(comp_layer, tx, ty - eps)
-                    ) / (2.0 * eps)
+                    # Sample pre-calculated gradients
+                    gv_x = common.bilinear_at(gx_comp, tx, ty)
+                    gv_y = common.bilinear_at(gy_comp, tx, ty)
 
                     diff = comp_val - ref_val
                     sum_gv2_x += gv_x * gv_x
@@ -304,6 +316,10 @@ if TAICHI_AVAILABLE:
 def process_single_layer(
     ref_layer_gpu,  # ti.ndarray (GPU buffer from pyramid)
     comp_layer_gpu,  # ti.ndarray (GPU buffer from pyramid)
+    gx_ref,  # ti.ndarray
+    gy_ref,  # ti.ndarray
+    gx_comp,  # ti.ndarray
+    gy_comp,  # ti.ndarray
     previous_flow_gpu,  # ti.ndarray or None
     layer_index: int,
     total_layers: int,
@@ -328,6 +344,9 @@ def process_single_layer(
     ref_gpu = ref_layer_gpu
     comp_gpu = comp_layer_gpu
 
+    ti.sync()
+    t_start = time.perf_counter()
+
     # 1. Initialize/Upsample flow
     flow_gpu = common.get_temp_buffer((h, w, 2), ti.f32, buffer_provider="pool")
 
@@ -343,7 +362,12 @@ def process_single_layer(
                 scale=ImageAlignmentConfig.FLOW_UPSCALE_FACTOR,
             )
 
+    ti.sync()
+    t_init = (time.perf_counter() - t_start) * 1000
+    init_label = "Initiation" if is_coarsest_layer else "Flow Upsampling"
+
     # 2. Match
+    t_match_start = time.perf_counter()
     current_tile_h = max(ImageAlignmentConfig.MIN_TILE_SIZE, min(tile_h, h))
     current_tile_w = max(ImageAlignmentConfig.MIN_TILE_SIZE, min(tile_w, w))
 
@@ -360,20 +384,6 @@ def process_single_layer(
             w,
             current_tile_h,
             current_tile_w,
-        )
-
-        # Subpixel Refinement
-        common.copy_field(refined_flow_gpu, flow_gpu)
-        _iterative_subpixel_refinement_kernel(
-            ref_gpu,
-            comp_gpu,
-            flow_gpu,
-            refined_flow_gpu,
-            h,
-            w,
-            current_tile_h,
-            current_tile_w,
-            max_iters=5,
         )
     else:
         # Coarse layers: use search_dist
@@ -392,10 +402,38 @@ def process_single_layer(
             current_search_dist,
         )
 
+    ti.sync()
+    t_match = (time.perf_counter() - t_match_start) * 1000
+    match_label = (
+        "Tile Matching (Fine)" if is_finest_layer else "Tile Matching (Coarse)"
+    )
+
+    t_subpixel = 0.0
+    if is_finest_layer:
+        t_sub_start = time.perf_counter()
+        # Subpixel Refinement
+        common.copy_field(refined_flow_gpu, flow_gpu)
+        _iterative_subpixel_refinement_kernel(
+            ref_gpu,
+            comp_gpu,
+            flow_gpu,
+            refined_flow_gpu,
+            gx_comp,
+            gy_comp,
+            h,
+            w,
+            current_tile_h,
+            current_tile_w,
+            max_iters=5,
+        )
+        ti.sync()
+        t_subpixel = (time.perf_counter() - t_sub_start) * 1000
+
     # No cleanup of ref_gpu/comp_gpu - they're owned by pyramid
     common.release_temp_buffer(flow_gpu)
 
     # 3. Post-process (median filter only, no RANSAC)
+    t_median_start = time.perf_counter()
     filtered_flow_gpu = common.get_temp_buffer(
         (h, w, 2), ti.f32, buffer_provider="pool"
     )
@@ -403,6 +441,24 @@ def process_single_layer(
         src=refined_flow_gpu, dst=filtered_flow_gpu, kernel_size=3, enable_tiling=False
     )
     common.release_temp_buffer(refined_flow_gpu)
+    ti.sync()
+    t_median = (time.perf_counter() - t_median_start) * 1000
+
+    t_total = (time.perf_counter() - t_start) * 1000
+
+    layer_suffix = ""
+    if is_coarsest_layer:
+        layer_suffix = " (Coarsest)"
+    elif is_finest_layer:
+        layer_suffix = " (Finest)"
+
+    print(f"Layer {layer_index}{layer_suffix}:")
+    print(f" - {init_label}: {t_init:.2f}ms")
+    print(f" - {match_label}: {t_match:.2f}ms")
+    if is_finest_layer:
+        print(f" - Subpixel Refinement (Gauss-Newton): {t_subpixel:.2f}ms")
+    print(f" - Median Filter: {t_median:.2f}ms")
+    print(f" Total Layer {layer_index}: {t_total:.2f}ms\n")
 
     # Return raw flow without RANSAC cleanup
     return filtered_flow_gpu
@@ -424,19 +480,54 @@ def compute_alignment_flow(
     if not TAICHI_AVAILABLE or not TAICHI_MODULES_AVAILABLE:
         raise ImportError("Taichi not ready")
 
+    ti.sync()
+    t_total_start = time.perf_counter()
+
     ref_gpu, ref_is_temp = common.ensure_taichi_field(ref_work_data, dtype=ti.f32)
     comp_gpu, comp_is_temp = common.ensure_taichi_field(current_work_data, dtype=ti.f32)
 
+    print("Pyramid Initiation:")
+    t_pyr_ref_start = time.perf_counter()
     ref_pyramid = build_image_pyramid_gpu(
         ref_gpu,
         n_levels=n_layers,
         min_size=ImageAlignmentConfig.MIN_PYRAMID_LAYER_SIZE,
     )
+    ti.sync()
+    t_pyr_ref = (time.perf_counter() - t_pyr_ref_start) * 1000
+    print(f" - Ref: {t_pyr_ref:.2f}ms")
+
+    t_pyr_comp_start = time.perf_counter()
     current_pyramid = build_image_pyramid_gpu(
         comp_gpu,
         n_levels=n_layers,
         min_size=ImageAlignmentConfig.MIN_PYRAMID_LAYER_SIZE,
     )
+    ti.sync()
+    t_pyr_comp = (time.perf_counter() - t_pyr_comp_start) * 1000
+    print(f" - Comp: {t_pyr_comp:.2f}ms\n")
+
+    # Add Gradient Pyramids
+    gx_ref_pyr = []
+    gy_ref_pyr = []
+    gx_comp_pyr = []
+    gy_comp_pyr = []
+
+    for i in range(len(ref_pyramid)):
+        h_i, w_i = ref_pyramid[i].shape
+        gx = common.get_temp_buffer((h_i, w_i), ti.f32, buffer_provider="pool")
+        gy = common.get_temp_buffer((h_i, w_i), ti.f32, buffer_provider="pool")
+        _compute_gradients_kernel(ref_pyramid[i], gx, gy, h_i, w_i)
+        gx_ref_pyr.append(gx)
+        gy_ref_pyr.append(gy)
+
+    for i in range(len(current_pyramid)):
+        h_i, w_i = current_pyramid[i].shape
+        gx = common.get_temp_buffer((h_i, w_i), ti.f32, buffer_provider="pool")
+        gy = common.get_temp_buffer((h_i, w_i), ti.f32, buffer_provider="pool")
+        _compute_gradients_kernel(current_pyramid[i], gx, gy, h_i, w_i)
+        gx_comp_pyr.append(gx)
+        gy_comp_pyr.append(gy)
 
     actual_layers = min(len(ref_pyramid), len(current_pyramid))
     flow_gpu = None
@@ -446,6 +537,10 @@ def compute_alignment_flow(
         flow_gpu = process_single_layer(
             ref_pyramid[i],
             current_pyramid[i],
+            gx_ref_pyr[i],
+            gy_ref_pyr[i],
+            gx_comp_pyr[i],
+            gy_comp_pyr[i],
             prev_flow,
             i,
             actual_layers,
@@ -458,15 +553,24 @@ def compute_alignment_flow(
 
     # No final RANSAC cleanup - return raw flow
 
-    for i in range(1, len(ref_pyramid)):
+    # Release Buffers
+    for i in range(len(ref_pyramid)):
         common.release_temp_buffer(ref_pyramid[i])
-    for i in range(1, len(current_pyramid)):
+        common.release_temp_buffer(gx_ref_pyr[i])
+        common.release_temp_buffer(gy_ref_pyr[i])
+    for i in range(len(current_pyramid)):
         common.release_temp_buffer(current_pyramid[i])
+        common.release_temp_buffer(gx_comp_pyr[i])
+        common.release_temp_buffer(gy_comp_pyr[i])
 
     if ref_is_temp:
         common.release_temp_buffer(ref_gpu)
     if comp_is_temp:
         common.release_temp_buffer(comp_gpu)
+
+    ti.sync()
+    t_total = (time.perf_counter() - t_total_start) * 1000
+    print(f"Total Alignment Time: {t_total:.2f}ms\n")
 
     return flow_gpu
 
