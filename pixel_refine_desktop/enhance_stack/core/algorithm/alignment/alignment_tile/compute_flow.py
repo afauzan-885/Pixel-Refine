@@ -179,8 +179,8 @@ if TAICHI_AVAILABLE:
         tile_w: int,
     ):
         """Fine level tile matching using ZMSAD cost."""
-        step_y = tile_h // 2
-        step_x = tile_w // 2
+        step_y = tile_h
+        step_x = tile_w
 
         for tile_y, tile_x in ti.ndrange(
             (h - tile_h + 1) // step_y, (w - tile_w + 1) // step_x
@@ -228,6 +228,118 @@ if TAICHI_AVAILABLE:
                         final_dy = float(init_dy + dy)
 
             # Write result
+            for r, c in ti.ndrange(tile_h, tile_w):
+                if y + r < h and x + c < w:
+                    refined_flow[y + r, x + c, 0] = final_dx
+                    refined_flow[y + r, x + c, 1] = final_dy
+
+    @ti.kernel
+    def _parabolic_subpixel_refinement_kernel(
+        ref_layer: ti.types.ndarray(),
+        comp_layer: ti.types.ndarray(),
+        flow: ti.types.ndarray(),
+        refined_flow: ti.types.ndarray(),
+        h: int,
+        w: int,
+        tile_h: int,
+        tile_w: int,
+    ):
+        """Subpixel refinement using parabolic fitting on ZMSAD surface."""
+        step_y = tile_h
+        step_x = tile_w
+
+        for tile_y, tile_x in ti.ndrange(
+            (h - tile_h + 1) // step_y, (w - tile_w + 1) // step_x
+        ):
+            y = tile_y * step_y
+            x = tile_x * step_x
+
+            # Get integer flow from previous search result
+            center_y = y + tile_h // 2
+            center_x = x + tile_w // 2
+            int_dx = int(ti.round(flow[center_y, center_x, 0]))
+            int_dy = int(ti.round(flow[center_y, center_x, 1]))
+
+            # Evaluate neighbors in X
+            c_m1_x = (
+                cost_function.compute_zmsad_cost(
+                    ref_layer,
+                    comp_layer,
+                    y,
+                    x,
+                    y + int_dy,
+                    x + int_dx - 1,
+                    tile_h,
+                    tile_w,
+                )
+                if x + int_dx - 1 >= 0
+                else 1e10
+            )
+            c_p1_x = (
+                cost_function.compute_zmsad_cost(
+                    ref_layer,
+                    comp_layer,
+                    y,
+                    x,
+                    y + int_dy,
+                    x + int_dx + 1,
+                    tile_h,
+                    tile_w,
+                )
+                if x + int_dx + 1 + tile_w <= w
+                else 1e10
+            )
+            c_0_0 = cost_function.compute_zmsad_cost(
+                ref_layer, comp_layer, y, x, y + int_dy, x + int_dx, tile_h, tile_w
+            )
+
+            # Evaluate neighbors in Y
+            c_m1_y = (
+                cost_function.compute_zmsad_cost(
+                    ref_layer,
+                    comp_layer,
+                    y,
+                    x,
+                    y + int_dy - 1,
+                    x + int_dx,
+                    tile_h,
+                    tile_w,
+                )
+                if y + int_dy - 1 >= 0
+                else 1e10
+            )
+            c_p1_y = (
+                cost_function.compute_zmsad_cost(
+                    ref_layer,
+                    comp_layer,
+                    y,
+                    x,
+                    y + int_dy + 1,
+                    x + int_dx,
+                    tile_h,
+                    tile_w,
+                )
+                if y + int_dy + 1 + tile_h <= h
+                else 1e10
+            )
+
+            # Fit parabolas
+            delta_x = 0.0
+            denom_x = 2.0 * (c_p1_x + c_m1_x - 2.0 * c_0_0)
+            if ti.abs(denom_x) > 1e-6:
+                delta_x = -(c_p1_x - c_m1_x) / denom_x
+            delta_x = tm.clamp(delta_x, -0.5, 0.5)
+
+            delta_y = 0.0
+            denom_y = 2.0 * (c_p1_y + c_m1_y - 2.0 * c_0_0)
+            if ti.abs(denom_y) > 1e-6:
+                delta_y = -(c_p1_y - c_m1_y) / denom_y
+            delta_y = tm.clamp(delta_y, -0.5, 0.5)
+
+            # Write result
+            final_dx = float(int_dx) + delta_x
+            final_dy = float(int_dy) + delta_y
+
             for r, c in ti.ndrange(tile_h, tile_w):
                 if y + r < h and x + c < w:
                     refined_flow[y + r, x + c, 0] = final_dx
@@ -409,22 +521,19 @@ def process_single_layer(
     )
 
     t_subpixel = 0.0
-    if is_finest_layer:
+    if not is_finest_layer:
         t_sub_start = time.perf_counter()
-        # Subpixel Refinement
+        # Parabolic Subpixel Refinement (Fast subpixel correction for coarse levels)
         common.copy_field(refined_flow_gpu, flow_gpu)
-        _iterative_subpixel_refinement_kernel(
+        _parabolic_subpixel_refinement_kernel(
             ref_gpu,
             comp_gpu,
             flow_gpu,
             refined_flow_gpu,
-            gx_comp,
-            gy_comp,
             h,
             w,
             current_tile_h,
             current_tile_w,
-            max_iters=5,
         )
         ti.sync()
         t_subpixel = (time.perf_counter() - t_sub_start) * 1000
@@ -455,8 +564,8 @@ def process_single_layer(
     print(f"Layer {layer_index}{layer_suffix}:")
     print(f" - {init_label}: {t_init:.2f}ms")
     print(f" - {match_label}: {t_match:.2f}ms")
-    if is_finest_layer:
-        print(f" - Subpixel Refinement (Gauss-Newton): {t_subpixel:.2f}ms")
+    if not is_finest_layer:
+        print(f" - Subpixel Refinement (Parabolic): {t_subpixel:.2f}ms")
     print(f" - Median Filter: {t_median:.2f}ms")
     print(f" Total Layer {layer_index}: {t_total:.2f}ms\n")
 
