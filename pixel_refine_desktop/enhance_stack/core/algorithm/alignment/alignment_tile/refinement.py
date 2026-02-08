@@ -10,13 +10,7 @@ try:
     import taichi as ti
     import taichi.math as tm
 
-    try:
-        from ...taichi_algorithm import common
-    except (ImportError, ValueError):
-        # Fallback for standalone script execution
-        from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm import (
-            common,
-        )
+    from . import cost_function
 
     TAICHI_AVAILABLE = True
 except ImportError:
@@ -36,55 +30,6 @@ MAX_STACK_TILE_SIZE = 64
 # ============================================================================
 
 if TAICHI_AVAILABLE:
-
-    @ti.func
-    def _get_zmcl_cost(
-        ref_layer: ti.types.ndarray(),
-        comp_layer: ti.types.ndarray(),
-        tile_x: int,
-        tile_y: int,
-        test_dx: int,
-        test_dy: int,
-        tile_w: int,
-        tile_h: int,
-    ) -> float:
-        """Helper to compute ZMCL cost for a tile shift."""
-        sum_diff = 0.0
-        for r, c in ti.ndrange(tile_h, tile_w):
-            val_ref = ref_layer[tile_y + r, tile_x + c]
-            val_comp = comp_layer[tile_y + test_dy + r, tile_x + test_dx + c]
-            sum_diff += val_ref - val_comp
-        mean_diff = sum_diff / float(tile_h * tile_w)
-
-        total_cost = 0.0
-        eps_sq = 1e-12
-        for r, c in ti.ndrange(tile_h, tile_w):
-            diff = (
-                ref_layer[tile_y + r, tile_x + c]
-                - comp_layer[tile_y + test_dy + r, tile_x + test_dx + c]
-            ) - mean_diff
-            total_cost += ti.sqrt(diff * diff + eps_sq)
-        return total_cost / float(tile_h * tile_w)
-
-    @ti.func
-    def _get_sad_cost(
-        ref_layer: ti.types.ndarray(),
-        comp_layer: ti.types.ndarray(),
-        tile_x: int,
-        tile_y: int,
-        test_dx: int,
-        test_dy: int,
-        tile_w: int,
-        tile_h: int,
-    ) -> float:
-        """Helper to compute SAD cost for a tile shift."""
-        total_cost = 0.0
-        for r, c in ti.ndrange(tile_h, tile_w):
-            total_cost += ti.abs(
-                ref_layer[tile_y + r, tile_x + c]
-                - comp_layer[tile_y + test_dy + r, tile_x + test_dx + c]
-            )
-        return total_cost / float(tile_h * tile_w)
 
     @ti.kernel
     def _subpixel_refinement_parabolic_kernel(
@@ -122,15 +67,15 @@ if TAICHI_AVAILABLE:
                     and tile_x + test_dx + tile_w <= w
                     and tile_y + test_dy + tile_h <= h
                 ):
-                    cost = _get_zmcl_cost(
+                    cost = cost_function.compute_zmsad_cost(
                         ref_layer,
                         comp_layer,
-                        tile_x,
                         tile_y,
-                        test_dx,
-                        test_dy,
-                        tile_w,
+                        tile_x,
+                        tile_y + test_dy,
+                        tile_x + test_dx,
                         tile_h,
+                        tile_w,
                     )
                     if cost < min_cost:
                         min_cost = cost
@@ -153,15 +98,15 @@ if TAICHI_AVAILABLE:
                 ):
                     costs[eval_idx] = 1e10
                 else:
-                    costs[eval_idx] = _get_sad_cost(
+                    costs[eval_idx] = cost_function.compute_zmsad_cost(
                         ref_layer,
                         comp_layer,
-                        tile_x,
                         tile_y,
-                        test_dx,
-                        test_dy,
-                        tile_w,
+                        tile_x,
+                        tile_y + test_dy,
+                        tile_x + test_dx,
                         tile_h,
+                        tile_w,
                     )
                 eval_idx += 1
 

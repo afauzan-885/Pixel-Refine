@@ -52,11 +52,6 @@ except ImportError:
 class ImageAlignmentConfig:
     """Configuration constants matching C++ namespace."""
 
-    NORMALIZATION_EPSILON = 1e-6
-    EPSILON_SQ = 1e-12
-    GRADIENT_WEIGHT_FACTOR = 1.4
-    SENSITIVITY = 150.0
-    STAB_EPSILON = 1e-6
     FLOW_UPSCALE_FACTOR = 2.0
     MIN_TILE_SIZE = 8
     MIN_PYRAMID_LAYER_SIZE = 32
@@ -68,26 +63,6 @@ class ImageAlignmentConfig:
 # ============================================================================
 
 if TAICHI_AVAILABLE:
-
-    @ti.kernel
-    def _compute_gradients_kernel(
-        img: ti.types.ndarray(),
-        gx: ti.types.ndarray(),
-        gy: ti.types.ndarray(),
-        h: int,
-        w: int,
-    ):
-        """Compute 2D gradients using central difference."""
-        for r, c in ti.ndrange(h, w):
-            if c > 0 and c < w - 1:
-                gx[r, c] = (img[r, c + 1] - img[r, c - 1]) * 0.5
-            else:
-                gx[r, c] = 0.0
-
-            if r > 0 and r < h - 1:
-                gy[r, c] = (img[r + 1, c] - img[r - 1, c]) * 0.5
-            else:
-                gy[r, c] = 0.0
 
     @ti.kernel
     def _initialize_coarsest_flow_kernel(
@@ -345,80 +320,6 @@ if TAICHI_AVAILABLE:
                     refined_flow[y + r, x + c, 0] = final_dx
                     refined_flow[y + r, x + c, 1] = final_dy
 
-    @ti.kernel
-    def _iterative_subpixel_refinement_kernel(
-        ref_layer: ti.types.ndarray(),
-        comp_layer: ti.types.ndarray(),
-        flow: ti.types.ndarray(),
-        refined_flow: ti.types.ndarray(),
-        gx_comp: ti.types.ndarray(),
-        gy_comp: ti.types.ndarray(),
-        h: int,
-        w: int,
-        tile_h: int,
-        tile_w: int,
-        max_iters: int,
-    ):
-        """Iterative subpixel refinement using Gauss-Newton optimization."""
-        step_y = tile_h
-        step_x = tile_w
-
-        for tile_y, tile_x in ti.ndrange(
-            (h - tile_h + 1) // step_y, (w - tile_w + 1) // step_x
-        ):
-            y = tile_y * step_y
-            x = tile_x * step_x
-
-            # Get initial flow guess
-            center_y = y + tile_h // 2
-            center_x = x + tile_w // 2
-            curr_dx = flow[center_y, center_x, 0]
-            curr_dy = flow[center_y, center_x, 1]
-
-            # Optimization Loop
-            for _ in range(max_iters):
-                sum_gv2_x = 0.0
-                sum_gv2_y = 0.0
-                sum_diff_gv_x = 0.0
-                sum_diff_gv_y = 0.0
-
-                stride = 2
-                for ir, ic in ti.ndrange(tile_h // stride, tile_w // stride):
-                    r = ir * stride
-                    c = ic * stride
-                    ref_val = ref_layer[y + r, x + c]
-                    tx = float(x + c) + curr_dx
-                    ty = float(y + r) + curr_dy
-
-                    comp_val = common.bicubic_at(comp_layer, tx, ty)
-
-                    # Sample pre-calculated gradients
-                    gv_x = common.bilinear_at(gx_comp, tx, ty)
-                    gv_y = common.bilinear_at(gy_comp, tx, ty)
-
-                    diff = comp_val - ref_val
-                    sum_gv2_x += gv_x * gv_x
-                    sum_gv2_y += gv_y * gv_y
-                    sum_diff_gv_x += diff * gv_x
-                    sum_diff_gv_y += diff * gv_y
-
-                # Simple GN Update (alpha damping = 0.5)
-                alpha = 0.5
-                if sum_gv2_x > 1e-6:
-                    curr_dx -= alpha * sum_diff_gv_x / sum_gv2_x
-                if sum_gv2_y > 1e-6:
-                    curr_dy -= alpha * sum_diff_gv_y / sum_gv2_y
-
-                # Stability clamp
-                curr_dx = tm.clamp(curr_dx, -50.0, 50.0)
-                curr_dy = tm.clamp(curr_dy, -50.0, 50.0)
-
-            # Write result
-            for r, c in ti.ndrange(tile_h, tile_w):
-                if y + r < h and x + c < w:
-                    refined_flow[y + r, x + c, 0] = curr_dx
-                    refined_flow[y + r, x + c, 1] = curr_dy
-
 
 # ============================================================================
 # Helper Functions
@@ -428,10 +329,6 @@ if TAICHI_AVAILABLE:
 def process_single_layer(
     ref_layer_gpu,  # ti.ndarray (GPU buffer from pyramid)
     comp_layer_gpu,  # ti.ndarray (GPU buffer from pyramid)
-    gx_ref,  # ti.ndarray
-    gy_ref,  # ti.ndarray
-    gx_comp,  # ti.ndarray
-    gy_comp,  # ti.ndarray
     previous_flow_gpu,  # ti.ndarray or None
     layer_index: int,
     total_layers: int,
@@ -616,28 +513,6 @@ def compute_alignment_flow(
     t_pyr_comp = (time.perf_counter() - t_pyr_comp_start) * 1000
     print(f" - Comp: {t_pyr_comp:.2f}ms\n")
 
-    # Add Gradient Pyramids
-    gx_ref_pyr = []
-    gy_ref_pyr = []
-    gx_comp_pyr = []
-    gy_comp_pyr = []
-
-    for i in range(len(ref_pyramid)):
-        h_i, w_i = ref_pyramid[i].shape
-        gx = common.get_temp_buffer((h_i, w_i), ti.f32, buffer_provider="pool")
-        gy = common.get_temp_buffer((h_i, w_i), ti.f32, buffer_provider="pool")
-        _compute_gradients_kernel(ref_pyramid[i], gx, gy, h_i, w_i)
-        gx_ref_pyr.append(gx)
-        gy_ref_pyr.append(gy)
-
-    for i in range(len(current_pyramid)):
-        h_i, w_i = current_pyramid[i].shape
-        gx = common.get_temp_buffer((h_i, w_i), ti.f32, buffer_provider="pool")
-        gy = common.get_temp_buffer((h_i, w_i), ti.f32, buffer_provider="pool")
-        _compute_gradients_kernel(current_pyramid[i], gx, gy, h_i, w_i)
-        gx_comp_pyr.append(gx)
-        gy_comp_pyr.append(gy)
-
     actual_layers = min(len(ref_pyramid), len(current_pyramid))
     flow_gpu = None
 
@@ -646,10 +521,6 @@ def compute_alignment_flow(
         flow_gpu = process_single_layer(
             ref_pyramid[i],
             current_pyramid[i],
-            gx_ref_pyr[i],
-            gy_ref_pyr[i],
-            gx_comp_pyr[i],
-            gy_comp_pyr[i],
             prev_flow,
             i,
             actual_layers,
@@ -665,12 +536,8 @@ def compute_alignment_flow(
     # Release Buffers
     for i in range(len(ref_pyramid)):
         common.release_temp_buffer(ref_pyramid[i])
-        common.release_temp_buffer(gx_ref_pyr[i])
-        common.release_temp_buffer(gy_ref_pyr[i])
     for i in range(len(current_pyramid)):
         common.release_temp_buffer(current_pyramid[i])
-        common.release_temp_buffer(gx_comp_pyr[i])
-        common.release_temp_buffer(gy_comp_pyr[i])
 
     if ref_is_temp:
         common.release_temp_buffer(ref_gpu)
