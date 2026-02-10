@@ -10,14 +10,29 @@ try:
     import taichi as ti
     import taichi.math as tm
 
-    from . import cost_function
-
     TAICHI_AVAILABLE = True
 except ImportError:
     TAICHI_AVAILABLE = False
     ti = None
     tm = None
-    common = None
+
+try:
+    from . import cost_function
+except ImportError:
+    # Facilitate standalone tests
+    try:
+        import cost_function
+    except ImportError:
+        cost_function = None
+
+try:
+    from ...taichi_algorithm import common
+except ImportError:
+    # Facilitate standalone tests
+    try:
+        import common
+    except ImportError:
+        common = None
 
 # ============================================================================
 # Constants
@@ -98,7 +113,7 @@ if TAICHI_AVAILABLE:
                 ):
                     costs[eval_idx] = 1e10
                 else:
-                    costs[eval_idx] = cost_function.compute_zmsad_cost(
+                    costs[eval_idx] = cost_function.compute_zmssd_cost(
                         ref_layer,
                         comp_layer,
                         tile_y,
@@ -283,6 +298,14 @@ def subpixel_refinement(
         raise ImportError("Taichi not available")
 
     h, w = ref_layer.shape[:2]
+
+    # Initialize GPU buffers if they don't exist
+    ref_gpu = ti.ndarray(ti.f32, shape=(h, w))
+    comp_gpu = ti.ndarray(ti.f32, shape=(h, w))
+    result_out = ti.ndarray(ti.f32, shape=(3,))
+
+    ref_gpu.from_numpy(np.ascontiguousarray(ref_layer, dtype=np.float32))
+    comp_gpu.from_numpy(np.ascontiguousarray(comp_layer, dtype=np.float32))
 
     # Boundary check
     if x < 0 or y < 0 or x + tile_w > w or y + tile_h > h:

@@ -59,10 +59,34 @@ if TAICHI_AVAILABLE:
 
         return total_abs_diff / float(tile_h * tile_w)
 
+    @ti.func
+    def compute_zmssd_cost(
+        ref: ti.types.ndarray(),
+        comp: ti.types.ndarray(),
+        y_ref: int,
+        x_ref: int,
+        y_comp: int,
+        x_comp: int,
+        tile_h: int,
+        tile_w: int,
+    ) -> float:
+        """
+        Compute Zero-Mean Sum of Squared Differences (ZM-SSD) cost.
+        Provides a smoother "U-shaped" cost surface ideal for parabolic fitting.
+        """
+        # Pass 1: Compute mean difference
+        sum_diff = 0.0
+        for r, c in ti.ndrange(tile_h, tile_w):
+            sum_diff += ref[y_ref + r, x_ref + c] - comp[y_comp + r, x_comp + c]
 
-# ============================================================================
-# Python API
-# ============================================================================
+        mean_diff = sum_diff / float(tile_h * tile_w)
 
-# Note: calculate_fine_analysis has been removed as it was only used for ZMCL testing.
-# The production pipeline now uses compute_zmsad_cost directly in Taichi kernels.
+        # Pass 2: Sum of Squared Differences with mean subtraction
+        total_sq_diff = 0.0
+        for r, c in ti.ndrange(tile_h, tile_w):
+            diff = (
+                ref[y_ref + r, x_ref + c] - comp[y_comp + r, x_comp + c]
+            ) - mean_diff
+            total_sq_diff += diff * diff
+
+        return total_sq_diff / float(tile_h * tile_w)

@@ -86,6 +86,38 @@ if TAICHI_AVAILABLE and _ti is not None:
             coarse_confidence[r, c] = conf
 
     @_ti.kernel
+    def _blend_guidance_maps(
+        current_level: _ti.types.ndarray(),
+        previous_level: _ti.types.ndarray(),
+        output: _ti.types.ndarray(),
+        h: int,
+        w: int,
+        current_weight: float,
+    ):
+        """Blend guidance maps from different pyramid levels.
+
+        Args:
+            current_level: Confidence map from current (finer) pyramid level
+            previous_level: Upsampled confidence map from previous (coarser) level
+            output: Blended output
+            current_weight: Weight for current level (0-1), previous gets (1-weight)
+        """
+        prev_weight = 1.0 - current_weight
+
+        for r, c in _ti.ndrange(h, w):
+            curr_val = current_level[r, c]
+            prev_val = previous_level[r, c]
+
+            # Weighted average with slight bias toward higher confidence
+            blended = curr_val * current_weight + prev_val * prev_weight
+
+            # Optional: boost if both levels agree (high confidence)
+            if curr_val > 0.7 and prev_val > 0.7:
+                blended = _ti.min(1.0, blended * 1.1)
+
+            output[r, c] = blended
+
+    @_ti.kernel
     def _phase2_fine_analysis(
         current: _ti.types.ndarray(),
         reference: _ti.types.ndarray(),
@@ -160,7 +192,7 @@ if TAICHI_AVAILABLE and _ti is not None:
                             if use_guidance == 1:
                                 pixel_guidance = guidance_map[yy, xx]
 
-                                                        # B. Adaptive Local Consistency Veto (The "Breakthrough")
+                                # B. Adaptive Local Consistency Veto (The "Breakthrough")
                             # If individual pixel diff exceeds noise significantly, we suppress it.
                             # Threshold lowered to 2.5x noise for better sensitivity in difficult areas.
                             diff = _ti.abs(current[yy, xx] - reference[yy, xx])
@@ -170,7 +202,8 @@ if TAICHI_AVAILABLE and _ti is not None:
                                 # Dampening becomes more aggressive if guidance also suggests mismatch
                                 dampening_factor = 1.6 + 1.0 * (1.0 - pixel_guidance)
                                 local_veto = _ti.exp(
-                                    -(diff / _ti.max(1e-6, noise_sigma) - 2.5) * dampening_factor
+                                    -(diff / _ti.max(1e-6, noise_sigma) - 2.5)
+                                    * dampening_factor
                                 )
 
                             # C. Combine everything
@@ -281,46 +314,126 @@ if TAICHI_AVAILABLE and _ti is not None:
                 )
                 _equalize_brightness_kernel(curr_gpu, ref_gpu, analysis_input, h, w)
 
-            # 4. Phase 1: Coarse Analysis for Guidance Map
+            # 4. Phase 1: Multi-Level Pyramid Analysis for Guidance Map
             use_guidance = 1
-            coarse_w = max(64, w // 4)
-            coarse_h = max(64, h // 4)
 
-            # Downsample to coarse resolution
-            curr_coarse = bilinear_resize(analysis_input, coarse_h, coarse_w, buffer_provider=buffer_provider)
-            ref_coarse = bilinear_resize(ref_gpu, coarse_h, coarse_w, buffer_provider=buffer_provider)
-
-            # Coarse confidence calculation
-            coarse_tile_w = max(8, tile_w // 4)
-            coarse_tile_h = max(8, tile_h // 4)
-            num_tiles_h = coarse_h // coarse_tile_h
-            num_tiles_w = coarse_w // coarse_tile_w
-
-            coarse_conf_gpu = common.get_temp_buffer(
-                (num_tiles_h, num_tiles_w), _ti.f32, buffer_provider
+            # Build pyramids for hierarchical analysis (auto-stop at 32px minimum)
+            curr_pyramid = pyramid.build_image_pyramid_gpu(
+                analysis_input,
+                n_levels=10,  # Will auto-stop at min_size
+                min_size=32,
+                buffer_provider=buffer_provider,
+            )
+            ref_pyramid = pyramid.build_image_pyramid_gpu(
+                ref_gpu, n_levels=10, min_size=32, buffer_provider=buffer_provider
             )
 
-            _phase1_coarse_analysis(
-                curr_coarse,
-                ref_coarse,
-                coarse_conf_gpu,
-                coarse_tile_h,
-                coarse_tile_w,
-                coarse_h,
-                coarse_w,
-                noise_sigma,
-                motion_sensitivity,
-                noise_offset_factor,
-            )
+            # Debug: Print pyramid levels
+            print(f"[Pyramid] Built {len(curr_pyramid)} levels:")
+            for idx, level in enumerate(curr_pyramid):
+                print(f"  Level {idx}: {level.shape[0]}x{level.shape[1]}")
 
-            # Upsample coarse confidence to full resolution for Phase 2 guidance
-            # Use Bicubic for smoother transitions and better boundary accuracy
-            guidance_gpu = bicubic_resize(coarse_conf_gpu, h, w, buffer_provider=buffer_provider)
+            # Hierarchical confidence propagation: coarse to fine
+            guidance_gpu = None
+            pyramid_confidences = []  # Track for cleanup
 
-            # Cleanup Phase 1 temp buffers
-            release_taichi_ndarray(curr_coarse)
-            release_taichi_ndarray(ref_coarse)
-            common.release_temp_buffer(coarse_conf_gpu)
+            try:
+                # Process from coarsest to finest level
+                for level_idx in range(len(curr_pyramid) - 1, -1, -1):
+                    curr_level = curr_pyramid[level_idx]
+                    ref_level = ref_pyramid[level_idx]
+
+                    h_level, w_level = curr_level.shape[0], curr_level.shape[1]
+
+                    # Calculate adaptive tile size for this pyramid level
+                    # Maintain consistent analysis granularity across scales
+                    scale_factor = h_level / h  # Relative to full resolution
+                    level_tile_h = max(8, int(tile_h * scale_factor))
+                    level_tile_w = max(8, int(tile_w * scale_factor))
+
+                    num_tiles_h = max(1, h_level // level_tile_h)
+                    num_tiles_w = max(1, w_level // level_tile_w)
+
+                    # Calculate confidence at this level
+                    level_conf_gpu = common.get_temp_buffer(
+                        (num_tiles_h, num_tiles_w), _ti.f32, buffer_provider
+                    )
+
+                    _phase1_coarse_analysis(
+                        curr_level,
+                        ref_level,
+                        level_conf_gpu,
+                        level_tile_h,
+                        level_tile_w,
+                        h_level,
+                        w_level,
+                        noise_sigma,
+                        motion_sensitivity,
+                        noise_offset_factor,
+                    )
+
+                    # Upsample to current level resolution for blending
+                    level_conf_upsampled = bicubic_resize(
+                        level_conf_gpu,
+                        h_level,
+                        w_level,
+                        buffer_provider=buffer_provider,
+                    )
+
+                    # Blend with previous guidance if exists (hierarchical refinement)
+                    if guidance_gpu is not None:
+                        # Upsample previous guidance to current level
+                        prev_guidance_upsampled = bicubic_resize(
+                            guidance_gpu,
+                            h_level,
+                            w_level,
+                            buffer_provider=buffer_provider,
+                        )
+
+                        # Weighted blend: 60% current level, 40% previous (coarser) level
+                        # This allows finer levels to refine while maintaining global context
+                        blended_guidance = common.get_temp_buffer(
+                            (h_level, w_level), _ti.f32, buffer_provider
+                        )
+                        _blend_guidance_maps(
+                            level_conf_upsampled,
+                            prev_guidance_upsampled,
+                            blended_guidance,
+                            h_level,
+                            w_level,
+                            0.6,  # weight for current level
+                        )
+
+                        # Release old guidance and update
+                        common.release_temp_buffer(guidance_gpu)
+                        common.release_temp_buffer(prev_guidance_upsampled)
+                        common.release_temp_buffer(level_conf_upsampled)
+                        guidance_gpu = blended_guidance
+                    else:
+                        # First level (coarsest), use as-is
+                        guidance_gpu = level_conf_upsampled
+
+                    # Track for cleanup
+                    pyramid_confidences.append(level_conf_gpu)
+
+                # Final upsample to full resolution if needed
+                if guidance_gpu is not None and (
+                    guidance_gpu.shape[0] != h or guidance_gpu.shape[1] != w
+                ):
+                    final_guidance = bicubic_resize(
+                        guidance_gpu, h, w, buffer_provider=buffer_provider
+                    )
+                    common.release_temp_buffer(guidance_gpu)
+                    guidance_gpu = final_guidance
+
+            finally:
+                # Cleanup pyramid levels and intermediate confidence maps
+                for level in curr_pyramid[1:]:  # Skip first (original image)
+                    common.release_temp_buffer(level)
+                for level in ref_pyramid[1:]:
+                    common.release_temp_buffer(level)
+                for conf in pyramid_confidences:
+                    common.release_temp_buffer(conf)
 
             # 5. Phase 2: Fine Analysis (Sliding Window MAD)
             use_stability = 1 if stability_map is not None else 0
