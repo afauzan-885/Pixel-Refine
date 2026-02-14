@@ -307,6 +307,7 @@ def process_in_gpu(
     images_processed_so_far,
     total_overall_images,
     enable_alignment=True,
+    alignment_tile_size=None,
     **kwargs,
 ):
     """Pipeline terpadu untuk Alignment + Merging di GPU."""
@@ -345,8 +346,8 @@ def process_in_gpu(
             reference_image_float,
             work_res_h,
             work_res_w,
-            tile_h,
-            tile_w,
+            alignment_tile_size if alignment_tile_size is not None else tile_h,
+            alignment_tile_size if alignment_tile_size is not None else tile_w,
             ref_dtype,
             update_progress,
             stop_requested,
@@ -430,6 +431,7 @@ def process_in_gpu(
                     noise_offset_factor=noise_offset_factor,
                     equalize_brightness=False,
                     buffer_provider="pool",
+                    search_radius=kwargs.get("similarity_search_radius", 3),
                 )
 
                 release_taichi_ndarray(curr_work_gray_gpu)

@@ -55,7 +55,7 @@ class ImageAlignmentConfig:
     FLOW_UPSCALE_FACTOR = 2.0
     MIN_TILE_SIZE = 8
     MIN_PYRAMID_LAYER_SIZE = 32
-    EARLY_EXIT_COST = 0.008
+    EARLY_EXIT_COST = 0.0001
     ADAPTIVE_THRESHOLD = 0.005  # Threshold for expanding search area
     ENABLE_MEDIAN_FILTER = False  # Experiment: Disable median filter
 
@@ -65,6 +65,67 @@ class ImageAlignmentConfig:
 # ============================================================================
 
 if TAICHI_AVAILABLE:
+
+    @ti.kernel
+    def _block_search_kernel(
+        ref_layer: ti.types.ndarray(),
+        comp_layer: ti.types.ndarray(),
+        refined_flow: ti.types.ndarray(),
+        h: int,
+        w: int,
+        tile_h: int,
+        tile_w: int,
+        search_radius: int,
+    ):
+        """Perform a wide-area block search for initial alignment."""
+        step_y = tile_h
+        step_x = tile_w
+
+        for tile_y, tile_x in ti.ndrange(
+            (h - tile_h + 1) // step_y, (w - tile_w + 1) // step_x
+        ):
+            y = tile_y * step_y
+            x = tile_x * step_x
+
+            best_cost = 1e10
+            best_dx = 0.0
+            best_dy = 0.0
+
+            # Wide area exhaustive search
+            for dy in range(-search_radius, search_radius + 1):
+                for dx in range(-search_radius, search_radius + 1):
+                    test_y = y + dy
+                    test_x = x + dx
+
+                    if (
+                        test_y < 0
+                        or test_x < 0
+                        or test_y + tile_h > h
+                        or test_x + tile_w > w
+                    ):
+                        continue
+
+                    cost = cost_function.compute_zmssd_cost(
+                        ref_layer,
+                        comp_layer,
+                        y,
+                        x,
+                        test_y,
+                        test_x,
+                        tile_h,
+                        tile_w,
+                    )
+
+                    if cost < best_cost:
+                        best_cost = cost
+                        best_dx = float(dx)
+                        best_dy = float(dy)
+
+            # Broadcast best match to all pixels in the tile
+            for r, c in ti.ndrange(tile_h, tile_w):
+                if y + r < h and x + c < w:
+                    refined_flow[y + r, x + c, 0] = best_dx
+                    refined_flow[y + r, x + c, 1] = best_dy
 
     @ti.kernel
     def _initialize_coarsest_flow_kernel(
@@ -437,6 +498,19 @@ def process_single_layer(
             w,
             current_tile_h,
             current_tile_w,
+        )
+    elif is_coarsest_layer:
+        # For coarsest layer, perform wide-area block search to establish global motion
+        search_radius = max(4, int(base_search_dist * 2))
+        _block_search_kernel(
+            ref_gpu,
+            comp_gpu,
+            refined_flow_gpu,
+            h,
+            w,
+            current_tile_h,
+            current_tile_w,
+            search_radius,
         )
     else:
         # Coarse layers: use search_dist

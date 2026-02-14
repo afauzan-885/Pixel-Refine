@@ -480,6 +480,7 @@ class SimilarityAlgorithm:
                     enable_alignment=enable_alignment,
                     num_images=num_images,  # Pass num_images for alignment check
                     num_workers=num_workers,  # Pass num_workers for alignment
+                    alignment_tile_size=10,  # [EXPERIMENT] Decoupled tile size: Alignment=10, Similarity=16
                     **unused_kwargs,
                 )
 
