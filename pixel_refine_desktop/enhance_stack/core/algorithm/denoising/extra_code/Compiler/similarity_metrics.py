@@ -67,46 +67,42 @@ if TAICHI_AVAILABLE:
                 if curr_x < 1 or curr_x >= w - 1:
                     continue
 
-                pixel_diff = ti.abs(
-                    current_img[curr_y, curr_x] - reference_img[curr_y, curr_x]
-                )
+                # Cache center pixels
+                c_pixel = current_img[curr_y, curr_x]
+                r_pixel = reference_img[curr_y, curr_x]
+                pixel_diff = ti.abs(c_pixel - r_pixel)
 
                 # Optimization Constants
                 adaptive_diff_threshold = ti.max(0.005, noise_level * 0.2)
                 structure_min_threshold_sq = 150.0
 
-                # --- 1:1 Gradient Calculation ---
-                # ... gradients (stay 1:1 with C++ logic for base component) ...
-                gx1 = (
-                    (current_img[curr_y, curr_x + 1] - current_img[curr_y, curr_x - 1])
-                    + (
-                        current_img[curr_y - 1, curr_x + 1]
-                        - current_img[curr_y - 1, curr_x - 1]
-                    )
-                    + (
-                        current_img[curr_y + 1, curr_x + 1]
-                        - current_img[curr_y + 1, curr_x - 1]
-                    )
-                ) * 0.333
-                gx2 = (
-                    (
-                        reference_img[curr_y, curr_x + 1]
-                        - reference_img[curr_y, curr_x - 1]
-                    )
-                    + (
-                        reference_img[curr_y - 1, curr_x + 1]
-                        - reference_img[curr_y - 1, curr_x - 1]
-                    )
-                    + (
-                        reference_img[curr_y + 1, curr_x + 1]
-                        - reference_img[curr_y + 1, curr_x - 1]
-                    )
-                ) * 0.333
-                gy1 = current_img[curr_y + 1, curr_x] - current_img[curr_y - 1, curr_x]
-                gy2 = (
-                    reference_img[curr_y + 1, curr_x]
-                    - reference_img[curr_y - 1, curr_x]
-                )
+                # --- Optimized Gradient Calculation ---
+                # Pre-fetch neighbors to avoid repeated indexing
+                # Current Image Neighbors
+                c_p10 = current_img[curr_y, curr_x + 1]
+                c_m10 = current_img[curr_y, curr_x - 1]
+                c_p1m1 = current_img[curr_y - 1, curr_x + 1]
+                c_m1m1 = current_img[curr_y - 1, curr_x - 1]
+                c_p1p1 = current_img[curr_y + 1, curr_x + 1]
+                c_m1p1 = current_img[curr_y + 1, curr_x - 1]
+                c_0p1 = current_img[curr_y + 1, curr_x]
+                c_0m1 = current_img[curr_y - 1, curr_x]
+
+                # Reference Image Neighbors
+                r_p10 = reference_img[curr_y, curr_x + 1]
+                r_m10 = reference_img[curr_y, curr_x - 1]
+                r_p1m1 = reference_img[curr_y - 1, curr_x + 1]
+                r_m1m1 = reference_img[curr_y - 1, curr_x - 1]
+                r_p1p1 = reference_img[curr_y + 1, curr_x + 1]
+                r_m1p1 = reference_img[curr_y + 1, curr_x - 1]
+                r_0p1 = reference_img[curr_y + 1, curr_x]
+                r_0m1 = reference_img[curr_y - 1, curr_x]
+
+                gx1 = ((c_p10 - c_m10) + (c_p1m1 - c_m1m1) + (c_p1p1 - c_m1p1)) * 0.333
+                gx2 = ((r_p10 - r_m10) + (r_p1m1 - r_m1m1) + (r_p1p1 - r_m1p1)) * 0.333
+
+                gy1 = c_0p1 - c_0m1
+                gy2 = r_0p1 - r_0m1
 
                 mag1_sq = gx1 * gx1 + gy1 * gy1
                 mag2_sq = gx2 * gx2 + gy2 * gy2

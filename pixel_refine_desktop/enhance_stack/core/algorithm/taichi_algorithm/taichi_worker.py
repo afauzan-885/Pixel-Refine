@@ -71,18 +71,27 @@ class _TaichiWorker(threading.Thread):
             reserved_cores = 2 if num_cores > 4 else 1
             ti_cpu_threads = max(1, num_cores - reserved_cores)
 
-            # Reduce reservation to 2GB to leave room for OS/UI
-            # Fallback chain: GPU -> CPU
-            try:
-                # Use ti.gpu (CUDA/Vulkan/Metal)
-                ti.init(arch=ti.gpu, offline_cache=True, device_memory_GB=2.0)
-            except Exception:
+            # Allow manual override via environment variable
+            forced_arch = os.environ.get("TAICHI_ARCH", "").lower()
+
+            if forced_arch == "cpu":
+                ti.init(arch=ti.cpu, cpu_max_num_threads=ti_cpu_threads)
+            elif forced_arch == "vulkan":
+                ti.init(arch=ti.vulkan, offline_cache=True, device_memory_GB=1.8)
+            elif forced_arch == "cuda":
+                ti.init(arch=ti.cuda, offline_cache=True, device_memory_GB=1.8)
+            else:
+                # Fallback chain: GPU -> CPU
                 try:
-                    # Limit CPU threads to keep UI responsive on fallback
-                    ti.init(arch=ti.cpu, cpu_max_num_threads=ti_cpu_threads)
-                except Exception as e:
-                    self.init_error = str(e)
-                    return
+                    # Use ti.gpu (CUDA/Vulkan/Metal)
+                    ti.init(arch=ti.gpu, offline_cache=True, device_memory_GB=1.8)
+                except Exception:
+                    try:
+                        # Limit CPU threads to keep UI responsive on fallback
+                        ti.init(arch=ti.cpu, cpu_max_num_threads=ti_cpu_threads)
+                    except Exception as e:
+                        self.init_error = str(e)
+                        return
 
             self.initialized = True
         except Exception as e:

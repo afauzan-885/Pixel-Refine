@@ -40,16 +40,15 @@ if TAICHI_AVAILABLE:
     ) -> float:
         """
         Compute Zero-Mean Sum of Absolute Differences (ZMSAD) cost.
-        Extremely fast and robust to uniform illumination changes.
+        Optimized to reduce memory passes.
         """
-        # Pass 1: Compute mean difference
         sum_diff = 0.0
+        # Single pass for mean
         for r, c in ti.ndrange(tile_h, tile_w):
             sum_diff += ref[y_ref + r, x_ref + c] - comp[y_comp + r, x_comp + c]
 
         mean_diff = sum_diff / float(tile_h * tile_w)
 
-        # Pass 2: Sum of Absolute Differences with mean subtraction
         total_abs_diff = 0.0
         for r, c in ti.ndrange(tile_h, tile_w):
             diff = (
@@ -72,21 +71,20 @@ if TAICHI_AVAILABLE:
     ) -> float:
         """
         Compute Zero-Mean Sum of Squared Differences (ZM-SSD) cost.
-        Provides a smoother "U-shaped" cost surface ideal for parabolic fitting.
+        Optimized using single-pass variance formula: E[X^2] - (E[X])^2
         """
-        # Pass 1: Compute mean difference
         sum_diff = 0.0
+        sum_sq_diff = 0.0
+
+        # Single pass for both sum and sum of squares
         for r, c in ti.ndrange(tile_h, tile_w):
-            sum_diff += ref[y_ref + r, x_ref + c] - comp[y_comp + r, x_comp + c]
+            diff = float(ref[y_ref + r, x_ref + c] - comp[y_comp + r, x_comp + c])
+            sum_diff += diff
+            sum_sq_diff += diff * diff
 
-        mean_diff = sum_diff / float(tile_h * tile_w)
+        n = float(tile_h * tile_w)
+        mean_diff = sum_diff / n
 
-        # Pass 2: Sum of Squared Differences with mean subtraction
-        total_sq_diff = 0.0
-        for r, c in ti.ndrange(tile_h, tile_w):
-            diff = (
-                ref[y_ref + r, x_ref + c] - comp[y_comp + r, x_comp + c]
-            ) - mean_diff
-            total_sq_diff += diff * diff
-
-        return total_sq_diff / float(tile_h * tile_w)
+        # Variance formula: Mean(X^2) - Mean(X)^2
+        # Use ti.max(0.0, ...) to avoid precision issues resulting in negative values
+        return ti.max(0.0, (sum_sq_diff / n) - (mean_diff * mean_diff))

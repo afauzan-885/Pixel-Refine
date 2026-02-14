@@ -105,6 +105,7 @@ if TAICHI_AVAILABLE:
                     ):
                         continue
 
+                    # Call optimized cost function
                     cost = cost_function.compute_zmssd_cost(
                         ref_layer,
                         comp_layer,
@@ -123,9 +124,10 @@ if TAICHI_AVAILABLE:
 
             # Broadcast best match to all pixels in the tile
             for r, c in ti.ndrange(tile_h, tile_w):
-                if y + r < h and x + c < w:
-                    refined_flow[y + r, x + c, 0] = best_dx
-                    refined_flow[y + r, x + c, 1] = best_dy
+                idx_y, idx_x = y + r, x + c
+                if idx_y < h and idx_x < w:
+                    refined_flow[idx_y, idx_x, 0] = best_dx
+                    refined_flow[idx_y, idx_x, 1] = best_dy
 
     @ti.kernel
     def _initialize_coarsest_flow_kernel(
@@ -149,9 +151,8 @@ if TAICHI_AVAILABLE:
         tile_h: int,
         tile_w: int,
         search_dist: int,
-        adaptive_threshold: float,
     ):
-        """Coarse level tile matching using ZM-SSD cost with adaptive search."""
+        """Coarse level tile matching using ZM-SSD cost."""
         step_y = tile_h
         step_x = tile_w
 
@@ -162,19 +163,25 @@ if TAICHI_AVAILABLE:
             x = tile_x * step_x
 
             # Get initial flow from upsampled previous level
+            # Use center pixel for better representativeness
             center_y = y + tile_h // 2
             center_x = x + tile_w // 2
-            init_dx = int(ti.round(flow[center_y, center_x, 0]))
-            init_dy = int(ti.round(flow[center_y, center_x, 1]))
+            init_dx_val = flow[center_y, center_x, 0]
+            init_dy_val = flow[center_y, center_x, 1]
+            init_dx = int(ti.round(init_dx_val))
+            init_dy = int(ti.round(init_dy_val))
 
             best_cost = 1e10
             best_dx = init_dx
             best_dy = init_dy
 
+            # Primary Search
             for dy in range(-search_dist, search_dist + 1):
+                cur_dy = init_dy + dy
                 for dx in range(-search_dist, search_dist + 1):
-                    test_y = y + init_dy + dy
-                    test_x = x + init_dx + dx
+                    cur_dx = init_dx + dx
+                    test_y = y + cur_dy
+                    test_x = x + cur_dx
 
                     if (
                         test_y < 0
@@ -197,55 +204,15 @@ if TAICHI_AVAILABLE:
 
                     if cost < best_cost:
                         best_cost = cost
-                        best_dx = init_dx + dx
-                        best_dy = init_dy + dy
-
-            # Adaptive Pass: If best_cost is high, expand search area (3x)
-            if best_cost > adaptive_threshold:
-                expanded_dist = search_dist * 3
-                for dy in range(-expanded_dist, expanded_dist + 1):
-                    for dx in range(-expanded_dist, expanded_dist + 1):
-                        # Skip area already checked
-                        if (
-                            dy >= -search_dist
-                            and dy <= search_dist
-                            and dx >= -search_dist
-                            and dx <= search_dist
-                        ):
-                            continue
-
-                        test_y = y + init_dy + dy
-                        test_x = x + init_dx + dx
-
-                        if (
-                            test_y < 0
-                            or test_x < 0
-                            or test_y + tile_h > h
-                            or test_x + tile_w > w
-                        ):
-                            continue
-
-                        cost = cost_function.compute_zmssd_cost(
-                            ref_layer,
-                            comp_layer,
-                            y,
-                            x,
-                            test_y,
-                            test_x,
-                            tile_h,
-                            tile_w,
-                        )
-
-                        if cost < best_cost:
-                            best_cost = cost
-                            best_dx = init_dx + dx
-                            best_dy = init_dy + dy
+                        best_dx = cur_dx
+                        best_dy = cur_dy
 
             # Write result
             for r, c in ti.ndrange(tile_h, tile_w):
-                if y + r < h and x + c < w:
-                    refined_flow[y + r, x + c, 0] = float(best_dx)
-                    refined_flow[y + r, x + c, 1] = float(best_dy)
+                idx_y, idx_x = y + r, x + c
+                if idx_y < h and idx_x < w:
+                    refined_flow[idx_y, idx_x, 0] = float(best_dx)
+                    refined_flow[idx_y, idx_x, 1] = float(best_dy)
 
     @ti.kernel
     def _search_fine_level_kernel(
@@ -449,10 +416,9 @@ def process_single_layer(
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
+    h, w = ref_layer_gpu.shape[:2]
     is_coarsest_layer = layer_index == total_layers - 1
     is_finest_layer = layer_index == 0
-
-    h, w = ref_layer_gpu.shape[:2]
 
     # Direct GPU usage - inputs are already GPU buffers from pyramid
     ref_gpu = ref_layer_gpu
@@ -517,11 +483,6 @@ def process_single_layer(
         depth_factor = 1.0 / (2.0 ** (total_layers - layer_index - 1))
         current_search_dist = max(1, int(base_search_dist * depth_factor))
 
-        # Adaptive logic only for L2 and coarser
-        adaptive_thresh = 1e10  # Disabled by default
-        if layer_index >= 2:
-            adaptive_thresh = ImageAlignmentConfig.ADAPTIVE_THRESHOLD
-
         _search_coarse_level_kernel(
             ref_gpu,
             comp_gpu,
@@ -532,7 +493,6 @@ def process_single_layer(
             current_tile_h,
             current_tile_w,
             current_search_dist,
-            adaptive_thresh,
         )
 
     # ti.sync()
