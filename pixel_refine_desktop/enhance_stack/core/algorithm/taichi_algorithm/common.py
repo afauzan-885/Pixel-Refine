@@ -140,6 +140,48 @@ if TAICHI_AVAILABLE:
         bottom = v10 * (1.0 - fx) + v11 * fx
         return top * (1.0 - fy) + bottom * fy
 
+    @ti.func
+    def bicubic_at_channel(
+        img: ti.types.ndarray(), x: float, y: float, c: int
+    ) -> float:
+        """Bicubic interpolation at fractional coordinates for a specific channel."""
+        h, w = img.shape[0], img.shape[1]
+        res = 0.0
+        if x < 1.0 or y < 1.0 or x >= float(w - 2) or y >= float(h - 2):
+            res = bilinear_at_3ch(img, x, y, h, w, c)
+        else:
+            ix = int(ti.floor(x))
+            iy = int(ti.floor(y))
+            fx = x - float(ix)
+            fy = y - float(iy)
+
+            # Pre-compute weights
+            wx = ti.Vector(
+                [
+                    cubic_weight(fx + 1.0),
+                    cubic_weight(fx),
+                    cubic_weight(1.0 - fx),
+                    cubic_weight(2.0 - fx),
+                ]
+            )
+            wy = ti.Vector(
+                [
+                    cubic_weight(fy + 1.0),
+                    cubic_weight(fy),
+                    cubic_weight(1.0 - fy),
+                    cubic_weight(2.0 - fy),
+                ]
+            )
+
+            # 4x4 interpolation
+            for j in ti.static(range(4)):
+                row_sum = 0.0
+                row_iy = iy - 1 + j
+                for i in ti.static(range(4)):
+                    row_sum += img[row_iy, ix - 1 + i, c] * wx[i]
+                res += row_sum * wy[j]
+        return res
+
     @ti.kernel
     def _copy_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray()):
         for I in ti.grouped(src):

@@ -636,10 +636,10 @@ def perform_alignment_gpu(
     use_sharpen = kwargs.get("use_sharpen", False)
     search_dist = kwargs.get("search_dist", 2.0)
 
-    # Calculate n_layers
+    # Calculate n_layers (Capped at 3 for Pixel-style low latency)
     min_layer_res = min(tile_h, tile_w) * 2
     log_arg = min(work_res_h, work_res_w) / min_layer_res if min_layer_res > 0 else 1
-    n_layers = max(1, int(np.ceil(np.log2(log_arg))) if log_arg > 0 else 1)
+    n_layers = min(3, max(1, int(np.ceil(np.log2(log_arg))) if log_arg > 0 else 1))
 
     # Force single worker for GPU
     if num_alignment_workers > 1:
@@ -790,10 +790,10 @@ def perform_image_alignment(
     ref_work_ptr = ref_work_gray_cpp.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
     # del ref_preprocessed_cpp (Keep it for Farneback/Tile if needed, or move to raft block)
 
-    # Siapkan variabel konfigurasi C++ (jika dibutuhkan)
+    # Siapkan variabel konfigurasi C++ (Capped at 3)
     min_layer_res = min(tile_h, tile_w) * 2
     log_arg = min(work_res_h, work_res_w) / min_layer_res if min_layer_res > 0 else 1
-    n_layers = max(1, int(np.ceil(np.log2(log_arg))) if log_arg > 0 else 1)
+    n_layers = min(3, max(1, int(np.ceil(np.log2(log_arg))) if log_arg > 0 else 1))
 
     # === BACKEND RAFT (GPU, multi-thread) ===
     if optical_flow_type == "raft":

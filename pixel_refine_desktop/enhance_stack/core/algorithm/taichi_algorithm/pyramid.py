@@ -27,18 +27,23 @@ if TAICHI_AVAILABLE:
         h_dst: int,
         w_dst: int,
     ):
-        """2x2 Average Pooling downsample (Anti-aliasing)."""
+        """5x5 Gaussian downsampling (High-quality Anti-aliasing)."""
+        # Gaussian weights [1, 4, 6, 4, 1] / 16
+        weights = ti.static([1.0, 4.0, 6.0, 4.0, 1.0])
+        total_weight = 256.0  # (1+4+6+4+1)^2
+
         for r, c in ti.ndrange(h_dst, w_dst):
-            y = r * 2
-            x = c * 2
+            y_src = r * 2
+            x_src = c * 2
 
-            # Simple 2x2 average for stability
-            v00 = src[ti.min(y, h_src - 1), ti.min(x, w_src - 1)]
-            v01 = src[ti.min(y, h_src - 1), ti.min(x + 1, w_src - 1)]
-            v10 = src[ti.min(y + 1, h_src - 1), ti.min(x, w_src - 1)]
-            v11 = src[ti.min(y + 1, h_src - 1), ti.min(x + 1, w_src - 1)]
+            val = 0.0
+            for j in ti.static(range(-2, 3)):
+                for i in ti.static(range(-2, 3)):
+                    sy = tm.clamp(y_src + j, 0, h_src - 1)
+                    sx = tm.clamp(x_src + i, 0, w_src - 1)
+                    val += src[sy, sx] * weights[j + 2] * weights[i + 2]
 
-            dst[r, c] = (v00 + v01 + v10 + v11) * 0.25
+            dst[r, c] = val / total_weight
 
     @ti.kernel
     def _upsample_flow_kernel(
@@ -51,26 +56,19 @@ if TAICHI_AVAILABLE:
         scale_x: float,
         scale_y: float,
     ):
+        """Bicubic upsampling for optical flow field."""
         for r, c in ti.ndrange(h_dst, w_dst):
-            u = r * (float(h_src) / float(h_dst))
-            v = c * (float(w_src) / float(w_dst))
-            y0 = int(ti.floor(u))
-            x0 = int(ti.floor(v))
-            y0 = tm.clamp(y0, 0, h_src - 1)
-            x0 = tm.clamp(x0, 0, w_src - 1)
-            y1 = tm.clamp(y0 + 1, 0, h_src - 1)
-            x1 = tm.clamp(x0 + 1, 0, w_src - 1)
-            wy = u - float(y0)
-            wx = v - float(x0)
-            f00 = tm.vec2(src[y0, x0, 0], src[y0, x0, 1])
-            f01 = tm.vec2(src[y0, x1, 0], src[y0, x1, 1])
-            f10 = tm.vec2(src[y1, x0, 0], src[y1, x0, 1])
-            f11 = tm.vec2(src[y1, x1, 0], src[y1, x1, 1])
-            res = (1.0 - wy) * ((1.0 - wx) * f00 + wx * f01) + wy * (
-                (1.0 - wx) * f10 + wx * f11
-            )
-            dst[r, c, 0] = res[0] * scale_x
-            dst[r, c, 1] = res[1] * scale_y
+            # Coordinates in source domain
+            v = float(c) * (float(w_src) / float(w_dst))
+            u = float(r) * (float(h_src) / float(h_dst))
+
+            # Sample each channel using bicubic interpolation from common.py
+            # Note: common.bicubic_at handles boundary clamping
+            val0 = common.bicubic_at_channel(src, v, u, 0)
+            val1 = common.bicubic_at_channel(src, v, u, 1)
+
+            dst[r, c, 0] = val0 * scale_x
+            dst[r, c, 1] = val1 * scale_y
 
 
 @ti_thread

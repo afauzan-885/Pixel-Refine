@@ -91,7 +91,10 @@ if TAICHI_AVAILABLE:
             best_dx = 0.0
             best_dy = 0.0
 
-            # Wide area exhaustive search
+            # 1. Integer Search with Zero-Motion Bias
+            # We give a slight preference (bias) to (0,0) shift
+            bias_weight = 0.999  # Slightly favor smaller costs at (0,0)
+
             for dy in range(-search_radius, search_radius + 1):
                 for dx in range(-search_radius, search_radius + 1):
                     test_y = y + dy
@@ -105,7 +108,6 @@ if TAICHI_AVAILABLE:
                     ):
                         continue
 
-                    # Call optimized cost function
                     cost = cost_function.compute_zmssd_cost(
                         ref_layer,
                         comp_layer,
@@ -117,10 +119,72 @@ if TAICHI_AVAILABLE:
                         tile_w,
                     )
 
+                    # Apply bias to (0,0)
+                    if dx == 0 and dy == 0:
+                        cost *= bias_weight
+
                     if cost < best_cost:
                         best_cost = cost
                         best_dx = float(dx)
                         best_dy = float(dy)
+
+            # 2. Subpixel Refinement (Parabolic Fitting)
+            # Find subpixel peak using 4-neighbors if not on search boundary
+            if (
+                -search_radius < best_dx < search_radius
+                and -search_radius < best_dy < search_radius
+            ):
+                # Sample 4 neighbors
+                c0 = best_cost
+                cx_m1 = cost_function.compute_zmssd_cost(
+                    ref_layer,
+                    comp_layer,
+                    y,
+                    x,
+                    y + int(best_dy),
+                    x + int(best_dx) - 1,
+                    tile_h,
+                    tile_w,
+                )
+                cx_p1 = cost_function.compute_zmssd_cost(
+                    ref_layer,
+                    comp_layer,
+                    y,
+                    x,
+                    y + int(best_dy),
+                    x + int(best_dx) + 1,
+                    tile_h,
+                    tile_w,
+                )
+                cy_m1 = cost_function.compute_zmssd_cost(
+                    ref_layer,
+                    comp_layer,
+                    y,
+                    x,
+                    y + int(best_dy) - 1,
+                    x + int(best_dx),
+                    tile_h,
+                    tile_w,
+                )
+                cy_p1 = cost_function.compute_zmssd_cost(
+                    ref_layer,
+                    comp_layer,
+                    y,
+                    x,
+                    y + int(best_dy) + 1,
+                    x + int(best_dx),
+                    tile_h,
+                    tile_w,
+                )
+
+                # Parabolic fit: x = x_int - (f(x+1) - f(x-1)) / (2 * (f(x+1) + f(x-1) - 2*f(x)))
+                denom_x = 2.0 * (cx_p1 + cx_m1 - 2.0 * c0)
+                if ti.abs(denom_x) > 1e-6:
+                    best_dx -= (cx_p1 - cx_m1) / denom_x
+
+                denom_y = 2.0 * (cy_p1 + cy_m1 - 2.0 * c0)
+                if ti.abs(denom_y) > 1e-6:
+                    best_dy -= (cy_p1 - cy_m1) / denom_y
 
             # Broadcast best match to all pixels in the tile
             for r, c in ti.ndrange(tile_h, tile_w):
