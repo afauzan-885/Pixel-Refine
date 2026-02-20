@@ -218,7 +218,7 @@ class SimilarityAlgorithm:
 
         # Execution Path (GPU/CPU)
         if process_in is None or process_in == "auto":
-            process_in = "cpu"
+            process_in = "gpu"
 
         print(f"[DEBUG] _spatial_merging active mode: {process_in}")
 
@@ -235,13 +235,35 @@ class SimilarityAlgorithm:
                 )
                 process_in = "cpu"
             else:
+                # [NEW] GPU Mode tidak kompatibel dengan Streaming (kendala sinkronisasi asinkron Taichi Driver).
+                # Kita secara manual mendaratkan semua array gambar ke RAM CPU menjadi list utuh.
+                gpu_images_target = images
+
+                from pixel_refine_desktop.enhance_stack.core.logic.image_streamer import (
+                    ImageStreamer,
+                )
+
+                if isinstance(images, ImageStreamer):
+                    print(
+                        "[INFO] Mengekstrak Streamer menjadi List untuk kompatibilitas rutinitas GPU (Offline/Batch Mode)..."
+                    )
+                    if update_progress:
+                        update_progress(p_init, "Mengalokasikan memori GPU Batch...")
+                    gpu_images_target = []
+
+                    for i, img in images.stream():
+                        if stop_requested and stop_requested():
+                            break
+                        if img is not None:
+                            gpu_images_target.append(img)
+
                 (
                     processed_frames_spatial,
                     final_image_sum_full_res,
                     weight_map_sum_full_res,
                     ref_noise_sigma,
                 ) = process_in_gpu(
-                    images=images,
+                    images=gpu_images_target,
                     reference_image_float=reference_image_float,
                     ref_image_h=ref_image_h,
                     ref_image_w=ref_image_w,
@@ -414,7 +436,11 @@ class SimilarityAlgorithm:
         Fungsi utama untuk menghitung kesamaan dan penggabungan frame (spatial/frequency).
         Sudah tahan stop_requested(), return value konsisten meski proses dibatalkan.
         """
-        if not isinstance(images, list) or not images:
+        from pixel_refine_desktop.enhance_stack.core.logic.image_streamer import (
+            ImageStreamer,
+        )
+
+        if not isinstance(images, (list, ImageStreamer)) or not images:
             raise ValueError(language_config.IMAGE_DATA_MUST_BE_VALID)
 
         try:
@@ -818,16 +844,12 @@ def main(
         if save_final_weight_map:
             print(language_config.OUTPUT_SAVE_WEIGHT_MAP.format(weight_map_output_path))
 
-        # --- 4. PERENCANAAN BATCH (UMUM) ---
-        # Gunakan max_batch_size=8 untuk menjaga RAM tetap aman
-        batch_plan = setup_balanced_batching(
-            total_images, language_config, max_batch_size=8
+        # --- 4. INISIALISASI STREAMER ---
+        from pixel_refine_desktop.enhance_stack.core.logic.image_streamer import (
+            ImageStreamer,
         )
-        if not batch_plan:
-            if update_progress:
-                update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
-            return
-        total_batches = len(batch_plan)
+
+        streamer = ImageStreamer(data_source, stop_requested)
 
         # --- DEFINISI FORMAT YANG DIDUKUNG ---
         SUPPORTED_FORMATS = {
@@ -930,83 +952,45 @@ def main(
                     f" [Linear Mode] Auto-calculated Proxy Scale (Fallback): {global_proxy_scale:.3f}"
                 )
 
-        # --- 5. PROSES INTI PER BATCH & AKUMULASI STREAMING ---
+        # --- 5. PROSES INTI DENGAN STREAMING ---
+        print(f"\n--- Memulai pemrosesan streaming ({total_images} gambar) ---")
+
+        batch_raw_res = image_processor.similarity_mnfr(
+            streamer,
+            merging_type=merging_type_from_settings,
+            ref_image_override=reference_image,
+            total_overall_images=total_images,
+            images_processed_so_far=0,
+            tile_size=spatial_tile_size_arg,
+            is_linear_mode=is_linear_mode,
+            overlap=spatial_overlap_arg if spatial_overlap_arg else 0.3,
+            motion_sensitivity=(
+                spatial_motion_sensitivity_arg
+                if spatial_motion_sensitivity_arg
+                else 1.0
+            ),
+            noise_offset_factor=(
+                spatial_noise_offset_factor_arg
+                if spatial_noise_offset_factor_arg
+                else 1.0
+            ),
+            stop_requested=stop_requested,
+            update_progress=update_progress,
+            return_raw=True,
+            save_temporal_std_path=None,
+            proxy_scale=global_proxy_scale,
+            **extra_merging_params,
+        )
+
         global_sum_img = None
         global_sum_weight = None
         global_total_frames = 0
-        images_processed_count = 0
 
-        for batch_num, (batch_start, batch_end) in enumerate(batch_plan, 1):
-            if stop_requested and stop_requested():
-                print(language_config.PROCESS_TERMINATED_BY_USER)
-                break
+        if batch_raw_res is not None and len(batch_raw_res) >= 3:
+            global_sum_img, global_sum_weight, global_total_frames = batch_raw_res[:3]
+            print(f"[DEBUG] Total Streamed Frames: {global_total_frames}")
 
-            print(
-                f"\n--- Processing batch {batch_num}/{total_batches} (Completed: {images_processed_count}) ---"
-            )
-
-            # Muat batch gambar
-            current_batch_images = _load_images_for_batch(
-                data_source,
-                (batch_start, batch_end),
-                stop_requested,
-                linear_mode=is_linear_mode,
-            )
-
-            if not current_batch_images:
-                continue
-
-            # Jalankan Algoritma Similarity
-            batch_raw_res = image_processor.similarity_mnfr(
-                current_batch_images,
-                merging_type=merging_type_from_settings,
-                # reference_image_float=None,  <-- REMOVED: Preventing overwrite of internal calculation
-                ref_image_override=reference_image,
-                total_overall_images=total_images,
-                images_processed_so_far=images_processed_count,
-                # Parameter Algoritma
-                tile_size=spatial_tile_size_arg,
-                is_linear_mode=is_linear_mode,  # Pass flag for proxy generation
-                overlap=spatial_overlap_arg if spatial_overlap_arg else 0.3,
-                motion_sensitivity=(
-                    spatial_motion_sensitivity_arg
-                    if spatial_motion_sensitivity_arg
-                    else 1.0
-                ),
-                noise_offset_factor=(
-                    spatial_noise_offset_factor_arg
-                    if spatial_noise_offset_factor_arg
-                    else 1.0
-                ),
-                stop_requested=stop_requested,
-                update_progress=update_progress,
-                return_raw=True,  # Penting: Kita butuh data mentah (float/16bit) dari batch ini untuk akumulasi
-                save_temporal_std_path=None,  # Tidak perlu simpan intermediate std map
-                **extra_merging_params,
-            )
-            if stop_requested and stop_requested():
-                break
-
-            if batch_raw_res is not None and len(batch_raw_res) == 3:
-                batch_sum_img, batch_sum_weight, batch_processed_frames = batch_raw_res
-
-                if global_sum_img is None:
-                    global_sum_img = batch_sum_img
-                    global_sum_weight = batch_sum_weight
-                else:
-                    global_sum_img += batch_sum_img
-                    global_sum_weight += batch_sum_weight
-
-                global_total_frames += batch_processed_frames
-                print(
-                    f"[DEBUG] Accumulated frames: {global_total_frames} (Batch added: {batch_processed_frames})"
-                )
-                # Update progress based on actual images processed in source data
-                images_processed_count += batch_end - batch_start
-
-            # Paksa cleanup memori setiap akhir batch
-            del current_batch_images
-            gc.collect()
+        gc.collect()
 
         if stop_requested and stop_requested():
             if update_progress and progress_bar:

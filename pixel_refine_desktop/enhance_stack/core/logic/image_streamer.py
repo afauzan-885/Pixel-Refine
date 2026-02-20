@@ -35,6 +35,25 @@ class ImageStreamer:
         elif isinstance(self.data_source, list):
             self.total_images = len(self.data_source)
 
+    def __len__(self):
+        return self.total_images
+
+    def __bool__(self):
+        return self.total_images > 0
+
+    def __getitem__(self, idx):
+        if self.is_hdf5 and self.keys:
+            with h5py.File(self.data_source, "r") as h5f:
+                return np.array(h5f[self.keys[idx]])
+        elif not self.is_hdf5 and self.data_source:
+            item = self.data_source[idx]
+            if isinstance(item, np.ndarray):
+                return item
+            elif isinstance(item, str):
+                loaded = load_images_from_paths([item], self.stop_requested)
+                return loaded[0] if loaded else None
+        raise IndexError("ImageStreamer index out of range")
+
     def _image_loader_worker(self):
         try:
             if self.is_hdf5 and self.keys:
@@ -45,13 +64,19 @@ class ImageStreamer:
                         img = np.array(h5f[key])
                         self.job_queue.put((i, img))
             elif not self.is_hdf5 and self.data_source:
-                for i, path in enumerate(self.data_source):
+                for i, item in enumerate(self.data_source):
                     if self.stop_requested and self.stop_requested():
                         break
-                    # Gunakan load tunggal untuk menghemat RAM
-                    loaded = load_images_from_paths([path], self.stop_requested)
-                    if loaded and loaded[0] is not None:
-                        self.job_queue.put((i, loaded[0]))
+
+                    if isinstance(item, np.ndarray):
+                        self.job_queue.put((i, item))
+                    elif isinstance(item, str):
+                        # Gunakan load tunggal untuk menghemat RAM
+                        loaded = load_images_from_paths([item], self.stop_requested)
+                        if loaded and loaded[0] is not None:
+                            self.job_queue.put((i, loaded[0]))
+                        else:
+                            self.job_queue.put((i, None))
                     else:
                         self.job_queue.put((i, None))
         except Exception as e:

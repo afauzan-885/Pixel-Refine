@@ -93,10 +93,6 @@ def process_in_cpu(
         )
         if not alignment_success and stop_requested and stop_requested():
             return 0, None, None, 0.0
-    elif enable_alignment and is_streamer and num_images > 1:
-        print(
-            "[Warning] On-the-fly local alignment in stream-mode is currently bypassed."
-        )
 
     # 2. SETUP FOR MERGING
     ref_for_weight_calc = reference_image_float
@@ -142,11 +138,24 @@ def process_in_cpu(
     # Iterator tunggal yang seragam
     image_iterator = images.stream() if is_streamer else enumerate(images)
 
+    # [OPTIMIZATION] Pre-allocate heavy buffers to avoid 2.2GB fragmented peak overhead
+    norm_img_buf = np.empty(
+        (ref_image_h, ref_image_w, ref_channels_buffer),
+        dtype=np.float32,
+    )
+    # Buffers that might be populated later
+    curr_float_buf = None
+    curr_gray_preprocessed_buf = None
+
     for i, img_orig in image_iterator:
         if stop_requested and stop_requested():
             break
         if img_orig is None:
             continue
+
+        print(
+            f"[Streaming Log] Memproses dan mengambil frame ke-{i+1}/{num_images} dari ImageStreamer (CPU)"
+        )
 
         # [NEW] Perform On-the-fly CPU Alignment before Merging
         current_process_image = img_orig
@@ -178,17 +187,27 @@ def process_in_cpu(
                 print(f"Error during on-the-fly CPU alignment for frame {i}: {e}")
 
         # 1. Hitung Weight Map Cache
-        curr_float = normalize_image(current_process_image, ref_dtype)
+        if (
+            curr_float_buf is None
+            or curr_float_buf.shape != current_process_image.shape
+        ):
+            curr_float_buf = np.empty(current_process_image.shape, dtype=np.float32)
+
+        normalize_image(current_process_image, ref_dtype, out=curr_float_buf)
         if is_linear_mode:
-            curr_float = to_gamma_proxy(curr_float, scale=proxy_scale)
+            # Inline/in-place proxy calculation is harder, we tolerate 1 copy here
+            curr_float = to_gamma_proxy(curr_float_buf, scale=proxy_scale)
+        else:
+            curr_float = curr_float_buf
 
         curr_gray_preprocessed, _ = preprocess_in_python(curr_float)
-        curr_work_gray = cv2.resize(
+
+        cv2.resize(
             curr_gray_preprocessed,
             (work_res_w, work_res_h),
+            dst=local_curr_work_res[:, :, 0],
             interpolation=cv2.INTER_LINEAR,
         )
-        local_curr_work_res[:, :, 0] = curr_work_gray
         weight_map_work_res.fill(0)
 
         c_interface.call_generate_weight_map_jit(
@@ -218,13 +237,7 @@ def process_in_cpu(
             interpolation=cv2.INTER_LINEAR,
         )
 
-        if "norm_img_buf" not in locals():
-            norm_img_buf = np.empty(
-                (ref_image_h, ref_image_w, ref_channels_buffer),
-                dtype=np.float32,
-            )
-
-        normalize_image(img_orig, ref_dtype, out=norm_img_buf)
+        normalize_image(current_process_image, ref_dtype, out=norm_img_buf)
 
         if norm_img_buf.shape[:2] != (ref_image_h, ref_image_w):
             norm_img = cv2.resize(
@@ -245,6 +258,20 @@ def process_in_cpu(
             images[i] = None
         if norm_img is not norm_img_buf:
             del norm_img
+
+        # [RAM KILLER] Menyapu bersih referensi array Python yang tidak di-cache
+        del current_process_image
+        if curr_float is not curr_float_buf:
+            del curr_float
+        if curr_gray_preprocessed is not curr_gray_preprocessed_buf:
+            del curr_gray_preprocessed
+        if img_orig is not None:
+            del img_orig
+
+        # Paksa Python melepaskan memori yang *dangling*
+        import gc
+
+        gc.collect()
 
         processed_frames += 1
 
@@ -359,10 +386,6 @@ def process_in_gpu(
         )
         if stop_requested and stop_requested():
             return 0, None, None, 0.0
-    elif enable_alignment and is_streamer and num_images > 1:
-        print(
-            "[Warning] On-the-fly local alignment in stream-mode is currently bypassed (GPU)."
-        )
 
     # 2. SETUP FOR MERGING
     ref_for_weight_calc = reference_image_float
@@ -392,6 +415,7 @@ def process_in_gpu(
         _weight_work_gpu = create_taichi_ndarray(
             np.zeros((work_res_h, work_res_w), dtype=np.float32)
         )
+        import traceback
 
         use_overall_progress = total_overall_images and total_overall_images > 0
 
@@ -439,6 +463,10 @@ def process_in_gpu(
                     break
                 if img_orig is None:
                     continue
+
+                print(
+                    f"[Streaming Log] Memproses dan mengambil frame ke-{i+1}/{num_images} dari ImageStreamer (GPU)"
+                )
 
                 # [NEW] Perform On-the-fly Alignment before Merging
                 current_process_image = img_orig
@@ -498,13 +526,22 @@ def process_in_gpu(
                         print(
                             f"Error during on-the-fly GPU alignment for frame {i}: {e}"
                         )
-                        import traceback
-
                         traceback.print_exc()
+
+                # If current_process_image is a Taichi ndarray (e.g. from compute_alignment_and_warp_hybrid_taichi)
+                # We either need to download it or pass it safely. Since normalize_image_gpu expects a numpy array
+                # or handles it internally, we'll ensure it's safely converted to numpy first for consistency.
+                if hasattr(current_process_image, "to_numpy"):
+                    import taichi as ti
+
+                    if isinstance(current_process_image, ti.ndarray):
+                        current_process_image = current_process_image.to_numpy()
 
                 curr_full_gpu = preprocess.normalize_image_gpu(
                     current_process_image, dtype=ref_dtype, buffer_provider="pool"
                 )
+
+                # Cek dimensi (Taichi menggunakan (n, m, c) atau numpy (h, w, c))
                 if curr_full_gpu.shape[:2] != (ref_image_h, ref_image_w):
                     new_full = bilinear_resize(curr_full_gpu, ref_image_h, ref_image_w)
                     release_taichi_ndarray(curr_full_gpu)
