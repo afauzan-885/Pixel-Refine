@@ -7,20 +7,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.base_worker import (
 import numpy as np
 import sqlite3
 import os
-from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
-from PySide6.QtCore import QThread, Signal, Qt
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
-    extract_all_metadata,
-    get_all_image_paths_for_single_process,
-    load_images_from_paths,
-    resize_all_with_padding,
-    resize_with_padding,
-    save_image,
-    setup_balanced_batching,
-)
-from pixel_refine_desktop.ui.resources.styles.stylesheet import PROGRESS_BAR
-from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 
 
 class AverageAlgorithm:
@@ -68,6 +55,10 @@ class AverageAlgorithm:
         total_overall_images=None,
         images_processed_so_far=0,
     ):
+        from pixel_refine_desktop.ui.views.settings.General.Language import (
+            language_config,
+        )
+
         """
         Melakukan stacking gambar dengan metode rata-rata sederhana (simple average).
         (Docstring lainnya tetap sama)
@@ -154,6 +145,17 @@ def main(
     batch_id=None,
     progress_bar=None,
 ):
+    import queue
+    import threading
+    from pixel_refine_desktop.ui.views.settings.General.Language import language_config
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
+        extract_all_metadata,
+        get_all_image_paths_for_single_process,
+        load_images_from_paths,
+        resize_with_padding,
+        save_image,
+    )
+
     try:
         if update_progress:
             update_progress(0, language_config.RUN_IMAGE_PROCESS_STARTED)
@@ -208,117 +210,64 @@ def main(
         )
         print(language_config.OUTPUT_IMAGE_TO_BE_SAVED.format(output_path))
 
-        if isinstance(data_source, str) and data_source.endswith(".h5"):
-            with h5py.File(data_source, "r") as f:
-                total_images = len(f.keys())
-        elif isinstance(data_source, list):
-            total_images = len(data_source)
+        # --- TAHAP 1: Inisialisasi Streamer ---
+        from pixel_refine_desktop.enhance_stack.core.logic.image_streamer import (
+            ImageStreamer,
+        )
+
+        streamer = ImageStreamer(data_source, stop_requested)
+        total_images = streamer.total_images
 
         if not total_images:
             if update_progress:
                 update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
             return
 
-        batch_plan = setup_balanced_batching(total_images, language_config)
-
-        if not batch_plan:
-            if update_progress:
-                update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
-            return
-
-        total_batches = len(batch_plan)
-        # print(language_config.NUMBER_OF_BATCHES_TO_BE_PROCESSED.format(total_batches))
-
+        # --- TAHAP 2: CONSUMER (Main Thread Melakukan Accumulasi) ---
         sum_accumulator = None
         total_count_processed = 0
-
-        # Penanda ukuran target dan bit-depth untuk konsistensi data
         target_shape = None
         reference_dtype = None
 
-        for batch_num, (batch_start, batch_end) in enumerate(batch_plan, 1):
-            if stop_requested and stop_requested():
-                print(language_config.PROCESS_TERMINATED_BY_USER)
-                break
-
-            print(
-                f"\n{language_config.PROCESSING_BATCH.format(batch_num, total_batches, batch_start)}"
-            )
-
-            batch_images = []
-            if isinstance(data_source, str) and data_source.endswith(".h5"):
-                with h5py.File(data_source, "r") as h5f:
-                    keys = list(h5f.keys())[batch_start:batch_end]
-                    batch_images = [np.array(h5f[key]) for key in keys]
-            else:  # Sumbernya adalah list path
-                batch_paths = data_source[batch_start:batch_end]
-                # Gunakan load_images_from_paths karena lebih tangguh untuk berbagai format
-                batch_images = load_images_from_paths(batch_paths, stop_requested)
-
-                # Setup awal dari gambar pertama (referensi)
-                if batch_images and target_shape is None:
-                    first_img = batch_images[0]
-                    target_shape = (first_img.shape[1], first_img.shape[0])  # (w, h)
-                    reference_dtype = first_img.dtype
-                    print(
-                        f"  -> Reference detect: {target_shape[0]}x{target_shape[1]}, Depth: {reference_dtype}"
-                    )
-
+        for idx, current_img in streamer.stream():
             if stop_requested and stop_requested():
                 break
-            if not batch_images:
-                print(
-                    language_config.SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED.format(
-                        batch_num
-                    )
-                )
+
+            if current_img is None:
                 continue
 
-            # --- PROSES AKUMULASI KUMULATIF SATU-TAHAP ---
-            num_in_batch = len(batch_images)
-            gc_threshold = max(1, int(num_in_batch * 0.7))
+            # Inisialisasi referensi gambar pertama jika belum
+            if target_shape is None:
+                target_shape = (current_img.shape[1], current_img.shape[0])  # (w, h)
+                reference_dtype = current_img.dtype
+                print(
+                    f"  -> Reference detect: {target_shape[0]}x{target_shape[1]}, Depth: {reference_dtype}"
+                )
 
-            for i in range(num_in_batch):
-                if stop_requested and stop_requested():
-                    break
+            # Validasi ukuran dan perbaiki (jika perlu)
+            if (current_img.shape[1], current_img.shape[0]) != target_shape:
+                current_img = resize_with_padding(current_img, target_shape)
 
-                current_img = batch_images[i]
-                if current_img is None:
-                    continue
+            # --- SINGLE STAGE ACCUMULATION ---
+            if sum_accumulator is None:
+                sum_accumulator = current_img.astype(np.float32)
+            else:
+                sum_accumulator += current_img.astype(np.float32)
 
-                # Validasi dimensi dan resize jika perlu
-                if (current_img.shape[1], current_img.shape[0]) != target_shape:
-                    current_img = resize_with_padding(current_img, target_shape)
+            total_count_processed += 1
 
-                # Inisialisasi accumulator hny sekali
-                if sum_accumulator is None:
-                    sum_accumulator = current_img.astype(np.float32)
-                else:
-                    # Akumulasi langsung ke float32 (Single Stage)
-                    sum_accumulator += current_img.astype(np.float32)
+            # --- RAM KILLER: Segera hapus gambar tunggal setelah dijumlahkan! ---
+            del current_img
 
-                total_count_processed += 1
+            # --- PROGRESS UPDATE ---
+            if update_progress:
+                progress_val = int((total_count_processed / total_images) * 98)
+                msg = language_config.IMAGE_PROCESS_IN_PROGRESS.format(
+                    total_count_processed, total_images
+                )
+                update_progress(progress_val, msg)
 
-                # Update progress UI
-                if update_progress:
-                    progress_val = int((total_count_processed / total_images) * 98)
-                    msg = language_config.IMAGE_PROCESS_IN_PROGRESS.format(
-                        total_count_processed, total_images
-                    )
-                    update_progress(progress_val, msg)
-
-                # --- STRATEGI GC ELEGAN (Refill Memory) ---
-                # Hapus referensi gambar dari list segera setelah variabel accumulator memegangnya
-                batch_images[i] = None
-
-                # GC setiap 70% proses batch atau di akhir batch
-                if (i + 1) >= gc_threshold or (i + 1) == num_in_batch:
-                    gc.collect()
-
-            # Cleanup total untuk batch ini
-            del batch_images
-            gc.collect()
-
+        # --- TAHAP 4: Pengecekan & Finalisasi ---
         if stop_requested and stop_requested():
             if update_progress and progress_bar:
                 update_progress(progress_bar.value(), "Proses dibatalkan.")
@@ -329,21 +278,18 @@ def main(
                 update_progress(100, language_config.DATA_FAILED_COMPLETION_CREATED)
             return
 
-        # --- FINALISASI RATA-RATA & PRESERVASI BIT-DEPTH ---
         if update_progress:
             update_progress(99, "Finalisasi...")
 
         average_image_float = sum_accumulator / total_count_processed
 
-        # Gunakan bit-depth asli dari referensi untuk clipping yang akurat
         if reference_dtype is None:
-            # Fallback jika gagal deteksi di awal
             reference_dtype = np.uint8
 
         max_val = np.iinfo(reference_dtype).max
         final_result = np.clip(average_image_float, 0, max_val).astype(reference_dtype)
 
-        # Bebaskan memori accumulator
+        # Bebaskan array raksasa float32
         del sum_accumulator
         gc.collect()
 
@@ -362,7 +308,6 @@ def main(
             if update_progress:
                 update_progress(100, final_message)
 
-            # Cleanup temp files jika ada
             if not single_process and batch_id is not None:
                 align_dir = os.path.join("database", "align")
                 batch_hdf5_path = os.path.join(
@@ -377,7 +322,6 @@ def main(
             if update_progress:
                 update_progress(100, language_config.FAILED_IMAGE_ENHANCEMENT)
 
-    # --- 5. Penanganan Error (Tetap sama, karena sudah bagus) ---
     except Exception as e:
         error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(e))
         traceback.print_exc()
@@ -392,6 +336,17 @@ def running_average(
     progress_callback=None,
     stop_callback=None,
 ):
+    from PySide6.QtWidgets import (
+        QMessageBox,
+        QVBoxLayout,
+        QDialog,
+        QProgressBar,
+        QLabel,
+    )
+    from PySide6.QtCore import Qt
+    from pixel_refine_desktop.ui.resources.styles.stylesheet import PROGRESS_BAR
+    from pixel_refine_desktop.ui.views.settings.General.Language import language_config
+
     # ==========================================================
     # KONDISI 1: MODE BATCH (TANPA GUI)
     # ==========================================================

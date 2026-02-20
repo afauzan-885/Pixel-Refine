@@ -204,6 +204,93 @@ if TAICHI_AVAILABLE:
             flow[r, c, 0] = 0.0
             flow[r, c, 1] = 0.0
 
+    @ti.func
+    def _compute_regularization_params(
+        flow: ti.types.ndarray(),
+        y: int,
+        x: int,
+        tile_h: int,
+        tile_w: int,
+        h_total: int,
+        w_total: int,
+    ) -> ti.types.vector(3, ti.f32):
+        """
+        Compute spatial regularization parameters from guide flow (upsampled prev level).
+        Returns: [avg_dx, avg_dy, weight]
+        """
+        sum_dx = 0.0
+        sum_dy = 0.0
+        sum_sq_diff = 0.0
+        count = 0.0
+
+        # Sample 3x3 neighbors of the tile
+        # Since 'flow' is at pixel level, we step by tile size
+        step_y = tile_h
+        step_x = tile_w
+
+        # Center index for flow sampling (center of the tile)
+        center_y = y + tile_h // 2
+        center_x = x + tile_w // 2
+
+        # 1. Compute Mean
+        for dy in range(-1, 2):
+            for dx in range(-1, 2):
+                if dy == 0 and dx == 0:
+                    continue  # Skip center (self)
+
+                # Neighbor tile center
+                ny = center_y + dy * step_y
+                nx = center_x + dx * step_x
+
+                if ny >= 0 and ny < h_total and nx >= 0 and nx < w_total:
+                    val_x = flow[ny, nx, 0]
+                    val_y = flow[ny, nx, 1]
+                    sum_dx += val_x
+                    sum_dy += val_y
+                    count += 1.0
+
+        avg_dx = 0.0
+        avg_dy = 0.0
+        variance = 0.0
+        lambda_val = 1.5  # Base lambda from C++
+
+        if count > 0:
+            avg_dx = sum_dx / count
+            avg_dy = sum_dy / count
+
+            # 2. Compute Variance
+            for dy in range(-1, 2):
+                for dx in range(-1, 2):
+                    if dy == 0 and dx == 0:
+                        continue
+
+                    ny = center_y + dy * step_y
+                    nx = center_x + dx * step_x
+
+                    if ny >= 0 and ny < h_total and nx >= 0 and nx < w_total:
+                        val_x = flow[ny, nx, 0]
+                        val_y = flow[ny, nx, 1]
+                        dist = (val_x - avg_dx) ** 2 + (val_y - avg_dy) ** 2
+                        sum_sq_diff += dist
+
+            variance = sum_sq_diff / count
+
+            # 3. Adaptive Lambda
+            if variance > 5.0:
+                lambda_val *= 0.5
+            elif variance < 0.5:
+                lambda_val *= 1.5
+
+        else:
+            # No neighbors (isolated) -> fallback to center flow
+            avg_dx = flow[center_y, center_x, 0]
+            avg_dy = flow[center_y, center_x, 1]
+
+        # Penalized cost multiplier (0.1f from C++)
+        weight = lambda_val * 0.1
+
+        return ti.Vector([avg_dx, avg_dy, weight])
+
     @ti.kernel
     def _search_coarse_level_kernel(
         ref_layer: ti.types.ndarray(),
@@ -216,9 +303,10 @@ if TAICHI_AVAILABLE:
         tile_w: int,
         search_dist: int,
     ):
-        """Coarse level tile matching using ZM-SSD cost."""
+        """Coarse level tile matching using ZM-SSD cost with Spatial Regularization."""
         step_y = tile_h
         step_x = tile_w
+        tile_area_inv = 1.0 / float(tile_h * tile_w)
 
         for tile_y, tile_x in ti.ndrange(
             (h - tile_h + 1) // step_y, (w - tile_w + 1) // step_x
@@ -226,8 +314,15 @@ if TAICHI_AVAILABLE:
             y = tile_y * step_y
             x = tile_x * step_x
 
+            # Get regularization params from neighbors
+            reg_params = _compute_regularization_params(
+                flow, y, x, tile_h, tile_w, h, w
+            )
+            spatial_mean_x = reg_params[0]
+            spatial_mean_y = reg_params[1]
+            spatial_weight = reg_params[2]
+
             # Get initial flow from upsampled previous level
-            # Use center pixel for better representativeness
             center_y = y + tile_h // 2
             center_x = x + tile_w // 2
             init_dx_val = flow[center_y, center_x, 0]
@@ -235,9 +330,9 @@ if TAICHI_AVAILABLE:
             init_dx = int(ti.round(init_dx_val))
             init_dy = int(ti.round(init_dy_val))
 
-            best_cost = 1e10
-            best_dx = init_dx
-            best_dy = init_dy
+            best_total_cost = 1e10
+            best_dx = float(init_dx)
+            best_dy = float(init_dy)
 
             # Primary Search
             for dy in range(-search_dist, search_dist + 1):
@@ -255,7 +350,8 @@ if TAICHI_AVAILABLE:
                     ):
                         continue
 
-                    cost = cost_function.compute_zmssd_cost(
+                    # 1. Visual Cost (Normalized)
+                    raw_cost = cost_function.compute_zmssd_cost(
                         ref_layer,
                         comp_layer,
                         y,
@@ -265,18 +361,34 @@ if TAICHI_AVAILABLE:
                         tile_h,
                         tile_w,
                     )
+                    visual_cost = raw_cost * tile_area_inv
 
-                    if cost < best_cost:
-                        best_cost = cost
-                        best_dx = cur_dx
-                        best_dy = cur_dy
+                    # 2. Spatial Penalty
+                    # Squared Euclidean Distance from Spatial Mean
+                    dist_sq = (float(cur_dx) - spatial_mean_x) ** 2 + (
+                        float(cur_dy) - spatial_mean_y
+                    ) ** 2
+
+                    # C++ Logic: Confidence Boost
+                    dynamic_weight = spatial_weight
+                    if visual_cost < 0.01:
+                        dynamic_weight *= 0.1
+                    elif visual_cost > 0.1:
+                        dynamic_weight *= 3.0
+
+                    total_cost = visual_cost + (dynamic_weight * dist_sq)
+
+                    if total_cost < best_total_cost:
+                        best_total_cost = total_cost
+                        best_dx = float(cur_dx)
+                        best_dy = float(cur_dy)
 
             # Write result
             for r, c in ti.ndrange(tile_h, tile_w):
                 idx_y, idx_x = y + r, x + c
                 if idx_y < h and idx_x < w:
-                    refined_flow[idx_y, idx_x, 0] = float(best_dx)
-                    refined_flow[idx_y, idx_x, 1] = float(best_dy)
+                    refined_flow[idx_y, idx_x, 0] = best_dx
+                    refined_flow[idx_y, idx_x, 1] = best_dy
 
     @ti.kernel
     def _search_fine_level_kernel(
@@ -289,9 +401,10 @@ if TAICHI_AVAILABLE:
         tile_h: int,
         tile_w: int,
     ):
-        """Fine level tile matching using ZMSAD cost."""
+        """Fine level tile matching using ZMSAD cost with Spatial Regularization."""
         step_y = tile_h
         step_x = tile_w
+        tile_area_inv = 1.0 / float(tile_h * tile_w)
 
         for tile_y, tile_x in ti.ndrange(
             (h - tile_h + 1) // step_y, (w - tile_w + 1) // step_x
@@ -299,20 +412,30 @@ if TAICHI_AVAILABLE:
             y = tile_y * step_y
             x = tile_x * step_x
 
+            # Get regularization params
+            reg_params = _compute_regularization_params(
+                flow, y, x, tile_h, tile_w, h, w
+            )
+            spatial_mean_x = reg_params[0]
+            spatial_mean_y = reg_params[1]
+            spatial_weight = reg_params[2]
+
             center_y = y + tile_h // 2
             center_x = x + tile_w // 2
             init_dx = int(ti.round(flow[center_y, center_x, 0]))
             init_dy = int(ti.round(flow[center_y, center_x, 1]))
 
-            best_cost = 1e10
+            best_total_cost = 1e10
             final_dx = float(init_dx)
             final_dy = float(init_dy)
 
             # Local 3x3 search around current guess
             for dy in range(-1, 2):
                 for dx in range(-1, 2):
-                    test_y = y + init_dy + dy
-                    test_x = x + init_dx + dx
+                    cur_dy = init_dy + dy
+                    cur_dx = init_dx + dx
+                    test_y = y + cur_dy
+                    test_x = x + cur_dx
 
                     if (
                         test_y < 0
@@ -322,7 +445,8 @@ if TAICHI_AVAILABLE:
                     ):
                         continue
 
-                    cost = cost_function.compute_zmssd_cost(
+                    # 1. Visual Cost
+                    raw_cost = cost_function.compute_zmssd_cost(
                         ref_layer,
                         comp_layer,
                         y,
@@ -332,11 +456,25 @@ if TAICHI_AVAILABLE:
                         tile_h,
                         tile_w,
                     )
+                    visual_cost = raw_cost * tile_area_inv
 
-                    if cost < best_cost:
-                        best_cost = cost
-                        final_dx = float(init_dx + dx)
-                        final_dy = float(init_dy + dy)
+                    # 2. Spatial Penalty
+                    dist_sq = (float(cur_dx) - spatial_mean_x) ** 2 + (
+                        float(cur_dy) - spatial_mean_y
+                    ) ** 2
+
+                    dynamic_weight = spatial_weight
+                    if visual_cost < 0.01:
+                        dynamic_weight *= 0.1
+                    elif visual_cost > 0.1:
+                        dynamic_weight *= 3.0
+
+                    total_cost = visual_cost + (dynamic_weight * dist_sq)
+
+                    if total_cost < best_total_cost:
+                        best_total_cost = total_cost
+                        final_dx = float(cur_dx)
+                        final_dy = float(cur_dy)
 
             # Write result
             for r, c in ti.ndrange(tile_h, tile_w):
