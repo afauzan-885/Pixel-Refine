@@ -85,37 +85,8 @@ if TAICHI_AVAILABLE and _ti is not None:
 
             coarse_confidence[r, c] = conf
 
-    @_ti.kernel
-    def _blend_guidance_maps(
-        current_level: _ti.types.ndarray(),
-        previous_level: _ti.types.ndarray(),
-        output: _ti.types.ndarray(),
-        h: int,
-        w: int,
-        current_weight: float,
-    ):
-        """Blend guidance maps from different pyramid levels.
-
-        Args:
-            current_level: Confidence map from current (finer) pyramid level
-            previous_level: Upsampled confidence map from previous (coarser) level
-            output: Blended output
-            current_weight: Weight for current level (0-1), previous gets (1-weight)
-        """
-        prev_weight = 1.0 - current_weight
-
-        for r, c in _ti.ndrange(h, w):
-            curr_val = current_level[r, c]
-            prev_val = previous_level[r, c]
-
-            # Weighted average with slight bias toward higher confidence
-            blended = curr_val * current_weight + prev_val * prev_weight
-
-            # Optional: boost if both levels agree (high confidence)
-            if curr_val > 0.7 and prev_val > 0.7:
-                blended = _ti.min(1.0, blended * 1.1)
-
-            output[r, c] = blended
+            # Peringatan: Kernel _blend_guidance_maps telah dihapus!
+            # Sebagai penggantinya, proses blending akan dihilangkan pada pipeline pemanggilan GPU.
 
     @_ti.kernel
     def _phase2_fine_analysis(
@@ -174,49 +145,31 @@ if TAICHI_AVAILABLE and _ti is not None:
                     excess_mad = _ti.max(0.0, mad_score - noise_offset)
                     conf_fine = _ti.exp(-excess_mad * motion_sensitivity)
 
-                    # 3. Guidance and Stability weighting
+                    # 3. Guidance, Stability and Confidence Weighting
+                    # Dalam C++, guidance dan stability diambil dari center tile saja
                     center_y = int(_ti.min(r + curr_h // 2, h - 1))
                     center_x = int(_ti.min(c + curr_w // 2, w - 1))
 
-                    tile_stability_factor = 1.0
-                    if use_stability == 1:
-                        tile_stability_factor = stability_map[center_y, center_x]
+                    guidance_val = 1.0
+                    if use_guidance == 1:
+                        guidance_val = guidance_map[center_y, center_x]
 
-                    if conf_fine * tile_stability_factor >= 1e-6:
-                        # 4. Global Accumulation with Per-Pixel Refinement
+                    final_conf = conf_fine * guidance_val
+
+                    if use_stability == 1:
+                        stab_val = stability_map[center_y, center_x]
+                        final_conf *= stab_val
+
+                    if final_conf >= 1e-6:
+                        # 4. Global Accumulation (Tile-level, persis seperti C++)
+                        # Tidak ada lagi per-pixel veto atau per-pixel guidance
                         for dr, dc in _ti.ndrange(curr_h, curr_w):
                             yy, xx = r + dr, c + dc
 
-                            # A. Per-pixel guidance for better boundary handling (instead of per-tile)
-                            pixel_guidance = 1.0
-                            if use_guidance == 1:
-                                pixel_guidance = guidance_map[yy, xx]
+                            # Kombinasi bobot base window dengan final_conf dari tile
+                            pixel_weight = base_window[dr, dc] * final_conf
 
-                                # B. Adaptive Local Consistency Veto (The "Breakthrough")
-                            # If individual pixel diff exceeds noise significantly, we suppress it.
-                            # Threshold lowered to 2.5x noise for better sensitivity in difficult areas.
-                            diff = _ti.abs(current[yy, xx] - reference[yy, xx])
-                            local_veto = 1.0
-                            veto_threshold = noise_sigma * 2.5
-                            if diff > veto_threshold:
-                                # Dampening becomes more aggressive if guidance also suggests mismatch
-                                dampening_factor = 1.6 + 1.0 * (1.0 - pixel_guidance)
-                                local_veto = _ti.exp(
-                                    -(diff / _ti.max(1e-6, noise_sigma) - 2.5)
-                                    * dampening_factor
-                                )
-
-                            # C. Combine everything
-                            pixel_weight = (
-                                base_window[dr, dc]
-                                * conf_fine
-                                * pixel_guidance
-                                * local_veto
-                                * tile_stability_factor
-                            )
-
-                            if pixel_weight >= 1e-8:
-                                weight_map_sum[yy, xx] += pixel_weight
+                            weight_map_sum[yy, xx] += pixel_weight
 
     @_ti.kernel
     def _equalize_brightness_kernel(
@@ -320,12 +273,12 @@ if TAICHI_AVAILABLE and _ti is not None:
             # Build pyramids for hierarchical analysis (auto-stop at 32px minimum)
             curr_pyramid = pyramid.build_image_pyramid_gpu(
                 analysis_input,
-                n_levels=10,  # Will auto-stop at min_size
+                n_levels=3,  # Will auto-stop at min_size
                 min_size=32,
                 buffer_provider=buffer_provider,
             )
             ref_pyramid = pyramid.build_image_pyramid_gpu(
-                ref_gpu, n_levels=10, min_size=32, buffer_provider=buffer_provider
+                ref_gpu, n_levels=3, min_size=32, buffer_provider=buffer_provider
             )
 
             # Debug: Print pyramid levels
@@ -382,33 +335,10 @@ if TAICHI_AVAILABLE and _ti is not None:
 
                     # Blend with previous guidance if exists (hierarchical refinement)
                     if guidance_gpu is not None:
-                        # Upsample previous guidance to current level
-                        prev_guidance_upsampled = bicubic_resize(
-                            guidance_gpu,
-                            h_level,
-                            w_level,
-                            buffer_provider=buffer_provider,
-                        )
-
-                        # Weighted blend: 60% current level, 40% previous (coarser) level
-                        # This allows finer levels to refine while maintaining global context
-                        blended_guidance = common.get_temp_buffer(
-                            (h_level, w_level), _ti.f32, buffer_provider
-                        )
-                        _blend_guidance_maps(
-                            level_conf_upsampled,
-                            prev_guidance_upsampled,
-                            blended_guidance,
-                            h_level,
-                            w_level,
-                            0.6,  # weight for current level
-                        )
-
-                        # Release old guidance and update
+                        # Release old guidance dan langsung gunakan level upsampled yang baru ini
+                        # (mengikuti gaya C++ yang murni tidak ada pembobotan historis level resolusi halus)
                         common.release_temp_buffer(guidance_gpu)
-                        common.release_temp_buffer(prev_guidance_upsampled)
-                        common.release_temp_buffer(level_conf_upsampled)
-                        guidance_gpu = blended_guidance
+                        guidance_gpu = level_conf_upsampled
                     else:
                         # First level (coarsest), use as-is
                         guidance_gpu = level_conf_upsampled
