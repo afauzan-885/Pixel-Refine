@@ -635,6 +635,7 @@ def perform_alignment_gpu(
     proxy_scale = kwargs.get("proxy_scale", 1.0)
     use_sharpen = kwargs.get("use_sharpen", False)
     search_dist = kwargs.get("search_dist", 2.0)
+    index_offset = kwargs.get("index_offset", 0)
 
     # Calculate n_layers (Capped at 3 for Pixel-style low latency)
     min_layer_res = min(tile_h, tile_w) * 2
@@ -682,7 +683,7 @@ def perform_alignment_gpu(
                     images[i] = warped_image
 
                     if save_align_image:
-                        save_aligned_image(warped_image, i, "GPU")
+                        save_aligned_image(warped_image, i + index_offset, "GPU")
                 else:
                     print(f"Warning: GPU alignment failed for image {i + 1}")
 
@@ -766,6 +767,7 @@ def perform_image_alignment(
 
     is_linear_mode = kwargs.get("is_linear_mode", False)
     proxy_scale = kwargs.get("proxy_scale", 1.0)  # [AUTO-SCALE]
+    index_offset = kwargs.get("index_offset", 0)
 
     # --- Preprocessing referensi (CPU MURNI tanpa Taichi) ---
     # Note: Farneback & Tile alignment use grayscale. Raft uses color.
@@ -896,7 +898,9 @@ def perform_image_alignment(
                                 # <<< INTEGRASI SAVE IMAGE C++ >>>
                                 if save_align_image:
                                     # Panggil save_aligned_image di sini
-                                    save_aligned_image(aligned_img, idx, "RAFT")
+                                    save_aligned_image(
+                                        aligned_img, idx + index_offset, "RAFT"
+                                    )
                                 # <<< AKHIR INTEGRASI >>>
 
                             else:
@@ -1031,7 +1035,9 @@ def perform_image_alignment(
                         if aligned_img is not None:
                             images[idx] = aligned_img
                             if save_align_image:
-                                save_aligned_image(aligned_img, idx, "FARNEBACK")
+                                save_aligned_image(
+                                    aligned_img, idx + index_offset, "FARNEBACK"
+                                )
                         else:
                             print(
                                 f"Warning: Farneback alignment returned None for image {i}"
@@ -1235,7 +1241,9 @@ def perform_image_alignment(
                         if aligned_img is not None:
                             images[idx] = aligned_img
                             if save_align_image:
-                                save_aligned_image(aligned_img, idx, "RAFT")
+                                save_aligned_image(
+                                    aligned_img, idx + index_offset, "RAFT"
+                                )
                             # [OPTIMIZATION]
                             del aligned_img
                     except Exception as e:

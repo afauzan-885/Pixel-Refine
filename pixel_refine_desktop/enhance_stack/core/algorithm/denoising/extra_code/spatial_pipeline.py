@@ -86,6 +86,7 @@ def process_in_cpu(
             progress_end=p_align_end,
             is_linear_mode=is_linear_mode,
             proxy_scale=proxy_scale,
+            index_offset=images_processed_so_far,
         )
         if not alignment_success and stop_requested and stop_requested():
             return 0, None, None, 0.0
@@ -355,6 +356,7 @@ def process_in_gpu(
             progress_end=p_align_end,
             is_linear_mode=is_linear_mode,
             proxy_scale=proxy_scale,
+            index_offset=images_processed_so_far,
             **kwargs,
         )
         if stop_requested and stop_requested():
