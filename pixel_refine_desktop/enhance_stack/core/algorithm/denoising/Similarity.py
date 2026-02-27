@@ -99,6 +99,224 @@ class SimilarityAlgorithm:
                 images.append(image)
         return images
 
+    def _apply_final_fusion_tiled(
+        self, sum_img, sum_weight, ref_img, noise_sigma, tile_size=512, padding=16
+    ):
+        """
+        Menjalankan _apply_precision_structure_fusion secara Tiled & Paralel.
+        Menghemat RAM drastis dan mempercepat proses akhir.
+        """
+        h, w = sum_img.shape[:2]
+        final_output = np.zeros_like(sum_img)
+
+        # Daftar tugas tile
+        tasks = []
+
+        # Generate koordinat tile
+        for y in range(0, h, tile_size):
+            for x in range(0, w, tile_size):
+                # Koordinat inti tile
+                y_end = min(y + tile_size, h)
+                x_end = min(x + tile_size, w)
+
+                # Koordinat dengan padding (untuk konteks Gaussian Blur agar tidak ada garis di sambungan)
+                y_start_pad = max(0, y - padding)
+                x_start_pad = max(0, x - padding)
+                y_end_pad = min(h, y_end + padding)
+                x_end_pad = min(w, x_end + padding)
+
+                # Hitung offset crop untuk mengembalikan ke ukuran asli setelah diproses
+                crop_y1 = y - y_start_pad
+                crop_y2 = crop_y1 + (y_end - y)
+                crop_x1 = x - x_start_pad
+                crop_x2 = crop_x1 + (x_end - x)
+
+                tasks.append(
+                    {
+                        "coords": (y, y_end, x, x_end),
+                        "pad_coords": (y_start_pad, y_end_pad, x_start_pad, x_end_pad),
+                        "crop": (crop_y1, crop_y2, crop_x1, crop_x2),
+                    }
+                )
+
+        # Fungsi Worker untuk ThreadPool
+        def process_single_tile(task):
+            py1, py2, px1, px2 = task["pad_coords"]
+
+            # 1. Ambil Slice Data (Copy kecil, hemat RAM)
+            s_img_slice = sum_img[py1:py2, px1:px2]
+            s_w_slice = sum_weight[py1:py2, px1:px2]
+            ref_slice = ref_img[py1:py2, px1:px2]
+
+            # 2. Normalisasi Lokal (Divide)
+            valid_mask = s_w_slice > 1e-6
+            fused_slice = np.zeros_like(s_img_slice)
+            np.divide(
+                s_img_slice,
+                s_w_slice[:, :, np.newaxis],
+                out=fused_slice,
+                where=valid_mask[:, :, np.newaxis],
+            )
+
+            # 3. Jalankan Algoritma Berat (Structure Fusion) pada slice kecil
+            #    Ini memanggil fungsi _apply_precision_structure_fusion yang sudah Anda miliki
+            processed_pad = self._apply_precision_structure_fusion(
+                fused_img=fused_slice,
+                weight_map=s_w_slice,
+                reference_img=ref_slice,
+                base_noise_sigma=noise_sigma,
+            )
+
+            # 4. Potong Padding (Ambil bagian tengah yang valid saja)
+            cy1, cy2, cx1, cx2 = task["crop"]
+            result_core = processed_pad[cy1:cy2, cx1:cx2]
+
+            return task["coords"], result_core
+
+        # Eksekusi Paralel
+        # Gunakan max_workers sesuai core CPU, tapi jangan terlalu banyak agar tidak overhead
+        max_threads = max(2, (os.cpu_count() or 4) - 1)
+
+        with ThreadPoolExecutor(max_workers=max_threads) as executor:
+            futures = [executor.submit(process_single_tile, t) for t in tasks]
+
+            for future in as_completed(futures):
+                try:
+                    (ty, ty2, tx, tx2), result_tile = future.result()
+                    final_output[ty:ty2, tx:tx2] = result_tile
+                except Exception as e:
+                    print(f"Error processing tile: {e}")
+                    # Fallback ke black atau original sum jika error (jarang terjadi)
+
+        return final_output
+
+    def _apply_precision_structure_fusion(
+        self, fused_img, weight_map, reference_img, base_noise_sigma
+    ):
+        """
+        Versi PENYEMPURNAAN: Smart Structure Fusion dengan 'Consistency Check'.
+
+        Peta bobot hanya menjadi 'Saran', keputusan final diambil berdasarkan
+        analisis kemiripan struktur antara Fused vs Reference.
+        """
+        # 1. Konversi Tipe Data
+        fused = fused_img.astype(np.float32)
+        ref = reference_img.astype(np.float32)
+
+        if ref.shape[:2] != fused.shape[:2]:
+            ref = cv2.resize(
+                ref, (fused.shape[1], fused.shape[0]), interpolation=cv2.INTER_AREA
+            )
+
+        # =====================================================================
+        # A. ANALISIS FREKUENSI (Tetap Menggunakan Parameter Favorit Anda)
+        # =====================================================================
+        k_radius = 3
+        k_sigma = 0.5
+
+        # Blur Reference & Fused
+        mu_ref = cv2.GaussianBlur(ref, (k_radius, k_radius), k_sigma)
+        mu_fused = cv2.GaussianBlur(fused, (k_radius, k_radius), k_sigma)
+
+        # Detail Kasar (High Frequency)
+        raw_detail_ref = ref - mu_ref
+        raw_detail_fused = fused - mu_fused
+
+        # Varians Reference (Kekayaan Tekstur)
+        ref_sq = ref * ref
+        mu_ref_sq = cv2.GaussianBlur(ref_sq, (k_radius, k_radius), k_sigma)
+        var_ref = mu_ref_sq - (mu_ref * mu_ref)
+        var_ref = np.maximum(var_ref, 0.0)
+
+        # =====================================================================
+        # B. MEMBUAT ULANG PETA KEPERCAYAAN (RE-EVALUASI BOBOT)
+        # =====================================================================
+        # Di sini kita tidak percaya buta pada weight_map.
+
+        # 1. Peta Bobot Awal (Saran dari akumulasi)
+        w_map_expanded = weight_map[:, :, np.newaxis] if fused.ndim == 3 else weight_map
+        weight_factor = np.clip(w_map_expanded / 8.0, 0.0, 1.0)  # 0.0 s/d 1.0
+
+        # 2. Analisis KONSISTENSI STRUKTUR (Verifikasi Kebenaran)
+        # Kita cek apakah detail di Fused Image 'sejalan' dengan Reference Image.
+        # Jika Fused Image blur (karena misalignment) tapi Reference tajam,
+        # maka similarity akan rendah.
+
+        # Hitung dot product sederhana dari detail (Correlation)
+        # +1.0 : Detail identik (Sangat Bagus)
+        #  0.0 : Fused blur/flat (Kurang Bagus)
+        # -1.0 : Detail berlawanan/Ghosting (Buruk)
+
+        # Normalisasi magnitude agar perbandingan adil
+        mag_ref = np.abs(raw_detail_ref) + 1e-6
+        mag_fused = np.abs(raw_detail_fused) + 1e-6
+
+        # Peta Konsistensi (-1 s/d 1)
+        consistency_map = (raw_detail_ref * raw_detail_fused) / (mag_ref * mag_fused)
+
+        # Mapping ke range 0.0 - 1.0 dengan bias ke arah positif
+        # Jika konsistensi > 0, kita mulai percaya. Jika < 0, tidak percaya.
+        structure_validity = np.clip((consistency_map + 0.2) * 1.5, 0.0, 1.0)
+
+        # Jika gambar berwarna, ambil rata-rata validitas channel
+        if structure_validity.ndim == 3:
+            structure_validity = np.mean(structure_validity, axis=2, keepdims=True)
+
+        # 3. FINAL CONFIDENCE MASK
+        # Kepercayaan Akhir = (Saran Bobot) x (Verifikasi Struktur)
+        # Jadi meskipun bobot tinggi, kalau strukturnya ngaco/blur, confidence turun.
+        final_confidence = weight_factor * structure_validity
+
+        # =====================================================================
+        # C. ESTIMASI NOISE & WIENER
+        # =====================================================================
+        epsilon = 1e-6
+        base_noise_var = base_noise_sigma**2
+
+        # Noise map tetap pakai weight map asli (karena ini hukum statistik jumlah sampel)
+        noise_var_map = base_noise_var / (w_map_expanded + epsilon)
+        local_noise_sigma = np.sqrt(noise_var_map)
+
+        alpha = var_ref / (var_ref + noise_var_map + epsilon)
+
+        # =====================================================================
+        # D. STRUCTURE INJECTION (CLEAN)
+        # =====================================================================
+
+        # Threshold 0.6 (Detail halus lolos)
+        shrinkage_threshold = 0.6 * local_noise_sigma
+
+        magnitude = np.abs(raw_detail_ref)
+        cleaned_detail_ref = (
+            np.sign(raw_detail_ref)
+            * np.maximum(0, magnitude - shrinkage_threshold)
+            * 1.1
+        )
+
+        structure_injected_image = mu_fused + cleaned_detail_ref
+
+        # =====================================================================
+        # E. SHARPENING (Hanya jika Confidence VALID)
+        # =====================================================================
+
+        # Sharpening 1.2
+        sharpened_fused = fused + (raw_detail_fused * 1.2)
+
+        # =====================================================================
+        # F. FINAL MIXING
+        # =====================================================================
+
+        # Masking keputusan akhir
+        # alpha menjamin kita hanya menajamkan area detail, bukan area flat.
+        decision_mask = final_confidence * alpha
+
+        # Smooth blending
+        final_output = (structure_injected_image * (1.0 - decision_mask)) + (
+            sharpened_fused * decision_mask
+        )
+
+        return np.clip(final_output, 0.0, 1.0)
+
     def _spatial_merging(
         self,
         images,
@@ -129,14 +347,7 @@ class SimilarityAlgorithm:
 
         # --- LANGKAH 1: Inisialisasi dan Resolusi Kerja ---
         tile_h, tile_w = map(int, tile_size)
-
-        from pixel_refine_desktop.enhance_stack.core.logic.image_streamer import (
-            ImageStreamer,
-        )
-
-        num_images = (
-            images.total_images if isinstance(images, ImageStreamer) else len(images)
-        )
+        num_images = len(images)
         work_res_h, work_res_w = ref_image_h, ref_image_w
         TARGET_MP = 12.5 * 1e6
         # --- COSTUM PROGRESS CALCULATION (GLOBAL SCOPE) MOVED UP ---
@@ -235,35 +446,13 @@ class SimilarityAlgorithm:
                 )
                 process_in = "cpu"
             else:
-                # [NEW] GPU Mode tidak kompatibel dengan Streaming (kendala sinkronisasi asinkron Taichi Driver).
-                # Kita secara manual mendaratkan semua array gambar ke RAM CPU menjadi list utuh.
-                gpu_images_target = images
-
-                from pixel_refine_desktop.enhance_stack.core.logic.image_streamer import (
-                    ImageStreamer,
-                )
-
-                if isinstance(images, ImageStreamer):
-                    print(
-                        "[INFO] Mengekstrak Streamer menjadi List untuk kompatibilitas rutinitas GPU (Offline/Batch Mode)..."
-                    )
-                    if update_progress:
-                        update_progress(p_init, "Mengalokasikan memori GPU Batch...")
-                    gpu_images_target = []
-
-                    for i, img in images.stream():
-                        if stop_requested and stop_requested():
-                            break
-                        if img is not None:
-                            gpu_images_target.append(img)
-
                 (
                     processed_frames_spatial,
                     final_image_sum_full_res,
                     weight_map_sum_full_res,
                     ref_noise_sigma,
                 ) = process_in_gpu(
-                    images=gpu_images_target,
+                    images=images,
                     reference_image_float=reference_image_float,
                     ref_image_h=ref_image_h,
                     ref_image_w=ref_image_w,
@@ -354,23 +543,26 @@ class SimilarityAlgorithm:
                 if update_progress:
                     update_progress(
                         pass_merge_range[1],
-                        "Finalizing Stream Averaging...",
+                        "Finalizing with Parallel Precision Fusion...",
                     )
 
-                # Langsung jalankan weighted averaging murni ke seluruh gambar
-                if weight_map_sum_full_res is not None:
-                    valid_mask = np.asarray(weight_map_sum_full_res) > 1e-6
-                    final_image = np.zeros_like(final_image_sum_full_res)
-                    np.divide(
-                        final_image_sum_full_res,
-                        weight_map_sum_full_res[:, :, np.newaxis],
-                        out=final_image,
-                        where=valid_mask[:, :, np.newaxis],
-                    )
-                    # Clip hasil rata-rata untuk menghindari nilai over/underflow
-                    final_image = np.clip(final_image, 0.0, 1.0)
-                else:
-                    final_image = np.zeros_like(final_image_sum_full_res)
+                # Pastikan reference full res tersedia dalam float32
+                ref_full_float = reference_image_float
+
+                # --- PERUBAHAN UTAMA DI SINI ---
+                # Kita panggil fungsi Tiled.
+                # Fungsi ini akan menangani Normalisasi (Divide) DAN Structure Fusion
+                # secara bertahap (per kotak) untuk menghemat memori.
+
+                # --- CPU Tiled Fusion (RESTORED TO SAFE VERSION) ---
+                final_image = self._apply_final_fusion_tiled(
+                    sum_img=final_image_sum_full_res,
+                    sum_weight=weight_map_sum_full_res,
+                    ref_img=ref_full_float,
+                    noise_sigma=ref_noise_sigma,
+                    tile_size=512,
+                    padding=16,
+                )
 
                 # Return result
                 if weight_of_each_image:
@@ -389,11 +581,18 @@ class SimilarityAlgorithm:
 
             except Exception as e:
                 print(f"Critical error in final stage: {e}")
-                import traceback
-
-                traceback.print_exc()
-
-                fallback_img = np.zeros_like(final_image_sum_full_res)
+                # Fallback darurat: Normalisasi global biasa tanpa struktur
+                if weight_map_sum_full_res is not None:
+                    valid_mask = np.asarray(weight_map_sum_full_res) > 1e-6
+                    fallback_img = np.zeros_like(final_image_sum_full_res)
+                    np.divide(
+                        final_image_sum_full_res,
+                        weight_map_sum_full_res[:, :, np.newaxis],
+                        out=fallback_img,
+                        where=valid_mask[:, :, np.newaxis],
+                    )
+                else:
+                    fallback_img = np.zeros_like(final_image_sum_full_res)
                 if weight_of_each_image:
                     return (
                         fallback_img,
@@ -436,11 +635,7 @@ class SimilarityAlgorithm:
         Fungsi utama untuk menghitung kesamaan dan penggabungan frame (spatial/frequency).
         Sudah tahan stop_requested(), return value konsisten meski proses dibatalkan.
         """
-        from pixel_refine_desktop.enhance_stack.core.logic.image_streamer import (
-            ImageStreamer,
-        )
-
-        if not isinstance(images, (list, ImageStreamer)) or not images:
+        if not isinstance(images, list) or not images:
             raise ValueError(language_config.IMAGE_DATA_MUST_BE_VALID)
 
         try:
@@ -844,12 +1039,16 @@ def main(
         if save_final_weight_map:
             print(language_config.OUTPUT_SAVE_WEIGHT_MAP.format(weight_map_output_path))
 
-        # --- 4. INISIALISASI STREAMER ---
-        from pixel_refine_desktop.enhance_stack.core.logic.image_streamer import (
-            ImageStreamer,
+        # --- 4. PERENCANAAN BATCH (UMUM) ---
+        # Gunakan max_batch_size=8 untuk menjaga RAM tetap aman
+        batch_plan = setup_balanced_batching(
+            total_images, language_config, max_batch_size=8
         )
-
-        streamer = ImageStreamer(data_source, stop_requested)
+        if not batch_plan:
+            if update_progress:
+                update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
+            return
+        total_batches = len(batch_plan)
 
         # --- DEFINISI FORMAT YANG DIDUKUNG ---
         SUPPORTED_FORMATS = {
@@ -952,45 +1151,83 @@ def main(
                     f" [Linear Mode] Auto-calculated Proxy Scale (Fallback): {global_proxy_scale:.3f}"
                 )
 
-        # --- 5. PROSES INTI DENGAN STREAMING ---
-        print(f"\n--- Memulai pemrosesan streaming ({total_images} gambar) ---")
-
-        batch_raw_res = image_processor.similarity_mnfr(
-            streamer,
-            merging_type=merging_type_from_settings,
-            ref_image_override=reference_image,
-            total_overall_images=total_images,
-            images_processed_so_far=0,
-            tile_size=spatial_tile_size_arg,
-            is_linear_mode=is_linear_mode,
-            overlap=spatial_overlap_arg if spatial_overlap_arg else 0.3,
-            motion_sensitivity=(
-                spatial_motion_sensitivity_arg
-                if spatial_motion_sensitivity_arg
-                else 1.0
-            ),
-            noise_offset_factor=(
-                spatial_noise_offset_factor_arg
-                if spatial_noise_offset_factor_arg
-                else 1.0
-            ),
-            stop_requested=stop_requested,
-            update_progress=update_progress,
-            return_raw=True,
-            save_temporal_std_path=None,
-            proxy_scale=global_proxy_scale,
-            **extra_merging_params,
-        )
-
+        # --- 5. PROSES INTI PER BATCH & AKUMULASI STREAMING ---
         global_sum_img = None
         global_sum_weight = None
         global_total_frames = 0
+        images_processed_count = 0
 
-        if batch_raw_res is not None and len(batch_raw_res) >= 3:
-            global_sum_img, global_sum_weight, global_total_frames = batch_raw_res[:3]
-            print(f"[DEBUG] Total Streamed Frames: {global_total_frames}")
+        for batch_num, (batch_start, batch_end) in enumerate(batch_plan, 1):
+            if stop_requested and stop_requested():
+                print(language_config.PROCESS_TERMINATED_BY_USER)
+                break
 
-        gc.collect()
+            print(
+                f"\n--- Processing batch {batch_num}/{total_batches} (Completed: {images_processed_count}) ---"
+            )
+
+            # Muat batch gambar
+            current_batch_images = _load_images_for_batch(
+                data_source,
+                (batch_start, batch_end),
+                stop_requested,
+                linear_mode=is_linear_mode,
+            )
+
+            if not current_batch_images:
+                continue
+
+            # Jalankan Algoritma Similarity
+            batch_raw_res = image_processor.similarity_mnfr(
+                current_batch_images,
+                merging_type=merging_type_from_settings,
+                # reference_image_float=None,  <-- REMOVED: Preventing overwrite of internal calculation
+                ref_image_override=reference_image,
+                total_overall_images=total_images,
+                images_processed_so_far=images_processed_count,
+                # Parameter Algoritma
+                tile_size=spatial_tile_size_arg,
+                is_linear_mode=is_linear_mode,  # Pass flag for proxy generation
+                overlap=spatial_overlap_arg if spatial_overlap_arg else 0.3,
+                motion_sensitivity=(
+                    spatial_motion_sensitivity_arg
+                    if spatial_motion_sensitivity_arg
+                    else 1.0
+                ),
+                noise_offset_factor=(
+                    spatial_noise_offset_factor_arg
+                    if spatial_noise_offset_factor_arg
+                    else 1.0
+                ),
+                stop_requested=stop_requested,
+                update_progress=update_progress,
+                return_raw=True,  # Penting: Kita butuh data mentah (float/16bit) dari batch ini untuk akumulasi
+                save_temporal_std_path=None,  # Tidak perlu simpan intermediate std map
+                **extra_merging_params,
+            )
+            if stop_requested and stop_requested():
+                break
+
+            if batch_raw_res is not None and len(batch_raw_res) == 3:
+                batch_sum_img, batch_sum_weight, batch_processed_frames = batch_raw_res
+
+                if global_sum_img is None:
+                    global_sum_img = batch_sum_img
+                    global_sum_weight = batch_sum_weight
+                else:
+                    global_sum_img += batch_sum_img
+                    global_sum_weight += batch_sum_weight
+
+                global_total_frames += batch_processed_frames
+                print(
+                    f"[DEBUG] Accumulated frames: {global_total_frames} (Batch added: {batch_processed_frames})"
+                )
+                # Update progress based on actual images processed in source data
+                images_processed_count += batch_end - batch_start
+
+            # Paksa cleanup memori setiap akhir batch
+            del current_batch_images
+            gc.collect()
 
         if stop_requested and stop_requested():
             if update_progress and progress_bar:
@@ -999,24 +1236,27 @@ def main(
 
         # --- 6. PENGGABUNGAN AKHIR (PRECISION STRUCTURE FUSION) ---
         final_result_img = None
-        if (
-            global_sum_img is not None
-            and global_sum_weight is not None
-            and global_total_frames > 0
-        ):
+        if global_sum_img is not None and global_total_frames > 0:
             if update_progress:
                 update_progress(95, "Finalizing with Parallel Precision Fusion...")
 
-            # --- 7. PENYIMPANAN HASIL AKHIR & PEMBERSIHAN ---
-            valid_mask = np.asarray(global_sum_weight) > 1e-6
-            final_result_normalized = np.zeros_like(global_sum_img)
-            np.divide(
-                global_sum_img,
-                global_sum_weight[:, :, np.newaxis],
-                out=final_result_normalized,
-                where=valid_mask[:, :, np.newaxis],
+            # Hitung estimasi noise dari referensi sebelum fusi akhir
+            # Jika Linear Mode, reference_image adalah Linear. Kita butuh Proxy untuk estimasi noise structure?
+            # Sebenarnya estimate_noise_in_python bekerja pada grayscale, jadi aman di-normalize.
+            # [MODIFIED] Menggunakan preprocess_in_python (CPU)
+            ref_gray_preproc, ref_noise_sigma = preprocess_in_python(
+                normalize_image(reference_image, reference_image.dtype)
             )
-            final_result_normalized = np.clip(final_result_normalized, 0.0, 1.0)
+
+            # --- 7. PENYIMPANAN HASIL AKHIR & PEMBERSIHAN ---
+            final_result_normalized = image_processor._apply_final_fusion_tiled(
+                sum_img=global_sum_img,
+                sum_weight=global_sum_weight,
+                ref_img=normalize_image(reference_image, reference_image.dtype),
+                noise_sigma=ref_noise_sigma,
+                tile_size=1024,
+                padding=16,
+            )
 
             # Kawal konversi bit-depth agar konsisten
             dtype_ref = reference_image.dtype

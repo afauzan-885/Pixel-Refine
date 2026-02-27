@@ -750,7 +750,7 @@ def perform_image_alignment(
     optical_flow_type="alignment_tile",
     num_alignment_workers=1,
     visualization=False,
-    save_align_image=True,
+    save_align_image=False,
     progress_start=30,
     progress_end=40,
     **kwargs,
