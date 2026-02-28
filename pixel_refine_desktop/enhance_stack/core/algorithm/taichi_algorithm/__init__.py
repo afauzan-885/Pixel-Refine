@@ -33,6 +33,7 @@ from .ransac import ransac_flow_cleanup
 from .bilateral_grid import bilateral_grid_filter
 from .pyramid import build_image_pyramid, build_image_pyramid_gpu, upsample_flow
 from .warp import warp_image_gpu
+from .phase_correlation import phase_correlation
 
 # --- Constants ---
 INTER_LINEAR = 1
@@ -296,4 +297,5 @@ __all__ = [
     "extract_channel",
     "insert_channel",
     "copy",
+    "phase_correlation",
 ]

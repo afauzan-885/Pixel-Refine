@@ -809,16 +809,14 @@ def process_single_layer(
     flow_gpu = common.get_temp_buffer((h, w, 2), ti.f32, buffer_provider="pool")
 
     if is_coarsest_layer:
-        from ...taichi_algorithm.phase_correlation import (
-            estimate_global_shift_taichi,
-        )
+        from ... import taichi_algorithm as ta
 
-        global_dx, global_dy, global_cost = estimate_global_shift_taichi(
-            ref_layer_gpu, comp_layer_gpu, max_shift=16
+        global_dx, global_dy, global_cost = ta.phase_correlation(
+            ref_layer_gpu, comp_layer_gpu, max_shift=32
         )
         # Output global shift to console for debugging
         print(
-            f"[Global Shift] Detected Initial Motion Prior: ({global_dx}, {global_dy}) ZMSSD: {global_cost:.4f}"
+            f"[Global Shift] Detected Initial Motion Prior: ({global_dx}, {global_dy}) ZNCC Cost: {global_cost:.4f}"
         )
         _initialize_coarsest_flow_kernel(
             flow_gpu, h, w, float(global_dx), float(global_dy)
