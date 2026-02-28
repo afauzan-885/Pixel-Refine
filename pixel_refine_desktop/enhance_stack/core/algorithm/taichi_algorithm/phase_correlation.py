@@ -38,9 +38,15 @@ if TAICHI_AVAILABLE:
             sum_ref = 0.0
             sum_comp = 0.0
             count = 0.0
+            step = 4
 
-            for y in range(max_shift, h - max_shift):
-                for x in range(max_shift, w - max_shift):
+            y_limit = (h - max_shift * 2) // step
+            x_limit = (w - max_shift * 2) // step
+
+            for i_y in range(y_limit):
+                for i_x in range(x_limit):
+                    y = max_shift + i_y * step
+                    x = max_shift + i_x * step
                     comp_y = y + dy
                     comp_x = x + dx
 
@@ -57,8 +63,10 @@ if TAICHI_AVAILABLE:
                 sum_sq_ref = 0.0
                 sum_sq_comp = 0.0
 
-                for y in range(max_shift, h - max_shift):
-                    for x in range(max_shift, w - max_shift):
+                for i_y in range(y_limit):
+                    for i_x in range(x_limit):
+                        y = max_shift + i_y * step
+                        x = max_shift + i_x * step
                         comp_y = y + dy
                         comp_x = x + dx
 
