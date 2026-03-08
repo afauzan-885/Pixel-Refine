@@ -29,6 +29,7 @@ from . import cost_function
 try:
     from ...taichi_algorithm.pyramid import (
         build_image_pyramid_gpu,
+        build_image_pyramid_gpu_4x,
         upsample_flow_gpu,
     )
     from ...taichi_algorithm.ransac import (
@@ -53,7 +54,7 @@ except ImportError as e:
 class ImageAlignmentConfig:
     """Configuration constants matching C++ namespace."""
 
-    FLOW_UPSCALE_FACTOR = 2.0
+    FLOW_UPSCALE_FACTOR = 4.0
     MIN_TILE_SIZE = 8
     MIN_PYRAMID_LAYER_SIZE = 32
     EARLY_EXIT_COST = 0.0001
@@ -361,10 +362,10 @@ if TAICHI_AVAILABLE:
                 if coarse_y < prev_h and coarse_x < prev_w:
                     # UPSCALE FACTOR is 2.0 based on build config
                     cands_dx[3] = int(
-                        ti.round(previous_flow[coarse_y, coarse_x, 0] * 2.0)
+                        ti.round(previous_flow[coarse_y, coarse_x, 0] * 4.0)
                     )
                     cands_dy[3] = int(
-                        ti.round(previous_flow[coarse_y, coarse_x, 1] * 2.0)
+                        ti.round(previous_flow[coarse_y, coarse_x, 1] * 4.0)
                     )
 
             for i in ti.static(range(4)):
@@ -825,6 +826,7 @@ def process_single_layer(
         if previous_flow_gpu is None:
             _initialize_coarsest_flow_kernel(flow_gpu, h, w, 0.0, 0.0)
         else:
+            # HDR+ style: 4× upscale factor between pyramid levels
             upsample_flow_gpu(
                 src_gpu=previous_flow_gpu,
                 dst_gpu=flow_gpu,
@@ -869,7 +871,7 @@ def process_single_layer(
             prev_w,
         )
     elif is_coarsest_layer:
-        # For coarsest layer, perform wide-area block search to establish global motion
+        # HDR+ style: wide-area block search at coarsest level (±4px at 1/64 res = ±256px full res)
         search_radius = max(4, int(base_search_dist * 2))
         _block_search_kernel(
             ref_gpu,
@@ -882,9 +884,8 @@ def process_single_layer(
             search_radius,
         )
     else:
-        # Coarse layers: use search_dist
-        depth_factor = 1.0 / (2.0 ** (total_layers - layer_index - 1))
-        current_search_dist = max(1, int(base_search_dist * depth_factor))
+        # HDR+ style: coarse layers with ±4px search (each level covers 4× more range)
+        current_search_dist = max(2, int(base_search_dist))
 
         _search_coarse_level_kernel(
             ref_gpu,
@@ -992,26 +993,28 @@ def compute_alignment_flow(
     ref_gpu, ref_is_temp = common.ensure_taichi_field(ref_work_data, dtype=ti.f32)
     comp_gpu, comp_is_temp = common.ensure_taichi_field(current_work_data, dtype=ti.f32)
 
-    print("Pyramid Initiation:")
+    print("Pyramid Initiation (HDR+ 4x):")
     t_pyr_ref_start = time.perf_counter()
-    ref_pyramid = build_image_pyramid_gpu(
+    ref_pyramid = build_image_pyramid_gpu_4x(
         ref_gpu,
         n_levels=n_layers,
         min_size=ImageAlignmentConfig.MIN_PYRAMID_LAYER_SIZE,
     )
     ti.sync()
     t_pyr_ref = (time.perf_counter() - t_pyr_ref_start) * 1000
-    print(f" - Ref: {t_pyr_ref:.2f}ms")
+    print(f" - Ref Pyramid: {t_pyr_ref:.2f}ms ({len(ref_pyramid)} levels)")
+    for lvl_i, lvl in enumerate(ref_pyramid):
+        print(f"   Level {lvl_i}: {lvl.shape[0]}x{lvl.shape[1]}")
 
     t_pyr_comp_start = time.perf_counter()
-    current_pyramid = build_image_pyramid_gpu(
+    current_pyramid = build_image_pyramid_gpu_4x(
         comp_gpu,
         n_levels=n_layers,
         min_size=ImageAlignmentConfig.MIN_PYRAMID_LAYER_SIZE,
     )
     ti.sync()
     t_pyr_comp = (time.perf_counter() - t_pyr_comp_start) * 1000
-    print(f" - Comp: {t_pyr_comp:.2f}ms\n")
+    print(f" - Comp Pyramid: {t_pyr_comp:.2f}ms\n")
 
     actual_layers = min(len(ref_pyramid), len(current_pyramid))
     flow_gpu = None

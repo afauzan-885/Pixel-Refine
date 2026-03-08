@@ -117,6 +117,52 @@ def build_image_pyramid_gpu(
 
 
 @ti_thread
+def build_image_pyramid_gpu_4x(
+    image_gpu,
+    n_levels: int = 4,
+    min_size: int = MIN_PYRAMID_SIZE,
+    buffer_provider="pool",
+) -> list:
+    """
+    GPU native interface: Build image pyramid with 4× downsampling per level (HDR+ style).
+    Each level is 1/4 the resolution of the previous level.
+    With 4 levels: Level 0 = full, Level 1 = 1/4, Level 2 = 1/16, Level 3 = 1/64.
+    Uses two cascaded 2× Gaussian downsamples for quality anti-aliasing.
+    """
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
+
+    pyramid = [image_gpu]
+    for _ in range(n_levels - 1):
+        prev = pyramid[-1]
+        h_src, w_src = prev.shape
+
+        # First 2× downsample
+        h_mid, w_mid = h_src // 2, w_src // 2
+        if h_mid < min_size or w_mid < min_size:
+            break
+
+        mid = common.get_temp_buffer((h_mid, w_mid), ti.f32, buffer_provider)
+        _downsample_2x_kernel(prev, mid, h_src, w_src, h_mid, w_mid)
+
+        # Second 2× downsample (total 4×)
+        h_dst, w_dst = h_mid // 2, w_mid // 2
+        if h_dst < min_size or w_dst < min_size:
+            # If second downsample is too small, keep the 2× version
+            pyramid.append(mid)
+            break
+
+        dst = common.get_temp_buffer((h_dst, w_dst), ti.f32, buffer_provider)
+        _downsample_2x_kernel(mid, dst, h_mid, w_mid, h_dst, w_dst)
+
+        # Release intermediate buffer
+        common.release_temp_buffer(mid)
+        pyramid.append(dst)
+
+    return pyramid
+
+
+@ti_thread
 def upsample_flow(
     flow: np.ndarray,
     target_h: int,

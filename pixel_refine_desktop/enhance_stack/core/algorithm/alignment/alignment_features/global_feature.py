@@ -1047,29 +1047,37 @@ def gaussian_window(size, sigma_scale=1 / 6):
 
 
 # ================= Replikasi Fungsi C++ untuk Estimasi Noise & Pra-pemrosesan Gambar Referensi =================
-MAD_TO_SIGMA_FACTOR = 1.4826
 _CLAHE_CACHE = {}
 _SIGMOID_LUT_CACHE = {}
 
 
-def estimate_noise_in_python(ref_image_gray_float: np.ndarray) -> float:
-    """Estimasi noise dengan minimal alokasi memori. (TETAP SAMA)"""
+def estimate_noise_in_python(ref_image_gray_float):
     if ref_image_gray_float is None or ref_image_gray_float.size == 0:
         return 0.015
-
-    h, w = ref_image_gray_float.shape
-    native_img = ref_image_gray_float
-    # hitung Laplacian
-    laplacian_output = cv2.Laplacian(native_img, cv2.CV_32F, ksize=3)
-    if laplacian_output is None:
-        return 0.015
-
-    # median & MAD in-place
-    median_val = np.median(laplacian_output)
-    np.abs(laplacian_output - median_val, out=laplacian_output)
-    mad_value = np.median(laplacian_output)
-    estimated_sigma = mad_value * MAD_TO_SIGMA_FACTOR
-    return float(np.clip(estimated_sigma, 0.001, 0.999))
+    H, W = ref_image_gray_float.shape
+    block_size = 8
+    min_blocks = 4
+    if H < block_size * 2 or W < block_size * 2:
+        native_img = ref_image_gray_float.copy()
+        lap = cv2.Laplacian(native_img, cv2.CV_32F, ksize=3)
+        return float(np.median(np.abs(lap - np.median(lap))) * 1.4826)
+    img_lap = cv2.Laplacian(ref_image_gray_float, cv2.CV_32F, ksize=3)
+    h_cut = (H // block_size) * block_size
+    w_cut = (W // block_size) * block_size
+    img_cut = img_lap[:h_cut, :w_cut]
+    blocks = (
+        img_cut.reshape(
+            h_cut // block_size, block_size, w_cut // block_size, block_size
+        )
+        .transpose(0, 2, 1, 3)
+        .reshape(-1, block_size * block_size)
+    )
+    block_medians = np.median(blocks, axis=1, keepdims=True)
+    block_mads = np.median(np.abs(blocks - block_medians), axis=1)
+    keep_ratio = 0.2
+    num_keep = max(min_blocks, int(len(block_mads) * keep_ratio))
+    estimated_sigma = np.median(np.partition(block_mads, num_keep)[:num_keep]) * 1.4826
+    return float(np.clip(estimated_sigma, 0.00001, 0.99999))
 
 
 def apply_s_curve_float32(img: np.ndarray, strength: float = 4.0, pivot: float = 0.5):

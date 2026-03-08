@@ -111,3 +111,26 @@ if TAICHI_AVAILABLE:
         # Variance formula: Mean(X^2) - Mean(X)^2
         # Use ti.max(0.0, ...) to avoid precision issues resulting in negative values
         return ti.max(0.0, (sum_sq_diff / n) - (mean_diff * mean_diff))
+
+    @ti.func
+    def compute_l1_cost(
+        ref: ti.types.ndarray(),
+        comp: ti.types.ndarray(),
+        y_ref: int,
+        x_ref: int,
+        y_comp: int,
+        x_comp: int,
+        tile_h: int,
+        tile_w: int,
+    ) -> float:
+        """
+        Compute Sum of Absolute Differences (SAD / L1) cost.
+        This is the standard HDR+ alignment cost metric.
+        Simple, fast, and robust to noise.
+        """
+        total_abs_diff = 0.0
+        for r, c in ti.ndrange(tile_h, tile_w):
+            diff = ref[y_ref + r, x_ref + c] - comp[y_comp + r, x_comp + c]
+            total_abs_diff += ti.abs(diff)
+
+        return total_abs_diff / float(tile_h * tile_w)

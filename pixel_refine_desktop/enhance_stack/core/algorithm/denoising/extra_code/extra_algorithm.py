@@ -751,7 +751,7 @@ def perform_image_alignment(
     optical_flow_type="alignment_tile",
     num_alignment_workers=1,
     visualization=False,
-    save_align_image=False,
+    save_align_image=True,
     progress_start=30,
     progress_end=40,
     **kwargs,
@@ -764,6 +764,10 @@ def perform_image_alignment(
     num_images = len(images)
     if num_images <= 1:
         return True
+
+    print(
+        f"[DEBUG] perform_image_alignment called with optical_flow_type: {optical_flow_type}"
+    )
 
     is_linear_mode = kwargs.get("is_linear_mode", False)
     proxy_scale = kwargs.get("proxy_scale", 1.0)  # [AUTO-SCALE]
@@ -1130,6 +1134,15 @@ def perform_image_alignment(
                         ctypes.POINTER(ctypes.c_float)
                     )
 
+                    # [DEBUG] Print preprocessing stats
+                    print(
+                        f"  [DEBUG] Image {i+1}: ref range=[{ref_work_gray_cpp.min():.4f}, {ref_work_gray_cpp.max():.4f}], "
+                        f"curr range=[{current_work_gray_cpp.min():.4f}, {current_work_gray_cpp.max():.4f}]"
+                    )
+                    print(
+                        f"  [DEBUG] Image {i+1}: work_res=({work_res_h}x{work_res_w}), tile=({tile_h}x{tile_w}), n_layers={n_layers}, search_dist=2.0"
+                    )
+
                     flow_ptr = ALIGN_LIB.compute_alignment_flow(
                         ref_work_ptr,
                         current_work_ptr,
@@ -1168,6 +1181,15 @@ def perform_image_alignment(
                             flow_buf_cpp.nbytes,
                         )
 
+                        # [DEBUG] Print flow statistics
+                        flow_mag = np.sqrt(
+                            flow_buf_cpp[..., 0] ** 2 + flow_buf_cpp[..., 1] ** 2
+                        )
+                        print(
+                            f"  [DEBUG] Image {i+1}: flow magnitude - mean={flow_mag.mean():.4f}, max={flow_mag.max():.4f}, "
+                            f"median={np.median(flow_mag):.4f}"
+                        )
+
                         full_h, full_w = original_image.shape[:2]
 
                         # === PERUBAHAN DI SINI ===
@@ -1183,6 +1205,14 @@ def perform_image_alignment(
                         )
                         # =========================
 
+                        # [DEBUG] Print scaled flow stats
+                        scaled_mag = np.sqrt(
+                            flow_full_res[..., 0] ** 2 + flow_full_res[..., 1] ** 2
+                        )
+                        print(
+                            f"  [DEBUG] Image {i+1}: SCALED flow - mean={scaled_mag.mean():.2f}, max={scaled_mag.max():.2f}"
+                        )
+
                         if visualization:
                             flow_vis = visualize_flow(flow_full_res)
                             cv2.imwrite(f"flow_cpp_{i+1:02d}.jpg", flow_vis)
@@ -1190,6 +1220,21 @@ def perform_image_alignment(
 
                         # 4. Warp Gambar
                         aligned_img = warp_image_opencv(original_image, flow_full_res)
+
+                        # [DEBUG] Compare original vs aligned
+                        orig_f = original_image.astype(np.float32)
+                        aligned_f = aligned_img.astype(np.float32)
+                        diff = np.abs(orig_f - aligned_f)
+                        print(
+                            f"  [DEBUG] Image {i+1}: WARP DIFF - mean={diff.mean():.2f}, max={diff.max():.2f}, "
+                            f"changed_pixels={np.sum(diff > 1)}/{diff.size}"
+                        )
+
+                        # [DEBUG] Save original (unaligned) for comparison
+                        if save_align_image:
+                            save_aligned_image(
+                                original_image, i + index_offset, "ORIGINAL"
+                            )
 
                         # [OPTIMIZATION]
                         del flow_buf_cpp, flow_full_res, flow_ptr
@@ -1242,7 +1287,7 @@ def perform_image_alignment(
                             images[idx] = aligned_img
                             if save_align_image:
                                 save_aligned_image(
-                                    aligned_img, idx + index_offset, "RAFT"
+                                    aligned_img, idx + index_offset, "TILE"
                                 )
                             # [OPTIMIZATION]
                             del aligned_img
