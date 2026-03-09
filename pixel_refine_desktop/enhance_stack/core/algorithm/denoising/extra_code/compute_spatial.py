@@ -1,8 +1,8 @@
 """
-Compute Similarity - Taichi GPU Migration
-=========================================
+Compute Spatial Merging - Taichi GPU Migration
+=============================================
 1:1 Migration from similarity_spatial_merging.cpp to Taichi.
-Handles brightness equalization, hierarchical motion analysis, and weight map generation.
+Handles brightness equalization, hierarchical motion analysis, and spatial weight map generation.
 """
 
 import numpy as np
@@ -53,6 +53,7 @@ if TAICHI_AVAILABLE and _ti is not None:
         noise_sigma: float,
         motion_sensitivity: float,
         noise_offset_factor: float,
+        weight_method: int,
     ):
         """Phase 1: Coarse analysis with simplified confidence estimation."""
         for r, c in _ti.ndrange(coarse_confidence.shape[0], coarse_confidence.shape[1]):
@@ -80,13 +81,14 @@ if TAICHI_AVAILABLE and _ti is not None:
             exponent = adjusted * motion_sensitivity * 0.5
 
             conf = 0.0
-            if exponent <= 20.0:
-                conf = 1.0 / (1.0 + _ti.exp(exponent - 2.0))
+            if weight_method == 0:
+                if exponent <= 20.0:
+                    conf = 1.0 / (1.0 + _ti.exp(exponent - 2.0))
+            else:
+                # Linear / Reciprocal weighting (More forgiving)
+                conf = 1.0 / (1.0 + exponent)
 
             coarse_confidence[r, c] = conf
-
-            # Peringatan: Kernel _blend_guidance_maps telah dihapus!
-            # Sebagai penggantinya, proses blending akan dihilangkan pada pipeline pemanggilan GPU.
 
     @_ti.kernel
     def _phase2_fine_analysis(
@@ -108,6 +110,7 @@ if TAICHI_AVAILABLE and _ti is not None:
         noise_offset_factor: float,
         use_stability: int,
         use_guidance: int,
+        weight_method: int,
     ):
         """Phase 2: Fine MAD analysis with 4-pass sliding window and accumulation."""
         pass_row_mod = pass_idx // 2
@@ -140,10 +143,17 @@ if TAICHI_AVAILABLE and _ti is not None:
                         1e-6,
                     )
 
-                    # 2. Calculate Exponential Match Confidence
+                    # 2. Calculate Match Confidence
                     noise_offset = noise_offset_factor * noise_sigma
                     excess_mad = _ti.max(0.0, mad_score - noise_offset)
-                    conf_fine = _ti.exp(-excess_mad * motion_sensitivity)
+
+                    conf_fine = 0.0
+                    if weight_method == 0:
+                        # Exponential fall-off
+                        conf_fine = _ti.exp(-excess_mad * motion_sensitivity)
+                    else:
+                        # Linear / Reciprocal (Inspired by HDR+ paper L1 Reciprocal)
+                        conf_fine = 1.0 / (1.0 + excess_mad * motion_sensitivity)
 
                     # 3. Guidance, Stability and Confidence Weighting
                     # Dalam C++, guidance dan stability diambil dari center tile saja
@@ -220,7 +230,7 @@ if TAICHI_AVAILABLE and _ti is not None:
     # --- INTERFACE FUNCTIONS ---
 
     @ti_thread
-    def generate_weight_map_taichi(
+    def generate_spatial_weights_taichi(
         current_image,
         reference_image,
         weight_map_sum,
@@ -235,6 +245,7 @@ if TAICHI_AVAILABLE and _ti is not None:
         noise_offset_factor,
         equalize_brightness,
         buffer_provider,
+        weight_method=0,
         **kwargs,
     ):
         """
@@ -323,6 +334,7 @@ if TAICHI_AVAILABLE and _ti is not None:
                         noise_sigma,
                         motion_sensitivity,
                         noise_offset_factor,
+                        weight_method,
                     )
 
                     # Upsample to current level resolution for blending
@@ -393,6 +405,7 @@ if TAICHI_AVAILABLE and _ti is not None:
                     noise_offset_factor,
                     use_stability,
                     use_guidance,
+                    weight_method,
                 )
 
         finally:
@@ -451,7 +464,7 @@ if TAICHI_AVAILABLE and _ti is not None:
 
 else:
     # Dummy interface functions for when Taichi is not available
-    def generate_weight_map_taichi(*args, **kwargs):
+    def generate_spatial_weights_taichi(*args, **kwargs):
         return None
 
     def accumulate_spatial_merging_taichi(*args, **kwargs):

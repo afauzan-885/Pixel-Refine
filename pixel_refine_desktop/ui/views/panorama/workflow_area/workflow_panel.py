@@ -51,7 +51,7 @@ class WorkflowPanel(QWidget):
     def _create_align_ui(self):
         widget = QWidget()
         layout = QHBoxLayout(widget)
-        layout.setAlignment(Qt.AlignLeft)
+        layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
 
         # Group 1
         g1 = QVBoxLayout()
@@ -63,8 +63,8 @@ class WorkflowPanel(QWidget):
 
         # Divider
         line = QFrame()
-        line.setFrameShape(QFrame.VLine)
-        line.setFrameShadow(QFrame.Sunken)
+        line.setFrameShape(QFrame.Shape.VLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(line)
 
         # Group 2

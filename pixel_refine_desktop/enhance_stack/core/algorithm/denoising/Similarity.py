@@ -124,6 +124,7 @@ class SimilarityAlgorithm:
         is_linear_mode=False,
         proxy_scale=1.0,
         process_in=None,
+        weight_method=0,
         **unused_kwargs,
     ):
 
@@ -218,8 +219,8 @@ class SimilarityAlgorithm:
         print(f"[DEBUG] _spatial_merging active mode: {process_in}")
 
         # [MODIFIED] Local import to prevent any Taichi initialization in CPU path
-        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.compute_similarity import (
-            generate_weight_map_taichi,
+        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.compute_spatial import (
+            generate_spatial_weights_taichi,
             accumulate_spatial_merging_taichi,
         )
 
@@ -262,6 +263,7 @@ class SimilarityAlgorithm:
             num_images=num_images,  # Pass num_images for alignment check
             num_workers=num_workers,  # Pass num_workers for alignment
             alignment_tile_size=8,  # [ROLLBACK] Reverted to 8 for warp efficiency
+            weight_method=weight_method,
             **unused_kwargs,
         )
 
@@ -341,6 +343,7 @@ class SimilarityAlgorithm:
         return_raw=False,
         is_linear_mode=False,
         proxy_scale=1.0,  # [AUTO-SCALE]
+        weight_method=0,
         **merging_kwargs,
     ):
         """
@@ -405,6 +408,7 @@ class SimilarityAlgorithm:
             "return_raw": return_raw,
             "is_linear_mode": is_linear_mode,
             "proxy_scale": proxy_scale,
+            "weight_method": weight_method,
         }
         common_call_args.update(merging_kwargs)
 
@@ -706,6 +710,10 @@ def main(
             custom_lib_path = general_settings.get("similarity_lib_path")
             if custom_lib_path:
                 extra_merging_params["lib_path"] = custom_lib_path
+
+            extra_merging_params["weight_method"] = general_settings.get(
+                "spatial_weight_method", 0
+            )
 
             # [USER REQUEST] Logic gate untuk Linear Mode dipindahkan ke sini
             # Default ke True agar aktif, set ke False untuk mematikan feature ini

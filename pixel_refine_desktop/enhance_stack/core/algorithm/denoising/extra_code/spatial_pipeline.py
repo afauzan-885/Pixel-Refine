@@ -309,6 +309,7 @@ def process_in_gpu(
     total_overall_images,
     enable_alignment=True,
     alignment_tile_size=None,
+    weight_method=0,
     **kwargs,
 ):
     """Pipeline terpadu untuk Alignment + Merging di GPU."""
@@ -325,8 +326,8 @@ def process_in_gpu(
         download_taichi_ndarray,
         clear_vram,
     )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.compute_similarity import (
-        generate_weight_map_taichi,
+    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.compute_spatial import (
+        generate_spatial_weights_taichi,
         accumulate_spatial_merging_taichi,
     )
     from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.bilinear_interpolation import (
@@ -418,7 +419,7 @@ def process_in_gpu(
                     buffer_provider="pool",
                 )
 
-                generate_weight_map_taichi(
+                generate_spatial_weights_taichi(
                     current_image=curr_work_gray_gpu,
                     reference_image=ref_work_res_pass2_gpu,
                     weight_map_sum=_weight_work_gpu,
@@ -433,6 +434,7 @@ def process_in_gpu(
                     noise_offset_factor=noise_offset_factor,
                     equalize_brightness=False,
                     buffer_provider="pool",
+                    weight_method=weight_method,
                     search_radius=kwargs.get("similarity_search_radius", 3),
                 )
 
