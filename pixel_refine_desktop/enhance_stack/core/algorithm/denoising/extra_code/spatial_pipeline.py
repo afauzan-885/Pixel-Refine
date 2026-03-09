@@ -309,7 +309,6 @@ def process_in_gpu(
     total_overall_images,
     enable_alignment=True,
     alignment_tile_size=None,
-    weight_method=0,
     **kwargs,
 ):
     """Pipeline terpadu untuk Alignment + Merging di GPU."""
@@ -434,7 +433,6 @@ def process_in_gpu(
                     noise_offset_factor=noise_offset_factor,
                     equalize_brightness=False,
                     buffer_provider="pool",
-                    weight_method=weight_method,
                     search_radius=kwargs.get("similarity_search_radius", 3),
                 )
 

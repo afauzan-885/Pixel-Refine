@@ -812,12 +812,12 @@ def process_single_layer(
     if is_coarsest_layer:
         from ... import taichi_algorithm as ta
 
-        global_dx, global_dy, global_cost = ta.phase_correlation(
+        global_dx, global_dy, global_conf = ta.phase_correlation(
             ref_layer_gpu, comp_layer_gpu, max_shift=32
         )
         # Output global shift to console for debugging
         print(
-            f"[Global Shift] Detected Initial Motion Prior: ({global_dx}, {global_dy}) ZNCC Cost: {global_cost:.4f}"
+            f"[Global Shift] Detected Initial Motion Prior: ({global_dx}, {global_dy}) Confidence: {global_conf:.4f}"
         )
         _initialize_coarsest_flow_kernel(
             flow_gpu, h, w, float(global_dx), float(global_dy)

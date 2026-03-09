@@ -124,7 +124,6 @@ class SimilarityAlgorithm:
         is_linear_mode=False,
         proxy_scale=1.0,
         process_in=None,
-        weight_method=0,
         **unused_kwargs,
     ):
 
@@ -260,10 +259,8 @@ class SimilarityAlgorithm:
             images_processed_so_far=images_processed_so_far,
             total_overall_images=total_overall_images,
             enable_alignment=enable_alignment,
-            num_images=num_images,  # Pass num_images for alignment check
             num_workers=num_workers,  # Pass num_workers for alignment
             alignment_tile_size=8,  # [ROLLBACK] Reverted to 8 for warp efficiency
-            weight_method=weight_method,
             **unused_kwargs,
         )
 
@@ -343,7 +340,6 @@ class SimilarityAlgorithm:
         return_raw=False,
         is_linear_mode=False,
         proxy_scale=1.0,  # [AUTO-SCALE]
-        weight_method=0,
         **merging_kwargs,
     ):
         """
@@ -408,7 +404,6 @@ class SimilarityAlgorithm:
             "return_raw": return_raw,
             "is_linear_mode": is_linear_mode,
             "proxy_scale": proxy_scale,
-            "weight_method": weight_method,
         }
         common_call_args.update(merging_kwargs)
 
@@ -932,8 +927,8 @@ def main(
                 batch_sum_img, batch_sum_weight, batch_processed_frames = batch_raw_res
 
                 if global_sum_img is None:
-                    global_sum_img = batch_sum_img
-                    global_sum_weight = batch_sum_weight
+                    global_sum_img = batch_sum_img.copy()
+                    global_sum_weight = batch_sum_weight.copy()
                 else:
                     global_sum_img += batch_sum_img
                     global_sum_weight += batch_sum_weight
@@ -965,19 +960,26 @@ def main(
             # Sebenarnya estimate_noise_in_python bekerja pada grayscale, jadi aman di-normalize.
             # [MODIFIED] Menggunakan preprocess_in_python (CPU)
             ref_gray_preproc, ref_noise_sigma = preprocess_in_python(
-                normalize_image(reference_image, reference_image.dtype)
+                normalize_image(reference_image, ref_dtype)
             )
 
             # --- 7. PENYIMPANAN HASIL AKHIR & PEMBERSIHAN ---
             # Apply simple mean calculation (Normalization)
-            valid_mask = global_sum_weight > 1e-6
-            final_result_normalized = np.zeros_like(global_sum_img)
-            np.divide(
-                global_sum_img,
-                global_sum_weight[:, :, np.newaxis],
-                out=final_result_normalized,
-                where=valid_mask[:, :, np.newaxis],
-            )
+            if global_sum_weight is not None and global_sum_img is not None:
+                valid_mask = global_sum_weight > 1e-6
+                final_result_normalized = np.zeros_like(global_sum_img)
+                np.divide(
+                    global_sum_img,
+                    global_sum_weight[:, :, np.newaxis],
+                    out=final_result_normalized,
+                    where=valid_mask[:, :, np.newaxis],
+                )
+            else:
+                # Fallback if no data was accumulated
+                final_result_normalized = normalize_image(
+                    reference_image, reference_image.dtype
+                )
+                valid_mask = np.zeros(final_result_normalized.shape[:2], dtype=bool)
 
             # Fill areas without data from reference image
             ref_float = normalize_image(reference_image, reference_image.dtype)

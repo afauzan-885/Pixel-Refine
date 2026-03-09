@@ -43,7 +43,6 @@ def load_similarity_config():
             "similarity_spatial_noise_mad_offset_factor": 0.12,
             "similarity_spatial_overlap_percent": 0.30,
             "similarity_spatial_num_workers": 1,  # [PENAMBAHAN] Default ke 'Auto' (-1)
-            "spatial_weight_method": 0,  # 0: Exponential, 1: Reciprocal
         },
     }
     final_config = {
@@ -111,7 +110,6 @@ def save_similarity_v1_config(config_to_save):
         "similarity_spatial_noise_mad_offset_factor",
         "similarity_spatial_overlap_percent",
         "similarity_spatial_num_workers",
-        "spatial_weight_method",
     ]  # [PENAMBAHAN]
 
     for key in spatial_keys:
@@ -245,22 +243,6 @@ def get_similarity_settings_page():
     num_workers_form.input.setMaximumWidth(150)
     widgets["num_workers_combo_spatial"] = num_workers_form.input
     spatial_container_main_layout.addWidget(num_workers_form)
-
-    # [PENAMBAHAN] --- Grup Baru: Weighting Method ---
-    weight_method_form = FormGroup(label="Weighting Method:", input_type="select")
-    weight_method_form.add_options(["Exponential (Agresif)", "Reciprocal (Halus)"])
-
-    current_weight_val = sim_v1_config.get("spatial_weight_method", 0)
-    weight_method_form.set_value(
-        "Reciprocal (Halus)" if current_weight_val == 1 else "Exponential (Agresif)"
-    )
-
-    weight_method_form.label.setToolTip(
-        "Metode perhitungan bobot MAD:\n- Exponential: Membuang ghosting secara agresif.\n- Reciprocal: Transisi lebih halus, lebih toleran terhadap alignment mikro."
-    )
-    weight_method_form.input.setMaximumWidth(150)
-    widgets["weight_method_combo_spatial"] = weight_method_form.input
-    spatial_container_main_layout.addWidget(weight_method_form)
 
     # --- Grup 2: Overlap (Spatial) ---
     overlap_sp_group_widget = QWidget()
@@ -419,11 +401,6 @@ def get_similarity_settings_page():
                     worker_text
                 )
 
-            weight_text = widgets["weight_method_combo_spatial"].currentText()
-            settings_to_save_flat["spatial_weight_method"] = (
-                1 if "Reciprocal" in weight_text else 0
-            )
-
             ms_val, _ = c_locale.toDouble(widgets["motion_sensitivity_input"].text())
             settings_to_save_flat["similarity_spatial_motion_sensitivity"] = ms_val
             nm_val, _ = c_locale.toDouble(widgets["noise_mad_offset_input"].text())
@@ -553,11 +530,6 @@ def get_similarity_settings_page():
         else:
             widgets["num_workers_combo_spatial"].setCurrentText(str(worker_default))
 
-        weight_default = defaults.get("spatial_weight_method", 0)
-        widgets["weight_method_combo_spatial"].setCurrentText(
-            "Reciprocal (Halus)" if weight_default == 1 else "Exponential (Agresif)"
-        )
-
         widgets["motion_sensitivity_slider"].setValue(
             int(
                 round(
@@ -584,9 +556,6 @@ def get_similarity_settings_page():
         save_current_settings_v1
     )
     widgets["tile_combo_spatial"].currentIndexChanged.connect(save_current_settings_v1)
-    widgets["weight_method_combo_spatial"].currentIndexChanged.connect(
-        save_current_settings_v1
-    )
     widgets["motion_sensitivity_slider"].sliderReleased.connect(
         save_current_settings_v1
     )

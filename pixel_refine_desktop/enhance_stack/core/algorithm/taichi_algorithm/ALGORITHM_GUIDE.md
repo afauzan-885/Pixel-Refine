@@ -106,7 +106,40 @@ smooth = ta.bilateral(img, d=9, sigmaColor=75, sigmaSpace=75)
 
 ---
 
-## 🚀 Deployment Pattern: Zero-Copy Pipeline
+### 8. `fft.py` - Frequency-Domain Analysis
+High-performance 2D FFT utilizing the Radix-2 algorithm.
+
+- **Use Case**: Global motion estimation, periodic noise removal, or frequency filtering.
+- **Example**:
+```python
+import taichi_algorithm as ta
+# Get sub-pixel translation (dx, dy, response)
+dx, dy, conf = ta.phase_correlation(img1, img2)
+```
+- **💡 Technical Deep Dive**:
+    - **Bit-Reversal Permutation**: Pre-shuffles data on GPU to allow in-place butterfly operations.
+    - **Zero-Padding**: Automatically pads inputs to the next power of two for optimal complexity $O(N \log N)$.
+
+---
+
+### 9. `ncc.py` - Pattern Matching
+General-purpose Normalized Cross-Correlation for feature tracking.
+
+- **Use Case**: Finding a template within an image, feature matching, or similarity analysis.
+- **Example**:
+```python
+import taichi_algorithm as ta
+# Match template or compare two images
+corr_map = ta.zncc_fft(img, template)
+best_y, best_x = np.unravel_index(np.argmax(corr_map), corr_map.shape)
+```
+- **� Technical Deep Dive**:
+    - **Frequency Domain Correlation**: Much faster than spatial sliding windows for large templates.
+    - **Mean Normalization**: Immune to global brightness/contrast variations.
+
+---
+
+## �🚀 Deployment Pattern: Zero-Copy Pipeline
 
 Avoid downloading to NumPy between steps. **Stay on the GPU**.
 
@@ -130,6 +163,8 @@ final = res.to_numpy()
 | Module | Use Case | Common Call |
 | :--- | :--- | :--- |
 | `common.py` | Color/Channels | `ta.cvtColor`, `ta.split`, `ta.merge` |
+| `fft.py` | Frequency/Motion| `ta.phase_correlate_fft`, `ta.ncc` |
+| `ncc.py` | Template Matching| `ta.zncc_fft` |
 | `pyramid.py` | Hierarchies | `ta.build_image_pyramid` |
 | `warp.py` | Motion warping | `ta.warp_image_gpu` |
 | `gaussian.py` | Efficient Blur | `ta.gaussian(src, ksize, sigmaX)` |

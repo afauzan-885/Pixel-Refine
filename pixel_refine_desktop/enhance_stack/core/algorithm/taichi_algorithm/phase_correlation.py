@@ -1,120 +1,93 @@
 """
-Global Spatial Search (Pseudo-Phase Correlation) - Taichi GPU Implementation
-============================================================================
-Provides an extremely fast global shift estimator using exhaustive spatial ZMSSD on
-the coarsest pyramid layer. Acts as a replacement for OpenCV's CPU phaseCorrelate.
+Global Motion Estimation (Phase Correlation) - Taichi GPU Implementation
+========================================================================
+Provides an extremely fast global shift estimator using frequency-domain
+Phase Correlation. Acts as a high-performance replacement for
+OpenCV's CPU phaseCorrelate.
 """
 
 import numpy as np
 
 try:
     import taichi as ti
-
-    TAICHI_AVAILABLE = True
+    from .taichi_worker import ti_thread, TAICHI_AVAILABLE
+    from . import common
+    from . import fft
 except ImportError:
     TAICHI_AVAILABLE = False
-    ti = None
+
 
 if TAICHI_AVAILABLE:
 
     @ti.kernel
-    def _compute_global_zncc_surface(
-        ref: ti.types.ndarray(),
-        comp: ti.types.ndarray(),
-        cost_surface: ti.types.ndarray(),
-        max_shift: int,
-        h: int,
-        w: int,
-    ):
+    def _phase_normalize_kernel(R: ti.types.ndarray(), mag: ti.types.ndarray()):
+        for I in ti.grouped(R):
+            m = mag[I]
+            if m > 1e-12:
+                R[I] /= m
+
+    @ti_thread
+    def phase_correlate_fft(ref, comp):
         """
-        Computes the ZNCC (Zero-mean Normalized Cross-Correlation) cost across a shift grid.
-        ZNCC is highly robust to illumination changes and is a spatial approximation of phase correlation.
-        Cost is defined as (1.0 - ZNCC), so 0.0 means perfect match.
+        Frequency-domain Phase Correlation for sub-pixel shift estimation.
+        formula: Cross-power spectrum R = (F * G*) / |F * G*|
+        shift = argmax(IFFT(R))
         """
-        for dy, dx in ti.ndrange(
-            (-max_shift, max_shift + 1), (-max_shift, max_shift + 1)
-        ):
-            # Pass 1: Calculate Means
-            sum_ref = 0.0
-            sum_comp = 0.0
-            count = 0.0
-            step = 4
+        # 1. FFT (using core FFT functions)
+        F = fft.fft2(ref)
+        G = fft.fft2(comp)
 
-            y_limit = (h - max_shift * 2) // step
-            x_limit = (w - max_shift * 2) // step
+        h, w = F.shape
+        R = common.get_temp_buffer((h, w), ti.types.vector(2, ti.f32))
 
-            for i_y in range(y_limit):
-                for i_x in range(x_limit):
-                    y = max_shift + i_y * step
-                    x = max_shift + i_x * step
-                    comp_y = y + dy
-                    comp_x = x + dx
+        # 2. Cross-power spectrum: G * F* (gives shift ref -> comp)
+        # Using kernels from fft module
+        fft._complex_mul_kernel(G, F, R, conj_b=1)
 
-                    sum_ref += float(ref[y, x])
-                    sum_comp += float(comp[comp_y, comp_x])
-                    count += 1.0
+        # 3. Normalize magnitude to 1.0 (Phase Correlation)
+        mag = common.get_temp_buffer((h, w), ti.f32)
+        fft._complex_to_mag_kernel(R, mag)
 
-            if count > 0.0:
-                mean_ref = sum_ref / count
-                mean_comp = sum_comp / count
+        _phase_normalize_kernel(R, mag)
+        common.release_temp_buffer(mag)
 
-                # Pass 2: Calculate ZNCC
-                numerator = 0.0
-                sum_sq_ref = 0.0
-                sum_sq_comp = 0.0
+        # 4. Inverse FFT
+        corr_gpu = fft.ifft2(R)
+        corr_np = corr_gpu.to_numpy()
 
-                for i_y in range(y_limit):
-                    for i_x in range(x_limit):
-                        y = max_shift + i_y * step
-                        x = max_shift + i_x * step
-                        comp_y = y + dy
-                        comp_x = x + dx
+        # Find peak
+        idx = np.unravel_index(np.argmax(corr_np), corr_np.shape)
+        dy, dx = idx[0], idx[1]
+        peak_val = corr_np[idx]
 
-                        val_ref = float(ref[y, x]) - mean_ref
-                        val_comp = float(comp[comp_y, comp_x]) - mean_comp
+        # Cleanup
+        common.release_temp_buffer(F)
+        common.release_temp_buffer(G)
+        common.release_temp_buffer(R)
+        common.release_temp_buffer(corr_gpu)
 
-                        numerator += val_ref * val_comp
-                        sum_sq_ref += val_ref * val_ref
-                        sum_sq_comp += val_comp * val_comp
+        # Shift wrapping (standard FFT behavior)
+        if dy > h // 2:
+            dy -= h
+        if dx > w // 2:
+            dx -= w
 
-                denominator = ti.sqrt(sum_sq_ref * sum_sq_comp)
-
-                # Protect against division by zero (e.g. flat textureless regions)
-                if denominator > 1e-6:
-                    zncc = numerator / denominator
-                    # Convert correlation [-1, 1] to cost [0, 2] where 0 is best
-                    # Max correlation (1.0) -> Cost (0.0)
-                    cost_surface[dy + max_shift, dx + max_shift] = 1.0 - zncc
-                else:
-                    cost_surface[dy + max_shift, dx + max_shift] = 1e10
-            else:
-                cost_surface[dy + max_shift, dx + max_shift] = 1e10
+        return float(dx), float(dy), float(peak_val)
 
 
 def phase_correlation(
     ref_layer: np.ndarray, comp_layer: np.ndarray, max_shift: int = 16
 ):
     """
-    Estimates the dominant global translation (dx, dy) between two 2D images.
+    Estimates the dominant global translation (dx, dy) between two 2D images
+    using frequency-domain Phase Correlation.
+
     Returns:
-        (best_dx, best_dy, best_cost)
+        (dx, dy, response)
+        where response is the correlation peak value [0.0, 1.0].
     """
     if not TAICHI_AVAILABLE:
         raise RuntimeError("Taichi is not available")
 
-    h, w = ref_layer.shape[:2]
-
-    # Pre-allocate cost surface
-    size = 2 * max_shift + 1
-    cost_surface = np.full((size, size), 1e10, dtype=np.float32)
-
-    _compute_global_zncc_surface(ref_layer, comp_layer, cost_surface, max_shift, h, w)
-
-    # Find the minimum cost location
-    min_idx = np.unravel_index(np.argmin(cost_surface), cost_surface.shape)
-
-    best_dy = int(min_idx[0]) - max_shift
-    best_dx = int(min_idx[1]) - max_shift
-    best_cost = float(cost_surface[min_idx[0], min_idx[1]])
-
-    return best_dx, best_dy, best_cost
+    # Call GPU implementation
+    return phase_correlate_fft(ref_layer, comp_layer)

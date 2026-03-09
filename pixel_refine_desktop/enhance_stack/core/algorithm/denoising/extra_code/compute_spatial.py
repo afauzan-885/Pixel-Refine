@@ -53,7 +53,6 @@ if TAICHI_AVAILABLE and _ti is not None:
         noise_sigma: float,
         motion_sensitivity: float,
         noise_offset_factor: float,
-        weight_method: int,
     ):
         """Phase 1: Coarse analysis with simplified confidence estimation."""
         for r, c in _ti.ndrange(coarse_confidence.shape[0], coarse_confidence.shape[1]):
@@ -80,13 +79,8 @@ if TAICHI_AVAILABLE and _ti is not None:
             adjusted = _ti.max(0.0, diff_ratio - noise_offset_factor)
             exponent = adjusted * motion_sensitivity * 0.5
 
-            conf = 0.0
-            if weight_method == 0:
-                if exponent <= 20.0:
-                    conf = 1.0 / (1.0 + _ti.exp(exponent - 2.0))
-            else:
-                # Linear / Reciprocal weighting (More forgiving)
-                conf = 1.0 / (1.0 + exponent)
+            # Linear / Reciprocal weighting (Consistent with HDR+)
+            conf = 1.0 / (1.0 + exponent)
 
             coarse_confidence[r, c] = conf
 
@@ -110,7 +104,6 @@ if TAICHI_AVAILABLE and _ti is not None:
         noise_offset_factor: float,
         use_stability: int,
         use_guidance: int,
-        weight_method: int,
     ):
         """Phase 2: Fine MAD analysis with 4-pass sliding window and accumulation."""
         pass_row_mod = pass_idx // 2
@@ -147,13 +140,8 @@ if TAICHI_AVAILABLE and _ti is not None:
                     noise_offset = noise_offset_factor * noise_sigma
                     excess_mad = _ti.max(0.0, mad_score - noise_offset)
 
-                    conf_fine = 0.0
-                    if weight_method == 0:
-                        # Exponential fall-off
-                        conf_fine = _ti.exp(-excess_mad * motion_sensitivity)
-                    else:
-                        # Linear / Reciprocal (Inspired by HDR+ paper L1 Reciprocal)
-                        conf_fine = 1.0 / (1.0 + excess_mad * motion_sensitivity)
+                    # Consistent Linear/Reciprocal weighting (HDR+ Paper)
+                    conf_fine = 1.0 / (1.0 + excess_mad * motion_sensitivity)
 
                     # 3. Guidance, Stability and Confidence Weighting
                     # Dalam C++, guidance dan stability diambil dari center tile saja
@@ -245,7 +233,6 @@ if TAICHI_AVAILABLE and _ti is not None:
         noise_offset_factor,
         equalize_brightness,
         buffer_provider,
-        weight_method=0,
         **kwargs,
     ):
         """
@@ -334,7 +321,6 @@ if TAICHI_AVAILABLE and _ti is not None:
                         noise_sigma,
                         motion_sensitivity,
                         noise_offset_factor,
-                        weight_method,
                     )
 
                     # Upsample to current level resolution for blending
@@ -405,7 +391,6 @@ if TAICHI_AVAILABLE and _ti is not None:
                     noise_offset_factor,
                     use_stability,
                     use_guidance,
-                    weight_method,
                 )
 
         finally:
