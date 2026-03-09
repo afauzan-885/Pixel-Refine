@@ -68,6 +68,7 @@ class DisplayPanel(QWidget):
     # Signals
     images_to_import_selected = Signal(list)
     page_changed = Signal(int)  # For global navigation
+    back_to_grid_requested = Signal()  # For generic UI compatibility
 
     def __init__(self, controller=None):
         super().__init__()
@@ -631,25 +632,35 @@ class DisplayPanel(QWidget):
     # === 2. PUBLIC METHODS UNTUK VIEW CONTROL ===
     # =========================================================================
 
-    def show_grid(self):
-        """Switch ke Grid View."""
-        self.display_stack.setCurrentIndex(0)
+    @Slot(str)
+    def set_project_view(self, project_name):
+        """Called when a project is selected to display its contents."""
+        self.header_title.setText(f"Project: {project_name}")
+        # Placeholder for actual data loading logic
+        self.show_grid_view()
 
-        # Update Header buttons
-        self.back_btn.setVisible(False)
+    @Slot()
+    def show_empty_state(self):
+        """Called when no project is selected."""
+        self.clear_display()
 
-        if self.current_batch_id:
-            self.import_button.setVisible(True)
-        else:
-            self.import_button.setVisible(False)
+    @Slot()
+    def show_grid_view(self):
+        """Alias for show_grid for generic UI compatibility."""
+        self.show_grid()
 
-    def show_preview(self):
-        """Switch ke Preview View."""
-        self.display_stack.setCurrentIndex(1)
+    @Slot(str)
+    def show_processing_view(self, message):
+        """Show a temporary processing message (UI simulation)."""
+        self.header_title.setText(message)
+        # In a real scenario, this would switch to a loading/processing stack index
 
-        # Update Header buttons
-        self.back_btn.setVisible(True)
-        self.import_button.setVisible(False)
+    @Slot()
+    def show_preview_result(self):
+        """Show the preview result after processing (UI simulation)."""
+        self.header_title.setText("Preview Result")
+        # Ensure we switch to the preview stack
+        self.show_preview()
 
     # =========================================================================
     # === 3. PRIVATE METHODS - GRID MANAGEMENT ===
