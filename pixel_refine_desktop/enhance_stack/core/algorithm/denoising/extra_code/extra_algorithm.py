@@ -765,10 +765,6 @@ def perform_image_alignment(
     if num_images <= 1:
         return True
 
-    print(
-        f"[DEBUG] perform_image_alignment called with optical_flow_type: {optical_flow_type}"
-    )
-
     is_linear_mode = kwargs.get("is_linear_mode", False)
     proxy_scale = kwargs.get("proxy_scale", 1.0)  # [AUTO-SCALE]
     index_offset = kwargs.get("index_offset", 0)
@@ -796,10 +792,10 @@ def perform_image_alignment(
     ref_work_ptr = ref_work_gray_cpp.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
     # del ref_preprocessed_cpp (Keep it for Farneback/Tile if needed, or move to raft block)
 
-    # Siapkan variabel konfigurasi C++ (Capped at 3)
+    # Siapkan variabel konfigurasi C++ (HDR+ style: 4 levels for 4x pyramid)
     min_layer_res = min(tile_h, tile_w) * 2
     log_arg = min(work_res_h, work_res_w) / min_layer_res if min_layer_res > 0 else 1
-    n_layers = min(3, max(1, int(np.ceil(np.log2(log_arg))) if log_arg > 0 else 1))
+    n_layers = min(4, max(1, int(np.ceil(np.log2(log_arg))) if log_arg > 0 else 1))
 
     # === BACKEND RAFT (GPU, multi-thread) ===
     if optical_flow_type == "raft":
@@ -1071,253 +1067,10 @@ def perform_image_alignment(
             return False
 
     # =================================================================
-    # === BACKEND C++ (alignment_tile) - PARALEL ===
+    # === [LEGACY] BACKEND C++ (alignment_tile) - DIHAPUS ===
+    # === Sekarang selalu pakai Taichi (GPU/CPU fallback otomatis) ===
+    # === See git history for full C++ DLL implementation ===
     # =================================================================
-    elif optical_flow_type == "alignment_tile":
-        if ALIGN_LIB is None:
-            error_msg = "Error: Backend C++ dipilih tetapi library 'alignment_tile.dll' tidak tersedia."
-            print(error_msg)
-            if update_progress:
-                update_progress(0, error_msg)
-            return False
-
-        try:
-            # --- Fungsi untuk 1 tugas alignment C++ (dijalankan di worker) ---
-            def process_single_alignment_cpp(
-                i,
-                ref_work_ptr,
-                work_res_h,
-                work_res_w,
-                tile_h,
-                tile_w,
-                n_layers,
-                original_image,
-                ref_dtype,
-                ALIGN_LIB,
-                stop_requested,
-                full_res_reference_image,
-            ):
-
-                if stop_requested and stop_requested():
-                    return (i, None)
-
-                flow_ptr = None
-                current_preprocessed_cpp = None
-                current_img_float = None
-                current_work_gray_cpp = None
-
-                try:
-                    # --- C++ DLL PATH ---
-                    current_img_float = normalize_image(original_image, ref_dtype)
-                    if is_linear_mode:
-                        current_img_float_proxy = to_gamma_proxy(
-                            current_img_float, scale=proxy_scale
-                        )
-                        # [MODIFIED] Menggunakan preprocess_in_python (CPU)
-                        current_preprocessed_cpp, _ = preprocess_in_python(
-                            current_img_float_proxy
-                        )
-                    else:
-                        # [MODIFIED] Menggunakan preprocess_in_python (CPU)
-                        current_preprocessed_cpp, _ = preprocess_in_python(
-                            current_img_float
-                        )
-
-                    current_work_gray_cpp = cv2.resize(
-                        current_preprocessed_cpp,
-                        (work_res_w, work_res_h),
-                        interpolation=cv2.INTER_LINEAR,
-                    ).astype(np.float32)
-
-                    current_work_gray_cpp = np.ascontiguousarray(current_work_gray_cpp)
-                    current_work_ptr = current_work_gray_cpp.ctypes.data_as(
-                        ctypes.POINTER(ctypes.c_float)
-                    )
-
-                    # [DEBUG] Print preprocessing stats
-                    print(
-                        f"  [DEBUG] Image {i+1}: ref range=[{ref_work_gray_cpp.min():.4f}, {ref_work_gray_cpp.max():.4f}], "
-                        f"curr range=[{current_work_gray_cpp.min():.4f}, {current_work_gray_cpp.max():.4f}]"
-                    )
-                    print(
-                        f"  [DEBUG] Image {i+1}: work_res=({work_res_h}x{work_res_w}), tile=({tile_h}x{tile_w}), n_layers={n_layers}, search_dist=2.0"
-                    )
-
-                    flow_ptr = ALIGN_LIB.compute_alignment_flow(
-                        ref_work_ptr,
-                        current_work_ptr,
-                        work_res_h,
-                        work_res_w,
-                        tile_h,
-                        tile_w,
-                        n_layers,
-                        2.0,
-                    )
-
-                except Exception as e:
-                    print(f"Error C++ setup/call for image {i+1}: {e}")
-                    traceback.print_exc()
-                    return (i, None)
-
-                finally:
-                    # Pastikan referensi Python lokal dibersihkan
-                    del (
-                        current_work_gray_cpp,
-                        current_preprocessed_cpp,
-                        current_img_float,
-                    )
-
-                aligned_img = None
-
-                if flow_ptr:
-                    try:
-                        # 3. Baca Flow dan Rescale
-                        flow_buf_cpp = np.empty(
-                            (work_res_h, work_res_w, 2), dtype=np.float32
-                        )
-                        ctypes.memmove(
-                            flow_buf_cpp.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-                            flow_ptr,
-                            flow_buf_cpp.nbytes,
-                        )
-
-                        # [DEBUG] Print flow statistics
-                        flow_mag = np.sqrt(
-                            flow_buf_cpp[..., 0] ** 2 + flow_buf_cpp[..., 1] ** 2
-                        )
-                        print(
-                            f"  [DEBUG] Image {i+1}: flow magnitude - mean={flow_mag.mean():.4f}, max={flow_mag.max():.4f}, "
-                            f"median={np.median(flow_mag):.4f}"
-                        )
-
-                        full_h, full_w = original_image.shape[:2]
-
-                        # === PERUBAHAN DI SINI ===
-                        # Ganti scale_flow_to_full_res dengan scale_flow
-                        # ksize=5 cukup ampuh hilangkan noise tanpa merusak gerakan besar
-                        flow_full_res = scale_flow(
-                            flow_buf_cpp,
-                            work_res_h,
-                            work_res_w,
-                            full_h,
-                            full_w,
-                            ksize=5,
-                        )
-                        # =========================
-
-                        # [DEBUG] Print scaled flow stats
-                        scaled_mag = np.sqrt(
-                            flow_full_res[..., 0] ** 2 + flow_full_res[..., 1] ** 2
-                        )
-                        print(
-                            f"  [DEBUG] Image {i+1}: SCALED flow - mean={scaled_mag.mean():.2f}, max={scaled_mag.max():.2f}"
-                        )
-
-                        if visualization:
-                            flow_vis = visualize_flow(flow_full_res)
-                            cv2.imwrite(f"flow_cpp_{i+1:02d}.jpg", flow_vis)
-                            del flow_vis
-
-                        # 4. Warp Gambar
-                        aligned_img = warp_image_opencv(original_image, flow_full_res)
-
-                        # [DEBUG] Compare original vs aligned
-                        orig_f = original_image.astype(np.float32)
-                        aligned_f = aligned_img.astype(np.float32)
-                        diff = np.abs(orig_f - aligned_f)
-                        print(
-                            f"  [DEBUG] Image {i+1}: WARP DIFF - mean={diff.mean():.2f}, max={diff.max():.2f}, "
-                            f"changed_pixels={np.sum(diff > 1)}/{diff.size}"
-                        )
-
-                        # [DEBUG] Save original (unaligned) for comparison
-                        if save_align_image:
-                            save_aligned_image(
-                                original_image, i + index_offset, "ORIGINAL"
-                            )
-
-                        # [OPTIMIZATION]
-                        del flow_buf_cpp, flow_full_res, flow_ptr
-
-                    except Exception as e:
-                        print(f"Error processing flow result for image {i+1}: {e}")
-                return (i, aligned_img)
-
-            # --- Parallel execution with ThreadPoolExecutor ---
-            with ThreadPoolExecutor(max_workers=num_alignment_workers) as executor:
-                futures = {}
-                processed_count = 0
-
-                # Kirim tugas ke executor
-                for i in range(1, num_images):
-                    if stop_requested and stop_requested():
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        return False
-
-                    if i > 1:
-                        time.sleep(0.1)
-
-                    future = executor.submit(
-                        process_single_alignment_cpp,
-                        i,
-                        ref_work_ptr,
-                        work_res_h,
-                        work_res_w,
-                        tile_h,
-                        tile_w,
-                        n_layers,
-                        images[i],
-                        ref_dtype,
-                        ALIGN_LIB,
-                        stop_requested,
-                        reference_image_float,
-                    )
-                    futures[future] = i
-
-                # Kumpulkan hasil
-                for future in as_completed(futures):
-                    i = futures[future]
-                    if stop_requested and stop_requested():
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        return False
-
-                    try:
-                        idx, aligned_img = future.result()
-                        if aligned_img is not None:
-                            images[idx] = aligned_img
-                            if save_align_image:
-                                save_aligned_image(
-                                    aligned_img, idx + index_offset, "TILE"
-                                )
-                            # [OPTIMIZATION]
-                            del aligned_img
-                    except Exception as e:
-                        print(
-                            f"❌ Worker C++ gagal untuk gambar {i+1} (saat fetch result): {e}"
-                        )
-
-                    gc.collect()
-
-                    processed_count += 1
-                    if update_progress:
-                        prog_fraction = processed_count / (num_images - 1)
-                        current_msg_progress = int(
-                            progress_start
-                            + prog_fraction * (progress_end - progress_start)
-                        )
-                        update_progress(
-                            current_msg_progress,
-                            f"Alignment gambar {processed_count}/{num_images - 1} (C++)...",
-                        )
-
-                    gc.collect()
-
-            return True
-
-        except Exception as e:
-            print(f"Error fatal di luar blok alignment C++ utama: {e}")
-            traceback.print_exc()
-            return False
 
 
 from .spatial_pipeline import process_in_cpu, process_in_gpu

@@ -99,224 +99,6 @@ class SimilarityAlgorithm:
                 images.append(image)
         return images
 
-    def _apply_final_fusion_tiled(
-        self, sum_img, sum_weight, ref_img, noise_sigma, tile_size=512, padding=16
-    ):
-        """
-        Menjalankan _apply_precision_structure_fusion secara Tiled & Paralel.
-        Menghemat RAM drastis dan mempercepat proses akhir.
-        """
-        h, w = sum_img.shape[:2]
-        final_output = np.zeros_like(sum_img)
-
-        # Daftar tugas tile
-        tasks = []
-
-        # Generate koordinat tile
-        for y in range(0, h, tile_size):
-            for x in range(0, w, tile_size):
-                # Koordinat inti tile
-                y_end = min(y + tile_size, h)
-                x_end = min(x + tile_size, w)
-
-                # Koordinat dengan padding (untuk konteks Gaussian Blur agar tidak ada garis di sambungan)
-                y_start_pad = max(0, y - padding)
-                x_start_pad = max(0, x - padding)
-                y_end_pad = min(h, y_end + padding)
-                x_end_pad = min(w, x_end + padding)
-
-                # Hitung offset crop untuk mengembalikan ke ukuran asli setelah diproses
-                crop_y1 = y - y_start_pad
-                crop_y2 = crop_y1 + (y_end - y)
-                crop_x1 = x - x_start_pad
-                crop_x2 = crop_x1 + (x_end - x)
-
-                tasks.append(
-                    {
-                        "coords": (y, y_end, x, x_end),
-                        "pad_coords": (y_start_pad, y_end_pad, x_start_pad, x_end_pad),
-                        "crop": (crop_y1, crop_y2, crop_x1, crop_x2),
-                    }
-                )
-
-        # Fungsi Worker untuk ThreadPool
-        def process_single_tile(task):
-            py1, py2, px1, px2 = task["pad_coords"]
-
-            # 1. Ambil Slice Data (Copy kecil, hemat RAM)
-            s_img_slice = sum_img[py1:py2, px1:px2]
-            s_w_slice = sum_weight[py1:py2, px1:px2]
-            ref_slice = ref_img[py1:py2, px1:px2]
-
-            # 2. Normalisasi Lokal (Divide)
-            valid_mask = s_w_slice > 1e-6
-            fused_slice = np.zeros_like(s_img_slice)
-            np.divide(
-                s_img_slice,
-                s_w_slice[:, :, np.newaxis],
-                out=fused_slice,
-                where=valid_mask[:, :, np.newaxis],
-            )
-
-            # 3. Jalankan Algoritma Berat (Structure Fusion) pada slice kecil
-            #    Ini memanggil fungsi _apply_precision_structure_fusion yang sudah Anda miliki
-            processed_pad = self._apply_precision_structure_fusion(
-                fused_img=fused_slice,
-                weight_map=s_w_slice,
-                reference_img=ref_slice,
-                base_noise_sigma=noise_sigma,
-            )
-
-            # 4. Potong Padding (Ambil bagian tengah yang valid saja)
-            cy1, cy2, cx1, cx2 = task["crop"]
-            result_core = processed_pad[cy1:cy2, cx1:cx2]
-
-            return task["coords"], result_core
-
-        # Eksekusi Paralel
-        # Gunakan max_workers sesuai core CPU, tapi jangan terlalu banyak agar tidak overhead
-        max_threads = max(2, (os.cpu_count() or 4) - 1)
-
-        with ThreadPoolExecutor(max_workers=max_threads) as executor:
-            futures = [executor.submit(process_single_tile, t) for t in tasks]
-
-            for future in as_completed(futures):
-                try:
-                    (ty, ty2, tx, tx2), result_tile = future.result()
-                    final_output[ty:ty2, tx:tx2] = result_tile
-                except Exception as e:
-                    print(f"Error processing tile: {e}")
-                    # Fallback ke black atau original sum jika error (jarang terjadi)
-
-        return final_output
-
-    def _apply_precision_structure_fusion(
-        self, fused_img, weight_map, reference_img, base_noise_sigma
-    ):
-        """
-        Versi PENYEMPURNAAN: Smart Structure Fusion dengan 'Consistency Check'.
-
-        Peta bobot hanya menjadi 'Saran', keputusan final diambil berdasarkan
-        analisis kemiripan struktur antara Fused vs Reference.
-        """
-        # 1. Konversi Tipe Data
-        fused = fused_img.astype(np.float32)
-        ref = reference_img.astype(np.float32)
-
-        if ref.shape[:2] != fused.shape[:2]:
-            ref = cv2.resize(
-                ref, (fused.shape[1], fused.shape[0]), interpolation=cv2.INTER_AREA
-            )
-
-        # =====================================================================
-        # A. ANALISIS FREKUENSI (Tetap Menggunakan Parameter Favorit Anda)
-        # =====================================================================
-        k_radius = 3
-        k_sigma = 0.5
-
-        # Blur Reference & Fused
-        mu_ref = cv2.GaussianBlur(ref, (k_radius, k_radius), k_sigma)
-        mu_fused = cv2.GaussianBlur(fused, (k_radius, k_radius), k_sigma)
-
-        # Detail Kasar (High Frequency)
-        raw_detail_ref = ref - mu_ref
-        raw_detail_fused = fused - mu_fused
-
-        # Varians Reference (Kekayaan Tekstur)
-        ref_sq = ref * ref
-        mu_ref_sq = cv2.GaussianBlur(ref_sq, (k_radius, k_radius), k_sigma)
-        var_ref = mu_ref_sq - (mu_ref * mu_ref)
-        var_ref = np.maximum(var_ref, 0.0)
-
-        # =====================================================================
-        # B. MEMBUAT ULANG PETA KEPERCAYAAN (RE-EVALUASI BOBOT)
-        # =====================================================================
-        # Di sini kita tidak percaya buta pada weight_map.
-
-        # 1. Peta Bobot Awal (Saran dari akumulasi)
-        w_map_expanded = weight_map[:, :, np.newaxis] if fused.ndim == 3 else weight_map
-        weight_factor = np.clip(w_map_expanded / 8.0, 0.0, 1.0)  # 0.0 s/d 1.0
-
-        # 2. Analisis KONSISTENSI STRUKTUR (Verifikasi Kebenaran)
-        # Kita cek apakah detail di Fused Image 'sejalan' dengan Reference Image.
-        # Jika Fused Image blur (karena misalignment) tapi Reference tajam,
-        # maka similarity akan rendah.
-
-        # Hitung dot product sederhana dari detail (Correlation)
-        # +1.0 : Detail identik (Sangat Bagus)
-        #  0.0 : Fused blur/flat (Kurang Bagus)
-        # -1.0 : Detail berlawanan/Ghosting (Buruk)
-
-        # Normalisasi magnitude agar perbandingan adil
-        mag_ref = np.abs(raw_detail_ref) + 1e-6
-        mag_fused = np.abs(raw_detail_fused) + 1e-6
-
-        # Peta Konsistensi (-1 s/d 1)
-        consistency_map = (raw_detail_ref * raw_detail_fused) / (mag_ref * mag_fused)
-
-        # Mapping ke range 0.0 - 1.0 dengan bias ke arah positif
-        # Jika konsistensi > 0, kita mulai percaya. Jika < 0, tidak percaya.
-        structure_validity = np.clip((consistency_map + 0.2) * 1.5, 0.0, 1.0)
-
-        # Jika gambar berwarna, ambil rata-rata validitas channel
-        if structure_validity.ndim == 3:
-            structure_validity = np.mean(structure_validity, axis=2, keepdims=True)
-
-        # 3. FINAL CONFIDENCE MASK
-        # Kepercayaan Akhir = (Saran Bobot) x (Verifikasi Struktur)
-        # Jadi meskipun bobot tinggi, kalau strukturnya ngaco/blur, confidence turun.
-        final_confidence = weight_factor * structure_validity
-
-        # =====================================================================
-        # C. ESTIMASI NOISE & WIENER
-        # =====================================================================
-        epsilon = 1e-6
-        base_noise_var = base_noise_sigma**2
-
-        # Noise map tetap pakai weight map asli (karena ini hukum statistik jumlah sampel)
-        noise_var_map = base_noise_var / (w_map_expanded + epsilon)
-        local_noise_sigma = np.sqrt(noise_var_map)
-
-        alpha = var_ref / (var_ref + noise_var_map + epsilon)
-
-        # =====================================================================
-        # D. STRUCTURE INJECTION (CLEAN)
-        # =====================================================================
-
-        # Threshold 0.6 (Detail halus lolos)
-        shrinkage_threshold = 0.6 * local_noise_sigma
-
-        magnitude = np.abs(raw_detail_ref)
-        cleaned_detail_ref = (
-            np.sign(raw_detail_ref)
-            * np.maximum(0, magnitude - shrinkage_threshold)
-            * 1.1
-        )
-
-        structure_injected_image = mu_fused + cleaned_detail_ref
-
-        # =====================================================================
-        # E. SHARPENING (Hanya jika Confidence VALID)
-        # =====================================================================
-
-        # Sharpening 1.2
-        sharpened_fused = fused + (raw_detail_fused * 1.2)
-
-        # =====================================================================
-        # F. FINAL MIXING
-        # =====================================================================
-
-        # Masking keputusan akhir
-        # alpha menjamin kita hanya menajamkan area detail, bukan area flat.
-        decision_mask = final_confidence * alpha
-
-        # Smooth blending
-        final_output = (structure_injected_image * (1.0 - decision_mask)) + (
-            sharpened_fused * decision_mask
-        )
-
-        return np.clip(final_output, 0.0, 1.0)
-
     def _spatial_merging(
         self,
         images,
@@ -428,100 +210,60 @@ class SimilarityAlgorithm:
         col_starts = np.ascontiguousarray(np.unique(col_starts).astype(np.int32))
 
         # Execution Path (GPU/CPU)
-        if process_in is None or process_in == "auto":
-            process_in = "gpu"
+        # [LEGACY] CPU mode dikomentari — sekarang selalu pakai Taichi (GPU/CPU fallback otomatis)
+        # if process_in is None or process_in == "auto":
+        #     process_in = "cpu"
+        process_in = "gpu"
 
         print(f"[DEBUG] _spatial_merging active mode: {process_in}")
 
-        if process_in == "gpu":
-            # [MODIFIED] Local import to prevent any Taichi initialization in CPU path
-            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.compute_similarity import (
-                generate_weight_map_taichi,
-                accumulate_spatial_merging_taichi,
-            )
+        # [MODIFIED] Local import to prevent any Taichi initialization in CPU path
+        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.compute_similarity import (
+            generate_weight_map_taichi,
+            accumulate_spatial_merging_taichi,
+        )
 
-            if not TAICHI_SPATIAL_AVAILABLE:
-                print(
-                    "Warning: GPU requested but Taichi Spatial not available. Falling back to CPU."
-                )
-                process_in = "cpu"
-            else:
-                (
-                    processed_frames_spatial,
-                    final_image_sum_full_res,
-                    weight_map_sum_full_res,
-                    ref_noise_sigma,
-                ) = process_in_gpu(
-                    images=images,
-                    reference_image_float=reference_image_float,
-                    ref_image_h=ref_image_h,
-                    ref_image_w=ref_image_w,
-                    ref_channels_buffer=ref_channels_buffer,
-                    ref_dtype=ref_dtype,
-                    work_res_h=work_res_h,
-                    work_res_w=work_res_w,
-                    tile_h=tile_h,
-                    tile_w=tile_w,
-                    row_starts=row_starts,
-                    col_starts=col_starts,
-                    base_window=base_window,
-                    motion_sensitivity=motion_sensitivity,
-                    noise_offset_factor=noise_offset_factor,
-                    update_progress=update_progress,
-                    stop_requested=stop_requested,
-                    pass_merge_range=pass_merge_range,
-                    p_align_start=p_align_start,
-                    p_align_end=p_align_end,
-                    p_merge_start=p_merge_start,
-                    is_linear_mode=is_linear_mode,
-                    proxy_scale=proxy_scale,
-                    images_processed_so_far=images_processed_so_far,
-                    total_overall_images=total_overall_images,
-                    enable_alignment=enable_alignment,
-                    num_images=num_images,  # Pass num_images for alignment check
-                    num_workers=num_workers,  # Pass num_workers for alignment
-                    alignment_tile_size=8,  # [ROLLBACK] Reverted to 8 for warp efficiency
-                    **unused_kwargs,
-                )
+        if not TAICHI_SPATIAL_AVAILABLE:
+            print("Warning: Taichi Spatial not available. Cannot proceed.")
+            return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
 
-        if process_in == "cpu":
-            (
-                processed_frames_spatial,
-                final_image_sum_full_res,
-                weight_map_sum_full_res,
-                ref_noise_sigma,
-            ) = process_in_cpu(
-                images=images,
-                reference_image_float=reference_image_float,
-                ref_image_h=ref_image_h,
-                ref_image_w=ref_image_w,
-                ref_channels_buffer=ref_channels_buffer,
-                ref_dtype=ref_dtype,
-                work_res_h=work_res_h,
-                work_res_w=work_res_w,
-                tile_h=tile_h,
-                tile_w=tile_w,
-                row_starts=row_starts,
-                col_starts=col_starts,
-                base_window=base_window,
-                motion_sensitivity=motion_sensitivity,
-                noise_offset_factor=noise_offset_factor,
-                num_workers=num_workers,
-                update_progress=update_progress,
-                stop_requested=stop_requested,
-                pass_merge_range=pass_merge_range,
-                p_align_start=p_align_start,
-                p_align_end=p_align_end,
-                p_merge_start=p_merge_start,
-                is_linear_mode=is_linear_mode,
-                proxy_scale=proxy_scale,
-                images_processed_so_far=images_processed_so_far,
-                total_overall_images=total_overall_images,
-                lib_path=lib_path,
-                enable_alignment=enable_alignment,
-                num_images=num_images,  # Pass num_images for alignment check
-                **unused_kwargs,
-            )
+        (
+            processed_frames_spatial,
+            final_image_sum_full_res,
+            weight_map_sum_full_res,
+            ref_noise_sigma,
+        ) = process_in_gpu(
+            images=images,
+            reference_image_float=reference_image_float,
+            ref_image_h=ref_image_h,
+            ref_image_w=ref_image_w,
+            ref_channels_buffer=ref_channels_buffer,
+            ref_dtype=ref_dtype,
+            work_res_h=work_res_h,
+            work_res_w=work_res_w,
+            tile_h=tile_h,
+            tile_w=tile_w,
+            row_starts=row_starts,
+            col_starts=col_starts,
+            base_window=base_window,
+            motion_sensitivity=motion_sensitivity,
+            noise_offset_factor=noise_offset_factor,
+            update_progress=update_progress,
+            stop_requested=stop_requested,
+            pass_merge_range=pass_merge_range,
+            p_align_start=p_align_start,
+            p_align_end=p_align_end,
+            p_merge_start=p_merge_start,
+            is_linear_mode=is_linear_mode,
+            proxy_scale=proxy_scale,
+            images_processed_so_far=images_processed_so_far,
+            total_overall_images=total_overall_images,
+            enable_alignment=enable_alignment,
+            num_images=num_images,  # Pass num_images for alignment check
+            num_workers=num_workers,  # Pass num_workers for alignment
+            alignment_tile_size=8,  # [ROLLBACK] Reverted to 8 for warp efficiency
+            **unused_kwargs,
+        )
 
         if final_image_sum_full_res is None:
             return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
@@ -539,73 +281,43 @@ class SimilarityAlgorithm:
                     processed_frames_spatial,
                 )
 
-            try:
-                if update_progress:
-                    update_progress(
-                        pass_merge_range[1],
-                        "Finalizing with Parallel Precision Fusion...",
-                    )
+        if update_progress:
+            update_progress(
+                pass_merge_range[1],
+                "Finalizing with simple mean calculation...",
+            )
 
-                # Pastikan reference full res tersedia dalam float32
-                ref_full_float = reference_image_float
+        # Simple mean calculation (Normalization)
+        final_image = None
+        if weight_map_sum_full_res is not None and final_image_sum_full_res is not None:
+            eps = 1e-6
+            valid_mask = weight_map_sum_full_res > eps
+            final_image = np.zeros_like(final_image_sum_full_res)
 
-                # --- PERUBAHAN UTAMA DI SINI ---
-                # Kita panggil fungsi Tiled.
-                # Fungsi ini akan menangani Normalisasi (Divide) DAN Structure Fusion
-                # secara bertahap (per kotak) untuk menghemat memori.
+            # [MODIFIED] Calculate mean: sum_img / sum_weight
+            np.divide(
+                final_image_sum_full_res,
+                weight_map_sum_full_res[:, :, np.newaxis],
+                out=final_image,
+                where=valid_mask[:, :, np.newaxis],
+            )
 
-                # --- CPU Tiled Fusion (RESTORED TO SAFE VERSION) ---
-                final_image = self._apply_final_fusion_tiled(
-                    sum_img=final_image_sum_full_res,
-                    sum_weight=weight_map_sum_full_res,
-                    ref_img=ref_full_float,
-                    noise_sigma=ref_noise_sigma,
-                    tile_size=512,
-                    padding=16,
-                )
+            # For areas without data, use reference image
+            final_image[~valid_mask] = reference_image_float[~valid_mask]
 
-                # Return result
-                if weight_of_each_image:
-                    return (
-                        final_image,
-                        weight_map_sum_full_res,
-                        processed_frames_spatial,
-                        [],
-                    )
-                else:
-                    return (
-                        final_image,
-                        weight_map_sum_full_res,
-                        processed_frames_spatial,
-                    )
-
-            except Exception as e:
-                print(f"Critical error in final stage: {e}")
-                # Fallback darurat: Normalisasi global biasa tanpa struktur
-                if weight_map_sum_full_res is not None:
-                    valid_mask = np.asarray(weight_map_sum_full_res) > 1e-6
-                    fallback_img = np.zeros_like(final_image_sum_full_res)
-                    np.divide(
-                        final_image_sum_full_res,
-                        weight_map_sum_full_res[:, :, np.newaxis],
-                        out=fallback_img,
-                        where=valid_mask[:, :, np.newaxis],
-                    )
-                else:
-                    fallback_img = np.zeros_like(final_image_sum_full_res)
-                if weight_of_each_image:
-                    return (
-                        fallback_img,
-                        weight_map_sum_full_res,
-                        processed_frames_spatial,
-                        [],
-                    )
-                else:
-                    return (
-                        fallback_img,
-                        weight_map_sum_full_res,
-                        processed_frames_spatial,
-                    )
+        if weight_of_each_image:
+            return (
+                final_image,
+                weight_map_sum_full_res,
+                processed_frames_spatial,
+                [],
+            )
+        else:
+            return (
+                final_image,
+                weight_map_sum_full_res,
+                processed_frames_spatial,
+            )
 
         return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
 
@@ -1249,14 +961,20 @@ def main(
             )
 
             # --- 7. PENYIMPANAN HASIL AKHIR & PEMBERSIHAN ---
-            final_result_normalized = image_processor._apply_final_fusion_tiled(
-                sum_img=global_sum_img,
-                sum_weight=global_sum_weight,
-                ref_img=normalize_image(reference_image, reference_image.dtype),
-                noise_sigma=ref_noise_sigma,
-                tile_size=1024,
-                padding=16,
+            # Apply simple mean calculation (Normalization)
+            valid_mask = global_sum_weight > 1e-6
+            final_result_normalized = np.zeros_like(global_sum_img)
+            np.divide(
+                global_sum_img,
+                global_sum_weight[:, :, np.newaxis],
+                out=final_result_normalized,
+                where=valid_mask[:, :, np.newaxis],
             )
+
+            # Fill areas without data from reference image
+            ref_float = normalize_image(reference_image, reference_image.dtype)
+            final_result_normalized[~valid_mask] = ref_float[~valid_mask]
+            del ref_float
 
             # Kawal konversi bit-depth agar konsisten
             dtype_ref = reference_image.dtype

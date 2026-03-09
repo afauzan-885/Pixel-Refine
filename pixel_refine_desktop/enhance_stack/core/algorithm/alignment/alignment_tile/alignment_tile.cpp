@@ -14,7 +14,6 @@
 #include <string>
 #include <vector>
 
-
 #include "refinement.hpp"
 
 // =========================================================================
@@ -51,7 +50,7 @@ struct TileResult {
 namespace ImageAlignmentConfig {
 constexpr int GAUSSIAN_CACHE_SIZE = 256;
 constexpr float NORMALIZATION_EPSILON = 1e-6f;
-constexpr float FLOW_UPSCALE_FACTOR = 2.0f;
+constexpr float FLOW_UPSCALE_FACTOR = 4.0f; // HDR+ style 4x pyramid
 constexpr int MIN_TILE_SIZE = 8;
 constexpr int MIN_PYRAMID_LAYER_SIZE = 32;
 } // namespace ImageAlignmentConfig
@@ -110,7 +109,7 @@ static inline cv::Mat upsamplingFlow(const cv::Mat &previous_level_flow,
              cv::INTER_LINEAR);
 
   // Scale flow vectors by the upscale factor
-  flow_upsampled *= FLOW_UPSCALE_FACTOR; // 2.0f
+  flow_upsampled *= FLOW_UPSCALE_FACTOR; // 4.0f (HDR+ style)
 
   return flow_upsampled;
 }
@@ -170,9 +169,9 @@ static inline void generateCandidateFlows(
   // upsampling) Hanya dilakukan jika bukan di level paling halus untuk
   // menghemat akses memori
   if (layer_index > 0) {
-    // Mapping koordinat ke level kasar (koordinat / 2)
-    const int coarse_y = (tile_center_y + current_tile_h / 2) / 2;
-    const int coarse_x = (tile_center_x + current_tile_w / 2) / 2;
+    // Mapping koordinat ke level kasar (koordinat / 4, HDR+ style)
+    const int coarse_y = (tile_center_y + current_tile_h / 2) / 4;
+    const int coarse_x = (tile_center_x + current_tile_w / 2) / 4;
 
     if (coarse_y >= 0 && coarse_y < previous_level_flow.rows && coarse_x >= 0 &&
         coarse_x < previous_level_flow.cols) {
@@ -235,6 +234,15 @@ searchCoarseLevelDirect(const cv::Mat &ref_layer, const cv::Mat &comp_layer,
                         int tile_y, int tile_x, int tile_h, int tile_w,
                         const cv::Vec2f &initial_flow, float search_dist,
                         std::vector<Candidate> &out_candidates) {
+  // Derive local variables from parameters
+  const int h_layer = ref_layer.rows;
+  const int w_layer = ref_layer.cols;
+  const int init_dx = static_cast<int>(std::round(initial_flow[0]));
+  const int init_dy = static_cast<int>(std::round(initial_flow[1]));
+  const int current_search_dist = static_cast<int>(search_dist);
+  const int tile_area = tile_h * tile_w;
+  const float tile_area_inv = 1.0f / static_cast<float>(tile_area);
+
   // --- PRE-COPY REFERENCE TILE (Hanya dilakukan sekali di luar loop search)
   // --- Salin Reference Tile ke buffer kontigu sekali saja
   copyTileToContiguousBuffer(ref_layer, tile_y, tile_x, tile_h, tile_w,
@@ -886,13 +894,14 @@ static cv::Mat processSingleLayer(const cv::Mat &ref_layer,
   int step_y = current_tile_h;
   int step_x = current_tile_w;
 
-  // --- 4. Adaptive Search Distance ---
-  // Layer halus radius kecil, layer kasar radius besar
+  // --- 4. Adaptive Search Distance (HDR+ style) ---
+  // With 4x pyramid, each level covers 4x more range, so constant search dist
+  // is fine
   float current_layer_search_dist = base_search_dist;
   if (!is_coarsest_layer) {
-    // OPTIMASI: Faster decay (2.0 instead of 1.5) untuk mengurangi search area
-    current_layer_search_dist = std::max(
-        1.0f, base_search_dist / (2.0f * (total_layers - layer_index)));
+    // HDR+ style: use consistent search distance (4x gap between levels is
+    // sufficient)
+    current_layer_search_dist = std::max(2.0f, base_search_dist);
   }
 
   const float tile_area_inv = 1.0f / (float)(current_tile_h * current_tile_w);
@@ -1122,20 +1131,29 @@ ALIGNMENT_API float *compute_alignment_flow(const float *ref_work_data,
     current_pyramid.push_back(current_work);
 
     for (int i = 0; i < n_layers - 1; ++i) {
-      // 1. Buat Mat kosong sebagai tujuan. Ini tidak mengalokasikan buffer
-      // data.
+      // HDR+ style: 4x downsample via cascaded double pyrDown
+      // Step 1: First 2x Gaussian downsample
+      cv::Mat mid_ref, mid_current;
+      cv::pyrDown(ref_pyramid.back(), mid_ref);
+      cv::pyrDown(current_pyramid.back(), mid_current);
+
+      // Step 2: Second 2x Gaussian downsample (total 4x)
       cv::Mat next_ref, next_current;
+      cv::pyrDown(mid_ref, next_ref);
+      cv::pyrDown(mid_current, next_current);
 
-      // 2. panggil pyrDown. Karena 'next_ref' ukurannya tidak pas,
-      cv::pyrDown(ref_pyramid.back(), next_ref);
-      cv::pyrDown(current_pyramid.back(), next_current);
-
-      // 3. Lakukan pengecekan ukuran
+      // Check minimum size
       if (next_ref.rows < MIN_PYRAMID_LAYER_SIZE ||
-          next_ref.cols < MIN_PYRAMID_LAYER_SIZE)
+          next_ref.cols < MIN_PYRAMID_LAYER_SIZE) {
+        // If 4x is too small, try keeping the 2x version
+        if (mid_ref.rows >= MIN_PYRAMID_LAYER_SIZE &&
+            mid_ref.cols >= MIN_PYRAMID_LAYER_SIZE) {
+          ref_pyramid.push_back(std::move(mid_ref));
+          current_pyramid.push_back(std::move(mid_current));
+        }
         break;
+      }
 
-      // 4. Pindahkan (move) Mat beserta buffer datanya ke dalam vector.
       ref_pyramid.push_back(std::move(next_ref));
       current_pyramid.push_back(std::move(next_current));
     }
