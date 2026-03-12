@@ -323,7 +323,6 @@ class SimilarityAlgorithm:
     def similarity_mnfr(
         self,
         images,
-        merging_type="spatial",
         tile_size=None,
         overlap=None,
         motion_sensitivity=None,
@@ -416,69 +415,62 @@ class SimilarityAlgorithm:
             )
             return np.zeros(out_shape_fb, dtype=dtype_ref), None, []
 
-        # --- Jalankan merging berdasarkan type ---
-        results = None
-        if merging_type == "spatial":
-            current_tile_size = (
-                tile_size
-                if tile_size is not None
-                else common_call_args.get("tile_size")
-            )
-            current_overlap = (
-                overlap if overlap is not None else common_call_args.get("overlap")
-            )
-            current_motion_sensitivity = (
-                motion_sensitivity
-                if motion_sensitivity is not None
-                else common_call_args.get("motion_sensitivity")
-            )
-            current_noise_offset_factor = (
-                noise_offset_factor
-                if noise_offset_factor is not None
-                else common_call_args.get("noise_offset_factor")
-            )
-            current_num_workers = (
-                num_workers
-                if num_workers is not None
-                else common_call_args.get("similarity_spatial_num_workers")
-            )
+        # --- Jalankan merging (Spatial) ---
+        current_tile_size = (
+            tile_size
+            if tile_size is not None
+            else common_call_args.get("tile_size")
+        )
+        current_overlap = (
+            overlap if overlap is not None else common_call_args.get("overlap")
+        )
+        current_motion_sensitivity = (
+            motion_sensitivity
+            if motion_sensitivity is not None
+            else common_call_args.get("motion_sensitivity")
+        )
+        current_noise_offset_factor = (
+            noise_offset_factor
+            if noise_offset_factor is not None
+            else common_call_args.get("noise_offset_factor")
+        )
+        current_num_workers = (
+            num_workers
+            if num_workers is not None
+            else common_call_args.get("similarity_spatial_num_workers")
+        )
 
-            # Jika parameter penting belum tersedia, hentikan aman
-            if any(
-                p is None
-                for p in [
-                    current_tile_size,
-                    current_overlap,
-                    current_motion_sensitivity,
-                    current_noise_offset_factor,
-                ]
-            ):
-                out_shape_fb = (
-                    (h_ref, w_ref)
-                    if channels_ref_orig == 1
-                    else (h_ref, w_ref, channels_ref_orig)
-                )
-                return np.zeros(out_shape_fb, dtype=dtype_ref), None, []
-
-            common_call_args.update(
-                {
-                    "tile_size": current_tile_size,
-                    "overlap": current_overlap,
-                    "motion_sensitivity": current_motion_sensitivity,
-                    "noise_offset_factor": current_noise_offset_factor,
-                    "num_workers": current_num_workers,
-                    "temporal_consistency": True,
-                    "save_temporal_std_path": save_temporal_std_path,
-                }
+        # Jika parameter penting belum tersedia, hentikan aman
+        if any(
+            p is None
+            for p in [
+                current_tile_size,
+                current_overlap,
+                current_motion_sensitivity,
+                current_noise_offset_factor,
+            ]
+        ):
+            out_shape_fb = (
+                (h_ref, w_ref)
+                if channels_ref_orig == 1
+                else (h_ref, w_ref, channels_ref_orig)
             )
-            results = self._spatial_merging(**common_call_args)
-            if return_raw:
-                return results
+            return np.zeros(out_shape_fb, dtype=dtype_ref), None, []
 
-        else:
-            raise ValueError(
-                f"Unsupported merging_type: {merging_type}. Merging type must be 'spatial'."
-            )
+        common_call_args.update(
+            {
+                "tile_size": current_tile_size,
+                "overlap": current_overlap,
+                "motion_sensitivity": current_motion_sensitivity,
+                "noise_offset_factor": current_noise_offset_factor,
+                "num_workers": current_num_workers,
+                "temporal_consistency": True,
+                "save_temporal_std_path": save_temporal_std_path,
+            }
+        )
+        results = self._spatial_merging(**common_call_args)
+        if return_raw:
+            return results
 
         # --- Jika tidak ada hasil karena stop_requested() ---
         if results is None:
@@ -676,9 +668,6 @@ def main(
         general_settings = load_similarity_config()
         image_processor = SimilarityAlgorithm(db_path)
 
-        merging_type_from_settings = general_settings.get(
-            "similarity_merging_type", "spatial"
-        )
         (
             spatial_tile_size_arg,
             spatial_overlap_arg,
@@ -687,34 +676,34 @@ def main(
         ) = (None, None, None, None)
         extra_merging_params = {}
 
-        if merging_type_from_settings == "spatial":
-            tile_val_sp = general_settings.get("similarity_spatial_tile_size", 16)
-            spatial_tile_size_arg = (tile_val_sp, tile_val_sp)
-            spatial_overlap_arg = general_settings.get(
-                "similarity_spatial_overlap_percent", 0.3
-            )
-            spatial_motion_sensitivity_arg = general_settings.get(
-                "similarity_spatial_motion_sensitivity", 150.00
-            )
-            spatial_noise_offset_factor_arg = general_settings.get(
-                "similarity_spatial_noise_mad_offset_factor", 1.0
-            )
-            extra_merging_params["similarity_spatial_num_workers"] = (
-                general_settings.get("similarity_spatial_num_workers", 1)
-            )  # Default -1 (Auto)
-            custom_lib_path = general_settings.get("similarity_lib_path")
-            if custom_lib_path:
-                extra_merging_params["lib_path"] = custom_lib_path
+        # --- KONFIGURASI PARAMETER SPASIAL ---
+        tile_val_sp = general_settings.get("similarity_spatial_tile_size", 16)
+        spatial_tile_size_arg = (tile_val_sp, tile_val_sp)
+        spatial_overlap_arg = general_settings.get(
+            "similarity_spatial_overlap_percent", 0.3
+        )
+        spatial_motion_sensitivity_arg = general_settings.get(
+            "similarity_spatial_motion_sensitivity", 150.00
+        )
+        spatial_noise_offset_factor_arg = general_settings.get(
+            "similarity_spatial_noise_mad_offset_factor", 1.0
+        )
+        extra_merging_params["similarity_spatial_num_workers"] = (
+            general_settings.get("similarity_spatial_num_workers", 1)
+        )  # Default -1 (Auto)
+        custom_lib_path = general_settings.get("similarity_lib_path")
+        if custom_lib_path:
+            extra_merging_params["lib_path"] = custom_lib_path
 
-            extra_merging_params["weight_method"] = general_settings.get(
-                "spatial_weight_method", 0
-            )
+        extra_merging_params["weight_method"] = general_settings.get(
+            "spatial_weight_method", 0
+        )
 
-            # [USER REQUEST] Logic gate untuk Linear Mode dipindahkan ke sini
-            # Default ke True agar aktif, set ke False untuk mematikan feature ini
-            extra_merging_params["enable_linear_mode"] = general_settings.get(
-                "enable_linear_mode", False
-            )
+        # [USER REQUEST] Logic gate untuk Linear Mode dipindahkan ke sini
+        # Default ke True agar aktif, set ke False untuk mematikan feature ini
+        extra_merging_params["enable_linear_mode"] = general_settings.get(
+            "enable_linear_mode", False
+        )
 
         # --- 2. SETUP SUMBER DATA & PATH ---
         data_source, image_paths, output_name_base, total_images = (
@@ -895,7 +884,6 @@ def main(
             # Jalankan Algoritma Similarity
             batch_raw_res = image_processor.similarity_mnfr(
                 current_batch_images,
-                merging_type=merging_type_from_settings,
                 # reference_image_float=None,  <-- REMOVED: Preventing overwrite of internal calculation
                 ref_image_override=reference_image,
                 total_overall_images=total_images,

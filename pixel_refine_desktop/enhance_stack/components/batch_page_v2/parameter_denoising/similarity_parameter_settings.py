@@ -35,7 +35,6 @@ def get_default_font(size=10, weight=QFont.Weight.Normal):
 
 def load_similarity_config():
     defaults = {
-        "similarity_merging_type": "spatial",
         "use_multi_core": True,
         "spatial_params": {
             "similarity_spatial_tile_size": 16,
@@ -46,7 +45,6 @@ def load_similarity_config():
         },
     }
     final_config = {
-        "similarity_merging_type": defaults["similarity_merging_type"],
         "use_multi_core": defaults["use_multi_core"],
         **defaults["spatial_params"],
     }
@@ -58,10 +56,6 @@ def load_similarity_config():
                 all_params_file.get("Similarity"), dict
             ):
                 loaded_similarity_section = all_params_file["Similarity"]
-                if "similarity_merging_type" in loaded_similarity_section:
-                    final_config["similarity_merging_type"] = loaded_similarity_section[
-                        "similarity_merging_type"
-                    ]
                 if "use_multi_core" in loaded_similarity_section:
                     final_config["use_multi_core"] = loaded_similarity_section[
                         "use_multi_core"
@@ -97,9 +91,6 @@ def save_similarity_v1_config(config_to_save):
     ):
         all_params_file["Similarity"] = {}
     similarity_section_to_save = {
-        "similarity_merging_type": config_to_save.get(
-            "similarity_merging_type", "spatial"
-        ),
         "use_multi_core": config_to_save.get("use_multi_core", True),
         "spatial_params": {},
         "spatial_params": {},
@@ -174,7 +165,6 @@ def create_slider_input_field_layout(
 def get_similarity_settings_page():
     sim_v1_config = load_similarity_config()
     original_v1_ui_defaults = {
-        "similarity_merging_type": "spatial",
         "similarity_spatial_tile_size": 20,
         "similarity_spatial_motion_sensitivity": 120.5,
         "similarity_spatial_noise_mad_offset_factor": 0.25,
@@ -389,7 +379,6 @@ def get_similarity_settings_page():
     def save_current_settings_v1():
         settings_to_save_flat = {}
         try:
-            settings_to_save_flat["similarity_merging_type"] = "spatial"
             settings_to_save_flat["similarity_spatial_tile_size"] = int(
                 widgets["tile_combo_spatial"].currentText()
             )
@@ -533,7 +522,7 @@ def get_similarity_settings_page():
         widgets["motion_sensitivity_slider"].setValue(
             int(
                 round(
-                    defaults.get("similarity_spatial_motion_sensitivity")
+                    defaults.get("similarity_spatial_motion_sensitivity", 100.0)
                     * motion_sens_multiplier_v1
                 )
             )
@@ -541,13 +530,13 @@ def get_similarity_settings_page():
         widgets["noise_mad_offset_slider"].setValue(
             int(
                 round(
-                    defaults.get("similarity_spatial_noise_mad_offset_factor")
+                    defaults.get("similarity_spatial_noise_mad_offset_factor", 1.0)
                     * noise_mad_multiplier_v1
                 )
             )
         )
         widgets["overlap_slider_spatial"].setValue(
-            int(round(defaults.get("similarity_spatial_overlap_percent") * 100))
+            int(round(defaults.get("similarity_spatial_overlap_percent", 0.35) * 100))
         )
         save_current_settings_v1()
 
