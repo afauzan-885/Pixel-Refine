@@ -94,24 +94,74 @@ def build_image_pyramid_gpu(
     image_gpu,
     n_levels: int = 4,
     min_size: int = MIN_PYRAMID_SIZE,
+    downscale_factor: float = 2.0,
     buffer_provider="pool",
 ) -> list:
-    """GPU native interface: Build image pyramid and return list of ti.ndarrays."""
+    """
+    GPU native interface: Build image pyramid with dynamic downsampling.
+    
+    Args:
+        image_gpu: Source image ti.ndarray.
+        n_levels: Total number of levels (including full res).
+        min_size: Minimum width or height to stop downsampling.
+        downscale_factor: Scale factor between levels (e.g., 2, 4, 1.5).
+            - Powers of 2: Uses high-quality cascaded 5x5 Gaussian downsampling.
+            - Others: Uses Bilinear interpolation.
+        buffer_provider: "pool" or "new".
+    """
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
     pyramid = [image_gpu]
+    
+    # Check if downscale_factor is a power of 2
+    is_power_of_2 = False
+    steps_per_level = 0
+    if downscale_factor > 0:
+        log2_val = np.log2(downscale_factor)
+        if np.isclose(log2_val, np.round(log2_val)):
+            is_power_of_2 = True
+            steps_per_level = int(np.round(log2_val))
+
     for _ in range(n_levels - 1):
         prev = pyramid[-1]
         h_src, w_src = prev.shape
-        h_dst, w_dst = h_src // 2, w_src // 2
+        
+        # Calculate target size
+        h_dst = int(np.round(h_src / downscale_factor))
+        w_dst = int(np.round(w_src / downscale_factor))
 
         if h_dst < min_size or w_dst < min_size:
             break
 
-        dst = common.get_temp_buffer((h_dst, w_dst), ti.f32, buffer_provider)
-        _downsample_2x_kernel(prev, dst, h_src, w_src, h_dst, w_dst)
-        pyramid.append(dst)
+        if is_power_of_2 and steps_per_level > 0:
+            # High-quality Gaussian cascaded downsampling
+            current_lvl_input = prev
+            for step in range(steps_per_level):
+                h_s, w_s = current_lvl_input.shape
+                h_d, w_d = h_s // 2, w_s // 2
+                
+                # Should not reach here if h_dst/w_dst check above is correct, 
+                # but adding safety for internal steps
+                if h_d < 1 or w_d < 1:
+                    break
+
+                dst = common.get_temp_buffer((h_d, w_d), ti.f32, buffer_provider)
+                _downsample_2x_kernel(current_lvl_input, dst, h_s, w_s, h_d, w_d)
+                
+                if step < steps_per_level - 1:
+                    if current_lvl_input is not prev:
+                        common.release_temp_buffer(current_lvl_input)
+                    current_lvl_input = dst
+                else:
+                    pyramid.append(dst)
+                    if current_lvl_input is not prev:
+                        common.release_temp_buffer(current_lvl_input)
+        else:
+            # Fallback to Bilinear Resize for arbitrary scales
+            from .bilinear_interpolation import bilinear_resize
+            dst = bilinear_resize(prev, h_dst, w_dst, buffer_provider=buffer_provider)
+            pyramid.append(dst)
 
     return pyramid
 
@@ -124,42 +174,11 @@ def build_image_pyramid_gpu_4x(
     buffer_provider="pool",
 ) -> list:
     """
-    GPU native interface: Build image pyramid with 4× downsampling per level (HDR+ style).
-    Each level is 1/4 the resolution of the previous level.
-    With 4 levels: Level 0 = full, Level 1 = 1/4, Level 2 = 1/16, Level 3 = 1/64.
-    Uses two cascaded 2× Gaussian downsamples for quality anti-aliasing.
+    Backward compatibility wrapper for 4x downsampling pyramid.
     """
-    if not TAICHI_AVAILABLE:
-        raise ImportError("Taichi not available")
-
-    pyramid = [image_gpu]
-    for _ in range(n_levels - 1):
-        prev = pyramid[-1]
-        h_src, w_src = prev.shape
-
-        # First 2× downsample
-        h_mid, w_mid = h_src // 2, w_src // 2
-        if h_mid < min_size or w_mid < min_size:
-            break
-
-        mid = common.get_temp_buffer((h_mid, w_mid), ti.f32, buffer_provider)
-        _downsample_2x_kernel(prev, mid, h_src, w_src, h_mid, w_mid)
-
-        # Second 2× downsample (total 4×)
-        h_dst, w_dst = h_mid // 2, w_mid // 2
-        if h_dst < min_size or w_dst < min_size:
-            # If second downsample is too small, keep the 2× version
-            pyramid.append(mid)
-            break
-
-        dst = common.get_temp_buffer((h_dst, w_dst), ti.f32, buffer_provider)
-        _downsample_2x_kernel(mid, dst, h_mid, w_mid, h_dst, w_dst)
-
-        # Release intermediate buffer
-        common.release_temp_buffer(mid)
-        pyramid.append(dst)
-
-    return pyramid
+    return build_image_pyramid_gpu(
+        image_gpu, n_levels, min_size, downscale_factor=4, buffer_provider=buffer_provider
+    )
 
 
 @ti_thread

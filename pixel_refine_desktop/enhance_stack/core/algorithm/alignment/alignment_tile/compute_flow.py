@@ -54,12 +54,12 @@ except ImportError as e:
 class ImageAlignmentConfig:
     """Configuration constants matching C++ namespace."""
 
-    FLOW_UPSCALE_FACTOR = 4.0
+    DEFAULT_DOWNSCALE_FACTOR = 4  # Default for HDR+ style
     MIN_TILE_SIZE = 8
     MIN_PYRAMID_LAYER_SIZE = 32
     EARLY_EXIT_COST = 0.0001
     ADAPTIVE_THRESHOLD = 0.005  # Threshold for expanding search area
-    ENABLE_MEDIAN_FILTER = False  # Experiment: Disable median filter
+    ENABLE_MEDIAN_FILTER = False  # Enable median filter for robust motion suppression
 
 
 # ============================================================================
@@ -82,12 +82,11 @@ if TAICHI_AVAILABLE:
         """Perform a wide-area block search for initial alignment."""
         step_y = tile_h
         step_x = tile_w
-
         for tile_y, tile_x in ti.ndrange(
-            (h - tile_h + 1) // step_y, (w - tile_w + 1) // step_x
+            (h + step_y - 1) // step_y, (w + step_x - 1) // step_x
         ):
-            y = tile_y * step_y
-            x = tile_x * step_x
+            y = tm.clamp(tile_y * step_y, 0, h - tile_h)
+            x = tm.clamp(tile_x * step_x, 0, w - tile_w)
 
             best_cost = 1e10
             best_dx = 0.0
@@ -103,10 +102,10 @@ if TAICHI_AVAILABLE:
                     test_x = x + dx
 
                     if (
-                        test_y < 0
-                        or test_x < 0
-                        or test_y + tile_h > h
-                        or test_x + tile_w > w
+                        test_y <= -tile_h
+                        or test_x <= -tile_w
+                        or test_y >= h
+                        or test_x >= w
                     ):
                         continue
 
@@ -290,8 +289,14 @@ if TAICHI_AVAILABLE:
             avg_dx = flow[center_y, center_x, 0]
             avg_dy = flow[center_y, center_x, 1]
 
-        # Penalized cost multiplier (0.1f from C++)
+        # Adaptive weight based on neighbor count (Edge/Corner mitigation)
+        # If we have fewer neighbors, increase regularization to prevent erratic motion
         weight = lambda_val * 0.1
+        # Edge/Corner Robustness: Increase regularization if we have fewer neighbors
+        if count < 8.0:
+            weight *= 2.0  # More aggressive regularization at boundaries
+        if count < 4.0:
+            weight *= 4.0  # Extreme regularization at corners
 
         return ti.Vector([avg_dx, avg_dy, weight])
 
@@ -309,6 +314,7 @@ if TAICHI_AVAILABLE:
         search_dist: int,
         prev_h: int,
         prev_w: int,
+        downscale_factor: int,
     ):
         """Coarse level tile matching using ZM-SSD cost with Spatial Regularization."""
         step_y = tile_h
@@ -316,10 +322,10 @@ if TAICHI_AVAILABLE:
         tile_area_inv = 1.0 / float(tile_h * tile_w)
 
         for tile_y, tile_x in ti.ndrange(
-            (h - tile_h + 1) // step_y, (w - tile_w + 1) // step_x
+            (h + step_y - 1) // step_y, (w + step_x - 1) // step_x
         ):
-            y = tile_y * step_y
-            x = tile_x * step_x
+            y = tm.clamp(tile_y * step_y, 0, h - tile_h)
+            x = tm.clamp(tile_x * step_x, 0, w - tile_w)
 
             # Get regularization params from neighbors
             reg_params = _compute_regularization_params(
@@ -342,85 +348,88 @@ if TAICHI_AVAILABLE:
             best_cand_dx = init_dx
             best_cand_dy = init_dy
 
-            cands_dx = ti.Vector([init_dx, init_dx, init_dx, init_dx])
-            cands_dy = ti.Vector([init_dy, init_dy, init_dy, init_dy])
+            # Multi-Stage Adaptive Search Offsets (Radius 1 & 2)
+            # 0-3: Cardinal, 4-7: Diagonal, 8-15: Extended Radius 2
+            neighbor_offsets = ti.Matrix([
+                [-1, 0], [1, 0], [0, -1], [0, 1],       # 0-3: Cardinal
+                [-1, -1], [1, -1], [-1, 1], [1, 1],     # 4-7: Diagonal
+                [-2, 0], [2, 0], [0, -2], [0, 2],       # 8-11: Ext Cardinal
+                [-2, -2], [2, -2], [-2, 2], [2, 2]      # 12-15: Ext Diagonal
+            ])
 
-            # Left Neighbor Candidate
-            if center_x - step_x >= 0:
-                cands_dx[1] = int(ti.round(flow[center_y, center_x - step_x, 0]))
-                cands_dy[1] = int(ti.round(flow[center_y, center_x - step_x, 1]))
+            # Use a larger vector for 18 candidates: Center, 16 Neighbors, Coarse
+            cands_dx = ti.Vector([init_dx] * 18)
+            cands_dy = ti.Vector([init_dy] * 18)
 
-            # Top Neighbor Candidate
-            if center_y - step_y >= 0:
-                cands_dx[2] = int(ti.round(flow[center_y - step_y, center_x, 0]))
-                cands_dy[2] = int(ti.round(flow[center_y - step_y, center_x, 1]))
+            # 1-16: Spatial Neighbors
+            for i in ti.static(range(16)):
+                nx = center_x + neighbor_offsets[i, 0] * step_x
+                ny = center_y + neighbor_offsets[i, 1] * step_y
+                if nx >= 0 and nx < w and ny >= 0 and ny < h:
+                    cands_dx[i + 1] = int(ti.round(flow[ny, nx, 0]))
+                    cands_dy[i + 1] = int(ti.round(flow[ny, nx, 1]))
 
-            # Coarse Projection Candidate (Fallback)
+            # 17: Coarse Projection Candidate (Fallback)
             if prev_h > 1 and prev_w > 1:
-                coarse_y = center_y // 2
-                coarse_x = center_x // 2
+                coarse_y = center_y // downscale_factor
+                coarse_x = center_x // downscale_factor
                 if coarse_y < prev_h and coarse_x < prev_w:
-                    # UPSCALE FACTOR is 2.0 based on build config
-                    cands_dx[3] = int(
-                        ti.round(previous_flow[coarse_y, coarse_x, 0] * 4.0)
-                    )
-                    cands_dy[3] = int(
-                        ti.round(previous_flow[coarse_y, coarse_x, 1] * 4.0)
-                    )
+                    cands_dx[17] = int(ti.round(previous_flow[coarse_y, coarse_x, 0] * float(downscale_factor)))
+                    cands_dy[17] = int(ti.round(previous_flow[coarse_y, coarse_x, 1] * float(downscale_factor)))
 
-            for i in ti.static(range(4)):
-                cand_test_y = y + cands_dy[i]
-                cand_test_x = x + cands_dx[i]
+            # --- MULTI-STAGE ADAPTIVE EVALUATION ---
+            # Stage 1: Basic (6 Candidates: Center, Coarse, 4 Cardinal)
+            for i in ti.static(range(6)):
+                cand_idx = i
+                if i == 5: cand_idx = 17 # Use Coarse Fallback as the 6th in Stage 1
+                
+                check_y = y + cands_dy[cand_idx]
+                check_x = x + cands_dx[cand_idx]
+                
+                # Unique Check
+                is_unique = True
+                for j in ti.static(range(i)):
+                    prev_idx = j
+                    if j == 5: prev_idx = 17
+                    if cands_dx[cand_idx] == cands_dx[prev_idx] and cands_dy[cand_idx] == cands_dy[prev_idx]:
+                        is_unique = False
+                
+                if is_unique and not (check_y <= -tile_h or check_x <= -tile_w or check_y >= h or check_x >= w):
+                    cost = cost_function.compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w) * tile_area_inv
+                    if cost < best_cand_cost:
+                        best_cand_cost, best_cand_dx, best_cand_dy = cost, cands_dx[cand_idx], cands_dy[cand_idx]
 
-                # --- 1. Deduplication Check ---
-                # Skip if this candidate is exactly the same as the center (cand 0)
-                # or if it's cand 2 and exactly the same as cand 1
-                is_duplicate = False
-                if i == 1:
-                    if cands_dx[1] == cands_dx[0] and cands_dy[1] == cands_dy[0]:
-                        is_duplicate = True
-                elif i == 2:
-                    if (cands_dx[2] == cands_dx[0] and cands_dy[2] == cands_dy[0]) or (
-                        cands_dx[2] == cands_dx[1] and cands_dy[2] == cands_dy[1]
-                    ):
-                        is_duplicate = True
-                elif i == 3:
-                    if (
-                        (cands_dx[3] == cands_dx[0] and cands_dy[3] == cands_dy[0])
-                        or (cands_dx[3] == cands_dx[1] and cands_dy[3] == cands_dy[1])
-                        or (cands_dx[3] == cands_dx[2] and cands_dy[3] == cands_dy[2])
-                    ):
-                        is_duplicate = True
+            # Stage 2: Quality (Next 4: Diagonals)
+            if best_cand_cost > 0.005:
+                for i in ti.static(range(6, 10)):
+                    check_y, check_x = y + cands_dy[i], x + cands_dx[i]
+                    is_unique = True
+                    for j in ti.static(range(6)): # Check against Stage 1
+                        prev_idx = j
+                        if j == 5: prev_idx = 17
+                        if cands_dx[i] == cands_dx[prev_idx] and cands_dy[i] == cands_dy[prev_idx]: is_unique = False
+                    
+                    if is_unique and not (check_y <= -tile_h or check_x <= -tile_w or check_y >= h or check_x >= w):
+                        cost = cost_function.compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w) * tile_area_inv
+                        if cost < best_cand_cost:
+                            best_cand_cost, best_cand_dx, best_cand_dy = cost, cands_dx[i], cands_dy[i]
 
-                if not is_duplicate:
-                    if not (
-                        cand_test_y < 0
-                        or cand_test_x < 0
-                        or cand_test_y + tile_h > h
-                        or cand_test_x + tile_w > w
-                    ):
-                        cand_raw_cost = 0.0
-                        cand_raw_cost = (
-                            cost_function.compute_zmssd_cost(
-                                ref_layer,
-                                comp_layer,
-                                y,
-                                x,
-                                cand_test_y,
-                                cand_test_x,
-                                tile_h,
-                                tile_w,
-                            )
-                            * tile_area_inv
-                        )
+            # Stage 3: Robustness (Next 8: Radius 2)
+            if best_cand_cost > 0.01:
+                for i in ti.static(range(10, 18)):
+                    check_y, check_x = y + cands_dy[i], x + cands_dx[i]
+                    is_unique = True
+                    for j in ti.static(range(10)): # Check against Stage 1 & 2
+                        prev_idx = j
+                        if j == 5: prev_idx = 17
+                        if cands_dx[i] == cands_dx[prev_idx] and cands_dy[i] == cands_dy[prev_idx]: is_unique = False
+                    
+                    if is_unique and not (check_y <= -tile_h or check_x <= -tile_w or check_y >= h or check_x >= w):
+                        cost = cost_function.compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w) * tile_area_inv
+                        if cost < best_cand_cost:
+                            best_cand_cost, best_cand_dx, best_cand_dy = cost, cands_dx[i], cands_dy[i]
 
-                        if cand_raw_cost < best_cand_cost:
-                            best_cand_cost = cand_raw_cost
-                            best_cand_dx = cands_dx[i]
-                            best_cand_dy = cands_dy[i]
-
-            init_dx = best_cand_dx
-            init_dy = best_cand_dy
+            init_dx, init_dy = best_cand_dx, best_cand_dy
             # --------------------------------------------
 
             best_total_cost = 1e10
@@ -438,10 +447,10 @@ if TAICHI_AVAILABLE:
                         test_x = x + cur_dx
 
                         if (
-                            test_y < 0
-                            or test_x < 0
-                            or test_y + tile_h > h
-                            or test_x + tile_w > w
+                            test_y <= -tile_h
+                            or test_x <= -tile_w
+                            or test_y >= h
+                            or test_x >= w
                         ):
                             continue
 
@@ -470,7 +479,14 @@ if TAICHI_AVAILABLE:
                         elif visual_cost > 0.1:
                             dynamic_weight *= 3.0
 
-                        total_cost = visual_cost + (dynamic_weight * dist_sq)
+                        # 3. Boundary Penalty: Slightly penalize movements that push the tile out
+                        boundary_penalty = 0.0
+                        if test_y < 0 or test_y + tile_h > h or test_x < 0 or test_x + tile_w > w:
+                            dist_y = tm.max(0.0, float(-test_y), float(test_y + tile_h - h))
+                            dist_x = tm.max(0.0, float(-test_x), float(test_x + tile_w - w))
+                            boundary_penalty = (dist_y + dist_x) * 0.01
+
+                        total_cost = visual_cost + (dynamic_weight * dist_sq) + boundary_penalty
 
                         if total_cost < best_total_cost:
                             best_total_cost = total_cost
@@ -497,6 +513,7 @@ if TAICHI_AVAILABLE:
         tile_w: int,
         prev_h: int,
         prev_w: int,
+        downscale_factor: int,
     ):
         """Fine level tile matching using ZMSAD cost with Spatial Regularization."""
         step_y = tile_h
@@ -504,10 +521,10 @@ if TAICHI_AVAILABLE:
         tile_area_inv = 1.0 / float(tile_h * tile_w)
 
         for tile_y, tile_x in ti.ndrange(
-            (h - tile_h + 1) // step_y, (w - tile_w + 1) // step_x
+            (h + step_y - 1) // step_y, (w + step_x - 1) // step_x
         ):
-            y = tile_y * step_y
-            x = tile_x * step_x
+            y = tm.clamp(tile_y * step_y, 0, h - tile_h)
+            x = tm.clamp(tile_x * step_x, 0, w - tile_w)
 
             # Get regularization params
             reg_params = _compute_regularization_params(
@@ -527,83 +544,87 @@ if TAICHI_AVAILABLE:
             best_cand_dx = init_dx
             best_cand_dy = init_dy
 
-            cands_dx = ti.Vector([init_dx, init_dx, init_dx, init_dx])
-            cands_dy = ti.Vector([init_dy, init_dy, init_dy, init_dy])
+            # Multi-Stage Adaptive Search Offsets (Radius 1 & 2)
+            # 0-3: Cardinal, 4-7: Diagonal, 8-15: Extended Radius 2
+            neighbor_offsets = ti.Matrix([
+                [-1, 0], [1, 0], [0, -1], [0, 1],       # 0-3: Cardinal
+                [-1, -1], [1, -1], [-1, 1], [1, 1],     # 4-7: Diagonal
+                [-2, 0], [2, 0], [0, -2], [0, 2],       # 8-11: Ext Cardinal
+                [-2, -2], [2, -2], [-2, 2], [2, 2]      # 12-15: Ext Diagonal
+            ])
 
-            # Left Neighbor Candidate
-            if center_x - step_x >= 0:
-                cands_dx[1] = int(ti.round(flow[center_y, center_x - step_x, 0]))
-                cands_dy[1] = int(ti.round(flow[center_y, center_x - step_x, 1]))
+            # Use a larger vector for 18 candidates: Center, 16 Neighbors, Coarse
+            cands_dx = ti.Vector([init_dx] * 18)
+            cands_dy = ti.Vector([init_dy] * 18)
 
-            # Top Neighbor Candidate
-            if center_y - step_y >= 0:
-                cands_dx[2] = int(ti.round(flow[center_y - step_y, center_x, 0]))
-                cands_dy[2] = int(ti.round(flow[center_y - step_y, center_x, 1]))
+            # 1-16: Spatial Neighbors
+            for i in ti.static(range(16)):
+                nx = center_x + neighbor_offsets[i, 0] * step_x
+                ny = center_y + neighbor_offsets[i, 1] * step_y
+                if nx >= 0 and nx < w and ny >= 0 and ny < h:
+                    cands_dx[i + 1] = int(ti.round(flow[ny, nx, 0]))
+                    cands_dy[i + 1] = int(ti.round(flow[ny, nx, 1]))
 
-            # Coarse Projection Candidate (Fallback)
+            # 17: Coarse Projection Candidate (Fallback)
             if prev_h > 1 and prev_w > 1:
-                coarse_y = center_y // 2
-                coarse_x = center_x // 2
+                coarse_y = center_y // downscale_factor
+                coarse_x = center_x // downscale_factor
                 if coarse_y < prev_h and coarse_x < prev_w:
-                    # UPSCALE FACTOR is 2.0 based on build config
-                    cands_dx[3] = int(
-                        ti.round(previous_flow[coarse_y, coarse_x, 0] * 2.0)
-                    )
-                    cands_dy[3] = int(
-                        ti.round(previous_flow[coarse_y, coarse_x, 1] * 2.0)
-                    )
+                    cands_dx[17] = int(ti.round(previous_flow[coarse_y, coarse_x, 0] * float(downscale_factor)))
+                    cands_dy[17] = int(ti.round(previous_flow[coarse_y, coarse_x, 1] * float(downscale_factor)))
 
-            for i in ti.static(range(4)):
-                cand_test_y = y + cands_dy[i]
-                cand_test_x = x + cands_dx[i]
+            # --- MULTI-STAGE ADAPTIVE EVALUATION ---
+            # Stage 1: Basic (6 Candidates: Center, Coarse, 4 Cardinal)
+            for i in ti.static(range(6)):
+                cand_idx = i
+                if i == 5: cand_idx = 17 # Use Coarse Fallback as the 6th in Stage 1
+                
+                check_y = y + cands_dy[cand_idx]
+                check_x = x + cands_dx[cand_idx]
+                
+                is_unique = True
+                for j in ti.static(range(i)):
+                    prev_idx = j
+                    if j == 5: prev_idx = 17
+                    if cands_dx[cand_idx] == cands_dx[prev_idx] and cands_dy[cand_idx] == cands_dy[prev_idx]:
+                        is_unique = False
+                
+                if is_unique and not (check_y <= -tile_h or check_x <= -tile_w or check_y >= h or check_x >= w):
+                    cost = cost_function.compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w) * tile_area_inv
+                    if cost < best_cand_cost:
+                        best_cand_cost, best_cand_dx, best_cand_dy = cost, cands_dx[cand_idx], cands_dy[cand_idx]
 
-                # --- 1. Deduplication Check ---
-                is_duplicate = False
-                if i == 1:
-                    if cands_dx[1] == cands_dx[0] and cands_dy[1] == cands_dy[0]:
-                        is_duplicate = True
-                elif i == 2:
-                    if (cands_dx[2] == cands_dx[0] and cands_dy[2] == cands_dy[0]) or (
-                        cands_dx[2] == cands_dx[1] and cands_dy[2] == cands_dy[1]
-                    ):
-                        is_duplicate = True
-                elif i == 3:
-                    if (
-                        (cands_dx[3] == cands_dx[0] and cands_dy[3] == cands_dy[0])
-                        or (cands_dx[3] == cands_dx[1] and cands_dy[3] == cands_dy[1])
-                        or (cands_dx[3] == cands_dx[2] and cands_dy[3] == cands_dy[2])
-                    ):
-                        is_duplicate = True
+            # Stage 2: Quality (Next 4: Diagonals)
+            if best_cand_cost > 0.005:
+                for i in ti.static(range(6, 10)):
+                    check_y, check_x = y + cands_dy[i], x + cands_dx[i]
+                    is_unique = True
+                    for j in ti.static(range(6)):
+                        prev_idx = j
+                        if j == 5: prev_idx = 17
+                        if cands_dx[i] == cands_dx[prev_idx] and cands_dy[i] == cands_dy[prev_idx]: is_unique = False
+                    
+                    if is_unique and not (check_y <= -tile_h or check_x <= -tile_w or check_y >= h or check_x >= w):
+                        cost = cost_function.compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w) * tile_area_inv
+                        if cost < best_cand_cost:
+                            best_cand_cost, best_cand_dx, best_cand_dy = cost, cands_dx[i], cands_dy[i]
 
-                if not is_duplicate:
-                    if not (
-                        cand_test_y < 0
-                        or cand_test_x < 0
-                        or cand_test_y + tile_h > h
-                        or cand_test_x + tile_w > w
-                    ):
-                        cand_raw_cost = 0.0
-                        cand_raw_cost = (
-                            cost_function.compute_zmssd_cost(
-                                ref_layer,
-                                comp_layer,
-                                y,
-                                x,
-                                cand_test_y,
-                                cand_test_x,
-                                tile_h,
-                                tile_w,
-                            )
-                            * tile_area_inv
-                        )
+            # Stage 3: Robustness (Next 8: Radius 2)
+            if best_cand_cost > 0.01:
+                for i in ti.static(range(10, 18)):
+                    check_y, check_x = y + cands_dy[i], x + cands_dx[i]
+                    is_unique = True
+                    for j in ti.static(range(10)):
+                        prev_idx = j
+                        if j == 5: prev_idx = 17
+                        if cands_dx[i] == cands_dx[prev_idx] and cands_dy[i] == cands_dy[prev_idx]: is_unique = False
+                    
+                    if is_unique and not (check_y <= -tile_h or check_x <= -tile_w or check_y >= h or check_x >= w):
+                        cost = cost_function.compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w) * tile_area_inv
+                        if cost < best_cand_cost:
+                            best_cand_cost, best_cand_dx, best_cand_dy = cost, cands_dx[i], cands_dy[i]
 
-                        if cand_raw_cost < best_cand_cost:
-                            best_cand_cost = cand_raw_cost
-                            best_cand_dx = cands_dx[i]
-                            best_cand_dy = cands_dy[i]
-
-            init_dx = best_cand_dx
-            init_dy = best_cand_dy
+            init_dx, init_dy = best_cand_dx, best_cand_dy
             # --------------------------------------------
 
             best_total_cost = 1e10
@@ -621,10 +642,10 @@ if TAICHI_AVAILABLE:
                         test_x = x + cur_dx
 
                         if (
-                            test_y < 0
-                            or test_x < 0
-                            or test_y + tile_h > h
-                            or test_x + tile_w > w
+                            test_y <= -tile_h
+                            or test_x <= -tile_w
+                            or test_y >= h
+                            or test_x >= w
                         ):
                             continue
 
@@ -651,7 +672,14 @@ if TAICHI_AVAILABLE:
                         elif visual_cost > 0.1:
                             dynamic_weight *= 3.0
 
-                        total_cost = visual_cost + (dynamic_weight * dist_sq)
+                        # 3. Boundary Penalty: Slightly penalize movements that push the tile out
+                        boundary_penalty = 0.0
+                        if test_y < 0 or test_y + tile_h > h or test_x < 0 or test_x + tile_w > w:
+                            dist_y = tm.max(0.0, float(-test_y), float(test_y + tile_h - h))
+                            dist_x = tm.max(0.0, float(-test_x), float(test_x + tile_w - w))
+                            boundary_penalty = (dist_y + dist_x) * 0.01
+
+                        total_cost = visual_cost + (dynamic_weight * dist_sq) + boundary_penalty
 
                         if total_cost < best_total_cost:
                             best_total_cost = total_cost
@@ -680,10 +708,10 @@ if TAICHI_AVAILABLE:
         step_x = tile_w
 
         for tile_y, tile_x in ti.ndrange(
-            (h - tile_h + 1) // step_y, (w - tile_w + 1) // step_x
+            (h + step_y - 1) // step_y, (w + step_x - 1) // step_x
         ):
-            y = tile_y * step_y
-            x = tile_x * step_x
+            y = tm.clamp(tile_y * step_y, 0, h - tile_h)
+            x = tm.clamp(tile_x * step_x, 0, w - tile_w)
 
             # Get integer flow from previous search result
             center_y = y + tile_h // 2
@@ -692,62 +720,54 @@ if TAICHI_AVAILABLE:
             int_dy = int(ti.round(flow[center_y, center_x, 1]))
 
             # Evaluate neighbors in X
-            c_m1_x = 1e10
-            if x + int_dx - 1 >= 0:
-                c_m1_x = cost_function.compute_zmssd_cost(
-                    ref_layer,
-                    comp_layer,
-                    y,
-                    x,
-                    y + int_dy,
-                    x + int_dx - 1,
-                    tile_h,
-                    tile_w,
-                )
+            c_m1_x = cost_function.compute_zmssd_cost(
+                ref_layer,
+                comp_layer,
+                y,
+                x,
+                y + int_dy,
+                x + int_dx - 1,
+                tile_h,
+                tile_w,
+            )
 
-            c_p1_x = 1e10
-            if x + int_dx + 1 + tile_w <= w:
-                c_p1_x = cost_function.compute_zmssd_cost(
-                    ref_layer,
-                    comp_layer,
-                    y,
-                    x,
-                    y + int_dy,
-                    x + int_dx + 1,
-                    tile_h,
-                    tile_w,
-                )
+            c_p1_x = cost_function.compute_zmssd_cost(
+                ref_layer,
+                comp_layer,
+                y,
+                x,
+                y + int_dy,
+                x + int_dx + 1,
+                tile_h,
+                tile_w,
+            )
 
             c_0_0 = cost_function.compute_zmssd_cost(
                 ref_layer, comp_layer, y, x, y + int_dy, x + int_dx, tile_h, tile_w
             )
 
             # Evaluate neighbors in Y
-            c_m1_y = 1e10
-            if y + int_dy - 1 >= 0:
-                c_m1_y = cost_function.compute_zmssd_cost(
-                    ref_layer,
-                    comp_layer,
-                    y,
-                    x,
-                    y + int_dy - 1,
-                    x + int_dx,
-                    tile_h,
-                    tile_w,
-                )
+            c_m1_y = cost_function.compute_zmssd_cost(
+                ref_layer,
+                comp_layer,
+                y,
+                x,
+                y + int_dy - 1,
+                x + int_dx,
+                tile_h,
+                tile_w,
+            )
 
-            c_p1_y = 1e10
-            if y + int_dy + 1 + tile_h <= h:
-                c_p1_y = cost_function.compute_zmssd_cost(
-                    ref_layer,
-                    comp_layer,
-                    y,
-                    x,
-                    y + int_dy + 1,
-                    x + int_dx,
-                    tile_h,
-                    tile_w,
-                )
+            c_p1_y = cost_function.compute_zmssd_cost(
+                ref_layer,
+                comp_layer,
+                y,
+                x,
+                y + int_dy + 1,
+                x + int_dx,
+                tile_h,
+                tile_w,
+            )
 
             # Fit parabolas
             delta_x = 0.0
@@ -786,6 +806,7 @@ def process_single_layer(
     tile_h: int,
     tile_w: int,
     base_search_dist: float,
+    downscale_factor: int = 4,
 ) -> any:  # Returns ti.ndarray (GPU)
     """
     Process tile matching for a single pyramid layer.
@@ -812,7 +833,7 @@ def process_single_layer(
     if is_coarsest_layer:
         from ... import taichi_algorithm as ta
 
-        global_dx, global_dy, global_conf = ta.phase_correlation(
+        global_dx, global_dy, global_conf = ta.global_translate_zncc(
             ref_layer_gpu, comp_layer_gpu, max_shift=32
         )
         # Output global shift to console for debugging
@@ -826,11 +847,11 @@ def process_single_layer(
         if previous_flow_gpu is None:
             _initialize_coarsest_flow_kernel(flow_gpu, h, w, 0.0, 0.0)
         else:
-            # HDR+ style: 4× upscale factor between pyramid levels
+            # Scalable upscale factor between pyramid levels
             upsample_flow_gpu(
                 src_gpu=previous_flow_gpu,
                 dst_gpu=flow_gpu,
-                scale=ImageAlignmentConfig.FLOW_UPSCALE_FACTOR,
+                scale=float(downscale_factor),
             )
 
     # ti.sync()
@@ -869,6 +890,7 @@ def process_single_layer(
             current_tile_w,
             prev_h,
             prev_w,
+            downscale_factor,
         )
     elif is_coarsest_layer:
         # HDR+ style: wide-area block search at coarsest level (±4px at 1/64 res = ±256px full res)
@@ -900,6 +922,7 @@ def process_single_layer(
             current_search_dist,
             prev_h,
             prev_w,
+            downscale_factor,
         )
 
     # ti.sync()
@@ -979,6 +1002,8 @@ def compute_alignment_flow(
     tile_w: int = 16,
     n_layers: int = 3,
     search_dist: float = 2.0,
+    downscale_factor: int = 4,
+    min_pyramid_size: int = ImageAlignmentConfig.MIN_PYRAMID_LAYER_SIZE,
     return_confidence: bool = False,
 ) -> any:
     """
@@ -993,12 +1018,13 @@ def compute_alignment_flow(
     ref_gpu, ref_is_temp = common.ensure_taichi_field(ref_work_data, dtype=ti.f32)
     comp_gpu, comp_is_temp = common.ensure_taichi_field(current_work_data, dtype=ti.f32)
 
-    print("Pyramid Initiation (HDR+ 4x):")
+    print(f"Pyramid Initiation ({downscale_factor}x):")
     t_pyr_ref_start = time.perf_counter()
-    ref_pyramid = build_image_pyramid_gpu_4x(
+    ref_pyramid = build_image_pyramid_gpu(
         ref_gpu,
         n_levels=n_layers,
-        min_size=ImageAlignmentConfig.MIN_PYRAMID_LAYER_SIZE,
+        min_size=min_pyramid_size,
+        downscale_factor=downscale_factor,
     )
     ti.sync()
     t_pyr_ref = (time.perf_counter() - t_pyr_ref_start) * 1000
@@ -1007,10 +1033,11 @@ def compute_alignment_flow(
         print(f"   Level {lvl_i}: {lvl.shape[0]}x{lvl.shape[1]}")
 
     t_pyr_comp_start = time.perf_counter()
-    current_pyramid = build_image_pyramid_gpu_4x(
+    current_pyramid = build_image_pyramid_gpu(
         comp_gpu,
         n_levels=n_layers,
-        min_size=ImageAlignmentConfig.MIN_PYRAMID_LAYER_SIZE,
+        min_size=min_pyramid_size,
+        downscale_factor=downscale_factor,
     )
     ti.sync()
     t_pyr_comp = (time.perf_counter() - t_pyr_comp_start) * 1000
@@ -1030,6 +1057,7 @@ def compute_alignment_flow(
             tile_h,
             tile_w,
             search_dist,
+            downscale_factor,
         )
         if prev_flow is not None:
             common.release_temp_buffer(prev_flow)

@@ -13,6 +13,17 @@ if TAICHI_AVAILABLE:
         d = B
         return a * t * t * t + b * t * t + c * t + d
 
+    @ti.func
+    def cubic_hermite_weights(t):
+        """Precalculate the 4 weights for cubic hermite interpolation."""
+        t2 = t * t
+        t3 = t2 * t
+        w0 = -0.5 * t3 + t2 - 0.5 * t
+        w1 = 1.5 * t3 - 2.5 * t2 + 1.0
+        w2 = -1.5 * t3 + 2.0 * t2 + 0.5 * t
+        w3 = 0.5 * t3 - 0.5 * t2
+        return ti.Vector([w0, w1, w2, w3])
+
     @ti.kernel
     def _bicubic_resize_kernel(
         src: ti.types.ndarray(),

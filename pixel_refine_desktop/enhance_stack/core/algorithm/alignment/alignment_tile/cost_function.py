@@ -43,6 +43,16 @@ if TAICHI_AVAILABLE:
             res = x * (27.0 + x2) / (27.0 + 9.0 * x2)
         return res
 
+@ti.func
+def reflect_idx(idx: int, size: int) -> int:
+    """Branchless BORDER_REFLECT_101 implementation for cost functions."""
+    res = idx
+    if res < 0:
+        res = -res
+    if res >= size:
+        res = 2 * (size - 1) - res
+    return tm.clamp(res, 0, size - 1)
+
 
 # ============================================================================
 # Taichi Kernels
@@ -66,16 +76,27 @@ if TAICHI_AVAILABLE:
         Optimized to reduce memory passes.
         """
         sum_diff = 0.0
+        h_ref, w_ref = ref.shape[0], ref.shape[1]
+        h_comp, w_comp = comp.shape[0], comp.shape[1]
+
         # Single pass for mean
         for r, c in ti.ndrange(tile_h, tile_w):
-            sum_diff += ref[y_ref + r, x_ref + c] - comp[y_comp + r, x_comp + c]
+            img_y_ref = reflect_idx(y_ref + r, h_ref)
+            img_x_ref = reflect_idx(x_ref + c, w_ref)
+            img_y_comp = reflect_idx(y_comp + r, h_comp)
+            img_x_comp = reflect_idx(x_comp + c, w_comp)
+            sum_diff += ref[img_y_ref, img_x_ref] - comp[img_y_comp, img_x_comp]
 
         mean_diff = sum_diff / float(tile_h * tile_w)
 
         total_abs_diff = 0.0
         for r, c in ti.ndrange(tile_h, tile_w):
+            img_y_ref = reflect_idx(y_ref + r, h_ref)
+            img_x_ref = reflect_idx(x_ref + c, w_ref)
+            img_y_comp = reflect_idx(y_comp + r, h_comp)
+            img_x_comp = reflect_idx(x_comp + c, w_comp)
             diff = (
-                ref[y_ref + r, x_ref + c] - comp[y_comp + r, x_comp + c]
+                ref[img_y_ref, img_x_ref] - comp[img_y_comp, img_x_comp]
             ) - mean_diff
             total_abs_diff += ti.abs(diff)
 
@@ -98,10 +119,17 @@ if TAICHI_AVAILABLE:
         """
         sum_diff = 0.0
         sum_sq_diff = 0.0
+        h_ref, w_ref = ref.shape[0], ref.shape[1]
+        h_comp, w_comp = comp.shape[0], comp.shape[1]
 
         # Single pass for both sum and sum of squares
         for r, c in ti.ndrange(tile_h, tile_w):
-            diff = float(ref[y_ref + r, x_ref + c] - comp[y_comp + r, x_comp + c])
+            img_y_ref = reflect_idx(y_ref + r, h_ref)
+            img_x_ref = reflect_idx(x_ref + c, w_ref)
+            img_y_comp = reflect_idx(y_comp + r, h_comp)
+            img_x_comp = reflect_idx(x_comp + c, w_comp)
+
+            diff = float(ref[img_y_ref, img_x_ref] - comp[img_y_comp, img_x_comp])
             sum_diff += diff
             sum_sq_diff += diff * diff
 
@@ -109,7 +137,6 @@ if TAICHI_AVAILABLE:
         mean_diff = sum_diff / n
 
         # Variance formula: Mean(X^2) - Mean(X)^2
-        # Use ti.max(0.0, ...) to avoid precision issues resulting in negative values
         return ti.max(0.0, (sum_sq_diff / n) - (mean_diff * mean_diff))
 
     @ti.func
@@ -129,8 +156,16 @@ if TAICHI_AVAILABLE:
         Simple, fast, and robust to noise.
         """
         total_abs_diff = 0.0
+        h_ref, w_ref = ref.shape[0], ref.shape[1]
+        h_comp, w_comp = comp.shape[0], comp.shape[1]
+
         for r, c in ti.ndrange(tile_h, tile_w):
-            diff = ref[y_ref + r, x_ref + c] - comp[y_comp + r, x_comp + c]
+            img_y_ref = reflect_idx(y_ref + r, h_ref)
+            img_x_ref = reflect_idx(x_ref + c, w_ref)
+            img_y_comp = reflect_idx(y_comp + r, h_comp)
+            img_x_comp = reflect_idx(x_comp + c, w_comp)
+
+            diff = ref[img_y_ref, img_x_ref] - comp[img_y_comp, img_x_comp]
             total_abs_diff += ti.abs(diff)
 
         return total_abs_diff / float(tile_h * tile_w)

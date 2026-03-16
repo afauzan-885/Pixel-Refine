@@ -24,6 +24,16 @@ except ImportError:
     bicubic_interpolation = None
 
 if TAICHI_AVAILABLE:
+    # Precomputed 5x5 Gaussian weights (sigma=1.0)
+    GAUSSIAN_SPATIAL_WEIGHTS = ti.Matrix(
+        [
+            [0.002969, 0.013306, 0.021938, 0.013306, 0.002969],
+            [0.013306, 0.059634, 0.098320, 0.059634, 0.013306],
+            [0.021938, 0.098320, 0.162103, 0.098320, 0.021938],
+            [0.013306, 0.059634, 0.098320, 0.059634, 0.013306],
+            [0.002969, 0.013306, 0.021938, 0.013306, 0.002969],
+        ]
+    )
 
     @ti.func
     def reflect_idx(idx: int, size: int) -> int:
@@ -36,296 +46,249 @@ if TAICHI_AVAILABLE:
         return tm.clamp(res, 0, size - 1)
 
     @ti.func
-    def sample_bicubic(
+    def sample_bicubic_fast(
         img: ti.types.ndarray(ndim=2), u: float, v: float, h: int, w: int
     ) -> float:
-        """Sample single-channel image with Bicubic interpolation using cubic_hermite."""
+        """Optimized Bicubic sampling with precomputed weights."""
         x0 = int(ti.floor(u))
         y0 = int(ti.floor(v))
         dx = u - float(x0)
         dy = v - float(y0)
 
-        col_results = ti.Vector([0.0, 0.0, 0.0, 0.0])
+        wx = bicubic_interpolation.cubic_hermite_weights(dx)
+        wy = bicubic_interpolation.cubic_hermite_weights(dy)
 
-        for m in range(-1, 3):  # y offset
-            p = ti.Vector([0.0, 0.0, 0.0, 0.0])
-            y_idx = reflect_idx(y0 + m, h)
-
-            for n in range(-1, 3):  # x offset
-                x_idx = reflect_idx(x0 + n, w)
-                p[n + 1] = img[y_idx, x_idx]
-
-            # Use user's existing cubic_hermite function
-            col_results[m + 1] = bicubic_interpolation.cubic_hermite(
-                p[0], p[1], p[2], p[3], dx
-            )
-
-        return bicubic_interpolation.cubic_hermite(
-            col_results[0], col_results[1], col_results[2], col_results[3], dy
-        )
+        res = 0.0
+        for m in ti.static(range(4)):
+            y_idx = reflect_idx(y0 + m - 1, h)
+            row_res = 0.0
+            for n in ti.static(range(4)):
+                x_idx = reflect_idx(x0 + n - 1, w)
+                row_res += img[y_idx, x_idx] * wx[n]
+            res += row_res * wy[m]
+        return res
 
     @ti.func
-    def sample_bicubic_3ch(
+    def sample_bicubic_3ch_fast(
         img: ti.types.ndarray(ndim=3), u: float, v: float, h: int, w: int, c: int
     ) -> float:
-        """Sample specific channel of 3-channel image with Bicubic interpolation."""
+        """Optimized 3-channel Bicubic sampling."""
         x0 = int(ti.floor(u))
         y0 = int(ti.floor(v))
         dx = u - float(x0)
         dy = v - float(y0)
 
-        col_results = ti.Vector([0.0, 0.0, 0.0, 0.0])
+        wx = bicubic_interpolation.cubic_hermite_weights(dx)
+        wy = bicubic_interpolation.cubic_hermite_weights(dy)
 
-        for m in range(-1, 3):
-            p = ti.Vector([0.0, 0.0, 0.0, 0.0])
-            y_idx = reflect_idx(y0 + m, h)
-            for n in range(-1, 3):
-                x_idx = reflect_idx(x0 + n, w)
-                p[n + 1] = img[y_idx, x_idx, c]
+        res = 0.0
+        for m in ti.static(range(4)):
+            y_idx = reflect_idx(y0 + m - 1, h)
+            row_res = 0.0
+            for n in ti.static(range(4)):
+                x_idx = reflect_idx(x0 + n - 1, w)
+                row_res += img[y_idx, x_idx, c] * wx[n]
+            res += row_res * wy[m]
+        return res
 
-            col_results[m + 1] = bicubic_interpolation.cubic_hermite(
-                p[0], p[1], p[2], p[3], dx
-            )
-
-        return bicubic_interpolation.cubic_hermite(
-            col_results[0], col_results[1], col_results[2], col_results[3], dy
-        )
-
-    # --- Dtype Conversion Kernels ---
-
-    @ti.kernel
-    def _convert_to_f32_kernel(
-        src: ti.types.ndarray(ndim=2),
-        dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
-        h: int,
-        w: int,
-    ):
-        """Convert u16/u8 to f32 (single channel)."""
-        for y, x in ti.ndrange(h, w):
-            dst[y, x] = float(src[y, x])
-
-    @ti.kernel
-    def _convert_to_f32_kernel_3ch(
-        src: ti.types.ndarray(ndim=3),
-        dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        h: int,
-        w: int,
-    ):
-        """Convert u16/u8 to f32 (3 channels)."""
-        for y, x in ti.ndrange(h, w):
-            for c in ti.static(range(3)):
-                dst[y, x, c] = float(src[y, x, c])
-
-    @ti.kernel
-    def _convert_from_f32_kernel(
-        src: ti.types.ndarray(dtype=ti.f32, ndim=2),
-        dst: ti.types.ndarray(ndim=2),
-        h: int,
-        w: int,
-        target_dtype: ti.template(),
-    ):
-        """Convert f32 back to u16/u8 with clamping (single channel)."""
-        for y, x in ti.ndrange(h, w):
-            val = src[y, x]
-            if ti.static(target_dtype == ti.u16):
-                dst[y, x] = ti.cast(tm.clamp(val, 0.0, 65535.0), ti.u16)
-            elif ti.static(target_dtype == ti.u8):
-                dst[y, x] = ti.cast(tm.clamp(val, 0.0, 255.0), ti.u8)
-            else:
-                dst[y, x] = val
-
-    @ti.kernel
-    def _convert_from_f32_kernel_3ch(
-        src: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        dst: ti.types.ndarray(ndim=3),
-        h: int,
-        w: int,
-        target_dtype: ti.template(),
-    ):
-        """Convert f32 back to u16/u8 with clamping (3 channels)."""
-        for y, x in ti.ndrange(h, w):
-            for c in ti.static(range(3)):
-                val = src[y, x, c]
-                if ti.static(target_dtype == ti.u16):
-                    dst[y, x, c] = ti.cast(tm.clamp(val, 0.0, 65535.0), ti.u16)
-                elif ti.static(target_dtype == ti.u8):
-                    dst[y, x, c] = ti.cast(tm.clamp(val, 0.0, 255.0), ti.u8)
-                else:
-                    dst[y, x, c] = val
+    # Kernels handling normalization and casting internally
 
     @ti.kernel
     def _warp_kernel_guided(
         src: ti.types.ndarray(ndim=2),
         flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
-        ref: ti.types.ndarray(),  # Guidance Image (can be 2D or 3D)
+        dst: ti.types.ndarray(ndim=2),
+        ref: ti.types.ndarray(),  # Guidance Image
         h: int,
         w: int,
-        use_guidance: int,
+        use_guidance: ti.template(),
         bits: int,
+        target_dtype: ti.template(),
     ):
+
+        inv_norm = 1.0
+        if bits > 0:
+            inv_norm = 1.0 / float((1 << bits) - 1)
+
         for y, x in ti.ndrange(h, w):
             u_final, v_final = 0.0, 0.0
 
-            if use_guidance:
-                # Joint Bilateral Refinement
-                total_w = 0.0
-                sum_u = 0.0
-                sum_v = 0.0
+            if ti.static(use_guidance):
+                # Joint Bilateral Refinement (Micro-Optimized)
+                total_w = 1e-12
+                sum_u, sum_v = 0.0, 0.0
 
-                # Sample center value (Virtual Grayscale)
                 center_val = 0.0
                 if ti.static(len(ref.shape) == 2):
-                    center_val = ref[y, x]
+                    center_val = float(ref[y, x]) * inv_norm
                 else:
-                    norm_factor = 1.0
-                    if bits > 0:
-                        norm_factor = float((1 << bits) - 1)
-                    center_val = float(ref[y, x, 1]) / norm_factor
+                    center_val = float(ref[y, x, 1]) * inv_norm
 
-                # Refinement Window (5x5)
-                for dy in range(-2, 3):
-                    for dx in range(-2, 3):
-                        ny, nx = y + dy, x + dx
-                        if 0 <= ny < h and 0 <= nx < w:
-                            # Spatial weight (Gaussian)
-                            dist_sq = float(dx * dx + dy * dy)
-                            w_s = ti.exp(-dist_sq / 2.0)
+                # Manually unrolled 5x5 window
+                for dy in ti.static(range(-2, 3)):
+                    ny = tm.clamp(y + dy, 0, h - 1)
+                    for dx in ti.static(range(-2, 3)):
+                        nx = tm.clamp(x + dx, 0, w - 1)
 
-                            # Range weight (Intensity Similarity)
-                            val_neighbor = 0.0
-                            if ti.static(len(ref.shape) == 2):
-                                val_neighbor = ref[ny, nx]
+                        # Spatial Gaussian Weight (Resolved at compile time)
+                        w_s = 0.0
+                        if ti.static(abs(dx) == 2):
+                            if ti.static(abs(dy) == 2):
+                                w_s = 0.002969
+                            elif ti.static(abs(dy) == 1):
+                                w_s = 0.013306
                             else:
-                                norm_factor = 1.0
-                                if bits > 0:
-                                    norm_factor = float((1 << bits) - 1)
-                                val_neighbor = float(ref[ny, nx, 1]) / norm_factor
+                                w_s = 0.021938
+                        elif ti.static(abs(dx) == 1):
+                            if ti.static(abs(dy) == 2):
+                                w_s = 0.013306
+                            elif ti.static(abs(dy) == 1):
+                                w_s = 0.059634
+                            else:
+                                w_s = 0.098320
+                        else:
+                            if ti.static(abs(dy) == 2):
+                                w_s = 0.021938
+                            elif ti.static(abs(dy) == 1):
+                                w_s = 0.098320
+                            else:
+                                w_s = 0.162103
 
-                            diff = ti.abs(val_neighbor - center_val)
-                            w_r = ti.exp(-(diff * diff) / 0.02)
+                        val_neighbor = 0.0
+                        if ti.static(len(ref.shape) == 2):
+                            val_neighbor = float(ref[ny, nx]) * inv_norm
+                        else:
+                            val_neighbor = float(ref[ny, nx, 1]) * inv_norm
 
-                            w_curr = w_s * w_r
-                            sum_u += flow[ny, nx, 0] * w_curr
-                            sum_v += flow[ny, nx, 1] * w_curr
-                            total_w += w_curr
+                        diff = val_neighbor - center_val
+                        # Exponential range weight (Optimized 1/0.02 = 50.0)
+                        w_curr = w_s * ti.exp(-(diff * diff) * 50.0)
 
-                if total_w > 1e-6:
-                    u_final = float(x) + sum_u / total_w
-                    v_final = float(y) + sum_v / total_w
-                else:
-                    u_final = float(x) + flow[y, x, 0]
-                    v_final = float(y) + flow[y, x, 1]
+                        sum_u += flow[ny, nx, 0] * w_curr
+                        sum_v += flow[ny, nx, 1] * w_curr
+                        total_w += w_curr
+
+                u_final = float(x) + sum_u / total_w
+                v_final = float(y) + sum_v / total_w
             else:
                 u_final = float(x) + flow[y, x, 0]
                 v_final = float(y) + flow[y, x, 1]
 
-            dst[y, x] = sample_bicubic(src, u_final, v_final, h, w)
+            res = sample_bicubic_fast(src, u_final, v_final, h, w)
+            if ti.static(target_dtype == ti.u16):
+                dst[y, x] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.u16)
+            elif ti.static(target_dtype == ti.u8):
+                dst[y, x] = ti.cast(tm.clamp(res, 0.0, 255.0), ti.u8)
+            else:
+                dst[y, x] = res
 
     @ti.kernel
     def _warp_kernel_guided_3ch(
         src: ti.types.ndarray(ndim=3),
         flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        ref: ti.types.ndarray(),  # Guidance (Grayscale or 3-ch)
+        dst: ti.types.ndarray(ndim=3),
+        ref: ti.types.ndarray(),
         h: int,
         w: int,
-        use_guidance: int,
+        use_guidance: ti.template(),
         bits: int,
+        target_dtype: ti.template(),
     ):
+
+        inv_norm = 1.0
+        if bits > 0:
+            inv_norm = 1.0 / float((1 << bits) - 1)
+
         for y, x in ti.ndrange(h, w):
             u_final, v_final = 0.0, 0.0
 
-            if use_guidance:
-                total_w = 0.0
-                sum_u = 0.0
-                sum_v = 0.0
+            if ti.static(use_guidance):
+                # Joint Bilateral Refinement (Micro-Optimized)
+                total_w = 1e-12
+                sum_u, sum_v = 0.0, 0.0
 
-                # Sample center value (Virtual Grayscale)
                 center_val = 0.0
                 if ti.static(len(ref.shape) == 2):
-                    center_val = ref[y, x]
+                    center_val = float(ref[y, x]) * inv_norm
                 else:
-                    norm_factor = 1.0
-                    if bits > 0:
-                        norm_factor = float((1 << bits) - 1)
-                    center_val = float(ref[y, x, 1]) / norm_factor
+                    center_val = float(ref[y, x, 1]) * inv_norm
 
-                for dy in range(-2, 3):
-                    for dx in range(-2, 3):
-                        ny, nx = y + dy, x + dx
-                        if 0 <= ny < h and 0 <= nx < w:
-                            dist_sq = float(dx * dx + dy * dy)
-                            w_s = ti.exp(-dist_sq / 2.0)
+                for dy in ti.static(range(-2, 3)):
+                    ny = tm.clamp(y + dy, 0, h - 1)
+                    for dx in ti.static(range(-2, 3)):
+                        nx = tm.clamp(x + dx, 0, w - 1)
 
-                            # Range weight (Intensity Similarity)
-                            val_neighbor = 0.0
-                            if ti.static(len(ref.shape) == 2):
-                                val_neighbor = ref[ny, nx]
+                        # Spatial Gaussian Weight
+                        w_s = 0.0
+                        if ti.static(abs(dx) == 2):
+                            if ti.static(abs(dy) == 2):
+                                w_s = 0.002969
+                            elif ti.static(abs(dy) == 1):
+                                w_s = 0.013306
                             else:
-                                norm_factor = 1.0
-                                if bits > 0:
-                                    norm_factor = float((1 << bits) - 1)
-                                val_neighbor = float(ref[ny, nx, 1]) / norm_factor
+                                w_s = 0.021938
+                        elif ti.static(abs(dx) == 1):
+                            if ti.static(abs(dy) == 2):
+                                w_s = 0.013306
+                            elif ti.static(abs(dy) == 1):
+                                w_s = 0.059634
+                            else:
+                                w_s = 0.098320
+                        else:
+                            if ti.static(abs(dy) == 2):
+                                w_s = 0.021938
+                            elif ti.static(abs(dy) == 1):
+                                w_s = 0.098320
+                            else:
+                                w_s = 0.162103
 
-                            diff = ti.abs(val_neighbor - center_val)
-                            w_r = ti.exp(-(diff * diff) / 0.02)
+                        val_neighbor = 0.0
+                        if ti.static(len(ref.shape) == 2):
+                            val_neighbor = float(ref[ny, nx]) * inv_norm
+                        else:
+                            val_neighbor = float(ref[ny, nx, 1]) * inv_norm
 
-                            w_curr = w_s * w_r
-                            sum_u += flow[ny, nx, 0] * w_curr
-                            sum_v += flow[ny, nx, 1] * w_curr
-                            total_w += w_curr
+                        diff = val_neighbor - center_val
+                        # Optimized exponent
+                        w_curr = w_s * ti.exp(-(diff * diff) * 50.0)
+                        sum_u += flow[ny, nx, 0] * w_curr
+                        sum_v += flow[ny, nx, 1] * w_curr
+                        total_w += w_curr
 
-                if total_w > 1e-6:
-                    u_final = float(x) + sum_u / total_w
-                    v_final = float(y) + sum_v / total_w
-                else:
-                    u_final = float(x) + flow[y, x, 0]
-                    v_final = float(y) + flow[y, x, 1]
+                u_final = float(x) + sum_u / total_w
+                v_final = float(y) + sum_v / total_w
             else:
                 u_final = float(x) + flow[y, x, 0]
                 v_final = float(y) + flow[y, x, 1]
 
             for c in ti.static(range(3)):
-                dst[y, x, c] = sample_bicubic_3ch(src, u_final, v_final, h, w, c)
+                res = sample_bicubic_3ch_fast(src, u_final, v_final, h, w, c)
+                if ti.static(target_dtype == ti.u16):
+                    dst[y, x, c] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.u16)
+                elif ti.static(target_dtype == ti.u8):
+                    dst[y, x, c] = ti.cast(tm.clamp(res, 0.0, 255.0), ti.u8)
+                else:
+                    dst[y, x, c] = res
 
     def warp_image_gpu(
         src, flow, dst=None, buffer_provider="pool", enable_tiling=True, guidance=None
     ):
         """
-        Warp image using optical flow on GPU with Bicubic Interpolation and
-        Optional Joint Bilateral Flow Refinement (if guidance image is provided).
-
-        Args:
-            guidance: Optional single-channel reference image (H, W).
-                     If provided, flow is smoothed respecting guidance edges.
-
-        Note:
-            Preserves source dtype (u16/u8/f32). Computation uses f32 internally
-            for precision, then converts back to source dtype.
+        Warp image on GPU with Optional Joint Bilateral Flow Refinement.
         """
         if not TAICHI_AVAILABLE:
             raise ImportError("Taichi not available")
 
         h, w = src.shape[:2]
 
-        # Preserve source dtype - don't force f32 conversion
         src_gpu, src_is_temp = common.ensure_taichi_field(
-            src, buffer_provider=buffer_provider  # Keep native dtype
+            src, buffer_provider=buffer_provider
         )
         flow_gpu, flow_is_temp = common.ensure_taichi_field(
             flow, dtype=ti.f32, buffer_provider=buffer_provider
         )
 
-        # Detect source dtype for output preservation
-        src_dtype = getattr(src, "dtype", None)
-        src_ti_dtype = ti.f32  # Default
-        if hasattr(src_gpu, "dtype"):
-            src_ti_dtype = src_gpu.dtype
-        elif src_dtype == np.uint16:
-            src_ti_dtype = ti.u16
-        elif src_dtype == np.uint8:
-            src_ti_dtype = ti.u8
+        src_ti_dtype = getattr(src_gpu, "dtype", ti.f32)
 
         use_guidance = 0
         guidance_gpu = None
@@ -334,86 +297,62 @@ if TAICHI_AVAILABLE:
 
         if guidance is not None:
             use_guidance = 1
-            # Automatic bit depth detection for normalization (Supports NumPy and Taichi)
             g_dtype = getattr(guidance, "dtype", None)
             if g_dtype in [np.uint16, ti.u16]:
                 bits = 16
             elif g_dtype in [np.uint8, ti.u8]:
                 bits = 8
-            elif g_dtype in [np.float32, ti.f32]:
-                bits = 0
-            else:
-                bits = 0  # Default to no normalization for unknown (usually float)
 
-            # Note: We allow ensure_taichi_field to keep u16 if provided
             guidance_gpu, guidance_is_temp = common.ensure_taichi_field(
                 guidance, buffer_provider=buffer_provider
             )
         else:
-            # Create a dummy 1x1 buffer
             guidance_gpu = common.get_temp_buffer((1, 1), ti.f32, buffer_provider)
             guidance_is_temp = True
 
         channels = 1 if len(src_gpu.shape) == 2 else src_gpu.shape[2]
+        res_gpu = None
+        created_dst = False
+        target_dtype = src_ti_dtype
 
-        # Create intermediate f32 buffer for computation
-        shape = (h, w) if channels == 1 else (h, w, 3)
-        dst_f32_gpu = common.get_temp_buffer(shape, ti.f32, buffer_provider)
-
-        # Convert src to f32 for computation if needed
-        if src_ti_dtype != ti.f32:
-            src_f32_gpu = common.get_temp_buffer(src_gpu.shape, ti.f32, buffer_provider)
-            # Simple copy with dtype conversion
-            if channels == 1:
-                _convert_to_f32_kernel(src_gpu, src_f32_gpu, h, w)
-            else:
-                _convert_to_f32_kernel_3ch(src_gpu, src_f32_gpu, h, w)
+        if (
+            dst is not None
+            and hasattr(dst, "shape")
+            and not isinstance(dst, np.ndarray)
+        ):
+            res_gpu = dst
+            target_dtype = dst.dtype
         else:
-            src_f32_gpu = src_gpu
+            res_gpu = common.get_temp_buffer(
+                src_gpu.shape, src_ti_dtype, buffer_provider
+            )
+            created_dst = True
 
-        # Perform warping in f32
         if channels == 1:
             _warp_kernel_guided(
-                src_f32_gpu,
+                src_gpu,
                 flow_gpu,
-                dst_f32_gpu,
+                res_gpu,
                 guidance_gpu,
                 h,
                 w,
                 use_guidance,
                 bits,
+                target_dtype,
             )
         else:
             _warp_kernel_guided_3ch(
-                src_f32_gpu,
+                src_gpu,
                 flow_gpu,
-                dst_f32_gpu,
+                res_gpu,
                 guidance_gpu,
                 h,
                 w,
                 use_guidance,
                 bits,
+                target_dtype,
             )
 
-        # Convert back to original dtype if needed
-        if dst is None:
-            if src_ti_dtype != ti.f32:
-                dst_gpu = common.get_temp_buffer(shape, src_ti_dtype, buffer_provider)
-                if channels == 1:
-                    _convert_from_f32_kernel(dst_f32_gpu, dst_gpu, h, w, src_ti_dtype)
-                else:
-                    _convert_from_f32_kernel_3ch(
-                        dst_f32_gpu, dst_gpu, h, w, src_ti_dtype
-                    )
-                common.release_temp_buffer(dst_f32_gpu)
-            else:
-                dst_gpu = dst_f32_gpu
-        else:
-            dst_gpu = dst
-
-        # Cleanup
-        if src_ti_dtype != ti.f32 and src_f32_gpu != src_gpu:
-            common.release_temp_buffer(src_f32_gpu)
         if src_is_temp:
             common.release_temp_buffer(src_gpu)
         if flow_is_temp:
@@ -421,9 +360,9 @@ if TAICHI_AVAILABLE:
         if guidance_is_temp:
             common.release_temp_buffer(guidance_gpu)
 
-        res = common.to_numpy_if_needed(dst_gpu, dst is None)
-        if dst is None:
-            common.release_temp_buffer(dst_gpu)
+        res = common.to_numpy_if_needed(res_gpu, dst is None)
+        if created_dst and dst is None:
+            common.release_temp_buffer(res_gpu)
 
         return res
 

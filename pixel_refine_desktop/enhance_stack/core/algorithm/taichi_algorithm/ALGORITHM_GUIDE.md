@@ -130,11 +130,11 @@ General-purpose Normalized Cross-Correlation for feature tracking.
 ```python
 import taichi_algorithm as ta
 # Match template or compare two images
-corr_map = ta.zncc_fft(img, template)
+corr_map = ta.zncc(img, template)
 best_y, best_x = np.unravel_index(np.argmax(corr_map), corr_map.shape)
 ```
 - **� Technical Deep Dive**:
-    - **Frequency Domain Correlation**: Much faster than spatial sliding windows for large templates.
+    - **Spatial Domain Correlation**: Uses an exact sliding window ZNCC kernel. Extremely stable for small templates and areas where frequency-domain artifacts (FFT) are undesirable.
     - **Mean Normalization**: Immune to global brightness/contrast variations.
 
 ---
@@ -163,8 +163,8 @@ final = res.to_numpy()
 | Module | Use Case | Common Call |
 | :--- | :--- | :--- |
 | `common.py` | Color/Channels | `ta.cvtColor`, `ta.split`, `ta.merge` |
-| `fft.py` | Frequency/Motion| `ta.phase_correlate_fft`, `ta.ncc` |
-| `ncc.py` | Template Matching| `ta.zncc_fft` |
+| `fft.py` | Frequency/Motion| `ta.phase_correlate_fft` |
+| `ncc.py` | Template Matching| `ta.zncc`, `ta.match_template` |
 | `pyramid.py` | Hierarchies | `ta.build_image_pyramid` |
 | `warp.py` | Motion warping | `ta.warp_image_gpu` |
 | `gaussian.py` | Efficient Blur | `ta.gaussian(src, ksize, sigmaX)` |

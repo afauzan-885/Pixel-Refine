@@ -35,7 +35,7 @@ from .pyramid import build_image_pyramid, build_image_pyramid_gpu, upsample_flow
 from .warp import warp_image_gpu
 from .phase_correlation import phase_correlation
 from .fft import fft2, ifft2
-from .ncc import zncc_fft, match_template_fft
+from .ncc import zncc, match_template, global_translate_zncc
 
 # --- Constants ---
 INTER_LINEAR = 1
@@ -267,9 +267,9 @@ absdiff = common.absdiff
 def ncc(image, template):
     """
     Simplified Normalized Cross-Correlation (ZNCC) interface.
-    Plug-and-play template matching using FFT backend.
+    Plug-and-play template matching using Spatial backend.
     """
-    return zncc_fft(image, template)
+    return zncc(image, template)
 
 
 __all__ = [
@@ -311,7 +311,8 @@ __all__ = [
     "phase_correlation",
     "fft2",
     "ifft2",
-    "zncc_fft",
-    "match_template_fft",
+    "zncc",
+    "match_template",
+    "global_translate_zncc",
     "ncc",
 ]
