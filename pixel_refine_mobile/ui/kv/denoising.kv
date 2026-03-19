@@ -1,0 +1,133 @@
+#:kivy 2.3.1
+
+<DenoisingScreen>:
+    name: 'denoising'
+    md_bg_color: 0.98, 0.98, 0.98, 1
+
+    MDBoxLayout:
+        orientation: 'vertical'
+
+        # --- TOP BAR ---
+        MDTopAppBar:
+            title: "Denoising Workspace"
+            elevation: 0
+            md_bg_color: 0.98, 0.98, 0.98, 1
+            specific_text_color: 0.2, 0.2, 0.2, 1
+            left_action_items: [["arrow-left", lambda x: root.go_back()]]
+            right_action_items: [["dots-vertical", lambda x: None]]
+
+        # --- MAIN CANVAS (60%) ---
+        MDRelativeLayout:
+            size_hint_y: 0.6
+            padding: "8dp"
+            
+            MDCard:
+                id: main_canvas
+                orientation: "vertical"
+                size_hint: 0.95, 0.95
+                pos_hint: {"center_x": .5, "center_y": .5}
+                radius: [20, 20, 20, 20]
+                md_bg_color: 0.9, 0.9, 0.9, 1
+                elevation: 1
+                on_release: root.import_images()
+                
+                # Placeholder Content
+                MDBoxLayout:
+                    id: placeholder
+                    orientation: 'vertical'
+                    spacing: "10dp"
+                    padding: "20dp"
+                    opacity: 1 if not root.has_images else 0
+                    
+                    MDIcon:
+                        icon: "camera-burst"
+                        font_size: "64sp"
+                        halign: "center"
+                        pos_hint: {"center_x": .5}
+                        theme_text_color: "Secondary"
+                        
+                    MDLabel:
+                        text: "Tap to add Multiple Images"
+                        halign: "center"
+                        theme_text_color: "Secondary"
+                        font_style: "Button"
+                
+                # Image Preview (Hidden until image is selected)
+                FitImage:
+                    id: preview_image
+                    source: root.preview_source
+                    radius: [20, 20, 20, 20]
+                    opacity: 1 if root.has_images else 0
+
+        # --- THUMBNAIL REEL (15%) ---
+        MDBoxLayout:
+            size_hint_y: 0.15
+            padding: ["12dp", "4dp"]
+            
+            MDScrollView:
+                do_scroll_y: False
+                do_scroll_x: True
+                
+                MDBoxLayout:
+                    id: thumbnail_list
+                    orientation: 'horizontal'
+                    adaptive_width: True
+                    spacing: "12dp"
+                    padding: ["4dp", "4dp"]
+                    # Thumbnails will be added here dynamically
+
+        # --- CONTROL PANEL (25%) ---
+        MDBoxLayout:
+            orientation: 'vertical'
+            size_hint_y: 0.25
+            padding: ["16dp", "0dp", "16dp", "16dp"]
+            spacing: "12dp"
+            
+            # Toggle Segmented (Simulated with MDRaisedButton and MDOutlinedButton)
+            MDBoxLayout:
+                size_hint_y: None
+                height: "48dp"
+                spacing: "8dp"
+                pos_hint: {"center_x": .5}
+                adaptive_width: True
+                
+                MDFillRoundFlatButton:
+                    text: "Alignment"
+                    md_bg_color: (0.1, 0.7, 0.3, 1) if root.mode == "Alignment" else (0.8, 0.8, 0.8, 1)
+                    on_release: root.mode = "Alignment"
+                    
+                MDIcon:
+                    icon: "swap-horizontal"
+                    theme_text_color: "Secondary"
+                    pos_hint: {"center_y": .5}
+                    
+                MDFillRoundFlatButton:
+                    text: "Denoising"
+                    md_bg_color: (0.1, 0.7, 0.3, 1) if root.mode == "Denoising" else (0.8, 0.8, 0.8, 1)
+                    on_release: root.mode = "Denoising"
+
+            # Information Label
+            MDLabel:
+                text: "IMG-001 Reference" if root.has_images else "No images selected"
+                halign: "center"
+                font_style: "Caption"
+                theme_text_color: "Secondary"
+                adaptive_height: True
+
+            # Progress Bar (Simulated)
+            MDProgressBar:
+                id: progress_bar
+                value: root.progress
+                color: 0.1, 0.7, 0.3, 1
+                size_hint_y: None
+                height: "4dp"
+
+            # RUN BUTTON
+            MDFillRoundFlatIconButton:
+                icon: "play-circle-outline"
+                text: "RUN ALGORITHM"
+                font_style: "H6"
+                size_hint_x: 1
+                height: "56dp"
+                md_bg_color: 0.1, 0.7, 0.3, 1
+                on_release: root.run_algorithm()

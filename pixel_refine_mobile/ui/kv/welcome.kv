@@ -1,0 +1,59 @@
+#:kivy 2.3.1
+
+<WelcomeScreen>:
+    name: 'welcome'
+    md_bg_color: 0.95, 0.95, 0.95, 1
+
+    MDBoxLayout:
+        orientation: 'vertical'
+        padding: "20dp"
+        spacing: "20dp"
+
+        MDWidget:
+            size_hint_y: 0.2
+
+        MDIcon:
+            icon: "view-carousel"
+            pos_hint: {"center_x": .5}
+            font_size: "120sp"
+            theme_text_color: "Custom"
+            text_color: 0.2, 0.2, 0.2, 1
+            
+        MDLabel:
+            text: "PIXEL REFINE"
+            halign: "center"
+            font_style: "H5"
+            bold: True
+            theme_text_color: "Custom"
+            text_color: 0.1, 0.7, 0.3, 1  
+
+        MDLabel:
+            text: "Computational\\nPhotography Tools"
+            halign: "center"
+            font_style: "Subtitle1"
+            theme_text_color: "Secondary"
+            size_hint_y: None
+            height: self.texture_size[1]
+            
+        MDWidget:
+            size_hint_y: 0.3
+
+        MDBoxLayout:
+            orientation: 'vertical'
+            size_hint_y: None
+            height: "50dp"
+            spacing: "10dp"
+            
+            MDProgressBar:
+                id: progress
+                value: 0
+                color: 0.1, 0.7, 0.3, 1
+                
+            MDLabel:
+                text: "loading..."
+                halign: "center"
+                font_style: "Caption"
+                theme_text_color: "Secondary"
+
+        MDWidget:
+            size_hint_y: 0.1

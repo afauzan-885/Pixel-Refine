@@ -47,7 +47,7 @@ if TAICHI_AVAILABLE:
 
     @ti.kernel
     def _normalize_kernel_2d(
-        src: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        src: ti.types.ndarray(ndim=2),
         dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
         h: int,
         w: int,
@@ -62,7 +62,7 @@ if TAICHI_AVAILABLE:
 
     @ti.kernel
     def _normalize_kernel_3d(
-        src: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        src: ti.types.ndarray(ndim=3),
         dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
         h: int,
         w: int,
@@ -362,6 +362,28 @@ if TAICHI_AVAILABLE:
     # Tier 3: Full Pipeline (Highest Impact - 75% speedup)
     # ========================================================================
 
+    @ti.func
+    def _fused_apply_postprocess(
+        val: float,
+        scale_norm: float,
+        scale_gamma: float,
+        gamma_pow: float,
+        slope: float,
+        cutoff: float,
+        use_sharpen: int,
+    ) -> float:
+        """Shared fused post-process math for JIT and AOT kernels."""
+        green = val / scale_norm
+        green = green * scale_gamma
+        if green < cutoff:
+            green = green * slope
+        else:
+            green = 1.099 * tm.pow(green, 1.0 / gamma_pow) - 0.099
+
+        if use_sharpen:
+            green = (green - 0.5) * 0.7 + 0.5
+        return tm.clamp(green, 0.0, 1.0)
+
     @ti.kernel
     def _fused_full_pipeline_kernel(
         src: ti.types.ndarray(dtype=ti.f32, ndim=3), # Standardize to 3D for AOT
@@ -402,43 +424,134 @@ if TAICHI_AVAILABLE:
             x1 = x0 + 1
             y1 = y0 + 1
 
-            # Step 2: Sample green channel with bilinear interpolation
-            # Extract green (channel 1) during sampling
-            v00 = 0.0
-            v10 = 0.0
-            v01 = 0.0
-            v11 = 0.0
+            # Step 2: Sample green channel with bilinear interpolation (3D RGB input)
+            v00 = float(src[y0, x0, 1])
+            v10 = float(src[y0, x1, 1])
+            v01 = float(src[y1, x0, 1])
+            v11 = float(src[y1, x1, 1])
 
-            if ti.static(len(src.shape) == 3):
-                v00 = float(src[y0, x0, 1])
-                v10 = float(src[y0, x1, 1])
-                v01 = float(src[y1, x0, 1])
-                v11 = float(src[y1, x1, 1])
-            else:
-                v00 = float(src[y0, x0])
-                v10 = float(src[y0, x1])
-                v01 = float(src[y1, x0])
-                v11 = float(src[y1, x1])
+            top = v00 * (1.0 - fx) + v10 * fx
+            bottom = v01 * (1.0 - fx) + v11 * fx
+            green = top * (1.0 - fy) + bottom * fy
+            dst[y, x] = _fused_apply_postprocess(
+                green,
+                scale_norm,
+                scale_gamma,
+                gamma_pow,
+                slope,
+                cutoff,
+                use_sharpen,
+            )
+
+    @ti.kernel
+    def _fused_full_pipeline_i32_2d_aot(
+        src: ti.types.ndarray(dtype=ti.i32, ndim=2),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        src_h: int,
+        src_w: int,
+        dst_h: int,
+        dst_w: int,
+        scale_norm: float,
+        scale_gamma: float,
+        gamma_pow: float,
+        slope: float,
+        cutoff: float,
+        use_sharpen: int,
+    ):
+        """
+        AOT-stable fused pipeline for grayscale i32 input.
+        Shared math with _fused_full_pipeline_kernel.
+        """
+        for y, x in ti.ndrange(dst_h, dst_w):
+            u = (x + 0.5) / float(dst_w)
+            v = (y + 0.5) / float(dst_h)
+
+            src_x = u * float(src_w) - 0.5
+            src_y = v * float(src_h) - 0.5
+
+            x0 = int(ti.floor(src_x))
+            y0 = int(ti.floor(src_y))
+            fx = src_x - x0
+            fy = src_y - y0
+
+            x0 = tm.clamp(x0, 0, src_w - 2)
+            y0 = tm.clamp(y0, 0, src_h - 2)
+            x1 = x0 + 1
+            y1 = y0 + 1
+
+            v00 = float(src[y0, x0])
+            v10 = float(src[y0, x1])
+            v01 = float(src[y1, x0])
+            v11 = float(src[y1, x1])
+
+            top = v00 * (1.0 - fx) + v10 * fx
+            bottom = v01 * (1.0 - fx) + v11 * fx
+            gray = top * (1.0 - fy) + bottom * fy
+
+            dst[y, x] = _fused_apply_postprocess(
+                gray,
+                scale_norm,
+                scale_gamma,
+                gamma_pow,
+                slope,
+                cutoff,
+                use_sharpen,
+            )
+
+    @ti.kernel
+    def _fused_full_pipeline_i32_3d_aot(
+        src: ti.types.ndarray(dtype=ti.i32, ndim=3),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        src_h: int,
+        src_w: int,
+        dst_h: int,
+        dst_w: int,
+        scale_norm: float,
+        scale_gamma: float,
+        gamma_pow: float,
+        slope: float,
+        cutoff: float,
+        use_sharpen: int,
+    ):
+        """
+        AOT-stable fused pipeline for RGB i32 input.
+        Uses green channel for alignment parity with preprocess_pipeline_gpu(extract_green=True).
+        """
+        for y, x in ti.ndrange(dst_h, dst_w):
+            u = (x + 0.5) / float(dst_w)
+            v = (y + 0.5) / float(dst_h)
+
+            src_x = u * float(src_w) - 0.5
+            src_y = v * float(src_h) - 0.5
+
+            x0 = int(ti.floor(src_x))
+            y0 = int(ti.floor(src_y))
+            fx = src_x - x0
+            fy = src_y - y0
+
+            x0 = tm.clamp(x0, 0, src_w - 2)
+            y0 = tm.clamp(y0, 0, src_h - 2)
+            x1 = x0 + 1
+            y1 = y0 + 1
+
+            v00 = float(src[y0, x0, 1])
+            v10 = float(src[y0, x1, 1])
+            v01 = float(src[y1, x0, 1])
+            v11 = float(src[y1, x1, 1])
 
             top = v00 * (1.0 - fx) + v10 * fx
             bottom = v01 * (1.0 - fx) + v11 * fx
             green = top * (1.0 - fy) + bottom * fy
 
-            # Step 3: Normalize
-            green = green / scale_norm
-
-            # Step 4: Gamma correction
-            green = green * scale_gamma
-            if green < cutoff:
-                green = green * slope
-            else:
-                green = 1.099 * tm.pow(green, 1.0 / gamma_pow) - 0.099
-
-            # Step 5: Sharpen (contrast reduction)
-            if use_sharpen:
-                green = (green - 0.5) * 0.7 + 0.5
-
-            dst[y, x] = tm.clamp(green, 0.0, 1.0)
+            dst[y, x] = _fused_apply_postprocess(
+                green,
+                scale_norm,
+                scale_gamma,
+                gamma_pow,
+                slope,
+                cutoff,
+                use_sharpen,
+            )
 
     @ti_thread
     def fused_full_pipeline(
@@ -506,10 +619,11 @@ if TAICHI_AVAILABLE:
         # Run fused kernel
         scale_gamma = scale if is_linear else 1.0
         
-        # Standardize src to 3D for AOT kernel compatibility (H, W, C)
+        # Standardize src to 3D for fused kernel compatibility (H, W, 3)
         src_3d = src_gpu
         if len(src_gpu.shape) == 2:
-            src_3d = src_gpu.reshape((src_h, src_w, 1))
+            src_3d = common.get_temp_buffer((src_h, src_w, 3), ti.f32, buffer_provider)
+            _normalize_kernel_2d(src_gpu, src_3d, src_h, src_w, 1.0)
 
         _fused_full_pipeline_kernel(
             src_3d,
@@ -527,6 +641,8 @@ if TAICHI_AVAILABLE:
         )
 
         # Cleanup
+        if src_3d is not src_gpu:
+            common.release_temp_buffer(src_3d)
         if src_is_temp:
             common.release_temp_buffer(src_gpu)
 

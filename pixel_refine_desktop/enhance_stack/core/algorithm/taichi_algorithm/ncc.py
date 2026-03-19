@@ -185,17 +185,32 @@ def global_translate_zncc(ref, comp, max_shift=16):
     comp_gpu, comp_temp = common.ensure_taichi_field(comp, dtype=ti.f32)
 
     h, w = ref_gpu.shape[:2]
-    size = 2 * max_shift + 1
+    # Prevent empty valid region on very small coarse layers.
+    safe_shift = int(
+        min(
+            int(max_shift),
+            max(0, (int(h) - 1) // 2),
+            max(0, (int(w) - 1) // 2),
+        )
+    )
+    if safe_shift <= 0:
+        if ref_temp:
+            common.release_temp_buffer(ref_gpu)
+        if comp_temp:
+            common.release_temp_buffer(comp_gpu)
+        return 0, 0, 1e10
+
+    size = 2 * safe_shift + 1
     cost_surface = common.get_temp_buffer((size, size), ti.f32)
     cost_surface.fill(1e10)
 
-    _compute_global_zncc_surface(ref_gpu, comp_gpu, cost_surface, max_shift, h, w)
+    _compute_global_zncc_surface(ref_gpu, comp_gpu, cost_surface, safe_shift, h, w)
 
     surface_np = cost_surface.to_numpy()
     min_idx = np.unravel_index(np.argmin(surface_np), surface_np.shape)
 
-    best_dy = int(min_idx[0]) - max_shift
-    best_dx = int(min_idx[1]) - max_shift
+    best_dy = int(min_idx[0]) - safe_shift
+    best_dx = int(min_idx[1]) - safe_shift
     best_cost = float(surface_np[min_idx[0], min_idx[1]])
 
     common.release_temp_buffer(cost_surface)
