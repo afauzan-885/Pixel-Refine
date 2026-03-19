@@ -11,6 +11,9 @@ Note: All pyramid processing stays on GPU to minimize CPU-GPU transfer overhead.
 
 import numpy as np
 import time
+import os
+import ctypes
+from platform import system
 
 try:
     import taichi as ti
@@ -70,9 +73,9 @@ if TAICHI_AVAILABLE:
 
     @ti.kernel
     def _block_search_kernel(
-        ref_layer: ti.types.ndarray(),
-        comp_layer: ti.types.ndarray(),
-        refined_flow: ti.types.ndarray(),
+        ref_layer: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        comp_layer: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        refined_flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
         h: int,
         w: int,
         tile_h: int,
@@ -196,7 +199,7 @@ if TAICHI_AVAILABLE:
 
     @ti.kernel
     def _initialize_coarsest_flow_kernel(
-        flow: ti.types.ndarray(),
+        flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
         h: int,
         w: int,
         init_dx: float,
@@ -209,7 +212,7 @@ if TAICHI_AVAILABLE:
 
     @ti.func
     def _compute_regularization_params(
-        flow: ti.types.ndarray(),
+        flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
         y: int,
         x: int,
         tile_h: int,
@@ -302,11 +305,11 @@ if TAICHI_AVAILABLE:
 
     @ti.kernel
     def _search_coarse_level_kernel(
-        ref_layer: ti.types.ndarray(),
-        comp_layer: ti.types.ndarray(),
-        flow: ti.types.ndarray(),
-        previous_flow: ti.types.ndarray(),
-        refined_flow: ti.types.ndarray(),
+        ref_layer: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        comp_layer: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        previous_flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        refined_flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
         h: int,
         w: int,
         tile_h: int,
@@ -502,11 +505,11 @@ if TAICHI_AVAILABLE:
 
     @ti.kernel
     def _search_fine_level_kernel(
-        ref_layer: ti.types.ndarray(),
-        comp_layer: ti.types.ndarray(),
-        flow: ti.types.ndarray(),
-        previous_flow: ti.types.ndarray(),
-        refined_flow: ti.types.ndarray(),
+        ref_layer: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        comp_layer: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        previous_flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        refined_flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
         h: int,
         w: int,
         tile_h: int,
@@ -694,10 +697,10 @@ if TAICHI_AVAILABLE:
 
     @ti.kernel
     def _parabolic_subpixel_refinement_kernel(
-        ref_layer: ti.types.ndarray(),
-        comp_layer: ti.types.ndarray(),
-        flow: ti.types.ndarray(),
-        refined_flow: ti.types.ndarray(),
+        ref_layer: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        comp_layer: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        refined_flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
         h: int,
         w: int,
         tile_h: int,
@@ -782,6 +785,9 @@ if TAICHI_AVAILABLE:
                 delta_y = -(c_p1_y - c_m1_y) / denom_y
             delta_y = tm.clamp(delta_y, -0.5, 0.5)
 
+            # Define best_total_cost for cost_map (SSD at integer peak)
+            best_total_cost = c_0_0
+
             # Write result
             final_dx = float(int_dx) + delta_x
             final_dy = float(int_dy) + delta_y
@@ -790,6 +796,30 @@ if TAICHI_AVAILABLE:
                 if y + r < h and x + c < w:
                     refined_flow[y + r, x + c, 0] = final_dx
                     refined_flow[y + r, x + c, 1] = final_dy
+
+
+# ============================================================================
+# AOT Support
+# ============================================================================
+class _AotKernelProvider:
+    """Disabled AOT loader for Python. Relying on offline_cache instead."""
+    @classmethod
+    def get(cls, name, fallback):
+        # We return fallback directly because ti.aot.load is for C++ deployment.
+        # Python users should use offline_cache=True in ti.init().
+        return fallback
+
+def _aot_upsample_flow_gpu(src_gpu, dst_gpu, scale=2.0):
+    """AOT-aware upsample flow helper."""
+    kernel = _AotKernelProvider.get("_upsample_flow_kernel", None)
+    if kernel:
+        h_src, w_src = src_gpu.shape[:2]
+        h_dst, w_dst = dst_gpu.shape[:2]
+        if isinstance(scale, (tuple, list)): sx, sy = scale
+        else: sx, sy = scale, scale
+        kernel(src_gpu, dst_gpu, h_src, w_src, h_dst, w_dst, float(sx), float(sy))
+    else:
+        upsample_flow_gpu(src_gpu, dst_gpu, scale)
 
 
 # ============================================================================
@@ -805,7 +835,7 @@ def process_single_layer(
     total_layers: int,
     tile_h: int,
     tile_w: int,
-    base_search_dist: float,
+    search_dist: float,
     downscale_factor: int = 4,
 ) -> any:  # Returns ti.ndarray (GPU)
     """
@@ -840,15 +870,15 @@ def process_single_layer(
         print(
             f"[Global Shift] Detected Initial Motion Prior: ({global_dx}, {global_dy}) Confidence: {global_conf:.4f}"
         )
-        _initialize_coarsest_flow_kernel(
+        _AotKernelProvider.get("_initialize_coarsest_flow_kernel", _initialize_coarsest_flow_kernel)(
             flow_gpu, h, w, float(global_dx), float(global_dy)
         )
     else:
         if previous_flow_gpu is None:
-            _initialize_coarsest_flow_kernel(flow_gpu, h, w, 0.0, 0.0)
+            _AotKernelProvider.get("_initialize_coarsest_flow_kernel", _initialize_coarsest_flow_kernel)(flow_gpu, h, w, 0.0, 0.0)
         else:
             # Scalable upscale factor between pyramid levels
-            upsample_flow_gpu(
+            _aot_upsample_flow_gpu(
                 src_gpu=previous_flow_gpu,
                 dst_gpu=flow_gpu,
                 scale=float(downscale_factor),
@@ -864,7 +894,7 @@ def process_single_layer(
     current_tile_w = max(ImageAlignmentConfig.MIN_TILE_SIZE, min(tile_w, w))
 
     refined_flow_gpu = common.get_temp_buffer((h, w, 2), ti.f32, buffer_provider="pool")
-    _initialize_coarsest_flow_kernel(refined_flow_gpu, h, w, 0.0, 0.0)
+    _AotKernelProvider.get("_initialize_coarsest_flow_kernel", _initialize_coarsest_flow_kernel)(refined_flow_gpu, h, w, 0.0, 0.0)
 
     # Safe previous flow dummy buffer if layer 0 is the coarsest
     safe_prev_flow = previous_flow_gpu
@@ -878,7 +908,7 @@ def process_single_layer(
         prev_w = safe_prev_flow.shape[1]
 
     if is_finest_layer:
-        _search_fine_level_kernel(
+        _AotKernelProvider.get("_search_fine_level_kernel", _search_fine_level_kernel)(
             ref_gpu,
             comp_gpu,
             flow_gpu,
@@ -894,8 +924,8 @@ def process_single_layer(
         )
     elif is_coarsest_layer:
         # HDR+ style: wide-area block search at coarsest level (±4px at 1/64 res = ±256px full res)
-        search_radius = max(4, int(base_search_dist * 2))
-        _block_search_kernel(
+        search_radius = max(4, int(search_dist * 2))
+        _AotKernelProvider.get("_block_search_kernel", _block_search_kernel)(
             ref_gpu,
             comp_gpu,
             refined_flow_gpu,
@@ -907,9 +937,9 @@ def process_single_layer(
         )
     else:
         # HDR+ style: coarse layers with ±4px search (each level covers 4× more range)
-        current_search_dist = max(2, int(base_search_dist))
+        current_search_dist = max(2, int(search_dist))
 
-        _search_coarse_level_kernel(
+        _AotKernelProvider.get("_search_coarse_level_kernel", _search_coarse_level_kernel)(
             ref_gpu,
             comp_gpu,
             flow_gpu,
@@ -936,7 +966,7 @@ def process_single_layer(
         # t_sub_start = time.perf_counter()
         # Parabolic Subpixel Refinement (Fast subpixel correction for coarse levels)
         common.copy_field(refined_flow_gpu, flow_gpu)
-        _parabolic_subpixel_refinement_kernel(
+        _AotKernelProvider.get("_parabolic_subpixel_refinement_kernel", _parabolic_subpixel_refinement_kernel)(
             ref_gpu,
             comp_gpu,
             flow_gpu,
@@ -994,6 +1024,85 @@ def process_single_layer(
     return flow_gpu
 
 
+# ============================================================================
+# C++ TiRT Backend Loader (ctypes)
+# ============================================================================
+_TIRT_LIB = None
+
+def _get_tirt_lib():
+    """Lazy load the TIRT C++ library."""
+    global _TIRT_LIB
+    if _TIRT_LIB is not None:
+        return _TIRT_LIB
+    
+    lib_name = "alignment_tile_taichi_api.dll" if system() == "Windows" else "libalignment_tile_taichi_api.so"
+    # Search in common locations
+    possible_paths = [
+        os.path.join(os.path.dirname(__file__), lib_name),
+        os.path.join(os.getcwd(), lib_name),
+        os.path.join(os.getcwd(), "UI", "data", lib_name),
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path):
+            try:
+                _TIRT_LIB = ctypes.CDLL(path)
+                print(f"[TiRT] Loaded backend from: {path}")
+                
+                # Define argtypes for the C++ function
+                # void compute_flow_taichi_tirt(float* ref, float* comp, float* flow, int h, int w, ...)
+                _TIRT_LIB.compute_flow_taichi_tirt.argtypes = [
+                    ctypes.POINTER(ctypes.c_float), # ref
+                    ctypes.POINTER(ctypes.c_float), # comp
+                    ctypes.POINTER(ctypes.c_float), # flow_out
+                    ctypes.c_int, # h
+                    ctypes.c_int, # w
+                    ctypes.c_int, # tile_h
+                    ctypes.c_int, # tile_w
+                    ctypes.c_int, # n_layers
+                    ctypes.c_float, # search_dist
+                    ctypes.c_int # downscale_factor
+                ]
+                return _TIRT_LIB
+            except Exception as e:
+                print(f"[TiRT] Failed to load {path}: {e}")
+    
+    return None
+
+def _compute_alignment_flow_tirt(
+    ref_data: np.ndarray,
+    comp_data: np.ndarray,
+    tile_h: int,
+    tile_w: int,
+    n_layers: int,
+    search_dist: float,
+    downscale_factor: int,
+):
+    """Call the C++ TiRT backend via ctypes."""
+    lib = _get_tirt_lib()
+    if lib is None:
+        print("[TiRT Error] Library not found, falling back to Taichi Python.")
+        return None
+    
+    h, w = ref_data.shape[:2]
+    # Ensure data is float32 and contiguous
+    ref_ptr = ref_data.astype(np.float32).ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+    comp_ptr = comp_data.astype(np.float32).ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+    
+    # Prepare output buffer
+    flow_out = np.zeros((h, w, 2), dtype=np.float32)
+    flow_ptr = flow_out.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+    
+    try:
+        lib.compute_flow_taichi_tirt(
+            ref_ptr, comp_ptr, flow_ptr,
+            h, w, tile_h, tile_w, n_layers, search_dist, downscale_factor
+        )
+        return flow_out
+    except Exception as e:
+        print(f"[TiRT Error] Execution failed: {e}")
+        return None
+
 @ti_thread
 def compute_alignment_flow(
     ref_work_data: np.ndarray,
@@ -1007,8 +1116,20 @@ def compute_alignment_flow(
     return_confidence: bool = False,
 ) -> any:
     """
-    Compute alignment flow - Stable Version.
+    Compute alignment flow - Stable Version with Dual Backend Dispatcher.
     """
+    # --- Backend Dispatcher ---
+    backend_mode = os.environ.get("PIXEL_REFINE_BACKEND", "DEVELOPMENT")
+    
+    if backend_mode == "PRODUCTION":
+        flow_tirt = _compute_alignment_flow_tirt(
+            ref_work_data, current_work_data,
+            tile_h, tile_w, n_layers, search_dist, downscale_factor
+        )
+        if flow_tirt is not None:
+            return flow_tirt
+        # Fallback to Taichi if TIRT fails
+    
     if not TAICHI_AVAILABLE or not TAICHI_MODULES_AVAILABLE:
         raise ImportError("Taichi not ready")
 
@@ -1048,6 +1169,8 @@ def compute_alignment_flow(
 
     for i in range(actual_layers - 1, -1, -1):
         prev_flow = flow_gpu
+        is_finest = (i == 0)
+            
         flow_gpu = process_single_layer(
             ref_pyramid[i],
             current_pyramid[i],
@@ -1059,6 +1182,10 @@ def compute_alignment_flow(
             search_dist,
             downscale_factor,
         )
+        # Store the final result
+        if is_finest:
+            pass  # No cost map storage anymore
+            
         if prev_flow is not None:
             common.release_temp_buffer(prev_flow)
 

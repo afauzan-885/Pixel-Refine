@@ -210,11 +210,6 @@ class AlignmentTileTaichi:
 
         return warped_img
 
-        # Release full res flow
-        common.release_temp_buffer(flow_full_gpu)
-
-        return warped_img
-
     @ti.kernel
     def _resize_flow_kernel(
         self,

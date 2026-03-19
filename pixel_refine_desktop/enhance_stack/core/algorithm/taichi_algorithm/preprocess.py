@@ -47,7 +47,7 @@ if TAICHI_AVAILABLE:
 
     @ti.kernel
     def _normalize_kernel_2d(
-        src: ti.types.ndarray(ndim=2),
+        src: ti.types.ndarray(dtype=ti.f32, ndim=2),
         dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
         h: int,
         w: int,
@@ -62,7 +62,7 @@ if TAICHI_AVAILABLE:
 
     @ti.kernel
     def _normalize_kernel_3d(
-        src: ti.types.ndarray(ndim=3),
+        src: ti.types.ndarray(dtype=ti.f32, ndim=3),
         dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
         h: int,
         w: int,
@@ -364,7 +364,7 @@ if TAICHI_AVAILABLE:
 
     @ti.kernel
     def _fused_full_pipeline_kernel(
-        src: ti.types.ndarray(),
+        src: ti.types.ndarray(dtype=ti.f32, ndim=3), # Standardize to 3D for AOT
         dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
         src_h: int,
         src_w: int,
@@ -505,8 +505,14 @@ if TAICHI_AVAILABLE:
 
         # Run fused kernel
         scale_gamma = scale if is_linear else 1.0
+        
+        # Standardize src to 3D for AOT kernel compatibility (H, W, C)
+        src_3d = src_gpu
+        if len(src_gpu.shape) == 2:
+            src_3d = src_gpu.reshape((src_h, src_w, 1))
+
         _fused_full_pipeline_kernel(
-            src_gpu,
+            src_3d,
             dst_gpu,
             src_h,
             src_w,

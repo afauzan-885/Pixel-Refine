@@ -85,6 +85,29 @@ if TAICHI_AVAILABLE and _ti is not None:
             coarse_confidence[r, c] = conf
 
     @_ti.kernel
+    def _generate_weights_from_alignment_cost_kernel(
+        cost_map: _ti.types.ndarray(),
+        weight_map: _ti.types.ndarray(),
+        motion_sensitivity: float,
+    ):
+        """Convert alignment cost (ZMSSD) directly to merging weight."""
+        for r, c in _ti.ndrange(weight_map.shape[0], weight_map.shape[1]):
+            cost = cost_map[r, c]
+            # Simpler reciprocal weighting: 1 / (1 + cost * sensitivity)
+            # Alignment cost (ZMSSD) is typically in range [0, 1]
+            weight_map[r, c] = 1.0 / (1.0 + cost * motion_sensitivity * 10.0) # Scale sensitivity for alignment cost
+
+    def generate_weights_from_cost_taichi(
+        cost_map_gpu,
+        weight_map_gpu,
+        motion_sensitivity: float = 1.0,
+    ):
+        """Python wrapper for cost-to-weight kernel."""
+        _generate_weights_from_alignment_cost_kernel(
+            cost_map_gpu, weight_map_gpu, motion_sensitivity
+        )
+
+    @_ti.kernel
     def _phase2_fine_analysis(
         current: _ti.types.ndarray(),
         reference: _ti.types.ndarray(),

@@ -31,135 +31,7 @@ def get_taichi_worker():
     return worker
 
 
-class SimilaritySpatialInterface:
-    """
-    Membungkus pemanggilan fungsi C++ yang telah dioptimalkan.
-    Sekarang HANYA menghasilkan weight_map.
-    """
-
-    def __init__(self, lib_path):
-        if not os.path.exists(lib_path):
-            raise FileNotFoundError(f"Shared library not found: {lib_path}")
-        try:
-            self.clib = ctypes.CDLL(lib_path)
-            if not hasattr(self.clib, "generate_weight_map_jit"):
-                raise AttributeError(
-                    "Function 'generate_weight_map_jit' not found in DLL. Check C++ extern \"C\" block."
-                )
-            self._define_argtypes()
-        except OSError as e:
-            raise OSError(f"Error loading shared library {lib_path}: {e}")
-        except AttributeError as e:
-            raise AttributeError(
-                f"Function not found in DLL or error setting argtypes. Did you compile C++ correctly? Error: {e}"
-            )
-
-    def _define_argtypes(self):
-        self.clib.generate_weight_map_jit.argtypes = [
-            np.ctypeslib.ndpointer(
-                dtype=np.float32, ndim=2, flags=("C_CONTIGUOUS", "WRITEABLE")
-            ),  # weight_map_sum (2D)
-            np.ctypeslib.ndpointer(
-                dtype=np.float32, flags="C_CONTIGUOUS"
-            ),  # current_image (flattened 1D/3D OK)
-            np.ctypeslib.ndpointer(
-                dtype=np.float32, flags="C_CONTIGUOUS"
-            ),  # reference_image_processed
-            np.ctypeslib.ndpointer(
-                dtype=np.float32, flags="C_CONTIGUOUS"
-            ),  # base_window
-            ctypes.c_void_p,  # stability_map_ptr
-            np.ctypeslib.ndpointer(
-                dtype=np.int32, ndim=1, flags="C_CONTIGUOUS"
-            ),  # row_starts
-            np.ctypeslib.ndpointer(
-                dtype=np.int32, ndim=1, flags="C_CONTIGUOUS"
-            ),  # col_starts
-            ctypes.c_int,
-            ctypes.c_int,  # num_row_starts, num_col_starts
-            ctypes.c_int,
-            ctypes.c_int,  # tile_h, tile_w
-            ctypes.c_int,
-            ctypes.c_int,  # h_img, w_img
-            ctypes.c_int,  # channels
-            ctypes.c_float,  # motion_sensitivity
-            ctypes.c_float,  # noise_offset_factor
-            ctypes.c_float,  # precomputed_ref_noise_sigma
-        ]
-        self.clib.generate_weight_map_jit.restype = None
-
-    # --- PERBAIKAN KUNCI: Sederhanakan parameter fungsi ---
-    def call_generate_weight_map_jit(
-        self,
-        weight_map_sum,
-        current_image,
-        reference_image_processed,
-        base_window,
-        stability_map,
-        row_starts,
-        col_starts,
-        tile_h,
-        tile_w,
-        h,
-        w,
-        channels,
-        motion_sensitivity,
-        noise_offset_factor,
-        precomputed_ref_noise_sigma,
-    ):
-
-        stability_map_ptr = None
-        if stability_map is not None:
-            if not stability_map.flags["C_CONTIGUOUS"]:
-                stability_map = np.ascontiguousarray(stability_map)
-            stability_map_ptr = stability_map.ctypes.data_as(ctypes.c_void_p)
-
-        # --- PERBAIKAN KUNCI: Panggil dengan argumen yang benar ---
-        self.clib.generate_weight_map_jit(
-            weight_map_sum,
-            current_image,
-            reference_image_processed,
-            base_window,
-            stability_map_ptr,
-            row_starts,
-            col_starts,
-            len(row_starts),
-            len(col_starts),
-            tile_h,
-            tile_w,
-            h,
-            w,
-            channels,
-            motion_sensitivity,
-            noise_offset_factor,
-            precomputed_ref_noise_sigma,
-        )
-
-
-ALIGN_LIB = None
-try:
-    lib_path = os.path.join("pixel_refine_desktop", "ui", "data", "alignment_tile.dll")
-    ALIGN_LIB = ctypes.CDLL(lib_path)
-
-    # Definisikan tanda tangan fungsi compute_alignment_flow
-    ALIGN_LIB.compute_alignment_flow.restype = ctypes.POINTER(ctypes.c_float)
-    ALIGN_LIB.compute_alignment_flow.argtypes = [
-        ctypes.POINTER(ctypes.c_float),  # ref_work_data
-        ctypes.POINTER(ctypes.c_float),  # current_work_data
-        ctypes.c_int,  # work_h
-        ctypes.c_int,  # work_w
-        ctypes.c_int,  # tile_h
-        ctypes.c_int,  # tile_w
-        ctypes.c_int,  # n_layers
-        ctypes.c_float,  # search_dist
-    ]
-
-    # Definisikan tanda tangan fungsi free_flow_memory
-    ALIGN_LIB.free_flow_memory.argtypes = [ctypes.POINTER(ctypes.c_float)]
-    ALIGN_LIB.free_flow_memory.restype = None
-
-except (OSError, AttributeError) as e:
-    ALIGN_LIB = None
+# --- SimilarityFrequencyInterface REMOVED (Legacy) ---
 
 
 class ONNXSessionManager:
@@ -648,6 +520,9 @@ def perform_alignment_gpu(
 
     print(f"[GPU Alignment] Processing {num_images - 1} images with Taichi GPU...")
 
+    # Array to store alignment cost maps (ZMSSD) for each image as confidence
+    cost_maps = [None] * num_images
+
     try:
         # Define GPU alignment task
         def _run_gpu_alignment_loop():
@@ -667,7 +542,8 @@ def perform_alignment_gpu(
                     return False
 
                 # Compute flow + warp (integrated)
-                warped_image = compute_alignment_and_warp_hybrid_taichi(
+                # Now returns (warped_image, cost_map)
+                result = compute_alignment_and_warp_hybrid_taichi(
                     images[i],
                     tile_h,
                     tile_w,
@@ -679,9 +555,16 @@ def perform_alignment_gpu(
                     search_dist=search_dist,
                 )
 
-                if warped_image is not None:
+                if result is not None and isinstance(result, tuple):
+                    warped_image, cost_map = result
                     images[i] = warped_image
+                    cost_maps[i] = cost_map
 
+                    if save_align_image:
+                        save_aligned_image(warped_image, i + index_offset, "GPU")
+                elif result is not None:  # Fallback for old API if needed
+                    warped_image = result
+                    images[i] = warped_image
                     if save_align_image:
                         save_aligned_image(warped_image, i + index_offset, "GPU")
                 else:
@@ -717,9 +600,8 @@ def perform_alignment_gpu(
         # [SMART LIFECYCLE] Reclaim VRAM after alignment
         try:
             worker.submit_and_wait(clear_taichi_cache)
-            # print("[Taichi] Alignment VRAM reclaimed.")
         except Exception as e:
-            print(f"[Taichi] Warning: Failed to reclaim alignment VRAM: {e}")
+            print(f"[Taichi] Alignment cleanup warning: {e}")
 
         print("✅ GPU Alignment selesai.")
         return True
@@ -727,13 +609,6 @@ def perform_alignment_gpu(
     except Exception as e:
         print(f"Error during GPU alignment: {e}")
         traceback.print_exc()
-
-        # Cleanup on error
-        try:
-            worker = get_taichi_worker()
-            worker.submit_and_wait(clear_taichi_cache)
-        except:
-            pass
 
         return False
 
@@ -1059,12 +934,12 @@ def perform_image_alignment(
                         )
 
             print("✅ Alignment Farneback selesai.")
-            return True
+            return True, [None] * num_images
 
         except Exception as e:
             print(f"Error kritis selama Farneback: {e}")
             traceback.print_exc()
-            return False
+            return False, None
 
     # =================================================================
     # === [LEGACY] BACKEND C++ (alignment_tile) - DIHAPUS ===

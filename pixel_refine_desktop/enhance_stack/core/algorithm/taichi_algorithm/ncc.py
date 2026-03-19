@@ -73,9 +73,9 @@ if TAICHI_AVAILABLE:
 
     @ti.kernel
     def _compute_global_zncc_surface(
-        ref: ti.types.ndarray(),
-        comp: ti.types.ndarray(),
-        cost_surface: ti.types.ndarray(),
+        ref: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        comp: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        cost_surface: ti.types.ndarray(dtype=ti.f32, ndim=2),
         max_shift: int,
         h: int,
         w: int,

@@ -6,7 +6,12 @@ This module initializes and runs the Pixel Refine application.
 
 import sys
 import os
+import time
 
+# --- Backend Configuration for AOT/TiRT ---
+# PRODUCTION = C++ TiRT (Ahead-of-Time)
+# DEVELOPMENT = Taichi Python (Just-in-Time / Cache)
+os.environ.get("PIXEL_REFINE_BACKEND", "DEVELOPMENT") # Default to Development
 # Disable CUDA Async Malloc for Taichi stability before any other imports
 os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
 

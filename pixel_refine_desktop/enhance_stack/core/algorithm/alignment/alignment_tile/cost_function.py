@@ -62,8 +62,8 @@ if TAICHI_AVAILABLE:
 
     @ti.func
     def compute_zmsad_cost(
-        ref: ti.types.ndarray(),
-        comp: ti.types.ndarray(),
+        ref: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        comp: ti.types.ndarray(dtype=ti.f32, ndim=2),
         y_ref: int,
         x_ref: int,
         y_comp: int,
@@ -104,8 +104,8 @@ if TAICHI_AVAILABLE:
 
     @ti.func
     def compute_zmssd_cost(
-        ref: ti.types.ndarray(),
-        comp: ti.types.ndarray(),
+        ref: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        comp: ti.types.ndarray(dtype=ti.f32, ndim=2),
         y_ref: int,
         x_ref: int,
         y_comp: int,
@@ -141,8 +141,8 @@ if TAICHI_AVAILABLE:
 
     @ti.func
     def compute_l1_cost(
-        ref: ti.types.ndarray(),
-        comp: ti.types.ndarray(),
+        ref: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        comp: ti.types.ndarray(dtype=ti.f32, ndim=2),
         y_ref: int,
         x_ref: int,
         y_comp: int,

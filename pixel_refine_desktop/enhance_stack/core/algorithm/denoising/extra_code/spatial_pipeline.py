@@ -327,6 +327,7 @@ def process_in_gpu(
     )
     from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.compute_spatial import (
         generate_spatial_weights_taichi,
+        generate_weights_from_cost_taichi,
         accumulate_spatial_merging_taichi,
     )
     from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.bilinear_interpolation import (
@@ -340,9 +341,8 @@ def process_in_gpu(
 
     num_images = len(images)
 
-    # 1. ALIGNMENT
     if enable_alignment and num_images > 1:
-        perform_alignment_gpu(
+        success = perform_alignment_gpu(
             images,
             reference_image_float,
             work_res_h,
@@ -359,6 +359,8 @@ def process_in_gpu(
             index_offset=images_processed_so_far,
             **kwargs,
         )
+        if not success:
+            print("Warning: GPU alignment failed partially.")
         if stop_requested and stop_requested():
             return 0, None, None, 0.0
 

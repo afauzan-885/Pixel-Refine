@@ -1,6 +1,7 @@
 """Image Pyramid - Taichi GPU"""
 
 import numpy as np
+import os
 
 try:
     import taichi as ti
@@ -20,8 +21,8 @@ if TAICHI_AVAILABLE:
 
     @ti.kernel
     def _downsample_2x_kernel(
-        src: ti.types.ndarray(),
-        dst: ti.types.ndarray(),
+        src: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
         h_src: int,
         w_src: int,
         h_dst: int,
@@ -47,8 +48,8 @@ if TAICHI_AVAILABLE:
 
     @ti.kernel
     def _upsample_flow_kernel(
-        src: ti.types.ndarray(),
-        dst: ti.types.ndarray(),
+        src: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
         h_src: int,
         w_src: int,
         h_dst: int,
@@ -69,6 +70,21 @@ if TAICHI_AVAILABLE:
 
             dst[r, c, 0] = val0 * scale_x
             dst[r, c, 1] = val1 * scale_y
+
+
+# ============================================================================
+# AOT Support
+# ============================================================================
+class _AotKernelProvider:
+    """Lazy loader for AOT kernels."""
+    _module = None
+    _kernels = {}
+
+    @classmethod
+    def get(cls, name, fallback):
+        # Python users should use offline_cache=True in ti.init().
+        # ti.aot.load is not available in the Python API.
+        return fallback
 
 
 @ti_thread
@@ -147,7 +163,7 @@ def build_image_pyramid_gpu(
                     break
 
                 dst = common.get_temp_buffer((h_d, w_d), ti.f32, buffer_provider)
-                _downsample_2x_kernel(current_lvl_input, dst, h_s, w_s, h_d, w_d)
+                _AotKernelProvider.get("_downsample_2x_kernel", _downsample_2x_kernel)(current_lvl_input, dst, h_s, w_s, h_d, w_d)
                 
                 if step < steps_per_level - 1:
                     if current_lvl_input is not prev:
@@ -226,6 +242,6 @@ def upsample_flow_gpu(
     else:
         sx, sy = scale, scale
 
-    _upsample_flow_kernel(
+    _AotKernelProvider.get("_upsample_flow_kernel", _upsample_flow_kernel)(
         src_gpu, dst_gpu, h_src, w_src, h_dst, w_dst, float(sx), float(sy)
     )
