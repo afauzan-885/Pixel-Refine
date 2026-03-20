@@ -2,14 +2,19 @@
 
 <ProjectScreen>:
     name: 'project'
-    md_bg_color: 0.98, 0.98, 0.98, 1
+    md_bg_color: 0.95, 0.95, 0.95, 1
 
     MDBoxLayout:
         orientation: 'vertical'
-        # Tambahkan padding atas agar tidak menabrak status bar HP
-        padding:["0dp", "24dp", "0dp", "0dp"] 
         
-        # MDTopAppBar dihapus dari sini
+        MDTopAppBar:
+            id: top_bar
+            title: "Projects"
+            elevation: 0
+            md_bg_color: 0.95, 0.95, 0.95, 1
+            specific_text_color: 0.2, 0.2, 0.2, 1
+            left_action_items: [["arrow-left", lambda x: root.go_back()]]
+            right_action_items: [["export", lambda x: None]]
             
         MDScrollView:
             MDBoxLayout:
@@ -18,9 +23,7 @@
                 spacing: "24dp"
                 adaptive_height: True
                 
-                # ==========================================
-                # EMPTY STATE (Mulai Proyek Baru)
-                # ==========================================
+                # --- EMPTY STATE: Large New Project Button ---
                 MDBoxLayout:
                     orientation: 'vertical'
                     adaptive_height: True
@@ -32,27 +35,26 @@
                     
                     MDCard:
                         orientation: "vertical"
-                        size_hint: .9, .8
-                        pos_hint: {"center_x": .5, "center_y": .5}
+                        size_hint: .9, .9
+                        pos_hint: {"center_x": .5}
                         padding: "24dp"
                         md_bg_color: 1, 1, 1, 1
                         radius: [25, 25, 25, 25]
-                        elevation: 0
+                        elevation: 2
                         ripple_behavior: True
-                        on_release: root.open_naming_sheet()
+                        on_release: root.create_new_project()
                         
                         MDBoxLayout:
                             orientation: 'vertical'
-                            spacing: "16dp"
-                            pos_hint: {"center_y": .5}
+                            spacing: "20dp"
                             
                             MDIcon:
-                                icon: "image-multiple"
+                                icon: "image-multiple-outline"
                                 font_size: "80sp"
                                 halign: "center"
                                 pos_hint: {"center_x": .5}
                                 theme_text_color: "Custom"
-                                text_color: 0.1, 0.65, 0.4, 1
+                                text_color: 0.1, 0.7, 0.3, 1
                                 
                             MDLabel:
                                 text: "Mulai Proyek Baru"
@@ -64,95 +66,69 @@
                                 text: "Ketuk untuk memilih foto burst\ndari galeri Anda"
                                 halign: "center"
                                 theme_text_color: "Secondary"
-                                font_style: "Body2"
+                                font_style: "Body1"
 
-                # ==========================================
-                # POPULATED STATE (Recent & Other Projects)
-                # ==========================================
+                # --- HAS PROJECTS STATE: Grid View ---
                 MDBoxLayout:
                     orientation: 'vertical'
                     adaptive_height: True
                     spacing: "16dp"
                     opacity: 1 if root.has_projects else 0
                     disabled: not root.has_projects
-                    size_hint_y: None if not root.has_projects else 1 
+                    size_hint_y: None if root.has_projects else 1 
                 
                     MDLabel:
-                        text: "Recent Project"
+                        text: "Recent Projects"
                         font_style: "H6"
                         bold: True
                         adaptive_height: True
                     
+                    # Grid for Recent Projects
                     MDGridLayout:
                         id: recent_grid
                         cols: 3
-                        spacing: "12dp"
+                        spacing: "10dp"
                         adaptive_height: True
                         
-                        # DASHED BORDER "NEW PROJECT" CARD
+                        # Plus / New Card 
                         MDCard:
                             orientation: "vertical"
                             size_hint: None, None
-                            size: "105dp", "130dp"
-                            md_bg_color: 0.95, 0.98, 0.95, 1
-                            radius: [15, 15, 15, 15]
-                            elevation: 0
+                            size: "100dp", "100dp"
+                            padding: "10dp"
+                            md_bg_color: 1, 1, 1, 1
+                            radius: [10, 10, 10, 10]
                             ripple_behavior: True
-                            on_release: root.open_naming_sheet()
-                            # Custom Dashed Border using Canvas
-                            canvas.after:
-                                Color:
-                                    rgba: 0.1, 0.65, 0.4, 1
-                                Line:
-                                    rounded_rectangle: [self.x, self.y, self.width, self.height, 15]
-                                    dash_offset: 4
-                                    dash_length: 4
-                                    width: 1.2
+                            on_release: root.create_new_project()
                             
                             MDIcon:
-                                icon: "plus"
+                                icon: "folder-plus"
                                 pos_hint: {"center_x": .5, "center_y": .6}
-                                font_size: "32sp"
+                                font_size: "36sp"
                                 theme_text_color: "Custom"
-                                text_color: 0.1, 0.65, 0.4, 1
+                                text_color: 0.1, 0.7, 0.3, 1
                                 
                             MDLabel:
-                                text: "New Project"
+                                text: "New"
                                 halign: "center"
                                 theme_text_color: "Custom"
-                                text_color: 0.1, 0.1, 0.1, 1
+                                text_color: 0.2, 0.2, 0.2, 1
                                 font_style: "Caption"
+                                bold: True
                                 
-                        # Example Existing Project Card (IMG-001)
-                        MDRelativeLayout:
-                            size_hint: None, None
-                            size: "105dp", "130dp"
-                            
-                            FitImage:
-                                source: "placeholder_image.jpg" # Ganti dengan gambar Anda
-                                radius: [15, 15, 15, 15]
-                                
-                            MDCard:
-                                size_hint: 1, None
-                                height: "30dp"
-                                md_bg_color: 1, 1, 1, 0.9
-                                radius: [0, 0, 15, 15]
-                                padding: ["8dp", "2dp", "4dp", "2dp"]
-                                
-                                MDLabel:
-                                    text: "IMG-001"
-                                    font_style: "Caption"
-                                    bold: True
-                                    
-                                MDCard:
-                                    md_bg_color: 0.1, 0.65, 0.4, 1
-                                    radius: [4, 4, 4, 4]
-                                    size_hint: None, None
-                                    size: "24dp", "16dp"
-                                    pos_hint: {"center_y": .5}
-                                    MDLabel:
-                                        text: "DN"
-                                        color: 1, 1, 1, 1
-                                        font_size: "10sp"
-                                        halign: "center"
-                                        bold: True
+                    MDWidget:
+                        size_hint_y: None
+                        height: "10dp"
+                        
+                    MDLabel:
+                        text: "Other projects"
+                        font_style: "H6"
+                        bold: True
+                        adaptive_height: True
+                        
+                    # Grid for Other Projects
+                    MDGridLayout:
+                        id: other_grid
+                        cols: 3
+                        spacing: "10dp"
+                        adaptive_height: True

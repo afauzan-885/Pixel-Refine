@@ -91,6 +91,156 @@ if TAICHI_AVAILABLE:
             res += row_res * wy[m]
         return res
 
+    @ti.func
+    def _guided_flow_at_i32_ref2d(
+        flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        ref_i32: ti.types.ndarray(dtype=ti.i32, ndim=2),
+        y: int,
+        x: int,
+        h: int,
+        w: int,
+    ) -> ti.types.vector(2, ti.f32):
+        """
+        AOT-friendly guided flow aggregation:
+        - fixed ref dtype/shape (i32, 2D)
+        - no template args / dynamic shape checks
+        """
+        inv_norm = 1.0 / 65535.0
+        total_w = 1e-12
+        sum_u, sum_v = 0.0, 0.0
+        center_val = float(ref_i32[y, x]) * inv_norm
+
+        for dy in ti.static(range(-2, 3)):
+            ny = tm.clamp(y + dy, 0, h - 1)
+            for dx in ti.static(range(-2, 3)):
+                nx = tm.clamp(x + dx, 0, w - 1)
+
+                w_s = 0.0
+                if ti.static(abs(dx) == 2):
+                    if ti.static(abs(dy) == 2):
+                        w_s = 0.002969
+                    elif ti.static(abs(dy) == 1):
+                        w_s = 0.013306
+                    else:
+                        w_s = 0.021938
+                elif ti.static(abs(dx) == 1):
+                    if ti.static(abs(dy) == 2):
+                        w_s = 0.013306
+                    elif ti.static(abs(dy) == 1):
+                        w_s = 0.059634
+                    else:
+                        w_s = 0.098320
+                else:
+                    if ti.static(abs(dy) == 2):
+                        w_s = 0.021938
+                    elif ti.static(abs(dy) == 1):
+                        w_s = 0.098320
+                    else:
+                        w_s = 0.162103
+
+                val_neighbor = float(ref_i32[ny, nx]) * inv_norm
+                diff = val_neighbor - center_val
+                w_curr = w_s * ti.exp(-(diff * diff) * 50.0)
+                sum_u += flow[ny, nx, 0] * w_curr
+                sum_v += flow[ny, nx, 1] * w_curr
+                total_w += w_curr
+
+        return ti.Vector([sum_u / total_w, sum_v / total_w])
+
+    @ti.func
+    def _guided_flow_at_i32_ref3d(
+        flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        ref_i32: ti.types.ndarray(dtype=ti.i32, ndim=3),
+        y: int,
+        x: int,
+        h: int,
+        w: int,
+    ) -> ti.types.vector(2, ti.f32):
+        """
+        AOT-friendly guided flow aggregation for RGB reference (uses green channel).
+        """
+        inv_norm = 1.0 / 65535.0
+        total_w = 1e-12
+        sum_u, sum_v = 0.0, 0.0
+        center_val = float(ref_i32[y, x, 1]) * inv_norm
+
+        for dy in ti.static(range(-2, 3)):
+            ny = tm.clamp(y + dy, 0, h - 1)
+            for dx in ti.static(range(-2, 3)):
+                nx = tm.clamp(x + dx, 0, w - 1)
+
+                w_s = 0.0
+                if ti.static(abs(dx) == 2):
+                    if ti.static(abs(dy) == 2):
+                        w_s = 0.002969
+                    elif ti.static(abs(dy) == 1):
+                        w_s = 0.013306
+                    else:
+                        w_s = 0.021938
+                elif ti.static(abs(dx) == 1):
+                    if ti.static(abs(dy) == 2):
+                        w_s = 0.013306
+                    elif ti.static(abs(dy) == 1):
+                        w_s = 0.059634
+                    else:
+                        w_s = 0.098320
+                else:
+                    if ti.static(abs(dy) == 2):
+                        w_s = 0.021938
+                    elif ti.static(abs(dy) == 1):
+                        w_s = 0.098320
+                    else:
+                        w_s = 0.162103
+
+                val_neighbor = float(ref_i32[ny, nx, 1]) * inv_norm
+                diff = val_neighbor - center_val
+                w_curr = w_s * ti.exp(-(diff * diff) * 50.0)
+                sum_u += flow[ny, nx, 0] * w_curr
+                sum_v += flow[ny, nx, 1] * w_curr
+                total_w += w_curr
+
+        return ti.Vector([sum_u / total_w, sum_v / total_w])
+
+    @ti.kernel
+    def _warp_guided_i32_aot(
+        src: ti.types.ndarray(dtype=ti.i32, ndim=2),
+        flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        dst: ti.types.ndarray(dtype=ti.i32, ndim=2),
+        ref: ti.types.ndarray(dtype=ti.i32, ndim=2),
+        h: int,
+        w: int,
+    ):
+        """
+        Public fixed-signature kernel for AOT export.
+        Keeping this in warp.py avoids reimplementing warp logic in aot_alignment_compiler.py.
+        """
+        for y, x in ti.ndrange(h, w):
+            guided_uv = _guided_flow_at_i32_ref2d(flow, ref, y, x, h, w)
+            u_final = float(x) + guided_uv[0]
+            v_final = float(y) + guided_uv[1]
+            res = sample_bicubic_fast(src, u_final, v_final, h, w)
+            dst[y, x] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.i32)
+
+    @ti.kernel
+    def _warp_guided_i32_rgb_aot(
+        src: ti.types.ndarray(dtype=ti.i32, ndim=3),
+        flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        dst: ti.types.ndarray(dtype=ti.i32, ndim=3),
+        ref: ti.types.ndarray(dtype=ti.i32, ndim=3),
+        h: int,
+        w: int,
+    ):
+        """
+        Public fixed-signature kernel for RGB AOT export.
+        """
+        for y, x in ti.ndrange(h, w):
+            guided_uv = _guided_flow_at_i32_ref3d(flow, ref, y, x, h, w)
+            u_final = float(x) + guided_uv[0]
+            v_final = float(y) + guided_uv[1]
+            for c in ti.static(range(3)):
+                res = sample_bicubic_3ch_fast(src, u_final, v_final, h, w, c)
+                dst[y, x, c] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.i32)
+
     # Kernels handling normalization and casting internally
 
     @ti.kernel

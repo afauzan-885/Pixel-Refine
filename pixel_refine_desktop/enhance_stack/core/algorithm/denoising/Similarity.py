@@ -416,9 +416,7 @@ class SimilarityAlgorithm:
 
         # --- Jalankan merging (Spatial) ---
         current_tile_size = (
-            tile_size
-            if tile_size is not None
-            else common_call_args.get("tile_size")
+            tile_size if tile_size is not None else common_call_args.get("tile_size")
         )
         current_overlap = (
             overlap if overlap is not None else common_call_args.get("overlap")
@@ -687,8 +685,8 @@ def main(
         spatial_noise_offset_factor_arg = general_settings.get(
             "similarity_spatial_noise_mad_offset_factor", 1.0
         )
-        extra_merging_params["similarity_spatial_num_workers"] = (
-            general_settings.get("similarity_spatial_num_workers", 1)
+        extra_merging_params["similarity_spatial_num_workers"] = general_settings.get(
+            "similarity_spatial_num_workers", 1
         )  # Default -1 (Auto)
         custom_lib_path = general_settings.get("similarity_lib_path")
         if custom_lib_path:

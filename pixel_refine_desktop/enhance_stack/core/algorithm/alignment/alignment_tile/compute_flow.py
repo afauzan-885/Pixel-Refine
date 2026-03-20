@@ -43,6 +43,18 @@ try:
 
     # common might be useful
     from ...taichi_algorithm import common
+    # Import kernels directly from ncc module to avoid shadowing from taichi_algorithm.ncc function
+    from ...taichi_algorithm.ncc import (
+        _compute_global_zncc_surface,
+        _reduce_min_2d_kernel,
+    )
+
+    class _NccModuleWrapper:
+        def __init__(self):
+            self._compute_global_zncc_surface = _compute_global_zncc_surface
+            self._reduce_min_2d_kernel = _reduce_min_2d_kernel
+
+    ncc_module = _NccModuleWrapper()
     from ...taichi_algorithm.taichi_worker import ti_thread
 
     TAICHI_MODULES_AVAILABLE = True
@@ -113,14 +125,7 @@ if TAICHI_AVAILABLE:
                         continue
 
                     cost = cost_function.compute_zmssd_cost(
-                        ref_layer,
-                        comp_layer,
-                        y,
-                        x,
-                        test_y,
-                        test_x,
-                        tile_h,
-                        tile_w,
+                        ref_layer, comp_layer, y, x, test_y, test_x, tile_h, tile_w, h, w, h, w
                     )
 
                     # Apply bias to (0,0)
@@ -141,44 +146,16 @@ if TAICHI_AVAILABLE:
                 # Sample 4 neighbors
                 c0 = best_cost
                 cx_m1 = cost_function.compute_zmssd_cost(
-                    ref_layer,
-                    comp_layer,
-                    y,
-                    x,
-                    y + int(best_dy),
-                    x + int(best_dx) - 1,
-                    tile_h,
-                    tile_w,
+                    ref_layer, comp_layer, y, x, y + int(best_dy), x + int(best_dx) - 1, tile_h, tile_w, h, w, h, w
                 )
                 cx_p1 = cost_function.compute_zmssd_cost(
-                    ref_layer,
-                    comp_layer,
-                    y,
-                    x,
-                    y + int(best_dy),
-                    x + int(best_dx) + 1,
-                    tile_h,
-                    tile_w,
+                    ref_layer, comp_layer, y, x, y + int(best_dy), x + int(best_dx) + 1, tile_h, tile_w, h, w, h, w
                 )
                 cy_m1 = cost_function.compute_zmssd_cost(
-                    ref_layer,
-                    comp_layer,
-                    y,
-                    x,
-                    y + int(best_dy) - 1,
-                    x + int(best_dx),
-                    tile_h,
-                    tile_w,
+                    ref_layer, comp_layer, y, x, y + int(best_dy) - 1, x + int(best_dx), tile_h, tile_w, h, w, h, w
                 )
                 cy_p1 = cost_function.compute_zmssd_cost(
-                    ref_layer,
-                    comp_layer,
-                    y,
-                    x,
-                    y + int(best_dy) + 1,
-                    x + int(best_dx),
-                    tile_h,
-                    tile_w,
+                    ref_layer, comp_layer, y, x, y + int(best_dy) + 1, x + int(best_dx), tile_h, tile_w, h, w, h, w
                 )
 
                 # Parabolic fit: x = x_int - (f(x+1) - f(x-1)) / (2 * (f(x+1) + f(x-1) - 2*f(x)))
@@ -398,7 +375,12 @@ if TAICHI_AVAILABLE:
                         is_unique = False
                 
                 if is_unique and not (check_y <= -tile_h or check_x <= -tile_w or check_y >= h or check_x >= w):
-                    cost = cost_function.compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w) * tile_area_inv
+                    cost = (
+                        cost_function.compute_zmssd_cost(
+                            ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w, h, w, h, w
+                        )
+                        * tile_area_inv
+                    )
                     if cost < best_cand_cost:
                         best_cand_cost, best_cand_dx, best_cand_dy = cost, cands_dx[cand_idx], cands_dy[cand_idx]
 
@@ -413,7 +395,12 @@ if TAICHI_AVAILABLE:
                         if cands_dx[i] == cands_dx[prev_idx] and cands_dy[i] == cands_dy[prev_idx]: is_unique = False
                     
                     if is_unique and not (check_y <= -tile_h or check_x <= -tile_w or check_y >= h or check_x >= w):
-                        cost = cost_function.compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w) * tile_area_inv
+                        cost = (
+                            cost_function.compute_zmssd_cost(
+                                ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w, h, w, h, w
+                            )
+                            * tile_area_inv
+                        )
                         if cost < best_cand_cost:
                             best_cand_cost, best_cand_dx, best_cand_dy = cost, cands_dx[i], cands_dy[i]
 
@@ -428,7 +415,12 @@ if TAICHI_AVAILABLE:
                         if cands_dx[i] == cands_dx[prev_idx] and cands_dy[i] == cands_dy[prev_idx]: is_unique = False
                     
                     if is_unique and not (check_y <= -tile_h or check_x <= -tile_w or check_y >= h or check_x >= w):
-                        cost = cost_function.compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w) * tile_area_inv
+                        cost = (
+                            cost_function.compute_zmssd_cost(
+                                ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w, h, w, h, w
+                            )
+                            * tile_area_inv
+                        )
                         if cost < best_cand_cost:
                             best_cand_cost, best_cand_dx, best_cand_dy = cost, cands_dx[i], cands_dy[i]
 
@@ -466,6 +458,10 @@ if TAICHI_AVAILABLE:
                             test_x,
                             tile_h,
                             tile_w,
+                            h,
+                            w,
+                            h,
+                            w,
                         )
                         visual_cost = raw_cost_ssd * tile_area_inv
 
@@ -593,7 +589,12 @@ if TAICHI_AVAILABLE:
                         is_unique = False
                 
                 if is_unique and not (check_y <= -tile_h or check_x <= -tile_w or check_y >= h or check_x >= w):
-                    cost = cost_function.compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w) * tile_area_inv
+                    cost = (
+                        cost_function.compute_zmssd_cost(
+                            ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w, h, w, h, w
+                        )
+                        * tile_area_inv
+                    )
                     if cost < best_cand_cost:
                         best_cand_cost, best_cand_dx, best_cand_dy = cost, cands_dx[cand_idx], cands_dy[cand_idx]
 
@@ -608,7 +609,12 @@ if TAICHI_AVAILABLE:
                         if cands_dx[i] == cands_dx[prev_idx] and cands_dy[i] == cands_dy[prev_idx]: is_unique = False
                     
                     if is_unique and not (check_y <= -tile_h or check_x <= -tile_w or check_y >= h or check_x >= w):
-                        cost = cost_function.compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w) * tile_area_inv
+                        cost = (
+                            cost_function.compute_zmssd_cost(
+                                ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w, h, w, h, w
+                            )
+                            * tile_area_inv
+                        )
                         if cost < best_cand_cost:
                             best_cand_cost, best_cand_dx, best_cand_dy = cost, cands_dx[i], cands_dy[i]
 
@@ -623,7 +629,12 @@ if TAICHI_AVAILABLE:
                         if cands_dx[i] == cands_dx[prev_idx] and cands_dy[i] == cands_dy[prev_idx]: is_unique = False
                     
                     if is_unique and not (check_y <= -tile_h or check_x <= -tile_w or check_y >= h or check_x >= w):
-                        cost = cost_function.compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w) * tile_area_inv
+                        cost = (
+                            cost_function.compute_zmssd_cost(
+                                ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w, h, w, h, w
+                            )
+                            * tile_area_inv
+                        )
                         if cost < best_cand_cost:
                             best_cand_cost, best_cand_dx, best_cand_dy = cost, cands_dx[i], cands_dy[i]
 
@@ -661,6 +672,10 @@ if TAICHI_AVAILABLE:
                             test_x,
                             tile_h,
                             tile_w,
+                            h,
+                            w,
+                            h,
+                            w,
                         )
                         visual_cost = raw_cost_ssd * tile_area_inv
 
@@ -732,6 +747,10 @@ if TAICHI_AVAILABLE:
                 x + int_dx - 1,
                 tile_h,
                 tile_w,
+                h,
+                w,
+                h,
+                w,
             )
 
             c_p1_x = cost_function.compute_zmssd_cost(
@@ -743,10 +762,14 @@ if TAICHI_AVAILABLE:
                 x + int_dx + 1,
                 tile_h,
                 tile_w,
+                h,
+                w,
+                h,
+                w,
             )
 
             c_0_0 = cost_function.compute_zmssd_cost(
-                ref_layer, comp_layer, y, x, y + int_dy, x + int_dx, tile_h, tile_w
+                ref_layer, comp_layer, y, x, y + int_dy, x + int_dx, tile_h, tile_w, h, w, h, w
             )
 
             # Evaluate neighbors in Y
@@ -759,6 +782,10 @@ if TAICHI_AVAILABLE:
                 x + int_dx,
                 tile_h,
                 tile_w,
+                h,
+                w,
+                h,
+                w,
             )
 
             c_p1_y = cost_function.compute_zmssd_cost(
@@ -770,6 +797,10 @@ if TAICHI_AVAILABLE:
                 x + int_dx,
                 tile_h,
                 tile_w,
+                h,
+                w,
+                h,
+                w,
             )
 
             # Fit parabolas
@@ -1040,29 +1071,40 @@ def _get_tirt_lib():
     possible_paths = [
         os.path.join(os.path.dirname(__file__), lib_name),
         os.path.join(os.getcwd(), lib_name),
+        os.path.join(os.getcwd(), "pixel_refine_desktop", "ui", "data", lib_name),
         os.path.join(os.getcwd(), "UI", "data", lib_name),
     ]
     
     for path in possible_paths:
         if os.path.exists(path):
             try:
+                # In Python 3.8+ on Windows, DLL dependencies in the same dir are not loaded by default.
+                if hasattr(os, 'add_dll_directory'):
+                    os.add_dll_directory(os.path.dirname(os.path.abspath(path)))
+                    
                 _TIRT_LIB = ctypes.CDLL(path)
                 print(f"[TiRT] Loaded backend from: {path}")
                 
-                # Define argtypes for the C++ function
-                # void compute_flow_taichi_tirt(float* ref, float* comp, float* flow, int h, int w, ...)
-                _TIRT_LIB.compute_flow_taichi_tirt.argtypes = [
+                # int init_alignment_tirt(const char* arch_name, const char* tcm_path)
+                _TIRT_LIB.init_alignment_tirt.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+                _TIRT_LIB.init_alignment_tirt.restype = ctypes.c_int
+                
+                # float* compute_alignment_flow_tirt(ref, comp, h, w, tile_h, tile_w, n_layers, search_dist)
+                _TIRT_LIB.compute_alignment_flow_tirt.argtypes = [
                     ctypes.POINTER(ctypes.c_float), # ref
                     ctypes.POINTER(ctypes.c_float), # comp
-                    ctypes.POINTER(ctypes.c_float), # flow_out
                     ctypes.c_int, # h
                     ctypes.c_int, # w
                     ctypes.c_int, # tile_h
                     ctypes.c_int, # tile_w
                     ctypes.c_int, # n_layers
-                    ctypes.c_float, # search_dist
-                    ctypes.c_int # downscale_factor
+                    ctypes.c_float # search_dist
                 ]
+                _TIRT_LIB.compute_alignment_flow_tirt.restype = ctypes.POINTER(ctypes.c_float)
+                
+                # void free_flow_memory(float* ptr)
+                _TIRT_LIB.free_flow_memory.argtypes = [ctypes.POINTER(ctypes.c_float)]
+                
                 return _TIRT_LIB
             except Exception as e:
                 print(f"[TiRT] Failed to load {path}: {e}")
@@ -1083,22 +1125,57 @@ def _compute_alignment_flow_tirt(
     if lib is None:
         print("[TiRT Error] Library not found, falling back to Taichi Python.")
         return None
+        
+    # Ensure initialization happens once
+    if getattr(lib, "_is_initialized", False) is False:
+        # Determine optimal TCM architecture file (Example fallback: Vulkan)
+        # Ideally, matching system capability. For now we default to Vulkan/CUDA if available
+        # You can toggle this dynamically. We will pick Vulkan (works well universally on GPU)
+        arch_str = b"vulkan"
+        tcm_path_str = os.path.join(os.getcwd(), "pixel_refine_desktop", "ui", "data", "compute_flow_vulkan.tcm")
+        
+        # fallback support
+        if not os.path.exists(tcm_path_str):
+            tcm_path_str = os.path.join(os.getcwd(), "UI", "data", "compute_flow_vulkan.tcm")
+            
+        if os.path.exists(tcm_path_str):
+            res = lib.init_alignment_tirt(arch_str, tcm_path_str.encode('utf-8'))
+            if res != 0:
+                print(f"[TiRT Error] Failed to init C++ API / Load TCM. Error code = {res}")
+                return None
+            lib._is_initialized = True
+        else:
+            print(f"[TiRT Error] TCM file not found at: {tcm_path_str}")
+            return None
     
     h, w = ref_data.shape[:2]
-    # Ensure data is float32 and contiguous
-    ref_ptr = ref_data.astype(np.float32).ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-    comp_ptr = comp_data.astype(np.float32).ctypes.data_as(ctypes.POINTER(ctypes.c_float))
     
-    # Prepare output buffer
-    flow_out = np.zeros((h, w, 2), dtype=np.float32)
-    flow_ptr = flow_out.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+    # If they are Taichi fields/ndarrays, download them to RAM (numpy) first
+    if hasattr(ref_data, 'to_numpy'):
+        ref_data = ref_data.to_numpy()
+    if hasattr(comp_data, 'to_numpy'):
+        comp_data = comp_data.to_numpy()
+
+    # Ensure data is float32 and contiguous
+    ref_ptr = np.ascontiguousarray(ref_data.astype(np.float32)).ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+    comp_ptr = np.ascontiguousarray(comp_data.astype(np.float32)).ctypes.data_as(ctypes.POINTER(ctypes.c_float))
     
     try:
-        lib.compute_flow_taichi_tirt(
-            ref_ptr, comp_ptr, flow_ptr,
-            h, w, tile_h, tile_w, n_layers, search_dist, downscale_factor
+        # returns float* ptr initialized by malloc in C++
+        out_ptr = lib.compute_alignment_flow_tirt(
+            ref_ptr, comp_ptr, h, w, tile_h, tile_w, n_layers, float(search_dist)
         )
-        return flow_out
+        if not out_ptr:
+            print("[TiRT Error] compute_alignment_flow_tirt returned null pointer.")
+            return None
+            
+        # Copy to python numpy array
+        out_array = np.ctypeslib.as_array(out_ptr, shape=(h, w, 2)).copy()
+        
+        # Free memory allocated in C++ logic
+        lib.free_flow_memory(out_ptr)
+        
+        return out_array
     except Exception as e:
         print(f"[TiRT Error] Execution failed: {e}")
         return None

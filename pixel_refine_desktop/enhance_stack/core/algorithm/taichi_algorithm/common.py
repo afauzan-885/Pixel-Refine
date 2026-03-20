@@ -35,9 +35,11 @@ if TAICHI_AVAILABLE:
         return res
 
     @ti.func
-    def bilinear_at(img: ti.types.ndarray(), x: float, y: float) -> float:
-        """Bilinear interpolation at fractional coordinates with edge clamping."""
-        h, w = img.shape[0], img.shape[1]
+    def bilinear_at(img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1) -> float:
+        """Bilinear interpolation at fractional coordinates with edge clamping. AOT-compatible."""
+        hh, ww = h, w
+        if ti.static(isinstance(h, int) and h == -1):
+            hh, ww = img.shape[0], img.shape[1]
         ix = int(ti.floor(x))
         iy = int(ti.floor(y))
 
@@ -60,13 +62,15 @@ if TAICHI_AVAILABLE:
         return top * (1.0 - fy) + bottom * fy
 
     @ti.func
-    def bicubic_at(img: ti.types.ndarray(), x: float, y: float) -> float:
-        """Bicubic interpolation at fractional coordinates using Catmull-Rom spline."""
-        h, w = img.shape[0], img.shape[1]
+    def bicubic_at(img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1) -> float:
+        """Bicubic interpolation at fractional coordinates using Catmull-Rom spline. AOT-compatible."""
+        hh, ww = h, w
+        if ti.static(isinstance(h, int) and h == -1):
+            hh, ww = img.shape[0], img.shape[1]
         # Boundary check - fallback to bilinear for edges
         res = 0.0
-        if x < 1.0 or y < 1.0 or x >= float(w - 2) or y >= float(h - 2):
-            res = bilinear_at(img, x, y)
+        if x < 1.0 or y < 1.0 or x >= float(ww - 2) or y >= float(hh - 2):
+            res = bilinear_at(img, x, y, hh, ww)
         else:
             ix = int(ti.floor(x))
             iy = int(ti.floor(y))
@@ -116,17 +120,20 @@ if TAICHI_AVAILABLE:
 
     @ti.func
     def bilinear_at_3ch(
-        img: ti.types.ndarray(), x: float, y: float, h: int, w: int, c: int
+        img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1, c: int = 0
     ) -> float:
         """Bilinear interpolation for a specific channel of a 3-channel image."""
+        hh, ww = h, w
+        if ti.static(isinstance(h, int) and h == -1):
+            hh, ww = img.shape[0], img.shape[1]
         ix = int(ti.floor(x))
         iy = int(ti.floor(y))
 
         # Clamp to bounds
-        ix0 = tm.clamp(ix, 0, w - 1)
-        iy0 = tm.clamp(iy, 0, h - 1)
-        ix1 = tm.clamp(ix + 1, 0, w - 1)
-        iy1 = tm.clamp(iy + 1, 0, h - 1)
+        ix0 = tm.clamp(ix, 0, ww - 1)
+        iy0 = tm.clamp(iy, 0, hh - 1)
+        ix1 = tm.clamp(ix + 1, 0, ww - 1)
+        iy1 = tm.clamp(iy + 1, 0, hh - 1)
 
         fx = x - float(ix)
         fy = y - float(iy)
@@ -142,13 +149,15 @@ if TAICHI_AVAILABLE:
 
     @ti.func
     def bicubic_at_channel(
-        img: ti.types.ndarray(), x: float, y: float, c: int
+        img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1, c: int = 0
     ) -> float:
-        """Bicubic interpolation at fractional coordinates for a specific channel."""
-        h, w = img.shape[0], img.shape[1]
+        """Bicubic interpolation at fractional coordinates for a specific channel. AOT-compatible."""
+        hh, ww = h, w
+        if ti.static(isinstance(h, int) and h == -1):
+            hh, ww = img.shape[0], img.shape[1]
         res = 0.0
-        if x < 1.0 or y < 1.0 or x >= float(w - 2) or y >= float(h - 2):
-            res = bilinear_at_3ch(img, x, y, h, w, c)
+        if x < 1.0 or y < 1.0 or x >= float(ww - 2) or y >= float(hh - 2):
+            res = bilinear_at_3ch(img, x, y, hh, ww, c)
         else:
             ix = int(ti.floor(x))
             iy = int(ti.floor(y))

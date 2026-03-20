@@ -28,7 +28,7 @@ if TAICHI_AVAILABLE:
         h_dst: int,
         w_dst: int,
     ):
-        """5x5 Gaussian downsampling (High-quality Anti-aliasing)."""
+        """Standard 2x downsampling (box filter). AOT-compatible."""
         # Gaussian weights [1, 4, 6, 4, 1] / 16
         weights = ti.static([1.0, 4.0, 6.0, 4.0, 1.0])
         total_weight = 256.0  # (1+4+6+4+1)^2
@@ -54,22 +54,20 @@ if TAICHI_AVAILABLE:
         w_src: int,
         h_dst: int,
         w_dst: int,
-        scale_x: float,
-        scale_y: float,
+        scale: float,
     ):
-        """Bicubic upsampling for optical flow field."""
+        """Bicubic upsampling for flow fields. AOT-compatible."""
         for r, c in ti.ndrange(h_dst, w_dst):
             # Coordinates in source domain
             v = float(c) * (float(w_src) / float(w_dst))
             u = float(r) * (float(h_src) / float(h_dst))
 
             # Sample each channel using bicubic interpolation from common.py
-            # Note: common.bicubic_at handles boundary clamping
-            val0 = common.bicubic_at_channel(src, v, u, 0)
-            val1 = common.bicubic_at_channel(src, v, u, 1)
+            val0 = common.bicubic_at_channel(src, v, u, h_src, w_src, 0)
+            val1 = common.bicubic_at_channel(src, v, u, h_src, w_src, 1)
 
-            dst[r, c, 0] = val0 * scale_x
-            dst[r, c, 1] = val1 * scale_y
+            dst[r, c, 0] = val0 * scale
+            dst[r, c, 1] = val1 * scale
 
 
 # ============================================================================
@@ -77,6 +75,7 @@ if TAICHI_AVAILABLE:
 # ============================================================================
 class _AotKernelProvider:
     """Lazy loader for AOT kernels."""
+
     _module = None
     _kernels = {}
 
@@ -115,7 +114,7 @@ def build_image_pyramid_gpu(
 ) -> list:
     """
     GPU native interface: Build image pyramid with dynamic downsampling.
-    
+
     Args:
         image_gpu: Source image ti.ndarray.
         n_levels: Total number of levels (including full res).
@@ -129,7 +128,7 @@ def build_image_pyramid_gpu(
         raise ImportError("Taichi not available")
 
     pyramid = [image_gpu]
-    
+
     # Check if downscale_factor is a power of 2
     is_power_of_2 = False
     steps_per_level = 0
@@ -141,34 +140,39 @@ def build_image_pyramid_gpu(
 
     for _ in range(n_levels - 1):
         prev = pyramid[-1]
-        h_src, w_src = prev.shape
-        
-        # Calculate target size
-        h_dst = int(np.round(h_src / downscale_factor))
-        w_dst = int(np.round(w_src / downscale_factor))
+        h_src_prev, w_src_prev = prev.shape
 
-        if h_dst < min_size or w_dst < min_size:
+        # Calculate target size
+        h_dst_curr = int(np.round(h_src_prev / downscale_factor))
+        w_dst_curr = int(np.round(w_src_prev / downscale_factor))
+
+        if h_dst_curr < min_size or w_dst_curr < min_size:
             break
 
         if is_power_of_2 and steps_per_level > 0:
             # High-quality Gaussian cascaded downsampling
             current_lvl_input = prev
+            h_s_curr, w_s_curr = h_src_prev, w_src_prev
             for step in range(steps_per_level):
-                h_s, w_s = current_lvl_input.shape
-                h_d, w_d = h_s // 2, w_s // 2
-                
-                # Should not reach here if h_dst/w_dst check above is correct, 
+                h_d_step, w_d_step = h_s_curr // 2, w_s_curr // 2
+
+                # Should not reach here if h_dst/w_dst check above is correct,
                 # but adding safety for internal steps
-                if h_d < 1 or w_d < 1:
+                if h_d_step < 1 or w_d_step < 1:
                     break
 
-                dst = common.get_temp_buffer((h_d, w_d), ti.f32, buffer_provider)
-                _AotKernelProvider.get("_downsample_2x_kernel", _downsample_2x_kernel)(current_lvl_input, dst, h_s, w_s, h_d, w_d)
-                
+                dst = common.get_temp_buffer(
+                    (h_d_step, w_d_step), ti.f32, buffer_provider
+                )
+                _AotKernelProvider.get("_downsample_2x_kernel", _downsample_2x_kernel)(
+                    current_lvl_input, dst, h_s_curr, w_s_curr, h_d_step, w_d_step
+                )
+
                 if step < steps_per_level - 1:
                     if current_lvl_input is not prev:
                         common.release_temp_buffer(current_lvl_input)
                     current_lvl_input = dst
+                    h_s_curr, w_s_curr = h_d_step, w_d_step
                 else:
                     pyramid.append(dst)
                     if current_lvl_input is not prev:
@@ -176,7 +180,10 @@ def build_image_pyramid_gpu(
         else:
             # Fallback to Bilinear Resize for arbitrary scales
             from .bilinear_interpolation import bilinear_resize
-            dst = bilinear_resize(prev, h_dst, w_dst, buffer_provider=buffer_provider)
+
+            dst = bilinear_resize(
+                prev, h_dst_curr, w_dst_curr, buffer_provider=buffer_provider
+            )
             pyramid.append(dst)
 
     return pyramid
@@ -193,7 +200,11 @@ def build_image_pyramid_gpu_4x(
     Backward compatibility wrapper for 4x downsampling pyramid.
     """
     return build_image_pyramid_gpu(
-        image_gpu, n_levels, min_size, downscale_factor=4, buffer_provider=buffer_provider
+        image_gpu,
+        n_levels,
+        min_size,
+        downscale_factor=4,
+        buffer_provider=buffer_provider,
     )
 
 
@@ -243,5 +254,8 @@ def upsample_flow_gpu(
         sx, sy = scale, scale
 
     _AotKernelProvider.get("_upsample_flow_kernel", _upsample_flow_kernel)(
-        src_gpu, dst_gpu, h_src, w_src, h_dst, w_dst, float(sx), float(sy)
+        src_gpu, dst_gpu,
+        h_src, w_src,
+        h_dst, w_dst,
+        float(sx),
     )
