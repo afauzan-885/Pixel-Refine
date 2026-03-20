@@ -1,0 +1,168 @@
+#:kivy 2.3.1
+
+<WorkspaceScreen>:
+    name: 'workspace'
+    md_bg_color: 0.98, 0.98, 0.98, 1
+
+    MDBoxLayout:
+        orientation: 'vertical'
+
+         # --- TOP BAR ---
+        MDTopAppBar:
+            title: "Burst Management\nWorkspace"
+            elevation: 0
+            md_bg_color: 0.98, 0.98, 0.98, 1
+            specific_text_color: 0.1, 0.1, 0.1, 1
+            left_action_items: [["chevron-left", lambda x: root.go_back()]]
+            right_action_items: [["dots-vertical", lambda x: None]]
+
+        MDScrollView:
+            MDBoxLayout:
+                orientation: 'vertical'
+                padding: "16dp"
+                spacing: "20dp"
+                adaptive_height: True
+
+                # --- BURST GALLERY CARD ---
+                MDCard:
+                    orientation: "vertical"
+                    size_hint_y: None
+                    height: "380dp"
+                    padding: "16dp"
+                    spacing: "16dp"
+                    radius:[20, 20, 20, 20]
+                    md_bg_color: 1, 1, 1, 1
+                    elevation: 0   # Menghilangkan bayangan
+                    line_color: 0.9, 0.9, 0.9, 1  # Memberi garis luar tipis
+
+                    MDLabel:
+                        text: "Burst Gallery"
+                        font_style: "Subtitle1"
+                        bold: True
+                        adaptive_height: True
+
+                    # --- KARTU IMPORT GAMBAR BARU ---
+                    MDCard:
+                        size_hint_y: 0.65
+                        md_bg_color: 0.96, 0.96, 0.96, 1
+                        radius: [12, 12, 12, 12]
+                        elevation: 0
+                        ripple_behavior: True
+                        on_release: print("Buka File Manager / Gallery di sini")
+                        
+                        # Menggunakan RelativeLayout agar Ikon dan Teks bisa bertumpuk
+                        MDRelativeLayout:
+                            
+                            # Ikon Pudar di Belakang
+                            MDIcon:
+                                icon: "image-plus"
+                                font_size: "100sp"
+                                halign: "center"
+                                pos_hint: {"center_x": .5, "center_y": .5}
+                                theme_text_color: "Custom"
+                                text_color: 0.1, 0.65, 0.4, 0.15  # Alpha 0.15 membuatnya pudar
+                            
+                            # Teks di Depan
+                            MDBoxLayout:
+                                orientation: "vertical"
+                                adaptive_height: True
+                                spacing: "8dp"
+                                pos_hint: {"center_x": .5, "center_y": .5}
+                                
+                                MDLabel:
+                                    text: "Import Gambar"
+                                    font_style: "H6"
+                                    bold: True
+                                    halign: "center"
+                                    theme_text_color: "Custom"
+                                    text_color: 0.3, 0.3, 0.3, 1
+                                    
+                                MDLabel:
+                                    text: "Ketuk untuk memilih dari galeri"
+                                    font_style: "Caption"
+                                    halign: "center"
+                                    theme_text_color: "Secondary"
+
+                    # Thumbnails Grid/Scroll
+                    MDScrollView:
+                        do_scroll_y: False
+                        do_scroll_x: True
+                        size_hint_y: 0.35
+                        
+                        MDBoxLayout:
+                            id: thumbnail_container
+                            orientation: 'horizontal'
+                            adaptive_width: True
+                            spacing: "8dp"
+
+                # --- ALGORITHM WORKFLOW CARD ---
+                MDCard:
+                    orientation: "vertical"
+                    size_hint_y: None
+                    height: "140dp"
+                    padding: "16dp"
+                    spacing: "16dp"
+                    radius:[20, 20, 20, 20]
+                    md_bg_color: 1, 1, 1, 1
+                    elevation: 0  # Menghilangkan bayangan
+                    line_color: 0.9, 0.9, 0.9, 1  # Memberi garis luar tipis
+
+                    MDLabel:
+                        text: "Algorithm Workflow"
+                        font_style: "Subtitle1"
+                        bold: True
+                        adaptive_height: True
+
+                    MDBoxLayout:
+                        adaptive_height: True
+                        spacing: "8dp"
+                        
+                        MDFillRoundFlatButton:
+                            text: "Alignment"
+                            md_bg_color: 0.9, 0.9, 0.9, 1
+                            text_color: 0.5, 0.5, 0.5, 1
+                            elevation: 0
+                            size_hint_x: 0.45
+
+                        MDIcon:
+                            icon: "arrow-right"
+                            theme_text_color: "Secondary"
+                            pos_hint: {"center_y": .5}
+                            size_hint_x: 0.1
+                            halign: "center"
+
+                        MDFillRoundFlatButton:
+                            text: root.tool_type
+                            md_bg_color: 0.1, 0.65, 0.4, 1
+                            elevation: 0
+                            size_hint_x: 0.45
+
+                    MDCard:
+                        adaptive_size: True
+                        md_bg_color: 0.92, 0.92, 0.95, 1
+                        radius:[12, 12, 12, 12]
+                        padding:["12dp", "4dp", "12dp", "4dp"]
+                        pos_hint: {"center_x": .5}
+                        elevation: 0
+                        
+                        MDLabel:
+                            text: f"{root.image_count} images selected"
+                            font_style: "Caption"
+                            adaptive_size: True
+
+        # --- BOTTOM RUN BUTTON ---
+        MDBoxLayout:
+            size_hint_y: None
+            height: "80dp"
+            padding: ["16dp", "12dp", "16dp", "16dp"]
+            md_bg_color: 0.98, 0.98, 0.98, 1
+
+            MDFillRoundFlatIconButton:
+                icon: "play"
+                text: "RUN ALGORITHM"
+                font_style: "Button"
+                size_hint_x: 1
+                height: "56dp"
+                md_bg_color: 0.1, 0.65, 0.4, 1
+                radius:[15, 15, 15, 15]
+                on_release: root.run_algorithm()

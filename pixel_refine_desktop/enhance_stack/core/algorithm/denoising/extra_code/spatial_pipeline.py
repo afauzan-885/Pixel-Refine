@@ -42,7 +42,6 @@ def process_in_cpu(
     """Pipeline terpadu untuk Alignment + Merging di CPU."""
     from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.extra_algorithm import (
         perform_image_alignment,
-        SimilaritySpatialInterface,
     )
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
         estimate_noise_in_python,
@@ -109,10 +108,7 @@ def process_in_cpu(
     )
     weight_map_sum_full_res = np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
 
-    try:
-        c_interface = SimilaritySpatialInterface(lib_path)
-    except Exception as e:
-        raise RuntimeError(f"Gagal memuat C++ interface: {e}")
+    c_interface = None
 
     # 3. MERGING LOOP (CPU)
     def weight_map_producer(task_queue, result_queue, images_list_ref):

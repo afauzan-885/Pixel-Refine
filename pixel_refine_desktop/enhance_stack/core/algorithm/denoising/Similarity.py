@@ -38,7 +38,6 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
     # to_gamma_proxy, # Replaced/Updated
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.extra_algorithm import (
-    SimilaritySpatialInterface,
     perform_image_alignment,
     perform_alignment_gpu,
     get_taichi_worker,

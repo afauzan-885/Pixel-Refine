@@ -47,7 +47,7 @@ if TAICHI_AVAILABLE:
 
     @ti.kernel
     def _normalize_kernel_2d(
-        src: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        src: ti.types.ndarray(ndim=2),
         dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
         h: int,
         w: int,
@@ -62,7 +62,7 @@ if TAICHI_AVAILABLE:
 
     @ti.kernel
     def _normalize_kernel_3d(
-        src: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        src: ti.types.ndarray(ndim=3),
         dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
         h: int,
         w: int,
