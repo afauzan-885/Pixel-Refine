@@ -15,8 +15,9 @@ def run_command(command, shell=False):
         errors='replace'
     )
     
-    for line in process.stdout:
-        print(line, end='')
+    if process.stdout:
+        for line in process.stdout:
+            print(line, end='')
     
     process.wait()
     return process.returncode
