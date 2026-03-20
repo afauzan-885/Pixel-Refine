@@ -43,6 +43,18 @@ try:
 
     # common might be useful
     from ...taichi_algorithm import common
+    # Import kernels directly from ncc module to avoid shadowing from taichi_algorithm.ncc function
+    from ...taichi_algorithm.ncc import (
+        _compute_global_zncc_surface,
+        _reduce_min_2d_kernel,
+    )
+
+    class _NccModuleWrapper:
+        def __init__(self):
+            self._compute_global_zncc_surface = _compute_global_zncc_surface
+            self._reduce_min_2d_kernel = _reduce_min_2d_kernel
+
+    ncc_module = _NccModuleWrapper()
     from ...taichi_algorithm.taichi_worker import ti_thread
 
     TAICHI_MODULES_AVAILABLE = True
@@ -113,14 +125,7 @@ if TAICHI_AVAILABLE:
                         continue
 
                     cost = cost_function.compute_zmssd_cost(
-                        ref_layer,
-                        comp_layer,
-                        y,
-                        x,
-                        test_y,
-                        test_x,
-                        tile_h,
-                        tile_w,
+                        ref_layer, comp_layer, y, x, test_y, test_x, tile_h, tile_w, h, w, h, w
                     )
 
                     # Apply bias to (0,0)
@@ -141,44 +146,16 @@ if TAICHI_AVAILABLE:
                 # Sample 4 neighbors
                 c0 = best_cost
                 cx_m1 = cost_function.compute_zmssd_cost(
-                    ref_layer,
-                    comp_layer,
-                    y,
-                    x,
-                    y + int(best_dy),
-                    x + int(best_dx) - 1,
-                    tile_h,
-                    tile_w,
+                    ref_layer, comp_layer, y, x, y + int(best_dy), x + int(best_dx) - 1, tile_h, tile_w, h, w, h, w
                 )
                 cx_p1 = cost_function.compute_zmssd_cost(
-                    ref_layer,
-                    comp_layer,
-                    y,
-                    x,
-                    y + int(best_dy),
-                    x + int(best_dx) + 1,
-                    tile_h,
-                    tile_w,
+                    ref_layer, comp_layer, y, x, y + int(best_dy), x + int(best_dx) + 1, tile_h, tile_w, h, w, h, w
                 )
                 cy_m1 = cost_function.compute_zmssd_cost(
-                    ref_layer,
-                    comp_layer,
-                    y,
-                    x,
-                    y + int(best_dy) - 1,
-                    x + int(best_dx),
-                    tile_h,
-                    tile_w,
+                    ref_layer, comp_layer, y, x, y + int(best_dy) - 1, x + int(best_dx), tile_h, tile_w, h, w, h, w
                 )
                 cy_p1 = cost_function.compute_zmssd_cost(
-                    ref_layer,
-                    comp_layer,
-                    y,
-                    x,
-                    y + int(best_dy) + 1,
-                    x + int(best_dx),
-                    tile_h,
-                    tile_w,
+                    ref_layer, comp_layer, y, x, y + int(best_dy) + 1, x + int(best_dx), tile_h, tile_w, h, w, h, w
                 )
 
                 # Parabolic fit: x = x_int - (f(x+1) - f(x-1)) / (2 * (f(x+1) + f(x-1) - 2*f(x)))
@@ -398,7 +375,12 @@ if TAICHI_AVAILABLE:
                         is_unique = False
                 
                 if is_unique and not (check_y <= -tile_h or check_x <= -tile_w or check_y >= h or check_x >= w):
-                    cost = cost_function.compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w) * tile_area_inv
+                    cost = (
+                        cost_function.compute_zmssd_cost(
+                            ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w, h, w, h, w
+                        )
+                        * tile_area_inv
+                    )
                     if cost < best_cand_cost:
                         best_cand_cost, best_cand_dx, best_cand_dy = cost, cands_dx[cand_idx], cands_dy[cand_idx]
 
@@ -413,7 +395,12 @@ if TAICHI_AVAILABLE:
                         if cands_dx[i] == cands_dx[prev_idx] and cands_dy[i] == cands_dy[prev_idx]: is_unique = False
                     
                     if is_unique and not (check_y <= -tile_h or check_x <= -tile_w or check_y >= h or check_x >= w):
-                        cost = cost_function.compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w) * tile_area_inv
+                        cost = (
+                            cost_function.compute_zmssd_cost(
+                                ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w, h, w, h, w
+                            )
+                            * tile_area_inv
+                        )
                         if cost < best_cand_cost:
                             best_cand_cost, best_cand_dx, best_cand_dy = cost, cands_dx[i], cands_dy[i]
 
@@ -428,7 +415,12 @@ if TAICHI_AVAILABLE:
                         if cands_dx[i] == cands_dx[prev_idx] and cands_dy[i] == cands_dy[prev_idx]: is_unique = False
                     
                     if is_unique and not (check_y <= -tile_h or check_x <= -tile_w or check_y >= h or check_x >= w):
-                        cost = cost_function.compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w) * tile_area_inv
+                        cost = (
+                            cost_function.compute_zmssd_cost(
+                                ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w, h, w, h, w
+                            )
+                            * tile_area_inv
+                        )
                         if cost < best_cand_cost:
                             best_cand_cost, best_cand_dx, best_cand_dy = cost, cands_dx[i], cands_dy[i]
 
@@ -466,6 +458,10 @@ if TAICHI_AVAILABLE:
                             test_x,
                             tile_h,
                             tile_w,
+                            h,
+                            w,
+                            h,
+                            w,
                         )
                         visual_cost = raw_cost_ssd * tile_area_inv
 
@@ -593,7 +589,12 @@ if TAICHI_AVAILABLE:
                         is_unique = False
                 
                 if is_unique and not (check_y <= -tile_h or check_x <= -tile_w or check_y >= h or check_x >= w):
-                    cost = cost_function.compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w) * tile_area_inv
+                    cost = (
+                        cost_function.compute_zmssd_cost(
+                            ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w, h, w, h, w
+                        )
+                        * tile_area_inv
+                    )
                     if cost < best_cand_cost:
                         best_cand_cost, best_cand_dx, best_cand_dy = cost, cands_dx[cand_idx], cands_dy[cand_idx]
 
@@ -608,7 +609,12 @@ if TAICHI_AVAILABLE:
                         if cands_dx[i] == cands_dx[prev_idx] and cands_dy[i] == cands_dy[prev_idx]: is_unique = False
                     
                     if is_unique and not (check_y <= -tile_h or check_x <= -tile_w or check_y >= h or check_x >= w):
-                        cost = cost_function.compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w) * tile_area_inv
+                        cost = (
+                            cost_function.compute_zmssd_cost(
+                                ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w, h, w, h, w
+                            )
+                            * tile_area_inv
+                        )
                         if cost < best_cand_cost:
                             best_cand_cost, best_cand_dx, best_cand_dy = cost, cands_dx[i], cands_dy[i]
 
@@ -623,7 +629,12 @@ if TAICHI_AVAILABLE:
                         if cands_dx[i] == cands_dx[prev_idx] and cands_dy[i] == cands_dy[prev_idx]: is_unique = False
                     
                     if is_unique and not (check_y <= -tile_h or check_x <= -tile_w or check_y >= h or check_x >= w):
-                        cost = cost_function.compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w) * tile_area_inv
+                        cost = (
+                            cost_function.compute_zmssd_cost(
+                                ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w, h, w, h, w
+                            )
+                            * tile_area_inv
+                        )
                         if cost < best_cand_cost:
                             best_cand_cost, best_cand_dx, best_cand_dy = cost, cands_dx[i], cands_dy[i]
 
@@ -661,6 +672,10 @@ if TAICHI_AVAILABLE:
                             test_x,
                             tile_h,
                             tile_w,
+                            h,
+                            w,
+                            h,
+                            w,
                         )
                         visual_cost = raw_cost_ssd * tile_area_inv
 
@@ -732,6 +747,10 @@ if TAICHI_AVAILABLE:
                 x + int_dx - 1,
                 tile_h,
                 tile_w,
+                h,
+                w,
+                h,
+                w,
             )
 
             c_p1_x = cost_function.compute_zmssd_cost(
@@ -743,10 +762,14 @@ if TAICHI_AVAILABLE:
                 x + int_dx + 1,
                 tile_h,
                 tile_w,
+                h,
+                w,
+                h,
+                w,
             )
 
             c_0_0 = cost_function.compute_zmssd_cost(
-                ref_layer, comp_layer, y, x, y + int_dy, x + int_dx, tile_h, tile_w
+                ref_layer, comp_layer, y, x, y + int_dy, x + int_dx, tile_h, tile_w, h, w, h, w
             )
 
             # Evaluate neighbors in Y
@@ -759,6 +782,10 @@ if TAICHI_AVAILABLE:
                 x + int_dx,
                 tile_h,
                 tile_w,
+                h,
+                w,
+                h,
+                w,
             )
 
             c_p1_y = cost_function.compute_zmssd_cost(
@@ -770,6 +797,10 @@ if TAICHI_AVAILABLE:
                 x + int_dx,
                 tile_h,
                 tile_w,
+                h,
+                w,
+                h,
+                w,
             )
 
             # Fit parabolas

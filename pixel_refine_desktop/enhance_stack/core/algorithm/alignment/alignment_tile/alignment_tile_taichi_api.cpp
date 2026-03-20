@@ -29,6 +29,7 @@ struct AlignmentContext {
   TiAotModule flow_mod;
   TiAotModule warp_mod;
   std::map<std::string, TiKernel> kernels;
+  std::map<std::string, TiComputeGraph> graphs;
 
   // Persistent GPU state for reference
   TiMemory ref_raw_gpu = TI_NULL_HANDLE;
@@ -51,6 +52,15 @@ struct AlignmentContext {
   TiMemory zncc_surface_gpu = TI_NULL_HANDLE;
   uint64_t zncc_surface_bytes = 0;
   int zncc_surface_side = 0;
+
+  TiMemory zncc_results_gpu = TI_NULL_HANDLE;
+  uint64_t zncc_results_bytes = 0;
+
+  // Intermediate cascading downsample buffers
+  TiMemory temp_down_ref = TI_NULL_HANDLE;
+  uint64_t temp_down_ref_bytes = 0;
+  TiMemory temp_down_comp = TI_NULL_HANDLE;
+  uint64_t temp_down_comp_bytes = 0;
 
   // Shared preprocess config (mirrors preprocess_pipeline_gpu knobs)
   float preprocess_scale_gamma = 1.0f; // 1.0 = gamma off
@@ -172,6 +182,19 @@ _ensure_pyramid_cache(AlignmentContext *ctx,
     if (!_ensure_memory(runtime, p.flow_temp, p.flow_temp_bytes, flow_bytes))
       return false;
   }
+
+  // Allocation for intermediate cascading buffers (max needed is (h0/2)*(w0/2))
+  if (!shapes.empty() && ctx->alignment_downscale_factor > 2) {
+    uint64_t max_inter_bytes =
+        _bytes_f32_2d(shapes[0].first / 2, shapes[0].second / 2);
+    if (!_ensure_memory(runtime, ctx->temp_down_ref, ctx->temp_down_ref_bytes,
+                        max_inter_bytes))
+      return false;
+    if (!_ensure_memory(runtime, ctx->temp_down_comp, ctx->temp_down_comp_bytes,
+                        max_inter_bytes))
+      return false;
+  }
+
   return true;
 }
 
@@ -209,6 +232,13 @@ TiArgument make_f32_arg(float val) {
   arg.type = TI_ARGUMENT_TYPE_F32;
   arg.value.f32 = val;
   return arg;
+}
+
+TiNamedArgument make_named_arg(const char *name, TiArgument arg) {
+  TiNamedArgument named_arg = {};
+  named_arg.name = name;
+  named_arg.argument = arg;
+  return named_arg;
 }
 
 bool _fused_full_pipeline_i32_aot_from_gpu(AlignmentContext *ctx,
@@ -386,16 +416,16 @@ ALIGN_API int init_alignment_modular_tirt(const char *arch_name,
   if (!g_ctx->preprocess_mod || !g_ctx->flow_mod || !g_ctx->warp_mod)
     return -2;
 
-  // Load Kernels with logging
-  auto load_k = [&](TiAotModule mod, const char *name, const char *key) {
-    TiKernel k = ti_get_aot_module_kernel(mod, name);
-    if (k == TI_NULL_HANDLE) {
-      std::cerr << "[TiRT Error] Failed to load kernel: " << name << " (" << key
+  // Load Graphs
+  auto load_g = [&](TiAotModule mod, const char *name, const char *key) {
+    TiComputeGraph g = ti_get_aot_module_compute_graph(mod, name);
+    if (g == TI_NULL_HANDLE) {
+      std::cerr << "[TiRT Error] Failed to load graph: " << name << " (" << key
                 << ")" << std::endl;
     } else {
-      g_ctx->kernels[key] = k;
+      g_ctx->graphs[key] = g;
     }
-    return k != TI_NULL_HANDLE;
+    return g != TI_NULL_HANDLE;
   };
 
   struct KernelSpec {
@@ -429,6 +459,10 @@ ALIGN_API int init_alignment_modular_tirt(const char *arch_name,
   for (const auto &spec : kernel_specs) {
     ok &= load_k(spec.mod, spec.kernel_name, spec.key);
   }
+
+  // Load monolithic graphs
+  load_g(g_ctx->flow_mod, "compute_flow_3layer", "compute_flow_3layer");
+  load_g(g_ctx->flow_mod, "compute_flow_4layer", "compute_flow_4layer");
 
   if (!ok) {
     std::cerr << "[TiRT Error] One or more kernels failed to load!"
@@ -502,6 +536,21 @@ ALIGN_API void clear_reference_modular_tirt() {
     g_ctx->zncc_surface_gpu = TI_NULL_HANDLE;
     g_ctx->zncc_surface_bytes = 0;
     g_ctx->zncc_surface_side = 0;
+  }
+  if (g_ctx->zncc_results_gpu != TI_NULL_HANDLE) {
+    ti_free_memory(g_ctx->runtime, g_ctx->zncc_results_gpu);
+    g_ctx->zncc_results_gpu = TI_NULL_HANDLE;
+    g_ctx->zncc_results_bytes = 0;
+  }
+  if (g_ctx->temp_down_ref != TI_NULL_HANDLE) {
+    ti_free_memory(g_ctx->runtime, g_ctx->temp_down_ref);
+    g_ctx->temp_down_ref = TI_NULL_HANDLE;
+    g_ctx->temp_down_ref_bytes = 0;
+  }
+  if (g_ctx->temp_down_comp != TI_NULL_HANDLE) {
+    ti_free_memory(g_ctx->runtime, g_ctx->temp_down_comp);
+    g_ctx->temp_down_comp = TI_NULL_HANDLE;
+    g_ctx->temp_down_comp_bytes = 0;
   }
   for (auto &lvl : g_ctx->pyramid_cache) {
     _release_pyramid_level(g_ctx->runtime, lvl);
@@ -611,6 +660,14 @@ ALIGN_API int32_t *compute_alignment_modular_tirt_ex(const int32_t *comp_u16,
   if (n_layers < 1)
     n_layers = 1;
 
+  // Calculate cascading steps per level (e.g., 2 steps for 4x downscale)
+  int steps_per_level = 1;
+  if (downscale_factor > 2) {
+    steps_per_level = (int)std::lround(std::log2((double)downscale_factor));
+    if (steps_per_level < 1)
+      steps_per_level = 1;
+  }
+
   std::vector<std::pair<int, int>> level_shapes;
   level_shapes.reserve((size_t)n_layers);
   level_shapes.push_back({h, w});
@@ -639,28 +696,41 @@ ALIGN_API int32_t *compute_alignment_modular_tirt_ex(const int32_t *comp_u16,
       _copy_field_gpu(runtime, g_ctx->comp_norm_gpu, pyramid[0].comp,
                       _bytes_f32_2d(h, w));
     } else {
-      std::vector<TiArgument> d_ref_args = {
-          make_ndarray_arg(pyramid[i - 1].ref,
-                           _shape_2d(pyramid[i - 1].h, pyramid[i - 1].w)),
-          make_ndarray_arg(pyramid[i].ref,
-                           _shape_2d(pyramid[i].h, pyramid[i].w)),
-          make_i32_arg(pyramid[i - 1].h),
-          make_i32_arg(pyramid[i - 1].w),
-          make_i32_arg(pyramid[i].h),
-          make_i32_arg(pyramid[i].w)};
-      launch_kernel_simple(runtime, g_ctx->kernels["_downsample_2x_kernel"],
-                           d_ref_args);
-      std::vector<TiArgument> d_comp_args = {
-          make_ndarray_arg(pyramid[i - 1].comp,
-                           _shape_2d(pyramid[i - 1].h, pyramid[i - 1].w)),
-          make_ndarray_arg(pyramid[i].comp,
-                           _shape_2d(pyramid[i].h, pyramid[i].w)),
-          make_i32_arg(pyramid[i - 1].h),
-          make_i32_arg(pyramid[i - 1].w),
-          make_i32_arg(pyramid[i].h),
-          make_i32_arg(pyramid[i].w)};
-      launch_kernel_simple(runtime, g_ctx->kernels["_downsample_2x_kernel"],
-                           d_comp_args);
+      // Cascaded Gaussian Downsampling (mirroring Python steps_per_level)
+      auto cascade_down = [&](TiMemory src_root, TiMemory dst_root, int h_in,
+                              int w_in, int h_final, int w_final,
+                              TiMemory temp_buf) {
+        TiMemory current_src = src_root;
+        int cur_h = h_in;
+        int cur_w = w_in;
+
+        for (int s = 0; s < steps_per_level; ++s) {
+          int target_h = (s == steps_per_level - 1) ? h_final : (cur_h / 2);
+          int target_w = (s == steps_per_level - 1) ? w_final : (cur_w / 2);
+          TiMemory current_dst = (s == steps_per_level - 1) ? dst_root : temp_buf;
+
+          std::vector<TiArgument> args = {
+              make_ndarray_arg(current_src, _shape_2d(cur_h, cur_w)),
+              make_ndarray_arg(current_dst, _shape_2d(target_h, target_w)),
+              make_i32_arg(cur_h),
+              make_i32_arg(cur_w),
+              make_i32_arg(target_h),
+              make_i32_arg(target_w)};
+
+          launch_kernel_simple(runtime, g_ctx->kernels["_downsample_2x_kernel"], args);
+
+          current_src = current_dst;
+          cur_h = target_h;
+          cur_w = target_w;
+        }
+      };
+
+      cascade_down(pyramid[i - 1].ref, pyramid[i].ref, pyramid[i - 1].h,
+                   pyramid[i - 1].w, pyramid[i].h, pyramid[i].w,
+                   g_ctx->temp_down_ref);
+      cascade_down(pyramid[i - 1].comp, pyramid[i].comp, pyramid[i - 1].h,
+                   pyramid[i - 1].w, pyramid[i].h, pyramid[i].w,
+                   g_ctx->temp_down_comp);
     }
   }
 
@@ -681,179 +751,282 @@ ALIGN_API int32_t *compute_alignment_modular_tirt_ex(const int32_t *comp_u16,
     }
   }
 
-  for (int i = effective_layers - 1; i >= 0; --i) {
-    // Python naming parity:
-    // flow_gpu        -> pyramid[i].flow
-    // refined_flow_gpu-> pyramid[i].flow_temp
-    const bool is_coarsest_layer = (i == effective_layers - 1);
-    const bool is_finest_layer = (i == 0);
-    const int current_tile_h =
-        std::max(min_tile_size, std::min(tile_h, pyramid[i].h));
-    const int current_tile_w =
-        std::max(min_tile_size, std::min(tile_w, pyramid[i].w));
+  if (effective_layers == 4 && g_ctx->graphs.count("compute_flow_4layer")) {
+    int search_radius = std::max(4, (int)(search_dist * 2.0f));
+    int current_search_dist = std::max(2, (int)search_dist);
 
-    // process_single_layer: refined_flow_gpu initialized to zeros.
-    std::vector<TiArgument> init_refined_args = {
-        make_ndarray_arg(pyramid[i].flow_temp,
-                         _shape_flow(pyramid[i].h, pyramid[i].w)),
-        make_i32_arg(pyramid[i].h),
-        make_i32_arg(pyramid[i].w),
-        make_f32_arg(0.0f),
-        make_f32_arg(0.0f),
+    const int zncc_max_shift = 32; // Standard for coarse layer robustness
+    const int zncc_size = 2 * zncc_max_shift + 1;
+    if (!_ensure_memory(runtime, g_ctx->zncc_surface_gpu, g_ctx->zncc_surface_bytes, (uint64_t)zncc_size * zncc_size * sizeof(float), false, false)) return nullptr;
+    if (!_ensure_memory(runtime, g_ctx->zncc_results_gpu, g_ctx->zncc_results_bytes, (uint64_t)3 * sizeof(float), false, false)) return nullptr;
+
+    std::vector<TiNamedArgument> graph_args = {
+        make_named_arg("ref_l0", make_ndarray_arg(pyramid[0].ref, _shape_2d(pyramid[0].h, pyramid[0].w))),
+        make_named_arg("ref_l1", make_ndarray_arg(pyramid[1].ref, _shape_2d(pyramid[1].h, pyramid[1].w))),
+        make_named_arg("ref_l2", make_ndarray_arg(pyramid[2].ref, _shape_2d(pyramid[2].h, pyramid[2].w))),
+        make_named_arg("ref_l3", make_ndarray_arg(pyramid[3].ref, _shape_2d(pyramid[3].h, pyramid[3].w))),
+
+        make_named_arg("comp_l0", make_ndarray_arg(pyramid[0].comp, _shape_2d(pyramid[0].h, pyramid[0].w))),
+        make_named_arg("comp_l1", make_ndarray_arg(pyramid[1].comp, _shape_2d(pyramid[1].h, pyramid[1].w))),
+        make_named_arg("comp_l2", make_ndarray_arg(pyramid[2].comp, _shape_2d(pyramid[2].h, pyramid[2].w))),
+        make_named_arg("comp_l3", make_ndarray_arg(pyramid[3].comp, _shape_2d(pyramid[3].h, pyramid[3].w))),
+
+        make_named_arg("flow_l0", make_ndarray_arg(pyramid[0].flow, _shape_flow(pyramid[0].h, pyramid[0].w))),
+        make_named_arg("flow_l1", make_ndarray_arg(pyramid[1].flow, _shape_flow(pyramid[1].h, pyramid[1].w))),
+        make_named_arg("flow_l2", make_ndarray_arg(pyramid[2].flow, _shape_flow(pyramid[2].h, pyramid[2].w))),
+        make_named_arg("flow_l3", make_ndarray_arg(pyramid[3].flow, _shape_flow(pyramid[3].h, pyramid[3].w))),
+
+        make_named_arg("flow_tmp_l0", make_ndarray_arg(pyramid[0].flow_temp, _shape_flow(pyramid[0].h, pyramid[0].w))),
+        make_named_arg("flow_tmp_l1", make_ndarray_arg(pyramid[1].flow_temp, _shape_flow(pyramid[1].h, pyramid[1].w))),
+        make_named_arg("flow_tmp_l2", make_ndarray_arg(pyramid[2].flow_temp, _shape_flow(pyramid[2].h, pyramid[2].w))),
+        make_named_arg("flow_tmp_l3", make_ndarray_arg(pyramid[3].flow_temp, _shape_flow(pyramid[3].h, pyramid[3].w))),
+
+        make_named_arg("zncc_surface", make_ndarray_arg(g_ctx->zncc_surface_gpu, {(uint32_t)zncc_size, (uint32_t)zncc_size})),
+        make_named_arg("zncc_results", make_ndarray_arg(g_ctx->zncc_results_gpu, {3u})),
+        make_named_arg("zncc_max_shift", make_i32_arg(zncc_max_shift)),
+
+        make_named_arg("tile_h", make_i32_arg(tile_h)),
+        make_named_arg("tile_w", make_i32_arg(tile_w)),
+        make_named_arg("search_dist", make_i32_arg(current_search_dist)),
+        make_named_arg("search_radius", make_i32_arg(search_radius)),
+        make_named_arg("scale", make_f32_arg((float)downscale_factor))
     };
-    launch_kernel_simple(runtime,
-                         g_ctx->kernels["_initialize_coarsest_flow_kernel"],
-                         init_refined_args);
 
-    if (is_coarsest_layer) {
-      int global_dx = 0;
-      int global_dy = 0;
-      float global_cost = 1e10f;
-      _global_translate_zncc(g_ctx, pyramid[i].ref, pyramid[i].comp,
-                             pyramid[i].h, pyramid[i].w, 32, global_dx,
-                             global_dy, global_cost);
+    ti_launch_compute_graph(runtime, g_ctx->graphs["compute_flow_4layer"], (uint32_t)graph_args.size(), graph_args.data());
+  } else if (effective_layers == 3 && g_ctx->graphs.count("compute_flow_3layer")) {
+    // Monolithic Graph Execution (Parity with Python compute_flow.py)
+    // Match Python: search_radius = max(4, int(search_dist * 2))
+    int search_radius = std::max(4, (int)(search_dist * 2.0f));
+    int current_search_dist = std::max(2, (int)search_dist);
 
-      std::vector<TiArgument> args = {
-          make_ndarray_arg(pyramid[i].flow,
-                           _shape_flow(pyramid[i].h, pyramid[i].w)),
-          make_i32_arg(pyramid[i].h), make_i32_arg(pyramid[i].w),
-          make_f32_arg((float)global_dx), make_f32_arg((float)global_dy)};
-      launch_kernel_simple(
-          runtime, g_ctx->kernels["_initialize_coarsest_flow_kernel"], args);
-    } else {
-      std::vector<TiArgument> u_args = {
-          make_ndarray_arg(pyramid[i + 1].flow,
-                           _shape_flow(pyramid[i + 1].h, pyramid[i + 1].w)),
+    const int zncc_max_shift = 32;
+    const int zncc_size = 2 * zncc_max_shift + 1;
+    if (!_ensure_memory(runtime, g_ctx->zncc_surface_gpu, g_ctx->zncc_surface_bytes, (uint64_t)zncc_size * zncc_size * sizeof(float), false, false)) return nullptr;
+    if (!_ensure_memory(runtime, g_ctx->zncc_results_gpu, g_ctx->zncc_results_bytes, (uint64_t)3 * sizeof(float), false, false)) return nullptr;
+
+    std::vector<TiNamedArgument> graph_args = {
+        make_named_arg("ref_l0", make_ndarray_arg(pyramid[0].ref,
+                                                  _shape_2d(pyramid[0].h,
+                                                            pyramid[0].w))),
+        make_named_arg("ref_l1", make_ndarray_arg(pyramid[1].ref,
+                                                  _shape_2d(pyramid[1].h,
+                                                            pyramid[1].w))),
+        make_named_arg("ref_l2", make_ndarray_arg(pyramid[2].ref,
+                                                  _shape_2d(pyramid[2].h,
+                                                            pyramid[2].w))),
+
+        make_named_arg("comp_l0", make_ndarray_arg(pyramid[0].comp,
+                                                   _shape_2d(pyramid[0].h,
+                                                             pyramid[0].w))),
+        make_named_arg("comp_l1", make_ndarray_arg(pyramid[1].comp,
+                                                   _shape_2d(pyramid[1].h,
+                                                             pyramid[1].w))),
+        make_named_arg("comp_l2", make_ndarray_arg(pyramid[2].comp,
+                                                   _shape_2d(pyramid[2].h,
+                                                             pyramid[2].w))),
+
+        make_named_arg("flow_l0", make_ndarray_arg(pyramid[0].flow,
+                                                   _shape_flow(pyramid[0].h,
+                                                               pyramid[0].w))),
+        make_named_arg("flow_l1", make_ndarray_arg(pyramid[1].flow,
+                                                   _shape_flow(pyramid[1].h,
+                                                               pyramid[1].w))),
+        make_named_arg("flow_l2", make_ndarray_arg(pyramid[2].flow,
+                                                   _shape_flow(pyramid[2].h,
+                                                               pyramid[2].w))),
+
+        make_named_arg("flow_tmp_l0",
+                       make_ndarray_arg(pyramid[0].flow_temp,
+                                        _shape_flow(pyramid[0].h,
+                                                    pyramid[0].w))),
+        make_named_arg("flow_tmp_l1",
+                       make_ndarray_arg(pyramid[1].flow_temp,
+                                        _shape_flow(pyramid[1].h,
+                                                    pyramid[1].w))),
+        make_named_arg("flow_tmp_l2",
+                       make_ndarray_arg(pyramid[2].flow_temp,
+                                        _shape_flow(pyramid[2].h,
+                                                    pyramid[2].w))),
+
+        make_named_arg("zncc_surface", make_ndarray_arg(g_ctx->zncc_surface_gpu, {(uint32_t)zncc_size, (uint32_t)zncc_size})),
+        make_named_arg("zncc_results", make_ndarray_arg(g_ctx->zncc_results_gpu, {3u})),
+        make_named_arg("zncc_max_shift", make_i32_arg(zncc_max_shift)),
+
+        make_named_arg("tile_h", make_i32_arg(tile_h)),
+        make_named_arg("tile_w", make_i32_arg(tile_w)),
+        make_named_arg("search_dist", make_i32_arg(current_search_dist)),
+        make_named_arg("search_radius", make_i32_arg(search_radius)),
+        make_named_arg("scale", make_f32_arg((float)downscale_factor))};
+
+    ti_launch_compute_graph(runtime, g_ctx->graphs["compute_flow_3layer"],
+                             (uint32_t)graph_args.size(), graph_args.data());
+  } else {
+    // Fallback to manual orchestration (dynamic levels)
+    for (int i = effective_layers - 1; i >= 0; --i) {
+      // Python naming parity:
+      // flow_gpu        -> pyramid[i].flow
+      // refined_flow_gpu-> pyramid[i].flow_temp
+      const bool is_coarsest_layer = (i == effective_layers - 1);
+      const bool is_finest_layer = (i == 0);
+      const int current_tile_h =
+          std::max(min_tile_size, std::min(tile_h, pyramid[i].h));
+      const int current_tile_w =
+          std::max(min_tile_size, std::min(tile_w, pyramid[i].w));
+
+      // process_single_layer: refined_flow_gpu initialized to zeros.
+      std::vector<TiArgument> init_refined_args = {
           make_ndarray_arg(pyramid[i].flow_temp,
                            _shape_flow(pyramid[i].h, pyramid[i].w)),
-          make_i32_arg(pyramid[i + 1].h),
-          make_i32_arg(pyramid[i + 1].w),
           make_i32_arg(pyramid[i].h),
           make_i32_arg(pyramid[i].w),
-          make_f32_arg((float)downscale_factor),
-          make_f32_arg((float)downscale_factor),
+          make_f32_arg(0.0f),
+          make_f32_arg(0.0f),
       };
-      launch_kernel_simple(runtime, g_ctx->kernels["_upsample_flow_kernel"],
-                           u_args);
-      _copy_field_gpu(runtime, pyramid[i].flow_temp, pyramid[i].flow,
-                      _bytes_f32_flow(pyramid[i].h, pyramid[i].w));
-    }
+      launch_kernel_simple(runtime,
+                           g_ctx->kernels["_initialize_coarsest_flow_kernel"],
+                           init_refined_args);
 
-    if (is_finest_layer) {
-      TiMemory prev_flow_mem = TI_NULL_HANDLE;
-      int prev_h = 1;
-      int prev_w = 1;
       if (is_coarsest_layer) {
-        if (safe_prev_flow != TI_NULL_HANDLE) {
-          prev_flow_mem = safe_prev_flow;
-          prev_h = 1;
-          prev_w = 1;
-        } else {
-          // Allocation fallback: keep kernel contract valid without
-          // out-of-bounds access.
-          prev_flow_mem = pyramid[i].flow;
-          prev_h = pyramid[i].h;
-          prev_w = pyramid[i].w;
-        }
+        int global_dx = 0;
+        int global_dy = 0;
+        float global_cost = 1e10f;
+        _global_translate_zncc(g_ctx, pyramid[i].ref, pyramid[i].comp,
+                               pyramid[i].h, pyramid[i].w, 32, global_dx,
+                               global_dy, global_cost);
+
+        std::vector<TiArgument> args = {
+            make_ndarray_arg(pyramid[i].flow,
+                             _shape_flow(pyramid[i].h, pyramid[i].w)),
+            make_i32_arg(pyramid[i].h), make_i32_arg(pyramid[i].w),
+            make_f32_arg((float)global_dx), make_f32_arg((float)global_dy)};
+        launch_kernel_simple(
+            runtime, g_ctx->kernels["_initialize_coarsest_flow_kernel"], args);
       } else {
-        prev_flow_mem = pyramid[i + 1].flow;
-        prev_h = pyramid[i + 1].h;
-        prev_w = pyramid[i + 1].w;
+        std::vector<TiArgument> u_args = {
+            make_ndarray_arg(pyramid[i + 1].flow,
+                             _shape_flow(pyramid[i + 1].h, pyramid[i + 1].w)),
+            make_ndarray_arg(pyramid[i].flow_temp,
+                             _shape_flow(pyramid[i].h, pyramid[i].w)),
+            make_i32_arg(pyramid[i + 1].h),
+            make_i32_arg(pyramid[i + 1].w),
+            make_i32_arg(pyramid[i].h),
+            make_i32_arg(pyramid[i].w),
+            make_f32_arg((float)downscale_factor),
+            make_f32_arg((float)downscale_factor),
+        };
+        launch_kernel_simple(runtime, g_ctx->kernels["_upsample_flow_kernel"],
+                             u_args);
+        _copy_field_gpu(runtime, pyramid[i].flow_temp, pyramid[i].flow,
+                        _bytes_f32_flow(pyramid[i].h, pyramid[i].w));
       }
 
-      std::vector<TiArgument> r_args = {
-          make_ndarray_arg(pyramid[i].ref,
-                           _shape_2d(pyramid[i].h, pyramid[i].w)),
-          make_ndarray_arg(pyramid[i].comp,
-                           _shape_2d(pyramid[i].h, pyramid[i].w)),
-          make_ndarray_arg(pyramid[i].flow,
-                           _shape_flow(pyramid[i].h, pyramid[i].w)),
-          make_ndarray_arg(prev_flow_mem, _shape_flow(prev_h, prev_w)),
-          make_ndarray_arg(pyramid[i].flow_temp,
-                           _shape_flow(pyramid[i].h, pyramid[i].w)),
-          make_i32_arg(pyramid[i].h),
-          make_i32_arg(pyramid[i].w),
-          make_i32_arg(current_tile_h),
-          make_i32_arg(current_tile_w)};
-      r_args.push_back(make_i32_arg(prev_h));
-      r_args.push_back(make_i32_arg(prev_w));
-      r_args.push_back(make_i32_arg(downscale_factor));
-      launch_kernel_simple(runtime, g_ctx->kernels["_search_fine_level_kernel"],
-                           r_args);
-    } else if (is_coarsest_layer) {
-      // Match Python: search_radius = max(4, int(search_dist * 2))
-      int search_radius = std::max(4, (int)(search_dist * 2.0f));
-      std::vector<TiArgument> s_args = {
-          make_ndarray_arg(pyramid[i].ref,
-                           _shape_2d(pyramid[i].h, pyramid[i].w)),
-          make_ndarray_arg(pyramid[i].comp,
-                           _shape_2d(pyramid[i].h, pyramid[i].w)),
-          make_ndarray_arg(pyramid[i].flow_temp,
-                           _shape_flow(pyramid[i].h, pyramid[i].w)),
-          make_i32_arg(pyramid[i].h),
-          make_i32_arg(pyramid[i].w),
-          make_i32_arg(current_tile_h),
-          make_i32_arg(current_tile_w),
-          make_i32_arg(search_radius)};
-      launch_kernel_simple(runtime, g_ctx->kernels["_block_search_kernel"],
-                           s_args);
-    } else {
-      // Match Python: current_search_dist = max(2, int(search_dist))
-      int current_search_dist = std::max(2, (int)search_dist);
-      std::vector<TiArgument> r_args = {
-          make_ndarray_arg(pyramid[i].ref,
-                           _shape_2d(pyramid[i].h, pyramid[i].w)),
-          make_ndarray_arg(pyramid[i].comp,
-                           _shape_2d(pyramid[i].h, pyramid[i].w)),
-          make_ndarray_arg(pyramid[i].flow,
-                           _shape_flow(pyramid[i].h, pyramid[i].w)),
-          make_ndarray_arg(pyramid[i + 1].flow,
-                           _shape_flow(pyramid[i + 1].h, pyramid[i + 1].w)),
-          make_ndarray_arg(pyramid[i].flow_temp,
-                           _shape_flow(pyramid[i].h, pyramid[i].w)),
-          make_i32_arg(pyramid[i].h),
-          make_i32_arg(pyramid[i].w),
-          make_i32_arg(current_tile_h),
-          make_i32_arg(current_tile_w),
-          make_i32_arg(current_search_dist),
-          make_i32_arg(pyramid[i + 1].h),
-          make_i32_arg(pyramid[i + 1].w),
-          make_i32_arg(downscale_factor)};
-      launch_kernel_simple(
-          runtime, g_ctx->kernels["_search_coarse_level_kernel"], r_args);
-    }
+      if (is_finest_layer) {
+        TiMemory prev_flow_mem = TI_NULL_HANDLE;
+        int prev_h = 1;
+        int prev_w = 1;
+        if (is_coarsest_layer) {
+          if (safe_prev_flow != TI_NULL_HANDLE) {
+            prev_flow_mem = safe_prev_flow;
+            prev_h = 1;
+            prev_w = 1;
+          } else {
+            prev_flow_mem = pyramid[i].flow;
+            prev_h = pyramid[i].h;
+            prev_w = pyramid[i].w;
+          }
+        } else {
+          prev_flow_mem = pyramid[i + 1].flow;
+          prev_h = pyramid[i + 1].h;
+          prev_w = pyramid[i + 1].w;
+        }
 
-    // process_single_layer: subpixel refinement for non-finest layers only.
-    if (!is_finest_layer) {
-      _copy_field_gpu(runtime, pyramid[i].flow_temp, pyramid[i].flow,
-                      _bytes_f32_flow(pyramid[i].h, pyramid[i].w));
+        std::vector<TiArgument> r_args = {
+            make_ndarray_arg(pyramid[i].ref,
+                             _shape_2d(pyramid[i].h, pyramid[i].w)),
+            make_ndarray_arg(pyramid[i].comp,
+                             _shape_2d(pyramid[i].h, pyramid[i].w)),
+            make_ndarray_arg(pyramid[i].flow,
+                             _shape_flow(pyramid[i].h, pyramid[i].w)),
+            make_ndarray_arg(prev_flow_mem, _shape_flow(prev_h, prev_w)),
+            make_ndarray_arg(pyramid[i].flow_temp,
+                             _shape_flow(pyramid[i].h, pyramid[i].w)),
+            make_i32_arg(pyramid[i].h),
+            make_i32_arg(pyramid[i].w),
+            make_i32_arg(current_tile_h),
+            make_i32_arg(current_tile_w)};
+        r_args.push_back(make_i32_arg(prev_h));
+        r_args.push_back(make_i32_arg(prev_w));
+        r_args.push_back(make_i32_arg(downscale_factor));
+        launch_kernel_simple(
+            runtime, g_ctx->kernels["_search_fine_level_kernel"], r_args);
+      } else if (is_coarsest_layer) {
+        int search_radius = std::max(4, (int)(search_dist * 2.0f));
+        std::vector<TiArgument> s_args = {
+            make_ndarray_arg(pyramid[i].ref,
+                             _shape_2d(pyramid[i].h, pyramid[i].w)),
+            make_ndarray_arg(pyramid[i].comp,
+                             _shape_2d(pyramid[i].h, pyramid[i].w)),
+            make_ndarray_arg(pyramid[i].flow_temp,
+                             _shape_flow(pyramid[i].h, pyramid[i].w)),
+            make_i32_arg(pyramid[i].h),
+            make_i32_arg(pyramid[i].w),
+            make_i32_arg(current_tile_h),
+            make_i32_arg(current_tile_w),
+            make_i32_arg(search_radius)};
+        launch_kernel_simple(runtime, g_ctx->kernels["_block_search_kernel"],
+                             s_args);
+      } else {
+        int current_search_dist = std::max(2, (int)search_dist);
+        std::vector<TiArgument> r_args = {
+            make_ndarray_arg(pyramid[i].ref,
+                             _shape_2d(pyramid[i].h, pyramid[i].w)),
+            make_ndarray_arg(pyramid[i].comp,
+                             _shape_2d(pyramid[i].h, pyramid[i].w)),
+            make_ndarray_arg(pyramid[i].flow,
+                             _shape_flow(pyramid[i].h, pyramid[i].w)),
+            make_ndarray_arg(pyramid[i + 1].flow,
+                             _shape_flow(pyramid[i + 1].h, pyramid[i + 1].w)),
+            make_ndarray_arg(pyramid[i].flow_temp,
+                             _shape_flow(pyramid[i].h, pyramid[i].w)),
+            make_i32_arg(pyramid[i].h),
+            make_i32_arg(pyramid[i].w),
+            make_i32_arg(current_tile_h),
+            make_i32_arg(current_tile_w),
+            make_i32_arg(current_search_dist),
+            make_i32_arg(pyramid[i + 1].h),
+            make_i32_arg(pyramid[i + 1].w),
+            make_i32_arg(downscale_factor)};
+        launch_kernel_simple(
+            runtime, g_ctx->kernels["_search_coarse_level_kernel"], r_args);
+      }
 
-      std::vector<TiArgument> sub_args = {
-          make_ndarray_arg(pyramid[i].ref,
-                           _shape_2d(pyramid[i].h, pyramid[i].w)),
-          make_ndarray_arg(pyramid[i].comp,
-                           _shape_2d(pyramid[i].h, pyramid[i].w)),
-          make_ndarray_arg(pyramid[i].flow,
-                           _shape_flow(pyramid[i].h, pyramid[i].w)),
-          make_ndarray_arg(pyramid[i].flow_temp,
-                           _shape_flow(pyramid[i].h, pyramid[i].w)),
-          make_i32_arg(pyramid[i].h),
-          make_i32_arg(pyramid[i].w),
-          make_i32_arg(current_tile_h),
-          make_i32_arg(current_tile_w)};
-      launch_kernel_simple(
-          runtime, g_ctx->kernels["_parabolic_subpixel_refinement_kernel"],
-          sub_args);
+      if (!is_finest_layer) {
+        _copy_field_gpu(runtime, pyramid[i].flow_temp, pyramid[i].flow,
+                        _bytes_f32_flow(pyramid[i].h, pyramid[i].w));
 
-      // Result is in flow_temp (refined). Copy back to flow for next-layer
-      // upsample.
-      _copy_field_gpu(runtime, pyramid[i].flow_temp, pyramid[i].flow,
-                      _bytes_f32_flow(pyramid[i].h, pyramid[i].w));
-    } else {
-      // Finest layer output lives in refined buffer; mirror to flow for stable
-      // final consumer.
-      _copy_field_gpu(runtime, pyramid[i].flow_temp, pyramid[i].flow,
-                      _bytes_f32_flow(pyramid[i].h, pyramid[i].w));
+        std::vector<TiArgument> sub_args = {
+            make_ndarray_arg(pyramid[i].ref,
+                             _shape_2d(pyramid[i].h, pyramid[i].w)),
+            make_ndarray_arg(pyramid[i].comp,
+                             _shape_2d(pyramid[i].h, pyramid[i].w)),
+            make_ndarray_arg(pyramid[i].flow,
+                             _shape_flow(pyramid[i].h, pyramid[i].w)),
+            make_ndarray_arg(pyramid[i].flow_temp,
+                             _shape_flow(pyramid[i].h, pyramid[i].w)),
+            make_i32_arg(pyramid[i].h),
+            make_i32_arg(pyramid[i].w),
+            make_i32_arg(current_tile_h),
+            make_i32_arg(current_tile_w)};
+        launch_kernel_simple(
+            runtime, g_ctx->kernels["_parabolic_subpixel_refinement_kernel"],
+            sub_args);
+
+        _copy_field_gpu(runtime, pyramid[i].flow_temp, pyramid[i].flow,
+                        _bytes_f32_flow(pyramid[i].h, pyramid[i].w));
+      } else {
+        _copy_field_gpu(runtime, pyramid[i].flow_temp, pyramid[i].flow,
+                        _bytes_f32_flow(pyramid[i].h, pyramid[i].w));
+      }
     }
   }
 
@@ -918,6 +1091,7 @@ ALIGN_API void deinit_alignment_modular_tirt() {
     ti_destroy_aot_module(g_ctx->preprocess_mod);
     ti_destroy_aot_module(g_ctx->flow_mod);
     ti_destroy_aot_module(g_ctx->warp_mod);
+    // Graphs and kernels are owned by the modules and destroyed with them
     ti_destroy_runtime(g_ctx->runtime);
   }
   delete g_ctx;

@@ -20,9 +20,9 @@ if TAICHI_AVAILABLE:
 
     @ti.kernel
     def _compute_zncc_map_kernel(
-        image: ti.types.ndarray(),
-        template: ti.types.ndarray(),
-        dst: ti.types.ndarray(),
+        image: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        template: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
         h_img: int,
         w_img: int,
         h_temp: int,
@@ -77,50 +77,44 @@ if TAICHI_AVAILABLE:
         comp: ti.types.ndarray(dtype=ti.f32, ndim=2),
         cost_surface: ti.types.ndarray(dtype=ti.f32, ndim=2),
         max_shift: int,
-        h: int,
-        w: int,
+        h_ref: int, w_ref: int,
+        h_comp: int, w_comp: int,
     ):
         """
-        Computes the ZNCC (Zero-mean Normalized Cross-Correlation) cost across a shift grid.
-        Identical to older implementation for global motion estimation.
+        Computes the ZNCC cost across a shift grid.
+        Uses a fixed cropping region to avoid bias near edges.
+        Formula: 1.0 - [sum((I-meanI)*(T-meanT)) / (stdI * stdT)]
         """
         for dy, dx in ti.ndrange(
             (-max_shift, max_shift + 1), (-max_shift, max_shift + 1)
         ):
-            # Pass 1: Calculate Means
             sum_ref = 0.0
             sum_comp = 0.0
             count = 0.0
 
-            for y in range(max_shift, h - max_shift):
-                for x in range(max_shift, w - max_shift):
-                    comp_y = y + dy
-                    comp_x = x + dx
-
-                    sum_ref += float(ref[y, x])
-                    sum_comp += float(comp[comp_y, comp_x])
+            # Pass 1: Calculate Means over fixed window
+            for y in range(max_shift, h_ref - max_shift):
+                for x in range(max_shift, w_ref - max_shift):
+                    sum_ref += ref[y, x]
+                    sum_comp += comp[y + dy, x + dx]
                     count += 1.0
 
             if count > 0.0:
                 mean_ref = sum_ref / count
                 mean_comp = sum_comp / count
 
-                # Pass 2: Calculate ZNCC
                 numerator = 0.0
                 sum_sq_ref = 0.0
                 sum_sq_comp = 0.0
 
-                for y in range(max_shift, h - max_shift):
-                    for x in range(max_shift, w - max_shift):
-                        comp_y = y + dy
-                        comp_x = x + dx
-
-                        val_ref = float(ref[y, x]) - mean_ref
-                        val_comp = float(comp[comp_y, comp_x]) - mean_comp
-
-                        numerator += val_ref * val_comp
-                        sum_sq_ref += val_ref * val_ref
-                        sum_sq_comp += val_comp * val_comp
+                # Pass 2: Calculate Covariance and Variance
+                for y in range(max_shift, h_ref - max_shift):
+                    for x in range(max_shift, w_ref - max_shift):
+                        v_ref = ref[y, x] - mean_ref
+                        v_comp = comp[y + dy, x + dx] - mean_comp
+                        numerator += v_ref * v_comp
+                        sum_sq_ref += v_ref * v_ref
+                        sum_sq_comp += v_comp * v_comp
 
                 denominator = ti.sqrt(sum_sq_ref * sum_sq_comp)
 
@@ -131,6 +125,32 @@ if TAICHI_AVAILABLE:
                     cost_surface[dy + max_shift, dx + max_shift] = 1e10
             else:
                 cost_surface[dy + max_shift, dx + max_shift] = 1e10
+
+
+    @ti.kernel
+    def _reduce_min_2d_kernel(
+        surface: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        results: ti.types.ndarray(dtype=ti.f32, ndim=1),  # [val, y, x]
+        h: int,
+        w: int,
+    ):
+        """Find the minimum value and its coordinates in a 2D surface."""
+        # Initialize results
+        results[0] = 1e10  # best_cost
+        results[1] = 0.0   # best_dy
+        results[2] = 0.0   # best_dx
+        
+        for y, x in ti.ndrange(h, w):
+            val = surface[y, x]
+            # Use atomic_min/max or a careful reduction
+            # For small surfaces (search radius), a simple atomic comparison is safe.
+            ti.atomic_min(results[0], val)
+        
+        # Second pass to find the index (less efficient but simple for now)
+        for y, x in ti.ndrange(h, w):
+            if surface[y, x] == results[0]:
+                results[1] = float(y)
+                results[2] = float(x)
 
 
 @ti_thread
@@ -204,7 +224,8 @@ def global_translate_zncc(ref, comp, max_shift=16):
     cost_surface = common.get_temp_buffer((size, size), ti.f32)
     cost_surface.fill(1e10)
 
-    _compute_global_zncc_surface(ref_gpu, comp_gpu, cost_surface, safe_shift, h, w)
+    h_comp, w_comp = comp_gpu.shape[:2]
+    _compute_global_zncc_surface(ref_gpu, comp_gpu, cost_surface, safe_shift, h, w, h_comp, w_comp)
 
     surface_np = cost_surface.to_numpy()
     min_idx = np.unravel_index(np.argmin(surface_np), surface_np.shape)
