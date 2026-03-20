@@ -1,0 +1,84 @@
+#:kivy 2.3.1
+
+<HomeScreen>:
+    name: 'home'
+    md_bg_color: 0.95, 0.95, 0.95, 1
+
+    MDBoxLayout:
+        orientation: 'vertical'
+        
+        MDTopAppBar:
+            title: "Demo"
+            elevation: 0
+            md_bg_color: 0.95, 0.95, 0.95, 1
+            specific_text_color: 0.2, 0.2, 0.2, 1
+            
+        MDScrollView:
+            MDBoxLayout:
+                orientation: 'vertical'
+                padding: "16dp"
+                spacing: "16dp"
+                adaptive_height: True
+                
+                MDCard:
+                    orientation: "vertical"
+                    padding: "16dp"
+                    size_hint_y: None
+                    height: "100dp"
+                    md_bg_color: 1, 1, 1, 1
+                    radius: [15, 15, 15, 15]
+                    ripple_behavior: True
+                    ripple_color: 0.1, 0.7, 0.3, 0.5
+                    on_release: root.open_tool_projects("Denoising")
+                    
+                    MDLabel:
+                        text: "Denoising"
+                        font_style: "Subtitle1"
+                        bold: True
+                        
+                    MDLabel:
+                        text: "Analyze burst images to remove noise and enhance detail"
+                        theme_text_color: "Secondary"
+                        font_style: "Caption"
+
+                MDCard:
+                    orientation: "vertical"
+                    padding: "16dp"
+                    size_hint_y: None
+                    height: "100dp"
+                    md_bg_color: 1, 1, 1, 1
+                    radius: [15, 15, 15, 15]
+                    ripple_behavior: True
+                    ripple_color: 0.1, 0.7, 0.3, 0.5  # Green ripple for white card
+                    on_release: root.open_tool_projects("HDR Stack")
+                    
+                    MDLabel:
+                        text: "HDR Stack"
+                        font_style: "Subtitle1"
+                        bold: True
+                        
+                    MDLabel:
+                        text: "Combine multiple with different exposure"
+                        theme_text_color: "Secondary"
+                        font_style: "Caption"
+
+                MDCard:
+                    orientation: "vertical"
+                    padding: "16dp"
+                    size_hint_y: None
+                    height: "100dp"
+                    md_bg_color: 1, 1, 1, 1
+                    radius: [15, 15, 15, 15]
+                    ripple_behavior: True
+                    ripple_color: 0.1, 0.7, 0.3, 0.5  # Green ripple for white card
+                    on_release: root.open_tool_projects("Panorama")
+                    
+                    MDLabel:
+                        text: "Panorama"
+                        font_style: "Subtitle1"
+                        bold: True
+                        
+                    MDLabel:
+                        text: "Stitch a multiple image for reduce a wide dymotional image"
+                        theme_text_color: "Secondary"
+                        font_style: "Caption"

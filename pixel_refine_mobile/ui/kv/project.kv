@@ -1,0 +1,134 @@
+#:kivy 2.3.1
+
+<ProjectScreen>:
+    name: 'project'
+    md_bg_color: 0.95, 0.95, 0.95, 1
+
+    MDBoxLayout:
+        orientation: 'vertical'
+        
+        MDTopAppBar:
+            id: top_bar
+            title: "Projects"
+            elevation: 0
+            md_bg_color: 0.95, 0.95, 0.95, 1
+            specific_text_color: 0.2, 0.2, 0.2, 1
+            left_action_items: [["arrow-left", lambda x: root.go_back()]]
+            right_action_items: [["export", lambda x: None]]
+            
+        MDScrollView:
+            MDBoxLayout:
+                orientation: 'vertical'
+                padding: "16dp"
+                spacing: "24dp"
+                adaptive_height: True
+                
+                # --- EMPTY STATE: Large New Project Button ---
+                MDBoxLayout:
+                    orientation: 'vertical'
+                    adaptive_height: True
+                    spacing: "16dp"
+                    opacity: 1 if not root.has_projects else 0
+                    disabled: root.has_projects
+                    size_hint_y: None
+                    height: "400dp" if not root.has_projects else 0
+                    
+                    MDCard:
+                        orientation: "vertical"
+                        size_hint: .9, .9
+                        pos_hint: {"center_x": .5}
+                        padding: "24dp"
+                        md_bg_color: 1, 1, 1, 1
+                        radius: [25, 25, 25, 25]
+                        elevation: 2
+                        ripple_behavior: True
+                        on_release: root.create_new_project()
+                        
+                        MDBoxLayout:
+                            orientation: 'vertical'
+                            spacing: "20dp"
+                            
+                            MDIcon:
+                                icon: "image-multiple-outline"
+                                font_size: "80sp"
+                                halign: "center"
+                                pos_hint: {"center_x": .5}
+                                theme_text_color: "Custom"
+                                text_color: 0.1, 0.7, 0.3, 1
+                                
+                            MDLabel:
+                                text: "Mulai Proyek Baru"
+                                font_style: "H5"
+                                halign: "center"
+                                bold: True
+                                
+                            MDLabel:
+                                text: "Ketuk untuk memilih foto burst\ndari galeri Anda"
+                                halign: "center"
+                                theme_text_color: "Secondary"
+                                font_style: "Body1"
+
+                # --- HAS PROJECTS STATE: Grid View ---
+                MDBoxLayout:
+                    orientation: 'vertical'
+                    adaptive_height: True
+                    spacing: "16dp"
+                    opacity: 1 if root.has_projects else 0
+                    disabled: not root.has_projects
+                    size_hint_y: None if root.has_projects else 1 
+                
+                    MDLabel:
+                        text: "Recent Projects"
+                        font_style: "H6"
+                        bold: True
+                        adaptive_height: True
+                    
+                    # Grid for Recent Projects
+                    MDGridLayout:
+                        id: recent_grid
+                        cols: 3
+                        spacing: "10dp"
+                        adaptive_height: True
+                        
+                        # Plus / New Card 
+                        MDCard:
+                            orientation: "vertical"
+                            size_hint: None, None
+                            size: "100dp", "100dp"
+                            padding: "10dp"
+                            md_bg_color: 1, 1, 1, 1
+                            radius: [10, 10, 10, 10]
+                            ripple_behavior: True
+                            on_release: root.create_new_project()
+                            
+                            MDIcon:
+                                icon: "folder-plus"
+                                pos_hint: {"center_x": .5, "center_y": .6}
+                                font_size: "36sp"
+                                theme_text_color: "Custom"
+                                text_color: 0.1, 0.7, 0.3, 1
+                                
+                            MDLabel:
+                                text: "New"
+                                halign: "center"
+                                theme_text_color: "Custom"
+                                text_color: 0.2, 0.2, 0.2, 1
+                                font_style: "Caption"
+                                bold: True
+                                
+                    MDWidget:
+                        size_hint_y: None
+                        height: "10dp"
+                        
+                    MDLabel:
+                        text: "Other projects"
+                        font_style: "H6"
+                        bold: True
+                        adaptive_height: True
+                        
+                    # Grid for Other Projects
+                    MDGridLayout:
+                        id: other_grid
+                        cols: 3
+                        spacing: "10dp"
+                        adaptive_height: True
