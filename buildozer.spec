@@ -21,8 +21,7 @@ source.include_exts = py,png,jpg,kv,atlas,json
 # (list) Source files to exclude (let empty to include any file)
 #source.exclude_exts = spec
 
-# (list) List of directory to exclude (let empty to include any directory)
-#source.exclude_dirs = tests, bin, venv, .git, pixel_refine_desktop
+source.exclude_dirs = tests, bin, venv, .git, pixel_refine_desktop, .buildozer
 
 # (list) List of exclusions using pattern matching
 #source.exclude_patterns = license,images/*/*.jpg
@@ -82,11 +81,7 @@ android.minapi = 21
 # This can be useful to avoid excess bandwidth usage or network errors
 #android.skip_update = False
 
-# (bool) If True, then automatically accept SDK license
-# agreements. This is intended for automation only. If set to False,
-# the default, you will be shown the license when first running
-# buildozer.
-#android.accept_sdk_license = False
+android.accept_sdk_license = True
 
 # (str) Android entry point, default is main.py
 android.entrypoint = main_mobile.py
