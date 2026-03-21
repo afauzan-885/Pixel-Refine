@@ -84,7 +84,7 @@ android.minapi = 21
 android.accept_sdk_license = True
 
 # (str) Android entry point, default is main.py
-android.entrypoint = main_mobile.py
+android.entrypoint = main.py
 
 # (list) Android application meta-data (key=value format)
 #android.meta_data =

@@ -14,6 +14,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Prepare Entry Point
+        run: cp main_mobile.py main.py
+
       - name: Build with Buildozer
         uses: digreatbrian/buildozer-action@v2
         with:
