@@ -215,6 +215,7 @@ class AlignmentTileTaichiAOT:
         is_linear=False,
         proxy_scale=1.0,
         use_sharpen=False,
+        return_format: str = "numpy_u16",
         **kwargs
     ):
         if self.lib is None:
@@ -231,10 +232,6 @@ class AlignmentTileTaichiAOT:
         comp_ptr = comp_i32.ctypes.data_as(ctypes.POINTER(ctypes.c_int32))
 
         out_count = h * w if channels == 1 else h * w * channels
-        # NOTE:
-        # Temporarily avoid compute_alignment_modular_tirt_into_ex due
-        # intermittent access violation on some environments.
-        # Use stable pointer-return path first for reliability.
         if hasattr(self.lib, "compute_alignment_modular_tirt_ex"):
             res_ptr = self.lib.compute_alignment_modular_tirt_ex(
                 comp_ptr, tile_h, tile_w, n_layers, search_dist, channels
@@ -248,8 +245,15 @@ class AlignmentTileTaichiAOT:
         result_flat = np.fromiter(res_ptr, dtype=np.int32, count=out_count)
         self.lib.free_u16_memory(res_ptr)
         if channels == 1:
-            return result_flat.reshape((h, w)).astype(np.uint16)
-        return result_flat.reshape((h, w, channels)).astype(np.uint16)
+            warped_u16 = result_flat.reshape((h, w)).astype(np.uint16)
+        else:
+            warped_u16 = result_flat.reshape((h, w, channels)).astype(np.uint16)
+
+        # AOT path always produces u16; convert to requested format if needed
+        if return_format == "numpy_f32":
+            return warped_u16.astype(np.float32) / 65535.0
+        # "ti_ndarray" not applicable for AOT/C++ path — fall back to u16
+        return warped_u16
 
     def clear_data(self):
         if self.lib:
@@ -309,6 +313,7 @@ class AlignmentTileTaichiJIT:
         proxy_scale=1.0,
         use_sharpen=False,
         search_dist=2.0,
+        return_format: str = "numpy_u16",
         **kwargs,
     ):
         if self.ref_work_res is None:
@@ -349,14 +354,34 @@ class AlignmentTileTaichiJIT:
         )
         common.release_temp_buffer(flow_low_gpu)
 
-        # Warp
-        warped_img = warp.warp_image_gpu(
+        # Warp (result is ti.ndarray in VRAM)
+        warped_img_gpu = warp.warp_image_gpu(
             comp_img_gpu, flow_full_gpu, guidance=self.ref_img_gpu
         )
-
         common.release_temp_buffer(comp_img_gpu)
         common.release_temp_buffer(flow_full_gpu)
-        return warped_img
+
+        # --- Return format dispatch ---
+        # warp_image_gpu() may return a Taichi ndarray (VRAM) OR a plain numpy array.
+        # Use hasattr guard to handle both cases safely.
+        is_taichi_ndarray = hasattr(warped_img_gpu, 'to_numpy')
+
+        if return_format == "ti_ndarray":
+            # Caller owns the buffer; must call common.release_temp_buffer() when done.
+            # If already numpy, wrap it — caller should treat it as read-only numpy.
+            return warped_img_gpu
+        elif return_format == "numpy_f32":
+            raw = warped_img_gpu.to_numpy() if is_taichi_ndarray else warped_img_gpu
+            result = raw.astype(np.float32) / 65535.0
+            if is_taichi_ndarray:
+                common.release_temp_buffer(warped_img_gpu)
+            return result
+        else:  # "numpy_u16" (default) — most memory-efficient for CPU merging
+            raw = warped_img_gpu.to_numpy() if is_taichi_ndarray else warped_img_gpu
+            result = raw.astype(np.uint16)
+            if is_taichi_ndarray:
+                common.release_temp_buffer(warped_img_gpu)
+            return result
 
     def _resize_flow_gpu(self, src, dst, sx, sy):
         # Local kernel to avoid global scope issues
@@ -445,10 +470,14 @@ def set_reference_hybrid_taichi(ref_img, work_h, work_w, **kwargs):
 
 @ti_thread
 def compute_alignment_and_warp_hybrid_taichi(
-    comp_img, tile_h, tile_w, n_layers, align_lib, **kwargs
+    comp_img, tile_h, tile_w, n_layers, align_lib,
+    return_format: str = "numpy_u16",
+    **kwargs
 ):
     return _get_processor().compute_alignment_and_warp(
-        comp_img, tile_h, tile_w, n_layers, **kwargs
+        comp_img, tile_h, tile_w, n_layers,
+        return_format=return_format,
+        **kwargs
     )
 
 

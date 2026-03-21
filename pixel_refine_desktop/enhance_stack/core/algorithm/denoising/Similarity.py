@@ -122,7 +122,7 @@ class SimilarityAlgorithm:
         return_raw=False,
         is_linear_mode=False,
         proxy_scale=1.0,
-        process_in=None,
+        process_in="gpu",
         **unused_kwargs,
     ):
 
@@ -209,59 +209,87 @@ class SimilarityAlgorithm:
         col_starts = np.ascontiguousarray(np.unique(col_starts).astype(np.int32))
 
         # Execution Path (GPU/CPU)
-        # [LEGACY] CPU mode dikomentari — sekarang selalu pakai Taichi (GPU/CPU fallback otomatis)
-        # if process_in is None or process_in == "auto":
-        #     process_in = "cpu"
-        process_in = "gpu"
+        if process_in is None or process_in == "auto":
+            process_in = "gpu" if TAICHI_SPATIAL_AVAILABLE else "cpu"
 
         print(f"[DEBUG] _spatial_merging active mode: {process_in}")
 
-        # [MODIFIED] Local import to prevent any Taichi initialization in CPU path
-        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.compute_spatial import (
-            generate_spatial_weights_taichi,
-            accumulate_spatial_merging_taichi,
-        )
-
-        if not TAICHI_SPATIAL_AVAILABLE:
-            print("Warning: Taichi Spatial not available. Cannot proceed.")
-            return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
-
-        (
-            processed_frames_spatial,
-            final_image_sum_full_res,
-            weight_map_sum_full_res,
-            ref_noise_sigma,
-        ) = process_in_gpu(
-            images=images,
-            reference_image_float=reference_image_float,
-            ref_image_h=ref_image_h,
-            ref_image_w=ref_image_w,
-            ref_channels_buffer=ref_channels_buffer,
-            ref_dtype=ref_dtype,
-            work_res_h=work_res_h,
-            work_res_w=work_res_w,
-            tile_h=tile_h,
-            tile_w=tile_w,
-            row_starts=row_starts,
-            col_starts=col_starts,
-            base_window=base_window,
-            motion_sensitivity=motion_sensitivity,
-            noise_offset_factor=noise_offset_factor,
-            update_progress=update_progress,
-            stop_requested=stop_requested,
-            pass_merge_range=pass_merge_range,
-            p_align_start=p_align_start,
-            p_align_end=p_align_end,
-            p_merge_start=p_merge_start,
-            is_linear_mode=is_linear_mode,
-            proxy_scale=proxy_scale,
-            images_processed_so_far=images_processed_so_far,
-            total_overall_images=total_overall_images,
-            enable_alignment=enable_alignment,
-            num_workers=num_workers,  # Pass num_workers for alignment
-            alignment_tile_size=8,  # [ROLLBACK] Reverted to 8 for warp efficiency
-            **unused_kwargs,
-        )
+        if process_in == "gpu" and TAICHI_SPATIAL_AVAILABLE:
+            (
+                processed_frames_spatial,
+                final_image_sum_full_res,
+                weight_map_sum_full_res,
+                ref_noise_sigma,
+            ) = process_in_gpu(
+                images=images,
+                reference_image_float=reference_image_float,
+                ref_image_h=ref_image_h,
+                ref_image_w=ref_image_w,
+                ref_channels_buffer=ref_channels_buffer,
+                ref_dtype=ref_dtype,
+                work_res_h=work_res_h,
+                work_res_w=work_res_w,
+                tile_h=tile_h,
+                tile_w=tile_w,
+                row_starts=row_starts,
+                col_starts=col_starts,
+                base_window=base_window,
+                motion_sensitivity=motion_sensitivity,
+                noise_offset_factor=noise_offset_factor,
+                update_progress=update_progress,
+                stop_requested=stop_requested,
+                pass_merge_range=pass_merge_range,
+                p_align_start=p_align_start,
+                p_align_end=p_align_end,
+                p_merge_start=p_merge_start,
+                is_linear_mode=is_linear_mode,
+                proxy_scale=proxy_scale,
+                images_processed_so_far=images_processed_so_far,
+                total_overall_images=total_overall_images,
+                enable_alignment=enable_alignment,
+                num_workers=num_workers,
+                alignment_tile_size=8,
+                lib_path=lib_path,
+                **unused_kwargs,
+            )
+        else:
+            (
+                processed_frames_spatial,
+                final_image_sum_full_res,
+                weight_map_sum_full_res,
+                ref_noise_sigma,
+            ) = process_in_cpu(
+                images=images,
+                reference_image_float=reference_image_float,
+                ref_image_h=ref_image_h,
+                ref_image_w=ref_image_w,
+                ref_channels_buffer=ref_channels_buffer,
+                ref_dtype=ref_dtype,
+                work_res_h=work_res_h,
+                work_res_w=work_res_w,
+                tile_h=tile_h,
+                tile_w=tile_w,
+                row_starts=row_starts,
+                col_starts=col_starts,
+                base_window=base_window,
+                motion_sensitivity=motion_sensitivity,
+                noise_offset_factor=noise_offset_factor,
+                num_workers=num_workers,
+                update_progress=update_progress,
+                stop_requested=stop_requested,
+                pass_merge_range=pass_merge_range,
+                p_align_start=p_align_start,
+                p_align_end=p_align_end,
+                p_merge_start=p_merge_start,
+                is_linear_mode=is_linear_mode,
+                proxy_scale=proxy_scale,
+                images_processed_so_far=images_processed_so_far,
+                total_overall_images=total_overall_images,
+                lib_path=lib_path,
+                enable_alignment=enable_alignment,
+                alignment_tile_size=8,
+                **unused_kwargs,
+            )
 
         if final_image_sum_full_res is None:
             return (None, None, 0, []) if weight_of_each_image else (None, None, 0)

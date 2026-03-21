@@ -187,6 +187,28 @@ if TAICHI_AVAILABLE:
             flow[r, c, 0] = init_dx
             flow[r, c, 1] = init_dy
 
+    @ti.kernel
+    def _initialize_flow_from_results_kernel(
+        flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        zncc_results: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        h: int,
+        w: int,
+        max_shift: int,
+    ):
+        """
+        Initialize flow from ZNCC global search results (AOT-compatible, GPU-only).
+        Reads raw indices from _reduce_min_2d_kernel output and converts to
+        actual (dx, dy) by subtracting max_shift offset.
+
+        zncc_results layout: [best_cost, best_y_idx, best_x_idx]
+        Actual shift: dx = best_x_idx - max_shift, dy = best_y_idx - max_shift
+        """
+        best_dy = zncc_results[1] - float(max_shift)
+        best_dx = zncc_results[2] - float(max_shift)
+        for r, c in ti.ndrange(h, w):
+            flow[r, c, 0] = best_dx
+            flow[r, c, 1] = best_dy
+
     @ti.func
     def _compute_regularization_params(
         flow: ti.types.ndarray(dtype=ti.f32, ndim=3),

@@ -33,6 +33,133 @@ def get_taichi_worker():
 
 # --- SimilarityFrequencyInterface REMOVED (Legacy) ---
 
+class SimilaritySpatialInterface:
+    """
+    Membungkus pemanggilan fungsi C++ yang telah dioptimalkan.
+    Sekarang HANYA menghasilkan weight_map.
+    """
+
+    def __init__(self, lib_path):
+        if not os.path.exists(lib_path):
+            raise FileNotFoundError(f"Shared library not found: {lib_path}")
+        try:
+            self.clib = ctypes.CDLL(lib_path)
+            if not hasattr(self.clib, "generate_weight_map_jit"):
+                raise AttributeError(
+                    "Function 'generate_weight_map_jit' not found in DLL. Check C++ extern \"C\" block."
+                )
+            self._define_argtypes()
+        except OSError as e:
+            raise OSError(f"Error loading shared library {lib_path}: {e}")
+        except AttributeError as e:
+            raise AttributeError(
+                f"Function not found in DLL or error setting argtypes. Did you compile C++ correctly? Error: {e}"
+            )
+
+    def _define_argtypes(self):
+        self.clib.generate_weight_map_jit.argtypes = [
+            np.ctypeslib.ndpointer(
+                dtype=np.float32, ndim=2, flags=("C_CONTIGUOUS", "WRITEABLE")
+            ),  # weight_map_sum (2D)
+            np.ctypeslib.ndpointer(
+                dtype=np.float32, flags="C_CONTIGUOUS"
+            ),  # current_image (flattened 1D/3D OK)
+            np.ctypeslib.ndpointer(
+                dtype=np.float32, flags="C_CONTIGUOUS"
+            ),  # reference_image_processed
+            np.ctypeslib.ndpointer(
+                dtype=np.float32, flags="C_CONTIGUOUS"
+            ),  # base_window
+            ctypes.c_void_p,  # stability_map_ptr
+            np.ctypeslib.ndpointer(
+                dtype=np.int32, ndim=1, flags="C_CONTIGUOUS"
+            ),  # row_starts
+            np.ctypeslib.ndpointer(
+                dtype=np.int32, ndim=1, flags="C_CONTIGUOUS"
+            ),  # col_starts
+            ctypes.c_int,
+            ctypes.c_int,  # num_row_starts, num_col_starts
+            ctypes.c_int,
+            ctypes.c_int,  # tile_h, tile_w
+            ctypes.c_int,
+            ctypes.c_int,  # h_img, w_img
+            ctypes.c_int,  # channels
+            ctypes.c_float,  # motion_sensitivity
+            ctypes.c_float,  # noise_offset_factor
+            ctypes.c_float,  # precomputed_ref_noise_sigma
+        ]
+        self.clib.generate_weight_map_jit.restype = None
+
+    def call_generate_weight_map_jit(
+        self,
+        weight_map_sum,
+        current_image,
+        reference_image_processed,
+        base_window,
+        stability_map,
+        row_starts,
+        col_starts,
+        tile_h,
+        tile_w,
+        h,
+        w,
+        channels,
+        motion_sensitivity,
+        noise_offset_factor,
+        precomputed_ref_noise_sigma,
+    ):
+        stability_map_ptr = None
+        if stability_map is not None:
+            if not stability_map.flags["C_CONTIGUOUS"]:
+                stability_map = np.ascontiguousarray(stability_map)
+            stability_map_ptr = stability_map.ctypes.data_as(ctypes.c_void_p)
+
+        self.clib.generate_weight_map_jit(
+            weight_map_sum,
+            current_image,
+            reference_image_processed,
+            base_window,
+            stability_map_ptr,
+            row_starts,
+            col_starts,
+            len(row_starts),
+            len(col_starts),
+            tile_h,
+            tile_w,
+            h,
+            w,
+            channels,
+            motion_sensitivity,
+            noise_offset_factor,
+            precomputed_ref_noise_sigma,
+        )
+
+
+ALIGN_LIB = None
+try:
+    lib_path = os.path.join("pixel_refine_desktop", "ui", "data", "alignment_tile.dll")
+    ALIGN_LIB = ctypes.CDLL(lib_path)
+
+    # Definisikan tanda tangan fungsi compute_alignment_flow
+    ALIGN_LIB.compute_alignment_flow.restype = ctypes.POINTER(ctypes.c_float)
+    ALIGN_LIB.compute_alignment_flow.argtypes = [
+        ctypes.POINTER(ctypes.c_float),  # ref_work_data
+        ctypes.POINTER(ctypes.c_float),  # current_work_data
+        ctypes.c_int,  # work_h
+        ctypes.c_int,  # work_w
+        ctypes.c_int,  # tile_h
+        ctypes.c_int,  # tile_w
+        ctypes.c_int,  # n_layers
+        ctypes.c_float,  # search_dist
+    ]
+
+    # Definisikan tanda tangan fungsi free_flow_memory
+    ALIGN_LIB.free_flow_memory.argtypes = [ctypes.POINTER(ctypes.c_float)]
+    ALIGN_LIB.free_flow_memory.restype = None
+
+except (OSError, AttributeError) as e:
+    ALIGN_LIB = None
+
 
 class ONNXSessionManager:
     """
@@ -447,6 +574,7 @@ def perform_alignment_gpu(
     save_align_image=True,
     progress_start=30,
     progress_end=40,
+    return_format: str = "numpy_u16",
     **kwargs,
 ):
     """
@@ -464,6 +592,13 @@ def perform_alignment_gpu(
         num_alignment_workers: Number of workers (forced to 1 for GPU)
         save_align_image: Save aligned images to disk
         progress_start, progress_end: Progress range
+        return_format: Format of aligned frames stored in images[].
+            - "numpy_u16" (default): drain VRAM → RAM as uint16. 
+                Best for CPU C++ merging (process_in_cpu).
+            - "numpy_f32": drain VRAM → RAM as float32 [0,1].
+            - "ti_ndarray": keep in VRAM as Taichi ndarray.
+                Best for GPU merging (process_in_gpu + Taichi merging).
+                Caller must release VRAM after use.
         **kwargs: Additional parameters
             - is_linear_mode: Linear workflow flag
             - proxy_scale: Exposure scaling for gamma proxy
@@ -519,6 +654,7 @@ def perform_alignment_gpu(
         print("[Info] Forcing single-threaded execution for Taichi GPU alignment.")
 
     print(f"[GPU Alignment] Processing {num_images - 1} images with Taichi GPU...")
+    print(f"[GPU Alignment] Return format: {return_format}")
 
     # Array to store alignment cost maps (ZMSSD) for each image as confidence
     cost_maps = [None] * num_images
@@ -549,6 +685,7 @@ def perform_alignment_gpu(
                     tile_w,
                     n_layers,
                     None,  # ALIGN_LIB not needed for GPU
+                    return_format=return_format,
                     is_linear=is_linear_mode,
                     proxy_scale=proxy_scale,
                     use_sharpen=use_sharpen,
@@ -598,10 +735,11 @@ def perform_alignment_gpu(
             return False
 
         # [SMART LIFECYCLE] Reclaim VRAM after alignment
-        try:
-            worker.submit_and_wait(clear_taichi_cache)
-        except Exception as e:
-            print(f"[Taichi] Alignment cleanup warning: {e}")
+        # NOTE: Tidak memanggil clear_taichi_cache() karena bisa memicu
+        # CUDA_ERROR_INVALID_CONTEXT saat cuMemFreeAsync dipanggil setelah
+        # Taichi selesai. Buffer per-frame sudah dibebaskan secara otomatis
+        # dalam loop (_run_gpu_alignment_loop) ketika return_format != "ti_ndarray".
+        # Buffer referensi (ref_img_gpu, ref_work_res) akan ditimpa pada call berikutnya.
 
         print("✅ GPU Alignment selesai.")
         return True
@@ -942,10 +1080,205 @@ def perform_image_alignment(
             return False, None
 
     # =================================================================
-    # === [LEGACY] BACKEND C++ (alignment_tile) - DIHAPUS ===
-    # === Sekarang selalu pakai Taichi (GPU/CPU fallback otomatis) ===
-    # === See git history for full C++ DLL implementation ===
+    # === BACKEND C++ (alignment_tile) - PARALEL ===
     # =================================================================
+    elif optical_flow_type == "alignment_tile":
+        if ALIGN_LIB is None:
+            error_msg = "Error: Backend C++ dipilih tetapi library 'alignment_tile.dll' tidak tersedia."
+            print(error_msg)
+            if update_progress:
+                update_progress(0, error_msg)
+            return False
 
+        try:
+            # --- Fungsi untuk 1 tugas alignment C++ (dijalankan di worker) ---
+            def process_single_alignment_cpp(
+                i,
+                ref_work_ptr,
+                work_res_h,
+                work_res_w,
+                tile_h,
+                tile_w,
+                n_layers,
+                original_image,
+                ref_dtype,
+                ALIGN_LIB,
+                stop_requested,
+                full_res_reference_image,
+            ):
+
+                if stop_requested and stop_requested():
+                    return (i, None)
+
+                flow_ptr = None
+                current_preprocessed_cpp = None
+                current_img_float = None
+                current_work_gray_cpp = None
+
+                try:
+                    # --- C++ DLL PATH ---
+                    current_img_float = normalize_image(original_image, ref_dtype)
+                    if is_linear_mode:
+                        current_img_float_proxy = to_gamma_proxy(
+                            current_img_float, scale=proxy_scale
+                        )
+                        # [MODIFIED] Menggunakan preprocess_in_python (CPU)
+                        current_preprocessed_cpp, _ = preprocess_in_python(
+                            current_img_float_proxy
+                        )
+                    else:
+                        # [MODIFIED] Menggunakan preprocess_in_python (CPU)
+                        current_preprocessed_cpp, _ = preprocess_in_python(
+                            current_img_float
+                        )
+
+                    current_work_gray_cpp = cv2.resize(
+                        current_preprocessed_cpp,
+                        (work_res_w, work_res_h),
+                        interpolation=cv2.INTER_LINEAR,
+                    ).astype(np.float32)
+
+                    current_work_gray_cpp = np.ascontiguousarray(current_work_gray_cpp)
+                    current_work_ptr = current_work_gray_cpp.ctypes.data_as(
+                        ctypes.POINTER(ctypes.c_float)
+                    )
+
+                    flow_ptr = ALIGN_LIB.compute_alignment_flow(
+                        ref_work_ptr,
+                        current_work_ptr,
+                        work_res_h,
+                        work_res_w,
+                        tile_h,
+                        tile_w,
+                        n_layers,
+                        2.0,
+                    )
+
+                except Exception as e:
+                    print(f"Error C++ setup/call for image {i+1}: {e}")
+                    traceback.print_exc()
+                    return (i, None)
+
+                finally:
+                    # Pastikan referensi Python lokal dibersihkan
+                    del (
+                        current_work_gray_cpp,
+                        current_preprocessed_cpp,
+                        current_img_float,
+                    )
+
+                aligned_img = None
+
+                if flow_ptr:
+                    try:
+                        # 3. Baca Flow dan Rescale
+                        flow_buf_cpp = np.empty(
+                            (work_res_h, work_res_w, 2), dtype=np.float32
+                        )
+                        ctypes.memmove(
+                            flow_buf_cpp.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                            flow_ptr,
+                            flow_buf_cpp.nbytes,
+                        )
+
+                        full_h, full_w = original_image.shape[:2]
+
+                        # Skala flow untuk mapping kembali
+                        flow_full_res = scale_flow(
+                            flow_buf_cpp,
+                            work_res_h,
+                            work_res_w,
+                            full_h,
+                            full_w,
+                            ksize=5,
+                        )
+
+                        if visualization:
+                            flow_vis = visualize_flow(flow_full_res)
+                            cv2.imwrite(f"flow_cpp_{i+1:02d}.jpg", flow_vis)
+                            del flow_vis
+
+                        # 4. Warp Gambar
+                        aligned_img = warp_image_opencv(original_image, flow_full_res)
+
+                        # [OPTIMIZATION]
+                        del flow_buf_cpp, flow_full_res, flow_ptr
+
+                    except Exception as e:
+                        print(f"Error processing flow result for image {i+1}: {e}")
+                return (i, aligned_img)
+
+            # --- Parallel execution with ThreadPoolExecutor ---
+            with ThreadPoolExecutor(max_workers=num_alignment_workers) as executor:
+                futures = {}
+                processed_count = 0
+
+                # Kirim tugas ke executor
+                for i in range(1, num_images):
+                    if stop_requested and stop_requested():
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        return False
+
+                    if i > 1:
+                        time.sleep(0.1)
+
+                    future = executor.submit(
+                        process_single_alignment_cpp,
+                        i,
+                        ref_work_ptr,
+                        work_res_h,
+                        work_res_w,
+                        tile_h,
+                        tile_w,
+                        n_layers,
+                        images[i],
+                        ref_dtype,
+                        ALIGN_LIB,
+                        stop_requested,
+                        reference_image_float,
+                    )
+                    futures[future] = i
+
+                # Kumpulkan hasil
+                for future in as_completed(futures):
+                    i = futures[future]
+                    if stop_requested and stop_requested():
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        return False
+
+                    try:
+                        idx, aligned_img = future.result()
+                        if aligned_img is not None:
+                            images[idx] = aligned_img
+                            if save_align_image:
+                                save_aligned_image(aligned_img, idx + index_offset, "CPP")
+                            # [OPTIMIZATION]
+                            del aligned_img
+                    except Exception as e:
+                        print(
+                            f"❌ Worker C++ gagal untuk gambar {i+1} (saat fetch result): {e}"
+                        )
+
+                    gc.collect()
+
+                    processed_count += 1
+                    if update_progress:
+                        prog_fraction = processed_count / (num_images - 1)
+                        current_msg_progress = int(
+                            progress_start
+                            + prog_fraction * (progress_end - progress_start)
+                        )
+                        update_progress(
+                            current_msg_progress,
+                            f"Alignment gambar {processed_count}/{num_images - 1} (C++)...",
+                        )
+
+            print("✅ Alignment C++ selesai.")
+            return True
+
+        except Exception as e:
+            print(f"Error kritis selama C++ Alignment: {e}")
+            traceback.print_exc()
+            return False
 
 from .spatial_pipeline import process_in_cpu, process_in_gpu
