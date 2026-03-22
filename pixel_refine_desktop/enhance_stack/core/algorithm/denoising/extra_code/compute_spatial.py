@@ -77,10 +77,9 @@ if TAICHI_AVAILABLE and _ti is not None:
             # Simplified confidence formula from C++
             diff_ratio = mad_score / _ti.max(1e-6, noise_sigma)
             adjusted = _ti.max(0.0, diff_ratio - noise_offset_factor)
-            exponent = adjusted * motion_sensitivity * 0.5
-
-            # Linear / Reciprocal weighting (Consistent with HDR+)
-            conf = 1.0 / (1.0 + exponent)
+            exponent = adjusted * motion_sensitivity * 0.45
+            # 1:1 C++ Parity: Sigmoid-like confidence
+            conf = 1.0 / (1.0 + _ti.exp(exponent - 2.0))
 
             coarse_confidence[r, c] = conf
 
@@ -163,8 +162,8 @@ if TAICHI_AVAILABLE and _ti is not None:
                     noise_offset = noise_offset_factor * noise_sigma
                     excess_mad = _ti.max(0.0, mad_score - noise_offset)
 
-                    # Consistent Linear/Reciprocal weighting (HDR+ Paper)
-                    conf_fine = 1.0 / (1.0 + excess_mad * motion_sensitivity)
+                    # 1:1 C++ Parity: Pure exponential confidence
+                    conf_fine = _ti.exp(-excess_mad * motion_sensitivity)
 
                     # 3. Guidance, Stability and Confidence Weighting
                     # Dalam C++, guidance dan stability diambil dari center tile saja
@@ -231,12 +230,15 @@ if TAICHI_AVAILABLE and _ti is not None:
             fy = (float(r) + 0.5) * (float(h_work) / float(h_full)) - 0.5
             fx = (float(c) + 0.5) * (float(w_work) / float(w_full)) - 0.5
 
-            w_val = common.bilinear_at(weight_map_work, fx, fy)
+            w_val = common.bilinear_at(weight_map_work, fx, fy, h_work, w_work)
 
             # Accumulate
-            weight_map_sum_full[r, c] += w_val
+            _ti.atomic_add(weight_map_sum_full[r, c], w_val)
             for ch in range(num_channels):
-                final_image_sum[r, c, ch] += current_image_full[r, c, ch] * w_val
+                _ti.atomic_add(
+                    final_image_sum[r, c, ch], current_image_full[r, c, ch] * w_val
+                )
+
 
     # --- INTERFACE FUNCTIONS ---
 

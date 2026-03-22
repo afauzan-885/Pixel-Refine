@@ -44,10 +44,10 @@ if TAICHI_AVAILABLE:
         iy = int(ti.floor(y))
 
         # Clamp to bounds
-        ix0 = tm.clamp(ix, 0, w - 1)
-        iy0 = tm.clamp(iy, 0, h - 1)
-        ix1 = tm.clamp(ix + 1, 0, w - 1)
-        iy1 = tm.clamp(iy + 1, 0, h - 1)
+        ix0 = tm.clamp(ix, 0, ww - 1)
+        iy0 = tm.clamp(iy, 0, hh - 1)
+        ix1 = tm.clamp(ix + 1, 0, ww - 1)
+        iy1 = tm.clamp(iy + 1, 0, hh - 1)
 
         fx = x - float(ix)
         fy = y - float(iy)
@@ -67,7 +67,7 @@ if TAICHI_AVAILABLE:
         hh, ww = h, w
         if ti.static(isinstance(h, int) and h == -1):
             hh, ww = img.shape[0], img.shape[1]
-        # Boundary check - fallback to bilinear for edges
+        # Boundary check - fallback to bilinear for edges (requires 2-pixel margin for bicubic)
         res = 0.0
         if x < 1.0 or y < 1.0 or x >= float(ww - 2) or y >= float(hh - 2):
             res = bilinear_at(img, x, y, hh, ww)

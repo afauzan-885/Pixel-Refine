@@ -72,9 +72,9 @@ if TAICHI_AVAILABLE:
                 r_pixel = reference_img[curr_y, curr_x]
                 pixel_diff = ti.abs(c_pixel - r_pixel)
 
-                # Optimization Constants
+                # Optimization Constants (Matching C++ parity)
                 adaptive_diff_threshold = ti.max(0.005, noise_level * 0.2)
-                structure_min_threshold_sq = 150.0
+                structure_min_threshold_sq = 150.0 # Standard C++ threshold
 
                 # --- Optimized Gradient Calculation ---
                 # Pre-fetch neighbors to avoid repeated indexing
@@ -108,11 +108,11 @@ if TAICHI_AVAILABLE:
                 mag2_sq = gx2 * gx2 + gy2 * gy2
                 min_mag_sq = ti.min(mag1_sq, mag2_sq)
 
-                # --- NOISE WEIGHTING (1:1 Branching Logic) ---
+                # --- NOISE WEIGHTING (1:1 C++ Parity) ---
                 noise_weight = 1.0
                 if noise_level > stab_epsilon:
                     if min_mag_sq < structure_min_threshold_sq:
-                        # Flat area
+                        # Flat area: C++ Logic (Ascending Ramp)
                         local_thr = adaptive_diff_threshold * 1.5
                         if pixel_diff < local_thr:
                             noise_weight = 0.05 + 0.95 * (pixel_diff / local_thr)
@@ -120,11 +120,9 @@ if TAICHI_AVAILABLE:
                             ratio = (pixel_diff - local_thr) / local_thr
                             noise_weight = 1.0 - 0.2 * ti.min(ratio, 1.0)
                     else:
-                        # Edge area
+                        # Edge area: C++ Logic
                         if pixel_diff < adaptive_diff_threshold:
-                            noise_weight = 1.15 + 0.15 * (
-                                1.0 - pixel_diff / adaptive_diff_threshold
-                            )
+                            noise_weight = 1.15 + 0.15 * (1.0 - pixel_diff / adaptive_diff_threshold)
                         else:
                             ratio = pixel_diff / (adaptive_diff_threshold * 4.0)
                             noise_weight = 0.3 + 0.4 * (1.0 - ti.min(ratio, 1.0))

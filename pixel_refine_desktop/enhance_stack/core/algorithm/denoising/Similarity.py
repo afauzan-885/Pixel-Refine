@@ -117,12 +117,13 @@ class SimilarityAlgorithm:
         lib_path="pixel_refine_desktop/ui/data/similarity_spatial_merging.dll",
         num_workers=-1,
         weight_of_each_image=False,
-        enable_alignment=True,
+        enable_alignment=False,
         scale_down_factor: float = 1.0,
         return_raw=False,
         is_linear_mode=False,
         proxy_scale=1.0,
         process_in="gpu",
+        merging_backend="taichi",  # Opsi: "cpp" atau "taichi"
         **unused_kwargs,
     ):
 
@@ -250,6 +251,7 @@ class SimilarityAlgorithm:
                 num_workers=num_workers,
                 alignment_tile_size=8,
                 lib_path=lib_path,
+                merging_backend=merging_backend,
                 **unused_kwargs,
             )
         else:
