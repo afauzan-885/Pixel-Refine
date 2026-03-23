@@ -11,7 +11,7 @@ import time
 # --- Backend Configuration for AOT/TiRT ---
 # PRODUCTION = C++ TiRT (Ahead-of-Time)
 # DEVELOPMENT = Taichi Python (Just-in-Time / Cache)
-os.environ["PIXEL_REFINE_BACKEND"] = "DEVELOPMENT"
+os.environ["PIXEL_REFINE_BACKEND"] = "PRODUCTION"
 # Disable CUDA Async Malloc for Taichi stability before any other imports
 os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
 

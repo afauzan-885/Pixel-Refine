@@ -47,9 +47,10 @@ if TAICHI_AVAILABLE:
 
     @ti.func
     def sample_bicubic_fast(
-        img: ti.types.ndarray(ndim=2), u: float, v: float, h: int, w: int
+        img: ti.template(), u: float, v: float
     ) -> float:
         """Optimized Bicubic sampling with precomputed weights."""
+        h, w = img.shape[0], img.shape[1]
         x0 = int(ti.floor(u))
         y0 = int(ti.floor(v))
         dx = u - float(x0)
@@ -70,9 +71,10 @@ if TAICHI_AVAILABLE:
 
     @ti.func
     def sample_bicubic_3ch_fast(
-        img: ti.types.ndarray(ndim=3), u: float, v: float, h: int, w: int, c: int
+        img: ti.template(), u: float, v: float, c: int
     ) -> float:
         """Optimized 3-channel Bicubic sampling."""
+        h, w = img.shape[0], img.shape[1]
         x0 = int(ti.floor(u))
         y0 = int(ti.floor(v))
         dx = u - float(x0)
@@ -93,18 +95,17 @@ if TAICHI_AVAILABLE:
 
     @ti.func
     def _guided_flow_at_i32_ref2d(
-        flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        ref_i32: ti.types.ndarray(dtype=ti.i32, ndim=2),
+        flow: ti.template(),
+        ref_i32: ti.template(),
         y: int,
         x: int,
-        h: int,
-        w: int,
     ) -> ti.types.vector(2, ti.f32):
         """
         AOT-friendly guided flow aggregation:
         - fixed ref dtype/shape (i32, 2D)
         - no template args / dynamic shape checks
         """
+        h, w = flow.shape[0], flow.shape[1]
         inv_norm = 1.0 / 65535.0
         total_w = 1e-12
         sum_u, sum_v = 0.0, 0.0
@@ -149,16 +150,15 @@ if TAICHI_AVAILABLE:
 
     @ti.func
     def _guided_flow_at_i32_ref3d(
-        flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        ref_i32: ti.types.ndarray(dtype=ti.i32, ndim=3),
+        flow: ti.template(),
+        ref_i32: ti.template(),
         y: int,
         x: int,
-        h: int,
-        w: int,
     ) -> ti.types.vector(2, ti.f32):
         """
         AOT-friendly guided flow aggregation for RGB reference (uses green channel).
         """
+        h, w = flow.shape[0], flow.shape[1]
         inv_norm = 1.0 / 65535.0
         total_w = 1e-12
         sum_u, sum_v = 0.0, 0.0
@@ -207,18 +207,17 @@ if TAICHI_AVAILABLE:
         flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
         dst: ti.types.ndarray(dtype=ti.i32, ndim=2),
         ref: ti.types.ndarray(dtype=ti.i32, ndim=2),
-        h: int,
-        w: int,
     ):
         """
         Public fixed-signature kernel for AOT export.
         Keeping this in warp.py avoids reimplementing warp logic in aot_alignment_compiler.py.
         """
+        h, w = src.shape[0], src.shape[1]
         for y, x in ti.ndrange(h, w):
-            guided_uv = _guided_flow_at_i32_ref2d(flow, ref, y, x, h, w)
+            guided_uv = _guided_flow_at_i32_ref2d(flow, ref, y, x)
             u_final = float(x) + guided_uv[0]
             v_final = float(y) + guided_uv[1]
-            res = sample_bicubic_fast(src, u_final, v_final, h, w)
+            res = sample_bicubic_fast(src, u_final, v_final)
             dst[y, x] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.i32)
 
     @ti.kernel
@@ -227,18 +226,51 @@ if TAICHI_AVAILABLE:
         flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
         dst: ti.types.ndarray(dtype=ti.i32, ndim=3),
         ref: ti.types.ndarray(dtype=ti.i32, ndim=3),
-        h: int,
-        w: int,
     ):
         """
         Public fixed-signature kernel for RGB AOT export.
         """
+        h, w = src.shape[0], src.shape[1]
         for y, x in ti.ndrange(h, w):
-            guided_uv = _guided_flow_at_i32_ref3d(flow, ref, y, x, h, w)
+            guided_uv = _guided_flow_at_i32_ref3d(flow, ref, y, x)
             u_final = float(x) + guided_uv[0]
             v_final = float(y) + guided_uv[1]
             for c in ti.static(range(3)):
-                res = sample_bicubic_3ch_fast(src, u_final, v_final, h, w, c)
+                res = sample_bicubic_3ch_fast(src, u_final, v_final, c)
+                dst[y, x, c] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.i32)
+
+    @ti.kernel
+    def _warp_naked_i32_aot(
+        src: ti.types.ndarray(dtype=ti.i32, ndim=2),
+        flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        dst: ti.types.ndarray(dtype=ti.i32, ndim=2),
+    ):
+        """
+        Naked Warp Kernel (Grayscale) - Optimized for pre-refined flow.
+        No guidance window, pure bicubic sampling.
+        """
+        h, w = src.shape[0], src.shape[1]
+        for y, x in ti.ndrange(h, w):
+            u_final = float(x) + flow[y, x, 0]
+            v_final = float(y) + flow[y, x, 1]
+            res = sample_bicubic_fast(src, u_final, v_final)
+            dst[y, x] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.i32)
+
+    @ti.kernel
+    def _warp_naked_i32_rgb_aot(
+        src: ti.types.ndarray(dtype=ti.i32, ndim=3),
+        flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        dst: ti.types.ndarray(dtype=ti.i32, ndim=3),
+    ):
+        """
+        Naked Warp Kernel (RGB) - Optimized for pre-refined flow.
+        """
+        h, w = src.shape[0], src.shape[1]
+        for y, x in ti.ndrange(h, w):
+            u_final = float(x) + flow[y, x, 0]
+            v_final = float(y) + flow[y, x, 1]
+            for c in ti.static(range(3)):
+                res = sample_bicubic_3ch_fast(src, u_final, v_final, c)
                 dst[y, x, c] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.i32)
 
     # Kernels handling normalization and casting internally
@@ -324,7 +356,7 @@ if TAICHI_AVAILABLE:
                 u_final = float(x) + flow[y, x, 0]
                 v_final = float(y) + flow[y, x, 1]
 
-            res = sample_bicubic_fast(src, u_final, v_final, h, w)
+            res = sample_bicubic_fast(src, u_final, v_final)
             if ti.static(target_dtype == ti.u16):
                 dst[y, x] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.u16)
             elif ti.static(target_dtype == ti.u8):
@@ -412,7 +444,7 @@ if TAICHI_AVAILABLE:
                 v_final = float(y) + flow[y, x, 1]
 
             for c in ti.static(range(3)):
-                res = sample_bicubic_3ch_fast(src, u_final, v_final, h, w, c)
+                res = sample_bicubic_3ch_fast(src, u_final, v_final, c)
                 if ti.static(target_dtype == ti.u16):
                     dst[y, x, c] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.u16)
                 elif ti.static(target_dtype == ti.u8):

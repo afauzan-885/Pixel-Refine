@@ -42,7 +42,8 @@ ALIGN_API int set_preprocess_config_modular_tirt(float scale_gamma,
  * ImageAlignmentConfig.MIN_TILE_SIZE).
  */
 ALIGN_API int set_alignment_config_modular_tirt(int downscale_factor,
-                                                int min_tile_size);
+                                                int min_tile_size,
+                                                int n_layers);
 
 /**
  * @brief Mengunggah dan menormalisasi gambar referensi ke GPU.
@@ -50,6 +51,10 @@ ALIGN_API int set_alignment_config_modular_tirt(int downscale_factor,
 ALIGN_API int set_reference_modular_tirt(const int32_t *ref_u16, int h, int w);
 ALIGN_API int set_reference_modular_tirt_ex(const int32_t *ref_u16, int h,
                                             int w, int channels);
+ALIGN_API int set_reference_full_modular_tirt_ex(const int32_t *ref_full_u16,
+                                                 int h, int w, int channels);
+ALIGN_API int set_comparison_full_modular_tirt_ex(const int32_t *comp_full_u16,
+                                                   int h, int w, int channels);
 
 /**
  * @brief Menjalankan alignment dan warping untuk gambar komparasi menggunakan
@@ -60,12 +65,13 @@ ALIGN_API int32_t *compute_alignment_modular_tirt(const int32_t *comp_u16,
                                                   int n_layers,
                                                   float search_dist);
 ALIGN_API int32_t *compute_alignment_modular_tirt_ex(const int32_t *comp_u16,
+                                                     int h, int w,
                                                      int tile_h, int tile_w,
                                                      int n_layers,
                                                      float search_dist,
                                                      int channels);
 ALIGN_API int compute_alignment_modular_tirt_into_ex(
-    const int32_t *comp_u16, int tile_h, int tile_w, int n_layers,
+    const int32_t *comp_u16, int h, int w, int tile_h, int tile_w, int n_layers,
     float search_dist, int channels, int32_t *out_u16);
 
 /**

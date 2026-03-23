@@ -33,6 +33,7 @@ def get_taichi_worker():
 
 # --- SimilarityFrequencyInterface REMOVED (Legacy) ---
 
+
 class SimilaritySpatialInterface:
     """
     Membungkus pemanggilan fungsi C++ yang telah dioptimalkan.
@@ -593,7 +594,7 @@ def perform_alignment_gpu(
         save_align_image: Save aligned images to disk
         progress_start, progress_end: Progress range
         return_format: Format of aligned frames stored in images[].
-            - "numpy_u16" (default): drain VRAM → RAM as uint16. 
+            - "numpy_u16" (default): drain VRAM → RAM as uint16.
                 Best for CPU C++ merging (process_in_cpu).
             - "numpy_f32": drain VRAM → RAM as float32 [0,1].
             - "ti_ndarray": keep in VRAM as Taichi ndarray.
@@ -644,10 +645,8 @@ def perform_alignment_gpu(
     search_dist = kwargs.get("search_dist", 2.0)
     index_offset = kwargs.get("index_offset", 0)
 
-    # Calculate n_layers (Capped at 3 for Pixel-style low latency)
-    min_layer_res = min(tile_h, tile_w) * 2
-    log_arg = min(work_res_h, work_res_w) / min_layer_res if min_layer_res > 0 else 1
-    n_layers = min(3, max(1, int(np.ceil(np.log2(log_arg))) if log_arg > 0 else 1))
+    # Calculate n_layers to target the resolution floor (Standardize on 3 for stability)
+    n_layers = 3
 
     # Force single worker for GPU
     if num_alignment_workers > 1:
@@ -667,6 +666,7 @@ def perform_alignment_gpu(
                 reference_image_float,
                 work_h=work_res_h,
                 work_w=work_res_w,
+                n_layers=n_layers,
                 is_linear=is_linear_mode,
                 proxy_scale=proxy_scale,
                 use_sharpen=use_sharpen,
@@ -1251,7 +1251,9 @@ def perform_image_alignment(
                         if aligned_img is not None:
                             images[idx] = aligned_img
                             if save_align_image:
-                                save_aligned_image(aligned_img, idx + index_offset, "CPP")
+                                save_aligned_image(
+                                    aligned_img, idx + index_offset, "CPP"
+                                )
                             # [OPTIMIZATION]
                             del aligned_img
                     except Exception as e:
@@ -1280,5 +1282,6 @@ def perform_image_alignment(
             print(f"Error kritis selama C++ Alignment: {e}")
             traceback.print_exc()
             return False
+
 
 from .spatial_pipeline import process_in_cpu, process_in_gpu

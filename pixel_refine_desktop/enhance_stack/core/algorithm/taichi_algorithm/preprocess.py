@@ -447,10 +447,6 @@ if TAICHI_AVAILABLE:
     def _fused_full_pipeline_i32_2d_aot(
         src: ti.types.ndarray(dtype=ti.i32, ndim=2),
         dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
-        src_h: int,
-        src_w: int,
-        dst_h: int,
-        dst_w: int,
         scale_norm: float,
         scale_gamma: float,
         gamma_pow: float,
@@ -462,6 +458,8 @@ if TAICHI_AVAILABLE:
         AOT-stable fused pipeline for grayscale i32 input.
         Shared math with _fused_full_pipeline_kernel.
         """
+        src_h, src_w = src.shape[0], src.shape[1]
+        dst_h, dst_w = dst.shape[0], dst.shape[1]
         for y, x in ti.ndrange(dst_h, dst_w):
             u = (x + 0.5) / float(dst_w)
             v = (y + 0.5) / float(dst_h)
@@ -502,10 +500,6 @@ if TAICHI_AVAILABLE:
     def _fused_full_pipeline_i32_3d_aot(
         src: ti.types.ndarray(dtype=ti.i32, ndim=3),
         dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
-        src_h: int,
-        src_w: int,
-        dst_h: int,
-        dst_w: int,
         scale_norm: float,
         scale_gamma: float,
         gamma_pow: float,
@@ -517,6 +511,8 @@ if TAICHI_AVAILABLE:
         AOT-stable fused pipeline for RGB i32 input.
         Uses green channel for alignment parity with preprocess_pipeline_gpu(extract_green=True).
         """
+        src_h, src_w = src.shape[0], src.shape[1]
+        dst_h, dst_w = dst.shape[0], dst.shape[1]
         for y, x in ti.ndrange(dst_h, dst_w):
             u = (x + 0.5) / float(dst_w)
             v = (y + 0.5) / float(dst_h)

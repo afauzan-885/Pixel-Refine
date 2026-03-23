@@ -77,14 +77,13 @@ if TAICHI_AVAILABLE:
         comp: ti.types.ndarray(dtype=ti.f32, ndim=2),
         cost_surface: ti.types.ndarray(dtype=ti.f32, ndim=2),
         max_shift: int,
-        h_ref: int, w_ref: int,
-        h_comp: int, w_comp: int,
     ):
         """
         Computes the ZNCC cost across a shift grid.
         Uses a fixed cropping region to avoid bias near edges.
         Formula: 1.0 - [sum((I-meanI)*(T-meanT)) / (stdI * stdT)]
         """
+        h_ref, w_ref = ref.shape[0], ref.shape[1]
         for dy, dx in ti.ndrange(
             (-max_shift, max_shift + 1), (-max_shift, max_shift + 1)
         ):
@@ -131,10 +130,9 @@ if TAICHI_AVAILABLE:
     def _reduce_min_2d_kernel(
         surface: ti.types.ndarray(dtype=ti.f32, ndim=2),
         results: ti.types.ndarray(dtype=ti.f32, ndim=1),  # [val, y, x]
-        h: int,
-        w: int,
     ):
         """Find the minimum value and its coordinates in a 2D surface."""
+        h, w = surface.shape[0], surface.shape[1]
         # Initialize results
         results[0] = 1e10  # best_cost
         results[1] = 0.0   # best_dy
@@ -225,7 +223,7 @@ def global_translate_zncc(ref, comp, max_shift=16):
     cost_surface.fill(1e10)
 
     h_comp, w_comp = comp_gpu.shape[:2]
-    _compute_global_zncc_surface(ref_gpu, comp_gpu, cost_surface, safe_shift, h, w, h_comp, w_comp)
+    _compute_global_zncc_surface(ref_gpu, comp_gpu, cost_surface, safe_shift)
 
     surface_np = cost_surface.to_numpy()
     min_idx = np.unravel_index(np.argmin(surface_np), surface_np.shape)

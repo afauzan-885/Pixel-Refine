@@ -951,6 +951,7 @@ def resize_all_with_padding(
     pad_color=(0, 0, 0),
     return_original_sizes=False,
     stop_requested=None,
+    force_even=False,
 ):
     """
     Resize + pad all images to the same size using letterbox strategy.
@@ -1001,6 +1002,13 @@ def resize_all_with_padding(
         raise ValueError(
             "Unsupported resize method. Use 'min', 'max', 'median', or 'preserve'."
         )
+
+    # Force even dimensions if requested
+    if force_even:
+        target_h = (target_h // 2) * 2
+        target_w = (target_w // 2) * 2
+        if verbose:
+            print(f"[Padding] Force Even: ({original_sizes[0][0]}x{original_sizes[0][1]}) -> ({target_h}x{target_w})")
 
     if verbose:
         print(f"Resizing all images to {target_w}x{target_h} using method: {method}")

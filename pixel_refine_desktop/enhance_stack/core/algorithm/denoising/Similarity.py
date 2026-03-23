@@ -117,7 +117,7 @@ class SimilarityAlgorithm:
         lib_path="pixel_refine_desktop/ui/data/similarity_spatial_merging.dll",
         num_workers=-1,
         weight_of_each_image=False,
-        enable_alignment=False,
+        enable_alignment=True,
         scale_down_factor: float = 1.0,
         return_raw=False,
         is_linear_mode=False,
@@ -660,7 +660,7 @@ def _load_images_for_batch(
             # Note: Resizing Linear Data requires care, but for now we assume same-size RAWs or handle it normally.
             # Ideally resize happens on both Linear and Proxy identically.
             resize_res = resize_all_with_padding(
-                batch_images, method="preserve", stop_requested=stop_requested
+                batch_images, method="preserve", stop_requested=stop_requested, force_even=True
             )
             # Proxy should also be resized to match reference if resizing happened!
             # But currently resize_all_with_padding assumes list of images.
