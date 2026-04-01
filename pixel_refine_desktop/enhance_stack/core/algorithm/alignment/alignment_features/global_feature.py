@@ -202,7 +202,7 @@ def _prepare_image_array_from_raw(
                     proxy_raw = raw.postprocess(
                         demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,
                         use_camera_wb=True,
-                        # no_auto_bright=True, # Default False (Auto Brightness ON)
+                        no_auto_bright=True,  # Default False (Auto Brightness ON)
                         gamma=gamma_setting,  # [GT PROXY] Needs sRGB Gamma (2.22, 4.5)
                         output_bps=16,  # User requested 16 bit GT
                         # [GT PROXY] Needs sRGB Color Space for valid brightness fitting
@@ -224,7 +224,7 @@ def _prepare_image_array_from_raw(
                 rgb = raw.postprocess(
                     demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,  # pyright: ignore[reportAttributeAccessIssue]
                     use_camera_wb=True,
-                    # no_auto_bright=True,
+                    no_auto_bright=True,
                     gamma=gamma_setting,
                     output_bps=16,
                     output_color=rawpy.ColorSpace.sRGB,  # pyright: ignore[reportAttributeAccessIssue]
@@ -1556,116 +1556,6 @@ def crop_image(image, crop_bounds):
     """Melakukan cropping pada gambar sesuai batas crop yang diberikan."""
     crop_x, crop_y, crop_w, crop_h = crop_bounds
     return image[crop_y : crop_y + crop_h, crop_x : crop_x + crop_w]
-
-
-# =========================================================================
-# === 6. PENYEMPURNAAN & PASCA-PEMROSESAN (Opsional)
-# =========================================================================
-
-
-def add_legend_heatmap(
-    img,
-    norm_values,
-    labels=("Static (High Weight)", "Moving (Low Weight)"),
-    font_scale_info=1.7,
-    thickness_info=2,
-    alpha=0.6,
-    font_scale_label=1.2,
-    thickness_label=2,
-):
-    h, w = img.shape[:2]
-    legend_width = 1000
-    legend_height = 500
-    margin = 10
-    bar_height = 20
-    bar_padding = 50  # Jarak antara color bar dan label
-    label_info_spacing = 100  # Jarak antara labels dan info_lines
-
-    # Posisi pojok kiri bawah
-    x0 = margin
-    y1 = h - margin
-    y0 = y1 - legend_height
-
-    # Buat panel transparan
-    overlay = img.copy()
-    cv2.rectangle(overlay, (x0, y0), (x0 + legend_width, y1), (0, 0, 0), -1)
-    alpha = 0.6
-    cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
-
-    # Buat color bar dengan step warna (diskrit)
-    legend_bar = np.zeros((bar_height, legend_width, 3), dtype=np.uint8)
-    num_steps = 15
-    step_width = legend_width // num_steps
-    for i in range(num_steps):
-        val = int((i / (num_steps - 1)) * 255)
-        color = cv2.applyColorMap(np.array([[val]], dtype=np.uint8), cv2.COLORMAP_JET)[
-            0, 0
-        ]
-        x_start = i * step_width
-        x_end = (i + 1) * step_width if i < num_steps - 1 else legend_width
-        legend_bar[:, x_start:x_end] = color
-    img[y0 + 5 : y0 + 5 + bar_height, x0 : x0 + legend_width] = legend_bar
-
-    # Font dan warna
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    text_color = (255, 255, 255)
-
-    # Label kiri dan kanan di bawah color bar, dengan padding 50px
-    label_y = y0 + 5 + bar_height + bar_padding
-    cv2.putText(
-        img,
-        labels[0],
-        (x0, label_y),
-        font,
-        font_scale_label,
-        text_color,
-        thickness_label,
-        cv2.LINE_AA,
-    )
-    text_size = cv2.getTextSize(labels[1], font, font_scale_label, thickness_label)[0]
-    cv2.putText(
-        img,
-        labels[1],
-        (x0 + legend_width - text_size[0], label_y),
-        font,
-        font_scale_label,
-        text_color,
-        thickness_label,
-        cv2.LINE_AA,
-    )
-
-    # Statistik
-    high_thresh = 0.7
-    low_thresh = 0.3
-    percent_high = (norm_values > high_thresh).sum() / norm_values.size * 100
-    percent_low = (norm_values < low_thresh).sum() / norm_values.size * 100
-    mean_val = np.mean(norm_values)
-
-    info_lines = [
-        f"High: {percent_high:.1f}%",
-        f"Low: {percent_low:.1f}%",
-        f"Avg: {mean_val:.3f}",
-    ]
-
-    # Hitung tinggi font untuk spacing otomatis (berdasarkan font info)
-    _, text_height = cv2.getTextSize("Ag", font, font_scale_info, thickness_info)[0]
-    line_spacing = int(text_height * 1.4)
-
-    # Tampilkan statistik di bawah label dengan tambahan jarak
-    for i, line in enumerate(info_lines):
-        y_text = label_y + label_info_spacing + line_spacing * (i + 1)
-        cv2.putText(
-            img,
-            line,
-            (x0, y_text),
-            font,
-            font_scale_info,
-            text_color,
-            thickness_info,
-            cv2.LINE_AA,
-        )
-
-    return img
 
 
 # =========================================================================

@@ -70,20 +70,7 @@ if TAICHI_AVAILABLE:
             dst[r, c, 1] = val1 * scale
 
 
-# ============================================================================
-# AOT Support
-# ============================================================================
-class _AotKernelProvider:
-    """Lazy loader for AOT kernels."""
 
-    _module = None
-    _kernels = {}
-
-    @classmethod
-    def get(cls, name, fallback):
-        # Python users should use offline_cache=True in ti.init().
-        # ti.aot.load is not available in the Python API.
-        return fallback
 
 
 @ti_thread
@@ -164,7 +151,7 @@ def build_image_pyramid_gpu(
                 dst = common.get_temp_buffer(
                     (h_d_step, w_d_step), ti.f32, buffer_provider
                 )
-                _AotKernelProvider.get("_downsample_2x_kernel", _downsample_2x_kernel)(
+                _downsample_2x_kernel(
                     current_lvl_input, dst, h_s_curr, w_s_curr, h_d_step, w_d_step
                 )
 
@@ -253,7 +240,7 @@ def upsample_flow_gpu(
     else:
         sx, sy = scale, scale
 
-    _AotKernelProvider.get("_upsample_flow_kernel", _upsample_flow_kernel)(
+    _upsample_flow_kernel(
         src_gpu, dst_gpu,
         h_src, w_src,
         h_dst, w_dst,

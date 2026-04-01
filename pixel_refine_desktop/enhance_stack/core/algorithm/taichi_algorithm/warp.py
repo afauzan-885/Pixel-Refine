@@ -211,8 +211,8 @@ if TAICHI_AVAILABLE:
         w: int,
     ):
         """
-        Public fixed-signature kernel for AOT export.
-        Keeping this in warp.py avoids reimplementing warp logic in aot_alignment_compiler.py.
+        Public fixed-signature kernel for AOT-friendly export.
+        Keeping this in warp.py provides a stable interface for potential AOT use.
         """
         for y, x in ti.ndrange(h, w):
             guided_uv = _guided_flow_at_i32_ref2d(flow, ref, y, x, h, w)

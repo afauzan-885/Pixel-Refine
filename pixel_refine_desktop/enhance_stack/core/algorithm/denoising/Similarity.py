@@ -11,6 +11,7 @@ import traceback
 import sys
 import numpy as np
 import cv2
+import onnxruntime as ort
 import sqlite3
 import sqlite3
 from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
@@ -98,6 +99,316 @@ class SimilarityAlgorithm:
                 images.append(image)
         return images
 
+    def _get_smart_merging_session(self, tile_size, preferred_device="gpu"):
+        model_dir = "database/Learning_Model/nanoburst"
+
+        # Priority mapping
+        device_map = {
+            "gpu": [
+                "CUDAExecutionProvider",
+                "DmlExecutionProvider",
+                "CPUExecutionProvider",
+            ],
+            "dml": ["DmlExecutionProvider", "CPUExecutionProvider"],
+            "cpu": ["CPUExecutionProvider"],
+        }
+        providers = device_map.get(preferred_device, device_map["gpu"])
+
+        # Format model paths
+        fmt = "fp16_gpu" if preferred_device in ["gpu", "dml"] else "fp32_cpu"
+        a_path = os.path.join(model_dir, f"smart_analysis_{tile_size}_{fmt}.onnx")
+        f_path = os.path.join(model_dir, f"smart_fusion_{tile_size}_{fmt}.onnx")
+
+        # Fallback to float32 if float16 missing
+        if not os.path.exists(a_path):
+            a_path = os.path.join(
+                model_dir, f"smart_analysis_{tile_size}_fp32_cpu.onnx"
+            )
+            f_path = os.path.join(model_dir, f"smart_fusion_{tile_size}_fp32_cpu.onnx")
+            providers = ["CPUExecutionProvider"]
+
+        if not os.path.exists(a_path) or not os.path.exists(f_path):
+            raise FileNotFoundError(
+                f"Smart Merging models not found for tile {tile_size}"
+            )
+
+        sess_a = ort.InferenceSession(a_path, providers=providers)
+        sess_f = ort.InferenceSession(f_path, providers=providers)
+        return sess_a, sess_f
+
+    def _smart_merging(
+        self,
+        images,
+        reference_image_float,
+        update_progress,  # <-- Geser ke atas
+        stop_requested,  # <-- Geser ke atas
+        tile_size,  # <-- Geser ke atas
+        overlap,  # <-- Geser ke atas
+        pass_merge_range=(0, 100),  # 🌟 SOLUSI: Pindah ke sini & beri nilai default!
+        preferred_device="gpu",
+        enable_alignment=True,
+        work_res_h=None,
+        work_res_w=None,
+        ref_dtype=None,
+        is_linear_mode=False,
+        proxy_scale=1.0,
+        num_workers=-1,
+        **unused_kwargs,
+    ):
+        num_images = len(images)
+        h, w, _ = reference_image_float.shape
+        h_orig, w_orig = h, w  # Save for crop-back after padding
+        tile_h, tile_w = map(int, tile_size)
+
+        # 0. ALIGNMENT (CPU Baseline for Stability)
+        if enable_alignment and num_images > 1:
+            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.extra_algorithm import (
+                perform_image_alignment,
+            )
+
+            p_align_start = int(pass_merge_range[0])
+            p_align_end = int(
+                pass_merge_range[0] + (pass_merge_range[1] - pass_merge_range[0]) * 0.3
+            )
+            f_merge_start = p_align_end
+            f_merge_range = (f_merge_start, pass_merge_range[1])
+
+            if update_progress:
+                update_progress(
+                    p_align_start, "Smart Merging: Aligning frames (CPU)..."
+                )
+
+            align_ref_input = reference_image_float
+            if is_linear_mode:
+                align_ref_input = to_gamma_proxy(
+                    reference_image_float, scale=proxy_scale
+                )
+
+            if work_res_h is None or work_res_w is None:
+                work_res_h, work_res_w = h, w
+
+            alignment_success = perform_image_alignment(
+                images,
+                align_ref_input,
+                work_res_h,
+                work_res_w,
+                8,
+                8,
+                ref_dtype if ref_dtype else images[0].dtype,
+                update_progress,
+                stop_requested,
+                num_alignment_workers=num_workers,
+                progress_start=p_align_start,
+                progress_end=p_align_end,
+                is_linear_mode=is_linear_mode,
+                proxy_scale=proxy_scale,
+            )
+            if not alignment_success and stop_requested and stop_requested():
+                return None, None, 0
+
+            pass_merge_range = f_merge_range
+
+        # 1. Initialize Sessions
+        try:
+            sess_a, sess_f = self._get_smart_merging_session(tile_h, preferred_device)
+        except Exception as e:
+            print(f"[Smart Merging] Error loading sessions: {e}")
+            return None, None, 0
+
+        # 2. Noise Estimation
+        gray_image = cv2.cvtColor(
+            (reference_image_float * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY
+        )
+        sigma_val = estimate_noise_in_python(gray_image.astype(np.float32) / 255.0)
+        sigma_input = np.array([[[[sigma_val]]]], dtype=np.float32)
+
+        # 3. Tiling & Buffers
+        # ── Pad ke KELIPATAN tile_size (bukan hanya ke minimum tile_size) ──────────────
+        # Ini menghilangkan "shrink-back" pada tile terakhir: setiap tile dijamin persis
+        # tile_h × tile_w, tidak ada daerah yang ditulis dua kali → tidak ada seam line.
+        pad_h = (tile_h - h % tile_h) % tile_h  # 0 jika sudah kelipatan
+        pad_w = (tile_w - w % tile_w) % tile_w
+        if pad_h > 0 or pad_w > 0:
+            reference_image_float = np.pad(
+                reference_image_float, ((0, pad_h), (0, pad_w), (0, 0)), mode="reflect"
+            )
+            for idx in range(len(images)):
+                img_f = normalize_image(images[idx], images[idx].dtype)
+                images[idx] = np.pad(
+                    img_f, ((0, pad_h), (0, pad_w), (0, 0)), mode="reflect"
+                )
+            h = reference_image_float.shape[0]
+            w = reference_image_float.shape[1]
+        print(
+            f"[Smart Merging] Padded canvas: {w}x{h} (tile={tile_w}x{tile_h}, "
+            f"grid={w//tile_w}x{h//tile_h}, overlap=0%)"
+        )
+
+        # ── Window & Overlap ────────────────────────────────────────────────────────────
+        # Tidak menggunakan overlap (stride = tile penuh) → tiap pixel ditulis tepat 1×.
+        # Gaussian window TIDAK dipakai karena tanpa overlap, tepi tile punya bobot ≈0
+        # yang akan diperkuat saat normalisasi → artefak cerah. Flat ones = aman.
+        win = np.ones(
+            (tile_h, tile_w), dtype=np.float32
+        )  # flat: stitching = simple copy
+
+        stride = tile_h  # overlap = 0%, stride = tile_size penuh
+
+        # Grid setup: range tepat, tidak ada shrink-back
+        y_coords = list(range(0, h, stride))  # h pasti kelipatan tile_h
+        x_coords = list(range(0, w, stride))  # w pasti kelipatan tile_w
+
+        # ----------------------------------------------------------------------
+        # 4. Tiled Buffers Setup (REVISI SAKTI: Mencegah Checkerboard)
+        # ----------------------------------------------------------------------
+        tile_accum_img = {}
+        tile_accum_weight = {}
+
+        if update_progress:
+            update_progress(
+                pass_merge_range[0], "Smart Merging: Processing Reference Tiles..."
+            )
+
+        ref_feat_tiles = []
+        ref_nchw = reference_image_float.transpose(2, 0, 1)[np.newaxis, ...].astype(
+            np.float32
+        )
+
+        total_tiles = len(y_coords) * len(x_coords)
+        print(
+            f"[Smart Merging] Total tiles: {total_tiles} ({len(y_coords)}×{len(x_coords)}), tile_size={tile_h}×{tile_w}, mode=sequential"
+        )
+
+        # --- Ekstrak fitur referensi secara SEQUENTIAL (1 tile per sess.run) ---
+        # Hemat RAM: tidak ada buffer akumulasi, setiap tile langsung diproses & disimpan
+        for y_start in y_coords:
+            row_feats = []
+            y_end = y_start + tile_h
+            for x_start in x_coords:
+                x_end = x_start + tile_w
+
+                # Ekstrak & inferensi referensi (1 tile)
+                ref_patch = ref_nchw[:, :, y_start:y_end, x_start:x_end]  # (1, C, H, W)
+                feat = sess_a.run(None, {"x": ref_patch})[0]  # (1, F, ...)
+                row_feats.append(feat)
+
+                # Inisialisasi wadah tile
+                ref_rgb_patch = reference_image_float[y_start:y_end, x_start:x_end]
+                tile_accum_img[(y_start, x_start)] = ref_rgb_patch.copy()
+                tile_accum_weight[(y_start, x_start)] = np.ones(
+                    (tile_h, tile_w), dtype=np.float32
+                )
+
+                if stop_requested and stop_requested():
+                    return None, None, 0
+            ref_feat_tiles.append(row_feats)
+
+        # ----------------------------------------------------------------------
+        # 5. Sequential Fusion (1 tile per sess.run — hemat RAM & VRAM)
+        # ----------------------------------------------------------------------
+        processed_frames = 1
+        for i in range(1, num_images):
+            if stop_requested and stop_requested():
+                break
+
+            curr_img = normalize_image(images[i], images[i].dtype)
+
+            # FIX: Pastikan curr_img sama dimensinya dengan referensi (h, w)
+            # Alignment bisa mengembalikan gambar di resolusi kerja yang berbeda
+            if curr_img.shape[0] != h or curr_img.shape[1] != w:
+                curr_img = cv2.resize(curr_img, (w, h), interpolation=cv2.INTER_LINEAR)
+
+            curr_nchw = curr_img.transpose(2, 0, 1)[np.newaxis, ...].astype(np.float32)
+
+            prog = pass_merge_range[0] + (i / num_images) * (
+                pass_merge_range[1] - pass_merge_range[0]
+            )
+            if update_progress:
+                update_progress(
+                    int(prog), f"Smart Merging: Fusing Frame {i+1}/{num_images}..."
+                )
+
+            for iy, y_start in enumerate(y_coords):
+                y_end = y_start + tile_h
+                for ix, x_start in enumerate(x_coords):
+                    x_end = x_start + tile_w
+
+                    # Analysis Model (1 tile)
+                    curr_patch = curr_nchw[:, :, y_start:y_end, x_start:x_end]
+                    feat_curr = sess_a.run(None, {"x": curr_patch})[0]
+
+                    # Fusion Model (1 tile)
+                    w_patch = sess_f.run(
+                        None,
+                        {
+                            "ref_feat": ref_feat_tiles[iy][ix],
+                            "curr_feat": feat_curr,
+                            "sigma": sigma_input,
+                        },
+                    )[0]
+
+                    w_2d = np.squeeze(np.array(w_patch))
+                    if w_2d.ndim > 2:
+                        w_2d = w_2d[..., 0]
+
+                    img_patch = curr_img[y_start:y_end, x_start:x_end]
+                    tile_accum_img[(y_start, x_start)] += (
+                        img_patch * w_2d[:, :, np.newaxis]
+                    )
+                    tile_accum_weight[(y_start, x_start)] += w_2d
+
+            processed_frames += 1
+
+        del sess_a, sess_f
+
+        # ----------------------------------------------------------------------
+        # 6. Global Stitching (Menjahit dengan Hanning Window yang Sempurna)
+        # ----------------------------------------------------------------------
+        if update_progress:
+            update_progress(
+                pass_merge_range[1], "Smart Merging: Final Tiling Stitch..."
+            )
+
+        accum_final_img = np.zeros_like(reference_image_float, dtype=np.float32)
+        accum_final_weight = np.zeros((h, w), dtype=np.float32)
+
+        for y_start in y_coords:
+            y_end = y_start + tile_h
+            for x_start in x_coords:
+                x_end = x_start + tile_w
+
+                # Selesaikan (Blend) Patch di level lokal
+                num = tile_accum_img[(y_start, x_start)]
+                den = tile_accum_weight[(y_start, x_start)][:, :, np.newaxis] + 1e-8
+                blended_patch = num / den
+
+                # Jahit Patch matang tersebut dengan Gaussian/Hanning Window ke Kanvas Utama
+                accum_final_img[y_start:y_end, x_start:x_end] += (
+                    blended_patch * win[:, :, np.newaxis]
+                )
+                accum_final_weight[y_start:y_end, x_start:x_end] += win
+
+        # 7. Normalisasi Akhir (Menghilangkan efek pantulan Hanning Window)
+        eps = 1e-8
+        valid_mask = accum_final_weight > eps
+        final_img = np.zeros_like(accum_final_img)
+        np.divide(
+            accum_final_img,
+            accum_final_weight[:, :, np.newaxis],
+            out=final_img,
+            where=valid_mask[:, :, np.newaxis],
+        )
+
+        # Isi sisa area yang tidak tersentuh dengan gambar referensi awal
+        final_img[~valid_mask] = reference_image_float[~valid_mask]
+
+        # 8. Potong kembali (Crop) jika sebelumnya gambar diberikan padding tambahan
+        if h_orig != h or w_orig != w:
+            final_img = final_img[:h_orig, :w_orig]
+            accum_final_weight = accum_final_weight[:h_orig, :w_orig]
+
+        return final_img, accum_final_weight, processed_frames
+
     def _spatial_merging(
         self,
         images,
@@ -117,12 +428,12 @@ class SimilarityAlgorithm:
         lib_path="pixel_refine_desktop/ui/data/similarity_spatial_merging.dll",
         num_workers=-1,
         weight_of_each_image=False,
-        enable_alignment=False,
+        enable_alignment=True,
         scale_down_factor: float = 1.0,
         return_raw=False,
         is_linear_mode=False,
         proxy_scale=1.0,
-        process_in="gpu",
+        process_in="cpu",
         merging_backend="taichi",  # Opsi: "cpp" atau "taichi"
         **unused_kwargs,
     ):
@@ -444,7 +755,9 @@ class SimilarityAlgorithm:
             )
             return np.zeros(out_shape_fb, dtype=dtype_ref), None, []
 
-        # --- Jalankan merging (Spatial) ---
+        # --- Jalankan merging (Spatial/Smart) ---
+        merging_mode = merging_kwargs.get("merging_mode", "smart")
+
         current_tile_size = (
             tile_size if tile_size is not None else common_call_args.get("tile_size")
         )
@@ -484,18 +797,48 @@ class SimilarityAlgorithm:
             )
             return np.zeros(out_shape_fb, dtype=dtype_ref), None, []
 
-        common_call_args.update(
-            {
-                "tile_size": current_tile_size,
-                "overlap": current_overlap,
-                "motion_sensitivity": current_motion_sensitivity,
-                "noise_offset_factor": current_noise_offset_factor,
-                "num_workers": current_num_workers,
-                "temporal_consistency": True,
-                "save_temporal_std_path": save_temporal_std_path,
-            }
-        )
-        results = self._spatial_merging(**common_call_args)
+        if merging_mode == "smart":
+            # Tile 320x320 dengan overlap 20% → model 320 tersedia, Gaussian window aktif
+            smart_tile = (320, 320)
+            smart_overlap = 0.20
+
+            # Extract resolution parameters for alignment (Same as Frequency/Spatial)
+            h_ref_int, w_ref_int = h_ref_norm, w_ref_norm
+            TARGET_MP = 12.5 * 1e6
+            if (h_ref_int * w_ref_int) > TARGET_MP:
+                scale_f = np.sqrt(TARGET_MP / (h_ref_int * w_ref_int))
+                work_h, work_w = int(h_ref_int * scale_f), int(w_ref_int * scale_f)
+            else:
+                work_h, work_w = h_ref_int, w_ref_int
+            work_h, work_w = (work_h // 2) * 2, (work_w // 2) * 2
+
+            common_call_args.update(
+                {
+                    "tile_size": smart_tile,
+                    "overlap": smart_overlap,
+                    "preferred_device": merging_kwargs.get("preferred_device", "gpu"),
+                    "work_res_h": work_h,
+                    "work_res_w": work_w,
+                    "enable_alignment": merging_kwargs.get("enable_alignment", True),
+                    "num_workers": current_num_workers,
+                    # Force ref_dtype for aligner
+                    "ref_dtype": dtype_ref,
+                }
+            )
+            results = self._smart_merging(**common_call_args)
+        else:
+            common_call_args.update(
+                {
+                    "tile_size": current_tile_size,
+                    "overlap": current_overlap,
+                    "motion_sensitivity": current_motion_sensitivity,
+                    "noise_offset_factor": current_noise_offset_factor,
+                    "num_workers": current_num_workers,
+                    "temporal_consistency": True,
+                    "save_temporal_std_path": save_temporal_std_path,
+                }
+            )
+            results = self._spatial_merging(**common_call_args)
         if return_raw:
             return results
 

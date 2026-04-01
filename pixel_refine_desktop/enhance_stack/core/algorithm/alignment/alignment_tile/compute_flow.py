@@ -851,28 +851,7 @@ if TAICHI_AVAILABLE:
                     refined_flow[y + r, x + c, 1] = final_dy
 
 
-# ============================================================================
-# AOT Support
-# ============================================================================
-class _AotKernelProvider:
-    """Disabled AOT loader for Python. Relying on offline_cache instead."""
-    @classmethod
-    def get(cls, name, fallback):
-        # We return fallback directly because ti.aot.load is for C++ deployment.
-        # Python users should use offline_cache=True in ti.init().
-        return fallback
 
-def _aot_upsample_flow_gpu(src_gpu, dst_gpu, scale=2.0):
-    """AOT-aware upsample flow helper."""
-    kernel = _AotKernelProvider.get("_upsample_flow_kernel", None)
-    if kernel:
-        h_src, w_src = src_gpu.shape[:2]
-        h_dst, w_dst = dst_gpu.shape[:2]
-        if isinstance(scale, (tuple, list)): sx, sy = scale
-        else: sx, sy = scale, scale
-        kernel(src_gpu, dst_gpu, h_src, w_src, h_dst, w_dst, float(sx), float(sy))
-    else:
-        upsample_flow_gpu(src_gpu, dst_gpu, scale)
 
 
 # ============================================================================
@@ -923,15 +902,12 @@ def process_single_layer(
         print(
             f"[Global Shift] Detected Initial Motion Prior: ({global_dx}, {global_dy}) Confidence: {global_conf:.4f}"
         )
-        _AotKernelProvider.get("_initialize_coarsest_flow_kernel", _initialize_coarsest_flow_kernel)(
+        _initialize_coarsest_flow_kernel(
             flow_gpu, h, w, float(global_dx), float(global_dy)
         )
     else:
-        if previous_flow_gpu is None:
-            _AotKernelProvider.get("_initialize_coarsest_flow_kernel", _initialize_coarsest_flow_kernel)(flow_gpu, h, w, 0.0, 0.0)
-        else:
             # Scalable upscale factor between pyramid levels
-            _aot_upsample_flow_gpu(
+            upsample_flow_gpu(
                 src_gpu=previous_flow_gpu,
                 dst_gpu=flow_gpu,
                 scale=float(downscale_factor),
@@ -947,7 +923,7 @@ def process_single_layer(
     current_tile_w = max(ImageAlignmentConfig.MIN_TILE_SIZE, min(tile_w, w))
 
     refined_flow_gpu = common.get_temp_buffer((h, w, 2), ti.f32, buffer_provider="pool")
-    _AotKernelProvider.get("_initialize_coarsest_flow_kernel", _initialize_coarsest_flow_kernel)(refined_flow_gpu, h, w, 0.0, 0.0)
+    _initialize_coarsest_flow_kernel(refined_flow_gpu, h, w, 0.0, 0.0)
 
     # Safe previous flow dummy buffer if layer 0 is the coarsest
     safe_prev_flow = previous_flow_gpu
@@ -961,7 +937,7 @@ def process_single_layer(
         prev_w = safe_prev_flow.shape[1]
 
     if is_finest_layer:
-        _AotKernelProvider.get("_search_fine_level_kernel", _search_fine_level_kernel)(
+        _search_fine_level_kernel(
             ref_gpu,
             comp_gpu,
             flow_gpu,
@@ -978,7 +954,7 @@ def process_single_layer(
     elif is_coarsest_layer:
         # HDR+ style: wide-area block search at coarsest level (±4px at 1/64 res = ±256px full res)
         search_radius = max(4, int(search_dist * 2))
-        _AotKernelProvider.get("_block_search_kernel", _block_search_kernel)(
+        _block_search_kernel(
             ref_gpu,
             comp_gpu,
             refined_flow_gpu,
@@ -992,7 +968,7 @@ def process_single_layer(
         # HDR+ style: coarse layers with ±4px search (each level covers 4× more range)
         current_search_dist = max(2, int(search_dist))
 
-        _AotKernelProvider.get("_search_coarse_level_kernel", _search_coarse_level_kernel)(
+        _search_coarse_level_kernel(
             ref_gpu,
             comp_gpu,
             flow_gpu,
@@ -1009,17 +985,13 @@ def process_single_layer(
         )
 
     # ti.sync()
-    t_match = 0.0  # (time.perf_counter() - t_match_start) * 1000
-    # match_label = (
-    #     "Tile Matching (Fine)" if is_finest_layer else "Tile Matching (Coarse)"
-    # )
+    t_match = 0.0
 
     t_subpixel = 0.0
     if not is_finest_layer:
-        # t_sub_start = time.perf_counter()
         # Parabolic Subpixel Refinement (Fast subpixel correction for coarse levels)
         common.copy_field(refined_flow_gpu, flow_gpu)
-        _AotKernelProvider.get("_parabolic_subpixel_refinement_kernel", _parabolic_subpixel_refinement_kernel)(
+        _parabolic_subpixel_refinement_kernel(
             ref_gpu,
             comp_gpu,
             flow_gpu,
@@ -1077,132 +1049,6 @@ def process_single_layer(
     return flow_gpu
 
 
-# ============================================================================
-# C++ TiRT Backend Loader (ctypes)
-# ============================================================================
-_TIRT_LIB = None
-
-def _get_tirt_lib():
-    """Lazy load the TIRT C++ library."""
-    global _TIRT_LIB
-    if _TIRT_LIB is not None:
-        return _TIRT_LIB
-    
-    lib_name = "alignment_tile_taichi_api.dll" if system() == "Windows" else "libalignment_tile_taichi_api.so"
-    # Search in common locations
-    possible_paths = [
-        os.path.join(os.path.dirname(__file__), lib_name),
-        os.path.join(os.getcwd(), lib_name),
-        os.path.join(os.getcwd(), "pixel_refine_desktop", "ui", "data", lib_name),
-        os.path.join(os.getcwd(), "UI", "data", lib_name),
-    ]
-    
-    for path in possible_paths:
-        if os.path.exists(path):
-            try:
-                # In Python 3.8+ on Windows, DLL dependencies in the same dir are not loaded by default.
-                if hasattr(os, 'add_dll_directory'):
-                    os.add_dll_directory(os.path.dirname(os.path.abspath(path)))
-                    
-                _TIRT_LIB = ctypes.CDLL(path)
-                print(f"[TiRT] Loaded backend from: {path}")
-                
-                # int init_alignment_tirt(const char* arch_name, const char* tcm_path)
-                _TIRT_LIB.init_alignment_tirt.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
-                _TIRT_LIB.init_alignment_tirt.restype = ctypes.c_int
-                
-                # float* compute_alignment_flow_tirt(ref, comp, h, w, tile_h, tile_w, n_layers, search_dist)
-                _TIRT_LIB.compute_alignment_flow_tirt.argtypes = [
-                    ctypes.POINTER(ctypes.c_float), # ref
-                    ctypes.POINTER(ctypes.c_float), # comp
-                    ctypes.c_int, # h
-                    ctypes.c_int, # w
-                    ctypes.c_int, # tile_h
-                    ctypes.c_int, # tile_w
-                    ctypes.c_int, # n_layers
-                    ctypes.c_float # search_dist
-                ]
-                _TIRT_LIB.compute_alignment_flow_tirt.restype = ctypes.POINTER(ctypes.c_float)
-                
-                # void free_flow_memory(float* ptr)
-                _TIRT_LIB.free_flow_memory.argtypes = [ctypes.POINTER(ctypes.c_float)]
-                
-                return _TIRT_LIB
-            except Exception as e:
-                print(f"[TiRT] Failed to load {path}: {e}")
-    
-    return None
-
-def _compute_alignment_flow_tirt(
-    ref_data: np.ndarray,
-    comp_data: np.ndarray,
-    tile_h: int,
-    tile_w: int,
-    n_layers: int,
-    search_dist: float,
-    downscale_factor: int,
-):
-    """Call the C++ TiRT backend via ctypes."""
-    lib = _get_tirt_lib()
-    if lib is None:
-        print("[TiRT Error] Library not found, falling back to Taichi Python.")
-        return None
-        
-    # Ensure initialization happens once
-    if getattr(lib, "_is_initialized", False) is False:
-        # Determine optimal TCM architecture file (Example fallback: Vulkan)
-        # Ideally, matching system capability. For now we default to Vulkan/CUDA if available
-        # You can toggle this dynamically. We will pick Vulkan (works well universally on GPU)
-        arch_str = b"vulkan"
-        tcm_path_str = os.path.join(os.getcwd(), "pixel_refine_desktop", "ui", "data", "compute_flow_vulkan.tcm")
-        
-        # fallback support
-        if not os.path.exists(tcm_path_str):
-            tcm_path_str = os.path.join(os.getcwd(), "UI", "data", "compute_flow_vulkan.tcm")
-            
-        if os.path.exists(tcm_path_str):
-            res = lib.init_alignment_tirt(arch_str, tcm_path_str.encode('utf-8'))
-            if res != 0:
-                print(f"[TiRT Error] Failed to init C++ API / Load TCM. Error code = {res}")
-                return None
-            lib._is_initialized = True
-        else:
-            print(f"[TiRT Error] TCM file not found at: {tcm_path_str}")
-            return None
-    
-    h, w = ref_data.shape[:2]
-    
-    # If they are Taichi fields/ndarrays, download them to RAM (numpy) first
-    if hasattr(ref_data, 'to_numpy'):
-        ref_data = ref_data.to_numpy()
-    if hasattr(comp_data, 'to_numpy'):
-        comp_data = comp_data.to_numpy()
-
-    # Ensure data is float32 and contiguous
-    ref_ptr = np.ascontiguousarray(ref_data.astype(np.float32)).ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-    comp_ptr = np.ascontiguousarray(comp_data.astype(np.float32)).ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-    
-    try:
-        # returns float* ptr initialized by malloc in C++
-        out_ptr = lib.compute_alignment_flow_tirt(
-            ref_ptr, comp_ptr, h, w, tile_h, tile_w, n_layers, float(search_dist)
-        )
-        if not out_ptr:
-            print("[TiRT Error] compute_alignment_flow_tirt returned null pointer.")
-            return None
-            
-        # Copy to python numpy array
-        out_array = np.ctypeslib.as_array(out_ptr, shape=(h, w, 2)).copy()
-        
-        # Free memory allocated in C++ logic
-        lib.free_flow_memory(out_ptr)
-        
-        return out_array
-    except Exception as e:
-        print(f"[TiRT Error] Execution failed: {e}")
-        return None
-
-@ti_thread
 def compute_alignment_flow(
     ref_work_data: np.ndarray,
     current_work_data: np.ndarray,
@@ -1215,19 +1061,8 @@ def compute_alignment_flow(
     return_confidence: bool = False,
 ) -> any:
     """
-    Compute alignment flow - Stable Version with Dual Backend Dispatcher.
+    Compute alignment flow - Pure Taichi JIT implementation.
     """
-    # --- Backend Dispatcher ---
-    backend_mode = os.environ.get("PIXEL_REFINE_BACKEND", "DEVELOPMENT")
-    
-    if backend_mode == "PRODUCTION":
-        flow_tirt = _compute_alignment_flow_tirt(
-            ref_work_data, current_work_data,
-            tile_h, tile_w, n_layers, search_dist, downscale_factor
-        )
-        if flow_tirt is not None:
-            return flow_tirt
-        # Fallback to Taichi if TIRT fails
     
     if not TAICHI_AVAILABLE or not TAICHI_MODULES_AVAILABLE:
         raise ImportError("Taichi not ready")

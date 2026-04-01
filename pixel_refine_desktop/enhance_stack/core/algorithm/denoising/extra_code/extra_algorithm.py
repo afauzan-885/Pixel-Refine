@@ -33,6 +33,7 @@ def get_taichi_worker():
 
 # --- SimilarityFrequencyInterface REMOVED (Legacy) ---
 
+
 class SimilaritySpatialInterface:
     """
     Membungkus pemanggilan fungsi C++ yang telah dioptimalkan.
@@ -509,20 +510,35 @@ def warp_image_opencv(
 # ==============================================================================
 def visualize_flow(flow):
     """
-    Mengubah peta optical flow menjadi citra berwarna untuk visualisasi.
-    Warna menunjukkan arah, kecerahan menunjukkan magnitudo.
+    Mengubah peta optical flow menjadi citra berwarna untuk visualisasi magnitude.
+    0px pergeseran: Hijau (0, 255, 0)
+    Pergeseran Maksimum: Merah (0, 0, 255)
     """
-    h, w = flow.shape[:2]
-    flow_uv = np.zeros((h, w, 2), dtype=np.float32)
-    flow_uv[..., 0] = flow[..., 0]
-    flow_uv[..., 1] = flow[..., 1]
-    magnitude, angle = cv2.cartToPolar(flow_uv[..., 0], flow_uv[..., 1])
-    hsv = np.zeros((h, w, 3), dtype=np.float32)
-    hsv[..., 0] = (angle * 180 / np.pi) / 2  # arah → hue
-    hsv[..., 1] = 1.0  # saturasi penuh
-    cv2.normalize(magnitude, hsv[..., 2], 0.0, 1.0, cv2.NORM_MINMAX)
-    flow_bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
-    return (flow_bgr * 255).astype(np.uint8)
+    # 1. Hitung Magnitude
+    magnitude, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+
+    # 2. Normalisasi Magnitude agar range 0.0 - 1.0 (sesuai pergerakan tertinggi di frame ini)
+    max_mag = np.max(magnitude)
+    if max_mag < 1e-6:
+        # Jika tidak ada gerakan sama sekali, kembalikan frame hijau murni
+        vis = np.zeros((flow.shape[0], flow.shape[1], 3), dtype=np.uint8)
+        vis[:, :, 1] = 255  # Green channel dalam BGR
+        return vis
+
+    norm_mag = np.clip(magnitude / max_mag, 0.0, 1.0)
+
+    # 3. Interpolasi Warna (Hijau ke Merah)
+    # BGR format: Green = (0, 255, 0), Red = (0, 0, 255)
+    vis = np.zeros((flow.shape[0], flow.shape[1], 3), dtype=np.uint8)
+    
+    # Red channel (BGR index 2) meningkat seiring magnitude
+    vis[:, :, 2] = (norm_mag * 255).astype(np.uint8)
+    
+    # Green channel (BGR index 1) menurun seiring magnitude
+    vis[:, :, 1] = ((1.0 - norm_mag) * 255).astype(np.uint8)
+    
+    # Blue channel (BGR index 0) tetap 0
+    return vis
 
 
 def save_aligned_image(
@@ -593,7 +609,7 @@ def perform_alignment_gpu(
         save_align_image: Save aligned images to disk
         progress_start, progress_end: Progress range
         return_format: Format of aligned frames stored in images[].
-            - "numpy_u16" (default): drain VRAM → RAM as uint16. 
+            - "numpy_u16" (default): drain VRAM → RAM as uint16.
                 Best for CPU C++ merging (process_in_cpu).
             - "numpy_f32": drain VRAM → RAM as float32 [0,1].
             - "ti_ndarray": keep in VRAM as Taichi ndarray.
@@ -763,8 +779,8 @@ def perform_image_alignment(
     stop_requested=None,
     optical_flow_type="alignment_tile",
     num_alignment_workers=1,
-    visualization=False,
-    save_align_image=True,
+    visualization=True,
+    save_align_image=False,
     progress_start=30,
     progress_end=40,
     **kwargs,
@@ -1251,7 +1267,9 @@ def perform_image_alignment(
                         if aligned_img is not None:
                             images[idx] = aligned_img
                             if save_align_image:
-                                save_aligned_image(aligned_img, idx + index_offset, "CPP")
+                                save_aligned_image(
+                                    aligned_img, idx + index_offset, "CPP"
+                                )
                             # [OPTIMIZATION]
                             del aligned_img
                     except Exception as e:
@@ -1280,5 +1298,6 @@ def perform_image_alignment(
             print(f"Error kritis selama C++ Alignment: {e}")
             traceback.print_exc()
             return False
+
 
 from .spatial_pipeline import process_in_cpu, process_in_gpu

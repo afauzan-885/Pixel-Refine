@@ -168,6 +168,20 @@ def process_in_cpu(
                     precomputed_ref_noise_sigma=ref_noise_sigma,
                 )
                 np.clip(weight_map_work_res, 0.0, 1.0, out=weight_map_work_res)
+
+                # [USER REQUEST] Visualisasi weight map individual
+                try:
+                    save_folder = "save_weight_map"
+                    if not os.path.exists(save_folder):
+                        os.makedirs(save_folder, exist_ok=True)
+                    
+                    # Convert [0, 1] to [0, 255]
+                    w_map_vis = (weight_map_work_res * 255).astype(np.uint8)
+                    filename = os.path.join(save_folder, f"weight_map_frame_{image_index:02d}.jpg")
+                    cv2.imwrite(filename, w_map_vis, [cv2.IMWRITE_JPEG_QUALITY, 96])
+                except Exception as e_save:
+                    print(f"Error saving weight map: {e_save}")
+
                 result_queue.put(
                     (image_index, (weight_map_work_res * 65535.0).astype(np.uint16))
                 )
@@ -430,6 +444,19 @@ def process_in_gpu(
                         precomputed_ref_noise_sigma=ref_noise_sigma,
                     )
                     np.clip(weight_map_work_res, 0.0, 1.0, out=weight_map_work_res)
+
+                    # [USER REQUEST] Visualisasi weight map individual (GPU+CPP path)
+                    try:
+                        save_folder = "save_weight_map"
+                        if not os.path.exists(save_folder):
+                            os.makedirs(save_folder, exist_ok=True)
+                        
+                        w_map_vis = (weight_map_work_res * 255).astype(np.uint8)
+                        filename = os.path.join(save_folder, f"weight_map_frame_{image_index:02d}.jpg")
+                        cv2.imwrite(filename, w_map_vis, [cv2.IMWRITE_JPEG_QUALITY, 96])
+                    except Exception as e_save:
+                        print(f"Error saving weight map (GPU+CPP): {e_save}")
+
                     result_queue.put((image_index, (weight_map_work_res * 65535.0).astype(np.uint16)))
                 except Exception:
                     result_queue.put((image_index, None))

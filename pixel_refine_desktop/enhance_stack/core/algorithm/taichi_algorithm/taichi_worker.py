@@ -26,6 +26,42 @@ try:
 except ImportError:
     TAICHI_AVAILABLE = False
 
+
+# --- Cache Strategy ---
+# Store Taichi kernels in the project root to prevent auto-deletion and speed up JIT.
+def _get_project_cache_path():
+    """Determine the project root and return the absolute path for the cache."""
+    try:
+        # e:\...\pixel_refine_desktop\enhance_stack\core\algorithm\taichi_algorithm\taichi_worker.py
+        current_file_dir = os.path.dirname(os.path.abspath(__file__)).replace("\\", "/")
+        
+        # Go up 5 levels to reach project root
+        project_root = current_file_dir
+        for _ in range(5):
+            project_root = os.path.dirname(project_root)
+            
+        cache_path = f"{project_root}/taichi_cache"
+        
+        # Ensure directory exists and is writable
+        if not os.path.exists(cache_path):
+            os.makedirs(cache_path, exist_ok=True)
+            
+        print(f"[TaichiWorker] Using project-level cache at: {cache_path}")
+        return cache_path
+    except Exception as e:
+        print(f"[TaichiWorker] Could not resolve project root for cache: {e}")
+        return None
+
+# --- CRITICAL: Set environment variables IMMEDIATELY upon import ---
+# This ensures Taichi picks up the project-level cache even if initialized elsewhere.
+_global_cache_path = _get_project_cache_path()
+if _global_cache_path:
+    os.environ["TI_OFFLINE_CACHE_FILE_PATH"] = _global_cache_path
+    os.environ["TI_OFFLINE_CACHE_DIR"] = _global_cache_path
+    os.environ["TI_OFFLINE_CACHE"] = "1"
+    # Optional: Disable async malloc if causing issues on some GPUs
+    os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
+
 # Windows Thread Priority Constants
 THREAD_PRIORITY_BELOW_NORMAL = -1
 
@@ -73,25 +109,33 @@ class _TaichiWorker(threading.Thread):
 
             # Allow manual override via environment variable
             forced_arch = os.environ.get("TAICHI_ARCH", "").lower()
+            cache_path = _global_cache_path
 
             if forced_arch == "cpu":
-                ti.init(arch=ti.cpu, cpu_max_num_threads=ti_cpu_threads)
+                ti.init(arch=ti.cpu, cpu_max_num_threads=ti_cpu_threads, offline_cache=True, offline_cache_file_path=cache_path)
             elif forced_arch == "vulkan":
-                ti.init(arch=ti.vulkan, offline_cache=True, device_memory_GB=1.8)
+                ti.init(arch=ti.vulkan, offline_cache=True, device_memory_GB=1.8, offline_cache_file_path=cache_path)
             elif forced_arch == "cuda":
-                ti.init(arch=ti.cuda, offline_cache=True, device_memory_GB=1.8)
+                ti.init(arch=ti.cuda, offline_cache=True, device_memory_GB=1.8, offline_cache_file_path=cache_path)
             else:
                 # Fallback chain: GPU -> CPU
                 try:
                     # Use ti.gpu (CUDA/Vulkan/Metal)
-                    ti.init(arch=ti.gpu, offline_cache=True, device_memory_GB=1.8)
-                except Exception:
+                    ti.init(arch=ti.gpu, offline_cache=True, device_memory_GB=1.8, offline_cache_file_path=cache_path)
+                except Exception as e:
                     try:
                         # Limit CPU threads to keep UI responsive on fallback
-                        ti.init(arch=ti.cpu, cpu_max_num_threads=ti_cpu_threads)
-                    except Exception as e:
-                        self.init_error = str(e)
+                        ti.init(arch=ti.cpu, cpu_max_num_threads=ti_cpu_threads, offline_cache=True, offline_cache_file_path=cache_path)
+                    except Exception as e2:
+                        self.init_error = str(e2)
                         return
+
+            # Verify configuration
+            try:
+                print(f"[TaichiWorker] Confirmed Offline Cache Path: {ti.cfg.offline_cache_file_path}")
+                print(f"[TaichiWorker] Offline Cache Enabled: {ti.cfg.offline_cache}")
+            except:
+                pass
 
             self.initialized = True
         except Exception as e:

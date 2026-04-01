@@ -366,6 +366,7 @@ if TAICHI_AVAILABLE:
     def _fused_apply_postprocess(
         val: float,
         scale_norm: float,
+        apply_gamma: int,
         scale_gamma: float,
         gamma_pow: float,
         slope: float,
@@ -374,11 +375,13 @@ if TAICHI_AVAILABLE:
     ) -> float:
         """Shared fused post-process math for JIT and AOT kernels."""
         green = val / scale_norm
-        green = green * scale_gamma
-        if green < cutoff:
-            green = green * slope
-        else:
-            green = 1.099 * tm.pow(green, 1.0 / gamma_pow) - 0.099
+        
+        if apply_gamma:
+            green = green * scale_gamma
+            if green < cutoff:
+                green = green * slope
+            else:
+                green = 1.099 * tm.pow(green, 1.0 / gamma_pow) - 0.099
 
         if use_sharpen:
             green = (green - 0.5) * 0.7 + 0.5
@@ -386,13 +389,14 @@ if TAICHI_AVAILABLE:
 
     @ti.kernel
     def _fused_full_pipeline_kernel(
-        src: ti.types.ndarray(dtype=ti.f32, ndim=3), # Standardize to 3D for AOT
+        src: ti.types.ndarray(ndim=3),  # Dynamic dtype for JIT flexibility
         dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
         src_h: int,
         src_w: int,
         dst_h: int,
         dst_w: int,
         scale_norm: float,
+        apply_gamma: int,
         scale_gamma: float,
         gamma_pow: float,
         slope: float,
@@ -436,6 +440,7 @@ if TAICHI_AVAILABLE:
             dst[y, x] = _fused_apply_postprocess(
                 green,
                 scale_norm,
+                apply_gamma,
                 scale_gamma,
                 gamma_pow,
                 slope,
@@ -452,6 +457,7 @@ if TAICHI_AVAILABLE:
         dst_h: int,
         dst_w: int,
         scale_norm: float,
+        apply_gamma: int,
         scale_gamma: float,
         gamma_pow: float,
         slope: float,
@@ -491,6 +497,7 @@ if TAICHI_AVAILABLE:
             dst[y, x] = _fused_apply_postprocess(
                 gray,
                 scale_norm,
+                apply_gamma,
                 scale_gamma,
                 gamma_pow,
                 slope,
@@ -507,6 +514,7 @@ if TAICHI_AVAILABLE:
         dst_h: int,
         dst_w: int,
         scale_norm: float,
+        apply_gamma: int,
         scale_gamma: float,
         gamma_pow: float,
         slope: float,
@@ -546,6 +554,7 @@ if TAICHI_AVAILABLE:
             dst[y, x] = _fused_apply_postprocess(
                 green,
                 scale_norm,
+                apply_gamma,
                 scale_gamma,
                 gamma_pow,
                 slope,
@@ -618,7 +627,7 @@ if TAICHI_AVAILABLE:
 
         # Run fused kernel
         scale_gamma = scale if is_linear else 1.0
-        
+
         # Standardize src to 3D for fused kernel compatibility (H, W, 3)
         src_3d = src_gpu
         if len(src_gpu.shape) == 2:
@@ -633,6 +642,7 @@ if TAICHI_AVAILABLE:
             dst_h,
             dst_w,
             scale_norm,
+            int(is_linear),
             scale_gamma,
             gamma_pow,
             slope,
@@ -665,6 +675,7 @@ if TAICHI_AVAILABLE:
         h: int,
         w: int,
         scale_norm: float,
+        apply_gamma: int,
         scale_gamma: float,
         gamma_pow: float,
         slope: float,
@@ -673,28 +684,23 @@ if TAICHI_AVAILABLE:
     ):
         """Fused kernel: Normalize → Gamma → Extract Green"""
         for y, x in ti.ndrange(h, w):
-            # Extract green channel
-            green = 0.0
+            # Extract raw value
+            val = 0.0
             if ti.static(len(src.shape) == 3):
-                green = float(src[y, x, 1])
+                val = float(src[y, x, 1])
             else:
-                green = float(src[y, x])
+                val = float(src[y, x])
 
-            # Normalize
-            green = green / scale_norm
-
-            # Gamma correction
-            green = green * scale_gamma
-            if green < cutoff:
-                green = green * slope
-            else:
-                green = 1.099 * tm.pow(green, 1.0 / gamma_pow) - 0.099
-
-            # Sharpen
-            if use_sharpen:
-                green = (green - 0.5) * 0.7 + 0.5
-
-            dst[y, x] = tm.clamp(green, 0.0, 1.0)
+            dst[y, x] = _fused_apply_postprocess(
+                val,
+                scale_norm,
+                apply_gamma,
+                scale_gamma,
+                gamma_pow,
+                slope,
+                cutoff,
+                use_sharpen,
+            )
 
     @ti_thread
     def fused_normalize_gamma_green(
@@ -747,6 +753,7 @@ if TAICHI_AVAILABLE:
             h,
             w,
             scale_norm,
+            int(is_linear),
             scale_gamma,
             gamma_pow,
             slope,
@@ -772,10 +779,12 @@ if TAICHI_AVAILABLE:
 
     @ti.kernel
     def _fused_gamma_and_extract_green_kernel(
-        src: ti.types.ndarray(dtype=ti.f32),
+        src: ti.types.ndarray(),
         dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
         h: int,
         w: int,
+        scale_norm: float,
+        apply_gamma: int,
         scale_gamma: float,
         gamma_pow: float,
         slope: float,
@@ -784,29 +793,28 @@ if TAICHI_AVAILABLE:
     ):
         """Fused kernel: Gamma → Extract Green"""
         for y, x in ti.ndrange(h, w):
-            # Extract green channel
-            green = 0.0
+            # Extract raw value
+            val = 0.0
             if ti.static(len(src.shape) == 3):
-                green = src[y, x, 1]
+                val = float(src[y, x, 1])
             else:
-                green = src[y, x]
+                val = float(src[y, x])
 
-            # Gamma correction
-            green = green * scale_gamma
-            if green < cutoff:
-                green = green * slope
-            else:
-                green = 1.099 * tm.pow(green, 1.0 / gamma_pow) - 0.099
-
-            # Sharpen
-            if use_sharpen:
-                green = (green - 0.5) * 0.7 + 0.5
-
-            dst[y, x] = tm.clamp(green, 0.0, 1.0)
+            dst[y, x] = _fused_apply_postprocess(
+                val,
+                scale_norm,
+                apply_gamma,
+                scale_gamma,
+                gamma_pow,
+                slope,
+                cutoff,
+                use_sharpen,
+            )
 
     @ti_thread
     def fused_gamma_and_extract_green(
         image,
+        apply_gamma=True,
         scale=1.0,
         use_sharpen=False,
         gamma_pow=2.22,
@@ -841,6 +849,8 @@ if TAICHI_AVAILABLE:
             dst_gpu,
             h,
             w,
+            1.0,  # scale_norm is 1.0 since it's already normalized
+            int(apply_gamma),
             scale,
             gamma_pow,
             slope,
@@ -921,7 +931,6 @@ def preprocess_pipeline_gpu(
 
     # Determine which steps are enabled
     has_normalize = normalize
-    has_gamma = apply_gamma
     has_green = extract_green and not use_raft
     has_resize = target_size is not None
 
@@ -930,11 +939,12 @@ def preprocess_pipeline_gpu(
     # ========================================================================
 
     # 4-step fusion (FASTEST - 75% speedup)
-    if has_normalize and has_gamma and has_green and has_resize:
+    # Optimized: Use fused kernel even if gamma is disabled (parity with AOT master kernel)
+    if has_normalize and has_green and has_resize:
         return fused_full_pipeline(
             image,
             target_size=target_size,
-            is_linear=True,
+            is_linear=apply_gamma,
             scale=scale,
             use_sharpen=use_sharpen,
             gamma_pow=gamma_pow,
@@ -946,10 +956,10 @@ def preprocess_pipeline_gpu(
         )
 
     # 3-step fusions (FAST - 60% speedup)
-    if has_normalize and has_gamma and has_green:
+    if has_normalize and has_green:
         return fused_normalize_gamma_green(
             image,
-            is_linear=True,
+            is_linear=apply_gamma,
             scale=scale,
             use_sharpen=use_sharpen,
             gamma_pow=gamma_pow,
@@ -961,9 +971,10 @@ def preprocess_pipeline_gpu(
         )
 
     # 2-step fusions (FASTER - 40% speedup)
-    if has_gamma and has_green:
+    if has_green:
         return fused_gamma_and_extract_green(
             image,
+            apply_gamma=apply_gamma,
             scale=scale,
             use_sharpen=use_sharpen,
             gamma_pow=gamma_pow,

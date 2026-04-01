@@ -8,12 +8,19 @@ import sys
 import os
 import time
 
-# --- Backend Configuration for AOT/TiRT ---
-# PRODUCTION = C++ TiRT (Ahead-of-Time)
-# DEVELOPMENT = Taichi Python (Just-in-Time / Cache)
-os.environ["PIXEL_REFINE_BACKEND"] = "DEVELOPMENT"
-# Disable CUDA Async Malloc for Taichi stability before any other imports
+# --- Taichi Cache Configuration ---
+# Store Taichi kernels in the project root to prevent auto-deletion and speed up JIT.
+# Using forward slashes and a standard folder name for maximum compatibility on Windows.
+_current_dir = os.path.dirname(os.path.abspath(__file__)).replace("\\", "/")
+_cache_path = f"{_current_dir}/taichi_cache"
+if not os.path.exists(_cache_path):
+    os.makedirs(_cache_path, exist_ok=True)
+os.environ["TI_OFFLINE_CACHE"] = "1"
+os.environ["TI_OFFLINE_CACHE_FILE_PATH"] = _cache_path
+os.environ["TI_OFFLINE_CACHE_DIR"] = _cache_path
 os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
+# PRODUCTION/DEVELOPMENT
+os.environ["PIXEL_REFINE_BACKEND"] = "DEVELOPMENT"
 
 
 # PySide6 imports

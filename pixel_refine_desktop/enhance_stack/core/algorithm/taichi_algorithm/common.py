@@ -357,7 +357,17 @@ def ensure_taichi_field(arr, dtype=None, shape=None, buffer_provider=None):
 
     # Check if already a Taichi field (GPU buffer)
     if hasattr(arr, "shape") and not isinstance(arr, np.ndarray):
-        return arr, False  # Already GPU, no upload needed
+        # Check if dtype matches
+        if dtype is not None and arr.dtype != dtype:
+            # Type mismatch on GPU! Must cast.
+            h_h, w_w = arr.shape[:2]
+            is_gray = len(arr.shape) == 2
+            shape_dst = (h_h, w_w) if is_gray else (h_h, w_w, 3)
+            dst_field = get_temp_buffer(shape_dst, dtype, buffer_provider)
+            # Use copy/cast kernel
+            _copy_kernel(arr, dst_field)
+            return dst_field, True # It's a temporary casted buffer
+        return arr, False  # Already GPU and correct type (or no type requested)
 
     # Upload numpy to GPU
     arr_contiguous = np.ascontiguousarray(arr)
