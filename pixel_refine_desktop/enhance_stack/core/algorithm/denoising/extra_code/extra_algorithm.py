@@ -660,10 +660,8 @@ def perform_alignment_gpu(
     search_dist = kwargs.get("search_dist", 2.0)
     index_offset = kwargs.get("index_offset", 0)
 
-    # Calculate n_layers (Capped at 3 for Pixel-style low latency)
-    min_layer_res = min(tile_h, tile_w) * 2
-    log_arg = min(work_res_h, work_res_w) / min_layer_res if min_layer_res > 0 else 1
-    n_layers = min(3, max(1, int(np.ceil(np.log2(log_arg))) if log_arg > 0 else 1))
+    # Calculate n_layers to target the resolution floor (Standardize on 3 for stability)
+    n_layers = 3
 
     # Force single worker for GPU
     if num_alignment_workers > 1:
@@ -683,6 +681,7 @@ def perform_alignment_gpu(
                 reference_image_float,
                 work_h=work_res_h,
                 work_w=work_res_w,
+                n_layers=n_layers,
                 is_linear=is_linear_mode,
                 proxy_scale=proxy_scale,
                 use_sharpen=use_sharpen,

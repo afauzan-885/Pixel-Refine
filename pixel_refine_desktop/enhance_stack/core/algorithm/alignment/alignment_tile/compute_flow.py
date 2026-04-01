@@ -71,7 +71,7 @@ class ImageAlignmentConfig:
 
     DEFAULT_DOWNSCALE_FACTOR = 4  # Default for HDR+ style
     MIN_TILE_SIZE = 8
-    MIN_PYRAMID_LAYER_SIZE = 32
+    MIN_PYRAMID_LAYER_SIZE = 190
     EARLY_EXIT_COST = 0.0001
     ADAPTIVE_THRESHOLD = 0.005  # Threshold for expanding search area
     ENABLE_MEDIAN_FILTER = False  # Enable median filter for robust motion suppression
@@ -88,13 +88,12 @@ if TAICHI_AVAILABLE:
         ref_layer: ti.types.ndarray(dtype=ti.f32, ndim=2),
         comp_layer: ti.types.ndarray(dtype=ti.f32, ndim=2),
         refined_flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        h: int,
-        w: int,
         tile_h: int,
         tile_w: int,
         search_radius: int,
     ):
         """Perform a wide-area block search for initial alignment."""
+        h, w = ref_layer.shape[0], ref_layer.shape[1]
         step_y = tile_h
         step_x = tile_w
         for tile_y, tile_x in ti.ndrange(
@@ -177,12 +176,11 @@ if TAICHI_AVAILABLE:
     @ti.kernel
     def _initialize_coarsest_flow_kernel(
         flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        h: int,
-        w: int,
         init_dx: float,
         init_dy: float,
     ):
         """Initialize flow to starting values for coarsest level."""
+        h, w = flow.shape[0], flow.shape[1]
         for r, c in ti.ndrange(h, w):
             flow[r, c, 0] = init_dx
             flow[r, c, 1] = init_dy
@@ -191,8 +189,6 @@ if TAICHI_AVAILABLE:
     def _initialize_flow_from_results_kernel(
         flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
         zncc_results: ti.types.ndarray(dtype=ti.f32, ndim=1),
-        h: int,
-        w: int,
         max_shift: int,
     ):
         """
@@ -203,6 +199,7 @@ if TAICHI_AVAILABLE:
         zncc_results layout: [best_cost, best_y_idx, best_x_idx]
         Actual shift: dx = best_x_idx - max_shift, dy = best_y_idx - max_shift
         """
+        h, w = flow.shape[0], flow.shape[1]
         best_dy = zncc_results[1] - float(max_shift)
         best_dx = zncc_results[2] - float(max_shift)
         for r, c in ti.ndrange(h, w):
@@ -309,16 +306,14 @@ if TAICHI_AVAILABLE:
         flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
         previous_flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
         refined_flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        h: int,
-        w: int,
         tile_h: int,
         tile_w: int,
         search_dist: int,
-        prev_h: int,
-        prev_w: int,
         downscale_factor: int,
     ):
         """Coarse level tile matching using ZM-SSD cost with Spatial Regularization."""
+        h, w = ref_layer.shape[0], ref_layer.shape[1]
+        prev_h, prev_w = previous_flow.shape[0], previous_flow.shape[1]
         step_y = tile_h
         step_x = tile_w
         tile_area_inv = 1.0 / float(tile_h * tile_w)
@@ -528,15 +523,13 @@ if TAICHI_AVAILABLE:
         flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
         previous_flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
         refined_flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        h: int,
-        w: int,
         tile_h: int,
         tile_w: int,
-        prev_h: int,
-        prev_w: int,
         downscale_factor: int,
     ):
         """Fine level tile matching using ZMSAD cost with Spatial Regularization."""
+        h, w = ref_layer.shape[0], ref_layer.shape[1]
+        prev_h, prev_w = previous_flow.shape[0], previous_flow.shape[1]
         step_y = tile_h
         step_x = tile_w
         tile_area_inv = 1.0 / float(tile_h * tile_w)
@@ -738,12 +731,11 @@ if TAICHI_AVAILABLE:
         comp_layer: ti.types.ndarray(dtype=ti.f32, ndim=2),
         flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
         refined_flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        h: int,
-        w: int,
         tile_h: int,
         tile_w: int,
     ):
         """Subpixel refinement using parabolic fitting on ZMSAD surface."""
+        h, w = ref_layer.shape[0], ref_layer.shape[1]
         step_y = tile_h
         step_x = tile_w
 

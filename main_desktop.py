@@ -8,6 +8,7 @@ import sys
 import os
 import time
 
+<<<<<<< HEAD
 # --- Taichi Cache Configuration ---
 # Store Taichi kernels in the project root to prevent auto-deletion and speed up JIT.
 # Using forward slashes and a standard folder name for maximum compatibility on Windows.
@@ -18,6 +19,13 @@ if not os.path.exists(_cache_path):
 os.environ["TI_OFFLINE_CACHE"] = "1"
 os.environ["TI_OFFLINE_CACHE_FILE_PATH"] = _cache_path
 os.environ["TI_OFFLINE_CACHE_DIR"] = _cache_path
+=======
+# --- Backend Configuration for AOT/TiRT ---
+# PRODUCTION = C++ TiRT (Ahead-of-Time)
+# DEVELOPMENT = Taichi Python (Just-in-Time / Cache)
+os.environ["PIXEL_REFINE_BACKEND"] = "PRODUCTION"
+# Disable CUDA Async Malloc for Taichi stability before any other imports
+>>>>>>> f0a7eaf58c12ba5408d95e3002d92aff14af32a4
 os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
 # PRODUCTION/DEVELOPMENT
 os.environ["PIXEL_REFINE_BACKEND"] = "DEVELOPMENT"

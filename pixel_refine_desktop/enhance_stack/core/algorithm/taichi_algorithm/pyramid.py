@@ -23,12 +23,10 @@ if TAICHI_AVAILABLE:
     def _downsample_2x_kernel(
         src: ti.types.ndarray(dtype=ti.f32, ndim=2),
         dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
-        h_src: int,
-        w_src: int,
-        h_dst: int,
-        w_dst: int,
     ):
         """Standard 2x downsampling (box filter). AOT-compatible."""
+        h_src, w_src = src.shape[0], src.shape[1]
+        h_dst, w_dst = dst.shape[0], dst.shape[1]
         # Gaussian weights [1, 4, 6, 4, 1] / 16
         weights = ti.static([1.0, 4.0, 6.0, 4.0, 1.0])
         total_weight = 256.0  # (1+4+6+4+1)^2
@@ -50,13 +48,11 @@ if TAICHI_AVAILABLE:
     def _upsample_flow_kernel(
         src: ti.types.ndarray(dtype=ti.f32, ndim=3),
         dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        h_src: int,
-        w_src: int,
-        h_dst: int,
-        w_dst: int,
         scale: float,
     ):
         """Bicubic upsampling for flow fields. AOT-compatible."""
+        h_src, w_src = src.shape[0], src.shape[1]
+        h_dst, w_dst = dst.shape[0], dst.shape[1]
         for r, c in ti.ndrange(h_dst, w_dst):
             # Coordinates in source domain
             v = float(c) * (float(w_src) / float(w_dst))
@@ -151,8 +147,13 @@ def build_image_pyramid_gpu(
                 dst = common.get_temp_buffer(
                     (h_d_step, w_d_step), ti.f32, buffer_provider
                 )
+<<<<<<< HEAD
                 _downsample_2x_kernel(
                     current_lvl_input, dst, h_s_curr, w_s_curr, h_d_step, w_d_step
+=======
+                _AotKernelProvider.get("_downsample_2x_kernel", _downsample_2x_kernel)(
+                    current_lvl_input, dst
+>>>>>>> f0a7eaf58c12ba5408d95e3002d92aff14af32a4
                 )
 
                 if step < steps_per_level - 1:
@@ -242,7 +243,5 @@ def upsample_flow_gpu(
 
     _upsample_flow_kernel(
         src_gpu, dst_gpu,
-        h_src, w_src,
-        h_dst, w_dst,
         float(sx),
     )

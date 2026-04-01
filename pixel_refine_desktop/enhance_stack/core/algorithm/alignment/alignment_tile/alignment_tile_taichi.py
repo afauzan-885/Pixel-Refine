@@ -91,6 +91,7 @@ class AlignmentTileTaichiAOT:
                 ]
                 self.lib.compute_preprocess_aot.restype = ctypes.c_int
 
+<<<<<<< HEAD
                 # Initialize runtime
                 res = self.lib.init_taichi_aot_runtime(
                     self.aot_module_path.encode("utf-8")
@@ -102,6 +103,85 @@ class AlignmentTileTaichiAOT:
                     )
                 else:
                     print(f"[TaichiAOT] Initialization failed with code: {res}")
+=======
+            self.lib.set_preprocess_config_modular_tirt.argtypes = [
+                ctypes.c_float,
+                ctypes.c_int,
+            ]
+            self.lib.set_preprocess_config_modular_tirt.restype = ctypes.c_int
+
+            if hasattr(self.lib, "set_alignment_config_modular_tirt"):
+                self.lib.set_alignment_config_modular_tirt.argtypes = [
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                ]
+                self.lib.set_alignment_config_modular_tirt.restype = ctypes.c_int
+
+            self.lib.compute_alignment_modular_tirt.argtypes = [
+                ctypes.POINTER(ctypes.c_int32),
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_float,
+            ]
+            self.lib.compute_alignment_modular_tirt.restype = ctypes.POINTER(
+                ctypes.c_int32
+            )
+            if hasattr(self.lib, "compute_alignment_modular_tirt_ex"):
+                self.lib.compute_alignment_modular_tirt_ex.argtypes = [
+                    ctypes.POINTER(ctypes.c_int32), # comp_u16
+                    ctypes.c_int, ctypes.c_int,    # h, w
+                    ctypes.c_int, ctypes.c_int,    # tile_h, tile_w
+                    ctypes.c_int,                  # n_layers
+                    ctypes.c_float,                # search_dist
+                    ctypes.c_int                   # channels
+                ]
+                self.lib.compute_alignment_modular_tirt_ex.restype = ctypes.POINTER(
+                    ctypes.c_int32
+                )
+            if hasattr(self.lib, "compute_alignment_modular_tirt_into_ex"):
+                self.lib.compute_alignment_modular_tirt_into_ex.argtypes = [
+                    ctypes.POINTER(ctypes.c_int32), # comp_u16
+                    ctypes.c_int, ctypes.c_int,    # h, w
+                    ctypes.c_int, ctypes.c_int,    # tile_h, tile_w
+                    ctypes.c_int,                  # n_layers
+                    ctypes.c_float,                # search_dist
+                    ctypes.c_int,                  # channels
+                    ctypes.POINTER(ctypes.c_int32) # out_u16
+                ]
+                self.lib.compute_alignment_modular_tirt_into_ex.restype = ctypes.c_int
+
+            self.lib.clear_reference_modular_tirt.argtypes = []
+            self.lib.clear_reference_modular_tirt.restype = None
+
+            self.lib.free_u16_memory.restype = None
+
+            if hasattr(self.lib, "set_reference_full_modular_tirt_ex"):
+                self.lib.set_reference_full_modular_tirt_ex.argtypes = [
+                    ctypes.POINTER(ctypes.c_int32),
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                ]
+                self.lib.set_reference_full_modular_tirt_ex.restype = ctypes.c_int
+            
+            if hasattr(self.lib, "set_comparison_full_modular_tirt_ex"):
+                self.lib.set_comparison_full_modular_tirt_ex.argtypes = [
+                    ctypes.POINTER(ctypes.c_int32),
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                ]
+                self.lib.set_comparison_full_modular_tirt_ex.restype = ctypes.c_int
+
+            # Initialize
+            res = self.lib.init_alignment_modular_tirt(
+                self.arch.encode("utf-8"), self.data_dir.encode("utf-8")
+            )
+            if res != 0:
+                print(f"[Taichi AOT] Failed to initialize C++ backend: {res}")
+>>>>>>> f0a7eaf58c12ba5408d95e3002d92aff14af32a4
             else:
                 print(f"[TaichiAOT] DLL not found at: {self.lib_path}")
         except Exception as e:
@@ -122,6 +202,7 @@ class AlignmentTileTaichiAOT:
             print("[TaichiAOT] Backend not initialized, skipping set_reference.")
             return
 
+<<<<<<< HEAD
         # 1. Upload original reference to GPU (untuk warping nanti)
         self.ref_img_gpu, _ = common.ensure_taichi_field(
             ref_img, buffer_provider="pool"
@@ -173,6 +254,111 @@ class AlignmentTileTaichiAOT:
         )
 
         self.work_h, self.work_w = work_h, work_w
+=======
+    def _prepare_image_i32(self, img):
+        """
+        Normalize and convert input image to int32 [0, 65535] range for C++ backend.
+        Handles uint8, uint16, and float32/64 inputs safely.
+        """
+        if img is None:
+            return None
+        
+        # 1. Ensure C-Contiguous
+        if not img.flags["C_CONTIGUOUS"]:
+            img = np.ascontiguousarray(img)
+            
+        # 2. Convert to int32 with proper scaling
+        if img.dtype == np.uint8:
+            # 8-bit to 16-bit range (0-255 -> 0-65535)
+            # Use 257 factor: 255 * 257 = 65535
+            return (img.astype(np.int32) * 257)
+            
+        elif img.dtype in (np.float32, np.float64):
+            # float [0, 1] to 16-bit range
+            # Clipped to avoid overflow/underflow
+            return np.clip(img * 65535.0, 0, 65535).astype(np.int32)
+            
+        elif img.dtype == np.uint16:
+            # Standard 16-bit to 32-bit cast
+            return img.astype(np.int32)
+            
+        else:
+            # Fallback for other types (e.g. int16, int32)
+            return img.astype(np.int32)
+
+    def _configure_alignment(self, downscale_factor=4, min_tile_size=8, n_layers=4):
+        if not self.initialized or self.lib is None:
+            return
+        if not hasattr(self.lib, "set_alignment_config_modular_tirt"):
+            return
+        self.lib.set_alignment_config_modular_tirt(
+            ctypes.c_int(int(downscale_factor)),
+            ctypes.c_int(int(min_tile_size)),
+            ctypes.c_int(int(n_layers)),
+        )
+
+    def set_reference(self, ref_img, work_h=None, work_w=None, is_linear=False, proxy_scale=1.0, use_sharpen=False, **kwargs):
+        if not self.initialized or self.lib is None:
+            return
+            
+        # Store working resolution for parity with JIT
+        self.work_h = work_h if work_h is not None else ref_img.shape[0]
+        self.work_w = work_w if work_w is not None else ref_img.shape[1]
+        
+        # [FIX] For 1:1 parity, we must work on the specified working resolution
+        if (self.work_h != ref_img.shape[0] or self.work_w != ref_img.shape[1]):
+            import cv2
+            ref_img_work = cv2.resize(ref_img, (self.work_w, self.work_h), interpolation=cv2.INTER_AREA)
+        else:
+            ref_img_work = ref_img
+
+        downscale_factor = kwargs.get("downscale_factor", 4)
+        min_tile_size = kwargs.get("min_tile_size", kwargs.get("min_tile", 8))
+        n_layers = kwargs.get("n_layers", 4)
+        self._configure_alignment(downscale_factor=downscale_factor, min_tile_size=min_tile_size, n_layers=n_layers)
+        self._configure_preprocess(is_linear=is_linear, proxy_scale=proxy_scale, use_sharpen=use_sharpen)
+        
+        h, w = ref_img_work.shape[:2]
+        channels = 1 if ref_img_work.ndim == 2 else int(ref_img_work.shape[2])
+        if channels not in (1, 3):
+            channels = 1
+            
+        # [FIX] Prepare image with proper scaling to uint16 range
+        ref_i32 = self._prepare_image_i32(ref_img_work)
+        if ref_i32 is None:
+            return
+            
+        if ref_img_work.ndim > 2:
+            ref_i32 = ref_i32.reshape(-1) # Flatten but keep logic clear
+        else:
+            ref_i32 = ref_i32.flatten()
+            
+        ref_ptr = ref_i32.ctypes.data_as(ctypes.POINTER(ctypes.c_int32))
+        if hasattr(self.lib, "set_reference_modular_tirt_ex"):
+            self.lib.set_reference_modular_tirt_ex(ref_ptr, h, w, channels)
+        else:
+            self.lib.set_reference_modular_tirt(ref_ptr, h, w)
+            
+        # [FIX] If we have a full-res image, pass it for guidance/warping parity
+        if (self.work_h != ref_img.shape[0] or self.work_w != ref_img.shape[1]):
+            ref_full_i32 = self._prepare_image_i32(ref_img)
+            if ref_full_i32 is not None:
+                # Flatten but keep reference to prevent GC
+                ref_full_ptr = ref_full_i32.ctypes.data_as(ctypes.POINTER(ctypes.c_int32))
+                if hasattr(self.lib, "set_reference_full_modular_tirt_ex"):
+                    self.lib.set_reference_full_modular_tirt_ex(
+                        ref_full_ptr, ref_img.shape[0], ref_img.shape[1], channels
+                    )
+                self._last_ref_full_i32 = ref_full_i32
+        else:
+            # If same resolution, reference_full IS reference_work
+            self._last_ref_full_i32 = None
+            if hasattr(self.lib, "set_reference_full_modular_tirt_ex"):
+                self.lib.set_reference_full_modular_tirt_ex(ref_ptr, h, w, channels)
+        
+        # Anchor to self
+        self._last_ref_i32 = ref_i32 
+>>>>>>> f0a7eaf58c12ba5408d95e3002d92aff14af32a4
 
     def compute_alignment_and_warp(
         self,
@@ -187,6 +373,7 @@ class AlignmentTileTaichiAOT:
         return_format: str = "numpy_u16",
         **kwargs,
     ):
+<<<<<<< HEAD
         """Alignment via Hybrid AOT-JIT Pipeline."""
         if not self.initialized or self.ref_work_res is None:
             return None
@@ -309,6 +496,82 @@ class AlignmentTileTaichiAOT:
                     d[r, c, i] = val * (x if i == 0 else y)
 
         _resize_k(src, dst, sx, sy)
+=======
+        if not self.initialized or self.lib is None:
+            return None
+
+        # [FIX] Resolution Parity: Align at work_res, warp/output at full_res
+        full_h, full_w = comp_img.shape[:2]
+        if (full_h != self.work_h or full_w != self.work_w):
+            import cv2
+            comp_img_work = cv2.resize(comp_img, (self.work_w, self.work_h), interpolation=cv2.INTER_AREA)
+        else:
+            comp_img_work = comp_img
+
+        h, w = comp_img_work.shape[:2]
+        channels = 1 if comp_img_work.ndim == 2 else int(comp_img_work.shape[2])
+        if channels not in (1, 3):
+            channels = 1
+            
+        downscale_factor = kwargs.get("downscale_factor", 4)
+        min_tile_size = kwargs.get("min_tile_size", kwargs.get("min_tile", 8))
+        self._configure_alignment(downscale_factor=downscale_factor, min_tile_size=min_tile_size)
+        self._configure_preprocess(is_linear=is_linear, proxy_scale=proxy_scale, use_sharpen=use_sharpen)
+        
+        # [FIX] Prepare comparison image with proper scaling
+        comp_i32 = self._prepare_image_i32(comp_img_work)
+        if comp_i32 is None:
+            return None
+        comp_ptr = comp_i32.ctypes.data_as(ctypes.POINTER(ctypes.c_int32))
+        
+        # [FIX] For dual-res parity, upload full-res image for warping
+        if (full_h != self.work_h or full_w != self.work_w):
+            comp_full_i32 = self._prepare_image_i32(comp_img)
+            if comp_full_i32 is not None:
+                comp_full_ptr = comp_full_i32.ctypes.data_as(ctypes.POINTER(ctypes.c_int32))
+                if hasattr(self.lib, "set_comparison_full_modular_tirt_ex"):
+                    self.lib.set_comparison_full_modular_tirt_ex(
+                        comp_full_ptr, full_h, full_w, channels
+                    )
+                # Keep reference
+                self._last_comp_full_i32 = comp_full_i32
+        else:
+            self._last_comp_full_i32 = None
+            if hasattr(self.lib, "set_comparison_full_modular_tirt_ex"):
+                self.lib.set_comparison_full_modular_tirt_ex(comp_ptr, h, w, channels)
+
+        # Pre-allocate output buffer for result
+        # If dual-res used, result is already full-res from C++
+        out_shape = (full_h, full_w, channels) if channels > 1 else (full_h, full_w)
+        out_i32 = np.empty(out_shape, dtype=np.int32) 
+        out_ptr = out_i32.ctypes.data_as(ctypes.POINTER(ctypes.c_int32))
+
+        if hasattr(self.lib, "compute_alignment_modular_tirt_into_ex"):
+            res = self.lib.compute_alignment_modular_tirt_into_ex(
+                comp_ptr, h, w, tile_h, tile_w, n_layers, ctypes.c_float(search_dist), 
+                channels, out_ptr
+            )
+            if res != 0:
+                print(f"[Taichi AOT] Graph execution failed: {res}")
+                return None
+            warped_u16 = out_i32.astype(np.uint16)
+        else:
+            # Fallback legacy
+            res_ptr = self.lib.compute_alignment_modular_tirt_ex(
+                comp_ptr, h, w, tile_h, tile_w, n_layers, ctypes.c_float(search_dist), channels
+            )
+            if not res_ptr:
+                return None
+            out_count = full_h * full_w if channels == 1 else full_h * full_w * channels
+            result_flat = np.fromiter(res_ptr, dtype=np.int32, count=out_count)
+            self.lib.free_u16_memory(res_ptr)
+            warped_u16 = result_flat.reshape(out_shape).astype(np.uint16)
+
+        # Output dispatch
+        if return_format == "numpy_f32":
+            return warped_u16.astype(np.float32) / 65535.0
+        return warped_u16
+>>>>>>> f0a7eaf58c12ba5408d95e3002d92aff14af32a4
 
     def clear_data(self):
         if self.ref_img_gpu:
@@ -416,7 +679,7 @@ class AlignmentTileTaichiJIT:
 
         # Warp (result is ti.ndarray in VRAM)
         warped_img_gpu = warp.warp_image_gpu(
-            comp_img_gpu, flow_full_gpu, guidance=self.ref_img_gpu
+            comp_img_gpu, flow_full_gpu, guidance=None
         )
         common.release_temp_buffer(comp_img_gpu)
         common.release_temp_buffer(flow_full_gpu)

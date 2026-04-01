@@ -13,7 +13,7 @@ import numpy as np
 import cv2
 import onnxruntime as ort
 import sqlite3
-import sqlite3
+import psutil
 from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
 from PySide6.QtCore import QThread, Signal, Qt
@@ -60,6 +60,12 @@ from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoi
     load_similarity_config,
 )
 
+
+
+def get_ram_usage():
+    process = psutil.Process()
+    mem_info = process.memory_info()
+    return mem_info.rss / 1024 / 1024  # Returns MiB
 
 class SimilarityAlgorithm:
     def __init__(self, db_path, hdf5_path=None):
@@ -155,6 +161,7 @@ class SimilarityAlgorithm:
         num_workers=-1,
         **unused_kwargs,
     ):
+        print(f"[RAM] Startup _smart_merging: {get_ram_usage():.2f} MB")
         num_images = len(images)
         h, w, _ = reference_image_float.shape
         h_orig, w_orig = h, w  # Save for crop-back after padding
@@ -207,6 +214,7 @@ class SimilarityAlgorithm:
                 return None, None, 0
 
             pass_merge_range = f_merge_range
+            print(f"[RAM] After Alignment: {get_ram_usage():.2f} MB")
 
         # 1. Initialize Sessions
         try:
@@ -214,6 +222,7 @@ class SimilarityAlgorithm:
         except Exception as e:
             print(f"[Smart Merging] Error loading sessions: {e}")
             return None, None, 0
+        print(f"[RAM] After Session Init: {get_ram_usage():.2f} MB")
 
         # 2. Noise Estimation
         gray_image = cv2.cvtColor(
@@ -243,6 +252,7 @@ class SimilarityAlgorithm:
             f"[Smart Merging] Padded canvas: {w}x{h} (tile={tile_w}x{tile_h}, "
             f"grid={w//tile_w}x{h//tile_h}, overlap=0%)"
         )
+        print(f"[RAM] After Padding: {get_ram_usage():.2f} MB")
 
         # ── Window & Overlap ────────────────────────────────────────────────────────────
         # Tidak menggunakan overlap (stride = tile penuh) → tiap pixel ditulis tepat 1×.
@@ -302,6 +312,7 @@ class SimilarityAlgorithm:
                 if stop_requested and stop_requested():
                     return None, None, 0
             ref_feat_tiles.append(row_feats)
+        print(f"[RAM] After Ref Feat Tiles: {get_ram_usage():.2f} MB")
 
         # ----------------------------------------------------------------------
         # 5. Sequential Fusion (1 tile per sess.run — hemat RAM & VRAM)
@@ -327,6 +338,7 @@ class SimilarityAlgorithm:
                 update_progress(
                     int(prog), f"Smart Merging: Fusing Frame {i+1}/{num_images}..."
                 )
+                print(f"[RAM] Before Fusing Frame {i+1}: {get_ram_usage():.2f} MB")
 
             for iy, y_start in enumerate(y_coords):
                 y_end = y_start + tile_h
@@ -358,8 +370,11 @@ class SimilarityAlgorithm:
                     tile_accum_weight[(y_start, x_start)] += w_2d
 
             processed_frames += 1
+            print(f"[RAM] After Fusing Frame {i+1}: {get_ram_usage():.2f} MB")
 
         del sess_a, sess_f
+        gc.collect()
+        print(f"[RAM] After Frames Loop & Clean: {get_ram_usage():.2f} MB")
 
         # ----------------------------------------------------------------------
         # 6. Global Stitching (Menjahit dengan Hanning Window yang Sempurna)
@@ -398,6 +413,7 @@ class SimilarityAlgorithm:
             out=final_img,
             where=valid_mask[:, :, np.newaxis],
         )
+        print(f"[RAM] After Division Normalization: {get_ram_usage():.2f} MB")
 
         # Isi sisa area yang tidak tersentuh dengan gambar referensi awal
         final_img[~valid_mask] = reference_image_float[~valid_mask]
@@ -437,6 +453,7 @@ class SimilarityAlgorithm:
         merging_backend="taichi",  # Opsi: "cpp" atau "taichi"
         **unused_kwargs,
     ):
+        print(f"[RAM] Startup _spatial_merging: {get_ram_usage():.2f} MB")
 
         # --- LANGKAH 1: Inisialisasi dan Resolusi Kerja ---
         tile_h, tile_w = map(int, tile_size)
@@ -525,6 +542,7 @@ class SimilarityAlgorithm:
             process_in = "gpu" if TAICHI_SPATIAL_AVAILABLE else "cpu"
 
         print(f"[DEBUG] _spatial_merging active mode: {process_in}")
+        print(f"[RAM] Before backend processing: {get_ram_usage():.2f} MB")
 
         if process_in == "gpu" and TAICHI_SPATIAL_AVAILABLE:
             (
@@ -603,6 +621,7 @@ class SimilarityAlgorithm:
                 alignment_tile_size=8,
                 **unused_kwargs,
             )
+        print(f"[RAM] After backend processing: {get_ram_usage():.2f} MB")
 
         if final_image_sum_full_res is None:
             return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
@@ -643,6 +662,7 @@ class SimilarityAlgorithm:
 
             # For areas without data, use reference image
             final_image[~valid_mask] = reference_image_float[~valid_mask]
+        print(f"[RAM] After Spatial Normalization: {get_ram_usage():.2f} MB")
 
         if weight_of_each_image:
             return (
@@ -1003,7 +1023,7 @@ def _load_images_for_batch(
             # Note: Resizing Linear Data requires care, but for now we assume same-size RAWs or handle it normally.
             # Ideally resize happens on both Linear and Proxy identically.
             resize_res = resize_all_with_padding(
-                batch_images, method="preserve", stop_requested=stop_requested
+                batch_images, method="preserve", stop_requested=stop_requested, force_even=True
             )
             # Proxy should also be resized to match reference if resizing happened!
             # But currently resize_all_with_padding assumes list of images.
@@ -1230,6 +1250,7 @@ def main(
         global_sum_weight = None
         global_total_frames = 0
         images_processed_count = 0
+        print(f"[RAM] Before Batch Loop: {get_ram_usage():.2f} MB")
 
         for batch_num, (batch_start, batch_end) in enumerate(batch_plan, 1):
             if stop_requested and stop_requested():
@@ -1301,6 +1322,7 @@ def main(
             # Paksa cleanup memori setiap akhir batch
             del current_batch_images
             gc.collect()
+            print(f"[RAM] After Batch {batch_num} Cleanup: {get_ram_usage():.2f} MB")
 
         if stop_requested and stop_requested():
             if update_progress and progress_bar:
