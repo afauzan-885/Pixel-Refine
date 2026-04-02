@@ -147,13 +147,8 @@ def build_image_pyramid_gpu(
                 dst = common.get_temp_buffer(
                     (h_d_step, w_d_step), ti.f32, buffer_provider
                 )
-<<<<<<< HEAD
-                _downsample_2x_kernel(
-                    current_lvl_input, dst, h_s_curr, w_s_curr, h_d_step, w_d_step
-=======
                 _AotKernelProvider.get("_downsample_2x_kernel", _downsample_2x_kernel)(
                     current_lvl_input, dst
->>>>>>> f0a7eaf58c12ba5408d95e3002d92aff14af32a4
                 )
 
                 if step < steps_per_level - 1:

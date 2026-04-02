@@ -61,11 +61,11 @@ from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoi
 )
 
 
-
 def get_ram_usage():
     process = psutil.Process()
     mem_info = process.memory_info()
     return mem_info.rss / 1024 / 1024  # Returns MiB
+
 
 class SimilarityAlgorithm:
     def __init__(self, db_path, hdf5_path=None):
@@ -241,11 +241,8 @@ class SimilarityAlgorithm:
             reference_image_float = np.pad(
                 reference_image_float, ((0, pad_h), (0, pad_w), (0, 0)), mode="reflect"
             )
-            for idx in range(len(images)):
-                img_f = normalize_image(images[idx], images[idx].dtype)
-                images[idx] = np.pad(
-                    img_f, ((0, pad_h), (0, pad_w), (0, 0)), mode="reflect"
-                )
+            # [OPTIMIZED] Do NOT pad the entire images list here.
+            # We will pad them one-by-one inside the loop to save RAM.
             h = reference_image_float.shape[0]
             w = reference_image_float.shape[1]
         print(
@@ -312,7 +309,12 @@ class SimilarityAlgorithm:
                 if stop_requested and stop_requested():
                     return None, None, 0
             ref_feat_tiles.append(row_feats)
-        print(f"[RAM] After Ref Feat Tiles: {get_ram_usage():.2f} MB")
+
+        # [SMART MEMORY] Remove ref_nchw buffer - we only need the extracted ref_feat_tiles
+        del ref_nchw
+        gc.collect()
+
+        print(f"[RAM] After Ref Feat Tiles & Cleanup: {get_ram_usage():.2f} MB")
 
         # ----------------------------------------------------------------------
         # 5. Sequential Fusion (1 tile per sess.run — hemat RAM & VRAM)
@@ -323,6 +325,12 @@ class SimilarityAlgorithm:
                 break
 
             curr_img = normalize_image(images[i], images[i].dtype)
+
+            # [OPTIMIZED] Pad ONLY current image inside loop
+            if pad_h > 0 or pad_w > 0:
+                curr_img = np.pad(
+                    curr_img, ((0, pad_h), (0, pad_w), (0, 0)), mode="reflect"
+                )
 
             # FIX: Pastikan curr_img sama dimensinya dengan referensi (h, w)
             # Alignment bisa mengembalikan gambar di resolusi kerja yang berbeda
@@ -371,6 +379,11 @@ class SimilarityAlgorithm:
 
             processed_frames += 1
             print(f"[RAM] After Fusing Frame {i+1}: {get_ram_usage():.2f} MB")
+
+            # [SMART MEMORY] Aggressive Cleanup per frame
+            images[i] = None  # Release original image from memory
+            del curr_img, curr_nchw, feat_curr, w_patch, w_2d
+            gc.collect()
 
         del sess_a, sess_f
         gc.collect()
@@ -518,7 +531,7 @@ class SimilarityAlgorithm:
         work_res_h, work_res_w = (work_res_h // 2) * 2, (work_res_w // 2) * 2
 
         # Setup tiling parameters
-        base_window = gaussian_window((tile_h, tile_w))
+        base_window = np.ones((tile_h, tile_w), dtype=np.float32)
         step_y = max(int(tile_h * (1 - overlap)), 1)
         step_x = max(int(tile_w * (1 - overlap)), 1)
 
@@ -1023,7 +1036,10 @@ def _load_images_for_batch(
             # Note: Resizing Linear Data requires care, but for now we assume same-size RAWs or handle it normally.
             # Ideally resize happens on both Linear and Proxy identically.
             resize_res = resize_all_with_padding(
-                batch_images, method="preserve", stop_requested=stop_requested, force_even=True
+                batch_images,
+                method="preserve",
+                stop_requested=stop_requested,
+                force_even=True,
             )
             # Proxy should also be resized to match reference if resizing happened!
             # But currently resize_all_with_padding assumes list of images.
