@@ -38,10 +38,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
     preprocess_in_python,
     # to_gamma_proxy, # Replaced/Updated
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.extra_algorithm import (
-    perform_image_alignment,
-    perform_alignment_gpu,
-    get_taichi_worker,
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.spatial_pipeline import (
     process_in_cpu,
     process_in_gpu,
 )
@@ -169,7 +166,7 @@ class SimilarityAlgorithm:
 
         # 0. ALIGNMENT (CPU Baseline for Stability)
         if enable_alignment and num_images > 1:
-            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.extra_algorithm import (
+            from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.alignment_core import (
                 perform_image_alignment,
             )
 
@@ -266,102 +263,110 @@ class SimilarityAlgorithm:
         x_coords = list(range(0, w, stride))  # w pasti kelipatan tile_w
 
         # ----------------------------------------------------------------------
-        # 4. Tiled Buffers Setup (REVISI SAKTI: Mencegah Checkerboard)
+        # 4. ROW-BY-ROW OPTIMIZED PROCESSING (O(Row) memory vs O(Image) memory)
         # ----------------------------------------------------------------------
-        tile_accum_img = {}
-        tile_accum_weight = {}
+        # Kanvas Utama untuk akumulasi akhir seluruh gambar
+        accum_final_img = np.zeros_like(reference_image_float, dtype=np.float32)
+        accum_final_weight = np.zeros((h, w), dtype=np.float32)
 
-        if update_progress:
-            update_progress(
-                pass_merge_range[0], "Smart Merging: Processing Reference Tiles..."
-            )
+        total_rows = len(y_coords)
+        processed_frames = num_images
 
-        ref_feat_tiles = []
-        ref_nchw = reference_image_float.transpose(2, 0, 1)[np.newaxis, ...].astype(
-            np.float32
-        )
+        # Transpose reference once to NCHW for easier row slicing
+        ref_nchw_full = reference_image_float.transpose(2, 0, 1)[
+            np.newaxis, ...
+        ].astype(np.float32)
 
-        total_tiles = len(y_coords) * len(x_coords)
-        print(
-            f"[Smart Merging] Total tiles: {total_tiles} ({len(y_coords)}×{len(x_coords)}), tile_size={tile_h}×{tile_w}, mode=sequential"
-        )
+        for iy, y_start in enumerate(y_coords):
+            if stop_requested and stop_requested():
+                return None, None, 0
 
-        # --- Ekstrak fitur referensi secara SEQUENTIAL (1 tile per sess.run) ---
-        # Hemat RAM: tidak ada buffer akumulasi, setiap tile langsung diproses & disimpan
-        for y_start in y_coords:
-            row_feats = []
+            if update_progress:
+                prog = pass_merge_range[0] + (iy / total_rows) * (
+                    pass_merge_range[1] - pass_merge_range[0]
+                )
+                update_progress(
+                    int(prog), f"Smart Merging: Processing Row {iy+1}/{total_rows}..."
+                )
+
+            # --- PREPARE ROW BUFFERS ---
             y_end = y_start + tile_h
+            row_tile_accum_img = {}  # Dictionary hanya untuk tile di baris ini
+            row_tile_accum_weight = {}  # Dictionary hanya untuk tile di baris ini
+            row_ref_feats = []  # Fitur referensi hanya untuk baris ini
+
+            # 1. Ekstrak Fitur Referensi & Inisialisasi Accumulator untuk Baris Ini
             for x_start in x_coords:
                 x_end = x_start + tile_w
 
                 # Ekstrak & inferensi referensi (1 tile)
-                ref_patch = ref_nchw[:, :, y_start:y_end, x_start:x_end]  # (1, C, H, W)
-                feat = sess_a.run(None, {"x": ref_patch})[0]  # (1, F, ...)
-                row_feats.append(feat)
+                ref_patch = ref_nchw_full[:, :, y_start:y_end, x_start:x_end]
+                feat = sess_a.run(None, {"x": ref_patch})[0]
+                row_ref_feats.append(feat)
 
-                # Inisialisasi wadah tile
+                # Inisialisasi wadah tile dengan data referensi
                 ref_rgb_patch = reference_image_float[y_start:y_end, x_start:x_end]
-                tile_accum_img[(y_start, x_start)] = ref_rgb_patch.copy()
-                tile_accum_weight[(y_start, x_start)] = np.ones(
+                row_tile_accum_img[x_start] = ref_rgb_patch.copy()
+                row_tile_accum_weight[x_start] = np.ones(
                     (tile_h, tile_w), dtype=np.float32
                 )
 
+            # 2. Proses Setiap Frame untuk Baris Ini
+            for i in range(1, num_images):
                 if stop_requested and stop_requested():
-                    return None, None, 0
-            ref_feat_tiles.append(row_feats)
+                    break
 
-        # [SMART MEMORY] Remove ref_nchw buffer - we only need the extracted ref_feat_tiles
-        del ref_nchw
-        gc.collect()
+                curr_frame_raw = images[i]
+                if curr_frame_raw is None:
+                    continue
 
-        print(f"[RAM] After Ref Feat Tiles & Cleanup: {get_ram_usage():.2f} MB")
+                h_f, w_f = curr_frame_raw.shape[:2]
 
-        # ----------------------------------------------------------------------
-        # 5. Sequential Fusion (1 tile per sess.run — hemat RAM & VRAM)
-        # ----------------------------------------------------------------------
-        processed_frames = 1
-        for i in range(1, num_images):
-            if stop_requested and stop_requested():
-                break
+                # Slice only the required strip from the raw frame
+                y_s_f = min(y_start, h_f)
+                y_e_f = min(y_start + tile_h, h_f)
+                frame_strip = curr_frame_raw[y_s_f:y_e_f, :, :]
 
-            curr_img = normalize_image(images[i], images[i].dtype)
+                # Normalize just the strip
+                strip_float = normalize_image(frame_strip, curr_frame_raw.dtype)
 
-            # [OPTIMIZED] Pad ONLY current image inside loop
-            if pad_h > 0 or pad_w > 0:
-                curr_img = np.pad(
-                    curr_img, ((0, pad_h), (0, pad_w), (0, 0)), mode="reflect"
+                # Pad/Fit strip to target dimensions (tile_h x w_padded)
+                pad_v = tile_h - strip_float.shape[0]
+                pad_h_strip = w - strip_float.shape[1]
+
+                if pad_v > 0 or pad_h_strip > 0:
+                    strip_padded = np.pad(
+                        strip_float,
+                        ((0, pad_v), (0, pad_h_strip), (0, 0)),
+                        mode="reflect",
+                    )
+                else:
+                    strip_padded = strip_float
+
+                # Resize horizontally if width still doesn't match
+                if strip_padded.shape[1] != w:
+                    strip_padded = cv2.resize(
+                        strip_padded, (w, tile_h), interpolation=cv2.INTER_LINEAR
+                    )
+
+                # Convert strip to NCHW
+                strip_nchw = strip_padded.transpose(2, 0, 1)[np.newaxis, ...].astype(
+                    np.float32
                 )
 
-            # FIX: Pastikan curr_img sama dimensinya dengan referensi (h, w)
-            # Alignment bisa mengembalikan gambar di resolusi kerja yang berbeda
-            if curr_img.shape[0] != h or curr_img.shape[1] != w:
-                curr_img = cv2.resize(curr_img, (w, h), interpolation=cv2.INTER_LINEAR)
-
-            curr_nchw = curr_img.transpose(2, 0, 1)[np.newaxis, ...].astype(np.float32)
-
-            prog = pass_merge_range[0] + (i / num_images) * (
-                pass_merge_range[1] - pass_merge_range[0]
-            )
-            if update_progress:
-                update_progress(
-                    int(prog), f"Smart Merging: Fusing Frame {i+1}/{num_images}..."
-                )
-                print(f"[RAM] Before Fusing Frame {i+1}: {get_ram_usage():.2f} MB")
-
-            for iy, y_start in enumerate(y_coords):
-                y_end = y_start + tile_h
+                # Process each tile in the row
                 for ix, x_start in enumerate(x_coords):
                     x_end = x_start + tile_w
 
-                    # Analysis Model (1 tile)
-                    curr_patch = curr_nchw[:, :, y_start:y_end, x_start:x_end]
+                    # Analysis Model
+                    curr_patch = strip_nchw[:, :, :, x_start:x_end]
                     feat_curr = sess_a.run(None, {"x": curr_patch})[0]
 
-                    # Fusion Model (1 tile)
+                    # Fusion Model
                     w_patch = sess_f.run(
                         None,
                         {
-                            "ref_feat": ref_feat_tiles[iy][ix],
+                            "ref_feat": row_ref_feats[ix],
                             "curr_feat": feat_curr,
                             "sigma": sigma_input,
                         },
@@ -371,50 +376,36 @@ class SimilarityAlgorithm:
                     if w_2d.ndim > 2:
                         w_2d = w_2d[..., 0]
 
-                    img_patch = curr_img[y_start:y_end, x_start:x_end]
-                    tile_accum_img[(y_start, x_start)] += (
-                        img_patch * w_2d[:, :, np.newaxis]
-                    )
-                    tile_accum_weight[(y_start, x_start)] += w_2d
+                    img_patch = strip_padded[:, x_start:x_end]
+                    row_tile_accum_img[x_start] += img_patch * w_2d[:, :, np.newaxis]
+                    row_tile_accum_weight[x_start] += w_2d
 
-            processed_frames += 1
-            print(f"[RAM] After Fusing Frame {i+1}: {get_ram_usage():.2f} MB")
+                del strip_float, strip_padded, strip_nchw, feat_curr, w_patch, w_2d
 
-            # [SMART MEMORY] Aggressive Cleanup per frame
-            images[i] = None  # Release original image from memory
-            del curr_img, curr_nchw, feat_curr, w_patch, w_2d
-            gc.collect()
-
-        del sess_a, sess_f
-        gc.collect()
-        print(f"[RAM] After Frames Loop & Clean: {get_ram_usage():.2f} MB")
-
-        # ----------------------------------------------------------------------
-        # 6. Global Stitching (Menjahit dengan Hanning Window yang Sempurna)
-        # ----------------------------------------------------------------------
-        if update_progress:
-            update_progress(
-                pass_merge_range[1], "Smart Merging: Final Tiling Stitch..."
-            )
-
-        accum_final_img = np.zeros_like(reference_image_float, dtype=np.float32)
-        accum_final_weight = np.zeros((h, w), dtype=np.float32)
-
-        for y_start in y_coords:
-            y_end = y_start + tile_h
+            # 3. Finalisasi Baris (Normalization & Stitching)
             for x_start in x_coords:
                 x_end = x_start + tile_w
 
-                # Selesaikan (Blend) Patch di level lokal
-                num = tile_accum_img[(y_start, x_start)]
-                den = tile_accum_weight[(y_start, x_start)][:, :, np.newaxis] + 1e-8
+                num = row_tile_accum_img[x_start]
+                den = row_tile_accum_weight[x_start][:, :, np.newaxis] + 1e-8
                 blended_patch = num / den
 
-                # Jahit Patch matang tersebut dengan Gaussian/Hanning Window ke Kanvas Utama
+                # Stitch ke kanvas utama
                 accum_final_img[y_start:y_end, x_start:x_end] += (
                     blended_patch * win[:, :, np.newaxis]
                 )
                 accum_final_weight[y_start:y_end, x_start:x_end] += win
+
+            # 4. Row Cleanup
+            del row_tile_accum_img, row_tile_accum_weight, row_ref_feats
+            gc.collect()
+            print(
+                f"[RAM] Finished Row {iy+1}/{total_rows}. Current: {get_ram_usage():.2f} MB"
+            )
+
+        # Cleanup final huge buffers
+        del ref_nchw_full, sess_a, sess_f
+        gc.collect()
 
         # 7. Normalisasi Akhir (Menghilangkan efek pantulan Hanning Window)
         eps = 1e-8

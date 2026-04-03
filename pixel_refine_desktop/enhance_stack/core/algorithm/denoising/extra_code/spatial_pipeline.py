@@ -40,9 +40,10 @@ def process_in_cpu(
     **kwargs,
 ):
     """Pipeline terpadu untuk Alignment + Merging di CPU."""
-    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.extra_algorithm import (
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.alignment_core import (
         perform_image_alignment,
     )
+
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
         estimate_noise_in_python,
         normalize_image,
@@ -109,11 +110,12 @@ def process_in_cpu(
     weight_map_sum_full_res = np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
 
     try:
-        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.extra_algorithm import (
+        from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.alignment_core import (
             SimilaritySpatialInterface,
         )
 
         c_interface = SimilaritySpatialInterface(lib_path)
+
     except Exception as e:
         raise RuntimeError(f"Gagal memuat C++ interface: {e}")
 
@@ -354,9 +356,10 @@ def process_in_gpu(
 
     # 1. ALIGNMENT (GPU Taichi)
     if enable_alignment and num_images > 1:
-        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.extra_algorithm import (
+        from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.alignment_core import (
             perform_alignment_gpu,
         )
+
 
         # Penentuan format return alignment berdasarkan backend merging yang akan digunakan
         align_return_format = "numpy_u16" if merging_backend == "cpp" else "ti_ndarray"
@@ -402,10 +405,11 @@ def process_in_gpu(
         weight_map_sum_full_res = np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
 
         try:
-            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.extra_algorithm import (
+            from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.alignment_core import (
                 SimilaritySpatialInterface,
             )
             c_interface = SimilaritySpatialInterface(lib_path)
+
         except Exception as e:
             raise RuntimeError(f"Gagal memuat C++ interface: {e}")
 
@@ -520,9 +524,10 @@ def process_in_gpu(
         from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm import (
             preprocess,
         )
-        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.extra_algorithm import (
+        from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.alignment_core import (
             get_taichi_worker,
         )
+
         from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.taichi_worker import (
             create_taichi_ndarray,
             release_taichi_ndarray,

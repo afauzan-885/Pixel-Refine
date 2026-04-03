@@ -1299,4 +1299,5 @@ def perform_image_alignment(
             return False
 
 
-from .spatial_pipeline import process_in_cpu, process_in_gpu
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.spatial_pipeline import process_in_cpu, process_in_gpu
+
