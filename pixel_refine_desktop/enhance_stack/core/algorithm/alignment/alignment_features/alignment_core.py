@@ -34,106 +34,9 @@ def get_taichi_worker():
 # --- SimilarityFrequencyInterface REMOVED (Legacy) ---
 
 
-class SimilaritySpatialInterface:
-    """
-    Membungkus pemanggilan fungsi C++ yang telah dioptimalkan.
-    Sekarang HANYA menghasilkan weight_map.
-    """
-
-    def __init__(self, lib_path):
-        if not os.path.exists(lib_path):
-            raise FileNotFoundError(f"Shared library not found: {lib_path}")
-        try:
-            self.clib = ctypes.CDLL(lib_path)
-            if not hasattr(self.clib, "generate_weight_map_jit"):
-                raise AttributeError(
-                    "Function 'generate_weight_map_jit' not found in DLL. Check C++ extern \"C\" block."
-                )
-            self._define_argtypes()
-        except OSError as e:
-            raise OSError(f"Error loading shared library {lib_path}: {e}")
-        except AttributeError as e:
-            raise AttributeError(
-                f"Function not found in DLL or error setting argtypes. Did you compile C++ correctly? Error: {e}"
-            )
-
-    def _define_argtypes(self):
-        self.clib.generate_weight_map_jit.argtypes = [
-            np.ctypeslib.ndpointer(
-                dtype=np.float32, ndim=2, flags=("C_CONTIGUOUS", "WRITEABLE")
-            ),  # weight_map_sum (2D)
-            np.ctypeslib.ndpointer(
-                dtype=np.float32, flags="C_CONTIGUOUS"
-            ),  # current_image (flattened 1D/3D OK)
-            np.ctypeslib.ndpointer(
-                dtype=np.float32, flags="C_CONTIGUOUS"
-            ),  # reference_image_processed
-            np.ctypeslib.ndpointer(
-                dtype=np.float32, flags="C_CONTIGUOUS"
-            ),  # base_window
-            ctypes.c_void_p,  # stability_map_ptr
-            np.ctypeslib.ndpointer(
-                dtype=np.int32, ndim=1, flags="C_CONTIGUOUS"
-            ),  # row_starts
-            np.ctypeslib.ndpointer(
-                dtype=np.int32, ndim=1, flags="C_CONTIGUOUS"
-            ),  # col_starts
-            ctypes.c_int,
-            ctypes.c_int,  # num_row_starts, num_col_starts
-            ctypes.c_int,
-            ctypes.c_int,  # tile_h, tile_w
-            ctypes.c_int,
-            ctypes.c_int,  # h_img, w_img
-            ctypes.c_int,  # channels
-            ctypes.c_float,  # motion_sensitivity
-            ctypes.c_float,  # noise_offset_factor
-            ctypes.c_float,  # precomputed_ref_noise_sigma
-        ]
-        self.clib.generate_weight_map_jit.restype = None
-
-    def call_generate_weight_map_jit(
-        self,
-        weight_map_sum,
-        current_image,
-        reference_image_processed,
-        base_window,
-        stability_map,
-        row_starts,
-        col_starts,
-        tile_h,
-        tile_w,
-        h,
-        w,
-        channels,
-        motion_sensitivity,
-        noise_offset_factor,
-        precomputed_ref_noise_sigma,
-    ):
-        stability_map_ptr = None
-        if stability_map is not None:
-            if not stability_map.flags["C_CONTIGUOUS"]:
-                stability_map = np.ascontiguousarray(stability_map)
-            stability_map_ptr = stability_map.ctypes.data_as(ctypes.c_void_p)
-
-        self.clib.generate_weight_map_jit(
-            weight_map_sum,
-            current_image,
-            reference_image_processed,
-            base_window,
-            stability_map_ptr,
-            row_starts,
-            col_starts,
-            len(row_starts),
-            len(col_starts),
-            tile_h,
-            tile_w,
-            h,
-            w,
-            channels,
-            motion_sensitivity,
-            noise_offset_factor,
-            precomputed_ref_noise_sigma,
-        )
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.spatial_similarity import (
+    SimilaritySpatialInterface,
+)
 
 
 ALIGN_LIB = None
@@ -530,13 +433,13 @@ def visualize_flow(flow):
     # 3. Interpolasi Warna (Hijau ke Merah)
     # BGR format: Green = (0, 255, 0), Red = (0, 0, 255)
     vis = np.zeros((flow.shape[0], flow.shape[1], 3), dtype=np.uint8)
-    
+
     # Red channel (BGR index 2) meningkat seiring magnitude
     vis[:, :, 2] = (norm_mag * 255).astype(np.uint8)
-    
+
     # Green channel (BGR index 1) menurun seiring magnitude
     vis[:, :, 1] = ((1.0 - norm_mag) * 255).astype(np.uint8)
-    
+
     # Blue channel (BGR index 0) tetap 0
     return vis
 
@@ -779,7 +682,7 @@ def perform_image_alignment(
     optical_flow_type="alignment_tile",
     num_alignment_workers=1,
     visualization=True,
-    save_align_image=False,
+    save_align_image=True,
     progress_start=30,
     progress_end=40,
     **kwargs,
@@ -1297,7 +1200,3 @@ def perform_image_alignment(
             print(f"Error kritis selama C++ Alignment: {e}")
             traceback.print_exc()
             return False
-
-
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.spatial_pipeline import process_in_cpu, process_in_gpu
-

@@ -1,57 +1,40 @@
 import os
-
-print("!!! [DEBUG] Similarity.py Module Loading... !!!")
-
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import gc
-import queue
-import threading
-import functools
 import traceback
-import sys
-import numpy as np
-import cv2
-import onnxruntime as ort
 import sqlite3
 import psutil
-from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 import h5py
-from PySide6.QtCore import QThread, Signal, Qt
+import numpy as np
+import cv2
+from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
+from PySide6.QtCore import Qt
+
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.smart_fusion.smart_fusion_core import (
+    SmartFusionProcessor,
+)
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.spatial_fusion import (
+    SpatialFusionProcessor,
+)
+
+# --- EXTERNAL ALGORITHM UTILS ---
 from pixel_refine_desktop.enhance_stack.core.algorithm.base_worker import (
     BaseAlgorithmWorker,
 )
+from pixel_refine_desktop.ui.resources.styles.stylesheet import PROGRESS_BAR
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
-    estimate_noise_in_python,
     extract_all_metadata,
-    gaussian_window,
-    get_all_image_paths_for_single_process,
-    load_images_from_paths,
     normalize_image,
-    # preprocess_in_python,  # REMOVED - now using preprocess.preprocess_in_python_gpu
-    resize_all_with_padding,
+    preprocess_in_python,
     save_image,
     setup_balanced_batching,
-    to_gamma_proxy,
     calculate_auto_scale,
-    calculate_scale_from_gt_proxy,  # [SMART PROXY]
-    save_linear_dng,  # [LINEAR DNG]
-    preprocess_in_python,
-    # to_gamma_proxy, # Replaced/Updated
-)
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.spatial_pipeline import (
-    process_in_cpu,
-    process_in_gpu,
+    calculate_scale_from_gt_proxy,
+    save_linear_dng,
+    get_all_image_paths_for_single_process,
+    load_images_from_paths,
+    resize_all_with_padding,
 )
 
-
-# --- TAICHI SPATIAL DETECTION ---
-from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.taichi_worker import (
-    TAICHI_AVAILABLE as TAICHI_SPATIAL_AVAILABLE,
-)
-
-print(f"[DEBUG] TAICHI_SPATIAL_AVAILABLE detected as: {TAICHI_SPATIAL_AVAILABLE}")
-
-from pixel_refine_desktop.ui.resources.styles.stylesheet import PROGRESS_BAR
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.similarity_parameter_settings import (
     load_similarity_config,
@@ -59,25 +42,20 @@ from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoi
 
 
 def get_ram_usage():
+    """Returns the current RAM usage of the process in MiB."""
     process = psutil.Process()
     mem_info = process.memory_info()
-    return mem_info.rss / 1024 / 1024  # Returns MiB
+    return mem_info.rss / 1024 / 1024
 
 
-class SimilarityAlgorithm:
-    def __init__(self, db_path, hdf5_path=None):
+class DataProvider:
+    """Handles data sourcing, batching, and image loading for the Similarity algorithm."""
+
+    def __init__(self, db_path):
         self.db_path = db_path
 
-        if hdf5_path is None:
-            self.hdf5_path = "database/align/aligned_images.h5"
-        else:
-            self.hdf5_path = hdf5_path
-
-        hdf5_folder = os.path.dirname(self.hdf5_path)
-        if not os.path.exists(hdf5_folder):
-            os.makedirs(hdf5_folder)
-
     def get_all_image_paths_for_batch_process(self, batch_id):
+        """Fetches all image paths for a specific batch from the database."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -92,597 +70,113 @@ class SimilarityAlgorithm:
             )
             return [row[0] for row in cursor.fetchall()]
 
-    def load_images_from_hdf5(self, hdf5_path, stop_requested=None):
-        images = []
-        with h5py.File(hdf5_path, "r") as h5f:
-            for key in h5f.keys():
-                if stop_requested and stop_requested():
-                    break
-                image = np.array(h5f[key])
-                images.append(image)
-        return images
+    def setup_data_source_and_paths(self, single_process, batch_id):
+        """Determines the data source (HDF5 or Raw paths) and prepares output metadata."""
+        align_dir = os.path.join("database", "align")
+        image_paths = []
+        output_name_base = ""
+        hdf5_path = ""
 
-    def _get_smart_merging_session(self, tile_size, preferred_device="gpu"):
-        model_dir = "database/Learning_Model/nanoburst"
-
-        # Priority mapping
-        device_map = {
-            "gpu": [
-                "CUDAExecutionProvider",
-                "DmlExecutionProvider",
-                "CPUExecutionProvider",
-            ],
-            "dml": ["DmlExecutionProvider", "CPUExecutionProvider"],
-            "cpu": ["CPUExecutionProvider"],
-        }
-        providers = device_map.get(preferred_device, device_map["gpu"])
-
-        # Format model paths
-        fmt = "fp16_gpu" if preferred_device in ["gpu", "dml"] else "fp32_cpu"
-        a_path = os.path.join(model_dir, f"smart_analysis_{tile_size}_{fmt}.onnx")
-        f_path = os.path.join(model_dir, f"smart_fusion_{tile_size}_{fmt}.onnx")
-
-        # Fallback to float32 if float16 missing
-        if not os.path.exists(a_path):
-            a_path = os.path.join(
-                model_dir, f"smart_analysis_{tile_size}_fp32_cpu.onnx"
+        if single_process:
+            hdf5_path = os.path.join(align_dir, "aligned_images.h5")
+            image_paths = get_all_image_paths_for_single_process(self.db_path)
+            ref_name = (
+                os.path.splitext(os.path.basename(image_paths[0]))[0]
+                if image_paths
+                else "single_process"
             )
-            f_path = os.path.join(model_dir, f"smart_fusion_{tile_size}_fp32_cpu.onnx")
-            providers = ["CPUExecutionProvider"]
-
-        if not os.path.exists(a_path) or not os.path.exists(f_path):
-            raise FileNotFoundError(
-                f"Smart Merging models not found for tile {tile_size}"
+            output_name_base = ref_name
+        else:
+            hdf5_path = os.path.join(align_dir, f"aligned_image_batch_{batch_id}.h5")
+            image_paths = self.get_all_image_paths_for_batch_process(batch_id)
+            ref_name = (
+                os.path.splitext(os.path.basename(image_paths[0]))[0]
+                if image_paths
+                else f"batch_{batch_id}"
             )
+            output_name_base = ref_name
 
-        sess_a = ort.InferenceSession(a_path, providers=providers)
-        sess_f = ort.InferenceSession(f_path, providers=providers)
-        return sess_a, sess_f
+        data_source = hdf5_path if os.path.exists(hdf5_path) else image_paths
 
-    def _smart_merging(
-        self,
-        images,
-        reference_image_float,
-        update_progress,  # <-- Geser ke atas
-        stop_requested,  # <-- Geser ke atas
-        tile_size,  # <-- Geser ke atas
-        overlap,  # <-- Geser ke atas
-        pass_merge_range=(0, 100),  # 🌟 SOLUSI: Pindah ke sini & beri nilai default!
-        preferred_device="gpu",
-        enable_alignment=True,
-        work_res_h=None,
-        work_res_w=None,
-        ref_dtype=None,
-        is_linear_mode=False,
-        proxy_scale=1.0,
-        num_workers=-1,
-        **unused_kwargs,
-    ):
-        print(f"[RAM] Startup _smart_merging: {get_ram_usage():.2f} MB")
-        num_images = len(images)
-        h, w, _ = reference_image_float.shape
-        h_orig, w_orig = h, w  # Save for crop-back after padding
-        tile_h, tile_w = map(int, tile_size)
+        total_images = 0
+        if isinstance(data_source, str) and data_source.endswith(".h5"):
+            print(language_config.PROCESSING_IMAGE_FROM_HDF5.format(data_source))
+            try:
+                with h5py.File(data_source, "r") as f:
+                    total_images = len(f.keys())
+            except Exception as e_h5:
+                raise IOError(f"Gagal membaca file HDF5: {e_h5}")
+        elif isinstance(data_source, list):
+            total_images = len(data_source)
 
-        # 0. ALIGNMENT (CPU Baseline for Stability)
-        if enable_alignment and num_images > 1:
-            from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.alignment_core import (
-                perform_image_alignment,
-            )
+        return data_source, image_paths, output_name_base, total_images
 
-            p_align_start = int(pass_merge_range[0])
-            p_align_end = int(
-                pass_merge_range[0] + (pass_merge_range[1] - pass_merge_range[0]) * 0.3
-            )
-            f_merge_start = p_align_end
-            f_merge_range = (f_merge_start, pass_merge_range[1])
-
-            if update_progress:
-                update_progress(
-                    p_align_start, "Smart Merging: Aligning frames (CPU)..."
-                )
-
-            align_ref_input = reference_image_float
-            if is_linear_mode:
-                align_ref_input = to_gamma_proxy(
-                    reference_image_float, scale=proxy_scale
-                )
-
-            if work_res_h is None or work_res_w is None:
-                work_res_h, work_res_w = h, w
-
-            alignment_success = perform_image_alignment(
-                images,
-                align_ref_input,
-                work_res_h,
-                work_res_w,
-                8,
-                8,
-                ref_dtype if ref_dtype else images[0].dtype,
-                update_progress,
-                stop_requested,
-                num_alignment_workers=num_workers,
-                progress_start=p_align_start,
-                progress_end=p_align_end,
-                is_linear_mode=is_linear_mode,
-                proxy_scale=proxy_scale,
-            )
-            if not alignment_success and stop_requested and stop_requested():
-                return None, None, 0
-
-            pass_merge_range = f_merge_range
-            print(f"[RAM] After Alignment: {get_ram_usage():.2f} MB")
-
-        # 1. Initialize Sessions
-        try:
-            sess_a, sess_f = self._get_smart_merging_session(tile_h, preferred_device)
-        except Exception as e:
-            print(f"[Smart Merging] Error loading sessions: {e}")
-            return None, None, 0
-        print(f"[RAM] After Session Init: {get_ram_usage():.2f} MB")
-
-        # 2. Noise Estimation
-        gray_image = cv2.cvtColor(
-            (reference_image_float * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY
-        )
-        sigma_val = estimate_noise_in_python(gray_image.astype(np.float32) / 255.0)
-        sigma_input = np.array([[[[sigma_val]]]], dtype=np.float32)
-
-        # 3. Tiling & Buffers
-        # ── Pad ke KELIPATAN tile_size (bukan hanya ke minimum tile_size) ──────────────
-        # Ini menghilangkan "shrink-back" pada tile terakhir: setiap tile dijamin persis
-        # tile_h × tile_w, tidak ada daerah yang ditulis dua kali → tidak ada seam line.
-        pad_h = (tile_h - h % tile_h) % tile_h  # 0 jika sudah kelipatan
-        pad_w = (tile_w - w % tile_w) % tile_w
-        if pad_h > 0 or pad_w > 0:
-            reference_image_float = np.pad(
-                reference_image_float, ((0, pad_h), (0, pad_w), (0, 0)), mode="reflect"
-            )
-            # [OPTIMIZED] Do NOT pad the entire images list here.
-            # We will pad them one-by-one inside the loop to save RAM.
-            h = reference_image_float.shape[0]
-            w = reference_image_float.shape[1]
-        print(
-            f"[Smart Merging] Padded canvas: {w}x{h} (tile={tile_w}x{tile_h}, "
-            f"grid={w//tile_w}x{h//tile_h}, overlap=0%)"
-        )
-        print(f"[RAM] After Padding: {get_ram_usage():.2f} MB")
-
-        # ── Window & Overlap ────────────────────────────────────────────────────────────
-        # Tidak menggunakan overlap (stride = tile penuh) → tiap pixel ditulis tepat 1×.
-        # Gaussian window TIDAK dipakai karena tanpa overlap, tepi tile punya bobot ≈0
-        # yang akan diperkuat saat normalisasi → artefak cerah. Flat ones = aman.
-        win = np.ones(
-            (tile_h, tile_w), dtype=np.float32
-        )  # flat: stitching = simple copy
-
-        stride = tile_h  # overlap = 0%, stride = tile_size penuh
-
-        # Grid setup: range tepat, tidak ada shrink-back
-        y_coords = list(range(0, h, stride))  # h pasti kelipatan tile_h
-        x_coords = list(range(0, w, stride))  # w pasti kelipatan tile_w
-
-        # ----------------------------------------------------------------------
-        # 4. ROW-BY-ROW OPTIMIZED PROCESSING (O(Row) memory vs O(Image) memory)
-        # ----------------------------------------------------------------------
-        # Kanvas Utama untuk akumulasi akhir seluruh gambar
-        accum_final_img = np.zeros_like(reference_image_float, dtype=np.float32)
-        accum_final_weight = np.zeros((h, w), dtype=np.float32)
-
-        total_rows = len(y_coords)
-        processed_frames = num_images
-
-        # Transpose reference once to NCHW for easier row slicing
-        ref_nchw_full = reference_image_float.transpose(2, 0, 1)[
-            np.newaxis, ...
-        ].astype(np.float32)
-
-        for iy, y_start in enumerate(y_coords):
-            if stop_requested and stop_requested():
-                return None, None, 0
-
-            if update_progress:
-                prog = pass_merge_range[0] + (iy / total_rows) * (
-                    pass_merge_range[1] - pass_merge_range[0]
-                )
-                update_progress(
-                    int(prog), f"Smart Merging: Processing Row {iy+1}/{total_rows}..."
-                )
-
-            # --- PREPARE ROW BUFFERS ---
-            y_end = y_start + tile_h
-            row_tile_accum_img = {}  # Dictionary hanya untuk tile di baris ini
-            row_tile_accum_weight = {}  # Dictionary hanya untuk tile di baris ini
-            row_ref_feats = []  # Fitur referensi hanya untuk baris ini
-
-            # 1. Ekstrak Fitur Referensi & Inisialisasi Accumulator untuk Baris Ini
-            for x_start in x_coords:
-                x_end = x_start + tile_w
-
-                # Ekstrak & inferensi referensi (1 tile)
-                ref_patch = ref_nchw_full[:, :, y_start:y_end, x_start:x_end]
-                feat = sess_a.run(None, {"x": ref_patch})[0]
-                row_ref_feats.append(feat)
-
-                # Inisialisasi wadah tile dengan data referensi
-                ref_rgb_patch = reference_image_float[y_start:y_end, x_start:x_end]
-                row_tile_accum_img[x_start] = ref_rgb_patch.copy()
-                row_tile_accum_weight[x_start] = np.ones(
-                    (tile_h, tile_w), dtype=np.float32
-                )
-
-            # 2. Proses Setiap Frame untuk Baris Ini
-            for i in range(1, num_images):
-                if stop_requested and stop_requested():
-                    break
-
-                curr_frame_raw = images[i]
-                if curr_frame_raw is None:
-                    continue
-
-                h_f, w_f = curr_frame_raw.shape[:2]
-
-                # Slice only the required strip from the raw frame
-                y_s_f = min(y_start, h_f)
-                y_e_f = min(y_start + tile_h, h_f)
-                frame_strip = curr_frame_raw[y_s_f:y_e_f, :, :]
-
-                # Normalize just the strip
-                strip_float = normalize_image(frame_strip, curr_frame_raw.dtype)
-
-                # Pad/Fit strip to target dimensions (tile_h x w_padded)
-                pad_v = tile_h - strip_float.shape[0]
-                pad_h_strip = w - strip_float.shape[1]
-
-                if pad_v > 0 or pad_h_strip > 0:
-                    strip_padded = np.pad(
-                        strip_float,
-                        ((0, pad_v), (0, pad_h_strip), (0, 0)),
-                        mode="reflect",
-                    )
-                else:
-                    strip_padded = strip_float
-
-                # Resize horizontally if width still doesn't match
-                if strip_padded.shape[1] != w:
-                    strip_padded = cv2.resize(
-                        strip_padded, (w, tile_h), interpolation=cv2.INTER_LINEAR
-                    )
-
-                # Convert strip to NCHW
-                strip_nchw = strip_padded.transpose(2, 0, 1)[np.newaxis, ...].astype(
-                    np.float32
-                )
-
-                # Process each tile in the row
-                for ix, x_start in enumerate(x_coords):
-                    x_end = x_start + tile_w
-
-                    # Analysis Model
-                    curr_patch = strip_nchw[:, :, :, x_start:x_end]
-                    feat_curr = sess_a.run(None, {"x": curr_patch})[0]
-
-                    # Fusion Model
-                    w_patch = sess_f.run(
-                        None,
-                        {
-                            "ref_feat": row_ref_feats[ix],
-                            "curr_feat": feat_curr,
-                            "sigma": sigma_input,
-                        },
-                    )[0]
-
-                    w_2d = np.squeeze(np.array(w_patch))
-                    if w_2d.ndim > 2:
-                        w_2d = w_2d[..., 0]
-
-                    img_patch = strip_padded[:, x_start:x_end]
-                    row_tile_accum_img[x_start] += img_patch * w_2d[:, :, np.newaxis]
-                    row_tile_accum_weight[x_start] += w_2d
-
-                del strip_float, strip_padded, strip_nchw, feat_curr, w_patch, w_2d
-
-            # 3. Finalisasi Baris (Normalization & Stitching)
-            for x_start in x_coords:
-                x_end = x_start + tile_w
-
-                num = row_tile_accum_img[x_start]
-                den = row_tile_accum_weight[x_start][:, :, np.newaxis] + 1e-8
-                blended_patch = num / den
-
-                # Stitch ke kanvas utama
-                accum_final_img[y_start:y_end, x_start:x_end] += (
-                    blended_patch * win[:, :, np.newaxis]
-                )
-                accum_final_weight[y_start:y_end, x_start:x_end] += win
-
-            # 4. Row Cleanup
-            del row_tile_accum_img, row_tile_accum_weight, row_ref_feats
-            gc.collect()
-            print(
-                f"[RAM] Finished Row {iy+1}/{total_rows}. Current: {get_ram_usage():.2f} MB"
-            )
-
-        # Cleanup final huge buffers
-        del ref_nchw_full, sess_a, sess_f
-        gc.collect()
-
-        # 7. Normalisasi Akhir (Menghilangkan efek pantulan Hanning Window)
-        eps = 1e-8
-        valid_mask = accum_final_weight > eps
-        final_img = np.zeros_like(accum_final_img)
-        np.divide(
-            accum_final_img,
-            accum_final_weight[:, :, np.newaxis],
-            out=final_img,
-            where=valid_mask[:, :, np.newaxis],
-        )
-        print(f"[RAM] After Division Normalization: {get_ram_usage():.2f} MB")
-
-        # Isi sisa area yang tidak tersentuh dengan gambar referensi awal
-        final_img[~valid_mask] = reference_image_float[~valid_mask]
-
-        # 8. Potong kembali (Crop) jika sebelumnya gambar diberikan padding tambahan
-        if h_orig != h or w_orig != w:
-            final_img = final_img[:h_orig, :w_orig]
-            accum_final_weight = accum_final_weight[:h_orig, :w_orig]
-
-        return final_img, accum_final_weight, processed_frames
-
-    def _spatial_merging(
-        self,
-        images,
-        ref_image_h,
-        ref_image_w,
-        ref_channels_buffer,
-        ref_dtype,
-        reference_image_float,
-        tile_size,
-        overlap,
-        motion_sensitivity,
-        noise_offset_factor,
-        update_progress=None,
+    @staticmethod
+    def load_images_for_batch(
+        data_source,
+        batch_indices,
         stop_requested=None,
-        total_overall_images=None,
-        images_processed_so_far=0,
-        lib_path="pixel_refine_desktop/ui/data/similarity_spatial_merging.dll",
-        num_workers=-1,
-        weight_of_each_image=False,
-        enable_alignment=True,
-        scale_down_factor: float = 1.0,
-        return_raw=False,
-        is_linear_mode=False,
-        proxy_scale=1.0,
-        process_in="cpu",
-        merging_backend="taichi",  # Opsi: "cpp" atau "taichi"
-        **unused_kwargs,
+        linear_mode=True,
+        capture_ref_proxy=False,
     ):
-        print(f"[RAM] Startup _spatial_merging: {get_ram_usage():.2f} MB")
+        """Loads a specific batch of images from HDF5 or filesystem."""
+        batch_start, batch_end = batch_indices
+        batch_images = []
+        ref_proxy = None
 
-        # --- LANGKAH 1: Inisialisasi dan Resolusi Kerja ---
-        tile_h, tile_w = map(int, tile_size)
-        num_images = len(images)
-        work_res_h, work_res_w = ref_image_h, ref_image_w
-        TARGET_MP = 12.5 * 1e6
-        # --- COSTUM PROGRESS CALCULATION (GLOBAL SCOPE) MOVED UP ---
-        use_overall_progress = total_overall_images and total_overall_images > 0
-        if use_overall_progress:
-            # Batch processing: Hitung slot global untuk stack ini
-            scope_start = (images_processed_so_far / total_overall_images) * 100.0
-            scope_end = (
-                (images_processed_so_far + num_images) / total_overall_images
-            ) * 100.0
-        else:
-            # Single processing: Full 0-100
-            scope_start = 0.0
-            scope_end = 100.0
+        if isinstance(data_source, str) and data_source.endswith(".h5"):
+            with h5py.File(data_source, "r") as h5f:
+                keys = list(h5f.keys())[batch_start:batch_end]
+                batch_images = [
+                    np.array(h5f[key])
+                    for key in keys
+                    if not (stop_requested and stop_requested())
+                ]
+        elif isinstance(data_source, list):
+            batch_paths = data_source[batch_start:batch_end]
+            load_res = load_images_from_paths(
+                batch_paths,
+                stop_requested,
+                linear_mode=linear_mode,
+                capture_ref_proxy=capture_ref_proxy,
+            )
 
-        scope_width = scope_end - scope_start
-
-        # Partitioning Scope:
-        # Align: 5% - 40% (relative to scope)
-        # Merge: 40% - 95% (relative to scope)
-        p_init = int(scope_start + scope_width * 0.05)
-        p_align_start = p_init
-        p_align_end = int(scope_start + scope_width * 0.40)
-        p_merge_start = p_align_end
-        p_merge_end = int(scope_start + scope_width * 0.95)
-
-        pass_merge_range = (p_merge_start, p_merge_end)
-
-        # Initialize return variables to prevent UnboundLocalError
-        processed_frames_spatial = 0
-        final_image_sum_full_res = None
-        weight_map_sum_full_res = None
-        ref_noise_sigma = 0.0
-
-        # --- Logika Scale Down ---
-        if scale_down_factor != 1.0:
-            if scale_down_factor < 1.0:
-                work_res_h = int(ref_image_h * scale_down_factor)
-                work_res_w = int(ref_image_w * scale_down_factor)
-                if update_progress:
-                    update_progress(p_init, f"Downscale aktif: {scale_down_factor:.2f}")
+            if capture_ref_proxy and isinstance(load_res, tuple):
+                batch_images, ref_proxy = load_res
             else:
-                if update_progress:
-                    update_progress(p_init, "Menggunakan resolusi asli (scale > 1.0)")
-        else:
-            if (ref_image_h * ref_image_w) > TARGET_MP:
-                scale_factor = np.sqrt(TARGET_MP / (ref_image_h * ref_image_w))
-                work_res_h, work_res_w = int(ref_image_h * scale_factor), int(
-                    ref_image_w * scale_factor
-                )
-                if update_progress:
-                    update_progress(p_init, f"Auto-scale ke {scale_factor:.2f}x")
-            else:
-                if update_progress:
-                    update_progress(p_init, "Menggunakan resolusi asli")
+                batch_images = load_res
 
-        # Pastikan genap
-        work_res_h, work_res_w = (work_res_h // 2) * 2, (work_res_w // 2) * 2
-
-        # Setup tiling parameters
-        base_window = np.ones((tile_h, tile_w), dtype=np.float32)
-        step_y = max(int(tile_h * (1 - overlap)), 1)
-        step_x = max(int(tile_w * (1 - overlap)), 1)
-
-        # --- FIX TIPE DATA (PENTING AGAR TIDAK CRASH DI C++) ---
-        row_starts = np.arange(0, work_res_h - tile_h + 1, step_y, dtype=np.int32)
-        if work_res_h > tile_h and (
-            row_starts.size == 0 or row_starts[-1] != work_res_h - tile_h
-        ):
-            row_starts = np.append(row_starts, work_res_h - tile_h)
-        row_starts = np.ascontiguousarray(np.unique(row_starts).astype(np.int32))
-
-        col_starts = np.arange(0, work_res_w - tile_w + 1, step_x, dtype=np.int32)
-        if work_res_w > tile_w and (
-            col_starts.size == 0 or col_starts[-1] != work_res_w - tile_w
-        ):
-            col_starts = np.append(col_starts, work_res_w - tile_w)
-        col_starts = np.ascontiguousarray(np.unique(col_starts).astype(np.int32))
-
-        # Execution Path (GPU/CPU)
-        if process_in is None or process_in == "auto":
-            process_in = "gpu" if TAICHI_SPATIAL_AVAILABLE else "cpu"
-
-        print(f"[DEBUG] _spatial_merging active mode: {process_in}")
-        print(f"[RAM] Before backend processing: {get_ram_usage():.2f} MB")
-
-        if process_in == "gpu" and TAICHI_SPATIAL_AVAILABLE:
-            (
-                processed_frames_spatial,
-                final_image_sum_full_res,
-                weight_map_sum_full_res,
-                ref_noise_sigma,
-            ) = process_in_gpu(
-                images=images,
-                reference_image_float=reference_image_float,
-                ref_image_h=ref_image_h,
-                ref_image_w=ref_image_w,
-                ref_channels_buffer=ref_channels_buffer,
-                ref_dtype=ref_dtype,
-                work_res_h=work_res_h,
-                work_res_w=work_res_w,
-                tile_h=tile_h,
-                tile_w=tile_w,
-                row_starts=row_starts,
-                col_starts=col_starts,
-                base_window=base_window,
-                motion_sensitivity=motion_sensitivity,
-                noise_offset_factor=noise_offset_factor,
-                update_progress=update_progress,
+            # Automatic resizing for consistency
+            resize_res = resize_all_with_padding(
+                batch_images,
+                method="preserve",
                 stop_requested=stop_requested,
-                pass_merge_range=pass_merge_range,
-                p_align_start=p_align_start,
-                p_align_end=p_align_end,
-                p_merge_start=p_merge_start,
-                is_linear_mode=is_linear_mode,
-                proxy_scale=proxy_scale,
-                images_processed_so_far=images_processed_so_far,
-                total_overall_images=total_overall_images,
-                enable_alignment=enable_alignment,
-                num_workers=num_workers,
-                alignment_tile_size=8,
-                lib_path=lib_path,
-                merging_backend=merging_backend,
-                **unused_kwargs,
+                force_even=True,
             )
-        else:
-            (
-                processed_frames_spatial,
-                final_image_sum_full_res,
-                weight_map_sum_full_res,
-                ref_noise_sigma,
-            ) = process_in_cpu(
-                images=images,
-                reference_image_float=reference_image_float,
-                ref_image_h=ref_image_h,
-                ref_image_w=ref_image_w,
-                ref_channels_buffer=ref_channels_buffer,
-                ref_dtype=ref_dtype,
-                work_res_h=work_res_h,
-                work_res_w=work_res_w,
-                tile_h=tile_h,
-                tile_w=tile_w,
-                row_starts=row_starts,
-                col_starts=col_starts,
-                base_window=base_window,
-                motion_sensitivity=motion_sensitivity,
-                noise_offset_factor=noise_offset_factor,
-                num_workers=num_workers,
-                update_progress=update_progress,
-                stop_requested=stop_requested,
-                pass_merge_range=pass_merge_range,
-                p_align_start=p_align_start,
-                p_align_end=p_align_end,
-                p_merge_start=p_merge_start,
-                is_linear_mode=is_linear_mode,
-                proxy_scale=proxy_scale,
-                images_processed_so_far=images_processed_so_far,
-                total_overall_images=total_overall_images,
-                lib_path=lib_path,
-                enable_alignment=enable_alignment,
-                alignment_tile_size=8,
-                **unused_kwargs,
-            )
-        print(f"[RAM] After backend processing: {get_ram_usage():.2f} MB")
+            if resize_res and resize_res[0]:
+                batch_images = resize_res[0]
 
-        if final_image_sum_full_res is None:
-            return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
+        if capture_ref_proxy:
+            return batch_images, ref_proxy
 
-        # --- LANGKAH 4: Normalisasi Akhir atau Return Raw ---
-        if stop_requested and stop_requested():
-            return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
+        return batch_images
 
-        if processed_frames_spatial > 0:
-            # Jika return_raw aktif, kita kembalikan akumulator mentah untuk ditumpuk nanti
-            if return_raw:
-                return (
-                    final_image_sum_full_res,
-                    weight_map_sum_full_res,
-                    processed_frames_spatial,
-                )
 
-        if update_progress:
-            update_progress(
-                pass_merge_range[1],
-                "Finalizing with simple mean calculation...",
-            )
+class SimilarityAlgorithm:
+    """
+    Main Orchestrator for the Similarity Merging algorithm.
+    Coordinates between Smart Fusion (AI) and Spatial Fusion (C++/Taichi).
+    """
 
-        # Simple mean calculation (Normalization)
-        final_image = None
-        if weight_map_sum_full_res is not None and final_image_sum_full_res is not None:
-            eps = 1e-6
-            valid_mask = weight_map_sum_full_res > eps
-            final_image = np.zeros_like(final_image_sum_full_res)
+    def __init__(self, db_path, hdf5_path=None):
+        self.db_path = db_path
+        self.data_provider = DataProvider(db_path)
+        self.smart_processor = SmartFusionProcessor()
+        self.spatial_processor = SpatialFusionProcessor()
 
-            # [MODIFIED] Calculate mean: sum_img / sum_weight
-            np.divide(
-                final_image_sum_full_res,
-                weight_map_sum_full_res[:, :, np.newaxis],
-                out=final_image,
-                where=valid_mask[:, :, np.newaxis],
-            )
-
-            # For areas without data, use reference image
-            final_image[~valid_mask] = reference_image_float[~valid_mask]
-        print(f"[RAM] After Spatial Normalization: {get_ram_usage():.2f} MB")
-
-        if weight_of_each_image:
-            return (
-                final_image,
-                weight_map_sum_full_res,
-                processed_frames_spatial,
-                [],
-            )
-        else:
-            return (
-                final_image,
-                weight_map_sum_full_res,
-                processed_frames_spatial,
-            )
-
-        return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
+    def get_all_image_paths_for_batch_process(self, batch_id):
+        """Legacy wrapper for DataProvider."""
+        return self.data_provider.get_all_image_paths_for_batch_process(batch_id)
 
     def similarity_mnfr(
         self,
@@ -702,61 +196,27 @@ class SimilarityAlgorithm:
         ref_image_override=None,
         return_raw=False,
         is_linear_mode=False,
-        proxy_scale=1.0,  # [AUTO-SCALE]
+        proxy_scale=1.0,
         **merging_kwargs,
     ):
-        """
-        Fungsi utama untuk menghitung kesamaan dan penggabungan frame (spatial/frequency).
-        Sudah tahan stop_requested(), return value konsisten meski proses dibatalkan.
-        """
+        """Entry point for the merging algorithm."""
         if not isinstance(images, list) or not images:
             raise ValueError(language_config.IMAGE_DATA_MUST_BE_VALID)
 
-        try:
-            ref_image = (
-                ref_image_override if ref_image_override is not None else images[0]
-            )
-            if not isinstance(ref_image, np.ndarray):
-                raise TypeError(language_config.IMAGE_DATA_MUST_BE_VALID)
+        ref_image = ref_image_override if ref_image_override is not None else images[0]
+        dtype_ref = ref_image.dtype
+        h_ref, w_ref = ref_image.shape[:2]
+        channels_ref_orig = ref_image.shape[2] if ref_image.ndim == 3 else 1
 
-            h_ref, w_ref, channels_ref_orig = (
-                ref_image.shape[0],
-                ref_image.shape[1],
-                (ref_image.shape[2] if ref_image.ndim == 3 else 1),
-            )
-            dtype_ref = ref_image.dtype
-            if channels_ref_orig not in (1, 3):
-                raise ValueError(
-                    language_config.IMAGE_CHANNEL_DOES_NOT_SUPPORT.format(
-                        channels_ref_orig
-                    )
-                )
-
-        except (AttributeError, IndexError, ValueError, TypeError) as e:
-            raise ValueError(language_config.FIRST_IMAGE_CANNOT_BE_OBTAINED.format(e))
-
-        if dtype_ref not in (np.uint8, np.uint16):
-            raise TypeError(language_config.IMAGE_BIT_REQUIRED)
-
-        channels_buffer = 3
         reference_image_float = normalize_image(ref_image, dtype_ref)
-
-        if reference_image_float is None:
-            raise ValueError(
-                f"normalize_image returned None! Dtype: {dtype_ref}, Shape: {ref_image.shape}"
-            )
-
         h_ref_norm, w_ref_norm, _ = reference_image_float.shape
 
-        final_image_normalized, final_weight_map, processed_frames = None, None, 0
-        weight_maps_per_image = []
-
-        # --- Persiapan argumen umum ---
-        common_call_args = {
+        # Common arguments for booth backends
+        common_args = {
             "images": images,
             "ref_image_h": h_ref_norm,
             "ref_image_w": w_ref_norm,
-            "ref_channels_buffer": channels_buffer,
+            "ref_channels_buffer": 3,
             "ref_dtype": dtype_ref,
             "reference_image_float": reference_image_float,
             "update_progress": update_progress,
@@ -768,284 +228,91 @@ class SimilarityAlgorithm:
             "is_linear_mode": is_linear_mode,
             "proxy_scale": proxy_scale,
         }
-        common_call_args.update(merging_kwargs)
+        common_args.update(merging_kwargs)
 
-        # --- Cek stop_requested() di awal ---
         if stop_requested and stop_requested():
-            out_shape_fb = (
+            out_shape = (
                 (h_ref, w_ref)
                 if channels_ref_orig == 1
                 else (h_ref, w_ref, channels_ref_orig)
             )
-            return np.zeros(out_shape_fb, dtype=dtype_ref), None, []
+            return np.zeros(out_shape, dtype=dtype_ref), None, []
 
-        # --- Jalankan merging (Spatial/Smart) ---
         merging_mode = merging_kwargs.get("merging_mode", "smart")
 
-        current_tile_size = (
-            tile_size if tile_size is not None else common_call_args.get("tile_size")
-        )
-        current_overlap = (
-            overlap if overlap is not None else common_call_args.get("overlap")
-        )
-        current_motion_sensitivity = (
-            motion_sensitivity
-            if motion_sensitivity is not None
-            else common_call_args.get("motion_sensitivity")
-        )
-        current_noise_offset_factor = (
-            noise_offset_factor
-            if noise_offset_factor is not None
-            else common_call_args.get("noise_offset_factor")
-        )
-        current_num_workers = (
-            num_workers
-            if num_workers is not None
-            else common_call_args.get("similarity_spatial_num_workers")
-        )
-
-        # Jika parameter penting belum tersedia, hentikan aman
-        if any(
-            p is None
-            for p in [
-                current_tile_size,
-                current_overlap,
-                current_motion_sensitivity,
-                current_noise_offset_factor,
-            ]
-        ):
-            out_shape_fb = (
-                (h_ref, w_ref)
-                if channels_ref_orig == 1
-                else (h_ref, w_ref, channels_ref_orig)
-            )
-            return np.zeros(out_shape_fb, dtype=dtype_ref), None, []
-
+        # Determine Backend
         if merging_mode == "smart":
-            # Tile 320x320 dengan overlap 20% → model 320 tersedia, Gaussian window aktif
-            smart_tile = (320, 320)
-            smart_overlap = 0.20
-
-            # Extract resolution parameters for alignment (Same as Frequency/Spatial)
-            h_ref_int, w_ref_int = h_ref_norm, w_ref_norm
-            TARGET_MP = 12.5 * 1e6
-            if (h_ref_int * w_ref_int) > TARGET_MP:
-                scale_f = np.sqrt(TARGET_MP / (h_ref_int * w_ref_int))
-                work_h, work_w = int(h_ref_int * scale_f), int(w_ref_int * scale_f)
-            else:
-                work_h, work_w = h_ref_int, w_ref_int
-            work_h, work_w = (work_h // 2) * 2, (work_w // 2) * 2
-
-            common_call_args.update(
-                {
-                    "tile_size": smart_tile,
-                    "overlap": smart_overlap,
-                    "preferred_device": merging_kwargs.get("preferred_device", "gpu"),
-                    "work_res_h": work_h,
-                    "work_res_w": work_w,
-                    "enable_alignment": merging_kwargs.get("enable_alignment", True),
-                    "num_workers": current_num_workers,
-                    # Force ref_dtype for aligner
-                    "ref_dtype": dtype_ref,
-                }
+            results = self.smart_processor.process(
+                tile_size=(320, 320),
+                overlap=0.20,
+                num_workers=(
+                    num_workers
+                    if num_workers is not None
+                    else merging_kwargs.get("similarity_spatial_num_workers", 1)
+                ),
+                noise_alpha=merging_kwargs.get("similarity_smart_noise_alpha", 1.8),
+                **common_args,
             )
-            results = self._smart_merging(**common_call_args)
         else:
-            common_call_args.update(
-                {
-                    "tile_size": current_tile_size,
-                    "overlap": current_overlap,
-                    "motion_sensitivity": current_motion_sensitivity,
-                    "noise_offset_factor": current_noise_offset_factor,
-                    "num_workers": current_num_workers,
-                    "temporal_consistency": True,
-                    "save_temporal_std_path": save_temporal_std_path,
-                }
+            results = self.spatial_processor.process(
+                tile_size=(
+                    tile_size
+                    if tile_size is not None
+                    else merging_kwargs.get("tile_size")
+                ),
+                overlap=(
+                    overlap if overlap is not None else merging_kwargs.get("overlap")
+                ),
+                motion_sensitivity=(
+                    motion_sensitivity
+                    if motion_sensitivity is not None
+                    else merging_kwargs.get("motion_sensitivity")
+                ),
+                noise_offset_factor=(
+                    noise_offset_factor
+                    if noise_offset_factor is not None
+                    else merging_kwargs.get("noise_offset_factor")
+                ),
+                num_workers=(
+                    num_workers
+                    if num_workers is not None
+                    else merging_kwargs.get("similarity_spatial_num_workers", 1)
+                ),
+                **common_args,
             )
-            results = self._spatial_merging(**common_call_args)
-        if return_raw:
-            return results
 
-        # --- Jika tidak ada hasil karena stop_requested() ---
         if results is None:
-            out_shape_fb = (
+            out_shape = (
                 (h_ref, w_ref)
                 if channels_ref_orig == 1
                 else (h_ref, w_ref, channels_ref_orig)
             )
-            return np.zeros(out_shape_fb, dtype=dtype_ref), None, []
+            return np.zeros(out_shape, dtype=dtype_ref), None, []
 
-        # --- Unpack results aman ---
-        final_image_normalized = results[0]
-        final_weight_map = results[1]
-        processed_frames = results[2]
+        final_img_norm, final_weight, processed_frames = (
+            results[0],
+            results[1],
+            results[2],
+        )
 
-        # Safe access to individual_maps if it exists (length 4)
-        individual_maps = results[3] if len(results) > 3 else []
+        # Scaling back to original bit-depth
+        if processed_frames > 0 and final_img_norm is not None:
+            if return_raw:
+                return results
 
-        # --- Stop_requested setelah proses tapi sebelum semua frame selesai ---
-        if (
-            stop_requested
-            and stop_requested()
-            and (processed_frames is None or processed_frames < len(images))
-        ):
-            processed_frames = 0 if processed_frames is None else processed_frames
-            all_final_weight_maps_to_return = individual_maps
-            final_img_output = (
-                np.zeros((h_ref, w_ref, channels_ref_orig), dtype=dtype_ref)
-                if final_image_normalized is None
-                else final_image_normalized
-            )
-            return final_img_output, final_weight_map, all_final_weight_maps_to_return
-
-        # --- Finalisasi output ---
-        if (
-            processed_frames is not None
-            and processed_frames > 0
-            and final_image_normalized is not None
-        ):
-            all_final_weight_maps_to_return = individual_maps
-
-            # Simpan weight map jika diminta
-            if save_weight_map_path and final_weight_map is not None:
-                try:
-                    os.makedirs(os.path.dirname(save_weight_map_path), exist_ok=True)
-                    max_w = np.max(final_weight_map)
-                    norm_w_vis = (
-                        final_weight_map / max_w
-                        if max_w > 1e-6
-                        else np.zeros_like(final_weight_map)
-                    )
-                    w_map_vis = (np.clip(norm_w_vis, 0.0, 1.0) * 255).astype(np.uint8)
-                    cv2.imwrite(save_weight_map_path, w_map_vis)
-                except Exception:
-                    traceback.print_exc()
-
-            # Skala ke tipe asli
             scale_val = np.float32(np.iinfo(dtype_ref).max)
-            final_img_scaled = final_image_normalized * scale_val
+            final_img_scaled = final_img_norm * scale_val
             if channels_ref_orig == 1:
-                final_img_out_ch = np.mean(final_img_scaled, axis=2)
+                final_img_out = np.mean(final_img_scaled, axis=2)
             else:
-                final_img_out_ch = final_img_scaled
-            min_v, max_v = 0, np.iinfo(dtype_ref).max
-            final_img_output = np.clip(final_img_out_ch, min_v, max_v).astype(
-                dtype_ref, copy=False
-            )
+                final_img_out = final_img_scaled
 
-            return final_img_output, final_weight_map, all_final_weight_maps_to_return
+            final_img_output = np.clip(
+                final_img_out, 0, np.iinfo(dtype_ref).max
+            ).astype(dtype_ref)
+            return final_img_output, final_weight, processed_frames
 
-        else:
-            # Jika tidak ada frame diproses
-            out_shape_fb = (
-                (h_ref, w_ref)
-                if channels_ref_orig == 1
-                else (h_ref, w_ref, channels_ref_orig)
-            )
-
-            return np.zeros(out_shape_fb, dtype=dtype_ref), None, []
-
-
-def _setup_data_source_and_paths(db_path, single_process, batch_id, image_processor):
-    align_dir = os.path.join("database", "align")
-    image_paths = []
-    output_name_base = ""
-    hdf5_path = ""
-
-    if single_process:
-        hdf5_path = os.path.join(align_dir, "aligned_images.h5")
-        image_paths = get_all_image_paths_for_single_process(db_path)
-        ref_name = (
-            os.path.splitext(os.path.basename(image_paths[0]))[0]
-            if image_paths
-            else "single_process"
-        )
-        output_name_base = ref_name
-    else:
-        if batch_id is None:
-            pass
-        hdf5_path = os.path.join(align_dir, f"aligned_image_batch_{batch_id}.h5")
-        image_paths = image_processor.get_all_image_paths_for_batch_process(batch_id)
-        ref_name = (
-            os.path.splitext(os.path.basename(image_paths[0]))[0]
-            if image_paths
-            else f"batch_{batch_id}"
-        )
-        output_name_base = ref_name
-
-    data_source = hdf5_path if os.path.exists(hdf5_path) else image_paths
-
-    total_images = 0
-    if isinstance(data_source, str) and data_source.endswith(".h5"):
-        print(language_config.PROCESSING_IMAGE_FROM_HDF5.format(data_source))
-        try:
-            with h5py.File(data_source, "r") as f:
-                total_images = len(f.keys())
-        except Exception as e_h5:
-            raise IOError(f"Gagal membaca file HDF5: {e_h5}")
-    elif isinstance(data_source, list):
-        total_images = len(data_source)
-
-    return data_source, image_paths, output_name_base, total_images
-
-
-def _load_images_for_batch(
-    data_source,
-    batch_indices,
-    stop_requested=None,
-    linear_mode=True,
-    capture_ref_proxy=False,
-):
-    batch_start, batch_end = batch_indices
-    batch_images = []
-    ref_proxy = None
-
-    if isinstance(data_source, str) and data_source.endswith(".h5"):
-        with h5py.File(data_source, "r") as h5f:
-            keys = list(h5f.keys())[batch_start:batch_end]
-            batch_images = [
-                np.array(h5f[key])
-                for key in keys
-                if not (stop_requested and stop_requested())
-            ]
-    elif isinstance(data_source, list):
-        batch_paths = data_source[batch_start:batch_end]
-        # Pass linear_mode to loader
-        load_res = load_images_from_paths(
-            batch_paths,
-            stop_requested,
-            linear_mode=linear_mode,
-            capture_ref_proxy=capture_ref_proxy,
-        )
-
-        if capture_ref_proxy and isinstance(load_res, tuple):
-            batch_images, ref_proxy = load_res
-        else:
-            batch_images = load_res
-
-        if "resize_all_with_padding" in globals():
-            # Note: Resizing Linear Data requires care, but for now we assume same-size RAWs or handle it normally.
-            # Ideally resize happens on both Linear and Proxy identically.
-            resize_res = resize_all_with_padding(
-                batch_images,
-                method="preserve",
-                stop_requested=stop_requested,
-                force_even=True,
-            )
-            # Proxy should also be resized to match reference if resizing happened!
-            # But currently resize_all_with_padding assumes list of images.
-            # Ref Proxy is single image.
-            # If batch_images[0] was resized, ref_proxy MUST be resized too.
-            # But handling that logic inside resize_all_with_padding is cleanest?
-            # Or just ignore assuming all same size is safe for now?
-            # User uses RAWs, usually same resolution.
-            if resize_res and resize_res[0]:
-                batch_images = resize_res[0]
-
-    if capture_ref_proxy:
-        return batch_images, ref_proxy
-
-    return batch_images
+        return np.zeros((h_ref, w_ref, channels_ref_orig), dtype=dtype_ref), None, 0
 
 
 def main(
@@ -1057,387 +324,197 @@ def main(
     save_final_weight_map=False,
     progress_bar=None,
 ):
+    """Main execution block."""
     try:
         if update_progress:
             update_progress(0, language_config.RUN_IMAGE_PROCESS_STARTED)
 
-        # --- 1. KONFIGURASI SPESIFIK UNTUK PROSES SIMILARITY ---
         general_settings = load_similarity_config()
-        image_processor = SimilarityAlgorithm(db_path)
+        processor = SimilarityAlgorithm(db_path)
+        data_provider = processor.data_provider
 
-        (
-            spatial_tile_size_arg,
-            spatial_overlap_arg,
-            spatial_motion_sensitivity_arg,
-            spatial_noise_offset_factor_arg,
-        ) = (None, None, None, None)
-        extra_merging_params = {}
+        # Setup parameters
+        tile_val = general_settings.get("similarity_spatial_tile_size", 16)
+        extra_params = {
+            "tile_size": (tile_val, tile_val),
+            "overlap": general_settings.get("similarity_spatial_overlap_percent", 0.3),
+            "motion_sensitivity": general_settings.get(
+                "similarity_spatial_motion_sensitivity", 150.00
+            ),
+            "noise_offset_factor": general_settings.get(
+                "similarity_spatial_noise_mad_offset_factor", 1.0
+            ),
+            "similarity_spatial_num_workers": general_settings.get(
+                "similarity_spatial_num_workers", 1
+            ),
+            "similarity_smart_noise_alpha": general_settings.get(
+                "similarity_smart_noise_alpha", 1.8
+            ),
+            "enable_linear_mode": general_settings.get("enable_linear_mode", False),
+        }
 
-        # --- KONFIGURASI PARAMETER SPASIAL ---
-        tile_val_sp = general_settings.get("similarity_spatial_tile_size", 16)
-        spatial_tile_size_arg = (tile_val_sp, tile_val_sp)
-        spatial_overlap_arg = general_settings.get(
-            "similarity_spatial_overlap_percent", 0.3
-        )
-        spatial_motion_sensitivity_arg = general_settings.get(
-            "similarity_spatial_motion_sensitivity", 150.00
-        )
-        spatial_noise_offset_factor_arg = general_settings.get(
-            "similarity_spatial_noise_mad_offset_factor", 1.0
-        )
-        extra_merging_params["similarity_spatial_num_workers"] = general_settings.get(
-            "similarity_spatial_num_workers", 1
-        )  # Default -1 (Auto)
-        custom_lib_path = general_settings.get("similarity_lib_path")
-        if custom_lib_path:
-            extra_merging_params["lib_path"] = custom_lib_path
+        custom_lib = general_settings.get("similarity_lib_path")
+        if custom_lib:
+            extra_params["lib_path"] = custom_lib
 
-        extra_merging_params["weight_method"] = general_settings.get(
-            "spatial_weight_method", 0
-        )
-
-        # [USER REQUEST] Logic gate untuk Linear Mode dipindahkan ke sini
-        # Default ke True agar aktif, set ke False untuk mematikan feature ini
-        extra_merging_params["enable_linear_mode"] = general_settings.get(
-            "enable_linear_mode", False
-        )
-
-        # --- 2. SETUP SUMBER DATA & PATH ---
+        # Setup data
         data_source, image_paths, output_name_base, total_images = (
-            _setup_data_source_and_paths(
-                db_path, single_process, batch_id, image_processor
-            )
+            data_provider.setup_data_source_and_paths(single_process, batch_id)
         )
-
         if not total_images:
             if update_progress:
                 update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
             return
 
-        metadata_output_path = os.path.join("database", "align", "metadata.json")
-        try:
-            extract_all_metadata(image_paths, metadata_file=metadata_output_path)
-        except Exception as e:
-            pass
-
-        output_folder_stack = "database/stack"
-        os.makedirs(output_folder_stack, exist_ok=True)
-        output_name_base_safe = (
+        # Output paths
+        output_folder = "database/stack"
+        os.makedirs(output_folder, exist_ok=True)
+        safe_name = (
             "".join(
                 c for c in output_name_base if c.isalnum() or c in ("_", "-")
             ).rstrip()
-            or "stack_result"
+            or "stack"
         )
-        output_path = os.path.join(
-            output_folder_stack,
-            f"{output_name_base_safe}_similarity.tif",
-        )
-        weight_map_output_path = os.path.join(
-            output_folder_stack,
-            f"{output_name_base_safe}_similarity_weight_map.png",
-        )
-        print(language_config.OUTPUT_IMAGE_TO_BE_SAVED.format(output_path))
-        if save_final_weight_map:
-            print(language_config.OUTPUT_SAVE_WEIGHT_MAP.format(weight_map_output_path))
+        output_path = os.path.join(output_folder, f"{safe_name}_similarity.tif")
 
-        # --- 4. PERENCANAAN BATCH (UMUM) ---
-        # Gunakan max_batch_size=8 untuk menjaga RAM tetap aman
-        batch_plan = setup_balanced_batching(
-            total_images, language_config, max_batch_size=8
-        )
-        if not batch_plan:
-            if update_progress:
-                update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
-            return
-        total_batches = len(batch_plan)
-
-        # --- DEFINISI FORMAT YANG DIDUKUNG ---
-        SUPPORTED_FORMATS = {
-            "jpg": [".jpg", ".jpeg", ".jiff", ".jli"],
-            "tiff": [".tif", ".tiff"],
-            "png": [".png"],
-            "raw": [
+        # Linear mode detection
+        is_linear_mode = False
+        if extra_params["enable_linear_mode"] and image_paths:
+            _, ext = os.path.splitext(image_paths[0])
+            if ext.lower() in [
                 ".dng",
                 ".cr2",
                 ".cr3",
                 ".nef",
-                ".nrw",
                 ".arw",
-                ".srf",
-                ".sr2",
-                ".orf",
-                ".rw2",
-                ".pef",
-                ".raf",
-                ".erf",
-                ".mrw",
-                ".kdc",
-                ".3fr",
-                ".fff",
-                ".rwl",
-                ".srw",
-                ".x3f",
-                ".mef",
-                ".iiq",
-            ],
-        }
-
-        # --- DETEKSI MODE LINEAR ---
-        # Cek apakah input adalah DNG/RAW untuk mengaktifkan Linear Mode
-        is_linear_mode = False
-        enable_linear_mode = extra_merging_params.get("enable_linear_mode", True)
-
-        if (
-            enable_linear_mode
-            and isinstance(image_paths, list)
-            and len(image_paths) > 0
-        ):
-            _, ext = os.path.splitext(image_paths[0])
-            if ext.lower() in SUPPORTED_FORMATS["raw"]:
+            ]:  # Simplified raw check
                 is_linear_mode = True
-                print(
-                    " [Linear Mode] RAW Input detected. Activating Linear DNG Pipeline."
-                )
 
-        # Muat gambar referensi (Frame #1) dengan Dual Conversion jika Linear Mode
-        ref_proxy_gt = None
-        if is_linear_mode:
-            # Dual return: (list_of_images, gt_proxy)
-            reference_image_list_res = _load_images_for_batch(
-                data_source,
-                (0, 1),
-                stop_requested,
-                linear_mode=is_linear_mode,
-                capture_ref_proxy=True,
-            )
-            if isinstance(reference_image_list_res, tuple):
-                reference_image_list, ref_proxy_gt = reference_image_list_res
-            else:
-                reference_image_list = reference_image_list_res
+        # Load reference
+        ref_res = data_provider.load_images_for_batch(
+            data_source,
+            (0, 1),
+            stop_requested,
+            linear_mode=is_linear_mode,
+            capture_ref_proxy=is_linear_mode,
+        )
+        if is_linear_mode and isinstance(ref_res, tuple):
+            reference_image, ref_proxy_gt = ref_res
+        elif isinstance(ref_res, list) and len(ref_res) > 0:
+            reference_image = ref_res[0]
+            ref_proxy_gt = None
         else:
-            reference_image_list = _load_images_for_batch(
-                data_source, (0, 1), stop_requested, linear_mode=is_linear_mode
-            )
+            reference_image = None
+            ref_proxy_gt = None
 
-        if reference_image_list and len(reference_image_list) > 0:
-            reference_image = reference_image_list[0]
-            ref_dtype = reference_image.dtype
-            if is_linear_mode and reference_image.dtype != np.uint16:
-                print(
-                    " [Warning] Linear mode active but reference image is not uint16!"
-                )
-        else:
-            if update_progress:
-                update_progress(0, language_config.FIRST_IMAGE_CANNOT_BE_OBTAINED)
-            return
-
-        # [AUTO-SCALE] Smart Scale Fitting dari GT Proxy
-        global_proxy_scale = 1.0
-        if is_linear_mode and reference_image is not None:
+        # Auto-scale for Linear Mode
+        proxy_scale = 1.0
+        if (
+            is_linear_mode
+            and reference_image is not None
+            and hasattr(reference_image, "dtype")
+        ):
             if ref_proxy_gt is not None:
-                global_proxy_scale = calculate_scale_from_gt_proxy(
-                    reference_image, ref_proxy_gt, ref_dtype
-                )
-                print(
-                    f" [Linear Mode] Fitted Proxy Scale from GT: {global_proxy_scale:.3f}"
+                proxy_scale = calculate_scale_from_gt_proxy(
+                    reference_image, ref_proxy_gt, reference_image.dtype
                 )
             else:
-                # Fallback ke Auto-Scale sederhana jika GT gagal
-                ref_float_temp = normalize_image(reference_image, ref_dtype)
-                global_proxy_scale = calculate_auto_scale(
-                    ref_float_temp, target_mean=0.25
-                )
-                del ref_float_temp
-                print(
-                    f" [Linear Mode] Auto-calculated Proxy Scale (Fallback): {global_proxy_scale:.3f}"
+                proxy_scale = calculate_auto_scale(
+                    normalize_image(reference_image, reference_image.dtype),
+                    target_mean=0.25,
                 )
 
-        # --- 5. PROSES INTI PER BATCH & AKUMULASI STREAMING ---
-        global_sum_img = None
-        global_sum_weight = None
-        global_total_frames = 0
-        images_processed_count = 0
-        print(f"[RAM] Before Batch Loop: {get_ram_usage():.2f} MB")
+        # Batch Processing Loop
+        batch_plan = setup_balanced_batching(
+            total_images, language_config, max_batch_size=8
+        )
+        global_sum_img, global_sum_weight, global_total_frames = None, None, 0
 
-        for batch_num, (batch_start, batch_end) in enumerate(batch_plan, 1):
+        for batch_num, (b_start, b_end) in enumerate(batch_plan, 1):
             if stop_requested and stop_requested():
-                print(language_config.PROCESS_TERMINATED_BY_USER)
                 break
 
-            print(
-                f"\n--- Processing batch {batch_num}/{total_batches} (Completed: {images_processed_count}) ---"
-            )
-
-            # Muat batch gambar
-            current_batch_images = _load_images_for_batch(
+            current_batch_images = data_provider.load_images_for_batch(
                 data_source,
-                (batch_start, batch_end),
+                (b_start, b_end),
                 stop_requested,
                 linear_mode=is_linear_mode,
             )
-
             if not current_batch_images:
                 continue
 
-            # Jalankan Algoritma Similarity
-            batch_raw_res = image_processor.similarity_mnfr(
+            # RUN ALGORITHM
+            batch_res = processor.similarity_mnfr(
                 current_batch_images,
-                # reference_image_float=None,  <-- REMOVED: Preventing overwrite of internal calculation
                 ref_image_override=reference_image,
                 total_overall_images=total_images,
-                images_processed_so_far=images_processed_count,
-                # Parameter Algoritma
-                tile_size=spatial_tile_size_arg,
-                is_linear_mode=is_linear_mode,  # Pass flag for proxy generation
-                overlap=spatial_overlap_arg if spatial_overlap_arg else 0.3,
-                motion_sensitivity=(
-                    spatial_motion_sensitivity_arg
-                    if spatial_motion_sensitivity_arg
-                    else 1.0
-                ),
-                noise_offset_factor=(
-                    spatial_noise_offset_factor_arg
-                    if spatial_noise_offset_factor_arg
-                    else 1.0
-                ),
-                stop_requested=stop_requested,
+                images_processed_so_far=b_start,
+                is_linear_mode=is_linear_mode,
+                proxy_scale=proxy_scale,
                 update_progress=update_progress,
-                return_raw=True,  # Penting: Kita butuh data mentah (float/16bit) dari batch ini untuk akumulasi
-                save_temporal_std_path=None,  # Tidak perlu simpan intermediate std map
-                **extra_merging_params,
+                stop_requested=stop_requested,
+                return_raw=True,
+                **extra_params,
             )
-            if stop_requested and stop_requested():
-                break
 
-            if batch_raw_res is not None and len(batch_raw_res) == 3:
-                batch_sum_img, batch_sum_weight, batch_processed_frames = batch_raw_res
-
+            if batch_res is not None and len(batch_res) >= 3:
+                b_img, b_weight, b_frames = batch_res[0], batch_res[1], batch_res[2]
                 if global_sum_img is None:
-                    global_sum_img = batch_sum_img.copy()
-                    global_sum_weight = batch_sum_weight.copy()
+                    global_sum_img = b_img.copy() if b_img is not None else None
+                    global_sum_weight = (
+                        b_weight.copy() if b_weight is not None else None
+                    )
                 else:
-                    global_sum_img += batch_sum_img
-                    global_sum_weight += batch_sum_weight
+                    if b_img is not None:
+                        global_sum_img += b_img
+                    if b_weight is not None:
+                        global_sum_weight += b_weight
+                global_total_frames += b_frames
 
-                global_total_frames += batch_processed_frames
-                print(
-                    f"[DEBUG] Accumulated frames: {global_total_frames} (Batch added: {batch_processed_frames})"
-                )
-                # Update progress based on actual images processed in source data
-                images_processed_count += batch_end - batch_start
-
-            # Paksa cleanup memori setiap akhir batch
             del current_batch_images
             gc.collect()
-            print(f"[RAM] After Batch {batch_num} Cleanup: {get_ram_usage():.2f} MB")
 
-        if stop_requested and stop_requested():
-            if update_progress and progress_bar:
-                update_progress(progress_bar.value(), "Proses Dibatalkan.")
-            return
-
-        # --- 6. PENGGABUNGAN AKHIR (PRECISION STRUCTURE FUSION) ---
-        final_result_img = None
+        # FINAL FUSION
         if global_sum_img is not None and global_total_frames > 0:
             if update_progress:
-                update_progress(95, "Finalizing with Parallel Precision Fusion...")
+                update_progress(95, "Finalizing fusion...")
 
-            # Hitung estimasi noise dari referensi sebelum fusi akhir
-            # Jika Linear Mode, reference_image adalah Linear. Kita butuh Proxy untuk estimasi noise structure?
-            # Sebenarnya estimate_noise_in_python bekerja pada grayscale, jadi aman di-normalize.
-            # [MODIFIED] Menggunakan preprocess_in_python (CPU)
-            ref_gray_preproc, ref_noise_sigma = preprocess_in_python(
-                normalize_image(reference_image, ref_dtype)
+            valid_mask = global_sum_weight > 1e-6
+            final_normalized = np.zeros_like(global_sum_img)
+            np.divide(
+                global_sum_img,
+                global_sum_weight[:, :, np.newaxis],
+                out=final_normalized,
+                where=valid_mask[:, :, np.newaxis],
             )
 
-            # --- 7. PENYIMPANAN HASIL AKHIR & PEMBERSIHAN ---
-            # Apply simple mean calculation (Normalization)
-            if global_sum_weight is not None and global_sum_img is not None:
-                valid_mask = global_sum_weight > 1e-6
-                final_result_normalized = np.zeros_like(global_sum_img)
-                np.divide(
-                    global_sum_img,
-                    global_sum_weight[:, :, np.newaxis],
-                    out=final_result_normalized,
-                    where=valid_mask[:, :, np.newaxis],
-                )
-            else:
-                # Fallback if no data was accumulated
-                final_result_normalized = normalize_image(
-                    reference_image, reference_image.dtype
-                )
-                valid_mask = np.zeros(final_result_normalized.shape[:2], dtype=bool)
-
-            # Fill areas without data from reference image
             ref_float = normalize_image(reference_image, reference_image.dtype)
-            final_result_normalized[~valid_mask] = ref_float[~valid_mask]
-            del ref_float
+            final_normalized[~valid_mask] = ref_float[~valid_mask]
 
-            # Kawal konversi bit-depth agar konsisten
-            dtype_ref = reference_image.dtype
-            # Jika is_linear_mode (Reference 16-bit), pastikan output 16-bit
-            # Jika is_linear_mode=False, tetap ikuti reference (uint8 atau uint16)
-            max_val = np.iinfo(dtype_ref).max
-            final_result_img = np.clip(
-                final_result_normalized * max_val, 0, max_val
-            ).astype(dtype_ref)
-
-            # Bebaskan memori
-            del global_sum_img, global_sum_weight, final_result_normalized
-            gc.collect()
-        else:
-            if update_progress and not (stop_requested and stop_requested()):
-                update_progress(100, language_config.DATA_FAILED_COMPLETION_CREATED)
-
-        if final_result_img is not None:
-            ref_path_for_save = image_paths[0] if image_paths else None
-
-            # [LINEAR DNG LOGIC] (Reverted)
-            if is_linear_mode:
-                # Ganti ekstensi output ke .dng
-                dng_output_path = os.path.splitext(output_path)[0] + ".dng"
-
-                save_success = save_linear_dng(
-                    final_result_img,
-                    dng_output_path,
-                    reference_image_path=ref_path_for_save,
-                )
-                # Update output_path agar pesan sukses mengarah ke file yang benar
-                if save_success:
-                    output_path = save_success
-            else:
-                # Normal TIFF/JPG Save
-                save_success = save_image(
-                    final_result_img,
-                    output_path,
-                    reference_image_path=ref_path_for_save,
-                )
-
-            final_message = (
-                f"{language_config.IMAGE_PROCESS_FINISHED}: {os.path.basename(output_path)}"
-                if save_success
-                else f"{language_config.FAILED_TO_SAVE_IMAGE}: {os.path.basename(output_path)}"
+            max_v = np.iinfo(reference_image.dtype).max
+            final_img = np.clip(final_normalized * max_v, 0, max_v).astype(
+                reference_image.dtype
             )
-            if update_progress:
-                update_progress(100, final_message)
 
-            if not single_process and batch_id is not None:
-                # Cleanup temp files
-                hdf5_path = os.path.join(
-                    "database", "align", f"aligned_image_batch_{batch_id}.h5"
+            # SAVE
+            if is_linear_mode:
+                output_path = save_linear_dng(
+                    final_img,
+                    os.path.splitext(output_path)[0] + ".dng",
+                    reference_image_path=image_paths[0],
                 )
-                if os.path.exists(hdf5_path):
-                    try:
-                        os.remove(hdf5_path)
-                    except OSError:
-                        pass
+            else:
+                save_image(final_img, output_path, reference_image_path=image_paths[0])
 
-    # --- 8. PENANGANAN ERROR (UMUM) ---
+            if update_progress:
+                update_progress(
+                    100, f"Process Finished: {os.path.basename(output_path)}"
+                )
+
     except Exception as e:
-        error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(e))
         traceback.print_exc()
-        if update_progress and not (stop_requested and stop_requested()):
-            update_progress(0, error_message)
+        if update_progress:
+            update_progress(0, f"Error: {str(e)}")
 
 
 def running_similarity(
@@ -1447,6 +524,7 @@ def running_similarity(
     progress_callback=None,
     stop_callback=None,
 ):
+    """UI Entry point."""
 
     # ==========================================================
     # KONDISI 1: MODE BATCH (TANPA GUI)
@@ -1479,7 +557,6 @@ def running_similarity(
         | Qt.WindowType.WindowCloseButtonHint
     )
 
-    # Layout untuk progress bar dan label
     layout = QVBoxLayout(dialog)
     label = QLabel(language_config.WINDOW_START_PROCESSING)
     layout.addWidget(label)
@@ -1490,15 +567,13 @@ def running_similarity(
     progress_bar.setStyleSheet(PROGRESS_BAR)
     layout.addWidget(progress_bar)
 
-    # Inisialisasi thread worker
     worker = BaseAlgorithmWorker(
         main,
         "pixel_refine_database.db",
         single_process=single_process,
         batch_id=batch_id,
     )
-    progress_bar_instance = progress_bar  # Pass progress_bar to main
-    # Menghubungkan signal worker ke fungsi pembaruan UI
+
     worker.progress_updated.connect(
         lambda progress, message: (
             progress_bar.setValue(progress),
@@ -1526,7 +601,6 @@ def running_similarity(
     worker.error_occurred.connect(error_handler)
 
     def on_dialog_close(event):
-        # Jika proses telah selesai, lewati konfirmasi
         if process_finished:
             event.accept()
         elif worker.isRunning():
@@ -1553,5 +627,4 @@ def running_similarity(
 
 
 if __name__ == "__main__":
-    db_path = "pixel_refine_database.db"
-    main(db_path)
+    main("pixel_refine_database.db")

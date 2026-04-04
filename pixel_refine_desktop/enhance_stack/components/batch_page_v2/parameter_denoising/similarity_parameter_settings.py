@@ -41,7 +41,8 @@ def load_similarity_config():
             "similarity_spatial_motion_sensitivity": 100.0,
             "similarity_spatial_noise_mad_offset_factor": 0.12,
             "similarity_spatial_overlap_percent": 0.30,
-            "similarity_spatial_num_workers": 1,  # [PENAMBAHAN] Default ke 'Auto' (-1)
+            "similarity_spatial_num_workers": 1, 
+            "similarity_smart_noise_alpha": 1.8, # [PENAMBAHAN] Default Smart Alpha
         },
     }
     final_config = {
@@ -101,6 +102,7 @@ def save_similarity_v1_config(config_to_save):
         "similarity_spatial_noise_mad_offset_factor",
         "similarity_spatial_overlap_percent",
         "similarity_spatial_num_workers",
+        "similarity_smart_noise_alpha",
     ]  # [PENAMBAHAN]
 
     for key in spatial_keys:
@@ -169,7 +171,8 @@ def get_similarity_settings_page():
         "similarity_spatial_motion_sensitivity": 120.5,
         "similarity_spatial_noise_mad_offset_factor": 0.25,
         "similarity_spatial_overlap_percent": 0.38,
-        "similarity_spatial_num_workers": 2,  # [PENAMBAHAN] Default UI
+        "similarity_spatial_num_workers": 2,
+        "similarity_smart_noise_alpha": 1.8,
     }
 
     page_widget = QWidget()
@@ -352,7 +355,39 @@ def get_similarity_settings_page():
 
     spatial_container_main_layout.addWidget(
         noise_offset_group_widget
-    )  # Asumsi ini grup parameter terakhir
+    )
+
+    # --- [PENAMBAHAN] Grup 5: Smart Noise Alpha ---
+    smart_alpha_group_widget = QWidget()
+    smart_alpha_layout = QVBoxLayout(smart_alpha_group_widget)
+    smart_alpha_layout.setContentsMargins(0, 0, 0, 0)
+    smart_alpha_layout.setSpacing(5)
+
+    smart_alpha_label_obj = QLabel("Smart Noise Alpha (AI):")
+    smart_alpha_label_obj.setFont(get_default_font(10, QFont.Weight.Bold))
+    smart_alpha_label_obj.setToolTip("Mengatur seberapa toleran model AI terhadap noise.\nNilai rendah (misal 1.5) = Lebih sensitif gerak (kurangi ghosting).\nNilai tinggi (misal 2.5) = Lebih bersih noise (risiko ghosting).")
+    smart_alpha_layout.addWidget(smart_alpha_label_obj)
+
+    initial_smart_alpha = sim_v1_config.get("similarity_smart_noise_alpha", 1.8)
+    smart_alpha_multiplier = 10.0
+    smart_alpha_slider_min, smart_alpha_slider_max = 5, 50 # 0.5 ke 5.0
+    smart_alpha_validator = QDoubleValidator(0.5, 5.0, 1)
+    smart_alpha_validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+    smart_alpha_field_layout, slider_sa, input_sa = create_slider_input_field_layout(
+        0, 0,
+        int(round(initial_smart_alpha * smart_alpha_multiplier)),
+        c_locale.toString(initial_smart_alpha, "f", 1),
+        smart_alpha_multiplier,
+        lambda v, m=smart_alpha_multiplier, loc=c_locale: loc.toString(v / m, "f", 1),
+        smart_alpha_validator,
+        c_locale,
+        slider_min_val=smart_alpha_slider_min,
+        slider_max_val=smart_alpha_slider_max
+    )
+    smart_alpha_layout.addLayout(smart_alpha_field_layout)
+    widgets["smart_noise_alpha_slider"] = slider_sa
+    widgets["smart_noise_alpha_input"] = input_sa
+    spatial_container_main_layout.addWidget(smart_alpha_group_widget)
 
     reset_spatial_button = QPushButton(
         getattr(language_config, "RESET_SPATIAL_DEFAULTS_BUTTON", "Reset Defaults")
@@ -398,6 +433,8 @@ def get_similarity_settings_page():
             settings_to_save_flat["similarity_spatial_overlap_percent"] = (
                 ov_sp_percent / 100.0
             )
+            sa_val, _ = c_locale.toDouble(widgets["smart_noise_alpha_input"].text())
+            settings_to_save_flat["similarity_smart_noise_alpha"] = sa_val
         except ValueError as e:
             print(f"Error parsing settings: {e}")
             return
@@ -507,6 +544,10 @@ def get_similarity_settings_page():
     setup_slider_input_connections(
         slider_ov_sp, input_ov_sp, 1.0, 0, 90, c_locale, 0, False
     )
+    setup_slider_input_connections(
+        slider_sa, input_sa, smart_alpha_multiplier, 0.5, 5.0, c_locale, 1, True,
+        smart_alpha_slider_min, smart_alpha_slider_max
+    )
 
     def reset_spatial_defaults():
         defaults = original_v1_ui_defaults
@@ -538,6 +579,9 @@ def get_similarity_settings_page():
         widgets["overlap_slider_spatial"].setValue(
             int(round(defaults.get("similarity_spatial_overlap_percent", 0.35) * 100))
         )
+        widgets["smart_noise_alpha_slider"].setValue(
+            int(round(defaults.get("similarity_smart_noise_alpha", 1.8) * smart_alpha_multiplier))
+        )
         save_current_settings_v1()
 
     widgets["reset_spatial_button"].clicked.connect(reset_spatial_defaults)
@@ -555,6 +599,8 @@ def get_similarity_settings_page():
     widgets["noise_mad_offset_input"].editingFinished.connect(save_current_settings_v1)
     widgets["overlap_slider_spatial"].sliderReleased.connect(save_current_settings_v1)
     widgets["overlap_input_spatial"].editingFinished.connect(save_current_settings_v1)
+    widgets["smart_noise_alpha_slider"].sliderReleased.connect(save_current_settings_v1)
+    widgets["smart_noise_alpha_input"].editingFinished.connect(save_current_settings_v1)
 
     main_page_layout.addStretch(1)
     scroll = QScrollArea()

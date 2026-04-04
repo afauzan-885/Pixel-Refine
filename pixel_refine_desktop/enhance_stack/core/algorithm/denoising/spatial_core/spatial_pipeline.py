@@ -110,7 +110,7 @@ def process_in_cpu(
     weight_map_sum_full_res = np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
 
     try:
-        from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.alignment_core import (
+        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.spatial_similarity import (
             SimilaritySpatialInterface,
         )
 
@@ -405,7 +405,7 @@ def process_in_gpu(
         weight_map_sum_full_res = np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
 
         try:
-            from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.alignment_core import (
+            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.spatial_similarity import (
                 SimilaritySpatialInterface,
             )
             c_interface = SimilaritySpatialInterface(lib_path)
@@ -534,7 +534,7 @@ def process_in_gpu(
             download_taichi_ndarray,
             clear_vram,
         )
-        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.compute_spatial import (
+        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.similarity_taichi.compute_spatial import (
             generate_spatial_weights_taichi,
             accumulate_spatial_merging_taichi,
         )

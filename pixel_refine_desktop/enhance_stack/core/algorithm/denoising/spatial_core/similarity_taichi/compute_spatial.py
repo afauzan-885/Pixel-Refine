@@ -8,20 +8,20 @@ Handles brightness equalization, hierarchical motion analysis, and spatial weigh
 import numpy as np
 from typing import Any
 
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.extra_code.Compiler.similarity_metrics import (
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.similarity_taichi.similarity_metrics import (
     calculate_hybrid_gradient_mad,
 )
 
 try:
     import taichi as ti
     import taichi.math as tm
-    from ...taichi_algorithm import (
+    from ....taichi_algorithm import (
         common,
         pyramid,
         bilinear_resize,
         bicubic_resize,
     )
-    from ...taichi_algorithm.taichi_worker import (
+    from ....taichi_algorithm.taichi_worker import (
         ti_thread,
         TAICHI_AVAILABLE,
         release_taichi_ndarray,
