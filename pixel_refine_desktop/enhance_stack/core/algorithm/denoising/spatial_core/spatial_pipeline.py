@@ -290,6 +290,13 @@ def process_in_cpu(
     finally:
         for t in threads:
             t.join(timeout=1.0)
+        
+        # Eager cleanup of shared buffers
+        if 'ref_work_res_pass2' in locals(): del ref_work_res_pass2
+        if 'ref_gray_preprocessed' in locals(): del ref_gray_preprocessed
+        if 'consumer_weight_full_buf' in locals(): del consumer_weight_full_buf
+        if 'norm_img_buf' in locals(): del norm_img_buf
+        
         gc.collect()
 
     return (
@@ -515,6 +522,13 @@ def process_in_gpu(
                     if not any(t.is_alive() for t in threads): break
         finally:
             for t in threads: t.join(timeout=1.0)
+            
+            # Eager cleanup of shared buffers
+            if 'ref_work_res_pass2' in locals(): del ref_work_res_pass2
+            if 'ref_gray_preprocessed' in locals(): del ref_gray_preprocessed
+            if 'consumer_weight_full_buf' in locals(): del consumer_weight_full_buf
+            if 'norm_img_buf' in locals(): del norm_img_buf
+            
             gc.collect()
 
         return (processed_frames, final_image_sum_full_res, weight_map_sum_full_res, ref_noise_sigma)

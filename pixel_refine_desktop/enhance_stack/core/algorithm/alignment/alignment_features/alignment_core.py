@@ -397,14 +397,22 @@ def scale_flow(flow, work_h, work_w, full_h, full_w, ksize=5):
 
 
 def warp_image_opencv(
-    image, flow, interpolation=cv2.INTER_CUBIC, border_mode=cv2.BORDER_REFLECT_101
+    image, flow, interpolation=cv2.INTER_CUBIC, border_mode=cv2.BORDER_REFLECT_101,
+    x_coords=None, y_coords=None
 ):
     """Warp gambar menggunakan optical flow."""
     h, w = image.shape[:2]
-    y_coords, x_coords = np.mgrid[0:h, 0:w].astype(np.float32)
+    
+    if x_coords is None or y_coords is None:
+        y_coords, x_coords = np.mgrid[0:h, 0:w].astype(np.float32)
+    
     new_x = x_coords + flow[:, :, 0]
     new_y = y_coords + flow[:, :, 1]
     warped = cv2.remap(image, new_x, new_y, interpolation, borderMode=border_mode)
+    
+    # Eager cleanup of temporary mapping arrays
+    del new_x, new_y
+    
     return warped
 
 
@@ -681,7 +689,7 @@ def perform_image_alignment(
     stop_requested=None,
     optical_flow_type="alignment_tile",
     num_alignment_workers=1,
-    visualization=True,
+    visualization=False,
     save_align_image=True,
     progress_start=30,
     progress_end=40,
@@ -1012,7 +1020,7 @@ def perform_image_alignment(
             # --- Fungsi untuk 1 tugas alignment C++ (dijalankan di worker) ---
             def process_single_alignment_cpp(
                 i,
-                ref_work_ptr,
+                ref_work_gray_cpp,
                 work_res_h,
                 work_res_w,
                 tile_h,
@@ -1023,15 +1031,12 @@ def perform_image_alignment(
                 ALIGN_LIB,
                 stop_requested,
                 full_res_reference_image,
+                x_coords_full=None,
+                y_coords_full=None,
             ):
 
                 if stop_requested and stop_requested():
                     return (i, None)
-
-                flow_ptr = None
-                current_preprocessed_cpp = None
-                current_img_float = None
-                current_work_gray_cpp = None
 
                 try:
                     # --- C++ DLL PATH ---
@@ -1061,6 +1066,10 @@ def perform_image_alignment(
                         ctypes.POINTER(ctypes.c_float)
                     )
 
+                    # Pastikan struktur referensi disiapkan untuk pointer
+                    ref_work_gray_cpp = np.ascontiguousarray(ref_work_gray_cpp)
+                    ref_work_ptr = ref_work_gray_cpp.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
                     flow_ptr = ALIGN_LIB.compute_alignment_flow(
                         ref_work_ptr,
                         current_work_ptr,
@@ -1072,6 +1081,53 @@ def perform_image_alignment(
                         2.0,
                     )
 
+                    aligned_img = None
+                    if flow_ptr:
+                        try:
+                            # 3. Baca Flow dan Rescale
+                            flow_buf_cpp = np.empty(
+                                (work_res_h, work_res_w, 2), dtype=np.float32
+                            )
+                            ctypes.memmove(
+                                flow_buf_cpp.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                                flow_ptr,
+                                flow_buf_cpp.nbytes,
+                            )
+
+                            full_h, full_w = original_image.shape[:2]
+
+                            # Skala flow untuk mapping kembali
+                            flow_full_res = scale_flow(
+                                flow_buf_cpp,
+                                work_res_h,
+                                work_res_w,
+                                full_h,
+                                full_w,
+                                ksize=5,
+                            )
+
+                            if visualization:
+                                flow_vis = visualize_flow(flow_full_res)
+                                cv2.imwrite(f"flow_cpp_{i+1:02d}.jpg", flow_vis)
+                                del flow_vis
+
+                            # 4. Warp Gambar menggunakan koordinat pre-calculated (OPTIMASI MEMORI 1)
+                            aligned_img = warp_image_opencv(
+                                original_image, flow_full_res, 
+                                x_coords=x_coords_full, y_coords=y_coords_full
+                            )
+
+                        except Exception as e:
+                            print(f"Error processing flow result for image {i+1}: {e}")
+                        finally:
+                            # [CRITICAL] Free C++ heap memory (OPTIMASI MEMORI 2)
+                            if ALIGN_LIB and flow_ptr:
+                                ALIGN_LIB.free_flow_memory(flow_ptr)
+                            
+                            # Cleanup temporaries
+                            if 'flow_buf_cpp' in locals(): del flow_buf_cpp
+                            if 'flow_full_res' in locals(): del flow_full_res
+                            
                 except Exception as e:
                     print(f"Error C++ setup/call for image {i+1}: {e}")
                     traceback.print_exc()
@@ -1079,52 +1135,16 @@ def perform_image_alignment(
 
                 finally:
                     # Pastikan referensi Python lokal dibersihkan
-                    del (
-                        current_work_gray_cpp,
-                        current_preprocessed_cpp,
-                        current_img_float,
-                    )
+                    if 'current_work_gray_cpp' in locals(): del current_work_gray_cpp
+                    if 'current_preprocessed_cpp' in locals(): del current_preprocessed_cpp
+                    if 'current_img_float' in locals(): del current_img_float
+                    if 'flow_ptr' in locals(): del flow_ptr
 
-                aligned_img = None
-
-                if flow_ptr:
-                    try:
-                        # 3. Baca Flow dan Rescale
-                        flow_buf_cpp = np.empty(
-                            (work_res_h, work_res_w, 2), dtype=np.float32
-                        )
-                        ctypes.memmove(
-                            flow_buf_cpp.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-                            flow_ptr,
-                            flow_buf_cpp.nbytes,
-                        )
-
-                        full_h, full_w = original_image.shape[:2]
-
-                        # Skala flow untuk mapping kembali
-                        flow_full_res = scale_flow(
-                            flow_buf_cpp,
-                            work_res_h,
-                            work_res_w,
-                            full_h,
-                            full_w,
-                            ksize=5,
-                        )
-
-                        if visualization:
-                            flow_vis = visualize_flow(flow_full_res)
-                            cv2.imwrite(f"flow_cpp_{i+1:02d}.jpg", flow_vis)
-                            del flow_vis
-
-                        # 4. Warp Gambar
-                        aligned_img = warp_image_opencv(original_image, flow_full_res)
-
-                        # [OPTIMIZATION]
-                        del flow_buf_cpp, flow_full_res, flow_ptr
-
-                    except Exception as e:
-                        print(f"Error processing flow result for image {i+1}: {e}")
                 return (i, aligned_img)
+
+            # [OPTIMIZATION] Pre-calculate coordinate maps once to save GBs of RAM
+            full_h, full_w = images[0].shape[:2]
+            y_coords_full, x_coords_full = np.mgrid[0:full_h, 0:full_w].astype(np.float32)
 
             # --- Parallel execution with ThreadPoolExecutor ---
             with ThreadPoolExecutor(max_workers=num_alignment_workers) as executor:
@@ -1143,7 +1163,7 @@ def perform_image_alignment(
                     future = executor.submit(
                         process_single_alignment_cpp,
                         i,
-                        ref_work_ptr,
+                        ref_work_gray_cpp,
                         work_res_h,
                         work_res_w,
                         tile_h,
@@ -1154,6 +1174,8 @@ def perform_image_alignment(
                         ALIGN_LIB,
                         stop_requested,
                         reference_image_float,
+                        x_coords_full,
+                        y_coords_full,
                     )
                     futures[future] = i
 
@@ -1194,6 +1216,11 @@ def perform_image_alignment(
                         )
 
             print("✅ Alignment C++ selesai.")
+            
+            # Explicitly cleanup shared maps
+            del x_coords_full, y_coords_full, reference_image_float
+            gc.collect()
+
             return True
 
         except Exception as e:

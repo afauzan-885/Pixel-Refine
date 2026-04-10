@@ -174,6 +174,13 @@ class SimilarityAlgorithm:
         self.smart_processor = SmartFusionProcessor()
         self.spatial_processor = SpatialFusionProcessor()
 
+    def close(self):
+        """Cleanup resources and close AI sessions."""
+        if self.smart_processor:
+            self.smart_processor.release_sessions()
+        self.smart_processor = None
+        gc.collect()
+
     def get_all_image_paths_for_batch_process(self, batch_id):
         """Legacy wrapper for DataProvider."""
         return self.data_provider.get_all_image_paths_for_batch_process(batch_id)
@@ -239,6 +246,7 @@ class SimilarityAlgorithm:
             return np.zeros(out_shape, dtype=dtype_ref), None, []
 
         merging_mode = merging_kwargs.get("merging_mode", "smart")
+        # merging_mode = merging_kwargs.get("merging_mode", "spatial")
 
         # Determine Backend
         if merging_mode == "smart":
@@ -250,7 +258,7 @@ class SimilarityAlgorithm:
                     if num_workers is not None
                     else merging_kwargs.get("similarity_spatial_num_workers", 1)
                 ),
-                noise_alpha=merging_kwargs.get("similarity_smart_noise_alpha", 1.8),
+                noise_alpha=merging_kwargs.get("similarity_smart_noise_alpha", 1.0),
                 **common_args,
             )
         else:
@@ -348,10 +356,18 @@ def main(
                 "similarity_spatial_num_workers", 1
             ),
             "similarity_smart_noise_alpha": general_settings.get(
-                "similarity_smart_noise_alpha", 1.8
+                "similarity_smart_noise_alpha", 1.0
             ),
             "enable_linear_mode": general_settings.get("enable_linear_mode", False),
         }
+
+        # Calculate effective alpha for Smart Noise Awareness
+        extra_params["similarity_smart_noise_aware_enable"] = general_settings.get(
+            "similarity_smart_noise_aware_enable", True
+        )
+        extra_params["similarity_smart_noise_strength"] = general_settings.get(
+            "similarity_smart_noise_strength", 100.0
+        )
 
         custom_lib = general_settings.get("similarity_lib_path")
         if custom_lib:
@@ -460,16 +476,21 @@ def main(
             if batch_res is not None and len(batch_res) >= 3:
                 b_img, b_weight, b_frames = batch_res[0], batch_res[1], batch_res[2]
                 if global_sum_img is None:
-                    global_sum_img = b_img.copy() if b_img is not None else None
-                    global_sum_weight = (
-                        b_weight.copy() if b_weight is not None else None
-                    )
+                    global_sum_img = b_img if b_img is not None else None
+                    global_sum_weight = b_weight if b_weight is not None else None
                 else:
                     if b_img is not None:
                         global_sum_img += b_img
                     if b_weight is not None:
                         global_sum_weight += b_weight
                 global_total_frames += b_frames
+
+            # Explicit cleanup after batch accumulation
+            del batch_res
+            if "b_img" in locals():
+                del b_img
+            if "b_weight" in locals():
+                del b_weight
 
             del current_batch_images
             gc.collect()
@@ -512,9 +533,28 @@ def main(
                 )
 
     except Exception as e:
+        print(f"Error in Similarity main loop: {e}")
         traceback.print_exc()
         if update_progress:
             update_progress(0, f"Error: {str(e)}")
+    finally:
+        # --- FINAL CLEANUP: Ensure RAM is returned to OS ---
+        print("[Similarity] Final cleanup...")
+
+        # Explicitly clear AI sessions and processor
+        if "processor" in locals():
+            processor.close()
+            del processor
+
+        # Delete large buffers
+        if "global_sum_img" in locals():
+            del global_sum_img
+        if "global_sum_weight" in locals():
+            del global_sum_weight
+        if "reference_image" in locals():
+            del reference_image
+
+        gc.collect()
 
 
 def running_similarity(

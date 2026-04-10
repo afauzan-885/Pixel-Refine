@@ -224,7 +224,7 @@ def _prepare_image_array_from_raw(
                 rgb = raw.postprocess(
                     demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,  # pyright: ignore[reportAttributeAccessIssue]
                     use_camera_wb=True,
-                    no_auto_bright=True,
+                    # no_auto_bright=True,
                     gamma=gamma_setting,
                     output_bps=16,
                     output_color=rawpy.ColorSpace.sRGB,  # pyright: ignore[reportAttributeAccessIssue]
@@ -1008,7 +1008,9 @@ def resize_all_with_padding(
         target_h = (target_h // 2) * 2
         target_w = (target_w // 2) * 2
         if verbose:
-            print(f"[Padding] Force Even: ({original_sizes[0][0]}x{original_sizes[0][1]}) -> ({target_h}x{target_w})")
+            print(
+                f"[Padding] Force Even: ({original_sizes[0][0]}x{original_sizes[0][1]}) -> ({target_h}x{target_w})"
+            )
 
     if verbose:
         print(f"Resizing all images to {target_w}x{target_h} using method: {method}")
@@ -1086,6 +1088,18 @@ def estimate_noise_in_python(ref_image_gray_float):
     num_keep = max(min_blocks, int(len(block_mads) * keep_ratio))
     estimated_sigma = np.median(np.partition(block_mads, num_keep)[:num_keep]) * 1.4826
     return float(np.clip(estimated_sigma, 0.00001, 0.99999))
+
+
+def calibrate_sigma(est_sigma):
+    """Menerjemahkan angka kasar OpenCV menjadi skala Pure Noise [0.01 - 0.40]"""
+    min_cv = 0.20
+    max_cv = 0.80
+    min_model = 0.01
+    max_model = 0.40
+    mapped_sigma = ((est_sigma - min_cv) / (max_cv - min_cv)) * (
+        max_model - min_model
+    ) + min_model
+    return float(np.clip(mapped_sigma, 0.01, max_model))
 
 
 def apply_s_curve_float32(img: np.ndarray, strength: float = 4.0, pivot: float = 0.5):

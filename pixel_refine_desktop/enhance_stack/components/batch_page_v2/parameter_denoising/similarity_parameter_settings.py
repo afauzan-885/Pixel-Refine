@@ -41,8 +41,10 @@ def load_similarity_config():
             "similarity_spatial_motion_sensitivity": 100.0,
             "similarity_spatial_noise_mad_offset_factor": 0.12,
             "similarity_spatial_overlap_percent": 0.30,
-            "similarity_spatial_num_workers": 1, 
-            "similarity_smart_noise_alpha": 1.8, # [PENAMBAHAN] Default Smart Alpha
+            "similarity_spatial_num_workers": 1,
+            "similarity_smart_noise_alpha": 1.8,
+            "similarity_smart_noise_aware_enable": False,  # Default diset ke False (OFF)
+            "similarity_smart_noise_strength": 100.0,  # [PENAMBAHAN] Strength (%)
         },
     }
     final_config = {
@@ -103,6 +105,8 @@ def save_similarity_v1_config(config_to_save):
         "similarity_spatial_overlap_percent",
         "similarity_spatial_num_workers",
         "similarity_smart_noise_alpha",
+        "similarity_smart_noise_aware_enable",
+        "similarity_smart_noise_strength",
     ]  # [PENAMBAHAN]
 
     for key in spatial_keys:
@@ -173,6 +177,8 @@ def get_similarity_settings_page():
         "similarity_spatial_overlap_percent": 0.38,
         "similarity_spatial_num_workers": 2,
         "similarity_smart_noise_alpha": 1.8,
+        "similarity_smart_noise_aware_enable": True,
+        "similarity_smart_noise_strength": 100.0,
     }
 
     page_widget = QWidget()
@@ -353,9 +359,7 @@ def get_similarity_settings_page():
     widgets["noise_mad_offset_slider"] = slider_nm
     widgets["noise_mad_offset_input"] = input_nm
 
-    spatial_container_main_layout.addWidget(
-        noise_offset_group_widget
-    )
+    spatial_container_main_layout.addWidget(noise_offset_group_widget)
 
     # --- [PENAMBAHAN] Grup 5: Smart Noise Alpha ---
     smart_alpha_group_widget = QWidget()
@@ -365,16 +369,19 @@ def get_similarity_settings_page():
 
     smart_alpha_label_obj = QLabel("Smart Noise Alpha (AI):")
     smart_alpha_label_obj.setFont(get_default_font(10, QFont.Weight.Bold))
-    smart_alpha_label_obj.setToolTip("Mengatur seberapa toleran model AI terhadap noise.\nNilai rendah (misal 1.5) = Lebih sensitif gerak (kurangi ghosting).\nNilai tinggi (misal 2.5) = Lebih bersih noise (risiko ghosting).")
+    smart_alpha_label_obj.setToolTip(
+        "Mengatur seberapa toleran model AI terhadap noise.\nNilai rendah (misal 1.5) = Lebih sensitif gerak (kurangi ghosting).\nNilai tinggi (misal 2.5) = Lebih bersih noise (risiko ghosting)."
+    )
     smart_alpha_layout.addWidget(smart_alpha_label_obj)
 
     initial_smart_alpha = sim_v1_config.get("similarity_smart_noise_alpha", 1.8)
     smart_alpha_multiplier = 10.0
-    smart_alpha_slider_min, smart_alpha_slider_max = 5, 50 # 0.5 ke 5.0
+    smart_alpha_slider_min, smart_alpha_slider_max = 5, 50  # 0.5 ke 5.0
     smart_alpha_validator = QDoubleValidator(0.5, 5.0, 1)
     smart_alpha_validator.setNotation(QDoubleValidator.Notation.StandardNotation)
     smart_alpha_field_layout, slider_sa, input_sa = create_slider_input_field_layout(
-        0, 0,
+        0,
+        0,
         int(round(initial_smart_alpha * smart_alpha_multiplier)),
         c_locale.toString(initial_smart_alpha, "f", 1),
         smart_alpha_multiplier,
@@ -382,12 +389,67 @@ def get_similarity_settings_page():
         smart_alpha_validator,
         c_locale,
         slider_min_val=smart_alpha_slider_min,
-        slider_max_val=smart_alpha_slider_max
+        slider_max_val=smart_alpha_slider_max,
     )
     smart_alpha_layout.addLayout(smart_alpha_field_layout)
     widgets["smart_noise_alpha_slider"] = slider_sa
     widgets["smart_noise_alpha_input"] = input_sa
     spatial_container_main_layout.addWidget(smart_alpha_group_widget)
+
+    # --- [PENAMBAHAN] Grup 6: Smart Noise Aware Enable & Strength ---
+    noise_ctrl_group_widget = QWidget()
+    noise_ctrl_layout = QVBoxLayout(noise_ctrl_group_widget)
+    noise_ctrl_layout.setContentsMargins(0, 0, 0, 0)
+    noise_ctrl_layout.setSpacing(10)
+
+    # Toggle Row
+    toggle_row_layout = QHBoxLayout()
+    noise_aware_label = QLabel("Smart Noise Aware (AI):")
+    noise_aware_label.setFont(get_default_font(10, QFont.Weight.Bold))
+    noise_aware_label.setToolTip(
+        "Aktifkan atau nonaktifkan kontribusi estimasi noise ke model AI.\nJika mati, model AI akan bekerja murni berdasarkan fitur gambar."
+    )
+
+    toggle_btn = QPushButton()
+    toggle_btn.setCheckable(True)
+    toggle_btn.setFixedSize(40, 20)
+    toggle_btn.setStyleSheet(TOGGLE_BUTTON)
+    toggle_btn.setChecked(
+        sim_v1_config.get("similarity_smart_noise_aware_enable", True)
+    )
+
+    toggle_row_layout.addWidget(noise_aware_label)
+    toggle_row_layout.addStretch()
+    toggle_row_layout.addWidget(toggle_btn)
+    noise_ctrl_layout.addLayout(toggle_row_layout)
+
+    # Strength Slider
+    strength_label = QLabel("Noise Contribution Strength (%):")
+    strength_label.setFont(get_default_font(9, QFont.Weight.Bold))
+    strength_label.setToolTip(
+        "Mengatur seberapa kuat pengaruh estimasi noise (0% = Mati, 100% = Penuh)."
+    )
+    noise_ctrl_layout.addWidget(strength_label)
+
+    initial_strength = sim_v1_config.get("similarity_smart_noise_strength", 100.0)
+    strength_validator = QIntValidator(0, 100)
+    strength_field_layout, slider_str, input_str = create_slider_input_field_layout(
+        0,
+        100,
+        int(initial_strength),
+        str(int(initial_strength)),
+        1.0,
+        lambda v, m=1: str(int(v)),
+        strength_validator,
+        c_locale,
+        is_overlap=True,  # reuse '%' label
+    )
+    noise_ctrl_layout.addLayout(strength_field_layout)
+
+    widgets["smart_noise_aware_toggle"] = toggle_btn
+    widgets["smart_noise_strength_slider"] = slider_str
+    widgets["smart_noise_strength_input"] = input_str
+    spatial_container_main_layout.addWidget(noise_ctrl_group_widget)
 
     reset_spatial_button = QPushButton(
         getattr(language_config, "RESET_SPATIAL_DEFAULTS_BUTTON", "Reset Defaults")
@@ -435,6 +497,12 @@ def get_similarity_settings_page():
             )
             sa_val, _ = c_locale.toDouble(widgets["smart_noise_alpha_input"].text())
             settings_to_save_flat["similarity_smart_noise_alpha"] = sa_val
+            settings_to_save_flat["similarity_smart_noise_aware_enable"] = widgets[
+                "smart_noise_aware_toggle"
+            ].isChecked()
+            settings_to_save_flat["similarity_smart_noise_strength"] = float(
+                widgets["smart_noise_strength_input"].text()
+            )
         except ValueError as e:
             print(f"Error parsing settings: {e}")
             return
@@ -545,8 +613,19 @@ def get_similarity_settings_page():
         slider_ov_sp, input_ov_sp, 1.0, 0, 90, c_locale, 0, False
     )
     setup_slider_input_connections(
-        slider_sa, input_sa, smart_alpha_multiplier, 0.5, 5.0, c_locale, 1, True,
-        smart_alpha_slider_min, smart_alpha_slider_max
+        slider_str, input_str, 1.0, 0, 100, c_locale, 0, False
+    )
+    setup_slider_input_connections(
+        slider_sa,
+        input_sa,
+        smart_alpha_multiplier,
+        0.5,
+        5.0,
+        c_locale,
+        1,
+        True,
+        smart_alpha_slider_min,
+        smart_alpha_slider_max,
     )
 
     def reset_spatial_defaults():
@@ -580,7 +659,18 @@ def get_similarity_settings_page():
             int(round(defaults.get("similarity_spatial_overlap_percent", 0.35) * 100))
         )
         widgets["smart_noise_alpha_slider"].setValue(
-            int(round(defaults.get("similarity_smart_noise_alpha", 1.8) * smart_alpha_multiplier))
+            int(
+                round(
+                    defaults.get("similarity_smart_noise_alpha", 1.8)
+                    * smart_alpha_multiplier
+                )
+            )
+        )
+        widgets["smart_noise_aware_toggle"].setChecked(
+            defaults.get("similarity_smart_noise_aware_enable", True)
+        )
+        widgets["smart_noise_strength_slider"].setValue(
+            int(defaults.get("similarity_smart_noise_strength", 100.0))
         )
         save_current_settings_v1()
 
@@ -601,6 +691,13 @@ def get_similarity_settings_page():
     widgets["overlap_input_spatial"].editingFinished.connect(save_current_settings_v1)
     widgets["smart_noise_alpha_slider"].sliderReleased.connect(save_current_settings_v1)
     widgets["smart_noise_alpha_input"].editingFinished.connect(save_current_settings_v1)
+    widgets["smart_noise_aware_toggle"].clicked.connect(save_current_settings_v1)
+    widgets["smart_noise_strength_slider"].sliderReleased.connect(
+        save_current_settings_v1
+    )
+    widgets["smart_noise_strength_input"].editingFinished.connect(
+        save_current_settings_v1
+    )
 
     main_page_layout.addStretch(1)
     scroll = QScrollArea()
