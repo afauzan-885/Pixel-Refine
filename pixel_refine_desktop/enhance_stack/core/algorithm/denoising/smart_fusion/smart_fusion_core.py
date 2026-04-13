@@ -57,6 +57,13 @@ class SmartFusionProcessor:
         self.current_tile_size = tile_size
         return self.sess_a, self.sess_f
 
+    def release_sessions(self):
+        """Releases the ONNX sessions and clears cache."""
+        self.sess_a = None
+        self.sess_f = None
+        self.current_tile_size = None
+        gc.collect()
+
     def process(
         self,
         images,
@@ -128,23 +135,44 @@ class SmartFusionProcessor:
             return None, None, 0
 
         # 3. Noise Estimation
-        gray_image = cv2.cvtColor((reference_image_float * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-        sigma_val = estimate_noise_in_python(gray_image.astype(np.float32) / 255.0)
+        noise_aware_enable = unused_kwargs.get("similarity_smart_noise_aware_enable", True)
+        if noise_aware_enable:
+            gray_image = cv2.cvtColor((reference_image_float * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+            sigma_val = estimate_noise_in_python(gray_image.astype(np.float32) / 255.0)
+        else:
+            sigma_val = 0.0
+            print("[Smart Fusion] Noise Awareness disabled: sigma forced to 0.0")
+
         sigma_input = np.array([[[[sigma_val]]]], dtype=np.float32)
         alpha_input = np.array([[[[noise_alpha]]]], dtype=np.float32)
+        if noise_aware_enable:
+            print(f"[Smart Fusion] Sigma: {sigma_val:.5f}")
 
         # 4. Tiling & Buffers
-        pad_h = (tile_h - h_orig % tile_h) % tile_h
-        pad_w = (tile_w - w_orig % tile_w) % tile_w
+        overlap_factor = overlap if overlap is not None else 0.1
+        stride_h = max(1, int(tile_h * (1 - overlap_factor)))
+        stride_w = max(1, int(tile_w * (1 - overlap_factor)))
+
+        def generate_coords(full_size, tile_size, stride):
+            if full_size <= tile_size:
+                return [0]
+            coords = list(range(0, full_size - tile_size, stride))
+            if coords[-1] + tile_size < full_size:
+                coords.append(full_size - tile_size)
+            return sorted(list(set(coords)))
+
+        y_coords = generate_coords(h_orig, tile_h, stride_h)
+        x_coords = generate_coords(w_orig, tile_w, stride_w)
+
+        # Padding minimal jika gambar lebih kecil dari tile
+        pad_h = max(0, tile_h - h_orig)
+        pad_w = max(0, tile_w - w_orig)
         
         ref_padded = reference_image_float
         if pad_h > 0 or pad_w > 0:
             ref_padded = np.pad(reference_image_float, ((0, pad_h), (0, pad_w), (0, 0)), mode="reflect")
         
         h_padded, w_padded = ref_padded.shape[:2]
-        stride = tile_h
-        y_coords = list(range(0, h_padded, stride))
-        x_coords = list(range(0, w_padded, stride))
 
         # 5. Row-by-Row Optimized Processing
         accum_final_img = np.zeros_like(ref_padded, dtype=np.float32)
@@ -152,7 +180,9 @@ class SmartFusionProcessor:
         total_rows = len(y_coords)
         
         ref_nchw_full = ref_padded.transpose(2, 0, 1)[np.newaxis, ...].astype(np.float32)
-        win = np.ones((tile_h, tile_w), dtype=np.float32)
+        win_y = np.hanning(tile_h + 2)[1:-1].astype(np.float32)
+        win_x = np.hanning(tile_w + 2)[1:-1].astype(np.float32)
+        win = np.outer(win_y, win_x).astype(np.float32)
 
         for iy, y_start in enumerate(y_coords):
             if stop_requested and stop_requested(): return None, None, 0
@@ -190,12 +220,18 @@ class SmartFusionProcessor:
 
                 for ix, x_start in enumerate(x_coords):
                     feat_curr = sess_a.run(None, {"x": strip_nchw[:, :, :, x_start : x_start + tile_w]})[0]
-                    w_patch = sess_f.run(None, {
-                        "ref_feat": row_ref_feats[ix], 
-                        "curr_feat": feat_curr, 
-                        "sigma": sigma_input,
-                        "alpha": alpha_input
-                    })[0]
+                    # Dynamic input mapping based on model signature
+                    input_names = [i.name for i in sess_f.get_inputs()]
+                    input_feed = {
+                        "ref_feat": row_ref_feats[ix],
+                        "curr_feat": feat_curr,
+                    }
+                    if "sigma" in input_names:
+                        input_feed["sigma"] = sigma_input
+                    if "alpha" in input_names:
+                        input_feed["alpha"] = alpha_input
+
+                    w_patch = sess_f.run(None, input_feed)[0]
                     w_2d = np.squeeze(np.array(w_patch))
                     if w_2d.ndim > 2: w_2d = w_2d[..., 0]
                     
@@ -211,14 +247,11 @@ class SmartFusionProcessor:
             del row_tile_accum_img, row_tile_accum_weight, row_ref_feats
             gc.collect()
 
-        # 6. Final Normalization
-        valid_mask = accum_final_weight > 1e-8
-        final_img = np.zeros_like(accum_final_img)
-        np.divide(accum_final_img, accum_final_weight[:, :, np.newaxis], out=final_img, where=valid_mask[:, :, np.newaxis])
-        final_img[~valid_mask] = ref_padded[~valid_mask]
-
+        # 6. Final Outputs
+        # Kita mengembalikan akumulasi mentah dan weight map agar Similarity.py
+        # dapat melakukan normalisasi akhir secara global. Ini mencegah normalisasi ganda.
         if h_orig != h_padded or w_orig != w_padded:
-            final_img = final_img[:h_orig, :w_orig]
+            accum_final_img = accum_final_img[:h_orig, :w_orig]
             accum_final_weight = accum_final_weight[:h_orig, :w_orig]
 
-        return final_img, accum_final_weight, num_images
+        return accum_final_img, accum_final_weight, num_images

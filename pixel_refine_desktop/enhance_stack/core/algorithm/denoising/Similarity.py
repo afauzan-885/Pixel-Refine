@@ -252,7 +252,7 @@ class SimilarityAlgorithm:
         if merging_mode == "smart":
             results = self.smart_processor.process(
                 tile_size=(320, 320),
-                overlap=0.20,
+                overlap=0.10,
                 num_workers=(
                     num_workers
                     if num_workers is not None
@@ -307,6 +307,13 @@ class SimilarityAlgorithm:
         if processed_frames > 0 and final_img_norm is not None:
             if return_raw:
                 return results
+
+            # Perform normalization if not returning raw (since processor now returns raw sums)
+            if final_weight is not None:
+                valid_mask = final_weight > 1e-6
+                normalized = np.zeros_like(final_img_norm)
+                np.divide(final_img_norm, final_weight[:, :, np.newaxis], out=normalized, where=valid_mask[:, :, np.newaxis])
+                final_img_norm = normalized
 
             scale_val = np.float32(np.iinfo(dtype_ref).max)
             final_img_scaled = final_img_norm * scale_val
