@@ -18,6 +18,18 @@ except ImportError:
 MIN_PYRAMID_SIZE = 32
 
 if TAICHI_AVAILABLE:
+    class _AotKernelProvider:
+        """Helper to switch between JIT and AOT kernels."""
+        _kernels = {}
+
+        @classmethod
+        def get(cls, name, fallback):
+            return cls._kernels.get(name, fallback)
+
+        @classmethod
+        def register(cls, name, kernel):
+            cls._kernels[name] = kernel
+
 
     @ti.kernel
     def _downsample_2x_kernel(
@@ -45,10 +57,38 @@ if TAICHI_AVAILABLE:
             dst[r, c] = val / total_weight
 
     @ti.kernel
+    def _downsample_2x_kernel_3ch(
+        src: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
+    ):
+        """Standard 2x downsampling (box filter) for 3-channel color images."""
+        h_src, w_src = src.shape[0], src.shape[1]
+        h_dst, w_dst = dst.shape[0], dst.shape[1]
+        weights = ti.static([1.0, 4.0, 6.0, 4.0, 1.0])
+        total_weight = 256.0
+
+        for r, c in ti.ndrange(h_dst, w_dst):
+            y_src = r * 2
+            x_src = c * 2
+
+            val = tm.vec3(0.0)
+            for j in ti.static(range(-2, 3)):
+                for i in ti.static(range(-2, 3)):
+                    sy = tm.clamp(y_src + j, 0, h_src - 1)
+                    sx = tm.clamp(x_src + i, 0, w_src - 1)
+                    w = weights[j + 2] * weights[i + 2]
+                    val += tm.vec3(src[sy, sx, 0], src[sy, sx, 1], src[sy, sx, 2]) * w
+
+            res = val / total_weight
+            dst[r, c, 0] = res[0]
+            dst[r, c, 1] = res[1]
+            dst[r, c, 2] = res[2]
+
+    @ti.kernel
     def _upsample_flow_kernel(
         src: ti.types.ndarray(dtype=ti.f32, ndim=3),
         dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        scale: float,
+        scale: ti.f32,
     ):
         """Bicubic upsampling for flow fields. AOT-compatible."""
         h_src, w_src = src.shape[0], src.shape[1]
@@ -109,6 +149,11 @@ def build_image_pyramid_gpu(
     """
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
+
+    # --- AOT ROUTING ---
+    if os.environ.get("PIXEL_REFINE_AOT_MODE") == "1":
+        from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+        return taichi_aot.build_image_pyramid(image_gpu, n_levels=n_levels, min_size=min_size, return_gpu=True)
 
     pyramid = [image_gpu]
 

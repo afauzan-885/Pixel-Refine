@@ -7,6 +7,7 @@ optimized for GPU execution using Radix-2 Cooley-Tukey algorithm.
 
 import numpy as np
 import math
+import os
 
 try:
     import taichi as ti
@@ -166,6 +167,11 @@ if TAICHI_AVAILABLE:
         Supports both NumPy and Taichi ndarray.
         Automatically pads to power of two if needed.
         """
+        # --- AOT ROUTING ---
+        if os.environ.get("PIXEL_REFINE_AOT_MODE") == "1":
+            from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+            return taichi_aot.fft2(src)
+            
         src_gpu, is_temp = common.ensure_taichi_field(src, dtype=ti.f32)
         h, w = src_gpu.shape[:2]
 
@@ -195,6 +201,11 @@ if TAICHI_AVAILABLE:
         Compute Inverse 2D Fast Fourier Transform.
         Returns a real (float32) field or NumPy array.
         """
+        # --- AOT ROUTING ---
+        if os.environ.get("PIXEL_REFINE_AOT_MODE") == "1":
+            from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+            return taichi_aot.ifft2(complex_gpu, target_shape=target_shape)
+            
         # Column-wise IFFT
         fft_1d_gpu(complex_gpu, is_inverse=True, is_col=True)
 

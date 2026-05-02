@@ -224,6 +224,11 @@ def gaussian_blur(
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
+    # --- AOT ROUTING ---
+    if os.environ.get("PIXEL_REFINE_AOT_MODE") == "1":
+        from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+        return taichi_aot.gaussian_blur(src, sigma=sigma, kernel_size=kernel_size, return_gpu=True)
+
     # --- OpenCV Parity Logic ---
     # If sigma is 0 or negative, it must be calculated from kernel_size
     # If kernel_size is 0 or None, it must be calculated from sigma

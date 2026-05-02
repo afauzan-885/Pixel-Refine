@@ -36,8 +36,8 @@ if TAICHI_AVAILABLE:
         count = 0.0
 
         for y, x in ti.ndrange(h, w):
-            sum_x += flow[y, x, 0]
-            sum_y += flow[y, x, 1]
+            sum_x += flow[y, x][0]
+            sum_y += flow[y, x][1]
             count += 1.0
 
         mean_out[0] = sum_x / count
@@ -54,8 +54,8 @@ if TAICHI_AVAILABLE:
         """Copy flow values to separate arrays for sorting."""
         for y, x in ti.ndrange(h, w):
             idx = y * w + x
-            sorted_x[idx] = flow[y, x, 0]
-            sorted_y[idx] = flow[y, x, 1]
+            sorted_x[idx] = flow[y, x][0]
+            sorted_y[idx] = flow[y, x][1]
 
     @ti.kernel
     def _count_inliers_kernel(
@@ -70,8 +70,8 @@ if TAICHI_AVAILABLE:
         """Count inliers that are within threshold of the model."""
         count = 0
         for y, x in ti.ndrange(h, w):
-            dx = flow[y, x, 0] - model_x
-            dy = flow[y, x, 1] - model_y
+            dx = flow[y, x][0] - model_x
+            dy = flow[y, x][1] - model_y
             dist = ti.sqrt(dx * dx + dy * dy)
 
             if dist < threshold:
@@ -97,8 +97,8 @@ if TAICHI_AVAILABLE:
 
         for y, x in ti.ndrange(h, w):
             if inlier_mask[y, x] == 1:
-                sum_x += flow[y, x, 0]
-                sum_y += flow[y, x, 1]
+                sum_x += flow[y, x][0]
+                sum_y += flow[y, x][1]
                 count += 1.0
 
         if count > 0:
@@ -122,12 +122,12 @@ if TAICHI_AVAILABLE:
         for y, x in ti.ndrange(h, w):
             if inlier_mask[y, x] == 1:
                 # Keep inlier values
-                output[y, x, 0] = flow[y, x, 0]
-                output[y, x, 1] = flow[y, x, 1]
+                output[y, x][0] = flow[y, x][0]
+                output[y, x][1] = flow[y, x][1]
             else:
                 # Replace outlier with model
-                output[y, x, 0] = model_x
-                output[y, x, 1] = model_y
+                output[y, x][0] = model_x
+                output[y, x][1] = model_y
 
     # ===== MOTION-AWARE RANSAC KERNELS =====
     @ti.kernel

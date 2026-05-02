@@ -5,11 +5,13 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.taichi_w
     TAICHI_AVAILABLE as TAICHI_SPATIAL_AVAILABLE,
 )
 
+
 def get_ram_usage():
     """Returns the current RAM usage of the process in MiB."""
     process = psutil.Process()
     mem_info = process.memory_info()
     return mem_info.rss / 1024 / 1024
+
 
 class SpatialFusionProcessor:
     """Handles the Spatial Fusion merging logic using C++ or Taichi backends."""
@@ -59,7 +61,9 @@ class SpatialFusionProcessor:
         if use_overall_progress:
             # Batch processing: Hitung slot global untuk stack ini
             scope_start = (images_processed_so_far / total_overall_images) * 100.0
-            scope_end = ((images_processed_so_far + num_images) / total_overall_images) * 100.0
+            scope_end = (
+                (images_processed_so_far + num_images) / total_overall_images
+            ) * 100.0
         else:
             # Single processing: Full 0-100
             scope_start, scope_end = 0.0, 100.0
@@ -74,28 +78,41 @@ class SpatialFusionProcessor:
         # Scale down logic
         if scale_down_factor != 1.0:
             if scale_down_factor < 1.0:
-                work_res_h, work_res_w = int(ref_image_h * scale_down_factor), int(ref_image_w * scale_down_factor)
-                if update_progress: update_progress(p_init, f"Downscale aktif: {scale_down_factor:.2f}")
+                work_res_h, work_res_w = int(ref_image_h * scale_down_factor), int(
+                    ref_image_w * scale_down_factor
+                )
+                if update_progress:
+                    update_progress(p_init, f"Downscale aktif: {scale_down_factor:.2f}")
             else:
-                if update_progress: update_progress(p_init, "Menggunakan resolusi asli (scale > 1.0)")
+                if update_progress:
+                    update_progress(p_init, "Menggunakan resolusi asli (scale > 1.0)")
         elif (ref_image_h * ref_image_w) > TARGET_MP:
             scale_factor = np.sqrt(TARGET_MP / (ref_image_h * ref_image_w))
-            work_res_h, work_res_w = int(ref_image_h * scale_factor), int(ref_image_w * scale_factor)
-            if update_progress: update_progress(p_init, f"Auto-scale ke {scale_factor:.2f}x")
-        
+            work_res_h, work_res_w = int(ref_image_h * scale_factor), int(
+                ref_image_w * scale_factor
+            )
+            if update_progress:
+                update_progress(p_init, f"Auto-scale ke {scale_factor:.2f}x")
+
         work_res_h, work_res_w = (work_res_h // 2) * 2, (work_res_w // 2) * 2
 
         # Tiling
         base_window = np.ones((tile_h, tile_w), dtype=np.float32)
-        step_y, step_x = max(int(tile_h * (1 - overlap)), 1), max(int(tile_w * (1 - overlap)), 1)
-        
+        step_y, step_x = max(int(tile_h * (1 - overlap)), 1), max(
+            int(tile_w * (1 - overlap)), 1
+        )
+
         row_starts = np.arange(0, work_res_h - tile_h + 1, step_y, dtype=np.int32)
-        if work_res_h > tile_h and (row_starts.size == 0 or row_starts[-1] != work_res_h - tile_h):
+        if work_res_h > tile_h and (
+            row_starts.size == 0 or row_starts[-1] != work_res_h - tile_h
+        ):
             row_starts = np.append(row_starts, work_res_h - tile_h)
         row_starts = np.ascontiguousarray(np.unique(row_starts).astype(np.int32))
 
         col_starts = np.arange(0, work_res_w - tile_w + 1, step_x, dtype=np.int32)
-        if work_res_w > tile_w and (col_starts.size == 0 or col_starts[-1] != work_res_w - tile_w):
+        if work_res_w > tile_w and (
+            col_starts.size == 0 or col_starts[-1] != work_res_w - tile_w
+        ):
             col_starts = np.append(col_starts, work_res_w - tile_w)
         col_starts = np.ascontiguousarray(np.unique(col_starts).astype(np.int32))
 
@@ -104,20 +121,36 @@ class SpatialFusionProcessor:
 
         # 2. Execute Backend
         backend_args = {
-            "images": images, "reference_image_float": reference_image_float,
-            "ref_image_h": ref_image_h, "ref_image_w": ref_image_w,
-            "ref_channels_buffer": ref_channels_buffer, "ref_dtype": ref_dtype,
-            "work_res_h": work_res_h, "work_res_w": work_res_w,
-            "tile_h": tile_h, "tile_w": tile_w,
-            "row_starts": row_starts, "col_starts": col_starts,
-            "base_window": base_window, "motion_sensitivity": motion_sensitivity,
-            "noise_offset_factor": noise_offset_factor, "update_progress": update_progress,
-            "stop_requested": stop_requested, "pass_merge_range": pass_merge_range,
-            "p_align_start": p_align_start, "p_align_end": p_align_end, "p_merge_start": p_merge_start,
-            "is_linear_mode": is_linear_mode, "proxy_scale": proxy_scale,
-            "images_processed_so_far": images_processed_so_far, "total_overall_images": total_overall_images,
-            "enable_alignment": enable_alignment, "num_workers": num_workers, "alignment_tile_size": 8,
-            "lib_path": lib_path, **unused_kwargs
+            "images": images,
+            "reference_image_float": reference_image_float,
+            "ref_image_h": ref_image_h,
+            "ref_image_w": ref_image_w,
+            "ref_channels_buffer": ref_channels_buffer,
+            "ref_dtype": ref_dtype,
+            "work_res_h": work_res_h,
+            "work_res_w": work_res_w,
+            "tile_h": tile_h,
+            "tile_w": tile_w,
+            "row_starts": row_starts,
+            "col_starts": col_starts,
+            "base_window": base_window,
+            "motion_sensitivity": motion_sensitivity,
+            "noise_offset_factor": noise_offset_factor,
+            "update_progress": update_progress,
+            "stop_requested": stop_requested,
+            "pass_merge_range": pass_merge_range,
+            "p_align_start": p_align_start,
+            "p_align_end": p_align_end,
+            "p_merge_start": p_merge_start,
+            "is_linear_mode": is_linear_mode,
+            "proxy_scale": proxy_scale,
+            "images_processed_so_far": images_processed_so_far,
+            "total_overall_images": total_overall_images,
+            "enable_alignment": enable_alignment,
+            "num_workers": num_workers,
+            "alignment_tile_size": 8,
+            "lib_path": lib_path,
+            **unused_kwargs,
         }
 
         if process_in == "gpu" and TAICHI_SPATIAL_AVAILABLE:
@@ -130,18 +163,25 @@ class SpatialFusionProcessor:
             return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
 
         # 3. Finalization
-        if stop_requested and stop_requested(): 
+        if stop_requested and stop_requested():
             return (None, None, 0, []) if weight_of_each_image else (None, None, 0)
-        
-        if processed_frames > 0 and return_raw: 
+
+        if processed_frames > 0 and return_raw:
             return (final_sum_img, sum_weight_full, processed_frames)
 
-        if update_progress: 
-            update_progress(pass_merge_range[1], "Finalizing with simple mean calculation...")
-        
+        if update_progress:
+            update_progress(
+                pass_merge_range[1], "Finalizing with simple mean calculation..."
+            )
+
         valid_mask = sum_weight_full > 1e-6
         final_image = np.zeros_like(final_sum_img)
-        np.divide(final_sum_img, sum_weight_full[:, :, np.newaxis], out=final_image, where=valid_mask[:, :, np.newaxis])
+        np.divide(
+            final_sum_img,
+            sum_weight_full[:, :, np.newaxis],
+            out=final_image,
+            where=valid_mask[:, :, np.newaxis],
+        )
         final_image[~valid_mask] = reference_image_float[~valid_mask]
 
         if weight_of_each_image:

@@ -93,6 +93,18 @@ def sobel(src, dst_dx=None, dst_dy=None, buffer_provider="pool", enable_tiling=T
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
+    # --- AOT ROUTING ---
+    import os
+    if os.environ.get("PIXEL_REFINE_AOT_MODE") == "1":
+        from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+        dx, dy = taichi_aot.sobel(src, return_gpu=True)
+        # Handle copying if user passed specific dst_dx/dy or needs numpy (fallback logic)
+        # To keep it safe, if dst_dx is None we return GPU buffer
+        if dst_dx is None and dst_dy is None:
+            return dx, dy
+        else:
+            return dx.to_numpy(), dy.to_numpy()
+
     # OOM Guard Trigger
     from . import oom_guard
 
@@ -148,6 +160,15 @@ def laplacian(src, dst=None, buffer_provider="pool", enable_tiling=True):
     """
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
+
+    # --- AOT ROUTING ---
+    import os
+    if os.environ.get("PIXEL_REFINE_AOT_MODE") == "1":
+        from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+        res = taichi_aot.laplacian(src, return_gpu=True)
+        if dst is None:
+            return res
+        return res.to_numpy()
 
     # OOM Guard Trigger
     if enable_tiling and isinstance(src, np.ndarray) and src.size > 2048 * 2048 * 3:

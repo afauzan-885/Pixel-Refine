@@ -14,8 +14,6 @@
 #include <string>
 #include <vector>
 
-#include "refinement.hpp"
-
 // =========================================================================
 // === PROFILING UTILS ===
 // =========================================================================
@@ -27,8 +25,7 @@ struct SimpleTimer {
   ~SimpleTimer() {
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> elapsed = end - start;
-    std::cout << "[C++ Timer] " << name << ": " << elapsed.count() << " ms"
-              << std::endl;
+    std::cout << "[C++ Timer] " << name << ": " << elapsed.count() << " ms\n";
   }
 };
 
@@ -36,1064 +33,598 @@ struct SimpleTimer {
 // === HELPER FUNCTIONS - Static Implementation ===
 // =========================================================================
 
-struct Candidate {
-  cv::Point2f flow;
-  float cost;
-};
-
-struct TileResult {
-  cv::Rect roi;
-  cv::Point2f flow;
-};
-
-// Konstanta konfigurasi
 namespace ImageAlignmentConfig {
-constexpr int GAUSSIAN_CACHE_SIZE = 256;
-constexpr float NORMALIZATION_EPSILON = 1e-6f;
 constexpr float FLOW_UPSCALE_FACTOR = 4.0f; // HDR+ style 4x pyramid
 constexpr int MIN_TILE_SIZE = 8;
-constexpr int MIN_PYRAMID_LAYER_SIZE = 32;
+constexpr int MIN_PYRAMID_LAYER_SIZE = 190;
 } // namespace ImageAlignmentConfig
 
 namespace AlignmentFlowHelpers {
-// Cache untuk Gaussian window
-static thread_local std::map<std::pair<int, int>, cv::Mat> gaussian_cache;
 
-/**
- * Mendapatkan Gaussian window dengan caching
- */
-static const cv::Mat &getGaussianWindow(int rows, int cols) {
-  using namespace ImageAlignmentConfig;
-
-  auto key = std::make_pair(rows, cols);
-  auto it = gaussian_cache.find(key);
-  if (it != gaussian_cache.end())
-    return it->second;
-
-  if (gaussian_cache.size() >= GAUSSIAN_CACHE_SIZE)
-    gaussian_cache.erase(gaussian_cache.begin());
-
-  cv::Mat kernel_y = cv::getGaussianKernel(rows, -1, CV_32F);
-  cv::Mat kernel_x = cv::getGaussianKernel(cols, -1, CV_32F);
-  cv::Mat window = kernel_y * kernel_x.t();
-
-  double minVal, maxVal;
-  cv::minMaxLoc(window, &minVal, &maxVal);
-  if (maxVal > NORMALIZATION_EPSILON)
-    window *= (1.0 / maxVal);
-  else
-    window = cv::Mat::zeros(rows, cols, CV_32F);
-
-  return gaussian_cache[key] = std::move(window);
-}
-
-/**
- * Inisialisasi flow untuk level coarsest (paling kasar)
- */
-static cv::Mat initializeCoarsestFlow(const cv::Mat &ref_layer) {
-  return cv::Mat::zeros(ref_layer.size(), CV_32FC2);
-}
-
-/**
- * Upsample flow dari level sebelumnya dengan edge-aware blending
- */
-static inline cv::Mat upsamplingFlow(const cv::Mat &previous_level_flow,
-                                     const cv::Mat &ref_layer) {
-  using namespace ImageAlignmentConfig;
-
-  cv::Mat flow_upsampled;
-  // OPTIMIZATION: Use INTER_LINEAR directly on CV_32FC2.
-  // This provides smoothed upsampling in a single pass,
-  // avoiding the need for manual split/boxFilter/merge.
-  cv::resize(previous_level_flow, flow_upsampled, ref_layer.size(), 0, 0,
-             cv::INTER_LINEAR);
-
-  // Scale flow vectors by the upscale factor
-  flow_upsampled *= FLOW_UPSCALE_FACTOR; // 4.0f (HDR+ style)
-
-  return flow_upsampled;
-}
-
-/**
- * Generate kandidat flow untuk tile matching
- */
-static inline void generateCandidateFlows(
-    std::vector<cv::Vec2f> &candidate_flows, int layer_index, int total_layers,
-    const cv::Mat &previous_level_flow, // Flow level kasar (belum di-upsample)
-    const cv::Mat &current_flow,        // Flow level ini (hasil upsample)
-    int tile_center_y, int tile_center_x, int current_tile_h,
-    int current_tile_w) {
-  using namespace ImageAlignmentConfig;
-
-  candidate_flows.clear();
-  // Kita batasi kapasitas karena kita hanya ambil kandidat paling relevan
-  candidate_flows.reserve(8);
-
-  // --- KASUS DASAR: Level paling kasar ---
-  if (layer_index == total_layers - 1) {
-    candidate_flows.emplace_back(0.0f, 0.0f);
-    return;
-  }
-
-  // --- 1. PRIMARY CANDIDATE: Inherited Flow (Tebakan dari level sebelumnya)
-  // --- Ini adalah kandidat terkuat.
-  const cv::Vec2f &center_flow = current_flow.at<cv::Vec2f>(
-      tile_center_y + current_tile_h / 2, tile_center_x + current_tile_w / 2);
-  candidate_flows.push_back(center_flow);
-
-  // --- 2. SPATIAL CANDIDATES (Tetangga) ---
-  // OPTIMASI: Hanya cek tetangga Kiri dan Atas.
-  // Alasan: Data tetangga ini biasanya sudah selesai diproses (kausalitas)
-  // dan cukup untuk menangani pergerakan objek yang konsisten.
-
-  // Jarak cek tetangga (gunakan ukuran tile penuh karena non-overlap)
-  const int step_x = current_tile_w;
-  const int step_y = current_tile_h;
-
-  // Cek Tetangga Kiri
-  int h_neighbor_x = tile_center_x - step_x;
-  if (h_neighbor_x >= 0) {
-    candidate_flows.push_back(
-        current_flow.at<cv::Vec2f>(tile_center_y, h_neighbor_x));
-  }
-
-  // Cek Tetangga Atas
-  int v_neighbor_y = tile_center_y - step_y;
-  if (v_neighbor_y >= 0) {
-    candidate_flows.push_back(
-        current_flow.at<cv::Vec2f>(v_neighbor_y, tile_center_x));
-  }
-
-  // --- 3. COARSE PROJECTION (Backup) ---
-  // Mengambil langsung dari raw previous level flow (jika ragu dengan hasil
-  // upsampling) Hanya dilakukan jika bukan di level paling halus untuk
-  // menghemat akses memori
-  if (layer_index > 0) {
-    // Mapping koordinat ke level kasar (koordinat / 4, HDR+ style)
-    const int coarse_y = (tile_center_y + current_tile_h / 2) / 4;
-    const int coarse_x = (tile_center_x + current_tile_w / 2) / 4;
-
-    if (coarse_y >= 0 && coarse_y < previous_level_flow.rows && coarse_x >= 0 &&
-        coarse_x < previous_level_flow.cols) {
-      // Jangan lupa dikali faktor upscale (biasanya 2.0)
-      candidate_flows.emplace_back(
-          previous_level_flow.at<cv::Vec2f>(coarse_y, coarse_x) *
-          FLOW_UPSCALE_FACTOR);
-    }
-  }
-
-  // --- 4. Fallback (Jika kosong) ---
-  if (candidate_flows.empty()) {
-    candidate_flows.push_back(center_flow);
-  }
-
-  // Deduplikasi sederhana (menghapus elemen berurutan yang sama)
-  // Tidak perlu sort mahal karena jumlah elemen sangat sedikit (< 6)
-  // Kita biarkan saja sedikit duplikasi demi kecepatan CPU,
-  // karena cost calculation cache nanti akan menangani duplikasi integer.
-}
-
-// --- THREAD-LOCAL BUFFERS (Optimasi Cost Calculation) ---
-// Buffers ini digunakan untuk menyimpan data tile 2D menjadi 1D contiguous.
-// Dideklarasikan static thread_local di namespace helper.
 static thread_local std::vector<float> ref_tile_buffer_g;
 static thread_local std::vector<float> comp_tile_buffer_g;
 
-/**
- * Helper untuk memuat data tile yang tidak contiguous di Mat ke buffer 1D
- * contiguous. Menggunakan std::memcpy untuk transfer data cepat.
- */
 static inline bool copyTileToContiguousBuffer(const cv::Mat &layer, int tile_y,
-                                              int tile_x, int tile_h,
-                                              int tile_w,
+                                              int tile_x, int tile_h, int tile_w,
                                               std::vector<float> &buffer) {
   const int tile_area = tile_h * tile_w;
-  if (buffer.size() < tile_area) {
+  if (buffer.size() < (size_t)tile_area) {
     buffer.resize(tile_area);
   }
 
   int buffer_idx = 0;
-  const int step = layer.step1(0); // Stride per baris dalam float
-
   for (int r = 0; r < tile_h; ++r) {
-    // Ambil pointer ke awal baris ROI di layer
     const float *p_row = layer.ptr<float>(tile_y + r) + tile_x;
-
-    // Salin satu baris (tile_w elemen) ke buffer
     std::memcpy(buffer.data() + buffer_idx, p_row, tile_w * sizeof(float));
     buffer_idx += tile_w;
   }
   return true;
 }
 
-// =========================================================================
-// searchCoarseLevelDirect (Optimized)
-// =========================================================================
-static inline void
-searchCoarseLevelDirect(const cv::Mat &ref_layer, const cv::Mat &comp_layer,
-                        int tile_y, int tile_x, int tile_h, int tile_w,
-                        const cv::Vec2f &initial_flow, float search_dist,
-                        std::vector<Candidate> &out_candidates) {
-  // Derive local variables from parameters
-  const int h_layer = ref_layer.rows;
-  const int w_layer = ref_layer.cols;
-  const int init_dx = static_cast<int>(std::round(initial_flow[0]));
-  const int init_dy = static_cast<int>(std::round(initial_flow[1]));
-  const int current_search_dist = static_cast<int>(search_dist);
-  const int tile_area = tile_h * tile_w;
-  const float tile_area_inv = 1.0f / static_cast<float>(tile_area);
-
-  // --- PRE-COPY REFERENCE TILE (Hanya dilakukan sekali di luar loop search)
-  // --- Salin Reference Tile ke buffer kontigu sekali saja
-  copyTileToContiguousBuffer(ref_layer, tile_y, tile_x, tile_h, tile_w,
-                             ref_tile_buffer_g);
-
-  for (int dy = -current_search_dist; dy <= current_search_dist; ++dy) {
-    for (int dx = -current_search_dist; dx <= current_search_dist; ++dx) {
-      const int test_y = tile_y + init_dy + dy;
-      const int test_x = tile_x + init_dx + dx;
-
-      // Batas Cek
-      if (test_y < 0 || test_x < 0 || test_y + tile_h > h_layer ||
-          test_x + tile_w > w_layer)
-        continue;
-
-      float current_cost = 0.0f;
-
-      // Compute spatial ZMCL cost (OPTIMIZED: single pass)
-      // 1. Copy Comparison Tile untuk posisi test (test_x, test_y)
-      copyTileToContiguousBuffer(comp_layer, test_y, test_x, tile_h, tile_w,
-                                 comp_tile_buffer_g);
-
-      // 2. Hitung cost AVX sekali jalan
-      current_cost = calculate_fine_analysis(
-          ref_tile_buffer_g.data(), comp_tile_buffer_g.data(), tile_area);
-
-      Candidate cand{cv::Point2f(init_dx + dx, init_dy + dy),
-                     current_cost * tile_area_inv};
-
-      // --- Logika Seleksi Top 5 Kandidat ---
-      if (out_candidates.size() < 5) {
-        out_candidates.push_back(cand);
-        std::sort(out_candidates.begin(), out_candidates.end(),
-                  [](const Candidate &a, const Candidate &b) {
-                    return a.cost < b.cost;
-                  });
-      } else if (cand.cost < out_candidates.back().cost) {
-        out_candidates.back() = cand;
-        std::sort(out_candidates.begin(), out_candidates.end(),
-                  [](const Candidate &a, const Candidate &b) {
-                    return a.cost < b.cost;
-                  });
-      }
+static inline float compute_zmssd_cost(
+    const cv::Mat &ref_layer, const cv::Mat &comp_layer,
+    int /*y*/, int /*x*/, int test_y, int test_x,
+    int tile_h, int tile_w,
+    int /*h*/, int /*w*/, int comp_h, int comp_w) {
+    
+    if (test_y < 0 || test_x < 0 || test_y + tile_h > comp_h || test_x + tile_w > comp_w) {
+        return std::numeric_limits<float>::max();
     }
-  }
+    
+    copyTileToContiguousBuffer(comp_layer, test_y, test_x, tile_h, tile_w, comp_tile_buffer_g);
+    return calculate_fine_analysis(ref_tile_buffer_g.data(), comp_tile_buffer_g.data(), tile_h * tile_w);
 }
 
-/**
- * Pencarian tile matching untuk level halus (fine) - hanya evaluasi kandidat
- */
-struct FineLevelSearchContext {
-  std::vector<Candidate> candidates;
+static void _initialize_coarsest_flow_kernel(cv::Mat& flow, int h, int w, float init_dx, float init_dy) {
+    flow = cv::Mat(h, w, CV_32FC2, cv::Scalar(init_dx, init_dy));
+}
 
-  FineLevelSearchContext() { candidates.reserve(1); }
-
-  void reset() { candidates.clear(); }
+struct RegParams {
+    float avg_dx;
+    float avg_dy;
+    float weight;
 };
 
-static inline bool searchFineLevelDirect(const cv::Mat &ref_layer,
-                                         const cv::Mat &comp_layer, int tile_y,
-                                         int tile_x, int tile_h, int tile_w,
-                                         const cv::Vec2f &initial_flow,
-                                         Candidate &out_candidate,
-                                         std::vector<float> &ref_buf,
-                                         std::vector<float> &comp_buf) {
-  // Parameter Threshold Adaptive
-  constexpr float ADAPTIVE_THRESHOLD = 0.05f;
-  constexpr float REFINEMENT_QUALITY_THRESHOLD =
-      0.01f; // Cost threshold untuk apply refinement
-  constexpr float MIN_COST_RANGE =
-      0.001f; // Minimum cost range untuk meaningful parabolic fit
-
-  const int h_layer = ref_layer.rows;
-  const int w_layer = ref_layer.cols;
-  const int tile_area = tile_h * tile_w;
-  // Pre-calculation inverse area untuk normalisasi
-  const float tile_area_inv = 1.0f / static_cast<float>(tile_area);
-
-  // 1. Setup Center Point
-  const int center_dx = static_cast<int>(std::round(initial_flow[0]));
-  const int center_dy = static_cast<int>(std::round(initial_flow[1]));
-
-  // Cek Bounds Awal (Early Exit jika titik awal di luar gambar)
-  if (tile_y + center_dy < 0 || tile_x + center_dx < 0 ||
-      tile_y + center_dy + tile_h > h_layer ||
-      tile_x + center_dx + tile_w > w_layer)
-    return false;
-
-  // 2. Load Reference Tile (SEKALI SAJA)
-  // Kita menggunakan ZMCL/AVX untuk SEMUA ukuran tile di level ini.
-  // Asumsi: calculate_fine_analysis bisa menangani ukuran tile berapapun
-  // selama buffer vector-nya cukup (yang sudah dihandle oleh
-  // copyTileToContiguousBuffer).
-  copyTileToContiguousBuffer(ref_layer, tile_y, tile_x, tile_h, tile_w,
-                             ref_buf);
-
-  // Helper Lambda Ringan
-  // Tidak ada lagi percabangan FFT vs ZMCL
-  auto evaluate_offset = [&](int dx, int dy, float &cost_out) -> bool {
-    const int ty = tile_y + dy;
-    const int tx = tile_x + dx;
-
-    // Bounds check per titik
-    if (ty < 0 || tx < 0 || ty + tile_h > h_layer || tx + tile_w > w_layer) {
-      cost_out = std::numeric_limits<float>::max();
-      return false;
-    }
-
-    // Copy Comp tile ke buffer & Hitung Cost
-    copyTileToContiguousBuffer(comp_layer, ty, tx, tile_h, tile_w, comp_buf);
-    cost_out =
-        calculate_fine_analysis(ref_buf.data(), comp_buf.data(), tile_area);
-
-    return true;
-  };
-
-  // --- PHASE 1: Collect 9-point costs untuk cache-based parabolic refinement
-  // --- Array untuk menyimpan 9 costs dalam layout row-major:
-  // [-1,-1] [0,-1] [1,-1]
-  // [-1, 0] [0, 0] [1, 0]
-  // [-1, 1] [0, 1] [1, 1]
-  float costs_3x3[9];
-  int cost_idx = 0;
-  float best_cost = std::numeric_limits<float>::max();
-  int best_dx = center_dx;
-  int best_dy = center_dy;
-
-  for (int ddy = -1; ddy <= 1; ++ddy) {
-    for (int ddx = -1; ddx <= 1; ++ddx) {
-      int check_dx = center_dx + ddx;
-      int check_dy = center_dy + ddy;
-      float neighbor_cost;
-
-      if (evaluate_offset(check_dx, check_dy, neighbor_cost)) {
-        costs_3x3[cost_idx] = neighbor_cost * tile_area_inv;
-
-        if (neighbor_cost < best_cost) {
-          best_cost = neighbor_cost;
-          best_dx = check_dx;
-          best_dy = check_dy;
-        }
-      } else {
-        costs_3x3[cost_idx] = std::numeric_limits<float>::max();
-      }
-      cost_idx++;
-    }
-  }
-
-  const float center_cost = costs_3x3[4]; // [0,0]
-  const float normalized_center_cost = center_cost;
-
-  // --- PHASE 2: Conditional Cache-Based Parabolic Refinement ---
-  // Hanya apply jika: ada room untuk improvement dan ada signal yang cukup
-  cv::Point2f final_flow =
-      cv::Point2f(static_cast<float>(best_dx), static_cast<float>(best_dy));
-
-  // Count valid costs dan hitung cost range
-  float cost_min = std::numeric_limits<float>::max();
-  float cost_max = -std::numeric_limits<float>::max();
-  int valid_costs = 0;
-
-  for (int i = 0; i < 9; ++i) {
-    if (costs_3x3[i] != std::numeric_limits<float>::max()) {
-      cost_min = std::min(cost_min, costs_3x3[i]);
-      cost_max = std::max(cost_max, costs_3x3[i]);
-      valid_costs++;
-    }
-  }
-
-  float cost_range = cost_max - cost_min;
-
-  // --- LIGHTWEIGHT OUTLIER FILTERING ---
-  // Calculate mean & std dari valid costs
-  float cost_sum = 0.0f;
-  for (int i = 0; i < 9; ++i) {
-    if (costs_3x3[i] != std::numeric_limits<float>::max()) {
-      cost_sum += costs_3x3[i];
-    }
-  }
-  float cost_mean = (valid_costs > 0) ? cost_sum / valid_costs : 0.0f;
-
-  // Calculate standard deviation
-  float cost_sq_sum = 0.0f;
-  for (int i = 0; i < 9; ++i) {
-    if (costs_3x3[i] != std::numeric_limits<float>::max()) {
-      float diff = costs_3x3[i] - cost_mean;
-      cost_sq_sum += diff * diff;
-    }
-  }
-  float cost_std =
-      (valid_costs > 1) ? std::sqrt(cost_sq_sum / (valid_costs - 1)) : 0.0f;
-
-  // Mark extreme outliers sebagai invalid (> mean + 2*sigma)
-  float outlier_threshold = cost_mean + 2.0f * cost_std;
-  int filtered_valid_costs = 0;
-  for (int i = 0; i < 9; ++i) {
-    if (costs_3x3[i] != std::numeric_limits<float>::max() &&
-        costs_3x3[i] > outlier_threshold) {
-      costs_3x3[i] = std::numeric_limits<float>::max();
-    } else if (costs_3x3[i] != std::numeric_limits<float>::max()) {
-      filtered_valid_costs++;
-    }
-  }
-
-  // Refinement condition:
-  // 1. Sufficient valid costs untuk parabolic fit (after filtering)
-  // 2. Center cost > threshold (ada room untuk improvement)
-  // 3. Sufficient cost range (signal yang jelas)
-  if (filtered_valid_costs >= 5 &&
-      normalized_center_cost > REFINEMENT_QUALITY_THRESHOLD &&
-      cost_range > MIN_COST_RANGE) {
-    // Parabolic fitting using CACHED costs (no new function calls!)
-    float left_cost = costs_3x3[3];   // [-1,0]
-    float right_cost = costs_3x3[5];  // [1,0]
-    float top_cost = costs_3x3[1];    // [0,-1]
-    float bottom_cost = costs_3x3[7]; // [0,1]
-
-    // Only proceed if cardinal neighbors are valid (not filtered as outliers)
-    if (left_cost != std::numeric_limits<float>::max() &&
-        right_cost != std::numeric_limits<float>::max() &&
-        top_cost != std::numeric_limits<float>::max() &&
-        bottom_cost != std::numeric_limits<float>::max()) {
-      // X-direction parabolic fit (gunakan left, center, right)
-      float delta_x = 0.0f;
-      {
-        float c_coeff = (right_cost + left_cost - 2.0f * center_cost) / 2.0f;
-        if (std::fabs(c_coeff) > 1e-6f) {
-          float b_coeff = (right_cost - left_cost) / 2.0f;
-          delta_x = -b_coeff / (2.0f * c_coeff);
-          // Clamp untuk mencegah outlier
-          delta_x = std::max(-0.5f, std::min(0.5f, delta_x));
-        }
-      }
-
-      // Y-direction parabolic fit (gunakan top, center, bottom)
-      float delta_y = 0.0f;
-      {
-        float c_coeff = (bottom_cost + top_cost - 2.0f * center_cost) / 2.0f;
-        if (std::fabs(c_coeff) > 1e-6f) {
-          float b_coeff = (bottom_cost - top_cost) / 2.0f;
-          delta_y = -b_coeff / (2.0f * c_coeff);
-          // Clamp untuk mencegah outlier
-          delta_y = std::max(-0.5f, std::min(0.5f, delta_y));
-        }
-      }
-
-      // Apply refined offset
-      final_flow = cv::Point2f(static_cast<float>(best_dx) + delta_x,
-                               static_cast<float>(best_dy) + delta_y);
-    }
-  }
-
-  // Output Result
-  out_candidate.flow = final_flow;
-  out_candidate.cost = best_cost * tile_area_inv;
-
-  return true;
-}
-
-static inline cv::Point2f selectBestCandidate(
-    const std::vector<Candidate> &candidates,
-    const cv::Mat &guide_flow, // Ganti nama biar jelas (ini upsampled flow)
-    int tile_y, int tile_x, int tile_h, int tile_w) {
-  // 1. Early Exit
-  if (candidates.empty())
-    return cv::Point2f(0, 0);
-
-  // Ambil kandidat terbaik secara visual (Cost terendah)
-  const float best_appearance_cost = candidates.front().cost;
-  const cv::Point2f best_appearance_flow = candidates.front().flow;
-
-  // --- 2. Analisis Tetangga (Neighborhood Statistics) ---
-  // Kita mengambil info dari 'guide_flow' (flow level sebelumnya yg di-upscale)
-  // karena flow level sekarang belum fully compute.
-
-  cv::Vec2f sum_neigh(0.0f, 0.0f);
-  float sum_sq_diff = 0.0f;
-  int neighbor_count = 0;
-
-  const int max_row = guide_flow.rows;
-  const int max_col = guide_flow.cols;
-
-  // Pointer access langsung ke baris yang relevan untuk kecepatan
-  // Kita hanya cek 3 baris: y-1, y, y+1
-  for (int dy = -1; dy <= 1; ++dy) {
-    const int ny = tile_y + dy;
-    if (ny < 0 || ny >= max_row)
-      continue;
-
-    const cv::Vec2f *row_ptr = guide_flow.ptr<cv::Vec2f>(ny);
-
-    for (int dx = -1; dx <= 1; ++dx) {
-      if (dy == 0 && dx == 0)
-        continue; // Skip center
-
-      const int nx = tile_x + dx;
-      if (nx >= 0 && nx < max_col) {
-        const cv::Vec2f &f = row_ptr[nx];
-        sum_neigh += f;
-        // Untuk varian kasar, kita hitung selisih dari center sementara
-        // (Nanti dikoreksi, tapi untuk speed ini cukup akurat)
-        float dist_sq =
-            (f[0] - best_appearance_flow.x) * (f[0] - best_appearance_flow.x) +
-            (f[1] - best_appearance_flow.y) * (f[1] - best_appearance_flow.y);
-        sum_sq_diff += dist_sq;
-
-        neighbor_count++;
-      }
-    }
-  }
-
-  // Jika tidak ada tetangga valid, kembalikan best appearance
-  if (neighbor_count == 0)
-    return best_appearance_flow;
-
-  const float inv_count = 1.0f / static_cast<float>(neighbor_count);
-  const cv::Vec2f avg_neigh = sum_neigh * inv_count;
-  const float avg_x = avg_neigh[0];
-  const float avg_y = avg_neigh[1];
-
-  // --- 3. Hitung Lambda (Weight) secara Ringan ---
-  float variance = sum_sq_diff * inv_count;
-
-  // Base lambda
-  float lambda = 1.5f;
-
-  // Penalties (Pengganti Exp)
-  // Jika varian tetangga tinggi (> 5.0), kurangi lambda (jangan terlalu dipaksa
-  // ikut tetangga yang galau)
-  if (variance > 5.0f)
-    lambda *= 0.5f;
-  else if (variance < 0.5f)
-    lambda *= 1.5f; // Tetangga sangat sepakat, ikuti mereka
-
-  // Confidence Boost (Pengganti Sobel/Texture analysis)
-  // Jika cost appearance sangat kecil (match bagus), kurangi pengaruh spatial
-  if (best_appearance_cost < 0.01f) {
-    lambda *= 0.1f; // Sangat percaya appearance
-  } else if (best_appearance_cost > 0.1f) {
-    lambda *= 3.0f; // Appearance ragu, paksa ikut tetangga
-  }
-
-  // --- 4. Seleksi Kandidat (Squared Distance - Tanpa Sqrt) ---
-  float min_total_cost = std::numeric_limits<float>::max();
-  cv::Point2f chosen_flow = best_appearance_flow;
-
-  // Pre-calcs
-  const float spatial_weight = lambda;
-
-  for (const auto &cand : candidates) {
-    // Squared Euclidean Distance (L2^2) -> Jauh lebih cepat dari sqrt(L2)
-    const float dx = cand.flow.x - avg_x;
-    const float dy = cand.flow.y - avg_y;
-    const float spatial_dist_sq = dx * dx + dy * dy;
-
-    // Total Cost = Appearance + Lambda * Spatial_Squared
-    // Catatan: Karena kita pakai dist squared, nilai spatial akan membesar
-    // kuadratik. Tapi karena ini hanya seleksi relatif, urutannya tetap valid.
-    const float total_cost =
-        cand.cost + (spatial_weight * spatial_dist_sq *
-                     0.1f); // 0.1f scaling factor untuk imbangi squared
-
-    if (total_cost < min_total_cost) {
-      min_total_cost = total_cost;
-      chosen_flow = cand.flow;
-    }
-  }
-
-  return chosen_flow;
-}
-
-/**
- * Apply RANSAC untuk outlier removal pada level kasar
- */
-static void RANSACOutlierRemoval(cv::Mat &flow, int layer_index,
-                                 int total_layers) {
-  if (layer_index < static_cast<int>(total_layers) - 1)
-    return;
-
-  static thread_local std::vector<cv::Point2f> flow_vectors;
-  flow_vectors.clear();
-  flow_vectors.reserve(flow.total() / 4);
-
-  const float min_magnitude_for_ransac =
-      std::max(0.2f, static_cast<float>(std::min(flow.rows, flow.cols)) *
-                         0.002f); // Increased min_magnitude
-
-  // Collect valid flow vectors and calculate their magnitudes
-  std::vector<float> magnitudes;
-  for (int r = 0; r < flow.rows; ++r) {
-    const cv::Vec2f *row_ptr = flow.ptr<cv::Vec2f>(r);
-    for (int c = 0; c < flow.cols; ++c) {
-      const cv::Vec2f &vec = row_ptr[c];
-      float mag = cv::norm(vec);
-      if (mag > min_magnitude_for_ransac) {
-        flow_vectors.emplace_back(vec[0], vec[1]);
-        magnitudes.push_back(mag);
-      }
-    }
-  }
-
-  if (flow_vectors.size() <= 12)
-    return;
-
-  // Calculate adaptive distance_threshold
-  std::sort(magnitudes.begin(), magnitudes.end());
-  float median_magnitude = magnitudes[magnitudes.size() / 2];
-  const float distance_threshold = std::max(
-      1.0f, median_magnitude * 0.2f); // 20% of median magnitude, min 1.0f
-
-  // RANSAC parameters
-  const int min_inliers_needed = static_cast<int>(flow_vectors.size() * 0.5);
-  const int max_iterations =
-      std::min(100, static_cast<int>(flow_vectors.size()));
-  const int early_stop_threshold = static_cast<int>(flow_vectors.size() * 0.8);
-
-  cv::Vec2f best_global_flow(0, 0);
-  int max_inliers = 0;
-
-  // RANSAC iterations
-  for (int iter = 0;
-       iter < max_iterations && max_inliers < early_stop_threshold; ++iter) {
-    const int rand_idx =
-        cv::theRNG().uniform(0, static_cast<int>(flow_vectors.size()));
-    const cv::Point2f hypothesis_flow = flow_vectors[rand_idx];
-
-    int current_inliers = 0;
-    cv::Vec2f inlier_sum(0, 0);
-
-    for (const auto &vec : flow_vectors) {
-      if (cv::norm(vec - hypothesis_flow) < distance_threshold) {
-        current_inliers++;
-        inlier_sum[0] += vec.x;
-        inlier_sum[1] += vec.y;
-      }
-    }
-
-    if (current_inliers > max_inliers) {
-      max_inliers = current_inliers;
-      best_global_flow = inlier_sum / static_cast<float>(current_inliers);
-    }
-  }
-
-  if (max_inliers > min_inliers_needed)
-    flow.setTo(cv::Scalar(best_global_flow[0], best_global_flow[1]));
-}
-
-/**
- * Spatial/Local RANSAC untuk final flow post-processing (OPTIMIZED)
- * Adaptive window processing dengan early termination untuk low-variance
- * regions
- */
-static void spatialLocalRANSACCleanup(
-    cv::Mat &flow,
-    int window_size = 64, // Adaptive window size
-    float overlap_ratio =
-        0.0f) // OPTIMIZATION: Zero overlap removes blending overhead
-{
-  if (flow.empty() || flow.type() != CV_32FC2)
-    return;
-
-  const int h = flow.rows;
-  const int w = flow.cols;
-
-  // Jika overlap 0, kita gunakan step = window_size (Non-overlapping blocks)
-  const int step = (overlap_ratio > 0.0f)
-                       ? static_cast<int>(window_size * (1.0f - overlap_ratio))
-                       : window_size;
-
-  // --- PHASE 1: PREPARE JOBS ---
-  struct WindowJob {
-    int wx, wy;
-  };
-  std::vector<WindowJob> jobs;
-  jobs.reserve((h / step + 1) * (w / step + 1));
-
-  for (int wy = 0; wy <= h - window_size; wy += step) {
-    for (int wx = 0; wx <= w - window_size; wx += step) {
-      jobs.push_back({wx, wy});
-    }
-  }
-
-#pragma omp parallel
-  {
-    // Thread-local buffers
-    const int max_pixels = window_size * window_size;
-    std::vector<float> magnitudes_buffer;
-    magnitudes_buffer.reserve(max_pixels / 4); // Subsampled
-
-    std::vector<cv::Point2f> flow_vectors;
-    flow_vectors.reserve(max_pixels / 4); // Subsampled
-
-#pragma omp for schedule(dynamic)
-    for (int i = 0; i < (int)jobs.size(); ++i) {
-      const int wx = jobs[i].wx;
-      const int wy = jobs[i].wy;
-
-      cv::Rect window_roi(wx, wy, window_size, window_size);
-      cv::Mat window_flow = flow(window_roi);
-
-      // --- 1. Quick Variance check (Subsampled) ---
-      magnitudes_buffer.clear();
-      float mag_sum = 0.0f;
-      for (int r = 0; r < window_size; r += 2) {
-        const cv::Vec2f *row_ptr = window_flow.ptr<cv::Vec2f>(r);
-        for (int c = 0; c < window_size; c += 2) {
-          const cv::Vec2f &f = row_ptr[c];
-          float mag = std::sqrt(f[0] * f[0] + f[1] * f[1]);
-          magnitudes_buffer.push_back(mag);
-          mag_sum += mag;
-        }
-      }
-
-      float mag_mean = mag_sum / magnitudes_buffer.size();
-      float mag_variance = 0.0f;
-      for (float mag : magnitudes_buffer) {
-        float diff = mag - mag_mean;
-        mag_variance += diff * diff;
-      }
-      mag_variance /= magnitudes_buffer.size();
-
-      // Skip RANSAC for low variance (Sangat umum di area statis/langit)
-      if (mag_variance < 0.5f)
-        continue;
-
-      // --- 2. RANSAC ---
-      std::nth_element(magnitudes_buffer.begin(),
-                       magnitudes_buffer.begin() + magnitudes_buffer.size() / 2,
-                       magnitudes_buffer.end());
-      float median_magnitude = magnitudes_buffer[magnitudes_buffer.size() / 2];
-      float distance_threshold = std::max(1.0f, median_magnitude * 0.25f);
-      float dist_thresh_sq = distance_threshold * distance_threshold;
-
-      flow_vectors.clear();
-      for (int r = 0; r < window_size; r += 2) {
-        const cv::Vec2f *row_ptr = window_flow.ptr<cv::Vec2f>(r);
-        for (int c = 0; c < window_size; c += 2) {
-          const cv::Vec2f &f = row_ptr[c];
-          flow_vectors.emplace_back(f[0], f[1]);
-        }
-      }
-
-      cv::Vec2f best_local_flow(0, 0);
-      int max_inliers = 0;
-      const int num_vectors = (int)flow_vectors.size();
-      const int min_inliers_needed = static_cast<int>(num_vectors * 0.4f);
-      const int max_iterations = (mag_variance > 5.0f) ? 25 : 12;
-
-      for (int iter = 0;
-           iter < max_iterations && max_inliers < min_inliers_needed; ++iter) {
-        const int rand_idx = cv::theRNG().uniform(0, num_vectors);
-        const cv::Point2f &hypothesis = flow_vectors[rand_idx];
-
-        int current_inliers = 0;
-        float in_sum_x = 0.0f, in_sum_y = 0.0f;
-
-        for (const auto &v : flow_vectors) {
-          float dx = v.x - hypothesis.x;
-          float dy = v.y - hypothesis.y;
-          if ((dx * dx + dy * dy) < dist_thresh_sq) {
-            current_inliers++;
-            in_sum_x += v.x;
-            in_sum_y += v.y;
-          }
-        }
-
-        if (current_inliers > max_inliers) {
-          max_inliers = current_inliers;
-          float inv = 1.0f / (float)current_inliers;
-          best_local_flow = cv::Vec2f(in_sum_x * inv, in_sum_y * inv);
-        }
-      }
-
-      // --- 3. Apply Directly (Zero Overlap logic) ---
-      if (max_inliers > min_inliers_needed) {
-        for (int r = 0; r < window_size; ++r) {
-          cv::Vec2f *row_ptr = window_flow.ptr<cv::Vec2f>(r);
-          for (int c = 0; c < window_size; ++c) {
-            row_ptr[c] = best_local_flow;
-          }
-        }
-      }
-    }
-  }
-}
-
-static inline float calculateCostAtIntegerPos(
-    const std::vector<float> &ref_tile_buffer, // Buffer Ref yang SUDAH diisi
-    const cv::Mat &comp_layer, int test_y, int test_x, int tile_h, int tile_w,
-    std::vector<float> &comp_tile_buffer // Buffer Comp untuk diisi ulang
+static inline RegParams _compute_regularization_params(
+    const cv::Mat &flow,
+    int y, int x,
+    int tile_h, int tile_w,
+    int h_total, int w_total
 ) {
-  // Cek batas gambar
-  if (test_y < 0 || test_x < 0 || test_y + tile_h > comp_layer.rows ||
-      test_x + tile_w > comp_layer.cols) {
-    return std::numeric_limits<float>::max();
-  }
-
-  // Salin Comparison Tile ke buffer kontigu
-  // HANYA ini yang perlu dilakukan berulang per lokasi pencarian
-  AlignmentFlowHelpers::copyTileToContiguousBuffer(
-      comp_layer, test_y, test_x, tile_h, tile_w, comp_tile_buffer);
-
-  // Hitung Cost (AVX ZMCL)
-  return calculate_fine_analysis(ref_tile_buffer.data(),
-                                 comp_tile_buffer.data(), tile_h * tile_w);
+    float sum_dx = 0.0f;
+    float sum_dy = 0.0f;
+    float sum_sq_diff = 0.0f;
+    float count = 0.0f;
+    
+    int step_y = tile_h;
+    int step_x = tile_w;
+    
+    int center_y = y + tile_h / 2;
+    int center_x = x + tile_w / 2;
+    
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            if (dy == 0 && dx == 0) continue;
+            
+            int ny = center_y + dy * step_y;
+            int nx = center_x + dx * step_x;
+            
+            if (ny >= 0 && ny < h_total && nx >= 0 && nx < w_total) {
+                cv::Vec2f val = flow.at<cv::Vec2f>(ny, nx);
+                sum_dx += val[0];
+                sum_dy += val[1];
+                count += 1.0f;
+            }
+        }
+    }
+    
+    float avg_dx = 0.0f, avg_dy = 0.0f, variance = 0.0f, lambda_val = 1.5f;
+    
+    if (count > 0.0f) {
+        avg_dx = sum_dx / count;
+        avg_dy = sum_dy / count;
+        
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (dy == 0 && dx == 0) continue;
+                
+                int ny = center_y + dy * step_y;
+                int nx = center_x + dx * step_x;
+                
+                if (ny >= 0 && ny < h_total && nx >= 0 && nx < w_total) {
+                    cv::Vec2f val = flow.at<cv::Vec2f>(ny, nx);
+                    float dist = (val[0] - avg_dx) * (val[0] - avg_dx) + (val[1] - avg_dy) * (val[1] - avg_dy);
+                    sum_sq_diff += dist;
+                }
+            }
+        }
+        
+        variance = sum_sq_diff / count;
+        
+        if (variance > 5.0f) lambda_val *= 0.5f;
+        else if (variance < 0.5f) lambda_val *= 1.5f;
+        
+    } else {
+        cv::Vec2f val = flow.at<cv::Vec2f>(center_y, center_x);
+        avg_dx = val[0];
+        avg_dy = val[1];
+    }
+    
+    float weight = lambda_val * 0.1f;
+    if (count < 8.0f) weight *= 2.0f;
+    if (count < 4.0f) weight *= 4.0f;
+    
+    return {avg_dx, avg_dy, weight};
 }
 
-/**
- * Proses tile matching untuk satu layer
- * OPTIMIZED FINEST LAYER:
- * - Tidak ada Subpixel Refinement (Berat) di layer halus.
- * - Menggunakan "Smart Selection": Memilih antara mempertahankan presisi float
- * dari layer kasar atau pindah ke grid integer baru jika ditemukan match yang
- * lebih baik.
- */
-static cv::Mat processSingleLayer(const cv::Mat &ref_layer,
-                                  const cv::Mat &comp_layer,
-                                  const cv::Mat &previous_level_flow,
-                                  int layer_index, int total_layers, int tile_h,
-                                  int tile_w, float base_search_dist) {
-  using namespace ImageAlignmentConfig;
+static void _block_search_kernel(
+    const cv::Mat &ref_layer, const cv::Mat &comp_layer,
+    cv::Mat &refined_flow,
+    int tile_h, int tile_w, int search_radius
+) {
+    int h = ref_layer.rows, w = ref_layer.cols;
+    int comp_h = comp_layer.rows, comp_w = comp_layer.cols;
+    int step_y = tile_h, step_x = tile_w;
 
-  const bool is_coarsest_layer = (layer_index == total_layers - 1);
-  const bool is_finest_layer = (layer_index == 0);
+    for (int tile_y = 0; tile_y < (h + step_y - 1) / step_y; ++tile_y) {
+        for (int tile_x = 0; tile_x < (w + step_x - 1) / step_x; ++tile_x) {
+            int y = std::max(0, std::min(tile_y * step_y, h - tile_h));
+            int x = std::max(0, std::min(tile_x * step_x, w - tile_w));
 
-  const int h_layer = ref_layer.rows;
-  const int w_layer = ref_layer.cols;
+            copyTileToContiguousBuffer(ref_layer, y, x, tile_h, tile_w, ref_tile_buffer_g);
 
-  // Timer per layer components
+            float best_cost = 1e10f;
+            float best_dx = 0.0f, best_dy = 0.0f;
+            float bias_weight = 0.999f;
 
-  // --- 1. Inisialisasi Flow ---
-  cv::Mat flow;
-  {
-    // Timer khusus Upsampling
-    if (is_coarsest_layer)
-      flow = AlignmentFlowHelpers::initializeCoarsestFlow(ref_layer);
-    else
-      flow =
-          AlignmentFlowHelpers::upsamplingFlow(previous_level_flow, ref_layer);
-  }
-
-  // --- 2. Setup Tile Size ---
-  // Clamp tile size agar tidak lebih besar dari gambar layer saat ini
-  int current_tile_h = std::max(MIN_TILE_SIZE, std::min(tile_h, h_layer));
-  int current_tile_w = std::max(MIN_TILE_SIZE, std::min(tile_w, w_layer));
-
-  // --- 3. OPTIMASI STEP (NON-OVERLAP) ---
-  // Menggunakan step sebesar ukuran tile. Mengurangi beban komputasi 75%.
-  int step_y = current_tile_h;
-  int step_x = current_tile_w;
-
-  // --- 4. Adaptive Search Distance (HDR+ style) ---
-  // With 4x pyramid, each level covers 4x more range, so constant search dist
-  // is fine
-  float current_layer_search_dist = base_search_dist;
-  if (!is_coarsest_layer) {
-    // HDR+ style: use consistent search distance (4x gap between levels is
-    // sufficient)
-    current_layer_search_dist = std::max(2.0f, base_search_dist);
-  }
-
-  const float tile_area_inv = 1.0f / (float)(current_tile_h * current_tile_w);
-
-  // OPTIMIZATION: DIRECT WRITE (Eliminate Serial Copy Phase)
-  // Kita butuh matriks tujuan terpisah agar tidak race condition saat membaca
-  // neighbor (flow) Gunakan Zeros (seperti logic original) bukan Clone, untuk
-  // hemat bandwidth.
-  cv::Mat refined_flow = cv::Mat::zeros(h_layer, w_layer, CV_32FC2);
-
-  {
-#pragma omp parallel
-    {
-      // Buffer lokal thread (reusable)
-      std::vector<cv::Vec2f> temp_initial_flows;
-      temp_initial_flows.reserve(10);
-
-      std::vector<Candidate> temp_search_results;
-      temp_search_results.reserve(16);
-
-      // Buffer Pixel ZMCL (Flat vector)
-      std::vector<float> local_ref_buffer(current_tile_h * current_tile_w);
-      std::vector<float> local_comp_buffer(current_tile_h * current_tile_w);
-
-      // Cache Cost Integer (Hanya dipakai di finest layer)
-      // OPTIMIZATION: Linear search vector is faster than std::map for small N
-      // (< 20)
-      struct CacheItem {
-        uint32_t key;
-        float val;
-      };
-      std::vector<CacheItem> integer_cost_cache;
-      integer_cost_cache.reserve(16);
-
-      // --- OPTIMASI EARLY EXIT ---
-      // Jika cost (MSE) di bawah nilai ini, hentikan pencarian kandidat lain.
-      // Increased from 0.005f to 0.008f for faster exit in flat/good regions
-      const float EARLY_EXIT_COST = 0.008f;
-
-#pragma omp for schedule(dynamic)
-      for (int y = 0; y <= h_layer - current_tile_h; y += step_y) {
-        for (int x = 0; x <= w_layer - current_tile_w; x += step_x) {
-          temp_initial_flows.clear();
-          temp_search_results.clear();
-
-          // 1. Dapatkan Kandidat
-          AlignmentFlowHelpers::generateCandidateFlows(
-              temp_initial_flows, layer_index, total_layers,
-              previous_level_flow, flow, y, x, current_tile_h, current_tile_w);
-
-          // 2. Evaluasi Kandidat
-
-          // === JALUR CEPAT: FINEST LAYER (ZMCL/AVX Optimized) ===
-          if (is_finest_layer) {
-            // Copy Reference Tile SEKALI saja
-            AlignmentFlowHelpers::copyTileToContiguousBuffer(
-                ref_layer, y, x, current_tile_h, current_tile_w,
-                local_ref_buffer);
-            integer_cost_cache.clear();
-
-            float best_cost_so_far = std::numeric_limits<float>::max();
-
-            for (const auto &initial_vec : temp_initial_flows) {
-              // Snap ke grid integer untuk cost calculation
-              int i_dx = static_cast<int>(std::round(initial_vec[0]));
-              int i_dy = static_cast<int>(std::round(initial_vec[1]));
-
-              // Key packing (int16 | int16 -> int32)
-              uint32_t key = (static_cast<uint16_t>(i_dy) << 16) |
-                             static_cast<uint16_t>(i_dx);
-
-              float cost = -1.0f;
-
-              // Linear Search
-              for (const auto &item : integer_cost_cache) {
-                if (item.key == key) {
-                  cost = item.val;
-                  break;
+            for (int dy = -search_radius; dy <= search_radius; ++dy) {
+                for (int dx = -search_radius; dx <= search_radius; ++dx) {
+                    float cost = compute_zmssd_cost(ref_layer, comp_layer, y, x, y+dy, x+dx, tile_h, tile_w, h, w, comp_h, comp_w);
+                    if (dx == 0 && dy == 0) cost *= bias_weight;
+                    if (cost < best_cost) {
+                        best_cost = cost; best_dx = static_cast<float>(dx); best_dy = static_cast<float>(dy);
+                    }
                 }
-              }
+            }
 
-              if (cost < 0.0f) {
-                // Cache Miss: Hitung Heavy Cost
-                int test_y = y + i_dy;
-                int test_x = x + i_dx;
+            if (-search_radius < best_dx && best_dx < search_radius && -search_radius < best_dy && best_dy < search_radius) {
+                float c0 = best_cost;
+                float cx_m1 = compute_zmssd_cost(ref_layer, comp_layer, y, x, y+int(best_dy), x+int(best_dx)-1, tile_h, tile_w, h, w, comp_h, comp_w);
+                float cx_p1 = compute_zmssd_cost(ref_layer, comp_layer, y, x, y+int(best_dy), x+int(best_dx)+1, tile_h, tile_w, h, w, comp_h, comp_w);
+                float cy_m1 = compute_zmssd_cost(ref_layer, comp_layer, y, x, y+int(best_dy)-1, x+int(best_dx), tile_h, tile_w, h, w, comp_h, comp_w);
+                float cy_p1 = compute_zmssd_cost(ref_layer, comp_layer, y, x, y+int(best_dy)+1, x+int(best_dx), tile_h, tile_w, h, w, comp_h, comp_w);
 
-                cost = AlignmentFlowHelpers::calculateCostAtIntegerPos(
-                    local_ref_buffer, comp_layer, test_y, test_x,
-                    current_tile_h, current_tile_w, local_comp_buffer);
+                float denom_x = 2.0f * (cx_p1 + cx_m1 - 2.0f * c0);
+                if (std::abs(denom_x) > 1e-6f) best_dx -= (cx_p1 - cx_m1) / denom_x;
+                float denom_y = 2.0f * (cy_p1 + cy_m1 - 2.0f * c0);
+                if (std::abs(denom_y) > 1e-6f) best_dy -= (cy_p1 - cy_m1) / denom_y;
+            }
 
-                if (cost != std::numeric_limits<float>::max()) {
-                  cost *= tile_area_inv;
+            for (int r = 0; r < tile_h; ++r) {
+                cv::Vec2f* row_ptr = refined_flow.ptr<cv::Vec2f>(y+r);
+                for (int c = 0; c < tile_w; ++c) {
+                    if (y + r < h && x + c < w) row_ptr[x+c] = cv::Vec2f(best_dx, best_dy);
                 }
-                integer_cost_cache.push_back({key, cost});
-              }
-
-              // Simpan hasil
-              if (cost != std::numeric_limits<float>::max()) {
-                temp_search_results.push_back({initial_vec, cost});
-                if (cost < best_cost_so_far)
-                  best_cost_so_far = cost;
-              }
-
-              // CHECK EARLY EXIT
-              // Jika kandidat pertama (Inherited Flow) sudah bagus, stop.
-              if (best_cost_so_far < EARLY_EXIT_COST)
-                break;
             }
-          }
-          // === JALUR STANDARD: COARSE LAYER ===
-          else {
-            for (const auto &initial_vec : temp_initial_flows) {
-              AlignmentFlowHelpers::searchCoarseLevelDirect(
-                  ref_layer, comp_layer, y, x, current_tile_h, current_tile_w,
-                  initial_vec, current_layer_search_dist, temp_search_results);
-
-              // Early exit untuk coarse search
-              if (!temp_search_results.empty() &&
-                  (temp_search_results.front().cost * tile_area_inv) <
-                      EARLY_EXIT_COST) {
-                break;
-              }
-            }
-          }
-
-          // 3. Pilih Flow Terbaik
-          cv::Point2f chosen_flow;
-          if (temp_search_results.empty()) {
-            // Fallback ke nilai awal flow map jika search gagal
-            chosen_flow = flow.at<cv::Point2f>(y, x);
-          } else if (temp_search_results.size() == 1) {
-            // OPTIMASI: Fast path untuk single candidate (skip expensive
-            // spatial analysis)
-            chosen_flow = temp_search_results[0].flow;
-          } else {
-            chosen_flow = AlignmentFlowHelpers::selectBestCandidate(
-                temp_search_results, flow, y, x, current_tile_h,
-                current_tile_w);
-          }
-
-          // 4. Subpixel Refinement
-          // SKIP untuk Finest Layer (boros waktu, gain visual minim di resolusi
-          // penuh) SKIP untuk Coarsest Layer (akan di-handle RANSAC)
-          if (!is_finest_layer && !is_coarsest_layer) {
-            chosen_flow = subpixel_refinement(
-                ref_layer, comp_layer, x, y, (int)std::round(chosen_flow.x),
-                (int)std::round(chosen_flow.y), current_tile_w, current_tile_h);
-          }
-
-          // 5. DIRECT WRITE TO OUTPUT MATRIX (Safe because no overlap)
-          int end_y = std::min(y + current_tile_h, h_layer);
-          int end_x = std::min(x + current_tile_w, w_layer);
-
-          for (int ry = y; ry < end_y; ++ry) {
-            cv::Vec2f *out_ptr = refined_flow.ptr<cv::Vec2f>(ry);
-            for (int rx = x; rx < end_x; ++rx) {
-              out_ptr[rx][0] = chosen_flow.x;
-              out_ptr[rx][1] = chosen_flow.y;
-            }
-          }
         }
-      }
-    } // End Parallel Region
-  } // End Search Timer Scope
+    }
+}
 
-  // Update flow ke hasil yang sudah di-refine
-  flow = refined_flow;
+static void _search_coarse_level_kernel(
+    const cv::Mat &ref_layer, const cv::Mat &comp_layer,
+    const cv::Mat &flow, const cv::Mat &previous_flow,
+    cv::Mat &refined_flow,
+    int tile_h, int tile_w, int search_dist, int downscale_factor
+) {
+    int h = ref_layer.rows, w = ref_layer.cols;
+    int prev_h = previous_flow.rows, prev_w = previous_flow.cols;
+    int comp_h = comp_layer.rows, comp_w = comp_layer.cols;
+    int step_y = tile_h, step_x = tile_w;
+    float tile_area_inv = 1.0f / (float)(tile_h * tile_w);
 
-  // --- 5. REDUCE PHASE (REMOVED - INTEGRATED TO PARALLEL LOOP ABOVE) ---
-  // (Waktu komputasi yang sebelumnya 60ms kini menyatu dengan search phase)
+    const int neighbor_offsets[16][2] = {
+        {-1, 0}, {1, 0}, {0, -1}, {0, 1},
+        {-1, -1}, {1, -1}, {-1, 1}, {1, 1},
+        {-2, 0}, {2, 0}, {0, -2}, {0, 2},
+        {-2, -2}, {2, -2}, {-2, 2}, {2, 2}
+    };
 
-  // --- 6. POST-PROCESSING FILTERS ---
+    for (int tile_y = 0; tile_y < (h + step_y - 1) / step_y; ++tile_y) {
+        for (int tile_x = 0; tile_x < (w + step_x - 1) / step_x; ++tile_x) {
+            int y = std::max(0, std::min(tile_y * step_y, h - tile_h));
+            int x = std::max(0, std::min(tile_x * step_x, w - tile_w));
 
-  // A. Smoothing Sambungan (De-blocking)
-  // Karena kita pakai non-overlap tiles, akan muncul efek kotak-kotak.
-  // Kita haluskan dengan filter cepat.
-  if (is_finest_layer) {
-    // Di layer akhir, gunakan Box Filter (sangat cepat, O(1))
-    // Kernel 3x3 cukup (Reduced from 5x5)
-    cv::boxFilter(flow, flow, -1, cv::Size(3, 3));
-  } else {
-    // OPTIMASI: Kernel 3x3 lebih cepat (vs 5x5) dan masih efektif
-    cv::medianBlur(flow, flow, 3);
-  }
+            copyTileToContiguousBuffer(ref_layer, y, x, tile_h, tile_w, ref_tile_buffer_g);
 
-  // B. RANSAC (Hanya di level paling kasar)
-  // Untuk memastikan alignment global awal benar
-  if (layer_index >= total_layers - 2) {
-    AlignmentFlowHelpers::RANSACOutlierRemoval(flow, layer_index, total_layers);
-  }
+            RegParams reg = _compute_regularization_params(flow, y, x, tile_h, tile_w, h, w);
+            float spatial_mean_x = reg.avg_dx, spatial_mean_y = reg.avg_dy, spatial_weight = reg.weight;
 
-  return flow;
+            int center_y = y + tile_h / 2, center_x = x + tile_w / 2;
+            cv::Vec2f init_flow = flow.at<cv::Vec2f>(center_y, center_x);
+            int init_dx = static_cast<int>(std::round(init_flow[0])), init_dy = static_cast<int>(std::round(init_flow[1]));
+
+            int cands_dx[18], cands_dy[18];
+            for(int i=0; i<18; i++) { cands_dx[i] = init_dx; cands_dy[i] = init_dy; }
+
+            for (int i = 0; i < 16; ++i) {
+                int nx = center_x + neighbor_offsets[i][0] * step_x;
+                int ny = center_y + neighbor_offsets[i][1] * step_y;
+                if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+                    cv::Vec2f nf = flow.at<cv::Vec2f>(ny, nx);
+                    cands_dx[i+1] = std::round(nf[0]); cands_dy[i+1] = std::round(nf[1]);
+                }
+            }
+
+            if (!previous_flow.empty() && prev_h > 1 && prev_w > 1) {
+                int coarse_y = center_y / downscale_factor, coarse_x = center_x / downscale_factor;
+                if (coarse_y < prev_h && coarse_x < prev_w) {
+                    cv::Vec2f pf = previous_flow.at<cv::Vec2f>(coarse_y, coarse_x);
+                    cands_dx[17] = std::round(pf[0] * downscale_factor); cands_dy[17] = std::round(pf[1] * downscale_factor);
+                }
+            }
+
+            float best_cand_cost = 1e10f;
+            int best_cand_dx = init_dx, best_cand_dy = init_dy;
+
+            for (int i = 0; i < 6; ++i) {
+                int cand_idx = (i == 5) ? 17 : i;
+                int check_y = y + cands_dy[cand_idx], check_x = x + cands_dx[cand_idx];
+                bool is_unique = true;
+                for (int j = 0; j < i; ++j) {
+                    int prev_idx = (j == 5) ? 17 : j;
+                    if (cands_dx[cand_idx] == cands_dx[prev_idx] && cands_dy[cand_idx] == cands_dy[prev_idx]) { is_unique = false; break; }
+                }
+                if (is_unique) {
+                    float cost = compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w, h, w, comp_h, comp_w) * tile_area_inv;
+                    if (cost < best_cand_cost) { best_cand_cost = cost; best_cand_dx = cands_dx[cand_idx]; best_cand_dy = cands_dy[cand_idx]; }
+                }
+            }
+
+            if (best_cand_cost > 0.005f) {
+                for (int i = 6; i < 10; ++i) {
+                    int check_y = y + cands_dy[i], check_x = x + cands_dx[i];
+                    bool is_unique = true;
+                    for (int j = 0; j < 6; ++j) {
+                        int prev_idx = (j == 5) ? 17 : j;
+                        if (cands_dx[i] == cands_dx[prev_idx] && cands_dy[i] == cands_dy[prev_idx]) { is_unique = false; break; }
+                    }
+                    if (is_unique) {
+                        float cost = compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w, h, w, comp_h, comp_w) * tile_area_inv;
+                        if (cost < best_cand_cost) { best_cand_cost = cost; best_cand_dx = cands_dx[i]; best_cand_dy = cands_dy[i]; }
+                    }
+                }
+            }
+
+            if (best_cand_cost > 0.01f) {
+                for (int i = 10; i < 18; ++i) {
+                    if (i==17) continue;
+                    int check_y = y + cands_dy[i], check_x = x + cands_dx[i];
+                    bool is_unique = true;
+                    for (int j = 0; j < 10; ++j) {
+                        int prev_idx = (j == 5) ? 17 : j;
+                        if (cands_dx[i] == cands_dx[prev_idx] && cands_dy[i] == cands_dy[prev_idx]) { is_unique = false; break; }
+                    }
+                    if (is_unique) {
+                        float cost = compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w, h, w, comp_h, comp_w) * tile_area_inv;
+                        if (cost < best_cand_cost) { best_cand_cost = cost; best_cand_dx = cands_dx[i]; best_cand_dy = cands_dy[i]; }
+                    }
+                }
+            }
+
+            init_dx = best_cand_dx; init_dy = best_cand_dy;
+            float best_total_cost = 1e10f;
+            float best_dx = float(init_dx), best_dy = float(init_dy);
+
+            if (best_cand_cost >= 0.001f) {
+                for (int dy = -search_dist; dy <= search_dist; ++dy) {
+                    float cur_dy = init_dy + dy;
+                    for (int dx = -search_dist; dx <= search_dist; ++dx) {
+                        float cur_dx = init_dx + dx;
+                        int test_y = y + cur_dy, test_x = x + cur_dx;
+
+                        float raw_cost = compute_zmssd_cost(ref_layer, comp_layer, y, x, test_y, test_x, tile_h, tile_w, h, w, comp_h, comp_w);
+                        if (raw_cost == std::numeric_limits<float>::max()) continue;
+                        
+                        float visual_cost = raw_cost * tile_area_inv;
+                        float dist_sq = (cur_dx - spatial_mean_x)*(cur_dx - spatial_mean_x) + (cur_dy - spatial_mean_y)*(cur_dy - spatial_mean_y);
+                        
+                        float dynamic_weight = spatial_weight;
+                        if (visual_cost < 0.01f) dynamic_weight *= 0.1f;
+                        else if (visual_cost > 0.1f) dynamic_weight *= 3.0f;
+                        
+                        float boundary_penalty = 0.0f;
+                        if (test_y < 0 || test_y + tile_h > h || test_x < 0 || test_x + tile_w > w) {
+                            float dist_y = std::max(0.0f, std::max(float(-test_y), float(test_y + tile_h - h)));
+                            float dist_x = std::max(0.0f, std::max(float(-test_x), float(test_x + tile_w - w)));
+                            boundary_penalty = (dist_y + dist_x) * 0.01f;
+                        }
+
+                        float total_cost = visual_cost + (dynamic_weight * dist_sq) + boundary_penalty;
+                        if (total_cost < best_total_cost) {
+                            best_total_cost = total_cost; best_dx = cur_dx; best_dy = cur_dy;
+                        }
+                    }
+                }
+            }
+
+            for (int r = 0; r < tile_h; ++r) {
+                cv::Vec2f* row_ptr = refined_flow.ptr<cv::Vec2f>(y+r);
+                for (int c = 0; c < tile_w; ++c) {
+                    if (y + r < h && x + c < w) row_ptr[x+c] = cv::Vec2f(best_dx, best_dy);
+                }
+            }
+        }
+    }
+}
+
+static void _search_fine_level_kernel(
+    const cv::Mat &ref_layer, const cv::Mat &comp_layer,
+    const cv::Mat &flow, const cv::Mat &previous_flow,
+    cv::Mat &refined_flow,
+    int tile_h, int tile_w, int downscale_factor
+) {
+    int h = ref_layer.rows, w = ref_layer.cols;
+    int prev_h = previous_flow.rows, prev_w = previous_flow.cols;
+    int comp_h = comp_layer.rows, comp_w = comp_layer.cols;
+    int step_y = tile_h, step_x = tile_w;
+    float tile_area_inv = 1.0f / (float)(tile_h * tile_w);
+
+    const int neighbor_offsets[16][2] = {
+        {-1, 0}, {1, 0}, {0, -1}, {0, 1},
+        {-1, -1}, {1, -1}, {-1, 1}, {1, 1},
+        {-2, 0}, {2, 0}, {0, -2}, {0, 2},
+        {-2, -2}, {2, -2}, {-2, 2}, {2, 2}
+    };
+
+    for (int tile_y = 0; tile_y < (h + step_y - 1) / step_y; ++tile_y) {
+        for (int tile_x = 0; tile_x < (w + step_x - 1) / step_x; ++tile_x) {
+            int y = std::max(0, std::min(tile_y * step_y, h - tile_h));
+            int x = std::max(0, std::min(tile_x * step_x, w - tile_w));
+
+            copyTileToContiguousBuffer(ref_layer, y, x, tile_h, tile_w, ref_tile_buffer_g);
+
+            RegParams reg = _compute_regularization_params(flow, y, x, tile_h, tile_w, h, w);
+            float spatial_mean_x = reg.avg_dx, spatial_mean_y = reg.avg_dy, spatial_weight = reg.weight;
+
+            int center_y = y + tile_h / 2, center_x = x + tile_w / 2;
+            cv::Vec2f init_flow = flow.at<cv::Vec2f>(center_y, center_x);
+            int init_dx = static_cast<int>(std::round(init_flow[0])), init_dy = static_cast<int>(std::round(init_flow[1]));
+
+            int cands_dx[18], cands_dy[18];
+            for (int i = 0; i < 18; i++) { cands_dx[i] = init_dx; cands_dy[i] = init_dy; }
+
+            for (int i = 0; i < 16; ++i) {
+                int nx = center_x + neighbor_offsets[i][0] * step_x;
+                int ny = center_y + neighbor_offsets[i][1] * step_y;
+                if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+                    cv::Vec2f nf = flow.at<cv::Vec2f>(ny, nx);
+                    cands_dx[i+1] = std::round(nf[0]); cands_dy[i+1] = std::round(nf[1]);
+                }
+            }
+
+            if (!previous_flow.empty() && prev_h > 1 && prev_w > 1) {
+                int coarse_y = center_y / downscale_factor, coarse_x = center_x / downscale_factor;
+                if (coarse_y < prev_h && coarse_x < prev_w) {
+                    cv::Vec2f pf = previous_flow.at<cv::Vec2f>(coarse_y, coarse_x);
+                    cands_dx[17] = std::round(pf[0] * downscale_factor); cands_dy[17] = std::round(pf[1] * downscale_factor);
+                }
+            }
+
+            float best_cand_cost = 1e10f;
+            int best_cand_dx = init_dx, best_cand_dy = init_dy;
+
+            for (int i = 0; i < 6; ++i) {
+                int cand_idx = (i == 5) ? 17 : i;
+                int check_y = y + cands_dy[cand_idx], check_x = x + cands_dx[cand_idx];
+                bool is_unique = true;
+                for (int j = 0; j < i; ++j) {
+                    int prev_idx = (j == 5) ? 17 : j;
+                    if (cands_dx[cand_idx] == cands_dx[prev_idx] && cands_dy[cand_idx] == cands_dy[prev_idx]) { is_unique = false; break; }
+                }
+                if (is_unique) {
+                    float cost = compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w, h, w, comp_h, comp_w) * tile_area_inv;
+                    if (cost < best_cand_cost) { best_cand_cost = cost; best_cand_dx = cands_dx[cand_idx]; best_cand_dy = cands_dy[cand_idx]; }
+                }
+            }
+
+            if (best_cand_cost > 0.005f) {
+                for (int i = 6; i < 10; ++i) {
+                    int check_y = y + cands_dy[i], check_x = x + cands_dx[i];
+                    bool is_unique = true;
+                    for (int j = 0; j < 6; ++j) {
+                        int prev_idx = (j == 5) ? 17 : j;
+                        if (cands_dx[i] == cands_dx[prev_idx] && cands_dy[i] == cands_dy[prev_idx]) { is_unique = false; break; }
+                    }
+                    if (is_unique) {
+                        float cost = compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w, h, w, comp_h, comp_w) * tile_area_inv;
+                        if (cost < best_cand_cost) { best_cand_cost = cost; best_cand_dx = cands_dx[i]; best_cand_dy = cands_dy[i]; }
+                    }
+                }
+            }
+
+            if (best_cand_cost > 0.01f) {
+                for (int i = 10; i < 18; ++i) {
+                    if (i==17) continue;
+                    int check_y = y + cands_dy[i], check_x = x + cands_dx[i];
+                    bool is_unique = true;
+                    for (int j = 0; j < 10; ++j) {
+                        int prev_idx = (j == 5) ? 17 : j;
+                        if (cands_dx[i] == cands_dx[prev_idx] && cands_dy[i] == cands_dy[prev_idx]) { is_unique = false; break; }
+                    }
+                    if (is_unique) {
+                        float cost = compute_zmssd_cost(ref_layer, comp_layer, y, x, check_y, check_x, tile_h, tile_w, h, w, comp_h, comp_w) * tile_area_inv;
+                        if (cost < best_cand_cost) { best_cand_cost = cost; best_cand_dx = cands_dx[i]; best_cand_dy = cands_dy[i]; }
+                    }
+                }
+            }
+
+            init_dx = best_cand_dx; init_dy = best_cand_dy;
+            float best_total_cost = 1e10f;
+            float final_dx = float(init_dx), final_dy = float(init_dy);
+
+            if (best_cand_cost >= 0.001f) {
+                for (int dy = -1; dy <= 1; ++dy) {
+                    float cur_dy = init_dy + dy;
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        float cur_dx = init_dx + dx;
+                        int test_y = y + cur_dy, test_x = x + cur_dx;
+
+                        float raw_cost = compute_zmssd_cost(ref_layer, comp_layer, y, x, test_y, test_x, tile_h, tile_w, h, w, comp_h, comp_w);
+                        if (raw_cost == std::numeric_limits<float>::max()) continue;
+                        
+                        float visual_cost = raw_cost * tile_area_inv;
+                        float dist_sq = (cur_dx - spatial_mean_x)*(cur_dx - spatial_mean_x) + (cur_dy - spatial_mean_y)*(cur_dy - spatial_mean_y);
+                        
+                        float dynamic_weight = spatial_weight;
+                        if (visual_cost < 0.01f) dynamic_weight *= 0.1f;
+                        else if (visual_cost > 0.1f) dynamic_weight *= 3.0f;
+                        
+                        float boundary_penalty = 0.0f;
+                        if (test_y < 0 || test_y + tile_h > h || test_x < 0 || test_x + tile_w > w) {
+                            float dist_y = std::max(0.0f, std::max(float(-test_y), float(test_y + tile_h - h)));
+                            float dist_x = std::max(0.0f, std::max(float(-test_x), float(test_x + tile_w - w)));
+                            boundary_penalty = (dist_y + dist_x) * 0.01f;
+                        }
+
+                        float total_cost = visual_cost + (dynamic_weight * dist_sq) + boundary_penalty;
+                        if (total_cost < best_total_cost) {
+                            best_total_cost = total_cost; final_dx = cur_dx; final_dy = cur_dy;
+                        }
+                    }
+                }
+            }
+
+            int int_dx = std::round(final_dx), int_dy = std::round(final_dy);
+            float c_0_0 = compute_zmssd_cost(ref_layer, comp_layer, y, x, y+int_dy, x+int_dx, tile_h, tile_w, h, w, comp_h, comp_w);
+            float c_m1_x = compute_zmssd_cost(ref_layer, comp_layer, y, x, y+int_dy, x+int_dx-1, tile_h, tile_w, h, w, comp_h, comp_w);
+            float c_p1_x = compute_zmssd_cost(ref_layer, comp_layer, y, x, y+int_dy, x+int_dx+1, tile_h, tile_w, h, w, comp_h, comp_w);
+            float c_m1_y = compute_zmssd_cost(ref_layer, comp_layer, y, x, y+int_dy-1, x+int_dx, tile_h, tile_w, h, w, comp_h, comp_w);
+            float c_p1_y = compute_zmssd_cost(ref_layer, comp_layer, y, x, y+int_dy+1, x+int_dx, tile_h, tile_w, h, w, comp_h, comp_w);
+
+            float delta_x = 0.0f;
+            float denom_x = 2.0f * (c_p1_x + c_m1_x - 2.0f * c_0_0);
+            if (std::abs(denom_x) > 1e-6f) delta_x = -(c_p1_x - c_m1_x) / denom_x;
+            delta_x = std::max(-0.5f, std::min(0.5f, delta_x));
+
+            float delta_y = 0.0f;
+            float denom_y = 2.0f * (c_p1_y + c_m1_y - 2.0f * c_0_0);
+            if (std::abs(denom_y) > 1e-6f) delta_y = -(c_p1_y - c_m1_y) / denom_y;
+            delta_y = std::max(-0.5f, std::min(0.5f, delta_y));
+
+            final_dx = float(int_dx) + delta_x;
+            final_dy = float(int_dy) + delta_y;
+
+            for (int r = 0; r < tile_h; ++r) {
+                cv::Vec2f* row_ptr = refined_flow.ptr<cv::Vec2f>(y+r);
+                for (int c = 0; c < tile_w; ++c) {
+                    if (y + r < h && x + c < w) row_ptr[x+c] = cv::Vec2f(final_dx, final_dy);
+                }
+            }
+        }
+    }
+}
+
+static void _parabolic_subpixel_refinement_kernel(
+    const cv::Mat &ref_layer, const cv::Mat &comp_layer,
+    const cv::Mat &flow, cv::Mat &refined_flow,
+    int tile_h, int tile_w
+) {
+    int h = ref_layer.rows, w = ref_layer.cols;
+    int comp_h = comp_layer.rows, comp_w = comp_layer.cols;
+    int step_y = tile_h, step_x = tile_w;
+
+    for (int tile_y = 0; tile_y < (h + step_y - 1) / step_y; ++tile_y) {
+        for (int tile_x = 0; tile_x < (w + step_x - 1) / step_x; ++tile_x) {
+            int y = std::max(0, std::min(tile_y * step_y, h - tile_h));
+            int x = std::max(0, std::min(tile_x * step_x, w - tile_w));
+
+            copyTileToContiguousBuffer(ref_layer, y, x, tile_h, tile_w, ref_tile_buffer_g);
+
+            int center_y = y + tile_h / 2, center_x = x + tile_w / 2;
+            cv::Vec2f flow_val = flow.at<cv::Vec2f>(center_y, center_x);
+            int int_dx = std::round(flow_val[0]), int_dy = std::round(flow_val[1]);
+
+            float c_0_0 = compute_zmssd_cost(ref_layer, comp_layer, y, x, y+int_dy, x+int_dx, tile_h, tile_w, h, w, comp_h, comp_w);
+            float c_m1_x = compute_zmssd_cost(ref_layer, comp_layer, y, x, y+int_dy, x+int_dx-1, tile_h, tile_w, h, w, comp_h, comp_w);
+            float c_p1_x = compute_zmssd_cost(ref_layer, comp_layer, y, x, y+int_dy, x+int_dx+1, tile_h, tile_w, h, w, comp_h, comp_w);
+            float c_m1_y = compute_zmssd_cost(ref_layer, comp_layer, y, x, y+int_dy-1, x+int_dx, tile_h, tile_w, h, w, comp_h, comp_w);
+            float c_p1_y = compute_zmssd_cost(ref_layer, comp_layer, y, x, y+int_dy+1, x+int_dx, tile_h, tile_w, h, w, comp_h, comp_w);
+
+            float delta_x = 0.0f;
+            float denom_x = 2.0f * (c_p1_x + c_m1_x - 2.0f * c_0_0);
+            if (std::abs(denom_x) > 1e-6f) delta_x = -(c_p1_x - c_m1_x) / denom_x;
+            delta_x = std::max(-0.5f, std::min(0.5f, delta_x));
+
+            float delta_y = 0.0f;
+            float denom_y = 2.0f * (c_p1_y + c_m1_y - 2.0f * c_0_0);
+            if (std::abs(denom_y) > 1e-6f) delta_y = -(c_p1_y - c_m1_y) / denom_y;
+            delta_y = std::max(-0.5f, std::min(0.5f, delta_y));
+
+            float final_dx = float(int_dx) + delta_x;
+            float final_dy = float(int_dy) + delta_y;
+
+            for (int r = 0; r < tile_h; ++r) {
+                cv::Vec2f* row_ptr = refined_flow.ptr<cv::Vec2f>(y+r);
+                for (int c = 0; c < tile_w; ++c) {
+                    if (y + r < h && x + c < w) row_ptr[x+c] = cv::Vec2f(final_dx, final_dy);
+                }
+            }
+        }
+    }
+}
+
+static cv::Mat process_single_layer(
+    const cv::Mat &ref_layer_gpu, const cv::Mat &comp_layer_gpu,
+    const cv::Mat &previous_flow_gpu, int layer_index, int total_layers,
+    int tile_h, int tile_w, float search_dist, int downscale_factor = 4) {
+    
+    int h = ref_layer_gpu.rows;
+    int w = ref_layer_gpu.cols;
+    bool is_coarsest_layer = (layer_index == total_layers - 1);
+    bool is_finest_layer = (layer_index == 0);
+
+    cv::Mat flow_gpu = cv::Mat::zeros(h, w, CV_32FC2);
+
+    if (is_coarsest_layer) {
+        _initialize_coarsest_flow_kernel(flow_gpu, h, w, 0.0f, 0.0f);
+    } else {
+        cv::resize(previous_flow_gpu, flow_gpu, cv::Size(w, h), 0, 0, cv::INTER_LINEAR);
+        flow_gpu *= static_cast<float>(downscale_factor);
+    }
+
+    int current_tile_h = std::max(ImageAlignmentConfig::MIN_TILE_SIZE, std::min(tile_h, h));
+    int current_tile_w = std::max(ImageAlignmentConfig::MIN_TILE_SIZE, std::min(tile_w, w));
+
+    cv::Mat refined_flow_gpu = cv::Mat::zeros(h, w, CV_32FC2);
+    _initialize_coarsest_flow_kernel(refined_flow_gpu, h, w, 0.0f, 0.0f);
+
+    cv::Mat safe_prev_flow = previous_flow_gpu;
+    if (safe_prev_flow.empty()) safe_prev_flow = cv::Mat::zeros(1, 1, CV_32FC2);
+
+    if (is_finest_layer) {
+        _search_fine_level_kernel(
+            ref_layer_gpu, comp_layer_gpu, flow_gpu, safe_prev_flow, refined_flow_gpu,
+            current_tile_h, current_tile_w, downscale_factor);
+    } else if (is_coarsest_layer) {
+        int search_radius = std::max(4, int(search_dist * 2.0f));
+        _block_search_kernel(
+            ref_layer_gpu, comp_layer_gpu, refined_flow_gpu,
+            current_tile_h, current_tile_w, search_radius);
+    } else {
+        int current_search_dist = std::max(2, int(search_dist));
+        _search_coarse_level_kernel(
+            ref_layer_gpu, comp_layer_gpu, flow_gpu, safe_prev_flow, refined_flow_gpu,
+            current_tile_h, current_tile_w, current_search_dist, downscale_factor);
+    }
+
+    if (!is_finest_layer) {
+        flow_gpu = refined_flow_gpu.clone();
+        _parabolic_subpixel_refinement_kernel(
+            ref_layer_gpu, comp_layer_gpu, flow_gpu, refined_flow_gpu,
+            current_tile_h, current_tile_w);
+    }
+
+    return refined_flow_gpu;
 }
 } // namespace AlignmentFlowHelpers
 
@@ -1107,20 +638,10 @@ ALIGNMENT_API float *compute_alignment_flow(const float *ref_work_data,
                                             int work_h, int work_w, int tile_h,
                                             int tile_w, int n_layers,
                                             float search_dist) {
-  // n_layers = 3;
   using namespace ImageAlignmentConfig;
 
-  // =========================================================================
-  // === BAGIAN A: Pra-pemrosesan dan Setup (OPTIMIZED)                   ===
-  // =========================================================================
-  cv::Mat ref_work(work_h, work_w, CV_32FC1,
-                   const_cast<float *>(ref_work_data));
-  cv::Mat current_work(work_h, work_w, CV_32FC1,
-                       const_cast<float *>(current_work_data));
-
-  // =========================================================================
-  // === BAGIAN B: Pembangunan Piramida Gambar (OPTIMIZED)                ===
-  // =========================================================================
+  cv::Mat ref_work(work_h, work_w, CV_32FC1, const_cast<float *>(ref_work_data));
+  cv::Mat current_work(work_h, work_w, CV_32FC1, const_cast<float *>(current_work_data));
 
   std::vector<cv::Mat> ref_pyramid, current_pyramid;
   {
@@ -1131,21 +652,16 @@ ALIGNMENT_API float *compute_alignment_flow(const float *ref_work_data,
     current_pyramid.push_back(current_work);
 
     for (int i = 0; i < n_layers - 1; ++i) {
-      // HDR+ style: 4x downsample via cascaded double pyrDown
-      // Step 1: First 2x Gaussian downsample
       cv::Mat mid_ref, mid_current;
       cv::pyrDown(ref_pyramid.back(), mid_ref);
       cv::pyrDown(current_pyramid.back(), mid_current);
 
-      // Step 2: Second 2x Gaussian downsample (total 4x)
       cv::Mat next_ref, next_current;
       cv::pyrDown(mid_ref, next_ref);
       cv::pyrDown(mid_current, next_current);
 
-      // Check minimum size
       if (next_ref.rows < MIN_PYRAMID_LAYER_SIZE ||
           next_ref.cols < MIN_PYRAMID_LAYER_SIZE) {
-        // If 4x is too small, try keeping the 2x version
         if (mid_ref.rows >= MIN_PYRAMID_LAYER_SIZE &&
             mid_ref.cols >= MIN_PYRAMID_LAYER_SIZE) {
           ref_pyramid.push_back(std::move(mid_ref));
@@ -1153,46 +669,27 @@ ALIGNMENT_API float *compute_alignment_flow(const float *ref_work_data,
         }
         break;
       }
-
       ref_pyramid.push_back(std::move(next_ref));
       current_pyramid.push_back(std::move(next_current));
     }
   }
 
-  // === BAGIAN C: Perhitungan Optical Flow (Coarse-to-Fine) ===
-  cv::Mat flow;
   cv::Mat previous_level_flow;
-
   {
-
     for (int i = static_cast<int>(ref_pyramid.size()) - 1; i >= 0; --i) {
-      const cv::Mat &ref_layer = ref_pyramid[i];
-      const cv::Mat &comp_layer = current_pyramid[i];
-
-      cv::Mat current_flow = AlignmentFlowHelpers::processSingleLayer(
-          ref_layer, comp_layer, previous_level_flow, i,
-          static_cast<int>(ref_pyramid.size()), tile_h, tile_w, search_dist);
+      cv::Mat current_flow = AlignmentFlowHelpers::process_single_layer(
+          ref_pyramid[i], current_pyramid[i], previous_level_flow, i,
+          static_cast<int>(ref_pyramid.size()), tile_h, tile_w, search_dist, (int)FLOW_UPSCALE_FACTOR);
 
       previous_level_flow = std::move(current_flow);
-      flow = cv::Mat();
     }
   }
 
-  flow = std::move(previous_level_flow);
+  cv::Mat flow = std::move(previous_level_flow);
 
-  // === BAGIAN C.5: Post-Processing - Spatial/Local RANSAC Cleanup ===
-  // Membersihkan flow field dengan local RANSAC per window
-  // window_size=64, overlap=25% (step=48) -> Reduced overlap for speed
-  {
-    // OPTIMIZATION: Reduce overlap (0.25 -> 0.1) for speed
-    AlignmentFlowHelpers::spatialLocalRANSACCleanup(flow, 64, 0.1f);
-  }
-
-  // === BAGIAN D: Finalisasi dan Pengembalian Data ===
   float *output_flow_data = nullptr;
   {
     if (!flow.empty()) {
-      // OPTIMIZATION: Pastikan continuous agar copy cepat
       if (!flow.isContinuous())
         flow = flow.clone();
 
@@ -1201,12 +698,8 @@ ALIGNMENT_API float *compute_alignment_flow(const float *ref_work_data,
       output_flow_data = static_cast<float *>(malloc(data_size));
 
       if (output_flow_data) {
-        // OPTIMIZATION: Parallel copy using OpenMP
-        // memcpy biasa bersifat serial. Parallel copy bisa lebih cepat
-        // menembus limit bandwidth memori pada gambar resolusi tinggi (12MP+).
         const int rows = flow.rows;
-        const int cols = flow.cols;
-        const size_t row_size_bytes = cols * flow.elemSize();
+        const size_t row_size_bytes = flow.cols * flow.elemSize();
 
 #pragma omp parallel for
         for (int r = 0; r < rows; ++r) {

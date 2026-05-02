@@ -48,8 +48,8 @@ if TAICHI_AVAILABLE:
                 for dx in ti.static(range(-1, 2)):
                     ny = tm.clamp(y + dy, 0, h - 1)
                     nx = tm.clamp(x + dx, 0, w - 1)
-                    vals_x[idx] = src[ny, nx, 0]
-                    vals_y[idx] = src[ny, nx, 1]
+                    vals_x[idx] = src[ny, nx][0]
+                    vals_y[idx] = src[ny, nx][1]
                     idx += 1
             for i in ti.static(range(9)):
                 for j in ti.static(range(i + 1, 9)):
@@ -59,8 +59,8 @@ if TAICHI_AVAILABLE:
                 for j in ti.static(range(i + 1, 9)):
                     if vals_y[j] < vals_y[i]:
                         vals_y[i], vals_y[j] = vals_y[j], vals_y[i]
-            dst[y, x, 0] = vals_x[4]
-            dst[y, x, 1] = vals_y[4]
+            dst[y, x][0] = vals_x[4]
+            dst[y, x][1] = vals_y[4]
 
     @ti.kernel
     def _confidence_weighted_median_flow_kernel(

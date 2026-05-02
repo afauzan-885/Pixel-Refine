@@ -103,6 +103,11 @@ def box_filter(
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
+    # --- AOT ROUTING ---
+    if os.environ.get("PIXEL_REFINE_AOT_MODE") == "1":
+        from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+        return taichi_aot.box_filter(src, kernel_size=kernel_size, return_gpu=True)
+
     # Detect input type for GPU pipeline
     is_taichi_input = hasattr(src, "to_numpy")
 
@@ -176,6 +181,11 @@ def box_filter_flow(
     """Supports both NumPy and Taichi ndarrays."""
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
+
+    # --- AOT ROUTING ---
+    if os.environ.get("PIXEL_REFINE_AOT_MODE") == "1":
+        from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+        return taichi_aot.box_filter(src, kernel_size=kernel_size, return_gpu=True)
 
     # OOM Guard Trigger
     if enable_tiling and isinstance(src, np.ndarray) and src.size > 2048 * 2048 * 3:

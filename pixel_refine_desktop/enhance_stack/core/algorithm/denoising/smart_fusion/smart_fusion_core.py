@@ -10,15 +10,17 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
     to_gamma_proxy,
 )
 
+
 def get_ram_usage():
     """Returns the current RAM usage of the process in MiB."""
     process = psutil.Process()
     mem_info = process.memory_info()
     return mem_info.rss / 1024 / 1024
 
+
 class SmartFusionProcessor:
     """Handles the AI-based Smart Fusion merging logic using ONNX models."""
-    
+
     def __init__(self, model_dir="database/Learning_Model/nanoburst"):
         self.model_dir = model_dir
         self.sess_a = None
@@ -32,7 +34,11 @@ class SmartFusionProcessor:
 
         # Priority mapping
         device_map = {
-            "gpu": ["CUDAExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"],
+            "gpu": [
+                "CUDAExecutionProvider",
+                "DmlExecutionProvider",
+                "CPUExecutionProvider",
+            ],
             "dml": ["DmlExecutionProvider", "CPUExecutionProvider"],
             "cpu": ["CPUExecutionProvider"],
         }
@@ -45,12 +51,18 @@ class SmartFusionProcessor:
 
         # Fallback to float32 if float16 missing
         if not os.path.exists(a_path):
-            a_path = os.path.join(self.model_dir, f"smart_analysis_{tile_size}_fp32_cpu.onnx")
-            f_path = os.path.join(self.model_dir, f"smart_fusion_{tile_size}_fp32_cpu.onnx")
+            a_path = os.path.join(
+                self.model_dir, f"smart_analysis_{tile_size}_fp32_cpu.onnx"
+            )
+            f_path = os.path.join(
+                self.model_dir, f"smart_fusion_{tile_size}_fp32_cpu.onnx"
+            )
             providers = ["CPUExecutionProvider"]
 
         if not os.path.exists(a_path) or not os.path.exists(f_path):
-            raise FileNotFoundError(f"Smart Merging models not found for tile {tile_size}")
+            raise FileNotFoundError(
+                f"Smart Merging models not found for tile {tile_size}"
+            )
 
         self.sess_a = ort.InferenceSession(a_path, providers=providers)
         self.sess_f = ort.InferenceSession(f_path, providers=providers)
@@ -97,7 +109,9 @@ class SmartFusionProcessor:
             )
 
             p_align_start = int(pass_merge_range[0])
-            p_align_end = int(pass_merge_range[0] + (pass_merge_range[1] - pass_merge_range[0]) * 0.3)
+            p_align_end = int(
+                pass_merge_range[0] + (pass_merge_range[1] - pass_merge_range[0]) * 0.3
+            )
             f_merge_range = (p_align_end, pass_merge_range[1])
 
             if update_progress:
@@ -105,14 +119,17 @@ class SmartFusionProcessor:
 
             align_ref_input = reference_image_float
             if is_linear_mode:
-                align_ref_input = to_gamma_proxy(reference_image_float, scale=proxy_scale)
+                align_ref_input = to_gamma_proxy(
+                    reference_image_float, scale=proxy_scale
+                )
 
             alignment_success = perform_image_alignment(
                 images,
                 align_ref_input,
                 work_res_h if work_res_h else h_orig,
                 work_res_w if work_res_w else w_orig,
-                8, 8,
+                8,
+                8,
                 ref_dtype if ref_dtype else images[0].dtype,
                 update_progress,
                 stop_requested,
@@ -135,9 +152,13 @@ class SmartFusionProcessor:
             return None, None, 0
 
         # 3. Noise Estimation
-        noise_aware_enable = unused_kwargs.get("similarity_smart_noise_aware_enable", True)
+        noise_aware_enable = unused_kwargs.get(
+            "similarity_smart_noise_aware_enable", True
+        )
         if noise_aware_enable:
-            gray_image = cv2.cvtColor((reference_image_float * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+            gray_image = cv2.cvtColor(
+                (reference_image_float * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY
+            )
             sigma_val = estimate_noise_in_python(gray_image.astype(np.float32) / 255.0)
         else:
             sigma_val = 0.0
@@ -167,85 +188,127 @@ class SmartFusionProcessor:
         # Padding minimal jika gambar lebih kecil dari tile
         pad_h = max(0, tile_h - h_orig)
         pad_w = max(0, tile_w - w_orig)
-        
+
         ref_padded = reference_image_float
         if pad_h > 0 or pad_w > 0:
-            ref_padded = np.pad(reference_image_float, ((0, pad_h), (0, pad_w), (0, 0)), mode="reflect")
-        
+            ref_padded = np.pad(
+                reference_image_float, ((0, pad_h), (0, pad_w), (0, 0)), mode="reflect"
+            )
+
         h_padded, w_padded = ref_padded.shape[:2]
 
-        # 5. Row-by-Row Optimized Processing
+        # 5. Row-Batching Optimized Processing
+        num_rows = len(y_coords)
+        num_cols = len(x_coords)
+        batch_size = 25
+
         accum_final_img = np.zeros_like(ref_padded, dtype=np.float32)
         accum_final_weight = np.zeros((h_padded, w_padded), dtype=np.float32)
-        total_rows = len(y_coords)
-        
-        ref_nchw_full = ref_padded.transpose(2, 0, 1)[np.newaxis, ...].astype(np.float32)
+
         win_y = np.hanning(tile_h + 2)[1:-1].astype(np.float32)
         win_x = np.hanning(tile_w + 2)[1:-1].astype(np.float32)
-        win = np.outer(win_y, win_x).astype(np.float32)
+        win_2d = np.outer(win_y, win_x).astype(np.float32)
+
+        input_names_f = [i.name for i in sess_f.get_inputs()]
 
         for iy, y_start in enumerate(y_coords):
-            if stop_requested and stop_requested(): return None, None, 0
+            if stop_requested and stop_requested():
+                return None, None, 0
+
+            # Progress update per row for better UX
             if update_progress:
-                prog = pass_merge_range[0] + (iy / total_rows) * (pass_merge_range[1] - pass_merge_range[0])
-                update_progress(int(prog), f"Smart Fusion: Processing Row {iy+1}/{total_rows}...")
+                prog = pass_merge_range[0] + (iy / num_rows) * (
+                    pass_merge_range[1] - pass_merge_range[0]
+                )
+                update_progress(
+                    int(prog), f"Smart Fusion: Processing Row {iy+1}/{num_rows}..."
+                )
 
-            y_end = y_start + tile_h
-            row_tile_accum_img = {x: ref_padded[y_start:y_end, x : x + tile_w].copy() for x in x_coords}
-            row_tile_accum_weight = {x: np.ones((tile_h, tile_w), dtype=np.float32) for x in x_coords}
-            
-            row_ref_feats = []
-            for x_start in x_coords:
-                ref_patch = ref_nchw_full[:, :, y_start:y_end, x_start : x_start + tile_w]
-                feat = sess_a.run(None, {"x": ref_patch})[0]
-                row_ref_feats.append(feat)
+            for ix_idx in range(0, num_cols, batch_size):
+                batch_x = x_coords[ix_idx : ix_idx + batch_size]
+                actual_b_size = len(batch_x)
 
-            for i in range(1, num_images):
-                if stop_requested and stop_requested(): break
-                curr_frame_raw = images[i]
-                if curr_frame_raw is None: continue
+                # 1. Prepare Reference Batch for these 10 X-coords
+                ref_patches = np.stack(
+                    [
+                        ref_padded[y_start : y_start + tile_h, x : x + tile_w]
+                        for x in batch_x
+                    ]
+                )
+                ref_nchw = ref_patches.transpose(0, 3, 1, 2).astype(np.float32)
+                ref_feats = sess_a.run(None, {"x": ref_nchw})[0]
 
-                # Slice & Process Strip
-                h_f = curr_frame_raw.shape[0]
-                y_s_f, y_e_f = min(y_start, h_f), min(y_start + tile_h, h_f)
-                strip_float = normalize_image(curr_frame_raw[y_s_f:y_e_f, :, :], curr_frame_raw.dtype)
-                
-                # Pad/Fit strip
-                p_v, p_h_s = tile_h - strip_float.shape[0], w_padded - strip_float.shape[1]
-                strip_padded = np.pad(strip_float, ((0, p_v), (0, p_h_s), (0, 0)), mode="reflect") if (p_v > 0 or p_h_s > 0) else strip_float
-                if strip_padded.shape[1] != w_padded:
-                    strip_padded = cv2.resize(strip_padded, (w_padded, tile_h), interpolation=cv2.INTER_LINEAR)
-                
-                strip_nchw = strip_padded.transpose(2, 0, 1)[np.newaxis, ...].astype(np.float32)
+                # Local Accumulators for these 10 tiles (Correct Quality Logic)
+                # sum(I*W) and sum(W)
+                tile_sum = ref_patches.copy().astype(
+                    np.float32
+                )  # Init with Ref (Weight 1.0)
+                tile_weight = np.ones((actual_b_size, tile_h, tile_w), dtype=np.float32)
 
-                for ix, x_start in enumerate(x_coords):
-                    feat_curr = sess_a.run(None, {"x": strip_nchw[:, :, :, x_start : x_start + tile_w]})[0]
-                    # Dynamic input mapping based on model signature
-                    input_names = [i.name for i in sess_f.get_inputs()]
-                    input_feed = {
-                        "ref_feat": row_ref_feats[ix],
-                        "curr_feat": feat_curr,
-                    }
-                    if "sigma" in input_names:
-                        input_feed["sigma"] = sigma_input
-                    if "alpha" in input_names:
-                        input_feed["alpha"] = alpha_input
+                # 2. Iterate through other frames for this horizontal batch
+                sigma_b = np.repeat(sigma_input, actual_b_size, axis=0)
+                alpha_b = np.repeat(alpha_input, actual_b_size, axis=0)
 
-                    w_patch = sess_f.run(None, input_feed)[0]
-                    w_2d = np.squeeze(np.array(w_patch))
-                    if w_2d.ndim > 2: w_2d = w_2d[..., 0]
-                    
-                    row_tile_accum_img[x_start] += strip_padded[:, x_start : x_start + tile_w] * w_2d[:, :, np.newaxis]
-                    row_tile_accum_weight[x_start] += w_2d
+                for f_idx in range(1, num_images):
+                    curr_frame = images[f_idx]
+                    if curr_frame is None:
+                        continue
 
-            # Finalize Row
-            for x_start in x_coords:
-                blended = row_tile_accum_img[x_start] / (row_tile_accum_weight[x_start][:, :, np.newaxis] + 1e-8)
-                accum_final_img[y_start:y_end, x_start : x_start + tile_w] += blended * win[:, :, np.newaxis]
-                accum_final_weight[y_start:y_end, x_start : x_start + tile_w] += win
+                    # Extract Frame Batch
+                    curr_patches_list = []
+                    for x in batch_x:
+                        p = curr_frame[
+                            y_start : min(y_start + tile_h, h_orig),
+                            x : min(x + tile_w, w_orig),
+                        ]
+                        if p.shape[0] < tile_h or p.shape[1] < tile_w:
+                            p = np.pad(
+                                p,
+                                (
+                                    (0, tile_h - p.shape[0]),
+                                    (0, tile_w - p.shape[1]),
+                                    (0, 0),
+                                ),
+                                mode="reflect",
+                            )
+                        curr_patches_list.append(p)
 
-            del row_tile_accum_img, row_tile_accum_weight, row_ref_feats
-            gc.collect()
+                    curr_batch = np.stack(curr_patches_list)
+                    curr_batch_norm = normalize_image(
+                        curr_batch, curr_frame.dtype
+                    ).astype(np.float32)
+                    curr_nchw = curr_batch_norm.transpose(0, 3, 1, 2)
+
+                    curr_feats = sess_a.run(None, {"x": curr_nchw})[0]
+
+                    input_feed = {"ref_feat": ref_feats, "curr_feat": curr_feats}
+                    if "sigma" in input_names_f:
+                        input_feed["sigma"] = sigma_b
+                    if "alpha" in input_names_f:
+                        input_feed["alpha"] = alpha_b
+
+                    w_batch = sess_f.run(None, input_feed)[0]
+                    w_2d_batch = w_batch.reshape(actual_b_size, tile_h, tile_w)
+
+                    # Accumulate Locally (Per-Tile Weighting)
+                    tile_sum += curr_batch_norm * w_2d_batch[..., np.newaxis]
+                    tile_weight += w_2d_batch
+
+                # 3. Finalize these 10 tiles and Splat to Global Buffer
+                # Blended = sum(I*W) / sum(W)
+                # Then Result = Blended * HanningWindow
+                for i, x in enumerate(batch_x):
+                    blended = tile_sum[i] / (tile_weight[i][..., np.newaxis] + 1e-8)
+
+                    accum_final_img[y_start : y_start + tile_h, x : x + tile_w] += (
+                        blended * win_2d[..., np.newaxis]
+                    )
+                    accum_final_weight[
+                        y_start : y_start + tile_h, x : x + tile_w
+                    ] += win_2d
+
+                del ref_patches, ref_nchw, ref_feats, tile_sum, tile_weight
+                gc.collect()
 
         # 6. Final Outputs
         # Kita mengembalikan akumulasi mentah dan weight map agar Similarity.py

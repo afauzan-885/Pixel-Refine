@@ -397,22 +397,26 @@ def scale_flow(flow, work_h, work_w, full_h, full_w, ksize=5):
 
 
 def warp_image_opencv(
-    image, flow, interpolation=cv2.INTER_CUBIC, border_mode=cv2.BORDER_REFLECT_101,
-    x_coords=None, y_coords=None
+    image,
+    flow,
+    interpolation=cv2.INTER_CUBIC,
+    border_mode=cv2.BORDER_REFLECT_101,
+    x_coords=None,
+    y_coords=None,
 ):
     """Warp gambar menggunakan optical flow."""
     h, w = image.shape[:2]
-    
+
     if x_coords is None or y_coords is None:
         y_coords, x_coords = np.mgrid[0:h, 0:w].astype(np.float32)
-    
+
     new_x = x_coords + flow[:, :, 0]
     new_y = y_coords + flow[:, :, 1]
     warped = cv2.remap(image, new_x, new_y, interpolation, borderMode=border_mode)
-    
+
     # Eager cleanup of temporary mapping arrays
     del new_x, new_y
-    
+
     return warped
 
 
@@ -453,10 +457,16 @@ def visualize_flow(flow):
 
 
 def save_aligned_image(
-    aligned_img, index, backend_name, save_folder="save_align_image"
+    aligned_img,
+    index,
+    backend_name,
+    save_folder="save_align_image",
+    save_prefix=None,
+    harvest_mode=True,
 ):
     """
     Menyimpan gambar RGB yang telah diselaraskan ke folder output dengan normalisasi dinamis.
+    Jika harvest_mode aktif, sistem akan memastikan file tidak menimpa file lama.
     """
     if aligned_img is None:
         return
@@ -476,15 +486,38 @@ def save_aligned_image(
 
     # Buat folder jika belum ada
     if not os.path.exists(save_folder):
-        os.makedirs(save_folder)
+        os.makedirs(save_folder, exist_ok=True)
 
-    # Buat nama file
+    # Tentukan Folder Penyimpanan (Gunakan subfolder jika ada prefix)
+    final_save_folder = os.path.join(save_folder, save_prefix) if save_prefix else save_folder
+    if not os.path.exists(final_save_folder):
+        os.makedirs(final_save_folder, exist_ok=True)
+
+    # Tentukan Nama File
+    # Nama file tetap standar agar lebih bersih (folder sudah unik)
     filename = f"aligned_{backend_name}_frame_{index:02d}.jpg"
-    output_path = os.path.join(save_folder, filename)
+    output_path = os.path.join(final_save_folder, filename)
 
-    # Jangan konversi ke BGR — simpan langsung sebagai RGB
-    cv2.imwrite(output_path, save_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
-    print(f"  [Save] {filename} disimpan sebagai RGB.")
+    # [SAFE SAVE] Logic: Jika harvest_mode aktif, tambahkan counter agar tidak menimpa
+    if harvest_mode and os.path.exists(output_path):
+        base, ext = os.path.splitext(filename)
+        counter = 1
+        while True:
+            new_filename = f"{base}_{counter}{ext}"
+            new_path = os.path.join(final_save_folder, new_filename)
+            if not os.path.exists(new_path):
+                filename = new_filename
+                output_path = new_path
+                break
+            counter += 1
+
+    # Don't konversi ke BGR — simpan langsung sebagai RGB
+    # Note: OpenCV imwrite uses BGR, but save_img here is expected to be BGR or handled accordingly.
+    # The original comment said "Jangan konversi ke BGR — simpan langsung sebagai RGB",
+    # but imwrite expects BGR. If the input is RGB, it will be saved with swapped channels.
+    # We maintain original behavior but fix the naming.
+    cv2.imwrite(output_path, save_img, [cv2.IMWRITE_JPEG_QUALITY, 98])
+    print(f"  [Save] {filename} disimpan (Harvest: {harvest_mode}).")
 
 
 def perform_alignment_gpu(
@@ -499,6 +532,7 @@ def perform_alignment_gpu(
     stop_requested=None,
     num_alignment_workers=1,
     save_align_image=True,
+    harvest_alignment=False,  # [NEW] Harvest mode toggle
     progress_start=30,
     progress_end=40,
     return_format: str = "numpy_u16",
@@ -570,6 +604,19 @@ def perform_alignment_gpu(
     use_sharpen = kwargs.get("use_sharpen", False)
     search_dist = kwargs.get("search_dist", 2.0)
     index_offset = kwargs.get("index_offset", 0)
+    save_prefix = kwargs.get("save_prefix", None)
+    save_folder = kwargs.get("save_folder", "save_align_image")
+
+    # [NEW] Simpan gambar referensi (Frame 00)
+    if save_align_image:
+        save_aligned_image(
+            images[0],
+            0 + index_offset,
+            "REF",
+            save_folder=save_folder,
+            save_prefix=save_prefix,
+            harvest_mode=harvest_alignment,
+        )
 
     # Calculate n_layers to target the resolution floor (Standardize on 3 for stability)
     n_layers = 3
@@ -624,12 +671,26 @@ def perform_alignment_gpu(
                     cost_maps[i] = cost_map
 
                     if save_align_image:
-                        save_aligned_image(warped_image, i + index_offset, "GPU")
+                        save_aligned_image(
+                            warped_image,
+                            i + index_offset,
+                            "GPU",
+                            save_folder=save_folder,
+                            save_prefix=save_prefix,
+                            harvest_mode=harvest_alignment,
+                        )
                 elif result is not None:  # Fallback for old API if needed
                     warped_image = result
                     images[i] = warped_image
                     if save_align_image:
-                        save_aligned_image(warped_image, i + index_offset, "GPU")
+                        save_aligned_image(
+                            warped_image,
+                            i + index_offset,
+                            "GPU",
+                            save_folder=save_folder,
+                            save_prefix=save_prefix,
+                            harvest_mode=harvest_alignment,
+                        )
                 else:
                     print(f"Warning: GPU alignment failed for image {i + 1}")
 
@@ -691,6 +752,7 @@ def perform_image_alignment(
     num_alignment_workers=1,
     visualization=False,
     save_align_image=True,
+    harvest_alignment=True,  # [NEW] Harvest mode toggle
     progress_start=30,
     progress_end=40,
     **kwargs,
@@ -707,6 +769,19 @@ def perform_image_alignment(
     is_linear_mode = kwargs.get("is_linear_mode", False)
     proxy_scale = kwargs.get("proxy_scale", 1.0)  # [AUTO-SCALE]
     index_offset = kwargs.get("index_offset", 0)
+    save_prefix = kwargs.get("save_prefix", None)
+    save_folder = kwargs.get("save_folder", "save_align_image")
+
+    # [NEW] Simpan gambar referensi (Frame 00)
+    if save_align_image:
+        save_aligned_image(
+            images[0],
+            0 + index_offset,
+            "REF",
+            save_folder=save_folder,
+            save_prefix=save_prefix,
+            harvest_mode=harvest_alignment,
+        )
 
     # --- Preprocessing referensi (CPU MURNI tanpa Taichi) ---
     # Note: Farneback & Tile alignment use grayscale. Raft uses color.
@@ -838,7 +913,12 @@ def perform_image_alignment(
                                 if save_align_image:
                                     # Panggil save_aligned_image di sini
                                     save_aligned_image(
-                                        aligned_img, idx + index_offset, "RAFT"
+                                        aligned_img,
+                                        idx + index_offset,
+                                        "RAFT",
+                                        save_folder=save_folder,
+                                        save_prefix=save_prefix,
+                                        harvest_mode=harvest_alignment,
                                     )
                                 # <<< AKHIR INTEGRASI >>>
 
@@ -975,7 +1055,12 @@ def perform_image_alignment(
                             images[idx] = aligned_img
                             if save_align_image:
                                 save_aligned_image(
-                                    aligned_img, idx + index_offset, "FARNEBACK"
+                                    aligned_img,
+                                    idx + index_offset,
+                                    "FARNEBACK",
+                                    save_folder=save_folder,
+                                    save_prefix=save_prefix,
+                                    harvest_mode=harvest_alignment,
                                 )
                         else:
                             print(
@@ -1068,7 +1153,9 @@ def perform_image_alignment(
 
                     # Pastikan struktur referensi disiapkan untuk pointer
                     ref_work_gray_cpp = np.ascontiguousarray(ref_work_gray_cpp)
-                    ref_work_ptr = ref_work_gray_cpp.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+                    ref_work_ptr = ref_work_gray_cpp.ctypes.data_as(
+                        ctypes.POINTER(ctypes.c_float)
+                    )
 
                     flow_ptr = ALIGN_LIB.compute_alignment_flow(
                         ref_work_ptr,
@@ -1089,7 +1176,9 @@ def perform_image_alignment(
                                 (work_res_h, work_res_w, 2), dtype=np.float32
                             )
                             ctypes.memmove(
-                                flow_buf_cpp.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                                flow_buf_cpp.ctypes.data_as(
+                                    ctypes.POINTER(ctypes.c_float)
+                                ),
                                 flow_ptr,
                                 flow_buf_cpp.nbytes,
                             )
@@ -1113,8 +1202,10 @@ def perform_image_alignment(
 
                             # 4. Warp Gambar menggunakan koordinat pre-calculated (OPTIMASI MEMORI 1)
                             aligned_img = warp_image_opencv(
-                                original_image, flow_full_res, 
-                                x_coords=x_coords_full, y_coords=y_coords_full
+                                original_image,
+                                flow_full_res,
+                                x_coords=x_coords_full,
+                                y_coords=y_coords_full,
                             )
 
                         except Exception as e:
@@ -1123,11 +1214,13 @@ def perform_image_alignment(
                             # [CRITICAL] Free C++ heap memory (OPTIMASI MEMORI 2)
                             if ALIGN_LIB and flow_ptr:
                                 ALIGN_LIB.free_flow_memory(flow_ptr)
-                            
+
                             # Cleanup temporaries
-                            if 'flow_buf_cpp' in locals(): del flow_buf_cpp
-                            if 'flow_full_res' in locals(): del flow_full_res
-                            
+                            if "flow_buf_cpp" in locals():
+                                del flow_buf_cpp
+                            if "flow_full_res" in locals():
+                                del flow_full_res
+
                 except Exception as e:
                     print(f"Error C++ setup/call for image {i+1}: {e}")
                     traceback.print_exc()
@@ -1135,16 +1228,22 @@ def perform_image_alignment(
 
                 finally:
                     # Pastikan referensi Python lokal dibersihkan
-                    if 'current_work_gray_cpp' in locals(): del current_work_gray_cpp
-                    if 'current_preprocessed_cpp' in locals(): del current_preprocessed_cpp
-                    if 'current_img_float' in locals(): del current_img_float
-                    if 'flow_ptr' in locals(): del flow_ptr
+                    if "current_work_gray_cpp" in locals():
+                        del current_work_gray_cpp
+                    if "current_preprocessed_cpp" in locals():
+                        del current_preprocessed_cpp
+                    if "current_img_float" in locals():
+                        del current_img_float
+                    if "flow_ptr" in locals():
+                        del flow_ptr
 
                 return (i, aligned_img)
 
             # [OPTIMIZATION] Pre-calculate coordinate maps once to save GBs of RAM
             full_h, full_w = images[0].shape[:2]
-            y_coords_full, x_coords_full = np.mgrid[0:full_h, 0:full_w].astype(np.float32)
+            y_coords_full, x_coords_full = np.mgrid[0:full_h, 0:full_w].astype(
+                np.float32
+            )
 
             # --- Parallel execution with ThreadPoolExecutor ---
             with ThreadPoolExecutor(max_workers=num_alignment_workers) as executor:
@@ -1192,7 +1291,12 @@ def perform_image_alignment(
                             images[idx] = aligned_img
                             if save_align_image:
                                 save_aligned_image(
-                                    aligned_img, idx + index_offset, "CPP"
+                                    aligned_img,
+                                    idx + index_offset,
+                                    "CPP",
+                                    save_folder=save_folder,
+                                    save_prefix=save_prefix,
+                                    harvest_mode=harvest_alignment,
                                 )
                             # [OPTIMIZATION]
                             del aligned_img
@@ -1216,7 +1320,7 @@ def perform_image_alignment(
                         )
 
             print("✅ Alignment C++ selesai.")
-            
+
             # Explicitly cleanup shared maps
             del x_coords_full, y_coords_full, reference_image_float
             gc.collect()

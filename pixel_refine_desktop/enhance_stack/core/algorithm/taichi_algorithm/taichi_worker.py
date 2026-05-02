@@ -16,8 +16,12 @@ import time
 import ctypes
 import numpy as np
 
-# Force stable CUDA context settings globally before any Taichi import
-os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
+# Check if we are running an AOT compiler script
+_IS_AOT_MODE = any("aot" in arg.lower() or "compiler" in arg.lower() for arg in sys.argv) or os.environ.get("PIXEL_REFINE_AOT_MODE") == "1"
+
+if not _IS_AOT_MODE:
+    # Force stable CUDA context settings globally before any Taichi import
+    os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
 
 try:
     import taichi as ti
@@ -55,7 +59,10 @@ def _get_project_cache_path():
 # --- CRITICAL: Set environment variables IMMEDIATELY upon import ---
 # This ensures Taichi picks up the project-level cache even if initialized elsewhere.
 _global_cache_path = _get_project_cache_path()
-if _global_cache_path:
+
+if _IS_AOT_MODE:
+    print("[TaichiWorker] AOT Compilation Mode Detected: Disabled JIT Worker and Cache Envs.")
+elif _global_cache_path:
     os.environ["TI_OFFLINE_CACHE_FILE_PATH"] = _global_cache_path
     os.environ["TI_OFFLINE_CACHE_DIR"] = _global_cache_path
     os.environ["TI_OFFLINE_CACHE"] = "1"
@@ -92,6 +99,12 @@ class _TaichiWorker(threading.Thread):
     def run(self):
         # 1. Reduce priority to leave room for UI thread
         self._set_low_priority()
+
+        if _IS_AOT_MODE:
+            # In AOT mode, the background worker does nothing to avoid Context Crashes
+            # All calls are executed synchronously in the main thread
+            self.initialized = True
+            return
 
         # 2. Initialize Taichi exactly once in this persistent thread
         if not TAICHI_AVAILABLE:
@@ -244,10 +257,22 @@ def ti_thread(func):
     """
     Decorator: Automatically routes function execution to the persistent Taichi thread.
     Prevents CUDA_ERROR_INVALID_CONTEXT and minimizes startup overhead.
+    
+    SPECIAL CASE: If 'g' (GraphBuilder) is passed in kwargs, we bypass the worker thread
+    to ensure graph recording happens correctly in the caller's thread/arch.
     """
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
+        # If we are globally in AOT mode, we bypass the worker thread completely
+        # and execute directly to prevent any context collision.
+        if _IS_AOT_MODE:
+            return func(*args, **kwargs)
+
+        # Bypass worker during AOT recording or if explicitly requested
+        if kwargs.get("g") is not None:
+            return func(*args, **kwargs)
+
         worker = _get_worker()
         return worker.submit(func, *args, **kwargs)
 

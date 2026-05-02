@@ -1,5 +1,6 @@
 import os
 import gc
+import time
 import traceback
 import sqlite3
 import psutil
@@ -245,8 +246,8 @@ class SimilarityAlgorithm:
             )
             return np.zeros(out_shape, dtype=dtype_ref), None, []
 
-        merging_mode = merging_kwargs.get("merging_mode", "smart")
-        # merging_mode = merging_kwargs.get("merging_mode", "spatial")
+        # merging_mode = merging_kwargs.get("merging_mode", "smart")
+        merging_mode = merging_kwargs.get("merging_mode", "spatial")
 
         # Determine Backend
         if merging_mode == "smart":
@@ -312,7 +313,12 @@ class SimilarityAlgorithm:
             if final_weight is not None:
                 valid_mask = final_weight > 1e-6
                 normalized = np.zeros_like(final_img_norm)
-                np.divide(final_img_norm, final_weight[:, :, np.newaxis], out=normalized, where=valid_mask[:, :, np.newaxis])
+                np.divide(
+                    final_img_norm,
+                    final_weight[:, :, np.newaxis],
+                    out=normalized,
+                    where=valid_mask[:, :, np.newaxis],
+                )
                 final_img_norm = normalized
 
             scale_val = np.float32(np.iinfo(dtype_ref).max)
@@ -447,9 +453,13 @@ def main(
                     target_mean=0.25,
                 )
 
+        # Generate unique session ID for this stack run
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        stack_session_id = f"{output_name_base}_{timestamp}"
+
         # Batch Processing Loop
         batch_plan = setup_balanced_batching(
-            total_images, language_config, max_batch_size=8
+            total_images, language_config, max_batch_size=15
         )
         global_sum_img, global_sum_weight, global_total_frames = None, None, 0
 
@@ -477,6 +487,10 @@ def main(
                 update_progress=update_progress,
                 stop_requested=stop_requested,
                 return_raw=True,
+                save_prefix=stack_session_id,  # [UNIQUE] Session-based prefix
+                harvest_alignment=extra_params.get(
+                    "harvest_alignment", False
+                ),  # [NEW] Pass from params
                 **extra_params,
             )
 

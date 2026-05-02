@@ -25,7 +25,7 @@ if TAICHI_AVAILABLE:
         return ti.Vector([w0, w1, w2, w3])
 
     @ti.kernel
-    def _bicubic_resize_kernel(
+    def _bicubic_resize_kernel_2d(
         src: ti.types.ndarray(),
         dst: ti.types.ndarray(),
         h_src: int,
@@ -57,8 +57,122 @@ if TAICHI_AVAILABLE:
             )
             dst[r, c] = val
 
+    @ti.kernel
+    def _bicubic_resize_kernel_3d(
+        src: ti.types.ndarray(),
+        dst: ti.types.ndarray(),
+        h_src: int,
+        w_src: int,
+        h_dst: int,
+        w_dst: int,
+    ):
+        for r, c in ti.ndrange(h_dst, w_dst):
+            y_src = (r + 0.5) * (float(h_src) / float(h_dst)) - 0.5
+            x_src = (c + 0.5) * (float(w_src) / float(w_dst)) - 0.5
 
-def bicubic_resize(src, target_h: int, target_w: int, dst=None, buffer_provider="pool"):
+            x_int = int(ti.floor(x_src))
+            y_int = int(ti.floor(y_src))
+
+            dx = x_src - x_int
+            dy = y_src - y_int
+
+            for ch in ti.static(range(3)):
+                col_results = ti.Vector([0.0, 0.0, 0.0, 0.0])
+                for m in range(-1, 3):
+                    p = ti.Vector([0.0, 0.0, 0.0, 0.0])
+                    y_idx = tm.clamp(y_int + m, 0, h_src - 1)
+                    for n in range(-1, 3):
+                        x_idx = tm.clamp(x_int + n, 0, w_src - 1)
+                        p[n + 1] = src[y_idx, x_idx, ch]
+                    col_results[m + 1] = cubic_hermite(p[0], p[1], p[2], p[3], dx)
+
+                val = cubic_hermite(
+                    col_results[0], col_results[1], col_results[2], col_results[3], dy
+                )
+                dst[r, c, ch] = val
+
+    @ti.kernel
+    def _bicubic_sample_kernel_2d(
+        src: ti.types.ndarray(),
+        coords: ti.types.ndarray(),
+        results: ti.types.ndarray(),
+        n_samples: int,
+        h_src: int,
+        w_src: int,
+    ):
+        for i in range(n_samples):
+            x_src = coords[i, 0]
+            y_src = coords[i, 1]
+
+            x_int = int(ti.floor(x_src))
+            y_int = int(ti.floor(y_src))
+            dx = x_src - x_int
+            dy = y_src - y_int
+
+            col_results = ti.Vector([0.0, 0.0, 0.0, 0.0])
+            for m in range(-1, 3):
+                p = ti.Vector([0.0, 0.0, 0.0, 0.0])
+                y_idx = tm.clamp(y_int + m, 0, h_src - 1)
+                for n in range(-1, 3):
+                    x_idx = tm.clamp(x_int + n, 0, w_src - 1)
+                    p[n + 1] = src[y_idx, x_idx]
+                col_results[m + 1] = cubic_hermite(p[0], p[1], p[2], p[3], dx)
+
+            val = cubic_hermite(
+                col_results[0], col_results[1], col_results[2], col_results[3], dy
+            )
+            results[i] = val
+
+    @ti.kernel
+    def _bicubic_sample_kernel_3d(
+        src: ti.types.ndarray(),
+        coords: ti.types.ndarray(),
+        results: ti.types.ndarray(),
+        n_samples: int,
+        h_src: int,
+        w_src: int,
+    ):
+        for i in range(n_samples):
+            x_src = coords[i, 0]
+            y_src = coords[i, 1]
+
+            x_int = int(ti.floor(x_src))
+            y_int = int(ti.floor(y_src))
+            dx = x_src - x_int
+            dy = y_src - y_int
+
+            for ch in ti.static(range(3)):
+                col_results = ti.Vector([0.0, 0.0, 0.0, 0.0])
+                for m in range(-1, 3):
+                    p = ti.Vector([0.0, 0.0, 0.0, 0.0])
+                    y_idx = tm.clamp(y_int + m, 0, h_src - 1)
+                    for n in range(-1, 3):
+                        x_idx = tm.clamp(x_int + n, 0, w_src - 1)
+                        p[n + 1] = src[y_idx, x_idx, ch]
+                    col_results[m + 1] = cubic_hermite(p[0], p[1], p[2], p[3], dx)
+
+                val = cubic_hermite(
+                    col_results[0], col_results[1], col_results[2], col_results[3], dy
+                )
+                results[i, ch] = val
+
+
+def bicubic_resize(
+    src=None, 
+    target_h: int = 0, 
+    target_w: int = 0, 
+    dst=None, 
+    buffer_provider="pool",
+    # === AOT RECORDING ARGUMENTS ===
+    g=None,
+    src_arg=None,
+    dst_arg=None,
+    h_src_arg=None,
+    w_src_arg=None,
+    h_dst_arg=None,
+    w_dst_arg=None,
+    is_rgb_aot=False,
+):
     """
     Smart bicubic resize API that auto-detects input type and returns appropriate output.
 
@@ -82,6 +196,11 @@ def bicubic_resize(src, target_h: int, target_w: int, dst=None, buffer_provider=
         raise ImportError("Taichi not available")
 
     from . import common
+
+    if g is not None:
+        target = _bicubic_resize_kernel_3d if is_rgb_aot else _bicubic_resize_kernel_2d
+        g.dispatch(target, src_arg, dst_arg, h_src_arg, w_src_arg, h_dst_arg, w_dst_arg)
+        return None
 
     # Detect input type
     is_taichi_input = hasattr(src, "to_numpy")
@@ -111,7 +230,10 @@ def bicubic_resize(src, target_h: int, target_w: int, dst=None, buffer_provider=
             )
 
         # Run kernel (works with both NumPy and Taichi fields)
-        _bicubic_resize_kernel(src_gpu, dst_gpu, h_src, w_src, h_dst, w_dst)
+        if is_3d:
+            _bicubic_resize_kernel_3d(src_gpu, dst_gpu, h_src, w_src, h_dst, w_dst)
+        else:
+            _bicubic_resize_kernel_2d(src_gpu, dst_gpu, h_src, w_src, h_dst, w_dst)
 
         # Cleanup temp src
         if src_is_temp:

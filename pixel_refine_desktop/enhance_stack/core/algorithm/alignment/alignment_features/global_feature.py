@@ -1062,31 +1062,24 @@ _SIGMOID_LUT_CACHE = {}
 
 
 def estimate_noise_in_python(ref_image_gray_float):
+    """
+    Estimasi noise sederhana menggunakan Laplacian.
+    Menyederhanakan perhitungan dari block-based ke Laplacian MAD saja.
+    """
     if ref_image_gray_float is None or ref_image_gray_float.size == 0:
         return 0.015
-    H, W = ref_image_gray_float.shape
-    block_size = 8
-    min_blocks = 4
-    if H < block_size * 2 or W < block_size * 2:
-        native_img = ref_image_gray_float.copy()
-        lap = cv2.Laplacian(native_img, cv2.CV_32F, ksize=3)
-        return float(np.median(np.abs(lap - np.median(lap))) * 1.4826)
-    img_lap = cv2.Laplacian(ref_image_gray_float, cv2.CV_32F, ksize=3)
-    h_cut = (H // block_size) * block_size
-    w_cut = (W // block_size) * block_size
-    img_cut = img_lap[:h_cut, :w_cut]
-    blocks = (
-        img_cut.reshape(
-            h_cut // block_size, block_size, w_cut // block_size, block_size
-        )
-        .transpose(0, 2, 1, 3)
-        .reshape(-1, block_size * block_size)
-    )
-    block_medians = np.median(blocks, axis=1, keepdims=True)
-    block_mads = np.median(np.abs(blocks - block_medians), axis=1)
-    keep_ratio = 0.2
-    num_keep = max(min_blocks, int(len(block_mads) * keep_ratio))
-    estimated_sigma = np.median(np.partition(block_mads, num_keep)[:num_keep]) * 1.4826
+
+    # Hitung Laplacian
+    lap = cv2.Laplacian(ref_image_gray_float, cv2.CV_32F, ksize=3)
+    if lap is None:
+        return 0.015
+
+    # Hitung Median Absolute Deviation (MAD)
+    # sigma = median(abs(lap - median(lap))) * 1.4826
+    median_val = np.median(lap)
+    mad_value = np.median(np.abs(lap - median_val))
+    estimated_sigma = mad_value * 1.4826
+
     return float(np.clip(estimated_sigma, 0.00001, 0.99999))
 
 

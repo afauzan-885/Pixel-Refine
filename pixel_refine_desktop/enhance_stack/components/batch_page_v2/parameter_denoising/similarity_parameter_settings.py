@@ -42,7 +42,7 @@ def load_similarity_config():
             "similarity_spatial_noise_mad_offset_factor": 0.12,
             "similarity_spatial_overlap_percent": 0.30,
             "similarity_spatial_num_workers": 1,
-            "similarity_smart_noise_alpha": 1.8,
+            "similarity_smart_noise_alpha": 1.0,
             "similarity_smart_noise_aware_enable": False,  # Default diset ke False (OFF)
             "similarity_smart_noise_strength": 100.0,  # [PENAMBAHAN] Strength (%)
         },

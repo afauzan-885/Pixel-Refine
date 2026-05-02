@@ -1,61 +1,79 @@
-#include "preprocessing_aot.h"
-#include <taichi/cpp/taichi.hpp>
+#include "taichi_modular_core.h"
 #include <iostream>
-#include <vector>
-#include <string>
-#include <cstdint>
+#include <cstring>
+#include <chrono>
 
-// Struktur internal untuk menyimpan konteks runtime
-struct AotContext {
-    ti::Runtime runtime;
-    ti::AotModule module;
-    ti::ComputeGraph preprocess_rgb;
-    ti::ComputeGraph preprocess_gray;
-    bool initialized = false;
-};
-
-// Singleton context
-static AotContext& get_context() {
-    static AotContext ctx;
-    return ctx;
-}
+#ifdef _WIN32
+#define PREPROCESS_API __declspec(dllexport)
+#else
+#define PREPROCESS_API
+#endif
 
 extern "C" {
 
 /**
- * Inisialisasi TiRT Runtime dan memuat modul AOT.
+ * Initialize Taichi Runtime (Vulkan)
  */
-PREPROCESS_API int init_taichi_aot_runtime(const char* module_path) {
-    auto& ctx = get_context();
-    if (ctx.initialized) return 0;
+PREPROCESS_API void* init_taichi_runtime() {
+    TiRuntime runtime = ti_create_runtime(TI_ARCH_VULKAN, 0);
+    return (void*)runtime;
+}
 
-    try {
-        // 1. Inisialisasi Runtime (Vulkan direkomendasikan untuk Desktop Windows)
-        ctx.runtime = ti::Runtime(TI_ARCH_VULKAN);
-        
-        // 2. Muat Modul AOT
-        ctx.module = ctx.runtime.load_aot_module(module_path);
-        
-        // 3. Ambil Grafik yang sudah didefinisikan di compiler
-        ctx.preprocess_rgb = ctx.module.get_compute_graph("preprocess_rgb");
-        ctx.preprocess_gray = ctx.module.get_compute_graph("preprocess_gray");
-        
-        ctx.initialized = true;
-        std::cout << "[TaichiAOT] Runtime initialized from: " << module_path << std::endl;
-        return 0;
-    } catch (const std::exception& e) {
-        std::cerr << "[TaichiAOT] Initialization failed: " << e.what() << std::endl;
-        return -1;
+/**
+ * Load AOT Module
+ */
+PREPROCESS_API void* load_aot_module(void* runtime, const char* path) {
+    if (!runtime || !path) return nullptr;
+    TiAotModule mod = ti_load_aot_module((TiRuntime)runtime, path);
+    return (void*)mod;
+}
+
+/**
+ * Allocate GPU Buffer (TiMemory)
+ */
+PREPROCESS_API void* allocate_gpu_buffer(void* runtime, uint64_t size, int host_accessible) {
+    if (!runtime) return nullptr;
+    TiMemoryAllocateInfo info = {};
+    info.size = size;
+    info.usage = TI_MEMORY_USAGE_STORAGE_BIT;
+    info.host_write = (host_accessible != 0);
+    info.host_read = (host_accessible != 0);
+    
+    TiMemory mem = ti_allocate_memory((TiRuntime)runtime, &info);
+    return (void*)mem;
+}
+
+/**
+ * Free GPU Buffer
+ */
+PREPROCESS_API void free_gpu_buffer(void* runtime, void* memory) {
+    if (runtime && memory) {
+        ti_free_memory((TiRuntime)runtime, (TiMemory)memory);
     }
 }
 
 /**
- * Melakukan preprocessing (Normalize -> Gamma -> Extract Green -> Resize) secara AOT.
+ * Map and Write data to GPU buffer
  */
-PREPROCESS_API int compute_preprocess_aot(
-    const int* src_ptr,  // Input pointer (int32)
-    float* dst_ptr,      // Output pointer (float32)
+PREPROCESS_API int write_to_gpu_buffer(void* runtime, void* memory, void* src_host, uint64_t size) {
+    if (!runtime || !memory || !src_host) return -1;
+    void* mapped = ti_map_memory((TiRuntime)runtime, (TiMemory)memory);
+    if (!mapped) return -2;
+    memcpy(mapped, src_host, size);
+    ti_unmap_memory((TiRuntime)runtime, (TiMemory)memory);
+    return 0;
+}
+
+/**
+ * Run Preprocessing Graph
+ */
+PREPROCESS_API int run_preprocess_aot(
+    void* runtime_ptr, 
+    void* module_ptr,
+    const char* graph_name,
+    void* src_mem, // TiMemory handle
     int src_h, int src_w, int src_c,
+    void* dst_mem, // TiMemory handle
     int dst_h, int dst_w,
     float scale_norm,
     int apply_gamma,
@@ -65,56 +83,71 @@ PREPROCESS_API int compute_preprocess_aot(
     float cutoff,
     int use_sharpen
 ) {
-    auto& ctx = get_context();
-    if (!ctx.initialized) return -1;
+    TiRuntime runtime = (TiRuntime)runtime_ptr;
+    TiAotModule module = (TiAotModule)module_ptr;
+    if (!runtime || !module) return -1;
 
-    try {
-        // 1. Siapkan NdArray untuk Input (Raw data dari CPU)
-        std::vector<uint32_t> src_shape;
-        if (src_c > 1) {
-            src_shape = {(uint32_t)src_h, (uint32_t)src_w, (uint32_t)src_c};
-        } else {
-            src_shape = {(uint32_t)src_h, (uint32_t)src_w};
-        }
-        
-        // Alokasi NdArray di GPU (host_accessible=true agar bisa ditulisi langsung)
-        ti::NdArray src_array = ctx.runtime.allocate_ndarray<int32_t>(src_shape, {}, true);
-        src_array.write(src_ptr, (size_t)src_h * src_w * src_c);
+    auto t0 = std::chrono::high_resolution_clock::now();
+    printf("[PreprocessAOT] graph='%s' src=(%d,%d,c=%d) dst=(%d,%d) scale_norm=%.0f gamma=%d\n",
+           graph_name, src_h, src_w, src_c, dst_h, dst_w, scale_norm, apply_gamma);
+    fflush(stdout);
 
-        // 2. Siapkan NdArray untuk Output (H, W) f32
-        ti::NdArray dst_array = ctx.runtime.allocate_ndarray<float>({(uint32_t)dst_h, (uint32_t)dst_w}, {}, true);
+    TiComputeGraph graph = ti_get_aot_module_compute_graph(module, graph_name);
+    if (!graph) return -2;
 
-        // 3. Pilih Grafik (RGB vs Gray)
-        ti::ComputeGraph* graph_ptr = (src_c > 1) ? &ctx.preprocess_rgb : &ctx.preprocess_gray;
-        ti::ComputeGraph& graph = *graph_ptr;
+    std::vector<TiNamedArgument> args;
+    
+    // Src NdArray
+    TiNdArray src_nd = {};
+    src_nd.memory = (TiMemory)src_mem;
+    src_nd.shape.dim_count = (src_c > 1) ? 3 : 2;
+    src_nd.shape.dims[0] = src_h;
+    src_nd.shape.dims[1] = src_w;
+    if (src_c > 1) src_nd.shape.dims[2] = src_c;
+    src_nd.elem_type = TI_DATA_TYPE_I32;
 
-        // 4. Bind Argumen sesuai urutan (Named arguments matching aot_alignment_compiler.py)
-        graph["src"] = src_array;
-        graph["dst"] = dst_array;
-        graph["src_h"] = (int32_t)src_h;
-        graph["src_w"] = (int32_t)src_w;
-        graph["dst_h"] = (int32_t)dst_h;
-        graph["dst_w"] = (int32_t)dst_w;
-        graph["scale_norm"] = (float)scale_norm;
-        graph["apply_gamma"] = (int32_t)apply_gamma;
-        graph["scale_gamma"] = (float)scale_gamma;
-        graph["gamma_pow"] = (float)gamma_pow;
-        graph["slope"] = (float)slope;
-        graph["cutoff"] = (float)cutoff;
-        graph["use_sharpen"] = (int32_t)use_sharpen;
+    // Dst NdArray
+    TiNdArray dst_nd = {};
+    dst_nd.memory = (TiMemory)dst_mem;
+    dst_nd.shape.dim_count = 2;
+    dst_nd.shape.dims[0] = dst_h;
+    dst_nd.shape.dims[1] = dst_w;
+    dst_nd.elem_type = TI_DATA_TYPE_F32;
 
-        // 5. Eksekusi di GPU
-        graph.launch();
-        ctx.runtime.wait(); // Sinkronisasi CPU-GPU
+    args.push_back({"src", {TI_ARGUMENT_TYPE_NDARRAY, {.ndarray = src_nd}}});
+    args.push_back({"dst", {TI_ARGUMENT_TYPE_NDARRAY, {.ndarray = dst_nd}}});
+    
+    // Scalars
+    TiArgument arg_snorm = {TI_ARGUMENT_TYPE_F32, {.f32 = scale_norm}};
+    args.push_back({"scale_norm", arg_snorm});
+    
+    TiArgument arg_gamma = {TI_ARGUMENT_TYPE_I32, {.i32 = apply_gamma}};
+    args.push_back({"apply_gamma", arg_gamma});
 
-        // 6. Baca hasil kembali ke pointer output NumPy (H*W float32)
-        dst_array.read(dst_ptr, (size_t)dst_h * dst_w);
-        
-        return 0;
-    } catch (const std::exception& e) {
-        std::cerr << "[TaichiAOT] Execution failed: " << e.what() << std::endl;
-        return -2;
-    }
+    TiArgument arg_sgamma = {TI_ARGUMENT_TYPE_F32, {.f32 = scale_gamma}};
+    args.push_back({"scale_gamma", arg_sgamma});
+
+    TiArgument arg_gpow = {TI_ARGUMENT_TYPE_F32, {.f32 = gamma_pow}};
+    args.push_back({"gamma_pow", arg_gpow});
+
+    TiArgument arg_slope = {TI_ARGUMENT_TYPE_F32, {.f32 = slope}};
+    args.push_back({"slope", arg_slope});
+
+    TiArgument arg_cutoff = {TI_ARGUMENT_TYPE_F32, {.f32 = cutoff}};
+    args.push_back({"cutoff", arg_cutoff});
+
+    TiArgument arg_sharpen = {TI_ARGUMENT_TYPE_I32, {.i32 = use_sharpen}};
+    args.push_back({"use_sharpen", arg_sharpen});
+
+    ti_launch_compute_graph(runtime, graph, (uint32_t)args.size(), args.data());
+    ti_wait(runtime);
+
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    printf("[PreprocessAOT] Done in %.2f ms\n", ms);
+    fflush(stdout);
+
+    return 0;
 }
 
 } // extern "C"

@@ -76,7 +76,7 @@ if TAICHI_AVAILABLE:
         ref: ti.types.ndarray(dtype=ti.f32, ndim=2),
         comp: ti.types.ndarray(dtype=ti.f32, ndim=2),
         cost_surface: ti.types.ndarray(dtype=ti.f32, ndim=2),
-        max_shift: int,
+        max_shift: ti.i32,
     ):
         """
         Computes the ZNCC cost across a shift grid.

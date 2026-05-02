@@ -1,0 +1,123 @@
+import taichi as ti
+import os
+import sys
+
+# Add project root to sys.path to allow imports
+file_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
+# Set AOT Mode globally before importing taichi_worker or related scripts
+os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
+
+from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm import (
+    bicubic_interpolation as bicubic,
+)
+
+
+def compile_bicubic_aot(arch=ti.vulkan, save_path="bicubic_interpolation_vulkan.tcm"):
+    print(f"\n>>> Compiling BICUBIC AOT for: {arch}")
+    ti.init(arch=arch, offline_cache=False)
+
+    # Compile Module
+    module = ti.aot.Module(arch)
+
+    # Common Scalar Args
+    h_src = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h_src", ti.i32)
+    w_src = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w_src", ti.i32)
+    h_dst = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h_dst", ti.i32)
+    w_dst = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w_dst", ti.i32)
+    n_samples = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "n_samples", ti.i32)
+
+    # 1. Graph: Bicubic Resize (Grayscale / 2D)
+    g_resize_2d = ti.graph.GraphBuilder()
+    src_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=2)
+    dst_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
+
+    bicubic.bicubic_resize(
+        g=g_resize_2d,
+        src_arg=src_2d,
+        dst_arg=dst_2d,
+        h_src_arg=h_src,
+        w_src_arg=w_src,
+        h_dst_arg=h_dst,
+        w_dst_arg=w_dst,
+        is_rgb_aot=False,
+    )
+    module.add_graph("bicubic_resize_f32_2d", g_resize_2d.compile())
+
+    # 2. Graph: Bicubic Resize (RGB / 3D)
+    g_resize_3d = ti.graph.GraphBuilder()
+    src_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=3)
+    dst_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
+
+    bicubic.bicubic_resize(
+        g=g_resize_3d,
+        src_arg=src_3d,
+        dst_arg=dst_3d,
+        h_src_arg=h_src,
+        w_src_arg=w_src,
+        h_dst_arg=h_dst,
+        w_dst_arg=w_dst,
+        is_rgb_aot=True,
+    )
+    module.add_graph("bicubic_resize_f32_3d", g_resize_3d.compile())
+
+    # 3. Graph: Bicubic Sampling (Grayscale / 2D)
+    g_sample_2d = ti.graph.GraphBuilder()
+    src_s2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=2)
+    coords_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "coords", ti.f32, ndim=2)
+    results_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "results", ti.f32, ndim=1)
+
+    g_sample_2d.dispatch(
+        bicubic._bicubic_sample_kernel_2d,
+        src_s2d,
+        coords_2d,
+        results_2d,
+        n_samples,
+        h_src,
+        w_src,
+    )
+    module.add_graph("bicubic_sample_f32_2d", g_sample_2d.compile())
+
+    # 4. Graph: Bicubic Sampling (RGB / 3D)
+    g_sample_3d = ti.graph.GraphBuilder()
+    src_s3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=3)
+    coords_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "coords", ti.f32, ndim=2)
+    results_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "results", ti.f32, ndim=2)
+
+    g_sample_3d.dispatch(
+        bicubic._bicubic_sample_kernel_3d,
+        src_s3d,
+        coords_3d,
+        results_3d,
+        n_samples,
+        h_src,
+        w_src,
+    )
+    module.add_graph("bicubic_sample_f32_3d", g_sample_3d.compile())
+
+    # Archive the module
+    module.archive(save_path)
+    print(f"Successfully compiled and archived to: {save_path}")
+    ti.reset()
+
+
+if __name__ == "__main__":
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    assets_dir = os.path.join(script_dir, "../aot_tcm")
+    os.makedirs(assets_dir, exist_ok=True)
+    
+    archs = [
+        (ti.vulkan, "vulkan"),
+        (ti.cuda, "cuda"),
+        (ti.cpu, "cpu")
+    ]
+    
+    for arch, suffix in archs:
+        save_path = os.path.abspath(os.path.join(assets_dir, f"bicubic_{suffix}.tcm"))
+        try:
+            compile_bicubic_aot(arch=arch, save_path=save_path)
+        except Exception as e:
+            print(f"Skipping {suffix} due to error: {e}")

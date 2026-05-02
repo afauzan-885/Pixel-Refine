@@ -375,7 +375,7 @@ if TAICHI_AVAILABLE:
     ) -> float:
         """Shared fused post-process math for JIT and AOT kernels."""
         green = val / scale_norm
-        
+
         if apply_gamma:
             green = green * scale_gamma
             if green < cutoff:
@@ -391,17 +391,17 @@ if TAICHI_AVAILABLE:
     def _fused_full_pipeline_kernel(
         src: ti.types.ndarray(ndim=3),  # Dynamic dtype for JIT flexibility
         dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
-        src_h: int,
-        src_w: int,
-        dst_h: int,
-        dst_w: int,
-        scale_norm: float,
-        apply_gamma: int,
-        scale_gamma: float,
-        gamma_pow: float,
-        slope: float,
-        cutoff: float,
-        use_sharpen: int,
+        src_h: ti.i32,
+        src_w: ti.i32,
+        dst_h: ti.i32,
+        dst_w: ti.i32,
+        scale_norm: ti.f32,
+        apply_gamma: ti.i32,
+        scale_gamma: ti.f32,
+        gamma_pow: ti.f32,
+        slope: ti.f32,
+        cutoff: ti.f32,
+        use_sharpen: ti.i32,
     ):
         """
         Fused kernel: Normalize → Gamma → Extract Green → Resize
@@ -452,17 +452,16 @@ if TAICHI_AVAILABLE:
     def _fused_full_pipeline_i32_2d_aot(
         src: ti.types.ndarray(dtype=ti.i32, ndim=2),
         dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
-        scale_norm: float,
-        apply_gamma: int,
-        scale_gamma: float,
-        gamma_pow: float,
-        slope: float,
-        cutoff: float,
-        use_sharpen: int,
+        scale_norm: ti.f32,
+        apply_gamma: ti.i32,
+        scale_gamma: ti.f32,
+        gamma_pow: ti.f32,
+        slope: ti.f32,
+        cutoff: ti.f32,
+        use_sharpen: ti.i32,
     ):
         """
-        AOT-stable fused pipeline for grayscale i32 input.
-        Shared math with _fused_full_pipeline_kernel.
+        AOT-stable fused pipeline for Grayscale (2D) i32 input.
         """
         src_h, src_w = src.shape[0], src.shape[1]
         dst_h, dst_w = dst.shape[0], dst.shape[1]
@@ -490,10 +489,10 @@ if TAICHI_AVAILABLE:
 
             top = v00 * (1.0 - fx) + v10 * fx
             bottom = v01 * (1.0 - fx) + v11 * fx
-            gray = top * (1.0 - fy) + bottom * fy
+            val = top * (1.0 - fy) + bottom * fy
 
             dst[y, x] = _fused_apply_postprocess(
-                gray,
+                val,
                 scale_norm,
                 apply_gamma,
                 scale_gamma,
@@ -507,13 +506,13 @@ if TAICHI_AVAILABLE:
     def _fused_full_pipeline_i32_3d_aot(
         src: ti.types.ndarray(dtype=ti.i32, ndim=3),
         dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
-        scale_norm: float,
-        apply_gamma: int,
-        scale_gamma: float,
-        gamma_pow: float,
-        slope: float,
-        cutoff: float,
-        use_sharpen: int,
+        scale_norm: ti.f32,
+        apply_gamma: ti.i32,
+        scale_gamma: ti.f32,
+        gamma_pow: ti.f32,
+        slope: ti.f32,
+        cutoff: ti.f32,
+        use_sharpen: ti.i32,
     ):
         """
         AOT-stable fused pipeline for RGB i32 input.
@@ -571,6 +570,18 @@ if TAICHI_AVAILABLE:
         dtype=None,
         buffer_provider="pool",
         return_numpy=False,
+        # === AOT RECORDING ARGUMENTS ===
+        g=None,
+        src_arg=None,
+        dst_arg=None,
+        scale_norm_arg=None,
+        apply_gamma_arg=None,
+        scale_gamma_arg=None,
+        gamma_pow_arg=None,
+        slope_arg=None,
+        cutoff_arg=None,
+        sharpen_arg=None,
+        is_rgb_aot=True,  # <--- NEW: Hint for AOT recording
     ):
         """
         Fused kernel: Normalize → Gamma → Extract Green → Resize
@@ -600,447 +611,306 @@ if TAICHI_AVAILABLE:
         if not TAICHI_AVAILABLE:
             raise ImportError("Taichi not available")
 
-        # Auto-detect dtype
-        if dtype is None:
-            dtype = getattr(image, "dtype", np.float32)
-
-        # Determine normalization scale
-        if np.issubdtype(dtype, np.integer):
-            scale_norm = float(np.iinfo(dtype).max)
-        else:
-            scale_norm = 1.0
-
-        # Upload to GPU if needed
-        src_gpu, src_is_temp = common.ensure_taichi_field(
-            image, buffer_provider=buffer_provider
-        )
-
-        src_h, src_w = src_gpu.shape[:2]
-        dst_h, dst_w = target_size
-
-        # Create output buffer
-        dst_gpu = common.get_temp_buffer((dst_h, dst_w), ti.f32, buffer_provider)
-
         # Run fused kernel
-        scale_gamma = scale if is_linear else 1.0
+        if g is None:
+            # Auto-detect dtype
+            if dtype is None:
+                dtype = getattr(image, "dtype", np.float32)
 
-        # Standardize src to 3D for fused kernel compatibility (H, W, 3)
-        src_3d = src_gpu
-        if len(src_gpu.shape) == 2:
-            src_3d = common.get_temp_buffer((src_h, src_w, 3), ti.f32, buffer_provider)
-            _normalize_kernel_2d(src_gpu, src_3d, src_h, src_w, 1.0)
-
-        _fused_full_pipeline_kernel(
-            src_3d,
-            dst_gpu,
-            src_h,
-            src_w,
-            dst_h,
-            dst_w,
-            scale_norm,
-            int(is_linear),
-            scale_gamma,
-            gamma_pow,
-            slope,
-            cutoff,
-            int(use_sharpen),
-        )
-
-        # Cleanup
-        if src_3d is not src_gpu:
-            common.release_temp_buffer(src_3d)
-        if src_is_temp:
-            common.release_temp_buffer(src_gpu)
-
-        # Return
-        if return_numpy:
-            result = dst_gpu.to_numpy()
-            common.release_temp_buffer(dst_gpu)
-            return result
-        else:
-            return dst_gpu
-
-    # ========================================================================
-    # Tier 2: 3-Step Fusions (60% speedup)
-    # ========================================================================
-
-    @ti.kernel
-    def _fused_normalize_gamma_green_kernel(
-        src: ti.types.ndarray(),
-        dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
-        h: int,
-        w: int,
-        scale_norm: float,
-        apply_gamma: int,
-        scale_gamma: float,
-        gamma_pow: float,
-        slope: float,
-        cutoff: float,
-        use_sharpen: int,
-    ):
-        """Fused kernel: Normalize → Gamma → Extract Green"""
-        for y, x in ti.ndrange(h, w):
-            # Extract raw value
-            val = 0.0
-            if ti.static(len(src.shape) == 3):
-                val = float(src[y, x, 1])
+            # Determine normalization scale
+            if np.issubdtype(dtype, np.integer):
+                scale_norm = float(np.iinfo(dtype).max)
             else:
-                val = float(src[y, x])
+                scale_norm = 1.0
 
-            dst[y, x] = _fused_apply_postprocess(
-                val,
+            # Upload to GPU if needed
+            src_gpu, src_is_temp = common.ensure_taichi_field(
+                image, buffer_provider=buffer_provider
+            )
+
+            src_h, src_w = src_gpu.shape[:2]
+            dst_h, dst_w = target_size
+
+            # Create output buffer
+            dst_gpu = common.get_temp_buffer((dst_h, dst_w), ti.f32, buffer_provider)
+
+            scale_gamma = scale if is_linear else 1.0
+
+            # Standardize src to 3D for fused kernel compatibility (H, W, 3)
+            src_3d = src_gpu
+            if len(src_gpu.shape) == 2:
+                src_3d = common.get_temp_buffer(
+                    (src_h, src_w, 3), ti.f32, buffer_provider
+                )
+                _normalize_kernel_2d(src_gpu, src_3d, src_h, src_w, 1.0)
+
+            _fused_full_pipeline_kernel(
+                src_3d,
+                dst_gpu,
+                src_h,
+                src_w,
+                dst_h,
+                dst_w,
                 scale_norm,
-                apply_gamma,
+                int(is_linear),
                 scale_gamma,
                 gamma_pow,
                 slope,
                 cutoff,
-                use_sharpen,
+                int(use_sharpen),
             )
 
-    @ti_thread
-    def fused_normalize_gamma_green(
-        image,
-        is_linear=False,
-        scale=1.0,
-        use_sharpen=False,
-        gamma_pow=2.22,
-        slope=4.5,
-        cutoff=0.018,
-        dtype=None,
-        buffer_provider="pool",
-        return_numpy=False,
-    ):
-        """
-        Fused kernel: Normalize → Gamma → Extract Green
+            # Cleanup (JIT ONLY)
+            if src_3d is not src_gpu:
+                common.release_temp_buffer(src_3d)
+            if src_is_temp:
+                common.release_temp_buffer(src_gpu)
 
-        Optimized for alignment preprocessing without resize.
-
-        Performance: ~60% faster than modular approach (3 kernels → 1 kernel)
-        """
-        if not TAICHI_AVAILABLE:
-            raise ImportError("Taichi not available")
-
-        # Auto-detect dtype
-        if dtype is None:
-            dtype = getattr(image, "dtype", np.float32)
-
-        # Determine normalization scale
-        if np.issubdtype(dtype, np.integer):
-            scale_norm = float(np.iinfo(dtype).max)
+            # Return
+            if return_numpy:
+                result = dst_gpu.to_numpy()
+                common.release_temp_buffer(dst_gpu)
+                return result
+            else:
+                return dst_gpu
         else:
-            scale_norm = 1.0
+            # AOT Mode: Dispatch specifically to the correct AOT kernel
+            kernel_to_use = (
+                _fused_full_pipeline_i32_3d_aot
+                if is_rgb_aot
+                else _fused_full_pipeline_i32_2d_aot
+            )
 
-        # Upload to GPU if needed
-        src_gpu, src_is_temp = common.ensure_taichi_field(
-            image, buffer_provider=buffer_provider
-        )
+            g.dispatch(
+                kernel_to_use,
+                src_arg,
+                dst_arg,
+                scale_norm_arg,
+                apply_gamma_arg,
+                scale_gamma_arg,
+                gamma_pow_arg,
+                slope_arg,
+                cutoff_arg,
+                sharpen_arg,
+            )
+            return None
 
-        h, w = src_gpu.shape[:2]
 
-        # Create output buffer
-        dst_gpu = common.get_temp_buffer((h, w), ti.f32, buffer_provider)
+# ========================================================================
+# Tier 2: 3-Step Fusions (60% speedup)
+# ========================================================================
 
-        # Run fused kernel
-        scale_gamma = scale if is_linear else 1.0
-        _fused_normalize_gamma_green_kernel(
-            src_gpu,
-            dst_gpu,
-            h,
-            w,
+
+@ti.kernel
+def _fused_normalize_gamma_green_kernel(
+    src: ti.types.ndarray(),
+    dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    h: int,
+    w: int,
+    scale_norm: float,
+    apply_gamma: int,
+    scale_gamma: float,
+    gamma_pow: float,
+    slope: float,
+    cutoff: float,
+    use_sharpen: int,
+):
+    """Fused kernel: Normalize → Gamma → Extract Green"""
+    for y, x in ti.ndrange(h, w):
+        # Extract raw value
+        val = 0.0
+        if ti.static(len(src.shape) == 3):
+            val = float(src[y, x, 1])
+        else:
+            val = float(src[y, x])
+
+        dst[y, x] = _fused_apply_postprocess(
+            val,
             scale_norm,
-            int(is_linear),
+            apply_gamma,
             scale_gamma,
             gamma_pow,
             slope,
             cutoff,
-            int(use_sharpen),
+            use_sharpen,
         )
-
-        # Cleanup
-        if src_is_temp:
-            common.release_temp_buffer(src_gpu)
-
-        # Return
-        if return_numpy:
-            result = dst_gpu.to_numpy()
-            common.release_temp_buffer(dst_gpu)
-            return result
-        else:
-            return dst_gpu
-
-    # ========================================================================
-    # Tier 1: 2-Step Fusions (40% speedup)
-    # ========================================================================
-
-    @ti.kernel
-    def _fused_gamma_and_extract_green_kernel(
-        src: ti.types.ndarray(),
-        dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
-        h: int,
-        w: int,
-        scale_norm: float,
-        apply_gamma: int,
-        scale_gamma: float,
-        gamma_pow: float,
-        slope: float,
-        cutoff: float,
-        use_sharpen: int,
-    ):
-        """Fused kernel: Gamma → Extract Green"""
-        for y, x in ti.ndrange(h, w):
-            # Extract raw value
-            val = 0.0
-            if ti.static(len(src.shape) == 3):
-                val = float(src[y, x, 1])
-            else:
-                val = float(src[y, x])
-
-            dst[y, x] = _fused_apply_postprocess(
-                val,
-                scale_norm,
-                apply_gamma,
-                scale_gamma,
-                gamma_pow,
-                slope,
-                cutoff,
-                use_sharpen,
-            )
-
-    @ti_thread
-    def fused_gamma_and_extract_green(
-        image,
-        apply_gamma=True,
-        scale=1.0,
-        use_sharpen=False,
-        gamma_pow=2.22,
-        slope=4.5,
-        cutoff=0.018,
-        buffer_provider="pool",
-        return_numpy=False,
-    ):
-        """
-        Fused kernel: Gamma → Extract Green
-
-        For already normalized images.
-
-        Performance: ~40% faster than modular approach (2 kernels → 1 kernel)
-        """
-        if not TAICHI_AVAILABLE:
-            raise ImportError("Taichi not available")
-
-        # Upload to GPU if needed
-        src_gpu, src_is_temp = common.ensure_taichi_field(
-            image, dtype=ti.f32, buffer_provider=buffer_provider
-        )
-
-        h, w = src_gpu.shape[:2]
-
-        # Create output buffer
-        dst_gpu = common.get_temp_buffer((h, w), ti.f32, buffer_provider)
-
-        # Run fused kernel
-        _fused_gamma_and_extract_green_kernel(
-            src_gpu,
-            dst_gpu,
-            h,
-            w,
-            1.0,  # scale_norm is 1.0 since it's already normalized
-            int(apply_gamma),
-            scale,
-            gamma_pow,
-            slope,
-            cutoff,
-            int(use_sharpen),
-        )
-
-        # Cleanup
-        if src_is_temp:
-            common.release_temp_buffer(src_gpu)
-
-        # Return
-        if return_numpy:
-            result = dst_gpu.to_numpy()
-            common.release_temp_buffer(dst_gpu)
-            return result
-        else:
-            return dst_gpu
-
-
-# ============================================================================
-# Unified Pipeline Function
-# ============================================================================
 
 
 @ti_thread
-def preprocess_pipeline_gpu(
+def fused_normalize_gamma_green(
     image,
-    normalize=True,
-    apply_gamma=False,
-    extract_green=True,
-    use_sharpen=False,
-    use_raft=False,
+    is_linear=False,
     scale=1.0,
+    use_sharpen=False,
     gamma_pow=2.22,
     slope=4.5,
     cutoff=0.018,
     dtype=None,
     buffer_provider="pool",
     return_numpy=False,
-    target_size=None,  # NEW: (height, width) for resize
 ):
     """
-    Smart GPU preprocessing pipeline with automatic optimization.
+    Fused kernel: Normalize → Gamma → Extract Green
 
-    Automatically selects the fastest fused kernel based on enabled steps.
-    The more steps you enable, the more optimization you get!
+    Optimized for alignment preprocessing without resize.
 
-    Pipeline: Normalize → Gamma → Extract Green → Resize
-
-    Args:
-        image: Input image (numpy or GPU buffer)
-        normalize: Apply normalization (u16/u8 → f32 [0,1])
-        apply_gamma: Apply gamma correction (linear → gamma)
-        extract_green: Extract green channel (RGB → grayscale)
-        use_sharpen: Apply contrast reduction (30%)
-        use_raft: Return as-is for RAFT (skips green extraction)
-        scale: Exposure scaling factor
-        gamma_pow: Gamma power
-        slope: Linear slope
-        cutoff: Gamma transition point
-        dtype: Original dtype (auto-detected if None)
-        buffer_provider: Buffer pool provider
-        return_numpy: If True, download to numpy array
-        target_size: (height, width) for resize, or None
-
-    Returns:
-        GPU buffer (ti.ndarray) or numpy array if return_numpy=True
-
-    Performance:
-        - 4-step fusion (N+G+E+R): ~75% faster
-        - 3-step fusion (N+G+E): ~60% faster
-        - 2-step fusion (G+E): ~40% faster
-        - Modular fallback: baseline speed
+    Performance: ~60% faster than modular approach (3 kernels → 1 kernel)
     """
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
-    # Determine which steps are enabled
-    has_normalize = normalize
-    has_green = extract_green and not use_raft
-    has_resize = target_size is not None
+    # Auto-detect dtype
+    if dtype is None:
+        dtype = getattr(image, "dtype", np.float32)
 
-    # ========================================================================
-    # Smart Kernel Selection - Route to optimal fused kernel
-    # ========================================================================
-
-    # 4-step fusion (FASTEST - 75% speedup)
-    # Optimized: Use fused kernel even if gamma is disabled (parity with AOT master kernel)
-    if has_normalize and has_green and has_resize:
-        return fused_full_pipeline(
-            image,
-            target_size=target_size,
-            is_linear=apply_gamma,
-            scale=scale,
-            use_sharpen=use_sharpen,
-            gamma_pow=gamma_pow,
-            slope=slope,
-            cutoff=cutoff,
-            dtype=dtype,
-            buffer_provider=buffer_provider,
-            return_numpy=return_numpy,
-        )
-
-    # 3-step fusions (FAST - 60% speedup)
-    if has_normalize and has_green:
-        return fused_normalize_gamma_green(
-            image,
-            is_linear=apply_gamma,
-            scale=scale,
-            use_sharpen=use_sharpen,
-            gamma_pow=gamma_pow,
-            slope=slope,
-            cutoff=cutoff,
-            dtype=dtype,
-            buffer_provider=buffer_provider,
-            return_numpy=return_numpy,
-        )
-
-    # 2-step fusions (FASTER - 40% speedup)
-    if has_green:
-        return fused_gamma_and_extract_green(
-            image,
-            apply_gamma=apply_gamma,
-            scale=scale,
-            use_sharpen=use_sharpen,
-            gamma_pow=gamma_pow,
-            slope=slope,
-            cutoff=cutoff,
-            buffer_provider=buffer_provider,
-            return_numpy=return_numpy,
-        )
-
-    # ========================================================================
-    # Fallback: Modular approach (for combinations without fused kernels)
-    # ========================================================================
-
-    current_gpu = None
-
-    # Step 1: Normalize
-    if normalize:
-        current_gpu = normalize_image_gpu(
-            image, dtype=dtype, buffer_provider=buffer_provider
-        )
+    # Determine normalization scale
+    if np.issubdtype(dtype, np.integer):
+        scale_norm = float(np.iinfo(dtype).max)
     else:
-        current_gpu, _ = common.ensure_taichi_field(
-            image, dtype=ti.f32, buffer_provider=buffer_provider
-        )
+        scale_norm = 1.0
 
-    # Step 2: Gamma
-    if apply_gamma:
-        prev_gpu = current_gpu
-        current_gpu = to_gamma_proxy_gpu(
-            prev_gpu,
-            scale=scale,
-            gamma_pow=gamma_pow,
-            slope=slope,
-            cutoff=cutoff,
-            buffer_provider=buffer_provider,
-        )
-        common.release_temp_buffer(prev_gpu)
+    # Upload to GPU if needed
+    src_gpu, src_is_temp = common.ensure_taichi_field(
+        image, buffer_provider=buffer_provider
+    )
 
-    # Step 3: Extract Green / Preprocess
-    if extract_green or use_sharpen:
-        prev_gpu = current_gpu
-        current_gpu = preprocess_in_python_gpu(
-            prev_gpu,
-            use_raft=use_raft,
-            use_sharpen=use_sharpen,
-            buffer_provider=buffer_provider,
-        )
-        if prev_gpu != current_gpu:
-            common.release_temp_buffer(prev_gpu)
+    h, w = src_gpu.shape[:2]
 
-    # Step 4: Resize (if needed)
-    if has_resize:
-        from . import bilinear_interpolation
+    # Create output buffer
+    dst_gpu = common.get_temp_buffer((h, w), ti.f32, buffer_provider)
 
-        prev_gpu = current_gpu
-        dst_h, dst_w = target_size
+    # Run fused kernel
+    scale_gamma = scale if is_linear else 1.0
+    _fused_normalize_gamma_green_kernel(
+        src_gpu,
+        dst_gpu,
+        h,
+        w,
+        scale_norm,
+        int(is_linear),
+        scale_gamma,
+        gamma_pow,
+        slope,
+        cutoff,
+        int(use_sharpen),
+    )
 
-        # Use public API which handles kernel selection and threading
-        current_gpu = bilinear_interpolation.bilinear_resize(
-            prev_gpu, dst_h, dst_w, dst=None
-        )
-        common.release_temp_buffer(prev_gpu)
+    # Cleanup
+    if src_is_temp:
+        common.release_temp_buffer(src_gpu)
 
     # Return
     if return_numpy:
-        result = current_gpu.to_numpy()
-        common.release_temp_buffer(current_gpu)
+        result = dst_gpu.to_numpy()
+        common.release_temp_buffer(dst_gpu)
         return result
     else:
-        return current_gpu
+        return dst_gpu
+
+
+# ========================================================================
+# Tier 1: 2-Step Fusions (40% speedup)
+# ========================================================================
+
+
+@ti.kernel
+def _fused_gamma_and_extract_green_kernel(
+    src: ti.types.ndarray(),
+    dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    h: int,
+    w: int,
+    scale_norm: float,
+    apply_gamma: int,
+    scale_gamma: float,
+    gamma_pow: float,
+    slope: float,
+    cutoff: float,
+    use_sharpen: int,
+):
+    """Fused kernel: Gamma → Extract Green"""
+    for y, x in ti.ndrange(h, w):
+        # Extract raw value
+        val = 0.0
+        if ti.static(len(src.shape) == 3):
+            val = float(src[y, x, 1])
+        else:
+            val = float(src[y, x])
+
+        dst[y, x] = _fused_apply_postprocess(
+            val,
+            scale_norm,
+            apply_gamma,
+            scale_gamma,
+            gamma_pow,
+            slope,
+            cutoff,
+            use_sharpen,
+        )
+
+
+@ti_thread
+def fused_gamma_and_extract_green(
+    image,
+    apply_gamma=True,
+    scale=1.0,
+    use_sharpen=False,
+    gamma_pow=2.22,
+    slope=4.5,
+    cutoff=0.018,
+    buffer_provider="pool",
+    return_numpy=False,
+):
+    """
+    Fused kernel: Gamma → Extract Green
+
+    For already normalized images.
+
+    Performance: ~40% faster than modular approach (2 kernels → 1 kernel)
+    """
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
+
+    # Upload to GPU if needed
+    src_gpu, src_is_temp = common.ensure_taichi_field(
+        image, dtype=ti.f32, buffer_provider=buffer_provider
+    )
+
+    h, w = src_gpu.shape[:2]
+
+    # Create output buffer
+    dst_gpu = common.get_temp_buffer((h, w), ti.f32, buffer_provider)
+
+    # Run fused kernel
+    _fused_gamma_and_extract_green_kernel(
+        src_gpu,
+        dst_gpu,
+        h,
+        w,
+        1.0,  # scale_norm is 1.0 since it's already normalized
+        int(apply_gamma),
+        scale,
+        gamma_pow,
+        slope,
+        cutoff,
+        int(use_sharpen),
+    )
+
+    # Cleanup
+    if src_is_temp:
+        common.release_temp_buffer(src_gpu)
+
+    # Return
+    if return_numpy:
+        result = dst_gpu.to_numpy()
+        common.release_temp_buffer(dst_gpu)
+        return result
+    else:
+        return dst_gpu
+
+
+# ============================================================================
+# Unified Pipeline Function
+# ============================================================================
 
 
 # ============================================================================
@@ -1261,102 +1131,128 @@ if not TAICHI_AVAILABLE:
 
         return np.clip(green, 0.0, 1.0)
 
-    def preprocess_pipeline_gpu(
-        image,
-        normalize=True,
-        apply_gamma=False,
-        extract_green=True,
-        use_sharpen=False,
-        use_raft=False,
-        scale=1.0,
-        gamma_pow=2.22,
-        slope=4.5,
-        cutoff=0.018,
-        dtype=None,
-        buffer_provider="pool",
-        return_numpy=True,
-        target_size=None,
-    ):
-        """
-        CPU fallback: Smart preprocessing pipeline.
 
-        Automatically routes to optimized CPU implementations.
-        """
-        # Determine which steps are enabled
-        has_normalize = normalize
-        has_gamma = apply_gamma
-        has_green = extract_green and not use_raft
-        has_resize = target_size is not None
+@ti_thread
+def preprocess_pipeline_gpu(
+    image,
+    normalize=True,
+    apply_gamma=True,
+    extract_green=True,
+    target_size=None,
+    scale=1.0,
+    use_sharpen=False,
+    gamma_pow=2.22,
+    slope=4.5,
+    cutoff=0.018,
+    use_raft=False,
+    dtype=None,
+    buffer_provider="pool",
+    # === AOT RECORDING ARGUMENTS ===
+    g=None,
+    src_arg=None,
+    dst_arg=None,
+    scale_norm_arg=None,
+    apply_gamma_arg=None,
+    scale_gamma_arg=None,
+    gamma_pow_arg=None,
+    slope_arg=None,
+    cutoff_arg=None,
+    sharpen_arg=None,
+    is_rgb_aot=True,
+):
+    """
+    Unified Preprocessing Pipeline (GPU Optimized).
+    Route to fused kernels for maximum performance.
+    """
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
 
-        # Route to optimized CPU functions
-        # 4-step fusion
-        if has_normalize and has_gamma and has_green and has_resize:
-            return fused_full_pipeline(
-                image,
-                target_size,
-                is_linear=True,
-                scale=scale,
-                use_sharpen=use_sharpen,
-                gamma_pow=gamma_pow,
-                slope=slope,
-                cutoff=cutoff,
-                dtype=dtype,
-            )
+    # AOT Recording Mode
+    if g is not None:
+        fused_full_pipeline(
+            None,
+            None,
+            g=g,
+            src_arg=src_arg,
+            dst_arg=dst_arg,
+            scale_norm_arg=scale_norm_arg,
+            apply_gamma_arg=apply_gamma_arg,
+            scale_gamma_arg=scale_gamma_arg,
+            gamma_pow_arg=gamma_pow_arg,
+            slope_arg=slope_arg,
+            cutoff_arg=cutoff_arg,
+            sharpen_arg=sharpen_arg,
+            is_rgb_aot=is_rgb_aot,
+        )
+        return None
 
-        # 3-step fusion
-        if has_normalize and has_gamma and has_green:
-            return fused_normalize_gamma_green(
-                image,
-                is_linear=True,
-                scale=scale,
-                use_sharpen=use_sharpen,
-                gamma_pow=gamma_pow,
-                slope=slope,
-                cutoff=cutoff,
-                dtype=dtype,
-            )
+    # JIT Runtime Mode
+    has_normalize = normalize
+    has_gamma = apply_gamma
+    has_green = extract_green and not use_raft
+    has_resize = target_size is not None
 
-        # 2-step fusion
-        if has_gamma and has_green:
-            return fused_gamma_and_extract_green(
-                image,
-                scale=scale,
-                use_sharpen=use_sharpen,
-                gamma_pow=gamma_pow,
-                slope=slope,
-                cutoff=cutoff,
-            )
+    # 4-step fusion (Fastest)
+    if has_normalize and has_gamma and has_green and has_resize:
+        return fused_full_pipeline(
+            image,
+            target_size,
+            is_linear=True,
+            scale=scale,
+            use_sharpen=use_sharpen,
+            gamma_pow=gamma_pow,
+            slope=slope,
+            cutoff=cutoff,
+            dtype=dtype,
+            buffer_provider=buffer_provider,
+        )
 
-        # Fallback: Modular approach
-        current = image
+    # 3-step fusion
+    if has_normalize and has_gamma and has_green:
+        return fused_normalize_gamma_green(
+            image,
+            is_linear=True,
+            scale=scale,
+            use_sharpen=use_sharpen,
+            gamma_pow=gamma_pow,
+            slope=slope,
+            cutoff=cutoff,
+            dtype=dtype,
+            buffer_provider=buffer_provider,
+        )
 
-        # Step 1: Normalize
-        if normalize:
-            current = normalize_image_gpu(current, dtype=dtype)
+    # Fallback (Modular)
+    current = image
+    if normalize:
+        current = normalize_image_gpu(
+            current, dtype=dtype, buffer_provider=buffer_provider
+        )
+    if apply_gamma:
+        current = to_gamma_proxy_gpu(
+            current,
+            scale=scale,
+            gamma_pow=gamma_pow,
+            slope=slope,
+            cutoff=cutoff,
+            buffer_provider=buffer_provider,
+        )
+    if extract_green or use_sharpen:
+        current = preprocess_in_python_gpu(
+            current,
+            use_raft=use_raft,
+            use_sharpen=use_sharpen,
+            buffer_provider=buffer_provider,
+        )
+    if has_resize:
+        import cv2
 
-        # Step 2: Gamma
-        if apply_gamma:
-            current = to_gamma_proxy_gpu(
-                current,
-                scale=scale,
-                gamma_pow=gamma_pow,
-                slope=slope,
-                cutoff=cutoff,
-            )
+        dst_h, dst_w = target_size
+        current_np = common.to_numpy_if_needed(current)
+        current_np = cv2.resize(
+            current_np, (dst_w, dst_h), interpolation=cv2.INTER_LINEAR
+        )
+        current = common.ensure_taichi_field(
+            current_np, buffer_provider=buffer_provider
+        )[0]
 
-        # Step 3: Extract green
-        if extract_green or use_sharpen:
-            current = preprocess_in_python_gpu(
-                current,
-                use_raft=use_raft,
-                use_sharpen=use_sharpen,
-            )
-
-        # Step 4: Resize
-        if has_resize:
-            dst_h, dst_w = target_size
-            current = cv2.resize(
-                current, (dst_w, dst_h), interpolation=cv2.INTER_LINEAR
-            )
-
-        return current
+    return current
