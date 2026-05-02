@@ -9,7 +9,7 @@ import numpy as np
 class DynamicArg(ctypes.Structure):
     _fields_ = [
         ("name", ctypes.c_char_p),
-        ("type", ctypes.c_int), # 0=Int32, 1=Float32, 2=ND_F32, 3=ND_Vec2_F32, 4=ND_I32, 5=ND_Vec2_I32
+        ("is_ndarray", ctypes.c_int), # 0=Int32, 1=Float32, 2=NDArray
         
         # Scalar values
         ("val_i32", ctypes.c_int32),
@@ -17,8 +17,11 @@ class DynamicArg(ctypes.Structure):
         
         # NDArray values
         ("ndarray_memory", ctypes.c_void_p),
+        ("elem_type", ctypes.c_int), # TiDataType enum value
         ("dim_count", ctypes.c_int),
-        ("shape", ctypes.c_uint32 * 8)
+        ("shape", ctypes.c_uint32 * 8),
+        ("elem_dim_count", ctypes.c_int),
+        ("elem_shape", ctypes.c_uint32 * 8),
     ]
 
 # -------------------------------------------------------------------------
@@ -99,6 +102,9 @@ def _init_aot_bridge():
     _LIB.run_aot_graph.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(DynamicArg), ctypes.c_int]
     _LIB.run_aot_graph.restype = None
 
+    _LIB.sync_runtime.argtypes = [ctypes.c_void_p]
+    _LIB.sync_runtime.restype = None
+
     # Backend selection: 0=Vulkan, 1=CUDA, 2=CPU
     arch_str = os.environ.get("PIXEL_REFINE_AOT_ARCH", "vulkan").lower()
     arch_id = 0
@@ -117,21 +123,50 @@ def _init_aot_bridge():
 # -------------------------------------------------------------------------
 # GPU Buffer Manager (Zero-Overhead Memory)
 # -------------------------------------------------------------------------
+class BufferPool:
+    def __init__(self):
+        self.free_buffers = {} # size_bytes -> list of handles
+
+    def acquire(self, size_bytes):
+        if size_bytes in self.free_buffers and self.free_buffers[size_bytes]:
+            return self.free_buffers[size_bytes].pop()
+        return None
+
+    def release(self, size_bytes, handle):
+        if size_bytes not in self.free_buffers:
+            self.free_buffers[size_bytes] = []
+        self.free_buffers[size_bytes].append(handle)
+
+    def clear(self):
+        global _LIB, _RUNTIME
+        if _LIB and _RUNTIME:
+            for size, handles in self.free_buffers.items():
+                for h in handles:
+                    try:
+                        _LIB.free_gpu_buffer(_RUNTIME, h)
+                    except: pass
+        self.free_buffers = {}
+
+
 class TaichiGPUBuffer:
-    def __init__(self, size_bytes, handle, shape, dtype=np.float32, is_vec2=False):
+    def __init__(self, size_bytes, handle, shape, dtype=np.float32, is_vec2=False, engine=None):
         self.size_bytes = size_bytes
         self.handle = handle  # void* pointer from C++ bridge
         self.shape = shape
         self.dtype = dtype
         self.is_vec2 = is_vec2
+        self.engine = engine # Reference to AOTEngine to access its pool
 
     def __del__(self):
-        """Automatically free VRAM when the Python object is garbage collected."""
-        if self.handle is not None and _LIB is not None and _RUNTIME is not None:
-            try:
-                _LIB.free_gpu_buffer(_RUNTIME, self.handle)
-            except:
-                pass
+        """Automatically return handle to pool or free VRAM."""
+        if self.handle is not None:
+            if self.engine and hasattr(self.engine, 'buffer_pool'):
+                self.engine.buffer_pool.release(self.size_bytes, self.handle)
+            elif _LIB is not None and _RUNTIME is not None:
+                try:
+                    _LIB.free_gpu_buffer(_RUNTIME, self.handle)
+                except:
+                    pass
             self.handle = None
 
     def to_numpy(self) -> np.ndarray:
@@ -179,27 +214,37 @@ class AOTModuleWrapper:
             args_array[i].name = key.encode('utf-8')
             
             if isinstance(value, int):
-                args_array[i].type = 0
+                args_array[i].is_ndarray = 0
                 args_array[i].val_i32 = value
             elif isinstance(value, float):
-                args_array[i].type = 1
+                args_array[i].is_ndarray = 1
                 args_array[i].val_f32 = value
             elif isinstance(value, TaichiGPUBuffer):
-                is_vec2 = getattr(value, 'is_vec2', False)
+                args_array[i].is_ndarray = 2
+                
+                # Map numpy dtype to TiDataType enum
                 if value.dtype == np.int32:
-                    args_array[i].type = 5 if is_vec2 else 4
+                    args_array[i].elem_type = 5 # TI_DATA_TYPE_I32
+                elif value.dtype == np.uint8:
+                    args_array[i].elem_type = 7 # TI_DATA_TYPE_U8
+                elif value.dtype == np.uint16:
+                    args_array[i].elem_type = 8 # TI_DATA_TYPE_U16
                 else:
-                    args_array[i].type = 3 if is_vec2 else 2
+                    args_array[i].elem_type = 1 # TI_DATA_TYPE_F32
                 
                 args_array[i].ndarray_memory = value.handle
                 
                 # Logic to split field shape and vector shape
+                is_vec2 = getattr(value, 'is_vec2', False)
                 shape = value.shape
                 dim_count = len(shape)
-                # If is_vec2 is True, the C++ bridge expects dim_count to be the FIELD dimensions only.
-                # If the shape already includes the trailing '2', we must decrement dim_count.
+                
                 if is_vec2 and dim_count > 0 and shape[-1] == 2:
                     dim_count -= 1
+                    args_array[i].elem_dim_count = 1
+                    args_array[i].elem_shape[0] = 2
+                else:
+                    args_array[i].elem_dim_count = 0
                 
                 args_array[i].dim_count = dim_count
                 for d in range(dim_count):
@@ -221,6 +266,7 @@ class AOTEngine:
             cls._instance = super(AOTEngine, cls).__new__(cls)
             _init_aot_bridge()
             cls._instance.modules = {}
+            cls._instance.buffer_pool = BufferPool()
         return cls._instance
         
     def get_vulkan_devices(self):
@@ -242,6 +288,10 @@ class AOTEngine:
         # Update environment for persistence
         os.environ["PIXEL_REFINE_AOT_DEVICE"] = str(device_id)
         
+        # Clear pool and modules
+        if hasattr(self, 'buffer_pool'):
+            self.buffer_pool.clear()
+        
         new_runtime = _LIB.init_aot_engine(arch_id, device_id)
         if not new_runtime:
             raise RuntimeError(f"Failed to re-initialize {arch_str.upper()} AOT Runtime on Device {device_id}")
@@ -249,6 +299,11 @@ class AOTEngine:
         _RUNTIME = new_runtime
         self.modules = {} # Clear cached modules as they are tied to the old runtime
         print(f"[TaichiAOT] Runtime switched to Device {device_id} ({arch_str.upper()})")
+
+    def sync(self):
+        """Manually synchronize the GPU (wait for all kernels to finish)."""
+        if _RUNTIME:
+            _LIB.sync_runtime(_RUNTIME)
 
     def load(self, tcm_path: str) -> AOTModuleWrapper:
         """Loads a TCM file and caches the module. Automatically handles architecture suffixes."""
@@ -284,33 +339,44 @@ class AOTEngine:
     def upload(self, arr: np.ndarray, is_vec2=False) -> TaichiGPUBuffer:
         """Upload a NumPy array to GPU VRAM and return a smart buffer handle."""
         arr_dtype = arr.dtype
-        if arr_dtype not in [np.float32, np.int32]:
+        if arr_dtype not in [np.float32, np.int32, np.uint8, np.uint16]:
             raise ValueError(f"Unsupported dtype: {arr_dtype}")
             
         arr_contiguous = np.ascontiguousarray(arr, dtype=arr_dtype)
         size_bytes = arr_contiguous.nbytes
-        handle = _LIB.allocate_gpu_buffer(_RUNTIME, size_bytes, 1)
+        
+        # Check pool first
+        handle = self.buffer_pool.acquire(size_bytes)
+        if not handle:
+            handle = _LIB.allocate_gpu_buffer(_RUNTIME, size_bytes, 1)
+        
         if not handle:
             raise MemoryError("Failed to allocate GPU Buffer.")
         
         _LIB.write_to_gpu_buffer(_RUNTIME, handle, arr_contiguous.ctypes.data_as(ctypes.c_void_p), size_bytes)
-        return TaichiGPUBuffer(size_bytes, handle, arr.shape, dtype=arr_dtype, is_vec2=is_vec2)
+        return TaichiGPUBuffer(size_bytes, handle, arr.shape, dtype=arr_dtype, is_vec2=is_vec2, engine=self)
 
     def allocate(self, shape, dtype=np.float32, is_vec2=False) -> TaichiGPUBuffer:
         """Allocate an empty GPU buffer."""
-        # Calculate size
         if isinstance(shape, int):
             shape = (shape,)
+            
+        # Adjust shape for vec2 if not already present
+        if is_vec2 and (len(shape) == 0 or shape[-1] != 2):
+            shape = shape + (2,)
+            
         elements = 1
         for s in shape: elements *= s
         
-        # Only f32 supported natively in this generic setup for now
-        size_bytes = elements * 4
-        if is_vec2:
-            size_bytes *= 2
+        dtype_obj = np.dtype(dtype)
+        size_bytes = elements * dtype_obj.itemsize
             
-        handle = _LIB.allocate_gpu_buffer(_RUNTIME, size_bytes, 1)
+        # Check pool first
+        handle = self.buffer_pool.acquire(size_bytes)
+        if not handle:
+            handle = _LIB.allocate_gpu_buffer(_RUNTIME, size_bytes, 1)
+            
         if not handle:
             raise MemoryError("Failed to allocate GPU Buffer.")
             
-        return TaichiGPUBuffer(size_bytes, handle, shape, dtype=dtype, is_vec2=is_vec2)
+        return TaichiGPUBuffer(size_bytes, handle, shape, dtype=dtype_obj.type, is_vec2=is_vec2, engine=self)

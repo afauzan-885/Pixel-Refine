@@ -18,12 +18,15 @@ extern "C" {
 // -----------------------------------------------------------------------
 struct DynamicArg {
     const char* name;
-    int type; // 0=Int32, 1=Float32, 2=ND_F32, 3=ND_Vec2_F32, 4=ND_I32, 5=ND_Vec2_I32
+    int is_ndarray; // 0=Int32, 1=Float32, 2=NDArray
     int32_t val_i32;
     float val_f32;
     TiMemory ndarray_memory;
+    int elem_type; // TiDataType enum value
     int dim_count;
     uint32_t shape[8];
+    int elem_dim_count;
+    uint32_t elem_shape[8];
 };
 
 // -----------------------------------------------------------------------
@@ -141,11 +144,17 @@ EXPORT void write_to_gpu_buffer(void* runtime, void* memory, void* data, uint64_
 EXPORT void read_from_gpu_buffer(void* runtime, void* memory, void* data, uint64_t size) {
     ti::Runtime* rt = (ti::Runtime*)runtime;
     if (!rt || !memory || !data) return;
+    rt->wait(); // Ensure all kernels are done before reading
     void* ptr = ti_map_memory(rt->runtime(), (TiMemory)memory);
     if (ptr) {
         memcpy(data, ptr, size);
         ti_unmap_memory(rt->runtime(), (TiMemory)memory);
     }
+}
+
+EXPORT void sync_runtime(void* runtime) {
+    ti::Runtime* rt = (ti::Runtime*)runtime;
+    if (rt) rt->wait();
 }
 
 // -----------------------------------------------------------------------
@@ -179,40 +188,32 @@ EXPORT void run_aot_graph(
             TiNamedArgument arg = {};
             arg.name = args_array[i].name;
             
-            if (args_array[i].type == 0) {
+            if (args_array[i].is_ndarray == 0) {
                 arg.argument.type = TI_ARGUMENT_TYPE_I32;
                 arg.argument.value.i32 = args_array[i].val_i32;
-            } else if (args_array[i].type == 1) {
+            } else if (args_array[i].is_ndarray == 1) {
                 arg.argument.type = TI_ARGUMENT_TYPE_F32;
                 arg.argument.value.f32 = args_array[i].val_f32;
-            } else if (args_array[i].type >= 2 && args_array[i].type <= 5) {
+            } else if (args_array[i].is_ndarray == 2) {
                 arg.argument.type = TI_ARGUMENT_TYPE_NDARRAY;
                 arg.argument.value.ndarray.memory = args_array[i].ndarray_memory;
-                
-                if (args_array[i].type == 4 || args_array[i].type == 5) {
-                    arg.argument.value.ndarray.elem_type = TI_DATA_TYPE_I32;
-                } else {
-                    arg.argument.value.ndarray.elem_type = TI_DATA_TYPE_F32;
-                }
+                arg.argument.value.ndarray.elem_type = (TiDataType)args_array[i].elem_type;
                 
                 arg.argument.value.ndarray.shape.dim_count = args_array[i].dim_count;
                 for (int d = 0; d < args_array[i].dim_count; d++) {
                     arg.argument.value.ndarray.shape.dims[d] = args_array[i].shape[d];
                 }
                 
-                // Vector shapes
-                if (args_array[i].type == 3 || args_array[i].type == 5) {
-                    arg.argument.value.ndarray.elem_shape.dim_count = 1;
-                    arg.argument.value.ndarray.elem_shape.dims[0] = 2; // vec2
-                } else {
-                    arg.argument.value.ndarray.elem_shape.dim_count = 0;
+                arg.argument.value.ndarray.elem_shape.dim_count = args_array[i].elem_dim_count;
+                for (int d = 0; d < args_array[i].elem_dim_count; d++) {
+                    arg.argument.value.ndarray.elem_shape.dims[d] = args_array[i].elem_shape[d];
                 }
             }
             ti_args.push_back(arg);
         }
 
         graph.launch(ti_args);
-        rt->wait();
+        // rt->wait(); // Removed for extreme performance!
     } catch (...) {}
 }
 

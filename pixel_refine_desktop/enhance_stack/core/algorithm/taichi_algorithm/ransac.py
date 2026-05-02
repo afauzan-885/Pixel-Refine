@@ -29,19 +29,21 @@ if TAICHI_AVAILABLE:
         mean_out: ti.types.ndarray(),
         h: int,
         w: int,
+        stride: int,
     ):
-        """Compute mean flow vector (simple translation model)."""
+        """Compute mean flow vector with stride."""
         sum_x = 0.0
         sum_y = 0.0
         count = 0.0
-
-        for y, x in ti.ndrange(h, w):
-            sum_x += flow[y, x][0]
-            sum_y += flow[y, x][1]
-            count += 1.0
-
-        mean_out[0] = sum_x / count
-        mean_out[1] = sum_y / count
+        for y, x in ti.ndrange((h + stride - 1) // stride, (w + stride - 1) // stride):
+            iy, ix = y * stride, x * stride
+            if iy < h and ix < w:
+                sum_x += flow[iy, ix][0]
+                sum_y += flow[iy, ix][1]
+                count += 1.0
+        if count > 0:
+            mean_out[0] = sum_x / count
+            mean_out[1] = sum_y / count
 
     @ti.kernel
     def _compute_median_flow_kernel(
@@ -60,27 +62,24 @@ if TAICHI_AVAILABLE:
     @ti.kernel
     def _count_inliers_kernel(
         flow: ti.types.ndarray(),
-        model_x: float,
-        model_y: float,
+        model: ti.types.ndarray(),
         threshold: float,
         inlier_mask: ti.types.ndarray(),
         h: int,
         w: int,
-    ) -> int:
-        """Count inliers that are within threshold of the model."""
-        count = 0
-        for y, x in ti.ndrange(h, w):
-            dx = flow[y, x][0] - model_x
-            dy = flow[y, x][1] - model_y
-            dist = ti.sqrt(dx * dx + dy * dy)
-
-            if dist < threshold:
-                inlier_mask[y, x] = 1
-                count += 1
-            else:
-                inlier_mask[y, x] = 0
-
-        return count
+        stride: int,
+    ):
+        """Update inlier mask with stride support."""
+        model_x, model_y = model[0], model[1]
+        for y, x in ti.ndrange((h + stride - 1) // stride, (w + stride - 1) // stride):
+            iy, ix = y * stride, x * stride
+            if iy < h and ix < w:
+                dx = flow[iy, ix][0] - model_x
+                dy = flow[iy, ix][1] - model_y
+                if dx * dx + dy * dy < threshold * threshold:
+                    inlier_mask[iy, ix] = 1
+                else:
+                    inlier_mask[iy, ix] = 0
 
     @ti.kernel
     def _compute_inlier_mean_kernel(
@@ -89,36 +88,34 @@ if TAICHI_AVAILABLE:
         mean_out: ti.types.ndarray(),
         h: int,
         w: int,
+        stride: int,
     ):
-        """Compute mean flow of inliers only."""
+        """Compute mean flow of inliers with stride support."""
         sum_x = 0.0
         sum_y = 0.0
         count = 0.0
-
-        for y, x in ti.ndrange(h, w):
-            if inlier_mask[y, x] == 1:
-                sum_x += flow[y, x][0]
-                sum_y += flow[y, x][1]
-                count += 1.0
-
+        for y, x in ti.ndrange((h + stride - 1) // stride, (w + stride - 1) // stride):
+            iy, ix = y * stride, x * stride
+            if iy < h and ix < w:
+                if inlier_mask[iy, ix] == 1:
+                    sum_x += flow[iy, ix][0]
+                    sum_y += flow[iy, ix][1]
+                    count += 1.0
         if count > 0:
             mean_out[0] = sum_x / count
             mean_out[1] = sum_y / count
-        else:
-            mean_out[0] = 0.0
-            mean_out[1] = 0.0
 
     @ti.kernel
     def _apply_ransac_result_kernel(
         flow: ti.types.ndarray(),
         inlier_mask: ti.types.ndarray(),
-        model_x: float,
-        model_y: float,
+        model: ti.types.ndarray(), # [model_x, model_y]
         output: ti.types.ndarray(),
         h: int,
         w: int,
     ):
         """Replace outlier flow with model prediction."""
+        model_x, model_y = model[0], model[1]
         for y, x in ti.ndrange(h, w):
             if inlier_mask[y, x] == 1:
                 # Keep inlier values

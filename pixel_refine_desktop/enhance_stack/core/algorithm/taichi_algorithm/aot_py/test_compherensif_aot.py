@@ -12,7 +12,7 @@ if project_root not in sys.path:
 
 # Enable AOT Mode Globally!
 os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
-os.environ["PIXEL_REFINE_AOT_DEVICE"] = "2"  # Target NVIDIA GPU
+os.environ["PIXEL_REFINE_AOT_DEVICE"] = "0"  # Target NVIDIA GPU
 
 # Import AOT API
 from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
@@ -43,16 +43,22 @@ def run_test():
 
     # Load and prepare image
     img = cv2.imread(img_path)
-    # Convert to grayscale for FFT testing and resize to a reasonable size to prevent massive VRAM usage
-    # 1024x1024 is good for FFT power-of-two requirement
-    img_resized = cv2.resize(img, (1024, 1024))
-    img_gray = cv2.cvtColor(img_resized, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    img_color = img_resized.astype(np.float32)
+    if img is None:
+        print(f"Error: Could not load image at {img_path}")
+        return
+
+    # Use original resolution
+    h_orig, w_orig = img.shape[:2]
+    img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    img_color = img.astype(np.float32)
+
+    # For FFT, we MUST have power-of-two. Let's use 2048x2048 for FFT test specifically
+    img_fft_ready = cv2.resize(img_gray, (2048, 2048))
 
     print(f"Loaded Image: {img_path}")
-    print(f"Test Resolution: 1024x1024")
+    print(f"Test Resolution: {w_orig}x{h_orig}")
 
-    n_frames = 100
+    n_frames = 50
 
     # ---------------------------------------------------------
     # 1. Bicubic Test
@@ -120,11 +126,11 @@ def run_test():
     # ---------------------------------------------------------
     # 5. FFT Test
     # ---------------------------------------------------------
-    print_header(f"5. FFT & IFFT ({n_frames} frames)")
+    print_header(f"5. FFT & IFFT ({n_frames} frames, 2048x2048)")
     start = time.perf_counter()
-    orig_gray_gpu = taichi_aot.engine.upload(img_gray)
+    fft_ready_gpu = taichi_aot.engine.upload(img_fft_ready)
     for _ in range(n_frames):
-        complex_gpu = taichi_aot.fft2(orig_gray_gpu)
+        complex_gpu = taichi_aot.fft2(fft_ready_gpu)
         reconstructed_gpu = taichi_aot.ifft2(complex_gpu)
 
     final_fft = reconstructed_gpu.to_numpy()

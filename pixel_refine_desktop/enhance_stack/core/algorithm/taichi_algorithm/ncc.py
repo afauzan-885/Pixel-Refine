@@ -1,8 +1,7 @@
 """
-Normalized Cross-Correlation (NCC) via FFT - Taichi GPU Implementation
-======================================================================
-Provides high-performance correlation functions for pattern matching,
-feature tracking, and general signal analysis using FFT backend.
+Normalized Cross-Correlation (NCC) - Taichi GPU Implementation
+==============================================================
+Provides high-performance correlation functions using Hybrid Integral + Spatial.
 """
 
 import numpy as np
@@ -15,233 +14,193 @@ try:
 except ImportError:
     TAICHI_AVAILABLE = False
 
-
 if TAICHI_AVAILABLE:
+    @ti.kernel
+    def _integral_image_row_scan_kernel(
+        src: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        sum_h: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        sq_sum_h: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        h: int, w: int
+    ):
+        for y in ti.ndrange(h):
+            row_sum = 0.0
+            row_sq_sum = 0.0
+            for x in range(w):
+                val = src[y, x]
+                row_sum += val
+                row_sq_sum += val * val
+                sum_h[y, x] = row_sum
+                sq_sum_h[y, x] = row_sq_sum
 
     @ti.kernel
-    def _compute_zncc_map_kernel(
+    def _integral_image_col_scan_kernel(
+        sum_h: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        sq_sum_h: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        sum_2d: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        sq_sum_2d: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        h: int, w: int
+    ):
+        for x in ti.ndrange(w):
+            col_sum = 0.0
+            col_sq_sum = 0.0
+            for y in range(h):
+                col_sum += sum_h[y, x]
+                col_sq_sum += sq_sum_h[y, x]
+                sum_2d[y, x] = col_sum
+                sq_sum_2d[y, x] = col_sq_sum
+
+    @ti.kernel
+    def _compute_correlation_kernel(
         image: ti.types.ndarray(dtype=ti.f32, ndim=2),
         template: ti.types.ndarray(dtype=ti.f32, ndim=2),
         dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
-        h_img: int,
-        w_img: int,
+        h_img: int, w_img: int,
+        h_temp: int, w_temp: int,
+        stride: int
+    ):
+        """Pure Cross-Correlation with Stride support."""
+        for y, x in ti.ndrange((h_img - h_temp) // stride + 1, (w_img - w_temp) // stride + 1):
+            acc = 0.0
+            iy, ix = y * stride, x * stride
+            for i, j in ti.ndrange(h_temp, w_temp):
+                acc += image[iy + i, ix + j] * template[i, j]
+            dst[y, x] = acc
+
+    @ti.kernel
+    def _assemble_zncc_kernel(
+        corr: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        sum_img: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        sq_sum_img: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        sum_t: float,
+        var_t_n: float,
+        n: float,
         h_temp: int,
         w_temp: int,
+        stride: int
     ):
-        """
-        Computes a full ZNCC correlation map in spatial domain.
-        Formula: sum((I - mean_I) * (T - mean_T)) / (std_I * std_T * N)
-        Result is in range [-1.0, 1.0].
-        """
-        # Pre-compute template stats once
-        sum_t = 0.0
-        sum_sq_t = 0.0
-        n = float(h_temp * w_temp)
-        for i, j in ti.ndrange(h_temp, w_temp):
-            val = float(template[i, j])
-            sum_t += val
-            sum_sq_t += val * val
-        
-        mean_t = sum_t / n
-        std_t_n = ti.sqrt(ti.max(0.0, sum_sq_t - (sum_t**2 / n)))
-
-        # Slide over image
-        for y, x in ti.ndrange(h_img - h_temp + 1, w_img - w_temp + 1):
-            sum_i = 0.0
-            sum_sq_i = 0.0
-            sum_it = 0.0
-
-            for i, j in ti.ndrange(h_temp, w_temp):
-                val_i = float(image[y + i, x + j])
-                val_t = float(template[i, j])
-                
-                sum_i += val_i
-                sum_sq_i += val_i * val_i
-                sum_it += val_i * val_t
-
-            # ZNCC Numerator: sum(I*T) - (sum_I * sum_T / N)
-            numerator = sum_it - (sum_i * sum_t / n)
+        """Combine correlation and stats with Stride support."""
+        for y, x in ti.ndrange(corr.shape[0], corr.shape[1]):
+            iy, ix = y * stride, x * stride
+            y1, x1 = iy - 1, ix - 1
+            y2, x2 = iy + h_temp - 1, ix + w_temp - 1
             
-            # Local variance of image window
-            var_i_n = ti.max(0.0, sum_sq_i - (sum_i**2 / n))
-            denominator = ti.sqrt(var_i_n * std_t_n**2)
+            s_a = sum_img[y2, x2]
+            s_b = sum_img[y1, x2] if y1 >= 0 else 0.0
+            s_c = sum_img[y2, x1] if x1 >= 0 else 0.0
+            s_d = sum_img[y1, x1] if (y1 >= 0 and x1 >= 0) else 0.0
+            s_i = s_a - s_b - s_c + s_d
 
-            if denominator > 1e-10:
-                dst[y, x] = tm.clamp(numerator / denominator, -1.0, 1.0)
-            else:
-                dst[y, x] = 0.0
+            sq_a = sq_sum_img[y2, x2]
+            sq_b = sq_sum_img[y1, x2] if y1 >= 0 else 0.0
+            sq_c = sq_sum_img[y2, x1] if x1 >= 0 else 0.0
+            sq_d = sq_sum_img[y1, x1] if (y1 >= 0 and x1 >= 0) else 0.0
+            s_sq_i = sq_a - sq_b - sq_c + sq_d
+            
+            numerator = corr[y, x] - (s_i * sum_t / n)
+            v_i_n = ti.max(0.0, s_sq_i - (s_i**2 / n))
+            denominator = ti.sqrt(ti.max(1e-12, v_i_n * var_t_n))
+            
+            dst[y, x] = tm.clamp(numerator / denominator, -1.0, 1.0)
 
     @ti.kernel
     def _compute_global_zncc_surface(
         ref: ti.types.ndarray(dtype=ti.f32, ndim=2),
         comp: ti.types.ndarray(dtype=ti.f32, ndim=2),
         cost_surface: ti.types.ndarray(dtype=ti.f32, ndim=2),
-        max_shift: ti.i32,
+        max_shift: int,
     ):
-        """
-        Computes the ZNCC cost across a shift grid.
-        Uses a fixed cropping region to avoid bias near edges.
-        Formula: 1.0 - [sum((I-meanI)*(T-meanT)) / (stdI * stdT)]
-        """
-        h_ref, w_ref = ref.shape[0], ref.shape[1]
-        for dy, dx in ti.ndrange(
-            (-max_shift, max_shift + 1), (-max_shift, max_shift + 1)
-        ):
+        h, w = ref.shape[0], ref.shape[1]
+        for dy, dx in ti.ndrange(2 * max_shift + 1, 2 * max_shift + 1):
+            shift_y = dy - max_shift
+            shift_x = dx - max_shift
+
             sum_ref = 0.0
             sum_comp = 0.0
+            sum_ref2 = 0.0
+            sum_comp2 = 0.0
+            sum_ref_comp = 0.0
             count = 0.0
 
-            # Pass 1: Calculate Means over fixed window
-            for y in range(max_shift, h_ref - max_shift):
-                for x in range(max_shift, w_ref - max_shift):
-                    sum_ref += ref[y, x]
-                    sum_comp += comp[y + dy, x + dx]
+            for y, x in ti.ndrange(h, w):
+                comp_y = y + shift_y
+                comp_x = x + shift_x
+                if 0 <= comp_y < h and 0 <= comp_x < w:
+                    v_r = ref[y, x]
+                    v_c = comp[comp_y, comp_x]
+                    sum_ref += v_r
+                    sum_comp += v_c
+                    sum_ref2 += v_r * v_r
+                    sum_comp2 += v_c * v_c
+                    sum_ref_comp += v_r * v_c
                     count += 1.0
 
-            if count > 0.0:
-                mean_ref = sum_ref / count
-                mean_comp = sum_comp / count
+            if count > 0:
+                mean_r = sum_ref / count
+                mean_c = sum_comp / count
+                var_r = sum_ref2 - (sum_ref * sum_ref / count)
+                var_c = sum_comp2 - (sum_comp * sum_comp / count)
+                cov = sum_ref_comp - (sum_ref * sum_comp / count)
 
-                numerator = 0.0
-                sum_sq_ref = 0.0
-                sum_sq_comp = 0.0
-
-                # Pass 2: Calculate Covariance and Variance
-                for y in range(max_shift, h_ref - max_shift):
-                    for x in range(max_shift, w_ref - max_shift):
-                        v_ref = ref[y, x] - mean_ref
-                        v_comp = comp[y + dy, x + dx] - mean_comp
-                        numerator += v_ref * v_comp
-                        sum_sq_ref += v_ref * v_ref
-                        sum_sq_comp += v_comp * v_comp
-
-                denominator = ti.sqrt(sum_sq_ref * sum_sq_comp)
+                numerator = cov
+                denominator = ti.sqrt(ti.max(1e-12, var_r * var_c))
 
                 if denominator > 1e-6:
                     zncc = numerator / denominator
-                    cost_surface[dy + max_shift, dx + max_shift] = 1.0 - zncc
+                    cost_surface[dy, dx] = 1.0 - zncc
                 else:
-                    cost_surface[dy + max_shift, dx + max_shift] = 1e10
+                    cost_surface[dy, dx] = 1e10
             else:
-                cost_surface[dy + max_shift, dx + max_shift] = 1e10
-
-
-    @ti.kernel
-    def _reduce_min_2d_kernel(
-        surface: ti.types.ndarray(dtype=ti.f32, ndim=2),
-        results: ti.types.ndarray(dtype=ti.f32, ndim=1),  # [val, y, x]
-    ):
-        """Find the minimum value and its coordinates in a 2D surface."""
-        h, w = surface.shape[0], surface.shape[1]
-        # Initialize results
-        results[0] = 1e10  # best_cost
-        results[1] = 0.0   # best_dy
-        results[2] = 0.0   # best_dx
-        
-        for y, x in ti.ndrange(h, w):
-            val = surface[y, x]
-            # Use atomic_min/max or a careful reduction
-            # For small surfaces (search radius), a simple atomic comparison is safe.
-            ti.atomic_min(results[0], val)
-        
-        # Second pass to find the index (less efficient but simple for now)
-        for y, x in ti.ndrange(h, w):
-            if surface[y, x] == results[0]:
-                results[1] = float(y)
-                results[2] = float(x)
+                cost_surface[dy, dx] = 1e10
 
 
 @ti_thread
-def zncc(image, template):
-    """
-    Zero-mean Normalized Cross-Correlation (ZNCC) - Spatial Version.
-    Exact sliding window implementation (Non-FFT).
-    """
-    if not TAICHI_AVAILABLE:
-        raise RuntimeError("Taichi not available")
-
+def zncc(image, template, stride=1):
+    """JIT Version of NCC with Stride."""
     img_gpu, img_temp = common.ensure_taichi_field(image, dtype=ti.f32)
     temp_gpu, temp_temp = common.ensure_taichi_field(template, dtype=ti.f32)
-
+    
     h_img, w_img = img_gpu.shape[:2]
     h_temp, w_temp = temp_gpu.shape[:2]
-
-    # Result size: (H_img - H_temp + 1, W_img - W_temp + 1)
-    res_h = h_img - h_temp + 1
-    res_w = w_img - w_temp + 1
     
-    if res_h <= 0 or res_w <= 0:
-        raise ValueError("Template larger than image")
-
+    res_h = (h_img - h_temp) // stride + 1
+    res_w = (w_img - w_temp) // stride + 1
+    
     res_field = common.get_temp_buffer((res_h, res_w), ti.f32)
-    res_field.fill(0.0)
+    corr_field = common.get_temp_buffer((res_h, res_w), ti.f32)
+    sum_h = common.get_temp_buffer((h_img, w_img), ti.f32)
+    sq_sum_h = common.get_temp_buffer((h_img, w_img), ti.f32)
+    sum_2d = common.get_temp_buffer((h_img, w_img), ti.f32)
+    sq_sum_2d = common.get_temp_buffer((h_img, w_img), ti.f32)
 
-    _compute_zncc_map_kernel(
-        img_gpu, temp_gpu, res_field, h_img, w_img, h_temp, w_temp
-    )
+    temp_np = template if isinstance(template, np.ndarray) else template.to_numpy()
+    sum_t = float(np.sum(temp_np))
+    var_t_n = float(np.sum(temp_np**2) - (sum_t**2 / (h_temp * w_temp)))
+
+    _integral_image_row_scan_kernel(img_gpu, sum_h, sq_sum_h, h_img, w_img)
+    _integral_image_col_scan_kernel(sum_h, sq_sum_h, sum_2d, sq_sum_2d, h_img, w_img)
+    _compute_correlation_kernel(img_gpu, temp_gpu, corr_field, h_img, w_img, h_temp, w_temp, stride)
+    _assemble_zncc_kernel(corr_field, sum_2d, sq_sum_2d, res_field, sum_t, var_t_n, float(h_temp * w_temp), h_temp, w_temp, stride)
 
     res_np = res_field.to_numpy()
 
-    # Cleanup
-    common.release_temp_buffer(res_field)
+    for f in [res_field, corr_field, sum_h, sq_sum_h, sum_2d, sq_sum_2d]:
+        common.release_temp_buffer(f)
     if img_temp: common.release_temp_buffer(img_gpu)
     if temp_temp: common.release_temp_buffer(temp_gpu)
 
     return res_np
 
-
-@ti_thread
 def global_translate_zncc(ref, comp, max_shift=16):
-    """
-    Estimates the dominant global translation (dx, dy) between two 2D images.
-    Uses spatial ZNCC for extreme robustness on coarsest layers.
-    """
-    if not TAICHI_AVAILABLE:
-        raise RuntimeError("Taichi not available")
-
-    ref_gpu, ref_temp = common.ensure_taichi_field(ref, dtype=ti.f32)
-    comp_gpu, comp_temp = common.ensure_taichi_field(comp, dtype=ti.f32)
-
-    h, w = ref_gpu.shape[:2]
-    # Prevent empty valid region on very small coarse layers.
-    safe_shift = int(
-        min(
-            int(max_shift),
-            max(0, (int(h) - 1) // 2),
-            max(0, (int(w) - 1) // 2),
-        )
-    )
-    if safe_shift <= 0:
-        if ref_temp:
-            common.release_temp_buffer(ref_gpu)
-        if comp_temp:
-            common.release_temp_buffer(comp_gpu)
-        return 0, 0, 1e10
-
-    size = 2 * safe_shift + 1
-    cost_surface = common.get_temp_buffer((size, size), ti.f32)
-    cost_surface.fill(1e10)
-
-    h_comp, w_comp = comp_gpu.shape[:2]
-    _compute_global_zncc_surface(ref_gpu, comp_gpu, cost_surface, safe_shift)
-
-    surface_np = cost_surface.to_numpy()
-    min_idx = np.unravel_index(np.argmin(surface_np), surface_np.shape)
-
-    best_dy = int(min_idx[0]) - safe_shift
-    best_dx = int(min_idx[1]) - safe_shift
-    best_cost = float(surface_np[min_idx[0], min_idx[1]])
-
-    common.release_temp_buffer(cost_surface)
-    if ref_temp: common.release_temp_buffer(ref_gpu)
-    if comp_temp: common.release_temp_buffer(comp_gpu)
-
-    return best_dx, best_dy, best_cost
-
+    """Fallback JIT translate."""
+    ref_gpu, _ = common.ensure_taichi_field(ref, ti.f32)
+    comp_gpu, _ = common.ensure_taichi_field(comp, ti.f32)
+    surface = common.get_temp_buffer((2*max_shift+1, 2*max_shift+1), ti.f32)
+    _compute_global_zncc_surface(ref_gpu, comp_gpu, surface, max_shift)
+    res = surface.to_numpy()
+    min_idx = np.unravel_index(np.argmin(res), res.shape)
+    return int(min_idx[1] - max_shift), int(min_idx[0] - max_shift), float(res[min_idx])
 
 def match_template(image, template):
-    """
-    Standard Template Matching via Spatial ZNCC.
-    Replaces older match_template_fft.
-    """
+    """Alias for zncc."""
     return zncc(image, template)

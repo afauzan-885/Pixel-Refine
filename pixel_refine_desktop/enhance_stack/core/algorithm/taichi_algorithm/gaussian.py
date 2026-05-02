@@ -46,16 +46,13 @@ if TAICHI_AVAILABLE:
                 # Left
                 x_left = x - k
                 if x_left < 0:
-                    x_left = (
-                        -x_left
-                    )  # Reflect 101 approx for small radius, or just clamp
-                # Standard clamp is safest
-                x_left = tm.clamp(x - k, 0, w - 1)
-
+                    x_left = 0
                 sum_val += src[y, x_left] * w_k
 
                 # Right
-                x_right = tm.clamp(x + k, 0, w - 1)
+                x_right = x + k
+                if x_right >= w:
+                    x_right = w - 1
                 sum_val += src[y, x_right] * w_k
 
                 total_weight += 2.0 * w_k
@@ -86,12 +83,16 @@ if TAICHI_AVAILABLE:
                 w_k = weights[k]
 
                 # Left
-                x_left = tm.clamp(x - k, 0, w - 1)
+                x_left = x - k
+                if x_left < 0:
+                    x_left = 0
                 val = tm.vec3(src[y, x_left, 0], src[y, x_left, 1], src[y, x_left, 2])
                 sum_val += val * w_k
 
                 # Right
-                x_right = tm.clamp(x + k, 0, w - 1)
+                x_right = x + k
+                if x_right >= w:
+                    x_right = w - 1
                 val = tm.vec3(
                     src[y, x_right, 0], src[y, x_right, 1], src[y, x_right, 2]
                 )
@@ -166,12 +167,16 @@ if TAICHI_AVAILABLE:
                 w_k = weights[k]
 
                 # Up
-                y_up = tm.clamp(y - k, 0, h - 1)
+                y_up = y - k
+                if y_up < 0:
+                    y_up = 0
                 val = tm.vec3(src[y_up, x, 0], src[y_up, x, 1], src[y_up, x, 2])
                 sum_val += val * w_k
 
                 # Down
-                y_down = tm.clamp(y + k, 0, h - 1)
+                y_down = y + k
+                if y_down >= h:
+                    y_down = h - 1
                 val = tm.vec3(src[y_down, x, 0], src[y_down, x, 1], src[y_down, x, 2])
                 sum_val += val * w_k
 
