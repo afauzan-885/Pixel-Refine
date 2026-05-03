@@ -174,13 +174,15 @@ class TaichiGPUBuffer:
         _init_aot_bridge()
         
         actual_shape = self.shape
-        # Restore trailing '2' for vec2 buffers if missing
-        if self.is_vec2 and (len(self.shape) == 0 or self.shape[-1] != 2):
-            actual_shape = self.shape + (2,)
-            
+        # Restore trailing '2/3/4' for vector buffers if missing in shape attribute
+        # Note: In our current implementation, we keep the full shape in self.shape
         res = np.zeros(actual_shape, dtype=self.dtype)
         _LIB.read_from_gpu_buffer(_RUNTIME, self.handle, res.ctypes.data_as(ctypes.c_void_p), self.size_bytes)
         return res
+
+    def view_as_vector(self, is_vector: bool = True) -> 'TaichiGPUBuffer':
+        """Return a view of this buffer with a different vector flag."""
+        return TaichiGPUBuffer(self.size_bytes, self.handle, self.shape, self.dtype, is_vec2=is_vector, engine=self.engine)
 
 # -------------------------------------------------------------------------
 # The Generic AOT Engine Class
@@ -235,14 +237,18 @@ class AOTModuleWrapper:
                 args_array[i].ndarray_memory = value.handle
                 
                 # Logic to split field shape and vector shape
-                is_vec2 = getattr(value, 'is_vec2', False)
+                # Support vec2, vec3, vec4 automatically based on shape
                 shape = value.shape
                 dim_count = len(shape)
                 
-                if is_vec2 and dim_count > 0 and shape[-1] == 2:
+                # Check if it's a vector field (is_vector or last dim is 2, 3, 4)
+                is_vector = getattr(value, 'is_vector', False) or getattr(value, 'is_vec2', False)
+                vec_size = shape[-1] if (dim_count > 0 and shape[-1] in [2, 3, 4]) else 1
+                
+                if is_vector and vec_size > 1:
                     dim_count -= 1
                     args_array[i].elem_dim_count = 1
-                    args_array[i].elem_shape[0] = 2
+                    args_array[i].elem_shape[0] = vec_size
                 else:
                     args_array[i].elem_dim_count = 0
                 
@@ -336,7 +342,7 @@ class AOTEngine:
         self.modules[resolved_path] = wrapper
         return wrapper
 
-    def upload(self, arr: np.ndarray, is_vec2=False) -> TaichiGPUBuffer:
+    def upload(self, arr: np.ndarray, is_vector: bool = False, is_vec2: bool = False) -> TaichiGPUBuffer:
         """Upload a NumPy array to GPU VRAM and return a smart buffer handle."""
         arr_dtype = arr.dtype
         if arr_dtype not in [np.float32, np.int32, np.uint8, np.uint16]:
@@ -354,22 +360,31 @@ class AOTEngine:
             raise MemoryError("Failed to allocate GPU Buffer.")
         
         _LIB.write_to_gpu_buffer(_RUNTIME, handle, arr_contiguous.ctypes.data_as(ctypes.c_void_p), size_bytes)
-        return TaichiGPUBuffer(size_bytes, handle, arr.shape, dtype=arr_dtype, is_vec2=is_vec2, engine=self)
+        
+        # Standardize on is_vector
+        vector_flag = is_vector or is_vec2
+            
+        return TaichiGPUBuffer(size_bytes, handle, arr.shape, dtype=arr_dtype, is_vec2=vector_flag, engine=self)
 
-    def allocate(self, shape, dtype=np.float32, is_vec2=False) -> TaichiGPUBuffer:
+    def allocate(self, shape, dtype=np.float32, is_vector: bool = False, is_vec2: bool = False) -> TaichiGPUBuffer:
         """Allocate an empty GPU buffer."""
         if isinstance(shape, int):
             shape = (shape,)
             
-        # Adjust shape for vec2 if not already present
-        if is_vec2 and (len(shape) == 0 or shape[-1] != 2):
-            shape = shape + (2,)
+        # Standardize on is_vector
+        vector_flag = is_vector or is_vec2
+        
+        # Auto-detect removed to prevent conflicts with 3D scalar kernels
+        if not vector_flag and is_vec2:
+            if len(shape) > 0 and shape[-1] != 2:
+                shape = shape + (2,)
+            vector_flag = True
             
         elements = 1
         for s in shape: elements *= s
         
         dtype_obj = np.dtype(dtype)
-        size_bytes = elements * dtype_obj.itemsize
+        size_bytes = int(elements * dtype_obj.itemsize)
             
         # Check pool first
         handle = self.buffer_pool.acquire(size_bytes)
@@ -379,4 +394,4 @@ class AOTEngine:
         if not handle:
             raise MemoryError("Failed to allocate GPU Buffer.")
             
-        return TaichiGPUBuffer(size_bytes, handle, shape, dtype=dtype_obj.type, is_vec2=is_vec2, engine=self)
+        return TaichiGPUBuffer(size_bytes, handle, shape, dtype=dtype_obj.type, is_vec2=vector_flag, engine=self)
