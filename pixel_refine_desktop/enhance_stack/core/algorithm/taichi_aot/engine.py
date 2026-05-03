@@ -149,17 +149,18 @@ class BufferPool:
 
 
 class TaichiGPUBuffer:
-    def __init__(self, size_bytes, handle, shape, dtype=np.float32, is_vec2=False, engine=None):
+    def __init__(self, size_bytes, handle, shape, dtype=np.float32, is_vec2=False, engine=None, is_owner=True):
         self.size_bytes = size_bytes
         self.handle = handle  # void* pointer from C++ bridge
         self.shape = shape
         self.dtype = dtype
         self.is_vec2 = is_vec2
         self.engine = engine # Reference to AOTEngine to access its pool
+        self.is_owner = is_owner
 
     def __del__(self):
         """Automatically return handle to pool or free VRAM."""
-        if self.handle is not None:
+        if self.handle is not None and self.is_owner:
             if self.engine and hasattr(self.engine, 'buffer_pool'):
                 self.engine.buffer_pool.release(self.size_bytes, self.handle)
             elif _LIB is not None and _RUNTIME is not None:
@@ -182,7 +183,8 @@ class TaichiGPUBuffer:
 
     def view_as_vector(self, is_vector: bool = True) -> 'TaichiGPUBuffer':
         """Return a view of this buffer with a different vector flag."""
-        return TaichiGPUBuffer(self.size_bytes, self.handle, self.shape, self.dtype, is_vec2=is_vector, engine=self.engine)
+        return TaichiGPUBuffer(self.size_bytes, self.handle, self.shape, self.dtype, 
+                               is_vec2=is_vector, engine=self.engine, is_owner=False)
 
 # -------------------------------------------------------------------------
 # The Generic AOT Engine Class
@@ -241,14 +243,22 @@ class AOTModuleWrapper:
                 shape = value.shape
                 dim_count = len(shape)
                 
-                # Check if it's a vector field (is_vector or last dim is 2, 3, 4)
+                # A buffer is a vector field if is_vec2/is_vector is set
                 is_vector = getattr(value, 'is_vector', False) or getattr(value, 'is_vec2', False)
-                vec_size = shape[-1] if (dim_count > 0 and shape[-1] in [2, 3, 4]) else 1
+                vec_size = 1
                 
-                if is_vector and vec_size > 1:
-                    dim_count -= 1
-                    args_array[i].elem_dim_count = 1
-                    args_array[i].elem_shape[0] = vec_size
+                if is_vector and dim_count > 0:
+                    # If it's marked as vector, the last dimension MUST be the vector size
+                    if shape[-1] in [2, 3, 4]:
+                        vec_size = shape[-1]
+                        dim_count -= 1
+                        args_array[i].elem_dim_count = 1
+                        args_array[i].elem_shape[0] = vec_size
+                    else:
+                        # Fallback: if is_vector is True but last dim is not 2,3,4, 
+                        # it might be a malformed vector buffer. 
+                        # In our system, we enforce that vectors have trailing dims.
+                        args_array[i].elem_dim_count = 0
                 else:
                     args_array[i].elem_dim_count = 0
                 
@@ -310,6 +320,21 @@ class AOTEngine:
         """Manually synchronize the GPU (wait for all kernels to finish)."""
         if _RUNTIME:
             _LIB.sync_runtime(_RUNTIME)
+
+    def clear_pool(self):
+        """Manually free all buffers in the pool."""
+        self.buffer_pool.clear()
+        print("[AOTEngine] Buffer pool cleared.")
+
+    def report_memory(self):
+        """Debug helper to show buffer pool state."""
+        total_pooled = 0
+        count = 0
+        for size, handles in self.buffer_pool.free_buffers.items():
+            total_pooled += size * len(handles)
+            count += len(handles)
+        print(f"[AOTEngine] Memory Report: {total_pooled / 1024**2:.2f} MB pooled in {count} buffers.")
+        return total_pooled
 
     def load(self, tcm_path: str) -> AOTModuleWrapper:
         """Loads a TCM file and caches the module. Automatically handles architecture suffixes."""
@@ -374,11 +399,13 @@ class AOTEngine:
         # Standardize on is_vector
         vector_flag = is_vector or is_vec2
         
-        # Auto-detect removed to prevent conflicts with 3D scalar kernels
-        if not vector_flag and is_vec2:
-            if len(shape) > 0 and shape[-1] != 2:
+        # Ensure vector fields have the trailing dimension in their shape
+        if vector_flag:
+            if len(shape) == 0:
+                shape = (2,) # Default to vec2 if empty shape but vector flagged
+            elif shape[-1] not in [2, 3, 4]:
+                # If last dim is not a valid vector size, assume we need to add 2 (complex/flow default)
                 shape = shape + (2,)
-            vector_flag = True
             
         elements = 1
         for s in shape: elements *= s

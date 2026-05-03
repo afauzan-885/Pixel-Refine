@@ -4,6 +4,7 @@ import time
 import os
 import sys
 import cv2
+import gc
 
 # Path setup
 file_dir = os.path.dirname(os.path.abspath(__file__))
@@ -30,7 +31,7 @@ def test_comprehensive():
         for i, name in enumerate(devices):
             active = (
                 " (ACTIVE)"
-                if str(i) == os.environ.get("PIXEL_REFINE_AOT_DEVICE", "1")
+                if str(i) == os.environ.get("PIXEL_REFINE_AOT_DEVICE", "0")
                 else ""
             )
             print(f"[{i}] {name}{active}")
@@ -66,33 +67,45 @@ def test_comprehensive():
     print_header(f"1. Bicubic (Resize) ({n_frames} frames)")
     start = time.perf_counter()
     for _ in range(n_frames):
-        _ = taichi_aot.resize(img_gpu, (512, 512), return_gpu=True)
+        res = taichi_aot.resize(img_gpu, (512, 512), return_gpu=True)
+        del res
     taichi_aot.engine.sync()
     print(f"Bicubic FPS: {n_frames / (time.perf_counter() - start):.2f}")
+    taichi_aot.engine.report_memory()
+    gc.collect()
 
     # 2. Box Filter (Optimized O(1))
     print_header(f"2. Box Filter (Integral O(1)) ({n_frames} frames)")
     start = time.perf_counter()
     for _ in range(n_frames):
-        _ = taichi_aot.box_filter(img_gpu, kernel_size=15, return_gpu=True)
+        res = taichi_aot.box_filter(img_gpu, kernel_size=15, return_gpu=True)
+        del res
     taichi_aot.engine.sync()
     print(f"Box Filter FPS: {n_frames / (time.perf_counter() - start):.2f}")
+    taichi_aot.engine.report_memory()
+    gc.collect()
 
     # 3. Gaussian Blur
     print_header(f"3. Gaussian Blur (Separable) ({n_frames} frames)")
     start = time.perf_counter()
     for _ in range(n_frames):
-        _ = taichi_aot.gaussian_blur(img_gpu, sigma=3.0, return_gpu=True)
+        res = taichi_aot.gaussian_blur(img_gpu, sigma=1.0, return_gpu=True)
+        del res
     taichi_aot.engine.sync()
     print(f"Gaussian Blur FPS: {n_frames / (time.perf_counter() - start):.2f}")
+    taichi_aot.engine.report_memory()
+    gc.collect()
 
     # 4. Image Pyramid
     print_header(f"4. Image Pyramid 4 Levels ({n_frames} frames)")
     start = time.perf_counter()
     for _ in range(n_frames):
-        _ = taichi_aot.image_pyramid(img_gpu, levels=4, return_gpu=True)
+        p = taichi_aot.image_pyramid(img_gpu, levels=4, return_gpu=True)
+        del p
     taichi_aot.engine.sync()
     print(f"Pyramid FPS: {n_frames / (time.perf_counter() - start):.2f}")
+    taichi_aot.engine.report_memory()
+    gc.collect()
 
     # 5. FFT & IFFT
     print_header(f"5. FFT & IFFT (2048x2048) ({n_frames} frames)")
@@ -100,26 +113,35 @@ def test_comprehensive():
     start = time.perf_counter()
     for _ in range(n_frames):
         complex_gpu = taichi_aot.fft2(fft_ready_gpu)
-        _ = taichi_aot.ifft2(complex_gpu)
+        res = taichi_aot.ifft2(complex_gpu)
+        del complex_gpu, res
     taichi_aot.engine.sync()
     print(f"FFT+IFFT FPS: {n_frames / (time.perf_counter() - start):.2f}")
+    taichi_aot.engine.report_memory()
+    gc.collect()
 
     # 7. Median Filter (3x3)
     print_header(f"7. Median Filter (3x3) ({n_frames} frames)")
     start = time.perf_counter()
     for _ in range(n_frames):
-        _ = taichi_aot.median_filter(img_gray_gpu, return_gpu=True)
+        res = taichi_aot.median_filter(img_gray_gpu, return_gpu=True)
+        del res
     taichi_aot.engine.sync()
     print(f"Median Filter FPS: {n_frames / (time.perf_counter() - start):.2f}")
+    taichi_aot.engine.report_memory()
+    gc.collect()
 
     # 8. Sobel & Laplacian
     print_header(f"8. Sobel & Laplacian ({n_frames} frames)")
     start = time.perf_counter()
     for _ in range(n_frames):
-        _, _ = taichi_aot.sobel(img_gray_gpu, return_gpu=True)
-        _ = taichi_aot.laplacian(img_gray_gpu, return_gpu=True)
+        dx, dy = taichi_aot.sobel(img_gray_gpu, return_gpu=True)
+        lap = taichi_aot.laplacian(img_gray_gpu, return_gpu=True)
+        del dx, dy, lap
     taichi_aot.engine.sync()
     print(f"Gradients FPS: {n_frames / (time.perf_counter() - start):.2f}")
+    taichi_aot.engine.report_memory()
+    gc.collect()
 
     # 9. NCC (ZNCC Integral O(1))
     print_header(f"9. NCC (Integral O(1)) ({n_frames} frames)")
@@ -127,9 +149,12 @@ def test_comprehensive():
     temp_gpu = taichi_aot.engine.upload(template)
     start = time.perf_counter()
     for _ in range(n_frames):
-        _ = taichi_aot.zncc(img_gray_gpu, temp_gpu, return_gpu=True)
+        res = taichi_aot.zncc(img_gray_gpu, temp_gpu, return_gpu=True)
+        del res
     taichi_aot.engine.sync()
     print(f"NCC FPS: {n_frames / (time.perf_counter() - start):.2f}")
+    taichi_aot.engine.report_memory()
+    gc.collect()
 
     # 10. RANSAC Flow Cleanup
     print_header(f"10. RANSAC Flow Cleanup ({n_frames} frames)")
@@ -137,10 +162,29 @@ def test_comprehensive():
     flow_gpu = taichi_aot.engine.upload(flow_mock, is_vec2=True)
     start = time.perf_counter()
     for _ in range(n_frames):
-        _ = taichi_aot.ransac_flow_cleanup(flow_gpu, threshold=1.0, return_gpu=True)
+        res = taichi_aot.ransac_flow_cleanup(flow_gpu, threshold=1.0, return_gpu=True)
+        del res
     taichi_aot.engine.sync()
     print(f"RANSAC FPS: {n_frames / (time.perf_counter() - start):.2f}")
+    taichi_aot.engine.report_memory()
+    gc.collect()
 
+    # 11. Warping (Guided)
+    print_header(f"11. Warping (Guided) ({n_frames} frames)")
+    # Create a small flow for testing
+    flow_warp = np.zeros((h_orig, w_orig, 2), dtype=np.float32)
+    flow_warp_gpu = taichi_aot.engine.upload(flow_warp, is_vec2=True)
+    start = time.perf_counter()
+    for _ in range(n_frames):
+        res = taichi_aot.warp_image(img_gpu, flow_warp_gpu, ref=img_gpu, return_gpu=True)
+        del res
+    taichi_aot.engine.sync()
+    print(f"Warping FPS: {n_frames / (time.perf_counter() - start):.2f}")
+    taichi_aot.engine.report_memory()
+    gc.collect()
+
+    taichi_aot.engine.report_memory()
+    taichi_aot.engine.clear_pool()
     print("\n[Success] Standardized Comprehensive Test Finished!")
 
 
