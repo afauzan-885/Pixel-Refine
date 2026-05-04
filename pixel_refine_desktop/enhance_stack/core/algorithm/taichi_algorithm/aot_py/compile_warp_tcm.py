@@ -9,17 +9,17 @@ if project_root not in sys.path:
 
 os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
 
-import pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.warp
-warp = sys.modules["pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.warp"]
+import pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.warp as warp
 
 def compile_warp_aot(arch=ti.vulkan, save_path="warp_vulkan.tcm"):
-    print(f"\n>>> Compiling WARP AOT for: {arch}")
+    print(f"\n>>> Compiling WARP AOT (Vector 2D for 3ch) for: {arch}")
     ti.init(arch=arch, offline_cache=False)
 
     module = ti.aot.Module(arch)
 
+    # Arguments
     flow_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "flow", ti.f32, ndim=3)
-
+    
     # 1. Warp Guided i32 (1-Channel)
     g_wg_1 = ti.graph.GraphBuilder()
     src_1 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.i32, ndim=2)
@@ -28,11 +28,11 @@ def compile_warp_aot(arch=ti.vulkan, save_path="warp_vulkan.tcm"):
     g_wg_1.dispatch(warp._warp_guided_i32_aot, src_1, flow_arg, dst_1, ref_1)
     module.add_graph("warp_guided_i32_1ch", g_wg_1.compile())
 
-    # 2. Warp Guided i32 (3-Channel)
+    # 2. Warp Guided i32 (3-Channel - Vector 2D)
     g_wg_3 = ti.graph.GraphBuilder()
-    src_3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.i32, ndim=3)
-    dst_3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.i32, ndim=3)
-    ref_3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ref", ti.i32, ndim=3)
+    src_3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.types.vector(3, ti.i32), ndim=2)
+    dst_3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.types.vector(3, ti.i32), ndim=2)
+    ref_3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ref", ti.types.vector(3, ti.i32), ndim=2)
     g_wg_3.dispatch(warp._warp_guided_i32_rgb_aot, src_3, flow_arg, dst_3, ref_3)
     module.add_graph("warp_guided_i32_3ch", g_wg_3.compile())
 
@@ -41,7 +41,7 @@ def compile_warp_aot(arch=ti.vulkan, save_path="warp_vulkan.tcm"):
     g_wn_1.dispatch(warp._warp_naked_i32_aot, src_1, flow_arg, dst_1)
     module.add_graph("warp_naked_i32_1ch", g_wn_1.compile())
 
-    # 4. Warp Naked i32 (3-Channel)
+    # 4. Warp Naked i32 (3-Channel - Vector 2D)
     g_wn_3 = ti.graph.GraphBuilder()
     g_wn_3.dispatch(warp._warp_naked_i32_rgb_aot, src_3, flow_arg, dst_3)
     module.add_graph("warp_naked_i32_3ch", g_wn_3.compile())

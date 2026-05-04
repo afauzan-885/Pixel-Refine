@@ -18,24 +18,27 @@ if TAICHI_AVAILABLE:
         w_dst: int,
     ):
         for r, c in ti.ndrange(h_dst, w_dst):
-            y_src = r * (float(h_src) / float(h_dst))
-            x_src = c * (float(w_src) / float(w_dst))
+            y_src = (float(r) + 0.5) * (float(h_src) / float(h_dst)) - 0.5
+            x_src = (float(c) + 0.5) * (float(w_src) / float(w_dst)) - 0.5
 
             y0 = int(ti.floor(y_src))
             x0 = int(ti.floor(x_src))
-            y1 = ti.min(y0 + 1, h_src - 1)
-            x1 = ti.min(x0 + 1, w_src - 1)
+            
+            y0_cl = tm.clamp(y0, 0, h_src - 1)
+            x0_cl = tm.clamp(x0, 0, w_src - 1)
+            y1_cl = tm.clamp(y0 + 1, 0, h_src - 1)
+            x1_cl = tm.clamp(x0 + 1, 0, w_src - 1)
 
             wy = y_src - float(y0)
             wx = x_src - float(x0)
 
-            q00 = src[y0, x0]
-            q01 = src[y0, x1]
-            q10 = src[y1, x0]
-            q11 = src[y1, x1]
+            q00 = src[y0_cl, x0_cl]
+            q01 = src[y0_cl, x1_cl]
+            q10 = src[y1_cl, x0_cl]
+            q11 = src[y1_cl, x1_cl]
 
-            r1 = tm.mix(q00, q01, wx)
-            r2 = tm.mix(q10, q11, wx)
+            r1 = tm.mix(float(q00), float(q01), wx)
+            r2 = tm.mix(float(q10), float(q11), wx)
             dst[r, c] = tm.mix(r1, r2, wy)
 
     @ti.kernel
@@ -48,24 +51,27 @@ if TAICHI_AVAILABLE:
         w_dst: int,
     ):
         for r, c, ch in ti.ndrange(h_dst, w_dst, dst.shape[2]):
-            y_src = r * (float(h_src) / float(h_dst))
-            x_src = c * (float(w_src) / float(w_dst))
+            y_src = (float(r) + 0.5) * (float(h_src) / float(h_dst)) - 0.5
+            x_src = (float(c) + 0.5) * (float(w_src) / float(w_dst)) - 0.5
 
             y0 = int(ti.floor(y_src))
             x0 = int(ti.floor(x_src))
-            y1 = ti.min(y0 + 1, h_src - 1)
-            x1 = ti.min(x0 + 1, w_src - 1)
+            
+            y0_cl = tm.clamp(y0, 0, h_src - 1)
+            x0_cl = tm.clamp(x0, 0, w_src - 1)
+            y1_cl = tm.clamp(y0 + 1, 0, h_src - 1)
+            x1_cl = tm.clamp(x0 + 1, 0, w_src - 1)
 
             wy = y_src - float(y0)
             wx = x_src - float(x0)
 
-            q00 = src[y0, x0, ch]
-            q01 = src[y0, x1, ch]
-            q10 = src[y1, x0, ch]
-            q11 = src[y1, x1, ch]
+            q00 = src[y0_cl, x0_cl, ch]
+            q01 = src[y0_cl, x1_cl, ch]
+            q10 = src[y1_cl, x0_cl, ch]
+            q11 = src[y1_cl, x1_cl, ch]
 
-            r1 = tm.mix(q00, q01, wx)
-            r2 = tm.mix(q10, q11, wx)
+            r1 = tm.mix(float(q00), float(q01), wx)
+            r2 = tm.mix(float(q10), float(q11), wx)
             dst[r, c, ch] = tm.mix(r1, r2, wy)
 
 

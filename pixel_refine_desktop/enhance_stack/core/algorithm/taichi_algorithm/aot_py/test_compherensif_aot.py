@@ -67,10 +67,21 @@ def test_comprehensive():
     print_header(f"1. Bicubic (Resize) ({n_frames} frames)")
     start = time.perf_counter()
     for _ in range(n_frames):
-        res = taichi_aot.resize(img_gpu, (512, 512), return_gpu=True)
+        res = taichi_aot.resize(img_gpu, (512, 512), interpolation=taichi_aot.INTER_CUBIC, return_gpu=True)
         del res
     taichi_aot.engine.sync()
     print(f"Bicubic FPS: {n_frames / (time.perf_counter() - start):.2f}")
+    taichi_aot.engine.report_memory()
+    gc.collect()
+
+    # 1b. Bilinear (Resize)
+    print_header(f"1b. Bilinear (Resize) ({n_frames} frames)")
+    start = time.perf_counter()
+    for _ in range(n_frames):
+        res = taichi_aot.resize(img_gpu, (512, 512), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+        del res
+    taichi_aot.engine.sync()
+    print(f"Bilinear FPS: {n_frames / (time.perf_counter() - start):.2f}")
     taichi_aot.engine.report_memory()
     gc.collect()
 
@@ -171,12 +182,15 @@ def test_comprehensive():
 
     # 11. Warping (Guided)
     print_header(f"11. Warping (Guided) ({n_frames} frames)")
-    # Create a small flow for testing
+    # Warping AOT expects i32 images (16-bit representation)
+    img_i32_gpu = taichi_aot.engine.upload(img_color.astype(np.int32))
+    
+    # Warping AOT (Old Version) expects Scalar 3D flow (H, W, 2)
     flow_warp = np.zeros((h_orig, w_orig, 2), dtype=np.float32)
-    flow_warp_gpu = taichi_aot.engine.upload(flow_warp, is_vec2=True)
+    flow_warp_gpu = taichi_aot.engine.upload(flow_warp, is_vec2=False) 
     start = time.perf_counter()
     for _ in range(n_frames):
-        res = taichi_aot.warp_image(img_gpu, flow_warp_gpu, ref=img_gpu, return_gpu=True)
+        res = taichi_aot.warp_image(img_i32_gpu, flow_warp_gpu, ref=img_i32_gpu, return_gpu=True)
         del res
     taichi_aot.engine.sync()
     print(f"Warping FPS: {n_frames / (time.perf_counter() - start):.2f}")

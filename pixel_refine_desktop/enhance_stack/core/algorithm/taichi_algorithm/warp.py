@@ -147,6 +147,50 @@ if TAICHI_AVAILABLE:
         return ti.Vector([sum_u / total_w, sum_v / total_w])
 
     @ti.func
+    def _guided_flow_at_i32_ref3d_vec(
+        flow: ti.template(),
+        ref_vec: ti.template(),
+        y: int,
+        x: int,
+    ) -> ti.types.vector(2, ti.f32):
+        """
+        AOT-friendly guided flow aggregation for RGB Vector reference (uses green channel).
+        """
+        h, w = flow.shape[0], flow.shape[1]
+        inv_norm = 1.0 / 65535.0
+        total_w = 1e-12
+        sum_u, sum_v = 0.0, 0.0
+        center_val = float(ref_vec[y, x][1]) * inv_norm
+
+        for dy in ti.static(range(-2, 3)):
+            ny = tm.clamp(y + dy, 0, h - 1)
+            for dx in ti.static(range(-2, 3)):
+                nx = tm.clamp(x + dx, 0, w - 1)
+
+                w_s = 0.0
+                if ti.static(abs(dx) == 2):
+                    if ti.static(abs(dy) == 2): w_s = 0.002969
+                    elif ti.static(abs(dy) == 1): w_s = 0.013306
+                    else: w_s = 0.021938
+                elif ti.static(abs(dx) == 1):
+                    if ti.static(abs(dy) == 2): w_s = 0.013306
+                    elif ti.static(abs(dy) == 1): w_s = 0.059634
+                    else: w_s = 0.098320
+                else:
+                    if ti.static(abs(dy) == 2): w_s = 0.021938
+                    elif ti.static(abs(dy) == 1): w_s = 0.098320
+                    else: w_s = 0.162103
+
+                val_neighbor = float(ref_vec[ny, nx][1]) * inv_norm
+                diff = val_neighbor - center_val
+                w_curr = w_s * ti.exp(-(diff * diff) * 50.0)
+                sum_u += flow[ny, nx, 0] * w_curr
+                sum_v += flow[ny, nx, 1] * w_curr
+                total_w += w_curr
+
+        return ti.Vector([sum_u / total_w, sum_v / total_w])
+
+    @ti.func
     def _guided_flow_at_i32_ref3d(
         flow: ti.template(),
         ref_i32: ti.template(),
@@ -213,20 +257,62 @@ if TAICHI_AVAILABLE:
             res = sample_bicubic_fast(src, u_final, v_final)
             dst[y, x] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.i32)
 
+    @ti.func
+    def cubic_hermite_weights(t):
+        """OpenCV-compatible Bicubic Weights (Catmull-Rom with a=-0.75)."""
+        t = ti.abs(t)
+        w = ti.Vector([0.0, 0.0, 0.0, 0.0])
+        a = -0.75
+        d = t
+        # p0: |d+1|
+        x = d + 1.0
+        w[0] = a * x**3 - 5.0 * a * x**2 + 8.0 * a * x - 4.0 * a
+        # p1: |d|
+        x = d
+        w[1] = (a + 2.0) * x**3 - (a + 3.0) * x**2 + 1.0
+        # p2: |1-d|
+        x = 1.0 - d
+        w[2] = (a + 2.0) * x**3 - (a + 3.0) * x**2 + 1.0
+        # p3: |2-d|
+        x = 2.0 - d
+        w[3] = a * x**3 - 5.0 * a * x**2 + 8.0 * a * x - 4.0 * a
+        
+        # Normalization
+        w_sum = w[0] + w[1] + w[2] + w[3]
+        return w / w_sum
+
     @ti.kernel
     def _warp_guided_i32_rgb_aot(
-        src: ti.types.ndarray(dtype=ti.i32, ndim=3),
+        src: ti.types.ndarray(dtype=ti.types.vector(3, ti.i32), ndim=2),
         flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        dst: ti.types.ndarray(dtype=ti.i32, ndim=3),
-        ref: ti.types.ndarray(dtype=ti.i32, ndim=3),
+        dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.i32), ndim=2),
+        ref: ti.types.ndarray(dtype=ti.types.vector(3, ti.i32), ndim=2),
     ):
         h, w = src.shape[0], src.shape[1]
         for y, x in ti.ndrange(h, w):
-            guided_uv = _guided_flow_at_i32_ref3d(flow, ref, y, x)
+            # For guidance we still use the green channel logic
+            guided_uv = _guided_flow_at_i32_ref3d_vec(flow, ref, y, x)
             u_final, v_final = float(x) + guided_uv[0], float(y) + guided_uv[1]
-            for c in ti.static(range(3)):
-                res = sample_bicubic_3ch_fast(src, u_final, v_final, c)
-                dst[y, x, c] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.i32)
+            
+            x_int = int(ti.floor(u_final))
+            y_int = int(ti.floor(v_final))
+            dx = u_final - x_int
+            dy = v_final - y_int
+            
+            # 4x4 Bicubic for Vector3
+            w_x = cubic_hermite_weights(dx)
+            w_y = cubic_hermite_weights(dy)
+            
+            res = ti.Vector([0.0, 0.0, 0.0])
+            for m in ti.static(range(-1, 3)):
+                row_res = ti.Vector([0.0, 0.0, 0.0])
+                yy = tm.clamp(y_int + m, 0, h - 1)
+                for n in ti.static(range(-1, 3)):
+                    xx = tm.clamp(x_int + n, 0, w - 1)
+                    row_res += ti.cast(src[yy, xx], ti.f32) * w_x[n + 1]
+                res += row_res * w_y[m + 1]
+            
+            dst[y, x] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.i32)
 
     @ti.kernel
     def _warp_naked_i32_aot(
@@ -242,16 +328,32 @@ if TAICHI_AVAILABLE:
 
     @ti.kernel
     def _warp_naked_i32_rgb_aot(
-        src: ti.types.ndarray(dtype=ti.i32, ndim=3),
+        src: ti.types.ndarray(dtype=ti.types.vector(3, ti.i32), ndim=2),
         flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        dst: ti.types.ndarray(dtype=ti.i32, ndim=3),
+        dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.i32), ndim=2),
     ):
         h, w = src.shape[0], src.shape[1]
         for y, x in ti.ndrange(h, w):
             u_final, v_final = float(x) + flow[y, x, 0], float(y) + flow[y, x, 1]
-            for c in ti.static(range(3)):
-                res = sample_bicubic_3ch_fast(src, u_final, v_final, c)
-                dst[y, x, c] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.i32)
+            
+            x_int = int(ti.floor(u_final))
+            y_int = int(ti.floor(v_final))
+            dx = u_final - x_int
+            dy = v_final - y_int
+            
+            w_x = cubic_hermite_weights(dx)
+            w_y = cubic_hermite_weights(dy)
+            
+            res = ti.Vector([0.0, 0.0, 0.0])
+            for m in ti.static(range(-1, 3)):
+                row_res = ti.Vector([0.0, 0.0, 0.0])
+                yy = tm.clamp(y_int + m, 0, h - 1)
+                for n in ti.static(range(-1, 3)):
+                    xx = tm.clamp(x_int + n, 0, w - 1)
+                    row_res += ti.cast(src[yy, xx], ti.f32) * w_x[n + 1]
+                res += row_res * w_y[m + 1]
+                
+            dst[y, x] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.i32)
 
     def record_warp_graph(g: ti.graph.GraphBuilder):
         """Record Warp Graph for AOT."""

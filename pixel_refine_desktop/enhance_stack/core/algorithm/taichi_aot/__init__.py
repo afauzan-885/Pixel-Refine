@@ -25,6 +25,7 @@ _gradients_module = engine.load(os.path.join(_tcm_dir, "gradients.tcm"))
 _median_module = engine.load(os.path.join(_tcm_dir, "median_filter.tcm"))
 _ncc_module = engine.load(os.path.join(_tcm_dir, "ncc.tcm"))
 _ransac_module = engine.load(os.path.join(_tcm_dir, "ransac.tcm"))
+_bilinear_module = engine.load(os.path.join(_tcm_dir, "bilinear.tcm"))
 
 # --- OpenCV-style Constants ---
 INTER_NEAREST = 0
@@ -55,12 +56,28 @@ def resize(src, dsize, interpolation=INTER_CUBIC, return_gpu=False):
         dst_buf = engine.allocate(dst_shape)
         _bicubic_module.run(graph_name, src=src_buf, dst=dst_buf, h_src=h_src, w_src=w_src, h_dst=target_h, w_dst=target_w)
         return dst_buf if return_gpu else dst_buf.to_numpy()
+    elif interpolation == INTER_LINEAR:
+        is_gpu_input = isinstance(src, TaichiGPUBuffer)
+        src_buf = src if is_gpu_input else engine.upload(src)
+        if src_buf.is_vec2: src_buf = src_buf.view_as_vector(False)
+        
+        is_3d = len(src_buf.shape) == 3
+        graph_name = "bilinear_resize_f32_3d" if is_3d else "bilinear_resize_f32_2d"
+        h_src, w_src = src_buf.shape[0], src_buf.shape[1]
+        dst_shape = (target_h, target_w, src_buf.shape[2]) if is_3d else (target_h, target_w)
+        dst_buf = engine.allocate(dst_shape)
+        _bilinear_module.run(graph_name, src=src_buf, dst=dst_buf, h_src=h_src, w_src=w_src, h_dst=target_h, w_dst=target_w)
+        return dst_buf if return_gpu else dst_buf.to_numpy()
     else:
-        raise NotImplementedError("Only INTER_CUBIC is supported in AOT currently.")
+        raise NotImplementedError(f"Interpolation mode {interpolation} is not supported in AOT currently.")
 
 def bicubic_interpolation(src, target_w, target_h, return_gpu=False):
     """Alias for resize(interpolation=INTER_CUBIC)"""
     return resize(src, (target_w, target_h), interpolation=INTER_CUBIC, return_gpu=return_gpu)
+
+def bilinear_interpolation(src, target_w, target_h, return_gpu=False):
+    """Alias for resize(interpolation=INTER_LINEAR)"""
+    return resize(src, (target_w, target_h), interpolation=INTER_LINEAR, return_gpu=return_gpu)
 
 def box_filter(src, kernel_size=3, return_gpu=False):
     """AOT Implementation of Box Filter (Scalar 3D Optimized)"""
@@ -156,8 +173,13 @@ def warp_image(src, flow, ref=None, return_gpu=False):
     
     dst_buf = engine.allocate(src_buf.shape, dtype=np.int32)
     
+    if is_3d:
+        src_buf = src_buf.view_as_vector(True)
+        dst_buf = dst_buf.view_as_vector(True)
+    
     if is_guided:
         ref_buf = ref if is_gpu_ref else engine.upload(ref.astype(np.int32) if ref.dtype != np.int32 else ref)
+        if is_3d: ref_buf = ref_buf.view_as_vector(True)
         graph = "warp_guided_i32_3ch" if is_3d else "warp_guided_i32_1ch"
         _warp_module.run(graph, src=src_buf, flow=flow_buf, dst=dst_buf, ref=ref_buf)
         if not is_gpu_ref: del ref_buf

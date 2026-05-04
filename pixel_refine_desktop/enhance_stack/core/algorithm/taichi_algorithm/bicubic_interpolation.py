@@ -15,14 +15,33 @@ if TAICHI_AVAILABLE:
 
     @ti.func
     def cubic_hermite_weights(t):
-        """Precalculate the 4 weights for cubic hermite interpolation."""
-        t2 = t * t
-        t3 = t2 * t
-        w0 = -0.5 * t3 + t2 - 0.5 * t
-        w1 = 1.5 * t3 - 2.5 * t2 + 1.0
-        w2 = -1.5 * t3 + 2.0 * t2 + 0.5 * t
-        w3 = 0.5 * t3 - 0.5 * t2
-        return ti.Vector([w0, w1, w2, w3])
+        """OpenCV-compatible Bicubic Weights (Catmull-Rom with a=-0.75)."""
+        t = ti.abs(t)
+        w = ti.Vector([0.0, 0.0, 0.0, 0.0])
+        # W(x) = (a+2)|x|^3 - (a+3)|x|^2 + 1 for |x| <= 1
+        # W(x) = a|x|^3 - 5a|x|^2 + 8a|x| - 4a for 1 < |x| < 2
+        a = -0.75
+        
+        # We need weights for t-1, t, t+1, t+2 (relative to floor)
+        # But actually for floor-1, floor, floor+1, floor+2 relative to sample point
+        # Let d = x - floor(x). Points are at -1-d, -d, 1-d, 2-d relative to x.
+        # |x-p| values: |d+1|, |d|, |1-d|, |2-d|
+        
+        d = t
+        # p0: |d+1|
+        x = d + 1.0
+        w[0] = a * x**3 - 5.0 * a * x**2 + 8.0 * a * x - 4.0 * a
+        # p1: |d|
+        x = d
+        w[1] = (a + 2.0) * x**3 - (a + 3.0) * x**2 + 1.0
+        # p2: |1-d|
+        x = 1.0 - d
+        w[2] = (a + 2.0) * x**3 - (a + 3.0) * x**2 + 1.0
+        # p3: |2-d|
+        x = 2.0 - d
+        w[3] = a * x**3 - 5.0 * a * x**2 + 8.0 * a * x - 4.0 * a
+        
+        return w
 
     @ti.kernel
     def _bicubic_resize_kernel_2d(
@@ -39,22 +58,21 @@ if TAICHI_AVAILABLE:
 
             x_int = int(ti.floor(x_src))
             y_int = int(ti.floor(y_src))
-
             dx = x_src - x_int
             dy = y_src - y_int
 
-            col_results = ti.Vector([0.0, 0.0, 0.0, 0.0])
-            for m in range(-1, 3):
-                p = ti.Vector([0.0, 0.0, 0.0, 0.0])
-                y_idx = tm.clamp(y_int + m, 0, h_src - 1)
-                for n in range(-1, 3):
-                    x_idx = tm.clamp(x_int + n, 0, w_src - 1)
-                    p[n + 1] = src[y_idx, x_idx]
-                col_results[m + 1] = cubic_hermite(p[0], p[1], p[2], p[3], dx)
+            w_x = cubic_hermite_weights(dx)
+            w_y = cubic_hermite_weights(dy)
 
-            val = cubic_hermite(
-                col_results[0], col_results[1], col_results[2], col_results[3], dy
-            )
+            val = 0.0
+            for m in ti.static(range(-1, 3)):
+                row_res = 0.0
+                yy = tm.clamp(y_int + m, 0, h_src - 1)
+                for n in ti.static(range(-1, 3)):
+                    xx = tm.clamp(x_int + n, 0, w_src - 1)
+                    row_res += src[yy, xx] * w_x[n + 1]
+                val += row_res * w_y[m + 1]
+            
             dst[r, c] = val
 
     @ti.kernel
@@ -72,23 +90,21 @@ if TAICHI_AVAILABLE:
 
             x_int = int(ti.floor(x_src))
             y_int = int(ti.floor(y_src))
-
             dx = x_src - x_int
             dy = y_src - y_int
 
-            for ch in ti.static(range(3)):
-                col_results = ti.Vector([0.0, 0.0, 0.0, 0.0])
-                for m in range(-1, 3):
-                    p = ti.Vector([0.0, 0.0, 0.0, 0.0])
-                    y_idx = tm.clamp(y_int + m, 0, h_src - 1)
-                    for n in range(-1, 3):
-                        x_idx = tm.clamp(x_int + n, 0, w_src - 1)
-                        p[n + 1] = src[y_idx, x_idx, ch]
-                    col_results[m + 1] = cubic_hermite(p[0], p[1], p[2], p[3], dx)
+            w_x = cubic_hermite_weights(dx)
+            w_y = cubic_hermite_weights(dy)
 
-                val = cubic_hermite(
-                    col_results[0], col_results[1], col_results[2], col_results[3], dy
-                )
+            for ch in ti.static(range(3)):
+                val = 0.0
+                for m in ti.static(range(-1, 3)):
+                    row_res = 0.0
+                    yy = tm.clamp(y_int + m, 0, h_src - 1)
+                    for n in ti.static(range(-1, 3)):
+                        xx = tm.clamp(x_int + n, 0, w_src - 1)
+                        row_res += src[yy, xx, ch] * w_x[n + 1]
+                    val += row_res * w_y[m + 1]
                 dst[r, c, ch] = val
 
     @ti.kernel

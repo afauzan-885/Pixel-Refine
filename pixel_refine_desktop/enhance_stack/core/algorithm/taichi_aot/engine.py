@@ -186,6 +186,11 @@ class TaichiGPUBuffer:
         return TaichiGPUBuffer(self.size_bytes, self.handle, self.shape, self.dtype, 
                                is_vec2=is_vector, engine=self.engine, is_owner=False)
 
+    def view_as_scalar(self) -> 'TaichiGPUBuffer':
+        """Return a view of this buffer forced as a scalar field (no vector dimension)."""
+        return TaichiGPUBuffer(self.size_bytes, self.handle, self.shape, self.dtype, 
+                               is_vec2=False, engine=self.engine, is_owner=False)
+
 # -------------------------------------------------------------------------
 # The Generic AOT Engine Class
 # -------------------------------------------------------------------------
