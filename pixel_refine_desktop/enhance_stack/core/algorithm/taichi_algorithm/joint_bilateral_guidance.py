@@ -1,12 +1,14 @@
 """
-Joint Bilateral Guidance - Taichi GPU Implementation
-=====================================================
-Highly optimized standalone module for refining flow or weight maps 
-using a reference image as guidance.
+Joint Bilateral Filter & JBLU - Taichi GPU Implementation
+==========================================================
+General-purpose edge-preserving filter + guided upsampler.
 
-Process: Joint Bilateral Refinement (JBR)
-Logic: 5x5 window, spatial Gaussian weighting + range color similarity weighting.
+Modes:
+  1. joint_bilateral_filter()   - Post-processor for any image/flow/scalar
+  2. joint_bilateral_upsample() - JBLU for upscaling low-res maps with hi-res guide
 """
+
+import numpy as np
 
 try:
     import taichi as ti
@@ -15,140 +17,393 @@ try:
     TAICHI_AVAILABLE = True
 except ImportError:
     TAICHI_AVAILABLE = False
-    ti = None
-    tm = None
-    common = None
+    ti = None; tm = None; common = None
+
+# --- Sigma Presets ---
+SIGMA_PRESETS = {
+    "low":    (0.8,  0.05),   # Gentle, preserves fine detail
+    "medium": (1.5,  0.10),   # Balanced (default)
+    "high":   (2.5,  0.20),   # Aggressive smoothing
+}
+
+def _get_sigma_args(preset="medium"):
+    ss, sr = SIGMA_PRESETS.get(preset, SIGMA_PRESETS["medium"])
+    return 1.0 / (2.0 * ss * ss), 1.0 / (2.0 * sr * sr)
 
 if TAICHI_AVAILABLE:
-    
-    @ti.func
-    def _compute_jbr_weight(dx: int, dy: int, diff: float) -> float:
+
+    # =========================================================================
+    # JBF KERNELS - General Post-Processor
+    # =========================================================================
+    # Guide is always grayscale f32 normalized [0, 1].
+    # Window variants: r=1 (3x3), r=2 (5x5), r=3 (7x7)
+
+    @ti.kernel
+    def _jbf_1ch_r1(src: ti.types.ndarray(dtype=ti.f32, ndim=2),
+                    guide: ti.types.ndarray(dtype=ti.f32, ndim=2),
+                    dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
+                    h: int, w: int, inv_2ss2: float, inv_2sr2: float):
+        for y, x in ti.ndrange(h, w):
+            total_w, acc = 1e-12, 0.0
+            c_g = guide[y, x]
+            for dy in ti.static(range(-1, 2)):
+                for dx in ti.static(range(-1, 2)):
+                    ny = tm.clamp(y+dy, 0, h-1); nx = tm.clamp(x+dx, 0, w-1)
+                    diff_g = guide[ny, nx] - c_g
+                    wt = ti.exp(-float(dx*dx+dy*dy)*inv_2ss2 - diff_g*diff_g*inv_2sr2)
+                    acc += src[ny, nx] * wt; total_w += wt
+            dst[y, x] = acc / total_w
+
+    @ti.kernel
+    def _jbf_1ch_r2(src: ti.types.ndarray(dtype=ti.f32, ndim=2),
+                    guide: ti.types.ndarray(dtype=ti.f32, ndim=2),
+                    dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
+                    h: int, w: int, inv_2ss2: float, inv_2sr2: float):
+        for y, x in ti.ndrange(h, w):
+            total_w, acc = 1e-12, 0.0
+            c_g = guide[y, x]
+            for dy in ti.static(range(-2, 3)):
+                for dx in ti.static(range(-2, 3)):
+                    ny = tm.clamp(y+dy, 0, h-1); nx = tm.clamp(x+dx, 0, w-1)
+                    diff_g = guide[ny, nx] - c_g
+                    wt = ti.exp(-float(dx*dx+dy*dy)*inv_2ss2 - diff_g*diff_g*inv_2sr2)
+                    acc += src[ny, nx] * wt; total_w += wt
+            dst[y, x] = acc / total_w
+
+    @ti.kernel
+    def _jbf_1ch_r3(src: ti.types.ndarray(dtype=ti.f32, ndim=2),
+                    guide: ti.types.ndarray(dtype=ti.f32, ndim=2),
+                    dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
+                    h: int, w: int, inv_2ss2: float, inv_2sr2: float):
+        for y, x in ti.ndrange(h, w):
+            total_w, acc = 1e-12, 0.0
+            c_g = guide[y, x]
+            for dy in ti.static(range(-3, 4)):
+                for dx in ti.static(range(-3, 4)):
+                    ny = tm.clamp(y+dy, 0, h-1); nx = tm.clamp(x+dx, 0, w-1)
+                    diff_g = guide[ny, nx] - c_g
+                    wt = ti.exp(-float(dx*dx+dy*dy)*inv_2ss2 - diff_g*diff_g*inv_2sr2)
+                    acc += src[ny, nx] * wt; total_w += wt
+            dst[y, x] = acc / total_w
+
+    # --- 3ch (RGB) ---
+    @ti.kernel
+    def _jbf_3ch_r1(src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+                    guide: ti.types.ndarray(dtype=ti.f32, ndim=2),
+                    dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+                    h: int, w: int, inv_2ss2: float, inv_2sr2: float):
+        for y, x in ti.ndrange(h, w):
+            total_w = 1e-12; acc = tm.vec3(0.0); c_g = guide[y, x]
+            for dy in ti.static(range(-1, 2)):
+                for dx in ti.static(range(-1, 2)):
+                    ny = tm.clamp(y+dy, 0, h-1); nx = tm.clamp(x+dx, 0, w-1)
+                    diff_g = guide[ny, nx] - c_g
+                    wt = ti.exp(-float(dx*dx+dy*dy)*inv_2ss2 - diff_g*diff_g*inv_2sr2)
+                    acc += src[ny, nx] * wt; total_w += wt
+            dst[y, x] = acc / total_w
+
+    @ti.kernel
+    def _jbf_3ch_r2(src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+                    guide: ti.types.ndarray(dtype=ti.f32, ndim=2),
+                    dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+                    h: int, w: int, inv_2ss2: float, inv_2sr2: float):
+        for y, x in ti.ndrange(h, w):
+            total_w = 1e-12; acc = tm.vec3(0.0); c_g = guide[y, x]
+            for dy in ti.static(range(-2, 3)):
+                for dx in ti.static(range(-2, 3)):
+                    ny = tm.clamp(y+dy, 0, h-1); nx = tm.clamp(x+dx, 0, w-1)
+                    diff_g = guide[ny, nx] - c_g
+                    wt = ti.exp(-float(dx*dx+dy*dy)*inv_2ss2 - diff_g*diff_g*inv_2sr2)
+                    acc += src[ny, nx] * wt; total_w += wt
+            dst[y, x] = acc / total_w
+
+    @ti.kernel
+    def _jbf_3ch_r3(src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+                    guide: ti.types.ndarray(dtype=ti.f32, ndim=2),
+                    dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+                    h: int, w: int, inv_2ss2: float, inv_2sr2: float):
+        for y, x in ti.ndrange(h, w):
+            total_w = 1e-12; acc = tm.vec3(0.0); c_g = guide[y, x]
+            for dy in ti.static(range(-3, 4)):
+                for dx in ti.static(range(-3, 4)):
+                    ny = tm.clamp(y+dy, 0, h-1); nx = tm.clamp(x+dx, 0, w-1)
+                    diff_g = guide[ny, nx] - c_g
+                    wt = ti.exp(-float(dx*dx+dy*dy)*inv_2ss2 - diff_g*diff_g*inv_2sr2)
+                    acc += src[ny, nx] * wt; total_w += wt
+            dst[y, x] = acc / total_w
+
+    # --- Flow (2ch) ---
+    @ti.kernel
+    def _jbf_flow_r1(src: ti.types.ndarray(dtype=ti.types.vector(2, ti.f32), ndim=2),
+                     guide: ti.types.ndarray(dtype=ti.f32, ndim=2),
+                     dst: ti.types.ndarray(dtype=ti.types.vector(2, ti.f32), ndim=2),
+                     h: int, w: int, inv_2ss2: float, inv_2sr2: float):
+        for y, x in ti.ndrange(h, w):
+            total_w = 1e-12; acc = tm.vec2(0.0); c_g = guide[y, x]
+            for dy in ti.static(range(-1, 2)):
+                for dx in ti.static(range(-1, 2)):
+                    ny = tm.clamp(y+dy, 0, h-1); nx = tm.clamp(x+dx, 0, w-1)
+                    diff_g = guide[ny, nx] - c_g
+                    wt = ti.exp(-float(dx*dx+dy*dy)*inv_2ss2 - diff_g*diff_g*inv_2sr2)
+                    acc += src[ny, nx] * wt; total_w += wt
+            dst[y, x] = acc / total_w
+
+    @ti.kernel
+    def _jbf_flow_r2(src: ti.types.ndarray(dtype=ti.types.vector(2, ti.f32), ndim=2),
+                     guide: ti.types.ndarray(dtype=ti.f32, ndim=2),
+                     dst: ti.types.ndarray(dtype=ti.types.vector(2, ti.f32), ndim=2),
+                     h: int, w: int, inv_2ss2: float, inv_2sr2: float):
+        for y, x in ti.ndrange(h, w):
+            total_w = 1e-12; acc = tm.vec2(0.0); c_g = guide[y, x]
+            for dy in ti.static(range(-2, 3)):
+                for dx in ti.static(range(-2, 3)):
+                    ny = tm.clamp(y+dy, 0, h-1); nx = tm.clamp(x+dx, 0, w-1)
+                    diff_g = guide[ny, nx] - c_g
+                    wt = ti.exp(-float(dx*dx+dy*dy)*inv_2ss2 - diff_g*diff_g*inv_2sr2)
+                    acc += src[ny, nx] * wt; total_w += wt
+            dst[y, x] = acc / total_w
+
+    @ti.kernel
+    def _jbf_flow_r3(src: ti.types.ndarray(dtype=ti.types.vector(2, ti.f32), ndim=2),
+                     guide: ti.types.ndarray(dtype=ti.f32, ndim=2),
+                     dst: ti.types.ndarray(dtype=ti.types.vector(2, ti.f32), ndim=2),
+                     h: int, w: int, inv_2ss2: float, inv_2sr2: float):
+        for y, x in ti.ndrange(h, w):
+            total_w = 1e-12; acc = tm.vec2(0.0); c_g = guide[y, x]
+            for dy in ti.static(range(-3, 4)):
+                for dx in ti.static(range(-3, 4)):
+                    ny = tm.clamp(y+dy, 0, h-1); nx = tm.clamp(x+dx, 0, w-1)
+                    diff_g = guide[ny, nx] - c_g
+                    wt = ti.exp(-float(dx*dx+dy*dy)*inv_2ss2 - diff_g*diff_g*inv_2sr2)
+                    acc += src[ny, nx] * wt; total_w += wt
+            dst[y, x] = acc / total_w
+
+    # =========================================================================
+    # JBLU KERNELS - Joint Bilateral Upsampling
+    # =========================================================================
+    # src_low is small, guide_hi is full resolution.
+    # For each HIGH-RES pixel, gather weighted LOW-RES neighbors.
+    # Range weight is based on guide_hi color difference.
+
+    @ti.kernel
+    def _jblu_1ch_r2(src_low: ti.types.ndarray(dtype=ti.f32, ndim=2),
+                     guide_hi: ti.types.ndarray(dtype=ti.f32, ndim=2),
+                     dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
+                     h_low: int, w_low: int, H: int, W: int,
+                     inv_2ss2: float, inv_2sr2: float):
+        for Y, X in ti.ndrange(H, W):
+            iy = int(ti.floor(float(Y) * float(h_low) / float(H)))
+            ix = int(ti.floor(float(X) * float(w_low) / float(W)))
+            c_g = guide_hi[Y, X]
+            total_w, acc = 1e-12, 0.0
+            for dy in ti.static(range(-2, 3)):
+                for dx in ti.static(range(-2, 3)):
+                    ny = tm.clamp(iy+dy, 0, h_low-1); nx = tm.clamp(ix+dx, 0, w_low-1)
+                    ny_hi = tm.clamp(int(float(ny)*float(H)/float(h_low)+0.5), 0, H-1)
+                    nx_hi = tm.clamp(int(float(nx)*float(W)/float(w_low)+0.5), 0, W-1)
+                    diff_g = guide_hi[ny_hi, nx_hi] - c_g
+                    wt = ti.exp(-float(dx*dx+dy*dy)*inv_2ss2 - diff_g*diff_g*inv_2sr2)
+                    acc += src_low[ny, nx] * wt; total_w += wt
+            dst[Y, X] = acc / total_w
+
+    @ti.kernel
+    def _jblu_flow_r2(src_low: ti.types.ndarray(dtype=ti.types.vector(2, ti.f32), ndim=2),
+                      guide_hi: ti.types.ndarray(dtype=ti.f32, ndim=2),
+                      dst: ti.types.ndarray(dtype=ti.types.vector(2, ti.f32), ndim=2),
+                      h_low: int, w_low: int, H: int, W: int,
+                      inv_2ss2: float, inv_2sr2: float,
+                      scale_y: float, scale_x: float):
+        for Y, X in ti.ndrange(H, W):
+            iy = int(ti.floor(float(Y) * float(h_low) / float(H)))
+            ix = int(ti.floor(float(X) * float(w_low) / float(W)))
+            c_g = guide_hi[Y, X]
+            total_w = 1e-12; acc = tm.vec2(0.0)
+            for dy in ti.static(range(-2, 3)):
+                for dx in ti.static(range(-2, 3)):
+                    ny = tm.clamp(iy+dy, 0, h_low-1); nx = tm.clamp(ix+dx, 0, w_low-1)
+                    ny_hi = tm.clamp(int(float(ny)*float(H)/float(h_low)+0.5), 0, H-1)
+                    nx_hi = tm.clamp(int(float(nx)*float(W)/float(w_low)+0.5), 0, W-1)
+                    diff_g = guide_hi[ny_hi, nx_hi] - c_g
+                    wt = ti.exp(-float(dx*dx+dy*dy)*inv_2ss2 - diff_g*diff_g*inv_2sr2)
+                    acc += src_low[ny, nx] * wt; total_w += wt
+            result = acc / total_w
+            dst[Y, X] = tm.vec2(result[0] * scale_x, result[1] * scale_y)
+
+    @ti.kernel
+    def _jblu_3ch_r2(src_low: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+                     guide_hi: ti.types.ndarray(dtype=ti.f32, ndim=2),
+                     dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+                     h_low: int, w_low: int, H: int, W: int,
+                     inv_2ss2: float, inv_2sr2: float):
+        for Y, X in ti.ndrange(H, W):
+            iy = int(ti.floor(float(Y) * float(h_low) / float(H)))
+            ix = int(ti.floor(float(X) * float(w_low) / float(W)))
+            c_g = guide_hi[Y, X]
+            total_w = 1e-12; acc = tm.vec3(0.0)
+            for dy in ti.static(range(-2, 3)):
+                for dx in ti.static(range(-2, 3)):
+                    ny = tm.clamp(iy+dy, 0, h_low-1); nx = tm.clamp(ix+dx, 0, w_low-1)
+                    ny_hi = tm.clamp(int(float(ny)*float(H)/float(h_low)+0.5), 0, H-1)
+                    nx_hi = tm.clamp(int(float(nx)*float(W)/float(w_low)+0.5), 0, W-1)
+                    diff_g = guide_hi[ny_hi, nx_hi] - c_g
+                    wt = ti.exp(-float(dx*dx+dy*dy)*inv_2ss2 - diff_g*diff_g*inv_2sr2)
+                    acc += src_low[ny, nx] * wt; total_w += wt
+            dst[Y, X] = acc / total_w
+
+    # =========================================================================
+    # HELPER: Prepare guide (ensure grayscale f32 normalized 0-1)
+    # =========================================================================
+    def _prepare_guide(guide_input, buffer_provider="pool"):
         """
-        Compute Joint Bilateral weight for a neighbor.
-        Combined Spatial Gaussian (sigma=1.0) and Range (sigma=0.02) weights.
+        Converts any guide input to a grayscale f32 [0,1] buffer.
+        - (H,W) f32: pass through (assumed already normalized)
+        - (H,W) u8/u16/i32: convert and normalize
+        - (H,W,3) any: convert BGR→gray then normalize
         """
-        # Spatial Gaussian weights (Precomputed for 5x5 sigma=1.0)
-        w_s = 0.0
-        adx, ady = abs(dx), abs(dy)
-        if adx == 2:
-            if ady == 2: w_s = 0.002969
-            elif ady == 1: w_s = 0.013306
-            else: w_s = 0.021938
-        elif adx == 1:
-            if ady == 2: w_s = 0.013306
-            elif ady == 1: w_s = 0.059634
-            else: w_s = 0.098320
+        is_taichi = hasattr(guide_input, 'to_numpy')
+
+        if is_taichi:
+            sh = guide_input.shape
+            if len(sh) == 2:
+                # Already 2D — normalize if not f32
+                if guide_input.dtype == np.float32:
+                    return guide_input, False  # ready to use
+                else:
+                    np_data = guide_input.to_numpy().astype(np.float32)
+                    np_data /= 255.0 if guide_input.dtype == np.uint8 else 65535.0
+                    buf = common.get_temp_buffer(sh, ti.f32, buffer_provider)
+                    buf.from_numpy(np_data)
+                    return buf, True
+            else:
+                # 3ch taichi → cvt color
+                np_data = guide_input.to_numpy().astype(np.float32)
+                gray = 0.299*np_data[:,:,2] + 0.587*np_data[:,:,1] + 0.114*np_data[:,:,0]
+                gray /= 255.0 if np_data.max() > 1.0 else 1.0
+                buf = common.get_temp_buffer(np_data.shape[:2], ti.f32, buffer_provider)
+                buf.from_numpy(gray.astype(np.float32))
+                return buf, True
         else:
-            if ady == 2: w_s = 0.021938
-            elif ady == 1: w_s = 0.098320
-            else: w_s = 0.162103
-            
-        # Range weight: exp(-(diff^2) / (2 * 0.02^2)) => exp(-diff^2 * 1250.0)
-        # Note: Warp.py used 50.0 which corresponds to larger sigma. 
-        # C++ uses 1/0.02 which is 50.0 if applied BEFORE squaring? 
-        # Warp.py: ti.exp(-(diff * diff) * 50.0)
-        return w_s * ti.exp(-(diff * diff) * 50.0)
+            # NumPy path
+            if guide_input.ndim == 3:
+                gray = (0.299*guide_input[:,:,2] + 0.587*guide_input[:,:,1]
+                        + 0.114*guide_input[:,:,0]).astype(np.float32)
+            else:
+                gray = guide_input.astype(np.float32)
 
-    @ti.kernel
-    def joint_bilateral_refinement_i32_2d_kernel(
-        flow_in: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        ref_i32: ti.types.ndarray(dtype=ti.i32, ndim=2),
-        flow_out: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        h: int,
-        w: int,
-        inv_norm: float,
-    ):
+            if gray.max() > 1.0:
+                gray = gray / 255.0 if gray.max() <= 255.0 else gray / 65535.0
+
+            buf = common.get_temp_buffer(gray.shape, ti.f32, buffer_provider)
+            buf.from_numpy(np.ascontiguousarray(gray))
+            return buf, True
+
+    # =========================================================================
+    # PUBLIC API
+    # =========================================================================
+    _JBF_1CH_KERNELS  = {1: _jbf_1ch_r1,  2: _jbf_1ch_r2,  3: _jbf_1ch_r3}
+    _JBF_3CH_KERNELS  = {1: _jbf_3ch_r1,  2: _jbf_3ch_r2,  3: _jbf_3ch_r3}
+    _JBF_FLOW_KERNELS = {1: _jbf_flow_r1, 2: _jbf_flow_r2, 3: _jbf_flow_r3}
+
+    def joint_bilateral_filter(src, guide, preset="medium", radius=2, buffer_provider="pool"):
         """
-        Standalone JBR Kernel for Grayscale Reference.
-        Refines a 2D flow field (u, v) using grayscale guidance.
-        """
-        for y, x in ti.ndrange(h, w):
-            total_w = 1e-12
-            sum_u, sum_v = 0.0, 0.0
-            center_val = float(ref_i32[y, x]) * inv_norm
+        General-purpose Joint Bilateral Filter.
 
-            for dy in ti.static(range(-2, 3)):
-                ny = tm.clamp(y + dy, 0, h - 1)
-                for dx in ti.static(range(-2, 3)):
-                    nx = tm.clamp(x + dx, 0, w - 1)
+        Args:
+            src    : (H,W), (H,W,3), or (H,W,2) — grayscale, RGB, or flow field (f32)
+            guide  : (H,W) or (H,W,3) — guidance image (any dtype, auto-converted to gray f32)
+            preset : "low" | "medium" | "high" — smoothing strength
+            radius : 1 (3×3) | 2 (5×5, default) | 3 (7×7)
 
-                    val_neighbor = float(ref_i32[ny, nx]) * inv_norm
-                    diff = val_neighbor - center_val
-                    
-                    w_curr = _compute_jbr_weight(dx, dy, diff)
-                    
-                    sum_u += flow_in[ny, nx, 0] * w_curr
-                    sum_v += flow_in[ny, nx, 1] * w_curr
-                    total_w += w_curr
-
-            flow_out[y, x, 0] = sum_u / total_w
-            flow_out[y, x, 1] = sum_v / total_w
-
-    @ti.kernel
-    def joint_bilateral_refinement_i32_3d_kernel(
-        flow_in: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        ref_i32: ti.types.ndarray(dtype=ti.i32, ndim=3),
-        flow_out: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        h: int,
-        w: int,
-        inv_norm: float,
-    ):
-        """
-        Standalone JBR Kernel for RGB Reference (Uses Green Channel).
-        """
-        for y, x in ti.ndrange(h, w):
-            total_w = 1e-12
-            sum_u, sum_v = 0.0, 0.0
-            center_val = float(ref_i32[y, x, 1]) * inv_norm
-
-            for dy in ti.static(range(-2, 3)):
-                ny = tm.clamp(y + dy, 0, h - 1)
-                for dx in ti.static(range(-2, 3)):
-                    nx = tm.clamp(x + dx, 0, w - 1)
-
-                    val_neighbor = float(ref_i32[ny, nx, 1]) * inv_norm
-                    diff = val_neighbor - center_val
-                    
-                    w_curr = _compute_jbr_weight(dx, dy, diff)
-                    
-                    sum_u += flow_in[ny, nx, 0] * w_curr
-                    sum_v += flow_in[ny, nx, 1] * w_curr
-                    total_w += w_curr
-
-            flow_out[y, x, 0] = sum_u / total_w
-            flow_out[y, x, 1] = sum_v / total_w
-
-    def apply_joint_bilateral_refinement_gpu(flow_in, reference, buffer_provider="pool"):
-        """
-        Python wrapper for JBR process.
+        Returns:
+            Filtered output. Same type as input (taichi or numpy).
         """
         if not TAICHI_AVAILABLE:
             raise ImportError("Taichi not available")
 
-        h, w = flow_in.shape[:2]
-        
-        # Ensure inputs are on GPU
-        flow_gpu, flow_is_temp = common.ensure_taichi_field(flow_in, dtype=ti.f32, buffer_provider=buffer_provider)
-        ref_gpu, ref_is_temp = common.ensure_taichi_field(reference, dtype=ti.i32, buffer_provider=buffer_provider)
-        
-        # Prepare output
-        flow_out_gpu = common.get_temp_buffer((h, w, 2), ti.f32, buffer_provider)
-        
-        # Determine normalization
-        inv_norm = 1.0 / 65535.0 # Default for u16/i32 parity
-        
-        # Dispatch
-        if len(ref_gpu.shape) == 2:
-            joint_bilateral_refinement_i32_2d_kernel(flow_gpu, ref_gpu, flow_out_gpu, h, w, inv_norm)
-        else:
-            joint_bilateral_refinement_i32_3d_kernel(flow_gpu, ref_gpu, flow_out_gpu, h, w, inv_norm)
-        
-        # Cleanup
-        if flow_is_temp: common.release_temp_buffer(flow_gpu)
-        if ref_is_temp: common.release_temp_buffer(ref_gpu)
-        
-        return flow_out_gpu
+        is_numpy = not hasattr(src, 'to_numpy')
+        src_gpu, src_is_temp = common.ensure_taichi_field(src, dtype=ti.f32,
+                                                           buffer_provider=buffer_provider)
+        guide_gpu, guide_is_temp = _prepare_guide(guide, buffer_provider)
+
+        h, w = src_gpu.shape[:2]
+        ndim = len(src_gpu.shape)
+        inv_2ss2, inv_2sr2 = _get_sigma_args(preset)
+
+        r = radius if radius in (1, 2, 3) else 2
+
+        if ndim == 2:
+            dst_gpu = common.get_temp_buffer((h, w), ti.f32, buffer_provider)
+            _JBF_1CH_KERNELS[r](src_gpu, guide_gpu, dst_gpu, h, w, inv_2ss2, inv_2sr2)
+        elif src_gpu.shape[2] == 3:
+            dst_gpu = common.get_temp_buffer((h, w, 3), ti.f32, buffer_provider)
+            _JBF_3CH_KERNELS[r](src_gpu, guide_gpu, dst_gpu, h, w, inv_2ss2, inv_2sr2)
+        else:  # flow (2ch)
+            dst_gpu = common.get_temp_buffer((h, w, 2), ti.f32, buffer_provider)
+            _JBF_FLOW_KERNELS[r](src_gpu, guide_gpu, dst_gpu, h, w, inv_2ss2, inv_2sr2)
+
+        if guide_is_temp: common.release_temp_buffer(guide_gpu)
+        if src_is_temp:   common.release_temp_buffer(src_gpu)
+
+        if is_numpy:
+            res = dst_gpu.to_numpy()
+            common.release_temp_buffer(dst_gpu)
+            return res
+        return dst_gpu
+
+    def joint_bilateral_upsample(src_low, guide_hi, preset="medium", buffer_provider="pool"):
+        """
+        Joint Bilateral Upsampling (JBLU).
+        Upsamples src_low to the resolution of guide_hi with edge-aware interpolation.
+
+        Args:
+            src_low  : (h,w), (h,w,3), or (h,w,2) flow — LOW-RES source
+            guide_hi : (H,W) or (H,W,3) — HIGH-RES guidance (auto-converted to gray)
+            preset   : "low" | "medium" | "high"
+
+        Returns:
+            Upsampled output at (H, W) resolution. Same channel count as src_low.
+        """
+        if not TAICHI_AVAILABLE:
+            raise ImportError("Taichi not available")
+
+        is_numpy = not hasattr(src_low, 'to_numpy')
+        src_gpu, src_is_temp = common.ensure_taichi_field(src_low, dtype=ti.f32,
+                                                           buffer_provider=buffer_provider)
+        guide_gpu, guide_is_temp = _prepare_guide(guide_hi, buffer_provider)
+
+        h_low, w_low = src_gpu.shape[:2]
+        H, W = guide_gpu.shape[:2]
+        scale_y = float(H) / float(h_low)
+        scale_x = float(W) / float(w_low)
+        ndim = len(src_gpu.shape)
+        inv_2ss2, inv_2sr2 = _get_sigma_args(preset)
+
+        if ndim == 2:
+            dst_gpu = common.get_temp_buffer((H, W), ti.f32, buffer_provider)
+            _jblu_1ch_r2(src_gpu, guide_gpu, dst_gpu,
+                         h_low, w_low, H, W, inv_2ss2, inv_2sr2)
+        elif src_gpu.shape[2] == 3:
+            dst_gpu = common.get_temp_buffer((H, W, 3), ti.f32, buffer_provider)
+            _jblu_3ch_r2(src_gpu, guide_gpu, dst_gpu,
+                         h_low, w_low, H, W, inv_2ss2, inv_2sr2)
+        else:  # flow (2ch)
+            dst_gpu = common.get_temp_buffer((H, W, 2), ti.f32, buffer_provider)
+            _jblu_flow_r2(src_gpu, guide_gpu, dst_gpu,
+                          h_low, w_low, H, W, inv_2ss2, inv_2sr2,
+                          scale_y, scale_x)
+
+        if guide_is_temp: common.release_temp_buffer(guide_gpu)
+        if src_is_temp:   common.release_temp_buffer(src_gpu)
+
+        if is_numpy:
+            res = dst_gpu.to_numpy()
+            common.release_temp_buffer(dst_gpu)
+            return res
+        return dst_gpu
 
 else:
-    def apply_joint_bilateral_refinement_gpu(*args, **kwargs):
+    def joint_bilateral_filter(*args, **kwargs):
+        raise ImportError("Taichi not available")
+
+    def joint_bilateral_upsample(*args, **kwargs):
         raise ImportError("Taichi not available")

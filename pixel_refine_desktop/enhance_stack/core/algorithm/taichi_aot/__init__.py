@@ -33,6 +33,7 @@ _ncc_module = load_tcm("ncc")
 _ransac_module = load_tcm("ransac")
 _common_module = load_tcm("common")
 _bilinear_module = load_tcm("bilinear")
+_jbf_module = load_tcm("jbf")
 
 # --- OpenCV-style Constants ---
 INTER_NEAREST = 0
@@ -103,6 +104,16 @@ def merge_3ch(c0, c1, c2):
     _common_module.run(graph, c0=c0, c1=c1, c2=c2, dst=dst)
     return dst
 
+def insert_channel(src, dst, ch):
+    """AOT Optimized channel insertion (in-place on GPU)."""
+    src_v = src
+    dst_v = dst
+    if len(dst.shape) == 3 and not getattr(dst, 'is_vector', False):
+        dst_v = dst.view_as_vector(True)
+    
+    graph = "insert_channel_f32" if src.dtype == np.float32 else "insert_channel_i32"
+    _common_module.run(graph, src=src_v, dst=dst_v, ch=int(ch))
+
 def rgb2gray(src):
     """AOT Optimized RGB to Gray conversion."""
     h, w = src.shape[0], src.shape[1]
@@ -117,10 +128,42 @@ def rgb2gray(src):
 
 def absdiff(src1, src2):
     """AOT Optimized absolute difference."""
-    dst = engine.allocate(src1.shape, dtype=src1.dtype)
-    graph = "absdiff_f32_2d" if src1.dtype == np.float32 else "absdiff_i32_2d"
-    _common_module.run(graph, src=src1, src2=src2, dst=dst)
+    is_3d = len(src1.shape) == 3
+    dst = engine.allocate(src1.shape, dtype=src1.dtype, is_vector=is_3d)
+    
+    src1_v, src2_v, dst_v = src1, src2, dst
+    if is_3d:
+        if not getattr(src1, 'is_vector', False): src1_v = src1.view_as_vector(True)
+        if not getattr(src2, 'is_vector', False): src2_v = src2.view_as_vector(True)
+        if not getattr(dst, 'is_vector', False): dst_v = dst.view_as_vector(True)
+        graph = "absdiff_vec3_f32"
+    else:
+        graph = "absdiff_f32_2d" if src1.dtype == np.float32 else "absdiff_i32_2d"
+    
+    _common_module.run(graph, src1=src1_v, src2=src2_v, dst=dst_v)
     return dst
+
+def cvtColor(src, code):
+    """AOT Optimized color conversion (OpenCV Parity)."""
+    # OpenCV Constants
+    COLOR_BGR2GRAY = 6
+    COLOR_RGB2GRAY = 7
+    
+    is_gpu = isinstance(src, TaichiGPUBuffer)
+    src_buf = src if is_gpu else engine.upload(src)
+    
+    if code in [COLOR_BGR2GRAY, COLOR_RGB2GRAY]:
+        h, w = src_buf.shape[0], src_buf.shape[1]
+        dst = engine.allocate((h, w), dtype=src_buf.dtype)
+        src_v = src_buf
+        if len(src_buf.shape) == 3 and not getattr(src_buf, 'is_vector', False):
+            src_v = src_buf.view_as_vector(True)
+        
+        graph = "rgb2gray_f32" if code == COLOR_RGB2GRAY else "bgr2gray_f32"
+        _common_module.run(graph, src=src_v, dst=dst)
+        return dst
+    
+    return src
 
 # -------------------------------------------------------------------------
 # Algorithm APIs
@@ -407,3 +450,149 @@ def zncc(image, template, stride=1, return_gpu=False):
     res = dst if return_gpu else dst.to_numpy()
     del s_2d, sq_2d, dst
     return res
+
+# -------------------------------------------------------------------------
+# SIGMA PRESETS (shared with JBF python-side)
+# -------------------------------------------------------------------------
+_JBF_SIGMA_PRESETS = {
+    "low":    (0.8,  0.05),
+    "medium": (1.5,  0.10),
+    "high":   (2.5,  0.20),
+}
+
+def _jbf_sigma(preset):
+    ss, sr = _JBF_SIGMA_PRESETS.get(preset, _JBF_SIGMA_PRESETS["medium"])
+    return 1.0 / (2.0 * ss * ss), 1.0 / (2.0 * sr * sr)
+
+def _prepare_guide_aot(guide_raw):
+    """Ensure guide is a 2D f32 GPU buffer, normalized [0,1]."""
+    is_gpu = isinstance(guide_raw, TaichiGPUBuffer)
+    if is_gpu:
+        g = guide_raw
+        if len(g.shape) == 3:
+            # Auto-convert 3ch → gray using common AOT
+            g = cvtColor(g, 6)  # BGR2GRAY
+        return g, False
+    else:
+        import numpy as _np
+        arr = _np.array(guide_raw, dtype=_np.float32)
+        if arr.ndim == 3:
+            arr = 0.299*arr[:,:,2] + 0.587*arr[:,:,1] + 0.114*arr[:,:,0]
+        if arr.max() > 1.0:
+            arr = arr / (255.0 if arr.max() <= 255.0 else 65535.0)
+        return engine.upload(arr.astype(_np.float32)), True
+
+def joint_bilateral_filter(src, guide, preset="medium", radius=2, return_gpu=False):
+    """
+    AOT Joint Bilateral Filter — General post-processor.
+
+    Args:
+        src    : (H,W), (H,W,3) vec, or (H,W,2) vec — grayscale/RGB/flow GPU buffer
+        guide  : (H,W) or (H,W,3) — guidance image (auto-converted to gray)
+        preset : "low" | "medium" | "high"
+        radius : 1=3x3 | 2=5x5 (default) | 3=7x7
+
+    Example:
+        # Post-process median result with original image as guide
+        clean = taichi_aot.joint_bilateral_filter(median_out, original_img, preset="medium")
+
+        # Refine flow field
+        smooth_flow = taichi_aot.joint_bilateral_filter(flow_gpu, ref_gray, preset="low")
+    """
+    is_gpu = isinstance(src, TaichiGPUBuffer)
+    src_buf = src if is_gpu else engine.upload(src)
+    guide_buf, guide_is_temp = _prepare_guide_aot(guide)
+
+    h, w = src_buf.shape[:2]
+    inv_2ss2, inv_2sr2 = _jbf_sigma(preset)
+    r = radius if radius in (1, 2, 3) else 2
+
+    # Determine src type
+    is_vec = getattr(src_buf, 'is_vector', False)
+    ndim = len(src_buf.shape)
+
+    if ndim == 2 and not is_vec:
+        # 1ch scalar
+        dst = engine.allocate((h, w))
+        _jbf_module.run(f"jbf_1ch_r{r}",
+                        src=src_buf, guide=guide_buf, dst=dst,
+                        h=h, w=w, inv_2ss2=inv_2ss2, inv_2sr2=inv_2sr2)
+    elif ndim == 3 and src_buf.shape[2] == 2 or (is_vec and src_buf.shape[-1] == 2 if hasattr(src_buf, 'shape') else False):
+        # flow 2ch
+        src_v = src_buf if is_vec else src_buf.view_as_vector(True)
+        dst = engine.allocate(src_buf.shape, is_vector=True)
+        dst_v = dst.view_as_vector(True)
+        _jbf_module.run(f"jbf_flow_r{r}",
+                        src=src_v, guide=guide_buf, dst=dst_v,
+                        h=h, w=w, inv_2ss2=inv_2ss2, inv_2sr2=inv_2sr2)
+    else:
+        # 3ch
+        src_v = src_buf if is_vec else src_buf.view_as_vector(True)
+        dst = engine.allocate(src_buf.shape, is_vector=True)
+        dst_v = dst.view_as_vector(True)
+        _jbf_module.run(f"jbf_3ch_r{r}",
+                        src=src_v, guide=guide_buf, dst=dst_v,
+                        h=h, w=w, inv_2ss2=inv_2ss2, inv_2sr2=inv_2sr2)
+
+    if guide_is_temp: del guide_buf
+    return dst if return_gpu else dst.to_numpy()
+
+def joint_bilateral_upsample(src_low, guide_hi, preset="medium", return_gpu=False):
+    """
+    AOT Joint Bilateral Upsampling (JBLU).
+    Upscales src_low to resolution of guide_hi with edge-aware interpolation.
+
+    Args:
+        src_low  : (h,w), (h,w,3) vec, or (h,w,2) vec — LOW-RES source
+        guide_hi : (H,W) or (H,W,3) — HIGH-RES guide (auto-converted to gray)
+        preset   : "low" | "medium" | "high"
+
+    Example:
+        # Upsample pyramid flow with full-res image as guide
+        flow_full = taichi_aot.joint_bilateral_upsample(flow_low, full_res_img)
+
+        # Upsample low-res mask
+        mask_full = taichi_aot.joint_bilateral_upsample(mask_low, full_res_gray)
+    """
+    is_gpu = isinstance(src_low, TaichiGPUBuffer)
+    src_buf = src_low if is_gpu else engine.upload(src_low)
+    guide_buf, guide_is_temp = _prepare_guide_aot(guide_hi)
+
+    h_low, w_low = src_buf.shape[:2]
+    H, W = guide_buf.shape[:2]
+    scale_y = float(H) / float(h_low)
+    scale_x = float(W) / float(w_low)
+    inv_2ss2, inv_2sr2 = _jbf_sigma(preset)
+
+    is_vec = getattr(src_buf, 'is_vector', False)
+    ndim = len(src_buf.shape)
+
+    if ndim == 2 and not is_vec:
+        # 1ch
+        dst = engine.allocate((H, W))
+        _jbf_module.run("jblu_1ch_r2",
+                        src_low=src_buf, guide_hi=guide_buf, dst=dst,
+                        h_low=h_low, w_low=w_low, H=H, W=W,
+                        inv_2ss2=inv_2ss2, inv_2sr2=inv_2sr2)
+    elif (ndim == 3 and src_buf.shape[2] == 2) or (is_vec and ndim == 2 and len(src_buf.shape) == 2):
+        # flow 2ch — check by is_vector and shape
+        src_v = src_buf if is_vec else src_buf.view_as_vector(True)
+        dst = engine.allocate((H, W, 2), is_vector=True)
+        dst_v = dst.view_as_vector(True)
+        _jbf_module.run("jblu_flow_r2",
+                        src_low=src_v, guide_hi=guide_buf, dst=dst_v,
+                        h_low=h_low, w_low=w_low, H=H, W=W,
+                        inv_2ss2=inv_2ss2, inv_2sr2=inv_2sr2,
+                        scale_y=scale_y, scale_x=scale_x)
+    else:
+        # 3ch
+        src_v = src_buf if is_vec else src_buf.view_as_vector(True)
+        dst = engine.allocate((H, W, 3), is_vector=True)
+        dst_v = dst.view_as_vector(True)
+        _jbf_module.run("jblu_3ch_r2",
+                        src_low=src_v, guide_hi=guide_buf, dst=dst_v,
+                        h_low=h_low, w_low=w_low, H=H, W=W,
+                        inv_2ss2=inv_2ss2, inv_2sr2=inv_2sr2)
+
+    if guide_is_temp: del guide_buf
+    return dst if return_gpu else dst.to_numpy()
