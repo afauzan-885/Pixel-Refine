@@ -155,6 +155,7 @@ class TaichiGPUBuffer:
         self.shape = shape
         self.dtype = dtype
         self.is_vec2 = is_vec2
+        self.is_vector = is_vec2 # Alias for better clarity
         self.engine = engine # Reference to AOTEngine to access its pool
         self.is_owner = is_owner
 

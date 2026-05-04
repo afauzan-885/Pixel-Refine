@@ -1,7 +1,6 @@
 import os
 import sys
 import numpy as np
-from ..taichi_algorithm.taichi_worker import ti_thread
 
 # Path resolution to find the bridge
 file_dir = os.path.dirname(os.path.abspath(__file__))
@@ -12,20 +11,28 @@ from .engine import AOTEngine, TaichiGPUBuffer
 # Initialize the Singleton Engine
 engine = AOTEngine()
 
-# Preload TCM Modules (Handles architecture suffixes automatically)
+# Preload TCM Modules
 _tcm_dir = os.path.abspath(os.path.join(file_dir, "../taichi_algorithm/aot_tcm"))
 
-_bicubic_module = engine.load(os.path.join(_tcm_dir, "bicubic.tcm"))
-_pyramid_module = engine.load(os.path.join(_tcm_dir, "pyramid.tcm"))
-_box_filter_module = engine.load(os.path.join(_tcm_dir, "box_filter.tcm"))
-_gaussian_module = engine.load(os.path.join(_tcm_dir, "gaussian.tcm"))
-_fft_module = engine.load(os.path.join(_tcm_dir, "fft.tcm"))
-_warp_module = engine.load(os.path.join(_tcm_dir, "warp.tcm"))
-_gradients_module = engine.load(os.path.join(_tcm_dir, "gradients.tcm"))
-_median_module = engine.load(os.path.join(_tcm_dir, "median_filter.tcm"))
-_ncc_module = engine.load(os.path.join(_tcm_dir, "ncc.tcm"))
-_ransac_module = engine.load(os.path.join(_tcm_dir, "ransac.tcm"))
-_bilinear_module = engine.load(os.path.join(_tcm_dir, "bilinear.tcm"))
+def load_tcm(name):
+    path = os.path.join(_tcm_dir, f"{name}.tcm")
+    try:
+        return engine.load(path)
+    except:
+        return None
+
+_bicubic_module = load_tcm("bicubic")
+_pyramid_module = load_tcm("pyramid")
+_box_filter_module = load_tcm("box_filter")
+_gaussian_module = load_tcm("gaussian")
+_fft_module = load_tcm("fft")
+_warp_module = load_tcm("warp")
+_gradients_module = load_tcm("gradients")
+_median_module = load_tcm("median_filter")
+_ncc_module = load_tcm("ncc")
+_ransac_module = load_tcm("ransac")
+_common_module = load_tcm("common")
+_bilinear_module = load_tcm("bilinear")
 
 # --- OpenCV-style Constants ---
 INTER_NEAREST = 0
@@ -40,73 +47,137 @@ def upload(arr: np.ndarray, is_vector=False) -> TaichiGPUBuffer:
     """Upload a NumPy array to GPU VRAM."""
     return engine.upload(arr, is_vector=is_vector)
 
+# -------------------------------------------------------------------------
+# Helper Functions (AOT-Optimized Utility)
+# -------------------------------------------------------------------------
+
+def copy_field(src, dst):
+    """Zero-overhead AOT copy."""
+    is_3ch = len(src.shape) == 3
+    graph = "copy_i32_2d"
+    if src.dtype == np.float32: 
+        graph = "copy_f32_2d"
+    elif is_3ch:
+        graph = "copy_vec3_2d"
+    
+    src_v, dst_v = src, dst
+    if is_3ch:
+        if not getattr(src, 'is_vector', False): src_v = src.view_as_vector(True)
+        if not getattr(dst, 'is_vector', False): dst_v = dst.view_as_vector(True)
+        
+    _common_module.run(graph, src=src_v, dst=dst_v)
+
+def extract_channel(src, ch):
+    """AOT Optimized channel extraction."""
+    h, w = src.shape[0], src.shape[1]
+    dst = engine.allocate((h, w), dtype=src.dtype)
+    src_v = src
+    if len(src.shape) == 3 and not getattr(src, 'is_vector', False):
+        src_v = src.view_as_vector(True)
+    
+    graph = "extract_channel_f32" if src.dtype == np.float32 else "extract_channel_i32"
+    _common_module.run(graph, src=src_v, dst=dst, ch=int(ch))
+    return dst
+
+def split_3ch(src):
+    """Fused 3-channel split."""
+    h, w = src.shape[0], src.shape[1]
+    dst_dtype = src.dtype
+    c0 = engine.allocate((h, w), dtype=dst_dtype)
+    c1 = engine.allocate((h, w), dtype=dst_dtype)
+    c2 = engine.allocate((h, w), dtype=dst_dtype)
+    src_v = src
+    if not getattr(src, 'is_vector', False): src_v = src.view_as_vector(True)
+    
+    graph = "split_3ch_f32" if dst_dtype == np.float32 else "split_3ch_i32"
+    _common_module.run(graph, src=src_v, c0=c0, c1=c1, c2=c2)
+    return [c0, c1, c2]
+
+def merge_3ch(c0, c1, c2):
+    """Fused 3-channel merge."""
+    h, w = c0.shape[0], c0.shape[1]
+    dst_dtype = c0.dtype
+    dst = engine.allocate((h, w, 3), dtype=dst_dtype, is_vector=True)
+    
+    graph = "merge_3ch_f32" if dst_dtype == np.float32 else "merge_3ch_i32"
+    _common_module.run(graph, c0=c0, c1=c1, c2=c2, dst=dst)
+    return dst
+
+def rgb2gray(src):
+    """AOT Optimized RGB to Gray conversion."""
+    h, w = src.shape[0], src.shape[1]
+    dst = engine.allocate((h, w), dtype=src.dtype)
+    src_v = src
+    if len(src.shape) == 3 and not getattr(src, 'is_vector', False):
+        src_v = src.view_as_vector(True)
+    
+    graph = "rgb2gray_f32" if src.dtype == np.float32 else "rgb2gray_i32"
+    _common_module.run(graph, src=src_v, dst=dst)
+    return dst
+
+def absdiff(src1, src2):
+    """AOT Optimized absolute difference."""
+    dst = engine.allocate(src1.shape, dtype=src1.dtype)
+    graph = "absdiff_f32_2d" if src1.dtype == np.float32 else "absdiff_i32_2d"
+    _common_module.run(graph, src=src1, src2=src2, dst=dst)
+    return dst
+
+# -------------------------------------------------------------------------
+# Algorithm APIs
+# -------------------------------------------------------------------------
+
 def resize(src, dsize, interpolation=INTER_CUBIC, return_gpu=False):
     """Taichi AOT Resize (OpenCV Parity API)"""
     target_w, target_h = dsize
+    is_gpu_input = isinstance(src, TaichiGPUBuffer)
+    src_buf = src if is_gpu_input else engine.upload(src)
+    
+    if src_buf.is_vector: src_buf = src_buf.view_as_vector(False)
+    
+    h_src, w_src = src_buf.shape[0], src_buf.shape[1]
+    is_3d = len(src_buf.shape) == 3
+    dst_shape = (target_h, target_w, src_buf.shape[2]) if is_3d else (target_h, target_w)
+    dst_buf = engine.allocate(dst_shape, dtype=src_buf.dtype)
+
     if interpolation == INTER_CUBIC:
-        is_gpu_input = isinstance(src, TaichiGPUBuffer)
-        src_buf = src if is_gpu_input else engine.upload(src)
-        # Bicubic expects Scalar 3D
-        if src_buf.is_vec2: src_buf = src_buf.view_as_vector(False)
-        
-        is_3d = len(src_buf.shape) == 3
         graph_name = "bicubic_resize_f32_3d" if is_3d else "bicubic_resize_f32_2d"
-        h_src, w_src = src_buf.shape[0], src_buf.shape[1]
-        dst_shape = (target_h, target_w, src_buf.shape[2]) if is_3d else (target_h, target_w)
-        dst_buf = engine.allocate(dst_shape)
+        if src_buf.dtype != np.float32:
+            graph_name = graph_name.replace("f32", "i32")
         _bicubic_module.run(graph_name, src=src_buf, dst=dst_buf, h_src=h_src, w_src=w_src, h_dst=target_h, w_dst=target_w)
-        return dst_buf if return_gpu else dst_buf.to_numpy()
     elif interpolation == INTER_LINEAR:
-        is_gpu_input = isinstance(src, TaichiGPUBuffer)
-        src_buf = src if is_gpu_input else engine.upload(src)
-        if src_buf.is_vec2: src_buf = src_buf.view_as_vector(False)
-        
-        is_3d = len(src_buf.shape) == 3
         graph_name = "bilinear_resize_f32_3d" if is_3d else "bilinear_resize_f32_2d"
-        h_src, w_src = src_buf.shape[0], src_buf.shape[1]
-        dst_shape = (target_h, target_w, src_buf.shape[2]) if is_3d else (target_h, target_w)
-        dst_buf = engine.allocate(dst_shape)
         _bilinear_module.run(graph_name, src=src_buf, dst=dst_buf, h_src=h_src, w_src=w_src, h_dst=target_h, w_dst=target_w)
-        return dst_buf if return_gpu else dst_buf.to_numpy()
     else:
         raise NotImplementedError(f"Interpolation mode {interpolation} is not supported in AOT currently.")
-
-def bicubic_interpolation(src, target_w, target_h, return_gpu=False):
-    """Alias for resize(interpolation=INTER_CUBIC)"""
-    return resize(src, (target_w, target_h), interpolation=INTER_CUBIC, return_gpu=return_gpu)
-
-def bilinear_interpolation(src, target_w, target_h, return_gpu=False):
-    """Alias for resize(interpolation=INTER_LINEAR)"""
-    return resize(src, (target_w, target_h), interpolation=INTER_LINEAR, return_gpu=return_gpu)
+        
+    return dst_buf if return_gpu else dst_buf.to_numpy()
 
 def box_filter(src, kernel_size=3, return_gpu=False):
-    """AOT Implementation of Box Filter (Scalar 3D Optimized)"""
+    """AOT Implementation of Box Filter."""
     is_gpu = isinstance(src, TaichiGPUBuffer)
     h, w = src.shape[:2]
     radius = kernel_size // 2
     is_3d = len(src.shape) == 3
     
     src_buf = src if is_gpu else engine.upload(src)
-    if src_buf.is_vec2: src_buf = src_buf.view_as_vector(False)
+    if src_buf.is_vector: src_buf = src_buf.view_as_vector(False)
     
-    dst_buf = engine.allocate(src_buf.shape)
+    dst_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype)
     
+    suffix = "3ch_f32" if is_3d else "f32"
     if kernel_size == 3:
-        graph = "box_filter_fused_3x3_3ch_f32" if is_3d else "box_filter_3x3_f32"
-        _box_filter_module.run(graph, src=src_buf, dst=dst_buf, h=h, w=w)
+        _box_filter_module.run(f"box_filter_fused_3x3_{suffix}", src=src_buf, dst=dst_buf, h=h, w=w)
     else:
-        tmp_buf = engine.allocate(src_buf.shape)
-        graph = "box_filter_separable_generic_3ch_f32" if is_3d else "box_filter_separable_generic_f32"
-        _box_filter_module.run(graph, src=src_buf, tmp=tmp_buf, dst=dst_buf, h=h, w=w, radius=radius)
-    
+        tmp_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype)
+        _box_filter_module.run(f"box_filter_separable_generic_{suffix}", src=src_buf, tmp=tmp_buf, dst=dst_buf, h=h, w=w, radius=radius)
+        del tmp_buf
+        
     return dst_buf if return_gpu else dst_buf.to_numpy()
 
 def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False):
-    """AOT Implementation of Gaussian Blur (Separable Scalar 3D)"""
+    """AOT Implementation of Gaussian Blur."""
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else engine.upload(src)
-    # Gaussian expects Scalar 3D
-    if src_buf.is_vec2: src_buf = src_buf.view_as_vector(False)
     
     if kernel_size is None or kernel_size <= 0:
         kernel_size = int(np.ceil(3 * sigma)) * 2 + 1
@@ -116,25 +187,25 @@ def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False):
     
     from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.gaussian import compute_gaussian_weights
     weights_np = compute_gaussian_weights(sigma, radius).astype(np.float32)
-    weights_buf = engine.upload(weights_np) # Still needed per sigma change
+    weights_buf = engine.upload(weights_np)
     
-    tmp_buf = engine.allocate(src_buf.shape)
-    dst_buf = engine.allocate(src_buf.shape)
+    tmp_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype)
+    dst_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype)
     
-    suffix = "3ch_f32" if is_3d else "1ch_f32"
+    type_suffix = "f32" if src_buf.dtype == np.float32 else "i32"
+    suffix = f"3ch_{type_suffix}" if is_3d else f"1ch_{type_suffix}"
+    
     _gaussian_module.run(f"gaussian_blur_x_{suffix}", src=src_buf, dst=tmp_buf, h=h, w=w, weights=weights_buf, radius=radius)
     _gaussian_module.run(f"gaussian_blur_y_{suffix}", src=tmp_buf, dst=dst_buf, h=h, w=w, weights=weights_buf, radius=radius)
     
-    # Cleanup intermediate buffers
     del tmp_buf, weights_buf
-    
     return dst_buf if return_gpu else dst_buf.to_numpy()
 
 def image_pyramid(src, levels=4, return_gpu=False):
     """AOT Implementation of Image Pyramid (Downsampling)"""
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else engine.upload(src)
-    if src_buf.is_vec2: src_buf = src_buf.view_as_vector(False) # Pyramid uses Scalar 3D
+    if src_buf.is_vector: src_buf = src_buf.view_as_vector(False)
     is_3d = len(src_buf.shape) == 3
     
     curr_buf = src_buf
@@ -146,129 +217,164 @@ def image_pyramid(src, levels=4, return_gpu=False):
         if next_h < 1 or next_w < 1: break
         
         dst_shape = (next_h, next_w, src_buf.shape[2]) if is_3d else (next_h, next_w)
-        dst_buf = engine.allocate(dst_shape)
+        dst_buf = engine.allocate(dst_shape, dtype=src_buf.dtype)
         _pyramid_module.run(graph, src=curr_buf, dst=dst_buf)
         
-        # Release intermediate level if it's not the original source
         if curr_buf is not src_buf:
             del curr_buf
             
         curr_buf = dst_buf
         
     return curr_buf if return_gpu else curr_buf.to_numpy()
-    
+
 def warp_image(src, flow, ref=None, return_gpu=False):
-    """AOT Implementation of Warp Image (Guided/Naked, Scalar 2D/3D)."""
+    """AOT Implementation of Warp Image (High Precision f32 supported)."""
     is_gpu_src = isinstance(src, TaichiGPUBuffer)
     is_gpu_flow = isinstance(flow, TaichiGPUBuffer)
     is_gpu_ref = isinstance(ref, TaichiGPUBuffer) if ref is not None else False
     
-    # Warping kernels in AOT expect i32 for images and f32 for flow (as NDArray 3D, not vector)
-    src_buf = src if is_gpu_src else engine.upload(src.astype(np.int32) if src.dtype != np.int32 else src)
-    flow_buf = flow if is_gpu_flow else engine.upload(flow.astype(np.float32) if flow.dtype != np.float32 else flow)
+    src_buf = src if is_gpu_src else engine.upload(src)
+    flow_buf = flow if is_gpu_flow else engine.upload(flow)
     
     h, w = src_buf.shape[:2]
     is_3d = len(src_buf.shape) == 3
     is_guided = ref is not None
     
-    dst_buf = engine.allocate(src_buf.shape, dtype=np.int32)
+    dst_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype, is_vector=is_3d)
     
-    if is_3d:
-        src_buf = src_buf.view_as_vector(True)
-        dst_buf = dst_buf.view_as_vector(True)
+    src_v = src_buf.view_as_vector(True) if is_3d else src_buf
+    dst_v = dst_buf.view_as_vector(True) if is_3d else dst_buf
+    
+    type_suffix = "f32" if src_buf.dtype == np.float32 else "i32"
+    ch_suffix = "3ch" if is_3d else "1ch"
     
     if is_guided:
-        ref_buf = ref if is_gpu_ref else engine.upload(ref.astype(np.int32) if ref.dtype != np.int32 else ref)
-        if is_3d: ref_buf = ref_buf.view_as_vector(True)
-        graph = "warp_guided_i32_3ch" if is_3d else "warp_guided_i32_1ch"
-        _warp_module.run(graph, src=src_buf, flow=flow_buf, dst=dst_buf, ref=ref_buf)
+        ref_buf = ref if is_gpu_ref else engine.upload(ref)
+        ref_v = ref_buf.view_as_vector(True) if is_3d else ref_buf
+        graph = f"warp_guided_{type_suffix}_{ch_suffix}"
+        _warp_module.run(graph, src=src_v, flow=flow_buf, dst=dst_v, ref=ref_v)
         if not is_gpu_ref: del ref_buf
     else:
-        graph = "warp_naked_i32_3ch" if is_3d else "warp_naked_i32_1ch"
-        _warp_module.run(graph, src=src_buf, flow=flow_buf, dst=dst_buf)
+        graph = f"warp_naked_{type_suffix}_{ch_suffix}"
+        _warp_module.run(graph, src=src_v, flow=flow_buf, dst=dst_v)
         
     if not is_gpu_src: del src_buf
     if not is_gpu_flow: del flow_buf
     
     return dst_buf if return_gpu else dst_buf.to_numpy()
 
-def median_filter(src, kernel_size=3, return_gpu=False):
-    """AOT Implementation of Median Filter (Fixed 3x3 currently)"""
+def median_filter(src, return_gpu=False):
+    """AOT Median Filter 3x3."""
     is_gpu = isinstance(src, TaichiGPUBuffer)
-    h, w = src.shape[:2]
-    is_flow = (len(src.shape) == 3 and src.shape[2] == 2)
+    src_buf = src if is_gpu else engine.upload(src)
+    h, w = src_buf.shape[:2]
     
-    src_buf = src if is_gpu else engine.upload(src, is_vector=is_flow)
-    if is_flow and not src_buf.is_vec2:
-        src_buf = src_buf.view_as_vector(True)
+    is_flow = (len(src_buf.shape) == 3 and src_buf.shape[2] == 2)
+    src_v = src_buf.view_as_vector(True) if is_flow else src_buf
+    
+    dst_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype, is_vector=is_flow)
+    dst_v = dst_buf.view_as_vector(True) if is_flow else dst_buf
+
+    if is_flow:
+        graph = "median_flow_3x3_f32"
+    else:
+        graph = "median_3x3_f32" if src_buf.dtype == np.float32 else "median_3x3"
         
-    dst_buf = engine.allocate(src_buf.shape, is_vector=is_flow)
-    graph = "median_flow_3x3_f32" if is_flow else "median_3x3_f32"
-    _median_module.run(graph, src=src_buf, dst=dst_buf, h=h, w=w)
+    _median_module.run(graph, src=src_v, dst=dst_v, h=h, w=w)
     return dst_buf if return_gpu else dst_buf.to_numpy()
 
-def _fft_1d_gpu(complex_buf, h, w, is_inverse, is_col):
-    """Helper to run multi-pass 1D FFT on GPU."""
-    n = h if is_col else w
-    bits = (n - 1).bit_length()
-
-    temp_buf = engine.allocate((h, w, 2), is_vector=True) # FFT uses vec2
-    _fft_module.run("fft_bit_reverse_f32", src=complex_buf, dst=temp_buf, bits=bits, is_col=1 if is_col else 0)
-    
-    # Swap pointers
-    complex_buf.handle, temp_buf.handle = temp_buf.handle, complex_buf.handle
-
-    for stage in range(1, bits + 1):
-        stage_len = 1 << stage
-        _fft_module.run("fft_stage_f32", data=complex_buf, n=n, stage_len=stage_len, 
-                        is_inverse=1 if is_inverse else 0, is_col=1 if is_col else 0)
-
-    if is_inverse:
-        _fft_module.run("fft_normalize_f32", data=complex_buf, scale=1.0 / n)
-
 def fft2(src):
-    """AOT Implementation of 2D FFT (Actual Butterfly)."""
+    """AOT Implementation of 2D FFT."""
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else engine.upload(src)
     h, w = src_buf.shape[:2]
     
     complex_buf = engine.allocate((h, w, 2), is_vector=True)
     _fft_module.run("fft_real_to_complex_f32", src=src_buf, dst=complex_buf, h=h, w=w)
-    _fft_1d_gpu(complex_buf, h, w, is_inverse=False, is_col=False)
-    _fft_1d_gpu(complex_buf, h, w, is_inverse=False, is_col=True)
+    
+    def run_fft_1d(buf, h, w, is_inverse, is_col):
+        n = h if is_col else w
+        bits = (n - 1).bit_length()
+        temp_buf = engine.allocate((h, w, 2), is_vector=True)
+        _fft_module.run("fft_bit_reverse_f32", src=buf, dst=temp_buf, bits=bits, is_col=1 if is_col else 0)
+        buf.handle, temp_buf.handle = temp_buf.handle, buf.handle
+        for stage in range(1, bits + 1):
+            _fft_module.run("fft_stage_f32", data=buf, n=n, stage_len=1 << stage, is_inverse=1 if is_inverse else 0, is_col=1 if is_col else 0)
+        if is_inverse:
+            _fft_module.run("fft_normalize_f32", data=buf, scale=1.0 / n)
+        del temp_buf
+
+    run_fft_1d(complex_buf, h, w, False, False)
+    run_fft_1d(complex_buf, h, w, False, True)
     return complex_buf
 
 def ifft2(complex_buf):
-    """AOT Implementation of 2D IFFT (Actual Butterfly)."""
+    """AOT Implementation of 2D IFFT."""
     h, w = complex_buf.shape[:2]
-    _fft_1d_gpu(complex_buf, h, w, is_inverse=True, is_col=True)
-    _fft_1d_gpu(complex_buf, h, w, is_inverse=True, is_col=False)
+    def run_fft_1d(buf, h, w, is_inverse, is_col):
+        n = h if is_col else w
+        bits = (n - 1).bit_length()
+        temp_buf = engine.allocate((h, w, 2), is_vector=True)
+        _fft_module.run("fft_bit_reverse_f32", src=buf, dst=temp_buf, bits=bits, is_col=1 if is_col else 0)
+        buf.handle, temp_buf.handle = temp_buf.handle, buf.handle
+        for stage in range(1, bits + 1):
+            _fft_module.run("fft_stage_f32", data=buf, n=n, stage_len=1 << stage, is_inverse=1 if is_inverse else 0, is_col=1 if is_col else 0)
+        if is_inverse:
+            _fft_module.run("fft_normalize_f32", data=buf, scale=1.0 / n)
+        del temp_buf
+
+    run_fft_1d(complex_buf, h, w, True, True)
+    run_fft_1d(complex_buf, h, w, True, False)
     dst_buf = engine.allocate((h, w))
     _fft_module.run("fft_complex_to_real_f32", src=complex_buf, dst=dst_buf, h=h, w=w)
     return dst_buf
 
 def sobel(src, return_gpu=False):
-    """AOT Implementation of Sobel Edge Detection."""
+    """AOT Sobel."""
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else engine.upload(src)
     h, w = src_buf.shape[:2]
-    dx_buf = engine.allocate((h, w))
-    dy_buf = engine.allocate((h, w))
-    _gradients_module.run("sobel_f32", src=src_buf, dst_dx=dx_buf, dst_dy=dy_buf, h=h, w=w)
-    if return_gpu: return dx_buf, dy_buf
-    return dx_buf.to_numpy(), dy_buf.to_numpy()
+    dx = engine.allocate((h, w))
+    dy = engine.allocate((h, w))
+    _gradients_module.run("sobel_f32", src=src_buf, dst_dx=dx, dst_dy=dy, h=h, w=w)
+    if return_gpu: return dx, dy
+    return dx.to_numpy(), dy.to_numpy()
 
 def laplacian(src, return_gpu=False):
-    """AOT Implementation of Laplacian Edge Detection."""
+    """AOT Laplacian."""
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else engine.upload(src)
     h, w = src_buf.shape[:2]
-    dst_buf = engine.allocate((h, w))
-    _gradients_module.run("laplacian_f32", src=src_buf, dst=dst_buf, h=h, w=w)
-    return dst_buf if return_gpu else dst_buf.to_numpy()
+    dst = engine.allocate((h, w))
+    _gradients_module.run("laplacian_f32", src=src_buf, dst=dst, h=h, w=w)
+    return dst if return_gpu else dst.to_numpy()
+
+def ransac_flow_cleanup(flow, threshold=1.0, return_gpu=False):
+    """AOT RANSAC Flow Cleanup."""
+    is_gpu = isinstance(flow, TaichiGPUBuffer)
+    flow_buf = flow if is_gpu else engine.upload(flow, is_vector=True)
+    if not flow_buf.is_vector: flow_buf = flow_buf.view_as_vector(True)
+    h, w = flow_buf.shape[:2]
+    
+    dst = engine.allocate(flow_buf.shape, is_vector=True)
+    mask = engine.allocate((h, w), dtype=np.int32)
+    model = engine.allocate((2,), dtype=np.float32) # [mean_u, mean_v]
+    
+    _ransac_module.run("ransac_flow_cleanup_f32", 
+                      flow=flow_buf, 
+                      inlier_mask=mask, 
+                      model=model, 
+                      output=dst, 
+                      h=h, w=w, 
+                      threshold=float(threshold),
+                      stride_refine=4, # Default sparse stride
+                      stride_final=1) # Full resolution
+                      
+    del mask, model
+    return dst if return_gpu else dst.to_numpy()
 
 def zncc(image, template, stride=1, return_gpu=False):
-    """AOT Implementation of True NCC via FFT + Integral Image"""
+    """AOT Optimized Spatial ZNCC."""
     is_gpu_img = isinstance(image, TaichiGPUBuffer)
     is_gpu_temp = isinstance(template, TaichiGPUBuffer)
     img_buf = image if is_gpu_img else engine.upload(image)
@@ -277,166 +383,27 @@ def zncc(image, template, stride=1, return_gpu=False):
     h_img, w_img = img_buf.shape[:2]
     h_temp, w_temp = temp_buf.shape[:2]
     
-    # 1. Choose Path: Coarse-to-Fine (Ultra Fast) or FFT (Large Template)
-    if h_temp <= 64 and w_temp <= 64:
-        # --- COARSE-TO-FINE PATH (30-60 FPS) ---
-        # Still need Integral Image for local stats
-        s_h = engine.allocate((h_img, w_img))
-        sq_h = engine.allocate((h_img, w_img))
-        s_2d = engine.allocate((h_img, w_img))
-        sq_2d = engine.allocate((h_img, w_img))
-        
-        # Template stats
-        temp_np = template if not is_gpu_temp else template.to_numpy()
-        sum_t = float(np.sum(temp_np))
-        n = float(h_temp * w_temp)
-        var_t_n = float(max(0.0, np.sum(temp_np**2) - (sum_t**2 / n)))
-
-        # A. Allocate Helper Buffers for OBG
-        stride = 4
-        res_h_c, res_w_c = (h_img - h_temp) // stride + 1, (w_img - w_temp) // stride + 1
-        dst_coarse = engine.allocate((res_h_c, res_w_c))
-        row_max = engine.allocate((res_h_c, 2))
-        final_peak = engine.allocate((1, 3))
-        
-        refine_radius = stride
-        refine_size = refine_radius * 2 + 1
-        dst_fine = engine.allocate((refine_size, refine_size))
-        
-        # B. ONE BIG GRAPH DISPATCH (The Peak of Optimization)
-        _ncc_module.run("zncc_auto", 
-                        src=img_buf, template=temp_buf,
-                        sum_h=s_h, sq_sum_h=sq_h, sum_2d=s_2d, sq_sum_2d=sq_2d,
-                        dst_coarse=dst_coarse, dst_fine=dst_fine,
-                        row_max=row_max, final_peak=final_peak,
-                        h=h_img, w=w_img, sum_t=sum_t, var_t_n=var_t_n, n_float=n,
-                        offset_y=0, offset_x=0, stride=stride)
-        
-        # C. DOWNLOAD ONLY THE WINNER (12 bytes)
-        peak_np = final_peak.to_numpy()
-        final_score = peak_np[0, 0]
-        
-        # Cleanup
-        del s_2d, sq_2d, dst_coarse, dst_fine, row_max, final_peak
-        if not is_gpu_img: del img_buf
-        if not is_gpu_temp: del temp_buf
-        
-        # Return peak info as a small 1x1 array for compatibility with benchmark
-        return np.array([[final_score]])
-
-    # --- FFT PATH (Fallback for large templates) ---
-    # 2. FFT Correlation (Numerator)
-    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.fft import _next_power_of_two
-    th = _next_power_of_two(h_img + h_temp - 1)
-    tw = _next_power_of_two(w_img + w_temp - 1)
-    bh, bw = int(np.log2(th)), int(np.log2(tw))
-    
-    # Buffers (Reused from pool)
-    img_c = engine.allocate((th, tw, 2), is_vector=True)
-    tmp_c = engine.allocate((th, tw, 2), is_vector=True)
-    corr_c = engine.allocate((th, tw, 2), is_vector=True)
-    corr_r = engine.allocate((th, tw))
-    
-    # FFT Image
-    _ncc_module.run("real_to_complex", src=img_buf, dst=tmp_c, src_h=h_img, src_w=w_img)
-    _ncc_module.run("bit_reverse", src=tmp_c, dst=img_c, bits=bw, is_col=0)
-    for s in range(1, bw + 1):
-        _ncc_module.run("fft_stage", data=img_c, n=tw, stage_len=1<<s, is_inverse=0, is_col=0)
-    
-    _ncc_module.run("bit_reverse", src=img_c, dst=tmp_c, bits=bh, is_col=1)
-    for s in range(1, bh + 1):
-        _ncc_module.run("fft_stage", data=tmp_c, n=th, stage_len=1<<s, is_inverse=0, is_col=1)
-    
-    img_fft = tmp_c
-    
-    # FFT Template
-    temp_c = engine.allocate((th, tw, 2), is_vector=True)
-    _ncc_module.run("real_to_complex", src=temp_buf, dst=temp_c, src_h=h_temp, src_w=w_temp)
-    _ncc_module.run("bit_reverse", src=temp_c, dst=img_c, bits=bw, is_col=0)
-    for s in range(1, bw + 1):
-        _ncc_module.run("fft_stage", data=img_c, n=tw, stage_len=1<<s, is_inverse=0, is_col=0)
-    _ncc_module.run("bit_reverse", src=img_c, dst=temp_c, bits=bh, is_col=1)
-    for s in range(1, bh + 1):
-        _ncc_module.run("fft_stage", data=temp_c, n=th, stage_len=1<<s, is_inverse=0, is_col=1)
-    temp_fft = temp_c
-
-    # Multiply & IFFT
-    _ncc_module.run("complex_mul", src=img_fft, dst=temp_fft, data=corr_c, conj_b=1)
-    del img_fft, temp_fft, temp_c
-    
-    scratch = img_c 
-    _ncc_module.run("bit_reverse", src=corr_c, dst=scratch, bits=bh, is_col=1)
-    for s in range(1, bh + 1):
-        _ncc_module.run("fft_stage", data=scratch, n=th, stage_len=1<<s, is_inverse=1, is_col=1)
-    _ncc_module.run("normalize", data=scratch, scale=1.0/th)
-
-    _ncc_module.run("bit_reverse", src=scratch, dst=corr_c, bits=bw, is_col=0)
-    for s in range(1, bw + 1):
-        _ncc_module.run("fft_stage", data=corr_c, n=tw, stage_len=1<<s, is_inverse=1, is_col=0)
-    _ncc_module.run("normalize", data=corr_c, scale=1.0/tw)
-
-    _ncc_module.run("complex_to_real", src=corr_c, dst=corr_r, dst_h=th, dst_w=tw)
-
-    # 2. Integral Image Denominator
     s_h = engine.allocate((h_img, w_img))
     sq_h = engine.allocate((h_img, w_img))
     s_2d = engine.allocate((h_img, w_img))
     sq_2d = engine.allocate((h_img, w_img))
+    
     _ncc_module.run("integral_row_scan", src=img_buf, sum_h=s_h, sq_sum_h=sq_h, h=h_img, w=w_img)
     _ncc_module.run("integral_col_scan", sum_h=s_h, sq_sum_h=sq_h, sum_2d=s_2d, sq_sum_2d=sq_2d, h=h_img, w=w_img)
+    
     del s_h, sq_h
-
-    # 3. Final Assembly
-    res_h, res_w = h_img - h_temp + 1, w_img - w_temp + 1
-    dst_buf = engine.allocate((res_h, res_w))
-    temp_np = template if not is_gpu_temp else template.to_numpy()
+    
+    temp_np = temp_buf.to_numpy() if is_gpu_temp else template
     sum_t = float(np.sum(temp_np))
     n = float(h_temp * w_temp)
     var_t_n = float(max(0.0, np.sum(temp_np**2) - (sum_t**2 / n)))
     
-    _ncc_module.run("assemble_zncc_fft", corr_r=corr_r, sum_2d=s_2d, sq_sum_2d=sq_2d, dst=dst_buf, 
-                    sum_t=sum_t, var_t_n=var_t_n, n_float=n, h_temp=h_temp, w_temp=w_temp)
+    res_h, res_w = (h_img - h_temp) // stride + 1, (w_img - w_temp) // stride + 1
+    dst = engine.allocate((res_h, res_w))
     
-    # Cleanup
-    del scratch, corr_c, corr_r
-    del s_2d, sq_2d
-    if not is_gpu_img: del img_buf
-    if not is_gpu_temp: del temp_buf
+    _ncc_module.run("zncc_spatial", src=img_buf, template=temp_buf, sum_2d=s_2d, sq_sum_2d=sq_2d,
+                    dst=dst, sum_t=sum_t, var_t_n=var_t_n, n_float=n, stride=stride)
     
-    return dst_buf if return_gpu else dst_buf.to_numpy()
-
-def match_template(image, template):
-    """Alias for zncc."""
-    return zncc(image, template)
-
-@ti_thread
-def global_translate_zncc(image, template):
-    """Computes the global translation vector using ZNCC surface peak."""
-    res = zncc(image, template)
-    h_res, w_res = res.shape
-    
-    # Simple argmax in Python for now (peak finding)
-    idx = np.argmax(res)
-    py, px = np.unravel_index(idx, res.shape)
-    
-    return float(px), float(py), float(res[py, px])
-
-def ransac_flow_cleanup(flow, threshold=3.0, n_iterations=5, return_gpu=False, return_model=False):
-    """AOT Implementation of RANSAC Flow Cleanup"""
-    is_gpu = isinstance(flow, TaichiGPUBuffer)
-    flow_buf = flow if is_gpu else engine.upload(flow, is_vector=True) # Flow is vec2
-    if not flow_buf.is_vec2: flow_buf = flow_buf.view_as_vector(True)
-    
-    h, w = flow_buf.shape[:2]
-    mask_buf = engine.allocate((h, w), dtype=np.int32)
-    model_buf = engine.allocate((2,))
-    output_buf = engine.allocate((h, w, 2), is_vector=True)
-    
-    _ransac_module.run("ransac_flow_cleanup_f32", flow=flow_buf, inlier_mask=mask_buf, model=model_buf, 
-                       threshold=threshold, output=output_buf, h=h, w=w, stride_refine=4, stride_final=1)
-    
-    model_np = model_buf.to_numpy() if return_model else None
-    if return_gpu:
-        return (output_buf, model_np) if return_model else output_buf
-    res = output_buf.to_numpy()
-    return (res, model_np) if return_model else res
+    res = dst if return_gpu else dst.to_numpy()
+    del s_2d, sq_2d, dst
+    return res

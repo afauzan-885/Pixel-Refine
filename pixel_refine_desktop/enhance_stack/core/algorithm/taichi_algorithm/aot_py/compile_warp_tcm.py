@@ -1,69 +1,66 @@
 import taichi as ti
 import os
+import numpy as np
 import sys
 
+# Ensure project root is in path
 file_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
+from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm import warp
 
-import pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.warp as warp
-
-def compile_warp_aot(arch=ti.vulkan, save_path="warp_vulkan.tcm"):
-    print(f"\n>>> Compiling WARP AOT (Vector 2D for 3ch) for: {arch}")
-    ti.init(arch=arch, offline_cache=False)
+def compile_warp_tcm():
+    arch_str = os.environ.get("PIXEL_REFINE_AOT_ARCH", "vulkan").lower()
+    arch = ti.vulkan
+    if arch_str == "cuda": arch = ti.cuda
+    elif arch_str == "cpu": arch = ti.x64
+    
+    print(f"\n>>> Compiling WARP AOT (f32/i32) for: {arch}")
+    ti.init(arch=arch)
+    
+    save_dir = os.path.join(os.path.dirname(__file__), "../aot_tcm")
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, "warp.tcm")
 
     module = ti.aot.Module(arch)
 
     # Arguments
     flow_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "flow", ti.f32, ndim=3)
     
-    # 1. Warp Guided i32 (1-Channel)
-    g_wg_1 = ti.graph.GraphBuilder()
-    src_1 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.i32, ndim=2)
-    dst_1 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.i32, ndim=2)
-    ref_1 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ref", ti.i32, ndim=2)
-    g_wg_1.dispatch(warp._warp_guided_i32_aot, src_1, flow_arg, dst_1, ref_1)
-    module.add_graph("warp_guided_i32_1ch", g_wg_1.compile())
+    # --- i32 GRAPHS ---
+    
+    # 1. Warp Guided i32 (3-Channel)
+    g_wg_i32_3 = ti.graph.GraphBuilder()
+    src_i32_3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.types.vector(3, ti.i32), ndim=2)
+    dst_i32_3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.types.vector(3, ti.i32), ndim=2)
+    ref_i32_3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ref", ti.types.vector(3, ti.i32), ndim=2)
+    g_wg_i32_3.dispatch(warp._warp_guided_i32_rgb_aot, src_i32_3, flow_arg, dst_i32_3, ref_i32_3)
+    module.add_graph("warp_guided_i32_3ch", g_wg_i32_3.compile())
+    
+    # 2. Warp Naked i32 (3-Channel)
+    g_wn_i32_3 = ti.graph.GraphBuilder()
+    g_wn_i32_3.dispatch(warp._warp_naked_i32_rgb_aot, src_i32_3, flow_arg, dst_i32_3)
+    module.add_graph("warp_naked_i32_3ch", g_wn_i32_3.compile())
 
-    # 2. Warp Guided i32 (3-Channel - Vector 2D)
-    g_wg_3 = ti.graph.GraphBuilder()
-    src_3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.types.vector(3, ti.i32), ndim=2)
-    dst_3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.types.vector(3, ti.i32), ndim=2)
-    ref_3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ref", ti.types.vector(3, ti.i32), ndim=2)
-    g_wg_3.dispatch(warp._warp_guided_i32_rgb_aot, src_3, flow_arg, dst_3, ref_3)
-    module.add_graph("warp_guided_i32_3ch", g_wg_3.compile())
-
-    # 3. Warp Naked i32 (1-Channel)
-    g_wn_1 = ti.graph.GraphBuilder()
-    g_wn_1.dispatch(warp._warp_naked_i32_aot, src_1, flow_arg, dst_1)
-    module.add_graph("warp_naked_i32_1ch", g_wn_1.compile())
-
-    # 4. Warp Naked i32 (3-Channel - Vector 2D)
-    g_wn_3 = ti.graph.GraphBuilder()
-    g_wn_3.dispatch(warp._warp_naked_i32_rgb_aot, src_3, flow_arg, dst_3)
-    module.add_graph("warp_naked_i32_3ch", g_wn_3.compile())
+    # --- f32 GRAPHS (High Precision) ---
+    
+    # 3. Warp Guided f32 (3-Channel)
+    g_wg_f32_3 = ti.graph.GraphBuilder()
+    src_f32_3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.types.vector(3, ti.f32), ndim=2)
+    dst_f32_3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.types.vector(3, ti.f32), ndim=2)
+    ref_f32_3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ref", ti.types.vector(3, ti.f32), ndim=2)
+    g_wg_f32_3.dispatch(warp._warp_guided_f32_rgb_aot, src_f32_3, flow_arg, dst_f32_3, ref_f32_3)
+    module.add_graph("warp_guided_f32_3ch", g_wg_f32_3.compile())
+    
+    # 4. Warp Naked f32 (3-Channel)
+    g_wn_f32_3 = ti.graph.GraphBuilder()
+    g_wn_f32_3.dispatch(warp._warp_naked_f32_rgb_aot, src_f32_3, flow_arg, dst_f32_3)
+    module.add_graph("warp_naked_f32_3ch", g_wn_f32_3.compile())
 
     module.archive(save_path)
     print(f"Successfully compiled and archived to: {save_path}")
-    ti.reset()
 
 if __name__ == "__main__":
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    assets_dir = os.path.join(script_dir, "../aot_tcm")
-    os.makedirs(assets_dir, exist_ok=True)
-    
-    archs = [
-        (ti.vulkan, "vulkan"),
-        (ti.cuda, "cuda"),
-        (ti.cpu, "cpu")
-    ]
-    
-    for arch, suffix in archs:
-        save_path = os.path.abspath(os.path.join(assets_dir, f"warp_{suffix}.tcm"))
-        try:
-            compile_warp_aot(arch=arch, save_path=save_path)
-        except Exception as e:
-            print(f"Skipping {suffix} due to error: {e}")
+    compile_warp_tcm()
