@@ -21,6 +21,23 @@ except ImportError:
     ti_thread = lambda f: f  # No-op in case of no Taichi
 
 if TAICHI_AVAILABLE:
+    import os
+    AOT_MODE = os.environ.get("PIXEL_REFINE_AOT_MODE") == "1"
+    _AOT_ENGINE = None
+
+    def _get_aot():
+        global _AOT_ENGINE
+        if _AOT_ENGINE is None:
+            try:
+                from . import taichi_aot
+                _AOT_ENGINE = taichi_aot
+            except (ImportError, ValueError):
+                try:
+                    import pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot as taichi_aot
+                    _AOT_ENGINE = taichi_aot
+                except ImportError:
+                    pass
+        return _AOT_ENGINE
 
     # --- Interpolation Utilities ---
     @ti.func
@@ -461,29 +478,26 @@ def _insert_channel_lowlevel(src, dst, channel):
 def split(img):
     """
     Split multi-channel image into tuple of single-channel images.
-
-    OpenCV-compatible: Same as cv2.split()
-
-    **Full GPU Pipeline Support:**
-    - If input is Taichi field → returns tuple of Taichi fields
-    - If input is NumPy array → returns tuple of NumPy arrays
-
-    Args:
-        img: Multi-channel image (H, W, C) - NumPy or Taichi field
-
-    Returns:
-        Tuple of single-channel images (ch0, ch1, ch2, ...)
-        Same type as input
-
-    Example:
-        >>> # NumPy workflow
-        >>> b, g, r = ta.split(rgb_img)
-        >>> # Same as: b, g, r = cv2.split(rgb_img)
-
-        >>> # GPU workflow (ZERO COPY!)
-        >>> b_gpu, g_gpu, r_gpu = ta.split(rgb_gpu)
-        >>> # All channels stay on GPU!
+    AOT-Aware: Dispatches to AOT module if PIXEL_REFINE_AOT_MODE=1
     """
+    if AOT_MODE:
+        aot = _get_aot()
+        if aot:
+            from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import TaichiGPUBuffer
+            is_gpu = isinstance(img, TaichiGPUBuffer)
+            img_v = img if is_gpu else aot.upload(img)
+            
+            if len(img_v.shape) == 3 and img_v.shape[2] == 3:
+                res_list = aot.split_3ch(img_v)
+            else:
+                c = img_v.shape[2] if len(img_v.shape) == 3 else 1
+                res_list = []
+                for i in range(c):
+                    res_list.append(aot.extract_channel(img_v, i))
+            
+            if is_gpu: return tuple(res_list)
+            return tuple([r.to_numpy() for r in res_list])
+
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
@@ -531,29 +545,30 @@ def split(img):
 def merge(channels):
     """
     Merge separate channels into multi-channel image.
-
-    OpenCV-compatible: Same as cv2.merge()
-
-    **Full GPU Pipeline Support:**
-    - If input channels are Taichi fields → returns Taichi field
-    - If input channels are NumPy arrays → returns NumPy array
-
-    Args:
-        channels: List or tuple of single-channel images (H, W)
-
-    Returns:
-        Multi-channel image (H, W, C)
-        Same type as input channels
-
-    Example:
-        >>> # NumPy workflow
-        >>> rgb = ta.merge([b, g, r])
-        >>> # Same as: rgb = cv2.merge([b, g, r])
-
-        >>> # GPU workflow (ZERO COPY!)
-        >>> rgb_gpu = ta.merge([b_gpu, g_gpu, r_gpu])
-        >>> # Result stays on GPU!
+    AOT-Aware: Dispatches to AOT module if PIXEL_REFINE_AOT_MODE=1
     """
+    if AOT_MODE:
+        aot = _get_aot()
+        if aot:
+            from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import TaichiGPUBuffer
+            is_gpu = isinstance(channels[0], TaichiGPUBuffer)
+            h, w = channels[0].shape[0], channels[0].shape[1]
+            c = len(channels)
+            if c == 3:
+                c0 = channels[0] if is_gpu else aot.upload(channels[0])
+                c1 = channels[1] if is_gpu else aot.upload(channels[1])
+                c2 = channels[2] if is_gpu else aot.upload(channels[2])
+                dst_buf = aot.merge_3ch(c0, c1, c2)
+            else:
+                # Fallback for other channel counts
+                dst_buf = aot.engine.allocate((h, w, c), dtype=channels[0].dtype, is_vector=(c==3))
+                for i, ch in enumerate(channels):
+                    ch_v = ch if is_gpu else aot.upload(ch)
+                    aot.insert_channel(ch_v, dst_buf, i)
+            
+            if is_gpu: return dst_buf
+            return dst_buf.to_numpy()
+
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
@@ -604,30 +619,19 @@ def merge(channels):
 def extract_channel(img, ch):
     """
     Extract single channel from multi-channel image.
-
-    OpenCV-compatible: Same as cv2.extractChannel()
-
-    **Full GPU Pipeline Support:**
-    - If input is Taichi field → returns Taichi field
-    - If input is NumPy array → returns NumPy array
-
-    Args:
-        img: Multi-channel image (H, W, C) - NumPy or Taichi field
-        ch: Channel index (0, 1, 2, ...)
-
-    Returns:
-        Single-channel image (H, W)
-        Same type as input
-
-    Example:
-        >>> # NumPy workflow
-        >>> green = ta.extract_channel(rgb, ch=1)
-        >>> # Same as: green = cv2.extractChannel(rgb, 1)
-
-        >>> # GPU workflow (ZERO COPY!)
-        >>> green_gpu = ta.extract_channel(rgb_gpu, ch=1)
-        >>> # Result stays on GPU!
+    AOT-Aware: Dispatches to AOT module if PIXEL_REFINE_AOT_MODE=1
     """
+    if AOT_MODE:
+        aot = _get_aot()
+        if aot:
+            from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import TaichiGPUBuffer
+            is_gpu = isinstance(img, TaichiGPUBuffer)
+            img_v = img if is_gpu else aot.upload(img)
+            res_gpu = aot.extract_channel(img_v, ch)
+            if is_gpu: return res_gpu
+            res_np = res_gpu.to_numpy()
+            return res_np
+
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
@@ -730,28 +734,25 @@ def insert_channel(src, dst, ch):
 def copy(img):
     """
     Copy image (auto-allocates output).
-
-    NumPy-compatible: Same as img.copy()
-
-    **Full GPU Pipeline Support:**
-    - If input is Taichi field → returns Taichi field
-    - If input is NumPy array → returns NumPy array
-
-    Args:
-        img: Input image - NumPy or Taichi field
-
-    Returns:
-        Copy of image - same type as input
-
-    Example:
-        >>> # NumPy workflow
-        >>> img_copy = ta.copy(img)
-        >>> # Same as: img_copy = img.copy()
-
-        >>> # GPU workflow (ZERO COPY!)
-        >>> img_gpu_copy = ta.copy(img_gpu)
-        >>> # Copy happens on GPU!
+    AOT-Aware: Dispatches to AOT module if PIXEL_REFINE_AOT_MODE=1
     """
+    if AOT_MODE:
+        aot = _get_aot()
+        if aot:
+            from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import TaichiGPUBuffer
+            is_gpu = isinstance(img, TaichiGPUBuffer)
+            img_v = img if is_gpu else aot.upload(img)
+            
+            h, w = img_v.shape[0], img_v.shape[1]
+            is_3d = len(img_v.shape) == 3
+            dst_shape = (h, w, img_v.shape[2]) if is_3d else (h, w)
+            dst_buf = aot.engine.allocate(dst_shape, dtype=img_v.dtype, is_vector=is_3d)
+            aot.copy_field(img_v, dst_buf)
+            
+            if is_gpu: return dst_buf
+            res_np = dst_buf.to_numpy()
+            return res_np
+
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
@@ -779,14 +780,18 @@ COLOR_GRAY2RGB = 8  # Gray to BGR/RGB is identical for grayscale
 def cvtColor(src, code, dst=None):
     """
     Convert image color space.
-    OpenCV-compatible: Same as cv2.cvtColor()
-
-    Supported codes:
-        - COLOR_BGR2GRAY
-        - COLOR_RGB2GRAY
-        - COLOR_GRAY2BGR
-        - COLOR_GRAY2RGB
+    AOT-Aware: Dispatches to AOT module if PIXEL_REFINE_AOT_MODE=1
     """
+    if AOT_MODE:
+        aot = _get_aot()
+        if aot and code in [COLOR_BGR2GRAY, COLOR_RGB2GRAY]:
+            from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import TaichiGPUBuffer
+            is_gpu = isinstance(src, TaichiGPUBuffer)
+            src_v = src if is_gpu else aot.upload(src)
+            res_gpu = aot.rgb2gray(src_v)
+            if is_gpu: return res_gpu
+            return res_gpu.to_numpy()
+
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 

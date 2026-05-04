@@ -199,8 +199,72 @@ if TAICHI_AVAILABLE:
 
         return ti.Vector([sum_u / total_w, sum_v / total_w])
 
+    @ti.func
+    def _guided_flow_at_i32_ref2d_turbo(
+        flow: ti.template(),
+        ref_i32: ti.template(),
+        y: int,
+        x: int,
+    ) -> ti.types.vector(2, ti.f32):
+        """Optimized 3x3 Guided Flow (Faster, minimal accuracy loss)"""
+        h, w = flow.shape[0], flow.shape[1]
+        inv_norm = 1.0 / 65535.0
+        total_w = 1e-12
+        sum_uv = ti.Vector([0.0, 0.0])
+        center_val = float(ref_i32[y, x]) * inv_norm
+
+        for dy in ti.static(range(-1, 2)):
+            ny = tm.clamp(y + dy, 0, h - 1)
+            for dx in ti.static(range(-1, 2)):
+                nx = tm.clamp(x + dx, 0, w - 1)
+                
+                w_s = 0.4
+                if ti.static(abs(dx) == 1 and abs(dy) == 1): w_s = 0.1
+                elif ti.static(abs(dx) == 1 or abs(dy) == 1): w_s = 0.2
+
+                val_neighbor = float(ref_i32[ny, nx]) * inv_norm
+                diff = val_neighbor - center_val
+                # Ultra-Fast Linear Approximation of Gaussian
+                w_curr = w_s * tm.max(0.0, 1.0 - (diff * diff) * 60.0)
+                sum_uv += flow[ny, nx] * w_curr
+                total_w += w_curr
+
+        return sum_uv / total_w
+
+    @ti.func
+    def _guided_flow_at_i32_ref3d_turbo(
+        flow: ti.template(),
+        ref_i32: ti.template(),
+        y: int,
+        x: int,
+    ) -> ti.types.vector(2, ti.f32):
+        """Optimized 3x3 Guided Flow for RGB (Uses Green)"""
+        h, w = flow.shape[0], flow.shape[1]
+        inv_norm = 1.0 / 65535.0
+        total_w = 1e-12
+        sum_uv = ti.Vector([0.0, 0.0])
+        center_val = float(ref_i32[y, x, 1]) * inv_norm
+
+        for dy in ti.static(range(-1, 2)):
+            ny = tm.clamp(y + dy, 0, h - 1)
+            for dx in ti.static(range(-1, 2)):
+                nx = tm.clamp(x + dx, 0, w - 1)
+                
+                w_s = 0.4
+                if ti.static(abs(dx) == 1 and abs(dy) == 1): w_s = 0.1
+                elif ti.static(abs(dx) == 1 or abs(dy) == 1): w_s = 0.2
+
+                val_neighbor = float(ref_i32[ny, nx, 1]) * inv_norm
+                diff = val_neighbor - center_val
+                # Ultra-Fast Linear Approximation of Gaussian
+                w_curr = w_s * tm.max(0.0, 1.0 - (diff * diff) * 60.0)
+                sum_uv += flow[ny, nx] * w_curr
+                total_w += w_curr
+
+        return sum_uv / total_w
+
     @ti.kernel
-    def _warp_guided_i32_aot(
+    def _warp_guided_i32_turbo_aot(
         src: ti.types.ndarray(dtype=ti.i32, ndim=2),
         flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
         dst: ti.types.ndarray(dtype=ti.i32, ndim=2),
@@ -208,13 +272,13 @@ if TAICHI_AVAILABLE:
     ):
         h, w = src.shape[0], src.shape[1]
         for y, x in ti.ndrange(h, w):
-            guided_uv = _guided_flow_at_i32_ref2d(flow, ref, y, x)
+            guided_uv = _guided_flow_at_i32_ref2d_turbo(flow, ref, y, x)
             u_final, v_final = float(x) + guided_uv[0], float(y) + guided_uv[1]
             res = sample_bicubic_fast(src, u_final, v_final)
             dst[y, x] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.i32)
 
     @ti.kernel
-    def _warp_guided_i32_rgb_aot(
+    def _warp_guided_i32_rgb_turbo_aot(
         src: ti.types.ndarray(dtype=ti.i32, ndim=3),
         flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
         dst: ti.types.ndarray(dtype=ti.i32, ndim=3),
@@ -222,36 +286,195 @@ if TAICHI_AVAILABLE:
     ):
         h, w = src.shape[0], src.shape[1]
         for y, x in ti.ndrange(h, w):
-            guided_uv = _guided_flow_at_i32_ref3d(flow, ref, y, x)
+            guided_uv = _guided_flow_at_i32_ref3d_turbo(flow, ref, y, x)
             u_final, v_final = float(x) + guided_uv[0], float(y) + guided_uv[1]
-            for c in ti.static(range(3)):
-                res = sample_bicubic_3ch_fast(src, u_final, v_final, c)
-                dst[y, x, c] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.i32)
+            
+            # Fused Bicubic Sampling for RGB
+            x0 = int(ti.floor(u_final))
+            y0 = int(ti.floor(v_final))
+            dx = u_final - float(x0)
+            dy = v_final - float(y0)
+            wx = bicubic_interpolation.cubic_hermite_weights(dx)
+            wy = bicubic_interpolation.cubic_hermite_weights(dy)
+
+            acc_r, acc_g, acc_b = 0.0, 0.0, 0.0
+            for m in ti.static(range(4)):
+                yy = reflect_idx(y0 + m - 1, h)
+                for n in ti.static(range(4)):
+                    xx = reflect_idx(x0 + n - 1, w)
+                    w_total = wx[n] * wy[m]
+                    acc_r += float(src[yy, xx, 0]) * w_total
+                    acc_g += float(src[yy, xx, 1]) * w_total
+                    acc_b += float(src[yy, xx, 2]) * w_total
+            
+            dst[y, x, 0] = ti.cast(tm.clamp(acc_r, 0.0, 65535.0), ti.i32)
+            dst[y, x, 1] = ti.cast(tm.clamp(acc_g, 0.0, 65535.0), ti.i32)
+            dst[y, x, 2] = ti.cast(tm.clamp(acc_b, 0.0, 65535.0), ti.i32)
 
     @ti.kernel
-    def _warp_naked_i32_aot(
+    def _warp_guided_i32_extreme_aot(
         src: ti.types.ndarray(dtype=ti.i32, ndim=2),
-        flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        flow: ti.types.ndarray(dtype=ti.types.vector(2, ti.f32), ndim=2),
+        dst: ti.types.ndarray(dtype=ti.i32, ndim=2),
+        ref: ti.types.ndarray(dtype=ti.i32, ndim=2),
+    ):
+        h, w = src.shape[0], src.shape[1]
+        for y, x in ti.ndrange(h, w):
+            guided_uv = _guided_flow_at_i32_ref2d_turbo(flow, ref, y, x)
+            u_final, v_final = float(x) + guided_uv[0], float(y) + guided_uv[1]
+            
+            # Fast Bilinear Sampling
+            ix = int(ti.floor(u_final))
+            iy = int(ti.floor(v_final))
+            ix0 = tm.clamp(ix, 0, w - 1)
+            iy0 = tm.clamp(iy, 0, h - 1)
+            ix1 = tm.clamp(ix + 1, 0, w - 1)
+            iy1 = tm.clamp(iy + 1, 0, h - 1)
+            fx = u_final - float(ix)
+            fy = v_final - float(iy)
+            
+            v00 = float(src[iy0, ix0])
+            v01 = float(src[iy0, ix1])
+            v10 = float(src[iy1, ix0])
+            v11 = float(src[iy1, ix1])
+            
+            res = tm.mix(tm.mix(v00, v01, fx), tm.mix(v10, v11, fx), fy)
+            dst[y, x] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.i32)
+
+    @ti.kernel
+    def _warp_guided_i32_rgb_ultra_aot(
+        src: ti.types.ndarray(dtype=ti.types.vector(3, ti.i32), ndim=2),
+        flow: ti.types.ndarray(dtype=ti.types.vector(2, ti.f32), ndim=2),
+        dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.i32), ndim=2),
+        ref_g: ti.types.ndarray(dtype=ti.i32, ndim=2), # 1-Channel Green Guidance
+    ):
+        h, w = src.shape[0], src.shape[1]
+        for y, x in ti.ndrange(h, w):
+            guided_uv = ti.Vector([0.0, 0.0])
+            inv_norm = 1.0 / 65535.0
+            
+            if y >= 1 and y < h - 1 and x >= 1 and x < w - 1:
+                # --- FAST PATH (No Clamping) ---
+                total_w = 1e-12
+                sum_uv = ti.Vector([0.0, 0.0])
+                center_val = float(ref_g[y, x]) * inv_norm
+                
+                # Star pattern
+                sum_uv += flow[y, x] * 0.4
+                total_w += 0.4
+                
+                # Pre-calculate K = 60.0 * (1/65535)^2 to avoid norm in loop
+                K_val = 1.397e-8
+                
+                for dy, dx in ti.static([(0, 1), (0, -1), (1, 0), (-1, 0)]):
+                    ny, nx = y + dy, x + dx
+                    val_neighbor = float(ref_g[ny, nx])
+                    diff = val_neighbor - float(ref_g[y, x])
+                    w_curr = 0.15 * tm.max(0.0, 1.0 - (diff * diff) * K_val)
+                    sum_uv += flow[ny, nx] * w_curr
+                    total_w += w_curr
+                
+                guided_uv = sum_uv / total_w
+            else:
+                # --- SLOW PATH ---
+                total_w = 1e-12
+                sum_uv = ti.Vector([0.0, 0.0])
+                for dy in ti.static(range(-1, 2)):
+                    ny = tm.clamp(y + dy, 0, h - 1)
+                    for dx in ti.static(range(-1, 2)):
+                        nx = tm.clamp(x + dx, 0, w - 1)
+                        sum_uv += flow[ny, nx] * 0.111
+                        total_w += 0.111
+                guided_uv = sum_uv / total_w
+
+            u_final, v_final = float(x) + guided_uv[0], float(y) + guided_uv[1]
+            
+            # Manual Bilinear for max speed
+            ix = int(ti.floor(u_final))
+            iy = int(ti.floor(v_final))
+            ix0, iy0 = tm.clamp(ix, 0, w - 1), tm.clamp(iy, 0, h - 1)
+            ix1, iy1 = tm.clamp(ix + 1, 0, w - 1), tm.clamp(iy + 1, 0, h - 1)
+            fx, fy = u_final - float(ix), v_final - float(iy)
+            
+            p00 = ti.cast(src[iy0, ix0], ti.f32)
+            p01 = ti.cast(src[iy0, ix1], ti.f32)
+            p10 = ti.cast(src[iy1, ix0], ti.f32)
+            p11 = ti.cast(src[iy1, ix1], ti.f32)
+            
+            # Manual lerp
+            res = p00 + (p01 - p00) * fx + (p10 - p00) * fy + (p00 - p01 - p10 + p11) * (fx * fy)
+            dst[y, x] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.i32)
+
+    @ti.kernel
+    def _warp_naked_i32_rgb_ultra_aot(
+        src: ti.types.ndarray(dtype=ti.types.vector(3, ti.i32), ndim=2),
+        flow: ti.types.ndarray(dtype=ti.types.vector(2, ti.f32), ndim=2),
+        dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.i32), ndim=2),
+    ):
+        h, w = src.shape[0], src.shape[1]
+        for y, x in ti.ndrange(h, w):
+            uv = flow[y, x]
+            u_final, v_final = float(x) + uv[0], float(y) + uv[1]
+            
+            ix = int(ti.floor(u_final))
+            iy = int(ti.floor(v_final))
+            
+            if iy >= 0 and iy < h - 1 and ix >= 0 and ix < w - 1:
+                # --- FAST PATH (No Clamping) ---
+                fx, fy = u_final - float(ix), v_final - float(iy)
+                p00 = ti.cast(src[iy, ix], ti.f32)
+                p01 = ti.cast(src[iy, ix + 1], ti.f32)
+                p10 = ti.cast(src[iy + 1, ix], ti.f32)
+                p11 = ti.cast(src[iy + 1, ix + 1], ti.f32)
+                res = p00 + (p01 - p00) * fx + (p10 - p00) * fy + (p00 - p01 - p10 + p11) * (fx * fy)
+                dst[y, x] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.i32)
+            else:
+                # --- SLOW PATH (With Clamping for Borders) ---
+                ix0, iy0 = tm.clamp(ix, 0, w - 1), tm.clamp(iy, 0, h - 1)
+                ix1, iy1 = tm.clamp(ix + 1, 0, w - 1), tm.clamp(iy + 1, 0, h - 1)
+                fx, fy = u_final - float(ix), v_final - float(iy)
+                p00 = ti.cast(src[iy0, ix0], ti.f32)
+                p01 = ti.cast(src[iy0, ix1], ti.f32)
+                p10 = ti.cast(src[iy1, ix0], ti.f32)
+                p11 = ti.cast(src[iy1, ix1], ti.f32)
+                res = p00 + (p01 - p00) * fx + (p10 - p00) * fy + (p00 - p01 - p10 + p11) * (fx * fy)
+                dst[y, x] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.i32)
+
+    @ti.kernel
+    def _extract_green_i32_aot(
+        src: ti.types.ndarray(dtype=ti.types.vector(3, ti.i32), ndim=2),
+        dst: ti.types.ndarray(dtype=ti.i32, ndim=2),
+    ):
+        for y, x in ti.ndrange(src.shape[0], src.shape[1]):
+            dst[y, x] = src[y, x][1]
+
+    @ti.kernel
+    def _warp_naked_i32_extreme_aot(
+        src: ti.types.ndarray(dtype=ti.i32, ndim=2),
+        flow: ti.types.ndarray(dtype=ti.types.vector(2, ti.f32), ndim=2),
         dst: ti.types.ndarray(dtype=ti.i32, ndim=2),
     ):
         h, w = src.shape[0], src.shape[1]
         for y, x in ti.ndrange(h, w):
-            u_final, v_final = float(x) + flow[y, x, 0], float(y) + flow[y, x, 1]
-            res = sample_bicubic_fast(src, u_final, v_final)
+            uv = flow[y, x]
+            u_final, v_final = float(x) + uv[0], float(y) + uv[1]
+            
+            ix = int(ti.floor(u_final))
+            iy = int(ti.floor(v_final))
+            ix0 = tm.clamp(ix, 0, w - 1)
+            iy0 = tm.clamp(iy, 0, h - 1)
+            ix1 = tm.clamp(ix + 1, 0, w - 1)
+            iy1 = tm.clamp(iy + 1, 0, h - 1)
+            fx = u_final - float(ix)
+            fy = v_final - float(iy)
+            
+            v00 = float(src[iy0, ix0])
+            v01 = float(src[iy0, ix1])
+            v10 = float(src[iy1, ix0])
+            v11 = float(src[iy1, ix1])
+            
+            res = tm.mix(tm.mix(v00, v01, fx), tm.mix(v10, v11, fx), fy)
             dst[y, x] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.i32)
-
-    @ti.kernel
-    def _warp_naked_i32_rgb_aot(
-        src: ti.types.ndarray(dtype=ti.i32, ndim=3),
-        flow: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        dst: ti.types.ndarray(dtype=ti.i32, ndim=3),
-    ):
-        h, w = src.shape[0], src.shape[1]
-        for y, x in ti.ndrange(h, w):
-            u_final, v_final = float(x) + flow[y, x, 0], float(y) + flow[y, x, 1]
-            for c in ti.static(range(3)):
-                res = sample_bicubic_3ch_fast(src, u_final, v_final, c)
-                dst[y, x, c] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.i32)
 
     def record_warp_graph(g: ti.graph.GraphBuilder):
         """Record Warp Graph for AOT."""

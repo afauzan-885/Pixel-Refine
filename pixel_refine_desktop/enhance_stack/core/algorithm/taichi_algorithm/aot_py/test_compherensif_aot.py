@@ -171,16 +171,33 @@ def test_comprehensive():
 
     # 11. Warping (Guided)
     print_header(f"11. Warping (Guided) ({n_frames} frames)")
+    # Warping AOT expects i32 images (16-bit representation)
+    img_i32_gpu = taichi_aot.engine.upload(img_color.astype(np.int32))
+    
     # Create a small flow for testing
     flow_warp = np.zeros((h_orig, w_orig, 2), dtype=np.float32)
-    flow_warp_gpu = taichi_aot.engine.upload(flow_warp, is_vec2=True)
+    flow_warp_gpu = taichi_aot.engine.upload(flow_warp)
     start = time.perf_counter()
     for _ in range(n_frames):
-        res = taichi_aot.warp_image(img_gpu, flow_warp_gpu, ref=img_gpu, return_gpu=True)
+        res = taichi_aot.warp_image(img_i32_gpu, flow_warp_gpu, ref=img_i32_gpu, return_gpu=True)
         del res
     taichi_aot.engine.sync()
     print(f"Warping FPS: {n_frames / (time.perf_counter() - start):.2f}")
     taichi_aot.engine.report_memory()
+    del img_i32_gpu
+    gc.collect()
+
+    # 12. Warping (Naked)
+    print_header(f"12. Warping (Naked) ({n_frames} frames)")
+    img_i32_gpu = taichi_aot.engine.upload(img_color.astype(np.int32))
+    start = time.perf_counter()
+    for _ in range(n_frames):
+        res = taichi_aot.warp_image(img_i32_gpu, flow_warp_gpu, ref=None, return_gpu=True)
+        del res
+    taichi_aot.engine.sync()
+    print(f"Naked Warping FPS: {n_frames / (time.perf_counter() - start):.2f}")
+    taichi_aot.engine.report_memory()
+    del img_i32_gpu
     gc.collect()
 
     taichi_aot.engine.report_memory()
