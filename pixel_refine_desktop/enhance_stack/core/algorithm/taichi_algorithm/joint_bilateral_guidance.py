@@ -21,9 +21,9 @@ except ImportError:
 
 # --- Sigma Presets ---
 SIGMA_PRESETS = {
-    "low":    (0.8,  0.05),   # Gentle, preserves fine detail
-    "medium": (1.5,  0.10),   # Balanced (default)
-    "high":   (2.5,  0.20),   # Aggressive smoothing
+    "high":   (0.8,  0.05),   # Highest detail preservation (gentle smoothing)
+    "medium": (1.5,  0.10),   # Balanced
+    "low":    (2.5,  0.20),   # Lowest detail preservation (aggressive smoothing)
 }
 
 def _get_sigma_args(preset="medium"):

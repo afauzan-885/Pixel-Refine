@@ -22,7 +22,10 @@ def compile_gaussian_tcm():
     
     save_dir = os.path.join(os.path.dirname(__file__), "../aot_tcm")
     os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, "gaussian.tcm")
+    suffix = "vulkan"
+    if arch == ti.cuda: suffix = "cuda"
+    elif arch == ti.x64: suffix = "cpu"
+    save_path = os.path.join(save_dir, f"gaussian_{suffix}.tcm")
 
     module = ti.aot.Module(arch)
 

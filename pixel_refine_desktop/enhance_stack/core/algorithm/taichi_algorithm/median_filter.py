@@ -30,8 +30,8 @@ if TAICHI_AVAILABLE:
                     nx = tm.clamp(x + dx, 0, w - 1)
                     vals[idx] = src[ny, nx]
                     idx += 1
-            for i in ti.static(range(9)):
-                for j in ti.static(range(i + 1, 9)):
+            for i in range(9):
+                for j in range(i + 1, 9):
                     if vals[j] < vals[i]:
                         vals[i], vals[j] = vals[j], vals[i]
             dst[y, x] = vals[4]
@@ -51,16 +51,38 @@ if TAICHI_AVAILABLE:
                     vals_x[idx] = src[ny, nx][0]
                     vals_y[idx] = src[ny, nx][1]
                     idx += 1
-            for i in ti.static(range(9)):
-                for j in ti.static(range(i + 1, 9)):
+            for i in range(9):
+                for j in range(i + 1, 9):
                     if vals_x[j] < vals_x[i]:
                         vals_x[i], vals_x[j] = vals_x[j], vals_x[i]
-            for i in ti.static(range(9)):
-                for j in ti.static(range(i + 1, 9)):
+            for i in range(9):
+                for j in range(i + 1, 9):
                     if vals_y[j] < vals_y[i]:
                         vals_y[i], vals_y[j] = vals_y[j], vals_y[i]
             dst[y, x][0] = vals_x[4]
             dst[y, x][1] = vals_y[4]
+
+    @ti.kernel
+    def _median_filter_rgb_3x3_kernel(
+        src: ti.types.ndarray(), dst: ti.types.ndarray(), h: int, w: int
+    ):
+
+        for y, x in ti.ndrange(h, w):
+            for c in ti.static(range(3)):
+                vals = ti.Vector([0.0] * 9)
+                idx = 0
+                for dy in ti.static(range(-1, 2)):
+                    for dx in ti.static(range(-1, 2)):
+                        ny = tm.clamp(y + dy, 0, h - 1)
+                        nx = tm.clamp(x + dx, 0, w - 1)
+                        vals[idx] = src[ny, nx, c]
+                        idx += 1
+                # Simple selection sort
+                for i in range(9):
+                    for j in range(i + 1, 9):
+                        if vals[j] < vals[i]:
+                            vals[i], vals[j] = vals[j], vals[i]
+                dst[y, x, c] = vals[4]
 
     @ti.kernel
     def _confidence_weighted_median_flow_kernel(
@@ -85,8 +107,8 @@ if TAICHI_AVAILABLE:
             for dy in ti.static(range(-2, 3)):
                 for dx in ti.static(range(-2, 3)):
                     ny, nx = tm.clamp(y + dy, 0, h - 1), tm.clamp(x + dx, 0, w - 1)
-                    vals_x[idx] = src[ny, nx, 0]
-                    vals_y[idx] = src[ny, nx, 1]
+                    vals_x[idx] = src[ny, nx][0]
+                    vals_y[idx] = src[ny, nx][1]
                     weights[idx] = conf[ny, nx]
                     idx += 1
 
@@ -107,8 +129,8 @@ if TAICHI_AVAILABLE:
                 sum_x += vals_x[i]
                 sum_y += vals_y[i]
 
-            dst[y, x, 0] = sum_x / 13.0
-            dst[y, x, 1] = sum_y / 13.0
+            dst[y, x][0] = sum_x / 13.0
+            dst[y, x][1] = sum_y / 13.0
 
 
 @ti_thread

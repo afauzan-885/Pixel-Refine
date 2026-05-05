@@ -56,10 +56,10 @@ def copy_field(src, dst):
     """Zero-overhead AOT copy."""
     is_3ch = len(src.shape) == 3
     graph = "copy_i32_2d"
-    if src.dtype == np.float32: 
+    if is_3ch:
+        graph = "copy_vec3_2d" if src.dtype == np.float32 else "copy_vec3_i32_2d"
+    elif src.dtype == np.float32: 
         graph = "copy_f32_2d"
-    elif is_3ch:
-        graph = "copy_vec3_2d"
     
     src_v, dst_v = src, dst
     if is_3ch:
@@ -313,6 +313,9 @@ def median_filter(src, return_gpu=False):
     h, w = src_buf.shape[:2]
     
     is_flow = (len(src_buf.shape) == 3 and src_buf.shape[2] == 2)
+    is_3ch = (len(src_buf.shape) == 3 and src_buf.shape[2] == 3)
+    
+    # Use vector for flow, but scalar 3D for RGB to avoid field_dim warnings in Taichi AOT
     src_v = src_buf.view_as_vector(True) if is_flow else src_buf
     
     dst_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype, is_vector=is_flow)
@@ -320,6 +323,8 @@ def median_filter(src, return_gpu=False):
 
     if is_flow:
         graph = "median_flow_3x3_f32"
+    elif is_3ch:
+        graph = "median_3ch_3x3_f32"
     else:
         graph = "median_3x3_f32" if src_buf.dtype == np.float32 else "median_3x3"
         
@@ -455,9 +460,9 @@ def zncc(image, template, stride=1, return_gpu=False):
 # SIGMA PRESETS (shared with JBF python-side)
 # -------------------------------------------------------------------------
 _JBF_SIGMA_PRESETS = {
-    "low":    (0.8,  0.05),
+    "high":   (0.8,  0.05),
     "medium": (1.5,  0.10),
-    "high":   (2.5,  0.20),
+    "low":    (2.5,  0.20),
 }
 
 def _jbf_sigma(preset):

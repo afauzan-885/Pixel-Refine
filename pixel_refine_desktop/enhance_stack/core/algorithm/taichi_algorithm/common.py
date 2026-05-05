@@ -52,7 +52,7 @@ if TAICHI_AVAILABLE:
 
     @ti.func
     def cubic_hermite_weights(t: float) -> ti.types.vector(4, ti.f32):
-        """OpenCV-compatible Bicubic Weights (Catmull-Rom with a=-0.75)."""
+        """OpenCV-compatible Bicubic Weights (Catmull-Rom with a=-0.75 for f32)."""
         t = ti.abs(t)
         w = ti.Vector([0.0, 0.0, 0.0, 0.0])
         a = -0.75
@@ -70,9 +70,8 @@ if TAICHI_AVAILABLE:
         x = 2.0 - d
         w[3] = a * x**3 - 5.0 * a * x**2 + 8.0 * a * x - 4.0 * a
         
-        # Normalization
-        w_sum = w[0] + w[1] + w[2] + w[3]
-        return w / w_sum
+        # No normalization needed for standard cubic splines as they sum to 1.0
+        return w
 
     @ti.func
     def bilinear_at(img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1) -> float:
@@ -198,14 +197,14 @@ if TAICHI_AVAILABLE:
         src: ti.types.ndarray(), dst: ti.types.ndarray(), channel: int
     ):
         for I in ti.grouped(dst):
-            dst[I] = src[I, channel]
+            dst[I] = src[I][channel]
 
     @ti.kernel
     def _insert_channel_kernel(
         src: ti.types.ndarray(), dst: ti.types.ndarray(), channel: int
     ):
         for I in ti.grouped(src):
-            dst[I, channel] = src[I]
+            dst[I][channel] = src[I]
 
     @ti.kernel
     def _absdiff_kernel(
@@ -217,18 +216,28 @@ if TAICHI_AVAILABLE:
     @ti.kernel
     def _cvt_color_rgb_to_gray_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray()):
         for i, j in dst:
-            r = src[i, j, 0]
-            g = src[i, j, 1]
-            b = src[i, j, 2]
+            r = ti.cast(src[i, j][0], ti.f32)
+            g = ti.cast(src[i, j][1], ti.f32)
+            b = ti.cast(src[i, j][2], ti.f32)
             # OpenCV formula: Y = 0.299*R + 0.587*G + 0.114*B
             dst[i, j] = 0.299 * r + 0.587 * g + 0.114 * b
 
     @ti.kernel
+    def _cvt_color_rgb_to_gray_i32_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray()):
+        for i, j in dst:
+            r = ti.cast(src[i, j][0], ti.i32)
+            g = ti.cast(src[i, j][1], ti.i32)
+            b = ti.cast(src[i, j][2], ti.i32)
+            # Integer Approximation: (306*R + 601*G + 117*B) >> 10
+            # This is bit-perfect with common integer CV implementations
+            dst[i, j] = (306 * r + 601 * g + 117 * b) >> 10
+
+    @ti.kernel
     def _cvt_color_bgr_to_gray_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray()):
         for i, j in dst:
-            b = src[i, j, 0]
-            g = src[i, j, 1]
-            r = src[i, j, 2]
+            b = src[i, j][0]
+            g = src[i, j][1]
+            r = src[i, j][2]
             # OpenCV formula: Y = 0.299*R + 0.587*G + 0.114*B
             dst[i, j] = 0.299 * r + 0.587 * g + 0.114 * b
 
@@ -236,9 +245,9 @@ if TAICHI_AVAILABLE:
     def _cvt_color_gray_to_rgb_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray()):
         for i, j in src:
             val = src[i, j]
-            dst[i, j, 0] = val
-            dst[i, j, 1] = val
-            dst[i, j, 2] = val
+            dst[i, j][0] = val
+            dst[i, j][1] = val
+            dst[i, j][2] = val
 
 
 class BufferCache:
