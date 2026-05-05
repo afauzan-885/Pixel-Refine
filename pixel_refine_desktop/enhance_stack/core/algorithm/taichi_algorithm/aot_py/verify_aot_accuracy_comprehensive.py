@@ -155,6 +155,25 @@ def verify_accuracy():
     mae_flow_scale = np.mean(np.abs(aot_jblu_flow[h//2, w//2] - np.array([4.0, 2.0])))
     print_result("JBLU Flow 2ch (Scaling)", mae_flow_scale, threshold=0.1)
 
+    # 11. Bilateral Grid (1ch Medium)
+    aot_bg = taichi_aot.bilateral_grid_filter(src_patch, preset="medium")
+    cv_bf = cv2.bilateralFilter((src_patch*255).astype(np.uint8), d=-1, sigmaColor=16, sigmaSpace=16).astype(np.float32) / 255.0
+    mae = np.mean(np.abs(aot_bg - cv_bf))
+    print_result("Bilateral Grid (1ch Medium)", mae, threshold=0.2)
+
+    # 12. INTER_AREA Resize (Color Downscaling)
+    target_size = (w//4, h//4)
+    aot_area = taichi_aot.resize(img.astype(np.float32), target_size, interpolation=taichi_aot.INTER_AREA)
+    cv_area = cv2.resize(img, target_size, interpolation=cv2.INTER_AREA).astype(np.float32)
+    mae_area = np.mean(np.abs(aot_area - cv_area))
+    print_result("INTER_AREA Resize (Color 4x)", mae_area, threshold=0.5)
+
+    # 13. Phase Correlation (Global Shift)
+    img_shifted = cv2.warpAffine(img_gray, np.float32([[1, 0, 5], [0, 1, -3]]), (w, h), borderMode=cv2.BORDER_REFLECT)
+    dx, dy, resp = taichi_aot.phase_correlation(img_gray.astype(np.float32), img_shifted.astype(np.float32))
+    err = abs(dx - 5.0) + abs(dy + 3.0)
+    print_result("Phase Correlation (dx=5, dy=-3)", err, threshold=0.1)
+
     print("="*60)
 
 if __name__ == "__main__":

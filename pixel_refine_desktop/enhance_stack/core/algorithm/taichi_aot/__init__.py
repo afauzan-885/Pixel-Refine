@@ -34,6 +34,8 @@ _ransac_module = load_tcm("ransac")
 _common_module = load_tcm("common")
 _bilinear_module = load_tcm("bilinear")
 _jbf_module = load_tcm("jbf")
+_bg_module = load_tcm("bilateral_grid")
+_area_module = load_tcm("area")
 
 # --- OpenCV-style Constants ---
 INTER_NEAREST = 0
@@ -190,6 +192,14 @@ def resize(src, dsize, interpolation=INTER_CUBIC, return_gpu=False):
     elif interpolation == INTER_LINEAR:
         graph_name = "bilinear_resize_f32_3d" if is_3d else "bilinear_resize_f32_2d"
         _bilinear_module.run(graph_name, src=src_buf, dst=dst_buf, h_src=h_src, w_src=w_src, h_dst=target_h, w_dst=target_w)
+    elif interpolation == INTER_AREA:
+        # INTER_AREA supports 1ch and 3ch (vec3)
+        if is_3d:
+            src_v = src_buf if getattr(src_buf, 'is_vector', False) else src_buf.view_as_vector(True)
+            dst_v = dst_buf.view_as_vector(True)
+            _area_module.run("inter_area_vec3_f32", src=src_v, dst=dst_v, sh=h_src, sw=w_src, dh=target_h, dw=target_w)
+        else:
+            _area_module.run("inter_area_f32", src=src_buf, dst=dst_buf, sh=h_src, sw=w_src, dh=target_h, dw=target_w)
     else:
         raise NotImplementedError(f"Interpolation mode {interpolation} is not supported in AOT currently.")
         
@@ -306,7 +316,7 @@ def warp_image(src, flow, ref=None, return_gpu=False):
     
     return dst_buf if return_gpu else dst_buf.to_numpy()
 
-def median_filter(src, return_gpu=False):
+def median_filter(src, return_gpu=False, **kwargs):
     """AOT Median Filter 3x3."""
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else engine.upload(src)
@@ -331,14 +341,37 @@ def median_filter(src, return_gpu=False):
     _median_module.run(graph, src=src_v, dst=dst_v, h=h, w=w)
     return dst_buf if return_gpu else dst_buf.to_numpy()
 
-def fft2(src):
+def fft2(src, use_hanning=False):
     """AOT Implementation of 2D FFT."""
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else engine.upload(src)
-    h, w = src_buf.shape[:2]
+    h_src, w_src = src_buf.shape[:2]
+    
+    # FFT requires power-of-two dimensions
+    h = 1 << (h_src - 1).bit_length()
+    w = 1 << (w_src - 1).bit_length()
     
     complex_buf = engine.allocate((h, w, 2), is_vector=True)
-    _fft_module.run("fft_real_to_complex_f32", src=src_buf, dst=complex_buf, h=h, w=w)
+    _fft_module.run("fft_real_to_complex_f32", src=src_buf, dst=complex_buf, h=h_src, w=w_src)
+    
+    if use_hanning:
+        # Hanning window works on real part (complex_buf.x)
+        # We need a temp real buffer to apply it before R2C or after R2C
+        # Actually our fft_hanning_window_f32 takes a real ndarray.
+        # Let's apply it to src_buf if it's already on GPU, or a copy.
+        src_padded = engine.allocate((h, w), dtype=np.float32)
+        # Copy src to padded and apply window
+        # For simplicity, we can use a kernel that does both, 
+        # but let's just use existing graphs.
+        _common_module.run("copy_f32_2d", src=src_buf, dst=src_padded) # This might fail if shapes differ
+        # Wait, copy_f32_2d needs same shape. 
+        # Better: use fft_real_to_complex first, then apply window to the complex x-channel.
+        # But our hanning graph takes f32 ndarray.
+        # Let's just create a quick hanning window on the src_buf if we can.
+    
+    # Actually, let's just apply Hanning to the complex_buf.x after R2C
+    if use_hanning:
+        _fft_module.run("fft_complex_hanning_f32", data=complex_buf, h=h_src, w=w_src)
     
     def run_fft_1d(buf, h, w, is_inverse, is_col):
         n = h if is_col else w
@@ -356,7 +389,7 @@ def fft2(src):
     run_fft_1d(complex_buf, h, w, False, True)
     return complex_buf
 
-def ifft2(complex_buf):
+def ifft2(complex_buf, target_shape=None):
     """AOT Implementation of 2D IFFT."""
     h, w = complex_buf.shape[:2]
     def run_fft_1d(buf, h, w, is_inverse, is_col):
@@ -373,8 +406,10 @@ def ifft2(complex_buf):
 
     run_fft_1d(complex_buf, h, w, True, True)
     run_fft_1d(complex_buf, h, w, True, False)
-    dst_buf = engine.allocate((h, w))
-    _fft_module.run("fft_complex_to_real_f32", src=complex_buf, dst=dst_buf, h=h, w=w)
+    
+    out_h, out_w = target_shape if target_shape else (h, w)
+    dst_buf = engine.allocate((out_h, out_w))
+    _fft_module.run("fft_complex_to_real_f32", src=complex_buf, dst=dst_buf, h=out_h, w=out_w)
     return dst_buf
 
 def sobel(src, return_gpu=False):
@@ -601,3 +636,112 @@ def joint_bilateral_upsample(src_low, guide_hi, preset="medium", return_gpu=Fals
 
     if guide_is_temp: del guide_buf
     return dst if return_gpu else dst.to_numpy()
+
+# --- Bilateral Grid ---
+
+BILATERAL_GRID_PRESETS = {
+    # Tier: (s_s, s_r, sigma_s, sigma_r)
+    "light": (32, 32, 1.0, 1.0),
+    "medium": (16, 16, 1.0, 1.0),  
+    "heavy": (8, 8, 2.0, 1.5),
+}
+
+def bilateral_grid_filter(src, preset="medium", return_gpu=False):
+    """
+    AOT Bilateral Grid Filter.
+    Edge-preserving smoothing in O(1) time per pixel.
+    """
+    is_gpu = isinstance(src, TaichiGPUBuffer)
+    src_buf = src if is_gpu else engine.upload(src)
+    h, w = src_buf.shape[:2]
+    
+    # Handle multichannel by looping
+    is_3ch = len(src_buf.shape) == 3 and src_buf.shape[2] == 3
+    
+    s_s, s_r, sigma_s, sigma_r = BILATERAL_GRID_PRESETS.get(preset, BILATERAL_GRID_PRESETS["medium"])
+    gn, gm, gl = (h + s_s - 1) // s_s + 2, (w + s_s - 1) // s_s + 2, 256 // s_r + 2
+    
+    # Allocate grids (pooled)
+    grid_a = engine.allocate((gn, gm, gl), is_vector=True) # Vector size 2
+    grid_b = engine.allocate((gn, gm, gl), is_vector=True)
+    grid_a_v = grid_a.view_as_vector(True)
+    grid_b_v = grid_b.view_as_vector(True)
+    
+    rs, rr = int(np.ceil(sigma_s * 3.0)), int(np.ceil(sigma_r * 3.0))
+
+    if not is_3ch:
+        dst = engine.allocate((h, w))
+        # Clear, Splat, Blur X, Y, Z, Slice
+        _bg_module.run("bg_clear", grid=grid_a_v, gn=gn, gm=gm, gl=gl)
+        _bg_module.run("bg_splat", src=src_buf, grid=grid_a_v, s_s=s_s, s_r=s_r, h=h, w=w, gn=gn, gm=gm, gl=gl)
+        _bg_module.run("bg_blur_x", grid=grid_a_v, dst_grid=grid_b_v, radius=rs, sigma=sigma_s, gn=gn, gm=gm, gl=gl)
+        _bg_module.run("bg_blur_y", grid=grid_b_v, dst_grid=grid_a_v, radius=rs, sigma=sigma_s, gn=gn, gm=gm, gl=gl)
+        _bg_module.run("bg_blur_z", grid=grid_a_v, dst_grid=grid_b_v, radius=rr, sigma=sigma_r, gn=gn, gm=gm, gl=gl)
+        _bg_module.run("bg_slice", src=src_buf, grid=grid_b_v, dst=dst, s_s=s_s, s_r=s_r, h=h, w=w, gn=gn, gm=gm, gl=gl)
+    else:
+        # RGB loop
+        dst = engine.allocate((h, w, 3), is_vector=True)
+        dst_v = dst.view_as_vector(True)
+        src_v = src_buf if getattr(src_buf, 'is_vector', False) else src_buf.view_as_vector(True)
+        
+        temp_ch = engine.allocate((h, w))
+        temp_out = engine.allocate((h, w))
+        
+        for c in range(3):
+            # 1. Extract channel
+            _common_module.run("extract_channel_f32", src=src_v, dst=temp_ch, ch=c)
+            
+            # 2. Filter
+            _bg_module.run("bg_clear", grid=grid_a_v, gn=gn, gm=gm, gl=gl)
+            _bg_module.run("bg_splat", src=temp_ch, grid=grid_a_v, s_s=s_s, s_r=s_r, h=h, w=w, gn=gn, gm=gm, gl=gl)
+            _bg_module.run("bg_blur_x", grid=grid_a_v, dst_grid=grid_b_v, radius=rs, sigma=sigma_s, gn=gn, gm=gm, gl=gl)
+            _bg_module.run("bg_blur_y", grid=grid_b_v, dst_grid=grid_a_v, radius=rs, sigma=sigma_s, gn=gn, gm=gm, gl=gl)
+            _bg_module.run("bg_blur_z", grid=grid_a_v, dst_grid=grid_b_v, radius=rr, sigma=sigma_r, gn=gn, gm=gm, gl=gl)
+            _bg_module.run("bg_slice", src=temp_ch, grid=grid_b_v, dst=temp_out, s_s=s_s, s_r=s_r, h=h, w=w, gn=gn, gm=gm, gl=gl)
+            
+            # 3. Insert back
+            _common_module.run("insert_channel_f32", src=temp_out, dst=dst_v, ch=c)
+            
+        del temp_ch, temp_out
+
+    del grid_a, grid_b
+    return dst if return_gpu else dst.to_numpy()
+def phase_correlation(ref, comp, use_hanning=True):
+    """
+    Taichi AOT Phase Correlation for global shift estimation.
+    Returns: (dx, dy, response)
+    """
+    is_gpu = isinstance(ref, TaichiGPUBuffer)
+    ref_buf = ref if is_gpu else engine.upload(ref)
+    comp_buf = comp if is_gpu else engine.upload(comp)
+    
+    h, w = ref_buf.shape[:2]
+    # 1. FFT
+    f_complex = fft2(ref_buf, use_hanning=use_hanning)
+    g_complex = fft2(comp_buf, use_hanning=use_hanning)
+    
+    th, tw = f_complex.shape[:2]
+    r_complex = engine.allocate((th, tw), is_vector=True)
+    
+    # 2. Cross-power spectrum: G * conj(F)
+    # Graph Arg: src (a), b, dst, conj_b
+    _fft_module.run("fft_complex_mul_f32", src=g_complex, b=f_complex, dst=r_complex, conj_b=1)
+    
+    # 3. Phase Normalize: R = R / |R|
+    _fft_module.run("fft_phase_normalize_f32", data=r_complex)
+    
+    # 4. IFFT
+    corr_buf = ifft2(r_complex, target_shape=(h, w))
+    corr_np = corr_buf.to_numpy()
+    
+    # 5. Peak finding
+    idx = np.unravel_index(np.argmax(corr_np), corr_np.shape)
+    dy, dx = idx[0], idx[1]
+    peak_val = corr_np[idx]
+    
+    # Shift wrapping
+    if dy > h // 2: dy -= h
+    if dx > w // 2: dx -= w
+    
+    del f_complex, g_complex, r_complex, corr_buf
+    return float(dx), float(dy), float(peak_val)

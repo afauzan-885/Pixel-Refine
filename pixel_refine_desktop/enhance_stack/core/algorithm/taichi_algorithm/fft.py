@@ -105,6 +105,33 @@ if TAICHI_AVAILABLE:
             if conj_b == 1:
                 vb = tm.vec2(vb.x, -vb.y)
             dst[i, j] = tm.vec2(va.x * vb.x - va.y * vb.y, va.x * vb.y + va.y * vb.x)
+    @ti.kernel
+    def _complex_to_mag_kernel(src: vec2_array, dst: f32_array):
+        for i, j in ti.ndrange(src.shape[0], src.shape[1]):
+            dst[i, j] = tm.length(src[i, j])
+
+    @ti.kernel
+    def _phase_normalize_kernel(data: vec2_array):
+        for i, j in ti.ndrange(data.shape[0], data.shape[1]):
+            m = tm.length(data[i, j])
+            if m > 1e-12:
+                data[i, j] /= m
+            else:
+                data[i, j] = tm.vec2(0.0, 0.0)
+
+    @ti.kernel
+    def _hanning_window_kernel(dst: f32_array, h: int, w: int):
+        for i, j in ti.ndrange(h, w):
+            wy = 0.5 * (1.0 - ti.cos(2.0 * math.pi * float(i) / float(h - 1)))
+            wx = 0.5 * (1.0 - ti.cos(2.0 * math.pi * float(j) / float(w - 1)))
+            dst[i, j] *= (wy * wx)
+
+    @ti.kernel
+    def _complex_hanning_kernel(data: vec2_array, h: int, w: int):
+        for i, j in ti.ndrange(h, w):
+            wy = 0.5 * (1.0 - ti.cos(2.0 * math.pi * float(i) / float(h - 1)))
+            wx = 0.5 * (1.0 - ti.cos(2.0 * math.pi * float(j) / float(w - 1)))
+            data[i, j] *= (wy * wx)
 
 def _is_power_of_two(n):
     return (n > 0) and (n & (n - 1) == 0)

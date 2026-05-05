@@ -1,0 +1,96 @@
+# Marker: GPU_NATIVE_MARKER_V3
+"""
+Area Interpolation (INTER_AREA) - Taichi AOT Implementation
+===========================================================
+High-quality downscaling using pixel area relation.
+Prevents aliasing by integrating contribution of source pixels.
+"""
+
+import numpy as np
+
+try:
+    import taichi as ti
+    import taichi.math as tm
+    TAICHI_AVAILABLE = True
+except ImportError:
+    TAICHI_AVAILABLE = False
+    ti = None; tm = None
+
+if TAICHI_AVAILABLE:
+
+    @ti.kernel
+    def _inter_area_1ch_kernel(
+        src: ti.types.ndarray(), 
+        dst: ti.types.ndarray(), 
+        sh: int, sw: int, dh: int, dw: int
+    ):
+        scale_x = float(sw) / float(dw)
+        scale_y = float(sh) / float(dh)
+        
+        # Norm factor is the area of one destination pixel in source coordinates
+        inv_norm = 1.0 / (scale_x * scale_y)
+        
+        for y, x in dst:
+            x_start = float(x) * scale_x
+            x_end = float(x + 1) * scale_x
+            y_start = float(y) * scale_y
+            y_end = float(y + 1) * scale_y
+            
+            acc = 0.0
+            sum_w = 0.0
+            
+            y_min = int(ti.floor(y_start))
+            y_max = int(ti.ceil(y_end))
+            x_min = int(ti.floor(x_start))
+            x_max = int(ti.ceil(x_end))
+            
+            for iy in range(y_min, y_max):
+                for ix in range(x_min, x_max):
+                    iy_c = tm.clamp(iy, 0, sh - 1)
+                    ix_c = tm.clamp(ix, 0, sw - 1)
+                    
+                    w_x = ti.max(0.0, ti.min(float(ix + 1), x_end) - ti.max(float(ix), x_start))
+                    w_y = ti.max(0.0, ti.min(float(iy + 1), y_end) - ti.max(float(iy), y_start))
+                    w = w_x * w_y
+                    
+                    acc += float(src[iy_c, ix_c]) * w
+                    sum_w += w
+            
+            dst[y, x] = acc / ti.max(sum_w, 1e-9)
+
+    @ti.kernel
+    def _inter_area_vec3_kernel(
+        src: ti.types.ndarray(), 
+        dst: ti.types.ndarray(), 
+        sh: int, sw: int, dh: int, dw: int
+    ):
+        scale_x = float(sw) / float(dw)
+        scale_y = float(sh) / float(dh)
+        
+        for y, x in dst:
+            x_start = float(x) * scale_x
+            x_end = float(x + 1) * scale_x
+            y_start = float(y) * scale_y
+            y_end = float(y + 1) * scale_y
+            
+            acc = ti.Vector([0.0, 0.0, 0.0])
+            sum_w = 0.0
+            
+            y_min = int(ti.floor(y_start))
+            y_max = int(ti.ceil(y_end))
+            x_min = int(ti.floor(x_start))
+            x_max = int(ti.ceil(x_end))
+            
+            for iy in range(y_min, y_max):
+                for ix in range(x_min, x_max):
+                    iy_c = tm.clamp(iy, 0, sh - 1)
+                    ix_c = tm.clamp(ix, 0, sw - 1)
+                    
+                    w_x = ti.max(0.0, ti.min(float(ix + 1), x_end) - ti.max(float(ix), x_start))
+                    w_y = ti.max(0.0, ti.min(float(iy + 1), y_end) - ti.max(float(iy), y_start))
+                    w = w_x * w_y
+                    
+                    acc += src[iy_c, ix_c] * w
+                    sum_w += w
+            
+            dst[y, x] = acc / ti.max(sum_w, 1e-9)

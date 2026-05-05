@@ -69,6 +69,21 @@ def compile_fft_aot(arch=ti.vulkan, save_path="fft_vulkan.tcm"):
     g_cmag = ti.graph.GraphBuilder()
     g_cmag.dispatch(fft_module._complex_to_mag_kernel, src_vec, dst_real)
     module.add_graph("fft_complex_to_mag_f32", g_cmag.compile())
+    
+    # 8. Phase Normalize
+    g_pnorm = ti.graph.GraphBuilder()
+    g_pnorm.dispatch(fft_module._phase_normalize_kernel, data_vec)
+    module.add_graph("fft_phase_normalize_f32", g_pnorm.compile())
+
+    # 9. Hanning Window
+    g_hwin = ti.graph.GraphBuilder()
+    g_hwin.dispatch(fft_module._hanning_window_kernel, dst_real, h_arg, w_arg)
+    module.add_graph("fft_hanning_window_f32", g_hwin.compile())
+
+    # 10. Complex Hanning Window
+    g_chwin = ti.graph.GraphBuilder()
+    g_chwin.dispatch(fft_module._complex_hanning_kernel, data_vec, h_arg, w_arg)
+    module.add_graph("fft_complex_hanning_f32", g_chwin.compile())
 
     module.archive(save_path)
     print(f"Successfully compiled and archived to: {save_path}")
