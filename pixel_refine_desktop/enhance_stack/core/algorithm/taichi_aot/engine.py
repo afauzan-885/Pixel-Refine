@@ -105,6 +105,15 @@ def _init_aot_bridge():
     _LIB.sync_runtime.argtypes = [ctypes.c_void_p]
     _LIB.sync_runtime.restype = None
 
+    _LIB.clear_pipeline.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    _LIB.clear_pipeline.restype = None
+
+    _LIB.add_to_pipeline.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(DynamicArg), ctypes.c_int]
+    _LIB.add_to_pipeline.restype = None
+
+    _LIB.run_pipeline.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(DynamicArg), ctypes.c_int]
+    _LIB.run_pipeline.restype = None
+
     # Backend selection: 0=Vulkan, 1=CUDA, 2=CPU
     arch_str = os.environ.get("PIXEL_REFINE_AOT_ARCH", "vulkan").lower()
     arch_id = 0
@@ -274,8 +283,14 @@ class AOTModuleWrapper:
             else:
                 raise TypeError(f"Unsupported argument type for '{key}': {type(value)}. Must be int, float, or TaichiGPUBuffer.")
                 
-        # Launch the generic graph
-        _LIB.run_aot_graph(_RUNTIME, self.module_ptr, graph_name.encode('utf-8'), args_array, num_args)
+        # Check if we are recording a pipeline
+        engine = AOTEngine()
+        if engine.current_pipeline:
+            _LIB.add_to_pipeline(self.module_ptr, engine.current_pipeline.encode('utf-8'), 
+                                 graph_name.encode('utf-8'), args_array, num_args)
+        else:
+            # Launch immediately
+            _LIB.run_aot_graph(_RUNTIME, self.module_ptr, graph_name.encode('utf-8'), args_array, num_args)
 
 
 class AOTEngine:
@@ -289,7 +304,68 @@ class AOTEngine:
             _init_aot_bridge()
             cls._instance.modules = {}
             cls._instance.buffer_pool = BufferPool()
+            cls._instance.current_pipeline = None
         return cls._instance
+
+    def record(self, name: str):
+        """Context manager to record a sequence of kernel calls into a pipeline."""
+        class PipelineRecorder:
+            def __init__(self, engine, name):
+                self.engine = engine
+                self.name = name
+            def __enter__(self):
+                _init_aot_bridge()
+                # Clear existing pipeline with same name
+                module = next(iter(self.engine.modules.values())) if self.engine.modules else None
+                module_ptr = module.module_ptr if module else None
+                _LIB.clear_pipeline(module_ptr, self.name.encode('utf-8'))
+                self.engine.current_pipeline = self.name
+                return self
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                self.engine.current_pipeline = None
+        
+        return PipelineRecorder(self, name)
+
+    def run_pipeline(self, name: str, module=None, **overrides):
+        """Executes a previously recorded pipeline with optional argument overrides."""
+        _init_aot_bridge()
+        if module is None:
+            if not self.modules:
+                raise RuntimeError("No AOT Module loaded to run pipeline.")
+            module = next(iter(self.modules.values()))
+            
+        num_overrides = len(overrides)
+        args_array = (DynamicArg * num_overrides)()
+        
+        for i, (key, value) in enumerate(overrides.items()):
+            args_array[i].name = key.encode('utf-8')
+            # Same logic as run() to map types
+            if isinstance(value, int):
+                args_array[i].is_ndarray = 0
+                args_array[i].val_i32 = value
+            elif isinstance(value, float):
+                args_array[i].is_ndarray = 1
+                args_array[i].val_f32 = value
+            elif isinstance(value, TaichiGPUBuffer):
+                args_array[i].is_ndarray = 2
+                if value.dtype == np.int32: args_array[i].elem_type = 5
+                elif value.dtype == np.uint8: args_array[i].elem_type = 7
+                elif value.dtype == np.uint16: args_array[i].elem_type = 8
+                else: args_array[i].elem_type = 1
+                args_array[i].ndarray_memory = value.handle
+                shape = value.shape
+                dim_count = len(shape)
+                is_vector = getattr(value, 'is_vector', False) or getattr(value, 'is_vec2', False)
+                if is_vector and dim_count > 0 and shape[-1] in [2, 3, 4]:
+                    args_array[i].elem_dim_count = 1
+                    args_array[i].elem_shape[0] = shape[-1]
+                    dim_count -= 1
+                else:
+                    args_array[i].elem_dim_count = 0
+                args_array[i].dim_count = dim_count
+                for d in range(dim_count): args_array[i].shape[d] = shape[d]
+        
+        _LIB.run_pipeline(_RUNTIME, module.module_ptr, name.encode('utf-8'), args_array, num_overrides)
         
     def get_vulkan_devices(self):
         """Returns a list of available Vulkan device names."""

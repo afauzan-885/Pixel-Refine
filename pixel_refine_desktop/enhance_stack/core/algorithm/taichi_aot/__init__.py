@@ -434,6 +434,10 @@ def laplacian(src, return_gpu=False):
 
 def ransac_flow_cleanup(flow, threshold=1.0, return_gpu=False):
     """AOT RANSAC Flow Cleanup."""
+    return ransac_flow_cleanup_aot(flow, threshold=threshold, return_gpu=return_gpu)
+
+def ransac_flow_cleanup_aot(flow, threshold=1.0, return_gpu=False):
+    """Internal AOT RANSAC implementation."""
     is_gpu = isinstance(flow, TaichiGPUBuffer)
     flow_buf = flow if is_gpu else engine.upload(flow, is_vector=True)
     if not flow_buf.is_vector: flow_buf = flow_buf.view_as_vector(True)
@@ -455,6 +459,19 @@ def ransac_flow_cleanup(flow, threshold=1.0, return_gpu=False):
                       
     del mask, model
     return dst if return_gpu else dst.to_numpy()
+
+def ncc_alignment(image, template, stride=1, return_gpu=False):
+    """
+    Taichi AOT ZNCC Alignment.
+    Returns: (dx, dy, confidence)
+    """
+    res_map = zncc(image, template, stride=stride, return_gpu=False) # Always need peak-finding on CPU for now
+    
+    idx = np.unravel_index(np.argmax(res_map), res_map.shape)
+    dy, dx = idx[0] * stride, idx[1] * stride
+    conf = float(res_map[idx])
+    
+    return float(dx), float(dy), conf
 
 def zncc(image, template, stride=1, return_gpu=False):
     """AOT Optimized Spatial ZNCC."""

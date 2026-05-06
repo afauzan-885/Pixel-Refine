@@ -30,6 +30,22 @@ struct DynamicArg {
 };
 
 // -----------------------------------------------------------------------
+// Pipeline Structures (Global)
+// -----------------------------------------------------------------------
+struct GraphDispatch {
+    void* module_ctx;
+    std::string graph_name;
+    std::vector<DynamicArg> args;
+    std::vector<std::string> arg_names; // Storage for name pointers
+};
+
+struct Pipeline {
+    std::vector<GraphDispatch> steps;
+};
+
+static std::unordered_map<std::string, Pipeline> global_pipelines;
+
+// -----------------------------------------------------------------------
 // Internal Cache for Graphics Objects
 // -----------------------------------------------------------------------
 struct ModuleContext {
@@ -214,6 +230,103 @@ EXPORT void run_aot_graph(
 
         graph.launch(ti_args);
         // rt->wait(); // Removed for extreme performance!
+    } catch (...) {}
+}
+
+// -----------------------------------------------------------------------
+// Pipeline Recording & Execution
+// -----------------------------------------------------------------------
+
+EXPORT void clear_pipeline(void* module_ctx, const char* pipeline_name) {
+    global_pipelines.erase(pipeline_name);
+}
+
+EXPORT void add_to_pipeline(
+    void* module_ctx, const char* pipeline_name, const char* graph_name,
+    DynamicArg* args_array, int num_args
+) {
+    if (!args_array) return;
+
+    GraphDispatch dispatch;
+    dispatch.module_ctx = module_ctx;
+    dispatch.graph_name = graph_name;
+    dispatch.args.reserve(num_args);
+    dispatch.arg_names.reserve(num_args);
+
+    for (int i = 0; i < num_args; i++) {
+        dispatch.arg_names.push_back(args_array[i].name);
+        DynamicArg arg = args_array[i];
+        arg.name = dispatch.arg_names.back().c_str(); // Point to stable memory
+        dispatch.args.push_back(arg);
+    }
+    
+    global_pipelines[pipeline_name].steps.push_back(std::move(dispatch));
+}
+
+EXPORT void run_pipeline(
+    void* runtime, void* dummy_module_ctx, const char* pipeline_name,
+    DynamicArg* overrides, int num_overrides
+) {
+    ti::Runtime* rt = (ti::Runtime*)runtime;
+    if (!rt) return;
+
+    auto it_pipe = global_pipelines.find(pipeline_name);
+    if (it_pipe == global_pipelines.end()) return;
+
+    Pipeline& pipe = it_pipe->second;
+
+    try {
+        for (auto& step : pipe.steps) {
+            ModuleContext* ctx = (ModuleContext*)step.module_ctx;
+            if (!ctx) continue;
+
+            auto it_g = ctx->graph_cache.find(step.graph_name);
+            if (it_g == ctx->graph_cache.end()) {
+                ti::ComputeGraph g = ctx->module->get_compute_graph(step.graph_name.c_str());
+                it_g = ctx->graph_cache.emplace(step.graph_name, std::move(g)).first;
+            }
+            ti::ComputeGraph& graph = it_g->second;
+
+            std::vector<TiNamedArgument> ti_args;
+            ti_args.reserve(step.args.size());
+
+            for (const auto& base_arg : step.args) {
+                TiNamedArgument arg = {};
+                arg.name = base_arg.name;
+
+                // Check for overrides by name
+                const DynamicArg* final_arg = &base_arg;
+                for (int j = 0; j < num_overrides; j++) {
+                    if (strcmp(overrides[j].name, base_arg.name) == 0) {
+                        final_arg = &overrides[j];
+                        break;
+                    }
+                }
+
+                if (final_arg->is_ndarray == 0) {
+                    arg.argument.type = TI_ARGUMENT_TYPE_I32;
+                    arg.argument.value.i32 = final_arg->val_i32;
+                } else if (final_arg->is_ndarray == 1) {
+                    arg.argument.type = TI_ARGUMENT_TYPE_F32;
+                    arg.argument.value.f32 = final_arg->val_f32;
+                } else if (final_arg->is_ndarray == 2) {
+                    arg.argument.type = TI_ARGUMENT_TYPE_NDARRAY;
+                    arg.argument.value.ndarray.memory = final_arg->ndarray_memory;
+                    arg.argument.value.ndarray.elem_type = (TiDataType)final_arg->elem_type;
+                    arg.argument.value.ndarray.shape.dim_count = final_arg->dim_count;
+                    for (int d = 0; d < final_arg->dim_count; d++) {
+                        arg.argument.value.ndarray.shape.dims[d] = final_arg->shape[d];
+                    }
+                    arg.argument.value.ndarray.elem_shape.dim_count = final_arg->elem_dim_count;
+                    for (int d = 0; d < final_arg->elem_dim_count; d++) {
+                        arg.argument.value.ndarray.elem_shape.dims[d] = final_arg->elem_shape[d];
+                    }
+                }
+                ti_args.push_back(arg);
+            }
+            graph.launch(ti_args);
+        }
+        rt->wait();
     } catch (...) {}
 }
 
