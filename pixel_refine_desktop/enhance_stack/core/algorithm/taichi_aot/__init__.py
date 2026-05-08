@@ -177,7 +177,8 @@ def resize(src, dsize, interpolation=INTER_CUBIC, return_gpu=False):
     is_gpu_input = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu_input else engine.upload(src)
     
-    if src_buf.is_vector: src_buf = src_buf.view_as_vector(False)
+    if is_gpu_input and len(src_buf.shape) == 3:
+        src_buf = src_buf.view_as_vector(True)
     
     h_src, w_src = src_buf.shape[0], src_buf.shape[1]
     is_3d = len(src_buf.shape) == 3
@@ -188,10 +189,15 @@ def resize(src, dsize, interpolation=INTER_CUBIC, return_gpu=False):
         graph_name = "bicubic_resize_f32_3d" if is_3d else "bicubic_resize_f32_2d"
         if src_buf.dtype != np.float32:
             graph_name = graph_name.replace("f32", "i32")
-        _bicubic_module.run(graph_name, src=src_buf, dst=dst_buf, h_src=h_src, w_src=w_src, h_dst=target_h, w_dst=target_w)
+        
+        src_v = src_buf if not is_3d else src_buf.view_as_vector(True)
+        dst_v = dst_buf if not is_3d else dst_buf.view_as_vector(True)
+        _bicubic_module.run(graph_name, src=src_v, dst=dst_v, h_src=h_src, w_src=w_src, h_dst=target_h, w_dst=target_w)
     elif interpolation == INTER_LINEAR:
         graph_name = "bilinear_resize_f32_3d" if is_3d else "bilinear_resize_f32_2d"
-        _bilinear_module.run(graph_name, src=src_buf, dst=dst_buf, h_src=h_src, w_src=w_src, h_dst=target_h, w_dst=target_w)
+        src_v = src_buf if not is_3d else src_buf.view_as_vector(True)
+        dst_v = dst_buf if not is_3d else dst_buf.view_as_vector(True)
+        _bilinear_module.run(graph_name, src=src_v, dst=dst_v, h_src=h_src, w_src=w_src, h_dst=target_h, w_dst=target_w)
     elif interpolation == INTER_AREA:
         # INTER_AREA supports 1ch and 3ch (vec3)
         if is_3d:
@@ -213,7 +219,7 @@ def box_filter(src, kernel_size=3, return_gpu=False):
     is_3d = len(src.shape) == 3
     
     src_buf = src if is_gpu else engine.upload(src)
-    if src_buf.is_vector: src_buf = src_buf.view_as_vector(False)
+    if is_3d: src_buf = src_buf.view_as_vector(True)
     
     dst_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype)
     
@@ -248,8 +254,12 @@ def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False):
     type_suffix = "f32" if src_buf.dtype == np.float32 else "i32"
     suffix = f"3ch_{type_suffix}" if is_3d else f"1ch_{type_suffix}"
     
-    _gaussian_module.run(f"gaussian_blur_x_{suffix}", src=src_buf, dst=tmp_buf, h=h, w=w, weights=weights_buf, radius=radius)
-    _gaussian_module.run(f"gaussian_blur_y_{suffix}", src=tmp_buf, dst=dst_buf, h=h, w=w, weights=weights_buf, radius=radius)
+    src_v = src_buf if not is_3d else src_buf.view_as_vector(True)
+    tmp_v = tmp_buf if not is_3d else tmp_buf.view_as_vector(True)
+    dst_v = dst_buf if not is_3d else dst_buf.view_as_vector(True)
+    
+    _gaussian_module.run(f"gaussian_blur_x_{suffix}", src=src_v, dst=tmp_v, h=h, w=w, weights=weights_buf, radius=radius)
+    _gaussian_module.run(f"gaussian_blur_y_{suffix}", src=tmp_v, dst=dst_v, h=h, w=w, weights=weights_buf, radius=radius)
     
     del tmp_buf, weights_buf
     return dst_buf if return_gpu else dst_buf.to_numpy()
@@ -258,8 +268,8 @@ def image_pyramid(src, levels=4, return_gpu=False):
     """AOT Implementation of Image Pyramid (Downsampling)"""
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else engine.upload(src)
-    if src_buf.is_vector: src_buf = src_buf.view_as_vector(False)
     is_3d = len(src_buf.shape) == 3
+    if is_3d: src_buf = src_buf.view_as_vector(True)
     
     curr_buf = src_buf
     graph = "downsample_2x_3ch_f32" if is_3d else "downsample_2x_f32"
@@ -417,11 +427,18 @@ def sobel(src, return_gpu=False):
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else engine.upload(src)
     h, w = src_buf.shape[:2]
+    is_3d = len(src_buf.shape) == 3
+    
+    src_v = src_buf if not is_3d else src_buf.view_as_vector(True)
+    
     dx = engine.allocate((h, w))
     dy = engine.allocate((h, w))
-    _gradients_module.run("sobel_f32", src=src_buf, dst_dx=dx, dst_dy=dy, h=h, w=w)
-    if return_gpu: return dx, dy
-    return dx.to_numpy(), dy.to_numpy()
+    
+    # Use 3ch graph if 3d
+    graph = "sobel_vec3_f32" if is_3d else "sobel_f32"
+    
+    _gradients_module.run(graph, src=src_v, dst_dx=dx, dst_dy=dy, h=h, w=w)
+    return (dx, dy) if return_gpu else (dx.to_numpy(), dy.to_numpy())
 
 def laplacian(src, return_gpu=False):
     """AOT Laplacian."""

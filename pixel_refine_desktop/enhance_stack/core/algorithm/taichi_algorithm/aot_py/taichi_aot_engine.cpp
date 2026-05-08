@@ -7,8 +7,22 @@
 
 #ifdef _WIN32
 #define EXPORT __declspec(dllexport)
+#include <windows.h>
+#include <wincodec.h>
+#pragma comment(lib, "windowscodecs.lib")
 #else
 #define EXPORT
+#endif
+
+// Forward declaration for WIC factory (global for performance)
+#ifdef _WIN32
+static IWICImagingFactory* g_wic_factory = nullptr;
+static void init_wic() {
+    if (!g_wic_factory) {
+        CoInitializeEx(NULL, COINIT_MULTITHREADED);
+        CoCreateInstance(CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&g_wic_factory));
+    }
+}
 #endif
 
 extern "C" {
@@ -168,9 +182,240 @@ EXPORT void read_from_gpu_buffer(void* runtime, void* memory, void* data, uint64
     }
 }
 
+EXPORT void* map_gpu_buffer(void* runtime, void* memory) {
+    ti::Runtime* rt = (ti::Runtime*)runtime;
+    if (!rt || !memory) return nullptr;
+    return ti_map_memory(rt->runtime(), (TiMemory)memory);
+}
+
+EXPORT void unmap_gpu_buffer(void* runtime, void* memory) {
+    ti::Runtime* rt = (ti::Runtime*)runtime;
+    if (rt && memory) {
+        ti_unmap_memory(rt->runtime(), (TiMemory)memory);
+    }
+}
+
+EXPORT void copy_gpu_buffer(void* runtime, void* src, void* dst, uint64_t size) {
+    ti::Runtime* rt = (ti::Runtime*)runtime;
+    if (!rt || !src || !dst) return;
+    
+    TiMemorySlice src_slice = {};
+    src_slice.memory = (TiMemory)src;
+    src_slice.offset = 0;
+    src_slice.size = size;
+    
+    TiMemorySlice dst_slice = {};
+    dst_slice.memory = (TiMemory)dst;
+    dst_slice.offset = 0;
+    dst_slice.size = size;
+    
+    ti_copy_memory_device_to_device(rt->runtime(), &dst_slice, &src_slice);
+    rt->wait(); // Synchronize to prevent race conditions
+}
+
 EXPORT void sync_runtime(void* runtime) {
     ti::Runtime* rt = (ti::Runtime*)runtime;
     if (rt) rt->wait();
+}
+
+// -----------------------------------------------------------------------
+// High-Performance Image IO (Smart Loader)
+// -----------------------------------------------------------------------
+EXPORT void* ti_imread_to_gpu(
+    void* runtime, const char* path, 
+    int* out_width, int* out_height, int* out_channels, int* out_bit_depth
+) {
+    ti::Runtime* rt = (ti::Runtime*)runtime;
+    if (!rt || !path) return nullptr;
+
+#ifdef _WIN32
+    init_wic();
+    if (!g_wic_factory) return nullptr;
+
+    IWICBitmapDecoder* decoder = nullptr;
+    wchar_t w_path[MAX_PATH];
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, w_path, MAX_PATH);
+
+    if (FAILED(g_wic_factory->CreateDecoderFromFilename(w_path, NULL, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder))) {
+        return nullptr;
+    }
+
+    IWICBitmapFrameDecode* frame = nullptr;
+    decoder->GetFrame(0, &frame);
+    
+    UINT w, h;
+    frame->GetSize(&w, &h);
+    *out_width = (int)w;
+    *out_height = (int)h;
+
+    WICPixelFormatGUID pixel_format;
+    frame->GetPixelFormat(&pixel_format);
+
+    // Determine channels and bit depth
+    int channels = 1;
+    int bit_depth = 8;
+    WICPixelFormatGUID target_format = GUID_WICPixelFormat8bppGray;
+
+    if (pixel_format == GUID_WICPixelFormat8bppGray) {
+        channels = 1; bit_depth = 8; target_format = GUID_WICPixelFormat8bppGray;
+    } else if (pixel_format == GUID_WICPixelFormat16bppGray) {
+        channels = 1; bit_depth = 16; target_format = GUID_WICPixelFormat16bppGray;
+    } else if (pixel_format == GUID_WICPixelFormat24bppBGR || pixel_format == GUID_WICPixelFormat32bppBGRA) {
+        channels = 3; bit_depth = 8; target_format = GUID_WICPixelFormat24bppBGR;
+    } else if (pixel_format == GUID_WICPixelFormat48bppBGR || pixel_format == GUID_WICPixelFormat64bppBGRA) {
+        channels = 3; bit_depth = 16; target_format = GUID_WICPixelFormat48bppBGR;
+    } else {
+        // Default fallback to 8-bit BGR
+        channels = 3; bit_depth = 8; target_format = GUID_WICPixelFormat24bppBGR;
+    }
+
+    *out_channels = channels;
+    *out_bit_depth = bit_depth;
+
+    // Allocate GPU memory
+    uint64_t size_bytes = (uint64_t)w * h * channels * (bit_depth / 8);
+    TiMemoryAllocateInfo allocate_info = {};
+    allocate_info.size = size_bytes;
+    allocate_info.usage = TI_MEMORY_USAGE_STORAGE_BIT;
+    allocate_info.host_write = true; // Required for CopyPixels map path
+    
+    TiMemory gpu_mem = ti_allocate_memory(rt->runtime(), &allocate_info);
+    if (!gpu_mem) {
+        frame->Release(); decoder->Release(); return nullptr;
+    }
+
+    // Copy pixels directly to GPU (using mapped memory if possible, or intermediate buffer)
+    void* gpu_ptr = ti_map_memory(rt->runtime(), gpu_mem);
+    if (gpu_ptr) {
+        if (pixel_format != target_format) {
+            // Need conversion
+            IWICFormatConverter* converter = nullptr;
+            g_wic_factory->CreateFormatConverter(&converter);
+            converter->Initialize(frame, target_format, WICBitmapDitherTypeNone, NULL, 0.0, WICBitmapPaletteTypeCustom);
+            converter->CopyPixels(NULL, (UINT)(w * channels * (bit_depth / 8)), (UINT)size_bytes, (BYTE*)gpu_ptr);
+            converter->Release();
+        } else {
+            frame->CopyPixels(NULL, (UINT)(w * channels * (bit_depth / 8)), (UINT)size_bytes, (BYTE*)gpu_ptr);
+        }
+        ti_unmap_memory(rt->runtime(), gpu_mem);
+    }
+
+    frame->Release();
+    decoder->Release();
+    return (void*)gpu_mem;
+
+#else
+    // TODO: Implement for Linux/Android using stb_image or similar
+    return nullptr;
+#endif
+}
+
+EXPORT bool ti_imwrite_from_gpu(
+    void* runtime, const char* path, void* gpu_mem,
+    int width, int height, int channels, int bit_depth
+) {
+    ti::Runtime* rt = (ti::Runtime*)runtime;
+    if (!rt || !path || !gpu_mem) return false;
+
+#ifdef _WIN32
+    init_wic();
+    if (!g_wic_factory) return false;
+
+    IWICStream* stream = nullptr;
+    g_wic_factory->CreateStream(&stream);
+    
+    wchar_t w_path[MAX_PATH];
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, w_path, MAX_PATH);
+
+    if (FAILED(stream->InitializeFromFilename(w_path, GENERIC_WRITE))) {
+        stream->Release(); return false;
+    }
+
+    IWICBitmapEncoder* encoder = nullptr;
+    // Auto-detect encoder based on extension
+    GUID encoder_guid = GUID_ContainerFormatPng;
+    std::string s_path = path;
+    if (s_path.find(".jpg") != std::string::npos || s_path.find(".jpeg") != std::string::npos) {
+        encoder_guid = GUID_ContainerFormatJpeg;
+    } else if (s_path.find(".tif") != std::string::npos) {
+        encoder_guid = GUID_ContainerFormatTiff;
+    }
+
+    if (FAILED(g_wic_factory->CreateEncoder(encoder_guid, NULL, &encoder))) {
+        stream->Release(); return false;
+    }
+
+    encoder->Initialize(stream, WICBitmapEncoderNoCache);
+
+    IWICBitmapFrameEncode* frame = nullptr;
+    encoder->CreateNewFrame(&frame, NULL);
+    frame->Initialize(NULL);
+    frame->SetSize(width, height);
+
+    WICPixelFormatGUID format_guid = GUID_WICPixelFormat8bppGray;
+    if (bit_depth == 8) {
+        format_guid = (channels == 1) ? GUID_WICPixelFormat8bppGray : GUID_WICPixelFormat24bppBGR;
+    } else {
+        format_guid = (channels == 1) ? GUID_WICPixelFormat16bppGray : GUID_WICPixelFormat48bppBGR;
+    }
+
+    frame->SetPixelFormat(&format_guid);
+
+    void* gpu_ptr = ti_map_memory(rt->runtime(), (TiMemory)gpu_mem);
+    if (gpu_ptr) {
+        UINT stride = width * channels * (bit_depth / 8);
+        UINT size = stride * height;
+        frame->WritePixels(height, stride, size, (BYTE*)gpu_ptr);
+        ti_unmap_memory(rt->runtime(), (TiMemory)gpu_mem);
+    }
+
+    frame->Commit();
+    encoder->Commit();
+    
+    frame->Release();
+    encoder->Release();
+    stream->Release();
+    return true;
+#else
+    return false;
+#endif
+}
+
+EXPORT bool ti_cast_buffer(
+    void* runtime, void* src_mem, void* dst_mem, 
+    int num_elements, int src_type, int dst_type
+) {
+    ti::Runtime* rt = (ti::Runtime*)runtime;
+    if (!rt || !src_mem || !dst_mem) return false;
+
+    void* src_ptr = ti_map_memory(rt->runtime(), (TiMemory)src_mem);
+    void* dst_ptr = ti_map_memory(rt->runtime(), (TiMemory)dst_mem);
+
+    if (src_ptr && dst_ptr) {
+        // Simple and fast C++ casting loop (can be optimized with SIMD)
+        if (src_type == 0 && dst_type == 2) { // f32 -> u8
+            float* s = (float*)src_ptr;
+            uint8_t* d = (uint8_t*)dst_ptr;
+            for (int i = 0; i < num_elements; ++i) d[i] = (uint8_t)(s[i] * 255.0f + 0.5f);
+        } else if (src_type == 2 && dst_type == 0) { // u8 -> f32
+            uint8_t* s = (uint8_t*)src_ptr;
+            float* d = (float*)dst_ptr;
+            for (int i = 0; i < num_elements; ++i) d[i] = (float)s[i] / 255.0f;
+        } else if (src_type == 0 && dst_type == 3) { // f32 -> u16
+            float* s = (float*)src_ptr;
+            uint16_t* d = (uint16_t*)dst_ptr;
+            for (int i = 0; i < num_elements; ++i) d[i] = (uint16_t)(s[i] * 65535.0f + 0.5f);
+        } else if (src_type == 3 && dst_type == 0) { // u16 -> f32
+            uint16_t* s = (uint16_t*)src_ptr;
+            float* d = (float*)dst_ptr;
+            for (int i = 0; i < num_elements; ++i) d[i] = (float)s[i] / 65535.0f;
+        }
+        
+        ti_unmap_memory(rt->runtime(), (TiMemory)src_mem);
+        ti_unmap_memory(rt->runtime(), (TiMemory)dst_mem);
+        return true;
+    }
+    return false;
 }
 
 // -----------------------------------------------------------------------
@@ -220,6 +465,9 @@ EXPORT void run_aot_graph(
                     arg.argument.value.ndarray.shape.dims[d] = args_array[i].shape[d];
                 }
                 
+                // Debug log
+                printf("[C++ Engine] Arg %s: dim_count=%d, elem_dim_count=%d\n", args_array[i].name, args_array[i].dim_count, args_array[i].elem_dim_count);
+                
                 arg.argument.value.ndarray.elem_shape.dim_count = args_array[i].elem_dim_count;
                 for (int d = 0; d < args_array[i].elem_dim_count; d++) {
                     arg.argument.value.ndarray.elem_shape.dims[d] = args_array[i].elem_shape[d];
@@ -265,7 +513,7 @@ EXPORT void add_to_pipeline(
 
 EXPORT void run_pipeline(
     void* runtime, void* dummy_module_ctx, const char* pipeline_name,
-    DynamicArg* overrides, int num_overrides
+    uint64_t* old_handles, DynamicArg* new_args, int num_overrides
 ) {
     ti::Runtime* rt = (ti::Runtime*)runtime;
     if (!rt) return;
@@ -294,12 +542,15 @@ EXPORT void run_pipeline(
                 TiNamedArgument arg = {};
                 arg.name = base_arg.name;
 
-                // Check for overrides by name
+                // Check for overrides by memory handle identity
                 const DynamicArg* final_arg = &base_arg;
-                for (int j = 0; j < num_overrides; j++) {
-                    if (strcmp(overrides[j].name, base_arg.name) == 0) {
-                        final_arg = &overrides[j];
-                        break;
+                if (base_arg.is_ndarray == 2) {
+                    uint64_t current_handle = (uint64_t)base_arg.ndarray_memory;
+                    for (int j = 0; j < num_overrides; j++) {
+                        if (old_handles[j] == current_handle) {
+                            final_arg = &new_args[j];
+                            break;
+                        }
                     }
                 }
 

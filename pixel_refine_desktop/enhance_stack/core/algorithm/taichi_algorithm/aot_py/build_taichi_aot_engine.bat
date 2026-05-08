@@ -43,7 +43,7 @@ g++ -shared -o taichi_aot_engine.dll ^
     %PGO_FLAGS% ^
     -I"%TAICHI_INC%" ^
     -L"%TAICHI_LIB%" ^
-    -ltaichi_c_api
+    -ltaichi_c_api -lole32 -luuid
 
 if %errorlevel% neq 0 (
     echo [Error] Kompilasi gagal.

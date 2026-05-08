@@ -150,30 +150,9 @@ def run_comprehensive_test():
     cv_lap = cv2.Laplacian(img_gray, cv2.CV_32F, ksize=1, borderType=cv2.BORDER_REFLECT)
     results.append(print_result("Laplacian (Gray)", np.mean(np.abs(aot_lap - cv_lap)), threshold=1.0))
 
-    # --- PERFORMANCE STRESS TEST ---
+    # --- PIPELINE STRESS TEST (SMART FUSION STYLE) ---
     if img_full is not None:
-        print_header("PERFORMANCE STRESS TEST (10 Frames)")
-        h_f, w_f = img_full.shape[:2]
-        print(f"Resolution: {w_f}x{h_f} ({ (w_f*h_f)/1e6 :.1f} MP)")
-        
-        n_iters = 10
-        print(f"Running {n_iters} iterations of Gaussian Blur (Roundtrip)...")
-        
-        # Warmup
-        _ = taichi_aot.gaussian_blur(img_full, sigma=1.5)
-        
-        start_time = time.perf_counter()
-        for _ in range(n_iters):
-            _ = taichi_aot.gaussian_blur(img_full, sigma=1.5)
-        
-        end_time = time.perf_counter()
-        total_time = end_time - start_time
-        latency = total_time / n_iters
-        fps = 1.0 / latency
-        
-        print(f"Total Time: {total_time:.4f} s")
-        print(f"Average Latency: {latency*1000:.2f} ms")
-        print(f"Average FPS: {fps:.2f}")
+        run_pipeline_stress_test(taichi_aot.engine, img_full)
     
     # --- FINAL VERDICT ---
     print_header("FINAL VERDICT")
@@ -182,6 +161,95 @@ def run_comprehensive_test():
     else:
         print(">>> SOME TESTS FAILED! Please check individual MAE values.")
     print("="*70)
+
+def run_pipeline_stress_test(engine, img_full):
+    print_header("ONE BIG GRAPH: PIPELINE STRESS TEST")
+    h_f, w_f = img_full.shape[:2]
+    print(f"Resolution: {w_f}x{h_f} ({ (w_f*h_f)/1e6 :.1f} MP)")
+    
+    try:
+        # 1. Recording Phase
+        print("\n[Stage 1] Recording Comprehensive Master Pipeline...")
+        # Create input placeholder
+        p_in = engine.placeholder((h_f, w_f, 3), dtype=np.float32)
+        
+        with engine.rec_pipeline("master_test_pipeline"):
+            # A. Downscale (Bicubic)
+            res_down = taichi_aot.resize(p_in, (w_f//2, h_f//2), interpolation=taichi_aot.INTER_CUBIC, return_gpu=True)
+            # B. Gaussian Blur
+            blur = taichi_aot.gaussian_blur(res_down, sigma=1.5, return_gpu=True)
+            # C. Median Filter
+            med = taichi_aot.median_filter(blur, return_gpu=True)
+            # D. Bilateral Grid (Denoise)
+            bg = taichi_aot.bilateral_grid_filter(med, preset="medium", return_gpu=True)
+            # E. Sobel (Gradients)
+            dx, dy = taichi_aot.sobel(bg, return_gpu=True)
+            # F. Upscale back (Bilinear)
+            res_up = taichi_aot.resize(bg, (w_f, h_f), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+            
+        print("[Success] Pipeline Recorded successfully.")
+        
+        # 2. Preparation Phase
+        img_gpu = engine.upload(img_full)
+        
+        # 3. Execution Phase (Master Pipeline)
+        n_iters = 50
+        print(f"\n[Stage 2] Running {n_iters} iterations of Master Pipeline (One Big Graph)...")
+        
+        # Warmup
+        engine.use_pipeline("master_test_pipeline", overrides={p_in: img_gpu})
+        engine.sync()
+        
+        start_time = time.perf_counter()
+        for i in range(n_iters):
+            engine.use_pipeline("master_test_pipeline", overrides={p_in: img_gpu})
+        engine.sync()
+        end_time = time.perf_counter()
+        
+        pipe_time = end_time - start_time
+        pipe_latency = (pipe_time / n_iters) * 1000
+        pipe_fps = 1.0 / (pipe_time / n_iters)
+        
+        # 4. Standard Dispatch Phase (Kernel by Kernel)
+        print(f"\n[Stage 3] Running {n_iters} iterations of Standard Dispatch (Kernel-by-Kernel)...")
+        
+        # Warmup
+        _ = taichi_aot.resize(img_gpu, (w_f//2, h_f//2), interpolation=taichi_aot.INTER_CUBIC, return_gpu=True)
+        engine.sync()
+        
+        start_time_std = time.perf_counter()
+        for i in range(n_iters):
+            # Chain the same operations manually (using return_gpu=True to stay on VRAM)
+            r1 = taichi_aot.resize(img_gpu, (w_f//2, h_f//2), interpolation=taichi_aot.INTER_CUBIC, return_gpu=True)
+            r2 = taichi_aot.gaussian_blur(r1, sigma=1.5, return_gpu=True)
+            r3 = taichi_aot.median_filter(r2, return_gpu=True)
+            r4 = taichi_aot.bilateral_grid_filter(r3, preset="medium", return_gpu=True)
+            _dx, _dy = taichi_aot.sobel(r4, return_gpu=True)
+            _r6 = taichi_aot.resize(r4, (w_f, h_f), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+        
+        engine.sync()
+        end_time_std = time.perf_counter()
+        
+        std_time = end_time_std - start_time_std
+        std_latency = (std_time / n_iters) * 1000
+        std_fps = 1.0 / (std_time / n_iters)
+        
+        # 5. Summary & Comparison
+        print_header("PERFORMANCE COMPARISON")
+        print(f"{'Method':<25} | {'Latency (ms)':<15} | {'FPS':<10}")
+        print("-" * 55)
+        print(f"{'Master Pipeline (OBG)':<25} | {pipe_latency:<15.2f} | {pipe_fps:<10.2f}")
+        print(f"{'Standard Dispatch':<25} | {std_latency:<15.2f} | {std_fps:<10.2f}")
+        print("-" * 55)
+        
+        improvement = (std_latency - pipe_latency) / std_latency * 100
+        print(f"\n>>> Speedup using Master Pipeline: {improvement:.2f}% faster")
+        print(f">>> Overhead Reduced: {std_latency - pipe_latency:.2f} ms per frame")
+        
+    except Exception as e:
+        print(f"\n[CRITICAL ERROR] Pipeline Test Failed: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     run_comprehensive_test()
