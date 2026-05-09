@@ -8,63 +8,47 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../../../../.."))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.warp import (
-    warp_image_gpu
-)
-from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.pyramid import (
-    _upsample_flow_kernel
+# Import kernels from the NEW kernel source file
+from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.warp_kernels import (
+    _warp_guided_i32_rgb_aot,
+    _warp_naked_i32_rgb_aot
 )
 
-def compile_warp_aot(arch=ti.vulkan, save_path="warp_vulkan.tcm"):
+def compile_warp_aot():
+    ui_data_dir = os.path.abspath(os.path.join(file_dir, "../../../../../ui/data/aot_assets"))
+    os.makedirs(ui_data_dir, exist_ok=True)
+
+    arch = ti.vulkan
+    print(f"\n>>> Compiling WARP AOT for: VULKAN")
+    
     ti.init(arch=arch, offline_cache=False)
+    mod = ti.aot.Module(arch)
 
-    # Compile Module
-    module = ti.aot.Module(arch)
+    # 1. Warp Guided i32 3ch
+    g_guided = ti.graph.GraphBuilder()
+    src_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.types.vector(3, ti.i32), ndim=2)
+    flow = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "flow", ti.f32, ndim=3)
+    dst_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.types.vector(3, ti.i32), ndim=2)
+    ref_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ref", ti.types.vector(3, ti.i32), ndim=2)
     
-    # Graph 1: Upsample
-    up_src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=3)
-    up_dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
-    up_scale = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "scale", ti.f32)
-    
-    g_up = ti.graph.GraphBuilder()
-    # Use standard upsample from pyramid.py
-    g_up.dispatch(_upsample_flow_kernel, up_src, up_dst, up_scale)
-    module.add_graph("upsample_flow", g_up.compile())
-    
-    # Graph 2: Warp RGB Guided
-    w_src_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.i32, ndim=3)
-    w_flow = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "flow", ti.f32, ndim=3)
-    w_dst_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.i32, ndim=3)
-    w_ref_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "guide", ti.i32, ndim=3)
-    
-    g_warp_rgb = ti.graph.GraphBuilder()
-    warp_image_gpu(
-        None, None, g=g_warp_rgb, 
-        src_arg=w_src_3d, flow_arg=w_flow, dst_arg=w_dst_3d, ref_arg=w_ref_3d,
-        is_rgb_aot=True
-    )
-    module.add_graph("warp_rgb", g_warp_rgb.compile())
+    g_guided.dispatch(_warp_guided_i32_rgb_aot, src_3d, flow, dst_3d, ref_3d)
+    mod.add_graph("warp_guided_i32_3ch", g_guided.compile())
 
-    # Graph 3: Warp Gray Guided (Optional, needed by some pipelines)
-    w_src_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.i32, ndim=2)
-    w_dst_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.i32, ndim=2)
-    w_ref_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "guide", ti.i32, ndim=2)
+    # 2. Warp Naked i32 3ch
+    g_naked = ti.graph.GraphBuilder()
+    g_naked.dispatch(_warp_naked_i32_rgb_aot, src_3d, flow, dst_3d)
+    mod.add_graph("warp_naked_i32_3ch", g_naked.compile())
+
+    # Simpan sebagai FOLDER (Lebih stabil untuk C-API Vulkan)
+    output_path = os.path.join(ui_data_dir, "warp_vulkan")
+    if os.path.exists(output_path):
+        import shutil
+        shutil.rmtree(output_path)
+    os.makedirs(output_path, exist_ok=True)
     
-    g_warp_gray = ti.graph.GraphBuilder()
-    warp_image_gpu(
-        None, None, g=g_warp_gray, 
-        src_arg=w_src_2d, flow_arg=w_flow, dst_arg=w_dst_2d, ref_arg=w_ref_2d,
-        is_rgb_aot=False
-    )
-    module.add_graph("warp_gray", g_warp_gray.compile())
-    
-    module.archive(save_path)
-    print(f"Successfully archived {save_path}")
+    mod.save(output_path)
+    print(f"Successfully saved AOT Module to: {output_path}")
     ti.reset()
 
 if __name__ == "__main__":
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    assets_dir = os.path.join(script_dir, "../../../../../", "ui", "data", "aot_assets")
-    os.makedirs(assets_dir, exist_ok=True)
-    save_path = os.path.abspath(os.path.join(assets_dir, "warp_vulkan.tcm"))
-    compile_warp_aot(save_path=save_path)
+    compile_warp_aot()

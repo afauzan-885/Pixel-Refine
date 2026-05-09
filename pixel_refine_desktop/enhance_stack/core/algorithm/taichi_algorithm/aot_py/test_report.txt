@@ -1,0 +1,59 @@
+[Taichi] version 1.7.4, llvm 15.0.1, commit b4b956fd, win, python 3.12.9
+[TaichiWorker] Using project-level cache at: e:/APP Developer/Pixel Refine/taichi_cache
+[TaichiWorker] AOT Compilation Mode Detected: Disabled JIT Worker and Cache Envs.
+
+======================================================================
+ TAICHI AOT MASTER COMPREHENSIVE TEST
+======================================================================
+Loaded test image: e:/APP Developer/Pixel Refine\test_algorithm/IMG_20250401_182043_B003.png
+Using 512x512 resized version for accuracy tests.
+[PASS] Bicubic Resize (RGB 2x)             | MAE:   0.000000 | Limit: 0.5
+[PASS] INTER_AREA Resize (RGB 0.25x)       | MAE:   0.000000 | Limit: 0.5
+[PASS] Bilinear Resize (RGB 2x)            | MAE:   0.000000 | Limit: 0.5
+[PASS] Warping Bicubic (RGB)               | MAE:   0.153623 | Limit: 2.0
+[PASS] Guided Warping (RGB)                | MAE:   0.153623 | Limit: 1.0
+[PASS] Gaussian Blur (RGB, sigma=1.5)      | MAE:   0.000100 | Limit: 0.5
+[PASS] Box Filter (RGB, k=5)               | MAE:   0.000053 | Limit: 0.5
+[PASS] Image Pyramid (3 levels)            | MAE:   0.000000 | Limit: 0.1
+[PASS] NCC Alignment (Zero Shift)          | MAE:   0.000000 | Limit: 0.1
+[PASS] Median Filter (RGB 3x3)             | MAE:   0.001958 | Limit: 0.01
+[PASS] Bilateral Grid (Gray, Med)          | MAE:   0.048381 | Limit: 0.2
+[PASS] Joint Bilateral Filter              | MAE:   0.000000 | Limit: 0.1
+[PASS] Joint Bilateral Upsample            | MAE:   0.000000 | Limit: 0.5
+[PASS] Phase Correlation (Shift 5, -3)     | MAE:   0.000000 | Limit: 0.1
+[PASS] RANSAC Flow Cleanup                 | MAE:   0.000000 | Limit: 1.0
+[PASS] Sobel DX (Gray)                     | MAE:   0.000000 | Limit: 0.5
+[PASS] Laplacian (Gray)                    | MAE:   0.000000 | Limit: 1.0
+
+======================================================================
+ ONE BIG GRAPH: PIPELINE STRESS TEST
+======================================================================
+Resolution: 3016x3016 (9.1 MP)
+
+[Stage 1] Recording RGB Master Pipeline...
+[Success] Pipeline Recorded successfully.
+
+[Stage 2] Running 2 iterations of Master Pipeline (One Big Graph)...
+
+[Stage 3] Running 2 iterations of Standard Dispatch (Kernel-by-Kernel)...
+
+[Stage 4] Verifying OBG Accuracy vs. Standard Dispatch...
+>>> OBG Accuracy MAE (vs Standard): 0.000000
+
+======================================================================
+ PERFORMANCE COMPARISON
+======================================================================
+Method                    | Latency (ms)    | FPS       
+-------------------------------------------------------
+Master Pipeline (OBG)     | 166.40          | 6.01      
+Standard Dispatch         | 169.26          | 5.91      
+-------------------------------------------------------
+
+>>> Speedup using Master Pipeline: 1.69% faster
+>>> Overhead Reduced: 2.86 ms per frame
+
+======================================================================
+ FINAL VERDICT
+======================================================================
+>>> ALL TESTS PASSED! AOT System is Healthy and Accurate.
+======================================================================

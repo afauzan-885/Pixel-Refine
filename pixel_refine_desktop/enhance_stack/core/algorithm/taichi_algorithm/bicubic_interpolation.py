@@ -108,6 +108,34 @@ if TAICHI_AVAILABLE:
                 dst[r, c, ch] = val
 
     @ti.kernel
+    def _bicubic_resize_kernel_vec3(
+        src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        h_src: int,
+        w_src: int,
+        h_dst: int,
+        w_dst: int,
+    ):
+        for r, c in ti.ndrange(h_dst, w_dst):
+            y_src = (r + 0.5) * (float(h_src) / float(h_dst)) - 0.5
+            x_src = (c + 0.5) * (float(w_src) / float(w_dst)) - 0.5
+            x_int = int(ti.floor(x_src))
+            y_int = int(ti.floor(y_src))
+            dx = x_src - x_int
+            dy = y_src - y_int
+            w_x = cubic_hermite_weights(dx)
+            w_y = cubic_hermite_weights(dy)
+            val = ti.Vector([0.0, 0.0, 0.0])
+            for m in ti.static(range(-1, 3)):
+                row_res = ti.Vector([0.0, 0.0, 0.0])
+                yy = tm.clamp(y_int + m, 0, h_src - 1)
+                for n in ti.static(range(-1, 3)):
+                    xx = tm.clamp(x_int + n, 0, w_src - 1)
+                    row_res += src[yy, xx] * w_x[n + 1]
+                val += row_res * w_y[m + 1]
+            dst[r, c] = val
+
+    @ti.kernel
     def _bicubic_sample_kernel_2d(
         src: ti.types.ndarray(),
         coords: ti.types.ndarray(),
@@ -172,6 +200,52 @@ if TAICHI_AVAILABLE:
                 )
                 results[i, ch] = val
 
+    @ti.kernel
+    def _bicubic_sample_kernel_vec3(
+        src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        coords: ti.types.ndarray(),
+        results: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=1),
+        n_samples: int,
+        h_src: int,
+        w_src: int,
+    ):
+        for i in range(n_samples):
+            x_src = coords[i, 0]
+            y_src = coords[i, 1]
+            x_int = int(ti.floor(x_src))
+            y_int = int(ti.floor(y_src))
+            dx = x_src - x_int
+            dy = y_src - y_int
+            col_results = ti.Matrix([[0.0, 0.0, 0.0] for _ in range(4)]) # 4x3 matrix
+            for m in range(4):
+                p = ti.Matrix([[0.0, 0.0, 0.0] for _ in range(4)])
+                y_idx = tm.clamp(y_int + m - 1, 0, h_src - 1)
+                for n in range(4):
+                    x_idx = tm.clamp(x_int + n - 1, 0, w_src - 1)
+                    p[n, 0] = src[y_idx, x_idx][0]
+                    p[n, 1] = src[y_idx, x_idx][1]
+                    p[n, 2] = src[y_idx, x_idx][2]
+                
+                # Manual hermite for vector
+                vec_p0 = ti.Vector([p[0,0], p[0,1], p[0,2]])
+                vec_p1 = ti.Vector([p[1,0], p[1,1], p[1,2]])
+                vec_p2 = ti.Vector([p[2,0], p[2,1], p[2,2]])
+                vec_p3 = ti.Vector([p[3,0], p[3,1], p[3,2]])
+                
+                res_m = cubic_hermite(vec_p0, vec_p1, vec_p2, vec_p3, dx)
+                col_results[m, 0] = res_m[0]
+                col_results[m, 1] = res_m[1]
+                col_results[m, 2] = res_m[2]
+
+            val = cubic_hermite(
+                ti.Vector([col_results[0,0], col_results[0,1], col_results[0,2]]),
+                ti.Vector([col_results[1,0], col_results[1,1], col_results[1,2]]),
+                ti.Vector([col_results[2,0], col_results[2,1], col_results[2,2]]),
+                ti.Vector([col_results[3,0], col_results[3,1], col_results[3,2]]),
+                dy
+            )
+            results[i] = val
+
 
 def bicubic_resize(
     src=None, 
@@ -214,7 +288,10 @@ def bicubic_resize(
     from . import common
 
     if g is not None:
-        target = _bicubic_resize_kernel_3d if is_rgb_aot else _bicubic_resize_kernel_2d
+        if is_rgb_aot:
+            target = _bicubic_resize_kernel_vec3
+        else:
+            target = _bicubic_resize_kernel_2d
         g.dispatch(target, src_arg, dst_arg, h_src_arg, w_src_arg, h_dst_arg, w_dst_arg)
         return None
 

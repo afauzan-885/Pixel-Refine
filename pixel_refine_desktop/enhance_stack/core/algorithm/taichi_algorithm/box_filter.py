@@ -31,9 +31,18 @@ if TAICHI_AVAILABLE:
                     acc0 += src[cy, cx, 0]
                     acc1 += src[cy, cx, 1]
                     acc2 += src[cy, cx, 2]
-            dst[y, x, 0] = acc0 / 9.0
-            dst[y, x, 1] = acc1 / 9.0
             dst[y, x, 2] = acc2 / 9.0
+
+    @ti.kernel
+    def _box_filter_3x3_vec3_f32_kernel(src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2), dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2), h: int, w: int):
+        for y, x in ti.ndrange(h, w):
+            acc = ti.Vector([0.0, 0.0, 0.0])
+            for i in ti.static(range(-1, 2)):
+                cy = tm.clamp(y + i, 0, h - 1)
+                for j in ti.static(range(-1, 2)):
+                    cx = tm.clamp(x + j, 0, w - 1)
+                    acc += src[cy, cx]
+            dst[y, x] = acc / 9.0
 
     @ti.kernel
     def _box_blur_h_generic_3ch_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray(), h: int, w: int, radius: int):
@@ -59,9 +68,25 @@ if TAICHI_AVAILABLE:
                 acc1 += src[cy, x, 1]
                 acc2 += src[cy, x, 2]
             div = float(radius * 2 + 1)
-            dst[y, x, 0] = acc0 / div
-            dst[y, x, 1] = acc1 / div
             dst[y, x, 2] = acc2 / div
+
+    @ti.kernel
+    def _box_blur_h_vec3_f32_kernel(src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2), dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2), h: int, w: int, radius: int):
+        for y, x in ti.ndrange(h, w):
+            acc = ti.Vector([0.0, 0.0, 0.0])
+            for j in range(-radius, radius + 1):
+                cx = tm.clamp(x + j, 0, w - 1)
+                acc += src[y, cx]
+            dst[y, x] = acc / float(radius * 2 + 1)
+
+    @ti.kernel
+    def _box_blur_v_vec3_f32_kernel(src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2), dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2), h: int, w: int, radius: int):
+        for y, x in ti.ndrange(h, w):
+            acc = ti.Vector([0.0, 0.0, 0.0])
+            for i in range(-radius, radius + 1):
+                cy = tm.clamp(y + i, 0, h - 1)
+                acc += src[cy, x]
+            dst[y, x] = acc / float(radius * 2 + 1)
 
 @ti_thread
 def box_filter(

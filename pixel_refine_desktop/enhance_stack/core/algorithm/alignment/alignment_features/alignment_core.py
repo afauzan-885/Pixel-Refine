@@ -18,6 +18,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
     preprocess_in_python,
     to_gamma_proxy,
 )
+from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.warp import warp_image_gpu
 
 
 def get_taichi_worker():
@@ -396,6 +397,7 @@ def scale_flow(flow, work_h, work_w, full_h, full_w, ksize=5):
     return np.dstack((u_smooth, v_smooth))
 
 
+# warp_image_opencv restored for CPU fallback
 def warp_image_opencv(
     image,
     flow,
@@ -404,7 +406,7 @@ def warp_image_opencv(
     x_coords=None,
     y_coords=None,
 ):
-    """Warp gambar menggunakan optical flow."""
+    """Warp gambar menggunakan optical flow (CPU path)."""
     h, w = image.shape[:2]
 
     if x_coords is None or y_coords is None:
@@ -865,7 +867,7 @@ def perform_image_alignment(
 
                     aligned_img = None
                     if flow_full_res is not None:
-                        aligned_img = warp_image_opencv(original_image, flow_full_res)
+                        aligned_img = warp_image_gpu(original_image, flow_full_res)
                         if visualization:
                             flow_vis = visualize_flow(flow_full_res)
                             cv2.imwrite(f"flow_raft_{i+1:02d}.jpg", flow_vis)
@@ -1013,7 +1015,7 @@ def perform_image_alignment(
                     0,
                 )
 
-                aligned_img = warp_image_opencv(original_image, flow)
+                aligned_img = warp_image_gpu(original_image, flow)
 
                 # [OPTIMIZATION] Clear temporaries
                 del current_img_float, current_preproc, current_gray_8u, flow, flow_init
@@ -1201,7 +1203,7 @@ def perform_image_alignment(
                                 del flow_vis
 
                             # 4. Warp Gambar menggunakan koordinat pre-calculated (OPTIMASI MEMORI 1)
-                            aligned_img = warp_image_opencv(
+                            aligned_img = warp_image_gpu(
                                 original_image,
                                 flow_full_res,
                                 x_coords=x_coords_full,

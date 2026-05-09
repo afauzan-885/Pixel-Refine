@@ -74,6 +74,34 @@ if TAICHI_AVAILABLE:
             r2 = tm.mix(float(q10), float(q11), wx)
             dst[r, c, ch] = tm.mix(r1, r2, wy)
 
+    @ti.kernel
+    def _bilinear_resize_kernel_vec3(
+        src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        h_src: int,
+        w_src: int,
+        h_dst: int,
+        w_dst: int,
+    ):
+        for r, c in ti.ndrange(h_dst, w_dst):
+            y_src = (float(r) + 0.5) * (float(h_src) / float(h_dst)) - 0.5
+            x_src = (float(c) + 0.5) * (float(w_src) / float(w_dst)) - 0.5
+            y0 = int(ti.floor(y_src))
+            x0 = int(ti.floor(x_src))
+            y0_cl = tm.clamp(y0, 0, h_src - 1)
+            x0_cl = tm.clamp(x0, 0, w_src - 1)
+            y1_cl = tm.clamp(y0 + 1, 0, h_src - 1)
+            x1_cl = tm.clamp(x0 + 1, 0, w_src - 1)
+            wy = y_src - float(y0)
+            wx = x_src - float(x0)
+            q00 = src[y0_cl, x0_cl]
+            q01 = src[y0_cl, x1_cl]
+            q10 = src[y1_cl, x0_cl]
+            q11 = src[y1_cl, x1_cl]
+            r1 = tm.mix(q00, q01, wx)
+            r2 = tm.mix(q10, q11, wx)
+            dst[r, c] = tm.mix(r1, r2, wy)
+
 
 def bilinear_resize(src, target_h: int, target_w: int, dst=None, buffer_provider="pool"):
     """

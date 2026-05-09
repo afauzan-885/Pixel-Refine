@@ -66,6 +66,42 @@ if TAICHI_AVAILABLE:
             dst_dy[y, x] = gy
 
     @ti.kernel
+    def _sobel_kernel_vec3(
+        src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        dst_dx: ti.types.ndarray(),
+        dst_dy: ti.types.ndarray(),
+        h: int,
+        w: int,
+    ):
+        for y, x in ti.ndrange(h, w):
+            # RGB weights for grayscale conversion: 0.299R + 0.587G + 0.114B
+            weights = ti.Vector([0.299, 0.587, 0.114])
+
+            gx = ti.Vector([0.0, 0.0, 0.0])
+            gy = ti.Vector([0.0, 0.0, 0.0])
+
+            # Top Row
+            val_tl = src[tm.clamp(y - 1, 0, h - 1), tm.clamp(x - 1, 0, w - 1)]
+            val_tm = src[tm.clamp(y - 1, 0, h - 1), x]
+            val_tr = src[tm.clamp(y - 1, 0, h - 1), tm.clamp(x + 1, 0, w - 1)]
+
+            # Middle Row
+            val_ml = src[y, tm.clamp(x - 1, 0, w - 1)]
+            val_mr = src[y, tm.clamp(x + 1, 0, w - 1)]
+
+            # Bottom Row
+            val_bl = src[tm.clamp(y + 1, 0, h - 1), tm.clamp(x - 1, 0, w - 1)]
+            val_bm = src[tm.clamp(y + 1, 0, h - 1), x]
+            val_br = src[tm.clamp(y + 1, 0, h - 1), tm.clamp(x + 1, 0, w - 1)]
+
+            gx = (val_tr + 2 * val_mr + val_br) - (val_tl + 2 * val_ml + val_bl)
+            gy = (val_bl + 2 * val_bm + val_br) - (val_tl + 2 * val_tm + val_tr)
+
+            # Dot product with weights to get grayscale gradient
+            dst_dx[y, x] = gx.dot(weights)
+            dst_dy[y, x] = gy.dot(weights)
+
+    @ti.kernel
     def _laplacian_kernel(
         src: ti.types.ndarray(), dst: ti.types.ndarray(), h: int, w: int
     ):

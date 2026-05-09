@@ -1,6 +1,16 @@
 import taichi as ti
 import os
-from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm import bilateral_grid as bg
+import sys
+
+# Path injection for project root
+file_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
+os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
+
+import pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.bilateral_grid as bg
 
 def compile_bg_aot(arch, save_path):
     print(f"\n>>> Compiling Bilateral Grid AOT for: {arch}")

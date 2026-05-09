@@ -57,6 +57,18 @@ def compile_gaussian_tcm():
     g_y_1ch_f32 = ti.graph.GraphBuilder()
     g_y_1ch_f32.dispatch(gaussian_mod._gaussian_blur_y_1ch_f32_kernel, src_2d_f32, dst_2d_f32, h_arg, w_arg, weights_arg, radius_arg)
     module.add_graph("gaussian_blur_y_1ch_f32", g_y_1ch_f32.compile())
+    
+    # --- VECTOR 3D GRAPHS (New Standard) ---
+    src_vec3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.types.vector(3, ti.f32), ndim=2)
+    dst_vec3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.types.vector(3, ti.f32), ndim=2)
+    
+    g_x_vec3_f32 = ti.graph.GraphBuilder()
+    g_x_vec3_f32.dispatch(gaussian_mod._gaussian_blur_x_vec3_f32_kernel, src_vec3, dst_vec3, h_arg, w_arg, weights_arg, radius_arg)
+    module.add_graph("gaussian_blur_x_vec3_f32", g_x_vec3_f32.compile())
+    
+    g_y_vec3_f32 = ti.graph.GraphBuilder()
+    g_y_vec3_f32.dispatch(gaussian_mod._gaussian_blur_y_vec3_f32_kernel, src_vec3, dst_vec3, h_arg, w_arg, weights_arg, radius_arg)
+    module.add_graph("gaussian_blur_y_vec3_f32", g_y_vec3_f32.compile())
 
     # --- i32 GRAPHS (Optional but included for parity) ---
     src_3d_i32 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.i32, ndim=3)

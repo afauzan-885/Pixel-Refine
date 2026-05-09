@@ -4,69 +4,99 @@ import sys
 import numpy as np
 
 # -------------------------------------------------------------------------
+# OpenCV-style Constants for Standardization
+# -------------------------------------------------------------------------
+INTER_NEAREST = 0
+INTER_LINEAR  = 1
+INTER_CUBIC   = 2
+INTER_AREA    = 3
+
+COLOR_BGR2GRAY = 6
+COLOR_RGB2GRAY = 7
+COLOR_GRAY2BGR = 8
+
+# -------------------------------------------------------------------------
 # Dynamic Argument Structure for C++ Engine
 # -------------------------------------------------------------------------
 class DynamicArg(ctypes.Structure):
     _fields_ = [
         ("name", ctypes.c_char_p),
-        ("is_ndarray", ctypes.c_int), # 0=Int32, 1=Float32, 2=NDArray
-        
-        # Scalar values
-        ("val_i32", ctypes.c_int32),
-        ("val_f32", ctypes.c_float),
-        
-        # NDArray values
-        ("ndarray_memory", ctypes.c_void_p),
-        ("elem_type", ctypes.c_int), # TiDataType enum value
+        ("arg_type", ctypes.c_int), # 0: ndarray, 1: scalar
+        ("dtype", ctypes.c_int),    # 0: f32, 1: i32, 2: u8, 3: u16
         ("dim_count", ctypes.c_int),
-        ("shape", ctypes.c_uint32 * 8),
+        ("shape", ctypes.c_int * 8),
         ("elem_dim_count", ctypes.c_int),
-        ("elem_shape", ctypes.c_uint32 * 8),
+        ("elem_shape", ctypes.c_int * 8),
+        ("is_vector", ctypes.c_int),
+        ("vector_dim", ctypes.c_int),
+        ("val_u64", ctypes.c_uint64)
     ]
+
+dtype_map = {
+    np.float32: 0,
+    np.int32: 1,
+    np.uint8: 2,
+    np.uint16: 3,
+    np.float64: 0, # Fallback
+}
 
 # -------------------------------------------------------------------------
 # Dynamic Argument Population Helper
 # -------------------------------------------------------------------------
-def _populate_dynamic_arg(arg: DynamicArg, key: str, value):
+def _populate_dynamic_arg(arg: DynamicArg, name_bytes, value):
     """Internal helper to fill DynamicArg metadata consistently."""
-    arg.name = key.encode('utf-8')
+    arg.name = name_bytes
     
     if isinstance(value, int):
-        arg.is_ndarray = 0
-        arg.val_i32 = value
+        arg.arg_type = 1
+        arg.dtype = 1 # i32
+        arg.val_u64 = value
     elif isinstance(value, float):
-        arg.is_ndarray = 1
-        arg.val_f32 = value
+        arg.arg_type = 1
+        arg.dtype = 0 # f32
+        arg.val_u64 = ctypes.cast(ctypes.pointer(ctypes.c_float(value)), ctypes.POINTER(ctypes.c_uint64)).contents.value
     elif isinstance(value, (TaichiGPUBuffer, TaichiPlaceholder)):
-        arg.is_ndarray = 2
+        arg.arg_type = 0
         
-        # Map numpy dtype to TiDataType enum
-        dtype_map = {np.int32: 5, np.uint8: 7, np.uint16: 8, np.float32: 1}
-        arg.elem_type = dtype_map.get(value.dtype, 1)
-        arg.ndarray_memory = value.handle
+        # Strict Metadata Alignment for AOT
+        is_vec = getattr(value, "is_vector", False)
+        v_dim = getattr(value, "vector_dim", 1)
         
+        arg.dtype = dtype_map.get(value.dtype if hasattr(value, 'dtype') else np.float32, 0)
+        arg.is_vector = 1 if is_vec else 0
+        arg.vector_dim = v_dim
+
         shape = value.shape
         dim_count = len(shape)
         
-        # AOT Convention: 3-channel images are Vector fields (ndim=2, elem_shape=3)
-        if dim_count == 3 and shape[2] == 3:
-            arg.dim_count = 2
-            arg.shape[0] = shape[0]
-            arg.shape[1] = shape[1]
-            arg.elem_dim_count = 1
-            arg.elem_shape[0] = 3
+        if is_vec:
+            # Vector field: Distinguish between spatial and vector components
+            if dim_count >= 2 and shape[-1] == v_dim:
+                # Shape explicitly includes vector dim (e.g. H, W, 3) -> Strip it for Taichi
+                arg.dim_count = dim_count - 1
+                for d in range(dim_count - 1): arg.shape[d] = shape[d]
+                arg.elem_dim_count = 1
+                arg.elem_shape[0] = v_dim
+            else:
+                # Shape is implicitly a grid of vectors (e.g. gn, gm, gl containing vec2)
+                arg.dim_count = dim_count
+                for d in range(dim_count): arg.shape[d] = shape[d]
+                arg.elem_dim_count = 1
+                arg.elem_shape[0] = v_dim
         else:
+            # Scalar field
             arg.dim_count = dim_count
-            for d in range(dim_count):
-                arg.shape[d] = shape[d]
+            for d in range(dim_count): arg.shape[d] = shape[d]
             arg.elem_dim_count = 0
+            
+        arg.val_u64 = ctypes.c_uint64(value.handle)
     else:
         # Backward compatibility for direct Taichi NDArrays (if any)
         if hasattr(value, "ptr"):
-            arg.is_ndarray = 2
-            arg.ndarray_memory = value.ptr
+            arg.arg_type = 0
+            arg.val_u64 = value.ptr
             # Fallback metadata mapping
-            arg.elem_type = 1
+            arg.dtype = 0 # Assume f32
             arg.dim_count = len(value.shape)
             for d, s in enumerate(value.shape): arg.shape[d] = s
             arg.elem_dim_count = 0
@@ -191,13 +221,13 @@ class BufferPool:
         self.free_buffers = {}
 
 class TaichiGPUBuffer:
-    def __init__(self, size_bytes, handle, shape, dtype=np.float32, is_vector=False, engine=None, is_owner=True, host_accessible=False):
+    def __init__(self, size_bytes, handle, shape, dtype=np.float32, is_vector=False, engine=None, is_owner=True, host_accessible=False, vector_dim=3):
         self.size_bytes = size_bytes
         self.handle = handle
         self.shape = shape
         self.dtype = dtype
         self.is_vector = is_vector
-        self.is_vec2 = is_vector
+        self.vector_dim = vector_dim
         self.engine = engine
         self.is_owner = is_owner
         self.host_accessible = host_accessible
@@ -238,12 +268,12 @@ class TaichiGPUBuffer:
         _LIB.ti_cast_buffer(_RUNTIME, self.handle, dst.handle, int(num_elements), dtype_map[self.dtype], dtype_map[target_dtype])
         return dst
 
-    def view_as_vector(self, is_vector=True):
-        return TaichiGPUBuffer(self.size_bytes, self.handle, self.shape, self.dtype, is_vector, self.engine, False, self.host_accessible)
+    def view_as_vector(self, is_vector=True, vector_dim=3):
+        return TaichiGPUBuffer(self.size_bytes, self.handle, self.shape, self.dtype, is_vector, self.engine, False, self.host_accessible, vector_dim)
 
 class TaichiPlaceholder(TaichiGPUBuffer):
-    def __init__(self, placeholder_id, shape, dtype, is_vector=False):
-        super().__init__(0, placeholder_id, shape, dtype, is_vector, None, False, False)
+    def __init__(self, placeholder_id, shape, dtype, is_vector=False, vector_dim=3):
+        super().__init__(0, placeholder_id, shape, dtype, is_vector, None, False, False, vector_dim)
 
 # -------------------------------------------------------------------------
 # AOT Engine and Wrappers
@@ -255,17 +285,24 @@ class AOTModuleWrapper:
     def run(self, graph_name, **kwargs):
         num_args = len(kwargs)
         args_array = (DynamicArg * num_args)()
-        for i, (k, v) in enumerate(kwargs.items()): _populate_dynamic_arg(args_array[i], k, v)
+        # CRITICAL: Keep names alive during the C++ call to prevent dangling pointers
+        arg_names = [k.encode('utf-8') for k in kwargs.keys()]
+        
+        for i, (k, v) in enumerate(kwargs.items()): 
+            _populate_dynamic_arg(args_array[i], arg_names[i], v)
+            
         engine = AOTEngine()
         if engine.current_pipeline:
             _LIB.add_to_pipeline(self.module_ptr, engine.current_pipeline.encode('utf-8'), graph_name.encode('utf-8'), args_array, num_args)
         else:
             _LIB.run_aot_graph(_RUNTIME, self.module_ptr, graph_name.encode('utf-8'), args_array, num_args)
 
+    def _dummy_run(self): pass # For keeping refs if needed
+
 class AOTEngine:
     _instance = None
     _active_arch = "vulkan"
-    _placeholder_id_counter = -1
+    _placeholder_id_counter = 0xFFFFFF00
 
     def __new__(cls):
         if cls._instance is None:
@@ -277,9 +314,9 @@ class AOTEngine:
             cls._instance._staging_pool = {}
         return cls._instance
 
-    def placeholder(self, shape, dtype=np.float32, is_vector=False):
-        p = TaichiPlaceholder(self._placeholder_id_counter, shape, dtype, is_vector)
-        self._placeholder_id_counter -= 1
+    def placeholder(self, shape, dtype=np.float32, is_vector=False, vector_dim=3):
+        p = TaichiPlaceholder(self._placeholder_id_counter, shape, dtype, is_vector, vector_dim)
+        self._placeholder_id_counter += 1
         return p
 
     def rec_pipeline(self, name):
@@ -299,16 +336,19 @@ class AOTEngine:
         n = len(ovr)
         handles = (ctypes.c_uint64 * n)()
         args = (DynamicArg * n)()
+        # Keep names alive
+        arg_names = [b"override"] * n
         for i, (p, b) in enumerate(ovr.items()):
             handles[i] = ctypes.c_uint64(p.handle)
-            _populate_dynamic_arg(args[i], "override", b)
+            _populate_dynamic_arg(args[i], arg_names[i], b)
         _LIB.run_pipeline(_RUNTIME, name.encode('utf-8'), handles, args, n)
 
-    def allocate(self, shape, dtype=np.float32, is_vector=False, host_accessible=False):
+    def allocate(self, shape, dtype=np.float32, is_vector=False, host_accessible=False, vector_dim=None):
         size = int(np.prod(shape) * np.dtype(dtype).itemsize)
+        v_dim = vector_dim if vector_dim is not None else (shape[-1] if is_vector and len(shape) >= 2 else 1)
         handle = self.buffer_pool.acquire(size) if not host_accessible else None
         if not handle: handle = _LIB.allocate_gpu_buffer(_RUNTIME, size, 1 if host_accessible else 0)
-        return TaichiGPUBuffer(size, handle, shape, dtype, is_vector, self, host_accessible=host_accessible)
+        return TaichiGPUBuffer(size, handle, shape, dtype, is_vector, self, host_accessible=host_accessible, vector_dim=v_dim)
 
     def get_staging_buffer(self, shape, dtype):
         size = int(np.prod(shape) * np.dtype(dtype).itemsize)
@@ -323,7 +363,7 @@ class AOTEngine:
         if hasattr(data, "__cuda_array_interface__"): return "cuda"
         return None
 
-    def _upload_fast_interop(self, data) -> TaichiGPUBuffer:
+    def _upload_fast_interop(self, data, is_vector=False, vector_dim=3) -> TaichiGPUBuffer:
         """Universal Fast-Copy bridge using Pinned Memory DMA."""
         obj_type = self._is_external_gpu_obj(data)
         shape = getattr(data, "shape", (1,))
@@ -351,18 +391,29 @@ class AOTEngine:
             ctypes.memmove(ptr, temp.ctypes.data, temp.nbytes)
             
         staging.unmap()
-        vram_target = self.allocate(shape, dtype)
+        vram_target = self.allocate(shape, dtype, is_vector=is_vector, vector_dim=vector_dim)
         _LIB.copy_gpu_buffer(_RUNTIME, staging.handle, vram_target.handle, staging.nbytes)
         return vram_target
 
-    def upload(self, data, is_vector=False):
+    def upload(self, data, is_vector=False, vector_dim=3):
         _init_aot_bridge()
         ext_type = self._is_external_gpu_obj(data)
+        
+        # Auto-detect Vector Fields (RGB=3, Flow=2)
+        if not is_vector and hasattr(data, "shape"):
+            if len(data.shape) == 3:
+                if data.shape[2] == 3:
+                    is_vector = True
+                    vector_dim = 3
+                elif data.shape[2] == 2:
+                    is_vector = True
+                    vector_dim = 2
+
         if ext_type:
-            return self._upload_fast_interop(data)
+            return self._upload_fast_interop(data, is_vector=is_vector, vector_dim=vector_dim)
         
         arr = np.ascontiguousarray(data)
-        buf = self.allocate(arr.shape, arr.dtype, is_vector=is_vector, host_accessible=True)
+        buf = self.allocate(arr.shape, arr.dtype, is_vector=is_vector, host_accessible=True, vector_dim=vector_dim)
         _LIB.write_to_gpu_buffer(_RUNTIME, buf.handle, arr.ctypes.data, buf.nbytes)
         return buf
 
@@ -399,3 +450,29 @@ class AOTEngine:
         self.modules = {}
 
 engine = AOTEngine()
+
+# -------------------------------------------------------------------------
+# OpenCV-style Data Unification (InputArray / OutputArray)
+# -------------------------------------------------------------------------
+def InputArray(data, is_vector=False, vector_dim=None) -> TaichiGPUBuffer:
+    """
+    OpenCV-style Data Input Unification.
+    Automatically handles NumPy arrays, PyTorch tensors, OpenCV UMats, 
+    native Python lists, or existing TaichiGPUBuffer instances.
+    """
+    if isinstance(data, (TaichiGPUBuffer, TaichiPlaceholder)):
+        return data
+    
+    # Auto-convert native Python structures
+    if isinstance(data, (list, tuple, int, float)):
+        data = np.array(data, dtype=np.float32)
+        
+    # Delegate to universal fast-interop bridge
+    return engine.upload(data, is_vector=is_vector, vector_dim=vector_dim)
+
+def OutputArray(shape, dtype=np.float32, is_vector=False, vector_dim=None) -> TaichiGPUBuffer:
+    """
+    OpenCV-style Data Output Allocation.
+    Creates an empty GPU VRAM buffer ready for writing.
+    """
+    return engine.allocate(shape, dtype=dtype, is_vector=is_vector, vector_dim=vector_dim)

@@ -4,9 +4,16 @@ import numpy as np
 
 # Path resolution to find the bridge
 file_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(file_dir, "../../../"))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
+from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm import bicubic_interpolation
 
 # Import the Generic AOT Engine and Buffer Pool
-from .engine import AOTEngine, TaichiGPUBuffer
+from .engine import AOTEngine, TaichiGPUBuffer, InputArray, OutputArray
+from .engine import INTER_CUBIC, INTER_LINEAR, INTER_NEAREST, INTER_AREA
+from .engine import COLOR_BGR2GRAY, COLOR_RGB2GRAY, COLOR_GRAY2BGR
 
 # Initialize the Singleton Engine
 engine = AOTEngine()
@@ -15,9 +22,15 @@ engine = AOTEngine()
 _tcm_dir = os.path.abspath(os.path.join(file_dir, "../taichi_algorithm/aot_tcm"))
 
 def load_tcm(name):
-    path = os.path.join(_tcm_dir, f"{name}.tcm")
+    # Try directory first (New standard)
+    path_dir = os.path.join(_tcm_dir, name)
+    if os.path.isdir(path_dir):
+        return engine.load(path_dir)
+    
+    # Fallback to .tcm file
+    path_file = os.path.join(_tcm_dir, f"{name}.tcm")
     try:
-        return engine.load(path)
+        return engine.load(path_file)
     except:
         return None
 
@@ -100,10 +113,10 @@ def merge_3ch(c0, c1, c2):
     """Fused 3-channel merge."""
     h, w = c0.shape[0], c0.shape[1]
     dst_dtype = c0.dtype
-    dst = engine.allocate((h, w, 3), dtype=dst_dtype, is_vector=True)
+    dst = engine.allocate((h, w), dtype=dst_dtype, is_vector=True, vector_dim=3)
     
     graph = "merge_3ch_f32" if dst_dtype == np.float32 else "merge_3ch_i32"
-    _common_module.run(graph, c0=c0, c1=c1, c2=c2, dst=dst)
+    _common_module.run(graph, c0=c0, c1=c1, c2=c2, dst=dst.view_as_vector(True, 3))
     return dst
 
 def insert_channel(src, dst, ch):
@@ -135,9 +148,9 @@ def absdiff(src1, src2):
     
     src1_v, src2_v, dst_v = src1, src2, dst
     if is_3d:
-        if not getattr(src1, 'is_vector', False): src1_v = src1.view_as_vector(True)
-        if not getattr(src2, 'is_vector', False): src2_v = src2.view_as_vector(True)
-        if not getattr(dst, 'is_vector', False): dst_v = dst.view_as_vector(True)
+        if not getattr(src1, 'is_vector', False): src1_v = src1.view_as_vector(True, 3)
+        if not getattr(src2, 'is_vector', False): src2_v = src2.view_as_vector(True, 3)
+        if not getattr(dst, 'is_vector', False): dst_v = dst.view_as_vector(True, 3)
         graph = "absdiff_vec3_f32"
     else:
         graph = "absdiff_f32_2d" if src1.dtype == np.float32 else "absdiff_i32_2d"
@@ -151,15 +164,14 @@ def cvtColor(src, code):
     COLOR_BGR2GRAY = 6
     COLOR_RGB2GRAY = 7
     
-    is_gpu = isinstance(src, TaichiGPUBuffer)
-    src_buf = src if is_gpu else engine.upload(src)
+    src_buf = InputArray(src)
     
     if code in [COLOR_BGR2GRAY, COLOR_RGB2GRAY]:
         h, w = src_buf.shape[0], src_buf.shape[1]
-        dst = engine.allocate((h, w), dtype=src_buf.dtype)
+        dst = OutputArray((h, w), dtype=src_buf.dtype)
         src_v = src_buf
         if len(src_buf.shape) == 3 and not getattr(src_buf, 'is_vector', False):
-            src_v = src_buf.view_as_vector(True)
+            src_v = src_buf.view_as_vector(True, 3)
         
         graph = "rgb2gray_f32" if code == COLOR_RGB2GRAY else "bgr2gray_f32"
         _common_module.run(graph, src=src_v, dst=dst)
@@ -174,92 +186,89 @@ def cvtColor(src, code):
 def resize(src, dsize, interpolation=INTER_CUBIC, return_gpu=False):
     """Taichi AOT Resize (OpenCV Parity API)"""
     target_w, target_h = dsize
-    is_gpu_input = isinstance(src, TaichiGPUBuffer)
-    src_buf = src if is_gpu_input else engine.upload(src)
+    src_buf = InputArray(src)
     
-    if is_gpu_input and len(src_buf.shape) == 3:
+    if isinstance(src, TaichiGPUBuffer) and len(src_buf.shape) == 3:
+        # Force vector for any 3D arrays (RGB or Flow)
         src_buf = src_buf.view_as_vector(True)
     
     h_src, w_src = src_buf.shape[0], src_buf.shape[1]
-    is_3d = len(src_buf.shape) == 3
-    dst_shape = (target_h, target_w, src_buf.shape[2]) if is_3d else (target_h, target_w)
-    dst_buf = engine.allocate(dst_shape, dtype=src_buf.dtype)
-
-    if interpolation == INTER_CUBIC:
-        graph_name = "bicubic_resize_f32_3d" if is_3d else "bicubic_resize_f32_2d"
-        if src_buf.dtype != np.float32:
-            graph_name = graph_name.replace("f32", "i32")
+    is_vec = getattr(src_buf, 'is_vector', False)
+    is_3d = (len(src_buf.shape) == 3) or is_vec
+    
+    # If it's a vector field but shape is 2D (like placeholders), we need to ensure dst_shape has the vector dim
+    v_dim = src_buf.vector_dim if is_vec else (src_buf.shape[2] if len(src_buf.shape) == 3 else 1)
+    
+    if is_3d:
+        dst_shape = (target_h, target_w, v_dim)
+    else:
+        dst_shape = (target_h, target_w)
         
-        src_v = src_buf if not is_3d else src_buf.view_as_vector(True)
-        dst_v = dst_buf if not is_3d else dst_buf.view_as_vector(True)
-        _bicubic_module.run(graph_name, src=src_v, dst=dst_v, h_src=h_src, w_src=w_src, h_dst=target_h, w_dst=target_w)
+    dst_buf = OutputArray(dst_shape, dtype=src_buf.dtype, is_vector=is_vec, vector_dim=v_dim)
+
+    is_vec = getattr(src_buf, 'is_vector', False)
+    
+    if interpolation == INTER_CUBIC:
+        graph_name = "bicubic_resize_f32_3d" if is_vec else "bicubic_resize_f32_2d"
+        if src_buf.dtype != np.float32: graph_name = graph_name.replace("f32", "i32")
+        _bicubic_module.run(graph_name, src=src_buf, dst=dst_buf, h_src=h_src, w_src=w_src, h_dst=target_h, w_dst=target_w)
     elif interpolation == INTER_LINEAR:
-        graph_name = "bilinear_resize_f32_3d" if is_3d else "bilinear_resize_f32_2d"
-        src_v = src_buf if not is_3d else src_buf.view_as_vector(True)
-        dst_v = dst_buf if not is_3d else dst_buf.view_as_vector(True)
-        _bilinear_module.run(graph_name, src=src_v, dst=dst_v, h_src=h_src, w_src=w_src, h_dst=target_h, w_dst=target_w)
+        graph_name = "bilinear_resize_f32_3d" if is_vec else "bilinear_resize_f32_2d"
+        _bilinear_module.run(graph_name, src=src_buf, dst=dst_buf, h_src=h_src, w_src=w_src, h_dst=target_h, w_dst=target_w)
     elif interpolation == INTER_AREA:
-        # INTER_AREA supports 1ch and 3ch (vec3)
-        if is_3d:
-            src_v = src_buf if getattr(src_buf, 'is_vector', False) else src_buf.view_as_vector(True)
-            dst_v = dst_buf.view_as_vector(True)
-            _area_module.run("inter_area_vec3_f32", src=src_v, dst=dst_v, sh=h_src, sw=w_src, dh=target_h, dw=target_w)
-        else:
-            _area_module.run("inter_area_f32", src=src_buf, dst=dst_buf, sh=h_src, sw=w_src, dh=target_h, dw=target_w)
+        graph_name = "inter_area_vec3_f32" if is_vec else "inter_area_f32"
+        _area_module.run(graph_name, src=src_buf, dst=dst_buf, sh=h_src, sw=w_src, dh=target_h, dw=target_w)
     else:
         raise NotImplementedError(f"Interpolation mode {interpolation} is not supported in AOT currently.")
+        
+    return dst_buf if return_gpu else dst_buf.to_numpy()
         
     return dst_buf if return_gpu else dst_buf.to_numpy()
 
 def box_filter(src, kernel_size=3, return_gpu=False):
     """AOT Implementation of Box Filter."""
-    is_gpu = isinstance(src, TaichiGPUBuffer)
-    h, w = src.shape[:2]
+    src_buf = InputArray(src)
+    h, w = src_buf.shape[:2]
     radius = kernel_size // 2
-    is_3d = len(src.shape) == 3
+    is_3d = len(src_buf.shape) == 3
     
-    src_buf = src if is_gpu else engine.upload(src)
-    if is_3d: src_buf = src_buf.view_as_vector(True)
+    dst_buf = OutputArray(src_buf.shape, dtype=src_buf.dtype, is_vector=is_3d)
+    is_vec = getattr(src_buf, 'is_vector', False)
     
-    dst_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype)
-    
-    suffix = "3ch_f32" if is_3d else "f32"
     if kernel_size == 3:
-        _box_filter_module.run(f"box_filter_fused_3x3_{suffix}", src=src_buf, dst=dst_buf, h=h, w=w)
+        target = "box_filter_fused_3x3_vec3_f32" if is_vec else "box_filter_fused_3x3_3ch_f32"
+        _box_filter_module.run(target, src=src_buf, dst=dst_buf, h=h, w=w)
     else:
-        tmp_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype)
-        _box_filter_module.run(f"box_filter_separable_generic_{suffix}", src=src_buf, tmp=tmp_buf, dst=dst_buf, h=h, w=w, radius=radius)
+        tmp_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype, is_vector=is_vec)
+        target = "box_filter_separable_generic_vec3_f32" if is_vec else "box_filter_separable_generic_3ch_f32"
+        _box_filter_module.run(target, src=src_buf, tmp=tmp_buf, dst=dst_buf, h=h, w=w, radius=radius)
         del tmp_buf
         
     return dst_buf if return_gpu else dst_buf.to_numpy()
 
 def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False):
     """AOT Implementation of Gaussian Blur."""
-    is_gpu = isinstance(src, TaichiGPUBuffer)
-    src_buf = src if is_gpu else engine.upload(src)
+    src_buf = InputArray(src)
     
     if kernel_size is None or kernel_size <= 0:
         kernel_size = int(np.ceil(3 * sigma)) * 2 + 1
     radius = kernel_size // 2
     h, w = src_buf.shape[:2]
+    is_vec = getattr(src_buf, 'is_vector', False)
     is_3d = len(src_buf.shape) == 3
     
     from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.gaussian import compute_gaussian_weights
     weights_np = compute_gaussian_weights(sigma, radius).astype(np.float32)
-    weights_buf = engine.upload(weights_np)
+    weights_buf = InputArray(weights_np)
     
-    tmp_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype)
-    dst_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype)
+    tmp_buf = OutputArray(src_buf.shape, dtype=src_buf.dtype, is_vector=is_vec)
+    dst_buf = OutputArray(src_buf.shape, dtype=src_buf.dtype, is_vector=is_vec)
     
-    type_suffix = "f32" if src_buf.dtype == np.float32 else "i32"
-    suffix = f"3ch_{type_suffix}" if is_3d else f"1ch_{type_suffix}"
+    target_x = "gaussian_blur_x_vec3_f32" if is_vec else "gaussian_blur_x_3ch_f32"
+    target_y = "gaussian_blur_y_vec3_f32" if is_vec else "gaussian_blur_y_3ch_f32"
     
-    src_v = src_buf if not is_3d else src_buf.view_as_vector(True)
-    tmp_v = tmp_buf if not is_3d else tmp_buf.view_as_vector(True)
-    dst_v = dst_buf if not is_3d else dst_buf.view_as_vector(True)
-    
-    _gaussian_module.run(f"gaussian_blur_x_{suffix}", src=src_v, dst=tmp_v, h=h, w=w, weights=weights_buf, radius=radius)
-    _gaussian_module.run(f"gaussian_blur_y_{suffix}", src=tmp_v, dst=dst_v, h=h, w=w, weights=weights_buf, radius=radius)
+    _gaussian_module.run(target_x, src=src_buf, dst=tmp_buf, h=h, w=w, weights=weights_buf, radius=radius)
+    _gaussian_module.run(target_y, src=tmp_buf, dst=dst_buf, h=h, w=w, weights=weights_buf, radius=radius)
     
     del tmp_buf, weights_buf
     return dst_buf if return_gpu else dst_buf.to_numpy()
@@ -269,7 +278,6 @@ def image_pyramid(src, levels=4, return_gpu=False):
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else engine.upload(src)
     is_3d = len(src_buf.shape) == 3
-    if is_3d: src_buf = src_buf.view_as_vector(True)
     
     curr_buf = src_buf
     graph = "downsample_2x_3ch_f32" if is_3d else "downsample_2x_f32"
@@ -304,22 +312,22 @@ def warp_image(src, flow, ref=None, return_gpu=False):
     is_guided = ref is not None
     
     dst_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype, is_vector=is_3d)
+
+    # Determine suffix
+    type_s = "f32" if src_buf.dtype == np.float32 else "i32"
+    is_vec = getattr(src_buf, 'is_vector', False)
     
-    src_v = src_buf.view_as_vector(True) if is_3d else src_buf
-    dst_v = dst_buf.view_as_vector(True) if is_3d else dst_buf
-    
-    type_suffix = "f32" if src_buf.dtype == np.float32 else "i32"
-    ch_suffix = "3ch" if is_3d else "1ch"
+    # The AOT kernels for warp expect flow to be a 3D scalar field [H, W, 2], not a 2D vector field.
+    flow_v = flow_buf.view_as_vector(False)
     
     if is_guided:
         ref_buf = ref if is_gpu_ref else engine.upload(ref)
-        ref_v = ref_buf.view_as_vector(True) if is_3d else ref_buf
-        graph = f"warp_guided_{type_suffix}_{ch_suffix}"
-        _warp_module.run(graph, src=src_v, flow=flow_buf, dst=dst_v, ref=ref_v)
+        target = f"warp_guided_{type_s}_3ch" if is_vec else f"warp_guided_{type_s}"
+        _warp_module.run(target, src=src_buf, flow=flow_v, dst=dst_buf, ref=ref_buf)
         if not is_gpu_ref: del ref_buf
     else:
-        graph = f"warp_naked_{type_suffix}_{ch_suffix}"
-        _warp_module.run(graph, src=src_v, flow=flow_buf, dst=dst_v)
+        target = f"warp_naked_{type_s}_3ch" if is_vec else f"warp_naked_{type_s}"
+        _warp_module.run(target, src=src_buf, flow=flow_v, dst=dst_buf)
         
     if not is_gpu_src: del src_buf
     if not is_gpu_flow: del flow_buf
@@ -336,10 +344,10 @@ def median_filter(src, return_gpu=False, **kwargs):
     is_3ch = (len(src_buf.shape) == 3 and src_buf.shape[2] == 3)
     
     # Use vector for flow, but scalar 3D for RGB to avoid field_dim warnings in Taichi AOT
-    src_v = src_buf.view_as_vector(True) if is_flow else src_buf
+    src_v = src_buf.view_as_vector(True) if is_flow else src_buf.view_as_vector(False)
     
     dst_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype, is_vector=is_flow)
-    dst_v = dst_buf.view_as_vector(True) if is_flow else dst_buf
+    dst_v = dst_buf.view_as_vector(True) if is_flow else dst_buf.view_as_vector(False)
 
     if is_flow:
         graph = "median_flow_3x3_f32"
@@ -456,11 +464,12 @@ def ransac_flow_cleanup(flow, threshold=1.0, return_gpu=False):
 def ransac_flow_cleanup_aot(flow, threshold=1.0, return_gpu=False):
     """Internal AOT RANSAC implementation."""
     is_gpu = isinstance(flow, TaichiGPUBuffer)
-    flow_buf = flow if is_gpu else engine.upload(flow, is_vector=True)
-    if not flow_buf.is_vector: flow_buf = flow_buf.view_as_vector(True)
+    flow_buf = flow if is_gpu else engine.upload(flow, is_vector=True, vector_dim=2)
+    if not flow_buf.is_vector or getattr(flow_buf, 'vector_dim', None) != 2: 
+        flow_buf = flow_buf.view_as_vector(True, 2)
     h, w = flow_buf.shape[:2]
     
-    dst = engine.allocate(flow_buf.shape, is_vector=True)
+    dst = OutputArray(flow_buf.shape, is_vector=True, vector_dim=2)
     mask = engine.allocate((h, w), dtype=np.int32)
     model = engine.allocate((2,), dtype=np.float32) # [mean_u, mean_v]
     
@@ -695,11 +704,11 @@ def bilateral_grid_filter(src, preset="medium", return_gpu=False):
     s_s, s_r, sigma_s, sigma_r = BILATERAL_GRID_PRESETS.get(preset, BILATERAL_GRID_PRESETS["medium"])
     gn, gm, gl = (h + s_s - 1) // s_s + 2, (w + s_s - 1) // s_s + 2, 256 // s_r + 2
     
-    # Allocate grids (pooled)
-    grid_a = engine.allocate((gn, gm, gl), is_vector=True) # Vector size 2
-    grid_b = engine.allocate((gn, gm, gl), is_vector=True)
-    grid_a_v = grid_a.view_as_vector(True)
-    grid_b_v = grid_b.view_as_vector(True)
+    # Allocate grids (pooled) - 3D spatial field of 2D vectors
+    grid_a = engine.allocate((gn, gm, gl), is_vector=True, vector_dim=2) 
+    grid_b = engine.allocate((gn, gm, gl), is_vector=True, vector_dim=2)
+    grid_a_v = grid_a.view_as_vector(True, 2)
+    grid_b_v = grid_b.view_as_vector(True, 2)
     
     rs, rr = int(np.ceil(sigma_s * 3.0)), int(np.ceil(sigma_r * 3.0))
 
@@ -755,7 +764,7 @@ def phase_correlation(ref, comp, use_hanning=True):
     g_complex = fft2(comp_buf, use_hanning=use_hanning)
     
     th, tw = f_complex.shape[:2]
-    r_complex = engine.allocate((th, tw), is_vector=True)
+    r_complex = OutputArray((th, tw, 2), is_vector=True)
     
     # 2. Cross-power spectrum: G * conj(F)
     # Graph Arg: src (a), b, dst, conj_b

@@ -32,15 +32,15 @@ extern "C" {
 // -----------------------------------------------------------------------
 struct DynamicArg {
     const char* name;
-    int is_ndarray; // 0=Int32, 1=Float32, 2=NDArray
-    int32_t val_i32;
-    float val_f32;
-    TiMemory ndarray_memory;
-    int elem_type; // TiDataType enum value
+    int arg_type; // 0: ndarray, 1: scalar
+    int dtype;    // 0: f32, 1: i32, 2: u8, 3: u16
     int dim_count;
-    uint32_t shape[8];
+    int32_t shape[8];
     int elem_dim_count;
-    uint32_t elem_shape[8];
+    int32_t elem_shape[8];
+    int is_vector;
+    int vector_dim;
+    uint64_t val_u64;
 };
 
 // -----------------------------------------------------------------------
@@ -410,12 +410,57 @@ EXPORT bool ti_cast_buffer(
             float* d = (float*)dst_ptr;
             for (int i = 0; i < num_elements; ++i) d[i] = (float)s[i] / 65535.0f;
         }
-        
         ti_unmap_memory(rt->runtime(), (TiMemory)src_mem);
         ti_unmap_memory(rt->runtime(), (TiMemory)dst_mem);
         return true;
     }
     return false;
+}
+
+// -----------------------------------------------------------------------
+// Internal Helper for Argument Mapping
+// -----------------------------------------------------------------------
+static void _fill_ti_arg(TiNamedArgument& arg, const DynamicArg& dyn_arg) {
+    arg.name = dyn_arg.name;
+    /*
+    if (dyn_arg.elem_dim_count > 0) {
+        printf("[C++ Engine] Arg %s: type=%d, dtype=%d, dim_count=%d, elem_dim_count=%d, elem_shape[0]=%d\n", 
+               dyn_arg.name, dyn_arg.arg_type, dyn_arg.dtype, dyn_arg.dim_count, dyn_arg.elem_dim_count, dyn_arg.elem_shape[0]);
+    } else {
+        printf("[C++ Engine] Arg %s: type=%d, dtype=%d, dim_count=%d, elem_dim_count=%d\n", 
+               dyn_arg.name, dyn_arg.arg_type, dyn_arg.dtype, dyn_arg.dim_count, dyn_arg.elem_dim_count);
+    }
+    */
+
+    if (dyn_arg.arg_type == 1) { // Scalar
+        if (dyn_arg.dtype == 0) { // f32
+            arg.argument.type = TI_ARGUMENT_TYPE_F32;
+            union { uint64_t u; float f; } converter;
+            converter.u = dyn_arg.val_u64;
+            arg.argument.value.f32 = converter.f;
+        } else { // i32 or others
+            arg.argument.type = TI_ARGUMENT_TYPE_I32;
+            arg.argument.value.i32 = (int32_t)dyn_arg.val_u64;
+        }
+    } else { // NDArray
+        arg.argument.type = TI_ARGUMENT_TYPE_NDARRAY;
+        arg.argument.value.ndarray.memory = (TiMemory)dyn_arg.val_u64;
+        
+        TiDataType ti_dt = TI_DATA_TYPE_F32;
+        if (dyn_arg.dtype == 1) ti_dt = TI_DATA_TYPE_I32;
+        else if (dyn_arg.dtype == 2) ti_dt = TI_DATA_TYPE_U8;
+        else if (dyn_arg.dtype == 3) ti_dt = TI_DATA_TYPE_U16;
+        
+        arg.argument.value.ndarray.elem_type = ti_dt;
+        arg.argument.value.ndarray.shape.dim_count = dyn_arg.dim_count;
+        for (int d = 0; d < dyn_arg.dim_count; d++) {
+            arg.argument.value.ndarray.shape.dims[d] = dyn_arg.shape[d];
+        }
+        arg.argument.value.ndarray.elem_shape.dim_count = dyn_arg.elem_dim_count;
+        for (int d = 0; d < dyn_arg.elem_dim_count; d++) {
+            arg.argument.value.ndarray.elem_shape.dims[d] = dyn_arg.elem_shape[d];
+        }
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -432,53 +477,44 @@ EXPORT void run_aot_graph(
     try {
         std::string gname(graph_name);
         auto it = ctx->graph_cache.find(gname);
-        
-        // If not in cache, create and MOVE into map
         if (it == ctx->graph_cache.end()) {
             ti::ComputeGraph g = ctx->module->get_compute_graph(graph_name);
             it = ctx->graph_cache.emplace(std::move(gname), std::move(g)).first;
         }
-        
-        // Use reference to the cached graph
         ti::ComputeGraph& graph = it->second;
 
         std::vector<TiNamedArgument> ti_args;
         ti_args.reserve(num_args);
-        
         for (int i = 0; i < num_args; i++) {
             TiNamedArgument arg = {};
-            arg.name = args_array[i].name;
-            
-            if (args_array[i].is_ndarray == 0) {
-                arg.argument.type = TI_ARGUMENT_TYPE_I32;
-                arg.argument.value.i32 = args_array[i].val_i32;
-            } else if (args_array[i].is_ndarray == 1) {
-                arg.argument.type = TI_ARGUMENT_TYPE_F32;
-                arg.argument.value.f32 = args_array[i].val_f32;
-            } else if (args_array[i].is_ndarray == 2) {
-                arg.argument.type = TI_ARGUMENT_TYPE_NDARRAY;
-                arg.argument.value.ndarray.memory = args_array[i].ndarray_memory;
-                arg.argument.value.ndarray.elem_type = (TiDataType)args_array[i].elem_type;
-                
-                arg.argument.value.ndarray.shape.dim_count = args_array[i].dim_count;
-                for (int d = 0; d < args_array[i].dim_count; d++) {
-                    arg.argument.value.ndarray.shape.dims[d] = args_array[i].shape[d];
-                }
-                
-                // Debug log
-                printf("[C++ Engine] Arg %s: dim_count=%d, elem_dim_count=%d\n", args_array[i].name, args_array[i].dim_count, args_array[i].elem_dim_count);
-                
-                arg.argument.value.ndarray.elem_shape.dim_count = args_array[i].elem_dim_count;
-                for (int d = 0; d < args_array[i].elem_dim_count; d++) {
-                    arg.argument.value.ndarray.elem_shape.dims[d] = args_array[i].elem_shape[d];
-                }
-            }
+            _fill_ti_arg(arg, args_array[i]);
             ti_args.push_back(arg);
         }
-
+        
+        // Clear any stale errors before launch
+        uint64_t junk_size = 0;
+        ti_get_last_error(&junk_size, nullptr);
+        
         graph.launch(ti_args);
-        // rt->wait(); // Removed for extreme performance!
-    } catch (...) {}
+        
+        // Check for launch errors
+        uint64_t msg_size = 0;
+        ti_get_last_error(&msg_size, nullptr);
+        if (msg_size > 1) { // 1 because sometimes it might be just \0
+            std::vector<char> msg(msg_size);
+            ti_get_last_error(&msg_size, msg.data());
+            if (msg[0] != '\0') {
+                printf("[C++ Engine] ERROR in run_aot_graph launch: %s\n", msg.data());
+            }
+        }
+        fflush(stdout);
+    } catch (const std::exception& e) {
+        printf("[C++ Engine] EXCEPTION in run_aot_graph: %s\n", e.what());
+        fflush(stdout);
+    } catch (...) {
+        printf("[C++ Engine] UNKNOWN EXCEPTION in run_aot_graph\n");
+        fflush(stdout);
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -502,9 +538,10 @@ EXPORT void add_to_pipeline(
     dispatch.arg_names.reserve(num_args);
 
     for (int i = 0; i < num_args; i++) {
-        dispatch.arg_names.push_back(args_array[i].name);
         DynamicArg arg = args_array[i];
-        arg.name = dispatch.arg_names.back().c_str(); // Point to stable memory
+        // Allocate storage for name string to keep it alive
+        dispatch.arg_names.push_back(args_array[i].name);
+        arg.name = dispatch.arg_names.back().c_str();
         dispatch.args.push_back(arg);
     }
     
@@ -512,16 +549,25 @@ EXPORT void add_to_pipeline(
 }
 
 EXPORT void run_pipeline(
-    void* runtime, void* dummy_module_ctx, const char* pipeline_name,
+    void* runtime, const char* pipeline_name,
     uint64_t* old_handles, DynamicArg* new_args, int num_overrides
 ) {
     ti::Runtime* rt = (ti::Runtime*)runtime;
     if (!rt) return;
 
     auto it_pipe = global_pipelines.find(pipeline_name);
-    if (it_pipe == global_pipelines.end()) return;
+    if (it_pipe == global_pipelines.end()) {
+        printf("[C++ Engine] ERROR: Pipeline '%s' not found!\n", pipeline_name);
+        fflush(stdout);
+        return;
+    }
 
     Pipeline& pipe = it_pipe->second;
+    if (pipe.steps.empty()) {
+        printf("[C++ Engine] WARNING: Pipeline '%s' has 0 steps.\n", pipeline_name);
+        fflush(stdout);
+        return;
+    }
 
     try {
         for (auto& step : pipe.steps) {
@@ -540,12 +586,11 @@ EXPORT void run_pipeline(
 
             for (const auto& base_arg : step.args) {
                 TiNamedArgument arg = {};
-                arg.name = base_arg.name;
-
+                
                 // Check for overrides by memory handle identity
                 const DynamicArg* final_arg = &base_arg;
-                if (base_arg.is_ndarray == 2) {
-                    uint64_t current_handle = (uint64_t)base_arg.ndarray_memory;
+                if (base_arg.arg_type == 0) {
+                    uint64_t current_handle = base_arg.val_u64;
                     for (int j = 0; j < num_overrides; j++) {
                         if (old_handles[j] == current_handle) {
                             final_arg = &new_args[j];
@@ -553,32 +598,41 @@ EXPORT void run_pipeline(
                         }
                     }
                 }
-
-                if (final_arg->is_ndarray == 0) {
-                    arg.argument.type = TI_ARGUMENT_TYPE_I32;
-                    arg.argument.value.i32 = final_arg->val_i32;
-                } else if (final_arg->is_ndarray == 1) {
-                    arg.argument.type = TI_ARGUMENT_TYPE_F32;
-                    arg.argument.value.f32 = final_arg->val_f32;
-                } else if (final_arg->is_ndarray == 2) {
-                    arg.argument.type = TI_ARGUMENT_TYPE_NDARRAY;
-                    arg.argument.value.ndarray.memory = final_arg->ndarray_memory;
-                    arg.argument.value.ndarray.elem_type = (TiDataType)final_arg->elem_type;
-                    arg.argument.value.ndarray.shape.dim_count = final_arg->dim_count;
-                    for (int d = 0; d < final_arg->dim_count; d++) {
-                        arg.argument.value.ndarray.shape.dims[d] = final_arg->shape[d];
-                    }
-                    arg.argument.value.ndarray.elem_shape.dim_count = final_arg->elem_dim_count;
-                    for (int d = 0; d < final_arg->elem_dim_count; d++) {
-                        arg.argument.value.ndarray.elem_shape.dims[d] = final_arg->elem_shape[d];
-                    }
-                }
+                _fill_ti_arg(arg, *final_arg);
+                
+                // CRITICAL: Always use the original name from the recorded step.
+                // The override argument from Python might have a generic name like "override".
+                arg.name = base_arg.name;
+                
                 ti_args.push_back(arg);
             }
+
+            // Clear any stale errors before each step
+            uint64_t junk_size = 0;
+            ti_get_last_error(&junk_size, nullptr);
+
             graph.launch(ti_args);
         }
         rt->wait();
-    } catch (...) {}
+        
+        // Check for error once after the whole pipeline
+        uint64_t msg_size = 0;
+        ti_get_last_error(&msg_size, nullptr);
+        if (msg_size > 1) {
+            std::vector<char> msg(msg_size);
+            ti_get_last_error(&msg_size, msg.data());
+            if (msg[0] != '\0') {
+                printf("[C++ Engine] ERROR in pipeline '%s': %s\n", pipeline_name, msg.data());
+            }
+        }
+        fflush(stdout);
+    } catch (const std::exception& e) {
+        printf("[C++ Engine] EXCEPTION in run_pipeline: %s\n", e.what());
+        fflush(stdout);
+    } catch (...) {
+        printf("[C++ Engine] UNKNOWN EXCEPTION in run_pipeline\n");
+        fflush(stdout);
+    }
 }
 
 } // extern "C"

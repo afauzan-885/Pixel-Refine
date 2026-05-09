@@ -31,12 +31,12 @@ def compile_bilinear_tcm(arch=ti.vulkan, save_path="bilinear_vulkan.tcm"):
     g_resize_2d.dispatch(bilinear._bilinear_resize_kernel, src_2d, dst_2d, h_src, w_src, h_dst, w_dst)
     module.add_graph("bilinear_resize_f32_2d", g_resize_2d.compile())
 
-    # 2. Bilinear Resize 3D (Color)
+    # 2. Bilinear Resize 3D (Color / Vector3)
     g_resize_3d = ti.graph.GraphBuilder()
-    src_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=3)
-    dst_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
+    src_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.types.vector(3, ti.f32), ndim=2)
+    dst_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.types.vector(3, ti.f32), ndim=2)
     
-    g_resize_3d.dispatch(bilinear._bilinear_resize_kernel_3d, src_3d, dst_3d, h_src, w_src, h_dst, w_dst)
+    g_resize_3d.dispatch(bilinear._bilinear_resize_kernel_vec3, src_3d, dst_3d, h_src, w_src, h_dst, w_dst)
     module.add_graph("bilinear_resize_f32_3d", g_resize_3d.compile())
 
     # Archive the module

@@ -9,18 +9,13 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm import warp
+from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm import warp_kernels as warp
 
-def compile_warp_tcm():
-    arch_str = os.environ.get("PIXEL_REFINE_AOT_ARCH", "vulkan").lower()
-    arch = ti.vulkan
-    if arch_str == "cuda": arch = ti.cuda
-    elif arch_str == "cpu": arch = ti.x64
-    
+def compile_warp_aot(arch):
     print(f"\n>>> Compiling WARP AOT (f32/i32) for: {arch}")
     ti.init(arch=arch)
     
-    save_dir = os.path.join(os.path.dirname(__file__), "../aot_tcm")
+    save_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../aot_tcm"))
     os.makedirs(save_dir, exist_ok=True)
     suffix = "vulkan"
     if arch == ti.cuda: suffix = "cuda"
@@ -64,6 +59,13 @@ def compile_warp_tcm():
 
     module.archive(save_path)
     print(f"Successfully compiled and archived to: {save_path}")
+    ti.reset()
 
 if __name__ == "__main__":
-    compile_warp_tcm()
+    archs = [ti.vulkan, ti.cuda, ti.x64]
+    for arch in archs:
+        try:
+            compile_warp_aot(arch)
+        except Exception as e:
+            print(f"Failed to compile for {arch}: {e}")
+            ti.reset()

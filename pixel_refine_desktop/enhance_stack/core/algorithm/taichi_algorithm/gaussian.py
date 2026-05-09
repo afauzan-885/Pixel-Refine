@@ -37,9 +37,41 @@ if TAICHI_AVAILABLE:
                     acc1 += (src[y, lx, 1] + src[y, rx, 1]) * wk
                     acc2 += (src[y, lx, 2] + src[y, rx, 2]) * wk
                     total_weight += 2.0 * wk
-            dst[y, x, 0] = acc0 / total_weight
-            dst[y, x, 1] = acc1 / total_weight
             dst[y, x, 2] = acc2 / total_weight
+
+    @ti.func
+    def _gaussian_blur_x_vec3_body(src: ti.template(), dst: ti.template(), h: int, w: int, weights: ti.template(), radius: int):
+        for y, x in ti.ndrange(h, w):
+            acc = ti.Vector([0.0, 0.0, 0.0])
+            total_weight = 0.0
+            w0 = weights[0]
+            acc += src[y, x] * w0
+            total_weight += w0
+            for k in ti.static(range(1, 17)):
+                if k <= radius:
+                    wk = weights[k]
+                    lx = common.reflect_idx(x - k, w)
+                    rx = common.reflect_idx(x + k, w)
+                    acc += (src[y, lx] + src[y, rx]) * wk
+                    total_weight += 2.0 * wk
+            dst[y, x] = acc / total_weight
+
+    @ti.func
+    def _gaussian_blur_y_vec3_body(src: ti.template(), dst: ti.template(), h: int, w: int, weights: ti.template(), radius: int):
+        for y, x in ti.ndrange(h, w):
+            acc = ti.Vector([0.0, 0.0, 0.0])
+            total_weight = 0.0
+            w0 = weights[0]
+            acc += src[y, x] * w0
+            total_weight += w0
+            for k in ti.static(range(1, 17)):
+                if k <= radius:
+                    wk = weights[k]
+                    ty = common.reflect_idx(y - k, h)
+                    by = common.reflect_idx(y + k, h)
+                    acc += (src[ty, x] + src[by, x]) * wk
+                    total_weight += 2.0 * wk
+            dst[y, x] = acc / total_weight
 
     @ti.func
     def _gaussian_blur_y_3ch_body(src: ti.template(), dst: ti.template(), h: int, w: int, weights: ti.template(), radius: int):
@@ -79,6 +111,14 @@ if TAICHI_AVAILABLE:
     @ti.kernel
     def _gaussian_blur_y_3ch_i32_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray(), h: int, w: int, weights: ti.types.ndarray(), radius: int):
         _gaussian_blur_y_3ch_body(src, dst, h, w, weights, radius)
+
+    @ti.kernel
+    def _gaussian_blur_x_vec3_f32_kernel(src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2), dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2), h: int, w: int, weights: ti.types.ndarray(), radius: int):
+        _gaussian_blur_x_vec3_body(src, dst, h, w, weights, radius)
+
+    @ti.kernel
+    def _gaussian_blur_y_vec3_f32_kernel(src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2), dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2), h: int, w: int, weights: ti.types.ndarray(), radius: int):
+        _gaussian_blur_y_vec3_body(src, dst, h, w, weights, radius)
 
     @ti.kernel
     def _gaussian_blur_x_1ch_f32_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray(), h: int, w: int, weights: ti.types.ndarray(), radius: int):

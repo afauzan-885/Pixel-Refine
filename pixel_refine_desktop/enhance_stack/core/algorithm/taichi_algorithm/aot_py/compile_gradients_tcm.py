@@ -21,13 +21,21 @@ def compile_gradients_aot(arch=ti.vulkan, save_path="gradients_vulkan.tcm"):
     h_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
     w_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
 
-    # 1. Sobel
+    # 1. Sobel (Grayscale)
     g_sobel = ti.graph.GraphBuilder()
     src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=2)
     dst_dx = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst_dx", ti.f32, ndim=2)
     dst_dy = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst_dy", ti.f32, ndim=2)
     g_sobel.dispatch(gradients._sobel_kernel, src, dst_dx, dst_dy, h_arg, w_arg)
     module.add_graph("sobel_f32", g_sobel.compile())
+
+    # 1b. Sobel (RGB / Vector3)
+    g_sobel_v3 = ti.graph.GraphBuilder()
+    src_v3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.types.vector(3, ti.f32), ndim=2)
+    dst_dx_v3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst_dx", ti.f32, ndim=2)
+    dst_dy_v3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst_dy", ti.f32, ndim=2)
+    g_sobel_v3.dispatch(gradients._sobel_kernel_vec3, src_v3, dst_dx_v3, dst_dy_v3, h_arg, w_arg)
+    module.add_graph("sobel_vec3_f32", g_sobel_v3.compile())
 
     # 2. Laplacian
     g_laplacian = ti.graph.GraphBuilder()

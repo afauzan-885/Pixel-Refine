@@ -47,10 +47,10 @@ def compile_bicubic_aot(arch=ti.vulkan, save_path="bicubic_interpolation_vulkan.
     )
     module.add_graph("bicubic_resize_f32_2d", g_resize_2d.compile())
 
-    # 2. Graph: Bicubic Resize (RGB / 3D)
+    # 2. Graph: Bicubic Resize (RGB / Vector3)
     g_resize_3d = ti.graph.GraphBuilder()
-    src_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=3)
-    dst_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
+    src_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.types.vector(3, ti.f32), ndim=2)
+    dst_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.types.vector(3, ti.f32), ndim=2)
 
     bicubic.bicubic_resize(
         g=g_resize_3d,
@@ -81,14 +81,14 @@ def compile_bicubic_aot(arch=ti.vulkan, save_path="bicubic_interpolation_vulkan.
     )
     module.add_graph("bicubic_sample_f32_2d", g_sample_2d.compile())
 
-    # 4. Graph: Bicubic Sampling (RGB / 3D)
+    # 4. Graph: Bicubic Sampling (RGB / Vector3)
     g_sample_3d = ti.graph.GraphBuilder()
-    src_s3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=3)
+    src_s3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.types.vector(3, ti.f32), ndim=2)
     coords_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "coords", ti.f32, ndim=2)
-    results_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "results", ti.f32, ndim=2)
+    results_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "results", ti.types.vector(3, ti.f32), ndim=1)
 
     g_sample_3d.dispatch(
-        bicubic._bicubic_sample_kernel_3d,
+        bicubic._bicubic_sample_kernel_vec3,
         src_s3d,
         coords_3d,
         results_3d,
