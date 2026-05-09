@@ -28,7 +28,7 @@ def preprocess_pipeline_gpu(
     # Path relative to: pixel_refine_desktop/enhance_stack/core/algorithm/taichi_algorithm/preprocess.py
     # Goal: pixel_refine_desktop/ui/data/aot_assets
     aot_assets_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../ui/data/aot_assets"))
-    tcm_path = os.path.join(aot_assets_dir, "preprocess_vulkan")
+    tcm_path = os.path.join(aot_assets_dir, "preprocess.tcm")
     mod = engine.load(tcm_path)
     
     # 2. Upload & Cast (AOT expects i32 for src)

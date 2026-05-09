@@ -51,27 +51,49 @@ if TAICHI_AVAILABLE:
         return tm.clamp(res, 0, size - 1)
 
     @ti.func
+    def quantize_subpixel(t: float) -> ti.f32:
+        """OpenCV-compatible coordinate quantization (32 sub-pixel positions)."""
+        return ti.floor(t * 32.0 + 0.5) / 32.0
+
+    @ti.func
     def cubic_hermite_weights(t: float) -> ti.types.vector(4, ti.f32):
         """OpenCV-compatible Bicubic Weights (Catmull-Rom with a=-0.75 for f32)."""
-        t = ti.abs(t)
+        # t is assumed to be in [0, 1)
         w = ti.Vector([0.0, 0.0, 0.0, 0.0])
         a = -0.75
+        
+        # d = distance to neighbor
+        # Neighbors are at index: -1, 0, 1, 2
+        # Distances: t+1, t, 1-t, 2-t
+        
         d = t
-        # p0: |d+1|
+        # d0 = t+1 (range [1, 2])
         x = d + 1.0
         w[0] = a * x**3 - 5.0 * a * x**2 + 8.0 * a * x - 4.0 * a
-        # p1: |d|
+        # d1 = t (range [0, 1])
         x = d
         w[1] = (a + 2.0) * x**3 - (a + 3.0) * x**2 + 1.0
-        # p2: |1-d|
+        # d2 = 1-t (range [0, 1])
         x = 1.0 - d
         w[2] = (a + 2.0) * x**3 - (a + 3.0) * x**2 + 1.0
-        # p3: |2-d|
+        # d3 = 2-t (range [1, 2])
         x = 2.0 - d
         w[3] = a * x**3 - 5.0 * a * x**2 + 8.0 * a * x - 4.0 * a
         
-        # No normalization needed for standard cubic splines as they sum to 1.0
-        return w
+        # Explicit normalization to reach 1e-7+ precision
+        # Even though mathematically they sum to 1, float precision can introduce tiny drifts.
+        s = w[0] + w[1] + w[2] + w[3]
+        return w / s
+
+    @ti.func
+    def reflect_idx_raw(idx: int, size: int) -> int:
+        """OpenCV BORDER_REFLECT implementation (fedcba|abcdefgh|hgfedcb)."""
+        res = idx
+        if res < 0:
+            res = -res - 1
+        if res >= size:
+            res = 2 * size - 1 - res
+        return tm.clamp(res, 0, size - 1)
 
     @ti.func
     def bilinear_at(img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1) -> float:

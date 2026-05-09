@@ -607,15 +607,13 @@ EXPORT void run_pipeline(
                 ti_args.push_back(arg);
             }
 
-            // Clear any stale errors before each step
-            uint64_t junk_size = 0;
-            ti_get_last_error(&junk_size, nullptr);
-
             graph.launch(ti_args);
         }
-        rt->wait();
         
-        // Check for error once after the whole pipeline
+        // Final synchronization is optional, but we'll remove it to allow pipelining.
+        // rt->wait(); 
+        
+        // Check for error once after the whole pipeline launch
         uint64_t msg_size = 0;
         ti_get_last_error(&msg_size, nullptr);
         if (msg_size > 1) {

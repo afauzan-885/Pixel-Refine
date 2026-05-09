@@ -48,14 +48,18 @@ def run_comprehensive_test():
 
     # --- GEOMETRIC & RESIZE ---
 
-    # 1. Bicubic Resize (Upscale)
-    target_size = (w * 2, h * 2)
-    aot_res = taichi_aot.resize(
-        img_rgb, target_size, interpolation=taichi_aot.INTER_CUBIC
+    # 1. Resize (Bicubic) - Non-integer scale to test sub-pixel drift
+    target_w, target_h = int(w * 1.33), int(h * 1.33)
+    aot_bicubic = taichi_aot.resize(
+        img_rgb, (target_w, target_h), interpolation=taichi_aot.INTER_CUBIC
     )
-    cv_res = cv2.resize(img_rgb, target_size, interpolation=cv2.INTER_CUBIC)
+    cv_bicubic = cv2.resize(
+        img_rgb, (target_w, target_h), interpolation=cv2.INTER_CUBIC
+    )
     results.append(
-        print_result("Bicubic Resize (RGB 2x)", np.mean(np.abs(aot_res - cv_res)))
+        print_result(
+            "Bicubic Resize (RGB 1.33x)", np.mean(np.abs(aot_bicubic - cv_bicubic))
+        )
     )
 
     # 2. INTER_AREA Resize (Downscale)
@@ -70,20 +74,25 @@ def run_comprehensive_test():
         )
     )
 
-    # 2b. Bilinear Resize (Upscale)
-    aot_bil = taichi_aot.resize(
-        img_rgb, target_size, interpolation=taichi_aot.INTER_LINEAR
+    # 2b. Bilinear Resize
+    target_size_bilinear = (w * 2, h * 2)
+    aot_bilinear = taichi_aot.resize(
+        img_rgb, target_size_bilinear, interpolation=taichi_aot.INTER_LINEAR
     )
-    cv_bil = cv2.resize(img_rgb, target_size, interpolation=cv2.INTER_LINEAR)
+    cv_bilinear = cv2.resize(
+        img_rgb, target_size_bilinear, interpolation=cv2.INTER_LINEAR
+    )
     results.append(
-        print_result("Bilinear Resize (RGB 2x)", np.mean(np.abs(aot_bil - cv_bil)))
+        print_result(
+            "Bilinear Resize (RGB 2x)", np.mean(np.abs(aot_bilinear - cv_bilinear))
+        )
     )
 
     # 3. Warping (Bicubic)
     M = np.float32([[1, 0, 10.5], [0, 1, -5.2]])  # Sub-pixel shift
     flow = np.zeros((h, w, 2), dtype=np.float32)
-    flow[..., 0] = 10.5
-    flow[..., 1] = -5.2
+    flow[..., 0] = -10.5  # Match OpenCV M13 sign (x_src = x_dst - M13)
+    flow[..., 1] = 5.2  # Match OpenCV M23 sign (y_src = y_dst - M23)
     aot_warp = taichi_aot.warp_image(img_rgb, flow)
     cv_warp = cv2.warpAffine(
         img_rgb, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT
@@ -246,7 +255,9 @@ def run_pipeline_stress_test(engine, img_full):
         img_gpu = engine.upload(test_img_f, is_vector=True)
 
         # Create input placeholder (Vector 3D)
-        p_in = engine.placeholder((h_f, w_f), dtype=np.float32, is_vector=True, vector_dim=3)
+        p_in = engine.placeholder(
+            (h_f, w_f), dtype=np.float32, is_vector=True, vector_dim=3
+        )
 
         with engine.rec_pipeline("master_test_pipeline"):
             # A. Downscale (Bicubic) - Input: RGB (ndim=3)
@@ -275,12 +286,12 @@ def run_pipeline_stress_test(engine, img_full):
                 interpolation=taichi_aot.INTER_CUBIC,
                 return_gpu=True,
             )
-            
+
         print("[Success] Pipeline Recorded successfully.")
 
         # 2. Preparation Phase
         # Stage 2: Benchmark Loop (OBG)
-        n_iters = 2
+        n_iters = 10
         print(
             f"\n[Stage 2] Running {n_iters} iterations of Master Pipeline (One Big Graph)..."
         )
