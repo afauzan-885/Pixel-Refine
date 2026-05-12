@@ -154,7 +154,7 @@ class SpatialFusionProcessor:
         }
 
         if process_in == "gpu" and TAICHI_SPATIAL_AVAILABLE:
-            res = process_in_gpu(merging_backend=merging_backend, **backend_args)
+            res = process_in_gpu(**backend_args)
         else:
             res = process_in_cpu(**backend_args)
 

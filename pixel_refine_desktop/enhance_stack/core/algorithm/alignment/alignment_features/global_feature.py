@@ -1254,6 +1254,8 @@ def normalize_image(image, dtype, out=None):
     return img_float
 
 
+
+
 def calculate_auto_scale(linear_img_float, target_mean=0.25):
     """
     Menghitung scale factor agar rata-rata brightness mendekati target_mean.
@@ -1302,6 +1304,8 @@ def to_gamma_proxy(linear_img, scale=1.0, gamma_pow=2.22, slope=4.5, cutoff=0.01
 
     # Pastikan output float32 valid
     return np.clip(res, 0.0, 1.0).astype(np.float32)
+
+
 
 
 # =========================================================================
@@ -1986,3 +1990,4 @@ def _run_apply_and_save_stage(
             if stop_requested and stop_requested():
                 break
             executor.submit(apply_and_save_task, task)
+

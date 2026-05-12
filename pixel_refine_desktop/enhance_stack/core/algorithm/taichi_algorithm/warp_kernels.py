@@ -84,18 +84,22 @@ def _warp_naked_i32_rgb_aot(src: ti.types.ndarray(dtype=ti.types.vector(3, ti.i3
         u_final, v_final = float(x) + flow[y, x, 0], float(y) + flow[y, x, 1]
         x_int, y_int = int(ti.floor(u_final)), int(ti.floor(v_final))
         dx, dy = u_final - float(x_int), v_final - float(y_int)
-        dx = common.quantize_subpixel(dx)
-        dy = common.quantize_subpixel(dy)
+        
         w_x, w_y = common.cubic_hermite_weights(dx), common.cubic_hermite_weights(dy)
+        
         res = ti.Vector([0.0, 0.0, 0.0])
         for m in ti.static(range(-1, 3)):
             yy = common.reflect_idx_raw(y_int + m, h)
             row_res = ti.Vector([0.0, 0.0, 0.0])
             for n in ti.static(range(-1, 3)):
                 xx = common.reflect_idx_raw(x_int + n, w)
+                # Note: Taichi Vector [0,1,2] maps to memory order. 
+                # For OpenCV BGR, [0]=B, [1]=G, [2]=R. 
+                # We process them as a vector to maintain performance.
                 row_res += ti.cast(src[yy, xx], ti.f32) * w_x[n + 1]
             res += row_res * w_y[m + 1]
-        dst[y, x] = ti.cast(tm.clamp(res, 0.0, 65535.0), ti.i32)
+            
+        dst[y, x] = ti.cast(tm.clamp(res, 0.0, 1048575.0), ti.i32) 
 
 @ti.kernel
 def _warp_guided_f32_rgb_aot(src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2), flow: ti.types.ndarray(dtype=ti.f32, ndim=3), dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2), ref: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2)):

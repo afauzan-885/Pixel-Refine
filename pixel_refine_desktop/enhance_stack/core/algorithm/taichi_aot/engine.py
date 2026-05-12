@@ -124,8 +124,14 @@ def _init_aot_bridge():
         # Add Taichi runtime bin for DLL resolution
         try:
             import taichi as ti
-            ti_bin = os.path.join(os.path.dirname(ti.__file__), "_lib", "c_api", "bin")
+            ti_root = os.path.dirname(ti.__file__)
+            ti_bin = os.path.join(ti_root, "_lib", "c_api", "bin")
             if os.path.exists(ti_bin): os.add_dll_directory(ti_bin)
+            
+            # CRITICAL: Set TI_LIB_DIR for the C++ Engine to find SPIR-V/CUDA runtimes
+            ti_runtime = os.path.join(ti_root, "_lib", "runtime")
+            if os.path.exists(ti_runtime):
+                os.environ["TI_LIB_DIR"] = ti_runtime
         except: pass
 
     try:
@@ -205,19 +211,28 @@ def _init_aot_bridge():
 # GPU Buffer Manager
 # -------------------------------------------------------------------------
 class BufferPool:
+    """Lightweight pool: tracks handles for potential reuse by exact size match."""
     def __init__(self):
-        self.free_buffers = {} # size -> list of handles
+        self.free_buffers = {}  # size -> list of handles
+
     def acquire(self, size):
-        if size in self.free_buffers and self.free_buffers[size]: return self.free_buffers[size].pop()
+        if size in self.free_buffers and self.free_buffers[size]:
+            return self.free_buffers[size].pop()
         return None
-    def release(self, size, handle):
-        if size not in self.free_buffers: self.free_buffers[size] = []
+
+    def store(self, size, handle):
+        """Store a handle for reuse (caller decides if reuse or free)."""
+        if size not in self.free_buffers:
+            self.free_buffers[size] = []
         self.free_buffers[size].append(handle)
+
     def clear(self):
+        """Force-free all pooled handles from VRAM."""
         global _LIB, _RUNTIME
         if _LIB and _RUNTIME:
-            for size, handles in self.free_buffers.items():
-                for h in handles: _LIB.free_gpu_buffer(_RUNTIME, h)
+            for handles in self.free_buffers.values():
+                for h in handles:
+                    _LIB.free_gpu_buffer(_RUNTIME, h)
         self.free_buffers = {}
 
 class TaichiGPUBuffer:
@@ -232,11 +247,17 @@ class TaichiGPUBuffer:
         self.is_owner = is_owner
         self.host_accessible = host_accessible
 
-    def __del__(self):
+    def destroy(self):
+        """Immediately release GPU VRAM. Does NOT use buffer pool reuse."""
         if self.handle is not None and self.is_owner:
-            if self.engine: self.engine.buffer_pool.release(self.size_bytes, self.handle)
-            elif _LIB: _LIB.free_gpu_buffer(_RUNTIME, self.handle)
+            global _LIB, _RUNTIME
+            if _LIB and _RUNTIME:
+                _LIB.free_gpu_buffer(_RUNTIME, self.handle)
             self.handle = None
+            self.is_owner = False
+
+    def __del__(self):
+        self.destroy()
 
     @property
     def nbytes(self): return self.size_bytes
@@ -347,7 +368,13 @@ class AOTEngine:
         size = int(np.prod(shape) * np.dtype(dtype).itemsize)
         v_dim = vector_dim if vector_dim is not None else (shape[-1] if is_vector and len(shape) >= 2 else 1)
         handle = self.buffer_pool.acquire(size) if not host_accessible else None
-        if not handle: handle = _LIB.allocate_gpu_buffer(_RUNTIME, size, 1 if host_accessible else 0)
+        if not handle: 
+            handle = _LIB.allocate_gpu_buffer(_RUNTIME, size, 1 if host_accessible else 0)
+        
+        if handle is None or handle == 0:
+            arch = getattr(self, "_active_arch", "unknown")
+            raise RuntimeError(f"GPU Allocation Failed! (Size: {size} bytes, Arch: {arch}). Runtime is likely NULL.")
+            
         return TaichiGPUBuffer(size, handle, shape, dtype, is_vector, self, host_accessible=host_accessible, vector_dim=v_dim)
 
     def get_staging_buffer(self, shape, dtype):

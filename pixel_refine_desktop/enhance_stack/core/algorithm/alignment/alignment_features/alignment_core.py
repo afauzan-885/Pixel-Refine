@@ -13,12 +13,7 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
-    normalize_image,
-    preprocess_in_python,
-    to_gamma_proxy,
-)
-from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.warp import warp_image_gpu
+# Importers moved into functions to avoid circular dependencies
 
 
 def get_taichi_worker():
@@ -473,6 +468,10 @@ def save_aligned_image(
     if aligned_img is None:
         return
 
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
+        normalize_image,
+    )
+
     # Tangani nilai NaN atau Inf
     aligned_img = np.nan_to_num(aligned_img)
 
@@ -534,69 +533,22 @@ def perform_alignment_gpu(
     stop_requested=None,
     num_alignment_workers=1,
     save_align_image=True,
-    harvest_alignment=False,  # [NEW] Harvest mode toggle
+    harvest_alignment=False,
     progress_start=30,
     progress_end=40,
     return_format: str = "numpy_u16",
     **kwargs,
 ):
     """
-    GPU-accelerated alignment using Taichi libraries.
-    Integrated flow computation + warping in one function.
-
-    Args:
-        images: List of images to align (modified in-place)
-        reference_image_float: Reference image (float32, normalized)
-        work_res_h, work_res_w: Working resolution for alignment
-        tile_h, tile_w: Tile size for optical flow
-        ref_dtype: Original dtype of reference image
-        update_progress: Progress callback
-        stop_requested: Stop flag callback
-        num_alignment_workers: Number of workers (forced to 1 for GPU)
-        save_align_image: Save aligned images to disk
-        progress_start, progress_end: Progress range
-        return_format: Format of aligned frames stored in images[].
-            - "numpy_u16" (default): drain VRAM → RAM as uint16.
-                Best for CPU C++ merging (process_in_cpu).
-            - "numpy_f32": drain VRAM → RAM as float32 [0,1].
-            - "ti_ndarray": keep in VRAM as Taichi ndarray.
-                Best for GPU merging (process_in_gpu + Taichi merging).
-                Caller must release VRAM after use.
-        **kwargs: Additional parameters
-            - is_linear_mode: Linear workflow flag
-            - proxy_scale: Exposure scaling for gamma proxy
-            - use_sharpen: Apply contrast reduction
-            - search_dist: Search distance for optical flow
-
-    Returns:
-        bool: Success status
+    GPU-accelerated alignment using Taichi AOT.
+    Communicates directly with compute_flow (AOT) via AOTEngine.
     """
-    # [MODIFIED] Local import to avoid Taichi initialization in CPU path
-    try:
-        from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_tile.alignment_tile_taichi import (
-            set_reference_hybrid_taichi,
-            compute_alignment_and_warp_hybrid_taichi,
-            clear_taichi_cache,
-            TAICHI_AVAILABLE,
-        )
-
-        taichi_import_error = None
-    except ImportError as e:
-        TAICHI_AVAILABLE = False
-        taichi_import_error = str(e)
-    except Exception as e:
-        TAICHI_AVAILABLE = False
-        taichi_import_error = str(e)
-
-    if not TAICHI_AVAILABLE:
-        error_msg = "Error: Taichi not available for GPU alignment."
-        if taichi_import_error:
-            error_msg += f"\nReason: {taichi_import_error}"
-        print(error_msg)
-        if update_progress:
-            update_progress(0, error_msg)
-        return False
-
+    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.warp import warp_image_gpu
+    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import AOTEngine
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import taichi_bridge
+    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.taichi_worker import ti_thread
+    
+    engine = AOTEngine()
     num_images = len(images)
     if num_images <= 1:
         return True
@@ -635,103 +587,104 @@ def perform_alignment_gpu(
 
     try:
         # Define GPU alignment task
+        # Execute on Taichi worker thread
         def _run_gpu_alignment_loop():
-            # Setup reference on GPU (same thread)
-            set_reference_hybrid_taichi(
-                reference_image_float,
-                work_h=work_res_h,
-                work_w=work_res_w,
-                n_layers=n_layers,
-                is_linear=is_linear_mode,
-                proxy_scale=proxy_scale,
-                use_sharpen=use_sharpen,
+            # 1. Load Alignment Module
+            file_dir = os.path.dirname(os.path.abspath(__file__))
+            tcm_path = os.path.abspath(os.path.join(file_dir, "../../../../../ui/data/aot_assets/compute_flow_vulkan.tcm"))
+            mod = engine.load(tcm_path)
+
+            # 2. Setup Reference Pyramid on GPU (ALLOCATE ONCE)
+            ref_pyramid = taichi_bridge.prepare_reference_for_alignment(
+                reference_image_float, is_linear_mode, proxy_scale, work_res_h, work_res_w
             )
+            
+            # 3. Allocate Flow Buffers (REUSE ONCE)
+            h_w, w_w = work_res_h, work_res_w
+            flow_l0 = engine.allocate((h_w, w_w, 2), dtype=np.float32, is_vector=False)
+            flow_l1 = engine.allocate((h_w // 2, w_w // 2, 2), dtype=np.float32, is_vector=False)
+            flow_l2 = engine.allocate((h_w // 4, w_w // 4, 2), dtype=np.float32, is_vector=False)
 
-            # Process each image
-            for i in range(1, num_images):
-                if stop_requested and stop_requested():
-                    return False
+            try:
+                # 4. Process each image
+                for i in range(1, num_images):
+                    if stop_requested and stop_requested():
+                        break
 
-                # Compute flow + warp (integrated)
-                # Now returns (warped_image, cost_map)
-                result = compute_alignment_and_warp_hybrid_taichi(
-                    images[i],
-                    tile_h,
-                    tile_w,
-                    n_layers,
-                    None,  # ALIGN_LIB not needed for GPU
-                    return_format=return_format,
-                    is_linear=is_linear_mode,
-                    proxy_scale=proxy_scale,
-                    use_sharpen=use_sharpen,
-                    search_dist=search_dist,
-                )
-
-                if result is not None and isinstance(result, tuple):
-                    warped_image, cost_map = result
-                    images[i] = warped_image
-                    cost_maps[i] = cost_map
-
-                    if save_align_image:
-                        save_aligned_image(
-                            warped_image,
-                            i + index_offset,
-                            "GPU",
-                            save_folder=save_folder,
-                            save_prefix=save_prefix,
-                            harvest_mode=harvest_alignment,
-                        )
-                elif result is not None:  # Fallback for old API if needed
-                    warped_image = result
-                    images[i] = warped_image
-                    if save_align_image:
-                        save_aligned_image(
-                            warped_image,
-                            i + index_offset,
-                            "GPU",
-                            save_folder=save_folder,
-                            save_prefix=save_prefix,
-                            harvest_mode=harvest_alignment,
-                        )
-                else:
-                    print(f"Warning: GPU alignment failed for image {i + 1}")
-
-                # Update progress
-                if update_progress:
-                    prog_fraction = i / (num_images - 1)
-                    current_msg_progress = int(
-                        progress_start + prog_fraction * (progress_end - progress_start)
-                    )
-                    update_progress(
-                        current_msg_progress,
-                        f"Alignment gambar {i}/{num_images - 1} (GPU)...",
+                    # A. Prepare Comparison Pyramid (Overwrites comp buffers if reuse logic exists)
+                    comp_pyramid = taichi_bridge.prepare_comparison_for_alignment(
+                        images[i], ref_dtype, is_linear_mode, proxy_scale, work_res_h, work_res_w
                     )
 
-                # Memory management
-                if i % 5 == 0:
+                    # B. Run One Big Graph (End-to-End Alignment)
+                    args = {
+                        'ref_l0': ref_pyramid[0], 'ref_l1': ref_pyramid[1], 'ref_l2': ref_pyramid[2],
+                        'comp_l0': comp_pyramid[0], 'comp_l1': comp_pyramid[1], 'comp_l2': comp_pyramid[2],
+                        'flow_l0': flow_l0, 'flow_l1': flow_l1, 'flow_l2': flow_l2,
+                        'tile_h': int(tile_h), 'tile_w': int(tile_w),
+                        'search_radius': 8, 'scale': 2.0, 'search_dist': int(search_dist),
+                        'downscale': 2
+                    }
+                    mod.run('align_end_to_end_3layer', **args)
+                    engine.sync()
+
+                    # C. Warp Full Resolution Image (Hybrid Approach)
+                    full_h, full_w = images[0].shape[:2]
+                    import pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot as taichi_aot
+                    
+                    # Convert to numpy and clear Python-side large arrays as soon as possible
+                    flow_work_np = flow_l0.to_numpy()
+                    
+                    dx_full = taichi_aot.resize(flow_work_np[:,:,0], (full_w, full_h), interpolation=taichi_aot.INTER_LINEAR)
+                    dy_full = taichi_aot.resize(flow_work_np[:,:,1], (full_w, full_h), interpolation=taichi_aot.INTER_LINEAR)
+                    del flow_work_np
+                    
+                    dx_full *= (float(full_w) / float(w_w))
+                    dy_full *= (float(full_h) / float(h_w))
+                    
+                    dx_full = cv2.GaussianBlur(dx_full, (5, 5), 0)
+                    dy_full = cv2.GaussianBlur(dy_full, (5, 5), 0)
+                    
+                    y, x = np.mgrid[0:full_h, 0:full_w].astype(np.float32)
+                    map_x, map_y = x + dx_full, y + dy_full
+                    del dx_full, dy_full, x, y
+                    images[i] = cv2.remap(images[i], map_x, map_y, cv2.INTER_LINEAR)
+                    del map_x, map_y
+
+                    if save_align_image:
+                        save_aligned_image(images[i], i + index_offset, "GPU_AOT", save_folder=save_folder, save_prefix=save_prefix, harvest_mode=harvest_alignment)
+
+                    # Update progress
+                    if update_progress:
+                        prog_fraction = i / (num_images - 1)
+                        update_progress(int(progress_start + prog_fraction * (progress_end - progress_start)), f"Alignment gambar {i}/{num_images - 1} (GPU)...")
+
+                    # D. Eager Memory Cleanup for Comparison Pyramid
+                    for buf in comp_pyramid:
+                        buf.destroy()
+                    
                     gc.collect()
+                    # Prevent TDR
+                    time.sleep(0.01)
 
-                # Prevent TDR
-                time.sleep(0.05)
+            finally:
+                # 5. EXPLICIT CLEANUP (Destroy all persistent buffers)
+                for buf in ref_pyramid: buf.destroy()
+                flow_l0.destroy(); flow_l1.destroy(); flow_l2.destroy()
+                
+                # [RAM/VRAM OPTIMIZATION] Unload TCM modules and clear pool to reach minimum idle
+                taichi_aot.unload_all_modules()
+                engine.buffer_pool.clear()
+                
+                gc.collect()
 
             return True
 
-        # Execute on Taichi worker thread
         worker = get_taichi_worker()
         success = worker.submit_and_wait(_run_gpu_alignment_loop)
 
-        if not success:
-            return False
-
-        # [SMART LIFECYCLE] Reclaim VRAM after alignment
-        # NOTE: Tidak memanggil clear_taichi_cache() karena bisa memicu
-        # CUDA_ERROR_INVALID_CONTEXT saat cuMemFreeAsync dipanggil setelah
-        # Taichi selesai. Buffer per-frame sudah dibebaskan secara otomatis
-        # dalam loop (_run_gpu_alignment_loop) ketika return_format != "ti_ndarray".
-        # Buffer referensi (ref_img_gpu, ref_work_res) akan ditimpa pada call berikutnya.
-
-        print("✅ GPU Alignment selesai.")
-        return True
+        print("✅ GPU Alignment selesai (VRAM Stabilized).")
+        return success
 
     except Exception as e:
         print(f"Error during GPU alignment: {e}")
@@ -759,6 +712,13 @@ def perform_image_alignment(
     progress_end=40,
     **kwargs,
 ):
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
+        normalize_image,
+        preprocess_in_python,
+        to_gamma_proxy,
+    )
+    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.warp import warp_image_gpu
+
     """
     Menyelaraskan (align) gambar dengan manajemen sumber daya yang aman.
     Supported types: 'raft', 'alignment_tile', 'farneback'
@@ -774,15 +734,22 @@ def perform_image_alignment(
     save_prefix = kwargs.get("save_prefix", None)
     save_folder = kwargs.get("save_folder", "save_align_image")
 
-    # [NEW] Simpan gambar referensi (Frame 00)
-    if save_align_image:
-        save_aligned_image(
-            images[0],
-            0 + index_offset,
-            "REF",
-            save_folder=save_folder,
-            save_prefix=save_prefix,
-            harvest_mode=harvest_alignment,
+    # [GPU-AUTO] Redirect to Taichi AOT GPU if type is alignment_tile
+    # This ensures that high-level pipelines (SimilarityMNFR) automatically use GPU acceleration.
+    if optical_flow_type == "alignment_tile":
+        # print("[Alignment Core] Redirecting to GPU Alignment Pipeline (AOT)...")
+        return perform_alignment_gpu(
+            images,
+            reference_image_float,
+            work_res_h,
+            work_res_w,
+            tile_h,
+            tile_w,
+            ref_dtype,
+            update_progress,
+            stop_requested,
+            search_dist=kwargs.get("search_dist", 2),
+            **kwargs
         )
 
     # --- Preprocessing referensi (CPU MURNI tanpa Taichi) ---
