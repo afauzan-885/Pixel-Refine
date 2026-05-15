@@ -43,7 +43,7 @@ dtype_map = {
 # -------------------------------------------------------------------------
 # Dynamic Argument Population Helper
 # -------------------------------------------------------------------------
-def _populate_dynamic_arg(arg: DynamicArg, name_bytes, value):
+def _populate_dynamic_arg(arg: DynamicArg, name_bytes, value, context_name="Unknown"):
     """Internal helper to fill DynamicArg metadata consistently."""
     arg.name = name_bytes
     
@@ -95,13 +95,17 @@ def _populate_dynamic_arg(arg: DynamicArg, name_bytes, value):
         if hasattr(value, "ptr"):
             arg.arg_type = 0
             arg.val_u64 = value.ptr
-            # Fallback metadata mapping
             arg.dtype = 0 # Assume f32
             arg.dim_count = len(value.shape)
             for d, s in enumerate(value.shape): arg.shape[d] = s
             arg.elem_dim_count = 0
         else:
-            raise TypeError(f"Unsupported argument type for '{key}': {type(value)}")
+            raise TypeError(
+                f"\n[AOTEngine Error] {context_name}: Unsupported object type for argument '{name_str}'.\n"
+                f"  EXPECTED: TaichiGPUBuffer, TaichiPlaceholder, int, or float.\n"
+                f"  ACTUAL  : {type(value)}\n"
+                f"  HINT    : If using NumPy, ensure you upload it via 'InputArray(data)' first."
+            )
 
 # -------------------------------------------------------------------------
 # Global State
@@ -136,6 +140,7 @@ def _init_aot_bridge():
 
     try:
         _LIB = ctypes.CDLL(engine_dll_path)
+        print(f"[AOTEngine] Successfully loaded backend bridge: {os.path.basename(engine_dll_path)}")
     except Exception as e:
         raise RuntimeError(f"Failed to load Generic AOT Engine DLL at {engine_dll_path}\nError: {e}")
 
@@ -205,6 +210,7 @@ def _init_aot_bridge():
     _RUNTIME = _LIB.init_aot_engine(arch_id, device_id)
     if not _RUNTIME:
         raise RuntimeError(f"Failed to initialize {arch_str.upper()} AOT Runtime.")
+    print(f"[AOTEngine] Runtime initialized on '{arch_str.upper()}' (Device {device_id})")
     AOTEngine._active_arch = arch_str
 
 # -------------------------------------------------------------------------
@@ -304,19 +310,31 @@ class AOTModuleWrapper:
     def __del__(self):
         if self.module_ptr: _LIB.destroy_aot_module(self.module_ptr)
     def run(self, graph_name, **kwargs):
+        """Menjalankan grafik Taichi AOT dengan validasi argumen yang informatif."""
         num_args = len(kwargs)
         args_array = (DynamicArg * num_args)()
         # CRITICAL: Keep names alive during the C++ call to prevent dangling pointers
         arg_names = [k.encode('utf-8') for k in kwargs.keys()]
         
         for i, (k, v) in enumerate(kwargs.items()): 
-            _populate_dynamic_arg(args_array[i], arg_names[i], v)
+            try:
+                _populate_dynamic_arg(args_array[i], arg_names[i], v, context_name=graph_name)
+            except Exception as e:
+                # Wrap error with clearer context
+                raise ValueError(f"Failed to prepare argument '{k}' for kernel '{graph_name}':\n{str(e)}")
             
         engine = AOTEngine()
         if engine.current_pipeline:
             _LIB.add_to_pipeline(self.module_ptr, engine.current_pipeline.encode('utf-8'), graph_name.encode('utf-8'), args_array, num_args)
         else:
-            _LIB.run_aot_graph(_RUNTIME, self.module_ptr, graph_name.encode('utf-8'), args_array, num_args)
+            try:
+                _LIB.run_aot_graph(_RUNTIME, self.module_ptr, graph_name.encode('utf-8'), args_array, num_args)
+            except Exception as e:
+                raise RuntimeError(
+                    f"\n[AOTEngine Execution Error] Kernel '{graph_name}' gagal dijalankan!\n"
+                    f"  ERROR: {str(e)}\n"
+                    f"  HINT : Periksa apakah ukuran (shape) dan tipe data input sudah sesuai dengan definisi kernel di C++."
+                )
 
     def _dummy_run(self): pass # For keeping refs if needed
 
@@ -373,8 +391,12 @@ class AOTEngine:
         
         if handle is None or handle == 0:
             arch = getattr(self, "_active_arch", "unknown")
-            raise RuntimeError(f"GPU Allocation Failed! (Size: {size} bytes, Arch: {arch}). Runtime is likely NULL.")
-            
+            raise RuntimeError(
+                f"\n[AOTEngine Memory Error] Failed to allocate {size/1024/1024:.2f} MB on GPU ({arch}).\n"
+                f"  HINT: VRAM might be exhausted. Try calling 'engine.buffer_pool.clear()' or 'gc.collect()' to free idle buffers."
+            )
+        
+        # print(f"[AOTEngine] New VRAM allocation: {size/1024/1024:.2f} MB ({dtype})")
         return TaichiGPUBuffer(size, handle, shape, dtype, is_vector, self, host_accessible=host_accessible, vector_dim=v_dim)
 
     def get_staging_buffer(self, shape, dtype):
@@ -449,7 +471,12 @@ class AOTEngine:
         p = f"{base}_{self._active_arch}{ext}" if os.path.exists(f"{base}_{self._active_arch}{ext}") else path
         if p in self.modules: return self.modules[p]
         ptr = _LIB.load_aot_module(_RUNTIME, p.encode('utf-8'))
-        if not ptr: raise RuntimeError(f"Failed to load TCM: {p}")
+        if not ptr: 
+            raise RuntimeError(
+                f"\n[AOTEngine Load Error] Failed to load TCM module at: {p}\n"
+                f"  HINT: Ensure the .tcm file exists and is compatible with the active GPU backend ({self._active_arch})."
+            )
+        print(f"[AOTEngine] Loaded TCM module: {os.path.basename(p)}")
         self.modules[p] = AOTModuleWrapper(ptr)
         return self.modules[p]
 
