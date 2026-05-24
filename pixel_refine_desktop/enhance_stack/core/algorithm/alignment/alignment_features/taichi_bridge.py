@@ -135,11 +135,23 @@ def prepare_reference_aot(reference_image_float, is_linear_mode, proxy_scale, wo
 
 
 def prepare_frame_aot(img_orig, ref_dtype, is_linear_mode, proxy_scale, work_res_h, work_res_w, ref_image_h, ref_image_w):
-    """Prepare comparison frame on GPU for merging. Returns (curr_full_gpu, curr_work_gray_gpu)."""
+    """Prepare comparison frame on GPU for merging. Returns (curr_full_gpu, curr_work_gray_gpu).
+
+    img_orig can be either a NumPy array or a TaichiGPUBuffer (e.g. when images[i] has already
+    been replaced by the GPU alignment result). In the latter case, upload() returns the same
+    object — we must NOT destroy it since we don't own it.
+    """
+    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import TaichiGPUBuffer
+    input_is_gpu_buf = isinstance(img_orig, TaichiGPUBuffer)
+
     uploaded = taichi_aot.upload(img_orig)
+    # We own 'uploaded' only if upload() actually allocated a new buffer (i.e. img_orig was NumPy)
+    we_own_uploaded = not input_is_gpu_buf
+
     curr_full_gpu = normalize_image_gpu(uploaded, dtype=ref_dtype)
-    if uploaded is not curr_full_gpu:
+    if we_own_uploaded and (uploaded is not curr_full_gpu):
         uploaded.destroy()
+
     if curr_full_gpu.shape[:2] != (ref_image_h, ref_image_w):
         new_full = taichi_aot.resize(curr_full_gpu, (ref_image_w, ref_image_h), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
         curr_full_gpu.destroy()

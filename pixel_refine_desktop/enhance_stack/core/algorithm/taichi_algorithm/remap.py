@@ -1,0 +1,245 @@
+"""Remap (Image Warping) - Taichi GPU"""
+
+import numpy as np
+import taichi as ti
+from .taichi_worker import ti_thread, TAICHI_AVAILABLE
+
+if TAICHI_AVAILABLE:
+    from .common import bilinear_at, bilinear_at_3ch
+
+    @ti.kernel
+    def _smooth_flow_kernel(
+        src: ti.types.ndarray(),
+        dst: ti.types.ndarray(),
+        h: int,
+        w: int,
+        weights: ti.types.ndarray(),
+        radius: int,
+    ):
+        """Separable Gaussian blur pass for a 2-channel flow field (H, W, 2).
+
+        Processes both channels in a single kernel to avoid repeated kernel launches.
+        Used for X-pass and Y-pass separately (call twice: x-pass then y-pass).
+        This is the X-pass variant: blurs along the column axis.
+        """
+        for r, c, ch in ti.ndrange(h, w, 2):
+            acc = 0.0
+            w_sum = 0.0
+            for k in range(-radius, radius + 1):
+                cc = ti.min(ti.max(c + k, 0), w - 1)
+                wk = weights[k + radius]
+                acc += src[r, cc, ch] * wk
+                w_sum += wk
+            dst[r, c, ch] = acc / (w_sum + 1e-12)
+
+    @ti.kernel
+    def _smooth_flow_y_kernel(
+        src: ti.types.ndarray(),
+        dst: ti.types.ndarray(),
+        h: int,
+        w: int,
+        weights: ti.types.ndarray(),
+        radius: int,
+    ):
+        """Y-pass Gaussian blur for 2-channel flow field (H, W, 2)."""
+        for r, c, ch in ti.ndrange(h, w, 2):
+            acc = 0.0
+            w_sum = 0.0
+            for k in range(-radius, radius + 1):
+                rr = ti.min(ti.max(r + k, 0), h - 1)
+                wk = weights[k + radius]
+                acc += src[rr, c, ch] * wk
+                w_sum += wk
+            dst[r, c, ch] = acc / (w_sum + 1e-12)
+
+    @ti.kernel
+    def _build_flow_maps_from_2ch_kernel(
+        flow: ti.types.ndarray(),
+        map_x: ti.types.ndarray(),
+        map_y: ti.types.ndarray(),
+        h_flow: int,
+        w_flow: int,
+        h_dst: int,
+        w_dst: int,
+        scale_x: float,
+        scale_y: float,
+    ):
+        """Build map_x and map_y from a smoothed 2-channel flow field (H_flow, W_flow, 2).
+
+        Combines bilinear upsampling, scale, and identity grid offset in one pass.
+        Avoids extracting individual channels from the flow field.
+
+        Channel 0 = dx (horizontal displacement)
+        Channel 1 = dy (vertical displacement)
+        """
+        for r, c in ti.ndrange(h_dst, w_dst):
+            # Map full-res pixel to flow-space coordinates
+            fx = float(c) * float(w_flow - 1) / float(w_dst - 1)
+            fy = float(r) * float(h_flow - 1) / float(h_dst - 1)
+
+            # Bilinear sample each channel from the 3D flow tensor
+            sampled_dx = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 0)
+            sampled_dy = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 1)
+
+            map_x[r, c] = float(c) + sampled_dx * scale_x
+            map_y[r, c] = float(r) + sampled_dy * scale_y
+
+    @ti.kernel
+    def _build_flow_maps_kernel(
+        dx: ti.types.ndarray(),
+        dy: ti.types.ndarray(),
+        map_x: ti.types.ndarray(),
+        map_y: ti.types.ndarray(),
+        h_flow: int,
+        w_flow: int,
+        h_dst: int,
+        w_dst: int,
+        scale_x: float,
+        scale_y: float,
+    ):
+        """Build map_x and map_y from separate low-res dx/dy flow channels (2D each).
+
+        Performs bilinear upsample of the flow field to (h_dst, w_dst),
+        scales the displacement vectors, and adds the identity grid
+        (pixel coordinates) — all in a single GPU pass.
+        """
+        for r, c in ti.ndrange(h_dst, w_dst):
+            # Normalized flow coordinates (maps full-res pixel to flow space)
+            fx = float(c) * float(w_flow - 1) / float(w_dst - 1)
+            fy = float(r) * float(h_flow - 1) / float(h_dst - 1)
+
+            # Bilinear sample the low-res flow
+            sampled_dx = bilinear_at(dx, fx, fy, h_flow, w_flow)
+            sampled_dy = bilinear_at(dy, fx, fy, h_flow, w_flow)
+
+            # Scale and add identity grid offset
+            map_x[r, c] = float(c) + sampled_dx * scale_x
+            map_y[r, c] = float(r) + sampled_dy * scale_y
+
+    @ti.kernel
+    def _remap_kernel(
+        src: ti.types.ndarray(),
+        map_x: ti.types.ndarray(),
+        map_y: ti.types.ndarray(),
+        dst: ti.types.ndarray(),
+        h_src: int,
+        w_src: int,
+        h_dst: int,
+        w_dst: int,
+    ):
+        for r, c in ti.ndrange(h_dst, w_dst):
+            dst[r, c] = bilinear_at(src, map_x[r, c], map_y[r, c], h_src, w_src)
+
+    @ti.kernel
+    def _remap_kernel_3d(
+        src: ti.types.ndarray(),
+        map_x: ti.types.ndarray(),
+        map_y: ti.types.ndarray(),
+        dst: ti.types.ndarray(),
+        h_src: int,
+        w_src: int,
+        h_dst: int,
+        w_dst: int,
+    ):
+        for r, c, ch in ti.ndrange(h_dst, w_dst, dst.shape[2]):
+            dst[r, c, ch] = bilinear_at_3ch(src, map_x[r, c], map_y[r, c], h_src, w_src, ch)
+
+    @ti.kernel
+    def _remap_kernel_vec3(
+        src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        map_x: ti.types.ndarray(),
+        map_y: ti.types.ndarray(),
+        dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        h_src: int,
+        w_src: int,
+        h_dst: int,
+        w_dst: int,
+    ):
+        for r, c in ti.ndrange(h_dst, w_dst):
+            dst[r, c] = bilinear_at(src, map_x[r, c], map_y[r, c], h_src, w_src)
+
+
+def remap(src, map_x, map_y, dst=None, buffer_provider="pool"):
+    """
+    GPU-accelerated Remap (Warping) API.
+    Interpolates input src using coordinate maps map_x and map_y.
+
+    All Taichi operations are synchronized via @ti_thread.
+
+    Args:
+        src: Input image - can be NumPy array OR Taichi ndarray. (H, W) or (H, W, C)
+        map_x: Coordinate map for X coordinates - NumPy array OR Taichi ndarray. (H_dst, W_dst)
+        map_y: Coordinate map for Y coordinates - NumPy array OR Taichi ndarray. (H_dst, W_dst)
+        dst: Optional pre-allocated output buffer.
+        buffer_provider: Optional buffer pool provider ("pool" or None).
+
+    Returns:
+        Warped image in the same format as input (NumPy or Taichi).
+    """
+    import os
+    if os.environ.get("PIXEL_REFINE_AOT_MODE") == "1":
+        from .common import _get_aot
+        aot = _get_aot()
+        if aot and hasattr(aot, "remap"):
+            is_taichi = hasattr(src, "to_numpy") or hasattr(map_x, "to_numpy") or hasattr(map_y, "to_numpy")
+            res_buf = aot.remap(src, map_x, map_y, return_gpu=is_taichi)
+            if dst is not None:
+                if is_taichi:
+                    from .common import copy_field
+                    copy_field(res_buf, dst)
+                else:
+                    dst[:] = res_buf
+                return dst
+            return res_buf
+
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
+
+    from .common import get_temp_buffer, release_temp_buffer, ensure_taichi_field
+
+    is_taichi_input = hasattr(src, "to_numpy") or hasattr(map_x, "to_numpy") or hasattr(map_y, "to_numpy")
+
+    @ti_thread
+    def _run_gpu_remap(src_data, mx_data, my_data, dst_data=None):
+        src_gpu, src_is_temp = ensure_taichi_field(src_data, dtype=ti.f32, buffer_provider=buffer_provider)
+        mx_gpu, mx_is_temp = ensure_taichi_field(mx_data, dtype=ti.f32, buffer_provider=buffer_provider)
+        my_gpu, my_is_temp = ensure_taichi_field(my_data, dtype=ti.f32, buffer_provider=buffer_provider)
+
+        h_src, w_src = src_gpu.shape[:2]
+        h_dst, w_dst = mx_gpu.shape[:2]
+        is_3d = len(src_gpu.shape) == 3
+        c_count = src_gpu.shape[2] if is_3d else 1
+
+        # Determine output buffer
+        if dst_data is None:
+            out_shape = (h_dst, w_dst, c_count) if is_3d else (h_dst, w_dst)
+            dst_gpu = get_temp_buffer(out_shape, ti.f32, buffer_provider)
+        else:
+            dst_gpu, _ = ensure_taichi_field(dst_data, dtype=ti.f32, buffer_provider=buffer_provider)
+
+        # Run kernel
+        if is_3d:
+            _remap_kernel_3d(src_gpu, mx_gpu, my_gpu, dst_gpu, h_src, w_src, h_dst, w_dst)
+        else:
+            _remap_kernel(src_gpu, mx_gpu, my_gpu, dst_gpu, h_src, w_src, h_dst, w_dst)
+
+        # Cleanup temps
+        if src_is_temp:
+            release_temp_buffer(src_gpu)
+        if mx_is_temp:
+            release_temp_buffer(mx_gpu)
+        if my_is_temp:
+            release_temp_buffer(my_gpu)
+
+        # Download if input was NumPy
+        if not is_taichi_input:
+            res = dst_gpu.to_numpy()
+            release_temp_buffer(dst_gpu)
+            if dst_data is not None:
+                dst_data[:] = res
+                return dst_data
+            return res
+
+        return dst_gpu
+
+    return _run_gpu_remap(src, map_x, map_y, dst)

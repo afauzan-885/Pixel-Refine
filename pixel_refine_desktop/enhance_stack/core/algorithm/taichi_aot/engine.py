@@ -446,6 +446,11 @@ class AOTEngine:
 
     def upload(self, data, is_vector=False, vector_dim=3):
         _init_aot_bridge()
+
+        # Short-circuit: if already a TaichiGPUBuffer, return as-is (zero-copy passthrough)
+        if isinstance(data, TaichiGPUBuffer):
+            return data
+
         ext_type = self._is_external_gpu_obj(data)
         
         # Auto-detect Vector Fields (RGB=3, Flow=2)
@@ -465,6 +470,7 @@ class AOTEngine:
         buf = self.allocate(arr.shape, arr.dtype, is_vector=is_vector, host_accessible=True, vector_dim=vector_dim)
         _LIB.write_to_gpu_buffer(_RUNTIME, buf.handle, arr.ctypes.data, buf.nbytes)
         return buf
+
 
     def load(self, path):
         base, ext = os.path.splitext(path)

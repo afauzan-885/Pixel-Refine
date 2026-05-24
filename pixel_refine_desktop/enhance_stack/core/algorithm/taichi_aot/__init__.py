@@ -334,8 +334,23 @@ def box_filter(src, kernel_size=3, return_gpu=False):
     return dst_buf if return_gpu else dst_buf.to_numpy()
 
 
-def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False):
-    """AOT Implementation of Gaussian Blur."""
+def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False, dst=None):
+    """AOT Implementation of Gaussian Blur.
+
+    Supports:
+      - 2D single-channel (H, W)              -> uses gaussian_blur_x/y_1ch_f32
+      - 3D scalar (H, W, 3)                   -> uses gaussian_blur_x/y_3ch_f32
+      - 3D vector field (H, W) is_vector=True -> uses gaussian_blur_x/y_vec3_f32
+
+    Args:
+        src:         Input buffer (TaichiGPUBuffer or np.ndarray).
+        sigma:       Gaussian standard deviation.
+        kernel_size: Kernel size (must be odd). Auto-computed from sigma if None.
+        return_gpu:  If True, returns TaichiGPUBuffer; otherwise returns np.ndarray.
+        dst:         Optional pre-allocated TaichiGPUBuffer to reuse (same shape as src).
+                     When provided, output is written directly into this buffer
+                     and the same buffer is returned, saving a VRAM allocation.
+    """
     src_buf = InputArray(src)
 
     if kernel_size is None or kernel_size <= 0:
@@ -343,7 +358,7 @@ def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False):
     radius = kernel_size // 2
     h, w = src_buf.shape[:2]
     is_vec = getattr(src_buf, "is_vector", False)
-    is_3d = len(src_buf.shape) == 3
+    is_2d = (len(src_buf.shape) == 2) and not is_vec
 
     from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.gaussian import (
         compute_gaussian_weights,
@@ -352,11 +367,25 @@ def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False):
     weights_np = compute_gaussian_weights(sigma, radius).astype(np.float32)
     weights_buf = InputArray(weights_np)
 
+    # Intermediate buffer (always freshly allocated — must be separate from src)
     tmp_buf = OutputArray(src_buf.shape, dtype=src_buf.dtype, is_vector=is_vec)
-    dst_buf = OutputArray(src_buf.shape, dtype=src_buf.dtype, is_vector=is_vec)
 
-    target_x = "gaussian_blur_x_vec3_f32" if is_vec else "gaussian_blur_x_3ch_f32"
-    target_y = "gaussian_blur_y_vec3_f32" if is_vec else "gaussian_blur_y_3ch_f32"
+    # Output: reuse caller-supplied dst if shape and dtype match, otherwise allocate
+    if dst is not None and dst.shape == src_buf.shape and dst.dtype == src_buf.dtype:
+        dst_buf = dst
+    else:
+        dst_buf = OutputArray(src_buf.shape, dtype=src_buf.dtype, is_vector=is_vec)
+
+    if is_2d:
+        # Single-channel 2D path
+        target_x = "gaussian_blur_x_1ch_f32"
+        target_y = "gaussian_blur_y_1ch_f32"
+    elif is_vec:
+        target_x = "gaussian_blur_x_vec3_f32"
+        target_y = "gaussian_blur_y_vec3_f32"
+    else:
+        target_x = "gaussian_blur_x_3ch_f32"
+        target_y = "gaussian_blur_y_3ch_f32"
 
     _mod("gaussian").run(
         target_x, src=src_buf, dst=tmp_buf, h=h, w=w, weights=weights_buf, radius=radius
@@ -367,6 +396,7 @@ def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False):
 
     del tmp_buf, weights_buf
     return dst_buf if return_gpu else dst_buf.to_numpy()
+
 
 
 def image_pyramid(src, levels=4, return_gpu=False):
@@ -1091,3 +1121,207 @@ def phase_correlation(ref, comp, use_hanning=True):
 
     del f_complex, g_complex, r_complex, corr_buf
     return float(dx), float(dy), float(peak_val)
+
+
+def remap(src, map_x, map_y, return_gpu=False):
+    """Taichi AOT Remap (OpenCV Parity API)"""
+    orig_dtype = None
+    if isinstance(src, np.ndarray) and src.dtype != np.float32:
+        orig_dtype = src.dtype
+        src_cast = src.astype(np.float32)
+    elif hasattr(src, "dtype") and src.dtype != np.float32:
+        orig_dtype = src.dtype
+        src_cast = src.cast(np.float32)
+    else:
+        src_cast = src
+
+    src_buf = InputArray(src_cast)
+    mx_buf = InputArray(map_x)
+    my_buf = InputArray(map_y)
+
+    h_src, w_src = src_buf.shape[:2]
+    h_dst, w_dst = mx_buf.shape[:2]
+    is_3d = len(src_buf.shape) == 3
+
+    if is_3d:
+        src_v = src_buf if getattr(src_buf, "is_vector", False) else src_buf.view_as_vector(True)
+        v_dim = src_v.vector_dim
+        dst_shape = (h_dst, w_dst, v_dim)
+        is_vec = True
+    else:
+        src_v = src_buf
+        v_dim = 1
+        dst_shape = (h_dst, w_dst)
+        is_vec = False
+
+    dst_buf = OutputArray(dst_shape, dtype=src_buf.dtype, is_vector=is_vec, vector_dim=v_dim)
+
+    graph_name = "remap_f32_3d" if is_vec else "remap_f32_2d"
+    _mod("remap").run(
+        graph_name,
+        src=src_v,
+        map_x=mx_buf,
+        map_y=my_buf,
+        dst=dst_buf,
+        h_src=h_src,
+        w_src=w_src,
+        h_dst=h_dst,
+        w_dst=w_dst,
+    )
+
+    if src_cast is not src and hasattr(src_cast, "destroy"):
+        src_cast.destroy()
+
+    res = dst_buf if return_gpu else dst_buf.to_numpy()
+
+    if orig_dtype is not None:
+        if return_gpu:
+            res_cast = res.cast(orig_dtype)
+            res.destroy()
+            res = res_cast
+        else:
+            if np.issubdtype(orig_dtype, np.integer):
+                res = np.clip(res, np.iinfo(orig_dtype).min, np.iinfo(orig_dtype).max)
+            res = res.astype(orig_dtype)
+
+    return res
+
+
+def smooth_flow_gpu(flow, sigma=1.0, kernel_size=5, dst=None):
+    """Gaussian blur a 2-channel flow field (H, W, 2) entirely on GPU.
+
+    Uses the fused smooth_flow_x / smooth_flow_y graphs compiled into remap.tcm.
+    Both channels are processed simultaneously in a single kernel launch per pass,
+    making this significantly faster than calling gaussian_blur twice on separate channels.
+
+    Args:
+        flow:        TaichiGPUBuffer (H, W, 2) — the raw flow field.
+        sigma:       Gaussian standard deviation.
+        kernel_size: Filter kernel size (must be odd). Auto-computed from sigma if <= 0.
+        dst:         Optional pre-allocated TaichiGPUBuffer (H, W, 2) to reuse as output.
+                     If None or incompatible, a new buffer is allocated.
+
+    Returns:
+        TaichiGPUBuffer (H, W, 2) — smoothed flow. Caller must destroy when done.
+    """
+    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.gaussian import (
+        compute_gaussian_weights,
+    )
+
+    if kernel_size is None or kernel_size <= 0:
+        kernel_size = int(np.ceil(3 * sigma)) * 2 + 1
+    radius = kernel_size // 2
+
+    weights_np = compute_gaussian_weights(sigma, radius).astype(np.float32)
+    weights_buf = InputArray(weights_np)
+
+    h, w = int(flow.shape[0]), int(flow.shape[1])
+
+    # Intermediate buffer for x-pass output (always new — cannot alias src)
+    tmp_buf = engine.allocate((h, w, 2), dtype=np.float32)
+
+    # Output buffer: reuse if compatible
+    if dst is not None and dst.shape == (h, w, 2) and dst.dtype == np.float32:
+        out_buf = dst
+    else:
+        out_buf = engine.allocate((h, w, 2), dtype=np.float32)
+
+    _mod("remap").run(
+        "smooth_flow_x",
+        src=flow, dst=tmp_buf,
+        h=h, w=w, weights=weights_buf, radius=radius,
+    )
+    _mod("remap").run(
+        "smooth_flow_y",
+        src=tmp_buf, dst=out_buf,
+        h=h, w=w, weights=weights_buf, radius=radius,
+    )
+
+    tmp_buf.destroy()
+    del weights_buf
+    return out_buf
+
+
+def build_flow_maps(flow_or_dx, flow_or_dy_or_h, full_h_or_w=None, full_w=None,
+                    scale_x=None, scale_y=None, map_x_buf=None, map_y_buf=None):
+    """Build remap coordinate maps from a flow field — fully on GPU.
+
+    Two calling conventions:
+      1. 2-channel flow tensor:
+         build_flow_maps(flow_2ch, full_h, full_w, ...)
+         where flow_2ch is TaichiGPUBuffer (H_flow, W_flow, 2).
+
+      2. Separate dx/dy tensors (legacy):
+         build_flow_maps(dx, dy, full_h, full_w, ...)
+         where dx and dy are TaichiGPUBuffer (H_flow, W_flow).
+
+    Args:
+        flow_or_dx:         2-channel flow buffer OR dx buffer.
+        flow_or_dy_or_h:    full_h (int) if 2ch convention, OR dy buffer if separate.
+        full_h_or_w:        full_w (int) if 2ch convention, OR full_h (int) if separate.
+        full_w:             full_w (int) only when using separate dx/dy convention.
+        scale_x:            Horizontal scale factor. Auto-computed if None.
+        scale_y:            Vertical scale factor. Auto-computed if None.
+        map_x_buf:          Optional pre-allocated output buffer (full_h, full_w) to reuse.
+        map_y_buf:          Optional pre-allocated output buffer (full_h, full_w) to reuse.
+
+    Returns:
+        (map_x_buf, map_y_buf): TaichiGPUBuffer (full_h, full_w) each.
+    """
+    # Detect calling convention
+    if isinstance(flow_or_dy_or_h, int):
+        # Convention 1: build_flow_maps(flow_2ch, full_h, full_w, ...)
+        flow_buf  = InputArray(flow_or_dx)
+        _full_h   = int(flow_or_dy_or_h)
+        _full_w   = int(full_h_or_w)
+        h_flow    = int(flow_buf.shape[0])
+        w_flow    = int(flow_buf.shape[1])
+
+        if scale_x is None:
+            scale_x = float(_full_w) / float(w_flow)
+        if scale_y is None:
+            scale_y = float(_full_h) / float(h_flow)
+
+        out_shape = (_full_h, _full_w)
+        if map_x_buf is None or map_x_buf.shape != out_shape or map_x_buf.dtype != np.float32:
+            map_x_buf = engine.allocate(out_shape, dtype=np.float32)
+        if map_y_buf is None or map_y_buf.shape != out_shape or map_y_buf.dtype != np.float32:
+            map_y_buf = engine.allocate(out_shape, dtype=np.float32)
+
+        _mod("remap").run(
+            "build_flow_maps_from_2ch",
+            flow=flow_buf, map_x=map_x_buf, map_y=map_y_buf,
+            h_flow=h_flow, w_flow=w_flow,
+            h_dst=_full_h, w_dst=_full_w,
+            scale_x=float(scale_x), scale_y=float(scale_y),
+        )
+    else:
+        # Convention 2: build_flow_maps(dx, dy, full_h, full_w, ...)
+        dx_buf  = InputArray(flow_or_dx)
+        dy_buf  = InputArray(flow_or_dy_or_h)
+        _full_h = int(full_h_or_w)
+        _full_w = int(full_w)
+        h_flow  = int(dx_buf.shape[0])
+        w_flow  = int(dx_buf.shape[1])
+
+        if scale_x is None:
+            scale_x = float(_full_w) / float(w_flow)
+        if scale_y is None:
+            scale_y = float(_full_h) / float(h_flow)
+
+        out_shape = (_full_h, _full_w)
+        if map_x_buf is None or map_x_buf.shape != out_shape or map_x_buf.dtype != np.float32:
+            map_x_buf = engine.allocate(out_shape, dtype=np.float32)
+        if map_y_buf is None or map_y_buf.shape != out_shape or map_y_buf.dtype != np.float32:
+            map_y_buf = engine.allocate(out_shape, dtype=np.float32)
+
+        _mod("remap").run(
+            "build_flow_maps",
+            dx=dx_buf, dy=dy_buf, map_x=map_x_buf, map_y=map_y_buf,
+            h_flow=h_flow, w_flow=w_flow,
+            h_dst=_full_h, w_dst=_full_w,
+            scale_x=float(scale_x), scale_y=float(scale_y),
+        )
+
+    return map_x_buf, map_y_buf
+

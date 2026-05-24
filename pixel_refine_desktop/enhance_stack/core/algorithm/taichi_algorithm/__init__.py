@@ -35,6 +35,7 @@ from .pyramid import build_image_pyramid, build_image_pyramid_gpu, upsample_flow
 from .phase_correlation import phase_correlation
 from .fft import fft2, ifft2
 from .ncc import zncc, match_template, global_translate_zncc
+from .remap import remap
 
 # --- Constants ---
 INTER_LINEAR = 1
@@ -289,6 +290,7 @@ __all__ = [
     "ransac",
     "cvtColor",
     "absdiff",
+    "remap",
     # Pyramid APIs
     "build_image_pyramid",
     "build_image_pyramid_gpu",
