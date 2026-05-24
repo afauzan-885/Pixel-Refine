@@ -14,6 +14,8 @@ Using 512x512 resized version for accuracy tests.
 [PASS] INTER_AREA Resize (RGB 0.25x)       | MAE:   0.000000 | Limit: 0.5
 [AOTEngine] Loaded TCM module: bilinear_vulkan.tcm
 [PASS] Bilinear Resize (RGB 2x)            | MAE:   0.000000 | Limit: 0.5
+[TaichiWorker] Using project-level cache at: e:/APP Developer/Pixel Refine/taichi_cache
+[TaichiWorker] AOT Compilation Mode Detected: Disabled JIT Worker and Cache Envs.
 [AOTEngine] Loaded TCM module: gaussian_vulkan.tcm
 [PASS] Gaussian Blur (RGB, sigma=1.5)      | MAE:   0.000100 | Limit: 0.5
 [AOTEngine] Loaded TCM module: box_filter_vulkan.tcm
@@ -58,12 +60,12 @@ Resolution: 3016x3016 (9.1 MP)
 ======================================================================
 Method                    | Latency (ms)    | FPS       
 -------------------------------------------------------
-Master Pipeline (OBG)     | 203.71          | 4.91      
-Standard Dispatch         | 356.26          | 2.81      
+Master Pipeline (OBG)     | 274.87          | 3.64      
+Standard Dispatch         | 317.14          | 3.15      
 -------------------------------------------------------
 
->>> Speedup using Master Pipeline: 42.82% faster
->>> Overhead Reduced: 152.54 ms per frame
+>>> Speedup using Master Pipeline: 13.33% faster
+>>> Overhead Reduced: 42.26 ms per frame
 
 ======================================================================
  FINAL VERDICT

@@ -425,3 +425,201 @@ def compile_spatial_tcm():
 
 if __name__ == "__main__":
     compile_spatial_tcm()
+
+
+# -------------------------------------------------------------------------
+# AOT Runtime Wrappers
+# -------------------------------------------------------------------------
+def generate_spatial_weights_taichi(
+    current_image,
+    reference_image,
+    weight_map_sum,
+    base_window,
+    stability_map,
+    row_starts,
+    col_starts,
+    tile_h,
+    tile_w,
+    noise_sigma,
+    motion_sensitivity,
+    noise_offset_factor,
+    equalize_brightness,
+    buffer_provider,
+    **kwargs,
+):
+    """
+    Calculates the weight map for a single frame relative to the reference using Taichi AOT.
+    """
+    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import AOTEngine
+    import pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot as taichi_aot
+    engine = AOTEngine()
+
+    # Load Module
+    file_dir = os.path.dirname(os.path.abspath(__file__))
+    cur = os.path.abspath(file_dir)
+    while os.path.basename(cur) != "pixel_refine_desktop" and len(cur) > 4:
+        cur = os.path.dirname(cur)
+    tcm_path = os.path.abspath(os.path.join(cur, "ui/data/aot_assets/spatial_vulkan.tcm"))
+    mod = engine.load(tcm_path)
+
+    # 1. Reset weight map sum to 0
+    zeros = np.zeros(weight_map_sum.shape, dtype=np.float32)
+    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import _LIB, _RUNTIME
+    _LIB.write_to_gpu_buffer(_RUNTIME, weight_map_sum.handle, zeros.ctypes.data, weight_map_sum.size_bytes)
+
+    h, w = current_image.shape[0], current_image.shape[1]
+
+    # 2. Brightness Equalization (Optional)
+    analysis_input = current_image
+    eq_temp = None
+    if equalize_brightness:
+        eq_temp = engine.allocate((h, w), dtype=np.float32)
+        mod.run("equalize_brightness", src=current_image, ref=reference_image, dst=eq_temp, h=int(h), w=int(w))
+        analysis_input = eq_temp
+
+    # 3. Phase 1: Coarse Analysis for Guidance Map (Level 2: 1/4 Resolution)
+    # Downscale in two steps (L0 -> L1 -> L2) to prevent aliasing
+    curr_l0 = analysis_input
+    curr_l1 = taichi_aot.resize(curr_l0, (w // 2, h // 2), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+    curr_l2 = taichi_aot.resize(curr_l1, (w // 4, h // 4), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+
+    ref_l0 = reference_image
+    ref_l1 = taichi_aot.resize(ref_l0, (w // 2, h // 2), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+    ref_l2 = taichi_aot.resize(ref_l1, (w // 4, h // 4), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+
+    guidance_gpu = None
+    level_conf_gpu = None
+
+    try:
+        # Run coarse analysis ONLY at the coarsest level (Level 2) to match C++
+        curr_level = curr_l2
+        ref_level = ref_l2
+
+        h_level, w_level = curr_level.shape[0], curr_level.shape[1]
+
+        scale_factor = h_level / h
+        level_tile_h = max(8, int(tile_h * scale_factor))
+        level_tile_w = max(8, int(tile_w * scale_factor))
+
+        num_tiles_h = max(1, h_level // level_tile_h)
+        num_tiles_w = max(1, w_level // level_tile_w)
+
+        level_conf_gpu = engine.allocate((num_tiles_h, num_tiles_w), dtype=np.float32)
+
+        mod.run(
+            "phase1_coarse_analysis",
+            current_coarse=curr_level,
+            reference_coarse=ref_level,
+            coarse_confidence=level_conf_gpu,
+            coarse_tile_h=int(level_tile_h),
+            coarse_tile_w=int(level_tile_w),
+            h_coarse=int(h_level),
+            w_coarse=int(w_level),
+            noise_sigma=float(noise_sigma),
+            motion_sensitivity=float(motion_sensitivity),
+            noise_offset_factor=float(noise_offset_factor),
+        )
+
+        # Upsample coarse tile grid to Level 2 resolution
+        guidance_gpu = taichi_aot.resize(
+            level_conf_gpu,
+            (w_level, h_level),
+            interpolation=taichi_aot.INTER_CUBIC,
+            return_gpu=True,
+        )
+
+        # Final upsample from Level 2 resolution to full resolution
+        if guidance_gpu is not None and (
+            guidance_gpu.shape[0] != h or guidance_gpu.shape[1] != w
+        ):
+            final_guidance = taichi_aot.resize(
+                guidance_gpu, (w, h), interpolation=taichi_aot.INTER_CUBIC, return_gpu=True
+            )
+            guidance_gpu.destroy()
+            guidance_gpu = final_guidance
+
+    finally:
+        # Cleanup pyramids and temp buffers
+        curr_l1.destroy()
+        curr_l2.destroy()
+        ref_l1.destroy()
+        ref_l2.destroy()
+        if level_conf_gpu is not None:
+            level_conf_gpu.destroy()
+
+    # 4. Phase 2: Fine Analysis (Sliding Window MAD)
+    use_stability = 1 if stability_map is not None else 0
+    dummy_gpu = None
+    if stability_map is None:
+        dummy_gpu = engine.allocate((1, 1), dtype=np.float32)
+        stability_map = dummy_gpu
+
+    try:
+        for pass_idx in range(4):
+            mod.run(
+                "phase2_fine_analysis",
+                current=analysis_input,
+                reference=reference_image,
+                guidance_map=guidance_gpu,
+                stability_map=stability_map,
+                weight_map_sum=weight_map_sum,
+                base_window=0,
+                row_starts=row_starts,
+                col_starts=col_starts,
+                pass_idx=int(pass_idx),
+                tile_h=int(tile_h),
+                tile_w=int(tile_w),
+                h=int(h),
+                w=int(w),
+                noise_sigma=float(noise_sigma),
+                motion_sensitivity=float(motion_sensitivity),
+                noise_offset_factor=float(noise_offset_factor),
+                use_stability=int(use_stability),
+                use_guidance=1,
+            )
+    finally:
+        if dummy_gpu is not None:
+            dummy_gpu.destroy()
+        if guidance_gpu is not None:
+            guidance_gpu.destroy()
+        if eq_temp is not None:
+            eq_temp.destroy()
+
+
+def accumulate_spatial_merging_taichi(
+    current_image_full,
+    weight_map_work,
+    final_image_sum,
+    weight_map_sum_full,
+    **kwargs,
+):
+    """
+    Accumulates a frame into the global sum using its processed weight map using Taichi AOT.
+    """
+    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import AOTEngine
+    engine = AOTEngine()
+
+    # Load Module
+    file_dir = os.path.dirname(os.path.abspath(__file__))
+    cur = os.path.abspath(file_dir)
+    while os.path.basename(cur) != "pixel_refine_desktop" and len(cur) > 4:
+        cur = os.path.dirname(cur)
+    tcm_path = os.path.abspath(os.path.join(cur, "ui/data/aot_assets/spatial_vulkan.tcm"))
+    mod = engine.load(tcm_path)
+
+    h_full, w_full = final_image_sum.shape[0], final_image_sum.shape[1]
+    h_work, w_work = weight_map_work.shape[0], weight_map_work.shape[1]
+    num_channels = final_image_sum.shape[2]
+
+    mod.run(
+        "accumulate_spatial_merging",
+        current_image_full=current_image_full,
+        weight_map_work=weight_map_work,
+        final_image_sum=final_image_sum,
+        weight_map_sum_full=weight_map_sum_full,
+        h_full=int(h_full),
+        w_full=int(w_full),
+        h_work=int(h_work),
+        w_work=int(w_work),
+        num_channels=int(num_channels),
+    )

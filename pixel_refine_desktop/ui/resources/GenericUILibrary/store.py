@@ -177,10 +177,10 @@ class DataStore(QObject):
                     self._data = new_data
                     self.changed.emit(None, self._data)
                     print(
-                        f"✅ DataStore: Sync success from {os.path.basename(self._file_path)}"
+                        f"[OK] DataStore: Sync success from {os.path.basename(self._file_path)}"
                     )
         except (json.JSONDecodeError, IOError) as e:
-            print(f"❌ DataStore: Error loading file {self._file_path}: {e}")
+            print(f"[ERROR] DataStore: Error loading file {self._file_path}: {e}")
 
     def save_to_file(self):
         """Save current data to the bound JSON file."""
@@ -216,7 +216,7 @@ class DataStore(QObject):
             if target not in self._watcher.files():
                 self._watcher.addPath(target)
                 print(
-                    f"📡 DataStore: Re-attached watcher to {os.path.basename(target)}"
+                    f"[WATCH] DataStore: Re-attached watcher to {os.path.basename(target)}"
                 )
 
 

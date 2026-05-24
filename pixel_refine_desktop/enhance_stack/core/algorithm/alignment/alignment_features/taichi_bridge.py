@@ -104,3 +104,59 @@ def prepare_comparison_for_alignment(comp_image, ref_dtype, is_linear_mode, prox
             comp_gray.destroy()
 
     return prepare_pyramid_aot(final_res_gray)
+
+
+def prepare_reference_aot(reference_image_float, is_linear_mode, proxy_scale, work_res_h, work_res_w):
+    """Prepare reference image on GPU for merging. Returns (ref_work_res_pass2_gpu, ref_noise_sigma)."""
+    ref_gpu = taichi_aot.upload(reference_image_float)
+    ref_final = ref_gpu
+
+    if is_linear_mode:
+        ref_final = to_gamma_proxy_gpu(ref_gpu, scale=proxy_scale)
+        if ref_gpu is not ref_final:
+            ref_gpu.destroy()
+
+    ref_gray = taichi_aot.rgb2gray(ref_final)
+    if ref_final is not ref_gray:
+        ref_final.destroy()
+
+    final_res_gray = ref_gray
+    if ref_gray.shape[:2] != (work_res_h, work_res_w):
+        final_res_gray = taichi_aot.resize(ref_gray, (work_res_w, work_res_h), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+        if ref_gray is not final_res_gray:
+            ref_gray.destroy()
+
+    # Estimate noise on CPU/NumPy
+    ref_gray_np = final_res_gray.to_numpy()
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import estimate_noise_in_python
+    ref_noise_sigma = estimate_noise_in_python(ref_gray_np)
+
+    return final_res_gray, ref_noise_sigma
+
+
+def prepare_frame_aot(img_orig, ref_dtype, is_linear_mode, proxy_scale, work_res_h, work_res_w, ref_image_h, ref_image_w):
+    """Prepare comparison frame on GPU for merging. Returns (curr_full_gpu, curr_work_gray_gpu)."""
+    uploaded = taichi_aot.upload(img_orig)
+    curr_full_gpu = normalize_image_gpu(uploaded, dtype=ref_dtype)
+    if uploaded is not curr_full_gpu:
+        uploaded.destroy()
+    if curr_full_gpu.shape[:2] != (ref_image_h, ref_image_w):
+        new_full = taichi_aot.resize(curr_full_gpu, (ref_image_w, ref_image_h), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+        curr_full_gpu.destroy()
+        curr_full_gpu = new_full
+
+    curr_final = curr_full_gpu
+    if is_linear_mode:
+        curr_final = to_gamma_proxy_gpu(curr_full_gpu, scale=proxy_scale)
+
+    curr_gray = taichi_aot.rgb2gray(curr_final)
+    if curr_final is not curr_full_gpu and curr_final is not curr_gray:
+        curr_final.destroy()
+
+    curr_work_gray_gpu = curr_gray
+    if curr_gray.shape[:2] != (work_res_h, work_res_w):
+        curr_work_gray_gpu = taichi_aot.resize(curr_gray, (work_res_w, work_res_h), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+        if curr_gray is not curr_work_gray_gpu:
+            curr_gray.destroy()
+
+    return curr_full_gpu, curr_work_gray_gpu

@@ -131,17 +131,20 @@ class _TaichiWorker(threading.Thread):
             elif forced_arch == "cuda":
                 ti.init(arch=ti.cuda, offline_cache=True, device_memory_GB=1.8, offline_cache_file_path=cache_path)
             else:
-                # Fallback chain: GPU -> CPU
+                # Fallback chain: Vulkan -> GPU -> CPU
                 try:
-                    # Use ti.gpu (CUDA/Vulkan/Metal)
-                    ti.init(arch=ti.gpu, offline_cache=True, device_memory_GB=1.8, offline_cache_file_path=cache_path)
-                except Exception as e:
+                    ti.init(arch=ti.vulkan, offline_cache=True, device_memory_GB=1.8, offline_cache_file_path=cache_path)
+                except Exception:
                     try:
-                        # Limit CPU threads to keep UI responsive on fallback
-                        ti.init(arch=ti.cpu, cpu_max_num_threads=ti_cpu_threads, offline_cache=True, offline_cache_file_path=cache_path)
-                    except Exception as e2:
-                        self.init_error = str(e2)
-                        return
+                        # Use ti.gpu (CUDA/Vulkan/Metal)
+                        ti.init(arch=ti.gpu, offline_cache=True, device_memory_GB=1.8, offline_cache_file_path=cache_path)
+                    except Exception as e:
+                        try:
+                            # Limit CPU threads to keep UI responsive on fallback
+                            ti.init(arch=ti.cpu, cpu_max_num_threads=ti_cpu_threads, offline_cache=True, offline_cache_file_path=cache_path)
+                        except Exception as e2:
+                            self.init_error = str(e2)
+                            return
 
             # Verify configuration
             try:

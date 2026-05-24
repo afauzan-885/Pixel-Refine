@@ -437,14 +437,20 @@ def process_in_gpu(
     processed_frames_spatial = [0]
 
     def _run_gpu_merging_loop():
-        _sum_gpu = create_taichi_ndarray(final_image_sum_full_res)
-        _weight_sum_full_gpu = create_taichi_ndarray(weight_map_sum_full_res)
-        _base_window_gpu = create_taichi_ndarray(base_window)
-        _rows_gpu = create_taichi_ndarray(row_starts)
-        _cols_gpu = create_taichi_ndarray(col_starts)
-        _weight_work_gpu = create_taichi_ndarray(
-            np.zeros((work_res_h, work_res_w), dtype=np.float32)
-        )
+        from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import AOTEngine
+        engine = AOTEngine()
+
+        _sum_gpu = taichi_aot.upload(final_image_sum_full_res)
+        _weight_sum_full_gpu = taichi_aot.upload(weight_map_sum_full_res)
+        _base_window_gpu = taichi_aot.upload(base_window)
+        
+        _rows_gpu = taichi_aot.upload(row_starts)
+        _rows_gpu.dtype = np.int32
+        
+        _cols_gpu = taichi_aot.upload(col_starts)
+        _cols_gpu.dtype = np.int32
+        
+        _weight_work_gpu = engine.allocate((work_res_h, work_res_w), dtype=np.float32)
 
         use_overall_progress = total_overall_images and total_overall_images > 0
         try:
@@ -484,7 +490,7 @@ def process_in_gpu(
                     search_radius=kwargs.get("similarity_search_radius", 3),
                 )
 
-                release_taichi_ndarray(curr_work_gray_gpu)
+                curr_work_gray_gpu.destroy()
 
                 accumulate_spatial_merging_taichi(
                     current_image_full=curr_full_gpu,
@@ -501,11 +507,11 @@ def process_in_gpu(
                     w_work=work_res_w,
                 )
 
-                release_taichi_ndarray(curr_full_gpu)
+                curr_full_gpu.destroy()
 
                 # Release input ti_ndarray if applicable
-                if hasattr(img_orig, "to_numpy"):
-                    release_taichi_ndarray(img_orig)
+                if hasattr(img_orig, "destroy"):
+                    img_orig.destroy()
 
                 images[i] = None
                 processed_frames_spatial[0] += 1
@@ -526,8 +532,8 @@ def process_in_gpu(
                     update_progress(prog, msg)
                 time.sleep(0.01)
 
-            download_taichi_ndarray(_sum_gpu, out=final_image_sum_full_res)
-            download_taichi_ndarray(_weight_sum_full_gpu, out=weight_map_sum_full_res)
+            final_image_sum_full_res[:] = _sum_gpu.to_numpy()
+            weight_map_sum_full_res[:] = _weight_sum_full_gpu.to_numpy()
             return True
         except Exception:
             import traceback
@@ -543,11 +549,22 @@ def process_in_gpu(
                 _weight_work_gpu,
             ]:
                 if buf:
-                    release_taichi_ndarray(buf)
-            clear_vram()
+                    try:
+                        buf.destroy()
+                    except:
+                        pass
+            taichi_aot.unload_all_modules()
+            engine.buffer_pool.clear()
 
-    worker = get_taichi_worker()
-    worker.submit_and_wait(_run_gpu_merging_loop)
+    try:
+        worker = get_taichi_worker()
+        worker.submit_and_wait(_run_gpu_merging_loop)
+    finally:
+        if ref_work_res_pass2_gpu:
+            try:
+                ref_work_res_pass2_gpu.destroy()
+            except:
+                pass
     return (
         processed_frames_spatial[0],
         final_image_sum_full_res,

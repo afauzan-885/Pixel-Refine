@@ -97,7 +97,9 @@ class SpatialFusionProcessor:
         work_res_h, work_res_w = (work_res_h // 2) * 2, (work_res_w // 2) * 2
 
         # Tiling
-        base_window = np.ones((tile_h, tile_w), dtype=np.float32)
+        win_y = np.hanning(tile_h).astype(np.float32)
+        win_x = np.hanning(tile_w).astype(np.float32)
+        base_window = np.outer(win_y, win_x).astype(np.float32)
         step_y, step_x = max(int(tile_h * (1 - overlap)), 1), max(
             int(tile_w * (1 - overlap)), 1
         )
