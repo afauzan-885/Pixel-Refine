@@ -25,6 +25,7 @@
 - **Universal GPU Bridge**: Cross-vendor (Nvidia/AMD/Intel) DMA transfer via Pinned-Memory Fast-Copy Bridge.
 - **Anti-Crash Design**: Explicit synchronization (`rt->wait()`) and automatic staging-read for VRAM-only buffers.
 - **Smart Image IO**: Direct C++ decoding to VRAM (imread/imwrite) using Windows Imaging Component (WIC).
+- **Single Source of Truth (`engine.py`)**: `engine.py` adalah jembatan backend C++ yang bersifat *single source of truth*. Logika dan perilakunya tidak boleh diubah kecuali atas instruksi/keputusan eksplisit dari user. Semua algoritma baru atau modifikasi yang menggunakan backend ini harus mematuhi aturan dan perilaku yang ditetapkan oleh `engine.py`.
 
 ## 🚀 Roadmap & Next Steps
 1. **Bilateral Grid Integration**: **Implemented**
@@ -38,3 +39,31 @@
 - `pixel_refine_desktop/enhance_stack/core/algorithm/taichi_algorithm/aot_py/taichi_aot_engine.cpp`: C++ Backend Orchestrator.
 - `pixel_refine_desktop/enhance_stack/core/algorithm/taichi_algorithm/aot_py/test_comprehensif.py`: Master test suite.
 - `test_algorithm/IMG_20250401_182043_B003.png`: Standard test image for high-res benchmarks.
+
+---
+
+## 📘 Deep Dive: Taichi AOT Architecture & Execution Stack
+
+Untuk pengembangan jangka panjang, berikut adalah spesifikasi dan alur kerja utama dari subsistem **Taichi AOT (Ahead-of-Time)** di Pixel Refine:
+
+### 1. Proses Kompilasi (Compile-Time)
+* **Penyusun Graf (`compile_*_tcm.py`)**:
+  * Mengimpor kernel Taichi dari kode JIT (misalnya `gaussian.py`).
+  * Menggunakan `ti.aot.Module(arch)` untuk menginisialisasi modul AOT untuk arsitektur target (`vulkan`, `cuda`, atau `cpu`).
+  * Mendefinisikan signature input secara eksplisit menggunakan `ti.graph.Arg` (misalnya `SCALAR` untuk parameter primitif dan `NDARRAY` dengan dimensi tertentu `ndim` untuk data array).
+  * Menyusun graf terpadu menggunakan `ti.graph.GraphBuilder()`, menambahkan pemanggilan kernel via `dispatch()`, lalu mengarsipkan menjadi berkas `.tcm` menggunakan `module.archive(save_path)`.
+
+### 2. C++ Generic AOT Engine (`taichi_aot_engine.cpp` -> `taichi_aot_engine.dll`)
+* **Core Bridge**: Menggunakan **Taichi C-API** untuk memuat modul AOT secara langsung di memori GPU dengan format biner `.tcm`.
+* **Caching Pintar**: Menyediakan `graph_cache` berbasis `std::unordered_map` untuk menghindari pencarian grafik berulang (`get_compute_graph`) yang lambat saat eksekusi real-time.
+* **Smart Image IO (WIC)**: Menggunakan COM Windows Imaging Component untuk membaca (`ti_imread_to_gpu`) dan menulis (`ti_imwrite_from_gpu`) gambar langsung ke memori GPU (VRAM) tanpa konversi NumPy perantara di CPU, mendukung kedalaman bit 8-bit dan 16-bit.
+* **Recording Pipeline**: Mendukung perekaman sekumpulan grafik eksekusi (`add_to_pipeline`) dan mengeksekusinya dalam satu siklus pemicu tunggal (`run_pipeline`) dengan mekanisme pencarian memori handle/placeholder swap.
+
+### 3. Python ctypes Bridge (`engine.py`)
+* **`TaichiGPUBuffer`**: Abstraksi tingkat Python untuk handle memori `TiMemory` di sisi C++. Mendukung `.to_numpy()` via staging buffer VRAM-to-RAM, `.destroy()` instan untuk pembebasan VRAM secara agresif, dan casting tipe data terakselerasi GPU (`.cast()`).
+* **OpenCV Hybrid Diagnostics**: Melakukan validasi ketat terhadap input graf (Tipe data, bentuk spasial, dan kesesuaian dimensi vektor/skalar) sebelum dikirim ke C-API, menghasilkan error assert detail dengan call-stack traceback lengkap.
+* **Single Source of Truth**: Modul `engine.py` bertindak sebagai satu-satunya kebenaran (*single truth*) untuk jembatan backend C++. Struktur logika, parameter, dan alur eksekusi di dalamnya bersifat sakral dan tidak boleh dimodifikasi tanpa persetujuan eksplisit dari user. Setiap algoritma harus menyesuaikan diri dengan regulasi yang ada di `engine.py`.
+
+### 4. Manajemen Thread GUI & AOT (`taichi_worker.py`)
+* **GUI Stability**: Melokalisasi pemanggilan Taichi JIT dalam thread latar belakang tunggal `AutomatedTaichiWorker` untuk mencegah kegagalan context GPU pada aplikasi Qt/PySide.
+* **AOT Bypass**: Ketika program berjalan dalam mode AOT compiler/eksekusi (`_IS_AOT_MODE`), siklus thread worker otomatis di-bypass, mengeksekusi panggilan graf secara langsung dan sinkron di thread pemanggil untuk menghindari overhead multi-threading.

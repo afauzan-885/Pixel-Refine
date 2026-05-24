@@ -543,10 +543,8 @@ def perform_alignment_gpu(
     GPU-accelerated alignment using Taichi AOT.
     Communicates directly with compute_flow (AOT) via AOTEngine.
     """
-    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.warp import warp_image_gpu
     from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import AOTEngine
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import taichi_bridge
-    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.taichi_worker import ti_thread
     
     engine = AOTEngine()
     num_images = len(images)
@@ -680,8 +678,13 @@ def perform_alignment_gpu(
 
             return True
 
-        worker = get_taichi_worker()
-        success = worker.submit_and_wait(_run_gpu_alignment_loop)
+        is_aot = os.environ.get("PIXEL_REFINE_AOT_MODE") == "1"
+        if is_aot:
+            print("[GPU Alignment] Running synchronously on caller thread (Pure Vulkan AOT C++)...")
+            success = _run_gpu_alignment_loop()
+        else:
+            worker = get_taichi_worker()
+            success = worker.submit_and_wait(_run_gpu_alignment_loop)
 
         print("✅ GPU Alignment selesai (VRAM Stabilized).")
         return success
@@ -717,7 +720,6 @@ def perform_image_alignment(
         preprocess_in_python,
         to_gamma_proxy,
     )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.warp import warp_image_gpu
 
     """
     Menyelaraskan (align) gambar dengan manajemen sumber daya yang aman.
@@ -834,7 +836,7 @@ def perform_image_alignment(
 
                     aligned_img = None
                     if flow_full_res is not None:
-                        aligned_img = warp_image_gpu(original_image, flow_full_res)
+                        aligned_img = warp_image_opencv(original_image, flow_full_res)
                         if visualization:
                             flow_vis = visualize_flow(flow_full_res)
                             cv2.imwrite(f"flow_raft_{i+1:02d}.jpg", flow_vis)
@@ -982,7 +984,7 @@ def perform_image_alignment(
                     0,
                 )
 
-                aligned_img = warp_image_gpu(original_image, flow)
+                aligned_img = warp_image_opencv(original_image, flow)
 
                 # [OPTIMIZATION] Clear temporaries
                 del current_img_float, current_preproc, current_gray_8u, flow, flow_init
@@ -1170,7 +1172,7 @@ def perform_image_alignment(
                                 del flow_vis
 
                             # 4. Warp Gambar menggunakan koordinat pre-calculated (OPTIMASI MEMORI 1)
-                            aligned_img = warp_image_gpu(
+                            aligned_img = warp_image_opencv(
                                 original_image,
                                 flow_full_res,
                                 x_coords=x_coords_full,

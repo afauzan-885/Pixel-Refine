@@ -32,7 +32,6 @@ from .gradients import laplacian as _laplacian_impl
 from .ransac import ransac_flow_cleanup
 from .bilateral_grid import bilateral_grid_filter
 from .pyramid import build_image_pyramid, build_image_pyramid_gpu, upsample_flow
-from .warp import warp_image_gpu
 from .phase_correlation import phase_correlation
 from .fft import fft2, ifft2
 from .ncc import zncc, match_template, global_translate_zncc
@@ -294,8 +293,6 @@ __all__ = [
     "build_image_pyramid",
     "build_image_pyramid_gpu",
     "upsample_flow",
-    # Warp APIs
-    "warp_image_gpu",
     # Bicubic Interpolation APIs
     "sample_at_bicubic",
     "sample_at",

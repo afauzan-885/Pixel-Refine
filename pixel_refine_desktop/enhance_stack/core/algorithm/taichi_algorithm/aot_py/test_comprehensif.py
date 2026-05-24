@@ -88,31 +88,6 @@ def run_comprehensive_test():
         )
     )
 
-    # 3. Warping (Bicubic)
-    M = np.float32([[1, 0, 10.5], [0, 1, -5.2]])  # Sub-pixel shift
-    flow = np.zeros((h, w, 2), dtype=np.float32)
-    flow[..., 0] = -10.5  # Match OpenCV M13 sign (x_src = x_dst - M13)
-    flow[..., 1] = 5.2  # Match OpenCV M23 sign (y_src = y_dst - M23)
-    aot_warp = taichi_aot.warp_image(img_rgb, flow)
-    cv_warp = cv2.warpAffine(
-        img_rgb, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT
-    )
-    results.append(
-        print_result(
-            "Warping Bicubic (RGB)", np.mean(np.abs(aot_warp - cv_warp)), threshold=2.0
-        )
-    )
-
-    # 3b. Guided Warping (RGB)
-    ref_rgb = img_rgb.copy()
-    aot_warp_g = taichi_aot.warp_image(img_rgb, flow, ref=ref_rgb)
-    # Refined warp should be very close to ref if flow is correct
-    results.append(
-        print_result(
-            "Guided Warping (RGB)", np.mean(np.abs(aot_warp_g - cv_warp)), threshold=1.0
-        )
-    )
-
     # 4. Gaussian Blur
     aot_blur = taichi_aot.gaussian_blur(img_rgb, sigma=1.5)
     cv_blur = cv2.GaussianBlur(img_rgb, (0, 0), 1.5, borderType=cv2.BORDER_REFLECT)

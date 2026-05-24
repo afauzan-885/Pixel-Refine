@@ -24,7 +24,7 @@ try:
 except ImportError:
     RAWPY_AVAILABLE = False
 
-from pixel_refine_desktop.ui.views.settings.General.Language import language_config
+# Removed module-level language_config import to prevent circular dependencies
 
 
 # =========================================================================
@@ -1565,6 +1565,7 @@ def compute_global_crop(
     crop_h = h - int(np.ceil(global_max_y - h)) - crop_y
 
     if crop_w <= 0 or crop_h <= 0:
+        from pixel_refine_desktop.ui.views.settings.General.Language import language_config
         print(language_config.FAIL_CROPPING_PROCESS)
         return None
 

@@ -203,8 +203,8 @@ def _init_aot_bridge():
     _LIB.ti_cast_buffer.restype = ctypes.c_bool
 
     # Initialization
-    arch_str = os.environ.get("PIXEL_REFINE_AOT_ARCH", "vulkan").lower()
-    arch_id = {"vulkan": 0, "cuda": 1, "cpu": 2}.get(arch_str, 0)
+    arch_str = "vulkan"
+    arch_id = 0
     device_id = int(os.environ.get("PIXEL_REFINE_AOT_DEVICE", "0"))
     
     _RUNTIME = _LIB.init_aot_engine(arch_id, device_id)

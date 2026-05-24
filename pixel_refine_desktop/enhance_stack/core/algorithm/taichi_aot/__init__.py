@@ -396,45 +396,6 @@ def image_pyramid(src, levels=4, return_gpu=False):
     return curr_buf if return_gpu else curr_buf.to_numpy()
 
 
-def warp_image(src, flow, ref=None, return_gpu=False):
-    """AOT Implementation of Warp Image (High Precision f32 supported)."""
-    is_gpu_src = isinstance(src, TaichiGPUBuffer)
-    is_gpu_flow = isinstance(flow, TaichiGPUBuffer)
-    is_gpu_ref = isinstance(ref, TaichiGPUBuffer) if ref is not None else False
-
-    src_buf = src if is_gpu_src else engine.upload(src)
-    flow_buf = flow if is_gpu_flow else engine.upload(flow)
-
-    h, w = src_buf.shape[:2]
-    is_3d = len(src_buf.shape) == 3
-    is_guided = ref is not None
-
-    dst_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype, is_vector=is_3d)
-
-    # Determine suffix
-    type_s = "f32" if src_buf.dtype == np.float32 else "i32"
-    is_vec = getattr(src_buf, "is_vector", False)
-
-    # The AOT kernels for warp expect flow to be a 3D scalar field [H, W, 2], not a 2D vector field.
-    flow_v = flow_buf.view_as_vector(False)
-
-    if is_guided:
-        ref_buf = ref if is_gpu_ref else engine.upload(ref)
-        target = f"warp_guided_{type_s}_3ch" if is_vec else f"warp_guided_{type_s}"
-        _mod("warp").run(target, src=src_buf, flow=flow_v, dst=dst_buf, ref=ref_buf)
-        if not is_gpu_ref:
-            del ref_buf
-    else:
-        target = f"warp_naked_{type_s}_3ch" if is_vec else f"warp_naked_{type_s}"
-        _mod("warp").run(target, src=src_buf, flow=flow_v, dst=dst_buf)
-
-    if not is_gpu_src:
-        del src_buf
-    if not is_gpu_flow:
-        del flow_buf
-
-    return dst_buf if return_gpu else dst_buf.to_numpy()
-
 
 def median_filter(src, return_gpu=False, **kwargs):
     """AOT Median Filter 3x3."""
