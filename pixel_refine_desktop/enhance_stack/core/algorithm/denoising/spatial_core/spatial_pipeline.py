@@ -404,6 +404,7 @@ def process_in_gpu(
             return 0, None, None, 0.0
 
     # 2. TAICHI MERGING (Full GPU Path)
+    print(f"[GPU Merging] Processing {num_images} images with Taichi GPU (Vulkan)...")
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
         estimate_noise_in_python,
     )
@@ -450,7 +451,7 @@ def process_in_gpu(
         _cols_gpu = taichi_aot.upload(col_starts)
         _cols_gpu.dtype = np.int32
         
-        _weight_work_gpu = engine.allocate((work_res_h, work_res_w), dtype=np.float32)
+        _weight_work_gpu = engine.allocate((work_res_h, work_res_w), dtype=np.float32, host_accessible=True)
 
         use_overall_progress = total_overall_images and total_overall_images > 0
         try:
@@ -493,9 +494,9 @@ def process_in_gpu(
                 curr_work_gray_gpu.destroy()
 
                 accumulate_spatial_merging_taichi(
-                    current_image_full=curr_full_gpu,
+                    current_image_full=curr_full_gpu.view_as_vector(False),
                     weight_map_work=_weight_work_gpu,
-                    final_image_sum=_sum_gpu,
+                    final_image_sum=_sum_gpu.view_as_vector(False),
                     weight_map_sum_full=_weight_sum_full_gpu,
                     row_starts=_rows_gpu,
                     col_starts=_cols_gpu,

@@ -43,7 +43,7 @@ class SpatialFusionProcessor:
         return_raw=False,
         is_linear_mode=False,
         proxy_scale=1.0,
-        process_in="cpu",
+        process_in="auto",
         merging_backend="taichi",
         **unused_kwargs,
     ):
