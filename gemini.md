@@ -67,3 +67,24 @@ Untuk pengembangan jangka panjang, berikut adalah spesifikasi dan alur kerja uta
 ### 4. Manajemen Thread GUI & AOT (`taichi_worker.py`)
 * **GUI Stability**: Melokalisasi pemanggilan Taichi JIT dalam thread latar belakang tunggal `AutomatedTaichiWorker` untuk mencegah kegagalan context GPU pada aplikasi Qt/PySide.
 * **AOT Bypass**: Ketika program berjalan dalam mode AOT compiler/eksekusi (`_IS_AOT_MODE`), siklus thread worker otomatis di-bypass, mengeksekusi panggilan graf secara langsung dan sinkron di thread pemanggil untuk menghindari overhead multi-threading.
+
+### 5. Backup Formulasi Non-Linear (Sebelum Migrasi Linear)
+*Catatan: Formulir di bawah ini dipertahankan sebagai cadangan setelah migrasi ke pipeline GPU Linear Demosaicing.*
+Subsistem demosaicing (`compile_hamilton_tcm.py`) sebelumnya mengimplementasikan pipeline pemrosesan warna non-linear berikut di GPU:
+* **Matriks Transformasi Warna (Camera-to-sRGB):**
+  Mengonversi piksel dari ruang warna linear sensor kamera (*Camera Space*) ke ruang warna sRGB menggunakan matriks transformasi $3 \times 3$ yang diekstrak dari metadata RAW/DNG:
+  $$\begin{aligned}
+  sR &= C_{00} \cdot R + C_{01} \cdot G + C_{02} \cdot B \\
+  sG &= C_{10} \cdot R + C_{11} \cdot G + C_{12} \cdot B \\
+  sB &= C_{20} \cdot R + C_{21} \cdot G + C_{22} \cdot B
+  \end{aligned}$$
+* **Dynamic Algebraic Sigmoid Highlight Roll-off (Tone Mapping):**
+  Memetakan rentang dinamis tinggi (HDR) $[0, \infty)$ ke SDR $[0, 1)$ secara halus dan asimtotik untuk menghindari hard clipping pada area super terang:
+  $$f(x) = \frac{x}{\sqrt{1 + x^2}}$$
+  Implementasi Taichi:
+  ```python
+  sR = sR / ti.math.sqrt(1.0 + sR * sR)
+  ```
+* **Gamma Correction:**
+  Menerapkan koreksi gamma standar sRGB untuk tampilan monitor:
+  $$\text{Output} = \text{clamp}(sRGB, 0.0, 1.0)^{1 / 2.22}$$

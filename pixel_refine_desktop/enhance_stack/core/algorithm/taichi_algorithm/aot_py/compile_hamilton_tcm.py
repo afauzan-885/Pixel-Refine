@@ -250,25 +250,17 @@ def _ha_red_blue_interpolation_kernel_opt(
 
         final_factor = factor * neutrality
 
-        # 4. Reconstruct and blend in white-balanced space
+        # 4. Reconstruct and blend in white-balanced space to eliminate magenta artifacts
         L = ti.max(R, ti.max(G, B))
         R = R * (1.0 - final_factor) + L * final_factor
         G = G * (1.0 - final_factor) + L * final_factor
         B = B * (1.0 - final_factor) + L * final_factor
 
-        # 5. Apply Camera-to-sRGB matrix transform
-        sR = cmatrix[0, 0] * R + cmatrix[0, 1] * G + cmatrix[0, 2] * B
-        sG = cmatrix[1, 0] * R + cmatrix[1, 1] * G + cmatrix[1, 2] * B
-        sB = cmatrix[2, 0] * R + cmatrix[2, 1] * G + cmatrix[2, 2] * B
-
-        # 6. Apply Dynamic Algebraic Sigmoid Highlight Roll-off to preserve gradients and color fidelity
-        sR = sR / ti.math.sqrt(1.0 + sR * sR)
-        sG = sG / ti.math.sqrt(1.0 + sG * sG)
-        sB = sB / ti.math.sqrt(1.0 + sB * sB)
-
-        dst[r, c, 0] = ti.math.pow(ti.math.clamp(sR, 0.0, 1.0), 1.0 / 2.22)
-        dst[r, c, 1] = ti.math.pow(ti.math.clamp(sG, 0.0, 1.0), 1.0 / 2.22)
-        dst[r, c, 2] = ti.math.pow(ti.math.clamp(sB, 0.0, 1.0), 1.0 / 2.22)
+        # 5. Direct camera linear RGB output normalized by maximum white balance gain to prevent highlight clipping
+        max_wb = ti.max(wb_r, ti.max(wb_g1, ti.max(wb_b, wb_g2)))
+        dst[r, c, 0] = ti.math.clamp(R / max_wb, 0.0, 1.0)
+        dst[r, c, 1] = ti.math.clamp(G / max_wb, 0.0, 1.0)
+        dst[r, c, 2] = ti.math.clamp(B / max_wb, 0.0, 1.0)
 
 
 @ti.kernel

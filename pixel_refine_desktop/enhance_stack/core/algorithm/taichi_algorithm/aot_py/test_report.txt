@@ -1,6 +1,8 @@
 [Taichi] version 1.7.4, llvm 15.0.1, commit b4b956fd, win, python 3.12.9
 [AOTEngine] Successfully loaded backend bridge: taichi_aot_engine.dll
 [AOTEngine] Runtime initialized on 'VULKAN' (Device 0)
+[TaichiWorker] Using project-level cache at: e:/APP Developer/Pixel Refine/taichi_cache
+[TaichiWorker] AOT Compilation Mode Detected: Disabled JIT Worker and Cache Envs.
 
 ======================================================================
  TAICHI AOT MASTER COMPREHENSIVE TEST
@@ -14,8 +16,6 @@ Using 512x512 resized version for accuracy tests.
 [PASS] INTER_AREA Resize (RGB 0.25x)       | MAE:   0.000000 | Limit: 0.5
 [AOTEngine] Loaded TCM module: bilinear_vulkan.tcm
 [PASS] Bilinear Resize (RGB 2x)            | MAE:   0.000000 | Limit: 0.5
-[TaichiWorker] Using project-level cache at: e:/APP Developer/Pixel Refine/taichi_cache
-[TaichiWorker] AOT Compilation Mode Detected: Disabled JIT Worker and Cache Envs.
 [AOTEngine] Loaded TCM module: gaussian_vulkan.tcm
 [PASS] Gaussian Blur (RGB, sigma=1.5)      | MAE:   0.000100 | Limit: 0.5
 [AOTEngine] Loaded TCM module: box_filter_vulkan.tcm
@@ -60,12 +60,12 @@ Resolution: 3016x3016 (9.1 MP)
 ======================================================================
 Method                    | Latency (ms)    | FPS       
 -------------------------------------------------------
-Master Pipeline (OBG)     | 210.41          | 4.75      
-Standard Dispatch         | 230.45          | 4.34      
+Master Pipeline (OBG)     | 209.58          | 4.77      
+Standard Dispatch         | 244.55          | 4.09      
 -------------------------------------------------------
 
->>> Speedup using Master Pipeline: 8.69% faster
->>> Overhead Reduced: 20.04 ms per frame
+>>> Speedup using Master Pipeline: 14.30% faster
+>>> Overhead Reduced: 34.98 ms per frame
 
 ======================================================================
  FINAL VERDICT
