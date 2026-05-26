@@ -604,6 +604,20 @@ def perform_alignment_gpu(
             )
             mod = engine.load(tcm_path)
 
+            # [LUMA ENHANCEMENT CACHE] Pre-allocate and populate 1D LUT once on GPU (Calibrated: contrast=0.8, brightness=0.0, gamma=0.78)
+            lut_np = np.zeros(256, dtype=np.float32)
+            contrast = 0.8
+            brightness = 0.0
+            gamma = 0.78
+            for i in range(256):
+                val = (i / 255.0) ** gamma * contrast + brightness
+                lut_np[i] = np.clip(val, 0.0, 1.0)
+            lut_gpu = engine.upload(lut_np)
+
+            # Pre-allocate luma blur buffer for tracking enhancement (ALLOC ONCE, REUSE EVERY FRAME)
+            h_w, w_w = work_res_h, work_res_w
+            blur_work_gpu = engine.allocate((h_w, w_w), dtype=np.float32)
+
             # 2. Setup Reference Pyramid on GPU (ALLOCATE ONCE)
             ref_pyramid = taichi_bridge.prepare_reference_for_alignment(
                 reference_image_float,
@@ -611,10 +625,11 @@ def perform_alignment_gpu(
                 proxy_scale,
                 work_res_h,
                 work_res_w,
+                lut_gpu=lut_gpu,
+                blur_work_gpu=blur_work_gpu,
             )
 
             # 3. Allocate Flow Buffers (REUSE ONCE)
-            h_w, w_w = work_res_h, work_res_w
             flow_l0 = engine.allocate((h_w, w_w, 2), dtype=np.float32, is_vector=False)
             flow_l1 = engine.allocate(
                 (h_w // 2, w_w // 2, 2), dtype=np.float32, is_vector=False
@@ -645,6 +660,8 @@ def perform_alignment_gpu(
                         proxy_scale,
                         work_res_h,
                         work_res_w,
+                        lut_gpu=lut_gpu,
+                        blur_work_gpu=blur_work_gpu,
                     )
 
                     # B. Run One Big Graph (End-to-End Alignment)
@@ -748,7 +765,7 @@ def perform_alignment_gpu(
                 flow_l2.destroy()
 
                 # Destroy reusable flow processing buffers
-                for _buf in [smooth_flow_buf, map_x_gpu, map_y_gpu]:
+                for _buf in [smooth_flow_buf, map_x_gpu, map_y_gpu, lut_gpu, blur_work_gpu]:
                     try:
                         _buf.destroy()
                     except Exception:

@@ -460,6 +460,16 @@ EXPORT bool ti_cast_buffer(void *runtime, void *src_mem, void *dst_mem,
       float *d = (float *)dst_ptr;
       for (int i = 0; i < num_elements; ++i)
         d[i] = (float)s[i] / 65535.0f;
+    } else if (src_type == 1 && dst_type == 3) { // i32 -> u16
+      int32_t *s = (int32_t *)src_ptr;
+      uint16_t *d = (uint16_t *)dst_ptr;
+      for (int i = 0; i < num_elements; ++i)
+        d[i] = (uint16_t)s[i];
+    } else if (src_type == 1 && dst_type == 2) { // i32 -> u8
+      int32_t *s = (int32_t *)src_ptr;
+      uint8_t *d = (uint8_t *)dst_ptr;
+      for (int i = 0; i < num_elements; ++i)
+        d[i] = (uint8_t)s[i];
     }
     ti_unmap_memory(rt->runtime(), (TiMemory)src_mem);
     ti_unmap_memory(rt->runtime(), (TiMemory)dst_mem);
@@ -677,6 +687,7 @@ EXPORT void run_pipeline(void *runtime, const char *pipeline_name,
       std::vector<TiNamedArgument> ti_args;
       ti_args.reserve(step.args.size());
 
+      int arg_idx = 0;
       for (const auto &base_arg : step.args) {
         TiNamedArgument arg = {};
 
@@ -691,7 +702,7 @@ EXPORT void run_pipeline(void *runtime, const char *pipeline_name,
             }
           }
         }
-        _fill_ti_arg(arg, *final_arg, j);
+        _fill_ti_arg(arg, *final_arg, arg_idx++);
 
         // CRITICAL: Always use the original name from the recorded step.
         // The override argument from Python might have a generic name like
@@ -726,21 +737,6 @@ EXPORT void run_pipeline(void *runtime, const char *pipeline_name,
     printf("[C++ Engine] UNKNOWN EXCEPTION in run_pipeline\n");
     fflush(stdout);
   }
-}
-
-} // extern "C"
-}
-}
-fflush(stdout);
-}
-catch (const std::exception &e) {
-  printf("[C++ Engine] EXCEPTION in run_pipeline: %s\n", e.what());
-  fflush(stdout);
-}
-catch (...) {
-  printf("[C++ Engine] UNKNOWN EXCEPTION in run_pipeline\n");
-  fflush(stdout);
-}
 }
 
 } // extern "C"

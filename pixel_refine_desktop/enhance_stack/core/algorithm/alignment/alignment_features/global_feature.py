@@ -170,44 +170,38 @@ def get_all_image_paths_for_batch_process(db_path, batch_id):
         return []
 
 
-def _prepare_image_array_from_raw(
+def _prepare_image_array_from_raw_backup(
     original_path, linear_mode=False, generate_ref_proxy=False
 ):
-    # Fungsi ini tidak berubah
+    """CPU Backup implementation using rawpy postprocessing."""
     try:
         if not RAWPY_AVAILABLE:
             return None
         with rawpy.imread(original_path) as raw:
             if linear_mode:
                 # LINEAR DNG MODE (Gamma 1.0, 16-bit, No Auto Brightness)
-                # output_color=rawpy.ColorSpace.sRGB means it applies the ColorMatrix to convert CameraRGB -> sRGB Primaries
-                # but with gamma=(1,1) it keeps the tone curve LINEAR.
                 rgb = raw.postprocess(
                     demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,
                     use_camera_wb=True,
                     no_auto_bright=True,  # Important for Linear
                     gamma=(1, 1),  # Linear Gamma
                     output_bps=16,
-                    # [REVERTED] Use sRGB for Linear DNG (Demosaiced)
                     output_color=rawpy.ColorSpace.sRGB,
                     highlight_mode=rawpy.HighlightMode.Blend,
                     user_flip=0,
                 )
 
-                # [DUAL CONVERSION] Jika requested, generate GT Proxy (Standard Look)
-                # Hanya untuk Reference Analysis
                 gt_proxy = None
                 if generate_ref_proxy:
                     gamma_setting = (2.222, 4.5)
                     proxy_raw = raw.postprocess(
                         demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,
                         use_camera_wb=True,
-                        no_auto_bright=True,  # Default False (Auto Brightness ON)
-                        gamma=gamma_setting,  # [GT PROXY] Needs sRGB Gamma (2.22, 4.5)
-                        output_bps=16,  # User requested 16 bit GT
-                        # [GT PROXY] Needs sRGB Color Space for valid brightness fitting
+                        no_auto_bright=True,
+                        gamma=gamma_setting,
+                        output_bps=16,
                         output_color=rawpy.ColorSpace.sRGB,
-                        highlight_mode=rawpy.HighlightMode.Blend,  # Corrected
+                        highlight_mode=rawpy.HighlightMode.Blend,
                         user_flip=0,
                     )
                     # Convert to BGR
@@ -219,17 +213,16 @@ def _prepare_image_array_from_raw(
                         gt_proxy = bgr_proxy
 
             else:
-                # STANDARD MODE (Gamma 2.222, Auto Brightness optional but usually on by default if not specified)
+                # STANDARD MODE (Gamma 2.222)
                 gamma_setting = (2.222, 4.5)
                 rgb = raw.postprocess(
-                    demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,  # pyright: ignore[reportAttributeAccessIssue]
+                    demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,
                     use_camera_wb=True,
-                    # no_auto_bright=True,
                     gamma=gamma_setting,
                     output_bps=16,
-                    output_color=rawpy.ColorSpace.sRGB,  # pyright: ignore[reportAttributeAccessIssue]
-                    highlight_mode=rawpy.HighlightMode.Blend,  # pyright: ignore[reportAttributeAccessIssue]
-                    user_flip=0,  # [FIX] Disable auto-rotation for processing consistency
+                    output_color=rawpy.ColorSpace.sRGB,
+                    highlight_mode=rawpy.HighlightMode.Blend,
+                    user_flip=0,
                 )
 
         if rgb.flags["WRITEABLE"]:
@@ -243,8 +236,38 @@ def _prepare_image_array_from_raw(
 
             return bgr
     except Exception as e:
-        print(f"Error membaca RAW file {original_path}: {e}")
+        print(f"Error membaca RAW file {original_path} via CPU backup: {e}")
         return None
+
+
+def _prepare_image_array_from_raw(
+    original_path, linear_mode=False, generate_ref_proxy=False
+):
+    """GPU-Accelerated RAW Demosaicing utilizing C++ AOT Hamilton-Adams pipeline."""
+    try:
+        if not RAWPY_AVAILABLE:
+            return None
+
+        import pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot as ta_aot
+
+        # Call GPU-accelerated Demosaicing (Auto-extracts all metadata and runs on GPU)
+        os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
+        bgr = ta_aot.demosaic(original_path, method="hamilton", return_gpu=False, output_bgr_u16=True)
+
+        # 5. GT Proxy Generation (if requested)
+        if generate_ref_proxy:
+            return (bgr, bgr.copy())
+
+        return bgr
+
+    except Exception as e:
+        print(
+            f"GPU AOT Demosaicing failed for {original_path}: {e}. Falling back to CPU backup."
+        )
+        # Robust fallback to CPU backup to guarantee no application crashes
+        return _prepare_image_array_from_raw_backup(
+            original_path, linear_mode, generate_ref_proxy
+        )
 
 
 def load_images_from_paths(
@@ -1254,8 +1277,6 @@ def normalize_image(image, dtype, out=None):
     return img_float
 
 
-
-
 def calculate_auto_scale(linear_img_float, target_mean=0.25):
     """
     Menghitung scale factor agar rata-rata brightness mendekati target_mean.
@@ -1304,8 +1325,6 @@ def to_gamma_proxy(linear_img, scale=1.0, gamma_pow=2.22, slope=4.5, cutoff=0.01
 
     # Pastikan output float32 valid
     return np.clip(res, 0.0, 1.0).astype(np.float32)
-
-
 
 
 # =========================================================================
@@ -1565,7 +1584,10 @@ def compute_global_crop(
     crop_h = h - int(np.ceil(global_max_y - h)) - crop_y
 
     if crop_w <= 0 or crop_h <= 0:
-        from pixel_refine_desktop.ui.views.settings.General.Language import language_config
+        from pixel_refine_desktop.ui.views.settings.General.Language import (
+            language_config,
+        )
+
         print(language_config.FAIL_CROPPING_PROCESS)
         return None
 
@@ -1991,4 +2013,3 @@ def _run_apply_and_save_stage(
             if stop_requested and stop_requested():
                 break
             executor.submit(apply_and_save_task, task)
-

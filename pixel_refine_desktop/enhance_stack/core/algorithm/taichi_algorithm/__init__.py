@@ -36,6 +36,8 @@ from .phase_correlation import phase_correlation
 from .fft import fft2, ifft2
 from .ncc import zncc, match_template, global_translate_zncc
 from .remap import remap
+from .enhance_image import enhance_grayscale
+from .Hamilton_demosaice import hamilton_demosaic
 
 # --- Constants ---
 INTER_LINEAR = 1
@@ -314,4 +316,6 @@ __all__ = [
     "match_template",
     "global_translate_zncc",
     "ncc",
+    "enhance_grayscale",
+    "hamilton_demosaic",
 ]

@@ -47,14 +47,14 @@ def _populate_dynamic_arg(arg: DynamicArg, name_bytes, value, context_name="Unkn
     """Internal helper to fill DynamicArg metadata consistently."""
     arg.name = name_bytes
     
-    if isinstance(value, int):
+    if isinstance(value, (int, np.integer)):
         arg.arg_type = 1
         arg.dtype = 1 # i32
-        arg.val_u64 = value
-    elif isinstance(value, float):
+        arg.val_u64 = int(value)
+    elif isinstance(value, (float, np.floating)):
         arg.arg_type = 1
         arg.dtype = 0 # f32
-        arg.val_u64 = ctypes.cast(ctypes.pointer(ctypes.c_float(value)), ctypes.POINTER(ctypes.c_uint64)).contents.value
+        arg.val_u64 = ctypes.cast(ctypes.pointer(ctypes.c_float(float(value))), ctypes.POINTER(ctypes.c_uint64)).contents.value
     elif isinstance(value, (TaichiGPUBuffer, TaichiPlaceholder)):
         arg.arg_type = 0
         
@@ -62,7 +62,10 @@ def _populate_dynamic_arg(arg: DynamicArg, name_bytes, value, context_name="Unkn
         is_vec = getattr(value, "is_vector", False)
         v_dim = getattr(value, "vector_dim", 1)
         
-        arg.dtype = dtype_map.get(value.dtype if hasattr(value, 'dtype') else np.float32, 0)
+        val_dtype = value.dtype if hasattr(value, 'dtype') else np.float32
+        if hasattr(val_dtype, 'type'):
+            val_dtype = val_dtype.type
+        arg.dtype = dtype_map.get(val_dtype, 0)
         arg.is_vector = 1 if is_vec else 0
         arg.vector_dim = v_dim
 
@@ -100,6 +103,7 @@ def _populate_dynamic_arg(arg: DynamicArg, name_bytes, value, context_name="Unkn
             for d, s in enumerate(value.shape): arg.shape[d] = s
             arg.elem_dim_count = 0
         else:
+            name_str = name_bytes.decode('utf-8') if isinstance(name_bytes, bytes) else str(name_bytes)
             raise TypeError(
                 f"\n[AOTEngine Error] {context_name}: Unsupported object type for argument '{name_str}'.\n"
                 f"  EXPECTED: TaichiGPUBuffer, TaichiPlaceholder, int, or float.\n"
@@ -220,26 +224,31 @@ class BufferPool:
     """Lightweight pool: tracks handles for potential reuse by exact size match."""
     def __init__(self):
         self.free_buffers = {}  # size -> list of handles
+        import threading
+        self._lock = threading.Lock()
 
     def acquire(self, size):
-        if size in self.free_buffers and self.free_buffers[size]:
-            return self.free_buffers[size].pop()
-        return None
+        with self._lock:
+            if size in self.free_buffers and self.free_buffers[size]:
+                return self.free_buffers[size].pop()
+            return None
 
     def store(self, size, handle):
         """Store a handle for reuse (caller decides if reuse or free)."""
-        if size not in self.free_buffers:
-            self.free_buffers[size] = []
-        self.free_buffers[size].append(handle)
+        with self._lock:
+            if size not in self.free_buffers:
+                self.free_buffers[size] = []
+            self.free_buffers[size].append(handle)
 
     def clear(self):
         """Force-free all pooled handles from VRAM."""
         global _LIB, _RUNTIME
-        if _LIB and _RUNTIME:
-            for handles in self.free_buffers.values():
-                for h in handles:
-                    _LIB.free_gpu_buffer(_RUNTIME, h)
-        self.free_buffers = {}
+        with self._lock:
+            if _LIB and _RUNTIME:
+                for handles in self.free_buffers.values():
+                    for h in handles:
+                        _LIB.free_gpu_buffer(_RUNTIME, h)
+            self.free_buffers = {}
 
 class TaichiGPUBuffer:
     def __init__(self, size_bytes, handle, shape, dtype=np.float32, is_vector=False, engine=None, is_owner=True, host_accessible=False, vector_dim=3):
@@ -258,7 +267,11 @@ class TaichiGPUBuffer:
         if self.handle is not None and self.is_owner:
             global _LIB, _RUNTIME
             if _LIB and _RUNTIME:
-                _LIB.free_gpu_buffer(_RUNTIME, self.handle)
+                if self.engine and hasattr(self.engine, "_lock"):
+                    with self.engine._lock:
+                        _LIB.free_gpu_buffer(_RUNTIME, self.handle)
+                else:
+                    _LIB.free_gpu_buffer(_RUNTIME, self.handle)
             self.handle = None
             self.is_owner = False
 
@@ -272,28 +285,50 @@ class TaichiGPUBuffer:
         """Read GPU data. Automatically handles staging for VRAM-only buffers."""
         out = np.zeros(self.shape, dtype=self.dtype)
         if self.host_accessible:
-            _LIB.read_from_gpu_buffer(_RUNTIME, self.handle, out.ctypes.data, self.size_bytes)
+            if self.engine and hasattr(self.engine, "_lock"):
+                with self.engine._lock:
+                    _LIB.read_from_gpu_buffer(_RUNTIME, self.handle, out.ctypes.data, self.size_bytes)
+            else:
+                _LIB.read_from_gpu_buffer(_RUNTIME, self.handle, out.ctypes.data, self.size_bytes)
         elif self.engine:
-            staging = self.engine.get_staging_buffer(self.shape, self.dtype)
-            _LIB.copy_gpu_buffer(_RUNTIME, self.handle, staging.handle, self.size_bytes)
-            _LIB.read_from_gpu_buffer(_RUNTIME, staging.handle, out.ctypes.data, self.size_bytes)
+            with self.engine._lock:
+                staging = self.engine.get_staging_buffer(self.shape, self.dtype)
+                _LIB.copy_gpu_buffer(_RUNTIME, self.handle, staging.handle, self.size_bytes)
+                _LIB.read_from_gpu_buffer(_RUNTIME, staging.handle, out.ctypes.data, self.size_bytes)
         else:
             raise RuntimeError("VRAM-only read requires engine for staging.")
         return out
 
-    def map(self): return _LIB.map_gpu_buffer(_RUNTIME, self.handle)
-    def unmap(self): _LIB.unmap_gpu_buffer(_RUNTIME, self.handle)
+    def map(self):
+        if self.engine and hasattr(self.engine, "_lock"):
+            with self.engine._lock:
+                return _LIB.map_gpu_buffer(_RUNTIME, self.handle)
+        return _LIB.map_gpu_buffer(_RUNTIME, self.handle)
+
+    def unmap(self):
+        if self.engine and hasattr(self.engine, "_lock"):
+            with self.engine._lock:
+                _LIB.unmap_gpu_buffer(_RUNTIME, self.handle)
+        else:
+            _LIB.unmap_gpu_buffer(_RUNTIME, self.handle)
     
-    def cast(self, target_dtype):
+    def cast(self, target_dtype, host_accessible=False):
         target_dtype = np.dtype(target_dtype).type
         if self.dtype == target_dtype: return self
         dtype_map = {np.float32: 0, np.int32: 1, np.uint8: 2, np.uint16: 3}
         if self.dtype not in dtype_map or target_dtype not in dtype_map:
             return self.engine.upload(self.to_numpy().astype(target_dtype))
-        dst = self.engine.allocate(self.shape, dtype=target_dtype)
-        num_elements = np.prod(self.shape)
-        _LIB.ti_cast_buffer(_RUNTIME, self.handle, dst.handle, int(num_elements), dtype_map[self.dtype], dtype_map[target_dtype])
-        return dst
+        if self.engine and hasattr(self.engine, "_lock"):
+            with self.engine._lock:
+                dst = self.engine.allocate(self.shape, dtype=target_dtype, host_accessible=host_accessible)
+                num_elements = np.prod(self.shape)
+                _LIB.ti_cast_buffer(_RUNTIME, self.handle, dst.handle, int(num_elements), dtype_map[self.dtype], dtype_map[target_dtype])
+                return dst
+        else:
+            dst = self.engine.allocate(self.shape, dtype=target_dtype, host_accessible=host_accessible)
+            num_elements = np.prod(self.shape)
+            _LIB.ti_cast_buffer(_RUNTIME, self.handle, dst.handle, int(num_elements), dtype_map[self.dtype], dtype_map[target_dtype])
+            return dst
 
     def view_as_vector(self, is_vector=True, vector_dim=3):
         return TaichiGPUBuffer(self.size_bytes, self.handle, self.shape, self.dtype, is_vector, self.engine, False, self.host_accessible, vector_dim)
@@ -324,17 +359,18 @@ class AOTModuleWrapper:
                 raise ValueError(f"Failed to prepare argument '{k}' for kernel '{graph_name}':\n{str(e)}")
             
         engine = AOTEngine()
-        if engine.current_pipeline:
-            _LIB.add_to_pipeline(self.module_ptr, engine.current_pipeline.encode('utf-8'), graph_name.encode('utf-8'), args_array, num_args)
-        else:
-            try:
-                _LIB.run_aot_graph(_RUNTIME, self.module_ptr, graph_name.encode('utf-8'), args_array, num_args)
-            except Exception as e:
-                raise RuntimeError(
-                    f"\n[AOTEngine Execution Error] Kernel '{graph_name}' gagal dijalankan!\n"
-                    f"  ERROR: {str(e)}\n"
-                    f"  HINT : Periksa apakah ukuran (shape) dan tipe data input sudah sesuai dengan definisi kernel di C++."
-                )
+        with engine._lock:
+            if engine.current_pipeline:
+                _LIB.add_to_pipeline(self.module_ptr, engine.current_pipeline.encode('utf-8'), graph_name.encode('utf-8'), args_array, num_args)
+            else:
+                try:
+                    _LIB.run_aot_graph(_RUNTIME, self.module_ptr, graph_name.encode('utf-8'), args_array, num_args)
+                except Exception as e:
+                    raise RuntimeError(
+                        f"\n[AOTEngine Execution Error] Kernel '{graph_name}' gagal dijalankan!\n"
+                        f"  ERROR: {str(e)}\n"
+                        f"  HINT : Periksa apakah ukuran (shape) dan tipe data input sudah sesuai dengan definisi kernel di C++."
+                    )
 
     def _dummy_run(self): pass # For keeping refs if needed
 
@@ -351,6 +387,8 @@ class AOTEngine:
             cls._instance.buffer_pool = BufferPool()
             cls._instance.current_pipeline = None
             cls._instance._staging_pool = {}
+            import threading
+            cls._instance._lock = threading.RLock()
         return cls._instance
 
     def placeholder(self, shape, dtype=np.float32, is_vector=False, vector_dim=3):
@@ -380,24 +418,26 @@ class AOTEngine:
         for i, (p, b) in enumerate(ovr.items()):
             handles[i] = ctypes.c_uint64(p.handle)
             _populate_dynamic_arg(args[i], arg_names[i], b)
-        _LIB.run_pipeline(_RUNTIME, name.encode('utf-8'), handles, args, n)
+        with self._lock:
+            _LIB.run_pipeline(_RUNTIME, name.encode('utf-8'), handles, args, n)
 
     def allocate(self, shape, dtype=np.float32, is_vector=False, host_accessible=False, vector_dim=None):
-        size = int(np.prod(shape) * np.dtype(dtype).itemsize)
-        v_dim = vector_dim if vector_dim is not None else (shape[-1] if is_vector and len(shape) >= 2 else 1)
-        handle = self.buffer_pool.acquire(size) if not host_accessible else None
-        if not handle: 
-            handle = _LIB.allocate_gpu_buffer(_RUNTIME, size, 1 if host_accessible else 0)
-        
-        if handle is None or handle == 0:
-            arch = getattr(self, "_active_arch", "unknown")
-            raise RuntimeError(
-                f"\n[AOTEngine Memory Error] Failed to allocate {size/1024/1024:.2f} MB on GPU ({arch}).\n"
-                f"  HINT: VRAM might be exhausted. Try calling 'engine.buffer_pool.clear()' or 'gc.collect()' to free idle buffers."
-            )
-        
-        # print(f"[AOTEngine] New VRAM allocation: {size/1024/1024:.2f} MB ({dtype})")
-        return TaichiGPUBuffer(size, handle, shape, dtype, is_vector, self, host_accessible=host_accessible, vector_dim=v_dim)
+        with self._lock:
+            size = int(np.prod(shape) * np.dtype(dtype).itemsize)
+            v_dim = vector_dim if vector_dim is not None else (shape[-1] if is_vector and len(shape) >= 2 else 1)
+            handle = self.buffer_pool.acquire(size) if not host_accessible else None
+            if not handle: 
+                handle = _LIB.allocate_gpu_buffer(_RUNTIME, size, 1 if host_accessible else 0)
+            
+            if handle is None or handle == 0:
+                arch = getattr(self, "_active_arch", "unknown")
+                raise RuntimeError(
+                    f"\n[AOTEngine Memory Error] Failed to allocate {size/1024/1024:.2f} MB on GPU ({arch}).\n"
+                    f"  HINT: VRAM might be exhausted. Try calling 'engine.buffer_pool.clear()' or 'gc.collect()' to free idle buffers."
+                )
+            
+            # print(f"[AOTEngine] New VRAM allocation: {size/1024/1024:.2f} MB ({dtype})")
+            return TaichiGPUBuffer(size, handle, shape, dtype, is_vector, self, host_accessible=host_accessible, vector_dim=v_dim)
 
     def get_staging_buffer(self, shape, dtype):
         size = int(np.prod(shape) * np.dtype(dtype).itemsize)
@@ -425,23 +465,24 @@ class AOTEngine:
         elif hasattr(data, "dtype"):
             dtype = data.dtype
 
-        staging = self.get_staging_buffer(shape, dtype)
-        ptr = staging.map()
-        
-        if obj_type == "pytorch":
-            import torch
-            target_view = torch.from_blob(ptr, shape, dtype=data.dtype, device='cpu')
-            target_view.copy_(data.detach(), non_blocking=False) 
-        elif hasattr(data, "__cuda_array_interface__"):
-            src_ptr = data.__cuda_array_interface__['data'][0]
-            ctypes.memmove(ptr, src_ptr, staging.nbytes)
-        else:
-            temp = np.ascontiguousarray(data)
-            ctypes.memmove(ptr, temp.ctypes.data, temp.nbytes)
+        with self._lock:
+            staging = self.get_staging_buffer(shape, dtype)
+            ptr = staging.map()
             
-        staging.unmap()
-        vram_target = self.allocate(shape, dtype, is_vector=is_vector, vector_dim=vector_dim)
-        _LIB.copy_gpu_buffer(_RUNTIME, staging.handle, vram_target.handle, staging.nbytes)
+            if obj_type == "pytorch":
+                import torch
+                target_view = torch.from_blob(ptr, shape, dtype=data.dtype, device='cpu')
+                target_view.copy_(data.detach(), non_blocking=False) 
+            elif hasattr(data, "__cuda_array_interface__"):
+                src_ptr = data.__cuda_array_interface__['data'][0]
+                ctypes.memmove(ptr, src_ptr, staging.nbytes)
+            else:
+                temp = np.ascontiguousarray(data)
+                ctypes.memmove(ptr, temp.ctypes.data, temp.nbytes)
+                
+            staging.unmap()
+            vram_target = self.allocate(shape, dtype, is_vector=is_vector, vector_dim=vector_dim)
+            _LIB.copy_gpu_buffer(_RUNTIME, staging.handle, vram_target.handle, staging.nbytes)
         return vram_target
 
     def upload(self, data, is_vector=False, vector_dim=3):
@@ -473,23 +514,25 @@ class AOTEngine:
 
 
     def load(self, path):
-        base, ext = os.path.splitext(path)
-        p = f"{base}_{self._active_arch}{ext}" if os.path.exists(f"{base}_{self._active_arch}{ext}") else path
-        if p in self.modules: return self.modules[p]
-        ptr = _LIB.load_aot_module(_RUNTIME, p.encode('utf-8'))
-        if not ptr: 
-            raise RuntimeError(
-                f"\n[AOTEngine Load Error] Failed to load TCM module at: {p}\n"
-                f"  HINT: Ensure the .tcm file exists and is compatible with the active GPU backend ({self._active_arch})."
-            )
-        print(f"[AOTEngine] Loaded TCM module: {os.path.basename(p)}")
-        self.modules[p] = AOTModuleWrapper(ptr)
-        return self.modules[p]
+        with self._lock:
+            base, ext = os.path.splitext(path)
+            p = f"{base}_{self._active_arch}{ext}" if os.path.exists(f"{base}_{self._active_arch}{ext}") else path
+            if p in self.modules: return self.modules[p]
+            ptr = _LIB.load_aot_module(_RUNTIME, p.encode('utf-8'))
+            if not ptr: 
+                raise RuntimeError(
+                    f"\n[AOTEngine Load Error] Failed to load TCM module at: {p}\n"
+                    f"  HINT: Ensure the .tcm file exists and is compatible with the active GPU backend ({self._active_arch})."
+                )
+            print(f"[AOTEngine] Loaded TCM module: {os.path.basename(p)}")
+            self.modules[p] = AOTModuleWrapper(ptr)
+            return self.modules[p]
 
     def imread(self, path):
         _init_aot_bridge()
         w, h, c, d = ctypes.c_int(0), ctypes.c_int(0), ctypes.c_int(0), ctypes.c_int(0)
-        handle = _LIB.ti_imread_to_gpu(_RUNTIME, path.encode('utf-8'), ctypes.byref(w), ctypes.byref(h), ctypes.byref(c), ctypes.byref(d))
+        with self._lock:
+            handle = _LIB.ti_imread_to_gpu(_RUNTIME, path.encode('utf-8'), ctypes.byref(w), ctypes.byref(h), ctypes.byref(c), ctypes.byref(d))
         if not handle: raise RuntimeError(f"Failed to load image: {path}")
         dtype = np.uint8 if d.value == 8 else np.uint16
         shape = (h.value, w.value) if c.value == 1 else (h.value, w.value, c.value)
@@ -500,14 +543,19 @@ class AOTEngine:
         h, w = buf.shape[0], buf.shape[1]
         c = 1 if len(buf.shape) == 2 else buf.shape[2]
         d = 8 if buf.dtype == np.uint8 else 16
-        if not _LIB.ti_imwrite_from_gpu(_RUNTIME, path.encode('utf-8'), buf.handle, w, h, c, d):
+        with self._lock:
+            res = _LIB.ti_imwrite_from_gpu(_RUNTIME, path.encode('utf-8'), buf.handle, w, h, c, d)
+        if not res:
             raise RuntimeError(f"Failed to save image: {path}")
 
-    def sync(self): _LIB.sync_runtime(_RUNTIME)
+    def sync(self):
+        with self._lock:
+            _LIB.sync_runtime(_RUNTIME)
     def reinit(self, device_id=0):
-        global _RUNTIME
-        _RUNTIME = _LIB.init_aot_engine({"vulkan":0,"cuda":1,"cpu":2}.get(self._active_arch, 0), device_id)
-        self.modules = {}
+        with self._lock:
+            global _RUNTIME
+            _RUNTIME = _LIB.init_aot_engine({"vulkan":0,"cuda":1,"cpu":2}.get(self._active_arch, 0), device_id)
+            self.modules = {}
 
 engine = AOTEngine()
 

@@ -15,6 +15,7 @@ if project_root not in sys.path:
 from .engine import AOTEngine, TaichiGPUBuffer, InputArray, OutputArray
 from .engine import INTER_CUBIC, INTER_LINEAR, INTER_NEAREST, INTER_AREA
 from .engine import COLOR_BGR2GRAY, COLOR_RGB2GRAY, COLOR_GRAY2BGR
+from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.taichi_worker import ti_thread
 
 # Bridge to specialized AOT functions
 # Moved to lazy imports in wrapper functions below to avoid circular imports
@@ -394,7 +395,9 @@ def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False, dst=None):
         target_y, src=tmp_buf, dst=dst_buf, h=h, w=w, weights=weights_buf, radius=radius
     )
 
-    del tmp_buf, weights_buf
+    tmp_buf.destroy()
+    if hasattr(weights_buf, "destroy"):
+        weights_buf.destroy()
     return dst_buf if return_gpu else dst_buf.to_numpy()
 
 
@@ -1324,4 +1327,218 @@ def build_flow_maps(flow_or_dx, flow_or_dy_or_h, full_h_or_w=None, full_w=None,
         )
 
     return map_x_buf, map_y_buf
+
+
+def enhance_grayscale(src, blur, lut, micro_contrast=2.93, return_gpu=False, dst=None):
+    """Taichi AOT Grayscale Image Enhancement (1D LUT & Micro-Contrast) API"""
+    src_buf = InputArray(src)
+    blur_buf = InputArray(blur)
+    lut_buf = InputArray(lut)
+
+    h, w = src_buf.shape[:2]
+
+    if dst is not None and dst.shape == (h, w) and dst.dtype == np.float32:
+        dst_buf = dst
+    else:
+        dst_buf = OutputArray((h, w), dtype=np.float32)
+
+    _mod("remap").run(
+        "enhance_grayscale",
+        src=src_buf,
+        blur=blur_buf,
+        lut=lut_buf,
+        dst=dst_buf,
+        micro_contrast=float(micro_contrast),
+        h=h,
+        w=w,
+    )
+
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+@ti_thread
+def hamilton_demosaic(
+    bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
+    """Taichi AOT Hamilton-Adams Demosaicing & Color Space / Gamma transform API"""
+    bayer_buf   = InputArray(bayer)
+    cmatrix_buf = InputArray(cmatrix)
+    
+    h, w = bayer_buf.shape[:2]
+    
+    # Pre-allocate temporary intermediate buffers in VRAM to keep it blazing fast!
+    wb_bayer_buf = engine.allocate((h, w), dtype=np.float32)
+    green_buf    = engine.allocate((h, w), dtype=np.float32)
+    
+    # Destination output RGB float32 buffer
+    if dst is not None and dst.shape == (h, w, 3) and dst.dtype == np.float32:
+        dst_buf = dst
+    else:
+        dst_buf = OutputArray((h, w, 3), dtype=np.float32)
+        
+    _mod("hamilton").run(
+        "hamilton_demosaic",
+        bayer=bayer_buf,
+        wb_bayer=wb_bayer_buf,
+        green=green_buf,
+        cmatrix=cmatrix_buf,
+        dst=dst_buf,
+        wb_r=float(wb_r),
+        wb_g1=float(wb_g1),
+        wb_b=float(wb_b),
+        wb_g2=float(wb_g2),
+        black=float(black_level),
+        white=float(white_level),
+        h=int(h),
+        w=int(w),
+        c00=int(c00),
+        c01=int(c01),
+        c10=int(c10),
+        c11=int(c11)
+    )
+    
+    # Immediately destroy intermediate VRAM buffers to keep VRAM footprint under ~8MB!
+    wb_bayer_buf.destroy()
+    green_buf.destroy()
+    if bayer_buf is not bayer:
+        bayer_buf.destroy()
+    if cmatrix_buf is not cmatrix:
+        cmatrix_buf.destroy()
+    
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+def demosaic(
+    raw_input,
+    wb_r=None, wb_g1=None, wb_b=None, wb_g2=None, cmatrix=None,
+    black_level=None, white_level=None, c00=None, c01=None, c10=None, c11=None,
+    method="hamilton", return_gpu=False, dst=None, output_bgr_u16=False
+):
+    """
+    Unified, Ultra-Simplified GPU-Accelerated RAW Demosaicing API.
+    
+    This function acts as the single entry-point for all GPU-accelerated demosaicing algorithms.
+    It automatically routes the raw sensor Bayer array to the appropriate pre-compiled AOT shader.
+    
+    Smart Metadata Auto-Extraction:
+    -------------------------------
+    To make integration extremely simple and prevent intimidating signatures, you can pass a
+    `rawpy` object or a file path string directly as the first argument. All sensor metadata
+    (Bayer array, WB gains, color matrix, black/white levels, layout indices) will be extracted
+    automatically under the hood!
+    
+    Usage Examples:
+    ---------------
+    1. Pass rawpy object directly (Recommended):
+       >>> rgb = ta_aot.demosaic(raw, method="hamilton")
+       
+    2. Pass DNG filepath directly:
+       >>> rgb = ta_aot.demosaic("path/to/image.dng", method="hamilton")
+       
+    3. Pass parameters manually (For advanced JIT/AOT parity checks):
+       >>> rgb = ta_aot.demosaic(bayer_np, wb_r, wb_g1, wb_b, wb_g2, cmatrix, ...)
+       
+    Supported Methods:
+    -----------------
+    1. 'hamilton' / 'hamilton-adams' / 'ha' / 'ppg':
+       - Real Name: Hamilton-Adams Edge-Directed Demosaicing (equivalent to PPG / Patterned Pixel Grouping).
+       - Features: High-speed edge-directed green interpolation, color difference gradient restoration,
+                   and fused sRGB + Dynamic Algebraic Sigmoid contrast roll-off.
+       
+    Parameters:
+    -----------
+    raw_input : rawpy.RawPy, str, or np.ndarray
+        Either a loaded rawpy object, a file path to a DNG/RAW image, or a raw Bayer NumPy array.
+    """
+    bayer = raw_input
+    
+    # Check if raw_input is a filepath string or rawpy object
+    is_rawpy_obj = hasattr(raw_input, "raw_image")
+    is_filepath = isinstance(raw_input, str) and os.path.exists(raw_input)
+    
+    if is_rawpy_obj or is_filepath:
+        import rawpy
+        
+        def _extract_from_raw(raw):
+            b_np = raw.raw_image.astype(np.float32)
+            bl = float(raw.black_level_per_channel[0])
+            wl = float(raw.white_level)
+            
+            wb_np = np.array(raw.camera_whitebalance, dtype=np.float32)
+            if len(wb_np) == 4:
+                if wb_np[3] <= 0.01:
+                    wb_np[3] = wb_np[1]
+                g_gain = (wb_np[1] + wb_np[3]) / 2.0
+                wb_np /= g_gain
+            else:
+                wb_np = np.array([1.5, 1.0, 2.0, 1.0], dtype=np.float32)
+
+            c_00 = int(raw.raw_colors[0, 0])
+            c_01 = int(raw.raw_colors[0, 1])
+            c_10 = int(raw.raw_colors[1, 0])
+            c_11 = int(raw.raw_colors[1, 1])
+            cm = raw.color_matrix[:, :3].astype(np.float32)
+            return b_np, wb_np[0], wb_np[1], wb_np[2], wb_np[3], cm, bl, wl, c_00, c_01, c_10, c_11
+            
+        if is_rawpy_obj:
+            bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix, black_level, white_level, c00, c01, c10, c11 = _extract_from_raw(raw_input)
+        else:
+            with rawpy.imread(raw_input) as raw:
+                bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix, black_level, white_level, c00, c01, c10, c11 = _extract_from_raw(raw)
+
+    method_lower = method.lower().replace("_", "-")
+    if method_lower in ("hamilton", "hamilton-adams", "ha", "ppg"):
+        if output_bgr_u16:
+            # Step 1: Run the demosaic JIT/AOT to produce float32 RGB on GPU
+            rgb_f32_gpu = hamilton_demosaic(
+                bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+                black_level, white_level, c00, c01, c10, c11,
+                return_gpu=True, dst=None
+            )
+            h, w = rgb_f32_gpu.shape[:2]
+            
+            # Step 2: Allocate host-accessible intermediate i32 BGR buffer in VRAM
+            bgr_i32_gpu = engine.allocate((h, w, 3), dtype=np.int32, host_accessible=True)
+            
+            # Step 3: Run the conversion/channel-swapping graph on GPU
+            _mod("hamilton").run(
+                "rgb_to_bgr_i32",
+                src=rgb_f32_gpu,
+                dst=bgr_i32_gpu,
+                h=int(h),
+                w=int(w)
+            )
+            
+            # Step 4: Clean up GPU intermediate float32 buffer immediately
+            rgb_f32_gpu.destroy()
+            
+            # Step 5: Convert and return
+            if not return_gpu:
+                engine.sync()
+                bgr_u16_gpu = bgr_i32_gpu.cast(np.uint16, host_accessible=True)
+                bgr_u16_cpu = bgr_u16_gpu.to_numpy()
+                bgr_u16_gpu.destroy()
+                bgr_i32_gpu.destroy()
+                return bgr_u16_cpu
+            else:
+                engine.sync()
+                bgr_u16_gpu = bgr_i32_gpu.cast(np.uint16, host_accessible=True)
+                bgr_i32_gpu.destroy()
+                return bgr_u16_gpu
+        else:
+            return hamilton_demosaic(
+                bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+                black_level, white_level, c00, c01, c10, c11,
+                return_gpu=return_gpu, dst=dst
+            )
+    else:
+        supported = ["'hamilton' (aliases: 'hamilton-adams', 'ha', 'ppg')"]
+        raise ValueError(
+            f"\n[Taichi AOT] Unsupported demosaicing method: '{method}'.\n"
+            f"  SUPPORTED METHODS: {', '.join(supported)}"
+        )
+
+
 
