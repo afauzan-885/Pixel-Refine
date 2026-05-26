@@ -121,6 +121,31 @@ if TAICHI_AVAILABLE:
         return top * (1.0 - fy) + bottom * fy
 
     @ti.func
+    def bilinear_at_vec3(img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1) -> ti.types.vector(3, ti.f32):
+        """Bilinear interpolation for vector(3, f32) fields with BORDER_REFLECT_101."""
+        hh, ww = h, w
+        if ti.static(isinstance(h, int) and h == -1):
+            hh, ww = img.shape[0], img.shape[1]
+        ix = int(ti.floor(x))
+        iy = int(ti.floor(y))
+        fx = x - float(ix)
+        fy = y - float(iy)
+
+        ix0 = reflect_idx(ix, ww)
+        iy0 = reflect_idx(iy, hh)
+        ix1 = reflect_idx(ix + 1, ww)
+        iy1 = reflect_idx(iy + 1, hh)
+
+        v00 = img[iy0, ix0]
+        v01 = img[iy0, ix1]
+        v10 = img[iy1, ix0]
+        v11 = img[iy1, ix1]
+
+        top = v00 * (1.0 - fx) + v01 * fx
+        bottom = v10 * (1.0 - fx) + v11 * fx
+        return top * (1.0 - fy) + bottom * fy
+
+    @ti.func
     def bicubic_at(img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1) -> float:
         """Bicubic interpolation with BORDER_REFLECT_101 and a=-0.75."""
         hh, ww = h, w

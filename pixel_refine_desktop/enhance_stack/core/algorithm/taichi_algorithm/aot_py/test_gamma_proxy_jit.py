@@ -9,14 +9,13 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-import pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.gamma_proxy_kernels as kernels
+import pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_tile.aot.gamma_proxy_kernels as kernels
 
 def to_gamma_proxy_python(linear_img, scale=1.0, gamma_pow=2.22, slope=4.5, cutoff=0.018):
-    img = np.clip(linear_img * scale, 0.0, 1.0)
-    res = np.where(
-        img < cutoff, img * slope, 1.099 * np.power(img, 1.0 / gamma_pow) - 0.099
-    )
-    return np.clip(res, 0.0, 1.0).astype(np.float32)
+    x = linear_img * scale
+    x_mapped = x / np.sqrt(1.0 + x * x)
+    res = np.power(np.clip(x_mapped, 0.0, 1.0), 1.0 / gamma_pow)
+    return res.astype(np.float32)
 
 def test_parity():
     ti.init(arch=ti.cpu)

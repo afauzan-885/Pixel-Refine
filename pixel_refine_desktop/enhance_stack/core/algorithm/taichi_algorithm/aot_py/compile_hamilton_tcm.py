@@ -235,28 +235,78 @@ def _ha_red_blue_interpolation_kernel_opt(
         G_raw = G / ti.max(0.1, (wb_g1 + wb_g2) * 0.5)
         B_raw = B / ti.max(0.1, wb_b)
 
-        # 2. Compute saturation metrics
-        max_raw = ti.max(R_raw, ti.max(G_raw, B_raw))
-        min_raw = ti.min(R_raw, ti.min(G_raw, B_raw))
+        # 2. Inpainting-based Highlight Reconstruction
+        # If any channel is approaching or exceeds the clipping limit, reconstruct using local ratios of HEALTHY unclipped pixels
+        clip_limit = 0.80
+        healthy_limit = 0.72 # Only use neighbor pixels that are completely healthy (unclipped) to prevent skewing ratios
+        
+        if R_raw > clip_limit or B_raw > clip_limit or G_raw > clip_limit:
+            sum_r_ratio = 0.0
+            count_r = 0.0
+            sum_b_ratio = 0.0
+            count_b = 0.0
+            
+            # Search 5x5 neighborhood for completely healthy ratios
+            for dr in range(-2, 3):
+                for dc in range(-2, 3):
+                    nr, nc = r + dr, c + dc
+                    if nr >= 0 and nr < h and nc >= 0 and nc < w:
+                        n_color_idx = 1
+                        nr_mod = nr % 2
+                        nc_mod = nc % 2
+                        if nr_mod == 0:
+                            n_color_idx = c00 if nc_mod == 0 else c01
+                        else:
+                            n_color_idx = c10 if nc_mod == 0 else c11
+                        
+                        n_raw = wb_bayer[nr, nc]
+                        n_green = green[nr, nc]
+                        
+                        if n_color_idx == 0: # Red neighbor
+                            n_r_raw = n_raw / ti.max(0.1, wb_r)
+                            n_g_raw = n_green / ti.max(0.1, (wb_g1 + wb_g2) * 0.5)
+                            # Only use completely healthy pixels (no channel is clipped/skewed)
+                            if n_r_raw < healthy_limit and n_g_raw < healthy_limit and n_g_raw > 0.01:
+                                weight = 1.0 / (1.0 + ti.cast(dr*dr + dc*dc, ti.f32))
+                                sum_r_ratio += (n_r_raw / n_g_raw) * weight
+                                count_r += weight
+                        elif n_color_idx == 2: # Blue neighbor
+                            n_b_raw = n_raw / ti.max(0.1, wb_b)
+                            n_g_raw = n_green / ti.max(0.1, (wb_g1 + wb_g2) * 0.5)
+                            # Only use completely healthy pixels
+                            if n_b_raw < healthy_limit and n_g_raw < healthy_limit and n_g_raw > 0.01:
+                                weight = 1.0 / (1.0 + ti.cast(dr*dr + dc*dc, ti.f32))
+                                sum_b_ratio += (n_b_raw / n_g_raw) * weight
+                                count_b += weight
 
-        # 3. Calculate highlight desaturation factor with wide, smooth transitions (Smoothstep)
-        factor = ti.math.clamp((max_raw - 0.55) / 0.43, 0.0, 1.0)
+            if count_r > 0.0 and R_raw > clip_limit:
+                ratio_r = sum_r_ratio / count_r
+                R_raw = ti.max(R_raw, G_raw * ratio_r)
+            if count_b > 0.0 and B_raw > clip_limit:
+                ratio_b = sum_b_ratio / count_b
+                B_raw = ti.max(B_raw, G_raw * ratio_b)
+            
+            # Re-scale back to white-balanced space
+            R = R_raw * wb_r
+            B = B_raw * wb_b
+
+        # 3. Compute saturation metrics on restored/inpainted channels
+        max_raw = ti.max(R_raw, ti.max(G_raw, B_raw))
+
+        # 4. Calculate highlight desaturation factor
+        # Smoothly blend to neutral white as we approach clipping to prevent magenta/cyan casts
+        factor = ti.math.clamp((max_raw - 0.75) / 0.23, 0.0, 1.0)
         factor = factor * factor * (3.0 - 2.0 * factor)
 
-        # Calculate color neutrality weight with a wide, soft smoothstep
-        ratio = min_raw / ti.max(1e-5, max_raw)
-        neutrality = ti.math.clamp((ratio - 0.40) / 0.45, 0.0, 1.0)
-        neutrality = neutrality * neutrality * (3.0 - 2.0 * neutrality)
+        final_factor = factor
 
-        final_factor = factor * neutrality
-
-        # 4. Reconstruct and blend in white-balanced space to eliminate magenta artifacts
+        # 5. Reconstruct and blend in white-balanced space to eliminate magenta artifacts in extreme highlights
         L = ti.max(R, ti.max(G, B))
         R = R * (1.0 - final_factor) + L * final_factor
         G = G * (1.0 - final_factor) + L * final_factor
         B = B * (1.0 - final_factor) + L * final_factor
 
-        # 5. Direct camera linear RGB output normalized by maximum white balance gain to prevent highlight clipping
+        # 6. Direct camera linear RGB output normalized by maximum white balance gain to prevent highlight clipping
         max_wb = ti.max(wb_r, ti.max(wb_g1, ti.max(wb_b, wb_g2)))
         dst[r, c, 0] = ti.math.clamp(R / max_wb, 0.0, 1.0)
         dst[r, c, 1] = ti.math.clamp(G / max_wb, 0.0, 1.0)

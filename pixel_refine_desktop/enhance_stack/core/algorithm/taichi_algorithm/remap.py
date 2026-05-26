@@ -5,7 +5,7 @@ import taichi as ti
 from .taichi_worker import ti_thread, TAICHI_AVAILABLE
 
 if TAICHI_AVAILABLE:
-    from .common import bilinear_at, bilinear_at_3ch
+    from .common import bilinear_at, bilinear_at_3ch, bilinear_at_vec3
 
     @ti.kernel
     def _smooth_flow_kernel(
@@ -156,7 +156,7 @@ if TAICHI_AVAILABLE:
         w_dst: int,
     ):
         for r, c in ti.ndrange(h_dst, w_dst):
-            dst[r, c] = bilinear_at(src, map_x[r, c], map_y[r, c], h_src, w_src)
+            dst[r, c] = bilinear_at_vec3(src, map_x[r, c], map_y[r, c], h_src, w_src)
 
 
 def remap(src, map_x, map_y, dst=None, buffer_provider="pool"):

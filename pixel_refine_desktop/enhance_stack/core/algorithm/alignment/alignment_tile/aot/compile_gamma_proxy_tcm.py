@@ -28,9 +28,10 @@ def compile_gamma_proxy_aot(arch=ti.vulkan, save_path="gamma_proxy_vulkan.tcm"):
     builder_rgb = ti.graph.GraphBuilder()
     src_rgb = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.types.vector(3, ti.f32), ndim=2)
     dst_rgb = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.types.vector(3, ti.f32), ndim=2)
+    cmatrix_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "cmatrix", ti.f32, ndim=2)
     
     builder_rgb.dispatch(kernels_mod.gamma_proxy_rgb_kernel, 
-                         src_rgb, dst_rgb, scale, gamma_pow, slope, cutoff)
+                         src_rgb, dst_rgb, cmatrix_arg, scale, gamma_pow, slope, cutoff)
     module.add_graph("gamma_proxy_rgb", builder_rgb.compile())
 
     # 2. Single Channel Graph (FP32 source)

@@ -60,12 +60,12 @@ Resolution: 3016x3016 (9.1 MP)
 ======================================================================
 Method                    | Latency (ms)    | FPS       
 -------------------------------------------------------
-Master Pipeline (OBG)     | 209.58          | 4.77      
-Standard Dispatch         | 244.55          | 4.09      
+Master Pipeline (OBG)     | 209.93          | 4.76      
+Standard Dispatch         | 232.05          | 4.31      
 -------------------------------------------------------
 
->>> Speedup using Master Pipeline: 14.30% faster
->>> Overhead Reduced: 34.98 ms per frame
+>>> Speedup using Master Pipeline: 9.53% faster
+>>> Overhead Reduced: 22.12 ms per frame
 
 ======================================================================
  FINAL VERDICT
