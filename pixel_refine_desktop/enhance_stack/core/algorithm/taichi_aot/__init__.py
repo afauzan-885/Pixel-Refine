@@ -1494,6 +1494,9 @@ def demosaic(
         else:
             with rawpy.imread(raw_input) as raw:
                 bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix, black_level, white_level, c00, c01, c10, c11 = _extract_from_raw(raw)
+        
+        # Store active cmatrix in engine singleton for downstream gamma proxy color space alignment transformations
+        engine.active_cmatrix = cmatrix
 
     method_lower = method.lower().replace("_", "-")
     if method_lower in ("hamilton", "hamilton-adams", "ha", "ppg"):

@@ -45,7 +45,16 @@ def to_gamma_proxy_gpu(image_gpu, scale=1.0, gamma_pow=2.22, slope=4.5, cutoff=0
         dst_gpu = engine.allocate(image_gpu.shape, dtype=np.float32, is_vector=image_gpu.is_vector, vector_dim=image_gpu.vector_dim)
 
     graph_name = "gamma_proxy_rgb" if image_gpu.is_vector else "gamma_proxy_single"
-    mod.run(graph_name, src=image_gpu, dst=dst_gpu, scale=float(scale), gamma_pow=float(gamma_pow), slope=float(slope), cutoff=float(cutoff))
+    if graph_name == "gamma_proxy_rgb":
+        # Retrieve active color matrix or fallback to identity
+        cmatrix = getattr(engine, "active_cmatrix", None)
+        if cmatrix is None:
+            cmatrix = np.eye(3, dtype=np.float32)
+        cmatrix_gpu = engine.upload(cmatrix)
+        mod.run(graph_name, src=image_gpu, dst=dst_gpu, cmatrix=cmatrix_gpu, scale=float(scale), gamma_pow=float(gamma_pow), slope=float(slope), cutoff=float(cutoff))
+        cmatrix_gpu.destroy()
+    else:
+        mod.run(graph_name, src=image_gpu, dst=dst_gpu, scale=float(scale), gamma_pow=float(gamma_pow), slope=float(slope), cutoff=float(cutoff))
     return dst_gpu
 
 
