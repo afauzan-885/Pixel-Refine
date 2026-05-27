@@ -252,6 +252,11 @@ def _prepare_image_array_from_raw(
 
         # Call GPU-accelerated Demosaicing (Auto-extracts all metadata and runs on GPU)
         os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
+        
+        # Backup (Linear Demosaic Version):
+        # bgr_linear = ta_aot.demosaic(original_path, method="hamilton", return_gpu=False, output_bgr_u16=True)
+        
+        # Active Version: Restored to JIT/AOT developed non-linear highlight logic from commit 56b751e
         bgr = ta_aot.demosaic(original_path, method="hamilton", return_gpu=False, output_bgr_u16=True)
 
         # 5. GT Proxy Generation (if requested)

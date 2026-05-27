@@ -302,7 +302,6 @@ def run_pipeline_stress_test(engine, img_full):
         start_time_std = time.perf_counter()
         for i in range(n_iters):
             # Chain the same operations manually (using return_gpu=True to stay on VRAM)
-            # Chain the same operations manually
             r1 = taichi_aot.resize(
                 img_gpu,
                 (w_f // 2, h_f // 2),
@@ -316,6 +315,16 @@ def run_pipeline_stress_test(engine, img_full):
             _r6 = taichi_aot.resize(
                 r4, (w_f, h_f), interpolation=taichi_aot.INTER_CUBIC, return_gpu=True
             )
+
+            # Explicitly release intermediate VRAM buffers to prevent massive memory leakage/spikes
+            r1.destroy()
+            r2.destroy()
+            r3.destroy()
+            r4.destroy()
+            _dx.destroy()
+            _dy.destroy()
+            if i < n_iters - 1:
+                _r6.destroy()
 
         engine.sync()
         end_time_std = time.perf_counter()

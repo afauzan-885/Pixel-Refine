@@ -13,6 +13,7 @@ if TAICHI_AVAILABLE:
         lut: ti.types.ndarray(),
         dst: ti.types.ndarray(),
         micro_contrast: float,
+        clarity: float,
         h: int,
         w: int,
     ):
@@ -20,18 +21,26 @@ if TAICHI_AVAILABLE:
             val = src[r, c]
             b_val = blur[r, c]
             
-            # 1. Micro-contrast detail enhancement (boost difference)
-            enhanced = val + (val - b_val) * micro_contrast
+            # 1. Contrast-Aware Halo-Free Detail Shaping (Soft limiter)
+            diff = val - b_val
+            shaped_diff = diff / (1.0 + ti.abs(diff) * 5.0)  # 5.0 halo suppression coefficient
             
-            # 2. Global contrast enhancement (1D LUT lookup)
+            # 2. Midtone-targeted local contrast (Clarity bell curve: peaks at 0.5, zero at 0 and 1)
+            midtone_mask = 16.0 * val * val * (1.0 - val) * (1.0 - val)
+            
+            # Combine Micro-contrast (high frequencies) and Clarity (midtones local contrast)
+            enhanced = val + shaped_diff * micro_contrast + shaped_diff * clarity * midtone_mask
+            
+            # 3. Global contrast enhancement (1D LUT lookup)
             lut_idx = ti.cast(ti.math.clamp(enhanced * 255.0, 0.0, 255.0), ti.i32)
             dst[r, c] = lut[lut_idx]
 
 
-def enhance_grayscale(src, blur, lut, micro_contrast=2.93, dst=None, buffer_provider="pool"):
+def enhance_grayscale(src, blur, lut, micro_contrast=2.93, clarity=0.0, dst=None, buffer_provider="pool"):
     """
-    GPU-accelerated Grayscale Image Enhancement (1D LUT & Micro-Contrast).
+    GPU-accelerated Grayscale Image Enhancement (1D LUT & Micro-Contrast & Clarity).
     Applies detail-boosting (micro-contrast) via difference from blurred image,
+    clarity via midtone-targeted local contrast,
     and shapes global contrast via a 1D Look-Up Table (LUT) - all in a single GPU pass.
 
     All Taichi operations are synchronized via @ti_thread.
@@ -41,6 +50,7 @@ def enhance_grayscale(src, blur, lut, micro_contrast=2.93, dst=None, buffer_prov
         blur:            Blurred luma image - NumPy array OR Taichi ndarray. (H, W)
         lut:             1D Look-Up Table (256 elements) - NumPy array OR Taichi ndarray.
         micro_contrast:  Scale factor to boost high-frequency details. Calibrated default: 2.93.
+        clarity:         Local contrast clarity factor.
         dst:             Optional pre-allocated output buffer (H, W).
         buffer_provider: Optional buffer pool provider ("pool" or None).
 
@@ -52,7 +62,7 @@ def enhance_grayscale(src, blur, lut, micro_contrast=2.93, dst=None, buffer_prov
         aot = _get_aot()
         if aot and hasattr(aot, "enhance_grayscale"):
             is_taichi = hasattr(src, "to_numpy") or hasattr(blur, "to_numpy") or hasattr(lut, "to_numpy")
-            res_buf = aot.enhance_grayscale(src, blur, lut, float(micro_contrast), return_gpu=is_taichi)
+            res_buf = aot.enhance_grayscale(src, blur, lut, float(micro_contrast), float(clarity), return_gpu=is_taichi)
             if dst is not None:
                 if is_taichi:
                     from .common import copy_field
@@ -82,7 +92,7 @@ def enhance_grayscale(src, blur, lut, micro_contrast=2.93, dst=None, buffer_prov
         else:
             dst_gpu, _ = ensure_taichi_field(dst_data, dtype=ti.f32, buffer_provider=buffer_provider)
 
-        _enhance_grayscale_kernel(src_gpu, blur_gpu, lut_gpu, dst_gpu, float(micro_contrast), h, w)
+        _enhance_grayscale_kernel(src_gpu, blur_gpu, lut_gpu, dst_gpu, float(micro_contrast), float(clarity), h, w)
 
         # Clean up temporaries
         if src_is_temp:

@@ -17,8 +17,9 @@ def normalize_image_gpu(image_gpu, dtype, out_gpu=None):
     tcm_path = os.path.join(aot_assets_dir, "normalize_image.tcm")
 
     inv_scale = 1.0
-    if np.issubdtype(dtype, np.integer):
-        inv_scale = 1.0 / float(np.iinfo(dtype).max)
+    buf_dtype = getattr(image_gpu, "dtype", dtype)
+    if np.issubdtype(buf_dtype, np.integer):
+        inv_scale = 1.0 / float(np.iinfo(buf_dtype).max)
 
     graph = "normalize_vec3_f32_to_vec3_f32" if image_gpu.is_vector else "normalize_f32_to_vec3"
     mod = engine.load(tcm_path)
@@ -59,7 +60,7 @@ def prepare_pyramid_aot(image_gpu):
 
 def prepare_reference_for_alignment(reference_image_float, is_linear_mode, proxy_scale, work_res_h, work_res_w, lut_gpu=None, blur_work_gpu=None):
     """Prepare reference image pyramid on GPU. Returns (l0, l1, l2) — caller must destroy all."""
-    ref_gpu = taichi_aot.upload(reference_image_float)
+    ref_gpu = taichi_aot.upload(reference_image_float, force_8bit=True)
     ref_final = ref_gpu
 
     if is_linear_mode:
@@ -78,13 +79,13 @@ def prepare_reference_for_alignment(reference_image_float, is_linear_mode, proxy
             ref_gray.destroy()
 
     if lut_gpu is not None:
-        # Fused GPU contrast & micro-contrast enhancement!
-        # Calibrated parameters: micro_contrast = 2.93, sigma = 0.7
+        # Fused GPU contrast & micro-contrast & Clarity enhancement!
+        # Calibrated parameters: micro_contrast = 1.89, clarity = 1.61, sigma = 0.8
         # 1. Blur the luma image on the GPU (reuses pre-allocated buffer if provided)
-        blur_gpu = taichi_aot.gaussian_blur(final_res_gray, sigma=0.7, return_gpu=True, dst=blur_work_gpu)
+        blur_gpu = taichi_aot.gaussian_blur(final_res_gray, sigma=0.8, return_gpu=True, dst=blur_work_gpu)
         # 2. Enhance luma directly on the GPU
         enhanced_gpu = taichi_aot.enhance_grayscale(
-            final_res_gray, blur_gpu, lut_gpu, micro_contrast=2.93, return_gpu=True
+            final_res_gray, blur_gpu, lut_gpu, micro_contrast=1.89, clarity=1.61, return_gpu=True
         )
         if blur_work_gpu is None:
             blur_gpu.destroy()
@@ -97,7 +98,7 @@ def prepare_reference_for_alignment(reference_image_float, is_linear_mode, proxy
 
 def prepare_comparison_for_alignment(comp_image, ref_dtype, is_linear_mode, proxy_scale, work_res_h, work_res_w, lut_gpu=None, blur_work_gpu=None):
     """Prepare comparison image pyramid on GPU. Returns (l0, l1, l2) — caller must destroy all."""
-    comp_input = taichi_aot.upload(comp_image)
+    comp_input = taichi_aot.upload(comp_image, force_8bit=True)
     comp_normalized = normalize_image_gpu(comp_input, dtype=ref_dtype)
     if comp_input is not comp_normalized:
         comp_input.destroy()
@@ -119,13 +120,13 @@ def prepare_comparison_for_alignment(comp_image, ref_dtype, is_linear_mode, prox
             comp_gray.destroy()
 
     if lut_gpu is not None:
-        # Fused GPU contrast & micro-contrast enhancement!
-        # Calibrated parameters: micro_contrast = 2.93, sigma = 0.7
+        # Fused GPU contrast & micro-contrast & Clarity enhancement!
+        # Calibrated parameters: micro_contrast = 1.89, clarity = 1.61, sigma = 0.8
         # 1. Blur the luma image on the GPU (reuses pre-allocated buffer if provided)
-        blur_gpu = taichi_aot.gaussian_blur(final_res_gray, sigma=0.7, return_gpu=True, dst=blur_work_gpu)
+        blur_gpu = taichi_aot.gaussian_blur(final_res_gray, sigma=0.8, return_gpu=True, dst=blur_work_gpu)
         # 2. Enhance luma directly on the GPU
         enhanced_gpu = taichi_aot.enhance_grayscale(
-            final_res_gray, blur_gpu, lut_gpu, micro_contrast=2.93, return_gpu=True
+            final_res_gray, blur_gpu, lut_gpu, micro_contrast=1.89, clarity=1.61, return_gpu=True
         )
         if blur_work_gpu is None:
             blur_gpu.destroy()

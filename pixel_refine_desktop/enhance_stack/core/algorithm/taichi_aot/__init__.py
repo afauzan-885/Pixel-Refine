@@ -65,8 +65,10 @@ INTER_LANCZOS4 = 4
 # --- Core API ---
 
 
-def upload(arr: np.ndarray, is_vector=False) -> TaichiGPUBuffer:
-    """Upload a NumPy array to GPU VRAM."""
+def upload(arr: np.ndarray, is_vector=False, force_8bit=False) -> TaichiGPUBuffer:
+    """Upload a NumPy array to GPU VRAM, optionally forcing 16-bit to 8-bit to optimize memory."""
+    if force_8bit and isinstance(arr, np.ndarray) and arr.dtype == np.uint16:
+        arr = (arr >> 8).astype(np.uint8)
     return engine.upload(arr, is_vector=is_vector)
 
 
@@ -1329,7 +1331,7 @@ def build_flow_maps(flow_or_dx, flow_or_dy_or_h, full_h_or_w=None, full_w=None,
     return map_x_buf, map_y_buf
 
 
-def enhance_grayscale(src, blur, lut, micro_contrast=2.93, return_gpu=False, dst=None):
+def enhance_grayscale(src, blur, lut, micro_contrast=2.93, clarity=0.0, return_gpu=False, dst=None):
     """Taichi AOT Grayscale Image Enhancement (1D LUT & Micro-Contrast) API"""
     src_buf = InputArray(src)
     blur_buf = InputArray(blur)
@@ -1349,6 +1351,7 @@ def enhance_grayscale(src, blur, lut, micro_contrast=2.93, return_gpu=False, dst
         lut=lut_buf,
         dst=dst_buf,
         micro_contrast=float(micro_contrast),
+        clarity=float(clarity),
         h=h,
         w=w,
     )
@@ -1465,6 +1468,10 @@ def demosaic(
             b_np = raw.raw_image.astype(np.float32)
             bl = float(raw.black_level_per_channel[0])
             wl = float(raw.white_level)
+            
+            # --- Dynamic Experiment: Limit white level to 98% to preserve highlight headroom ---
+            wl = wl * 0.98
+            # ------------------------------------------------------------------------------------
             
             wb_np = np.array(raw.camera_whitebalance, dtype=np.float32)
             if len(wb_np) == 4:

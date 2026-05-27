@@ -111,6 +111,7 @@ def enhance_grayscale_kernel(
     lut: ti.types.ndarray(),
     dst: ti.types.ndarray(),
     micro_contrast: ti.f32,
+    clarity: ti.f32,
     h: ti.i32,
     w: ti.i32
 ):
@@ -118,10 +119,17 @@ def enhance_grayscale_kernel(
         val = src[r, c]
         b_val = blur[r, c]
         
-        # 1. Micro-contrast detail enhancement (boost difference)
-        enhanced = val + (val - b_val) * micro_contrast
+        # 1. Contrast-Aware Halo-Free Detail Shaping (Soft limiter)
+        diff = val - b_val
+        shaped_diff = diff / (1.0 + ti.abs(diff) * 5.0)  # 5.0 halo suppression coefficient
         
-        # 2. Global contrast enhancement (1D LUT lookup)
+        # 2. Midtone-targeted local contrast (Clarity bell curve: peaks at 0.5, zero at 0 and 1)
+        midtone_mask = 16.0 * val * val * (1.0 - val) * (1.0 - val)
+        
+        # Combine Micro-contrast (high frequencies) and Clarity (midtones local contrast)
+        enhanced = val + shaped_diff * micro_contrast + shaped_diff * clarity * midtone_mask
+        
+        # 3. Global contrast enhancement (1D LUT lookup)
         lut_idx = ti.cast(ti.math.clamp(enhanced * 255.0, 0.0, 255.0), ti.i32)
         dst[r, c] = lut[lut_idx]
 
@@ -142,6 +150,7 @@ def get_gaussian_weights(sigma, radius):
 def run_enhancement(params):
     # Unpack parameters
     micro_c    = params["micro_c"]
+    clarity    = params["clarity"]
     sigma      = params["sigma"]
     contrast   = params["contrast"]
     brightness = params["brightness"]
@@ -169,7 +178,7 @@ def run_enhancement(params):
     gaussian_blur_y_kernel(tmp_gpu, blur_gpu, h, w, weights_gpu, radius)
     
     # D. Execute fused contrast & detail enhancement kernel on GPU
-    enhance_grayscale_kernel(src_gpu, blur_gpu, lut_gpu, dst_gpu, micro_c, h, w)
+    enhance_grayscale_kernel(src_gpu, blur_gpu, lut_gpu, dst_gpu, micro_c, clarity, h, w)
     
     # E. Download result from VRAM to CPU for visualization
     res_img = dst_gpu.to_numpy()
@@ -177,11 +186,21 @@ def run_enhancement(params):
 
 # 5. Setup OpenCV Window & GUI Trackbars
 win_name = "Taichi GPU Image Enhancement Calibration"
-cv2.namedWindow(win_name, cv2.WINDOW_AUTOSIZE)
+has_display = True
+
+# Detect if we can create a window
+try:
+    cv2.namedWindow(win_name, cv2.WINDOW_AUTOSIZE)
+    # Test highgui window presence
+    cv2.getWindowProperty(win_name, cv2.WND_PROP_VISIBLE)
+except Exception:
+    has_display = False
+    print("\n[Warning] No active display screen or GUI context detected. Running in Headless Simulation Mode...")
 
 # Default baseline parameters
 current_params = {
     "micro_c": 1.5,
+    "clarity": 1.2,
     "sigma": 1.5,
     "contrast": 1.0,
     "brightness": 0.0,
@@ -191,80 +210,121 @@ current_params = {
 def on_trackbar_change(*_):
     pass
 
-# Create Trackbars with integer mapping
-# Micro-Contrast: 0 - 500 (maps to 0.0 - 5.0)
-cv2.createTrackbar("Micro-Contrast", win_name, int(current_params["micro_c"] * 100), 500, on_trackbar_change)
-# Sigma: 5 - 50 (maps to 0.5 - 5.0)
-cv2.createTrackbar("Sigma (Detail Scale)", win_name, int(current_params["sigma"] * 10), 50, on_trackbar_change)
-# Contrast: 50 - 300 (maps to 0.5 - 3.0)
-cv2.createTrackbar("Global Contrast", win_name, int(current_params["contrast"] * 100), 300, on_trackbar_change)
-# Brightness: 0 - 100 (maps to -0.5 - 0.5)
-cv2.createTrackbar("Brightness Offset", win_name, int((current_params["brightness"] + 0.5) * 100), 100, on_trackbar_change)
-# Gamma: 20 - 300 (maps to 0.2 - 3.0)
-cv2.createTrackbar("Gamma Curve", win_name, int(current_params["gamma"] * 100), 300, on_trackbar_change)
+if has_display:
+    # Create Trackbars with integer mapping
+    # Micro-Contrast: 0 - 500 (maps to 0.0 - 5.0)
+    cv2.createTrackbar("Micro-Contrast", win_name, int(current_params["micro_c"] * 100), 500, on_trackbar_change)
+    # Clarity: 0 - 400 (maps to 0.0 - 4.0)
+    cv2.createTrackbar("Clarity (Clarity)", win_name, int(current_params["clarity"] * 100), 400, on_trackbar_change)
+    # Sigma: 5 - 50 (maps to 0.5 - 5.0)
+    cv2.createTrackbar("Sigma (Detail Scale)", win_name, int(current_params["sigma"] * 10), 50, on_trackbar_change)
+    # Contrast: 50 - 300 (maps to 0.5 - 3.0)
+    cv2.createTrackbar("Global Contrast", win_name, int(current_params["contrast"] * 100), 300, on_trackbar_change)
+    # Brightness: 0 - 100 (maps to -0.5 - 0.5)
+    cv2.createTrackbar("Brightness Offset", win_name, int((current_params["brightness"] + 0.5) * 100), 100, on_trackbar_change)
+    # Gamma: 20 - 300 (maps to 0.2 - 3.0)
+    cv2.createTrackbar("Gamma Curve", win_name, int(current_params["gamma"] * 100), 300, on_trackbar_change)
 
 # Main interactive loop
 try:
-    while True:
-        # Retrieve trackbar values
-        mc_val   = cv2.getTrackbarPos("Micro-Contrast", win_name) / 100.0
-        sig_val  = cv2.getTrackbarPos("Sigma (Detail Scale)", win_name) / 10.0
-        sig_val  = max(0.5, sig_val)  # prevent sigma = 0
-        cont_val = cv2.getTrackbarPos("Global Contrast", win_name) / 100.0
-        bright_val = (cv2.getTrackbarPos("Brightness Offset", win_name) / 100.0) - 0.5
-        gam_val  = cv2.getTrackbarPos("Gamma Curve", win_name) / 100.0
-        gam_val  = max(0.1, gam_val)  # prevent gamma = 0
+    if has_display:
+        while True:
+            # Retrieve trackbar values
+            mc_val     = cv2.getTrackbarPos("Micro-Contrast", win_name) / 100.0
+            clarity_val = cv2.getTrackbarPos("Clarity (Clarity)", win_name) / 100.0
+            sig_val    = cv2.getTrackbarPos("Sigma (Detail Scale)", win_name) / 10.0
+            sig_val    = max(0.5, sig_val)  # prevent sigma = 0
+            cont_val   = cv2.getTrackbarPos("Global Contrast", win_name) / 100.0
+            bright_val = (cv2.getTrackbarPos("Brightness Offset", win_name) / 100.0) - 0.5
+            gam_val    = cv2.getTrackbarPos("Gamma Curve", win_name) / 100.0
+            gam_val    = max(0.1, gam_val)  # prevent gamma = 0
+            
+            # Pack active parameters
+            current_params = {
+                "micro_c": mc_val,
+                "clarity": clarity_val,
+                "sigma": sig_val,
+                "contrast": cont_val,
+                "brightness": bright_val,
+                "gamma": gam_val
+            }
+            
+            # Run enhancement on GPU
+            enhanced_float = run_enhancement(current_params)
+            
+            # Convert back to uint8 for rendering
+            src_u8 = (img_gray * 255.0).astype(np.uint8)
+            enhanced_u8 = (enhanced_float * 255.0).astype(np.uint8)
+            
+            # Create a side-by-side comparison image
+            comparison = np.hstack((src_u8, enhanced_u8))
+            
+            # Draw status overlay
+            overlay = comparison.copy()
+            cv2.putText(overlay, "ORIGINAL", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,), 2)
+            cv2.putText(overlay, "ENHANCED (Taichi GPU)", (w + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,), 2)
+            
+            text_status = f"Micro-C: {mc_val:.2f} | Clarity: {clarity_val:.2f} | Sigma: {sig_val:.1f} | Contrast: {cont_val:.2f} | Bright: {bright_val:.2f} | Gamma: {gam_val:.2f}"
+            cv2.putText(overlay, text_status, (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,), 1)
+            
+            # Show image
+            cv2.imshow(win_name, overlay)
+            
+            key = cv2.waitKey(30) & 0xFF
+            if key == ord('q') or key == 27:  # Q or ESC to exit
+                break
+            elif key == ord('s'):  # S to save results
+                # Save final values
+                save_path_img = os.path.join(project_root, "scratch/enhanced_comparison.png")
+                cv2.imwrite(save_path_img, comparison)
+                
+                save_path_txt = os.path.join(project_root, "scratch/enhancement_params.txt")
+                with open(save_path_txt, "w") as f:
+                    f.write(f"=== CALIBRATED PARAMETERS ===\n")
+                    f.write(f"Micro-Contrast (mc): {mc_val:.4f}\n")
+                    f.write(f"Clarity (clarity): {clarity_val:.4f}\n")
+                    f.write(f"Sigma (sigma): {sig_val:.4f}\n")
+                    f.write(f"Global Contrast (contrast): {cont_val:.4f}\n")
+                    f.write(f"Brightness (brightness): {bright_val:.4f}\n")
+                    f.write(f"Gamma (gamma): {gam_val:.4f}\n")
+                
+                print(f"\n[Saved] Parameters saved successfully to: {save_path_txt}")
+                print(f"[Saved] Comparison image saved to: {save_path_img}")
+    else:
+        # Headless simulation mode
+        mc_val     = current_params["micro_c"]
+        clarity_val = current_params["clarity"]
+        sig_val    = current_params["sigma"]
+        cont_val   = current_params["contrast"]
+        bright_val = current_params["brightness"]
+        gam_val    = current_params["gamma"]
         
-        # Pack active parameters
-        current_params = {
-            "micro_c": mc_val,
-            "sigma": sig_val,
-            "contrast": cont_val,
-            "brightness": bright_val,
-            "gamma": gam_val
-        }
-        
-        # Run enhancement on GPU
+        print(f"[Sim] Starting baseline GPU calculation...")
         enhanced_float = run_enhancement(current_params)
         
-        # Convert back to uint8 for rendering
         src_u8 = (img_gray * 255.0).astype(np.uint8)
         enhanced_u8 = (enhanced_float * 255.0).astype(np.uint8)
-        
-        # Create a side-by-side comparison image
         comparison = np.hstack((src_u8, enhanced_u8))
         
-        # Draw status overlay
-        overlay = comparison.copy()
-        cv2.putText(overlay, "ORIGINAL", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,), 2)
-        cv2.putText(overlay, "ENHANCED (Taichi GPU)", (w + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,), 2)
+        # Save comparison outputs
+        save_path_img = os.path.join(project_root, "scratch/enhanced_comparison.png")
+        cv2.imwrite(save_path_img, comparison)
         
-        text_status = f"Micro-C: {mc_val:.2f} | Sigma: {sig_val:.1f} | Contrast: {cont_val:.2f} | Bright: {bright_val:.2f} | Gamma: {gam_val:.2f}"
-        cv2.putText(overlay, text_status, (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,), 1)
-        
-        # Show image
-        cv2.imshow(win_name, overlay)
-        
-        key = cv2.waitKey(30) & 0xFF
-        if key == ord('q') or key == 27:  # Q or ESC to exit
-            break
-        elif key == ord('s'):  # S to save results
-            # Save final values
-            save_path_img = os.path.join(project_root, "scratch/enhanced_comparison.png")
-            cv2.imwrite(save_path_img, comparison)
+        save_path_txt = os.path.join(project_root, "scratch/enhancement_params.txt")
+        with open(save_path_txt, "w") as f:
+            f.write(f"=== CALIBRATED PARAMETERS (HEADLESS) ===\n")
+            f.write(f"Micro-Contrast (mc): {mc_val:.4f}\n")
+            f.write(f"Clarity (clarity): {clarity_val:.4f}\n")
+            f.write(f"Sigma (sigma): {sig_val:.4f}\n")
+            f.write(f"Global Contrast (contrast): {cont_val:.4f}\n")
+            f.write(f"Brightness (brightness): {bright_val:.4f}\n")
+            f.write(f"Gamma (gamma): {gam_val:.4f}\n")
             
-            save_path_txt = os.path.join(project_root, "scratch/enhancement_params.txt")
-            with open(save_path_txt, "w") as f:
-                f.write(f"=== CALIBRATED PARAMETERS ===\n")
-                f.write(f"Micro-Contrast (mc): {mc_val:.4f}\n")
-                f.write(f"Sigma (sigma): {sig_val:.4f}\n")
-                f.write(f"Global Contrast (contrast): {cont_val:.4f}\n")
-                f.write(f"Brightness (brightness): {bright_val:.4f}\n")
-                f.write(f"Gamma (gamma): {gam_val:.4f}\n")
-            
-            print(f"\n[Saved] Parameters saved successfully to: {save_path_txt}")
-            print(f"[Saved] Comparison image saved to: {save_path_img}")
+        print(f"[Saved] Headless simulation completed successfully!")
+        print(f"[Saved] Output saved to: {save_path_txt}")
+        print(f"[Saved] Visual saved to: {save_path_img}")
             
 finally:
-    cv2.destroyAllWindows()
+    if has_display:
+        cv2.destroyAllWindows()
     print("Interactive Calibration Terminated Cleanly.")

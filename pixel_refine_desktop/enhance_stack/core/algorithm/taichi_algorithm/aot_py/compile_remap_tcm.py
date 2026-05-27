@@ -99,17 +99,18 @@ def compile_remap_tcm(arch=ti.vulkan, save_path="remap_vulkan.tcm"):
     )
     module.add_graph("build_flow_maps_from_2ch", g_bfm_2ch.compile())
 
-    # 6. Grayscale Image Enhancement (1D LUT & Micro-Contrast)
+    # 6. Grayscale Image Enhancement (1D LUT & Micro-Contrast & Clarity)
     g_enhance = ti.graph.GraphBuilder()
-    enh_src   = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=2)
-    enh_blur  = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "blur", ti.f32, ndim=2)
-    enh_lut   = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "lut", ti.f32, ndim=1)
-    enh_dst   = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
-    enh_mc    = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "micro_contrast", ti.f32)
-    enh_h     = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
-    enh_w     = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
+    enh_src     = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=2)
+    enh_blur    = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "blur", ti.f32, ndim=2)
+    enh_lut     = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "lut", ti.f32, ndim=1)
+    enh_dst     = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
+    enh_mc      = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "micro_contrast", ti.f32)
+    enh_clarity = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "clarity", ti.f32)
+    enh_h       = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
+    enh_w       = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
     g_enhance.dispatch(
-        _enhance_grayscale_kernel, enh_src, enh_blur, enh_lut, enh_dst, enh_mc, enh_h, enh_w
+        _enhance_grayscale_kernel, enh_src, enh_blur, enh_lut, enh_dst, enh_mc, enh_clarity, enh_h, enh_w
     )
     module.add_graph("enhance_grayscale", g_enhance.compile())
 

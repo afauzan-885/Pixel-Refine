@@ -595,6 +595,7 @@ def perform_alignment_gpu(
         def _run_gpu_alignment_loop():
             # 1. Load Alignment Module
             import pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot as taichi_aot
+
             file_dir = os.path.dirname(os.path.abspath(__file__))
             tcm_path = os.path.abspath(
                 os.path.join(
@@ -604,11 +605,11 @@ def perform_alignment_gpu(
             )
             mod = engine.load(tcm_path)
 
-            # [LUMA ENHANCEMENT CACHE] Pre-allocate and populate 1D LUT once on GPU (Calibrated: contrast=0.8, brightness=0.0, gamma=0.78)
+            # [LUMA ENHANCEMENT CACHE] Pre-allocate and populate 1D LUT once on GPU (Calibrated: contrast=1.20 (+50% boost), brightness=0.35, gamma=0.78)
             lut_np = np.zeros(256, dtype=np.float32)
-            contrast = 0.8
-            brightness = 0.0
-            gamma = 0.78
+            contrast = 1.2  # 0.8 * 1.50 (+50% standard contrast boost)
+            brightness = 0.30  # Increased brightness offset
+            gamma = 0.80
             for i in range(256):
                 val = (i / 255.0) ** gamma * contrast + brightness
                 lut_np[i] = np.clip(val, 0.0, 1.0)
@@ -643,8 +644,8 @@ def perform_alignment_gpu(
             # map_x_gpu/map_y_gpu: full-res coordinate maps — reused per frame
             full_h_ref, full_w_ref = images[0].shape[:2]
             smooth_flow_buf = engine.allocate((h_w, w_w, 2), dtype=np.float32)
-            map_x_gpu       = engine.allocate((full_h_ref, full_w_ref), dtype=np.float32)
-            map_y_gpu       = engine.allocate((full_h_ref, full_w_ref), dtype=np.float32)
+            map_x_gpu = engine.allocate((full_h_ref, full_w_ref), dtype=np.float32)
+            map_y_gpu = engine.allocate((full_h_ref, full_w_ref), dtype=np.float32)
 
             try:
                 # 4. Process each image
@@ -701,12 +702,13 @@ def perform_alignment_gpu(
 
                     # Step C3: Build full-res coordinate maps — bilinear upsample + scale + grid
                     map_x_gpu, map_y_gpu = taichi_aot.build_flow_maps(
-                        smooth_flow_buf,          # 2-channel flow (H_work, W_work, 2)
-                        full_h_ref, full_w_ref,   # target resolution
+                        smooth_flow_buf,  # 2-channel flow (H_work, W_work, 2)
+                        full_h_ref,
+                        full_w_ref,  # target resolution
                         scale_x=float(full_w_ref) / float(w_w),
                         scale_y=float(full_h_ref) / float(h_w),
-                        map_x_buf=map_x_gpu,      # reuse buffer
-                        map_y_buf=map_y_gpu,      # reuse buffer
+                        map_x_buf=map_x_gpu,  # reuse buffer
+                        map_y_buf=map_y_gpu,  # reuse buffer
                     )
 
                     # Step C4: Warp image using GPU coordinate maps
@@ -765,7 +767,13 @@ def perform_alignment_gpu(
                 flow_l2.destroy()
 
                 # Destroy reusable flow processing buffers
-                for _buf in [smooth_flow_buf, map_x_gpu, map_y_gpu, lut_gpu, blur_work_gpu]:
+                for _buf in [
+                    smooth_flow_buf,
+                    map_x_gpu,
+                    map_y_gpu,
+                    lut_gpu,
+                    blur_work_gpu,
+                ]:
                     try:
                         _buf.destroy()
                     except Exception:

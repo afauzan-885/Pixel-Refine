@@ -453,6 +453,43 @@ def process_in_gpu(
         
         _weight_work_gpu = engine.allocate((work_res_h, work_res_w), dtype=np.float32, host_accessible=True)
 
+        # [OBG RUNTIME PIPELINE] Record spatial weight & merging steps once as a single graph (OBG style) without compiling TCMs
+        p_curr_work_gray = engine.placeholder((work_res_h, work_res_w), dtype=np.float32)
+        p_curr_full_flat = engine.placeholder((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32, is_vector=False)
+
+        with engine.rec_pipeline("spatial_merge_pipeline"):
+            generate_spatial_weights_taichi(
+                current_image=p_curr_work_gray,
+                reference_image=ref_work_res_pass2_gpu,
+                weight_map_sum=_weight_work_gpu,
+                base_window=_base_window_gpu,
+                stability_map=None,
+                row_starts=_rows_gpu,
+                col_starts=_cols_gpu,
+                tile_h=tile_h,
+                tile_w=tile_w,
+                noise_sigma=ref_noise_sigma,
+                motion_sensitivity=motion_sensitivity,
+                noise_offset_factor=noise_offset_factor,
+                equalize_brightness=False,
+                buffer_provider="pool",
+                search_radius=kwargs.get("similarity_search_radius", 3),
+            )
+            accumulate_spatial_merging_taichi(
+                current_image_full=p_curr_full_flat,
+                weight_map_work=_weight_work_gpu,
+                final_image_sum=_sum_gpu.view_as_vector(False),
+                weight_map_sum_full=_weight_sum_full_gpu,
+                row_starts=_rows_gpu,
+                col_starts=_cols_gpu,
+                tile_h=tile_h,
+                tile_w=tile_w,
+                h_full=ref_image_h,
+                w_full=ref_image_w,
+                h_work=work_res_h,
+                w_work=work_res_w,
+            )
+
         use_overall_progress = total_overall_images and total_overall_images > 0
         try:
             for i, img_orig in enumerate(images):
@@ -473,41 +510,13 @@ def process_in_gpu(
                     ref_image_w
                 )
 
-                generate_spatial_weights_taichi(
-                    current_image=curr_work_gray_gpu,
-                    reference_image=ref_work_res_pass2_gpu,
-                    weight_map_sum=_weight_work_gpu,
-                    base_window=_base_window_gpu,
-                    stability_map=None,
-                    row_starts=_rows_gpu,
-                    col_starts=_cols_gpu,
-                    tile_h=tile_h,
-                    tile_w=tile_w,
-                    noise_sigma=ref_noise_sigma,
-                    motion_sensitivity=motion_sensitivity,
-                    noise_offset_factor=noise_offset_factor,
-                    equalize_brightness=False,
-                    buffer_provider="pool",
-                    search_radius=kwargs.get("similarity_search_radius", 3),
-                )
+                # Playback the pre-recorded pipeline with overrides (zero-copy memory handle swapping)
+                engine.use_pipeline("spatial_merge_pipeline", overrides={
+                    p_curr_work_gray: curr_work_gray_gpu,
+                    p_curr_full_flat: curr_full_gpu.view_as_vector(False)
+                })
 
                 curr_work_gray_gpu.destroy()
-
-                accumulate_spatial_merging_taichi(
-                    current_image_full=curr_full_gpu.view_as_vector(False),
-                    weight_map_work=_weight_work_gpu,
-                    final_image_sum=_sum_gpu.view_as_vector(False),
-                    weight_map_sum_full=_weight_sum_full_gpu,
-                    row_starts=_rows_gpu,
-                    col_starts=_cols_gpu,
-                    tile_h=tile_h,
-                    tile_w=tile_w,
-                    h_full=ref_image_h,
-                    w_full=ref_image_w,
-                    h_work=work_res_h,
-                    w_work=work_res_w,
-                )
-
                 curr_full_gpu.destroy()
 
                 # Release input ti_ndarray if applicable
