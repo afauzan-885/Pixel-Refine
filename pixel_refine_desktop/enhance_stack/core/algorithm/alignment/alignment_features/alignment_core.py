@@ -752,10 +752,14 @@ def perform_alignment_gpu(
                             f"Alignment gambar {i}/{num_images - 1} (GPU)...",
                         )
 
+                    # --- CRITICAL FIX FOR iGPU STABILITY ---
+                    # Wait for GPU to finish execution before deallocating comparison pyramid buffers!
+                    engine.sync()
+
                     # D. Eager Memory Cleanup for Comparison Pyramid only
                     # (smooth_flow_buf, map_x_gpu, map_y_gpu are REUSED next frame — do NOT destroy)
                     for buf in comp_pyramid:
-                        buf.destroy()
+                        buf.release()
                     # No gc.collect() per frame — Python GC is slow; VRAM is managed explicitly
 
             finally:

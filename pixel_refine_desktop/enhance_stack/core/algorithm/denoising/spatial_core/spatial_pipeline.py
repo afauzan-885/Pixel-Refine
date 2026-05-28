@@ -514,16 +514,24 @@ def process_in_gpu(
                 )
 
                 # Playback the pre-recorded pipeline with overrides (zero-copy memory handle swapping)
+                print(f"[DEBUG] p_curr_work_gray handle: {p_curr_work_gray.handle}, curr_work_gray_gpu handle: {curr_work_gray_gpu.handle if curr_work_gray_gpu else 'None'}")
+                print(f"[DEBUG] p_curr_full_flat handle: {p_curr_full_flat.handle}, curr_full_flat handle: {curr_full_gpu.view_as_vector(False).handle if curr_full_gpu else 'None'}")
                 engine.use_pipeline("spatial_merge_pipeline", overrides={
                     p_curr_work_gray: curr_work_gray_gpu,
                     p_curr_full_flat: curr_full_gpu.view_as_vector(False)
                 })
 
-                curr_work_gray_gpu.destroy()
-                curr_full_gpu.destroy()
+                # --- CRITICAL FIX FOR iGPU STABILITY ---
+                # Wait for GPU to finish execution before freeing buffers to prevent page faults/driver hangs
+                engine.sync()
+
+                curr_work_gray_gpu.release()
+                curr_full_gpu.release()
 
                 # Release input ti_ndarray if applicable
-                if hasattr(img_orig, "destroy"):
+                if hasattr(img_orig, "release"):
+                    img_orig.release()
+                elif hasattr(img_orig, "destroy"):
                     img_orig.destroy()
 
                 images[i] = None

@@ -54,6 +54,7 @@ def unload_all_modules():
     """Release all cached TCM modules. Call after heavy processing to free VRAM."""
     _module_cache.clear()
     engine.modules.clear()
+    engine.clear_pipelines()
 
 # --- OpenCV-style Constants ---
 INTER_NEAREST = 0
@@ -397,8 +398,11 @@ def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False, dst=None):
         target_y, src=tmp_buf, dst=dst_buf, h=h, w=w, weights=weights_buf, radius=radius
     )
 
-    tmp_buf.destroy()
-    if hasattr(weights_buf, "destroy"):
+    engine.sync()
+    tmp_buf.release()
+    if hasattr(weights_buf, "release"):
+        weights_buf.release()
+    elif hasattr(weights_buf, "destroy"):
         weights_buf.destroy()
     return dst_buf if return_gpu else dst_buf.to_numpy()
 
@@ -1074,11 +1078,14 @@ def bilateral_grid_filter(src, preset="medium", return_gpu=False):
                 gl=gl,
             )
 
-            # 3. Insert back
-            _mod("common").run("insert_channel_f32", src=temp_out, dst=dst_v, ch=c)
-
+        engine.sync()
+        temp_ch.release()
+        temp_out.release()
         del temp_ch, temp_out
 
+    engine.sync()
+    grid_a.release()
+    grid_b.release()
     del grid_a, grid_b
     return dst if return_gpu else dst.to_numpy()
 
@@ -1174,15 +1181,23 @@ def remap(src, map_x, map_y, return_gpu=False):
         w_dst=w_dst,
     )
 
-    if src_cast is not src and hasattr(src_cast, "destroy"):
+    if src_cast is not src and hasattr(src_cast, "release"):
+        engine.sync()
+        src_cast.release()
+    elif src_cast is not src and hasattr(src_cast, "destroy"):
+        engine.sync()
         src_cast.destroy()
 
-    res = dst_buf if return_gpu else dst_buf.to_numpy()
+    if not return_gpu:
+        res = dst_buf.to_numpy()
+    else:
+        engine.sync()
+        res = dst_buf
 
     if orig_dtype is not None:
         if return_gpu:
             res_cast = res.cast(orig_dtype)
-            res.destroy()
+            res.release()
             res = res_cast
         else:
             if np.issubdtype(orig_dtype, np.integer):
@@ -1242,7 +1257,12 @@ def smooth_flow_gpu(flow, sigma=1.0, kernel_size=5, dst=None):
         h=h, w=w, weights=weights_buf, radius=radius,
     )
 
-    tmp_buf.destroy()
+    engine.sync()
+    tmp_buf.release()
+    if hasattr(weights_buf, "release"):
+        weights_buf.release()
+    elif hasattr(weights_buf, "destroy"):
+        weights_buf.destroy()
     del weights_buf
     return out_buf
 
@@ -1402,12 +1422,17 @@ def hamilton_demosaic(
         c11=int(c11)
     )
     
-    # Immediately destroy intermediate VRAM buffers to keep VRAM footprint under ~8MB!
-    wb_bayer_buf.destroy()
-    green_buf.destroy()
-    if bayer_buf is not bayer:
+    # Immediately release intermediate VRAM buffers back to pool to keep VRAM footprint under ~8MB!
+    engine.sync()
+    wb_bayer_buf.release()
+    green_buf.release()
+    if bayer_buf is not bayer and hasattr(bayer_buf, "release"):
+        bayer_buf.release()
+    elif bayer_buf is not bayer and hasattr(bayer_buf, "destroy"):
         bayer_buf.destroy()
-    if cmatrix_buf is not cmatrix:
+    if cmatrix_buf is not cmatrix and hasattr(cmatrix_buf, "release"):
+        cmatrix_buf.release()
+    elif cmatrix_buf is not cmatrix and hasattr(cmatrix_buf, "destroy"):
         cmatrix_buf.destroy()
     
     return dst_buf if return_gpu else dst_buf.to_numpy()
@@ -1522,20 +1547,21 @@ def demosaic(
             )
             
             # Step 4: Clean up GPU intermediate float32 buffer immediately
-            rgb_f32_gpu.destroy()
+            engine.sync()
+            rgb_f32_gpu.release()
             
             # Step 5: Convert and return
             if not return_gpu:
                 engine.sync()
                 bgr_u16_gpu = bgr_i32_gpu.cast(np.uint16, host_accessible=True)
                 bgr_u16_cpu = bgr_u16_gpu.to_numpy()
-                bgr_u16_gpu.destroy()
-                bgr_i32_gpu.destroy()
+                bgr_u16_gpu.release()
+                bgr_i32_gpu.release()
                 return bgr_u16_cpu
             else:
                 engine.sync()
                 bgr_u16_gpu = bgr_i32_gpu.cast(np.uint16, host_accessible=True)
-                bgr_i32_gpu.destroy()
+                bgr_i32_gpu.release()
                 return bgr_u16_gpu
         else:
             return hamilton_demosaic(

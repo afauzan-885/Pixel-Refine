@@ -261,10 +261,40 @@ class TaichiGPUBuffer:
         self.engine = engine
         self.is_owner = is_owner
         self.host_accessible = host_accessible
+        self.associated_pipelines = set()
+
+    def release(self):
+        """Release the buffer back to the engine's buffer pool for reuse."""
+        if self.handle is not None and self.is_owner:
+            if self.engine and self.engine.current_pipeline:
+                # Bypass/protect buffers during recording to prevent use-after-free
+                if getattr(self, "is_pipeline_intermediate", False) or (self.engine.current_pipeline in self.associated_pipelines):
+                    return
+            
+            if self.engine and not self.host_accessible:
+                self.engine.buffer_pool.store(self.size_bytes, self.handle)
+                self.handle = None
+                self.is_owner = False
+            else:
+                self.destroy()
 
     def destroy(self):
         """Immediately release GPU VRAM. Does NOT use buffer pool reuse."""
         if self.handle is not None and self.is_owner:
+            # Bypass/protect buffers during recording to prevent use-after-free
+            if self.engine and self.engine.current_pipeline:
+                if getattr(self, "is_pipeline_intermediate", False) or (self.engine.current_pipeline in self.associated_pipelines):
+                    return
+
+            # Auto-clear associated pipelines: if buffer is destroyed outside of recording,
+            # automatically clear the pipeline to prevent memory accesses to freed handles.
+            if self.associated_pipelines:
+                pipelines_to_clear = list(self.associated_pipelines)
+                self.associated_pipelines.clear()
+                if self.engine:
+                    for pipe_name in pipelines_to_clear:
+                        self.engine.clear_pipeline_by_name(pipe_name)
+
             global _LIB, _RUNTIME
             if _LIB and _RUNTIME:
                 if self.engine and hasattr(self.engine, "_lock"):
@@ -275,8 +305,15 @@ class TaichiGPUBuffer:
             self.handle = None
             self.is_owner = False
 
+    def _force_destroy(self):
+        """Force release GPU VRAM regardless of pipeline intermediate status."""
+        self.is_pipeline_intermediate = False
+        self.associated_pipelines.clear()
+        self.destroy()
+
     def __del__(self):
         self.destroy()
+
 
     @property
     def nbytes(self): return self.size_bytes
@@ -361,6 +398,15 @@ class AOTModuleWrapper:
         engine = AOTEngine()
         with engine._lock:
             if engine.current_pipeline:
+                # Associate and track any TaichiGPUBuffer arguments with the current pipeline during recording
+                for arg_val in kwargs.values():
+                    if isinstance(arg_val, TaichiGPUBuffer):
+                        arg_val.associated_pipelines.add(engine.current_pipeline)
+                        if engine.current_pipeline not in engine._pipeline_intermediates:
+                            engine._pipeline_intermediates[engine.current_pipeline] = []
+                        if arg_val not in engine._pipeline_intermediates[engine.current_pipeline]:
+                            engine._pipeline_intermediates[engine.current_pipeline].append(arg_val)
+
                 _LIB.add_to_pipeline(self.module_ptr, engine.current_pipeline.encode('utf-8'), graph_name.encode('utf-8'), args_array, num_args)
             else:
                 try:
@@ -386,6 +432,8 @@ class AOTEngine:
             cls._instance.modules = {}
             cls._instance.buffer_pool = BufferPool()
             cls._instance.current_pipeline = None
+            cls._instance._pipeline_intermediates = {}
+            cls._instance.recorded_pipelines = set()
             cls._instance._staging_pool = {}
             import threading
             cls._instance._lock = threading.RLock()
@@ -403,12 +451,23 @@ class AOTEngine:
                 module = next(iter(self.engine.modules.values())) if self.engine.modules else None
                 _LIB.clear_pipeline(module.module_ptr if module else None, self.name.encode('utf-8'))
                 self.engine.current_pipeline = self.name
+                self.engine.recorded_pipelines.add(self.name)
+                
+                # Clear previous intermediates for this pipeline
+                if self.name in self.engine._pipeline_intermediates:
+                    for buf in self.engine._pipeline_intermediates[self.name]:
+                        buf._force_destroy()
+                    del self.engine._pipeline_intermediates[self.name]
                 return self
             def __exit__(self, *args): self.engine.current_pipeline = None
         return Recorder(self, name)
 
     def use_pipeline(self, name, overrides=None):
         _init_aot_bridge()
+        if name not in self.recorded_pipelines:
+            print(f"[AOTEngine WARNING] Pipeline '{name}' is not recorded or has been invalidated (one of its buffers was destroyed). Skipping execution.")
+            return
+            
         ovr = overrides or {}
         n = len(ovr)
         handles = (ctypes.c_uint64 * n)()
@@ -437,7 +496,36 @@ class AOTEngine:
                 )
             
             # print(f"[AOTEngine] New VRAM allocation: {size/1024/1024:.2f} MB ({dtype})")
-            return TaichiGPUBuffer(size, handle, shape, dtype, is_vector, self, host_accessible=host_accessible, vector_dim=v_dim)
+            buf = TaichiGPUBuffer(size, handle, shape, dtype, is_vector, self, host_accessible=host_accessible, vector_dim=v_dim)
+            if self.current_pipeline:
+                buf.is_pipeline_intermediate = True
+                buf.associated_pipelines.add(self.current_pipeline)
+                if self.current_pipeline not in self._pipeline_intermediates:
+                    self._pipeline_intermediates[self.current_pipeline] = []
+                self._pipeline_intermediates[self.current_pipeline].append(buf)
+            return buf
+
+    def clear_pipeline_by_name(self, name):
+        """Safely erases a pipeline from C++ and forces destruction of its intermediate buffers."""
+        with self._lock:
+            if name in self.recorded_pipelines:
+                self.recorded_pipelines.remove(name)
+            _LIB.clear_pipeline(None, name.encode('utf-8'))
+            if name in self._pipeline_intermediates:
+                bufs = self._pipeline_intermediates[name]
+                for buf in bufs:
+                    if name in buf.associated_pipelines:
+                        buf.associated_pipelines.remove(name)
+                    if not buf.associated_pipelines:
+                        buf._force_destroy()
+                del self._pipeline_intermediates[name]
+
+    def clear_pipelines(self):
+        """Clear all registered pipelines and destroy their intermediate buffers."""
+        with self._lock:
+            for name in list(self._pipeline_intermediates.keys()):
+                self.clear_pipeline_by_name(name)
+            self.recorded_pipelines.clear()
 
     def get_staging_buffer(self, shape, dtype):
         size = int(np.prod(shape) * np.dtype(dtype).itemsize)

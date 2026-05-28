@@ -53,19 +53,19 @@ Resolution: 3016x3016 (9.1 MP)
 [Stage 3] Running 10 iterations of Standard Dispatch (Kernel-by-Kernel)...
 
 [Stage 4] Verifying OBG Accuracy vs. Standard Dispatch...
->>> OBG Accuracy MAE (vs Standard): nan
+>>> OBG Accuracy MAE (vs Standard): 0.000000
 
 ======================================================================
  PERFORMANCE COMPARISON
 ======================================================================
 Method                    | Latency (ms)    | FPS       
 -------------------------------------------------------
-Master Pipeline (OBG)     | 211.16          | 4.74      
-Standard Dispatch         | 210.71          | 4.75      
+Master Pipeline (OBG)     | 159.65          | 6.26      
+Standard Dispatch         | 190.57          | 5.25      
 -------------------------------------------------------
 
->>> Speedup using Master Pipeline: -0.21% faster
->>> Overhead Reduced: -0.45 ms per frame
+>>> Speedup using Master Pipeline: 16.23% faster
+>>> Overhead Reduced: 30.93 ms per frame
 
 ======================================================================
  FINAL VERDICT
