@@ -56,20 +56,11 @@ class DataProvider:
         self.db_path = db_path
 
     def get_all_image_paths_for_batch_process(self, batch_id):
-        """Fetches all image paths for a specific batch from the database."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT images.path 
-                FROM batch_process_image
-                JOIN images ON batch_process_image.image_id_batch = images.id
-                WHERE batch_process_image.batch_id = ?
-                ORDER BY batch_process_image.is_reference_batch DESC, images.path ASC
-            """,
-                (batch_id,),
-            )
-            return [row[0] for row in cursor.fetchall()]
+        """Fetches all image paths for a specific batch from the database with validation."""
+        from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
+            get_all_image_paths_for_batch_process,
+        )
+        return get_all_image_paths_for_batch_process(self.db_path, batch_id)
 
     def setup_data_source_and_paths(self, single_process, batch_id):
         """Determines the data source (HDF5 or Raw paths) and prepares output metadata."""
@@ -457,9 +448,9 @@ def main(
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         stack_session_id = f"{output_name_base}_{timestamp}"
 
-        # Batch Processing Loop
+        # Batch Processing Loop (Sequential 1-by-1 Mode)
         batch_plan = setup_balanced_batching(
-            total_images, language_config, max_batch_size=15
+            total_images, language_config, max_batch_size=1
         )
         global_sum_img, global_sum_weight, global_total_frames = None, None, 0
 
@@ -476,6 +467,12 @@ def main(
             if not current_batch_images:
                 continue
 
+            # Prepend the reference image to the target image for alignment and single merging
+            skip_first = False
+            if b_start > 0:
+                current_batch_images = [reference_image] + current_batch_images
+                skip_first = True
+
             # RUN ALGORITHM
             batch_res = processor.similarity_mnfr(
                 current_batch_images,
@@ -491,6 +488,7 @@ def main(
                 harvest_alignment=extra_params.get(
                     "harvest_alignment", False
                 ),  # [NEW] Pass from params
+                skip_first_merge=skip_first,
                 **extra_params,
             )
 

@@ -208,12 +208,13 @@ def process_in_cpu(
     ]
     for t in threads:
         t.start()
-    for i in range(num_images):
+    start_idx = 1 if kwargs.get("skip_first_merge", False) else 0
+    for i in range(start_idx, num_images):
         task_queue.put(i)
     for _ in range(final_num_workers):
         task_queue.put(None)
 
-    finished_count = 0
+    finished_count = start_idx
     processed_frames = 0
     consumer_weight_full_buf = np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
     use_overall_progress = total_overall_images and total_overall_images > 0
@@ -491,8 +492,10 @@ def process_in_gpu(
             )
 
         use_overall_progress = total_overall_images and total_overall_images > 0
+        start_idx = 1 if kwargs.get("skip_first_merge", False) else 0
         try:
-            for i, img_orig in enumerate(images):
+            for i in range(start_idx, num_images):
+                img_orig = images[i]
                 if stop_requested and stop_requested():
                     break
                 if img_orig is None:
