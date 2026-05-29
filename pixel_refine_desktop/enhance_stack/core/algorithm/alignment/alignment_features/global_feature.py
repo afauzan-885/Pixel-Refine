@@ -373,6 +373,49 @@ def load_images_from_paths(
     return images
 
 
+def load_single_image(
+    data_source, index, stop_requested=None, linear_mode=True, capture_ref_proxy=False
+):
+    """Loads a single image at the given index from HDF5 or filesystem."""
+    import h5py
+    ref_proxy = None
+    
+    if isinstance(data_source, str) and data_source.endswith(".h5"):
+        with h5py.File(data_source, "r") as h5f:
+            key = list(h5f.keys())[index]
+            img = np.array(h5f[key])
+            return (img, None) if capture_ref_proxy else img
+            
+    elif isinstance(data_source, list):
+        path = data_source[index]
+        load_res = load_images_from_paths(
+            [path],
+            stop_requested,
+            linear_mode=linear_mode,
+            capture_ref_proxy=capture_ref_proxy,
+        )
+
+        if capture_ref_proxy and isinstance(load_res, tuple):
+            batch_images, ref_proxy = load_res
+        else:
+            batch_images = load_res
+
+        # Automatic resizing for consistency
+        resize_res = resize_all_with_padding(
+            batch_images,
+            method="preserve",
+            stop_requested=stop_requested,
+            force_even=True,
+        )
+        if resize_res and resize_res[0]:
+            batch_images = resize_res[0]
+
+        img = batch_images[0] if batch_images else None
+        if capture_ref_proxy:
+            return img, ref_proxy
+        return img
+
+
 def save_to_hdf5(h5f, dataset_name, cropped, metadata=None):
     """
     Save images (array) into HDF5 and embed metadata as attributes using multithreading.

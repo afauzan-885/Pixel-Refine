@@ -34,6 +34,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
     get_all_image_paths_for_single_process,
     load_images_from_paths,
     resize_all_with_padding,
+    load_single_image,
 )
 
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
@@ -411,20 +412,17 @@ def main(
                 is_linear_mode = True
 
         # Load reference
-        ref_res = data_provider.load_images_for_batch(
+        ref_res = load_single_image(
             data_source,
-            (0, 1),
+            0,
             stop_requested,
             linear_mode=is_linear_mode,
             capture_ref_proxy=is_linear_mode,
         )
         if is_linear_mode and isinstance(ref_res, tuple):
             reference_image, ref_proxy_gt = ref_res
-        elif isinstance(ref_res, list) and len(ref_res) > 0:
-            reference_image = ref_res[0]
-            ref_proxy_gt = None
         else:
-            reference_image = None
+            reference_image = ref_res
             ref_proxy_gt = None
 
         # Auto-scale for Linear Mode
@@ -448,29 +446,26 @@ def main(
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         stack_session_id = f"{output_name_base}_{timestamp}"
 
-        # Batch Processing Loop (Sequential 1-by-1 Mode)
-        batch_plan = setup_balanced_batching(
-            total_images, language_config, max_batch_size=1
-        )
+        # Sequential Frame-by-Frame Loop (Indeks 0 s.d total_images - 1)
         global_sum_img, global_sum_weight, global_total_frames = None, None, 0
 
-        for batch_num, (b_start, b_end) in enumerate(batch_plan, 1):
+        for i in range(total_images):
             if stop_requested and stop_requested():
                 break
 
-            current_batch_images = data_provider.load_images_for_batch(
-                data_source,
-                (b_start, b_end),
-                stop_requested,
-                linear_mode=is_linear_mode,
-            )
-            if not current_batch_images:
-                continue
-
-            # Prepend the reference image to the target image for alignment and single merging
             skip_first = False
-            if b_start > 0:
-                current_batch_images = [reference_image] + current_batch_images
+            if i == 0:
+                current_batch_images = [reference_image]
+            else:
+                current_image = load_single_image(
+                    data_source,
+                    i,
+                    stop_requested,
+                    linear_mode=is_linear_mode,
+                )
+                if current_image is None:
+                    continue
+                current_batch_images = [reference_image, current_image]
                 skip_first = True
 
             # RUN ALGORITHM
@@ -478,7 +473,7 @@ def main(
                 current_batch_images,
                 ref_image_override=reference_image,
                 total_overall_images=total_images,
-                images_processed_so_far=b_start,
+                images_processed_so_far=i,
                 is_linear_mode=is_linear_mode,
                 proxy_scale=proxy_scale,
                 update_progress=update_progress,
@@ -510,7 +505,8 @@ def main(
                 del b_img
             if "b_weight" in locals():
                 del b_weight
-
+            if "current_image" in locals():
+                del current_image
             del current_batch_images
             gc.collect()
 
