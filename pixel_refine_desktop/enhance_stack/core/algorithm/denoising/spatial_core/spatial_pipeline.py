@@ -574,8 +574,6 @@ def process_in_gpu(
                         buf.destroy()
                     except:
                         pass
-            taichi_aot.unload_all_modules()
-            engine.buffer_pool.clear()
 
     try:
         worker = get_taichi_worker()

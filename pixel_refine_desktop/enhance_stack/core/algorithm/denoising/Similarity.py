@@ -561,6 +561,17 @@ def main(
             processor.close()
             del processor
 
+        # Clear Taichi VRAM and cached modules globally at the very end
+        try:
+            from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+            from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import AOTEngine
+            taichi_aot.unload_all_modules()
+            AOTEngine().buffer_pool.clear()
+            AOTEngine().clear_pipelines()
+            print("[Similarity] Taichi VRAM and Pipelines Cleared Successfully.")
+        except Exception as e_clear:
+            print(f"[Similarity] Error clearing Taichi AOT cache: {e_clear}")
+
         # Delete large buffers
         if "global_sum_img" in locals():
             del global_sum_img

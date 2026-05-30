@@ -783,10 +783,6 @@ def perform_alignment_gpu(
                     except Exception:
                         pass
 
-                # [RAM/VRAM OPTIMIZATION] Unload TCM modules and clear pool to reach minimum idle
-                taichi_aot.unload_all_modules()
-                engine.buffer_pool.clear()
-
                 gc.collect()
 
             return True
@@ -801,7 +797,7 @@ def perform_alignment_gpu(
             worker = get_taichi_worker()
             success = worker.submit_and_wait(_run_gpu_alignment_loop)
 
-        print("✅ GPU Alignment selesai (VRAM Stabilized).")
+        print("[OK] GPU Alignment selesai (VRAM Stabilized).")
         return success
 
     except Exception as e:

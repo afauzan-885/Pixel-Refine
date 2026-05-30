@@ -316,6 +316,10 @@ class TaichiGPUBuffer:
 
 
     @property
+    def ndim(self):
+        return len(self.shape)
+
+    @property
     def nbytes(self): return self.size_bytes
 
     def to_numpy(self):

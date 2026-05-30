@@ -340036,3 +340036,4251 @@
   [Arg 6] Scalar I32: 3060 (raw 0xbf4)
   [Arg 7] Scalar I32: 4082 (raw 0xff2)
   [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar F32: 0.003922 (raw 0x3b808081)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 9] Scalar I32: 8 (raw 0x8)
+  [Arg 10] Scalar I32: 8 (raw 0x8)
+  [Arg 11] Scalar I32: 8 (raw 0x8)
+  [Arg 12] Scalar F32: 2.000000 (raw 0x40000000)
+  [Arg 13] Scalar I32: 2 (raw 0x2)
+  [Arg 14] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'align_end_to_end_3layer' with 15 args...
+[C++ Engine] Graph 'align_end_to_end_3layer' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_x' with 6 args...
+[C++ Engine] Graph 'smooth_flow_x' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_y' with 6 args...
+[C++ Engine] Graph 'smooth_flow_y' launched successfully.
+  [Arg 3] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 4] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 6] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 7] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+[C++ Engine] Launching graph 'build_flow_maps_from_2ch' with 9 args...
+[C++ Engine] Graph 'build_flow_maps_from_2ch' launched successfully.
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'remap_f32_3d' with 8 args...
+[C++ Engine] Graph 'remap_f32_3d' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar F32: 0.003922 (raw 0x3b808081)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 9] Scalar I32: 8 (raw 0x8)
+  [Arg 10] Scalar I32: 8 (raw 0x8)
+  [Arg 11] Scalar I32: 8 (raw 0x8)
+  [Arg 12] Scalar F32: 2.000000 (raw 0x40000000)
+  [Arg 13] Scalar I32: 2 (raw 0x2)
+  [Arg 14] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'align_end_to_end_3layer' with 15 args...
+[C++ Engine] Graph 'align_end_to_end_3layer' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_x' with 6 args...
+[C++ Engine] Graph 'smooth_flow_x' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_y' with 6 args...
+[C++ Engine] Graph 'smooth_flow_y' launched successfully.
+  [Arg 3] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 4] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 6] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 7] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+[C++ Engine] Launching graph 'build_flow_maps_from_2ch' with 9 args...
+[C++ Engine] Graph 'build_flow_maps_from_2ch' launched successfully.
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'remap_f32_3d' with 8 args...
+[C++ Engine] Graph 'remap_f32_3d' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar F32: 0.003922 (raw 0x3b808081)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 9] Scalar I32: 8 (raw 0x8)
+  [Arg 10] Scalar I32: 8 (raw 0x8)
+  [Arg 11] Scalar I32: 8 (raw 0x8)
+  [Arg 12] Scalar F32: 2.000000 (raw 0x40000000)
+  [Arg 13] Scalar I32: 2 (raw 0x2)
+  [Arg 14] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'align_end_to_end_3layer' with 15 args...
+[C++ Engine] Graph 'align_end_to_end_3layer' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_x' with 6 args...
+[C++ Engine] Graph 'smooth_flow_x' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_y' with 6 args...
+[C++ Engine] Graph 'smooth_flow_y' launched successfully.
+  [Arg 3] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 4] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 6] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 7] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+[C++ Engine] Launching graph 'build_flow_maps_from_2ch' with 9 args...
+[C++ Engine] Graph 'build_flow_maps_from_2ch' launched successfully.
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'remap_f32_3d' with 8 args...
+[C++ Engine] Graph 'remap_f32_3d' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar F32: 0.003922 (raw 0x3b808081)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 9] Scalar I32: 8 (raw 0x8)
+  [Arg 10] Scalar I32: 8 (raw 0x8)
+  [Arg 11] Scalar I32: 8 (raw 0x8)
+  [Arg 12] Scalar F32: 2.000000 (raw 0x40000000)
+  [Arg 13] Scalar I32: 2 (raw 0x2)
+  [Arg 14] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'align_end_to_end_3layer' with 15 args...
+[C++ Engine] Graph 'align_end_to_end_3layer' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_x' with 6 args...
+[C++ Engine] Graph 'smooth_flow_x' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_y' with 6 args...
+[C++ Engine] Graph 'smooth_flow_y' launched successfully.
+  [Arg 3] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 4] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 6] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 7] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+[C++ Engine] Launching graph 'build_flow_maps_from_2ch' with 9 args...
+[C++ Engine] Graph 'build_flow_maps_from_2ch' launched successfully.
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'remap_f32_3d' with 8 args...
+[C++ Engine] Graph 'remap_f32_3d' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar F32: 0.003922 (raw 0x3b808081)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 9] Scalar I32: 8 (raw 0x8)
+  [Arg 10] Scalar I32: 8 (raw 0x8)
+  [Arg 11] Scalar I32: 8 (raw 0x8)
+  [Arg 12] Scalar F32: 2.000000 (raw 0x40000000)
+  [Arg 13] Scalar I32: 2 (raw 0x2)
+  [Arg 14] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'align_end_to_end_3layer' with 15 args...
+[C++ Engine] Graph 'align_end_to_end_3layer' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_x' with 6 args...
+[C++ Engine] Graph 'smooth_flow_x' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_y' with 6 args...
+[C++ Engine] Graph 'smooth_flow_y' launched successfully.
+  [Arg 3] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 4] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 6] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 7] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+[C++ Engine] Launching graph 'build_flow_maps_from_2ch' with 9 args...
+[C++ Engine] Graph 'build_flow_maps_from_2ch' launched successfully.
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'remap_f32_3d' with 8 args...
+[C++ Engine] Graph 'remap_f32_3d' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar F32: 0.003922 (raw 0x3b808081)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 9] Scalar I32: 8 (raw 0x8)
+  [Arg 10] Scalar I32: 8 (raw 0x8)
+  [Arg 11] Scalar I32: 8 (raw 0x8)
+  [Arg 12] Scalar F32: 2.000000 (raw 0x40000000)
+  [Arg 13] Scalar I32: 2 (raw 0x2)
+  [Arg 14] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'align_end_to_end_3layer' with 15 args...
+[C++ Engine] Graph 'align_end_to_end_3layer' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_x' with 6 args...
+[C++ Engine] Graph 'smooth_flow_x' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_y' with 6 args...
+[C++ Engine] Graph 'smooth_flow_y' launched successfully.
+  [Arg 3] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 4] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 6] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 7] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+[C++ Engine] Launching graph 'build_flow_maps_from_2ch' with 9 args...
+[C++ Engine] Graph 'build_flow_maps_from_2ch' launched successfully.
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'remap_f32_3d' with 8 args...
+[C++ Engine] Graph 'remap_f32_3d' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar F32: 0.003922 (raw 0x3b808081)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 9] Scalar I32: 8 (raw 0x8)
+  [Arg 10] Scalar I32: 8 (raw 0x8)
+  [Arg 11] Scalar I32: 8 (raw 0x8)
+  [Arg 12] Scalar F32: 2.000000 (raw 0x40000000)
+  [Arg 13] Scalar I32: 2 (raw 0x2)
+  [Arg 14] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'align_end_to_end_3layer' with 15 args...
+[C++ Engine] Graph 'align_end_to_end_3layer' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_x' with 6 args...
+[C++ Engine] Graph 'smooth_flow_x' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_y' with 6 args...
+[C++ Engine] Graph 'smooth_flow_y' launched successfully.
+  [Arg 3] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 4] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 6] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 7] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+[C++ Engine] Launching graph 'build_flow_maps_from_2ch' with 9 args...
+[C++ Engine] Graph 'build_flow_maps_from_2ch' launched successfully.
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'remap_f32_3d' with 8 args...
+[C++ Engine] Graph 'remap_f32_3d' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar F32: 0.003922 (raw 0x3b808081)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 9] Scalar I32: 8 (raw 0x8)
+  [Arg 10] Scalar I32: 8 (raw 0x8)
+  [Arg 11] Scalar I32: 8 (raw 0x8)
+  [Arg 12] Scalar F32: 2.000000 (raw 0x40000000)
+  [Arg 13] Scalar I32: 2 (raw 0x2)
+  [Arg 14] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'align_end_to_end_3layer' with 15 args...
+[C++ Engine] Graph 'align_end_to_end_3layer' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_x' with 6 args...
+[C++ Engine] Graph 'smooth_flow_x' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_y' with 6 args...
+[C++ Engine] Graph 'smooth_flow_y' launched successfully.
+  [Arg 3] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 4] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 6] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 7] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+[C++ Engine] Launching graph 'build_flow_maps_from_2ch' with 9 args...
+[C++ Engine] Graph 'build_flow_maps_from_2ch' launched successfully.
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'remap_f32_3d' with 8 args...
+[C++ Engine] Graph 'remap_f32_3d' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar F32: 0.003922 (raw 0x3b808081)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 9] Scalar I32: 8 (raw 0x8)
+  [Arg 10] Scalar I32: 8 (raw 0x8)
+  [Arg 11] Scalar I32: 8 (raw 0x8)
+  [Arg 12] Scalar F32: 2.000000 (raw 0x40000000)
+  [Arg 13] Scalar I32: 2 (raw 0x2)
+  [Arg 14] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'align_end_to_end_3layer' with 15 args...
+[C++ Engine] Graph 'align_end_to_end_3layer' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_x' with 6 args...
+[C++ Engine] Graph 'smooth_flow_x' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_y' with 6 args...
+[C++ Engine] Graph 'smooth_flow_y' launched successfully.
+  [Arg 3] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 4] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 6] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 7] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+[C++ Engine] Launching graph 'build_flow_maps_from_2ch' with 9 args...
+[C++ Engine] Graph 'build_flow_maps_from_2ch' launched successfully.
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'remap_f32_3d' with 8 args...
+[C++ Engine] Graph 'remap_f32_3d' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar F32: 0.003922 (raw 0x3b808081)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 9] Scalar I32: 8 (raw 0x8)
+  [Arg 10] Scalar I32: 8 (raw 0x8)
+  [Arg 11] Scalar I32: 8 (raw 0x8)
+  [Arg 12] Scalar F32: 2.000000 (raw 0x40000000)
+  [Arg 13] Scalar I32: 2 (raw 0x2)
+  [Arg 14] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'align_end_to_end_3layer' with 15 args...
+[C++ Engine] Graph 'align_end_to_end_3layer' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_x' with 6 args...
+[C++ Engine] Graph 'smooth_flow_x' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_y' with 6 args...
+[C++ Engine] Graph 'smooth_flow_y' launched successfully.
+  [Arg 3] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 4] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 6] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 7] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+[C++ Engine] Launching graph 'build_flow_maps_from_2ch' with 9 args...
+[C++ Engine] Graph 'build_flow_maps_from_2ch' launched successfully.
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'remap_f32_3d' with 8 args...
+[C++ Engine] Graph 'remap_f32_3d' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar F32: 0.003922 (raw 0x3b808081)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 9] Scalar I32: 8 (raw 0x8)
+  [Arg 10] Scalar I32: 8 (raw 0x8)
+  [Arg 11] Scalar I32: 8 (raw 0x8)
+  [Arg 12] Scalar F32: 2.000000 (raw 0x40000000)
+  [Arg 13] Scalar I32: 2 (raw 0x2)
+  [Arg 14] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'align_end_to_end_3layer' with 15 args...
+[C++ Engine] Graph 'align_end_to_end_3layer' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_x' with 6 args...
+[C++ Engine] Graph 'smooth_flow_x' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_y' with 6 args...
+[C++ Engine] Graph 'smooth_flow_y' launched successfully.
+  [Arg 3] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 4] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 6] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 7] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+[C++ Engine] Launching graph 'build_flow_maps_from_2ch' with 9 args...
+[C++ Engine] Graph 'build_flow_maps_from_2ch' launched successfully.
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'remap_f32_3d' with 8 args...
+[C++ Engine] Graph 'remap_f32_3d' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar F32: 0.003922 (raw 0x3b808081)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 9] Scalar I32: 8 (raw 0x8)
+  [Arg 10] Scalar I32: 8 (raw 0x8)
+  [Arg 11] Scalar I32: 8 (raw 0x8)
+  [Arg 12] Scalar F32: 2.000000 (raw 0x40000000)
+  [Arg 13] Scalar I32: 2 (raw 0x2)
+  [Arg 14] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'align_end_to_end_3layer' with 15 args...
+[C++ Engine] Graph 'align_end_to_end_3layer' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_x' with 6 args...
+[C++ Engine] Graph 'smooth_flow_x' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_y' with 6 args...
+[C++ Engine] Graph 'smooth_flow_y' launched successfully.
+  [Arg 3] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 4] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 6] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 7] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+[C++ Engine] Launching graph 'build_flow_maps_from_2ch' with 9 args...
+[C++ Engine] Graph 'build_flow_maps_from_2ch' launched successfully.
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'remap_f32_3d' with 8 args...
+[C++ Engine] Graph 'remap_f32_3d' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar F32: 0.003922 (raw 0x3b808081)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 9] Scalar I32: 8 (raw 0x8)
+  [Arg 10] Scalar I32: 8 (raw 0x8)
+  [Arg 11] Scalar I32: 8 (raw 0x8)
+  [Arg 12] Scalar F32: 2.000000 (raw 0x40000000)
+  [Arg 13] Scalar I32: 2 (raw 0x2)
+  [Arg 14] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'align_end_to_end_3layer' with 15 args...
+[C++ Engine] Graph 'align_end_to_end_3layer' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_x' with 6 args...
+[C++ Engine] Graph 'smooth_flow_x' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_y' with 6 args...
+[C++ Engine] Graph 'smooth_flow_y' launched successfully.
+  [Arg 3] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 4] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 6] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 7] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+[C++ Engine] Launching graph 'build_flow_maps_from_2ch' with 9 args...
+[C++ Engine] Graph 'build_flow_maps_from_2ch' launched successfully.
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'remap_f32_3d' with 8 args...
+[C++ Engine] Graph 'remap_f32_3d' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar F32: 0.003922 (raw 0x3b808081)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 9] Scalar I32: 8 (raw 0x8)
+  [Arg 10] Scalar I32: 8 (raw 0x8)
+  [Arg 11] Scalar I32: 8 (raw 0x8)
+  [Arg 12] Scalar F32: 2.000000 (raw 0x40000000)
+  [Arg 13] Scalar I32: 2 (raw 0x2)
+  [Arg 14] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'align_end_to_end_3layer' with 15 args...
+[C++ Engine] Graph 'align_end_to_end_3layer' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_x' with 6 args...
+[C++ Engine] Graph 'smooth_flow_x' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_y' with 6 args...
+[C++ Engine] Graph 'smooth_flow_y' launched successfully.
+  [Arg 3] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 4] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 6] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 7] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+[C++ Engine] Launching graph 'build_flow_maps_from_2ch' with 9 args...
+[C++ Engine] Graph 'build_flow_maps_from_2ch' launched successfully.
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'remap_f32_3d' with 8 args...
+[C++ Engine] Graph 'remap_f32_3d' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar F32: 0.003922 (raw 0x3b808081)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 9] Scalar I32: 8 (raw 0x8)
+  [Arg 10] Scalar I32: 8 (raw 0x8)
+  [Arg 11] Scalar I32: 8 (raw 0x8)
+  [Arg 12] Scalar F32: 2.000000 (raw 0x40000000)
+  [Arg 13] Scalar I32: 2 (raw 0x2)
+  [Arg 14] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'align_end_to_end_3layer' with 15 args...
+[C++ Engine] Graph 'align_end_to_end_3layer' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_x' with 6 args...
+[C++ Engine] Graph 'smooth_flow_x' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_y' with 6 args...
+[C++ Engine] Graph 'smooth_flow_y' launched successfully.
+  [Arg 3] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 4] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 6] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 7] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+[C++ Engine] Launching graph 'build_flow_maps_from_2ch' with 9 args...
+[C++ Engine] Graph 'build_flow_maps_from_2ch' launched successfully.
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'remap_f32_3d' with 8 args...
+[C++ Engine] Graph 'remap_f32_3d' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar F32: 0.003922 (raw 0x3b808081)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 9] Scalar I32: 8 (raw 0x8)
+  [Arg 10] Scalar I32: 8 (raw 0x8)
+  [Arg 11] Scalar I32: 8 (raw 0x8)
+  [Arg 12] Scalar F32: 2.000000 (raw 0x40000000)
+  [Arg 13] Scalar I32: 2 (raw 0x2)
+  [Arg 14] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'align_end_to_end_3layer' with 15 args...
+[C++ Engine] Graph 'align_end_to_end_3layer' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_x' with 6 args...
+[C++ Engine] Graph 'smooth_flow_x' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_y' with 6 args...
+[C++ Engine] Graph 'smooth_flow_y' launched successfully.
+  [Arg 3] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 4] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 6] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 7] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+[C++ Engine] Launching graph 'build_flow_maps_from_2ch' with 9 args...
+[C++ Engine] Graph 'build_flow_maps_from_2ch' launched successfully.
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'remap_f32_3d' with 8 args...
+[C++ Engine] Graph 'remap_f32_3d' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar F32: 0.003922 (raw 0x3b808081)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 9] Scalar I32: 8 (raw 0x8)
+  [Arg 10] Scalar I32: 8 (raw 0x8)
+  [Arg 11] Scalar I32: 8 (raw 0x8)
+  [Arg 12] Scalar F32: 2.000000 (raw 0x40000000)
+  [Arg 13] Scalar I32: 2 (raw 0x2)
+  [Arg 14] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'align_end_to_end_3layer' with 15 args...
+[C++ Engine] Graph 'align_end_to_end_3layer' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_x' with 6 args...
+[C++ Engine] Graph 'smooth_flow_x' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_y' with 6 args...
+[C++ Engine] Graph 'smooth_flow_y' launched successfully.
+  [Arg 3] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 4] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 6] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 7] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+[C++ Engine] Launching graph 'build_flow_maps_from_2ch' with 9 args...
+[C++ Engine] Graph 'build_flow_maps_from_2ch' launched successfully.
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'remap_f32_3d' with 8 args...
+[C++ Engine] Graph 'remap_f32_3d' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 5] Scalar F32: 1.917603 (raw 0x3ff57404)
+  [Arg 6] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 7] Scalar F32: 1.481910 (raw 0x3fbdaf3c)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 9] Scalar F32: 0.000000 (raw 0x0)
+  [Arg 10] Scalar F32: 1002.539978 (raw 0x447aa28f)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar I32: 1 (raw 0x1)
+  [Arg 14] Scalar I32: 0 (raw 0x0)
+  [Arg 15] Scalar I32: 2 (raw 0x2)
+  [Arg 16] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'hamilton_demosaic' with 17 args...
+[C++ Engine] Graph 'hamilton_demosaic' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'rgb_to_bgr_i32' with 4 args...
+[C++ Engine] Graph 'rgb_to_bgr_i32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar F32: 0.003922 (raw 0x3b808081)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_x_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_x_1ch_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3 (raw 0x3)
+[C++ Engine] Launching graph 'gaussian_blur_y_1ch_f32' with 6 args...
+[C++ Engine] Graph 'gaussian_blur_y_1ch_f32' launched successfully.
+  [Arg 4] Scalar F32: 1.890000 (raw 0x3ff1eb85)
+  [Arg 5] Scalar F32: 1.610000 (raw 0x3fce147b)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'enhance_grayscale' with 8 args...
+[C++ Engine] Graph 'enhance_grayscale' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+[C++ Engine] Launching graph 'bilinear_resize_f32_2d' with 6 args...
+[C++ Engine] Graph 'bilinear_resize_f32_2d' launched successfully.
+  [Arg 9] Scalar I32: 8 (raw 0x8)
+  [Arg 10] Scalar I32: 8 (raw 0x8)
+  [Arg 11] Scalar I32: 8 (raw 0x8)
+  [Arg 12] Scalar F32: 2.000000 (raw 0x40000000)
+  [Arg 13] Scalar I32: 2 (raw 0x2)
+  [Arg 14] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'align_end_to_end_3layer' with 15 args...
+[C++ Engine] Graph 'align_end_to_end_3layer' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_x' with 6 args...
+[C++ Engine] Graph 'smooth_flow_x' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 2 (raw 0x2)
+[C++ Engine] Launching graph 'smooth_flow_y' with 6 args...
+[C++ Engine] Graph 'smooth_flow_y' launched successfully.
+  [Arg 3] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 4] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 6] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 7] Scalar F32: 1.000000 (raw 0x3f800000)
+  [Arg 8] Scalar F32: 1.000000 (raw 0x3f800000)
+[C++ Engine] Launching graph 'build_flow_maps_from_2ch' with 9 args...
+[C++ Engine] Graph 'build_flow_maps_from_2ch' launched successfully.
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+[C++ Engine] Launching graph 'remap_f32_3d' with 8 args...
+[C++ Engine] Graph 'remap_f32_3d' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar F32: 0.000015 (raw 0x37800080)
+[C++ Engine] Launching graph 'normalize_vec3_f32_to_vec3_f32' with 3 args...
+[C++ Engine] Graph 'normalize_vec3_f32_to_vec3_f32' launched successfully.
+[C++ Engine] Launching graph 'rgb2gray_f32' with 2 args...
+[C++ Engine] Graph 'rgb2gray_f32' launched successfully.
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 3] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 4] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 5] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 2] Scalar I32: 1512 (raw 0x5e8)
+  [Arg 3] Scalar I32: 2016 (raw 0x7e0)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 3] Scalar I32: 8 (raw 0x8)
+  [Arg 4] Scalar I32: 8 (raw 0x8)
+  [Arg 5] Scalar I32: 756 (raw 0x2f4)
+  [Arg 6] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 7] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 8] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 9] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 2] Scalar I32: 94 (raw 0x5e)
+  [Arg 3] Scalar I32: 126 (raw 0x7e)
+  [Arg 4] Scalar I32: 756 (raw 0x2f4)
+  [Arg 5] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 2] Scalar I32: 756 (raw 0x2f4)
+  [Arg 3] Scalar I32: 1008 (raw 0x3f0)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 0 (raw 0x0)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 1 (raw 0x1)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 2 (raw 0x2)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 5] Scalar I32: 0 (raw 0x0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)
+  [Arg 9] Scalar I32: 16 (raw 0x10)
+  [Arg 10] Scalar I32: 16 (raw 0x10)
+  [Arg 11] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 12] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 13] Scalar F32: 0.174425 (raw 0x3e329c79)
+  [Arg 14] Scalar F32: 100.000000 (raw 0x42c80000)
+  [Arg 15] Scalar F32: 0.120000 (raw 0x3df5c28f)
+  [Arg 16] Scalar I32: 0 (raw 0x0)
+  [Arg 17] Scalar I32: 1 (raw 0x1)
+  [Arg 4] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 5] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 6] Scalar I32: 3024 (raw 0xbd0)
+  [Arg 7] Scalar I32: 4032 (raw 0xfc0)
+  [Arg 8] Scalar I32: 3 (raw 0x3)

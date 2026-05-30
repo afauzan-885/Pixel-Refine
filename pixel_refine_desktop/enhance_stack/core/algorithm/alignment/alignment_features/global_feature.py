@@ -252,12 +252,14 @@ def _prepare_image_array_from_raw(
 
         # Call GPU-accelerated Demosaicing (Auto-extracts all metadata and runs on GPU)
         os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
-        
+
         # Backup (Linear Demosaic Version):
         # bgr_linear = ta_aot.demosaic(original_path, method="hamilton", return_gpu=False, output_bgr_u16=True)
-        
+
         # Active Version: Restored to JIT/AOT developed non-linear highlight logic from commit 56b751e
-        bgr = ta_aot.demosaic(original_path, method="hamilton", return_gpu=False, output_bgr_u16=True)
+        bgr = ta_aot.demosaic(
+            original_path, method="hamilton", return_gpu=False, output_bgr_u16=True
+        )
 
         # 5. GT Proxy Generation (if requested)
         if generate_ref_proxy:
@@ -378,14 +380,15 @@ def load_single_image(
 ):
     """Loads a single image at the given index from HDF5 or filesystem."""
     import h5py
+
     ref_proxy = None
-    
+
     if isinstance(data_source, str) and data_source.endswith(".h5"):
         with h5py.File(data_source, "r") as h5f:
             key = list(h5f.keys())[index]
             img = np.array(h5f[key])
             return (img, None) if capture_ref_proxy else img
-            
+
     elif isinstance(data_source, list):
         path = data_source[index]
         load_res = load_images_from_paths(
