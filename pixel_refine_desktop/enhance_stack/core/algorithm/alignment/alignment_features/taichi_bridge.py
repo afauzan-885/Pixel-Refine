@@ -174,41 +174,84 @@ def prepare_reference_aot(reference_image_float, is_linear_mode, proxy_scale, wo
     return final_res_gray, ref_noise_sigma
 
 
-def prepare_frame_aot(img_orig, ref_dtype, is_linear_mode, proxy_scale, work_res_h, work_res_w, ref_image_h, ref_image_w):
-    """Prepare comparison frame on GPU for merging. Returns (curr_full_gpu, curr_work_gray_gpu).
+def prepare_reference_aot(reference_image_float, is_linear_mode, proxy_scale, work_res_h, work_res_w):
+    """Prepare reference image on GPU for merging. Returns (ref_work_res_pass2_gpu, ref_noise_sigma)."""
+    ref_gpu = taichi_aot.upload(reference_image_float)
+    
+    # FUSED OPTIMIZATION: If linear mode, we apply both scale (1.0) and proxy_scale directly to gamma_proxy 
+    # to avoid creating an intermediate normalized image buffer.
+    if is_linear_mode:
+        ref_final = to_gamma_proxy_gpu(ref_gpu, scale=proxy_scale)
+        if ref_gpu is not ref_final:
+            ref_gpu.release()
+    else:
+        # For non-linear, since we bypass gamma_proxy, we just normalize
+        ref_final = normalize_image_gpu(ref_gpu, dtype=np.float32)
+        if ref_gpu is not ref_final:
+            ref_gpu.release()
 
-    img_orig can be either a NumPy array or a TaichiGPUBuffer (e.g. when images[i] has already
-    been replaced by the GPU alignment result). In the latter case, upload() returns the same
-    object — we must NOT destroy it since we don't own it.
-    """
+    ref_gray = taichi_aot.rgb2gray(ref_final)
+    if ref_final is not ref_gray:
+        ref_final.release()
+
+    final_res_gray = ref_gray
+    if ref_gray.shape[:2] != (work_res_h, work_res_w):
+        final_res_gray = taichi_aot.resize(ref_gray, (work_res_w, work_res_h), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+        if ref_gray is not final_res_gray:
+            ref_gray.release()
+
+    # Estimate noise on CPU/NumPy
+    ref_gray_np = final_res_gray.to_numpy()
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import estimate_noise_in_python
+    ref_noise_sigma = estimate_noise_in_python(ref_gray_np)
+
+    return final_res_gray, ref_noise_sigma
+
+
+def prepare_frame_aot(img_orig, ref_dtype, is_linear_mode, proxy_scale, work_res_h, work_res_w, ref_image_h, ref_image_w):
+    """Prepare comparison frame on GPU for merging. Returns (curr_full_gpu, curr_work_gray_gpu)."""
     from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import TaichiGPUBuffer
     input_is_gpu_buf = isinstance(img_orig, TaichiGPUBuffer)
 
     uploaded = taichi_aot.upload(img_orig)
-    # We own 'uploaded' only if upload() actually allocated a new buffer (i.e. img_orig was NumPy)
     we_own_uploaded = not input_is_gpu_buf
 
-    curr_full_gpu = normalize_image_gpu(uploaded, dtype=ref_dtype)
-    if we_own_uploaded and (uploaded is not curr_full_gpu):
-        uploaded.destroy()
+    # FUSED OPTIMIZATION: Combine normalization scale and gamma proxy scale together.
+    # We directly apply scale (combined with normalizer inverse scale) inside gamma curve kernel if linear mode.
+    if is_linear_mode:
+        inv_scale = 1.0
+        buf_dtype = getattr(uploaded, "dtype", ref_dtype)
+        if np.issubdtype(buf_dtype, np.integer):
+            inv_scale = 1.0 / float(np.iinfo(buf_dtype).max)
+        
+        # We pass combined scale (proxy_scale * inv_scale) directly to gamma_proxy 
+        # to process raw uint16 -> gamma scale in one step!
+        curr_final = to_gamma_proxy_gpu(uploaded, scale=proxy_scale * inv_scale)
+        curr_full_gpu = curr_final # For linear merging we use gamma proxy space
+    else:
+        # Non-linear: directly normalize image
+        curr_full_gpu = normalize_image_gpu(uploaded, dtype=ref_dtype)
+        curr_final = curr_full_gpu
+
+    if we_own_uploaded and (uploaded is not curr_final) and (uploaded is not curr_full_gpu):
+        uploaded.release()
 
     if curr_full_gpu.shape[:2] != (ref_image_h, ref_image_w):
         new_full = taichi_aot.resize(curr_full_gpu, (ref_image_w, ref_image_h), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
-        curr_full_gpu.destroy()
+        if curr_full_gpu is not curr_final:
+            curr_full_gpu.release()
         curr_full_gpu = new_full
 
-    curr_final = curr_full_gpu
-    if is_linear_mode:
-        curr_final = to_gamma_proxy_gpu(curr_full_gpu, scale=proxy_scale)
-
     curr_gray = taichi_aot.rgb2gray(curr_final)
+    
+    # Eagerly release curr_final if it is an intermediate and not full result
     if curr_final is not curr_full_gpu and curr_final is not curr_gray:
-        curr_final.destroy()
+        curr_final.release()
 
     curr_work_gray_gpu = curr_gray
     if curr_gray.shape[:2] != (work_res_h, work_res_w):
         curr_work_gray_gpu = taichi_aot.resize(curr_gray, (work_res_w, work_res_h), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
         if curr_gray is not curr_work_gray_gpu:
-            curr_gray.destroy()
+            curr_gray.release()
 
     return curr_full_gpu, curr_work_gray_gpu
