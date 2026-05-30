@@ -314,6 +314,51 @@ def process_in_cpu(
     )
 
 
+_SPATIAL_CACHE = {
+    "static_bufs": None,
+    "_sum_gpu": None,
+    "_weight_sum_full_gpu": None,
+    "_base_window_gpu": None,
+    "_rows_gpu": None,
+    "_cols_gpu": None,
+    "_weight_work_gpu": None,
+    "ref_image_h": None,
+    "ref_image_w": None,
+    "ref_channels_buffer": None,
+    "work_res_h": None,
+    "work_res_w": None,
+    "gpu_upload_threads": None,
+}
+
+
+def clear_spatial_cache():
+    """Safely destroy all cached GPU buffers for spatial merging."""
+    global _SPATIAL_CACHE
+    print("[GPU Merging] Clearing persistent spatial merging cache...")
+    if _SPATIAL_CACHE["static_bufs"] is not None:
+        for buf in _SPATIAL_CACHE["static_bufs"]:
+            try:
+                buf.destroy()
+            except:
+                pass
+    for key in [
+        "_sum_gpu",
+        "_weight_sum_full_gpu",
+        "_base_window_gpu",
+        "_rows_gpu",
+        "_cols_gpu",
+        "_weight_work_gpu",
+    ]:
+        buf = _SPATIAL_CACHE[key]
+        if buf is not None:
+            try:
+                buf.destroy()
+            except:
+                pass
+    for key in _SPATIAL_CACHE:
+        _SPATIAL_CACHE[key] = None
+
+
 def process_in_gpu(
     images,
     reference_image_float,
@@ -350,7 +395,9 @@ def process_in_gpu(
     Merging:   Selalu Taichi (full GPU).
     """
     from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import taichi_bridge
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import (
+        taichi_bridge,
+    )
     from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 
     num_images = len(images)
@@ -425,6 +472,9 @@ def process_in_gpu(
     from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.bilinear_interpolation import (
         bilinear_resize,
     )
+    import queue
+    import threading
+    import concurrent.futures
 
     # Preprocessing Gambar Referensi (Unified API)
     ref_for_weight_calc = reference_image_float
@@ -438,25 +488,166 @@ def process_in_gpu(
     weight_map_sum_full_res = np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
     processed_frames_spatial = [0]
 
+    # Get configuration parameter for upload threads. Default is 2 (double buffering).
+    gpu_upload_threads = kwargs.get("gpu_upload_threads", 2)
+    print(
+        f"[GPU Merging] Using {gpu_upload_threads} thread buffer pipeline (Double Buffering)."
+    )
+
+    # Static buffer definition to avoid any VRAM allocation inside the merging loop
+    class StaticGPUFrameBuffer:
+        def __init__(
+            self,
+            engine,
+            ref_image_h,
+            ref_image_w,
+            ref_channels_buffer,
+            work_res_h,
+            work_res_w,
+            ref_dtype,
+            is_linear_mode,
+        ):
+            self.engine = engine
+            is_vector = ref_channels_buffer == 3 or ref_channels_buffer == 2
+            vector_dim = ref_channels_buffer if is_vector else 1
+            shape_full = (
+                (ref_image_h, ref_image_w)
+                if ref_channels_buffer == 1
+                else (ref_image_h, ref_image_w, ref_channels_buffer)
+            )
+
+            self.upload_buf = engine.allocate(
+                shape_full,
+                dtype=ref_dtype,
+                is_vector=is_vector,
+                vector_dim=vector_dim,
+                host_accessible=True,
+            )
+            self.full_buf = engine.allocate(
+                shape_full, dtype=np.float32, is_vector=is_vector, vector_dim=vector_dim
+            )
+            self.gray_full_buf = engine.allocate(
+                (ref_image_h, ref_image_w), dtype=np.float32
+            )
+            self.work_gray_buf = engine.allocate(
+                (work_res_h, work_res_w), dtype=np.float32
+            )
+
+        def write_data(self, numpy_arr):
+            from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import (
+                _LIB,
+                _RUNTIME,
+                TaichiGPUBuffer,
+            )
+
+            if isinstance(numpy_arr, TaichiGPUBuffer):
+                with self.engine._lock:
+                    _LIB.copy_gpu_buffer(
+                        _RUNTIME,
+                        numpy_arr.handle,
+                        self.upload_buf.handle,
+                        self.upload_buf.size_bytes,
+                    )
+            else:
+                arr = np.ascontiguousarray(numpy_arr)
+                with self.engine._lock:
+                    _LIB.write_to_gpu_buffer(
+                        _RUNTIME,
+                        self.upload_buf.handle,
+                        arr.ctypes.data,
+                        self.upload_buf.size_bytes,
+                    )
+
+        def preprocess(self, is_linear_mode, proxy_scale, ref_dtype):
+            from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot import (
+                _mod,
+            )
+
+            if is_linear_mode:
+                inv_scale = 1.0
+                if np.issubdtype(ref_dtype, np.integer):
+                    inv_scale = 1.0 / float(np.iinfo(ref_dtype).max)
+                from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.taichi_bridge import (
+                    to_gamma_proxy_gpu,
+                )
+
+                to_gamma_proxy_gpu(
+                    self.upload_buf,
+                    scale=proxy_scale * inv_scale,
+                    dst_gpu=self.full_buf,
+                )
+            else:
+                from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.taichi_bridge import (
+                    normalize_image_gpu,
+                )
+
+                normalize_image_gpu(self.upload_buf, ref_dtype, out_gpu=self.full_buf)
+
+            src_v = (
+                self.full_buf.view_as_vector(True)
+                if not getattr(self.full_buf, "is_vector", False)
+                else self.full_buf
+            )
+            _mod("common").run("rgb2gray_f32", src=src_v, dst=self.gray_full_buf)
+
+            h_src, w_src = self.gray_full_buf.shape[0], self.gray_full_buf.shape[1]
+            target_h, target_w = (
+                self.work_gray_buf.shape[0],
+                self.work_gray_buf.shape[1],
+            )
+            _mod("bilinear").run(
+                "bilinear_resize_f32_2d",
+                src=self.gray_full_buf,
+                dst=self.work_gray_buf,
+                h_src=h_src,
+                w_src=w_src,
+                h_dst=target_h,
+                w_dst=target_w,
+            )
+
+        def destroy(self):
+            for buf in [
+                self.upload_buf,
+                self.full_buf,
+                self.gray_full_buf,
+                self.work_gray_buf,
+            ]:
+                if buf:
+                    try:
+                        buf.destroy()
+                    except:
+                        pass
+
     def _run_gpu_merging_loop():
-        from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import AOTEngine
+        from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import (
+            AOTEngine,
+        )
+
         engine = AOTEngine()
 
         _sum_gpu = taichi_aot.upload(final_image_sum_full_res)
         _weight_sum_full_gpu = taichi_aot.upload(weight_map_sum_full_res)
         _base_window_gpu = taichi_aot.upload(base_window)
-        
+
         _rows_gpu = taichi_aot.upload(row_starts)
         _rows_gpu.dtype = np.int32
-        
+
         _cols_gpu = taichi_aot.upload(col_starts)
         _cols_gpu.dtype = np.int32
-        
-        _weight_work_gpu = engine.allocate((work_res_h, work_res_w), dtype=np.float32, host_accessible=True)
+
+        _weight_work_gpu = engine.allocate(
+            (work_res_h, work_res_w), dtype=np.float32, host_accessible=True
+        )
 
         # [OBG RUNTIME PIPELINE] Record spatial weight & merging steps once as a single graph (OBG style) without compiling TCMs
-        p_curr_work_gray = engine.placeholder((work_res_h, work_res_w), dtype=np.float32)
-        p_curr_full_flat = engine.placeholder((ref_image_h, ref_image_w, ref_channels_buffer), dtype=np.float32, is_vector=False)
+        p_curr_work_gray = engine.placeholder(
+            (work_res_h, work_res_w), dtype=np.float32
+        )
+        p_curr_full_flat = engine.placeholder(
+            (ref_image_h, ref_image_w, ref_channels_buffer),
+            dtype=np.float32,
+            is_vector=False,
+        )
 
         with engine.rec_pipeline("spatial_merge_pipeline"):
             generate_spatial_weights_taichi(
@@ -493,48 +684,97 @@ def process_in_gpu(
 
         use_overall_progress = total_overall_images and total_overall_images > 0
         start_idx = 1 if kwargs.get("skip_first_merge", False) else 0
+
+        # Initialize static buffers pool for double/triple buffering
+        static_bufs = [
+            StaticGPUFrameBuffer(
+                engine,
+                ref_image_h,
+                ref_image_w,
+                ref_channels_buffer,
+                work_res_h,
+                work_res_w,
+                ref_dtype,
+                is_linear_mode,
+            )
+            for _ in range(gpu_upload_threads)
+        ]
+        free_queue = queue.Queue()
+        for buf in static_bufs:
+            free_queue.put(buf)
+
+        vram_queue = queue.Queue(maxsize=max(1, gpu_upload_threads - 1))
+        upload_error = [None]
+
+        def upload_worker():
+            try:
+                for i in range(start_idx, num_images):
+                    if stop_requested and stop_requested():
+                        break
+                    img_orig = images[i]
+                    if img_orig is None:
+                        continue
+
+                    # Get an available static buffer from the pool (blocks if none are free)
+                    static_buf = free_queue.get()
+
+                    # Write NumPy data and preprocess directly on GPU to the static buffer
+                    static_buf.write_data(img_orig)
+                    static_buf.preprocess(is_linear_mode, proxy_scale, ref_dtype)
+
+                    # Release input CPU/NumPy resource to keep RAM footprint low
+                    if hasattr(img_orig, "release"):
+                        img_orig.release()
+                    elif hasattr(img_orig, "destroy"):
+                        img_orig.destroy()
+                    images[i] = None
+
+                    # Push to VRAM queue
+                    vram_queue.put((i, static_buf))
+                vram_queue.put(None)  # Sentinel signal
+            except Exception as e:
+                import traceback
+
+                traceback.print_exc()
+                upload_error[0] = e
+                vram_queue.put(None)
+
+        # Launch background upload thread
+        t_upload = threading.Thread(target=upload_worker, daemon=True)
+        t_upload.start()
+
+        # Benchmark timing
+        t_start = time.time()
         try:
-            for i in range(start_idx, num_images):
-                img_orig = images[i]
+            while True:
                 if stop_requested and stop_requested():
                     break
-                if img_orig is None:
-                    continue
 
-                # Preprocessing Frame (Unified API)
-                curr_full_gpu, curr_work_gray_gpu = taichi_bridge.prepare_frame_aot(
-                    img_orig,
-                    ref_dtype,
-                    is_linear_mode,
-                    proxy_scale,
-                    work_res_h,
-                    work_res_w,
-                    ref_image_h,
-                    ref_image_w
-                )
+                item = vram_queue.get()
+                if item is None:
+                    break
+
+                if upload_error[0] is not None:
+                    raise upload_error[0]
+
+                i, static_buf = item
 
                 # Playback the pre-recorded pipeline with overrides (zero-copy memory handle swapping)
-                print(f"[DEBUG] p_curr_work_gray handle: {p_curr_work_gray.handle}, curr_work_gray_gpu handle: {curr_work_gray_gpu.handle if curr_work_gray_gpu else 'None'}")
-                print(f"[DEBUG] p_curr_full_flat handle: {p_curr_full_flat.handle}, curr_full_flat handle: {curr_full_gpu.view_as_vector(False).handle if curr_full_gpu else 'None'}")
-                engine.use_pipeline("spatial_merge_pipeline", overrides={
-                    p_curr_work_gray: curr_work_gray_gpu,
-                    p_curr_full_flat: curr_full_gpu.view_as_vector(False)
-                })
+                engine.use_pipeline(
+                    "spatial_merge_pipeline",
+                    overrides={
+                        p_curr_work_gray: static_buf.work_gray_buf,
+                        p_curr_full_flat: static_buf.full_buf.view_as_vector(False),
+                    },
+                )
 
                 # --- CRITICAL FIX FOR iGPU STABILITY ---
                 # Wait for GPU to finish execution before freeing buffers to prevent page faults/driver hangs
                 engine.sync()
 
-                curr_work_gray_gpu.release()
-                curr_full_gpu.release()
+                # Return buffer to pool
+                free_queue.put(static_buf)
 
-                # Release input ti_ndarray if applicable
-                if hasattr(img_orig, "release"):
-                    img_orig.release()
-                elif hasattr(img_orig, "destroy"):
-                    img_orig.destroy()
-
-                images[i] = None
                 processed_frames_spatial[0] += 1
 
                 if update_progress:
@@ -551,16 +791,42 @@ def process_in_gpu(
                         else f"Spatial Merging: {i+1}/{num_images} (GPU Taichi)"
                     )
                     update_progress(prog, msg)
-                time.sleep(0.01)
+                time.sleep(0.001)
 
-            final_image_sum_full_res[:] = _sum_gpu.to_numpy()
-            weight_map_sum_full_res[:] = _weight_sum_full_gpu.to_numpy()
+            # Zero-copy memory download directly to the pre-allocated target numpy arrays
+            from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import (
+                _LIB,
+                _RUNTIME,
+            )
+
+            with engine._lock:
+                _LIB.read_from_gpu_buffer(
+                    _RUNTIME,
+                    _sum_gpu.handle,
+                    final_image_sum_full_res.ctypes.data,
+                    _sum_gpu.size_bytes,
+                )
+                _LIB.read_from_gpu_buffer(
+                    _RUNTIME,
+                    _weight_sum_full_gpu.handle,
+                    weight_map_sum_full_res.ctypes.data,
+                    _weight_sum_full_gpu.size_bytes,
+                )
+
+            # Print GPU Merging Benchmark time
+            dur = (time.time() - t_start) * 1000.0
+            print(
+                f"[BENCHMARK] GPU Merging selesai dalam {dur:.2f} ms untuk {processed_frames_spatial[0]} gambar ({dur/max(1, processed_frames_spatial[0]):.2f} ms/frame)."
+            )
             return True
         except Exception:
             import traceback
+
             traceback.print_exc()
             return False
         finally:
+            for buf in static_bufs:
+                buf.destroy()
             for buf in [
                 _sum_gpu,
                 _weight_sum_full_gpu,

@@ -1,30 +1,30 @@
-name: Android Build
+# name: Android Build
 
-on:
-  push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
-  workflow_dispatch:
+# on:
+#   push:
+#     branches: [ main, master ]
+#   pull_request:
+#     branches: [ main, master ]
+#   workflow_dispatch:
 
-jobs:
-  build:
-    runs-on: ubuntu-22.04
+# jobs:
+#   build:
+#     runs-on: ubuntu-22.04
 
-    steps:
-      - uses: actions/checkout@v4
+#     steps:
+#       - uses: actions/checkout@v4
 
-      - name: Prepare Entry Point
-        run: cp main_mobile.py main.py
+#       - name: Prepare Entry Point
+#         run: cp main_mobile.py main.py
 
-      - name: Build with Buildozer
-        uses: digreatbrian/buildozer-action@v2
-        with:
-          buildozer-cmd: buildozer android debug
-          work-dir: .
+#       - name: Build with Buildozer
+#         uses: digreatbrian/buildozer-action@v2
+#         with:
+#           buildozer-cmd: buildozer android debug
+#           work-dir: .
 
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: package
-          path: bin/*.apk
+#       - name: Upload APK artifact
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: package
+#           path: bin/*.apk

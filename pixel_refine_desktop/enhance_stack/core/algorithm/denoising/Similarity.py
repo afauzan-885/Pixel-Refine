@@ -61,6 +61,7 @@ class DataProvider:
         from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
             get_all_image_paths_for_batch_process,
         )
+
         return get_all_image_paths_for_batch_process(self.db_path, batch_id)
 
     def setup_data_source_and_paths(self, single_process, batch_id):
@@ -564,7 +565,10 @@ def main(
         # Clear Taichi VRAM and cached modules globally at the very end
         try:
             from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
-            from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import AOTEngine
+            from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import (
+                AOTEngine,
+            )
+
             taichi_aot.unload_all_modules()
             AOTEngine().buffer_pool.clear()
             AOTEngine().clear_pipelines()

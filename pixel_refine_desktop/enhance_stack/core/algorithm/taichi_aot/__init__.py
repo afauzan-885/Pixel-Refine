@@ -1438,6 +1438,105 @@ def hamilton_demosaic(
     return dst_buf if return_gpu else dst_buf.to_numpy()
 
 
+@ti_thread
+def hamilton_demosaic_1channel(
+    bayer, wb_r, wb_g1, wb_b, wb_g2,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
+    """Fast Green-Only Demosaic to Grayscale 1-channel."""
+    bayer_buf = InputArray(bayer)
+    h, w = bayer_buf.shape[:2]
+    wb_bayer_buf = engine.allocate((h, w), dtype=np.float32)
+    
+    if dst is not None and dst.shape == (h, w) and dst.dtype == np.float32:
+        dst_buf = dst
+    else:
+        dst_buf = OutputArray((h, w), dtype=np.float32)
+        
+    _mod("hamilton").run(
+        "hamilton_demosaic_1channel",
+        bayer=bayer_buf,
+        wb_bayer=wb_bayer_buf,
+        dst=dst_buf,
+        wb_r=float(wb_r),
+        wb_g1=float(wb_g1),
+        wb_b=float(wb_b),
+        wb_g2=float(wb_g2),
+        black=float(black_level),
+        white=float(white_level),
+        h=int(h),
+        w=int(w),
+        c00=int(c00),
+        c01=int(c01),
+        c10=int(c10),
+        c11=int(c11)
+    )
+    
+    engine.sync()
+    wb_bayer_buf.release()
+    if bayer_buf is not bayer and hasattr(bayer_buf, "release"):
+        bayer_buf.release()
+    elif bayer_buf is not bayer and hasattr(bayer_buf, "destroy"):
+        bayer_buf.destroy()
+        
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+@ti_thread
+def hamilton_demosaic_3channel(
+    bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
+    """Full-Luma Demosaic directly to Grayscale 1-channel."""
+    bayer_buf = InputArray(bayer)
+    cmatrix_buf = InputArray(cmatrix)
+    h, w = bayer_buf.shape[:2]
+    wb_bayer_buf = engine.allocate((h, w), dtype=np.float32)
+    green_buf = engine.allocate((h, w), dtype=np.float32)
+    
+    if dst is not None and dst.shape == (h, w) and dst.dtype == np.float32:
+        dst_buf = dst
+    else:
+        dst_buf = OutputArray((h, w), dtype=np.float32)
+        
+    _mod("hamilton").run(
+        "hamilton_demosaic_3channel",
+        bayer=bayer_buf,
+        wb_bayer=wb_bayer_buf,
+        green=green_buf,
+        cmatrix=cmatrix_buf,
+        dst=dst_buf,
+        wb_r=float(wb_r),
+        wb_g1=float(wb_g1),
+        wb_b=float(wb_b),
+        wb_g2=float(wb_g2),
+        black=float(black_level),
+        white=float(white_level),
+        h=int(h),
+        w=int(w),
+        c00=int(c00),
+        c01=int(c01),
+        c10=int(c10),
+        c11=int(c11)
+    )
+    
+    engine.sync()
+    wb_bayer_buf.release()
+    green_buf.release()
+    if bayer_buf is not bayer and hasattr(bayer_buf, "release"):
+        bayer_buf.release()
+    elif bayer_buf is not bayer and hasattr(bayer_buf, "destroy"):
+        bayer_buf.destroy()
+    if cmatrix_buf is not cmatrix and hasattr(cmatrix_buf, "release"):
+        cmatrix_buf.release()
+    elif cmatrix_buf is not cmatrix and hasattr(cmatrix_buf, "destroy"):
+        cmatrix_buf.destroy()
+        
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
 def demosaic(
     raw_input,
     wb_r=None, wb_g1=None, wb_b=None, wb_g2=None, cmatrix=None,
@@ -1522,6 +1621,16 @@ def demosaic(
         
         # Store active cmatrix in engine singleton for downstream gamma proxy color space alignment transformations
         engine.active_cmatrix = cmatrix
+        engine.active_wb_r = wb_r
+        engine.active_wb_g1 = wb_g1
+        engine.active_wb_b = wb_b
+        engine.active_wb_g2 = wb_g2
+        engine.active_black_level = black_level
+        engine.active_white_level = white_level
+        engine.active_c00 = c00
+        engine.active_c01 = c01
+        engine.active_c10 = c10
+        engine.active_c11 = c11
 
     method_lower = method.lower().replace("_", "-")
     if method_lower in ("hamilton", "hamilton-adams", "ha", "ppg"):
@@ -1569,8 +1678,20 @@ def demosaic(
                 black_level, white_level, c00, c01, c10, c11,
                 return_gpu=return_gpu, dst=dst
             )
+    elif method_lower in ("hamilton-1channel", "hamilton-1ch", "ha-1ch"):
+        return hamilton_demosaic_1channel(
+            bayer, wb_r, wb_g1, wb_b, wb_g2,
+            black_level, white_level, c00, c01, c10, c11,
+            return_gpu=return_gpu, dst=dst
+        )
+    elif method_lower in ("hamilton-3channel", "hamilton-3ch", "ha-3ch"):
+        return hamilton_demosaic_3channel(
+            bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+            black_level, white_level, c00, c01, c10, c11,
+            return_gpu=return_gpu, dst=dst
+        )
     else:
-        supported = ["'hamilton' (aliases: 'hamilton-adams', 'ha', 'ppg')"]
+        supported = ["'hamilton' (aliases: 'hamilton-adams', 'ha', 'ppg')", "'hamilton-1channel'", "'hamilton-3channel'"]
         raise ValueError(
             f"\n[Taichi AOT] Unsupported demosaicing method: '{method}'.\n"
             f"  SUPPORTED METHODS: {', '.join(supported)}"

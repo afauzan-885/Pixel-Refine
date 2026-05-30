@@ -69,23 +69,59 @@ def prepare_pyramid_aot(image_gpu):
 
 def prepare_reference_for_alignment(reference_image_float, is_linear_mode, proxy_scale, work_res_h, work_res_w, lut_gpu=None, blur_work_gpu=None):
     """Prepare reference image pyramid on GPU. Returns (l0, l1, l2) — caller must destroy all."""
-    ref_gpu = taichi_aot.upload(reference_image_float, force_8bit=True)
-    ref_final = ref_gpu
-
-    if is_linear_mode:
-        ref_final = to_gamma_proxy_gpu(ref_gpu, scale=proxy_scale)
+    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot import TaichiGPUBuffer
+    input_is_gpu_buf = isinstance(reference_image_float, TaichiGPUBuffer)
+    
+    # Check if the reference image is a 1-channel RAW image that needs fast demosaicing directly to grayscale
+    is_raw_sensor = (not input_is_gpu_buf and reference_image_float.ndim == 2) or (input_is_gpu_buf and len(reference_image_float.shape) == 2)
+    
+    if is_raw_sensor:
+        # FUSED RAW OPTIMIZATION: Decode Bayer directly to Grayscale 1-channel (Green-only fast luma)
+        # Avoids allocating massive RGB intermediate VRAM buffers!
+        ref_gpu = taichi_aot.upload(reference_image_float, force_8bit=False)
+        # Get active camera parameters from engine if available
+        engine = AOTEngine()
+        wb_r = getattr(engine, "active_wb_r", 1.0)
+        wb_g1 = getattr(engine, "active_wb_g1", 1.0)
+        wb_b = getattr(engine, "active_wb_b", 1.0)
+        wb_g2 = getattr(engine, "active_wb_g2", 1.0)
+        black_level = getattr(engine, "active_black_level", 0.0)
+        white_level = getattr(engine, "active_white_level", 16383.0)
+        c00 = getattr(engine, "active_c00", 0)
+        c01 = getattr(engine, "active_c01", 1)
+        c10 = getattr(engine, "active_c10", 1)
+        c11 = getattr(engine, "active_c11", 2)
+        
+        ref_final = taichi_aot.demosaic(
+            ref_gpu, wb_r, wb_g1, wb_b, wb_g2, None,
+            black_level, white_level, c00, c01, c10, c11,
+            method="hamilton-1channel", return_gpu=True
+        )
         if ref_gpu is not ref_final:
-            ref_gpu.destroy()
+            ref_gpu.release()
+    else:
+        ref_gpu = taichi_aot.upload(reference_image_float, force_8bit=True)
+        ref_final = ref_gpu
 
-    ref_gray = taichi_aot.rgb2gray(ref_final)
-    if ref_final is not ref_gray:
-        ref_final.destroy()
+        if is_linear_mode:
+            ref_final = to_gamma_proxy_gpu(ref_gpu, scale=proxy_scale)
+            if ref_gpu is not ref_final:
+                ref_gpu.release()
+
+    # Convert ref_final to grayscale 1-channel if it is a 3-channel image
+    if not is_raw_sensor:
+        ref_gray = taichi_aot.rgb2gray(ref_final)
+        if ref_final is not ref_gray:
+            ref_final.release()
+    else:
+        # Already Grayscale 1-channel
+        ref_gray = ref_final
 
     final_res_gray = ref_gray
     if ref_gray.shape[:2] != (work_res_h, work_res_w):
         final_res_gray = taichi_aot.resize(ref_gray, (work_res_w, work_res_h), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
         if ref_gray is not final_res_gray:
-            ref_gray.destroy()
+            ref_gray.release()
 
     if lut_gpu is not None:
         # Fused GPU contrast & micro-contrast & Clarity enhancement!
@@ -97,9 +133,9 @@ def prepare_reference_for_alignment(reference_image_float, is_linear_mode, proxy
             final_res_gray, blur_gpu, lut_gpu, micro_contrast=1.89, clarity=1.61, return_gpu=True
         )
         if blur_work_gpu is None:
-            blur_gpu.destroy()
+            blur_gpu.release()
         if final_res_gray is not enhanced_gpu:
-            final_res_gray.destroy()
+            final_res_gray.release()
         final_res_gray = enhanced_gpu
 
     return prepare_pyramid_aot(final_res_gray)
@@ -107,26 +143,62 @@ def prepare_reference_for_alignment(reference_image_float, is_linear_mode, proxy
 
 def prepare_comparison_for_alignment(comp_image, ref_dtype, is_linear_mode, proxy_scale, work_res_h, work_res_w, lut_gpu=None, blur_work_gpu=None):
     """Prepare comparison image pyramid on GPU. Returns (l0, l1, l2) — caller must destroy all."""
-    comp_input = taichi_aot.upload(comp_image, force_8bit=True)
-    comp_normalized = normalize_image_gpu(comp_input, dtype=ref_dtype)
-    if comp_input is not comp_normalized:
-        comp_input.destroy()
+    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot import TaichiGPUBuffer
+    input_is_gpu_buf = isinstance(comp_image, TaichiGPUBuffer)
+    
+    # Check if the image is a 1-channel RAW image that needs fast demosaicing directly to grayscale
+    is_raw_sensor = (not input_is_gpu_buf and comp_image.ndim == 2) or (input_is_gpu_buf and len(comp_image.shape) == 2)
+    
+    if is_raw_sensor:
+        # FUSED RAW OPTIMIZATION: Decode Bayer directly to Grayscale 1-channel (Green-only fast luma)
+        # Avoids allocating massive RGB intermediate VRAM buffers!
+        comp_gpu = taichi_aot.upload(comp_image, force_8bit=False)
+        # Get active camera parameters from engine if available
+        engine = AOTEngine()
+        wb_r = getattr(engine, "active_wb_r", 1.0)
+        wb_g1 = getattr(engine, "active_wb_g1", 1.0)
+        wb_b = getattr(engine, "active_wb_b", 1.0)
+        wb_g2 = getattr(engine, "active_wb_g2", 1.0)
+        black_level = getattr(engine, "active_black_level", 0.0)
+        white_level = getattr(engine, "active_white_level", 16383.0)
+        c00 = getattr(engine, "active_c00", 0)
+        c01 = getattr(engine, "active_c01", 1)
+        c10 = getattr(engine, "active_c10", 1)
+        c11 = getattr(engine, "active_c11", 2)
+        
+        comp_final = taichi_aot.demosaic(
+            comp_gpu, wb_r, wb_g1, wb_b, wb_g2, None,
+            black_level, white_level, c00, c01, c10, c11,
+            method="hamilton-1channel", return_gpu=True
+        )
+        if comp_gpu is not comp_final:
+            comp_gpu.release()
+    else:
+        comp_input = taichi_aot.upload(comp_image, force_8bit=True)
+        comp_normalized = normalize_image_gpu(comp_input, dtype=ref_dtype)
+        if comp_input is not comp_normalized:
+            comp_input.release()
 
-    comp_final = comp_normalized
-    if is_linear_mode:
-        comp_final = to_gamma_proxy_gpu(comp_normalized, scale=proxy_scale)
-        if comp_normalized is not comp_final:
-            comp_normalized.destroy()
+        comp_final = comp_normalized
+        if is_linear_mode:
+            comp_final = to_gamma_proxy_gpu(comp_normalized, scale=proxy_scale)
+            if comp_normalized is not comp_final:
+                comp_normalized.release()
 
-    comp_gray = taichi_aot.rgb2gray(comp_final)
-    if comp_final is not comp_gray:
-        comp_final.destroy()
+    # Convert comp_final to grayscale 1-channel if it is a 3-channel image
+    if not is_raw_sensor:
+        comp_gray = taichi_aot.rgb2gray(comp_final)
+        if comp_final is not comp_gray:
+            comp_final.release()
+    else:
+        # Already Grayscale 1-channel
+        comp_gray = comp_final
 
     final_res_gray = comp_gray
     if comp_gray.shape[:2] != (work_res_h, work_res_w):
         final_res_gray = taichi_aot.resize(comp_gray, (work_res_w, work_res_h), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
         if comp_gray is not final_res_gray:
-            comp_gray.destroy()
+            comp_gray.release()
 
     if lut_gpu is not None:
         # Fused GPU contrast & micro-contrast & Clarity enhancement!
@@ -138,9 +210,9 @@ def prepare_comparison_for_alignment(comp_image, ref_dtype, is_linear_mode, prox
             final_res_gray, blur_gpu, lut_gpu, micro_contrast=1.89, clarity=1.61, return_gpu=True
         )
         if blur_work_gpu is None:
-            blur_gpu.destroy()
+            blur_gpu.release()
         if final_res_gray is not enhanced_gpu:
-            final_res_gray.destroy()
+            final_res_gray.release()
         final_res_gray = enhanced_gpu
 
     return prepare_pyramid_aot(final_res_gray)
