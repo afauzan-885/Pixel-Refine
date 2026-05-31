@@ -148,10 +148,49 @@ def insert_channel(src, dst, ch):
     _mod("common").run(graph, src=src_v, dst=dst_v, ch=int(ch))
 
 
-def rgb2gray(src):
+def generate_hanning_window_2d(shape, exclude_boundary=False, dtype=np.float32) -> TaichiGPUBuffer:
+    """AOT Optimized 2D Hanning window generation."""
+    h, w = shape
+    dst = engine.allocate((h, w), dtype=dtype)
+    _mod("common").run("generate_hanning_window_2d", dst=dst, H=int(h), W=int(w), exclude_boundary=int(exclude_boundary))
+    return dst
+
+
+def mean_division(sum_img: TaichiGPUBuffer, sum_weight: TaichiGPUBuffer, ref_img: TaichiGPUBuffer, dst: TaichiGPUBuffer = None) -> TaichiGPUBuffer:
+    """AOT Optimized final mean division and fallback."""
+    if dst is None:
+        dst = engine.allocate(sum_img.shape, dtype=sum_img.dtype, is_vector=getattr(sum_img, "is_vector", False), vector_dim=getattr(sum_img, "vector_dim", 1))
+
+    is_vec = len(sum_img.shape) == 3 or getattr(sum_img, "is_vector", False)
+    graph = "mean_division_vec3_f32" if is_vec else "mean_division_f32"
+
+    sum_img_v = sum_img
+    ref_img_v = ref_img
+    dst_v = dst
+
+    if is_vec:
+        if not getattr(sum_img, "is_vector", False):
+            sum_img_v = sum_img.view_as_vector(True)
+        if not getattr(ref_img, "is_vector", False):
+            ref_img_v = ref_img.view_as_vector(True)
+        if not getattr(dst, "is_vector", False):
+            dst_v = dst.view_as_vector(True)
+
+    _mod("common").run(graph, sum_img=sum_img_v, sum_weight=sum_weight, ref_img=ref_img_v, dst=dst_v)
+    return dst
+
+
+# NumPy-like aliases for JIT/AOT consistency
+hanning = generate_hanning_window_2d
+divide = mean_division
+
+
+
+def rgb2gray(src, dst=None):
     """AOT Optimized RGB to Gray conversion."""
     h, w = src.shape[0], src.shape[1]
-    dst = engine.allocate((h, w), dtype=src.dtype)
+    if dst is None:
+        dst = engine.allocate((h, w), dtype=src.dtype)
     src_v = src
     if len(src.shape) == 3 and not getattr(src, "is_vector", False):
         src_v = src.view_as_vector(True)
@@ -230,7 +269,7 @@ def to_gamma_proxy(
     return to_gamma_proxy_gpu(src_gpu, scale=scale, dst_gpu=out)
 
 
-def resize(src, dsize, interpolation=INTER_CUBIC, return_gpu=False):
+def resize(src, dsize, interpolation=INTER_CUBIC, return_gpu=False, dst=None):
     """Taichi AOT Resize (OpenCV Parity API)"""
     target_w, target_h = dsize
     src_buf = InputArray(src)
@@ -250,14 +289,17 @@ def resize(src, dsize, interpolation=INTER_CUBIC, return_gpu=False):
         else (src_buf.shape[2] if len(src_buf.shape) == 3 else 1)
     )
 
-    if is_3d:
-        dst_shape = (target_h, target_w, v_dim)
-    else:
-        dst_shape = (target_h, target_w)
+    if dst is None:
+        if is_3d:
+            dst_shape = (target_h, target_w, v_dim)
+        else:
+            dst_shape = (target_h, target_w)
 
-    dst_buf = OutputArray(
-        dst_shape, dtype=src_buf.dtype, is_vector=is_vec, vector_dim=v_dim
-    )
+        dst_buf = OutputArray(
+            dst_shape, dtype=src_buf.dtype, is_vector=is_vec, vector_dim=v_dim
+        )
+    else:
+        dst_buf = dst
 
     is_vec = getattr(src_buf, "is_vector", False)
 
@@ -303,39 +345,46 @@ def resize(src, dsize, interpolation=INTER_CUBIC, return_gpu=False):
 
     return dst_buf if return_gpu else dst_buf.to_numpy()
 
-    return dst_buf if return_gpu else dst_buf.to_numpy()
 
-
-def box_filter(src, kernel_size=3, return_gpu=False):
+def box_filter(src, kernel_size=3, return_gpu=False, dst=None):
     """AOT Implementation of Box Filter."""
     src_buf = InputArray(src)
     h, w = src_buf.shape[:2]
     radius = kernel_size // 2
     is_3d = len(src_buf.shape) == 3
 
-    dst_buf = OutputArray(src_buf.shape, dtype=src_buf.dtype, is_vector=is_3d)
+    if dst is None:
+        dst_buf = OutputArray(src_buf.shape, dtype=src_buf.dtype, is_vector=is_3d)
+    else:
+        dst_buf = dst
+
     is_vec = getattr(src_buf, "is_vector", False)
 
     if kernel_size == 3:
-        target = (
-            "box_filter_fused_3x3_vec3_f32"
-            if is_vec
-            else "box_filter_fused_3x3_3ch_f32"
-        )
+        target = "box_filter_fused_3x3_1ch_f32"
+        if is_3d:
+            target = (
+                "box_filter_fused_3x3_vec3_f32"
+                if is_vec
+                else "box_filter_fused_3x3_3ch_f32"
+            )
         _mod("box_filter").run(target, src=src_buf, dst=dst_buf, h=h, w=w)
     else:
         tmp_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype, is_vector=is_vec)
-        target = (
-            "box_filter_separable_generic_vec3_f32"
-            if is_vec
-            else "box_filter_separable_generic_3ch_f32"
-        )
+        target = "box_filter_separable_generic_1ch_f32"
+        if is_3d:
+            target = (
+                "box_filter_separable_generic_vec3_f32"
+                if is_vec
+                else "box_filter_separable_generic_3ch_f32"
+            )
         _mod("box_filter").run(
             target, src=src_buf, tmp=tmp_buf, dst=dst_buf, h=h, w=w, radius=radius
         )
         del tmp_buf
 
     return dst_buf if return_gpu else dst_buf.to_numpy()
+
 
 
 def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False, dst=None):
@@ -1422,7 +1471,7 @@ def hamilton_demosaic(
         c11=int(c11)
     )
     
-    # Immediately release intermediate VRAM buffers back to pool to keep VRAM footprint under ~8MB!
+    # Immediately release intermediate VRAM buffers back to pool
     engine.sync()
     wb_bayer_buf.release()
     green_buf.release()
@@ -1444,10 +1493,9 @@ def hamilton_demosaic_1channel(
     black_level, white_level, c00, c01, c10, c11,
     return_gpu=False, dst=None
 ):
-    """Fast Green-Only Demosaic to Grayscale 1-channel."""
+    """Fast Green-Only Demosaic to Grayscale 1-channel (Fused Single-Pass)."""
     bayer_buf = InputArray(bayer)
     h, w = bayer_buf.shape[:2]
-    wb_bayer_buf = engine.allocate((h, w), dtype=np.float32)
     
     if dst is not None and dst.shape == (h, w) and dst.dtype == np.float32:
         dst_buf = dst
@@ -1457,7 +1505,6 @@ def hamilton_demosaic_1channel(
     _mod("hamilton").run(
         "hamilton_demosaic_1channel",
         bayer=bayer_buf,
-        wb_bayer=wb_bayer_buf,
         dst=dst_buf,
         wb_r=float(wb_r),
         wb_g1=float(wb_g1),
@@ -1474,12 +1521,99 @@ def hamilton_demosaic_1channel(
     )
     
     engine.sync()
-    wb_bayer_buf.release()
     if bayer_buf is not bayer and hasattr(bayer_buf, "release"):
         bayer_buf.release()
     elif bayer_buf is not bayer and hasattr(bayer_buf, "destroy"):
         bayer_buf.destroy()
         
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+@ti_thread
+def hamilton_demosaic_half_res(
+    bayer, wb_r, wb_g1, wb_b, wb_g2,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
+    """Bypass Demosaicing: Extract Green Sub-Sampling to 1/2 size (half_res) grayscale (Fused Single-Pass)."""
+    bayer_buf = InputArray(bayer)
+    h, w = bayer_buf.shape[:2]
+    
+    if dst is not None and dst.shape == (h // 2, w // 2) and dst.dtype == np.float32:
+        dst_buf = dst
+    else:
+        dst_buf = OutputArray((h // 2, w // 2), dtype=np.float32)
+        
+    _mod("hamilton").run(
+        "hamilton_demosaic_half_res",
+        bayer=bayer_buf,
+        dst=dst_buf,
+        wb_r=float(wb_r),
+        wb_g1=float(wb_g1),
+        wb_b=float(wb_b),
+        wb_g2=float(wb_g2),
+        black=float(black_level),
+        white=float(white_level),
+        h=int(h),
+        w=int(w),
+        c00=int(c00),
+        c01=int(c01),
+        c10=int(c10),
+        c11=int(c11)
+    )
+    
+    engine.sync()
+    if bayer_buf is not bayer and hasattr(bayer_buf, "release"):
+        bayer_buf.release()
+    elif bayer_buf is not bayer and hasattr(bayer_buf, "destroy"):
+        bayer_buf.destroy()
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+@ti_thread
+def hamilton_demosaic_rgb_half_res(
+    bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
+    """Bypass Demosaicing: Extract RGB Direct Sub-Sampling to 1/2 size (half_res) RGB (Fused Single-Pass)."""
+    bayer_buf = InputArray(bayer)
+    cmatrix_buf = InputArray(cmatrix)
+    h, w = bayer_buf.shape[:2]
+    
+    if dst is not None and dst.shape == (h // 2, w // 2, 3) and dst.dtype == np.float32:
+        dst_buf = dst
+    else:
+        dst_buf = OutputArray((h // 2, w // 2, 3), dtype=np.float32)
+        
+    _mod("hamilton").run(
+        "hamilton_demosaic_rgb_half_res",
+        bayer=bayer_buf,
+        cmatrix=cmatrix_buf,
+        dst=dst_buf,
+        wb_r=float(wb_r),
+        wb_g1=float(wb_g1),
+        wb_b=float(wb_b),
+        wb_g2=float(wb_g2),
+        black=float(black_level),
+        white=float(white_level),
+        h=int(h),
+        w=int(w),
+        c00=int(c00),
+        c01=int(c01),
+        c10=int(c10),
+        c11=int(c11)
+    )
+    
+    engine.sync()
+    if bayer_buf is not bayer and hasattr(bayer_buf, "release"):
+        bayer_buf.release()
+    elif bayer_buf is not bayer and hasattr(bayer_buf, "destroy"):
+        bayer_buf.destroy()
+    if cmatrix_buf is not cmatrix and hasattr(cmatrix_buf, "release"):
+        cmatrix_buf.release()
+    elif cmatrix_buf is not cmatrix and hasattr(cmatrix_buf, "destroy"):
+        cmatrix_buf.destroy()
     return dst_buf if return_gpu else dst_buf.to_numpy()
 
 
@@ -1684,6 +1818,18 @@ def demosaic(
             black_level, white_level, c00, c01, c10, c11,
             return_gpu=return_gpu, dst=dst
         )
+    elif method_lower in ("hamilton-half-res", "hamilton-half", "ha-half-res", "ha-half", "half-res"):
+        return hamilton_demosaic_half_res(
+            bayer, wb_r, wb_g1, wb_b, wb_g2,
+            black_level, white_level, c00, c01, c10, c11,
+            return_gpu=return_gpu, dst=dst
+        )
+    elif method_lower in ("hamilton-rgb-half-res", "hamilton-rgb-half", "ha-rgb-half-res", "rgb-half-res"):
+        return hamilton_demosaic_rgb_half_res(
+            bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+            black_level, white_level, c00, c01, c10, c11,
+            return_gpu=return_gpu, dst=dst
+        )
     elif method_lower in ("hamilton-3channel", "hamilton-3ch", "ha-3ch"):
         return hamilton_demosaic_3channel(
             bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
@@ -1691,7 +1837,13 @@ def demosaic(
             return_gpu=return_gpu, dst=dst
         )
     else:
-        supported = ["'hamilton' (aliases: 'hamilton-adams', 'ha', 'ppg')", "'hamilton-1channel'", "'hamilton-3channel'"]
+        supported = [
+            "'hamilton' (aliases: 'hamilton-adams', 'ha', 'ppg')",
+            "'hamilton-1channel' (aliases: 'hamilton-1ch', 'ha-1ch')",
+            "'hamilton-half-res' (aliases: 'hamilton-half', 'ha-half-res', 'half-res')",
+            "'hamilton-rgb-half-res' (aliases: 'hamilton-rgb-half', 'ha-rgb-half-res', 'rgb-half-res')",
+            "'hamilton-3channel' (aliases: 'hamilton-3ch', 'ha-3ch')"
+        ]
         raise ValueError(
             f"\n[Taichi AOT] Unsupported demosaicing method: '{method}'.\n"
             f"  SUPPORTED METHODS: {', '.join(supported)}"

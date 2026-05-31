@@ -152,6 +152,7 @@ class SpatialFusionProcessor:
             "num_workers": num_workers,
             "alignment_tile_size": 8,
             "lib_path": lib_path,
+            "return_raw": return_raw,
             **unused_kwargs,
         }
 
@@ -171,20 +172,24 @@ class SpatialFusionProcessor:
         if processed_frames > 0 and return_raw:
             return (final_sum_img, sum_weight_full, processed_frames)
 
-        if update_progress:
-            update_progress(
-                pass_merge_range[1], "Finalizing with simple mean calculation..."
-            )
+        if process_in == "gpu" and TAICHI_SPATIAL_AVAILABLE:
+            # Division already completed on GPU, final_sum_img contains the finalized image
+            final_image = final_sum_img
+        else:
+            if update_progress:
+                update_progress(
+                    pass_merge_range[1], "Finalizing with simple mean calculation on CPU..."
+                )
 
-        valid_mask = sum_weight_full > 1e-6
-        final_image = np.zeros_like(final_sum_img)
-        np.divide(
-            final_sum_img,
-            sum_weight_full[:, :, np.newaxis],
-            out=final_image,
-            where=valid_mask[:, :, np.newaxis],
-        )
-        final_image[~valid_mask] = reference_image_float[~valid_mask]
+            valid_mask = sum_weight_full > 1e-6
+            final_image = np.zeros_like(final_sum_img)
+            np.divide(
+                final_sum_img,
+                sum_weight_full[:, :, np.newaxis],
+                out=final_image,
+                where=valid_mask[:, :, np.newaxis],
+            )
+            final_image[~valid_mask] = reference_image_float[~valid_mask]
 
         if weight_of_each_image:
             return (final_image, sum_weight_full, processed_frames, [])

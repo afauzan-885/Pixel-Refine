@@ -48,6 +48,20 @@ def compile_box_filter_aot(arch=ti.vulkan, save_path="box_filter_vulkan.tcm"):
     g_sep_vec3.dispatch(box_filter_mod._box_blur_h_vec3_f32_kernel, src_vec3, tmp_vec3, h_arg, w_arg, radius_arg)
     g_sep_vec3.dispatch(box_filter_mod._box_blur_v_vec3_f32_kernel, tmp_vec3, dst_vec3, h_arg, w_arg, radius_arg)
     module.add_graph("box_filter_separable_generic_vec3_f32", g_sep_vec3.compile())
+
+    # --- 1-CHANNEL GRAYSCALE GRAPHS ---
+    src_1d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=2)
+    tmp_1d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "tmp", ti.f32, ndim=2)
+    dst_1d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
+
+    g_3x3_1ch = ti.graph.GraphBuilder()
+    g_3x3_1ch.dispatch(box_filter_mod._box_filter_3x3_1ch_f32_unrolled_kernel, src_1d, dst_1d, h_arg, w_arg)
+    module.add_graph("box_filter_fused_3x3_1ch_f32", g_3x3_1ch.compile())
+
+    g_sep_1ch = ti.graph.GraphBuilder()
+    g_sep_1ch.dispatch(box_filter_mod._box_blur_h_generic_1ch_kernel, src_1d, tmp_1d, h_arg, w_arg, radius_arg)
+    g_sep_1ch.dispatch(box_filter_mod._box_blur_v_generic_1ch_kernel, tmp_1d, dst_1d, h_arg, w_arg, radius_arg)
+    module.add_graph("box_filter_separable_generic_1ch_f32", g_sep_1ch.compile())
     
     module.archive(save_path)
     print(f"Successfully compiled and archived to: {save_path}")

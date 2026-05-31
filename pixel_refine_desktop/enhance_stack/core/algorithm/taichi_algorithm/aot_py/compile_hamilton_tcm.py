@@ -13,7 +13,6 @@ os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
 
 # --- Define JIT Kernels for Compiler-Time only ---
 
-
 @ti.kernel
 def _preprocess_bayer_kernel(
     bayer: ti.types.ndarray(),
@@ -72,7 +71,7 @@ def _ha_green_interpolation_kernel_opt(
     c11: ti.i32,
 ):
     """Pass 1: Hamilton-Adams Edge-Directed Green Channel Reconstruction.
-    Enhanced with local 3x3 gradient smoothing to eliminate maze/checkerboard artifacts on high ISO noise.
+    Optimized: standard Hamilton-Adams 1-row/col gradient estimation (no redundant loops) for 3x memory bandwidth savings.
     """
     for r, c in ti.ndrange(h, w):
         color_idx = 1
@@ -88,31 +87,14 @@ def _ha_green_interpolation_kernel_opt(
         if is_green:
             green[r, c] = wb_bayer[r, c]
         else:
-            if r > 2 and r < h - 3 and c > 2 and c < w - 3:
-                # Calculate smoothed directional gradients over a local neighborhood to suppress noise spikes
-                dh_accum = 0.0
-                dv_accum = 0.0
+            if r > 1 and r < h - 2 and c > 1 and c < w - 2:
+                dh = ti.abs(wb_bayer[r, c - 1] - wb_bayer[r, c + 1]) + ti.abs(
+                    2.0 * wb_bayer[r, c] - wb_bayer[r, c - 2] - wb_bayer[r, c + 2]
+                )
+                dv = ti.abs(wb_bayer[r - 1, c] - wb_bayer[r + 1, c]) + ti.abs(
+                    2.0 * wb_bayer[r, c] - wb_bayer[r - 2, c] - wb_bayer[r + 2, c]
+                )
 
-                # Check gradients on a local 3x3 window of same-phase calculations
-                for dr in ti.static([-1, 0, 1]):
-                    # Row offset
-                    ro = r + dr * 2
-                    # Horizontal gradient estimator
-                    dh_accum += ti.abs(wb_bayer[ro, c - 1] - wb_bayer[ro, c + 1]) + ti.abs(
-                        2.0 * wb_bayer[ro, c] - wb_bayer[ro, c - 2] - wb_bayer[ro, c + 2]
-                    )
-                for dc in ti.static([-1, 0, 1]):
-                    # Col offset
-                    co = c + dc * 2
-                    # Vertical gradient estimator
-                    dv_accum += ti.abs(wb_bayer[r - 1, co] - wb_bayer[r + 1, co]) + ti.abs(
-                        2.0 * wb_bayer[r, co] - wb_bayer[r - 2, co] - wb_bayer[r + 2, co]
-                    )
-
-                dh = dh_accum / 3.0
-                dv = dv_accum / 3.0
-
-                # Adaptive noise thresholding (prevents random switching on flat noisy regions)
                 noise_threshold = 0.035
                 diff = ti.abs(dh - dv)
 
@@ -127,17 +109,14 @@ def _ha_green_interpolation_kernel_opt(
                 c_down2 = wb_bayer[r + 2, c]
 
                 if diff < noise_threshold:
-                    # Flat or very noisy area: do isotropic average to blend smoothly and suppress patterns
                     green[r, c] = (g_left + g_right + g_up + g_down) * 0.25 + (
                         4.0 * c_center - c_left2 - c_right2 - c_up2 - c_down2
                     ) * 0.125
                 elif dh < dv:
-                    # Sharp horizontal structure
                     green[r, c] = (g_left + g_right) * 0.5 + (
                         2.0 * c_center - c_left2 - c_right2
                     ) * 0.25
                 else:
-                    # Sharp vertical structure
                     green[r, c] = (g_up + g_down) * 0.5 + (
                         2.0 * c_center - c_up2 - c_down2
                     ) * 0.25
@@ -150,6 +129,7 @@ def _ha_green_interpolation_kernel_opt(
                         g_val += wb_bayer[nr, nc]
                         g_count += 1.0
                 green[r, c] = g_val / g_count
+
 
 
 @ti.kernel
@@ -170,7 +150,7 @@ def _ha_red_blue_interpolation_kernel_opt(
     c11: ti.i32,
 ):
     """Pass 2: Red and Blue Reconstruction using Directional Color Difference Interpolation.
-    Enhanced with directional weights based on reconstructured green gradient to avoid color fringing.
+    Uses cached preprocessed wb_bayer for maximum performance.
     """
     for r, c in ti.ndrange(h, w):
         color_idx = 1
@@ -187,7 +167,6 @@ def _ha_red_blue_interpolation_kernel_opt(
         if color_idx == 0:  # Red pixel
             R = wb_bayer[r, c]
             if r > 0 and r < h - 1 and c > 0 and c < w - 1:
-                # Directional diagonal weights to prevent color fringing at sharp boundaries
                 g_diff_diag1 = ti.abs(green[r - 1, c - 1] - green[r + 1, c + 1])
                 g_diff_diag2 = ti.abs(green[r - 1, c + 1] - green[r + 1, c - 1])
                 w1 = 1.0 / (1.0 + g_diff_diag1)
@@ -248,106 +227,29 @@ def _ha_red_blue_interpolation_kernel_opt(
                 else:
                     B = G
 
-        # --- Advanced Highlight Recovery & Desaturation (executed in white-balanced camera space) ---
-        # 1. Estimate RAW Bayer values (before white balance)
+        # --- Advanced Highlight Recovery & Desaturation (from commit 1106566) ---
         R_raw = R / ti.max(0.1, wb_r)
         G_raw = G / ti.max(0.1, (wb_g1 + wb_g2) * 0.5)
         B_raw = B / ti.max(0.1, wb_b)
 
-        # 2. Inpainting-based Highlight Reconstruction
-        clip_limit = 0.80
-        healthy_limit = 0.72
-        
-        if R_raw > clip_limit or B_raw > clip_limit or G_raw > clip_limit:
-            sum_r_ratio = 0.0
-            count_r = 0.0
-            sum_b_ratio = 0.0
-            count_b = 0.0
-            
-            for dr in range(-2, 3):
-                for dc in range(-2, 3):
-                    nr, nc = r + dr, c + dc
-                    if nr >= 0 and nr < h and nc >= 0 and nc < w:
-                        n_color_idx = 1
-                        nr_mod = nr % 2
-                        nc_mod = nc % 2
-                        if nr_mod == 0:
-                            n_color_idx = c00 if nc_mod == 0 else c01
-                        else:
-                            n_color_idx = c10 if nc_mod == 0 else c11
-                        
-                        n_raw = wb_bayer[nr, nc]
-                        n_green = green[nr, nc]
-                        
-                        if n_color_idx == 0: # Red neighbor
-                            n_r_raw = n_raw / ti.max(0.1, wb_r)
-                            n_g_raw = n_green / ti.max(0.1, (wb_g1 + wb_g2) * 0.5)
-                            if n_r_raw < healthy_limit and n_g_raw < healthy_limit and n_g_raw > 0.01:
-                                weight = 1.0 / (1.0 + ti.cast(dr*dr + dc*dc, ti.f32))
-                                sum_r_ratio += (n_r_raw / n_g_raw) * weight
-                                count_r += weight
-                        elif n_color_idx == 2: # Blue neighbor
-                            n_b_raw = n_raw / ti.max(0.1, wb_b)
-                            n_g_raw = n_green / ti.max(0.1, (wb_g1 + wb_g2) * 0.5)
-                            if n_b_raw < healthy_limit and n_g_raw < healthy_limit and n_g_raw > 0.01:
-                                weight = 1.0 / (1.0 + ti.cast(dr*dr + dc*dc, ti.f32))
-                                sum_b_ratio += (n_b_raw / n_g_raw) * weight
-                                count_b += weight
-
-            if count_r > 0.0 and R_raw > clip_limit:
-                ratio_r = sum_r_ratio / count_r
-                R_raw = ti.max(R_raw, G_raw * ratio_r)
-            if count_b > 0.0 and B_raw > clip_limit:
-                ratio_b = sum_b_ratio / count_b
-                B_raw = ti.max(B_raw, G_raw * ratio_b)
-            
-            R = R_raw * wb_r
-            B = B_raw * wb_b
-
-        # --- FUSED CHROMINANCE MEDIAN FILTERING (Fringe & LCA Aberration Suppression) ---
-        # Run a 3x3 local median filter on color differences (R-G and B-G) to remove color fringing 
-        # while keeping the green-channel structure perfectly sharp.
-        if r > 1 and r < h - 2 and c > 1 and c < w - 2:
-            # We collect chrominance differences of the 3x3 neighborhood
-            # r_diff = R - G, b_diff = B - G
-            # To perform a bubble sort on 9 values in Taichi
-            val_r_0 = (wb_bayer[r-1, c-1] - green[r-1, c-1]) if ((r-1)%2==0 and (c-1)%2==0) else (R-G) # approximation
-            # Since neighborhood raw values are not directly accessible for non-native pixels,
-            # we do a directional smooth on difference differences
-            sum_diff_r = 0.0
-            sum_diff_b = 0.0
-            weight_sum = 0.0
-            for dr in ti.static([-1, 0, 1]):
-                for dc in ti.static([-1, 0, 1]):
-                    nr, nc = r + dr, c + dc
-                    # Approximate local differences to smooth the chrominance
-                    # This acts as a robust low-pass filter on color differences
-                    w_dist = 1.0 / (1.0 + ti.cast(dr*dr + dc*dc, ti.f32))
-                    # Fallback to local approximation if neighbor not computed yet:
-                    # In AOT, all pixels have their Green G channel reconstructed already.
-                    # Red & Blue are reconstructed concurrently. 
-                    # We can do a spatial local average of chrominance to suppress LCA fringing
-                    sum_diff_r += (R - G) * w_dist
-                    sum_diff_b += (B - G) * w_dist
-                    weight_sum += w_dist
-            
-            # Blend the smoothed chrominance back (suppresses fringing at edges)
-            # Edge indicator: check local green variance
-            g_var = ti.abs(green[r, c-1] - green[r, c+1]) + ti.abs(green[r-1, c] - green[r+1, c])
-            if g_var > 0.05: # At high-contrast edges, aggressively blend towards smooth chrominance
-                R = G + (sum_diff_r / weight_sum)
-                B = G + (sum_diff_b / weight_sum)
-
         max_raw = ti.max(R_raw, ti.max(G_raw, B_raw))
-        factor = ti.math.clamp((max_raw - 0.75) / 0.23, 0.0, 1.0)
+        min_raw = ti.min(R_raw, ti.min(G_raw, B_raw))
+
+        factor = ti.math.clamp((max_raw - 0.55) / 0.43, 0.0, 1.0)
         factor = factor * factor * (3.0 - 2.0 * factor)
 
-        L = ti.max(R, ti.max(G, B))
-        R = R * (1.0 - factor) + L * factor
-        G = G * (1.0 - factor) + L * factor
-        B = B * (1.0 - factor) + L * factor
+        ratio = min_raw / ti.max(1e-5, max_raw)
+        neutrality = ti.math.clamp((ratio - 0.40) / 0.45, 0.0, 1.0)
+        neutrality = neutrality * neutrality * (3.0 - 2.0 * neutrality)
 
-        # 6. Apply Camera-to-sRGB matrix transform and Sigmoid Highlight Roll-off
+        final_factor = factor * neutrality
+
+        L = ti.max(R, ti.max(G, B))
+        R = R * (1.0 - final_factor) + L * final_factor
+        G = G * (1.0 - final_factor) + L * final_factor
+        B = B * (1.0 - final_factor) + L * final_factor
+
+        # sRGB conversion & Gamma curve
         sR = cmatrix[0, 0] * R + cmatrix[0, 1] * G + cmatrix[0, 2] * B
         sG = cmatrix[1, 0] * R + cmatrix[1, 1] * G + cmatrix[1, 2] * B
         sB = cmatrix[2, 0] * R + cmatrix[2, 1] * G + cmatrix[2, 2] * B
@@ -361,10 +263,26 @@ def _ha_red_blue_interpolation_kernel_opt(
         dst[r, c, 2] = ti.math.pow(ti.math.clamp(sB, 0.0, 1.0), 1.0 / 2.22)
 
 
+@ti.func
+def _get_green_gain(nr: ti.i32, nc: ti.i32, c00: ti.i32, c01: ti.i32, c10: ti.i32, c11: ti.i32, wb_g1: ti.f32, wb_g2: ti.f32) -> ti.f32:
+    color_idx = 1
+    if nr % 2 == 0:
+        color_idx = c00 if nc % 2 == 0 else c01
+    else:
+        color_idx = c10 if nc % 2 == 0 else c11
+    return wb_g1 if color_idx == 1 else wb_g2
+
+
 @ti.kernel
-def _ha_green_to_grayscale_1channel_kernel(
-    wb_bayer: ti.types.ndarray(),
+def _ha_green_to_grayscale_1channel_fused_kernel(
+    bayer: ti.types.ndarray(),
     dst: ti.types.ndarray(),
+    wb_r: ti.f32,
+    wb_g1: ti.f32,
+    wb_b: ti.f32,
+    wb_g2: ti.f32,
+    black: ti.f32,
+    white: ti.f32,
     h: ti.i32,
     w: ti.i32,
     c00: ti.i32,
@@ -372,7 +290,12 @@ def _ha_green_to_grayscale_1channel_kernel(
     c10: ti.i32,
     c11: ti.i32,
 ):
-    """Fast Green-Only Demosaic to Grayscale 1-channel."""
+    """FUSED 1-Channel (Grayscale Full-Res): Fuses preprocessing, normalization, white balance 
+    and fast green demosaicing into a single fast GPU pass. Eliminates temporary memory footprint entirely.
+    Optimized: static neighborhood fetching and fast WB mapping using hardware-friendly select branches.
+    """
+    inv_range = 1.0 / ti.max(1.0, white - black)
+    
     for r, c in ti.ndrange(h, w):
         color_idx = 1
         r_mod = r % 2
@@ -381,20 +304,175 @@ def _ha_green_to_grayscale_1channel_kernel(
             color_idx = c00 if c_mod == 0 else c01
         else:
             color_idx = c10 if c_mod == 0 else c11
-
+            
         is_green = (color_idx == 1) or (color_idx == 3)
-
+        
         if is_green:
-            dst[r, c] = wb_bayer[r, c]
+            raw_val = ti.math.clamp((bayer[r, c] - black) * inv_range, 0.0, 1.0)
+            gain = wb_g1 if color_idx == 1 else wb_g2
+            dst[r, c] = raw_val * gain
         else:
-            g_val = 0.0
-            g_count = 0.0
-            for dr, dc in ti.static([(-1, 0), (1, 0), (0, -1), (0, 1)]):
-                nr, nc = r + dr, c + dc
-                if nr >= 0 and nr < h and nc >= 0 and nc < w:
-                    g_val += wb_bayer[nr, nc]
-                    g_count += 1.0
+            c_left = ti.max(0, c - 1)
+            c_right = ti.min(w - 1, c + 1)
+            r_up = ti.max(0, r - 1)
+            r_down = ti.min(h - 1, r + 1)
+            
+            raw_l = ti.math.clamp((bayer[r, c_left] - black) * inv_range, 0.0, 1.0)
+            raw_r = ti.math.clamp((bayer[r, c_right] - black) * inv_range, 0.0, 1.0)
+            raw_u = ti.math.clamp((bayer[r_up, c] - black) * inv_range, 0.0, 1.0)
+            raw_d = ti.math.clamp((bayer[r_down, c] - black) * inv_range, 0.0, 1.0)
+            
+            gain_l = _get_green_gain(r, c_left, c00, c01, c10, c11, wb_g1, wb_g2)
+            gain_r = _get_green_gain(r, c_right, c00, c01, c10, c11, wb_g1, wb_g2)
+            gain_u = _get_green_gain(r_up, c, c00, c01, c10, c11, wb_g1, wb_g2)
+            gain_d = _get_green_gain(r_down, c, c00, c01, c10, c11, wb_g1, wb_g2)
+            
+            dst[r, c] = (raw_l * gain_l + raw_r * gain_r + raw_u * gain_u + raw_d * gain_d) * 0.25
+
+
+
+@ti.kernel
+def _ha_green_half_res_fused_kernel(
+    bayer: ti.types.ndarray(),
+    dst: ti.types.ndarray(),
+    wb_r: ti.f32,
+    wb_g1: ti.f32,
+    wb_b: ti.f32,
+    wb_g2: ti.f32,
+    black: ti.f32,
+    white: ti.f32,
+    h: ti.i32,
+    w: ti.i32,
+    c00: ti.i32,
+    c01: ti.i32,
+    c10: ti.i32,
+    c11: ti.i32,
+):
+    """FUSED Bypass Demosaicing: Extract Green Sub-Sampling directly from RAW to 1/2 size grayscale.
+    Executes in a single pass without intermediate VRAM buffers (saving VRAM and bandwidth).
+    """
+    inv_range = 1.0 / ti.max(1.0, white - black)
+    
+    for r, c in ti.ndrange(h // 2, w // 2):
+        r_orig = r * 2
+        c_orig = c * 2
+        
+        g_val = 0.0
+        g_count = 0.0
+        
+        for dr, dc in ti.static([(0, 0), (0, 1), (1, 0), (1, 1)]):
+            nr, nc = r_orig + dr, c_orig + dc
+            
+            color_idx = 1
+            nr_mod = nr % 2
+            nc_mod = nc % 2
+            if nr_mod == 0:
+                color_idx = c00 if nc_mod == 0 else c01
+            else:
+                color_idx = c10 if nc_mod == 0 else c11
+                
+            is_green = (color_idx == 1) or (color_idx == 3)
+            if is_green:
+                raw_val = ti.math.clamp((bayer[nr, nc] - black) * inv_range, 0.0, 1.0)
+                gain = wb_g1 if color_idx == 1 else wb_g2
+                g_val += raw_val * gain
+                g_count += 1.0
+                
+        if g_count > 0.0:
             dst[r, c] = g_val / g_count
+        else:
+            dst[r, c] = ti.math.clamp((bayer[r_orig, c_orig] - black) * inv_range, 0.0, 1.0)
+
+
+@ti.kernel
+def _ha_rgb_half_res_fused_kernel(
+    bayer: ti.types.ndarray(),
+    cmatrix: ti.types.ndarray(),
+    dst: ti.types.ndarray(),
+    wb_r: ti.f32,
+    wb_g1: ti.f32,
+    wb_b: ti.f32,
+    wb_g2: ti.f32,
+    black: ti.f32,
+    white: ti.f32,
+    h: ti.i32,
+    w: ti.i32,
+    c00: ti.i32,
+    c01: ti.i32,
+    c10: ti.i32,
+    c11: ti.i32,
+):
+    """FUSED Bypass Demosaicing: Extract RGB Directly from Bayer 2x2 blocks to 1/2 size RGB.
+    Executes in a single pass without intermediate VRAM buffers.
+    """
+    inv_range = 1.0 / ti.max(1.0, white - black)
+    
+    for r, c in ti.ndrange(h // 2, w // 2):
+        r_orig = r * 2
+        c_orig = c * 2
+        
+        val_00 = ti.math.clamp((bayer[r_orig, c_orig] - black) * inv_range, 0.0, 1.0)
+        val_01 = ti.math.clamp((bayer[r_orig, c_orig + 1] - black) * inv_range, 0.0, 1.0)
+        val_10 = ti.math.clamp((bayer[r_orig + 1, c_orig] - black) * inv_range, 0.0, 1.0)
+        val_11 = ti.math.clamp((bayer[r_orig + 1, c_orig + 1] - black) * inv_range, 0.0, 1.0)
+        
+        R, G1, B, G2 = 0.0, 0.0, 0.0, 0.0
+        
+        if c00 == 0: R = val_00
+        elif c00 == 1: G1 = val_00
+        elif c00 == 2: B = val_00
+        else: G2 = val_00
+        
+        if c01 == 0: R = val_01
+        elif c01 == 1: G1 = val_01
+        elif c01 == 2: B = val_01
+        else: G2 = val_01
+        
+        if c10 == 0: R = val_10
+        elif c10 == 1: G1 = val_10
+        elif c10 == 2: B = val_10
+        else: G2 = val_10
+        
+        if c11 == 0: R = val_11
+        elif c11 == 1: G1 = val_11
+        elif c11 == 2: B = val_11
+        else: G2 = val_11
+        
+        # Zero-overhead highlight desaturation to prevent magenta cast on overexposed regions
+        # Protected by color neutrality weight (protects saturated highlights like fire/red lights)
+        G_raw = (G1 + G2) * 0.5
+        min_raw = ti.min(R, ti.min(G_raw, B))
+        max_raw = ti.max(R, ti.max(G_raw, B))
+        
+        factor = ti.math.clamp((max_raw - 0.55) / 0.43, 0.0, 1.0)
+        factor = factor * factor * (3.0 - 2.0 * factor)
+
+        ratio = min_raw / ti.max(1e-5, max_raw)
+        neutrality = ti.math.clamp((ratio - 0.40) / 0.45, 0.0, 1.0)
+        neutrality = neutrality * neutrality * (3.0 - 2.0 * neutrality)
+
+        final_factor = factor * neutrality
+
+        R = R * wb_r
+        G = (G1 * wb_g1 + G2 * wb_g2) * 0.5
+        B = B * wb_b
+
+        L = ti.max(R, ti.max(G, B))
+        R = R * (1.0 - final_factor) + L * final_factor
+        G = G * (1.0 - final_factor) + L * final_factor
+        B = B * (1.0 - final_factor) + L * final_factor
+        
+        sR = cmatrix[0, 0] * R + cmatrix[0, 1] * G + cmatrix[0, 2] * B
+        sG = cmatrix[1, 0] * R + cmatrix[1, 1] * G + cmatrix[1, 2] * B
+        sB = cmatrix[2, 0] * R + cmatrix[2, 1] * G + cmatrix[2, 2] * B
+        
+        sR = sR / ti.math.sqrt(1.0 + sR * sR)
+        sG = sG / ti.math.sqrt(1.0 + sG * sG)
+        sB = sB / ti.math.sqrt(1.0 + sB * sB)
+        
+        dst[r, c, 0] = ti.math.pow(ti.math.clamp(sR, 0.0, 1.0), 1.0 / 2.22)
+        dst[r, c, 1] = ti.math.pow(ti.math.clamp(sG, 0.0, 1.0), 1.0 / 2.22)
+        dst[r, c, 2] = ti.math.pow(ti.math.clamp(sB, 0.0, 1.0), 1.0 / 2.22)
 
 
 @ti.kernel
@@ -488,23 +566,6 @@ def _ha_to_grayscale_3channel_kernel(
         G_raw = G / ti.max(0.1, (wb_g1 + wb_g2) * 0.5)
         B_raw = B / ti.max(0.1, wb_b)
 
-        # FUSED CHROMINANCE MEDIAN FILTERING
-        if r > 1 and r < h - 2 and c > 1 and c < w - 2:
-            sum_diff_r = 0.0
-            sum_diff_b = 0.0
-            weight_sum = 0.0
-            for dr in ti.static([-1, 0, 1]):
-                for dc in ti.static([-1, 0, 1]):
-                    w_dist = 1.0 / (1.0 + ti.cast(dr*dr + dc*dc, ti.f32))
-                    sum_diff_r += (R - G) * w_dist
-                    sum_diff_b += (B - G) * w_dist
-                    weight_sum += w_dist
-            
-            g_var = ti.abs(green[r, c-1] - green[r, c+1]) + ti.abs(green[r-1, c] - green[r+1, c])
-            if g_var > 0.05:
-                R = G + (sum_diff_r / weight_sum)
-                B = G + (sum_diff_b / weight_sum)
-
         max_raw = ti.max(R_raw, ti.max(G_raw, B_raw))
         factor = ti.math.clamp((max_raw - 0.75) / 0.23, 0.0, 1.0)
         factor = factor * factor * (3.0 - 2.0 * factor)
@@ -522,7 +583,6 @@ def _ha_to_grayscale_3channel_kernel(
         sG = sG / ti.math.sqrt(1.0 + sG * sG)
         sB = sB / ti.math.sqrt(1.0 + sB * sB)
 
-        # Convert to Luma sRGB Grayscale: Y = 0.299*R + 0.587*G + 0.114*B
         luma = (
             0.299 * ti.math.pow(ti.math.clamp(sR, 0.0, 1.0), 1.0 / 2.22) +
             0.587 * ti.math.pow(ti.math.clamp(sG, 0.0, 1.0), 1.0 / 2.22) +
@@ -554,7 +614,7 @@ def compile_hamilton_tcm(arch=ti.vulkan, save_path="hamilton_vulkan.tcm"):
 
     module = ti.aot.Module(arch)
 
-    # 1. Define main RGB graph builder
+    # 1. Define main RGB graph builder (Preprocessed path restored and optimized)
     g_hamilton = ti.graph.GraphBuilder()
 
     # Inputs and Outputs
@@ -599,7 +659,7 @@ def compile_hamilton_tcm(arch=ti.vulkan, save_path="hamilton_vulkan.tcm"):
         c11_arg,
     )
 
-    # Dispatch Pass 1: Green Reconstruction
+    # Dispatch Pass 1: Green Reconstruction using cached wb_bayer
     g_hamilton.dispatch(
         _ha_green_interpolation_kernel_opt,
         wb_bayer_arg,
@@ -612,7 +672,7 @@ def compile_hamilton_tcm(arch=ti.vulkan, save_path="hamilton_vulkan.tcm"):
         c11_arg,
     )
 
-    # Dispatch Pass 2: Red/Blue Reconstruction & Color/Gamma Transform
+    # Dispatch Pass 2: Red/Blue Reconstruction using cached wb_bayer
     g_hamilton.dispatch(
         _ha_red_blue_interpolation_kernel_opt,
         wb_bayer_arg,
@@ -633,13 +693,13 @@ def compile_hamilton_tcm(arch=ti.vulkan, save_path="hamilton_vulkan.tcm"):
 
     module.add_graph("hamilton_demosaic", g_hamilton.compile())
 
-    # 2. Define 1-Channel (Green-only) Grayscale graph builder
+    # 2. Define 1-Channel (Green-only) Grayscale graph builder (Fused Single-Pass!)
     g_gray_1ch = ti.graph.GraphBuilder()
     dst_gray_1ch_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
     g_gray_1ch.dispatch(
-        _preprocess_bayer_kernel,
+        _ha_green_to_grayscale_1channel_fused_kernel,
         bayer_arg,
-        wb_bayer_arg,
+        dst_gray_1ch_arg,
         wb_r_arg,
         wb_g1_arg,
         wb_b_arg,
@@ -653,10 +713,21 @@ def compile_hamilton_tcm(arch=ti.vulkan, save_path="hamilton_vulkan.tcm"):
         c10_arg,
         c11_arg,
     )
-    g_gray_1ch.dispatch(
-        _ha_green_to_grayscale_1channel_kernel,
-        wb_bayer_arg,
-        dst_gray_1ch_arg,
+    module.add_graph("hamilton_demosaic_1channel", g_gray_1ch.compile())
+
+    # 2b. Define Half-Res (Green Sub-sampling) Grayscale graph builder (Fused Single-Pass!)
+    g_half_res = ti.graph.GraphBuilder()
+    dst_half_res_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
+    g_half_res.dispatch(
+        _ha_green_half_res_fused_kernel,
+        bayer_arg,
+        dst_half_res_arg,
+        wb_r_arg,
+        wb_g1_arg,
+        wb_b_arg,
+        wb_g2_arg,
+        black_arg,
+        white_arg,
         h_arg,
         w_arg,
         c00_arg,
@@ -664,7 +735,30 @@ def compile_hamilton_tcm(arch=ti.vulkan, save_path="hamilton_vulkan.tcm"):
         c10_arg,
         c11_arg,
     )
-    module.add_graph("hamilton_demosaic_1channel", g_gray_1ch.compile())
+    module.add_graph("hamilton_demosaic_half_res", g_half_res.compile())
+
+    # 2c. Define Half-Res (RGB Sub-sampling) graph builder (Fused Single-Pass!)
+    g_rgb_half_res = ti.graph.GraphBuilder()
+    dst_rgb_half_res_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
+    g_rgb_half_res.dispatch(
+        _ha_rgb_half_res_fused_kernel,
+        bayer_arg,
+        cmatrix_arg,
+        dst_rgb_half_res_arg,
+        wb_r_arg,
+        wb_g1_arg,
+        wb_b_arg,
+        wb_g2_arg,
+        black_arg,
+        white_arg,
+        h_arg,
+        w_arg,
+        c00_arg,
+        c01_arg,
+        c10_arg,
+        c11_arg,
+    )
+    module.add_graph("hamilton_demosaic_rgb_half_res", g_rgb_half_res.compile())
 
     # 3. Define 3-Channel (Full-Luma) Grayscale graph builder
     g_gray_3ch = ti.graph.GraphBuilder()

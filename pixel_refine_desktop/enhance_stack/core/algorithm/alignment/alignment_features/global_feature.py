@@ -171,13 +171,29 @@ def get_all_image_paths_for_batch_process(db_path, batch_id):
 
 
 def _prepare_image_array_from_raw_backup(
-    original_path, linear_mode=False, generate_ref_proxy=False
+    original_path, linear_mode=False, generate_ref_proxy=False, alignment_mode=False
 ):
     """CPU Backup implementation using rawpy postprocessing."""
     try:
         if not RAWPY_AVAILABLE:
             return None
         with rawpy.imread(original_path) as raw:
+            if alignment_mode:
+                rgb = raw.postprocess(
+                    use_camera_wb=True,
+                    output_bps=16,
+                    output_color=rawpy.ColorSpace.sRGB,
+                    user_flip=0,
+                )
+                bgr = rgb
+                if rgb.flags["WRITEABLE"]:
+                    b_channel = bgr[:, :, 0].copy()
+                    bgr[:, :, 0] = bgr[:, :, 2]
+                    bgr[:, :, 2] = b_channel
+                bgr_f32 = bgr.astype(np.float32) / 65535.0
+                gray = cv2.cvtColor(bgr_f32, cv2.COLOR_BGR2GRAY)
+                return gray
+
             if linear_mode:
                 # LINEAR DNG MODE (Gamma 1.0, 16-bit, No Auto Brightness)
                 rgb = raw.postprocess(
@@ -241,7 +257,7 @@ def _prepare_image_array_from_raw_backup(
 
 
 def _prepare_image_array_from_raw(
-    original_path, linear_mode=False, generate_ref_proxy=False
+    original_path, linear_mode=False, generate_ref_proxy=False, alignment_mode=False
 ):
     """GPU-Accelerated RAW Demosaicing utilizing C++ AOT Hamilton-Adams pipeline."""
     try:
@@ -253,8 +269,11 @@ def _prepare_image_array_from_raw(
         # Call GPU-accelerated Demosaicing (Auto-extracts all metadata and runs on GPU)
         os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
 
-        # Backup (Linear Demosaic Version):
-        # bgr_linear = ta_aot.demosaic(original_path, method="hamilton", return_gpu=False, output_bgr_u16=True)
+        if alignment_mode:
+            gray_full = ta_aot.demosaic(
+                original_path, method="hamilton-1channel", return_gpu=False
+            )
+            return gray_full
 
         # Active Version: Restored to JIT/AOT developed non-linear highlight logic from commit 56b751e
         bgr = ta_aot.demosaic(
@@ -273,12 +292,12 @@ def _prepare_image_array_from_raw(
         )
         # Robust fallback to CPU backup to guarantee no application crashes
         return _prepare_image_array_from_raw_backup(
-            original_path, linear_mode, generate_ref_proxy
+            original_path, linear_mode, generate_ref_proxy, alignment_mode
         )
 
 
 def load_images_from_paths(
-    image_paths, stop_requested=None, linear_mode=False, capture_ref_proxy=False
+    image_paths, stop_requested=None, linear_mode=False, capture_ref_proxy=False, alignment_mode=False
 ):
     images = []
     raw_extensions = {".dng", ".cr2", ".nef", ".arw", ".orf", ".rw2", ".pef", ".srw"}
@@ -303,6 +322,27 @@ def load_images_from_paths(
             print(f"Error loading standard image {path} with PIL: {e}")
             return cv2.imread(path, cv2.IMREAD_UNCHANGED)
 
+    def _load_and_process_standard_alignment(path):
+        try:
+            img = _load_standard_with_orientation(path)
+            if img is None:
+                return None
+            img_f32 = img.astype(np.float32)
+            if img.dtype == np.uint16:
+                img_f32 /= 65535.0
+            else:
+                img_f32 /= 255.0
+
+            if img_f32.ndim == 3:
+                gray = cv2.cvtColor(img_f32, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = img_f32
+
+            return gray
+        except Exception as e:
+            print(f"Error processing standard image for alignment {path}: {e}")
+            return None
+
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
         for idx_path, path in enumerate(image_paths):
             if stop_requested and stop_requested():
@@ -320,14 +360,16 @@ def load_images_from_paths(
                         _prepare_image_array_from_raw,
                         path,
                         linear_mode,
-                        generate_ref_proxy=generate_proxy,  # Kwargs passed if function accepts it
-                        # Note: _prepare_image_array_from_raw accepts *args or specific arg
-                        # We updated it to accept generate_ref_proxy name
+                        generate_ref_proxy=generate_proxy,
+                        alignment_mode=alignment_mode,
                     )
                     raw_futures.append(future)
             else:
                 if os.path.exists(path):
-                    future = executor.submit(cv2.imread, path, cv2.IMREAD_UNCHANGED)
+                    if alignment_mode:
+                        future = executor.submit(_load_and_process_standard_alignment, path)
+                    else:
+                        future = executor.submit(cv2.imread, path, cv2.IMREAD_UNCHANGED)
                     standard_futures.append(future)
 
         # Ambil hasil dari gambar RAW

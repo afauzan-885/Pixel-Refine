@@ -50,10 +50,20 @@ def run_strict_verification():
     tcm_path = os.path.join(project_root, "pixel_refine_desktop", "ui", "data", "aot_assets", "compute_flow_vulkan.tcm")
     mod = engine.load(tcm_path)
     
-    img_path = os.path.join(project_root, "test_algorithm", "IMG_20160202_015247.png")
-    img_raw = cv2.imread(img_path)
-    pad = 100
-    img_ref = img_raw[pad:-pad, pad:-pad].copy()
+    img_path = os.path.join(project_root, "test_algorithm", "IMG_20250401_182043_B002.dng")
+    if not os.path.exists(img_path):
+        print("Warning: Test DNG not found, generating synthetic pattern.")
+        img_ref = np.random.rand(1024, 1024, 3).astype(np.float32) * 255.0
+        img_ref = img_ref.astype(np.uint8)
+    else:
+        import rawpy
+        print(f"Loading and demosaicing: {img_path}")
+        with rawpy.imread(img_path) as raw:
+            rgb = raw.postprocess(use_camera_wb=True, half_size=True)
+            img_ref = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            h_ref, w_ref = img_ref.shape[:2]
+            img_ref = img_ref[(h_ref//2 - 512):(h_ref//2 + 512), (w_ref//2 - 512):(w_ref//2 + 512)].copy()
+    
     h, w = img_ref.shape[:2]
     
     shifts = [0, 10, 20, 30, 40, 50]

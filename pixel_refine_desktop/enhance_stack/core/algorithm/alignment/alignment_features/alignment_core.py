@@ -647,13 +647,50 @@ def perform_alignment_gpu(
             map_x_gpu = engine.allocate((full_h_ref, full_w_ref), dtype=np.float32)
             map_y_gpu = engine.allocate((full_h_ref, full_w_ref), dtype=np.float32)
 
+            import queue
+            import threading
+
+            h5_file_handle = kwargs.get("h5_file_handle", None)
+            write_queue = queue.Queue(maxsize=4)
+            h5_lock = threading.Lock()
+
+            def bg_writer_worker():
+                from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
+                    save_to_hdf5,
+                    extract_exif,
+                )
+
+                while True:
+                    item = write_queue.get()
+                    if item is None:
+                        write_queue.task_done()
+                        break
+                    idx, data, path = item
+                    try:
+                        exif_data = extract_exif(path) if path else {}
+                        with h5_lock:
+                            save_to_hdf5(
+                                h5_file_handle, f"image_{idx}", data, exif_data
+                            )
+                    except Exception as writer_err:
+                        print(f"⚠️ Error in background HDF5 writer thread: {writer_err}")
+                    finally:
+                        del data
+                        write_queue.task_done()
+                        gc.collect()
+
+            writer_thread = None
+            if h5_file_handle is not None:
+                writer_thread = threading.Thread(target=bg_writer_worker, daemon=True)
+                writer_thread.start()
+
             try:
                 # 4. Process each image
                 for i in range(1, num_images):
                     if stop_requested and stop_requested():
                         break
 
-                    # A. Prepare Comparison Pyramid (Overwrites comp buffers if reuse logic exists)
+                    # A. Prepare Comparison Pyramid (Overwrites comp buffers in place without allocations)
                     comp_pyramid = taichi_bridge.prepare_comparison_for_alignment(
                         images[i],
                         ref_dtype,
@@ -678,10 +715,10 @@ def perform_alignment_gpu(
                         "flow_l2": flow_l2,
                         "tile_h": int(tile_h),
                         "tile_w": int(tile_w),
-                        "search_radius": 8,
-                        "scale": 2.0,
+                        "search_radius": 3,
+                        "scale": 1.5,
                         "search_dist": int(search_dist),
-                        "downscale": 2,
+                        "downscale": 3,
                     }
                     mod.run("align_end_to_end_3layer", **args)
                     engine.sync()
@@ -711,10 +748,96 @@ def perform_alignment_gpu(
                         map_y_buf=map_y_gpu,  # reuse buffer
                     )
 
+                    h5_file_handle = kwargs.get("h5_file_handle", None)
+                    image_paths = kwargs.get("image_paths", None)
+                    ref_img_full = kwargs.get("reference_image", None)
+
+                    # Load the full-resolution RGB/BGR image on-the-fly to warp it
+                    if image_paths and i < len(image_paths):
+                        from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
+                            load_images_from_paths,
+                            resize_all_with_padding,
+                        )
+
+                        full_res_img_list = load_images_from_paths(
+                            [image_paths[i]],
+                            stop_requested=stop_requested,
+                            linear_mode=is_linear_mode,
+                        )
+                        if full_res_img_list:
+                            # Detect if it's RAW to skip padding
+                            _, ext = os.path.splitext(image_paths[i])
+                            is_raw = ext.lower() in [
+                                ".dng",
+                                ".cr2",
+                                ".cr3",
+                                ".nef",
+                                ".arw",
+                                ".orf",
+                                ".rw2",
+                                ".pef",
+                                ".srw",
+                            ]
+
+                            if is_raw:
+                                # RAW images are guaranteed to be identical in size, skip padding to keep it blazing fast!
+                                full_res_img = full_res_img_list[0]
+                            elif ref_img_full is not None:
+                                # Pre-pad/resize standard images to match reference image shape exactly using preserve strategy
+                                resize_res = resize_all_with_padding(
+                                    [ref_img_full, full_res_img_list[0]],
+                                    method="preserve",
+                                    stop_requested=stop_requested,
+                                    force_even=True,
+                                )
+                                full_res_img = resize_res[0][1]
+                            else:
+                                resize_res = resize_all_with_padding(
+                                    full_res_img_list,
+                                    method="preserve",
+                                    stop_requested=stop_requested,
+                                    force_even=True,
+                                )
+                                full_res_img = resize_res[0][0]
+                        else:
+                            full_res_img = images[i]
+                    else:
+                        full_res_img = images[i]
+
                     # Step C4: Warp image using GPU coordinate maps
-                    if return_format == "ti_ndarray":
+                    if h5_file_handle is not None:
+                        aligned_np = taichi_aot.remap(
+                            full_res_img, map_x_gpu, map_y_gpu, return_gpu=False
+                        )
+                        # Push to background writer queue (will block if queue is full to prevent memory bloat)
+                        write_queue.put(
+                            (
+                                i,
+                                aligned_np,
+                                (
+                                    image_paths[i]
+                                    if (image_paths and i < len(image_paths))
+                                    else None
+                                ),
+                            )
+                        )
+
+                        if save_align_image:
+                            save_aligned_image(
+                                aligned_np,
+                                i + index_offset,
+                                "GPU_AOT",
+                                save_folder=save_folder,
+                                save_prefix=save_prefix,
+                                harvest_mode=harvest_alignment,
+                            )
+                        del full_res_img
+                        if hasattr(images[i], "destroy"):
+                            images[i].destroy()
+                        images[i] = None
+                    elif return_format == "ti_ndarray":
                         aligned_gpu = taichi_aot.remap(
-                            images[i], map_x_gpu, map_y_gpu, return_gpu=True
+                            full_res_img, map_x_gpu, map_y_gpu, return_gpu=True
                         )
                         if save_align_image:
                             save_img = aligned_gpu.to_numpy()
@@ -727,9 +850,10 @@ def perform_alignment_gpu(
                                 harvest_mode=harvest_alignment,
                             )
                         images[i] = aligned_gpu
+                        del full_res_img
                     else:
                         images[i] = taichi_aot.remap(
-                            images[i], map_x_gpu, map_y_gpu, return_gpu=False
+                            full_res_img, map_x_gpu, map_y_gpu, return_gpu=False
                         )
                         if save_align_image:
                             save_aligned_image(
@@ -740,6 +864,7 @@ def perform_alignment_gpu(
                                 save_prefix=save_prefix,
                                 harvest_mode=harvest_alignment,
                             )
+                        del full_res_img
 
                     # Update progress
                     if update_progress:
@@ -756,13 +881,18 @@ def perform_alignment_gpu(
                     # Wait for GPU to finish execution before deallocating comparison pyramid buffers!
                     engine.sync()
 
-                    # D. Eager Memory Cleanup for Comparison Pyramid only
+                    # D. Eager Memory Cleanup for Comparison Pyramid only (allocated dynamically, so release!)
                     # (smooth_flow_buf, map_x_gpu, map_y_gpu are REUSED next frame — do NOT destroy)
                     for buf in comp_pyramid:
                         buf.release()
                     # No gc.collect() per frame — Python GC is slow; VRAM is managed explicitly
 
             finally:
+                # Stop background writer thread if active
+                if writer_thread is not None:
+                    write_queue.put(None)
+                    writer_thread.join()
+
                 # 5. EXPLICIT CLEANUP (Destroy all persistent buffers)
                 for buf in ref_pyramid:
                     buf.destroy()

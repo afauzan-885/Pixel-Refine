@@ -296,6 +296,33 @@ if TAICHI_AVAILABLE:
             dst[i, j][1] = val
             dst[i, j][2] = val
 
+    @ti.kernel
+    def _generate_hanning_window_2d_kernel(dst: ti.types.ndarray(), H: int, W: int, exclude_boundary: int):
+        for i, j in dst:
+            wy = 1.0
+            if H > 1:
+                if exclude_boundary == 1:
+                    wy = 0.5 - 0.5 * ti.cos(2.0 * 3.141592653589793 * float(i + 1) / float(H + 1))
+                else:
+                    wy = 0.5 - 0.5 * ti.cos(2.0 * 3.141592653589793 * float(i) / float(H - 1))
+            wx = 1.0
+            if W > 1:
+                if exclude_boundary == 1:
+                    wx = 0.5 - 0.5 * ti.cos(2.0 * 3.141592653589793 * float(j + 1) / float(W + 1))
+                else:
+                    wx = 0.5 - 0.5 * ti.cos(2.0 * 3.141592653589793 * float(j) / float(W - 1))
+            dst[i, j] = wy * wx
+
+    @ti.kernel
+    def _mean_division_kernel(sum_img: ti.types.ndarray(), sum_weight: ti.types.ndarray(), ref_img: ti.types.ndarray(), dst: ti.types.ndarray()):
+        for i, j in sum_weight:
+            w = sum_weight[i, j]
+            if w > 1e-6:
+                dst[i, j] = sum_img[i, j] / w
+            else:
+                dst[i, j] = ref_img[i, j]
+
+
 
 class BufferCache:
     """
@@ -906,3 +933,73 @@ def absdiff(src1, src2, dst=None):
         return res
 
     return dst_gpu
+
+
+@ti_thread
+def generate_hanning_window_2d(shape, exclude_boundary=False, dtype=np.float32):
+    """
+    Generate 2D Hanning window directly on GPU.
+    exclude_boundary: If True, behaves like np.hanning(M + 2)[1:-1]
+    """
+    if AOT_MODE:
+        aot = _get_aot()
+        if aot:
+            return aot.generate_hanning_window_2d(shape, exclude_boundary, dtype)
+
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
+
+    h, w = shape
+    dst = get_temp_buffer((h, w), ti.f32)
+    _generate_hanning_window_2d_kernel(dst, h, w, 1 if exclude_boundary else 0)
+    return dst
+
+
+@ti_thread
+def mean_division(sum_img, sum_weight, ref_img, dst=None):
+    """
+    Perform final mean division and fallback on GPU.
+    """
+    if AOT_MODE:
+        aot = _get_aot()
+        if aot:
+            return aot.mean_division(sum_img, sum_weight, ref_img, dst)
+
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
+
+    is_taichi_input = hasattr(sum_img, "to_numpy")
+
+    sum_img_gpu, s_temp = ensure_taichi_field(sum_img, dtype=ti.f32)
+    sum_weight_gpu, sw_temp = ensure_taichi_field(sum_weight, dtype=ti.f32)
+    ref_img_gpu, r_temp = ensure_taichi_field(ref_img, dtype=ti.f32)
+
+    if dst is None:
+        dst_gpu = get_temp_buffer(sum_img_gpu.shape, ti.f32)
+    else:
+        dst_gpu, _ = ensure_taichi_field(dst, dtype=ti.f32)
+
+    _mean_division_kernel(sum_img_gpu, sum_weight_gpu, ref_img_gpu, dst_gpu)
+
+    if s_temp:
+        release_temp_buffer(sum_img_gpu)
+    if sw_temp:
+        release_temp_buffer(sum_weight_gpu)
+    if r_temp:
+        release_temp_buffer(ref_img_gpu)
+
+    if not is_taichi_input:
+        res = dst_gpu.to_numpy()
+        release_temp_buffer(dst_gpu)
+        if dst is not None:
+            dst[:] = res
+            return dst
+        return res
+
+    return dst_gpu
+
+
+# NumPy-like aliases for JIT/AOT consistency
+hanning = generate_hanning_window_2d
+divide = mean_division
+

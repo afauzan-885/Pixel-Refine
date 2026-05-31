@@ -88,6 +88,36 @@ if TAICHI_AVAILABLE:
                 acc += src[cy, x]
             dst[y, x] = acc / float(radius * 2 + 1)
 
+    @ti.kernel
+    def _box_filter_3x3_1ch_f32_unrolled_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray(), h: int, w: int):
+        for y, x in ti.ndrange(h, w):
+            acc = 0.0
+            for i in ti.static(range(-1, 2)):
+                cy = tm.clamp(y + i, 0, h - 1)
+                for j in ti.static(range(-1, 2)):
+                    cx = tm.clamp(x + j, 0, w - 1)
+                    acc += src[cy, cx]
+            dst[y, x] = acc / 9.0
+
+    @ti.kernel
+    def _box_blur_h_generic_1ch_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray(), h: int, w: int, radius: int):
+        for y, x in ti.ndrange(h, w):
+            acc = 0.0
+            for j in range(-radius, radius + 1):
+                cx = tm.clamp(x + j, 0, w - 1)
+                acc += src[y, cx]
+            dst[y, x] = acc / float(radius * 2 + 1)
+
+    @ti.kernel
+    def _box_blur_v_generic_1ch_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray(), h: int, w: int, radius: int):
+        for y, x in ti.ndrange(h, w):
+            acc = 0.0
+            for i in range(-radius, radius + 1):
+                cy = tm.clamp(y + i, 0, h - 1)
+                acc += src[cy, x]
+            dst[y, x] = acc / float(radius * 2 + 1)
+
+
 @ti_thread
 def box_filter(
     src, dst=None, kernel_size: int = 3, buffer_provider="pool", enable_tiling=True
@@ -116,6 +146,14 @@ def box_filter(
             tmp_gpu = common.get_temp_buffer(src_gpu.shape, ti.f32, buffer_provider)
             _box_blur_h_generic_3ch_kernel(src_gpu, tmp_gpu, h, w, radius)
             _box_blur_v_generic_3ch_kernel(tmp_gpu, dst_gpu, h, w, radius)
+            common.release_temp_buffer(tmp_gpu)
+    else:
+        if kernel_size == 3:
+            _box_filter_3x3_1ch_f32_unrolled_kernel(src_gpu, dst_gpu, h, w)
+        else:
+            tmp_gpu = common.get_temp_buffer(src_gpu.shape, ti.f32, buffer_provider)
+            _box_blur_h_generic_1ch_kernel(src_gpu, tmp_gpu, h, w, radius)
+            _box_blur_v_generic_1ch_kernel(tmp_gpu, dst_gpu, h, w, radius)
             common.release_temp_buffer(tmp_gpu)
 
     if src_is_temp: common.release_temp_buffer(src_gpu)

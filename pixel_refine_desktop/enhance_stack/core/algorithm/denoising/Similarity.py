@@ -34,7 +34,6 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
     get_all_image_paths_for_single_process,
     load_images_from_paths,
     resize_all_with_padding,
-    load_single_image,
 )
 
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
@@ -57,12 +56,20 @@ class DataProvider:
         self.db_path = db_path
 
     def get_all_image_paths_for_batch_process(self, batch_id):
-        """Fetches all image paths for a specific batch from the database with validation."""
-        from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
-            get_all_image_paths_for_batch_process,
-        )
-
-        return get_all_image_paths_for_batch_process(self.db_path, batch_id)
+        """Fetches all image paths for a specific batch from the database."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT images.path 
+                FROM batch_process_image
+                JOIN images ON batch_process_image.image_id_batch = images.id
+                WHERE batch_process_image.batch_id = ?
+                ORDER BY batch_process_image.is_reference_batch DESC, images.path ASC
+            """,
+                (batch_id,),
+            )
+            return [row[0] for row in cursor.fetchall()]
 
     def setup_data_source_and_paths(self, single_process, batch_id):
         """Determines the data source (HDF5 or Raw paths) and prepares output metadata."""
@@ -112,6 +119,7 @@ class DataProvider:
         stop_requested=None,
         linear_mode=True,
         capture_ref_proxy=False,
+        alignment_mode=False,
     ):
         """Loads a specific batch of images from HDF5 or filesystem."""
         batch_start, batch_end = batch_indices
@@ -133,6 +141,7 @@ class DataProvider:
                 stop_requested,
                 linear_mode=linear_mode,
                 capture_ref_proxy=capture_ref_proxy,
+                alignment_mode=alignment_mode,
             )
 
             if capture_ref_proxy and isinstance(load_res, tuple):
@@ -201,7 +210,7 @@ class SimilarityAlgorithm:
         **merging_kwargs,
     ):
         """Entry point for the merging algorithm."""
-        if not isinstance(images, list) or not images:
+        if not isinstance(images, list) or (not images and merging_kwargs.get("data_source") is None):
             raise ValueError(language_config.IMAGE_DATA_MUST_BE_VALID)
 
         ref_image = ref_image_override if ref_image_override is not None else images[0]
@@ -339,6 +348,7 @@ def main(
     progress_bar=None,
 ):
     """Main execution block."""
+    start_time = time.perf_counter()
     try:
         if update_progress:
             update_progress(0, language_config.RUN_IMAGE_PROCESS_STARTED)
@@ -413,17 +423,20 @@ def main(
                 is_linear_mode = True
 
         # Load reference
-        ref_res = load_single_image(
+        ref_res = data_provider.load_images_for_batch(
             data_source,
-            0,
+            (0, 1),
             stop_requested,
             linear_mode=is_linear_mode,
             capture_ref_proxy=is_linear_mode,
         )
         if is_linear_mode and isinstance(ref_res, tuple):
             reference_image, ref_proxy_gt = ref_res
+        elif isinstance(ref_res, list) and len(ref_res) > 0:
+            reference_image = ref_res[0]
+            ref_proxy_gt = None
         else:
-            reference_image = ref_res
+            reference_image = None
             ref_proxy_gt = None
 
         # Auto-scale for Linear Mode
@@ -447,69 +460,143 @@ def main(
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         stack_session_id = f"{output_name_base}_{timestamp}"
 
-        # Sequential Frame-by-Frame Loop (Indeks 0 s.d total_images - 1)
+        reference_image_float = normalize_image(reference_image, reference_image.dtype)
+        h_ref_norm, w_ref_norm = reference_image_float.shape[:2]
+
+        # Check if we can stream from H5 with zero-allocation buffer reuse
+        is_hdf5 = isinstance(data_source, str) and data_source.endswith(".h5")
+        
+        if not is_hdf5:
+            if update_progress:
+                update_progress(0, "Menjalankan alignment awal (Taichi GPU) untuk membuat file HDF5...")
+                
+            hdf5_path = "database/align/aligned_images.h5" if single_process else f"database/align/aligned_image_batch_{batch_id}.h5"
+            os.makedirs(os.path.dirname(hdf5_path), exist_ok=True)
+            
+            # Load and resize images for alignment in full-res RGB
+            images_for_align = data_provider.load_images_for_batch(
+                image_paths,
+                (0, len(image_paths)),
+                stop_requested,
+                linear_mode=is_linear_mode,
+                alignment_mode=False,
+            )
+            
+            with h5py.File(hdf5_path, "w") as h5f:
+                from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import save_to_hdf5, extract_exif
+                save_to_hdf5(h5f, "image_0", reference_image, extract_exif(image_paths[0]))
+                
+                from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.alignment_core import perform_alignment_gpu
+                perform_alignment_gpu(
+                    images=images_for_align,
+                    reference_image_float=reference_image_float,
+                    work_res_h=h_ref_norm,
+                    work_res_w=w_ref_norm,
+                    tile_h=extra_params.get("tile_size", (16, 16))[0],
+                    tile_w=extra_params.get("tile_size", (16, 16))[1],
+                    ref_dtype=reference_image.dtype,
+                    update_progress=update_progress,
+                    stop_requested=stop_requested,
+                    h5_file_handle=h5f,
+                    image_paths=image_paths,
+                    is_linear_mode=is_linear_mode,
+                    proxy_scale=proxy_scale,
+                    reference_image=reference_image,
+                )
+                
+            del images_for_align
+            gc.collect()
+            
+            # Re-check data source to load the newly created H5 file
+            data_source, image_paths, output_name_base, total_images = (
+                data_provider.setup_data_source_and_paths(single_process, batch_id)
+            )
+            is_hdf5 = isinstance(data_source, str) and data_source.endswith(".h5")
+
         global_sum_img, global_sum_weight, global_total_frames = None, None, 0
 
-        for i in range(total_images):
-            if stop_requested and stop_requested():
-                break
-
-            skip_first = False
-            if i == 0:
-                current_batch_images = [reference_image]
-            else:
-                current_image = load_single_image(
-                    data_source,
-                    i,
-                    stop_requested,
-                    linear_mode=is_linear_mode,
-                )
-                if current_image is None:
-                    continue
-                current_batch_images = [reference_image, current_image]
-                skip_first = True
-
-            # RUN ALGORITHM
+        if is_hdf5:
+            # Disable internal alignment since images are already aligned in HDF5
+            extra_params["enable_alignment"] = False
+            
+            # RUN ALGORITHM once on the entire HDF5 data source using GPU Streaming!
             batch_res = processor.similarity_mnfr(
-                current_batch_images,
+                images=[],  # Empty list since we stream directly from H5 on GPU
                 ref_image_override=reference_image,
                 total_overall_images=total_images,
-                images_processed_so_far=i,
+                images_processed_so_far=0,
                 is_linear_mode=is_linear_mode,
                 proxy_scale=proxy_scale,
                 update_progress=update_progress,
                 stop_requested=stop_requested,
                 return_raw=True,
-                save_prefix=stack_session_id,  # [UNIQUE] Session-based prefix
-                harvest_alignment=extra_params.get(
-                    "harvest_alignment", False
-                ),  # [NEW] Pass from params
-                skip_first_merge=skip_first,
+                save_prefix=stack_session_id,
+                harvest_alignment=extra_params.get("harvest_alignment", False),
+                data_source=data_source,  # Pass H5 path for streaming
                 **extra_params,
             )
-
+            
             if batch_res is not None and len(batch_res) >= 3:
-                b_img, b_weight, b_frames = batch_res[0], batch_res[1], batch_res[2]
-                if global_sum_img is None:
-                    global_sum_img = b_img if b_img is not None else None
-                    global_sum_weight = b_weight if b_weight is not None else None
-                else:
-                    if b_img is not None:
-                        global_sum_img += b_img
-                    if b_weight is not None:
-                        global_sum_weight += b_weight
-                global_total_frames += b_frames
+                global_sum_img = batch_res[0]
+                global_sum_weight = batch_res[1]
+                global_total_frames = batch_res[2]
+        else:
+            # Fallback for CPU / non-H5 paths
+            batch_plan = setup_balanced_batching(
+                total_images, language_config, max_batch_size=15
+            )
+            for batch_num, (b_start, b_end) in enumerate(batch_plan, 1):
+                if stop_requested and stop_requested():
+                    break
 
-            # Explicit cleanup after batch accumulation
-            del batch_res
-            if "b_img" in locals():
-                del b_img
-            if "b_weight" in locals():
-                del b_weight
-            if "current_image" in locals():
-                del current_image
-            del current_batch_images
-            gc.collect()
+                current_batch_images = data_provider.load_images_for_batch(
+                    data_source,
+                    (b_start, b_end),
+                    stop_requested,
+                    linear_mode=is_linear_mode,
+                )
+                if not current_batch_images:
+                    continue
+
+                # RUN ALGORITHM
+                batch_res = processor.similarity_mnfr(
+                    current_batch_images,
+                    ref_image_override=reference_image,
+                    total_overall_images=total_images,
+                    images_processed_so_far=b_start,
+                    is_linear_mode=is_linear_mode,
+                    proxy_scale=proxy_scale,
+                    update_progress=update_progress,
+                    stop_requested=stop_requested,
+                    return_raw=True,
+                    save_prefix=stack_session_id,  # [UNIQUE] Session-based prefix
+                    harvest_alignment=extra_params.get(
+                        "harvest_alignment", False
+                    ),  # [NEW] Pass from params
+                    **extra_params,
+                )
+
+                if batch_res is not None and len(batch_res) >= 3:
+                    b_img, b_weight, b_frames = batch_res[0], batch_res[1], batch_res[2]
+                    if global_sum_img is None:
+                        global_sum_img = b_img if b_img is not None else None
+                        global_sum_weight = b_weight if b_weight is not None else None
+                    else:
+                        if b_img is not None:
+                            global_sum_img += b_img
+                        if b_weight is not None:
+                            global_sum_weight += b_weight
+                    global_total_frames += b_frames
+
+                # Explicit cleanup after batch accumulation
+                del batch_res
+                if "b_img" in locals():
+                    del b_img
+                if "b_weight" in locals():
+                    del b_weight
+
+                del current_batch_images
+                gc.collect()
 
         # FINAL FUSION
         if global_sum_img is not None and global_total_frames > 0:
@@ -554,6 +641,9 @@ def main(
         if update_progress:
             update_progress(0, f"Error: {str(e)}")
     finally:
+        if "start_time" in locals():
+            elapsed = time.perf_counter() - start_time
+            print(f"\n[Benchmark] Seluruh proses selesai dalam {elapsed:.2f} detik.\n")
         # --- FINAL CLEANUP: Ensure RAM is returned to OS ---
         print("[Similarity] Final cleanup...")
 
@@ -561,20 +651,6 @@ def main(
         if "processor" in locals():
             processor.close()
             del processor
-
-        # Clear Taichi VRAM and cached modules globally at the very end
-        try:
-            from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
-            from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import (
-                AOTEngine,
-            )
-
-            taichi_aot.unload_all_modules()
-            AOTEngine().buffer_pool.clear()
-            AOTEngine().clear_pipelines()
-            print("[Similarity] Taichi VRAM and Pipelines Cleared Successfully.")
-        except Exception as e_clear:
-            print(f"[Similarity] Error clearing Taichi AOT cache: {e_clear}")
 
         # Delete large buffers
         if "global_sum_img" in locals():

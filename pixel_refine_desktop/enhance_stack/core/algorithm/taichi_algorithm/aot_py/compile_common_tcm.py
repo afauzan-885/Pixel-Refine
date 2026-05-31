@@ -125,6 +125,36 @@ def compile_common_aot(arch=ti.vulkan, save_path="common_vulkan.tcm"):
 
     add_absdiff_vec3("absdiff_vec3_f32", ti.f32)
 
+    # 5. Hanning Window Kernel
+    def add_hanning_window(name):
+        builder = ti.graph.GraphBuilder()
+        dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
+        h = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "H", ti.i32)
+        w = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "W", ti.i32)
+        exclude_boundary = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "exclude_boundary", ti.i32)
+        builder.dispatch(common_mod._generate_hanning_window_2d_kernel, dst, h, w, exclude_boundary)
+        module.add_graph(name, builder.compile())
+
+    add_hanning_window("generate_hanning_window_2d")
+
+    # 6. Mean Division Kernels
+    def add_mean_division(name, dtype, is_vec=False):
+        builder = ti.graph.GraphBuilder()
+        if is_vec:
+            sum_img = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "sum_img", ti.types.vector(3, dtype), ndim=2)
+            ref_img = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ref_img", ti.types.vector(3, dtype), ndim=2)
+            dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.types.vector(3, dtype), ndim=2)
+        else:
+            sum_img = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "sum_img", dtype, ndim=2)
+            ref_img = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ref_img", dtype, ndim=2)
+            dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", dtype, ndim=2)
+        sum_weight = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "sum_weight", dtype, ndim=2)
+        builder.dispatch(common_mod._mean_division_kernel, sum_img, sum_weight, ref_img, dst)
+        module.add_graph(name, builder.compile())
+
+    add_mean_division("mean_division_f32", ti.f32, is_vec=False)
+    add_mean_division("mean_division_vec3_f32", ti.f32, is_vec=True)
+
     module.archive(save_path)
     print(f"Successfully compiled and archived to: {save_path}")
     ti.reset()

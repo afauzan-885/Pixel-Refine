@@ -1,19 +1,25 @@
 import os
 import numpy as np
 from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
-from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import AOTEngine
+from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import (
+    AOTEngine,
+)
 
 
 def normalize_image_gpu(image_gpu, dtype, out_gpu=None):
     engine = AOTEngine()
     h, w = image_gpu.shape[0], image_gpu.shape[1]
     if out_gpu is None:
-        out_gpu = engine.allocate((h, w, 3), dtype=np.float32, is_vector=True, vector_dim=3)
+        out_gpu = engine.allocate(
+            (h, w, 3), dtype=np.float32, is_vector=True, vector_dim=3
+        )
 
     src_f32 = image_gpu.cast(np.float32)
 
     file_dir = os.path.dirname(os.path.abspath(__file__))
-    aot_assets_dir = os.path.abspath(os.path.join(file_dir, "../../../../../ui/data/aot_assets"))
+    aot_assets_dir = os.path.abspath(
+        os.path.join(file_dir, "../../../../../ui/data/aot_assets")
+    )
     tcm_path = os.path.join(aot_assets_dir, "normalize_image.tcm")
 
     inv_scale = 1.0
@@ -21,7 +27,11 @@ def normalize_image_gpu(image_gpu, dtype, out_gpu=None):
     if np.issubdtype(buf_dtype, np.integer):
         inv_scale = 1.0 / float(np.iinfo(buf_dtype).max)
 
-    graph = "normalize_vec3_f32_to_vec3_f32" if image_gpu.is_vector else "normalize_f32_to_vec3"
+    graph = (
+        "normalize_vec3_f32_to_vec3_f32"
+        if image_gpu.is_vector
+        else "normalize_f32_to_vec3"
+    )
     mod = engine.load(tcm_path)
     if graph == "normalize_f32_to_vec3":
         mod.run(graph, src=src_f32, dst=out_gpu, inv_scale=float(inv_scale))
@@ -34,15 +44,24 @@ def normalize_image_gpu(image_gpu, dtype, out_gpu=None):
     return out_gpu
 
 
-def to_gamma_proxy_gpu(image_gpu, scale=1.0, gamma_pow=2.22, slope=4.5, cutoff=0.018, dst_gpu=None):
+def to_gamma_proxy_gpu(
+    image_gpu, scale=1.0, gamma_pow=2.22, slope=4.5, cutoff=0.018, dst_gpu=None
+):
     engine = AOTEngine()
     file_dir = os.path.dirname(os.path.abspath(__file__))
-    aot_assets_dir = os.path.abspath(os.path.join(file_dir, "../../../../../ui/data/aot_assets"))
+    aot_assets_dir = os.path.abspath(
+        os.path.join(file_dir, "../../../../../ui/data/aot_assets")
+    )
     tcm_path = os.path.join(aot_assets_dir, "gamma_proxy.tcm")
 
     mod = engine.load(tcm_path)
     if dst_gpu is None:
-        dst_gpu = engine.allocate(image_gpu.shape, dtype=np.float32, is_vector=image_gpu.is_vector, vector_dim=image_gpu.vector_dim)
+        dst_gpu = engine.allocate(
+            image_gpu.shape,
+            dtype=np.float32,
+            is_vector=image_gpu.is_vector,
+            vector_dim=image_gpu.vector_dim,
+        )
 
     graph_name = "gamma_proxy_rgb" if image_gpu.is_vector else "gamma_proxy_single"
     if graph_name == "gamma_proxy_rgb":
@@ -51,10 +70,27 @@ def to_gamma_proxy_gpu(image_gpu, scale=1.0, gamma_pow=2.22, slope=4.5, cutoff=0
         if cmatrix is None:
             cmatrix = np.eye(3, dtype=np.float32)
         cmatrix_gpu = engine.upload(cmatrix)
-        mod.run(graph_name, src=image_gpu, dst=dst_gpu, cmatrix=cmatrix_gpu, scale=float(scale), gamma_pow=float(gamma_pow), slope=float(slope), cutoff=float(cutoff))
+        mod.run(
+            graph_name,
+            src=image_gpu,
+            dst=dst_gpu,
+            cmatrix=cmatrix_gpu,
+            scale=float(scale),
+            gamma_pow=float(gamma_pow),
+            slope=float(slope),
+            cutoff=float(cutoff),
+        )
         cmatrix_gpu.destroy()
     else:
-        mod.run(graph_name, src=image_gpu, dst=dst_gpu, scale=float(scale), gamma_pow=float(gamma_pow), slope=float(slope), cutoff=float(cutoff))
+        mod.run(
+            graph_name,
+            src=image_gpu,
+            dst=dst_gpu,
+            scale=float(scale),
+            gamma_pow=float(gamma_pow),
+            slope=float(slope),
+            cutoff=float(cutoff),
+        )
     return dst_gpu
 
 
@@ -62,19 +98,36 @@ def prepare_pyramid_aot(image_gpu):
     """Creates a 3-layer pyramid (L0, L1, L2). L0=full res, L1=1/2, L2=1/4."""
     l0 = image_gpu
     h, w = l0.shape[0], l0.shape[1]
-    l1 = taichi_aot.resize(l0, (w // 2, h // 2), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
-    l2 = taichi_aot.resize(l1, (w // 4, h // 4), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+    l1 = taichi_aot.resize(
+        l0, (w // 2, h // 2), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True
+    )
+    l2 = taichi_aot.resize(
+        l1, (w // 4, h // 4), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True
+    )
     return l0, l1, l2
 
 
-def prepare_reference_for_alignment(reference_image_float, is_linear_mode, proxy_scale, work_res_h, work_res_w, lut_gpu=None, blur_work_gpu=None):
+def prepare_reference_for_alignment(
+    reference_image_float,
+    is_linear_mode,
+    proxy_scale,
+    work_res_h,
+    work_res_w,
+    lut_gpu=None,
+    blur_work_gpu=None,
+):
     """Prepare reference image pyramid on GPU. Returns (l0, l1, l2) — caller must destroy all."""
-    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot import TaichiGPUBuffer
+    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot import (
+        TaichiGPUBuffer,
+    )
+
     input_is_gpu_buf = isinstance(reference_image_float, TaichiGPUBuffer)
-    
+
     # Check if the reference image is a 1-channel RAW image that needs fast demosaicing directly to grayscale
-    is_raw_sensor = (not input_is_gpu_buf and reference_image_float.ndim == 2) or (input_is_gpu_buf and len(reference_image_float.shape) == 2)
-    
+    is_raw_sensor = (not input_is_gpu_buf and reference_image_float.ndim == 2) or (
+        input_is_gpu_buf and len(reference_image_float.shape) == 2
+    )
+
     if is_raw_sensor:
         # FUSED RAW OPTIMIZATION: Decode Bayer directly to Grayscale 1-channel (Green-only fast luma)
         # Avoids allocating massive RGB intermediate VRAM buffers!
@@ -91,11 +144,22 @@ def prepare_reference_for_alignment(reference_image_float, is_linear_mode, proxy
         c01 = getattr(engine, "active_c01", 1)
         c10 = getattr(engine, "active_c10", 1)
         c11 = getattr(engine, "active_c11", 2)
-        
+
         ref_final = taichi_aot.demosaic(
-            ref_gpu, wb_r, wb_g1, wb_b, wb_g2, None,
-            black_level, white_level, c00, c01, c10, c11,
-            method="hamilton-1channel", return_gpu=True
+            ref_gpu,
+            wb_r,
+            wb_g1,
+            wb_b,
+            wb_g2,
+            None,
+            black_level,
+            white_level,
+            c00,
+            c01,
+            c10,
+            c11,
+            method="hamilton-1channel",
+            return_gpu=True,
         )
         if ref_gpu is not ref_final:
             ref_gpu.release()
@@ -119,7 +183,12 @@ def prepare_reference_for_alignment(reference_image_float, is_linear_mode, proxy
 
     final_res_gray = ref_gray
     if ref_gray.shape[:2] != (work_res_h, work_res_w):
-        final_res_gray = taichi_aot.resize(ref_gray, (work_res_w, work_res_h), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+        final_res_gray = taichi_aot.resize(
+            ref_gray,
+            (work_res_w, work_res_h),
+            interpolation=taichi_aot.INTER_LINEAR,
+            return_gpu=True,
+        )
         if ref_gray is not final_res_gray:
             ref_gray.release()
 
@@ -127,10 +196,17 @@ def prepare_reference_for_alignment(reference_image_float, is_linear_mode, proxy
         # Fused GPU contrast & micro-contrast & Clarity enhancement!
         # Calibrated parameters: micro_contrast = 1.89, clarity = 1.61, sigma = 0.8
         # 1. Blur the luma image on the GPU (reuses pre-allocated buffer if provided)
-        blur_gpu = taichi_aot.gaussian_blur(final_res_gray, sigma=0.8, return_gpu=True, dst=blur_work_gpu)
+        blur_gpu = taichi_aot.gaussian_blur(
+            final_res_gray, sigma=0.8, return_gpu=True, dst=blur_work_gpu
+        )
         # 2. Enhance luma directly on the GPU
         enhanced_gpu = taichi_aot.enhance_grayscale(
-            final_res_gray, blur_gpu, lut_gpu, micro_contrast=1.89, clarity=1.61, return_gpu=True
+            final_res_gray,
+            blur_gpu,
+            lut_gpu,
+            micro_contrast=1.89,
+            clarity=1.61,
+            return_gpu=True,
         )
         if blur_work_gpu is None:
             blur_gpu.release()
@@ -141,14 +217,28 @@ def prepare_reference_for_alignment(reference_image_float, is_linear_mode, proxy
     return prepare_pyramid_aot(final_res_gray)
 
 
-def prepare_comparison_for_alignment(comp_image, ref_dtype, is_linear_mode, proxy_scale, work_res_h, work_res_w, lut_gpu=None, blur_work_gpu=None):
+def prepare_comparison_for_alignment(
+    comp_image,
+    ref_dtype,
+    is_linear_mode,
+    proxy_scale,
+    work_res_h,
+    work_res_w,
+    lut_gpu=None,
+    blur_work_gpu=None,
+):
     """Prepare comparison image pyramid on GPU. Returns (l0, l1, l2) — caller must destroy all."""
-    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot import TaichiGPUBuffer
+    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot import (
+        TaichiGPUBuffer,
+    )
+
     input_is_gpu_buf = isinstance(comp_image, TaichiGPUBuffer)
-    
+
     # Check if the image is a 1-channel RAW image that needs fast demosaicing directly to grayscale
-    is_raw_sensor = (not input_is_gpu_buf and comp_image.ndim == 2) or (input_is_gpu_buf and len(comp_image.shape) == 2)
-    
+    is_raw_sensor = (not input_is_gpu_buf and comp_image.ndim == 2) or (
+        input_is_gpu_buf and len(comp_image.shape) == 2
+    )
+
     if is_raw_sensor:
         # FUSED RAW OPTIMIZATION: Decode Bayer directly to Grayscale 1-channel (Green-only fast luma)
         # Avoids allocating massive RGB intermediate VRAM buffers!
@@ -165,11 +255,22 @@ def prepare_comparison_for_alignment(comp_image, ref_dtype, is_linear_mode, prox
         c01 = getattr(engine, "active_c01", 1)
         c10 = getattr(engine, "active_c10", 1)
         c11 = getattr(engine, "active_c11", 2)
-        
+
         comp_final = taichi_aot.demosaic(
-            comp_gpu, wb_r, wb_g1, wb_b, wb_g2, None,
-            black_level, white_level, c00, c01, c10, c11,
-            method="hamilton-1channel", return_gpu=True
+            comp_gpu,
+            wb_r,
+            wb_g1,
+            wb_b,
+            wb_g2,
+            None,
+            black_level,
+            white_level,
+            c00,
+            c01,
+            c10,
+            c11,
+            method="hamilton-1channel",
+            return_gpu=True,
         )
         if comp_gpu is not comp_final:
             comp_gpu.release()
@@ -196,7 +297,12 @@ def prepare_comparison_for_alignment(comp_image, ref_dtype, is_linear_mode, prox
 
     final_res_gray = comp_gray
     if comp_gray.shape[:2] != (work_res_h, work_res_w):
-        final_res_gray = taichi_aot.resize(comp_gray, (work_res_w, work_res_h), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+        final_res_gray = taichi_aot.resize(
+            comp_gray,
+            (work_res_w, work_res_h),
+            interpolation=taichi_aot.INTER_LINEAR,
+            return_gpu=True,
+        )
         if comp_gray is not final_res_gray:
             comp_gray.release()
 
@@ -204,10 +310,17 @@ def prepare_comparison_for_alignment(comp_image, ref_dtype, is_linear_mode, prox
         # Fused GPU contrast & micro-contrast & Clarity enhancement!
         # Calibrated parameters: micro_contrast = 1.89, clarity = 1.61, sigma = 0.8
         # 1. Blur the luma image on the GPU (reuses pre-allocated buffer if provided)
-        blur_gpu = taichi_aot.gaussian_blur(final_res_gray, sigma=0.8, return_gpu=True, dst=blur_work_gpu)
+        blur_gpu = taichi_aot.gaussian_blur(
+            final_res_gray, sigma=0.8, return_gpu=True, dst=blur_work_gpu
+        )
         # 2. Enhance luma directly on the GPU
         enhanced_gpu = taichi_aot.enhance_grayscale(
-            final_res_gray, blur_gpu, lut_gpu, micro_contrast=1.89, clarity=1.61, return_gpu=True
+            final_res_gray,
+            blur_gpu,
+            lut_gpu,
+            micro_contrast=1.89,
+            clarity=1.61,
+            return_gpu=True,
         )
         if blur_work_gpu is None:
             blur_gpu.release()
@@ -218,7 +331,9 @@ def prepare_comparison_for_alignment(comp_image, ref_dtype, is_linear_mode, prox
     return prepare_pyramid_aot(final_res_gray)
 
 
-def prepare_reference_aot(reference_image_float, is_linear_mode, proxy_scale, work_res_h, work_res_w):
+def prepare_reference_aot(
+    reference_image_float, is_linear_mode, proxy_scale, work_res_h, work_res_w
+):
     """Prepare reference image on GPU for merging. Returns (ref_work_res_pass2_gpu, ref_noise_sigma)."""
     ref_gpu = taichi_aot.upload(reference_image_float)
     ref_final = ref_gpu
@@ -234,23 +349,33 @@ def prepare_reference_aot(reference_image_float, is_linear_mode, proxy_scale, wo
 
     final_res_gray = ref_gray
     if ref_gray.shape[:2] != (work_res_h, work_res_w):
-        final_res_gray = taichi_aot.resize(ref_gray, (work_res_w, work_res_h), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+        final_res_gray = taichi_aot.resize(
+            ref_gray,
+            (work_res_w, work_res_h),
+            interpolation=taichi_aot.INTER_LINEAR,
+            return_gpu=True,
+        )
         if ref_gray is not final_res_gray:
             ref_gray.destroy()
 
     # Estimate noise on CPU/NumPy
     ref_gray_np = final_res_gray.to_numpy()
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import estimate_noise_in_python
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
+        estimate_noise_in_python,
+    )
+
     ref_noise_sigma = estimate_noise_in_python(ref_gray_np)
 
     return final_res_gray, ref_noise_sigma
 
 
-def prepare_reference_aot(reference_image_float, is_linear_mode, proxy_scale, work_res_h, work_res_w):
+def prepare_reference_aot(
+    reference_image_float, is_linear_mode, proxy_scale, work_res_h, work_res_w
+):
     """Prepare reference image on GPU for merging. Returns (ref_work_res_pass2_gpu, ref_noise_sigma)."""
     ref_gpu = taichi_aot.upload(reference_image_float)
-    
-    # FUSED OPTIMIZATION: If linear mode, we apply both scale (1.0) and proxy_scale directly to gamma_proxy 
+
+    # FUSED OPTIMIZATION: If linear mode, we apply both scale (1.0) and proxy_scale directly to gamma_proxy
     # to avoid creating an intermediate normalized image buffer.
     if is_linear_mode:
         ref_final = to_gamma_proxy_gpu(ref_gpu, scale=proxy_scale)
@@ -268,21 +393,41 @@ def prepare_reference_aot(reference_image_float, is_linear_mode, proxy_scale, wo
 
     final_res_gray = ref_gray
     if ref_gray.shape[:2] != (work_res_h, work_res_w):
-        final_res_gray = taichi_aot.resize(ref_gray, (work_res_w, work_res_h), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+        final_res_gray = taichi_aot.resize(
+            ref_gray,
+            (work_res_w, work_res_h),
+            interpolation=taichi_aot.INTER_LINEAR,
+            return_gpu=True,
+        )
         if ref_gray is not final_res_gray:
             ref_gray.release()
 
     # Estimate noise on CPU/NumPy
     ref_gray_np = final_res_gray.to_numpy()
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import estimate_noise_in_python
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
+        estimate_noise_in_python,
+    )
+
     ref_noise_sigma = estimate_noise_in_python(ref_gray_np)
 
     return final_res_gray, ref_noise_sigma
 
 
-def prepare_frame_aot(img_orig, ref_dtype, is_linear_mode, proxy_scale, work_res_h, work_res_w, ref_image_h, ref_image_w):
+def prepare_frame_aot(
+    img_orig,
+    ref_dtype,
+    is_linear_mode,
+    proxy_scale,
+    work_res_h,
+    work_res_w,
+    ref_image_h,
+    ref_image_w,
+):
     """Prepare comparison frame on GPU for merging. Returns (curr_full_gpu, curr_work_gray_gpu)."""
-    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import TaichiGPUBuffer
+    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import (
+        TaichiGPUBuffer,
+    )
+
     input_is_gpu_buf = isinstance(img_orig, TaichiGPUBuffer)
 
     uploaded = taichi_aot.upload(img_orig)
@@ -295,34 +440,48 @@ def prepare_frame_aot(img_orig, ref_dtype, is_linear_mode, proxy_scale, work_res
         buf_dtype = getattr(uploaded, "dtype", ref_dtype)
         if np.issubdtype(buf_dtype, np.integer):
             inv_scale = 1.0 / float(np.iinfo(buf_dtype).max)
-        
-        # We pass combined scale (proxy_scale * inv_scale) directly to gamma_proxy 
+
+        # We pass combined scale (proxy_scale * inv_scale) directly to gamma_proxy
         # to process raw uint16 -> gamma scale in one step!
         curr_final = to_gamma_proxy_gpu(uploaded, scale=proxy_scale * inv_scale)
-        curr_full_gpu = curr_final # For linear merging we use gamma proxy space
+        curr_full_gpu = curr_final  # For linear merging we use gamma proxy space
     else:
         # Non-linear: directly normalize image
         curr_full_gpu = normalize_image_gpu(uploaded, dtype=ref_dtype)
         curr_final = curr_full_gpu
 
-    if we_own_uploaded and (uploaded is not curr_final) and (uploaded is not curr_full_gpu):
+    if (
+        we_own_uploaded
+        and (uploaded is not curr_final)
+        and (uploaded is not curr_full_gpu)
+    ):
         uploaded.release()
 
     if curr_full_gpu.shape[:2] != (ref_image_h, ref_image_w):
-        new_full = taichi_aot.resize(curr_full_gpu, (ref_image_w, ref_image_h), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+        new_full = taichi_aot.resize(
+            curr_full_gpu,
+            (ref_image_w, ref_image_h),
+            interpolation=taichi_aot.INTER_LINEAR,
+            return_gpu=True,
+        )
         if curr_full_gpu is not curr_final:
             curr_full_gpu.release()
         curr_full_gpu = new_full
 
     curr_gray = taichi_aot.rgb2gray(curr_final)
-    
+
     # Eagerly release curr_final if it is an intermediate and not full result
     if curr_final is not curr_full_gpu and curr_final is not curr_gray:
         curr_final.release()
 
     curr_work_gray_gpu = curr_gray
     if curr_gray.shape[:2] != (work_res_h, work_res_w):
-        curr_work_gray_gpu = taichi_aot.resize(curr_gray, (work_res_w, work_res_h), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+        curr_work_gray_gpu = taichi_aot.resize(
+            curr_gray,
+            (work_res_w, work_res_h),
+            interpolation=taichi_aot.INTER_LINEAR,
+            return_gpu=True,
+        )
         if curr_gray is not curr_work_gray_gpu:
             curr_gray.release()
 
