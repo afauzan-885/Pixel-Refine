@@ -114,31 +114,35 @@ class ThumbnailWorker(QRunnable):
         result_image = QImage()
 
         try:
-            # 1. Check SQLite Cache First
+            # 1. Cek Disk Cache (JPG di database/cache/thumbnails)
             repo = get_thumbnail_repo()
             cached_image = repo.get_thumbnail(self.image_path)
             if not cached_image.isNull():
-                if not self._should_abort():
-                    result_image = cached_image
+                # Cache hit: langsung set result agar finally bisa emit
+                result_image = cached_image
                 return
 
             if self._should_abort():
                 return
 
-            # 2. Process image (Decoding)
+            # 2. Decode gambar (demosaic untuk RAW, OpenCV/PIL untuk lainnya)
             pil_thumb = process_thumbnail_logic(self.image_path, self.thumbnail_size)
 
             if self._should_abort():
                 return
 
-            # 3. Convert to QImage
+            # 3. Simpan ke JPG -> muat kembali ke RAM -> emit ke UI
             if pil_thumb:
-                result_image = convert_pil_to_qimage(pil_thumb)
+                temp_image = convert_pil_to_qimage(pil_thumb)
+                if not temp_image.isNull():
+                    repo.save_thumbnail(self.image_path, temp_image)
+                    result_image = repo.get_thumbnail(self.image_path)
 
         except Exception as e:
             if not self._should_abort():
                 print(f"[ThumbnailWorker] Error processing {self.image_path}: {e}")
         finally:
+            # Selalu emit (cache hit maupun decode baru), agar UI selalu update
             if not self._should_abort():
                 try:
                     self.signals.thumbnail_ready.emit(result_image, self.image_path)
@@ -192,16 +196,19 @@ class ThumbnailBulkWorker(QRunnable):
 
             q_img_to_emit = QImage()
             try:
-                # 1. Process image (Decoding)
-                # Kita tidak cek SQLite di sini karena process_batch sudah melakukan bulk check.
+                # 1. Decode gambar (process_batch sudah filter cache miss sebelumnya)
                 pil_thumb = process_thumbnail_logic(path, self.thumbnail_size)
 
                 if self._should_abort():
                     return
 
-                # 2. Convert to QImage
+                # 2. Simpan ke JPG di disk -> muat kembali -> emit ke UI (realtime)
                 if pil_thumb:
-                    q_img_to_emit = convert_pil_to_qimage(pil_thumb)
+                    temp_image = convert_pil_to_qimage(pil_thumb)
+                    if not temp_image.isNull():
+                        repo = get_thumbnail_repo()
+                        repo.save_thumbnail(path, temp_image)
+                        q_img_to_emit = repo.get_thumbnail(path)
                 else:
                     print(f"[ThumbnailBulkWorker] Failed to decode image: {path}")
 
@@ -242,22 +249,41 @@ def process_thumbnail_logic(image_path, thumbnail_size):
             if img is not None:
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 pil_img = Image.fromarray(img)
-                return ImageOps.fit(pil_img, thumbnail_size, Image.Resampling.LANCZOS)
+                return ImageOps.fit(pil_img, thumbnail_size, Image.Resampling.BILINEAR)
 
         # 2. Fallback to PIL for TIFF, RAW, etc.
         ext = os.path.splitext(image_path)[1].lower()
         if ext in SUPPORTED_FORMATS.get("raw", []):
-            with rawpy.imread(image_path) as raw:
-                img_array = raw.postprocess(
-                    output_bps=8, use_camera_wb=True, half_size=True
-                )
-                pil_img = Image.fromarray(img_array, "RGB")
-                pil_img.thumbnail(thumbnail_size, Image.Resampling.LANCZOS)
-                return pil_img
+            try:
+                from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import taichi_lock
+                from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+                
+                with taichi_lock:
+                    # Direct GPU demosaic half resolution (always consistent with full preview)
+                    rgb_f32 = taichi_aot.demosaic(image_path, method="hamilton-rgb-half-res")
+                
+                if rgb_f32 is not None:
+                    img_array = np.clip(rgb_f32 * 255.0, 0, 255).astype(np.uint8)
+                    pil_img = Image.fromarray(img_array, "RGB")
+                    return ImageOps.fit(pil_img, thumbnail_size, Image.Resampling.BILINEAR)
+                else:
+                    raise RuntimeError("Hamilton demosaic returned None")
+            except Exception as e_raw:
+                print(f"[ThumbnailProcessor] Hamilton RAW decoding failed for {image_path}: {e_raw}. Falling back to full demosaic.")
+
+            # Fallback 2: Full demosaic (Hamilton/Taichi) if fast method fails
+            from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
+                load_raw_as_8bit_rgb,
+            )
+            img_array = load_raw_as_8bit_rgb(image_path)
+            pil_img = Image.fromarray(img_array, "RGB")
+            return ImageOps.fit(pil_img, thumbnail_size, Image.Resampling.BILINEAR)
 
         with Image.open(image_path) as img:
             img_corrected = ImageOps.exif_transpose(img)
-            return ImageOps.fit(img_corrected, thumbnail_size, Image.Resampling.LANCZOS)
+            return ImageOps.fit(
+                img_corrected, thumbnail_size, Image.Resampling.BILINEAR
+            )
 
     except Exception as e:
         print(f"[ThumbnailProcessor] Error processing {image_path}: {e}")
@@ -394,7 +420,7 @@ class ThumbnailBatchProcessor(QObject):
     # Signal untuk melaporkan progres pemeriksaan awal (cek disk/cache)
     check_progress = Signal(str, int)
 
-    def __init__(self, thumbnail_size=(128, 128), max_concurrent=4):
+    def __init__(self, thumbnail_size=(128, 128), max_concurrent=None):
         """
         Initialize batch processor.
         """
@@ -432,7 +458,11 @@ class ThumbnailBatchProcessor(QObject):
         self._last_emit_decode = -1
         self._last_emit_save = -1
 
-        # Config QThreadPool (Defaults to 4 for balance)
+        # Config QThreadPool (Dynamic scaling based on CPU count)
+        if max_concurrent is None:
+            import os
+            # Set to CPU logical core count, min 4 and max 12 to balance I/O and CPU
+            max_concurrent = max(4, min(12, os.cpu_count() or 4))
         QThreadPool.globalInstance().setMaxThreadCount(max_concurrent)
 
     def add_to_stats(self, count):
@@ -542,7 +572,7 @@ class ThumbnailBatchProcessor(QObject):
             self._emit_progress()
             return
 
-        # 2. BULK LOAD DARI SQLite (L2) - Menggunakan Bulk Read Dinamis
+        # 2. BULK LOAD DARI Disk Cache (L2) - JPG di database/cache/thumbnails
         repo = get_thumbnail_repo()
 
         # Emit initial check progress (0%)
@@ -643,33 +673,17 @@ class ThumbnailBatchProcessor(QObject):
             # Simpan ke RAM Cache (L1)
             self.ram_cache[image_path] = q_image
 
-            # Masukkan ke Pending Save Queue
-            self.pending_save_queue.append((image_path, q_image))
-
-            # Reset timer flush (Deferred Save)
-            if len(self.pending_save_queue) >= 100:
-                self.flush_to_disk()
-            else:
-                self.flush_timer.start(2000)
-
         # Progress tracking: Selalu update agar progress mencapai 100%
         if self.path_to_batch.get(image_path) == self.current_batch_id:
             if image_path not in self._processed_paths:
                 self._processed_paths.add(image_path)
                 self.decoded_count += 1
 
-            if not is_success:
-                if image_path not in self._persisted_paths:
-                    self._persisted_paths.add(image_path)
-                    self.saved_count += 1
+            if image_path not in self._persisted_paths:
+                self._persisted_paths.add(image_path)
+                self.saved_count += 1
 
-            # --- PROGRESS SYNC FIX ---
-            # Jika sudah mencapai akhir, paksa flush agar status mencapai 100% tanpa nunggu timer
-            if self.decoded_count >= self.total_to_process:
-                if self.pending_save_queue:
-                    self.flush_to_disk()
-            else:
-                self._emit_progress()
+            self._emit_progress()
 
         # Selalu jalankan callback agar UI berhenti menunjukkan loading
         if image_path in self.callbacks:
@@ -696,8 +710,8 @@ class ThumbnailBatchProcessor(QObject):
 
     def flush_to_disk(self):
         """
-        Menyimpan semua thumbnail yang ada di queue ke database SQLite secara BULK.
-        Menggunakan DYNAMIC BULK SIZE untuk efisiensi transaksi.
+        Menyimpan semua thumbnail yang ada di pending queue ke disk (JPG) secara BULK.
+        Dipanggil saat idle atau saat stop_all() untuk memastikan tidak ada yang terlewat.
         """
         if not self.pending_save_queue:
             return
@@ -707,7 +721,7 @@ class ThumbnailBatchProcessor(QObject):
 
         total_count = len(data_to_save)
 
-        # --- LOGIKA DYNAMIC BULK SIZE ---
+        # Dynamic chunk size berdasarkan volume
         chunk_size = 50
         if total_count >= 1499:
             chunk_size = 400
@@ -715,10 +729,6 @@ class ThumbnailBatchProcessor(QObject):
             chunk_size = 200
         elif total_count >= 500:
             chunk_size = 100
-
-        # print(
-        #     f"[ThumbnailProcessor] DEFERRED SAVE: Writing {total_count} thumbnails to Cache using chunk_size: {chunk_size}"
-        # )
 
         repo = get_thumbnail_repo()
         for i in range(0, total_count, chunk_size):
@@ -731,8 +741,6 @@ class ThumbnailBatchProcessor(QObject):
                     self._persisted_paths.add(path)
                     self.saved_count += 1
             self._emit_progress()
-
-        # print(f"[ThumbnailProcessor] Deferred save complete.")
 
     def stop_all(self):
         """Stop semua background tasks dan pastikan data tersimpan."""

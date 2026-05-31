@@ -192,28 +192,6 @@ def prepare_reference_for_alignment(
         if ref_gray is not final_res_gray:
             ref_gray.release()
 
-    if lut_gpu is not None:
-        # Fused GPU contrast & micro-contrast & Clarity enhancement!
-        # Calibrated parameters: micro_contrast = 1.89, clarity = 1.61, sigma = 0.8
-        # 1. Blur the luma image on the GPU (reuses pre-allocated buffer if provided)
-        blur_gpu = taichi_aot.gaussian_blur(
-            final_res_gray, sigma=0.8, return_gpu=True, dst=blur_work_gpu
-        )
-        # 2. Enhance luma directly on the GPU
-        enhanced_gpu = taichi_aot.enhance_grayscale(
-            final_res_gray,
-            blur_gpu,
-            lut_gpu,
-            micro_contrast=1.89,
-            clarity=1.61,
-            return_gpu=True,
-        )
-        if blur_work_gpu is None:
-            blur_gpu.release()
-        if final_res_gray is not enhanced_gpu:
-            final_res_gray.release()
-        final_res_gray = enhanced_gpu
-
     return prepare_pyramid_aot(final_res_gray)
 
 
@@ -305,28 +283,6 @@ def prepare_comparison_for_alignment(
         )
         if comp_gray is not final_res_gray:
             comp_gray.release()
-
-    if lut_gpu is not None:
-        # Fused GPU contrast & micro-contrast & Clarity enhancement!
-        # Calibrated parameters: micro_contrast = 1.89, clarity = 1.61, sigma = 0.8
-        # 1. Blur the luma image on the GPU (reuses pre-allocated buffer if provided)
-        blur_gpu = taichi_aot.gaussian_blur(
-            final_res_gray, sigma=0.8, return_gpu=True, dst=blur_work_gpu
-        )
-        # 2. Enhance luma directly on the GPU
-        enhanced_gpu = taichi_aot.enhance_grayscale(
-            final_res_gray,
-            blur_gpu,
-            lut_gpu,
-            micro_contrast=1.89,
-            clarity=1.61,
-            return_gpu=True,
-        )
-        if blur_work_gpu is None:
-            blur_gpu.release()
-        if final_res_gray is not enhanced_gpu:
-            final_res_gray.release()
-        final_res_gray = enhanced_gpu
 
     return prepare_pyramid_aot(final_res_gray)
 

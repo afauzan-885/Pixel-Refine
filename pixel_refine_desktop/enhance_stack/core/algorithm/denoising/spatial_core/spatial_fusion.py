@@ -70,9 +70,10 @@ class SpatialFusionProcessor:
 
         scope_width = scope_end - scope_start
         p_init = int(scope_start + scope_width * 0.05)
-        p_align_start = p_init
-        p_align_end = int(scope_start + scope_width * 0.40)
-        p_merge_start, p_merge_end = p_align_end, int(scope_start + scope_width * 0.95)
+        p_align_start = unused_kwargs.get("align_progress_start", p_init)
+        p_align_end = unused_kwargs.get("align_progress_end", int(scope_start + scope_width * 0.40))
+        p_merge_start = unused_kwargs.get("merge_progress_start", p_align_end)
+        p_merge_end = unused_kwargs.get("merge_progress_end", int(scope_start + scope_width * 0.95))
         pass_merge_range = (p_merge_start, p_merge_end)
 
         # Scale down logic

@@ -207,15 +207,9 @@ class ImageLoaderThread(QThread):
 
             # Handle RAW formats
             elif ext in SUPPORTED_FORMATS.get("raw", []):
-                with rawpy.imread(self.image_path) as raw:
-                    # Postprocess untuk mendapatkan RGB array
-                    image_array = raw.postprocess(
-                        output_bps=8,
-                        use_camera_wb=True,
-                        half_size=False,  # Full size untuk preview
-                    )
-                    # rawpy returns RGB, convert ke BGR
-                    image_array = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
+                from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import load_raw_as_8bit_rgb
+                img_rgb = load_raw_as_8bit_rgb(self.image_path)
+                image_array = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
         except Exception as e:
             print(f"Error loading image {self.image_path}: {e}")
@@ -419,11 +413,9 @@ def load_and_display_image(
                 image_array = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
 
         elif ext in SUPPORTED_FORMATS.get("raw", []):
-            with rawpy.imread(image_path) as raw:
-                image_array = raw.postprocess(
-                    output_bps=8, use_camera_wb=True, half_size=False
-                )
-                image_array = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
+            from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import load_raw_as_8bit_rgb
+            img_rgb = load_raw_as_8bit_rgb(image_path)
+            image_array = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
         else:
             print(f"Unsupported format: {ext}")

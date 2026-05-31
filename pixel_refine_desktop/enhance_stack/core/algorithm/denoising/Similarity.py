@@ -34,6 +34,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
     get_all_image_paths_for_single_process,
     load_images_from_paths,
     resize_all_with_padding,
+    cleanup_old_hdf5_files,
 )
 
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
@@ -97,6 +98,9 @@ class DataProvider:
             )
             output_name_base = ref_name
 
+        # Hapus file HDF5 lama selain file target saat ini untuk menghemat ruang HDD
+        cleanup_old_hdf5_files(hdf5_path)
+
         data_source = hdf5_path if os.path.exists(hdf5_path) else image_paths
 
         total_images = 0
@@ -120,6 +124,9 @@ class DataProvider:
         linear_mode=True,
         capture_ref_proxy=False,
         alignment_mode=False,
+        update_progress=None,
+        progress_start=0,
+        progress_end=100,
     ):
         """Loads a specific batch of images from HDF5 or filesystem."""
         batch_start, batch_end = batch_indices
@@ -142,6 +149,9 @@ class DataProvider:
                 linear_mode=linear_mode,
                 capture_ref_proxy=capture_ref_proxy,
                 alignment_mode=alignment_mode,
+                update_progress=update_progress,
+                progress_start=progress_start,
+                progress_end=progress_end,
             )
 
             if capture_ref_proxy and isinstance(load_res, tuple):
@@ -246,7 +256,7 @@ class SimilarityAlgorithm:
                 if channels_ref_orig == 1
                 else (h_ref, w_ref, channels_ref_orig)
             )
-            return np.zeros(out_shape, dtype=dtype_ref), None, []
+            return np.zeros(out_shape, dtype=dtype_ref), None, 0
 
         # merging_mode = merging_kwargs.get("merging_mode", "smart")
         merging_mode = merging_kwargs.get("merging_mode", "spatial")
@@ -298,7 +308,7 @@ class SimilarityAlgorithm:
                 if channels_ref_orig == 1
                 else (h_ref, w_ref, channels_ref_orig)
             )
-            return np.zeros(out_shape, dtype=dtype_ref), None, []
+            return np.zeros(out_shape, dtype=dtype_ref), None, 0
 
         final_img_norm, final_weight, processed_frames = (
             results[0],
@@ -466,20 +476,25 @@ def main(
         # Check if we can stream from H5 with zero-allocation buffer reuse
         is_hdf5 = isinstance(data_source, str) and data_source.endswith(".h5")
         
+        just_aligned = False
         if not is_hdf5:
+            just_aligned = True
             if update_progress:
                 update_progress(0, "Menjalankan alignment awal (Taichi GPU) untuk membuat file HDF5...")
                 
             hdf5_path = "database/align/aligned_images.h5" if single_process else f"database/align/aligned_image_batch_{batch_id}.h5"
             os.makedirs(os.path.dirname(hdf5_path), exist_ok=True)
             
-            # Load and resize images for alignment in full-res RGB
+            # Load and resize images for alignment in full-res RGB (Progress: 0% to 25%)
             images_for_align = data_provider.load_images_for_batch(
                 image_paths,
                 (0, len(image_paths)),
                 stop_requested,
                 linear_mode=is_linear_mode,
                 alignment_mode=False,
+                update_progress=update_progress,
+                progress_start=0,
+                progress_end=25,
             )
             
             with h5py.File(hdf5_path, "w") as h5f:
@@ -502,6 +517,8 @@ def main(
                     is_linear_mode=is_linear_mode,
                     proxy_scale=proxy_scale,
                     reference_image=reference_image,
+                    progress_start=25,
+                    progress_end=50,
                 )
                 
             del images_for_align
@@ -518,6 +535,10 @@ def main(
         if is_hdf5:
             # Disable internal alignment since images are already aligned in HDF5
             extra_params["enable_alignment"] = False
+            
+            # Pass custom progress range for merging (50-95% if aligned just now, 0-95% if already aligned)
+            extra_params["merge_progress_start"] = 50 if just_aligned else 0
+            extra_params["merge_progress_end"] = 95
             
             # RUN ALGORITHM once on the entire HDF5 data source using GPU Streaming!
             batch_res = processor.similarity_mnfr(
@@ -545,18 +566,32 @@ def main(
             batch_plan = setup_balanced_batching(
                 total_images, language_config, max_batch_size=15
             )
-            for batch_num, (b_start, b_end) in enumerate(batch_plan, 1):
+            num_batches = len(batch_plan)
+            batch_share = 95.0 / num_batches
+            
+            for batch_idx, (b_start, b_end) in enumerate(batch_plan):
                 if stop_requested and stop_requested():
                     break
+
+                b_start_prog = batch_idx * batch_share
+                b_end_prog = (batch_idx + 1) * batch_share
+                load_end_prog = b_start_prog + batch_share * 0.15
 
                 current_batch_images = data_provider.load_images_for_batch(
                     data_source,
                     (b_start, b_end),
                     stop_requested,
                     linear_mode=is_linear_mode,
+                    update_progress=update_progress,
+                    progress_start=int(b_start_prog),
+                    progress_end=int(load_end_prog),
                 )
                 if not current_batch_images:
                     continue
+
+                # Pass custom progress range for merging this batch
+                extra_params["merge_progress_start"] = int(load_end_prog)
+                extra_params["merge_progress_end"] = int(b_end_prog)
 
                 # RUN ALGORITHM
                 batch_res = processor.similarity_mnfr(
@@ -614,6 +649,25 @@ def main(
 
             ref_float = normalize_image(reference_image, reference_image.dtype)
             final_normalized[~valid_mask] = ref_float[~valid_mask]
+
+            # Adaptive Box-Filter High-Frequency Denoise
+            from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import estimate_noise_in_python
+            ref_gray_for_noise = cv2.cvtColor(ref_float, cv2.COLOR_BGR2GRAY)
+            est_noise = estimate_noise_in_python(ref_gray_for_noise)
+            
+            if est_noise >= 0.20:
+                print(f"[Denoise] Moderate/High noise detected (sigma={est_noise:.4f}). Applying Adaptive High-Frequency Box-Filter Denoise...")
+                # 1. Low-frequency part (LF) via box filter
+                lf = cv2.boxFilter(final_normalized, ddepth=-1, ksize=(3, 3), borderType=cv2.BORDER_REFLECT)
+                # 2. High-frequency part (HF)
+                hf = final_normalized - lf
+                # 3. Suppress noise in HF based on noise strength (higher noise = more suppression)
+                # Map est_noise range [0.20, 0.80] to alpha range [0.15, 0.45]
+                alpha = np.clip(0.15 + (est_noise - 0.20) * 0.5, 0.15, 0.45)
+                hf_clean = hf * (1.0 - alpha)
+                # 4. Reconstruct
+                final_normalized = lf + hf_clean
+                print(f"  [Denoise] Damped high-frequency noise by {alpha*100:.1f}% without affecting structures.")
 
             max_v = np.iinfo(reference_image.dtype).max
             final_img = np.clip(final_normalized * max_v, 0, max_v).astype(

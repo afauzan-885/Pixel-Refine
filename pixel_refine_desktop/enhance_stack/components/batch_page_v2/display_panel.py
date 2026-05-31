@@ -703,6 +703,9 @@ class DisplayPanel(QWidget):
         # Delegate incremental population to GridManager
         self.grid_manager.populate_grid_incremental(visual_images)
 
+        # Aktifkan watchdog recovery untuk retry thumbnail yang tertinggal
+        self.grid_manager.start_recovery_timer()
+
     @Slot()
     def clear_display(self):
         """
@@ -749,7 +752,7 @@ class DisplayPanel(QWidget):
         self.all_cards.clear()
         self.selection_manager.clear()
         self.logic.grid_items.clear()
-        self.grid_manager.stop_staged_timer()
+        self.grid_manager.stop_staged_timer()  # Menghentikan staged + recovery timer
 
     def _show_empty_batch_state(self):
         """Delegate to UIStateManager."""

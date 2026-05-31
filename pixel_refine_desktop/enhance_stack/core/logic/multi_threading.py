@@ -100,6 +100,48 @@ def _process_image_part(img_part_data):
         raise RuntimeError(f"Failed to process quadrant: {e}")
 
 
+import threading
+
+taichi_lock = threading.Lock()
+
+
+def load_raw_as_8bit_rgb(image_path: str) -> np.ndarray:
+    """Loads a RAW/DNG image and returns it as an 8-bit RGB numpy array using Hamilton Demosaic with rawpy fallback."""
+    filename = os.path.basename(image_path)
+    try:
+        from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+
+        with taichi_lock:
+            rgb_f32 = taichi_aot.demosaic(image_path, method="hamilton")
+        if rgb_f32 is not None:
+            return np.clip(rgb_f32 * 255.0, 0, 255).astype(np.uint8)
+        else:
+            raise RuntimeError("Hamilton demosaic returned None")
+    except Exception as e_ta:
+        print(
+            f"[Fallback] Taichi Hamilton demosaic failed ({e_ta}), falling back to rawpy."
+        )
+        try:
+            with rawpy.imread(image_path) as raw:
+                gamma_setting = (2.222, 4.5)
+                img_array = raw.postprocess(
+                    demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,  # type: ignore
+                    four_color_rgb=True,
+                    use_camera_wb=True,
+                    gamma=gamma_setting,
+                    output_bps=8,
+                    output_color=rawpy.ColorSpace.sRGB,  # type: ignore
+                    highlight_mode=rawpy.HighlightMode.Blend,  # type: ignore
+                )
+                if img_array is None:
+                    raise RuntimeError(f"Rawpy postprocessing failed for {filename}")
+                return img_array
+        except rawpy.LibRawError as e:
+            raise RuntimeError(f"Rawpy Error for {filename}: {e}")  # type: ignore
+        except Exception as e:
+            raise RuntimeError(f"Unexpected DNG error for {filename}: {e}")
+
+
 class RawImageProcessingThread(BaseMultiThreading):
     """
     Thread untuk memproses gambar dari path file menjadi QPixmap atau QImage.
@@ -153,29 +195,7 @@ class RawImageProcessingThread(BaseMultiThreading):
                     if key == "raw"
                 )
                 if is_raw:
-                    try:
-                        with rawpy.imread(image_path) as raw:
-                            # Pemrosesan dasar untuk mendapatkan array RGB 8-bit
-                            gamma_setting = (2.222, 4.5)
-                            # gamma_setting = (1,1)
-                            img_array = raw.postprocess(
-                                demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,  # type: ignore
-                                four_color_rgb=True,
-                                use_camera_wb=True,
-                                # no_auto_bright=True,
-                                gamma=gamma_setting,
-                                output_bps=8,
-                                output_color=rawpy.ColorSpace.sRGB,  # type: ignore
-                                highlight_mode=rawpy.HighlightMode.Blend,  # type: ignore
-                            )
-                            if img_array is None:
-                                raise RuntimeError(
-                                    f"Rawpy postprocessing failed for {filename}"
-                                )
-                    except rawpy.LibRawError as e:
-                        raise RuntimeError(f"Rawpy Error for {filename}: {e}")  # type: ignore
-                    except Exception as e:
-                        raise RuntimeError(f"Unexpected DNG error for {filename}: {e}")
+                    img_array = load_raw_as_8bit_rgb(image_path)
 
                 else:  # Untuk format non-RAW (JPG, PNG, TIFF, dll.)
                     img_cv = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)

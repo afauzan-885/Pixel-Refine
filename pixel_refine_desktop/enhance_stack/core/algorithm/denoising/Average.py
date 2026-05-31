@@ -18,6 +18,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
     resize_with_padding,
     save_image,
     setup_balanced_batching,
+    cleanup_old_hdf5_files,
 )
 from pixel_refine_desktop.ui.resources.styles.stylesheet import PROGRESS_BAR
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
@@ -193,6 +194,10 @@ def main(
             )
             data_source = hdf5_path if os.path.exists(hdf5_path) else image_paths
 
+        # Hapus file HDF5 lama selain file target saat ini untuk menghemat ruang HDD
+        cleanup_old_hdf5_files(hdf5_path)
+
+
         metadata_output_path = os.path.join("database", "align", "metadata.json")
         try:
             extract_all_metadata(image_paths, metadata_file=metadata_output_path)
@@ -255,14 +260,14 @@ def main(
                 # Gunakan load_images_from_paths karena lebih tangguh untuk berbagai format
                 batch_images = load_images_from_paths(batch_paths, stop_requested)
 
-                # Setup awal dari gambar pertama (referensi)
-                if batch_images and target_shape is None:
-                    first_img = batch_images[0]
-                    target_shape = (first_img.shape[1], first_img.shape[0])  # (w, h)
-                    reference_dtype = first_img.dtype
-                    print(
-                        f"  -> Reference detect: {target_shape[0]}x{target_shape[1]}, Depth: {reference_dtype}"
-                    )
+            # Setup awal dari gambar pertama (referensi)
+            if batch_images and target_shape is None:
+                first_img = batch_images[0]
+                target_shape = (first_img.shape[1], first_img.shape[0])  # (w, h)
+                reference_dtype = first_img.dtype
+                print(
+                    f"  -> Reference detect: {target_shape[0]}x{target_shape[1]}, Depth: {reference_dtype}"
+                )
 
             if stop_requested and stop_requested():
                 break

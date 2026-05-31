@@ -644,8 +644,13 @@ def perform_alignment_gpu(
             # map_x_gpu/map_y_gpu: full-res coordinate maps — reused per frame
             full_h_ref, full_w_ref = images[0].shape[:2]
             smooth_flow_buf = engine.allocate((h_w, w_w, 2), dtype=np.float32)
-            map_x_gpu = engine.allocate((full_h_ref, full_w_ref), dtype=np.float32)
-            map_y_gpu = engine.allocate((full_h_ref, full_w_ref), dtype=np.float32)
+            use_flow_remap = kwargs.get("use_flow_remap", True)
+            if not use_flow_remap:
+                map_x_gpu = engine.allocate((full_h_ref, full_w_ref), dtype=np.float32)
+                map_y_gpu = engine.allocate((full_h_ref, full_w_ref), dtype=np.float32)
+            else:
+                map_x_gpu = None
+                map_y_gpu = None
 
             import queue
             import threading
@@ -737,16 +742,17 @@ def perform_alignment_gpu(
                         flow_l0, sigma=1.0, kernel_size=5, dst=smooth_flow_buf
                     )
 
-                    # Step C3: Build full-res coordinate maps — bilinear upsample + scale + grid
-                    map_x_gpu, map_y_gpu = taichi_aot.build_flow_maps(
-                        smooth_flow_buf,  # 2-channel flow (H_work, W_work, 2)
-                        full_h_ref,
-                        full_w_ref,  # target resolution
-                        scale_x=float(full_w_ref) / float(w_w),
-                        scale_y=float(full_h_ref) / float(h_w),
-                        map_x_buf=map_x_gpu,  # reuse buffer
-                        map_y_buf=map_y_gpu,  # reuse buffer
-                    )
+                    # Step C3: Build full-res coordinate maps if not using flow remap
+                    if not use_flow_remap:
+                        map_x_gpu, map_y_gpu = taichi_aot.build_flow_maps(
+                            smooth_flow_buf,  # 2-channel flow (H_work, W_work, 2)
+                            full_h_ref,
+                            full_w_ref,  # target resolution
+                            scale_x=float(full_w_ref) / float(w_w),
+                            scale_y=float(full_h_ref) / float(h_w),
+                            map_x_buf=map_x_gpu,  # reuse buffer
+                            map_y_buf=map_y_gpu,  # reuse buffer
+                        )
 
                     h5_file_handle = kwargs.get("h5_file_handle", None)
                     image_paths = kwargs.get("image_paths", None)
@@ -804,11 +810,16 @@ def perform_alignment_gpu(
                     else:
                         full_res_img = images[i]
 
-                    # Step C4: Warp image using GPU coordinate maps
+                    # Step C4: Warp image using GPU coordinate maps or flow remap
                     if h5_file_handle is not None:
-                        aligned_np = taichi_aot.remap(
-                            full_res_img, map_x_gpu, map_y_gpu, return_gpu=False
-                        )
+                        if use_flow_remap:
+                            aligned_np = taichi_aot.remap_with_flow(
+                                full_res_img, smooth_flow_buf, full_h_ref, full_w_ref, return_gpu=False
+                            )
+                        else:
+                            aligned_np = taichi_aot.remap(
+                                full_res_img, map_x_gpu, map_y_gpu, return_gpu=False
+                            )
                         # Push to background writer queue (will block if queue is full to prevent memory bloat)
                         write_queue.put(
                             (
@@ -836,9 +847,14 @@ def perform_alignment_gpu(
                             images[i].destroy()
                         images[i] = None
                     elif return_format == "ti_ndarray":
-                        aligned_gpu = taichi_aot.remap(
-                            full_res_img, map_x_gpu, map_y_gpu, return_gpu=True
-                        )
+                        if use_flow_remap:
+                            aligned_gpu = taichi_aot.remap_with_flow(
+                                full_res_img, smooth_flow_buf, full_h_ref, full_w_ref, return_gpu=True
+                            )
+                        else:
+                            aligned_gpu = taichi_aot.remap(
+                                full_res_img, map_x_gpu, map_y_gpu, return_gpu=True
+                            )
                         if save_align_image:
                             save_img = aligned_gpu.to_numpy()
                             save_aligned_image(
@@ -852,9 +868,14 @@ def perform_alignment_gpu(
                         images[i] = aligned_gpu
                         del full_res_img
                     else:
-                        images[i] = taichi_aot.remap(
-                            full_res_img, map_x_gpu, map_y_gpu, return_gpu=False
-                        )
+                        if use_flow_remap:
+                            images[i] = taichi_aot.remap_with_flow(
+                                full_res_img, smooth_flow_buf, full_h_ref, full_w_ref, return_gpu=False
+                            )
+                        else:
+                            images[i] = taichi_aot.remap(
+                                full_res_img, map_x_gpu, map_y_gpu, return_gpu=False
+                            )
                         if save_align_image:
                             save_aligned_image(
                                 images[i],
@@ -909,7 +930,8 @@ def perform_alignment_gpu(
                     blur_work_gpu,
                 ]:
                     try:
-                        _buf.destroy()
+                        if _buf is not None:
+                            _buf.destroy()
                     except Exception:
                         pass
 

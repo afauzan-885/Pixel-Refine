@@ -15,6 +15,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.remap im
     _remap_kernel, _remap_kernel_vec3,
     _build_flow_maps_kernel, _build_flow_maps_from_2ch_kernel,
     _smooth_flow_kernel, _smooth_flow_y_kernel,
+    _remap_with_flow_kernel, _remap_with_flow_kernel_vec3,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.enhance_image import (
     _enhance_grayscale_kernel,
@@ -113,6 +114,59 @@ def compile_remap_tcm(arch=ti.vulkan, save_path="remap_vulkan.tcm"):
         _enhance_grayscale_kernel, enh_src, enh_blur, enh_lut, enh_dst, enh_mc, enh_clarity, enh_h, enh_w
     )
     module.add_graph("enhance_grayscale", g_enhance.compile())
+
+    # 7. Fused Remap with Flow (Grayscale & Color, support f32 & u16)
+    # Common arguments for all remap_with_flow graphs
+    flow_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "flow", ti.f32, ndim=3)
+    h_src_f  = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h_src", ti.i32)
+    w_src_f  = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w_src", ti.i32)
+    h_dst_f  = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h_dst", ti.i32)
+    w_dst_f  = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w_dst", ti.i32)
+    h_flow_f = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h_flow", ti.i32)
+    w_flow_f = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w_flow", ti.i32)
+    sc_x     = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "scale_x", ti.f32)
+    sc_y     = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "scale_y", ti.f32)
+
+    # 7.1 f32 2D
+    g_rwf_f32_2d = ti.graph.GraphBuilder()
+    src_f32_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=2)
+    dst_f32_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
+    g_rwf_f32_2d.dispatch(
+        _remap_with_flow_kernel, src_f32_2d, flow_arg, dst_f32_2d,
+        h_src_f, w_src_f, h_dst_f, w_dst_f, h_flow_f, w_flow_f, sc_x, sc_y
+    )
+    module.add_graph("remap_with_flow_f32_2d", g_rwf_f32_2d.compile())
+
+    # 7.2 f32 3D (Vector3)
+    g_rwf_f32_3d = ti.graph.GraphBuilder()
+    src_f32_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.types.vector(3, ti.f32), ndim=2)
+    dst_f32_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.types.vector(3, ti.f32), ndim=2)
+    g_rwf_f32_3d.dispatch(
+        _remap_with_flow_kernel_vec3, src_f32_3d, flow_arg, dst_f32_3d,
+        h_src_f, w_src_f, h_dst_f, w_dst_f, h_flow_f, w_flow_f, sc_x, sc_y
+    )
+    module.add_graph("remap_with_flow_f32_3d", g_rwf_f32_3d.compile())
+
+    # 7.3 u16 2D (Mapped to i32 for Vulkan/AOT safety)
+    g_rwf_u16_2d = ti.graph.GraphBuilder()
+    src_u16_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.i32, ndim=2)
+    dst_u16_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.i32, ndim=2)
+    g_rwf_u16_2d.dispatch(
+        _remap_with_flow_kernel, src_u16_2d, flow_arg, dst_u16_2d,
+        h_src_f, w_src_f, h_dst_f, w_dst_f, h_flow_f, w_flow_f, sc_x, sc_y
+    )
+    module.add_graph("remap_with_flow_u16_2d", g_rwf_u16_2d.compile())
+
+    # 7.4 u16 3D (Vector3, Mapped to i32 for Vulkan/AOT safety)
+    g_rwf_u16_3d = ti.graph.GraphBuilder()
+    src_u16_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.types.vector(3, ti.i32), ndim=2)
+    dst_u16_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.types.vector(3, ti.i32), ndim=2)
+    g_rwf_u16_3d.dispatch(
+        _remap_with_flow_kernel_vec3, src_u16_3d, flow_arg, dst_u16_3d,
+        h_src_f, w_src_f, h_dst_f, w_dst_f, h_flow_f, w_flow_f, sc_x, sc_y
+    )
+    module.add_graph("remap_with_flow_u16_3d", g_rwf_u16_3d.compile())
+
 
     # Archive the module
     module.archive(save_path)

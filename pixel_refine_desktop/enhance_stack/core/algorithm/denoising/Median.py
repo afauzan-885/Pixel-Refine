@@ -19,6 +19,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
     resize_all_with_padding,
     save_image,
     setup_balanced_batching,
+    cleanup_old_hdf5_files,
 )
 from pixel_refine_desktop.ui.resources.styles.stylesheet import PROGRESS_BAR
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
@@ -362,6 +363,10 @@ def main(
                 else f"batch_{batch_id}"
             )
             data_source = hdf5_path if os.path.exists(hdf5_path) else image_paths
+
+        # Hapus file HDF5 lama selain file target saat ini untuk menghemat ruang HDD
+        cleanup_old_hdf5_files(hdf5_path)
+
 
         metadata_output_path = os.path.join("database", "align", "metadata.json")
         try:

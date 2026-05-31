@@ -209,8 +209,23 @@ def _init_aot_bridge():
     # Initialization
     arch_str = "vulkan"
     arch_id = 0
-    device_id = int(os.environ.get("PIXEL_REFINE_AOT_DEVICE", "0"))
     
+    device_id = 0
+    env_device = os.environ.get("PIXEL_REFINE_AOT_DEVICE")
+    if env_device is not None:
+        device_id = int(env_device)
+    else:
+        try:
+            devices_str = _LIB.scan_vulkan_devices().decode('utf-8')
+            device_list = [d.strip().lower() for d in devices_str.split(';')]
+            for idx, dev_name in enumerate(device_list):
+                if "nvidia" in dev_name or "geforce" in dev_name:
+                    device_id = idx
+                    print(f"[AOTEngine] Auto-selected NVIDIA GPU at Device index: {device_id} ({devices_str.split(';')[idx].strip()})")
+                    break
+        except Exception as e:
+            print(f"[AOTEngine WARNING] Failed to auto-scan GPUs: {e}. Falling back to default Device 0.")
+            
     _RUNTIME = _LIB.init_aot_engine(arch_id, device_id)
     if not _RUNTIME:
         raise RuntimeError(f"Failed to initialize {arch_str.upper()} AOT Runtime.")

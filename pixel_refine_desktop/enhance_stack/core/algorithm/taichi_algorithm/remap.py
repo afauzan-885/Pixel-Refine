@@ -159,6 +159,53 @@ if TAICHI_AVAILABLE:
             dst[r, c] = bilinear_at_vec3(src, map_x[r, c], map_y[r, c], h_src, w_src)
 
 
+    @ti.kernel
+    def _remap_with_flow_kernel(
+        src: ti.types.ndarray(),
+        flow: ti.types.ndarray(),
+        dst: ti.types.ndarray(),
+        h_src: int,
+        w_src: int,
+        h_dst: int,
+        w_dst: int,
+        h_flow: int,
+        w_flow: int,
+        scale_x: float,
+        scale_y: float,
+    ):
+        for r, c in ti.ndrange(h_dst, w_dst):
+            fx = float(c) * float(w_flow - 1) / float(w_dst - 1)
+            fy = float(r) * float(h_flow - 1) / float(h_dst - 1)
+            sampled_dx = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 0)
+            sampled_dy = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 1)
+            src_x = float(c) + sampled_dx * scale_x
+            src_y = float(r) + sampled_dy * scale_y
+            dst[r, c] = bilinear_at(src, src_x, src_y, h_src, w_src)
+
+    @ti.kernel
+    def _remap_with_flow_kernel_vec3(
+        src: ti.types.ndarray(),
+        flow: ti.types.ndarray(),
+        dst: ti.types.ndarray(),
+        h_src: int,
+        w_src: int,
+        h_dst: int,
+        w_dst: int,
+        h_flow: int,
+        w_flow: int,
+        scale_x: float,
+        scale_y: float,
+    ):
+        for r, c in ti.ndrange(h_dst, w_dst):
+            fx = float(c) * float(w_flow - 1) / float(w_dst - 1)
+            fy = float(r) * float(h_flow - 1) / float(h_dst - 1)
+            sampled_dx = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 0)
+            sampled_dy = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 1)
+            src_x = float(c) + sampled_dx * scale_x
+            src_y = float(r) + sampled_dy * scale_y
+            dst[r, c] = bilinear_at_vec3(src, src_x, src_y, h_src, w_src)
+
+
 def remap(src, map_x, map_y, dst=None, buffer_provider="pool"):
     """
     GPU-accelerated Remap (Warping) API.
@@ -243,3 +290,81 @@ def remap(src, map_x, map_y, dst=None, buffer_provider="pool"):
         return dst_gpu
 
     return _run_gpu_remap(src, map_x, map_y, dst)
+
+
+def remap_with_flow(src, flow, full_h, full_w, dst=None, buffer_provider="pool"):
+    """
+    Fused GPU-accelerated Remap with Flow API.
+    Interpolates input src using 2-channel flow field, on-the-fly interpolating flow.
+
+    All Taichi operations are synchronized via @ti_thread.
+    """
+    import os
+    if os.environ.get("PIXEL_REFINE_AOT_MODE") == "1":
+        from .common import _get_aot
+        aot = _get_aot()
+        if aot and hasattr(aot, "remap_with_flow"):
+            is_taichi = hasattr(src, "to_numpy") or hasattr(flow, "to_numpy")
+            res_buf = aot.remap_with_flow(
+                src, flow, full_h, full_w, return_gpu=is_taichi, dst=dst
+            )
+            return res_buf
+
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
+
+    from .common import get_temp_buffer, release_temp_buffer, ensure_taichi_field
+
+    is_taichi_input = hasattr(src, "to_numpy") or hasattr(flow, "to_numpy")
+
+    @ti_thread
+    def _run_gpu_remap_with_flow(src_data, flow_data, dst_data=None):
+        src_gpu, src_is_temp = ensure_taichi_field(src_data, dtype=ti.f32, buffer_provider=buffer_provider)
+        flow_gpu, flow_is_temp = ensure_taichi_field(flow_data, dtype=ti.f32, buffer_provider=buffer_provider)
+
+        h_src, w_src = src_gpu.shape[:2]
+        h_flow, w_flow = flow_gpu.shape[:2]
+        is_3d = len(src_gpu.shape) == 3
+        c_count = src_gpu.shape[2] if is_3d else 1
+
+        scale_x = float(full_w) / float(w_flow)
+        scale_y = float(full_h) / float(h_flow)
+
+        # Determine output buffer
+        if dst_data is None:
+            out_shape = (full_h, full_w, c_count) if is_3d else (full_h, full_w)
+            dst_gpu = get_temp_buffer(out_shape, ti.f32, buffer_provider)
+        else:
+            dst_gpu, _ = ensure_taichi_field(dst_data, dtype=ti.f32, buffer_provider=buffer_provider)
+
+        # Run kernel
+        if is_3d:
+            _remap_with_flow_kernel_vec3(
+                src_gpu, flow_gpu, dst_gpu,
+                h_src, w_src, full_h, full_w, h_flow, w_flow, scale_x, scale_y
+            )
+        else:
+            _remap_with_flow_kernel(
+                src_gpu, flow_gpu, dst_gpu,
+                h_src, w_src, full_h, full_w, h_flow, w_flow, scale_x, scale_y
+            )
+
+        # Cleanup temps
+        if src_is_temp:
+            release_temp_buffer(src_gpu)
+        if flow_is_temp:
+            release_temp_buffer(flow_gpu)
+
+        # Download if input was NumPy
+        if not is_taichi_input:
+            res = dst_gpu.to_numpy()
+            release_temp_buffer(dst_gpu)
+            if dst_data is not None:
+                dst_data[:] = res
+                return dst_data
+            return res
+
+        return dst_gpu
+
+    return _run_gpu_remap_with_flow(src, flow, dst)
+

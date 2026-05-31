@@ -297,7 +297,8 @@ def _prepare_image_array_from_raw(
 
 
 def load_images_from_paths(
-    image_paths, stop_requested=None, linear_mode=False, capture_ref_proxy=False, alignment_mode=False
+    image_paths, stop_requested=None, linear_mode=False, capture_ref_proxy=False, alignment_mode=False,
+    update_progress=None, progress_start=0, progress_end=100
 ):
     images = []
     raw_extensions = {".dng", ".cr2", ".nef", ".arw", ".orf", ".rw2", ".pef", ".srw"}
@@ -342,6 +343,9 @@ def load_images_from_paths(
         except Exception as e:
             print(f"Error processing standard image for alignment {path}: {e}")
             return None
+
+    total_paths = len(image_paths)
+    loaded_count = 0
 
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
         for idx_path, path in enumerate(image_paths):
@@ -395,6 +399,11 @@ def load_images_from_paths(
                         images.append(res)
             except Exception as e:
                 print(f"Error loading RAW image: {e}")
+            finally:
+                loaded_count += 1
+                if update_progress:
+                    prog_val = int(progress_start + (loaded_count / total_paths) * (progress_end - progress_start))
+                    update_progress(prog_val, f"Loading RAW image {loaded_count}/{total_paths}...")
 
         # Ambil hasil dari gambar Standard
         for future in as_completed(standard_futures):
@@ -410,6 +419,11 @@ def load_images_from_paths(
                     images.append(img)
             except Exception as e:
                 print(f"Error loading standard image: {e}")
+            finally:
+                loaded_count += 1
+                if update_progress:
+                    prog_val = int(progress_start + (loaded_count / total_paths) * (progress_end - progress_start))
+                    update_progress(prog_val, f"Loading standard image {loaded_count}/{total_paths}...")
 
     if capture_ref_proxy:
         return images, gt_proxy_result
@@ -2100,9 +2114,36 @@ def _run_apply_and_save_stage(
                 del compensated
             gc.collect()
 
-    # --- Eksekusi Menggunakan ThreadPoolExecutor ---
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
         for task in tasks:
             if stop_requested and stop_requested():
                 break
             executor.submit(apply_and_save_task, task)
+
+
+def cleanup_old_hdf5_files(current_hdf5_path: str):
+    """
+    Menghapus file HDF5 (.h5) lain di direktori database/align untuk menghemat ruang HDD.
+    Hanya menyisakan file hdf5 yang sedang diproses (current_hdf5_path).
+    """
+    try:
+        align_dir = os.path.dirname(current_hdf5_path)
+        if not align_dir:
+            align_dir = os.path.join("database", "align")
+        if not os.path.exists(align_dir):
+            return
+            
+        current_name = os.path.basename(current_hdf5_path)
+        
+        # Loop semua file di align_dir
+        for filename in os.listdir(align_dir):
+            if filename.endswith(".h5") and filename != current_name:
+                file_path = os.path.join(align_dir, filename)
+                try:
+                    os.remove(file_path)
+                    print(f"[Cleanup] Menghapus file HDF5 lama untuk menghemat HDD: {file_path}")
+                except Exception as e:
+                    print(f"[Cleanup] Gagal menghapus {file_path}: {e}")
+    except Exception as e:
+        print(f"[Cleanup] Error saat membersihkan HDF5: {e}")
+

@@ -1256,6 +1256,121 @@ def remap(src, map_x, map_y, return_gpu=False):
     return res
 
 
+def remap_with_flow(src, flow, full_h, full_w, return_gpu=False, dst=None):
+    """
+    Fused remap with flow: bilinear interpolate flow on-the-fly + warp src image.
+    Eliminates need for map_x, map_y full-res buffers (~91.6 MB VRAM saved).
+    """
+    # Cast src to float32 on CPU if it is not float32 (matches legacy remap behavior)
+    orig_dtype = None
+    if isinstance(src, np.ndarray) and src.dtype != np.float32:
+        orig_dtype = src.dtype
+        src_cpu = src.astype(np.float32)
+    elif hasattr(src, "dtype") and src.dtype != np.float32:
+        orig_dtype = src.dtype
+        src_cpu = src.cast(np.float32)
+    else:
+        src_cpu = src
+        if hasattr(src, "dtype"):
+            orig_dtype = src.dtype
+        else:
+            orig_dtype = np.float32
+
+    is_gpu_src = isinstance(src_cpu, TaichiGPUBuffer)
+    is_gpu_flow = isinstance(flow, TaichiGPUBuffer)
+    src_buf = src_cpu if is_gpu_src else engine.upload(src_cpu)
+    if is_gpu_flow:
+        flow_buf = flow
+    else:
+        # Bypass engine.upload auto-detect bug for (H, W, 2) flow array by using direct allocation
+        flow_buf = engine.allocate(flow.shape, dtype=np.float32, is_vector=False, host_accessible=True)
+        from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import _LIB, _RUNTIME
+        _LIB.write_to_gpu_buffer(_RUNTIME, flow_buf.handle, np.ascontiguousarray(flow, dtype=np.float32).ctypes.data, flow_buf.nbytes)
+
+    h_src, w_src = src_buf.shape[:2]
+    h_flow, w_flow = flow_buf.shape[:2]
+    is_3d = len(src_buf.shape) == 3
+    c_count = src_buf.shape[2] if is_3d else 1
+
+    src_cast = src_buf
+    target_dtype = np.float32
+    graph_name = "remap_with_flow_f32_3d" if is_3d else "remap_with_flow_f32_2d"
+
+    # Output buffer determination (allocate intermediate float32 buffer)
+    if dst is None:
+        dst_shape = (full_h, full_w, c_count) if is_3d else (full_h, full_w)
+        dst_buf = engine.allocate(dst_shape, dtype=np.float32, is_vector=is_3d)
+    else:
+        if dst.dtype == np.float32:
+            dst_buf = dst
+        else:
+            dst_buf = engine.allocate(dst.shape, dtype=np.float32, is_vector=is_3d)
+
+    # Input view for 3d vector graphs
+    src_v = src_cast
+    dst_v = dst_buf
+    if is_3d:
+        src_v = src_cast if getattr(src_cast, "is_vector", False) else src_cast.view_as_vector(True)
+        dst_v = dst_buf if getattr(dst_buf, "is_vector", False) else dst_buf.view_as_vector(True)
+
+    scale_x = float(full_w) / float(w_flow)
+    scale_y = float(full_h) / float(h_flow)
+
+    # Run AOT Graph (always float32 for interpolation precision)
+    _mod("remap").run(
+        graph_name,
+        src=src_v,
+        flow=flow_buf,
+        dst=dst_v,
+        h_src=int(h_src),
+        w_src=int(w_src),
+        h_dst=int(full_h),
+        w_dst=int(full_w),
+        h_flow=int(h_flow),
+        w_flow=int(w_flow),
+        scale_x=float(scale_x),
+        scale_y=float(scale_y),
+    )
+
+    # Sync
+    engine.sync()
+    
+    # Clean up intermediate casts and uploads
+    if src_cast is not src_buf:
+        src_cast.release()
+    if not is_gpu_src:
+        src_buf.release()
+    if not is_gpu_flow:
+        flow_buf.release()
+
+    # Cast back to original dtype or download with CPU fallback
+    if return_gpu:
+        if dst is not None and dst is not dst_buf:
+            from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.common import copy_field
+            copy_field(dst_buf, dst)
+            dst_buf.release()
+            return dst
+        return dst_buf
+    else:
+        # Download f32 from GPU first, then cast on CPU to avoid Vulkan u16/i16 host-mapping restrictions or .cast failures
+        res_f32 = dst_buf.to_numpy()
+        dst_buf.release()
+        
+        if orig_dtype != np.float32:
+            if np.issubdtype(orig_dtype, np.integer):
+                res_np = np.clip(res_f32, np.iinfo(orig_dtype).min, np.iinfo(orig_dtype).max).astype(orig_dtype)
+            else:
+                res_np = res_f32.astype(orig_dtype)
+        else:
+            res_np = res_f32
+            
+        if dst is not None:
+            dst[:] = res_np
+            return dst
+        return res_np
+
+
+
 def smooth_flow_gpu(flow, sigma=1.0, kernel_size=5, dst=None):
     """Gaussian blur a 2-channel flow field (H, W, 2) entirely on GPU.
 
@@ -1671,6 +1786,27 @@ def hamilton_demosaic_3channel(
     return dst_buf if return_gpu else dst_buf.to_numpy()
 
 
+def rotate_by_flip(img: np.ndarray, flip: int) -> np.ndarray:
+    """Rotates a numpy array according to the LibRaw/rawpy sizes.flip value."""
+    if flip == 0:
+        return img
+    elif flip == 1:
+        return np.fliplr(img)
+    elif flip == 2:
+        return np.rot90(img, 2)
+    elif flip == 3:
+        return np.rot90(img, 2)
+    elif flip == 4:
+        return np.fliplr(np.rot90(img, 1))
+    elif flip == 5:
+        return np.rot90(img, 1)
+    elif flip == 6:
+        return np.rot90(img, 3)
+    elif flip == 7:
+        return np.fliplr(np.rot90(img, 3))
+    return img
+
+
 def demosaic(
     raw_input,
     wb_r=None, wb_g1=None, wb_b=None, wb_g2=None, cmatrix=None,
@@ -1714,6 +1850,7 @@ def demosaic(
         Either a loaded rawpy object, a file path to a DNG/RAW image, or a raw Bayer NumPy array.
     """
     bayer = raw_input
+    flip = 0
     
     # Check if raw_input is a filepath string or rawpy object
     is_rawpy_obj = hasattr(raw_input, "raw_image")
@@ -1748,9 +1885,11 @@ def demosaic(
             return b_np, wb_np[0], wb_np[1], wb_np[2], wb_np[3], cm, bl, wl, c_00, c_01, c_10, c_11
             
         if is_rawpy_obj:
+            flip = getattr(raw_input.sizes, "flip", 0)
             bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix, black_level, white_level, c00, c01, c10, c11 = _extract_from_raw(raw_input)
         else:
             with rawpy.imread(raw_input) as raw:
+                flip = getattr(raw.sizes, "flip", 0)
                 bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix, black_level, white_level, c00, c01, c10, c11 = _extract_from_raw(raw)
         
         # Store active cmatrix in engine singleton for downstream gamma proxy color space alignment transformations
@@ -1800,6 +1939,8 @@ def demosaic(
                 bgr_u16_cpu = bgr_u16_gpu.to_numpy()
                 bgr_u16_gpu.release()
                 bgr_i32_gpu.release()
+                if flip != 0:
+                    bgr_u16_cpu = rotate_by_flip(bgr_u16_cpu, flip)
                 return bgr_u16_cpu
             else:
                 engine.sync()
@@ -1807,35 +1948,50 @@ def demosaic(
                 bgr_i32_gpu.release()
                 return bgr_u16_gpu
         else:
-            return hamilton_demosaic(
+            res = hamilton_demosaic(
                 bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
                 black_level, white_level, c00, c01, c10, c11,
                 return_gpu=return_gpu, dst=dst
             )
+            if not return_gpu and flip != 0:
+                res = rotate_by_flip(res, flip)
+            return res
     elif method_lower in ("hamilton-1channel", "hamilton-1ch", "ha-1ch"):
-        return hamilton_demosaic_1channel(
+        res = hamilton_demosaic_1channel(
             bayer, wb_r, wb_g1, wb_b, wb_g2,
             black_level, white_level, c00, c01, c10, c11,
             return_gpu=return_gpu, dst=dst
         )
+        if not return_gpu and flip != 0:
+            res = rotate_by_flip(res, flip)
+        return res
     elif method_lower in ("hamilton-half-res", "hamilton-half", "ha-half-res", "ha-half", "half-res"):
-        return hamilton_demosaic_half_res(
+        res = hamilton_demosaic_half_res(
             bayer, wb_r, wb_g1, wb_b, wb_g2,
             black_level, white_level, c00, c01, c10, c11,
             return_gpu=return_gpu, dst=dst
         )
+        if not return_gpu and flip != 0:
+            res = rotate_by_flip(res, flip)
+        return res
     elif method_lower in ("hamilton-rgb-half-res", "hamilton-rgb-half", "ha-rgb-half-res", "rgb-half-res"):
-        return hamilton_demosaic_rgb_half_res(
+        res = hamilton_demosaic_rgb_half_res(
             bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
             black_level, white_level, c00, c01, c10, c11,
             return_gpu=return_gpu, dst=dst
         )
+        if not return_gpu and flip != 0:
+            res = rotate_by_flip(res, flip)
+        return res
     elif method_lower in ("hamilton-3channel", "hamilton-3ch", "ha-3ch"):
-        return hamilton_demosaic_3channel(
+        res = hamilton_demosaic_3channel(
             bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
             black_level, white_level, c00, c01, c10, c11,
             return_gpu=return_gpu, dst=dst
         )
+        if not return_gpu and flip != 0:
+            res = rotate_by_flip(res, flip)
+        return res
     else:
         supported = [
             "'hamilton' (aliases: 'hamilton-adams', 'ha', 'ppg')",
