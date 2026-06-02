@@ -8,13 +8,26 @@ OpenCV's CPU phaseCorrelate.
 
 import numpy as np
 
+import os
+import importlib
+
+TAICHI_AVAILABLE = False
+ti = None
+tm = None
+
+if os.environ.get("AOT_MODE", "1") == "0":
+    try:
+        ti = importlib.import_module("taichi")
+        TAICHI_AVAILABLE = True
+    except ImportError:
+        pass
+
 try:
-    import taichi as ti
-    from .taichi_worker import ti_thread, TAICHI_AVAILABLE
+    from .taichi_worker import ti_thread
     from . import common
     from . import fft
 except ImportError:
-    TAICHI_AVAILABLE = False
+    pass
 
 
 if TAICHI_AVAILABLE:
@@ -86,6 +99,10 @@ def phase_correlation(
         (dx, dy, response)
         where response is the correlation peak value [0.0, 1.0].
     """
+    if os.environ.get("AOT_MODE", "1") == "1":
+        from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+        return taichi_aot.phase_correlation(ref_layer, comp_layer)
+
     if not TAICHI_AVAILABLE:
         raise RuntimeError("Taichi is not available")
 

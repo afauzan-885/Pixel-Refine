@@ -131,7 +131,8 @@ def _init_aot_bridge():
         
         # Add Taichi runtime bin for DLL resolution
         try:
-            import taichi as ti
+            import importlib
+            ti = importlib.import_module("taichi")
             ti_root = os.path.dirname(ti.__file__)
             ti_bin = os.path.join(ti_root, "_lib", "c_api", "bin")
             if os.path.exists(ti_bin): os.add_dll_directory(ti_bin)

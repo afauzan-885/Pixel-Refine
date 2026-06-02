@@ -3,17 +3,26 @@
 
 import numpy as np
 
+import os
+import importlib
+
+TAICHI_AVAILABLE = False
+ti = None
+tm = None
+
+if os.environ.get("AOT_MODE", "1") == "0":
+    try:
+        ti = importlib.import_module("taichi")
+        tm = importlib.import_module("taichi.math")
+        TAICHI_AVAILABLE = True
+    except ImportError:
+        pass
+
 try:
-    import taichi as ti
-    import taichi.math as tm
     from . import common
     from .taichi_worker import ti_thread
-
-    TAICHI_AVAILABLE = True
 except ImportError:
-    TAICHI_AVAILABLE = False
-    ti = None
-    tm = None
+    pass
 
 if TAICHI_AVAILABLE:
 
@@ -138,6 +147,10 @@ def median_filter(
     src, dst=None, kernel_size: int = 3, buffer_provider="pool", enable_tiling=True
 ):
     """Supports both NumPy and Taichi ndarrays."""
+    if os.environ.get("AOT_MODE", "1") == "1":
+        from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+        return taichi_aot.median_filter(src, return_gpu=hasattr(src, "to_numpy"))
+
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
     if kernel_size != 3:
@@ -181,6 +194,10 @@ def median_filter_flow(
     src, dst=None, kernel_size: int = 3, buffer_provider="pool", enable_tiling=True
 ):
     """Supports both NumPy and Taichi ndarrays."""
+    if os.environ.get("AOT_MODE", "1") == "1":
+        from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+        return taichi_aot.median_filter(src, return_gpu=hasattr(src, "to_numpy"))
+
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
     if kernel_size != 3:

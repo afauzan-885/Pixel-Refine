@@ -4,17 +4,26 @@
 import numpy as np
 import os
 
+import os
+import importlib
+
+TAICHI_AVAILABLE = False
+ti = None
+tm = None
+
+if os.environ.get("AOT_MODE", "1") == "0":
+    try:
+        ti = importlib.import_module("taichi")
+        tm = importlib.import_module("taichi.math")
+        TAICHI_AVAILABLE = True
+    except ImportError:
+        pass
+
 try:
-    import taichi as ti
-    import taichi.math as tm
     from . import common
     from .taichi_worker import ti_thread
-
-    TAICHI_AVAILABLE = True
 except ImportError:
-    TAICHI_AVAILABLE = False
-    ti = None
-    tm = None
+    pass
 
 if TAICHI_AVAILABLE:
 
@@ -160,10 +169,11 @@ def compute_gaussian_weights(sigma, radius):
 
 @ti_thread
 def gaussian_blur(src, dst=None, sigma=1.0, kernel_size=None, buffer_provider="pool", **kwargs):
-    if not TAICHI_AVAILABLE: raise ImportError("Taichi not available")
-    if os.environ.get("PIXEL_REFINE_AOT_MODE") == "1":
+    if os.environ.get("AOT_MODE", "1") == "1":
         from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
         return taichi_aot.gaussian_blur(src, sigma=sigma, kernel_size=kernel_size, return_gpu=True)
+
+    if not TAICHI_AVAILABLE: raise ImportError("Taichi not available")
 
     if kernel_size is None or kernel_size <= 0:
         radius = int(np.ceil(3 * sigma))

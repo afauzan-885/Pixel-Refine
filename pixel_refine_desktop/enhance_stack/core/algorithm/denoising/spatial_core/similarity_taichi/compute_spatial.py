@@ -1,15 +1,43 @@
-import taichi as ti
 import numpy as np
 import os
 import shutil
 import zipfile
 import sys
+import importlib
 
-# Support running directly or as a module
-if __name__ == "__main__" or __package__ is None:
-    from block_matching import calculate_hybrid_gradient_optimized, calculate_match_confidence
+# If run directly for compilation, force JIT mode
+if __name__ == "__main__":
+    os.environ["AOT_MODE"] = "0"
+
+TAICHI_AVAILABLE = False
+ti = None
+
+if os.environ.get("AOT_MODE", "1") == "0":
+    try:
+        ti = importlib.import_module("taichi")
+        TAICHI_AVAILABLE = True
+    except ImportError:
+        pass
+
+calculate_hybrid_gradient_optimized = None
+calculate_match_confidence = None
+
+if TAICHI_AVAILABLE:
+    # Support running directly or as a module
+    if __name__ == "__main__" or __package__ is None:
+        from block_matching import calculate_hybrid_gradient_optimized, calculate_match_confidence
+    else:
+        from .block_matching import calculate_hybrid_gradient_optimized, calculate_match_confidence
 else:
-    from .block_matching import calculate_hybrid_gradient_optimized, calculate_match_confidence
+    class DummyTi:
+        i32 = "int"
+        f32 = "float"
+        def kernel(self, f): return f
+        def func(self, f): return f
+        class Types:
+            def ndarray(self, *args, **kwargs): return "ndarray"
+        types = Types()
+    ti = DummyTi()
 
 @ti.kernel
 def equalize_brightness_kernel(
@@ -183,6 +211,8 @@ def accumulate_spatial_merging_kernel(
             final_image_sum[i, j, c] += current_image_full[i, j, c] * w_val
 
 def compile_spatial_tcm():
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi is not available")
     print(f"\n>>> Compiling SPATIAL MERGING AOT for Vulkan")
     ti.init(arch=ti.vulkan, offline_cache=False)
 

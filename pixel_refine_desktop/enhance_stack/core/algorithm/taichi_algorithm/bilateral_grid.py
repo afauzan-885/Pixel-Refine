@@ -8,15 +8,26 @@ Refactored for AOT compatibility with split kernels.
 
 import numpy as np
 
+import os
+import importlib
+
+TAICHI_AVAILABLE = False
+ti = None
+tm = None
+
+if os.environ.get("AOT_MODE", "1") == "0":
+    try:
+        ti = importlib.import_module("taichi")
+        tm = importlib.import_module("taichi.math")
+        TAICHI_AVAILABLE = True
+    except ImportError:
+        pass
+
 try:
-    import taichi as ti
-    import taichi.math as tm
     from . import common
     from .taichi_worker import ti_thread
-    TAICHI_AVAILABLE = True
 except ImportError:
-    TAICHI_AVAILABLE = False
-    ti = None; tm = None; common = None
+    pass
 
 if TAICHI_AVAILABLE:
 
@@ -149,7 +160,22 @@ if TAICHI_AVAILABLE:
 
 @ti_thread
 def bilateral_grid_filter(img, dst=None, s_s=16, s_r=16, sigma_s=1.0, sigma_r=1.0):
-    """JIT wrapper for the new split-kernel architecture (for compatibility and testing)."""
+    if os.environ.get("AOT_MODE", "1") == "1":
+        from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+        preset = "medium"
+        if s_s <= 8: preset = "heavy"
+        elif s_s >= 32: preset = "light"
+        res_gpu = taichi_aot.bilateral_grid_filter(img, preset=preset, return_gpu=hasattr(img, "to_numpy"))
+        if dst is not None:
+            if isinstance(dst, np.ndarray) and not isinstance(res_gpu, np.ndarray):
+                dst[:] = res_gpu.to_numpy()
+            else:
+                dst[:] = res_gpu
+            return dst
+        return res_gpu
+
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
     h, w = img.shape[:2]
     gn, gm, gl = (h + s_s - 1) // s_s + 1, (w + s_s - 1) // s_s + 1, 256 // s_r + 1
     

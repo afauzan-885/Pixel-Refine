@@ -390,7 +390,7 @@ if __name__ == "__main__":
             process.wait()
     else:
         # This is the subprocess running the actual logic
-        os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
+        os.environ["AOT_MODE"] = "1"
         from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
 
         run_comprehensive_test()

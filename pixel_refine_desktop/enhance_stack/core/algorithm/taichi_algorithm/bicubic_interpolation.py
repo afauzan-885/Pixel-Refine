@@ -1,7 +1,23 @@
 import numpy as np
-import taichi as ti
-import taichi.math as tm
-from .taichi_worker import ti_thread, TAICHI_AVAILABLE
+import os
+import importlib
+
+TAICHI_AVAILABLE = False
+ti = None
+tm = None
+
+if os.environ.get("AOT_MODE", "1") == "0":
+    try:
+        ti = importlib.import_module("taichi")
+        tm = importlib.import_module("taichi.math")
+        TAICHI_AVAILABLE = True
+    except ImportError:
+        pass
+
+try:
+    from .taichi_worker import ti_thread
+except ImportError:
+    pass
 
 if TAICHI_AVAILABLE:
     # ... (Kernels remain the same but will be executed via @ti_thread)
@@ -282,6 +298,10 @@ def bicubic_resize(
     Returns:
         Resized image (same type as input unless dst is provided)
     """
+    if os.environ.get("AOT_MODE", "1") == "1":
+        from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+        return taichi_aot.resize(src, (target_w, target_h), interpolation=taichi_aot.INTER_CUBIC, return_gpu=hasattr(src, "to_numpy"), dst=dst)
+
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
@@ -412,3 +432,7 @@ def sample_at(img, x, y, channel=None):
 # Legacy alias
 def bicubic_resize_gpu(src_gpu, target_h: int, target_w: int, dst_gpu=None):
     return bicubic_resize(src_gpu, target_h, target_w, dst_gpu)
+
+if not TAICHI_AVAILABLE:
+    def cubic_hermite(*args, **kwargs):
+        raise ImportError("Taichi JIT is not available")

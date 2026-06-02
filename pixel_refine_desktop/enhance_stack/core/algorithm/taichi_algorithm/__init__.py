@@ -3,7 +3,15 @@
 # API Style: OpenCV-like (ta.resize, ta.median, ta.sobel, etc.)
 
 import numpy as np
-import taichi as ti
+import os
+import importlib
+
+ti = None
+if os.environ.get("AOT_MODE", "1") == "0":
+    try:
+        ti = importlib.import_module("taichi")
+    except ImportError:
+        pass
 
 # --- Core Imports ---
 from . import common
@@ -57,7 +65,10 @@ def _process_generic(func, src, *args, **kwargs):
     Generic wrapper to handle Single-Channel (H, W) and Multi-Channel (H, W, C).
     Applies 'func' to each channel independently if input is multi-channel.
     """
-    if not isinstance(src, (np.ndarray, ti.Field, ti.MatrixField)):
+    is_taichi_field = False
+    if ti is not None:
+        is_taichi_field = isinstance(src, (ti.Field, ti.MatrixField))
+    if not isinstance(src, np.ndarray) and not is_taichi_field:
         # Try to handle as generic sequence if needed, but usually we expect numpy/taichi
         pass
 
@@ -68,13 +79,8 @@ def _process_generic(func, src, *args, **kwargs):
         return func(src, *args, **kwargs)
 
     # --- Multi-Channel Handling ---
-
-    # 1. Upload to GPU if Numpy (for efficient splitting on GPU)
-    # We use common.ensure_taichi_field.
-    # Note: func() likely calls ensure_taichi_field inside, but we want to split *before* calling func
-    # if func doesn't support 3D.
-
-    # Assuming 'func' works on 2D fields.
+    if ti is None:
+        raise ImportError("Taichi is not available for JIT multi-channel processing")
 
     src_gpu, src_is_temp = common.ensure_taichi_field(src, dtype=ti.f32)
     h, w = shape[:2]

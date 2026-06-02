@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import psutil
 from .spatial_pipeline import process_in_cpu, process_in_gpu
@@ -119,8 +120,9 @@ class SpatialFusionProcessor:
             col_starts = np.append(col_starts, work_res_w - tile_w)
         col_starts = np.ascontiguousarray(np.unique(col_starts).astype(np.int32))
 
+        is_aot = os.environ.get("AOT_MODE", "1") == "1"
         if process_in is None or process_in == "auto":
-            process_in = "gpu" if TAICHI_SPATIAL_AVAILABLE else "cpu"
+            process_in = "gpu" if (TAICHI_SPATIAL_AVAILABLE or is_aot) else "cpu"
 
         # 2. Execute Backend
         backend_args = {
@@ -157,7 +159,7 @@ class SpatialFusionProcessor:
             **unused_kwargs,
         }
 
-        if process_in == "gpu" and TAICHI_SPATIAL_AVAILABLE:
+        if process_in == "gpu" and (TAICHI_SPATIAL_AVAILABLE or is_aot):
             res = process_in_gpu(**backend_args)
         else:
             res = process_in_cpu(**backend_args)
@@ -173,7 +175,7 @@ class SpatialFusionProcessor:
         if processed_frames > 0 and return_raw:
             return (final_sum_img, sum_weight_full, processed_frames)
 
-        if process_in == "gpu" and TAICHI_SPATIAL_AVAILABLE:
+        if process_in == "gpu" and (TAICHI_SPATIAL_AVAILABLE or is_aot):
             # Division already completed on GPU, final_sum_img contains the finalized image
             final_image = final_sum_img
         else:

@@ -10,7 +10,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 # Enable AOT Mode
-os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
+os.environ["AOT_MODE"] = "1"
 
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.alignment_core import perform_image_alignment
 from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import AOTEngine

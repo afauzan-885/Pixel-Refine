@@ -6,16 +6,25 @@ Sobel and Laplacian edge detection.
 
 import numpy as np
 
-try:
-    import taichi as ti
-    import taichi.math as tm
-    from . import common
+import os
+import importlib
 
-    TAICHI_AVAILABLE = True
+TAICHI_AVAILABLE = False
+ti = None
+tm = None
+
+if os.environ.get("AOT_MODE", "1") == "0":
+    try:
+        ti = importlib.import_module("taichi")
+        tm = importlib.import_module("taichi.math")
+        TAICHI_AVAILABLE = True
+    except ImportError:
+        pass
+
+try:
+    from . import common
 except ImportError:
-    TAICHI_AVAILABLE = False
-    ti = None
-    tm = None
+    pass
 
 if TAICHI_AVAILABLE:
 
@@ -126,12 +135,7 @@ def sobel(src, dst_dx=None, dst_dy=None, buffer_provider="pool", enable_tiling=T
     Returns (dx, dy).
     Caller responsible for releasing if pool used.
     """
-    if not TAICHI_AVAILABLE:
-        raise ImportError("Taichi not available")
-
-    # --- AOT ROUTING ---
-    import os
-    if os.environ.get("PIXEL_REFINE_AOT_MODE") == "1":
+    if os.environ.get("AOT_MODE", "1") == "1":
         from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
         dx, dy = taichi_aot.sobel(src, return_gpu=True)
         # Handle copying if user passed specific dst_dx/dy or needs numpy (fallback logic)
@@ -140,6 +144,9 @@ def sobel(src, dst_dx=None, dst_dy=None, buffer_provider="pool", enable_tiling=T
             return dx, dy
         else:
             return dx.to_numpy(), dy.to_numpy()
+
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
 
     # OOM Guard Trigger
     from . import oom_guard
@@ -194,17 +201,15 @@ def laplacian(src, dst=None, buffer_provider="pool", enable_tiling=True):
     """
     Compute Laplacian.
     """
-    if not TAICHI_AVAILABLE:
-        raise ImportError("Taichi not available")
-
-    # --- AOT ROUTING ---
-    import os
-    if os.environ.get("PIXEL_REFINE_AOT_MODE") == "1":
+    if os.environ.get("AOT_MODE", "1") == "1":
         from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
         res = taichi_aot.laplacian(src, return_gpu=True)
         if dst is None:
             return res
         return res.to_numpy()
+
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
 
     # OOM Guard Trigger
     if enable_tiling and isinstance(src, np.ndarray) and src.size > 2048 * 2048 * 3:

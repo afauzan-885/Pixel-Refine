@@ -8,13 +8,29 @@ import numpy as np
 import math
 import os
 
+import importlib
+
+TAICHI_AVAILABLE = False
+ti = None
+tm = None
+
+if os.environ.get("AOT_MODE", "1") == "0":
+    try:
+        ti = importlib.import_module("taichi")
+        tm = importlib.import_module("taichi.math")
+        TAICHI_AVAILABLE = True
+    except ImportError:
+        pass
+
 try:
-    import taichi as ti
-    import taichi.math as tm
-    from .taichi_worker import ti_thread, TAICHI_AVAILABLE
     from . import common
 except ImportError:
-    TAICHI_AVAILABLE = False
+    pass
+
+if TAICHI_AVAILABLE:
+    from .taichi_worker import ti_thread
+else:
+    ti_thread = lambda f: f
 
 if TAICHI_AVAILABLE:
     # Use explicit vector NDArray type for AOT compatibility
@@ -141,6 +157,8 @@ def _next_power_of_two(n):
 
 @ti_thread
 def fft_1d_gpu(data_gpu, is_inverse=False, is_col=False):
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi is not available")
     h, w = data_gpu.shape
     n = h if is_col else w
     bits = int(math.log2(n))
@@ -155,9 +173,11 @@ def fft_1d_gpu(data_gpu, is_inverse=False, is_col=False):
 
 @ti_thread
 def fft2(src):
-    if os.environ.get("PIXEL_REFINE_AOT_MODE") == "1":
+    if os.environ.get("AOT_MODE", "1") == "1":
         from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
         return taichi_aot.fft2(src)
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi is not available")
     src_gpu, is_temp = common.ensure_taichi_field(src, dtype=ti.f32)
     h, w = src_gpu.shape[:2]
     target_h, target_w = _next_power_of_two(h), _next_power_of_two(w)
@@ -170,9 +190,11 @@ def fft2(src):
 
 @ti_thread
 def ifft2(complex_gpu, target_shape=None):
-    if os.environ.get("PIXEL_REFINE_AOT_MODE") == "1":
+    if os.environ.get("AOT_MODE", "1") == "1":
         from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
         return taichi_aot.ifft2(complex_gpu, target_shape=target_shape)
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi is not available")
     fft_1d_gpu(complex_gpu, is_inverse=True, is_col=True)
     fft_1d_gpu(complex_gpu, is_inverse=True, is_col=False)
     h, w = complex_gpu.shape

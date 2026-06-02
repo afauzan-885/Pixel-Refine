@@ -10,14 +10,25 @@ Modes:
 
 import numpy as np
 
+import os
+import importlib
+
+TAICHI_AVAILABLE = False
+ti = None
+tm = None
+
+if os.environ.get("AOT_MODE", "1") == "0":
+    try:
+        ti = importlib.import_module("taichi")
+        tm = importlib.import_module("taichi.math")
+        TAICHI_AVAILABLE = True
+    except ImportError:
+        pass
+
 try:
-    import taichi as ti
-    import taichi.math as tm
     from . import common
-    TAICHI_AVAILABLE = True
 except ImportError:
-    TAICHI_AVAILABLE = False
-    ti = None; tm = None; common = None
+    pass
 
 # --- Sigma Presets ---
 SIGMA_PRESETS = {
@@ -304,106 +315,89 @@ if TAICHI_AVAILABLE:
     _JBF_3CH_KERNELS  = {1: _jbf_3ch_r1,  2: _jbf_3ch_r2,  3: _jbf_3ch_r3}
     _JBF_FLOW_KERNELS = {1: _jbf_flow_r1, 2: _jbf_flow_r2, 3: _jbf_flow_r3}
 
-    def joint_bilateral_filter(src, guide, preset="medium", radius=2, buffer_provider="pool"):
-        """
-        General-purpose Joint Bilateral Filter.
+def joint_bilateral_filter(src, guide, preset="medium", radius=2, buffer_provider="pool"):
+    """
+    General-purpose Joint Bilateral Filter.
+    """
+    if os.environ.get("AOT_MODE", "1") == "1":
+        from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+        return taichi_aot.joint_bilateral_filter(src, guide, preset=preset, radius=radius, return_gpu=hasattr(src, "to_numpy"))
 
-        Args:
-            src    : (H,W), (H,W,3), or (H,W,2) — grayscale, RGB, or flow field (f32)
-            guide  : (H,W) or (H,W,3) — guidance image (any dtype, auto-converted to gray f32)
-            preset : "low" | "medium" | "high" — smoothing strength
-            radius : 1 (3×3) | 2 (5×5, default) | 3 (7×7)
-
-        Returns:
-            Filtered output. Same type as input (taichi or numpy).
-        """
-        if not TAICHI_AVAILABLE:
-            raise ImportError("Taichi not available")
-
-        is_numpy = not hasattr(src, 'to_numpy')
-        src_gpu, src_is_temp = common.ensure_taichi_field(src, dtype=ti.f32,
-                                                           buffer_provider=buffer_provider)
-        guide_gpu, guide_is_temp = _prepare_guide(guide, buffer_provider)
-
-        h, w = src_gpu.shape[:2]
-        ndim = len(src_gpu.shape)
-        inv_2ss2, inv_2sr2 = _get_sigma_args(preset)
-
-        r = radius if radius in (1, 2, 3) else 2
-
-        if ndim == 2:
-            dst_gpu = common.get_temp_buffer((h, w), ti.f32, buffer_provider)
-            _JBF_1CH_KERNELS[r](src_gpu, guide_gpu, dst_gpu, h, w, inv_2ss2, inv_2sr2)
-        elif src_gpu.shape[2] == 3:
-            dst_gpu = common.get_temp_buffer((h, w, 3), ti.f32, buffer_provider)
-            _JBF_3CH_KERNELS[r](src_gpu, guide_gpu, dst_gpu, h, w, inv_2ss2, inv_2sr2)
-        else:  # flow (2ch)
-            dst_gpu = common.get_temp_buffer((h, w, 2), ti.f32, buffer_provider)
-            _JBF_FLOW_KERNELS[r](src_gpu, guide_gpu, dst_gpu, h, w, inv_2ss2, inv_2sr2)
-
-        if guide_is_temp: common.release_temp_buffer(guide_gpu)
-        if src_is_temp:   common.release_temp_buffer(src_gpu)
-
-        if is_numpy:
-            res = dst_gpu.to_numpy()
-            common.release_temp_buffer(dst_gpu)
-            return res
-        return dst_gpu
-
-    def joint_bilateral_upsample(src_low, guide_hi, preset="medium", buffer_provider="pool"):
-        """
-        Joint Bilateral Upsampling (JBLU).
-        Upsamples src_low to the resolution of guide_hi with edge-aware interpolation.
-
-        Args:
-            src_low  : (h,w), (h,w,3), or (h,w,2) flow — LOW-RES source
-            guide_hi : (H,W) or (H,W,3) — HIGH-RES guidance (auto-converted to gray)
-            preset   : "low" | "medium" | "high"
-
-        Returns:
-            Upsampled output at (H, W) resolution. Same channel count as src_low.
-        """
-        if not TAICHI_AVAILABLE:
-            raise ImportError("Taichi not available")
-
-        is_numpy = not hasattr(src_low, 'to_numpy')
-        src_gpu, src_is_temp = common.ensure_taichi_field(src_low, dtype=ti.f32,
-                                                           buffer_provider=buffer_provider)
-        guide_gpu, guide_is_temp = _prepare_guide(guide_hi, buffer_provider)
-
-        h_low, w_low = src_gpu.shape[:2]
-        H, W = guide_gpu.shape[:2]
-        scale_y = float(H) / float(h_low)
-        scale_x = float(W) / float(w_low)
-        ndim = len(src_gpu.shape)
-        inv_2ss2, inv_2sr2 = _get_sigma_args(preset)
-
-        if ndim == 2:
-            dst_gpu = common.get_temp_buffer((H, W), ti.f32, buffer_provider)
-            _jblu_1ch_r2(src_gpu, guide_gpu, dst_gpu,
-                         h_low, w_low, H, W, inv_2ss2, inv_2sr2)
-        elif src_gpu.shape[2] == 3:
-            dst_gpu = common.get_temp_buffer((H, W, 3), ti.f32, buffer_provider)
-            _jblu_3ch_r2(src_gpu, guide_gpu, dst_gpu,
-                         h_low, w_low, H, W, inv_2ss2, inv_2sr2)
-        else:  # flow (2ch)
-            dst_gpu = common.get_temp_buffer((H, W, 2), ti.f32, buffer_provider)
-            _jblu_flow_r2(src_gpu, guide_gpu, dst_gpu,
-                          h_low, w_low, H, W, inv_2ss2, inv_2sr2,
-                          scale_y, scale_x)
-
-        if guide_is_temp: common.release_temp_buffer(guide_gpu)
-        if src_is_temp:   common.release_temp_buffer(src_gpu)
-
-        if is_numpy:
-            res = dst_gpu.to_numpy()
-            common.release_temp_buffer(dst_gpu)
-            return res
-        return dst_gpu
-
-else:
-    def joint_bilateral_filter(*args, **kwargs):
+    if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
-    def joint_bilateral_upsample(*args, **kwargs):
+    is_numpy = not hasattr(src, 'to_numpy')
+    src_gpu, src_is_temp = common.ensure_taichi_field(src, dtype=ti.f32,
+                                                       buffer_provider=buffer_provider)
+    guide_gpu, guide_is_temp = _prepare_guide(guide, buffer_provider)
+
+    h, w = src_gpu.shape[:2]
+    ndim = len(src_gpu.shape)
+    inv_2ss2, inv_2sr2 = _get_sigma_args(preset)
+
+    r = radius if radius in (1, 2, 3) else 2
+
+    if ndim == 2:
+        dst_gpu = common.get_temp_buffer((h, w), ti.f32, buffer_provider)
+        _JBF_1CH_KERNELS[r](src_gpu, guide_gpu, dst_gpu, h, w, inv_2ss2, inv_2sr2)
+    elif src_gpu.shape[2] == 3:
+        dst_gpu = common.get_temp_buffer((h, w, 3), ti.f32, buffer_provider)
+        _JBF_3CH_KERNELS[r](src_gpu, guide_gpu, dst_gpu, h, w, inv_2ss2, inv_2sr2)
+    else:  # flow (2ch)
+        dst_gpu = common.get_temp_buffer((h, w, 2), ti.f32, buffer_provider)
+        _JBF_FLOW_KERNELS[r](src_gpu, guide_gpu, dst_gpu, h, w, inv_2ss2, inv_2sr2)
+
+    if guide_is_temp: common.release_temp_buffer(guide_gpu)
+    if src_is_temp:   common.release_temp_buffer(src_gpu)
+
+    if is_numpy:
+        res = dst_gpu.to_numpy()
+        common.release_temp_buffer(dst_gpu)
+        return res
+    return dst_gpu
+
+def joint_bilateral_upsample(src_low, guide_hi, preset="medium", buffer_provider="pool"):
+    """
+    Joint Bilateral Upsampling (JBLU).
+    """
+    if os.environ.get("AOT_MODE", "1") == "1":
+        from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+        return taichi_aot.joint_bilateral_upsample(src_low, guide_hi, preset=preset, return_gpu=hasattr(src_low, "to_numpy"))
+
+    if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
+
+    is_numpy = not hasattr(src_low, 'to_numpy')
+    src_gpu, src_is_temp = common.ensure_taichi_field(src_low, dtype=ti.f32,
+                                                       buffer_provider=buffer_provider)
+    guide_gpu, guide_is_temp = _prepare_guide(guide_hi, buffer_provider)
+
+    h_low, w_low = src_gpu.shape[:2]
+    H, W = guide_gpu.shape[:2]
+    scale_y = float(H) / float(h_low)
+    scale_x = float(W) / float(w_low)
+    ndim = len(src_gpu.shape)
+    inv_2ss2, inv_2sr2 = _get_sigma_args(preset)
+
+    if ndim == 2:
+        dst_gpu = common.get_temp_buffer((H, W), ti.f32, buffer_provider)
+        _jblu_1ch_r2(src_gpu, guide_gpu, dst_gpu,
+                     h_low, w_low, H, W, inv_2ss2, inv_2sr2)
+    elif src_gpu.shape[2] == 3:
+        dst_gpu = common.get_temp_buffer((H, W, 3), ti.f32, buffer_provider)
+        _jblu_3ch_r2(src_gpu, guide_gpu, dst_gpu,
+                     h_low, w_low, H, W, inv_2ss2, inv_2sr2)
+    else:  # flow (2ch)
+        dst_gpu = common.get_temp_buffer((H, W, 2), ti.f32, buffer_provider)
+        _jblu_flow_r2(src_gpu, guide_gpu, dst_gpu,
+                      h_low, w_low, H, W, inv_2ss2, inv_2sr2,
+                      scale_y, scale_x)
+
+    if guide_is_temp: common.release_temp_buffer(guide_gpu)
+    if src_is_temp:   common.release_temp_buffer(src_gpu)
+
+    if is_numpy:
+        res = dst_gpu.to_numpy()
+        common.release_temp_buffer(dst_gpu)
+        return res
+    return dst_gpu

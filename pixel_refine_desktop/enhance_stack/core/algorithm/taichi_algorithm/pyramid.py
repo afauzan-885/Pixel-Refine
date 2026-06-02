@@ -3,17 +3,26 @@
 import numpy as np
 import os
 
-try:
-    import taichi as ti
-    import taichi.math as tm
-    from . import common
-    from .taichi_worker import ti_thread, TAICHI_AVAILABLE
+import os
+import importlib
 
+TAICHI_AVAILABLE = False
+ti = None
+tm = None
+
+if os.environ.get("AOT_MODE", "1") == "0":
+    try:
+        ti = importlib.import_module("taichi")
+        tm = importlib.import_module("taichi.math")
+        TAICHI_AVAILABLE = True
+    except ImportError:
+        pass
+
+try:
+    from . import common
+    from .taichi_worker import ti_thread
 except ImportError:
-    TAICHI_AVAILABLE = False
-    ti = None
-    tm = None
-    ti_thread = lambda f: f  # No-op in case of no Taichi
+    pass
 
 MIN_PYRAMID_SIZE = 32
 
@@ -114,6 +123,10 @@ def build_image_pyramid(
     image: np.ndarray, n_levels: int = 4, min_size: int = MIN_PYRAMID_SIZE
 ) -> list:
     """CPU interface: Build image pyramid and return list of NumPy arrays."""
+    if os.environ.get("AOT_MODE", "1") == "1":
+        from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+        return [lvl.to_numpy() for lvl in taichi_aot.image_pyramid(image, levels=n_levels, return_gpu=True)]
+
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
@@ -147,13 +160,12 @@ def build_image_pyramid_gpu(
             - Others: Uses Bilinear interpolation.
         buffer_provider: "pool" or "new".
     """
+    if os.environ.get("AOT_MODE", "1") == "1":
+        from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+        return taichi_aot.image_pyramid(image_gpu, levels=n_levels, return_gpu=True)
+
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
-
-    # --- AOT ROUTING ---
-    if os.environ.get("PIXEL_REFINE_AOT_MODE") == "1":
-        from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
-        return taichi_aot.build_image_pyramid(image_gpu, n_levels=n_levels, min_size=min_size, return_gpu=True)
 
     pyramid = [image_gpu]
 
@@ -245,6 +257,17 @@ def upsample_flow(
     buffer_provider="pool",
 ) -> np.ndarray:
     """CPU interface: Upsample flow using NumPy input/output."""
+    if os.environ.get("AOT_MODE", "1") == "1":
+        from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import AOTEngine
+        engine = AOTEngine()
+        src_gpu = engine.upload(flow)
+        dst_gpu = engine.allocate((target_h, target_w, 2), dtype=np.float32)
+        upsample_flow_gpu(src_gpu, dst_gpu, scale)
+        res = dst_gpu.to_numpy()
+        src_gpu.destroy()
+        dst_gpu.destroy()
+        return res
+
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
@@ -270,6 +293,16 @@ def upsample_flow_gpu(
     scale: float | tuple[float, float] = 2.0,
 ):
     """GPU native interface: Upsample flow from one ti.ndarray to another."""
+    if os.environ.get("AOT_MODE", "1") == "1":
+        from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+        pyramid_mod = taichi_aot._mod("pyramid")
+        if isinstance(scale, (tuple, list)):
+            sx = scale[0]
+        else:
+            sx = scale
+        pyramid_mod.run("upsample_flow_f32", src=src_gpu, dst=dst_gpu, scale=float(sx))
+        return
+
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 

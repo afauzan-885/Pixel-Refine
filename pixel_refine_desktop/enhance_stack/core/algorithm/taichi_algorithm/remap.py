@@ -1,8 +1,24 @@
 """Remap (Image Warping) - Taichi GPU"""
 
 import numpy as np
-import taichi as ti
-from .taichi_worker import ti_thread, TAICHI_AVAILABLE
+import os
+import importlib
+
+TAICHI_AVAILABLE = False
+ti = None
+tm = None
+
+if os.environ.get("AOT_MODE", "1") == "0":
+    try:
+        ti = importlib.import_module("taichi")
+        TAICHI_AVAILABLE = True
+    except ImportError:
+        pass
+
+try:
+    from .taichi_worker import ti_thread
+except ImportError:
+    pass
 
 if TAICHI_AVAILABLE:
     from .common import bilinear_at, bilinear_at_3ch, bilinear_at_vec3
@@ -224,7 +240,7 @@ def remap(src, map_x, map_y, dst=None, buffer_provider="pool"):
         Warped image in the same format as input (NumPy or Taichi).
     """
     import os
-    if os.environ.get("PIXEL_REFINE_AOT_MODE") == "1":
+    if os.environ.get("AOT_MODE", "1") == "1":
         from .common import _get_aot
         aot = _get_aot()
         if aot and hasattr(aot, "remap"):
@@ -300,7 +316,7 @@ def remap_with_flow(src, flow, full_h, full_w, dst=None, buffer_provider="pool")
     All Taichi operations are synchronized via @ti_thread.
     """
     import os
-    if os.environ.get("PIXEL_REFINE_AOT_MODE") == "1":
+    if os.environ.get("AOT_MODE", "1") == "1":
         from .common import _get_aot
         aot = _get_aot()
         if aot and hasattr(aot, "remap_with_flow"):

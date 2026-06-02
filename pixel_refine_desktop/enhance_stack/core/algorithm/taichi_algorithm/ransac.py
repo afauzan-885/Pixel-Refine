@@ -9,16 +9,25 @@ Simple translation/affine model fitting with parallel inlier counting.
 
 import numpy as np
 
-try:
-    import taichi as ti
-    import taichi.math as tm
-    from . import common
+import os
+import importlib
 
-    TAICHI_AVAILABLE = True
+TAICHI_AVAILABLE = False
+ti = None
+tm = None
+
+if os.environ.get("AOT_MODE", "1") == "0":
+    try:
+        ti = importlib.import_module("taichi")
+        tm = importlib.import_module("taichi.math")
+        TAICHI_AVAILABLE = True
+    except ImportError:
+        pass
+
+try:
+    from . import common
 except ImportError:
-    TAICHI_AVAILABLE = False
-    ti = None
-    tm = None
+    pass
 
 
 if TAICHI_AVAILABLE:
@@ -312,6 +321,10 @@ def ransac_flow_cleanup(
     RANSAC-based outlier removal for optical flow.
     Supports both NumPy and Taichi ndarrays natively.
     """
+    if os.environ.get("AOT_MODE", "1") == "1":
+        from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+        return taichi_aot.ransac_flow_cleanup(flow, threshold=threshold, return_gpu=hasattr(flow, "to_numpy"))
+
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 

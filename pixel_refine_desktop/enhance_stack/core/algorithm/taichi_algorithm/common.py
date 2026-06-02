@@ -7,37 +7,44 @@ Shared functions for buffer management, type checking, and common operations.
 import numpy as np
 import threading
 
-try:
-    import taichi as ti
-    import taichi.math as tm
-    from .taichi_worker import ti_thread, TAICHI_AVAILABLE
+import os
+import importlib
 
-except ImportError:
-    TAICHI_AVAILABLE = False
-    from typing import Any
+TAICHI_AVAILABLE = False
+ti = None
+tm = None
 
-    ti: Any = None
-    tm: Any = None
+if os.environ.get("AOT_MODE", "1") == "0":
+    try:
+        ti = importlib.import_module("taichi")
+        tm = importlib.import_module("taichi.math")
+        TAICHI_AVAILABLE = True
+    except ImportError:
+        pass
+
+if not TAICHI_AVAILABLE:
     ti_thread = lambda f: f  # No-op in case of no Taichi
+else:
+    from .taichi_worker import ti_thread
+
+AOT_MODE = os.environ.get("AOT_MODE", "1") == "1"
+_AOT_ENGINE = None
+
+def _get_aot():
+    global _AOT_ENGINE
+    if _AOT_ENGINE is None:
+        try:
+            from . import taichi_aot
+            _AOT_ENGINE = taichi_aot
+        except (ImportError, ValueError):
+            try:
+                import pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot as taichi_aot
+                _AOT_ENGINE = taichi_aot
+            except ImportError:
+                pass
+    return _AOT_ENGINE
 
 if TAICHI_AVAILABLE:
-    import os
-    AOT_MODE = os.environ.get("PIXEL_REFINE_AOT_MODE") == "1"
-    _AOT_ENGINE = None
-
-    def _get_aot():
-        global _AOT_ENGINE
-        if _AOT_ENGINE is None:
-            try:
-                from . import taichi_aot
-                _AOT_ENGINE = taichi_aot
-            except (ImportError, ValueError):
-                try:
-                    import pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot as taichi_aot
-                    _AOT_ENGINE = taichi_aot
-                except ImportError:
-                    pass
-        return _AOT_ENGINE
 
     # --- Interpolation Utilities ---
     @ti.func
@@ -541,7 +548,7 @@ def _insert_channel_lowlevel(src, dst, channel):
 def split(img):
     """
     Split multi-channel image into tuple of single-channel images.
-    AOT-Aware: Dispatches to AOT module if PIXEL_REFINE_AOT_MODE=1
+    AOT-Aware: Dispatches to AOT module if AOT_MODE=1
     """
     if AOT_MODE:
         aot = _get_aot()
@@ -608,7 +615,7 @@ def split(img):
 def merge(channels):
     """
     Merge separate channels into multi-channel image.
-    AOT-Aware: Dispatches to AOT module if PIXEL_REFINE_AOT_MODE=1
+    AOT-Aware: Dispatches to AOT module if AOT_MODE=1
     """
     if AOT_MODE:
         aot = _get_aot()
@@ -682,7 +689,7 @@ def merge(channels):
 def extract_channel(img, ch):
     """
     Extract single channel from multi-channel image.
-    AOT-Aware: Dispatches to AOT module if PIXEL_REFINE_AOT_MODE=1
+    AOT-Aware: Dispatches to AOT module if AOT_MODE=1
     """
     if AOT_MODE:
         aot = _get_aot()
@@ -797,7 +804,7 @@ def insert_channel(src, dst, ch):
 def copy(img):
     """
     Copy image (auto-allocates output).
-    AOT-Aware: Dispatches to AOT module if PIXEL_REFINE_AOT_MODE=1
+    AOT-Aware: Dispatches to AOT module if AOT_MODE=1
     """
     if AOT_MODE:
         aot = _get_aot()
@@ -843,7 +850,7 @@ COLOR_GRAY2RGB = 8  # Gray to BGR/RGB is identical for grayscale
 def cvtColor(src, code, dst=None):
     """
     Convert image color space.
-    AOT-Aware: Dispatches to AOT module if PIXEL_REFINE_AOT_MODE=1
+    AOT-Aware: Dispatches to AOT module if AOT_MODE=1
     """
     if AOT_MODE:
         aot = _get_aot()

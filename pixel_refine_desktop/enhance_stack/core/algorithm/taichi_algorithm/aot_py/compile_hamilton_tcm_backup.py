@@ -1,3 +1,6 @@
+import os
+os.environ["AOT_MODE"] = "0"
+
 import taichi as ti
 import os
 import sys
@@ -9,7 +12,6 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 # Set AOT Mode
-os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
 
 # --- Define JIT Kernels for Compiler-Time only ---
 

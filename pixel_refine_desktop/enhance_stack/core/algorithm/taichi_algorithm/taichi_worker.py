@@ -16,19 +16,22 @@ import time
 import ctypes
 import numpy as np
 
-# Check if we are running an AOT compiler script
-_IS_AOT_MODE = any("aot" in arg.lower() or "compiler" in arg.lower() for arg in sys.argv) or os.environ.get("PIXEL_REFINE_AOT_MODE") == "1"
+# Check if we are running in AOT mode (default: yes)
+_IS_AOT_MODE = any("aot" in arg.lower() or "compiler" in arg.lower() for arg in sys.argv) or os.environ.get("AOT_MODE", "1") == "1"
 
 if not _IS_AOT_MODE:
     # Force stable CUDA context settings globally before any Taichi import
     os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
 
-try:
-    import taichi as ti
-
-    TAICHI_AVAILABLE = True
-except ImportError:
-    TAICHI_AVAILABLE = False
+TAICHI_AVAILABLE = False
+ti = None
+if os.environ.get("AOT_MODE", "1") == "0":
+    try:
+        import importlib
+        ti = importlib.import_module("taichi")
+        TAICHI_AVAILABLE = True
+    except ImportError:
+        pass
 
 
 # --- Cache Strategy ---

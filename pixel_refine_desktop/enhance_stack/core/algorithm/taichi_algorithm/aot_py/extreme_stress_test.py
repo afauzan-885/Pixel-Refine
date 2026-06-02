@@ -8,7 +8,7 @@ import sys
 project_root = "e:/APP Developer/Pixel Refine"
 sys.path.append(project_root)
 
-os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
+os.environ["AOT_MODE"] = "1"
 from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
 from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import AOTEngine, TaichiGPUBuffer
 

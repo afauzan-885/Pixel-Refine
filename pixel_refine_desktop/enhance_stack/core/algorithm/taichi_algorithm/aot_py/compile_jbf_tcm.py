@@ -1,3 +1,6 @@
+import os
+os.environ["AOT_MODE"] = "0"
+
 """
 compile_jbf_tcm.py
 Compiles Joint Bilateral Filter (JBF) + JBLU kernels to AOT (.tcm).
@@ -14,7 +17,6 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
 jbf = importlib.import_module(
     "pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.joint_bilateral_guidance"
 )

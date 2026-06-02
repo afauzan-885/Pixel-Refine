@@ -1,3 +1,6 @@
+import os
+os.environ["AOT_MODE"] = "0"
+
 import taichi as ti
 import os
 import sys
@@ -8,7 +11,6 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
 gaussian_mod = importlib.import_module("pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.gaussian")
 
 def compile_gaussian_tcm():

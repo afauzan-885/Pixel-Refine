@@ -9,7 +9,7 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
+os.environ["AOT_MODE"] = "0"
 # Relative import from the new aot folder
 import gamma_proxy_kernels as kernels_mod
 

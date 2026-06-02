@@ -1,3 +1,6 @@
+import os
+os.environ["AOT_MODE"] = "0"
+
 import taichi as ti
 import os
 

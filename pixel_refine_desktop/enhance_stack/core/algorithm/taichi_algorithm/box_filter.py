@@ -4,17 +4,26 @@
 import numpy as np
 import os
 
+import os
+import importlib
+
+TAICHI_AVAILABLE = False
+ti = None
+tm = None
+
+if os.environ.get("AOT_MODE", "1") == "0":
+    try:
+        ti = importlib.import_module("taichi")
+        tm = importlib.import_module("taichi.math")
+        TAICHI_AVAILABLE = True
+    except ImportError:
+        pass
+
 try:
-    import taichi as ti
-    import taichi.math as tm
     from . import common
     from .taichi_worker import ti_thread
-
-    TAICHI_AVAILABLE = True
 except ImportError:
-    TAICHI_AVAILABLE = False
-    ti = None
-    tm = None
+    pass
 
 if TAICHI_AVAILABLE:
 
@@ -122,12 +131,12 @@ if TAICHI_AVAILABLE:
 def box_filter(
     src, dst=None, kernel_size: int = 3, buffer_provider="pool", enable_tiling=True
 ):
-    if not TAICHI_AVAILABLE:
-        raise ImportError("Taichi not available")
-
-    if os.environ.get("PIXEL_REFINE_AOT_MODE") == "1":
+    if os.environ.get("AOT_MODE", "1") == "1":
         from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
         return taichi_aot.box_filter(src, kernel_size=kernel_size, return_gpu=True)
+
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
 
     h, w = src.shape[:2]
     radius = kernel_size // 2

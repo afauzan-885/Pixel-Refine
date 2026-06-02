@@ -8,13 +8,20 @@ Prevents aliasing by integrating contribution of source pixels.
 
 import numpy as np
 
-try:
-    import taichi as ti
-    import taichi.math as tm
-    TAICHI_AVAILABLE = True
-except ImportError:
-    TAICHI_AVAILABLE = False
-    ti = None; tm = None
+import os
+import importlib
+
+TAICHI_AVAILABLE = False
+ti = None
+tm = None
+
+if os.environ.get("AOT_MODE", "1") == "0":
+    try:
+        ti = importlib.import_module("taichi")
+        tm = importlib.import_module("taichi.math")
+        TAICHI_AVAILABLE = True
+    except ImportError:
+        pass
 
 if TAICHI_AVAILABLE:
 

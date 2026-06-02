@@ -2,8 +2,24 @@
 
 import os
 import numpy as np
-import taichi as ti
-from .taichi_worker import ti_thread, TAICHI_AVAILABLE
+import os
+import importlib
+
+TAICHI_AVAILABLE = False
+ti = None
+tm = None
+
+if os.environ.get("AOT_MODE", "1") == "0":
+    try:
+        ti = importlib.import_module("taichi")
+        TAICHI_AVAILABLE = True
+    except ImportError:
+        pass
+
+try:
+    from .taichi_worker import ti_thread
+except ImportError:
+    pass
 
 if TAICHI_AVAILABLE:
     @ti.kernel
@@ -14,6 +30,7 @@ if TAICHI_AVAILABLE:
         dst: ti.types.ndarray(),
         micro_contrast: float,
         clarity: float,
+        noise_coring: float,
         h: int,
         w: int,
     ):
@@ -21,9 +38,19 @@ if TAICHI_AVAILABLE:
             val = src[r, c]
             b_val = blur[r, c]
             
-            # 1. Contrast-Aware Halo-Free Detail Shaping (Soft limiter)
+            # 1. Contrast-Aware Halo-Free Detail Shaping with Noise Coring
             diff = val - b_val
-            shaped_diff = diff / (1.0 + ti.abs(diff) * 5.0)  # 5.0 halo suppression coefficient
+            abs_diff = ti.abs(diff)
+            
+            # Apply smooth coring to prevent noise amplification
+            attenuation = 1.0
+            if abs_diff < noise_coring:
+                if noise_coring > 0.0:
+                    attenuation = abs_diff / noise_coring
+                else:
+                    attenuation = 0.0
+            
+            shaped_diff = (diff * attenuation) / (1.0 + abs_diff * 5.0)  # 5.0 halo suppression coefficient
             
             # 2. Midtone-targeted local contrast (Clarity bell curve: peaks at 0.5, zero at 0 and 1)
             midtone_mask = 16.0 * val * val * (1.0 - val) * (1.0 - val)
@@ -36,7 +63,7 @@ if TAICHI_AVAILABLE:
             dst[r, c] = lut[lut_idx]
 
 
-def enhance_grayscale(src, blur, lut, micro_contrast=2.93, clarity=0.0, dst=None, buffer_provider="pool"):
+def enhance_grayscale(src, blur, lut, micro_contrast=2.93, clarity=0.0, noise_coring=0.0, dst=None, buffer_provider="pool"):
     """
     GPU-accelerated Grayscale Image Enhancement (1D LUT & Micro-Contrast & Clarity).
     Applies detail-boosting (micro-contrast) via difference from blurred image,
@@ -51,17 +78,19 @@ def enhance_grayscale(src, blur, lut, micro_contrast=2.93, clarity=0.0, dst=None
         lut:             1D Look-Up Table (256 elements) - NumPy array OR Taichi ndarray.
         micro_contrast:  Scale factor to boost high-frequency details. Calibrated default: 2.93.
         clarity:         Local contrast clarity factor.
+        noise_coring:    Threshold to suppress low-amplitude noise boosting.
         dst:             Optional pre-allocated output buffer (H, W).
         buffer_provider: Optional buffer pool provider ("pool" or None).
 
     Returns:
         Enhanced grayscale image in the same format as input (NumPy or Taichi).
     """
-    if os.environ.get("PIXEL_REFINE_AOT_MODE") == "1":
+    if os.environ.get("AOT_MODE", "1") == "1":
         from .common import _get_aot
         aot = _get_aot()
         if aot and hasattr(aot, "enhance_grayscale"):
             is_taichi = hasattr(src, "to_numpy") or hasattr(blur, "to_numpy") or hasattr(lut, "to_numpy")
+            # Fallback to passing available parameters to AOT
             res_buf = aot.enhance_grayscale(src, blur, lut, float(micro_contrast), float(clarity), return_gpu=is_taichi)
             if dst is not None:
                 if is_taichi:
@@ -92,7 +121,7 @@ def enhance_grayscale(src, blur, lut, micro_contrast=2.93, clarity=0.0, dst=None
         else:
             dst_gpu, _ = ensure_taichi_field(dst_data, dtype=ti.f32, buffer_provider=buffer_provider)
 
-        _enhance_grayscale_kernel(src_gpu, blur_gpu, lut_gpu, dst_gpu, float(micro_contrast), float(clarity), h, w)
+        _enhance_grayscale_kernel(src_gpu, blur_gpu, lut_gpu, dst_gpu, float(micro_contrast), float(clarity), float(noise_coring), h, w)
 
         # Clean up temporaries
         if src_is_temp:

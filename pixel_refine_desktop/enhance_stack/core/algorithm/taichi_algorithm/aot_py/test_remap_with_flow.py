@@ -9,7 +9,7 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 # Enable AOT Mode
-os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
+os.environ["AOT_MODE"] = "1"
 
 import pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot as taichi_aot
 from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import AOTEngine

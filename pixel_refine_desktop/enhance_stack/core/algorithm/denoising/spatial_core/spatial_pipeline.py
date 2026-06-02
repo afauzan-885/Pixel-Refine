@@ -186,9 +186,7 @@ def process_in_cpu(
                 except Exception as e_save:
                     print(f"Error saving weight map: {e_save}")
 
-                result_queue.put(
-                    (image_index, (weight_map_work_res * 65535.0).astype(np.uint16))
-                )
+                result_queue.put((image_index, weight_map_work_res.copy()))
             except Exception:
                 result_queue.put((image_index, None))
                 continue
@@ -224,11 +222,11 @@ def process_in_cpu(
             if stop_requested and stop_requested():
                 break
             try:
-                image_index, weight_map_uint16 = result_queue.get(timeout=0.1)
-                if weight_map_uint16 is not None:
+                image_index, weight_map_float = result_queue.get(timeout=0.1)
+                if weight_map_float is not None:
                     image_orig = images[image_index]
                     if image_orig is not None:
-                        w_float = weight_map_uint16.astype(np.float32) * (1.0 / 65535.0)
+                        w_float = weight_map_float
                         cv2.resize(
                             w_float,
                             (ref_image_w, ref_image_h),
@@ -260,7 +258,7 @@ def process_in_cpu(
 
                         # [OPTIMIZATION] Explicit deletion and cleaning
                         images[image_index] = None
-                        del image_orig, weight_map_uint16, w_float
+                        del image_orig, weight_map_float, w_float
                         if norm_img is not norm_img_buf:
                             del norm_img
 
@@ -658,8 +656,12 @@ def process_in_gpu(
             engine.buffer_pool.clear()
 
     try:
-        worker = get_taichi_worker()
-        worker.submit_and_wait(_run_gpu_merging_loop)
+        is_aot = os.environ.get("AOT_MODE", "1") == "1"
+        if is_aot:
+            _run_gpu_merging_loop()
+        else:
+            worker = get_taichi_worker()
+            worker.submit_and_wait(_run_gpu_merging_loop)
     finally:
         if ref_work_res_pass2_gpu:
             try:

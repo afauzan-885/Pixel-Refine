@@ -1,7 +1,23 @@
 import numpy as np
-import taichi as ti
-import taichi.math as tm
-from .taichi_worker import ti_thread, TAICHI_AVAILABLE
+import os
+import importlib
+
+TAICHI_AVAILABLE = False
+ti = None
+tm = None
+
+if os.environ.get("AOT_MODE", "1") == "0":
+    try:
+        ti = importlib.import_module("taichi")
+        tm = importlib.import_module("taichi.math")
+        TAICHI_AVAILABLE = True
+    except ImportError:
+        pass
+
+try:
+    from .taichi_worker import ti_thread
+except ImportError:
+    pass
 
 if TAICHI_AVAILABLE:
 
@@ -32,6 +48,10 @@ def nearest_resize(src, target_h: int, target_w: int, dst=None):
     Smart nearest resize API that auto-detects input type and returns appropriate output.
     All Taichi operations are synchronized via @ti_thread.
     """
+    if os.environ.get("AOT_MODE", "1") == "1":
+        from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+        return taichi_aot.resize(src, (target_w, target_h), interpolation=taichi_aot.INTER_NEAREST, return_gpu=hasattr(src, "to_numpy"), dst=dst)
+
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
