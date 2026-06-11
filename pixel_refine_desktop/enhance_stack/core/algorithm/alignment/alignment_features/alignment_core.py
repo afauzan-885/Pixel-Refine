@@ -939,7 +939,7 @@ def perform_alignment_gpu(
 
             return True
 
-        is_aot = os.environ.get("AOT_MODE", "1") == "1"
+        is_aot = os.environ.get("PIXEL_REFINE_AOT_MODE") == "1"
         if is_aot:
             print(
                 "[GPU Alignment] Running synchronously on caller thread (Pure Vulkan AOT C++)..."

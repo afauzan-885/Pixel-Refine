@@ -9,8 +9,6 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-os.environ["AOT_MODE"] = "0"
-
 # Relative import from the same aot folder
 import normalize_image_kernels as kernels
 

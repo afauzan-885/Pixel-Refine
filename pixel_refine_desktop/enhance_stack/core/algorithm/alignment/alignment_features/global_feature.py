@@ -267,7 +267,7 @@ def _prepare_image_array_from_raw(
         import pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot as ta_aot
 
         # Call GPU-accelerated Demosaicing (Auto-extracts all metadata and runs on GPU)
-        os.environ["AOT_MODE"] = "1"
+        os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
 
         if alignment_mode:
             gray_full = ta_aot.demosaic(
