@@ -109,7 +109,7 @@ def load_raw_as_8bit_rgb(image_path: str) -> np.ndarray:
     """Loads a RAW/DNG image and returns it as an 8-bit RGB numpy array using Hamilton Demosaic with rawpy fallback."""
     filename = os.path.basename(image_path)
     try:
-        from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+        from taichi_library import taichi_aot
 
         with taichi_lock:
             rgb_f32 = taichi_aot.demosaic(image_path, method="hamilton")

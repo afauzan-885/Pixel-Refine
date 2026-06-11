@@ -1,3 +1,4 @@
+import torch
 import os
 
 os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
@@ -12,6 +13,11 @@ import traceback
 import cv2
 import numpy as np
 import onnxruntime as ort
+from abc import ABC, abstractmethod
+import torch.nn as nn
+import torch.nn.functional as F
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Importers moved into functions to avoid circular dependencies
 
@@ -523,6 +529,176 @@ def save_aligned_image(
     print(f"  [Save] {filename} disimpan (Harvest: {harvest_mode}).")
 
 
+# ==============================================================================
+# SUNTIKAN ARSITEKTUR AI KE INTERFASI PIPELINE (alignment_core.py)
+# ==============================================================================
+
+
+# ==============================================================================
+# 2. CORE BACKBONE COMPONENTS (PARAMETER-FREE)
+# ==============================================================================
+class SimAM(nn.Module):
+    def __init__(self, e=1e-4):
+        super().__init__()
+        self.act = nn.Sigmoid()
+        self.e = e
+
+    def forward(self, x):
+        n = x.shape[2] * x.shape[3] - 1
+        d = (x - x.mean(dim=[2, 3], keepdim=True)).pow(2)
+        v = d.sum(dim=[2, 3], keepdim=True) / n
+        return x * self.act(d / (4 * (v + self.e)) + 0.5)
+
+
+class FeatureBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.res = in_ch == out_ch
+        self.dw = nn.Conv2d(in_ch, in_ch, 3, padding=1, groups=in_ch, bias=False)
+        self.bn1 = nn.BatchNorm2d(in_ch)
+        self.act1 = nn.ReLU(inplace=True)
+        self.pw = nn.Conv2d(in_ch, out_ch, 1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_ch)
+        self.act2 = nn.ReLU(inplace=True)
+        self.attn = SimAM()
+
+    def forward(self, x):
+        u = self.attn(self.act2(self.bn2(self.pw(self.act1(self.bn1(self.dw(x)))))))
+        return x + u if self.res else u
+
+
+# ==============================================================================
+# 3. BASE SIMILARITY WEIGHT GENERATOR (ABSTRACT CLASS)
+# ==============================================================================
+class BaseSimilarityWeightGenerator(nn.Module, ABC):
+    def __init__(self):
+        super().__init__()
+        self.init_backbone()
+
+    @abstractmethod
+    def init_backbone(self):
+        pass
+
+    @abstractmethod
+    def extract_features(self, ref_img):
+        pass
+
+    @abstractmethod
+    def compute_similarity_error(self, ref_img, curr_img, features):
+        pass
+
+    @abstractmethod
+    def map_to_weights(self, error_tensor, is_inference=False):
+        pass
+
+    def forward(self, ref_img, curr_img, is_inference=False):
+        features = self.extract_features(ref_img)
+        error_block, extra_info = self.compute_similarity_error(
+            ref_img, curr_img, features
+        )
+        weight_map = self.map_to_weights(error_block, is_inference=is_inference)
+        return weight_map, extra_info
+
+
+# ==============================================================================
+# 4. ADAPTIVE HEAD & IMPLEMENTATION MODEL
+# ==============================================================================
+class AdaptiveOpticalFlowHead(nn.Module):
+    def __init__(self, feature_channels=16, max_search_radius=12):
+        super().__init__()
+        self.max_radius = max_search_radius
+
+        # Prediksi Radius Jarak Pencarian Dinamis (0.0 s/d 1.0 -> Skala Radius)
+        self.radius_head = nn.Sequential(
+            nn.Conv2d(feature_channels, 16, 3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(16, 1, 1),
+            nn.Sigmoid(),
+        )
+        # Prediksi Bobot Konsistensi Spasial Dinamis (Lambda TV Loss)
+        self.lambda_head = nn.Sequential(
+            nn.Conv2d(feature_channels, 16, 3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(16, 1, 1),
+            nn.Softplus(),
+        )
+
+    def forward(self, features):
+        search_gate_map = self.radius_head(features) * self.max_radius
+        spatial_lambda_map = self.lambda_head(features)
+        return search_gate_map, spatial_lambda_map
+
+
+class PhysicsInformedFlowGenerator(BaseSimilarityWeightGenerator):
+    def init_backbone(self):
+        self.feature_extractor = nn.Sequential(
+            nn.Conv2d(1, 16, 3, padding=1, bias=False),
+            nn.ReLU(inplace=True),
+            FeatureBlock(16, 16),
+            FeatureBlock(16, 16),
+            FeatureBlock(16, 16),
+        )
+        self.adaptive_brain = AdaptiveOpticalFlowHead(
+            feature_channels=16, max_search_radius=12
+        )
+
+    def extract_features(self, ref_img):
+        return self.feature_extractor(ref_img)
+
+    def compute_similarity_error(self, ref_img, curr_img, features):
+        # AI menentukan keputusan fisis berdasarkan ekstraksi gambar referensi
+        dynamic_radius, dynamic_lambda = self.adaptive_brain(features)
+
+        # Perhitungan matematis dasar (SAD / Perbedaan Intensitas Awal)
+        pixel_diff = torch.abs(curr_img - ref_img)
+
+        # 🚀 PERBAIKAN: Gunakan fungsi eksponensial negatif atau perkalian langsung
+        # agar lambda bertindak sebagai 'pemicu sensitivitas' bukan penghancur skala loss.
+        lambda_full = F.interpolate(
+            dynamic_lambda,
+            size=pixel_diff.shape[2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        # Jika lambda tinggi (AI yakin area itu statis), error diperkuat agar model sensitif.
+        # Jika lambda rendah (AI tahu ada pergerakan/tepi objek), error diredam.
+        error_block = pixel_diff * torch.exp(lambda_full)
+
+        # Catat keputusan runtime untuk dilempar ke pipeline eksternal (Taichi AOT) & Loss Engine
+        runtime_decision = {"radius_map": dynamic_radius, "lambda_map": dynamic_lambda}
+        return error_block, runtime_decision
+
+    def map_to_weights(self, error_tensor, is_inference=False):
+        mask = torch.sigmoid(3.0 * (1.0 - error_tensor))
+        if is_inference:
+            mask = mask**1.5
+        return mask
+
+
+# Tambahkan struktur model hasil latihan kita ke alignment_core
+class Student_NanoBurstNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Menggunakan FeatureBlock & Adaptive Head dari arsitektur terintegrasi kita
+        self.encoder = nn.Sequential(
+            nn.Conv2d(1, 16, 3, padding=1, bias=False),
+            nn.ReLU(inplace=True),
+            FeatureBlock(16, 16),
+            FeatureBlock(16, 16),
+            FeatureBlock(16, 16),
+        )
+        # Pastikan max_search_radius sinkron dengan target Taichi (12)
+        self.adaptive_brain = AdaptiveOpticalFlowHead(
+            feature_channels=16, max_search_radius=12
+        )
+
+    def forward(self, ref_gray, curr_gray):
+        ref_feat = self.encoder(ref_gray)
+        radius_map, lambda_map = self.adaptive_brain(ref_feat)
+        return radius_map, lambda_map
+
+
 def perform_alignment_gpu(
     images,
     reference_image_float,
@@ -534,18 +710,20 @@ def perform_alignment_gpu(
     update_progress=None,
     stop_requested=None,
     num_alignment_workers=1,
-    save_align_image=False,
+    save_align_image=True,
     harvest_alignment=False,
     progress_start=30,
     progress_end=40,
     return_format: str = "numpy_u16",
+    optical_flow_type="alignment_tile",
     **kwargs,
 ):
     """
-    GPU-accelerated alignment using Taichi AOT.
-    Communicates directly with compute_flow (AOT) via AOTEngine.
+    GPU-accelerated alignment menggunakan Taichi AOT terpandu AI adaptif.
+    Berkomunikasi langsung dengan compute_flow (AOT) via AOTEngine dengan
+    suntikan matriks parameter radius_map dinamis per frame dari PyTorch.
     """
-    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import (
+    from taichi_library.taichi_aot.engine import (
         AOTEngine,
     )
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import (
@@ -559,13 +737,26 @@ def perform_alignment_gpu(
 
     is_linear_mode = kwargs.get("is_linear_mode", False)
     proxy_scale = kwargs.get("proxy_scale", 1.0)
-    use_sharpen = kwargs.get("use_sharpen", False)
     search_dist = kwargs.get("search_dist", 2.0)
+    flow_backend = kwargs.get("flow_backend", optical_flow_type)
+    active_arch = engine._active_arch if hasattr(engine, "_active_arch") else "vulkan"
+
+    flow_module_name = (
+        f"block_align_{active_arch}.tcm"
+        if flow_backend == "block_align"
+        else "compute_flow_vulkan.tcm"
+    )
+    flow_graph_name = (
+        "block_align_end_to_end_3layer"
+        if flow_backend == "block_align"
+        else "align_end_to_end_3layer"
+    )
+    save_backend_name = "BLOCK_ALIGN" if flow_backend == "block_align" else "GPU_AOT"
     index_offset = kwargs.get("index_offset", 0)
     save_prefix = kwargs.get("save_prefix", None)
     save_folder = kwargs.get("save_folder", "save_align_image")
 
-    # [NEW] Simpan gambar referensi (Frame 00)
+    # [SAFE SAVE] Simpan gambar referensi awal (Frame 00)
     if save_align_image:
         save_aligned_image(
             images[0],
@@ -576,50 +767,66 @@ def perform_alignment_gpu(
             harvest_mode=harvest_alignment,
         )
 
-    # Calculate n_layers to target the resolution floor (Standardize on 3 for stability)
+    # Standarisasi pada 3 layer pyramid untuk stabilitas fisis coarse-to-fine
     n_layers = 3
 
-    # Force single worker for GPU
+    # Paksa single-thread eksekusi untuk GPU Taichi guna menghindari race condition context
     if num_alignment_workers > 1:
         print("[Info] Forcing single-threaded execution for Taichi GPU alignment.")
 
-    print(f"[GPU Alignment] Processing {num_images - 1} images with Taichi GPU...")
+    print(
+        f"[GPU Alignment] Processing {num_images - 1} images with AI-Guided Taichi GPU..."
+    )
     print(f"[GPU Alignment] Return format: {return_format}")
 
-    # Array to store alignment cost maps (ZMSSD) for each image as confidence
-    cost_maps = [None] * num_images
+    # 🚀 STEP 1: INISIALISASI MODEL AI & LOAD WEIGHTS CHECKPOINT (.PTH)
+    print("[AI Guided] Memuat Otak Parameter Adaptif ke DEVICE GPU...")
+    ai_model = Student_NanoBurstNet().to(DEVICE)
+
+    # Tentukan path berkas checkpoint pth hasil latihan Anda
+    ckpt_path = os.path.join("database", "Learning_Model", "nano_flow_ep8.pth")
+    if os.path.exists(ckpt_path):
+        try:
+            ckpt = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
+        except:
+            ckpt = torch.load(ckpt_path, map_location=DEVICE)
+        ai_model.load_state_dict(ckpt["model_state_dict"], strict=False)
+        print(f"✅ Otak AI Berhasil Disambungkan: {os.path.basename(ckpt_path)}")
+    else:
+        print(
+            "⚠️ Checkpoint tidak ditemukan di database/Learning_Model/. Menggunakan inisialisasi acak."
+        )
+    ai_model.eval()
 
     try:
-        # Define GPU alignment task
-        # Execute on Taichi worker thread
+        # Definisikan GPU alignment task loop
         def _run_gpu_alignment_loop():
-            # 1. Load Alignment Module
-            import pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot as taichi_aot
+            import taichi_library.taichi_aot as taichi_aot
 
             file_dir = os.path.dirname(os.path.abspath(__file__))
             tcm_path = os.path.abspath(
                 os.path.join(
                     file_dir,
-                    "../../../../../ui/data/aot_assets/compute_flow_vulkan.tcm",
+                    "../../../../../ui/data/aot_assets",
+                    flow_module_name,
                 )
             )
             mod = engine.load(tcm_path)
 
-            # [LUMA ENHANCEMENT CACHE] Pre-allocate and populate 1D LUT once on GPU (Calibrated: contrast=1.20 (+50% boost), brightness=0.35, gamma=0.78)
+            # [LUMA ENHANCEMENT CACHE] Pre-allocate LUT untuk optimasi kontras
             lut_np = np.zeros(256, dtype=np.float32)
-            contrast = 1.2  # 0.8 * 1.50 (+50% standard contrast boost)
-            brightness = 0.30  # Increased brightness offset
+            contrast = 1.2
+            brightness = 0.30
             gamma = 0.80
             for i in range(256):
                 val = (i / 255.0) ** gamma * contrast + brightness
                 lut_np[i] = np.clip(val, 0.0, 1.0)
             lut_gpu = engine.upload(lut_np)
 
-            # Pre-allocate luma blur buffer for tracking enhancement (ALLOC ONCE, REUSE EVERY FRAME)
             h_w, w_w = work_res_h, work_res_w
             blur_work_gpu = engine.allocate((h_w, w_w), dtype=np.float32)
 
-            # 2. Setup Reference Pyramid on GPU (ALLOCATE ONCE)
+            # 2. Setup Reference Pyramid pada GPU (ALLOCATE ONCE)
             ref_pyramid = taichi_bridge.prepare_reference_for_alignment(
                 reference_image_float,
                 is_linear_mode,
@@ -628,7 +835,14 @@ def perform_alignment_gpu(
                 work_res_w,
                 lut_gpu=lut_gpu,
                 blur_work_gpu=blur_work_gpu,
+                num_layers=n_layers,
             )
+
+            # 🚀 AKURASI MIKRO: Ambil citra referensi tingkat kasar (L2) untuk dianalisis oleh AI
+            ref_l2_np = ref_pyramid[2].to_numpy()  # Shape: [H//4, W//4]
+            ref_l2_tensor = (
+                torch.from_numpy(ref_l2_np).float().to(DEVICE).unsqueeze(0).unsqueeze(0)
+            )  # [1, 1, H_c, W_c]
 
             # 3. Allocate Flow Buffers (REUSE ONCE)
             flow_l0 = engine.allocate((h_w, w_w, 2), dtype=np.float32, is_vector=False)
@@ -639,11 +853,9 @@ def perform_alignment_gpu(
                 (h_w // 4, w_w // 4, 2), dtype=np.float32, is_vector=False
             )
 
-            # Pre-allocate per-frame reusable VRAM buffers (ALLOC ONCE, REUSE EVERY FRAME)
-            # smooth_flow_buf: smoothed 2-channel flow (H_work, W_work, 2) — reused per frame
-            # map_x_gpu/map_y_gpu: full-res coordinate maps — reused per frame
             full_h_ref, full_w_ref = images[0].shape[:2]
             smooth_flow_buf = engine.allocate((h_w, w_w, 2), dtype=np.float32)
+
             use_flow_remap = kwargs.get("use_flow_remap", True)
             if not use_flow_remap:
                 map_x_gpu = engine.allocate((full_h_ref, full_w_ref), dtype=np.float32)
@@ -690,12 +902,12 @@ def perform_alignment_gpu(
                 writer_thread.start()
 
             try:
-                # 4. Process each image
+                # 4. Loop Proses Penyelarasan per Bingkai Citra Kompetitor
                 for i in range(1, num_images):
                     if stop_requested and stop_requested():
                         break
 
-                    # A. Prepare Comparison Pyramid (Overwrites comp buffers in place without allocations)
+                    # A. Siapkan Piramida Gambar Kompetitor (Overwrite in place)
                     comp_pyramid = taichi_bridge.prepare_comparison_for_alignment(
                         images[i],
                         ref_dtype,
@@ -705,9 +917,35 @@ def perform_alignment_gpu(
                         work_res_w,
                         lut_gpu=lut_gpu,
                         blur_work_gpu=blur_work_gpu,
+                        num_layers=n_layers,
                     )
 
-                    # B. Run One Big Graph (End-to-End Alignment)
+                    # 🚀 STEP 2: INFERENSI AI UNTUK MENENTUKAN PARAMETER RADIUS DINAMIS
+                    comp_l2_np = comp_pyramid[2].to_numpy()
+                    comp_l2_tensor = (
+                        torch.from_numpy(comp_l2_np)
+                        .float()
+                        .to(DEVICE)
+                        .unsqueeze(0)
+                        .unsqueeze(0)
+                    )
+
+                    with torch.no_grad():
+                        # AI menganalisis perbandingan citra resolusi kasar untuk memetakan jarak guncangan
+                        radius_map, _ = ai_model(ref_l2_tensor, comp_l2_tensor)
+                        # Squeeze & transposisi menjadi dimensi standar NumPy [H_blok, W_blok, 1]
+                        radius_map_np = (
+                            radius_map.squeeze(0)
+                            .permute(1, 2, 0)
+                            .cpu()
+                            .numpy()
+                            .astype(np.float32)
+                        )
+
+                    # 🚀 STEP 3: UPLOAD RADIUS MAP BUATAN AI SEBAGAI NDARRAY UNTUK TAICHI
+                    ai_radius_gpu = engine.upload(radius_map_np)
+
+                    # 🚀 STEP 4: EKSEKUSI GRAF BESAR TAICHI (SUNTIKKAN NDARRAY AI)
                     args = {
                         "ref_l0": ref_pyramid[0],
                         "ref_l1": ref_pyramid[1],
@@ -715,50 +953,41 @@ def perform_alignment_gpu(
                         "comp_l0": comp_pyramid[0],
                         "comp_l1": comp_pyramid[1],
                         "comp_l2": comp_pyramid[2],
+                        "ai_radius_map": ai_radius_gpu,  # 🚀 JAWABAN AI MASUK KE SINI
                         "flow_l0": flow_l0,
                         "flow_l1": flow_l1,
                         "flow_l2": flow_l2,
                         "tile_h": int(tile_h),
                         "tile_w": int(tile_w),
-                        "search_radius": 3,
-                        "scale": 1.5,
+                        "scale": 2.0,
                         "search_dist": int(search_dist),
-                        "downscale": 3,
+                        "downscale": 2,
                     }
-                    mod.run("align_end_to_end_3layer", **args)
+                    mod.run(flow_graph_name, **args)
                     engine.sync()
 
-                    # C. Warp Full Resolution Image — Pure GPU Pipeline (Zero CPU Round-Trip)
-                    #
-                    # Pipeline (all in VRAM, NO .to_numpy(), NO cv2, NO np.mgrid):
-                    #   flow_l0 (H_work, W_work, 2)
-                    #       → smooth_flow_gpu   → smooth_flow_buf (reuse, Gaussian 5×5)
-                    #       → build_flow_maps   → map_x_gpu, map_y_gpu (reuse, bilinear upsample
-                    #                                                     + scale + identity grid)
-                    #       → remap             → aligned image
+                    # 🚀 VRAM PROTECT: Hancurkan buffer parameter AI segera setelah kernel selesai run
+                    ai_radius_gpu.destroy()
 
-                    # Step C1+C2: Smooth both flow channels together in one GPU call
+                    # B. Pure GPU Remap Warping Pipeline
                     smooth_flow_buf = taichi_aot.smooth_flow_gpu(
                         flow_l0, sigma=1.0, kernel_size=5, dst=smooth_flow_buf
                     )
 
-                    # Step C3: Build full-res coordinate maps if not using flow remap
                     if not use_flow_remap:
                         map_x_gpu, map_y_gpu = taichi_aot.build_flow_maps(
-                            smooth_flow_buf,  # 2-channel flow (H_work, W_work, 2)
+                            smooth_flow_buf,
                             full_h_ref,
-                            full_w_ref,  # target resolution
+                            full_w_ref,
                             scale_x=float(full_w_ref) / float(w_w),
                             scale_y=float(full_h_ref) / float(h_w),
-                            map_x_buf=map_x_gpu,  # reuse buffer
-                            map_y_buf=map_y_gpu,  # reuse buffer
+                            map_x_buf=map_x_gpu,
+                            map_y_buf=map_y_gpu,
                         )
 
-                    h5_file_handle = kwargs.get("h5_file_handle", None)
                     image_paths = kwargs.get("image_paths", None)
                     ref_img_full = kwargs.get("reference_image", None)
 
-                    # Load the full-resolution RGB/BGR image on-the-fly to warp it
                     if image_paths and i < len(image_paths):
                         from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
                             load_images_from_paths,
@@ -771,7 +1000,6 @@ def perform_alignment_gpu(
                             linear_mode=is_linear_mode,
                         )
                         if full_res_img_list:
-                            # Detect if it's RAW to skip padding
                             _, ext = os.path.splitext(image_paths[i])
                             is_raw = ext.lower() in [
                                 ".dng",
@@ -786,10 +1014,8 @@ def perform_alignment_gpu(
                             ]
 
                             if is_raw:
-                                # RAW images are guaranteed to be identical in size, skip padding to keep it blazing fast!
                                 full_res_img = full_res_img_list[0]
                             elif ref_img_full is not None:
-                                # Pre-pad/resize standard images to match reference image shape exactly using preserve strategy
                                 resize_res = resize_all_with_padding(
                                     [ref_img_full, full_res_img_list[0]],
                                     method="preserve",
@@ -810,17 +1036,21 @@ def perform_alignment_gpu(
                     else:
                         full_res_img = images[i]
 
-                    # Step C4: Warp image using GPU coordinate maps or flow remap
+                    # Warp image berdasarkan ketersediaan jenis remap
                     if h5_file_handle is not None:
                         if use_flow_remap:
                             aligned_np = taichi_aot.remap_with_flow(
-                                full_res_img, smooth_flow_buf, full_h_ref, full_w_ref, return_gpu=False
+                                full_res_img,
+                                smooth_flow_buf,
+                                full_h_ref,
+                                full_w_ref,
+                                return_gpu=False,
                             )
                         else:
                             aligned_np = taichi_aot.remap(
                                 full_res_img, map_x_gpu, map_y_gpu, return_gpu=False
                             )
-                        # Push to background writer queue (will block if queue is full to prevent memory bloat)
+
                         write_queue.put(
                             (
                                 i,
@@ -837,19 +1067,25 @@ def perform_alignment_gpu(
                             save_aligned_image(
                                 aligned_np,
                                 i + index_offset,
-                                "GPU_AOT",
+                                save_backend_name,
                                 save_folder=save_folder,
                                 save_prefix=save_prefix,
                                 harvest_mode=harvest_alignment,
                             )
+
                         del full_res_img
                         if hasattr(images[i], "destroy"):
                             images[i].destroy()
                         images[i] = None
+
                     elif return_format == "ti_ndarray":
                         if use_flow_remap:
                             aligned_gpu = taichi_aot.remap_with_flow(
-                                full_res_img, smooth_flow_buf, full_h_ref, full_w_ref, return_gpu=True
+                                full_res_img,
+                                smooth_flow_buf,
+                                full_h_ref,
+                                full_w_ref,
+                                return_gpu=True,
                             )
                         else:
                             aligned_gpu = taichi_aot.remap(
@@ -860,7 +1096,7 @@ def perform_alignment_gpu(
                             save_aligned_image(
                                 save_img,
                                 i + index_offset,
-                                "GPU_AOT",
+                                save_backend_name,
                                 save_folder=save_folder,
                                 save_prefix=save_prefix,
                                 harvest_mode=harvest_alignment,
@@ -870,7 +1106,11 @@ def perform_alignment_gpu(
                     else:
                         if use_flow_remap:
                             images[i] = taichi_aot.remap_with_flow(
-                                full_res_img, smooth_flow_buf, full_h_ref, full_w_ref, return_gpu=False
+                                full_res_img,
+                                smooth_flow_buf,
+                                full_h_ref,
+                                full_w_ref,
+                                return_gpu=False,
                             )
                         else:
                             images[i] = taichi_aot.remap(
@@ -880,14 +1120,13 @@ def perform_alignment_gpu(
                             save_aligned_image(
                                 images[i],
                                 i + index_offset,
-                                "GPU_AOT",
+                                save_backend_name,
                                 save_folder=save_folder,
                                 save_prefix=save_prefix,
                                 harvest_mode=harvest_alignment,
                             )
                         del full_res_img
 
-                    # Update progress
                     if update_progress:
                         prog_fraction = i / (num_images - 1)
                         update_progress(
@@ -895,33 +1134,27 @@ def perform_alignment_gpu(
                                 progress_start
                                 + prog_fraction * (progress_end - progress_start)
                             ),
-                            f"Alignment gambar {i}/{num_images - 1} (GPU)...",
+                            f"Alignment gambar {i}/{num_images - 1} (AI + GPU)...",
                         )
 
-                    # --- CRITICAL FIX FOR iGPU STABILITY ---
-                    # Wait for GPU to finish execution before deallocating comparison pyramid buffers!
+                    # Sinkronisasi iGPU untuk stabilitas context sebelum pelepasan temporary buffer
                     engine.sync()
 
-                    # D. Eager Memory Cleanup for Comparison Pyramid only (allocated dynamically, so release!)
-                    # (smooth_flow_buf, map_x_gpu, map_y_gpu are REUSED next frame — do NOT destroy)
                     for buf in comp_pyramid:
                         buf.release()
-                    # No gc.collect() per frame — Python GC is slow; VRAM is managed explicitly
 
             finally:
-                # Stop background writer thread if active
                 if writer_thread is not None:
                     write_queue.put(None)
                     writer_thread.join()
 
-                # 5. EXPLICIT CLEANUP (Destroy all persistent buffers)
+                # 5. EXPLICIT RESOUCE DESTROY (Pembersihan VRAM Total)
                 for buf in ref_pyramid:
                     buf.destroy()
                 flow_l0.destroy()
                 flow_l1.destroy()
                 flow_l2.destroy()
 
-                # Destroy reusable flow processing buffers
                 for _buf in [
                     smooth_flow_buf,
                     map_x_gpu,
@@ -934,7 +1167,6 @@ def perform_alignment_gpu(
                             _buf.destroy()
                     except Exception:
                         pass
-
                 gc.collect()
 
             return True
@@ -949,13 +1181,12 @@ def perform_alignment_gpu(
             worker = get_taichi_worker()
             success = worker.submit_and_wait(_run_gpu_alignment_loop)
 
-        print("[OK] GPU Alignment selesai (VRAM Stabilized).")
+        print("[OK] AI-Guided GPU Alignment selesai (VRAM Stabilized).")
         return success
 
     except Exception as e:
         print(f"Error during GPU alignment: {e}")
         traceback.print_exc()
-
         return False
 
 
@@ -986,7 +1217,7 @@ def perform_image_alignment(
 
     """
     Menyelaraskan (align) gambar dengan manajemen sumber daya yang aman.
-    Supported types: 'raft', 'alignment_tile', 'farneback'
+    Supported types: 'raft', 'alignment_tile', 'block_align', 'farneback'
     """
 
     num_images = len(images)
@@ -999,10 +1230,13 @@ def perform_image_alignment(
     save_prefix = kwargs.get("save_prefix", None)
     save_folder = kwargs.get("save_folder", "save_align_image")
 
-    # [GPU-AUTO] Redirect to Taichi AOT GPU if type is alignment_tile
+    # [GPU-AUTO] Redirect to Taichi AOT GPU if type is alignment_tile/block_align
     # This ensures that high-level pipelines (SimilarityMNFR) automatically use GPU acceleration.
-    if optical_flow_type == "alignment_tile":
+    if optical_flow_type in ("alignment_tile", "block_align"):
         # print("[Alignment Core] Redirecting to GPU Alignment Pipeline (AOT)...")
+        gpu_kwargs = dict(kwargs)
+        gpu_kwargs["search_dist"] = kwargs.get("search_dist", 2)
+        gpu_kwargs["flow_backend"] = optical_flow_type
         return perform_alignment_gpu(
             images,
             reference_image_float,
@@ -1013,14 +1247,13 @@ def perform_image_alignment(
             ref_dtype,
             update_progress,
             stop_requested,
-            search_dist=kwargs.get("search_dist", 2),
-            **kwargs,
+            **gpu_kwargs,
         )
 
     # --- Preprocessing referensi (CPU MURNI tanpa Taichi) ---
     # Note: Farneback & Tile alignment use grayscale. Raft uses color.
     if optical_flow_type == "raft":
-        from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm import (
+        from taichi_library.taichi_algorithm import (
             preprocess,
         )
 

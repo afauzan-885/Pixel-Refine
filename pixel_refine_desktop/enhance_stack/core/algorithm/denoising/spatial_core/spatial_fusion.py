@@ -2,9 +2,7 @@ import os
 import numpy as np
 import psutil
 from .spatial_pipeline import process_in_cpu, process_in_gpu
-from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.taichi_worker import (
-    TAICHI_AVAILABLE as TAICHI_SPATIAL_AVAILABLE,
-)
+
 
 
 def get_ram_usage():
@@ -51,6 +49,10 @@ class SpatialFusionProcessor:
         """Executes the Spatial Fusion algorithm on a batch of images."""
         print(f"[RAM] Startup SpatialFusionProcessor: {get_ram_usage():.2f} MB")
 
+        from taichi_library.taichi_algorithm.taichi_worker import (
+            TAICHI_AVAILABLE as TAICHI_SPATIAL_AVAILABLE,
+        )
+
         # 1. Initialization and Work Resolution
         tile_h, tile_w = map(int, tile_size)
         num_images = len(images)
@@ -72,9 +74,13 @@ class SpatialFusionProcessor:
         scope_width = scope_end - scope_start
         p_init = int(scope_start + scope_width * 0.05)
         p_align_start = unused_kwargs.get("align_progress_start", p_init)
-        p_align_end = unused_kwargs.get("align_progress_end", int(scope_start + scope_width * 0.40))
+        p_align_end = unused_kwargs.get(
+            "align_progress_end", int(scope_start + scope_width * 0.40)
+        )
         p_merge_start = unused_kwargs.get("merge_progress_start", p_align_end)
-        p_merge_end = unused_kwargs.get("merge_progress_end", int(scope_start + scope_width * 0.95))
+        p_merge_end = unused_kwargs.get(
+            "merge_progress_end", int(scope_start + scope_width * 0.95)
+        )
         pass_merge_range = (p_merge_start, p_merge_end)
 
         # Scale down logic
@@ -181,7 +187,8 @@ class SpatialFusionProcessor:
         else:
             if update_progress:
                 update_progress(
-                    pass_merge_range[1], "Finalizing with simple mean calculation on CPU..."
+                    pass_merge_range[1],
+                    "Finalizing with simple mean calculation on CPU...",
                 )
 
             valid_mask = sum_weight_full > 1e-6

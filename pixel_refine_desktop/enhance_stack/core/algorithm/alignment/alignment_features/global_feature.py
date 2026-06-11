@@ -264,7 +264,7 @@ def _prepare_image_array_from_raw(
         if not RAWPY_AVAILABLE:
             return None
 
-        import pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot as ta_aot
+        import taichi_library.taichi_aot as ta_aot
 
         # Call GPU-accelerated Demosaicing (Auto-extracts all metadata and runs on GPU)
         os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
@@ -297,8 +297,14 @@ def _prepare_image_array_from_raw(
 
 
 def load_images_from_paths(
-    image_paths, stop_requested=None, linear_mode=False, capture_ref_proxy=False, alignment_mode=False,
-    update_progress=None, progress_start=0, progress_end=100
+    image_paths,
+    stop_requested=None,
+    linear_mode=False,
+    capture_ref_proxy=False,
+    alignment_mode=False,
+    update_progress=None,
+    progress_start=0,
+    progress_end=100,
 ):
     images = []
     raw_extensions = {".dng", ".cr2", ".nef", ".arw", ".orf", ".rw2", ".pef", ".srw"}
@@ -371,7 +377,9 @@ def load_images_from_paths(
             else:
                 if os.path.exists(path):
                     if alignment_mode:
-                        future = executor.submit(_load_and_process_standard_alignment, path)
+                        future = executor.submit(
+                            _load_and_process_standard_alignment, path
+                        )
                     else:
                         future = executor.submit(cv2.imread, path, cv2.IMREAD_UNCHANGED)
                     standard_futures.append(future)
@@ -402,8 +410,13 @@ def load_images_from_paths(
             finally:
                 loaded_count += 1
                 if update_progress:
-                    prog_val = int(progress_start + (loaded_count / total_paths) * (progress_end - progress_start))
-                    update_progress(prog_val, f"Loading RAW image {loaded_count}/{total_paths}...")
+                    prog_val = int(
+                        progress_start
+                        + (loaded_count / total_paths) * (progress_end - progress_start)
+                    )
+                    update_progress(
+                        prog_val, f"Loading RAW image {loaded_count}/{total_paths}..."
+                    )
 
         # Ambil hasil dari gambar Standard
         for future in as_completed(standard_futures):
@@ -422,8 +435,14 @@ def load_images_from_paths(
             finally:
                 loaded_count += 1
                 if update_progress:
-                    prog_val = int(progress_start + (loaded_count / total_paths) * (progress_end - progress_start))
-                    update_progress(prog_val, f"Loading standard image {loaded_count}/{total_paths}...")
+                    prog_val = int(
+                        progress_start
+                        + (loaded_count / total_paths) * (progress_end - progress_start)
+                    )
+                    update_progress(
+                        prog_val,
+                        f"Loading standard image {loaded_count}/{total_paths}...",
+                    )
 
     if capture_ref_proxy:
         return images, gt_proxy_result
@@ -1240,7 +1259,7 @@ def apply_s_curve_float32(img: np.ndarray, strength: float = 4.0, pivot: float =
 
 
 # preprocess_in_python has been moved to:
-# pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.preprocess
+# taichi_library.taichi_algorithm.preprocess
 # Use: preprocess.preprocess_in_python_gpu() instead
 # This provides automatic GPU/CPU fallback with identical API
 
@@ -2132,18 +2151,61 @@ def cleanup_old_hdf5_files(current_hdf5_path: str):
             align_dir = os.path.join("database", "align")
         if not os.path.exists(align_dir):
             return
-            
+
         current_name = os.path.basename(current_hdf5_path)
-        
+
         # Loop semua file di align_dir
         for filename in os.listdir(align_dir):
             if filename.endswith(".h5") and filename != current_name:
                 file_path = os.path.join(align_dir, filename)
                 try:
                     os.remove(file_path)
-                    print(f"[Cleanup] Menghapus file HDF5 lama untuk menghemat HDD: {file_path}")
+                    print(
+                        f"[Cleanup] Menghapus file HDF5 lama untuk menghemat HDD: {file_path}"
+                    )
                 except Exception as e:
                     print(f"[Cleanup] Gagal menghapus {file_path}: {e}")
     except Exception as e:
         print(f"[Cleanup] Error saat membersihkan HDF5: {e}")
 
+
+def is_hdf5_cache_valid(hdf5_path: str, ref_image_path: str) -> bool:
+    """
+    Memvalidasi apakah cache HDF5 masih relevan dengan gambar referensi saat ini.
+
+    HDF5 menyimpan atribut 'ref_image_path' saat dibuat. Fungsi ini
+    membandingkan nama file (basename) dari path yang tersimpan dengan
+    path referensi saat ini. Jika berbeda, cache dianggap tidak valid.
+
+    Args:
+        hdf5_path: Path ke file HDF5 yang akan divalidasi.
+        ref_image_path: Path lengkap dari gambar referensi saat ini.
+
+    Returns:
+        True jika cache valid (referensi sama), False jika tidak valid.
+    """
+    try:
+        import h5py
+        with h5py.File(hdf5_path, "r") as f:
+            stored_ref = f.attrs.get("ref_image_path", "")
+            if not stored_ref:
+                # Tidak ada atribut referensi — cache lama, anggap tidak valid
+                return False
+
+            stored_basename = os.path.basename(str(stored_ref))
+            current_basename = os.path.basename(ref_image_path)
+            is_valid = stored_basename == current_basename
+
+            if is_valid:
+                print(
+                    f"[CacheValidation] Cache HDF5 valid. Referensi cocok: {current_basename}"
+                )
+            else:
+                print(
+                    f"[CacheValidation] Cache HDF5 tidak valid. "
+                    f"Tersimpan: '{stored_basename}', Sekarang: '{current_basename}'"
+                )
+            return is_valid
+    except Exception as e:
+        print(f"[CacheValidation] Gagal membaca atribut HDF5: {e}")
+        return False

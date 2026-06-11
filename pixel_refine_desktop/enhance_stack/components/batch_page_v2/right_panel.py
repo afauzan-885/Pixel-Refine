@@ -24,6 +24,7 @@ from pixel_refine_desktop.ui.resources.GenericUILibrary import (
     ListGroup,
     Button,
     FormGroup,
+    FeatureCard,
 )
 from pixel_refine_desktop.ui.resources.GenericUILibrary.mixins import SyncMixin
 
@@ -114,14 +115,12 @@ class RightPanel(QWidget, SyncMixin):
 
         settings = {
             "alignment_algo": self.align_form.get_value(),
-            "super_resolution_algo": self.sr_form.get_value(),
-            "denoising_algo": self.denoise_form.get_value(),
+            "super_resolution_algo": self.sr_card.get_value(),
+            "denoising_algo": self.denoise_card.get_value(),
             "checkbox_align_images": self.align_form.get_value()
             not in ["None", "No Alignment"],
-            "checkbox_super_resolution": self.sr_form.get_value()
-            not in ["None", "No Super Resolution"],
-            "checkbox_denoising": self.denoise_form.get_value()
-            not in ["None", "No Denoising"],
+            "checkbox_super_resolution": self.sr_card.is_checked,
+            "checkbox_denoising": self.denoise_card.is_checked,
         }
 
         # Use logic module to update store
@@ -191,12 +190,15 @@ class RightPanel(QWidget, SyncMixin):
         self.scroll_area.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
+        self.scroll_area.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
 
         self.scroll_content = QWidget()
         self.scroll_content_layout = QVBoxLayout(self.scroll_content)
         self.scroll_content_layout.setContentsMargins(
-            0, 5, 10, 5
-        )  # Margin for scrollbar space
+            0, 5, 0, 5
+        )
         self.scroll_content_layout.setSpacing(10)
 
         algo_label = QLabel("Algorithm Settings")
@@ -205,39 +207,43 @@ class RightPanel(QWidget, SyncMixin):
         )
         self.scroll_content_layout.addWidget(algo_label)
 
-        # Alignment FormGroup
+        # Alignment FormGroup (keep hidden in background)
         align_names = self.logic.get_algorithm_names("alignment")
         self.align_form = FormGroup("Alignment", input_type="select")
         self.align_form.add_options(align_names)
         if align_names:
             self.align_form.set_value(align_names[0])
         self.align_form.value_changed.connect(self._on_settings_changed)
-        self.scroll_content_layout.addWidget(self.align_form)
-
-        # Declarative Bindings: Link to Store via SyncMixin
+        # self.scroll_content_layout.addWidget(self.align_form)
         self.add_binding("alignment_algo", self.align_form, fallback="No Alignment")
 
-        # Super Resolution FormGroup
+        # Super Resolution Feature Card
         sr_names = self.logic.get_algorithm_names("super_resolution")
-        self.sr_form = FormGroup("Super Resolution", input_type="select")
-        self.sr_form.add_options(sr_names)
-        if sr_names:
-            self.sr_form.set_value(sr_names[0])
-        self.sr_form.value_changed.connect(self._on_settings_changed)
-        self.scroll_content_layout.addWidget(self.sr_form)
+        self.sr_card = FeatureCard(
+            "SUPER RESOLUTION",
+            "Upscale stack resolution dynamically using high-quality interpolation.",
+            sr_names,
+            "No Super Resolution",
+            self,
+        )
+        self.sr_card.value_changed.connect(self._on_settings_changed)
+        self.scroll_content_layout.addWidget(self.sr_card)
         self.add_binding(
-            "super_resolution_algo", self.sr_form, fallback="No Super Resolution"
+            "super_resolution_algo", self.sr_card, fallback="No Super Resolution"
         )
 
-        # Denoising FormGroup
+        # Denoising Feature Card
         denoise_names = self.logic.get_algorithm_names("denoising")
-        self.denoise_form = FormGroup("Denoising", input_type="select")
-        self.denoise_form.add_options(denoise_names)
-        if denoise_names:
-            self.denoise_form.set_value(denoise_names[0])
-        self.denoise_form.value_changed.connect(self._on_settings_changed)
-        self.scroll_content_layout.addWidget(self.denoise_form)
-        self.add_binding("denoising_algo", self.denoise_form, fallback="No Denoising")
+        self.denoise_card = FeatureCard(
+            "DENOISING",
+            "Reduce noise and clean image details while preserving edges.",
+            denoise_names,
+            "No Denoising",
+            self,
+        )
+        self.denoise_card.value_changed.connect(self._on_settings_changed)
+        self.scroll_content_layout.addWidget(self.denoise_card)
+        self.add_binding("denoising_algo", self.denoise_card, fallback="No Denoising")
 
         self.scroll_content_layout.addStretch()
         self.scroll_area.setWidget(self.scroll_content)
@@ -276,6 +282,9 @@ class RightPanel(QWidget, SyncMixin):
             self.splitter.setSizes([self.height(), 0])
             return
 
+        # Dynamically set height of algo container based on current layout requirements
+        self.algo_container.setFixedHeight(self._calculate_algo_target_h())
+
         # Optimization for Large Displays (Maximised)
         current_height = self.height()
         LARGE_MODE_THRESHOLD = 900
@@ -289,12 +298,34 @@ class RightPanel(QWidget, SyncMixin):
             # For smaller screens, let splitter handle it or force 1:1 if needed
             pass
 
+    def _update_cards_mutually_exclusive_state(self):
+        """Enforce mutual exclusivity between Super Resolution and Denoising using the disable state."""
+        self.sr_card.blockSignals(True)
+        self.denoise_card.blockSignals(True)
+        try:
+            if self.denoise_card.is_checked:
+                self.sr_card.setChecked(False)
+                self.sr_card.setEnabled(False)
+            else:
+                self.sr_card.setEnabled(True)
+
+            if self.sr_card.is_checked:
+                self.denoise_card.setChecked(False)
+                self.denoise_card.setEnabled(False)
+            else:
+                self.denoise_card.setEnabled(True)
+        finally:
+            self.sr_card.blockSignals(False)
+            self.denoise_card.blockSignals(False)
+
     def _on_settings_changed(self, save_to_store=True):
         """Emit current settings and optionally save to persistence."""
+        self._update_cards_mutually_exclusive_state()
+
         settings = {
             "alignment": self.align_form.get_value() or "",
-            "super_resolution": self.sr_form.get_value() or "",
-            "denoising": self.denoise_form.get_value() or "",
+            "super_resolution": self.sr_card.get_value() or "",
+            "denoising": self.denoise_card.get_value() or "",
         }
 
         # 1. Emit realtime signal for UI adaptation
@@ -395,7 +426,7 @@ class RightPanel(QWidget, SyncMixin):
             # Emit signal clearing selection if needed (handled by list group clearing usually)
 
     def _calculate_algo_target_h(self):
-        """Calculate dynamic target height based on content but capped at 280px."""
+        """Calculate dynamic target height based on content but capped at 360px."""
         # Force a layout update to get accurate sizeHint
         # Use the stored layout reference directly
         if self.scroll_content_layout:
@@ -406,8 +437,8 @@ class RightPanel(QWidget, SyncMixin):
         # Header (30) + Button (45) + Margins/Spacing (15)
         total_h = content_h + 80
 
-        # Clamp between 150 and 280
-        return max(150, min(total_h, 280))
+        # Clamp between 150 and 360
+        return max(150, min(total_h, 360))
 
     def _on_selection_changed(self, selected_values):
         """Buffer selection change to prevent UI lag during rapid clicking."""

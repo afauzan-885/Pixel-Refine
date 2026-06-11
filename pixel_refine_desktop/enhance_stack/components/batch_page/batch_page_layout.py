@@ -644,7 +644,7 @@ class BatchPageLayout(QWidget):
                 return
 
             self._bulk_delete_animation_counter = len(panels_to_animate)
-            delay_ms = 300
+            delay_ms = 10
 
             for index, panel_ref in enumerate(panel_refs):
                 QTimer.singleShot(

@@ -156,17 +156,22 @@ class CombinedPanel(QWidget):
         self.checkboxes = {}
         self.comboboxes = {}
 
-        # Hitung jumlah gambar dalam batch ini sekali
+        # Hitung jumlah gambar dalam batch ini sekali (dan validasi keberadaan file fisik)
         self.image_paths_in_batch = []
         self.image_count_in_batch = 0
         if self.batch_id is not None:
             try:
-                self.image_paths_in_batch = self.database_manager.get_images_by_batch(
-                    self.batch_id
-                )
+                raw_paths = self.database_manager.get_images_by_batch(self.batch_id)
+                # Cek keberadaan file di disk secara sangat efisien
+                missing_paths = [p for p in raw_paths if not os.path.exists(p)]
+                if missing_paths:
+                    self.database_manager.batch_process_delete_selected_images(self.batch_id, missing_paths)
+                    self.image_paths_in_batch = self.database_manager.get_images_by_batch(self.batch_id)
+                else:
+                    self.image_paths_in_batch = raw_paths
                 self.image_count_in_batch = len(self.image_paths_in_batch)
             except Exception as e:
-                print(f"Error getting images for batch {self.batch_id}: {e}")
+                print(f"Error getting/validating images for batch {self.batch_id}: {e}")
 
         # Flag untuk mengecek apakah overlay masih “alive”
         self._overlay_alive = False
@@ -906,9 +911,25 @@ class CombinedPanel(QWidget):
             print("[ERROR] process_all_batch called with no batch_id.")
             return
 
-        # --- Langkah 1: Verifikasi Batch ID terhadap Database Manager ---
+        # --- Langkah 1: Verifikasi Batch ID terhadap Database Manager & Validasi Keberadaan File ---
         try:
-            images_in_db = self.database_manager.get_images_by_batch(self.batch_id)
+            raw_paths = self.database_manager.get_images_by_batch(self.batch_id)
+            # Validasi cepat keberadaan file fisik di disk
+            missing_paths = [p for p in raw_paths if not os.path.exists(p)]
+            if missing_paths:
+                self.database_manager.batch_process_delete_selected_images(self.batch_id, missing_paths)
+                images_in_db = self.database_manager.get_images_by_batch(self.batch_id)
+                # Refresh data internal dan UI label info batch
+                self.image_paths_in_batch = images_in_db
+                self.image_count_in_batch = len(images_in_db)
+                if hasattr(self, "batch_info_label") and self.batch_info_label and self.sequential_batch_number is not None:
+                    batch_label_text = language_config.BATCH_LABEL_FORMAT.format(
+                        self.sequential_batch_number, self.image_count_in_batch
+                    )
+                    self.batch_info_label.setText(batch_label_text)
+            else:
+                images_in_db = raw_paths
+
             if not images_in_db:
                 print(
                     f"[WARN] No images found in database for batch_id: {self.batch_id}. Skipping."

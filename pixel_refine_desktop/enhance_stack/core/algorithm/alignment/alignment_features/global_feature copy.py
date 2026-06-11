@@ -1105,7 +1105,7 @@ def apply_s_curve_float32(img: np.ndarray, strength: float = 4.0, pivot: float =
 
 
 # preprocess_in_python has been moved to:
-# pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.preprocess
+# taichi_library.taichi_algorithm.preprocess
 # Use: preprocess.preprocess_in_python_gpu() instead
 # This provides automatic GPU/CPU fallback with identical API
 

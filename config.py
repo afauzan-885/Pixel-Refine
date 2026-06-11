@@ -43,3 +43,10 @@ SUPPORTED_FORMATS = {
         ".iiq",
     ],
 }
+
+WINDOW_CONFIG = {
+    "app_aspect_ratio": 1200 / 600,
+    "min_screen_ratio": 0.76,
+    "abs_min_width": 800,
+    "abs_min_height": 400,
+}

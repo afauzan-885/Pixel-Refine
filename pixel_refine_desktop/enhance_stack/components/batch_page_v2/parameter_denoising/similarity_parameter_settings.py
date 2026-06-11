@@ -37,9 +37,9 @@ def load_similarity_config():
     defaults = {
         "use_multi_core": True,
         "spatial_params": {
-            "similarity_spatial_tile_size": 8,
-            "similarity_spatial_motion_sensitivity": 100.0,
-            "similarity_spatial_noise_mad_offset_factor": 0.12,
+            "similarity_spatial_tile_size": 32,
+            "similarity_spatial_motion_sensitivity": 150.00,
+            "similarity_spatial_noise_mad_offset_factor": 0.15,
             "similarity_spatial_overlap_percent": 0.40,
             "similarity_spatial_num_workers": 1,
             "similarity_smart_noise_alpha": 1.0,

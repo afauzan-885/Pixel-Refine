@@ -185,10 +185,10 @@ class PixelRefineMain(QMainWindow):
 
         # Window configuration
         self.window_config = WindowConfig(
-            app_aspect_ratio=1200 / 600,
-            min_screen_ratio=0.76,
-            abs_min_width=800,
-            abs_min_height=400,
+            app_aspect_ratio=config.WINDOW_CONFIG["app_aspect_ratio"],
+            min_screen_ratio=config.WINDOW_CONFIG["min_screen_ratio"],
+            abs_min_width=config.WINDOW_CONFIG["abs_min_width"],
+            abs_min_height=config.WINDOW_CONFIG["abs_min_height"],
         )
         self.window_config.apply_to_window(self)
 

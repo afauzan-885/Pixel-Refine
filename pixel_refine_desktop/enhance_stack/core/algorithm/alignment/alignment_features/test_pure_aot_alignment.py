@@ -10,7 +10,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import AOTEngine
+from taichi_library.taichi_aot.engine import AOTEngine
 
 def test_pure_aot_direct():
     print("--- Verifikasi DIRECT Taichi AOT (Pure VRAM) ---")

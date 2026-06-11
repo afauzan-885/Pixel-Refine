@@ -45,10 +45,19 @@ class BatchDeleteProcess(QThread):
 
         # Hapus cache dari disk untuk batch tertentu
         image_paths = self.database_manager.get_images_by_batch(self.batch_id)
-        for path in image_paths:
-            cache_path = os.path.join(self.cache_dir, os.path.basename(path) + ".jpg")
-            if os.path.exists(cache_path):
-                os.remove(cache_path)
+        if image_paths:
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                futures = []
+                for path in image_paths:
+                    cache_path = os.path.join(self.cache_dir, os.path.basename(path) + ".jpg")
+                    futures.append(executor.submit(os.remove, cache_path))
+                for future in futures:
+                    try:
+                        future.result()
+                    except FileNotFoundError:
+                        pass
+                    except Exception as e:
+                        print(f"Error deleting cache file: {e}")
 
         # Hapus batch dari database
         self.database_manager.batch_process_delete_batch(self.batch_id)
@@ -68,20 +77,34 @@ class BatchDeleteProcess(QThread):
         for thread in self.thumbnail_threads:
             thread.pause()
 
-        # Ambil semua batch ID dan kumpulkan semua image path dari seluruh batch
-        batch_ids = self.database_manager.get_all_batch_ids()
+        # Ambil seluruh path gambar dari semua batch dalam satu query cepat
         all_image_paths = []
-        for batch_id in batch_ids:
-            image_paths = self.database_manager.get_images_by_batch(batch_id)
-            all_image_paths.extend(image_paths)
-        # Hapus duplikat jika ada
-        all_image_paths = list(set(all_image_paths))
+        try:
+            with self.database_manager._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT DISTINCT i.path
+                    FROM images i
+                    JOIN batch_process_image bpi ON i.id = bpi.image_id_batch
+                """)
+                all_image_paths = [row[0] for row in cursor.fetchall()]
+        except Exception as e:
+            print(f"Error fetching all batch images for deletion: {e}")
 
-        # Hapus cache gambar dari disk
-        for path in all_image_paths:
-            cache_path = os.path.join(self.cache_dir, os.path.basename(path) + ".jpg")
-            if os.path.exists(cache_path):
-                os.remove(cache_path)
+        # Hapus cache gambar dari disk secara efisien menggunakan thread pool
+        if all_image_paths:
+            with ThreadPoolExecutor(max_workers=12) as executor:
+                futures = []
+                for path in all_image_paths:
+                    cache_path = os.path.join(self.cache_dir, os.path.basename(path) + ".jpg")
+                    futures.append(executor.submit(os.remove, cache_path))
+                for future in futures:
+                    try:
+                        future.result()
+                    except FileNotFoundError:
+                        pass
+                    except Exception as e:
+                        print(f"Error deleting cache file: {e}")
 
         # Hapus seluruh batch beserta gambar yang terkait dari database
         self.database_manager.delete_all_batches()

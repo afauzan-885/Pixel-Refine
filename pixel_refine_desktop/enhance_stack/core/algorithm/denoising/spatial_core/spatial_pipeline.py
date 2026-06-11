@@ -362,37 +362,42 @@ def process_in_gpu(
     reference_image_float,
     ref_image_h,
     ref_image_w,
-    ref_channels_buffer,
-    ref_dtype,
-    work_res_h,
-    work_res_w,
-    tile_h,
-    tile_w,
-    row_starts,
-    col_starts,
-    base_window,
-    motion_sensitivity,
-    noise_offset_factor,
-    update_progress,
-    stop_requested,
-    pass_merge_range,
-    p_align_start,
-    p_align_end,
-    p_merge_start,
-    is_linear_mode,
-    proxy_scale,
-    images_processed_so_far,
-    total_overall_images,
-    lib_path,
+    ref_channels_buffer=3,
+    ref_dtype=None,
+    work_res_h=None,
+    work_res_w=None,
+    tile_h=16,
+    tile_w=16,
+    row_starts=None,
+    col_starts=None,
+    base_window=None,
+    motion_sensitivity=None,
+    noise_offset_factor=None,
+    update_progress=None,
+    stop_requested=None,
+    pass_merge_range=None,
+    p_align_start=30,
+    p_align_end=40,
+    p_merge_start=40,
+    is_linear_mode=False,
+    proxy_scale=1.0,
+    images_processed_so_far=0,
+    total_overall_images=None,
+    lib_path=None,
     alignment_tile_size=None,
+    alignment_variant: str = "block_flow",
     **kwargs,
 ):
     """Pipeline GPU Alignment + Merging (Full GPU Path).
 
     Alignment: Selalu GPU Taichi.
     Merging:   Selalu Taichi (full GPU).
+
+    alignment_variant:
+        'block_flow'        — HDR+ optical-flow tile matching (default)
+        'block_correlation' — Hierarchical Phase Correlation
     """
-    from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+    from taichi_library import taichi_aot
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import (
         taichi_bridge,
     )
@@ -401,6 +406,7 @@ def process_in_gpu(
     data_source = kwargs.get("data_source")
     if not images and data_source:
         import h5py
+
         with h5py.File(data_source, "r") as f:
             num_images = sum(1 for k in f.keys() if k.startswith("image_"))
     else:
@@ -433,6 +439,18 @@ def process_in_gpu(
             )
             ref_align_input = ref_align_gpu.to_numpy()
 
+        # Resolve flow_backend / optical_flow_type
+        # If alignment_variant is "block_align" or optical_flow_type is "block_align", use it.
+        # Otherwise default to optical_flow_type parameter.
+        flow_backend = kwargs.get("optical_flow_type", kwargs.get("flow_backend", "alignment_tile"))
+        if alignment_variant == "block_align":
+            flow_backend = "block_align"
+
+        # Pop keys from kwargs to prevent multiple values for keyword argument error
+        align_kwargs = dict(kwargs)
+        align_kwargs.pop("optical_flow_type", None)
+        align_kwargs.pop("flow_backend", None)
+
         success = perform_alignment_gpu(
             images,
             ref_align_input,
@@ -449,8 +467,11 @@ def process_in_gpu(
             proxy_scale=proxy_scale,
             index_offset=images_processed_so_far,
             return_format=align_return_format,
-            **kwargs,
+            optical_flow_type=flow_backend,
+            **align_kwargs,
         )
+        if kwargs.get("alignment_only", False):
+            return success
         if not success:
             print("Warning: GPU alignment failed partially.")
         if stop_requested and stop_requested():
@@ -464,7 +485,7 @@ def process_in_gpu(
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.alignment_core import (
         get_taichi_worker,
     )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.taichi_worker import (
+    from taichi_library.taichi_algorithm.taichi_worker import (
         create_taichi_ndarray,
         release_taichi_ndarray,
         download_taichi_ndarray,
@@ -474,7 +495,7 @@ def process_in_gpu(
         generate_spatial_weights_taichi,
         accumulate_spatial_merging_taichi,
     )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_algorithm.bilinear_interpolation import (
+    from taichi_library.taichi_algorithm.bilinear_interpolation import (
         bilinear_resize,
     )
 
@@ -491,12 +512,17 @@ def process_in_gpu(
     processed_frames_spatial = [0]
 
     def _run_gpu_merging_loop():
-        from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import AOTEngine
+        from taichi_library.taichi_aot.engine import (
+            AOTEngine,
+        )
+
         engine = AOTEngine()
 
         _sum_gpu = taichi_aot.upload(final_image_sum_full_res)
         _weight_sum_full_gpu = taichi_aot.upload(weight_map_sum_full_res)
-        _base_window_gpu = taichi_aot.generate_hanning_window_2d((tile_h, tile_w), exclude_boundary=False)
+        _base_window_gpu = taichi_aot.generate_hanning_window_2d(
+            (tile_h, tile_w), exclude_boundary=False
+        )
 
         _rows_gpu = taichi_aot.upload(row_starts)
         _rows_gpu.dtype = np.int32
@@ -504,7 +530,9 @@ def process_in_gpu(
         _cols_gpu = taichi_aot.upload(col_starts)
         _cols_gpu.dtype = np.int32
 
-        _weight_work_gpu = engine.allocate((work_res_h, work_res_w), dtype=np.float32, host_accessible=True)
+        _weight_work_gpu = engine.allocate(
+            (work_res_h, work_res_w), dtype=np.float32, host_accessible=True
+        )
 
         batch_size = 8
         use_overall_progress = total_overall_images and total_overall_images > 0
@@ -518,6 +546,7 @@ def process_in_gpu(
                 chunk_images = []
                 if data_source is not None:
                     import h5py
+
                     with h5py.File(data_source, "r") as h5f:
                         for idx in range(start_idx, end_idx):
                             chunk_images.append(h5f[f"image_{idx}"][:])
@@ -541,7 +570,7 @@ def process_in_gpu(
                         work_res_h,
                         work_res_w,
                         ref_image_h,
-                        ref_image_w
+                        ref_image_w,
                     )
 
                     generate_spatial_weights_taichi(
@@ -560,6 +589,7 @@ def process_in_gpu(
                         equalize_brightness=False,
                         buffer_provider="pool",
                         search_radius=kwargs.get("similarity_search_radius", 3),
+                        early_exit_threshold=kwargs.get("early_exit_threshold", 0.05),
                     )
 
                     curr_work_gray_gpu.destroy()
@@ -604,13 +634,15 @@ def process_in_gpu(
                     for idx in range(start_idx, end_idx):
                         images[idx] = None
                 import gc
+
                 gc.collect()
 
             return_raw = kwargs.get("return_raw", False)
             if not return_raw and processed_frames_spatial[0] > 0:
                 if update_progress:
                     update_progress(
-                        pass_merge_range[1], "Finalizing with simple mean calculation on GPU..."
+                        pass_merge_range[1],
+                        "Finalizing with simple mean calculation on GPU...",
                     )
                 _ref_full_gpu = taichi_aot.upload(reference_image_float)
                 _final_image_gpu = engine.allocate(
@@ -618,7 +650,7 @@ def process_in_gpu(
                     dtype=_sum_gpu.dtype,
                     is_vector=getattr(_sum_gpu, "is_vector", False),
                     vector_dim=getattr(_sum_gpu, "vector_dim", 1),
-                    host_accessible=True
+                    host_accessible=True,
                 )
                 taichi_aot.mean_division(
                     sum_img=_sum_gpu,
@@ -636,6 +668,7 @@ def process_in_gpu(
             return True
         except Exception:
             import traceback
+
             traceback.print_exc()
             return False
         finally:
@@ -674,4 +707,3 @@ def process_in_gpu(
         weight_map_sum_full_res,
         ref_noise_sigma,
     )
-

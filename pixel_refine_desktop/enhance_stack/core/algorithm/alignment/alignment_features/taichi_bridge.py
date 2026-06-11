@@ -1,7 +1,7 @@
 import os
 import numpy as np
-from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
-from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import (
+from taichi_library import taichi_aot
+from taichi_library.taichi_aot.engine import (
     AOTEngine,
 )
 
@@ -94,17 +94,17 @@ def to_gamma_proxy_gpu(
     return dst_gpu
 
 
-def prepare_pyramid_aot(image_gpu):
-    """Creates a 3-layer pyramid (L0, L1, L2). L0=full res, L1=1/2, L2=1/4."""
-    l0 = image_gpu
-    h, w = l0.shape[0], l0.shape[1]
-    l1 = taichi_aot.resize(
-        l0, (w // 2, h // 2), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True
-    )
-    l2 = taichi_aot.resize(
-        l1, (w // 4, h // 4), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True
-    )
-    return l0, l1, l2
+def prepare_pyramid_aot(image_gpu, num_layers=3):
+    """Creates a multi-layer pyramid (L0, L1, ...). L0=full res, L1=1/2, L2=1/4, etc."""
+    layers = [image_gpu]
+    for i in range(1, num_layers):
+        prev = layers[-1]
+        h_prev, w_prev = prev.shape[:2]
+        next_layer = taichi_aot.resize(
+            prev, (w_prev // 2, h_prev // 2), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True
+        )
+        layers.append(next_layer)
+    return tuple(layers)
 
 
 def prepare_reference_for_alignment(
@@ -115,9 +115,10 @@ def prepare_reference_for_alignment(
     work_res_w,
     lut_gpu=None,
     blur_work_gpu=None,
+    num_layers=3,
 ):
-    """Prepare reference image pyramid on GPU. Returns (l0, l1, l2) — caller must destroy all."""
-    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot import (
+    """Prepare reference image pyramid on GPU. Returns (l0, l1, l2, ...) — caller must destroy all."""
+    from taichi_library.taichi_aot import (
         TaichiGPUBuffer,
     )
 
@@ -192,7 +193,7 @@ def prepare_reference_for_alignment(
         if ref_gray is not final_res_gray:
             ref_gray.release()
 
-    return prepare_pyramid_aot(final_res_gray)
+    return prepare_pyramid_aot(final_res_gray, num_layers=num_layers)
 
 
 def prepare_comparison_for_alignment(
@@ -204,9 +205,10 @@ def prepare_comparison_for_alignment(
     work_res_w,
     lut_gpu=None,
     blur_work_gpu=None,
+    num_layers=3,
 ):
-    """Prepare comparison image pyramid on GPU. Returns (l0, l1, l2) — caller must destroy all."""
-    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot import (
+    """Prepare comparison image pyramid on GPU. Returns (l0, l1, l2, ...) — caller must destroy all."""
+    from taichi_library.taichi_aot import (
         TaichiGPUBuffer,
     )
 
@@ -284,7 +286,7 @@ def prepare_comparison_for_alignment(
         if comp_gray is not final_res_gray:
             comp_gray.release()
 
-    return prepare_pyramid_aot(final_res_gray)
+    return prepare_pyramid_aot(final_res_gray, num_layers=num_layers)
 
 
 def prepare_reference_aot(
@@ -380,7 +382,7 @@ def prepare_frame_aot(
     ref_image_w,
 ):
     """Prepare comparison frame on GPU for merging. Returns (curr_full_gpu, curr_work_gray_gpu)."""
-    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import (
+    from taichi_library.taichi_aot.engine import (
         TaichiGPUBuffer,
     )
 

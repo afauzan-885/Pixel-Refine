@@ -48,6 +48,10 @@ if TAICHI_AVAILABLE:
     def calculate_hybrid_gradient_optimized(
         current_img: ti.template(),
         reference_img: ti.template(),
+        curr_grad_x: ti.template(),
+        curr_grad_y: ti.template(),
+        ref_grad_x: ti.template(),
+        ref_grad_y: ti.template(),
         r: int,
         c: int,
         curr_h: int,
@@ -56,23 +60,26 @@ if TAICHI_AVAILABLE:
         w: int,
         noise_level: float,
         grad_weight_factor: float,
-        stab_epsilon: float
+        stab_epsilon: float,
+        flat_weight: float
     ) -> float:
         """
         Calculates the hybrid gradient similarity score between current and reference blocks.
-        Strict 1:1 parity with C++ Internal::calculate_hybrid_gradient_optimized.
+        Strict 1:1 parity with C++ Internal::calculate_hybrid_gradient_optimized using precomputed gradients.
         """
         weighted_sum = 0.0
         total_weight = 0.0
         
         grad_sensitivity = 202.5
+        # Adaptive Vision Boost: increase sensitivity dynamically on low-contrast tiles
+        adaptive_grad_sensitivity = grad_sensitivity * (1.0 + 3.0 * flat_weight)
         structure_min_threshold_sq = 150.0
 
         # 1-pixel border skip to prevent out of bounds and match C++
-        for y in range(1, curr_h - 1):
-            for x in range(1, curr_w - 1):
-                img_y = r + y
-                img_x = c + x
+        for y in range((curr_h - 1) // 2):
+            img_y = r + 1 + y * 2
+            for x in range((curr_w - 1) // 2):
+                img_x = c + 1 + x * 2
                 
                 p1_val = current_img[img_y, img_x]
                 p2_val = reference_img[img_y, img_x]
@@ -80,33 +87,27 @@ if TAICHI_AVAILABLE:
                 
                 adaptive_diff_threshold = ti.max(0.005, noise_level * 0.2)
                 
-                # --- Diagonal Averaging Gradients (3 rows) ---
-                # Current Image gradients
-                gx1_center = current_img[img_y, img_x + 1] - current_img[img_y, img_x - 1]
-                gx1_top = current_img[img_y - 1, img_x + 1] - current_img[img_y - 1, img_x - 1]
-                gx1_bottom = current_img[img_y + 1, img_x + 1] - current_img[img_y + 1, img_x - 1]
-                gx1 = (gx1_center + gx1_top + gx1_bottom) * 0.333
-                
-                gy1 = current_img[img_y + 1, img_x] - current_img[img_y - 1, img_x]
-                
-                # Reference Image gradients
-                gx2_center = reference_img[img_y, img_x + 1] - reference_img[img_y, img_x - 1]
-                gx2_top = reference_img[img_y - 1, img_x + 1] - reference_img[img_y - 1, img_x - 1]
-                gx2_bottom = reference_img[img_y + 1, img_x + 1] - reference_img[img_y + 1, img_x - 1]
-                gx2 = (gx2_center + gx2_top + gx2_bottom) * 0.333
-                
-                gy2 = reference_img[img_y + 1, img_x] - reference_img[img_y - 1, img_x]
+                # --- Read Precomputed Gradients directly ---
+                gx1 = curr_grad_x[img_y, img_x]
+                gy1 = curr_grad_y[img_y, img_x]
+                gx2 = ref_grad_x[img_y, img_x]
+                gy2 = ref_grad_y[img_y, img_x]
                 
                 mag1_sq = gx1 * gx1 + gy1 * gy1
                 mag2_sq = gx2 * gx2 + gy2 * gy2
                 min_mag_sq = ti.min(mag1_sq, mag2_sq)
                 
+                # Adaptive to local intensity (p2_val): dark areas get higher noise tolerance scale, highlights get stricter.
+                # Linear scaling maps p2_val=0 to scale=3.0 and p2_val=1.0 to scale=1.0. Extremely cheap on GPU.
+                tolerance_scale = ti.max(1.0, ti.min(3.0, 3.0 - 2.0 * p2_val))
+                local_adaptive_diff_threshold = adaptive_diff_threshold * tolerance_scale
+
                 # --- continuous noise weight ---
                 noise_weight = 1.0
                 if noise_level > stab_epsilon:
                     if min_mag_sq < structure_min_threshold_sq:
                         # Flat area
-                        local_thr = adaptive_diff_threshold * 1.5
+                        local_thr = local_adaptive_diff_threshold * 1.5
                         if pixel_diff < local_thr:
                             noise_weight = 0.05 + 0.95 * (pixel_diff / local_thr)
                         else:
@@ -116,22 +117,26 @@ if TAICHI_AVAILABLE:
                             noise_weight = 1.0 - 0.2 * ratio
                     else:
                         # Edge area
-                        if pixel_diff < adaptive_diff_threshold:
-                            noise_weight = 1.15 + 0.15 * (1.0 - pixel_diff / adaptive_diff_threshold)
+                        if pixel_diff < local_adaptive_diff_threshold:
+                            noise_weight = 1.15 + 0.15 * (1.0 - pixel_diff / local_adaptive_diff_threshold)
                         else:
-                            ratio = pixel_diff / (adaptive_diff_threshold * 4.0)
+                            ratio = pixel_diff / (local_adaptive_diff_threshold * 4.0)
                             if ratio > 1.0:
                                 ratio = 1.0
                             noise_weight = 0.3 + 0.4 * (1.0 - ratio)
                 
-                # --- structure weight ---
+                # --- structure weight & deghosting penalty ---
                 structure_weight = 1.0
                 if min_mag_sq > stab_epsilon and mag1_sq > stab_epsilon and mag2_sq > stab_epsilon:
                     dot = gx1 * gx2 + gy1 * gy2
                     cos_sim = dot / ti.sqrt(mag1_sq * mag2_sq)
-                    score = ti.max(0.0, cos_sim) * ti.sqrt(min_mag_sq)
                     
-                    structure_weight = 1.0 + grad_weight_factor * fast_tanh(score * grad_sensitivity)
+                    if min_mag_sq > structure_min_threshold_sq and cos_sim < 0.2:
+                        # Mismatched structure orientations: scale up pixel_diff to penalize mismatch and prevent ghosting
+                        pixel_diff = pixel_diff * (1.5 - cos_sim)
+                    else:
+                        score = ti.max(0.0, cos_sim) * ti.sqrt(min_mag_sq)
+                        structure_weight = 1.0 + grad_weight_factor * fast_tanh(score * adaptive_grad_sensitivity)
                     
                 final_weight = structure_weight * noise_weight
                 weighted_sum += pixel_diff * final_weight

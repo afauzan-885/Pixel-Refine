@@ -3,8 +3,25 @@ Bootstrap-like Card Components for PySide6
 Provides reusable card containers
 """
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
-from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QFrame,
+    QComboBox,
+    QCheckBox,
+    QPushButton,
+    QGridLayout,
+    QSizePolicy,
+)
+from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtGui import QPainter, QColor, QBrush
+from .mixins import RealtimeMixin
+from .theme import create_checkbox_style, create_select_style
+from pixel_refine_desktop.ui.resources.animations.animation_manager import (
+    HeightAnimator,
+)
 
 
 class Card(QFrame):
@@ -234,3 +251,321 @@ class CardGroup(QWidget):
     def add_card(self, card, stretch=1):
         """Add card to group"""
         self.layout.addWidget(card, stretch)
+
+
+class ToggleSwitch(QWidget):
+    toggled = Signal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(36, 20)
+        self._checked = False
+        self._thumb_position = 2.0
+        self._last_click_time = 0
+
+    def isChecked(self):
+        return self._checked
+
+    def setChecked(self, checked):
+        if self._checked != checked:
+            self._checked = checked
+            self._thumb_position = 18.0 if checked else 2.0
+            self.update()
+            self.toggled.emit(checked)
+
+    def mousePressEvent(self, event):
+        import time
+
+        current_time = time.time()
+        if current_time - self._last_click_time < 0.25:
+            event.accept()
+            return
+        self._last_click_time = current_time
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setChecked(not self._checked)
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Draw track
+        track_color = QColor("#2ECC71") if self._checked else QColor("#BDC3C7")
+        painter.setBrush(QBrush(track_color))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(
+            0, 0, self.width(), self.height(), self.height() / 2, self.height() / 2
+        )
+
+        # Draw thumb
+        painter.setBrush(QBrush(QColor("#FFFFFF")))
+        thumb_size = self.height() - 4
+        painter.drawEllipse(self._thumb_position, 2, thumb_size, thumb_size)
+
+
+class FeatureCard(QFrame, RealtimeMixin):
+    """
+    A premium toggleable card component for algorithms.
+    """
+
+    value_changed = Signal(str)
+
+    def __init__(
+        self,
+        title,
+        description,
+        options,
+        fallback_val,
+        parent=None,
+        adaptive_directions=None,
+    ):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setObjectName("featureCard")
+
+        self.is_checked = False
+        self.fallback_val = fallback_val
+        self.options = [
+            opt
+            for opt in options
+            if opt not in ["No Denoising", "No Super Resolution", "No Alignment"]
+        ]
+        self._last_click_time = 0
+
+        if adaptive_directions is None:
+            adaptive_directions = ["bottom"]
+        self.adaptive_directions = adaptive_directions
+
+        # Setup debouncing timer (200ms) to prevent rapid signal spamming
+        self._debounce_timer = QTimer(self)
+        self._debounce_timer.setSingleShot(True)
+        self._debounce_timer.setInterval(200)
+        self._debounce_timer.timeout.connect(self._emit_debounced_value)
+
+        # Apply adaptive size policies based on direction
+        h_policy = (
+            QSizePolicy.Policy.Expanding
+            if "right" in self.adaptive_directions
+            else QSizePolicy.Policy.Preferred
+        )
+        v_policy = (
+            QSizePolicy.Policy.Expanding
+            if "bottom" in self.adaptive_directions
+            else QSizePolicy.Policy.Preferred
+        )
+        self.setSizePolicy(h_policy, v_policy)
+
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(8, 6, 8, 6)
+        self.main_layout.setSpacing(4)
+
+        # Header layout
+        header_layout = QHBoxLayout()
+
+        # Premium animated toggle switch (replacing QCheckBox indicator)
+        self.switch_indicator = ToggleSwitch(self)
+        self.switch_indicator.toggled.connect(self.setChecked)
+        header_layout.addWidget(self.switch_indicator)
+
+        self.title_lbl = QLabel(title)
+        self.title_lbl.setStyleSheet(
+            "font-weight: bold; font-size: 11pt; color: #2C3E50; background: transparent;"
+        )
+        header_layout.addWidget(self.title_lbl)
+        header_layout.addStretch()
+
+        self.main_layout.addLayout(header_layout)
+
+        # Description
+        self.desc_lbl = QLabel(description)
+        self.desc_lbl.setStyleSheet(
+            "color: #7F8C8D; font-size: 9.5pt; background: transparent;"
+        )
+        self.desc_lbl.setWordWrap(True)
+        self.desc_lbl.setMinimumWidth(0)
+        self.main_layout.addWidget(self.desc_lbl)
+
+        # Collapsible Selection container
+        self.option_widget = QWidget()
+        option_layout = QVBoxLayout(self.option_widget)
+        option_layout.setContentsMargins(0, 5, 0, 0)
+        option_layout.setSpacing(4)
+
+        # Dropdown selection container (replacing option grid buttons)
+        self.combo = QComboBox()
+        self.combo.addItems(self.options)
+        self.combo.setStyleSheet(create_select_style())
+        self.combo.currentTextChanged.connect(self._on_combo_changed)
+        option_layout.addWidget(self.combo)
+
+        self.main_layout.addWidget(self.option_widget)
+        self.option_widget.setVisible(False)
+
+        # Setup height animator from library
+        self.height_animator = HeightAnimator(self)
+
+        self.update_styles()
+
+    def setEnabled(self, enabled):
+        super().setEnabled(enabled)
+        self.switch_indicator.setEnabled(enabled)
+        self.combo.setEnabled(enabled)
+        self.update_styles()
+
+        # Apply visual semi-transparency for disabled state
+        if not enabled:
+            from PySide6.QtWidgets import QGraphicsOpacityEffect
+            effect = self.graphicsEffect()
+            if not isinstance(effect, QGraphicsOpacityEffect):
+                effect = QGraphicsOpacityEffect(self)
+                self.setGraphicsEffect(effect)
+            effect.setOpacity(0.5)
+        else:
+            self.setGraphicsEffect(None)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        import config
+
+        threshold = getattr(config, "FEATURE_CARD_COLLAPSE_THRESHOLD", 230)
+
+        # Adjust font sizes dynamically based on current card width
+        w = self.width()
+        if w < 180:
+            title_sz = 9
+            desc_sz = 8
+        elif w < 230:
+            title_sz = 10
+            desc_sz = 8.5
+        else:
+            title_sz = 11
+            desc_sz = 9.5
+
+        self.title_lbl.setStyleSheet(
+            f"font-weight: bold; font-size: {title_sz}pt; color: #2C3E50; background: transparent;"
+        )
+        self.desc_lbl.setStyleSheet(
+            f"color: #7F8C8D; font-size: {desc_sz}pt; background: transparent;"
+        )
+
+    def _emit_debounced_value(self):
+        self.value_changed.emit(self.get_value())
+
+    def setChecked(self, checked):
+        if self.is_checked != checked:
+            self.is_checked = checked
+            self.switch_indicator.setChecked(checked)
+
+            # Smoothly animate options expansion using HeightAnimator
+            if checked:
+                self.option_widget.show()
+                target_h = self.option_widget.sizeHint().height()
+                self.height_animator.animate_height(self.option_widget, target_h)
+            else:
+                self.height_animator.animate_height(self.option_widget, 0)
+
+            self.update_styles()
+            self._debounce_timer.start()
+
+            # Request parent right panel to recalculate layout height if bottom expansion active
+            if "bottom" in self.adaptive_directions:
+                parent_panel = self.parentWidget()
+                while parent_panel:
+                    if hasattr(parent_panel, "algo_container") and hasattr(
+                        parent_panel, "_calculate_algo_target_h"
+                    ):
+                        parent_panel.algo_container.setFixedHeight(
+                            parent_panel._calculate_algo_target_h()
+                        )
+                        break
+                    parent_panel = parent_panel.parentWidget()
+
+    def mousePressEvent(self, event):
+        if not self.isEnabled():
+            super().mousePressEvent(event)
+            return
+
+        import time
+
+        current_time = time.time()
+        if current_time - getattr(self, "_last_click_time", 0) < 0.25:
+            event.accept()
+            return
+        self._last_click_time = current_time
+
+        pos = event.position().toPoint()
+        child = self.childAt(pos)
+        # If clicked inside option widget or on the toggle switch, let children handle it
+        if child and (
+            child == self.switch_indicator or self.option_widget.isAncestorOf(child)
+        ):
+            super().mousePressEvent(event)
+            return
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setChecked(not self.is_checked)
+        super().mousePressEvent(event)
+
+    def _on_combo_changed(self, text):
+        if self.is_checked:
+            self._debounce_timer.start()
+
+    def get_value(self):
+        if self.is_checked:
+            return self.combo.currentText()
+        return self.fallback_val
+
+    def set_value(self, val):
+        self.blockSignals(True)
+        if val == self.fallback_val or not val:
+            self.setChecked(False)
+        else:
+            self.setChecked(True)
+            idx = self.combo.findText(val)
+            if idx >= 0:
+                self.combo.setCurrentIndex(idx)
+        self.blockSignals(False)
+
+    def update_styles(self):
+        if not self.isEnabled():
+            self.setStyleSheet(
+                """
+                QFrame#featureCard {
+                    background-color: #F8F9FA;
+                    border: 1px solid #E8EDF2;
+                    border-radius: 8px;
+                }
+                QLabel {
+                    color: #BDC3C7;
+                }
+            """
+            )
+        elif self.is_checked:
+            self.setStyleSheet(
+                """
+                QFrame#featureCard {
+                    background-color: #F0FDF4;
+                    border: 2px solid #2ECC71;
+                    border-radius: 8px;
+                }
+                QLabel {
+                    color: #2C3E50;
+                }
+            """
+            )
+        else:
+            self.setStyleSheet(
+                """
+                QFrame#featureCard {
+                    background-color: #FFFFFF;
+                    border: 1px solid #E8EDF2;
+                    border-radius: 8px;
+                }
+                QLabel {
+                    color: #2C3E50;
+                }
+            """
+            )

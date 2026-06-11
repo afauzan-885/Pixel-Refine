@@ -1,0 +1,2009 @@
+import os
+import sys
+import numpy as np
+
+# Path resolution to find the bridge
+file_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(file_dir, "../../../"))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
+# Legacy JIT imports removed as we now use AOT (TCM) exclusively
+
+
+# Import the Generic AOT Engine and Buffer Pool
+from .engine import AOTEngine, TaichiGPUBuffer, InputArray, OutputArray
+from .engine import INTER_CUBIC, INTER_LINEAR, INTER_NEAREST, INTER_AREA
+from .engine import COLOR_BGR2GRAY, COLOR_RGB2GRAY, COLOR_GRAY2BGR
+from taichi_library.taichi_algorithm.taichi_worker import ti_thread
+
+# Bridge to specialized AOT functions
+# Moved to lazy imports in wrapper functions below to avoid circular imports
+
+# Initialize the Singleton Engine
+engine = AOTEngine()
+
+# --- Lazy-Load TCM Module Cache ---
+# Modules are NOT loaded at startup. Loaded on first use, cached permanently.
+# Saves ~200MB of idle VRAM compared to eager loading all 15 modules.
+_tcm_dir = os.path.abspath(os.path.join(file_dir, "../taichi_algorithm/aot_tcm"))
+_module_cache = {}  # name -> AOTModuleWrapper (loaded on demand)
+
+
+def _mod(name: str):
+    """Lazy-load and cache a TCM module by name. Thread-safe via GIL."""
+    if name not in _module_cache:
+        path_dir = os.path.join(_tcm_dir, name)
+        if os.path.isdir(path_dir):
+            _module_cache[name] = engine.load(path_dir)
+        else:
+            path_file = os.path.join(_tcm_dir, f"{name}.tcm")
+            try:
+                _module_cache[name] = engine.load(path_file)
+            except Exception:
+                _module_cache[name] = None
+    return _module_cache[name]
+
+
+def load_tcm(name):
+    """Public helper for external callers (backward compat). Uses lazy cache."""
+    return _mod(name)
+
+
+def unload_all_modules():
+    """Release all cached TCM modules. Call after heavy processing to free VRAM."""
+    _module_cache.clear()
+    engine.modules.clear()
+    engine.clear_pipelines()
+
+# --- OpenCV-style Constants ---
+INTER_NEAREST = 0
+INTER_LINEAR = 1
+INTER_CUBIC = 2
+INTER_AREA = 3
+INTER_LANCZOS4 = 4
+
+# --- Core API ---
+
+
+def upload(arr: np.ndarray, is_vector=False, force_8bit=False) -> TaichiGPUBuffer:
+    """Upload a NumPy array to GPU VRAM, optionally forcing 16-bit to 8-bit to optimize memory."""
+    if force_8bit and isinstance(arr, np.ndarray) and arr.dtype == np.uint16:
+        arr = (arr >> 8).astype(np.uint8)
+    return engine.upload(arr, is_vector=is_vector)
+
+
+# -------------------------------------------------------------------------
+# Helper Functions (AOT-Optimized Utility)
+# -------------------------------------------------------------------------
+
+
+def copy_field(src, dst):
+    """Zero-overhead AOT copy."""
+    is_3ch = len(src.shape) == 3
+    graph = "copy_i32_2d"
+    if is_3ch:
+        graph = "copy_vec3_2d" if src.dtype == np.float32 else "copy_vec3_i32_2d"
+    elif src.dtype == np.float32:
+        graph = "copy_f32_2d"
+
+    src_v, dst_v = src, dst
+    if is_3ch:
+        if not getattr(src, "is_vector", False):
+            src_v = src.view_as_vector(True)
+        if not getattr(dst, "is_vector", False):
+            dst_v = dst.view_as_vector(True)
+
+    _mod("common").run(graph, src=src_v, dst=dst_v)
+
+
+def extract_channel(src, ch):
+    """AOT Optimized channel extraction."""
+    h, w = src.shape[0], src.shape[1]
+    dst = engine.allocate((h, w), dtype=src.dtype)
+    src_v = src
+    if len(src.shape) == 3 and not getattr(src, "is_vector", False):
+        src_v = src.view_as_vector(True)
+
+    graph = "extract_channel_f32" if src.dtype == np.float32 else "extract_channel_i32"
+    _mod("common").run(graph, src=src_v, dst=dst, ch=int(ch))
+    return dst
+
+
+def split_3ch(src):
+    """Fused 3-channel split."""
+    h, w = src.shape[0], src.shape[1]
+    dst_dtype = src.dtype
+    c0 = engine.allocate((h, w), dtype=dst_dtype)
+    c1 = engine.allocate((h, w), dtype=dst_dtype)
+    c2 = engine.allocate((h, w), dtype=dst_dtype)
+    src_v = src
+    if not getattr(src, "is_vector", False):
+        src_v = src.view_as_vector(True)
+
+    graph = "split_3ch_f32" if dst_dtype == np.float32 else "split_3ch_i32"
+    _mod("common").run(graph, src=src_v, c0=c0, c1=c1, c2=c2)
+    return [c0, c1, c2]
+
+
+def merge_3ch(c0, c1, c2):
+    """Fused 3-channel merge."""
+    h, w = c0.shape[0], c0.shape[1]
+    dst_dtype = c0.dtype
+    dst = engine.allocate((h, w), dtype=dst_dtype, is_vector=True, vector_dim=3)
+
+    graph = "merge_3ch_f32" if dst_dtype == np.float32 else "merge_3ch_i32"
+    _mod("common").run(graph, c0=c0, c1=c1, c2=c2, dst=dst.view_as_vector(True, 3))
+    return dst
+
+
+def insert_channel(src, dst, ch):
+    """AOT Optimized channel insertion (in-place on GPU)."""
+    src_v = src
+    dst_v = dst
+    if len(dst.shape) == 3 and not getattr(dst, "is_vector", False):
+        dst_v = dst.view_as_vector(True)
+
+    graph = "insert_channel_f32" if src.dtype == np.float32 else "insert_channel_i32"
+    _mod("common").run(graph, src=src_v, dst=dst_v, ch=int(ch))
+
+
+def generate_hanning_window_2d(shape, exclude_boundary=False, dtype=np.float32) -> TaichiGPUBuffer:
+    """AOT Optimized 2D Hanning window generation."""
+    h, w = shape
+    dst = engine.allocate((h, w), dtype=dtype)
+    _mod("common").run("generate_hanning_window_2d", dst=dst, H=int(h), W=int(w), exclude_boundary=int(exclude_boundary))
+    return dst
+
+
+def mean_division(sum_img: TaichiGPUBuffer, sum_weight: TaichiGPUBuffer, ref_img: TaichiGPUBuffer, dst: TaichiGPUBuffer = None) -> TaichiGPUBuffer:
+    """AOT Optimized final mean division and fallback."""
+    if dst is None:
+        dst = engine.allocate(sum_img.shape, dtype=sum_img.dtype, is_vector=getattr(sum_img, "is_vector", False), vector_dim=getattr(sum_img, "vector_dim", 1))
+
+    is_vec = len(sum_img.shape) == 3 or getattr(sum_img, "is_vector", False)
+    graph = "mean_division_vec3_f32" if is_vec else "mean_division_f32"
+
+    sum_img_v = sum_img
+    ref_img_v = ref_img
+    dst_v = dst
+
+    if is_vec:
+        if not getattr(sum_img, "is_vector", False):
+            sum_img_v = sum_img.view_as_vector(True)
+        if not getattr(ref_img, "is_vector", False):
+            ref_img_v = ref_img.view_as_vector(True)
+        if not getattr(dst, "is_vector", False):
+            dst_v = dst.view_as_vector(True)
+
+    _mod("common").run(graph, sum_img=sum_img_v, sum_weight=sum_weight, ref_img=ref_img_v, dst=dst_v)
+    return dst
+
+
+# NumPy-like aliases for JIT/AOT consistency
+hanning = generate_hanning_window_2d
+divide = mean_division
+
+
+
+def rgb2gray(src, dst=None):
+    """AOT Optimized RGB to Gray conversion."""
+    h, w = src.shape[0], src.shape[1]
+    if dst is None:
+        dst = engine.allocate((h, w), dtype=src.dtype)
+    src_v = src
+    if len(src.shape) == 3 and not getattr(src, "is_vector", False):
+        src_v = src.view_as_vector(True)
+
+    graph = "rgb2gray_f32" if src.dtype == np.float32 else "rgb2gray_i32"
+    _mod("common").run(graph, src=src_v, dst=dst)
+    return dst
+
+
+def absdiff(src1, src2):
+    """AOT Optimized absolute difference."""
+    is_3d = len(src1.shape) == 3
+    dst = engine.allocate(src1.shape, dtype=src1.dtype, is_vector=is_3d)
+
+    src1_v, src2_v, dst_v = src1, src2, dst
+    if is_3d:
+        if not getattr(src1, "is_vector", False):
+            src1_v = src1.view_as_vector(True, 3)
+        if not getattr(src2, "is_vector", False):
+            src2_v = src2.view_as_vector(True, 3)
+        if not getattr(dst, "is_vector", False):
+            dst_v = dst.view_as_vector(True, 3)
+        graph = "absdiff_vec3_f32"
+    else:
+        graph = "absdiff_f32_2d" if src1.dtype == np.float32 else "absdiff_i32_2d"
+
+    _mod("common").run(graph, src1=src1_v, src2=src2_v, dst=dst_v)
+    return dst
+
+
+def cvtColor(src, code):
+    """AOT Optimized color conversion (OpenCV Parity)."""
+    # OpenCV Constants
+    COLOR_BGR2GRAY = 6
+    COLOR_RGB2GRAY = 7
+
+    src_buf = InputArray(src)
+
+    if code in [COLOR_BGR2GRAY, COLOR_RGB2GRAY]:
+        h, w = src_buf.shape[0], src_buf.shape[1]
+        dst = OutputArray((h, w), dtype=src_buf.dtype)
+        src_v = src_buf
+        if len(src_buf.shape) == 3 and not getattr(src_buf, "is_vector", False):
+            src_v = src_buf.view_as_vector(True, 3)
+
+        graph = "rgb2gray_f32" if code == COLOR_RGB2GRAY else "bgr2gray_f32"
+        _mod("common").run(graph, src=src_v, dst=dst)
+        return dst
+
+    return src
+
+
+# -------------------------------------------------------------------------
+# Algorithm APIs
+# -------------------------------------------------------------------------
+
+
+def normalize_image(
+    src: InputArray, dtype: np.dtype, out: OutputArray = None
+) -> TaichiGPUBuffer:
+    """High-level normalization [0, 1] using AOT."""
+    from . import engine  # Use relative or local engine
+    from ..alignment.alignment_features.taichi_bridge import normalize_image_gpu
+
+    src_gpu = upload(src) if not isinstance(src, TaichiGPUBuffer) else src
+    return normalize_image_gpu(src_gpu, dtype, out_gpu=out)
+
+
+def to_gamma_proxy(
+    src: InputArray, scale: float = 1.0, out: OutputArray = None
+) -> TaichiGPUBuffer:
+    """High-level Gamma Proxy transformation using AOT."""
+    from ..alignment.alignment_features.taichi_bridge import to_gamma_proxy_gpu
+
+    src_gpu = upload(src) if not isinstance(src, TaichiGPUBuffer) else src
+    return to_gamma_proxy_gpu(src_gpu, scale=scale, dst_gpu=out)
+
+
+def resize(src, dsize, interpolation=INTER_CUBIC, return_gpu=False, dst=None):
+    """Taichi AOT Resize (OpenCV Parity API)"""
+    target_w, target_h = dsize
+    src_buf = InputArray(src)
+
+    if isinstance(src, TaichiGPUBuffer) and len(src_buf.shape) == 3:
+        # Force vector for any 3D arrays (RGB or Flow)
+        src_buf = src_buf.view_as_vector(True)
+
+    h_src, w_src = src_buf.shape[0], src_buf.shape[1]
+    is_vec = getattr(src_buf, "is_vector", False)
+    is_3d = (len(src_buf.shape) == 3) or is_vec
+
+    # If it's a vector field but shape is 2D (like placeholders), we need to ensure dst_shape has the vector dim
+    v_dim = (
+        src_buf.vector_dim
+        if is_vec
+        else (src_buf.shape[2] if len(src_buf.shape) == 3 else 1)
+    )
+
+    if dst is None:
+        if is_3d:
+            dst_shape = (target_h, target_w, v_dim)
+        else:
+            dst_shape = (target_h, target_w)
+
+        dst_buf = OutputArray(
+            dst_shape, dtype=src_buf.dtype, is_vector=is_vec, vector_dim=v_dim
+        )
+    else:
+        dst_buf = dst
+
+    is_vec = getattr(src_buf, "is_vector", False)
+
+    if interpolation == INTER_CUBIC:
+        graph_name = "bicubic_resize_f32_3d" if is_vec else "bicubic_resize_f32_2d"
+        if src_buf.dtype != np.float32:
+            graph_name = graph_name.replace("f32", "i32")
+        _mod("bicubic").run(
+            graph_name,
+            src=src_buf,
+            dst=dst_buf,
+            h_src=h_src,
+            w_src=w_src,
+            h_dst=target_h,
+            w_dst=target_w,
+        )
+    elif interpolation == INTER_LINEAR:
+        graph_name = "bilinear_resize_f32_3d" if is_vec else "bilinear_resize_f32_2d"
+        _mod("bilinear").run(
+            graph_name,
+            src=src_buf,
+            dst=dst_buf,
+            h_src=h_src,
+            w_src=w_src,
+            h_dst=target_h,
+            w_dst=target_w,
+        )
+    elif interpolation == INTER_AREA:
+        graph_name = "inter_area_vec3_f32" if is_vec else "inter_area_f32"
+        _mod("area").run(
+            graph_name,
+            src=src_buf,
+            dst=dst_buf,
+            sh=h_src,
+            sw=w_src,
+            dh=target_h,
+            dw=target_w,
+        )
+    else:
+        raise NotImplementedError(
+            f"Interpolation mode {interpolation} is not supported in AOT currently."
+        )
+
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+def box_filter(src, kernel_size=3, return_gpu=False, dst=None):
+    """AOT Implementation of Box Filter."""
+    src_buf = InputArray(src)
+    h, w = src_buf.shape[:2]
+    radius = kernel_size // 2
+    is_3d = len(src_buf.shape) == 3
+
+    if dst is None:
+        dst_buf = OutputArray(src_buf.shape, dtype=src_buf.dtype, is_vector=is_3d)
+    else:
+        dst_buf = dst
+
+    is_vec = getattr(src_buf, "is_vector", False)
+
+    if kernel_size == 3:
+        target = "box_filter_fused_3x3_1ch_f32"
+        if is_3d:
+            target = (
+                "box_filter_fused_3x3_vec3_f32"
+                if is_vec
+                else "box_filter_fused_3x3_3ch_f32"
+            )
+        _mod("box_filter").run(target, src=src_buf, dst=dst_buf, h=h, w=w)
+    else:
+        tmp_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype, is_vector=is_vec)
+        target = "box_filter_separable_generic_1ch_f32"
+        if is_3d:
+            target = (
+                "box_filter_separable_generic_vec3_f32"
+                if is_vec
+                else "box_filter_separable_generic_3ch_f32"
+            )
+        _mod("box_filter").run(
+            target, src=src_buf, tmp=tmp_buf, dst=dst_buf, h=h, w=w, radius=radius
+        )
+        del tmp_buf
+
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+
+def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False, dst=None):
+    """AOT Implementation of Gaussian Blur.
+
+    Supports:
+      - 2D single-channel (H, W)              -> uses gaussian_blur_x/y_1ch_f32
+      - 3D scalar (H, W, 3)                   -> uses gaussian_blur_x/y_3ch_f32
+      - 3D vector field (H, W) is_vector=True -> uses gaussian_blur_x/y_vec3_f32
+
+    Args:
+        src:         Input buffer (TaichiGPUBuffer or np.ndarray).
+        sigma:       Gaussian standard deviation.
+        kernel_size: Kernel size (must be odd). Auto-computed from sigma if None.
+        return_gpu:  If True, returns TaichiGPUBuffer; otherwise returns np.ndarray.
+        dst:         Optional pre-allocated TaichiGPUBuffer to reuse (same shape as src).
+                     When provided, output is written directly into this buffer
+                     and the same buffer is returned, saving a VRAM allocation.
+    """
+    src_buf = InputArray(src)
+
+    if kernel_size is None or kernel_size <= 0:
+        kernel_size = int(np.ceil(3 * sigma)) * 2 + 1
+    radius = kernel_size // 2
+    h, w = src_buf.shape[:2]
+    is_vec = getattr(src_buf, "is_vector", False)
+    is_2d = (len(src_buf.shape) == 2) and not is_vec
+
+    from taichi_library.taichi_algorithm.gaussian import (
+        compute_gaussian_weights,
+    )
+
+    weights_np = compute_gaussian_weights(sigma, radius).astype(np.float32)
+    weights_buf = InputArray(weights_np)
+
+    # Intermediate buffer (always freshly allocated — must be separate from src)
+    tmp_buf = OutputArray(src_buf.shape, dtype=src_buf.dtype, is_vector=is_vec)
+
+    # Output: reuse caller-supplied dst if shape and dtype match, otherwise allocate
+    if dst is not None and dst.shape == src_buf.shape and dst.dtype == src_buf.dtype:
+        dst_buf = dst
+    else:
+        dst_buf = OutputArray(src_buf.shape, dtype=src_buf.dtype, is_vector=is_vec)
+
+    if is_2d:
+        # Single-channel 2D path
+        target_x = "gaussian_blur_x_1ch_f32"
+        target_y = "gaussian_blur_y_1ch_f32"
+    elif is_vec:
+        target_x = "gaussian_blur_x_vec3_f32"
+        target_y = "gaussian_blur_y_vec3_f32"
+    else:
+        target_x = "gaussian_blur_x_3ch_f32"
+        target_y = "gaussian_blur_y_3ch_f32"
+
+    _mod("gaussian").run(
+        target_x, src=src_buf, dst=tmp_buf, h=h, w=w, weights=weights_buf, radius=radius
+    )
+    _mod("gaussian").run(
+        target_y, src=tmp_buf, dst=dst_buf, h=h, w=w, weights=weights_buf, radius=radius
+    )
+
+    engine.sync()
+    tmp_buf.release()
+    if hasattr(weights_buf, "release"):
+        weights_buf.release()
+    elif hasattr(weights_buf, "destroy"):
+        weights_buf.destroy()
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+
+def image_pyramid(src, levels=4, return_gpu=False):
+    """AOT Implementation of Image Pyramid (Downsampling)"""
+    is_gpu = isinstance(src, TaichiGPUBuffer)
+    src_buf = src if is_gpu else engine.upload(src)
+    is_3d = len(src_buf.shape) == 3
+
+    curr_buf = src_buf
+    graph = "downsample_2x_3ch_f32" if is_3d else "downsample_2x_f32"
+
+    for _ in range(levels):
+        h, w = curr_buf.shape[0], curr_buf.shape[1]
+        next_h, next_w = h // 2, w // 2
+        if next_h < 1 or next_w < 1:
+            break
+
+        dst_shape = (next_h, next_w, src_buf.shape[2]) if is_3d else (next_h, next_w)
+        dst_buf = engine.allocate(dst_shape, dtype=src_buf.dtype)
+        _mod("pyramid").run(graph, src=curr_buf, dst=dst_buf)
+
+        if curr_buf is not src_buf:
+            del curr_buf
+
+        curr_buf = dst_buf
+
+    return curr_buf if return_gpu else curr_buf.to_numpy()
+
+
+
+def median_filter(src, return_gpu=False, **kwargs):
+    """AOT Median Filter 3x3."""
+    is_gpu = isinstance(src, TaichiGPUBuffer)
+    src_buf = src if is_gpu else engine.upload(src)
+    h, w = src_buf.shape[:2]
+
+    is_flow = len(src_buf.shape) == 3 and src_buf.shape[2] == 2
+    is_3ch = len(src_buf.shape) == 3 and src_buf.shape[2] == 3
+
+    # Use vector for flow, but scalar 3D for RGB to avoid field_dim warnings in Taichi AOT
+    src_v = src_buf.view_as_vector(True) if is_flow else src_buf.view_as_vector(False)
+
+    dst_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype, is_vector=is_flow)
+    dst_v = dst_buf.view_as_vector(True) if is_flow else dst_buf.view_as_vector(False)
+
+    if is_flow:
+        graph = "median_flow_3x3_f32"
+    elif is_3ch:
+        graph = "median_3ch_3x3_f32"
+    else:
+        graph = "median_3x3_f32" if src_buf.dtype == np.float32 else "median_3x3"
+
+    _mod("median_filter").run(graph, src=src_v, dst=dst_v, h=h, w=w)
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+def fft2(src, use_hanning=False):
+    """AOT Implementation of 2D FFT."""
+    is_gpu = isinstance(src, TaichiGPUBuffer)
+    src_buf = src if is_gpu else engine.upload(src)
+    h_src, w_src = src_buf.shape[:2]
+
+    # FFT requires power-of-two dimensions
+    h = 1 << (h_src - 1).bit_length()
+    w = 1 << (w_src - 1).bit_length()
+
+    complex_buf = engine.allocate((h, w, 2), is_vector=True)
+    _mod("fft").run(
+        "fft_real_to_complex_f32", src=src_buf, dst=complex_buf, h=h_src, w=w_src
+    )
+
+    if use_hanning:
+        # Hanning window works on real part (complex_buf.x)
+        # We need a temp real buffer to apply it before R2C or after R2C
+        # Actually our fft_hanning_window_f32 takes a real ndarray.
+        # Let's apply it to src_buf if it's already on GPU, or a copy.
+        src_padded = engine.allocate((h, w), dtype=np.float32)
+        # Copy src to padded and apply window
+        # For simplicity, we can use a kernel that does both,
+        # but let's just use existing graphs.
+        _mod("common").run(
+            "copy_f32_2d", src=src_buf, dst=src_padded
+        )  # This might fail if shapes differ
+        # Wait, copy_f32_2d needs same shape.
+        # Better: use fft_real_to_complex first, then apply window to the complex x-channel.
+        # But our hanning graph takes f32 ndarray.
+        # Let's just create a quick hanning window on the src_buf if we can.
+
+    # Actually, let's just apply Hanning to the complex_buf.x after R2C
+    if use_hanning:
+        _mod("fft").run("fft_complex_hanning_f32", data=complex_buf, h=h_src, w=w_src)
+
+    def run_fft_1d(buf, h, w, is_inverse, is_col):
+        n = h if is_col else w
+        bits = (n - 1).bit_length()
+        temp_buf = engine.allocate((h, w, 2), is_vector=True)
+        _mod("fft").run(
+            "fft_bit_reverse_f32",
+            src=buf,
+            dst=temp_buf,
+            bits=bits,
+            is_col=1 if is_col else 0,
+        )
+        buf.handle, temp_buf.handle = temp_buf.handle, buf.handle
+        for stage in range(1, bits + 1):
+            _mod("fft").run(
+                "fft_stage_f32",
+                data=buf,
+                n=n,
+                stage_len=1 << stage,
+                is_inverse=1 if is_inverse else 0,
+                is_col=1 if is_col else 0,
+            )
+        if is_inverse:
+            _mod("fft").run("fft_normalize_f32", data=buf, scale=1.0 / n)
+        del temp_buf
+
+    run_fft_1d(complex_buf, h, w, False, False)
+    run_fft_1d(complex_buf, h, w, False, True)
+    return complex_buf
+
+
+def ifft2(complex_buf, target_shape=None):
+    """AOT Implementation of 2D IFFT."""
+    h, w = complex_buf.shape[:2]
+
+    def run_fft_1d(buf, h, w, is_inverse, is_col):
+        n = h if is_col else w
+        bits = (n - 1).bit_length()
+        temp_buf = engine.allocate((h, w, 2), is_vector=True)
+        _mod("fft").run(
+            "fft_bit_reverse_f32",
+            src=buf,
+            dst=temp_buf,
+            bits=bits,
+            is_col=1 if is_col else 0,
+        )
+        buf.handle, temp_buf.handle = temp_buf.handle, buf.handle
+        for stage in range(1, bits + 1):
+            _mod("fft").run(
+                "fft_stage_f32",
+                data=buf,
+                n=n,
+                stage_len=1 << stage,
+                is_inverse=1 if is_inverse else 0,
+                is_col=1 if is_col else 0,
+            )
+        if is_inverse:
+            _mod("fft").run("fft_normalize_f32", data=buf, scale=1.0 / n)
+        del temp_buf
+
+    run_fft_1d(complex_buf, h, w, True, True)
+    run_fft_1d(complex_buf, h, w, True, False)
+
+    out_h, out_w = target_shape if target_shape else (h, w)
+    dst_buf = engine.allocate((out_h, out_w))
+    _mod("fft").run(
+        "fft_complex_to_real_f32", src=complex_buf, dst=dst_buf, h=out_h, w=out_w
+    )
+    return dst_buf
+
+
+def sobel(src, return_gpu=False):
+    """AOT Sobel."""
+    is_gpu = isinstance(src, TaichiGPUBuffer)
+    src_buf = src if is_gpu else engine.upload(src)
+    h, w = src_buf.shape[:2]
+    is_3d = len(src_buf.shape) == 3
+
+    src_v = src_buf if not is_3d else src_buf.view_as_vector(True)
+
+    dx = engine.allocate((h, w))
+    dy = engine.allocate((h, w))
+
+    # Use 3ch graph if 3d
+    graph = "sobel_vec3_f32" if is_3d else "sobel_f32"
+
+    _mod("gradients").run(graph, src=src_v, dst_dx=dx, dst_dy=dy, h=h, w=w)
+    return (dx, dy) if return_gpu else (dx.to_numpy(), dy.to_numpy())
+
+
+def laplacian(src, return_gpu=False):
+    """AOT Laplacian."""
+    is_gpu = isinstance(src, TaichiGPUBuffer)
+    src_buf = src if is_gpu else engine.upload(src)
+    h, w = src_buf.shape[:2]
+    dst = engine.allocate((h, w))
+    _mod("gradients").run("laplacian_f32", src=src_buf, dst=dst, h=h, w=w)
+    return dst if return_gpu else dst.to_numpy()
+
+
+def ransac_flow_cleanup(flow, threshold=1.0, return_gpu=False):
+    """AOT RANSAC Flow Cleanup."""
+    return ransac_flow_cleanup_aot(flow, threshold=threshold, return_gpu=return_gpu)
+
+
+def ransac_flow_cleanup_aot(flow, threshold=1.0, return_gpu=False):
+    """Internal AOT RANSAC implementation."""
+    is_gpu = isinstance(flow, TaichiGPUBuffer)
+    flow_buf = flow if is_gpu else engine.upload(flow, is_vector=True, vector_dim=2)
+    if not flow_buf.is_vector or getattr(flow_buf, "vector_dim", None) != 2:
+        flow_buf = flow_buf.view_as_vector(True, 2)
+    h, w = flow_buf.shape[:2]
+
+    dst = OutputArray(flow_buf.shape, is_vector=True, vector_dim=2)
+    mask = engine.allocate((h, w), dtype=np.int32)
+    model = engine.allocate((2,), dtype=np.float32)  # [mean_u, mean_v]
+
+    _mod("ransac").run(
+        "ransac_flow_cleanup_f32",
+        flow=flow_buf,
+        inlier_mask=mask,
+        model=model,
+        output=dst,
+        h=h,
+        w=w,
+        threshold=float(threshold),
+        stride_refine=4,  # Default sparse stride
+        stride_final=1,
+    )  # Full resolution
+
+    del mask, model
+    return dst if return_gpu else dst.to_numpy()
+
+
+def ncc_alignment(image, template, stride=1, return_gpu=False):
+    """
+    Taichi AOT ZNCC Alignment.
+    Returns: (dx, dy, confidence)
+    """
+    res_map = zncc(
+        image, template, stride=stride, return_gpu=False
+    )  # Always need peak-finding on CPU for now
+
+    idx = np.unravel_index(np.argmax(res_map), res_map.shape)
+    dy, dx = idx[0] * stride, idx[1] * stride
+    conf = float(res_map[idx])
+
+    return float(dx), float(dy), conf
+
+
+def zncc(image, template, stride=1, return_gpu=False):
+    """AOT Optimized Spatial ZNCC."""
+    is_gpu_img = isinstance(image, TaichiGPUBuffer)
+    is_gpu_temp = isinstance(template, TaichiGPUBuffer)
+    img_buf = image if is_gpu_img else engine.upload(image)
+    temp_buf = template if is_gpu_temp else engine.upload(template)
+
+    h_img, w_img = img_buf.shape[:2]
+    h_temp, w_temp = temp_buf.shape[:2]
+
+    s_h = engine.allocate((h_img, w_img))
+    sq_h = engine.allocate((h_img, w_img))
+    s_2d = engine.allocate((h_img, w_img))
+    sq_2d = engine.allocate((h_img, w_img))
+
+    _mod("ncc").run(
+        "integral_row_scan", src=img_buf, sum_h=s_h, sq_sum_h=sq_h, h=h_img, w=w_img
+    )
+    _mod("ncc").run(
+        "integral_col_scan",
+        sum_h=s_h,
+        sq_sum_h=sq_h,
+        sum_2d=s_2d,
+        sq_sum_2d=sq_2d,
+        h=h_img,
+        w=w_img,
+    )
+
+    del s_h, sq_h
+
+    temp_np = temp_buf.to_numpy() if is_gpu_temp else template
+    sum_t = float(np.sum(temp_np))
+    n = float(h_temp * w_temp)
+    var_t_n = float(max(0.0, np.sum(temp_np**2) - (sum_t**2 / n)))
+
+    res_h, res_w = (h_img - h_temp) // stride + 1, (w_img - w_temp) // stride + 1
+    dst = engine.allocate((res_h, res_w))
+
+    _mod("ncc").run(
+        "zncc_spatial",
+        src=img_buf,
+        template=temp_buf,
+        sum_2d=s_2d,
+        sq_sum_2d=sq_2d,
+        dst=dst,
+        sum_t=sum_t,
+        var_t_n=var_t_n,
+        n_float=n,
+        stride=stride,
+    )
+
+    res = dst if return_gpu else dst.to_numpy()
+    del s_2d, sq_2d, dst
+    return res
+
+
+# -------------------------------------------------------------------------
+# SIGMA PRESETS (shared with JBF python-side)
+# -------------------------------------------------------------------------
+_JBF_SIGMA_PRESETS = {
+    "high": (0.8, 0.05),
+    "medium": (1.5, 0.10),
+    "low": (2.5, 0.20),
+}
+
+
+def _jbf_sigma(preset):
+    ss, sr = _JBF_SIGMA_PRESETS.get(preset, _JBF_SIGMA_PRESETS["medium"])
+    return 1.0 / (2.0 * ss * ss), 1.0 / (2.0 * sr * sr)
+
+
+def _prepare_guide_aot(guide_raw):
+    """Ensure guide is a 2D f32 GPU buffer, normalized [0,1]."""
+    is_gpu = isinstance(guide_raw, TaichiGPUBuffer)
+    if is_gpu:
+        g = guide_raw
+        if len(g.shape) == 3:
+            # Auto-convert 3ch → gray using common AOT
+            g = cvtColor(g, 6)  # BGR2GRAY
+        return g, False
+    else:
+        import numpy as _np
+
+        arr = _np.array(guide_raw, dtype=_np.float32)
+        if arr.ndim == 3:
+            arr = 0.299 * arr[:, :, 2] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 0]
+        if arr.max() > 1.0:
+            arr = arr / (255.0 if arr.max() <= 255.0 else 65535.0)
+        return engine.upload(arr.astype(_np.float32)), True
+
+
+def joint_bilateral_filter(src, guide, preset="medium", radius=2, return_gpu=False):
+    """
+    AOT Joint Bilateral Filter — General post-processor.
+
+    Args:
+        src    : (H,W), (H,W,3) vec, or (H,W,2) vec — grayscale/RGB/flow GPU buffer
+        guide  : (H,W) or (H,W,3) — guidance image (auto-converted to gray)
+        preset : "low" | "medium" | "high"
+        radius : 1=3x3 | 2=5x5 (default) | 3=7x7
+
+    Example:
+        # Post-process median result with original image as guide
+        clean = taichi_aot.joint_bilateral_filter(median_out, original_img, preset="medium")
+
+        # Refine flow field
+        smooth_flow = taichi_aot.joint_bilateral_filter(flow_gpu, ref_gray, preset="low")
+    """
+    is_gpu = isinstance(src, TaichiGPUBuffer)
+    src_buf = src if is_gpu else engine.upload(src)
+    guide_buf, guide_is_temp = _prepare_guide_aot(guide)
+
+    h, w = src_buf.shape[:2]
+    inv_2ss2, inv_2sr2 = _jbf_sigma(preset)
+    r = radius if radius in (1, 2, 3) else 2
+
+    # Determine src type
+    is_vec = getattr(src_buf, "is_vector", False)
+    ndim = len(src_buf.shape)
+
+    if ndim == 2 and not is_vec:
+        # 1ch scalar
+        dst = engine.allocate((h, w))
+        _mod("jbf").run(
+            f"jbf_1ch_r{r}",
+            src=src_buf,
+            guide=guide_buf,
+            dst=dst,
+            h=h,
+            w=w,
+            inv_2ss2=inv_2ss2,
+            inv_2sr2=inv_2sr2,
+        )
+    elif (
+        ndim == 3
+        and src_buf.shape[2] == 2
+        or (is_vec and src_buf.shape[-1] == 2 if hasattr(src_buf, "shape") else False)
+    ):
+        # flow 2ch
+        src_v = src_buf if is_vec else src_buf.view_as_vector(True)
+        dst = engine.allocate(src_buf.shape, is_vector=True)
+        dst_v = dst.view_as_vector(True)
+        _mod("jbf").run(
+            f"jbf_flow_r{r}",
+            src=src_v,
+            guide=guide_buf,
+            dst=dst_v,
+            h=h,
+            w=w,
+            inv_2ss2=inv_2ss2,
+            inv_2sr2=inv_2sr2,
+        )
+    else:
+        # 3ch
+        src_v = src_buf if is_vec else src_buf.view_as_vector(True)
+        dst = engine.allocate(src_buf.shape, is_vector=True)
+        dst_v = dst.view_as_vector(True)
+        _mod("jbf").run(
+            f"jbf_3ch_r{r}",
+            src=src_v,
+            guide=guide_buf,
+            dst=dst_v,
+            h=h,
+            w=w,
+            inv_2ss2=inv_2ss2,
+            inv_2sr2=inv_2sr2,
+        )
+
+    if guide_is_temp:
+        del guide_buf
+    return dst if return_gpu else dst.to_numpy()
+
+
+def joint_bilateral_upsample(src_low, guide_hi, preset="medium", return_gpu=False):
+    """
+    AOT Joint Bilateral Upsampling (JBLU).
+    Upscales src_low to resolution of guide_hi with edge-aware interpolation.
+
+    Args:
+        src_low  : (h,w), (h,w,3) vec, or (h,w,2) vec — LOW-RES source
+        guide_hi : (H,W) or (H,W,3) — HIGH-RES guide (auto-converted to gray)
+        preset   : "low" | "medium" | "high"
+
+    Example:
+        # Upsample pyramid flow with full-res image as guide
+        flow_full = taichi_aot.joint_bilateral_upsample(flow_low, full_res_img)
+
+        # Upsample low-res mask
+        mask_full = taichi_aot.joint_bilateral_upsample(mask_low, full_res_gray)
+    """
+    is_gpu = isinstance(src_low, TaichiGPUBuffer)
+    src_buf = src_low if is_gpu else engine.upload(src_low)
+    guide_buf, guide_is_temp = _prepare_guide_aot(guide_hi)
+
+    h_low, w_low = src_buf.shape[:2]
+    H, W = guide_buf.shape[:2]
+    scale_y = float(H) / float(h_low)
+    scale_x = float(W) / float(w_low)
+    inv_2ss2, inv_2sr2 = _jbf_sigma(preset)
+
+    is_vec = getattr(src_buf, "is_vector", False)
+    ndim = len(src_buf.shape)
+
+    if ndim == 2 and not is_vec:
+        # 1ch
+        dst = engine.allocate((H, W))
+        _mod("jbf").run(
+            "jblu_1ch_r2",
+            src_low=src_buf,
+            guide_hi=guide_buf,
+            dst=dst,
+            h_low=h_low,
+            w_low=w_low,
+            H=H,
+            W=W,
+            inv_2ss2=inv_2ss2,
+            inv_2sr2=inv_2sr2,
+        )
+    elif (ndim == 3 and src_buf.shape[2] == 2) or (
+        is_vec and ndim == 2 and len(src_buf.shape) == 2
+    ):
+        # flow 2ch — check by is_vector and shape
+        src_v = src_buf if is_vec else src_buf.view_as_vector(True)
+        dst = engine.allocate((H, W, 2), is_vector=True)
+        dst_v = dst.view_as_vector(True)
+        _mod("jbf").run(
+            "jblu_flow_r2",
+            src_low=src_v,
+            guide_hi=guide_buf,
+            dst=dst_v,
+            h_low=h_low,
+            w_low=w_low,
+            H=H,
+            W=W,
+            inv_2ss2=inv_2ss2,
+            inv_2sr2=inv_2sr2,
+            scale_y=scale_y,
+            scale_x=scale_x,
+        )
+    else:
+        # 3ch
+        src_v = src_buf if is_vec else src_buf.view_as_vector(True)
+        dst = engine.allocate((H, W, 3), is_vector=True)
+        dst_v = dst.view_as_vector(True)
+        _mod("jbf").run(
+            "jblu_3ch_r2",
+            src_low=src_v,
+            guide_hi=guide_buf,
+            dst=dst_v,
+            h_low=h_low,
+            w_low=w_low,
+            H=H,
+            W=W,
+            inv_2ss2=inv_2ss2,
+            inv_2sr2=inv_2sr2,
+        )
+
+    if guide_is_temp:
+        del guide_buf
+    return dst if return_gpu else dst.to_numpy()
+
+
+# --- Bilateral Grid ---
+
+BILATERAL_GRID_PRESETS = {
+    # Tier: (s_s, s_r, sigma_s, sigma_r)
+    "light": (32, 32, 1.0, 1.0),
+    "medium": (16, 16, 1.0, 1.0),
+    "heavy": (8, 8, 2.0, 1.5),
+}
+
+
+def bilateral_grid_filter(src, preset="medium", return_gpu=False):
+    """
+    AOT Bilateral Grid Filter.
+    Edge-preserving smoothing in O(1) time per pixel.
+    """
+    is_gpu = isinstance(src, TaichiGPUBuffer)
+    src_buf = src if is_gpu else engine.upload(src)
+    h, w = src_buf.shape[:2]
+
+    # Handle multichannel by looping
+    is_3ch = len(src_buf.shape) == 3 and src_buf.shape[2] == 3
+
+    s_s, s_r, sigma_s, sigma_r = BILATERAL_GRID_PRESETS.get(
+        preset, BILATERAL_GRID_PRESETS["medium"]
+    )
+    gn, gm, gl = (h + s_s - 1) // s_s + 2, (w + s_s - 1) // s_s + 2, 256 // s_r + 2
+
+    # Allocate grids (pooled) - 3D spatial field of 2D vectors
+    grid_a = engine.allocate((gn, gm, gl), is_vector=True, vector_dim=2)
+    grid_b = engine.allocate((gn, gm, gl), is_vector=True, vector_dim=2)
+    grid_a_v = grid_a.view_as_vector(True, 2)
+    grid_b_v = grid_b.view_as_vector(True, 2)
+
+    rs, rr = int(np.ceil(sigma_s * 3.0)), int(np.ceil(sigma_r * 3.0))
+
+    if not is_3ch:
+        dst = engine.allocate((h, w))
+        # Clear, Splat, Blur X, Y, Z, Slice
+        _mod("bilateral_grid").run("bg_clear", grid=grid_a_v, gn=gn, gm=gm, gl=gl)
+        _mod("bilateral_grid").run(
+            "bg_splat",
+            src=src_buf,
+            grid=grid_a_v,
+            s_s=s_s,
+            s_r=s_r,
+            h=h,
+            w=w,
+            gn=gn,
+            gm=gm,
+            gl=gl,
+        )
+        _mod("bilateral_grid").run(
+            "bg_blur_x",
+            grid=grid_a_v,
+            dst_grid=grid_b_v,
+            radius=rs,
+            sigma=sigma_s,
+            gn=gn,
+            gm=gm,
+            gl=gl,
+        )
+        _mod("bilateral_grid").run(
+            "bg_blur_y",
+            grid=grid_b_v,
+            dst_grid=grid_a_v,
+            radius=rs,
+            sigma=sigma_s,
+            gn=gn,
+            gm=gm,
+            gl=gl,
+        )
+        _mod("bilateral_grid").run(
+            "bg_blur_z",
+            grid=grid_a_v,
+            dst_grid=grid_b_v,
+            radius=rr,
+            sigma=sigma_r,
+            gn=gn,
+            gm=gm,
+            gl=gl,
+        )
+        _mod("bilateral_grid").run(
+            "bg_slice",
+            src=src_buf,
+            grid=grid_b_v,
+            dst=dst,
+            s_s=s_s,
+            s_r=s_r,
+            h=h,
+            w=w,
+            gn=gn,
+            gm=gm,
+            gl=gl,
+        )
+    else:
+        # RGB loop
+        dst = engine.allocate((h, w, 3), is_vector=True)
+        dst_v = dst.view_as_vector(True)
+        src_v = (
+            src_buf
+            if getattr(src_buf, "is_vector", False)
+            else src_buf.view_as_vector(True)
+        )
+
+        temp_ch = engine.allocate((h, w))
+        temp_out = engine.allocate((h, w))
+
+        for c in range(3):
+            # 1. Extract channel
+            _mod("common").run("extract_channel_f32", src=src_v, dst=temp_ch, ch=c)
+
+            # 2. Filter
+            _mod("bilateral_grid").run("bg_clear", grid=grid_a_v, gn=gn, gm=gm, gl=gl)
+            _mod("bilateral_grid").run(
+                "bg_splat",
+                src=temp_ch,
+                grid=grid_a_v,
+                s_s=s_s,
+                s_r=s_r,
+                h=h,
+                w=w,
+                gn=gn,
+                gm=gm,
+                gl=gl,
+            )
+            _mod("bilateral_grid").run(
+                "bg_blur_x",
+                grid=grid_a_v,
+                dst_grid=grid_b_v,
+                radius=rs,
+                sigma=sigma_s,
+                gn=gn,
+                gm=gm,
+                gl=gl,
+            )
+            _mod("bilateral_grid").run(
+                "bg_blur_y",
+                grid=grid_b_v,
+                dst_grid=grid_a_v,
+                radius=rs,
+                sigma=sigma_s,
+                gn=gn,
+                gm=gm,
+                gl=gl,
+            )
+            _mod("bilateral_grid").run(
+                "bg_blur_z",
+                grid=grid_a_v,
+                dst_grid=grid_b_v,
+                radius=rr,
+                sigma=sigma_r,
+                gn=gn,
+                gm=gm,
+                gl=gl,
+            )
+            _mod("bilateral_grid").run(
+                "bg_slice",
+                src=temp_ch,
+                grid=grid_b_v,
+                dst=temp_out,
+                s_s=s_s,
+                s_r=s_r,
+                h=h,
+                w=w,
+                gn=gn,
+                gm=gm,
+                gl=gl,
+            )
+
+        engine.sync()
+        temp_ch.release()
+        temp_out.release()
+        del temp_ch, temp_out
+
+    engine.sync()
+    grid_a.release()
+    grid_b.release()
+    del grid_a, grid_b
+    return dst if return_gpu else dst.to_numpy()
+
+
+def phase_correlation(ref, comp, use_hanning=True):
+    """
+    Taichi AOT Phase Correlation for global shift estimation.
+    Returns: (dx, dy, response)
+    """
+    is_gpu = isinstance(ref, TaichiGPUBuffer)
+    ref_buf = ref if is_gpu else engine.upload(ref)
+    comp_buf = comp if is_gpu else engine.upload(comp)
+
+    h, w = ref_buf.shape[:2]
+    # 1. FFT
+    f_complex = fft2(ref_buf, use_hanning=use_hanning)
+    g_complex = fft2(comp_buf, use_hanning=use_hanning)
+
+    th, tw = f_complex.shape[:2]
+    r_complex = OutputArray((th, tw, 2), is_vector=True)
+
+    # 2. Cross-power spectrum: G * conj(F)
+    # Graph Arg: src (a), b, dst, conj_b
+    _mod("fft").run(
+        "fft_complex_mul_f32", src=g_complex, b=f_complex, dst=r_complex, conj_b=1
+    )
+
+    # 3. Phase Normalize: R = R / |R|
+    _mod("fft").run("fft_phase_normalize_f32", data=r_complex)
+
+    # 4. IFFT
+    corr_buf = ifft2(r_complex, target_shape=(h, w))
+    corr_np = corr_buf.to_numpy()
+
+    # 5. Peak finding
+    idx = np.unravel_index(np.argmax(corr_np), corr_np.shape)
+    dy, dx = idx[0], idx[1]
+    peak_val = corr_np[idx]
+
+    # Shift wrapping
+    if dy > h // 2:
+        dy -= h
+    if dx > w // 2:
+        dx -= w
+
+    del f_complex, g_complex, r_complex, corr_buf
+    return float(dx), float(dy), float(peak_val)
+
+
+def remap(src, map_x, map_y, return_gpu=False):
+    """Taichi AOT Remap (OpenCV Parity API)"""
+    orig_dtype = None
+    if isinstance(src, np.ndarray) and src.dtype != np.float32:
+        orig_dtype = src.dtype
+        src_cast = src.astype(np.float32)
+    elif hasattr(src, "dtype") and src.dtype != np.float32:
+        orig_dtype = src.dtype
+        src_cast = src.cast(np.float32)
+    else:
+        src_cast = src
+
+    src_buf = InputArray(src_cast)
+    mx_buf = InputArray(map_x)
+    my_buf = InputArray(map_y)
+
+    h_src, w_src = src_buf.shape[:2]
+    h_dst, w_dst = mx_buf.shape[:2]
+    is_3d = len(src_buf.shape) == 3
+
+    if is_3d:
+        src_v = src_buf if getattr(src_buf, "is_vector", False) else src_buf.view_as_vector(True)
+        v_dim = src_v.vector_dim
+        dst_shape = (h_dst, w_dst, v_dim)
+        is_vec = True
+    else:
+        src_v = src_buf
+        v_dim = 1
+        dst_shape = (h_dst, w_dst)
+        is_vec = False
+
+    dst_buf = OutputArray(dst_shape, dtype=src_buf.dtype, is_vector=is_vec, vector_dim=v_dim)
+
+    graph_name = "remap_f32_3d" if is_vec else "remap_f32_2d"
+    _mod("remap").run(
+        graph_name,
+        src=src_v,
+        map_x=mx_buf,
+        map_y=my_buf,
+        dst=dst_buf,
+        h_src=h_src,
+        w_src=w_src,
+        h_dst=h_dst,
+        w_dst=w_dst,
+    )
+
+    if src_cast is not src and hasattr(src_cast, "release"):
+        engine.sync()
+        src_cast.release()
+    elif src_cast is not src and hasattr(src_cast, "destroy"):
+        engine.sync()
+        src_cast.destroy()
+
+    if not return_gpu:
+        res = dst_buf.to_numpy()
+    else:
+        engine.sync()
+        res = dst_buf
+
+    if orig_dtype is not None:
+        if return_gpu:
+            res_cast = res.cast(orig_dtype)
+            res.release()
+            res = res_cast
+        else:
+            if np.issubdtype(orig_dtype, np.integer):
+                res = np.clip(res, np.iinfo(orig_dtype).min, np.iinfo(orig_dtype).max)
+            res = res.astype(orig_dtype)
+
+    return res
+
+
+def remap_with_flow(src, flow, full_h, full_w, return_gpu=False, dst=None):
+    """
+    Fused remap with flow: bilinear interpolate flow on-the-fly + warp src image.
+    Eliminates need for map_x, map_y full-res buffers (~91.6 MB VRAM saved).
+    """
+    # Cast src to float32 on CPU if it is not float32 (matches legacy remap behavior)
+    orig_dtype = None
+    if isinstance(src, np.ndarray) and src.dtype != np.float32:
+        orig_dtype = src.dtype
+        src_cpu = src.astype(np.float32)
+    elif hasattr(src, "dtype") and src.dtype != np.float32:
+        orig_dtype = src.dtype
+        src_cpu = src.cast(np.float32)
+    else:
+        src_cpu = src
+        if hasattr(src, "dtype"):
+            orig_dtype = src.dtype
+        else:
+            orig_dtype = np.float32
+
+    is_gpu_src = isinstance(src_cpu, TaichiGPUBuffer)
+    is_gpu_flow = isinstance(flow, TaichiGPUBuffer)
+    src_buf = src_cpu if is_gpu_src else engine.upload(src_cpu)
+    if is_gpu_flow:
+        flow_buf = flow
+    else:
+        # Bypass engine.upload auto-detect bug for (H, W, 2) flow array by using direct allocation
+        flow_buf = engine.allocate(flow.shape, dtype=np.float32, is_vector=False, host_accessible=True)
+        from taichi_library.taichi_aot.engine import _LIB, _RUNTIME
+        _LIB.write_to_gpu_buffer(_RUNTIME, flow_buf.handle, np.ascontiguousarray(flow, dtype=np.float32).ctypes.data, flow_buf.nbytes)
+
+    h_src, w_src = src_buf.shape[:2]
+    h_flow, w_flow = flow_buf.shape[:2]
+    is_3d = len(src_buf.shape) == 3
+    c_count = src_buf.shape[2] if is_3d else 1
+
+    src_cast = src_buf
+    target_dtype = np.float32
+    graph_name = "remap_with_flow_f32_3d" if is_3d else "remap_with_flow_f32_2d"
+
+    # Output buffer determination (allocate intermediate float32 buffer)
+    if dst is None:
+        dst_shape = (full_h, full_w, c_count) if is_3d else (full_h, full_w)
+        dst_buf = engine.allocate(dst_shape, dtype=np.float32, is_vector=is_3d)
+    else:
+        if dst.dtype == np.float32:
+            dst_buf = dst
+        else:
+            dst_buf = engine.allocate(dst.shape, dtype=np.float32, is_vector=is_3d)
+
+    # Input view for 3d vector graphs
+    src_v = src_cast
+    dst_v = dst_buf
+    if is_3d:
+        src_v = src_cast if getattr(src_cast, "is_vector", False) else src_cast.view_as_vector(True)
+        dst_v = dst_buf if getattr(dst_buf, "is_vector", False) else dst_buf.view_as_vector(True)
+
+    scale_x = float(full_w) / float(w_flow)
+    scale_y = float(full_h) / float(h_flow)
+
+    # Run AOT Graph (always float32 for interpolation precision)
+    _mod("remap").run(
+        graph_name,
+        src=src_v,
+        flow=flow_buf,
+        dst=dst_v,
+        h_src=int(h_src),
+        w_src=int(w_src),
+        h_dst=int(full_h),
+        w_dst=int(full_w),
+        h_flow=int(h_flow),
+        w_flow=int(w_flow),
+        scale_x=float(scale_x),
+        scale_y=float(scale_y),
+    )
+
+    # Sync
+    engine.sync()
+    
+    # Clean up intermediate casts and uploads
+    if src_cast is not src_buf:
+        src_cast.release()
+    if not is_gpu_src:
+        src_buf.release()
+    if not is_gpu_flow:
+        flow_buf.release()
+
+    # Cast back to original dtype or download with CPU fallback
+    if return_gpu:
+        if dst is not None and dst is not dst_buf:
+            from taichi_library.taichi_algorithm.common import copy_field
+            copy_field(dst_buf, dst)
+            dst_buf.release()
+            return dst
+        return dst_buf
+    else:
+        # Download f32 from GPU first, then cast on CPU to avoid Vulkan u16/i16 host-mapping restrictions or .cast failures
+        res_f32 = dst_buf.to_numpy()
+        dst_buf.release()
+        
+        if orig_dtype != np.float32:
+            if np.issubdtype(orig_dtype, np.integer):
+                res_np = np.clip(res_f32, np.iinfo(orig_dtype).min, np.iinfo(orig_dtype).max).astype(orig_dtype)
+            else:
+                res_np = res_f32.astype(orig_dtype)
+        else:
+            res_np = res_f32
+            
+        if dst is not None:
+            dst[:] = res_np
+            return dst
+        return res_np
+
+
+
+def smooth_flow_gpu(flow, sigma=1.0, kernel_size=5, dst=None):
+    """Gaussian blur a 2-channel flow field (H, W, 2) entirely on GPU.
+
+    Uses the fused smooth_flow_x / smooth_flow_y graphs compiled into remap.tcm.
+    Both channels are processed simultaneously in a single kernel launch per pass,
+    making this significantly faster than calling gaussian_blur twice on separate channels.
+
+    Args:
+        flow:        TaichiGPUBuffer (H, W, 2) — the raw flow field.
+        sigma:       Gaussian standard deviation.
+        kernel_size: Filter kernel size (must be odd). Auto-computed from sigma if <= 0.
+        dst:         Optional pre-allocated TaichiGPUBuffer (H, W, 2) to reuse as output.
+                     If None or incompatible, a new buffer is allocated.
+
+    Returns:
+        TaichiGPUBuffer (H, W, 2) — smoothed flow. Caller must destroy when done.
+    """
+    from taichi_library.taichi_algorithm.gaussian import (
+        compute_gaussian_weights,
+    )
+
+    if kernel_size is None or kernel_size <= 0:
+        kernel_size = int(np.ceil(3 * sigma)) * 2 + 1
+    radius = kernel_size // 2
+
+    weights_np = compute_gaussian_weights(sigma, radius).astype(np.float32)
+    weights_buf = InputArray(weights_np)
+
+    h, w = int(flow.shape[0]), int(flow.shape[1])
+
+    # Intermediate buffer for x-pass output (always new — cannot alias src)
+    tmp_buf = engine.allocate((h, w, 2), dtype=np.float32)
+
+    # Output buffer: reuse if compatible
+    if dst is not None and dst.shape == (h, w, 2) and dst.dtype == np.float32:
+        out_buf = dst
+    else:
+        out_buf = engine.allocate((h, w, 2), dtype=np.float32)
+
+    _mod("remap").run(
+        "smooth_flow_x",
+        src=flow, dst=tmp_buf,
+        h=h, w=w, weights=weights_buf, radius=radius,
+    )
+    _mod("remap").run(
+        "smooth_flow_y",
+        src=tmp_buf, dst=out_buf,
+        h=h, w=w, weights=weights_buf, radius=radius,
+    )
+
+    engine.sync()
+    tmp_buf.release()
+    if hasattr(weights_buf, "release"):
+        weights_buf.release()
+    elif hasattr(weights_buf, "destroy"):
+        weights_buf.destroy()
+    del weights_buf
+    return out_buf
+
+
+def build_flow_maps(flow_or_dx, flow_or_dy_or_h, full_h_or_w=None, full_w=None,
+                    scale_x=None, scale_y=None, map_x_buf=None, map_y_buf=None):
+    """Build remap coordinate maps from a flow field — fully on GPU.
+
+    Two calling conventions:
+      1. 2-channel flow tensor:
+         build_flow_maps(flow_2ch, full_h, full_w, ...)
+         where flow_2ch is TaichiGPUBuffer (H_flow, W_flow, 2).
+
+      2. Separate dx/dy tensors (legacy):
+         build_flow_maps(dx, dy, full_h, full_w, ...)
+         where dx and dy are TaichiGPUBuffer (H_flow, W_flow).
+
+    Args:
+        flow_or_dx:         2-channel flow buffer OR dx buffer.
+        flow_or_dy_or_h:    full_h (int) if 2ch convention, OR dy buffer if separate.
+        full_h_or_w:        full_w (int) if 2ch convention, OR full_h (int) if separate.
+        full_w:             full_w (int) only when using separate dx/dy convention.
+        scale_x:            Horizontal scale factor. Auto-computed if None.
+        scale_y:            Vertical scale factor. Auto-computed if None.
+        map_x_buf:          Optional pre-allocated output buffer (full_h, full_w) to reuse.
+        map_y_buf:          Optional pre-allocated output buffer (full_h, full_w) to reuse.
+
+    Returns:
+        (map_x_buf, map_y_buf): TaichiGPUBuffer (full_h, full_w) each.
+    """
+    # Detect calling convention
+    if isinstance(flow_or_dy_or_h, int):
+        # Convention 1: build_flow_maps(flow_2ch, full_h, full_w, ...)
+        flow_buf  = InputArray(flow_or_dx)
+        _full_h   = int(flow_or_dy_or_h)
+        _full_w   = int(full_h_or_w)
+        h_flow    = int(flow_buf.shape[0])
+        w_flow    = int(flow_buf.shape[1])
+
+        if scale_x is None:
+            scale_x = float(_full_w) / float(w_flow)
+        if scale_y is None:
+            scale_y = float(_full_h) / float(h_flow)
+
+        out_shape = (_full_h, _full_w)
+        if map_x_buf is None or map_x_buf.shape != out_shape or map_x_buf.dtype != np.float32:
+            map_x_buf = engine.allocate(out_shape, dtype=np.float32)
+        if map_y_buf is None or map_y_buf.shape != out_shape or map_y_buf.dtype != np.float32:
+            map_y_buf = engine.allocate(out_shape, dtype=np.float32)
+
+        _mod("remap").run(
+            "build_flow_maps_from_2ch",
+            flow=flow_buf, map_x=map_x_buf, map_y=map_y_buf,
+            h_flow=h_flow, w_flow=w_flow,
+            h_dst=_full_h, w_dst=_full_w,
+            scale_x=float(scale_x), scale_y=float(scale_y),
+        )
+    else:
+        # Convention 2: build_flow_maps(dx, dy, full_h, full_w, ...)
+        dx_buf  = InputArray(flow_or_dx)
+        dy_buf  = InputArray(flow_or_dy_or_h)
+        _full_h = int(full_h_or_w)
+        _full_w = int(full_w)
+        h_flow  = int(dx_buf.shape[0])
+        w_flow  = int(dx_buf.shape[1])
+
+        if scale_x is None:
+            scale_x = float(_full_w) / float(w_flow)
+        if scale_y is None:
+            scale_y = float(_full_h) / float(h_flow)
+
+        out_shape = (_full_h, _full_w)
+        if map_x_buf is None or map_x_buf.shape != out_shape or map_x_buf.dtype != np.float32:
+            map_x_buf = engine.allocate(out_shape, dtype=np.float32)
+        if map_y_buf is None or map_y_buf.shape != out_shape or map_y_buf.dtype != np.float32:
+            map_y_buf = engine.allocate(out_shape, dtype=np.float32)
+
+        _mod("remap").run(
+            "build_flow_maps",
+            dx=dx_buf, dy=dy_buf, map_x=map_x_buf, map_y=map_y_buf,
+            h_flow=h_flow, w_flow=w_flow,
+            h_dst=_full_h, w_dst=_full_w,
+            scale_x=float(scale_x), scale_y=float(scale_y),
+        )
+
+    return map_x_buf, map_y_buf
+
+
+def enhance_grayscale(src, blur, lut, micro_contrast=2.93, clarity=0.0, return_gpu=False, dst=None):
+    """Taichi AOT Grayscale Image Enhancement (1D LUT & Micro-Contrast) API"""
+    src_buf = InputArray(src)
+    blur_buf = InputArray(blur)
+    lut_buf = InputArray(lut)
+
+    h, w = src_buf.shape[:2]
+
+    if dst is not None and dst.shape == (h, w) and dst.dtype == np.float32:
+        dst_buf = dst
+    else:
+        dst_buf = OutputArray((h, w), dtype=np.float32)
+
+    _mod("remap").run(
+        "enhance_grayscale",
+        src=src_buf,
+        blur=blur_buf,
+        lut=lut_buf,
+        dst=dst_buf,
+        micro_contrast=float(micro_contrast),
+        clarity=float(clarity),
+        h=h,
+        w=w,
+    )
+
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+@ti_thread
+def hamilton_demosaic(
+    bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
+    """Taichi AOT Hamilton-Adams Demosaicing & Color Space / Gamma transform API"""
+    bayer_buf   = InputArray(bayer)
+    cmatrix_buf = InputArray(cmatrix)
+    
+    h, w = bayer_buf.shape[:2]
+    
+    # Pre-allocate temporary intermediate buffers in VRAM to keep it blazing fast!
+    wb_bayer_buf = engine.allocate((h, w), dtype=np.float32)
+    green_buf    = engine.allocate((h, w), dtype=np.float32)
+    
+    # Destination output RGB float32 buffer
+    if dst is not None and dst.shape == (h, w, 3) and dst.dtype == np.float32:
+        dst_buf = dst
+    else:
+        dst_buf = OutputArray((h, w, 3), dtype=np.float32)
+        
+    _mod("hamilton").run(
+        "hamilton_demosaic",
+        bayer=bayer_buf,
+        wb_bayer=wb_bayer_buf,
+        green=green_buf,
+        cmatrix=cmatrix_buf,
+        dst=dst_buf,
+        wb_r=float(wb_r),
+        wb_g1=float(wb_g1),
+        wb_b=float(wb_b),
+        wb_g2=float(wb_g2),
+        black=float(black_level),
+        white=float(white_level),
+        h=int(h),
+        w=int(w),
+        c00=int(c00),
+        c01=int(c01),
+        c10=int(c10),
+        c11=int(c11)
+    )
+    
+    # Immediately release intermediate VRAM buffers back to pool
+    engine.sync()
+    wb_bayer_buf.release()
+    green_buf.release()
+    if bayer_buf is not bayer and hasattr(bayer_buf, "release"):
+        bayer_buf.release()
+    elif bayer_buf is not bayer and hasattr(bayer_buf, "destroy"):
+        bayer_buf.destroy()
+    if cmatrix_buf is not cmatrix and hasattr(cmatrix_buf, "release"):
+        cmatrix_buf.release()
+    elif cmatrix_buf is not cmatrix and hasattr(cmatrix_buf, "destroy"):
+        cmatrix_buf.destroy()
+    
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+@ti_thread
+def hamilton_demosaic_1channel(
+    bayer, wb_r, wb_g1, wb_b, wb_g2,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
+    """Fast Green-Only Demosaic to Grayscale 1-channel (Fused Single-Pass)."""
+    bayer_buf = InputArray(bayer)
+    h, w = bayer_buf.shape[:2]
+    
+    if dst is not None and dst.shape == (h, w) and dst.dtype == np.float32:
+        dst_buf = dst
+    else:
+        dst_buf = OutputArray((h, w), dtype=np.float32)
+        
+    _mod("hamilton").run(
+        "hamilton_demosaic_1channel",
+        bayer=bayer_buf,
+        dst=dst_buf,
+        wb_r=float(wb_r),
+        wb_g1=float(wb_g1),
+        wb_b=float(wb_b),
+        wb_g2=float(wb_g2),
+        black=float(black_level),
+        white=float(white_level),
+        h=int(h),
+        w=int(w),
+        c00=int(c00),
+        c01=int(c01),
+        c10=int(c10),
+        c11=int(c11)
+    )
+    
+    engine.sync()
+    if bayer_buf is not bayer and hasattr(bayer_buf, "release"):
+        bayer_buf.release()
+    elif bayer_buf is not bayer and hasattr(bayer_buf, "destroy"):
+        bayer_buf.destroy()
+        
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+@ti_thread
+def hamilton_demosaic_half_res(
+    bayer, wb_r, wb_g1, wb_b, wb_g2,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
+    """Bypass Demosaicing: Extract Green Sub-Sampling to 1/2 size (half_res) grayscale (Fused Single-Pass)."""
+    bayer_buf = InputArray(bayer)
+    h, w = bayer_buf.shape[:2]
+    
+    if dst is not None and dst.shape == (h // 2, w // 2) and dst.dtype == np.float32:
+        dst_buf = dst
+    else:
+        dst_buf = OutputArray((h // 2, w // 2), dtype=np.float32)
+        
+    _mod("hamilton").run(
+        "hamilton_demosaic_half_res",
+        bayer=bayer_buf,
+        dst=dst_buf,
+        wb_r=float(wb_r),
+        wb_g1=float(wb_g1),
+        wb_b=float(wb_b),
+        wb_g2=float(wb_g2),
+        black=float(black_level),
+        white=float(white_level),
+        h=int(h),
+        w=int(w),
+        c00=int(c00),
+        c01=int(c01),
+        c10=int(c10),
+        c11=int(c11)
+    )
+    
+    engine.sync()
+    if bayer_buf is not bayer and hasattr(bayer_buf, "release"):
+        bayer_buf.release()
+    elif bayer_buf is not bayer and hasattr(bayer_buf, "destroy"):
+        bayer_buf.destroy()
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+@ti_thread
+def hamilton_demosaic_rgb_half_res(
+    bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
+    """Bypass Demosaicing: Extract RGB Direct Sub-Sampling to 1/2 size (half_res) RGB (Fused Single-Pass)."""
+    bayer_buf = InputArray(bayer)
+    cmatrix_buf = InputArray(cmatrix)
+    h, w = bayer_buf.shape[:2]
+    
+    if dst is not None and dst.shape == (h // 2, w // 2, 3) and dst.dtype == np.float32:
+        dst_buf = dst
+    else:
+        dst_buf = OutputArray((h // 2, w // 2, 3), dtype=np.float32)
+        
+    _mod("hamilton").run(
+        "hamilton_demosaic_rgb_half_res",
+        bayer=bayer_buf,
+        cmatrix=cmatrix_buf,
+        dst=dst_buf,
+        wb_r=float(wb_r),
+        wb_g1=float(wb_g1),
+        wb_b=float(wb_b),
+        wb_g2=float(wb_g2),
+        black=float(black_level),
+        white=float(white_level),
+        h=int(h),
+        w=int(w),
+        c00=int(c00),
+        c01=int(c01),
+        c10=int(c10),
+        c11=int(c11)
+    )
+    
+    engine.sync()
+    if bayer_buf is not bayer and hasattr(bayer_buf, "release"):
+        bayer_buf.release()
+    elif bayer_buf is not bayer and hasattr(bayer_buf, "destroy"):
+        bayer_buf.destroy()
+    if cmatrix_buf is not cmatrix and hasattr(cmatrix_buf, "release"):
+        cmatrix_buf.release()
+    elif cmatrix_buf is not cmatrix and hasattr(cmatrix_buf, "destroy"):
+        cmatrix_buf.destroy()
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+@ti_thread
+def hamilton_demosaic_3channel(
+    bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
+    """Full-Luma Demosaic directly to Grayscale 1-channel."""
+    bayer_buf = InputArray(bayer)
+    cmatrix_buf = InputArray(cmatrix)
+    h, w = bayer_buf.shape[:2]
+    wb_bayer_buf = engine.allocate((h, w), dtype=np.float32)
+    green_buf = engine.allocate((h, w), dtype=np.float32)
+    
+    if dst is not None and dst.shape == (h, w) and dst.dtype == np.float32:
+        dst_buf = dst
+    else:
+        dst_buf = OutputArray((h, w), dtype=np.float32)
+        
+    _mod("hamilton").run(
+        "hamilton_demosaic_3channel",
+        bayer=bayer_buf,
+        wb_bayer=wb_bayer_buf,
+        green=green_buf,
+        cmatrix=cmatrix_buf,
+        dst=dst_buf,
+        wb_r=float(wb_r),
+        wb_g1=float(wb_g1),
+        wb_b=float(wb_b),
+        wb_g2=float(wb_g2),
+        black=float(black_level),
+        white=float(white_level),
+        h=int(h),
+        w=int(w),
+        c00=int(c00),
+        c01=int(c01),
+        c10=int(c10),
+        c11=int(c11)
+    )
+    
+    engine.sync()
+    wb_bayer_buf.release()
+    green_buf.release()
+    if bayer_buf is not bayer and hasattr(bayer_buf, "release"):
+        bayer_buf.release()
+    elif bayer_buf is not bayer and hasattr(bayer_buf, "destroy"):
+        bayer_buf.destroy()
+    if cmatrix_buf is not cmatrix and hasattr(cmatrix_buf, "release"):
+        cmatrix_buf.release()
+    elif cmatrix_buf is not cmatrix and hasattr(cmatrix_buf, "destroy"):
+        cmatrix_buf.destroy()
+        
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+def rotate_by_flip(img: np.ndarray, flip: int) -> np.ndarray:
+    """Rotates a numpy array according to the LibRaw/rawpy sizes.flip value."""
+    if flip == 0:
+        return img
+    elif flip == 1:
+        return np.fliplr(img)
+    elif flip == 2:
+        return np.rot90(img, 2)
+    elif flip == 3:
+        return np.rot90(img, 2)
+    elif flip == 4:
+        return np.fliplr(np.rot90(img, 1))
+    elif flip == 5:
+        return np.rot90(img, 1)
+    elif flip == 6:
+        return np.rot90(img, 3)
+    elif flip == 7:
+        return np.fliplr(np.rot90(img, 3))
+    return img
+
+
+def demosaic(
+    raw_input,
+    wb_r=None, wb_g1=None, wb_b=None, wb_g2=None, cmatrix=None,
+    black_level=None, white_level=None, c00=None, c01=None, c10=None, c11=None,
+    method="hamilton", return_gpu=False, dst=None, output_bgr_u16=False
+):
+    """
+    Unified, Ultra-Simplified GPU-Accelerated RAW Demosaicing API.
+    
+    This function acts as the single entry-point for all GPU-accelerated demosaicing algorithms.
+    It automatically routes the raw sensor Bayer array to the appropriate pre-compiled AOT shader.
+    
+    Smart Metadata Auto-Extraction:
+    -------------------------------
+    To make integration extremely simple and prevent intimidating signatures, you can pass a
+    `rawpy` object or a file path string directly as the first argument. All sensor metadata
+    (Bayer array, WB gains, color matrix, black/white levels, layout indices) will be extracted
+    automatically under the hood!
+    
+    Usage Examples:
+    ---------------
+    1. Pass rawpy object directly (Recommended):
+       >>> rgb = ta_aot.demosaic(raw, method="hamilton")
+       
+    2. Pass DNG filepath directly:
+       >>> rgb = ta_aot.demosaic("path/to/image.dng", method="hamilton")
+       
+    3. Pass parameters manually (For advanced JIT/AOT parity checks):
+       >>> rgb = ta_aot.demosaic(bayer_np, wb_r, wb_g1, wb_b, wb_g2, cmatrix, ...)
+       
+    Supported Methods:
+    -----------------
+    1. 'hamilton' / 'hamilton-adams' / 'ha' / 'ppg':
+       - Real Name: Hamilton-Adams Edge-Directed Demosaicing (equivalent to PPG / Patterned Pixel Grouping).
+       - Features: High-speed edge-directed green interpolation, color difference gradient restoration,
+                   and fused sRGB + Dynamic Algebraic Sigmoid contrast roll-off.
+       
+    Parameters:
+    -----------
+    raw_input : rawpy.RawPy, str, or np.ndarray
+        Either a loaded rawpy object, a file path to a DNG/RAW image, or a raw Bayer NumPy array.
+    """
+    bayer = raw_input
+    flip = 0
+    
+    # Check if raw_input is a filepath string or rawpy object
+    is_rawpy_obj = hasattr(raw_input, "raw_image")
+    is_filepath = isinstance(raw_input, str) and os.path.exists(raw_input)
+    
+    if is_rawpy_obj or is_filepath:
+        import rawpy
+        
+        def _extract_from_raw(raw):
+            b_np = raw.raw_image.astype(np.float32)
+            bl = float(raw.black_level_per_channel[0])
+            wl = float(raw.white_level)
+            
+            # --- Dynamic Experiment: Limit white level to 98% to preserve highlight headroom ---
+            wl = wl * 0.98
+            # ------------------------------------------------------------------------------------
+            
+            wb_np = np.array(raw.camera_whitebalance, dtype=np.float32)
+            if len(wb_np) == 4:
+                if wb_np[3] <= 0.01:
+                    wb_np[3] = wb_np[1]
+                g_gain = (wb_np[1] + wb_np[3]) / 2.0
+                wb_np /= g_gain
+            else:
+                wb_np = np.array([1.5, 1.0, 2.0, 1.0], dtype=np.float32)
+
+            c_00 = int(raw.raw_colors[0, 0])
+            c_01 = int(raw.raw_colors[0, 1])
+            c_10 = int(raw.raw_colors[1, 0])
+            c_11 = int(raw.raw_colors[1, 1])
+            cm = raw.color_matrix[:, :3].astype(np.float32)
+            return b_np, wb_np[0], wb_np[1], wb_np[2], wb_np[3], cm, bl, wl, c_00, c_01, c_10, c_11
+            
+        if is_rawpy_obj:
+            flip = getattr(raw_input.sizes, "flip", 0)
+            bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix, black_level, white_level, c00, c01, c10, c11 = _extract_from_raw(raw_input)
+        else:
+            with rawpy.imread(raw_input) as raw:
+                flip = getattr(raw.sizes, "flip", 0)
+                bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix, black_level, white_level, c00, c01, c10, c11 = _extract_from_raw(raw)
+        
+        # Store active cmatrix in engine singleton for downstream gamma proxy color space alignment transformations
+        engine.active_cmatrix = cmatrix
+        engine.active_wb_r = wb_r
+        engine.active_wb_g1 = wb_g1
+        engine.active_wb_b = wb_b
+        engine.active_wb_g2 = wb_g2
+        engine.active_black_level = black_level
+        engine.active_white_level = white_level
+        engine.active_c00 = c00
+        engine.active_c01 = c01
+        engine.active_c10 = c10
+        engine.active_c11 = c11
+
+    method_lower = method.lower().replace("_", "-")
+    if method_lower in ("hamilton", "hamilton-adams", "ha", "ppg"):
+        if output_bgr_u16:
+            # Step 1: Run the demosaic JIT/AOT to produce float32 RGB on GPU
+            rgb_f32_gpu = hamilton_demosaic(
+                bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+                black_level, white_level, c00, c01, c10, c11,
+                return_gpu=True, dst=None
+            )
+            h, w = rgb_f32_gpu.shape[:2]
+            
+            # Step 2: Allocate host-accessible intermediate i32 BGR buffer in VRAM
+            bgr_i32_gpu = engine.allocate((h, w, 3), dtype=np.int32, host_accessible=True)
+            
+            # Step 3: Run the conversion/channel-swapping graph on GPU
+            _mod("hamilton").run(
+                "rgb_to_bgr_i32",
+                src=rgb_f32_gpu,
+                dst=bgr_i32_gpu,
+                h=int(h),
+                w=int(w)
+            )
+            
+            # Step 4: Clean up GPU intermediate float32 buffer immediately
+            engine.sync()
+            rgb_f32_gpu.release()
+            
+            # Step 5: Convert and return
+            if not return_gpu:
+                engine.sync()
+                bgr_u16_gpu = bgr_i32_gpu.cast(np.uint16, host_accessible=True)
+                bgr_u16_cpu = bgr_u16_gpu.to_numpy()
+                bgr_u16_gpu.release()
+                bgr_i32_gpu.release()
+                if flip != 0:
+                    bgr_u16_cpu = rotate_by_flip(bgr_u16_cpu, flip)
+                return bgr_u16_cpu
+            else:
+                engine.sync()
+                bgr_u16_gpu = bgr_i32_gpu.cast(np.uint16, host_accessible=True)
+                bgr_i32_gpu.release()
+                return bgr_u16_gpu
+        else:
+            res = hamilton_demosaic(
+                bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+                black_level, white_level, c00, c01, c10, c11,
+                return_gpu=return_gpu, dst=dst
+            )
+            if not return_gpu and flip != 0:
+                res = rotate_by_flip(res, flip)
+            return res
+    elif method_lower in ("hamilton-1channel", "hamilton-1ch", "ha-1ch"):
+        res = hamilton_demosaic_1channel(
+            bayer, wb_r, wb_g1, wb_b, wb_g2,
+            black_level, white_level, c00, c01, c10, c11,
+            return_gpu=return_gpu, dst=dst
+        )
+        if not return_gpu and flip != 0:
+            res = rotate_by_flip(res, flip)
+        return res
+    elif method_lower in ("hamilton-half-res", "hamilton-half", "ha-half-res", "ha-half", "half-res"):
+        res = hamilton_demosaic_half_res(
+            bayer, wb_r, wb_g1, wb_b, wb_g2,
+            black_level, white_level, c00, c01, c10, c11,
+            return_gpu=return_gpu, dst=dst
+        )
+        if not return_gpu and flip != 0:
+            res = rotate_by_flip(res, flip)
+        return res
+    elif method_lower in ("hamilton-rgb-half-res", "hamilton-rgb-half", "ha-rgb-half-res", "rgb-half-res"):
+        res = hamilton_demosaic_rgb_half_res(
+            bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+            black_level, white_level, c00, c01, c10, c11,
+            return_gpu=return_gpu, dst=dst
+        )
+        if not return_gpu and flip != 0:
+            res = rotate_by_flip(res, flip)
+        return res
+    elif method_lower in ("hamilton-3channel", "hamilton-3ch", "ha-3ch"):
+        res = hamilton_demosaic_3channel(
+            bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+            black_level, white_level, c00, c01, c10, c11,
+            return_gpu=return_gpu, dst=dst
+        )
+        if not return_gpu and flip != 0:
+            res = rotate_by_flip(res, flip)
+        return res
+    else:
+        supported = [
+            "'hamilton' (aliases: 'hamilton-adams', 'ha', 'ppg')",
+            "'hamilton-1channel' (aliases: 'hamilton-1ch', 'ha-1ch')",
+            "'hamilton-half-res' (aliases: 'hamilton-half', 'ha-half-res', 'half-res')",
+            "'hamilton-rgb-half-res' (aliases: 'hamilton-rgb-half', 'ha-rgb-half-res', 'rgb-half-res')",
+            "'hamilton-3channel' (aliases: 'hamilton-3ch', 'ha-3ch')"
+        ]
+        raise ValueError(
+            f"\n[Taichi AOT] Unsupported demosaicing method: '{method}'.\n"
+            f"  SUPPORTED METHODS: {', '.join(supported)}"
+        )
+
+
+

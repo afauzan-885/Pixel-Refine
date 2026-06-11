@@ -1061,6 +1061,22 @@ class WidthAnimator(QObject):
 class HeightAnimator(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._active_anims = weakref.WeakKeyDictionary()
+
+    def _cleanup_anim(self, target):
+        if not target:
+            return
+        try:
+            if target in self._active_anims:
+                anim_data = self._active_anims.get(target)
+                if anim_data:
+                    timer = anim_data.get("timer")
+                    if timer:
+                        timer.stop()
+                        timer.deleteLater()
+                self._active_anims.pop(target, None)
+        except Exception:
+            pass
 
     def animate_height(
         self, target, end_height, duration=250, curve=QEasingCurve.Type.InOutQuad
@@ -1068,13 +1084,31 @@ class HeightAnimator(QObject):
         if not target:
             return
 
-        # Prepare for expansion if currently hidden or height 0
-        if end_height > 0 and (not target.isVisible() or target.height() <= 1):
-            target.show()
-            target.setMinimumHeight(0)
-            target.setMaximumHeight(0)
+        # Cancel any active animation/timer for this target first
+        if target in self._active_anims:
+            anim_data = self._active_anims[target]
+            try:
+                group = anim_data.get("group")
+                if group:
+                    group.stop()
+            except Exception:
+                pass
+            self._cleanup_anim(target)
 
-        start_height = target.height()
+        # Prepare for expansion if currently hidden or height 0
+        try:
+            if end_height > 0 and (not target.isVisible() or target.height() <= 1):
+                target.show()
+                target.setMinimumHeight(0)
+                target.setMaximumHeight(0)
+        except RuntimeError:
+            return
+
+        try:
+            start_height = target.height()
+        except RuntimeError:
+            return
+
         if start_height == end_height:
             self._set_flex_height(target, end_height)
             return
@@ -1088,12 +1122,59 @@ class HeightAnimator(QObject):
             anim.setEndValue(end_height)
             group.addAnimation(anim)
 
-        group.finished.connect(lambda: self._set_flex_height(target, end_height))
+        # Watchdog Timer - force completion if animation gets stuck
+        watchdog_timer = QTimer(self)
+        watchdog_timer.setSingleShot(True)
+        timeout_ms = max(1500, duration + 500)
+
+        target_ref = weakref.ref(target)
+
+        def on_watchdog_timeout():
+            t = target_ref()
+            if t and is_widget_alive(t):
+                try:
+                    group.stop()
+                except Exception:
+                    pass
+                self._set_flex_height(t, end_height)
+            self._cleanup_anim(t)
+
+        watchdog_timer.timeout.connect(on_watchdog_timeout)
+
+        def on_finished():
+            t = target_ref()
+            if t and is_widget_alive(t):
+                self._set_flex_height(t, end_height)
+            self._cleanup_anim(t)
+
+        group.finished.connect(on_finished)
+
+        # Save to active animations tracking
+        self._active_anims[target] = {
+            "group": group,
+            "timer": watchdog_timer,
+            "end_height": end_height,
+        }
+
+        watchdog_timer.start(timeout_ms)
         group.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
     def _set_flex_height(self, widget, height):
-        if height > 0:
-            widget.setMinimumHeight(height)
-            widget.setMaximumHeight(16777215)
-        else:
-            widget.setFixedHeight(0)
+        try:
+            if not widget or not is_widget_alive(widget):
+                return
+            if height > 0:
+                widget.setMinimumHeight(height)
+                widget.setMaximumHeight(16777215)
+            else:
+                widget.setFixedHeight(0)
+
+            # Notify parent layout to update geometry and adjust size to avoid cut-off UI
+            p = widget.parentWidget()
+            if p and is_widget_alive(p):
+                p.updateGeometry()
+                if hasattr(p, "adjustSize"):
+                    p.adjustSize()
+        except RuntimeError:
+            pass
+

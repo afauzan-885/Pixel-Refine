@@ -35,6 +35,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
     load_images_from_paths,
     resize_all_with_padding,
     cleanup_old_hdf5_files,
+    is_hdf5_cache_valid,
 )
 
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
@@ -100,6 +101,20 @@ class DataProvider:
 
         # Hapus file HDF5 lama selain file target saat ini untuk menghemat ruang HDD
         cleanup_old_hdf5_files(hdf5_path)
+
+        # --- Validasi cache HDF5 berdasarkan referensi image ---
+        # Jika HDF5 ada tapi referensi image berubah (misal batch diisi ulang dengan
+        # gambar berbeda), hapus cache lama agar alignment dijalankan ulang.
+        ref_image_path_current = image_paths[0] if image_paths else ""
+        if os.path.exists(hdf5_path) and ref_image_path_current:
+            if not is_hdf5_cache_valid(hdf5_path, ref_image_path_current):
+                try:
+                    os.remove(hdf5_path)
+                    print(
+                        f"[CacheValidation] Cache HDF5 dihapus karena referensi berubah: {hdf5_path}"
+                    )
+                except Exception as e_del:
+                    print(f"[CacheValidation] Gagal menghapus cache HDF5: {e_del}")
 
         data_source = hdf5_path if os.path.exists(hdf5_path) else image_paths
 
@@ -370,15 +385,15 @@ def main(
         data_provider = processor.data_provider
 
         # Setup parameters
-        tile_val = general_settings.get("similarity_spatial_tile_size", 10)
+        tile_val = general_settings.get("similarity_spatial_tile_size", 12)
         extra_params = {
             "tile_size": (tile_val, tile_val),
-            "overlap": general_settings.get("similarity_spatial_overlap_percent", 0.40),
+            "overlap": general_settings.get("similarity_spatial_overlap_percent", 0.28),
             "motion_sensitivity": general_settings.get(
                 "similarity_spatial_motion_sensitivity", 150.00
             ),
             "noise_offset_factor": general_settings.get(
-                "similarity_spatial_noise_mad_offset_factor", 0.22
+                "similarity_spatial_noise_mad_offset_factor", 0.15
             ),
             "similarity_spatial_num_workers": general_settings.get(
                 "similarity_spatial_num_workers", 1
@@ -512,31 +527,38 @@ def main(
                     extract_exif,
                 )
 
+                # Simpan path referensi image ke root attrs HDF5 untuk validasi cache di masa depan
+                h5f.attrs["ref_image_path"] = image_paths[0] if image_paths else ""
+
                 save_to_hdf5(
                     h5f, "image_0", reference_image, extract_exif(image_paths[0])
                 )
 
-                from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.alignment_core import (
-                    perform_alignment_gpu,
+                from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.spatial_pipeline import (
+                    process_in_gpu,
                 )
 
-                perform_alignment_gpu(
+                process_in_gpu(
                     images=images_for_align,
                     reference_image_float=reference_image_float,
+                    ref_image_h=h_ref_norm,
+                    ref_image_w=w_ref_norm,
+                    ref_dtype=reference_image.dtype,
                     work_res_h=h_ref_norm,
                     work_res_w=w_ref_norm,
                     tile_h=extra_params.get("tile_size", (16, 16))[0],
                     tile_w=extra_params.get("tile_size", (16, 16))[1],
-                    ref_dtype=reference_image.dtype,
                     update_progress=update_progress,
                     stop_requested=stop_requested,
-                    h5_file_handle=h5f,
-                    image_paths=image_paths,
+                    p_align_start=25,
+                    p_align_end=50,
                     is_linear_mode=is_linear_mode,
                     proxy_scale=proxy_scale,
+                    h5_file_handle=h5f,
+                    image_paths=image_paths,
                     reference_image=reference_image,
-                    progress_start=25,
-                    progress_end=50,
+                    alignment_only=True,
+                    optical_flow_type="alignment_tile",
                 )
 
             del images_for_align

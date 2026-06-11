@@ -256,7 +256,7 @@ def process_thumbnail_logic(image_path, thumbnail_size):
         if ext in SUPPORTED_FORMATS.get("raw", []):
             try:
                 from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import taichi_lock
-                from pixel_refine_desktop.enhance_stack.core.algorithm import taichi_aot
+                from taichi_library import taichi_aot
                 
                 with taichi_lock:
                     # Direct GPU demosaic half resolution (always consistent with full preview)

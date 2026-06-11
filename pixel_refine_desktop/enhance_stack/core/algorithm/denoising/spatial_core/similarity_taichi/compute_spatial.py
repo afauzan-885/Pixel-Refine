@@ -40,6 +40,27 @@ else:
     ti = DummyTi()
 
 @ti.kernel
+def precompute_gradients_kernel(
+    img: ti.types.ndarray(),
+    grad_x: ti.types.ndarray(),
+    grad_y: ti.types.ndarray(),
+    h: ti.i32,
+    w: ti.i32
+):
+    """Precomputes Sobel DX and DY gradients for the entire image to avoid redundant calculations inside windows."""
+    for y, x in ti.ndrange(h, w):
+        if 0 < y < h - 1 and 0 < x < w - 1:
+            gx_center = img[y, x + 1] - img[y, x - 1]
+            gx_top = img[y - 1, x + 1] - img[y - 1, x - 1]
+            gx_bottom = img[y + 1, x + 1] - img[y + 1, x - 1]
+            grad_x[y, x] = (gx_center + gx_top + gx_bottom) * 0.333
+            
+            grad_y[y, x] = img[y + 1, x] - img[y - 1, x]
+        else:
+            grad_x[y, x] = 0.0
+            grad_y[y, x] = 0.0
+
+@ti.kernel
 def equalize_brightness_kernel(
     src: ti.types.ndarray(),
     ref: ti.types.ndarray(),
@@ -68,6 +89,10 @@ def equalize_brightness_kernel(
 def phase1_coarse_analysis_kernel(
     current_coarse: ti.types.ndarray(),
     reference_coarse: ti.types.ndarray(),
+    coarse_grad_x: ti.types.ndarray(),
+    coarse_grad_y: ti.types.ndarray(),
+    ref_coarse_grad_x: ti.types.ndarray(),
+    ref_coarse_grad_y: ti.types.ndarray(),
     coarse_confidence: ti.types.ndarray(),
     coarse_tile_h: ti.i32,
     coarse_tile_w: ti.i32,
@@ -86,9 +111,12 @@ def phase1_coarse_analysis_kernel(
         
         if curr_h > 0 and curr_w > 0:
             mad_score = calculate_hybrid_gradient_optimized(
-                current_coarse, reference_coarse, tile_y, tile_x,
+                current_coarse, reference_coarse,
+                coarse_grad_x, coarse_grad_y,
+                ref_coarse_grad_x, ref_coarse_grad_y,
+                tile_y, tile_x,
                 curr_h, curr_w, h_coarse, w_coarse,
-                noise_sigma, 1.0, 1e-6
+                noise_sigma, 1.0, 1e-6, 0.0
             )
             
             diff_ratio = mad_score / ti.max(1e-6, noise_sigma)
@@ -107,6 +135,10 @@ def phase1_coarse_analysis_kernel(
 def phase2_fine_analysis_kernel(
     current: ti.types.ndarray(),
     reference: ti.types.ndarray(),
+    curr_grad_x: ti.types.ndarray(),
+    curr_grad_y: ti.types.ndarray(),
+    ref_grad_x: ti.types.ndarray(),
+    ref_grad_y: ti.types.ndarray(),
     guidance_map: ti.types.ndarray(),
     stability_map: ti.types.ndarray(),
     weight_map_sum: ti.types.ndarray(),
@@ -122,7 +154,8 @@ def phase2_fine_analysis_kernel(
     motion_sensitivity: ti.f32,
     noise_offset_factor: ti.f32,
     use_stability: ti.i32,
-    use_guidance: ti.i32
+    use_guidance: ti.i32,
+    early_exit_threshold: ti.f32
 ):
     """Performs sliding window analysis for fine weight map accumulation on GPU."""
     pass_row_mod = pass_idx // 2
@@ -131,34 +164,62 @@ def phase2_fine_analysis_kernel(
     num_rows = row_starts.shape[0]
     num_cols = col_starts.shape[0]
     
-    for i, j in ti.ndrange(num_rows, num_cols):
-        if (i % 2 == pass_row_mod) and (j % 2 == pass_col_mod):
-            r = row_starts[i]
-            c = col_starts[j]
-            curr_h = ti.min(tile_h, h - r)
-            curr_w = ti.min(tile_w, w - c)
+    limit_rows = (num_rows - pass_row_mod + 1) // 2
+    limit_cols = (num_cols - pass_col_mod + 1) // 2
+    for k, m in ti.ndrange(limit_rows, limit_cols):
+        i = pass_row_mod + k * 2
+        j = pass_col_mod + m * 2
+        r = row_starts[i]
+        c = col_starts[j]
+        curr_h = ti.min(tile_h, h - r)
+        curr_w = ti.min(tile_w, w - c)
+        if curr_h > 0 and curr_w > 0:
+            center_x = ti.min(c + curr_w // 2, w - 1)
+            center_y = ti.min(r + curr_h // 2, h - 1)
             
-            if curr_h > 0 and curr_w > 0:
+            guidance_val = 1.0
+            if use_guidance == 1:
+                guidance_val = guidance_map[center_y, center_x]
+                
+            stab_val = 1.0
+            if use_stability == 1:
+                stab_val = stability_map[center_y, center_x]
+                
+            if guidance_val >= early_exit_threshold and stab_val >= early_exit_threshold:
+                # Calculate local block contrast from reference patch
+                ref_min = 1.0
+                ref_max = 0.0
+                # Highly optimized 5-point unrolled local contrast estimation (GPU register friendly)
+                c_y = curr_h // 2
+                c_x = curr_w // 2
+                v0 = reference[r + c_y, c + c_x]
+                v1 = reference[r, c]
+                v2 = reference[r, c + curr_w - 1]
+                v3 = reference[r + curr_h - 1, c]
+                v4 = reference[r + curr_h - 1, c + curr_w - 1]
+                
+                ref_min = ti.min(v0, ti.min(v1, ti.min(v2, ti.min(v3, v4))))
+                ref_max = ti.max(v0, ti.max(v1, ti.max(v2, ti.max(v3, v4))))
+                contrast = ref_max - ref_min
+                
+                # Flat weight transition mapping with adaptive contrast limits based on local luma
+                mean_luma = (v0 + v1 + v2 + v3 + v4) * 0.2
+                contrast_limit = 0.12 * ti.max(0.05, mean_luma)
+                contrast_range = 0.08 * ti.max(0.05, mean_luma)
+                flat_weight = ti.max(0.0, ti.min(1.0, (contrast_limit - contrast) / contrast_range))
+     
                 mad_score = calculate_hybrid_gradient_optimized(
-                    current, reference, r, c, curr_h, curr_w, h, w,
-                    noise_sigma, 1.0, 1e-6
+                    current, reference,
+                    curr_grad_x, curr_grad_y,
+                    ref_grad_x, ref_grad_y,
+                    r, c, curr_h, curr_w, h, w,
+                    noise_sigma, 1.0, 1e-6, flat_weight
                 )
                 
                 confidence_fine = calculate_match_confidence(
                     mad_score, noise_sigma, motion_sensitivity, noise_offset_factor
                 )
                 
-                center_x = ti.min(c + curr_w // 2, w - 1)
-                center_y = ti.min(r + curr_h // 2, h - 1)
-                
-                guidance_val = 1.0
-                if use_guidance == 1:
-                    guidance_val = guidance_map[center_y, center_x]
-                    
-                stab_val = 1.0
-                if use_stability == 1:
-                    stab_val = stability_map[center_y, center_x]
-                    
                 final_conf = confidence_fine * guidance_val * stab_val
                 
                 if final_conf >= 1e-6:
@@ -218,6 +279,28 @@ def compile_spatial_tcm():
 
     module = ti.aot.Module(ti.vulkan)
 
+    # 0. Precompute Gradients Graph
+    sym_img = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "img", dtype=ti.f32, ndim=2)
+    sym_grad_x = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "grad_x", dtype=ti.f32, ndim=2)
+    sym_grad_y = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "grad_y", dtype=ti.f32, ndim=2)
+    sym_h_grad = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", dtype=ti.i32)
+    sym_w_grad = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", dtype=ti.i32)
+
+    g_grad = ti.graph.GraphBuilder()
+    g_grad.dispatch(precompute_gradients_kernel, sym_img, sym_grad_x, sym_grad_y, sym_h_grad, sym_w_grad)
+    module.add_graph("precompute_gradients", g_grad.compile())
+
+    # Gradient symbols for reuse
+    sym_curr_grad_x = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "curr_grad_x", dtype=ti.f32, ndim=2)
+    sym_curr_grad_y = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "curr_grad_y", dtype=ti.f32, ndim=2)
+    sym_ref_grad_x = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ref_grad_x", dtype=ti.f32, ndim=2)
+    sym_ref_grad_y = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ref_grad_y", dtype=ti.f32, ndim=2)
+
+    sym_coarse_grad_x = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "coarse_grad_x", dtype=ti.f32, ndim=2)
+    sym_coarse_grad_y = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "coarse_grad_y", dtype=ti.f32, ndim=2)
+    sym_ref_coarse_grad_x = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ref_coarse_grad_x", dtype=ti.f32, ndim=2)
+    sym_ref_coarse_grad_y = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ref_coarse_grad_y", dtype=ti.f32, ndim=2)
+
     # 1. Equalize Brightness Graph
     sym_src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", dtype=ti.f32, ndim=2)
     sym_ref = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ref", dtype=ti.f32, ndim=2)
@@ -246,6 +329,10 @@ def compile_spatial_tcm():
         phase1_coarse_analysis_kernel,
         sym_curr_coarse,
         sym_ref_coarse,
+        sym_coarse_grad_x,
+        sym_coarse_grad_y,
+        sym_ref_coarse_grad_x,
+        sym_ref_coarse_grad_y,
         sym_coarse_conf,
         sym_coarse_tile_h,
         sym_coarse_tile_w,
@@ -273,12 +360,17 @@ def compile_spatial_tcm():
     sym_w_fine = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", dtype=ti.i32)
     sym_use_stability = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "use_stability", dtype=ti.i32)
     sym_use_guidance = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "use_guidance", dtype=ti.i32)
+    sym_early_exit_threshold = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "early_exit_threshold", dtype=ti.f32)
 
     g_p2 = ti.graph.GraphBuilder()
     g_p2.dispatch(
         phase2_fine_analysis_kernel,
         sym_current,
         sym_reference,
+        sym_curr_grad_x,
+        sym_curr_grad_y,
+        sym_ref_grad_x,
+        sym_ref_grad_y,
         sym_guidance_map,
         sym_stability_map,
         sym_weight_map_sum,
@@ -294,7 +386,8 @@ def compile_spatial_tcm():
         sym_motion_sens,
         sym_noise_offset,
         sym_use_stability,
-        sym_use_guidance
+        sym_use_guidance,
+        sym_early_exit_threshold
     )
     module.add_graph("phase2_fine_analysis", g_p2.compile())
 
@@ -335,6 +428,10 @@ def compile_spatial_tcm():
         phase2_fine_analysis_kernel,
         sym_current,
         sym_reference,
+        sym_curr_grad_x,
+        sym_curr_grad_y,
+        sym_ref_grad_x,
+        sym_ref_grad_y,
         sym_guidance_map,
         sym_stability_map,
         sym_weight_map_sum,
@@ -350,12 +447,17 @@ def compile_spatial_tcm():
         sym_motion_sens,
         sym_noise_offset,
         sym_use_stability,
-        sym_use_guidance
+        sym_use_guidance,
+        sym_early_exit_threshold
     )
     g_fine_accum.dispatch(
         phase2_fine_analysis_kernel,
         sym_current,
         sym_reference,
+        sym_curr_grad_x,
+        sym_curr_grad_y,
+        sym_ref_grad_x,
+        sym_ref_grad_y,
         sym_guidance_map,
         sym_stability_map,
         sym_weight_map_sum,
@@ -371,12 +473,17 @@ def compile_spatial_tcm():
         sym_motion_sens,
         sym_noise_offset,
         sym_use_stability,
-        sym_use_guidance
+        sym_use_guidance,
+        sym_early_exit_threshold
     )
     g_fine_accum.dispatch(
         phase2_fine_analysis_kernel,
         sym_current,
         sym_reference,
+        sym_curr_grad_x,
+        sym_curr_grad_y,
+        sym_ref_grad_x,
+        sym_ref_grad_y,
         sym_guidance_map,
         sym_stability_map,
         sym_weight_map_sum,
@@ -392,12 +499,17 @@ def compile_spatial_tcm():
         sym_motion_sens,
         sym_noise_offset,
         sym_use_stability,
-        sym_use_guidance
+        sym_use_guidance,
+        sym_early_exit_threshold
     )
     g_fine_accum.dispatch(
         phase2_fine_analysis_kernel,
         sym_current,
         sym_reference,
+        sym_curr_grad_x,
+        sym_curr_grad_y,
+        sym_ref_grad_x,
+        sym_ref_grad_y,
         sym_guidance_map,
         sym_stability_map,
         sym_weight_map_sum,
@@ -413,7 +525,8 @@ def compile_spatial_tcm():
         sym_motion_sens,
         sym_noise_offset,
         sym_use_stability,
-        sym_use_guidance
+        sym_use_guidance,
+        sym_early_exit_threshold
     )
     g_fine_accum.dispatch(
         accumulate_spatial_merging_kernel,
@@ -428,6 +541,114 @@ def compile_spatial_tcm():
         sym_num_channels
     )
     module.add_graph("fine_analysis_and_accumulate", g_fine_accum.compile())
+    
+    # 5b. Combined Fine Analysis 4 Passes
+    g_4passes = ti.graph.GraphBuilder()
+    g_4passes.dispatch(
+        phase2_fine_analysis_kernel,
+        sym_current,
+        sym_reference,
+        sym_curr_grad_x,
+        sym_curr_grad_y,
+        sym_ref_grad_x,
+        sym_ref_grad_y,
+        sym_guidance_map,
+        sym_stability_map,
+        sym_weight_map_sum,
+        sym_base_window,
+        sym_row_starts,
+        sym_col_starts,
+        sym_pass_idx_0,
+        sym_tile_h,
+        sym_tile_w,
+        sym_h_fine,
+        sym_w_fine,
+        sym_noise_sigma,
+        sym_motion_sens,
+        sym_noise_offset,
+        sym_use_stability,
+        sym_use_guidance,
+        sym_early_exit_threshold
+    )
+    g_4passes.dispatch(
+        phase2_fine_analysis_kernel,
+        sym_current,
+        sym_reference,
+        sym_curr_grad_x,
+        sym_curr_grad_y,
+        sym_ref_grad_x,
+        sym_ref_grad_y,
+        sym_guidance_map,
+        sym_stability_map,
+        sym_weight_map_sum,
+        sym_base_window,
+        sym_row_starts,
+        sym_col_starts,
+        sym_pass_idx_1,
+        sym_tile_h,
+        sym_tile_w,
+        sym_h_fine,
+        sym_w_fine,
+        sym_noise_sigma,
+        sym_motion_sens,
+        sym_noise_offset,
+        sym_use_stability,
+        sym_use_guidance,
+        sym_early_exit_threshold
+    )
+    g_4passes.dispatch(
+        phase2_fine_analysis_kernel,
+        sym_current,
+        sym_reference,
+        sym_curr_grad_x,
+        sym_curr_grad_y,
+        sym_ref_grad_x,
+        sym_ref_grad_y,
+        sym_guidance_map,
+        sym_stability_map,
+        sym_weight_map_sum,
+        sym_base_window,
+        sym_row_starts,
+        sym_col_starts,
+        sym_pass_idx_2,
+        sym_tile_h,
+        sym_tile_w,
+        sym_h_fine,
+        sym_w_fine,
+        sym_noise_sigma,
+        sym_motion_sens,
+        sym_noise_offset,
+        sym_use_stability,
+        sym_use_guidance,
+        sym_early_exit_threshold
+    )
+    g_4passes.dispatch(
+        phase2_fine_analysis_kernel,
+        sym_current,
+        sym_reference,
+        sym_curr_grad_x,
+        sym_curr_grad_y,
+        sym_ref_grad_x,
+        sym_ref_grad_y,
+        sym_guidance_map,
+        sym_stability_map,
+        sym_weight_map_sum,
+        sym_base_window,
+        sym_row_starts,
+        sym_col_starts,
+        sym_pass_idx_3,
+        sym_tile_h,
+        sym_tile_w,
+        sym_h_fine,
+        sym_w_fine,
+        sym_noise_sigma,
+        sym_motion_sens,
+        sym_noise_offset,
+        sym_use_stability,
+        sym_use_guidance,
+        sym_early_exit_threshold
+    )
+    module.add_graph("generate_fine_weights_4passes", g_4passes.compile())
 
     # Save AOT module to temporary directory, package into ZIP (.tcm), and cleanup
     file_dir = os.path.dirname(os.path.abspath(__file__))
@@ -480,8 +701,8 @@ def generate_spatial_weights_taichi(
     """
     Calculates the weight map for a single frame relative to the reference using Taichi AOT.
     """
-    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import AOTEngine
-    import pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot as taichi_aot
+    from taichi_library.taichi_aot.engine import AOTEngine
+    import taichi_library.taichi_aot as taichi_aot
     engine = AOTEngine()
 
     # Load Module
@@ -492,10 +713,23 @@ def generate_spatial_weights_taichi(
     tcm_path = os.path.abspath(os.path.join(cur, "ui/data/aot_assets/spatial_vulkan.tcm"))
     mod = engine.load(tcm_path)
 
+    import time
+    profile_hotspots = kwargs.get("profile_hotspots", False) or os.environ.get("PROFILE_SPATIAL", "0") == "1"
+    hotspots = {}
+
+    t_start = time.perf_counter()
+
     # 1. Reset weight map sum to 0
     zeros = np.zeros(weight_map_sum.shape, dtype=np.float32)
-    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import _LIB, _RUNTIME
+    from taichi_library.taichi_aot.engine import _LIB, _RUNTIME
     _LIB.write_to_gpu_buffer(_RUNTIME, weight_map_sum.handle, zeros.ctypes.data, weight_map_sum.size_bytes)
+
+    if profile_hotspots:
+        engine.sync()
+        hotspots["1. Reset weight map"] = (time.perf_counter() - t_start) * 1000
+        t_prev = time.perf_counter()
+    else:
+        t_prev = 0.0
 
     h, w = current_image.shape[0], current_image.shape[1]
 
@@ -507,6 +741,11 @@ def generate_spatial_weights_taichi(
         mod.run("equalize_brightness", src=current_image, ref=reference_image, dst=eq_temp, h=int(h), w=int(w))
         analysis_input = eq_temp
 
+    if profile_hotspots:
+        engine.sync()
+        hotspots["2. Brightness Equalization"] = (time.perf_counter() - t_prev) * 1000
+        t_prev = time.perf_counter()
+
     # 3. Phase 1: Coarse Analysis for Guidance Map (Level 2: 1/4 Resolution)
     # Downscale in two steps (L0 -> L1 -> L2) to prevent aliasing
     curr_l0 = analysis_input
@@ -517,8 +756,17 @@ def generate_spatial_weights_taichi(
     ref_l1 = taichi_aot.resize(ref_l0, (w // 2, h // 2), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
     ref_l2 = taichi_aot.resize(ref_l1, (w // 4, h // 4), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
 
+    if profile_hotspots:
+        engine.sync()
+        hotspots["3a. Downscaling Pyramids"] = (time.perf_counter() - t_prev) * 1000
+        t_prev = time.perf_counter()
+
     guidance_gpu = None
     level_conf_gpu = None
+    curr_coarse_grad_x = None
+    curr_coarse_grad_y = None
+    ref_coarse_grad_x = None
+    ref_coarse_grad_y = None
 
     try:
         # Run coarse analysis ONLY at the coarsest level (Level 2) to match C++
@@ -526,6 +774,21 @@ def generate_spatial_weights_taichi(
         ref_level = ref_l2
 
         h_level, w_level = curr_level.shape[0], curr_level.shape[1]
+
+        # Allocate coarse gradients
+        curr_coarse_grad_x = engine.allocate((h_level, w_level), dtype=np.float32)
+        curr_coarse_grad_y = engine.allocate((h_level, w_level), dtype=np.float32)
+        ref_coarse_grad_x = engine.allocate((h_level, w_level), dtype=np.float32)
+        ref_coarse_grad_y = engine.allocate((h_level, w_level), dtype=np.float32)
+
+        # Run precompute_gradients on coarse level
+        mod.run("precompute_gradients", img=curr_level, grad_x=curr_coarse_grad_x, grad_y=curr_coarse_grad_y, h=int(h_level), w=int(w_level))
+        mod.run("precompute_gradients", img=ref_level, grad_x=ref_coarse_grad_x, grad_y=ref_coarse_grad_y, h=int(h_level), w=int(w_level))
+
+        if profile_hotspots:
+            engine.sync()
+            hotspots["3b. Coarse Gradients Precompute"] = (time.perf_counter() - t_prev) * 1000
+            t_prev = time.perf_counter()
 
         scale_factor = h_level / h
         level_tile_h = max(8, int(tile_h * scale_factor))
@@ -540,6 +803,10 @@ def generate_spatial_weights_taichi(
             "phase1_coarse_analysis",
             current_coarse=curr_level,
             reference_coarse=ref_level,
+            coarse_grad_x=curr_coarse_grad_x,
+            coarse_grad_y=curr_coarse_grad_y,
+            ref_coarse_grad_x=ref_coarse_grad_x,
+            ref_coarse_grad_y=ref_coarse_grad_y,
             coarse_confidence=level_conf_gpu,
             coarse_tile_h=int(level_tile_h),
             coarse_tile_w=int(level_tile_w),
@@ -549,6 +816,11 @@ def generate_spatial_weights_taichi(
             motion_sensitivity=float(motion_sensitivity),
             noise_offset_factor=float(noise_offset_factor),
         )
+
+        if profile_hotspots:
+            engine.sync()
+            hotspots["3c. Phase 1 Coarse Analysis Kernel"] = (time.perf_counter() - t_prev) * 1000
+            t_prev = time.perf_counter()
 
         # Upsample coarse tile grid to Level 2 resolution
         guidance_gpu = taichi_aot.resize(
@@ -568,14 +840,32 @@ def generate_spatial_weights_taichi(
             guidance_gpu.destroy()
             guidance_gpu = final_guidance
 
+        if profile_hotspots:
+            engine.sync()
+            hotspots["3d. Guidance Map Upsampling & Resize"] = (time.perf_counter() - t_prev) * 1000
+            t_prev = time.perf_counter()
+
     finally:
         # Cleanup pyramids and temp buffers
         curr_l1.destroy()
         curr_l2.destroy()
         ref_l1.destroy()
         ref_l2.destroy()
+        if curr_coarse_grad_x is not None:
+            curr_coarse_grad_x.destroy()
+        if curr_coarse_grad_y is not None:
+            curr_coarse_grad_y.destroy()
+        if ref_coarse_grad_x is not None:
+            ref_coarse_grad_x.destroy()
+        if ref_coarse_grad_y is not None:
+            ref_coarse_grad_y.destroy()
         if level_conf_gpu is not None:
             level_conf_gpu.destroy()
+
+        if profile_hotspots:
+            engine.sync()
+            hotspots["3e. Coarse Temp Cleanup"] = (time.perf_counter() - t_prev) * 1000
+            t_prev = time.perf_counter()
 
     # 4. Phase 2: Fine Analysis (Sliding Window MAD)
     use_stability = 1 if stability_map is not None else 0
@@ -584,36 +874,92 @@ def generate_spatial_weights_taichi(
         dummy_gpu = engine.allocate((1, 1), dtype=np.float32)
         stability_map = dummy_gpu
 
+    curr_grad_x = None
+    curr_grad_y = None
+    ref_grad_x = None
+    ref_grad_y = None
+
     try:
-        for pass_idx in range(4):
-            mod.run(
-                "phase2_fine_analysis",
-                current=analysis_input,
-                reference=reference_image,
-                guidance_map=guidance_gpu,
-                stability_map=stability_map,
-                weight_map_sum=weight_map_sum,
-                base_window=0,
-                row_starts=row_starts,
-                col_starts=col_starts,
-                pass_idx=int(pass_idx),
-                tile_h=int(tile_h),
-                tile_w=int(tile_w),
-                h=int(h),
-                w=int(w),
-                noise_sigma=float(noise_sigma),
-                motion_sensitivity=float(motion_sensitivity),
-                noise_offset_factor=float(noise_offset_factor),
-                use_stability=int(use_stability),
-                use_guidance=1,
-            )
+        # Allocate fine gradients
+        curr_grad_x = engine.allocate((h, w), dtype=np.float32)
+        curr_grad_y = engine.allocate((h, w), dtype=np.float32)
+        ref_grad_x = engine.allocate((h, w), dtype=np.float32)
+        ref_grad_y = engine.allocate((h, w), dtype=np.float32)
+
+        # Run precompute_gradients on fine level
+        mod.run("precompute_gradients", img=analysis_input, grad_x=curr_grad_x, grad_y=curr_grad_y, h=int(h), w=int(w))
+        mod.run("precompute_gradients", img=reference_image, grad_x=ref_grad_x, grad_y=ref_grad_y, h=int(h), w=int(w))
+
+        if profile_hotspots:
+            engine.sync()
+            hotspots["4a. Fine Gradients Precompute"] = (time.perf_counter() - t_prev) * 1000
+            t_prev = time.perf_counter()
+
+        # Extract early_exit_threshold from kwargs
+        early_exit_threshold = float(kwargs.get("early_exit_threshold", 0.05))
+
+        mod.run(
+            "generate_fine_weights_4passes",
+            current=analysis_input,
+            reference=reference_image,
+            curr_grad_x=curr_grad_x,
+            curr_grad_y=curr_grad_y,
+            ref_grad_x=ref_grad_x,
+            ref_grad_y=ref_grad_y,
+            guidance_map=guidance_gpu,
+            stability_map=stability_map,
+            weight_map_sum=weight_map_sum,
+            base_window=0,
+            row_starts=row_starts,
+            col_starts=col_starts,
+            pass_idx_0=0,
+            pass_idx_1=1,
+            pass_idx_2=2,
+            pass_idx_3=3,
+            tile_h=int(tile_h),
+            tile_w=int(tile_w),
+            h=int(h),
+            w=int(w),
+            noise_sigma=float(noise_sigma),
+            motion_sensitivity=float(motion_sensitivity),
+            noise_offset_factor=float(noise_offset_factor),
+            use_stability=int(use_stability),
+            use_guidance=1,
+            early_exit_threshold=early_exit_threshold,
+        )
+
+        if profile_hotspots:
+            engine.sync()
+            hotspots["4b. Phase 2 Fine Analysis (4-Pass Kernel)"] = (time.perf_counter() - t_prev) * 1000
+            t_prev = time.perf_counter()
     finally:
+        if curr_grad_x is not None:
+            curr_grad_x.destroy()
+        if curr_grad_y is not None:
+            curr_grad_y.destroy()
+        if ref_grad_x is not None:
+            ref_grad_x.destroy()
+        if ref_grad_y is not None:
+            ref_grad_y.destroy()
         if dummy_gpu is not None:
             dummy_gpu.destroy()
         if guidance_gpu is not None:
             guidance_gpu.destroy()
         if eq_temp is not None:
             eq_temp.destroy()
+
+        if profile_hotspots:
+            engine.sync()
+            hotspots["4c. Fine Cleanup"] = (time.perf_counter() - t_prev) * 1000
+            total_t = (time.perf_counter() - t_start) * 1000
+            print("\n" + "="*60)
+            print(" SPATIAL FUSION HOTSPOT PROFILING (ms)")
+            print("="*60)
+            for k, v in hotspots.items():
+                print(f" {k:<45} : {v:>8.2f} ms ({v/total_t*100.0:>5.1f}%)")
+            print("-"*60)
+            print(f" {'Total GPU Wrapper Time':<45} : {total_t:>8.2f} ms")
+            print("="*60 + "\n")
 
 
 def accumulate_spatial_merging_taichi(
@@ -626,7 +972,7 @@ def accumulate_spatial_merging_taichi(
     """
     Accumulates a frame into the global sum using its processed weight map using Taichi AOT.
     """
-    from pixel_refine_desktop.enhance_stack.core.algorithm.taichi_aot.engine import AOTEngine
+    from taichi_library.taichi_aot.engine import AOTEngine
     engine = AOTEngine()
 
     # Load Module

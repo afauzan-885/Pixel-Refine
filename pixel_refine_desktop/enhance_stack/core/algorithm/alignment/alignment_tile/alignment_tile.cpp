@@ -1,6 +1,6 @@
 #include "alignment_tile.h"
-#include "cost_function.hpp"
-#include "refinement.hpp"
+#include "cpp/cost_function.hpp"
+#include "cpp/refinement.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
