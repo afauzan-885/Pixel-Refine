@@ -76,6 +76,14 @@ class RightPanel(QWidget, SyncMixin):
         self._setup_ui()
         self._load_batches()
 
+        if self.controller:
+            self.controller.batch_created.connect(self._update_process_all_btn_visibility)
+            self.controller.batch_deleted.connect(self._update_process_all_btn_visibility)
+            self.controller.images_added.connect(lambda bid, count: self._update_process_all_btn_visibility())
+            self.controller.images_removed.connect(lambda bid, count: self._update_process_all_btn_visibility())
+
+        self._update_process_all_btn_visibility()
+
     def on_store_changed(self, key, value):
         """React to store changes (SyncMixin handles bindings)."""
         if self._is_syncing:
@@ -251,11 +259,6 @@ class RightPanel(QWidget, SyncMixin):
         # Add Scroll Area to Main Algo Layout
         algo_layout.addWidget(self.scroll_area)
 
-        # Process All Batch Button (Fixed at bottom)
-        self.process_all_btn = Button("Process All Batch", variant="primary")
-        self.process_all_btn.clicked.connect(self._on_process_all_clicked)
-        algo_layout.addWidget(self.process_all_btn)
-
         # Initialize Default Settings
         self._on_settings_changed()
 
@@ -268,6 +271,11 @@ class RightPanel(QWidget, SyncMixin):
         self.splitter.setCollapsible(1, False)
 
         main_layout.addWidget(self.splitter)
+
+        # Process All Batch Button (Fixed at the very bottom of RightPanel, below splitter)
+        self.process_all_btn = Button("Process All Batch", variant="primary")
+        self.process_all_btn.clicked.connect(self._on_process_all_clicked)
+        main_layout.addWidget(self.process_all_btn)
 
         # Hide algo container initially until a batch is selected
         self.algo_container.setFixedHeight(0)
@@ -408,12 +416,14 @@ class RightPanel(QWidget, SyncMixin):
         if not selected_ids:
             return
 
-        reply = QMessageBox.question(
-            self,
-            "Confirm Delete",
-            f"Delete {len(selected_ids)} selected batch(es)?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Confirm Delete")
+        msg_box.setText(f"Delete {len(selected_ids)} selected batch(es)?")
+        msg_box.setIcon(QMessageBox.Icon.Question)
+        msg_box.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowTitleHint)
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        msg_box.setDefaultButton(QMessageBox.StandardButton.No)
+        reply = msg_box.exec()
 
         if reply == QMessageBox.StandardButton.Yes:
             for bid in selected_ids:
@@ -439,6 +449,23 @@ class RightPanel(QWidget, SyncMixin):
 
         # Clamp between 150 and 360
         return max(150, min(total_h, 360))
+
+    def _update_process_all_btn_visibility(self):
+        """Show or hide Process All Batch button depending on if any batch contains images."""
+        if not self.controller:
+            self.process_all_btn.hide()
+            return
+        
+        try:
+            batches = self.controller.get_all_batches()
+            has_batches_with_images = any(len(batch.images) > 0 for batch in batches)
+            if has_batches_with_images:
+                self.process_all_btn.show()
+            else:
+                self.process_all_btn.hide()
+        except Exception as e:
+            print(f"Error checking batch image counts: {e}")
+            self.process_all_btn.hide()
 
     def _on_selection_changed(self, selected_values):
         """Buffer selection change to prevent UI lag during rapid clicking."""

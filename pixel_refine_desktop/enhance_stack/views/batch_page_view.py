@@ -1,145 +1,101 @@
 """
 Batch Page View (MVC Hybrid).
-Wraps legacy BatchPageLayout while connecting to MVC controllers.
+Wraps legacy BatchPageLayout with a Bulk Mode header.
 """
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGraphicsOpacityEffect
 from PySide6.QtCore import Signal
 
-# from pixel_refine_desktop.enhance_stack.components.batch_page import BatchPageLayout # Legacy
-from pixel_refine_desktop.enhance_stack.components.batch_page_v2.page_layout import (
-    BatchPageV2Layout,
-)  # V2
-
-from pixel_refine_desktop.enhance_stack.controllers.batch_page_controller import (
-    BatchPageController,
-)
-from pixel_refine_desktop.enhance_stack.controllers.import_export_controller import (
-    ImportExportController,
-)
-from pixel_refine_desktop.enhance_stack.controllers.image_processing_controller import (
-    ImageProcessingController,
-)
-
-
-from pixel_refine_desktop.enhance_stack.core.logic.database_manager import (
-    DatabaseManager,
-)
-
+from pixel_refine_desktop.enhance_stack.components.bulk_page import BulkPageLayout # Legacy
 
 class BatchPageView(QWidget):
     """
-    Batch page view with MVC architecture.
-    Wraps legacy BatchPageLayout but connects to controllers for business logic.
+    Batch page view wrapping V1 (legacy) BatchPageLayout with a Bulk Mode header.
     """
-
     page_changed = Signal(int)  # Forward global navigation
+    bulk_mode_toggled = Signal(bool)
 
     def __init__(self, db_path: str, parent=None):
         super().__init__(parent)
         self.db_path = db_path
-
-        # Init Database Manager for V2 Layout
-        self.database_manager = DatabaseManager(db_path)
-
-        # Initialize controllers
-        self.batch_controller = BatchPageController(db_path, self)
-        self.import_export_controller = ImportExportController(self)
-        self.processing_controller = ImageProcessingController(self)
-
         self.setup_ui()
-        self.connect_controller_signals()
 
     def setup_ui(self):
-        """Setup UI using V2 Layout."""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(5, 8, 5, 5)
+        layout.setSpacing(5)
 
-        # Use V2 Layout
-        self.batch_layout = BatchPageV2Layout(self.database_manager)
+        # Bulk Mode Header
+        self.legacy_header = QWidget()
+        self.legacy_header.setFixedHeight(50)
+        self.legacy_header.setObjectName("LegacyHeader")
+        self.legacy_header.setStyleSheet("#LegacyHeader { background-color: #FFFFFF; border-radius: 4px; }")
+        
+        legacy_header_layout = QHBoxLayout(self.legacy_header)
+        legacy_header_layout.setContentsMargins(10, 5, 10, 5)
+        
+        legacy_title = QLabel("Bulk Mode")
+        legacy_title.setStyleSheet("font-weight: bold; font-size: 16px; color: #333; padding: 5px;")
+        legacy_header_layout.addWidget(legacy_title)
+        
+        legacy_header_layout.addStretch()
+        
+        # Bulk Mode Toggle Switch for Legacy Wrapper
+        from pixel_refine_desktop.ui.resources.GenericUILibrary import ToggleSwitch, Button
+        legacy_toggle_layout = QHBoxLayout()
+        legacy_toggle_layout.setSpacing(6)
+        
+        legacy_toggle_label = QLabel("Bulk Mode")
+        legacy_toggle_label.setStyleSheet("font-size: 11pt; color: #555; font-weight: 500;")
+        legacy_toggle_layout.addWidget(legacy_toggle_label)
+        
+        self.legacy_bulk_switch = ToggleSwitch(self.legacy_header)
+        self.legacy_bulk_switch.setChecked(True)
+        self.legacy_bulk_switch.toggled.connect(self.bulk_mode_toggled.emit)
+        legacy_toggle_layout.addWidget(self.legacy_bulk_switch)
+        
+        legacy_header_layout.addLayout(legacy_toggle_layout)
+        legacy_header_layout.addStretch()
+        
+        # Process All Button
+        # Uses QGraphicsOpacityEffect to visually hide without removing physical space
+        # so that the toggle position remains stable.
+        self.process_all_btn = Button("Process All Batch", variant="primary")
+        self.process_all_btn.setFixedWidth(150)
+        self.process_all_btn.clicked.connect(self._on_process_all_clicked)
+        legacy_header_layout.addWidget(self.process_all_btn)
+
+        # Apply opacity effect - starts invisible if no batches (updated after batch_layout init)
+        self._process_all_opacity = QGraphicsOpacityEffect(self.process_all_btn)
+        self._process_all_opacity.setOpacity(0.0)
+        self.process_all_btn.setGraphicsEffect(self._process_all_opacity)
+
+        layout.addWidget(self.legacy_header)
+
+        # The V1 Batch Page Layout
+        self.batch_layout = BulkPageLayout()
         layout.addWidget(self.batch_layout)
 
-        # Connect Navigation
-        self.batch_layout.page_changed.connect(self.page_changed)
+        # Wire data_changed from batch_layout to update button visibility
+        self.batch_layout.data_changed.connect(self._update_process_all_visibility)
 
-    def connect_controller_signals(self):
-        """Connect controller signals to view updates."""
-        # Batch controller signals
-        self.batch_controller.batch_created.connect(self._on_batch_created)
-        self.batch_controller.batch_updated.connect(self._on_batch_updated)
-        self.batch_controller.batch_deleted.connect(self._on_batch_deleted)
-        self.batch_controller.batch_error.connect(self._on_batch_error)
+        # Set initial visibility after batch_layout is ready
+        self._update_process_all_visibility()
 
-        # Processing signals
+    def _update_process_all_visibility(self):
+        """Show or hide Process All Batch button based on whether any batch exists.
+        Uses opacity=0/1 to hide/show WITHOUT removing physical space (toggle stays fixed)."""
+        try:
+            db_ids = self.batch_layout.database_manager.get_all_batch_ids()
+            has_batches = len(db_ids) > 0
+        except Exception:
+            has_batches = False
 
-        self.processing_controller.workflow_completed.connect(
-            self._on_workflow_completed
-        )
-        self.processing_controller.workflow_error.connect(self._on_workflow_error)
+        self._process_all_opacity.setOpacity(1.0 if has_batches else 0.0)
+        # Also disable click when invisible to prevent accidental triggering
+        self.process_all_btn.setEnabled(has_batches)
 
-        # Connect legacy signals to controllers
-        if hasattr(self.batch_layout, "data_changed"):
-            self.batch_layout.data_changed.connect(self._on_data_changed)
-
-    # Delegate methods to legacy layout
-    def handle_batch_import_button(self):
-        """Handle batch import button."""
-        if hasattr(self.batch_layout, "handle_batch_import_button"):
-            self.batch_layout.handle_batch_import_button()
-
-    def handle_delete_all_batches(self):
-        """Handle delete all batches."""
-        if hasattr(self.batch_layout, "handle_delete_all_batches"):
-            self.batch_layout.handle_delete_all_batches()
-
-    def process_all_batches(self):
-        """Handle process all batches."""
-        if hasattr(self.batch_layout, "process_all_batches"):
+    def _on_process_all_clicked(self):
+        if hasattr(self, "batch_layout") and hasattr(self.batch_layout, "process_all_batches"):
             self.batch_layout.process_all_batches()
 
-    # Signal handlers from controllers
-    def _on_batch_created(self, batch_id: int, batch_name: str):
-        """Handle batch creation."""
-        print(f"✅ Batch created via controller: {batch_name} (ID: {batch_id})")
-        # Refresh legacy UI
-        if hasattr(self.batch_layout, "data_changed"):
-            self.batch_layout.data_changed.emit()
-
-    def _on_batch_updated(self, batch_id: int):
-        """Handle batch update."""
-        print(f"✅ Batch updated: ID {batch_id}")
-        if hasattr(self.batch_layout, "data_changed"):
-            self.batch_layout.data_changed.emit()
-
-    def _on_batch_deleted(self, batch_id: int):
-        """Handle batch deletion."""
-        print(f"✅ Batch deleted: ID {batch_id}")
-        if hasattr(self.batch_layout, "data_changed"):
-            self.batch_layout.data_changed.emit()
-
-    def _on_batch_error(self, error: str):
-        """Handle batch error."""
-        print(f"❌ Batch error: {error}")
-        from PySide6.QtWidgets import QMessageBox
-
-        QMessageBox.critical(self, "Batch Error", error)
-
-    def _on_workflow_completed(self, result_path: str):
-        """Handle workflow completion."""
-        print(f"✅ Workflow completed: {result_path}")
-        from PySide6.QtWidgets import QMessageBox
-
-        QMessageBox.information(
-            self, "Processing Complete", f"Result saved to:\n{result_path}"
-        )
-
-    def _on_workflow_error(self, error: str):
-        """Handle workflow error."""
-        print(f"❌ Workflow error: {error}")
-        from PySide6.QtWidgets import QMessageBox
-
-        QMessageBox.critical(self, "Processing Error", error)
-
-    def _on_data_changed(self):
-        """Handle data changed from legacy layout."""
-        print("📊 Batch data changed")

@@ -80,6 +80,7 @@ from pixel_refine_desktop.enhance_stack.core.logic.grid_manager import GridManag
 from pixel_refine_desktop.enhance_stack.core.logic.ui_state_manager import (
     UIStateManager,
 )
+from pixel_refine_desktop.enhance_stack.core.logic.database_manager import DatabaseManager
 from pixel_refine_desktop.enhance_stack.core.logic.drag_drop_handler import (
     DragDropHandler,
 )
@@ -247,6 +248,26 @@ class DisplayPanel(QWidget):
             "font-weight: bold; font-size: 16px; color: #333; padding: 5px;"
         )
         self.header_layout.addWidget(self.header_title)
+        
+        # Stretch to center the Bulk Mode switch
+        self.header_layout.addStretch()
+        
+        # Bulk Mode Toggle Switch
+        from pixel_refine_desktop.ui.resources.GenericUILibrary import ToggleSwitch
+        self.bulk_mode_layout = QHBoxLayout()
+        self.bulk_mode_layout.setSpacing(6)
+        
+        self.bulk_mode_label = QLabel("Bulk Mode")
+        self.bulk_mode_label.setStyleSheet("font-size: 11pt; color: #555; font-weight: 500;")
+        self.bulk_mode_layout.addWidget(self.bulk_mode_label)
+        
+        self.bulk_mode_switch = ToggleSwitch(self)
+        self.bulk_mode_switch.setChecked(False)
+        self.bulk_mode_layout.addWidget(self.bulk_mode_switch)
+        
+        self.header_layout.addLayout(self.bulk_mode_layout)
+        
+        # Stretch to push action buttons to the right
         self.header_layout.addStretch()
 
         # Tools/Actions Area
@@ -311,6 +332,13 @@ class DisplayPanel(QWidget):
         self.import_button.setVisible(False)
         self.header_layout.addWidget(self.import_button)
 
+        # 4. New Batch button (shown ONLY when no batches exist / right panel is hidden)
+        self.new_batch_header_btn = Button("New Batch", variant="primary")
+        self.new_batch_header_btn.setFixedWidth(110)
+        self.new_batch_header_btn.clicked.connect(self._create_new_batch)
+        self.new_batch_header_btn.setVisible(False)  # Hidden by default; shown from page_layout
+        self.header_layout.addWidget(self.new_batch_header_btn)
+
         self.display_container.add_layout(self.header_layout)
 
         # =====================================================================
@@ -329,9 +357,9 @@ class DisplayPanel(QWidget):
 
         # --- INDEX 0: GRID VIEW ---
         self.grid_view_widget = QWidget()
-        # Inner content gets a slightly darker background to make the white border visible
+        # Make the background transparent to focus on the inner green box placeholder
         self.grid_view_widget.setStyleSheet(
-            "background-color: #F0F0F0; border-radius: 4px;"
+            "background-color: transparent; border-radius: 4px;"
         )
         grid_view_layout = QVBoxLayout(self.grid_view_widget)
         grid_view_layout.setContentsMargins(
@@ -570,13 +598,11 @@ class DisplayPanel(QWidget):
         self.settings_overlay.raise_()
 
     def toggle_sidebar(self):
-        """Toggle floating sidebar visibility with animation."""
+        """Toggle floating sidebar visibility directly without fade animation."""
         is_visible = self.sidebar_overlay.isVisible()
         if is_visible:
-            # Hide with FADE
             self.sidebar_overlay.hide()
         else:
-            # Show with FADE
             self.sidebar_overlay.show()
             self.sidebar_overlay.raise_()
 
@@ -728,14 +754,8 @@ class DisplayPanel(QWidget):
         # Hide import button saat no batch selected
         self.import_button.setVisible(False)
 
-        # Create placeholder dengan "New Batch" button
-        placeholder_html = "<p>Create a new batch to get started.</p>"
-        placeholder = self._create_placeholder_widget(
-            html_text=placeholder_html,
-            button_text="New Batch",
-            on_button_click=self._create_new_batch,
-        )
-        self._set_placeholder(placeholder)
+        # Show "No batch selected" state with folder link callback
+        self.ui_state_manager.show_no_batch_state(self._create_new_batch, self._import_images_to_new_batch)
 
         if self.preview_scene:
             self.preview_scene.clear()
@@ -743,6 +763,42 @@ class DisplayPanel(QWidget):
         self.show_grid()
 
         pass
+
+    def _import_images_to_new_batch(self):
+        """Handle clicking the folder icon when no batch is selected. Imports images into a new batch."""
+        if not self.controller or not self.right_panel:
+            return
+
+        file_filter = self.import_manager._build_file_filter()
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select Images to Import to New Batch", "", file_filter
+        )
+
+        if not paths:
+            return
+
+        # 1. Create a new batch automatically with unique sequential name
+        all_batches = self.controller.get_all_batches()
+        existing_names = {b.name for b in all_batches}
+        index = 1
+        while f"Batch {index}" in existing_names:
+            index += 1
+        name = f"Batch {index}"
+
+        batch_id = self.controller.create_batch(name)
+        if batch_id:
+            # 2. Select it in RightPanel list group so it loads
+            self.right_panel.list_group.add_item(name, value=batch_id)
+            self.right_panel.list_group.select_item_by_value(batch_id)
+
+            # 3. Instantiate DatabaseManager and start background import process immediately
+            db_mgr = DatabaseManager(self.controller.db_path)
+            self.import_manager.handle_batch_import(
+                controller=self.controller,
+                database_manager=db_mgr,
+                file_paths=paths,
+                batch_id=batch_id
+            )
 
     def _reset_population_state(self):
         """Unified method to stop all pending populating tasks and clear tracking."""

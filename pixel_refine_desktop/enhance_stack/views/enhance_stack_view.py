@@ -13,6 +13,7 @@ from pixel_refine_desktop.ui.resources.animations.animation_manager import (
     StackedWidgetAnimator,
 )
 from pixel_refine_desktop.ui.resources.animations.slide import slide
+from pixel_refine_desktop.ui.resources.animations.fade import fade_in
 from pixel_refine_desktop.ui.resources.animations.toast.toast_manager import (
     ToastManager,
 )
@@ -70,9 +71,46 @@ class EnhanceStackView(QWidget):
 
     def connect_signals(self):
         """Connect top bar signals and toast notifications."""
-        # Top bar switch buttons
-        # self.top_bar.single_button.toggled.connect(self._handle_switch_request)
-        # self.top_bar.batch_button.toggled.connect(self._handle_switch_request)
+        # Connect Bulk Mode toggles between V2 (SinglePageView) and V1 (BatchPageView)
+        if hasattr(self.single_page_view, "workspace_panel") and self.single_page_view.workspace_panel:
+            dp = self.single_page_view.workspace_panel.display_panel
+            if hasattr(dp, "bulk_mode_switch"):
+                dp.bulk_mode_switch.toggled.connect(self._on_v2_bulk_toggled)
+
+        self.batch_page_view.bulk_mode_toggled.connect(self._on_legacy_bulk_toggled)
+
+    def _on_v2_bulk_toggled(self, checked):
+        if checked:
+            # Switch to Legacy V1 Batch Page with fade transition
+            fade_in(self.animator, self.batch_page_view, self.stacked_widget, duration=300)
+            # Synchronize batches: refresh V1
+            if hasattr(self.batch_page_view, "batch_layout"):
+                self.batch_page_view.batch_layout.data_changed.emit()
+            # Synchronize switch on legacy header
+            self.batch_page_view.legacy_bulk_switch.blockSignals(True)
+            self.batch_page_view.legacy_bulk_switch.setChecked(True)
+            self.batch_page_view.legacy_bulk_switch.blockSignals(False)
+
+    def _on_legacy_bulk_toggled(self, checked):
+        if not checked:
+            # Switch back to V2 Layout with fade transition
+            fade_in(self.animator, self.single_page_view, self.stacked_widget, duration=300)
+            
+            # Defer/stop V1 thumbnail generation and reset lazy load limit immediately (Task 4)
+            if hasattr(self.batch_page_view, "batch_layout"):
+                self.batch_page_view.batch_layout.stop_thumbnail()
+                self.batch_page_view.batch_layout.limit = 10
+                
+            # Synchronize batches: refresh V2
+            if hasattr(self.single_page_view, "batch_panel") and self.single_page_view.batch_panel:
+                self.single_page_view.batch_panel._load_batches()
+            # Synchronize switch on V2 header
+            if hasattr(self.single_page_view, "workspace_panel") and self.single_page_view.workspace_panel:
+                dp = self.single_page_view.workspace_panel.display_panel
+                if hasattr(dp, "bulk_mode_switch"):
+                    dp.bulk_mode_switch.blockSignals(True)
+                    dp.bulk_mode_switch.setChecked(False)
+                    dp.bulk_mode_switch.blockSignals(False)
 
         # Single page buttons
         # self.top_bar.single_page_import_button.clicked.connect(
@@ -97,8 +135,17 @@ class EnhanceStackView(QWidget):
         if hasattr(self.batch_page_view, "batch_layout"):
             if hasattr(self.batch_page_view.batch_layout, "show_toast_requested"):
                 self.batch_page_view.batch_layout.show_toast_requested.connect(
-                    self.toast_manager.show
+                    self._handle_legacy_toast
                 )
+
+    def _handle_legacy_toast(self, message, duration_or_category, is_progress):
+        """Handle legacy toast notifications from BatchPageLayout V1."""
+        if is_progress:
+            category = duration_or_category if isinstance(duration_or_category, str) else "legacy_batch_progress"
+            self.toast_manager.show_progress(message, category=category)
+        else:
+            duration = duration_or_category if isinstance(duration_or_category, int) else 3000
+            self.toast_manager.show_message(message, duration=duration)
 
     def _handle_switch_request(self):
         """Handle switch between single and batch pages."""

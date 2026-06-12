@@ -253,57 +253,7 @@ class CardGroup(QWidget):
         self.layout.addWidget(card, stretch)
 
 
-class ToggleSwitch(QWidget):
-    toggled = Signal(bool)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedSize(36, 20)
-        self._checked = False
-        self._thumb_position = 2.0
-        self._last_click_time = 0
-
-    def isChecked(self):
-        return self._checked
-
-    def setChecked(self, checked):
-        if self._checked != checked:
-            self._checked = checked
-            self._thumb_position = 18.0 if checked else 2.0
-            self.update()
-            self.toggled.emit(checked)
-
-    def mousePressEvent(self, event):
-        import time
-
-        current_time = time.time()
-        if current_time - self._last_click_time < 0.25:
-            event.accept()
-            return
-        self._last_click_time = current_time
-
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.setChecked(not self._checked)
-            event.accept()
-        else:
-            super().mousePressEvent(event)
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        # Draw track
-        track_color = QColor("#2ECC71") if self._checked else QColor("#BDC3C7")
-        painter.setBrush(QBrush(track_color))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRoundedRect(
-            0, 0, self.width(), self.height(), self.height() / 2, self.height() / 2
-        )
-
-        # Draw thumb
-        painter.setBrush(QBrush(QColor("#FFFFFF")))
-        thumb_size = self.height() - 4
-        painter.drawEllipse(self._thumb_position, 2, thumb_size, thumb_size)
+from .buttons import ToggleSwitch
 
 
 class FeatureCard(QFrame, RealtimeMixin):

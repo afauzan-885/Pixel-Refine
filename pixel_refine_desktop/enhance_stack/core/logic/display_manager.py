@@ -226,7 +226,9 @@ def display_processed_result(display_panel, image_path, update_dropdown=True):
 
     item = None
 
-    if original_pixmap and processed_pixmap:
+    use_compare = True
+
+    if original_pixmap and processed_pixmap and use_compare:
         # --- FIX: Scale Original to Match Processed (1:1 Comparison) ---
         # Checks if dimensions differ (e.g. upscaling)
         if (

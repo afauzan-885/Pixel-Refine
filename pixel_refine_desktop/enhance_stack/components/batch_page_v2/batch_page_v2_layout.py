@@ -73,7 +73,7 @@ from pixel_refine_desktop.enhance_stack.core.logic.workflow_process import (
     ImageViewer,
     get_last_image,
 )
-from pixel_refine_desktop.enhance_stack.components.batch_page.image_batch_management import (
+from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_import_service import (
     convert_tiff_to_uncompressed,
 )
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config

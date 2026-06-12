@@ -33,7 +33,10 @@
 - **Anti-Crash Design**: Explicit synchronization (`rt->wait()`) dan automatic staging-read untuk buffer VRAM-only.
 - **Smart Image IO**: Direct C++ decoding to VRAM (imread/imwrite) menggunakan Windows Imaging Component (WIC).
 - **Single Source of Truth (`engine.py`)**: `engine.py` adalah jembatan backend C++ yang bersifat *single source of truth*. Logika dan perilakunya tidak boleh diubah kecuali atas instruksi/keputusan eksplisit dari user. Semua algoritma baru atau modifikasi yang menggunakan backend ini harus mematuhi aturan dan perilaku yang ditetapkan oleh `engine.py`.
-- **UI Style Consistency (GenericUILibrary)**: Semua pembuatan atau pengeditan komponen antarmuka pengguna (UI) harus memanfaatkan pustaka/framework `pixel_refine_desktop/ui/resources/GenericUILibrary` (seperti `Card`, `Button`, `FormGroup`, `ListGroup`, dll.) untuk memastikan kepatuhan penuh terhadap sistem tema, tipografi, dan gaya yang telah ditentukan. Jangan membuat gaya/styles kustom ad-hoc secara manual.
+- **UI Style Consistency (GenericUILibrary & Animations)**:
+  - **GenericUILibrary**: Semua pembuatan atau pengeditan komponen antarmuka pengguna (UI) wajib menggunakan pustaka/framework di path `pixel_refine_desktop/ui/resources/GenericUILibrary` (seperti `Card`, `Button`, `FormGroup`, `ListGroup`, dll.) untuk memastikan keselarasan penuh terhadap sistem tema, tipografi, dan gaya yang telah ditentukan. Jangan membuat styles kustom ad-hoc secara manual.
+  - **Animations**: Jika menambahkan desain UI yang memiliki animasi, wajib menggunakan pustaka/library yang ada di dalam path `pixel_refine_desktop/ui/resources/animations`.
+  - **Custom UI Component**: Jika ingin membuat UI baru yang bersifat kustom, sebisa mungkin tambahkan komponen tersebut ke dalam skrip yang ada di dalam path `pixel_refine_desktop/ui/resources/GenericUILibrary` daripada membuat berkas/skrip baru.
 
 > [!IMPORTANT]
 > **i32 Popcount Bug (Vulkan/AOT):** Algoritma parallel popcount (`0x55555555` trick) hanya benar pada **unsigned** integer. Pada `ti.i32`, operator `>>` adalah **arithmetic shift** (propagasi sign bit). Untuk nilai i32 dengan bit-31 aktif, popcount AKAN SALAH. **Fix wajib**: isolasi bit-31 terpisah sebelum menerapkan bit-trick pada 31 bit bawah.

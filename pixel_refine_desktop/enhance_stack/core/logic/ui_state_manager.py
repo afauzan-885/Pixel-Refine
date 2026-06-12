@@ -44,6 +44,7 @@ class UIStateManager:
         html_text: str = "",
         button_text: Optional[str] = None,
         on_button_click: Optional[Callable] = None,
+        on_link_activated: Optional[Callable[[str], None]] = None,
     ) -> QWidget:
         """
         Create placeholder widget to display when grid is empty.
@@ -53,28 +54,44 @@ class UIStateManager:
             html_text: HTML text to display
             button_text: Text for button (optional)
             on_button_click: Callback for button click (optional)
+            on_link_activated: Callback for link click (optional)
 
         Returns:
             QWidget: Container with layout stretch + label + button (if provided)
         """
         container = QWidget()
+        container.setObjectName("PlaceholderWidget")
+        container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        container.setStyleSheet(
+            "#PlaceholderWidget { background-color: transparent; }"
+        )
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(5, 5, 5, 5)
-        layout.setSpacing(5)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(0)
 
-        # Top stretch for vertical centering
-        layout.addStretch()
+        # Create nested card widget (green box/focused card)
+        card = QWidget()
+        card.setObjectName("PlaceholderCard")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        card.setStyleSheet(
+            "#PlaceholderCard { background-color: #F5F8FA; border: 1px solid #E2E8F0; border-radius: 8px; }"
+        )
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(35, 35, 35, 35)
+        card_layout.setSpacing(15)
 
-        # Text label
+        # Text label inside card
         if html_text:
             label = QLabel(html_text)
             label.setTextFormat(Qt.TextFormat.RichText)
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             label.setWordWrap(True)
             label.setStyleSheet("QLabel { color: #888; font-size: 14px; }")
-            layout.addWidget(label)
+            if on_link_activated:
+                label.linkActivated.connect(on_link_activated)
+            card_layout.addWidget(label)
 
-        # Button (if provided)
+        # Button (if provided) inside card
         if button_text and on_button_click:
             btn = Button(button_text, variant="secondary")
             btn.setFixedWidth(120)
@@ -84,7 +101,13 @@ class UIStateManager:
             btn_layout.addStretch()
             btn_layout.addWidget(btn)
             btn_layout.addStretch()
-            layout.addLayout(btn_layout)
+            card_layout.addLayout(btn_layout)
+
+        # Top stretch for vertical centering
+        layout.addStretch()
+
+        # Let the card stretch horizontally across the screen as requested
+        layout.addWidget(card)
 
         # Bottom stretch for vertical centering
         layout.addStretch()
@@ -137,25 +160,53 @@ class UIStateManager:
         Show empty state when batch is selected but has no images.
         Display informative message + button to import images directly.
         """
-        placeholder_html = "<p>Drag and drop images ke sini,<br>atau gunakan tombol di atas untuk memilih dari folder.</p>"
+        placeholder_html = """
+        <div style="text-align: center; max-width: 600px; margin: 0 auto; font-family: 'Segoe UI', Arial, sans-serif;">
+            <div style="font-size: 64px; color: #cbd5e1; margin-bottom: 10px;">🖼️</div>
+            <div style="font-size: 16px; font-weight: 600; color: #1e293b; margin-bottom: 4px; line-height: 1.25;">This Batch is Empty</div>
+            <div style="font-size: 13px; color: #64748b; margin: 0; line-height: 1.3;">
+                Drag and drop images here, or use the "Import Images" button in the toolbar to load pictures into this batch.
+            </div>
+        </div>
+        """
         placeholder = self.create_placeholder_widget(html_text=placeholder_html)
         self.set_placeholder(placeholder)
 
-    def show_no_batch_state(self, on_create_batch: Callable):
+    def show_no_batch_state(self, on_create_batch: Callable, on_import_click: Optional[Callable] = None):
         """
         Show state when no batch is selected.
-        Display message with "New Batch" button.
+        Display message with clickable folder icon.
 
         Args:
             on_create_batch: Callback for creating new batch
+            on_import_click: Callback for importing images into a new batch
         """
-        placeholder_html = "<p>Create a new batch to get started.</p>"
+        placeholder_html = """
+        <div style="text-align: center; max-width: 520px; margin: 0 auto; font-family: 'Segoe UI', Arial, sans-serif;">
+            <a href="import_no_batch" style="text-decoration: none; outline: none;">
+                <div style="font-size: 52px; color: #94a3b8; margin-bottom: 16px;">📁</div>
+            </a>
+            <div style="font-size: 15px; font-weight: 600; color: #1e293b; margin-bottom: 8px; letter-spacing: -0.01em;">
+                No Batches Yet
+            </div>
+            <div style="font-size: 12.5px; color: #64748b; line-height: 1.7; margin: 0;">
+                Click the <a href="import_no_batch" style="color: #3b82f6; text-decoration: none; font-weight: 500;">folder icon</a> above to select images and create your first batch.
+            </div>
+        </div>
+        """
+
+        def link_handler(link):
+            if link == "import_no_batch" and on_import_click:
+                on_import_click()
+
         placeholder = self.create_placeholder_widget(
             html_text=placeholder_html,
-            button_text="New Batch",
-            on_button_click=on_create_batch,
+            button_text=None,
+            on_button_click=None,
+            on_link_activated=link_handler,
         )
         self.set_placeholder(placeholder)
+
 
     def update_header_title(
         self,

@@ -94,40 +94,100 @@ class GeneralSettingsPage(Container, SyncMixin):
         )
         self.apply_btn = Button(apply_text, variant="ghost")
         self.apply_btn.setMinimumHeight(35)
+        self.apply_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FFFFFF;
+                color: #2ECC71;
+                border: 2px solid #2ECC71;
+                border-radius: 6px;
+                padding: 6px 16px;
+                font-weight: bold;
+                font-size: 11pt;
+            }
+            QPushButton:hover {
+                background-color: #2ECC71;
+                color: #FFFFFF;
+            }
+            QPushButton:pressed {
+                background-color: #27AE60;
+                color: #FFFFFF;
+            }
+        """)
         self.apply_btn.clicked.connect(self._on_apply_clicked)
 
         actions.add_item(self.apply_btn)
         self.add_widget(actions)
 
+    def retranslate_ui(self):
+        """Dynamically update all UI labels when the language is changed."""
+        language_config.reload_language()
+        
+        # Try to update parent tab text
+        parent_tab = self.parentWidget()
+        if parent_tab:
+            parent_tab_parent = parent_tab.parentWidget()
+            from PySide6.QtWidgets import QTabWidget
+            if isinstance(parent_tab_parent, QTabWidget):
+                idx = parent_tab_parent.indexOf(parent_tab)
+                if idx != -1:
+                    parent_tab_parent.setTabText(idx, getattr(language_config, "SETTING_GENERAL_LABEL", "General"))
+            elif isinstance(parent_tab, QTabWidget):
+                idx = parent_tab.indexOf(self)
+                if idx != -1:
+                    parent_tab.setTabText(idx, getattr(language_config, "SETTING_GENERAL_LABEL", "General"))
+
+        # Update labels and tooltips
+        lang_label = getattr(language_config, "LANGUAGE_LABEL", "Language:")
+        self.language_group.label.setText(lang_label)
+
+        gpu_label = getattr(language_config, "GPU_ACCELERATION_LABEL", "GPU Acceleration")
+        gpu_tip = getattr(language_config, "GPU_ACCELERATION_DESCRIPTION", "")
+        self.gpu_cb.checkbox.setText(gpu_label)
+        self.gpu_cb.checkbox.setToolTip(gpu_tip)
+
+        cpu_label = getattr(language_config, "MULTI_CORE_CPU", "Multi-Core CPU")
+        cpu_tip = getattr(language_config, "MULTI_CORE_CPU_DESCRIPTION", "")
+        self.cpu_cb.checkbox.setText(cpu_label)
+        self.cpu_cb.checkbox.setToolTip(cpu_tip)
+
+        thumb_label = getattr(language_config, "THUMBNAIL_LABEL", "Enable Thumbnails")
+        thumb_tip = getattr(language_config, "THUMBNAIL_DESCRIPTION", "")
+        self.thumb_cb.checkbox.setText(thumb_label)
+        self.thumb_cb.checkbox.setToolTip(thumb_tip)
+
+        apply_text = getattr(language_config, "APPLY_PARAMETER_BUTTON_TEXT", "Apply Settings")
+        self.apply_btn.setText(apply_text)
+
+        # Update window title if possible
+        main_win = self.window()
+        if main_win:
+            from config import APP_VERSION
+            main_win.setWindowTitle(f"Pixel Refine - Version {APP_VERSION}")
+
     def _on_apply_clicked(self):
         """
         Final apply logic:
         1. Save language from FormGroup to store.
-        2. Trigger restart only if language has changed.
+        2. Apply changes immediately in real-time.
         """
-
         if isinstance(self.language_group.input, QComboBox):
             new_lang = self.language_group.input.currentText()
-            # We compare with initial to see if restart is needed
-            needs_restart = str(new_lang).lower() != str(self._initial_language).lower()
-
-            # Save to store (this will update app_setting.json)
             self.store.set("language", new_lang)
-
-            if needs_restart:
-                self._prompt_restart()
-            else:
-                QMessageBox.information(
-                    self,
-                    "Setting",
-                    getattr(
-                        language_config,
-                        "SETTINGS_SAVED",
-                        "Settings saved successfully!",
-                    ),
-                )
+            self._initial_language = new_lang
+            
+            # Dynamically retranslate settings UI
+            self.retranslate_ui()
+            
+            QMessageBox.information(
+                self,
+                "Setting",
+                getattr(
+                    language_config,
+                    "SETTINGS_SAVED",
+                    "Settings saved successfully!",
+                ),
+            )
         else:
-            # Fallback for unexpected input type
             QMessageBox.information(
                 self,
                 "Setting",
@@ -135,33 +195,6 @@ class GeneralSettingsPage(Container, SyncMixin):
                     language_config, "SETTINGS_SAVED", "Settings saved successfully!"
                 ),
             )
-
-    def _prompt_restart(self):
-        msg_box = QMessageBox(self)
-        msg_box.setWindowTitle(
-            getattr(language_config, "RESTART_APPLICATION_REQUIRED", "Restart Required")
-        )
-        msg_box.setText(
-            getattr(
-                language_config,
-                "RESTART_APPLICATION_DESCRIPTION",
-                "Changes require restart.",
-            )
-        )
-        msg_box.setIcon(QMessageBox.Icon.Warning)
-
-        restart_btn = msg_box.addButton(
-            getattr(language_config, "ACCEPT_RESTART_APPLICATION", "Restart Now"),
-            QMessageBox.ButtonRole.AcceptRole,
-        )
-        msg_box.addButton(
-            getattr(language_config, "REJECT_APPLICATION_DESCRIPTION", "Later"),
-            QMessageBox.ButtonRole.RejectRole,
-        )
-
-        msg_box.exec()
-        if msg_box.clickedButton() == restart_btn:
-            restart_application()
 
 
 def general_page():

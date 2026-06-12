@@ -4,8 +4,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QWidget,
     QMessageBox,
+    QGraphicsOpacityEffect,
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QPropertyAnimation, QEasingCurve, QTimer
 from pixel_refine_desktop.ui.resources.GenericUILibrary.store import get_store
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +32,89 @@ from pixel_refine_desktop.enhance_stack.controllers.batch_page_controller import
     BatchPageController,
 )
 from pixel_refine_desktop.enhance_stack.core.logic.process_manager import ProcessManager
+
+
+def _animate_panel_visibility(panel: QWidget, visible: bool):
+    """Fade a panel in or out smoothly without removing it from layout."""
+    effect = panel.graphicsEffect()
+    if not isinstance(effect, QGraphicsOpacityEffect):
+        effect = QGraphicsOpacityEffect(panel)
+        panel.setGraphicsEffect(effect)
+
+    start_val = 1.0 if not visible else 0.0
+    end_val = 0.0 if not visible else 1.0
+
+    anim = QPropertyAnimation(effect, b"opacity", panel)
+    anim.setDuration(280)
+    anim.setStartValue(start_val)
+    anim.setEndValue(end_val)
+    anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
+
+    if visible:
+        panel.setMaximumWidth(16777215)  # Reset to unlimited before fade-in
+        panel.show()
+
+    def on_finished():
+        if not visible:
+            panel.hide()
+            panel.setMaximumWidth(0)
+
+    anim.finished.connect(on_finished)
+    anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
+
+def _update_right_panel_visibility(layout_instance: Any):
+    """Show or hide the RightPanel based on whether batches exist in DB."""
+    if not layout_instance.controller:
+        return
+    try:
+        batches = layout_instance.controller.get_all_batches()
+        has_batches = len(batches) > 0
+    except Exception:
+        has_batches = False
+
+    panel = layout_instance.batch_panel
+    currently_visible = panel.isVisible() and panel.maximumWidth() != 0
+
+    if has_batches and not currently_visible:
+        _animate_panel_visibility(panel, True)
+    elif not has_batches and currently_visible:
+        _animate_panel_visibility(panel, False)
+
+    # Sync the header "New Batch" shortcut button in the workspace panel
+    _sync_new_batch_header_btn(layout_instance, has_batches)
+
+
+def _sync_new_batch_header_btn(layout_instance: Any, has_batches: bool):
+    """Show the 'New Batch' shortcut in the display panel header only when no batches exist."""
+    try:
+        dp = layout_instance.workspace_panel.display_panel
+        if hasattr(dp, "new_batch_header_btn"):
+            dp.new_batch_header_btn.setVisible(not has_batches)
+    except Exception:
+        pass
+
+
+def _set_initial_right_panel_visibility(layout_instance: Any):
+    """
+    On app startup, hide right panel immediately (no animation) if no batches exist.
+    This gives a clean first-impression without a distracting slide/fade on load.
+    """
+    if not layout_instance.controller:
+        return
+    try:
+        batches = layout_instance.controller.get_all_batches()
+        has_batches = len(batches) > 0
+    except Exception:
+        has_batches = False
+
+    panel = layout_instance.batch_panel
+    if not has_batches:
+        panel.hide()
+        panel.setMaximumWidth(0)
+
+    # Also sync the header shortcut button
+    _sync_new_batch_header_btn(layout_instance, has_batches)
 
 
 def setup_main_layout(layout_instance: Any, database_manager: DatabaseManager):
@@ -101,6 +185,20 @@ def setup_main_layout(layout_instance: Any, database_manager: DatabaseManager):
             layout_instance.page_changed
         )
 
+    # --- Right Panel Visibility based on batch existence ---
+    # Wire controller signals to show/hide right panel
+    if layout_instance.controller:
+        layout_instance.controller.batch_created.connect(
+            lambda _: _update_right_panel_visibility(layout_instance)
+        )
+        layout_instance.controller.batch_deleted.connect(
+            lambda _: _update_right_panel_visibility(layout_instance)
+        )
+
+    # Set initial right panel visibility based on whether batches already exist
+    # Defer by one event loop tick so the widget is fully shown before we resize it
+    QTimer.singleShot(0, lambda: _set_initial_right_panel_visibility(layout_instance))
+
 
 def _load_batch_content(layout_instance, batch_id):
     """Helper to load batch content into workspace panel."""
@@ -120,12 +218,21 @@ def _handle_images_imported(layout_instance, file_paths):
     current_batch_id = display_panel.current_batch_id
 
     if not current_batch_id:
-        QMessageBox.warning(
-            layout_instance,
-            "No Batch Selected",
-            "Please select a batch first before adding images.",
-        )
-        return
+        # Automatically create a new batch with unique sequential name
+        all_batches = layout_instance.controller.get_all_batches()
+        existing_names = {b.name for b in all_batches}
+        index = 1
+        while f"Batch {index}" in existing_names:
+            index += 1
+        name = f"Batch {index}"
+
+        current_batch_id = layout_instance.controller.create_batch(name)
+        if current_batch_id:
+            if display_panel.right_panel:
+                display_panel.right_panel.list_group.add_item(name, value=current_batch_id)
+                display_panel.right_panel.list_group.select_item_by_value(current_batch_id)
+        else:
+            return
 
     try:
         # Use ImportManager's logic instead of manual threading setup here

@@ -18,15 +18,26 @@ def load_language_setting():
 
 LANGUAGE = load_language_setting()
 
-# Import modul bahasa sesuai nilai dari app_setting.json
-if LANGUAGE in ["indonesian"]:
-    from .lang_indonesian import *
-elif LANGUAGE in ["english"]:
-    from .lang_english import *
-elif LANGUAGE in ["melayu"]:
-    from .lang_melayu import *
-elif LANGUAGE in ["china traditional"]:
-    from .lang_simplified_china import *
-else:
-    # Jika tidak sesuai, default ke bahasa Inggris
-    from .lang_english import *
+def reload_language():
+    global LANGUAGE
+    LANGUAGE = load_language_setting()
+    
+    import sys
+    current_module = sys.modules[__name__]
+    
+    if LANGUAGE == "indonesian":
+        from . import lang_indonesian as lang
+    elif LANGUAGE == "melayu":
+        from . import lang_melayu as lang
+    elif LANGUAGE == "china traditional":
+        from . import lang_simplified_china as lang
+    else:
+        from . import lang_english as lang
+        
+    for key, val in lang.__dict__.items():
+        if key.isupper():
+            setattr(current_module, key, val)
+
+# Initial load
+reload_language()
+

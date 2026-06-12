@@ -5,7 +5,7 @@ Reusable Sidebar Component (MVC).
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QPushButton
 from PySide6.QtGui import QIcon
-from PySide6.QtCore import Slot, QEasingCurve, Signal, Qt
+from PySide6.QtCore import Slot, QEasingCurve, Signal, Qt, QSize
 from pixel_refine_desktop.ui.resources.animations.animation_manager import WidthAnimator
 from pixel_refine_desktop.ui.resources.styles import stylesheet
 
@@ -92,7 +92,12 @@ class Sidebar(QWidget):
         Create a navigation button with icon only and tooltip.
         """
         btn = QPushButton("")  # No text, icon only
-        btn.setIcon(QIcon(icon_path))
+        icon = QIcon()
+        icon.addFile(icon_path, QSize(28, 28), QIcon.Mode.Normal)
+        icon.addFile(icon_path, QSize(28, 28), QIcon.Mode.Active)
+        icon.addFile(icon_path, QSize(28, 28), QIcon.Mode.Selected)
+        btn.setIcon(icon)
+        btn.setIconSize(QSize(28, 28))
         btn.setCheckable(True)
         btn.setToolTip(text)  # Set tooltip to show name on hover
         btn.setToolTipDuration(0)  # Tooltip stays until mouse leaves

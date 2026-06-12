@@ -203,7 +203,15 @@ class ImportManager(QObject):
             def local_on_finished(total):
                 self.on_batch_import_finished(batch_id)
 
+            def local_on_progress(progress_percent, items_left):
+                self.panel.toast.show_progress(
+                    f"Mengimpor... ({progress_percent}%) - {items_left} tersisa",
+                    category="import_progress",
+                    position=ToastPosition.BOTTOM_RIGHT,
+                )
+
             import_worker.completion_signal.connect(local_on_finished)
+            import_worker.progress_signal.connect(local_on_progress)
 
             # Start import
             self.on_batch_import_started(batch_id)

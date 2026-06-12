@@ -158,7 +158,7 @@ class ImportExportController(QObject):
         Returns:
             List of tuples (success, result_path_or_error)
         """
-        from pixel_refine_desktop.enhance_stack.components.batch_page.image_batch_management import (
+        from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_import_service import (
             convert_tiff_to_uncompressed,
         )
 

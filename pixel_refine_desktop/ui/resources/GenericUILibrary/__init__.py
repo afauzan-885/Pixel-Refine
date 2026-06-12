@@ -66,7 +66,7 @@ def apply_stylesheet():
 # Import all components for easy access
 
 # Buttons
-from .buttons import Button, IconButton, ButtonGroup, ToggleButton
+from .buttons import Button, IconButton, ButtonGroup, ToggleButton, ToggleSwitch
 
 # Forms
 from .forms import FormGroup, Input, Select, Checkbox, Radio, RadioGroup, FormRow
@@ -81,6 +81,8 @@ from .cards import Card, CardHeader, CardBody, CardFooter, CardGroup, FeatureCar
 from .list_group import ListGroup
 from .image_grid import ImageCard
 from .empty_state import EmptyState
+from .skeleton import SkeletonLoader
+
 
 # Modals and Overlays
 from .modals import (
@@ -164,6 +166,7 @@ __all__ = [
     "ListGroup",
     "ImageCard",
     "EmptyState",
+    "SkeletonLoader",
     # Modals
     "Modal",
     "ModalHeader",
