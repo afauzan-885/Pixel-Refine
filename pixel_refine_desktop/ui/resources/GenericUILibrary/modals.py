@@ -11,8 +11,10 @@ from PySide6.QtWidgets import (
     QDialog,
     QPushButton,
     QFrame,
+    QStyle,
 )
 from PySide6.QtCore import Qt, Signal, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QColor
 
 
 class Modal(QDialog):
@@ -298,3 +300,144 @@ class LoadingSpinner(QWidget):
     def set_message(self, message):
         """Update loading message"""
         self.message_label.setText(message)
+
+
+class modal_confirm(QDialog):
+    """
+    A premium styled, frameless, custom confirmation dialog matching the exact layout of image 2.
+    It contains a clean title bar (with title and icon, but no minimize/maximize/close system buttons),
+    a blue query icon next to the confirmation message, action buttons at the bottom right,
+    and a smooth fade-in animation.
+    """
+    def __init__(self, message="Are you sure?", parent=None):
+        super().__init__(parent)
+        self.setModal(True)
+        # Frameless and transparent window background
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        
+        # Set exact dialog size (matching standard confirm boxes)
+        self.setFixedSize(400, 150)
+        
+        # Setup Fade-in Animation
+        self.fade_anim = QPropertyAnimation(self, b"windowOpacity")
+        self.fade_anim.setDuration(220)
+        self.fade_anim.setStartValue(0.0)
+        self.fade_anim.setEndValue(1.0)
+        self.fade_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+        
+        # Main layout
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)  # margin for drop shadow
+        
+        # Card container widget for border, shadow and background
+        self.container = QWidget(self)
+        self.container.setObjectName("ConfirmContainer")
+        self.container.setStyleSheet("""
+            QWidget#ConfirmContainer {
+                background-color: #F8FAFC; /* Clean off-white/light gray */
+                border: 1px solid #CBD5E1;
+                border-radius: 6px;
+            }
+        """)
+        
+        # Drop shadow effect
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(12)
+        shadow.setColor(QColor(0, 0, 0, 45))
+        shadow.setOffset(0, 4)
+        self.container.setGraphicsEffect(shadow)
+        
+        # Container interior layout
+        container_layout = QVBoxLayout(self.container)
+        container_layout.setContentsMargins(0, 0, 0, 12)
+        container_layout.setSpacing(0)
+        
+        # 1. Custom Title Bar (matching Image 2 header style)
+        self.title_bar = QWidget()
+        self.title_bar.setObjectName("TitleBar")
+        self.title_bar.setFixedHeight(32)
+        self.title_bar.setStyleSheet("""
+             QWidget#TitleBar {
+                background-color: #FFFFFF;
+                border-bottom: 1px solid #E2E8F0;
+                border-top-left-radius: 5px;
+                border-top-right-radius: 5px;
+            }
+        """)
+        title_layout = QHBoxLayout(self.title_bar)
+        title_layout.setContentsMargins(12, 0, 12, 0)
+        
+        # Title bar text (Logo Qt dihapus, hanya label tulisan)
+        self.title_text = QLabel("Confirm Delete")
+        self.title_text.setStyleSheet("font-family: 'Segoe UI', Arial; font-size: 12px; color: #1E293B; font-weight: 500; background-color: transparent;")
+        title_layout.addWidget(self.title_text)
+        title_layout.addStretch()
+        
+        container_layout.addWidget(self.title_bar)
+        
+        # 2. Content Layout (Side-by-side Icon and Text)
+        content_widget = QWidget()
+        content_layout = QHBoxLayout(content_widget)
+        content_layout.setContentsMargins(18, 16, 18, 10)
+        content_layout.setSpacing(14)
+        
+        # Blue question icon
+        self.query_icon = QLabel()
+        icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxQuestion)
+        self.query_icon.setPixmap(icon.pixmap(30, 30))
+        self.query_icon.setAlignment(Qt.AlignmentFlag.AlignTop)
+        content_layout.addWidget(self.query_icon)
+        
+        # Confirmation message label
+        self.message_label = QLabel(message)
+        self.message_label.setWordWrap(True)
+        self.message_label.setStyleSheet("""
+            font-family: 'Segoe UI', Arial, sans-serif;
+            font-size: 13.5px;
+            color: #334155;
+            line-height: 1.4;
+        """)
+        self.message_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        content_layout.addWidget(self.message_label, 1)
+        
+        container_layout.addWidget(content_widget, 1)
+        
+        # 3. Action Buttons (Yes/No)
+        button_widget = QWidget()
+        button_layout = QHBoxLayout(button_widget)
+        button_layout.setContentsMargins(18, 0, 18, 4)
+        button_layout.setSpacing(8)
+        button_layout.addStretch()
+        
+        from .buttons import Button
+        self.yes_button = Button("Yes", variant="primary")
+        self.yes_button.setFixedWidth(64)
+        self.yes_button.clicked.connect(self.accept)
+        
+        self.no_button = Button("No", variant="secondary")
+        self.no_button.setFixedWidth(64)
+        self.no_button.clicked.connect(self.reject)
+        
+        button_layout.addWidget(self.yes_button)
+        button_layout.addWidget(self.no_button)
+        
+        container_layout.addWidget(button_widget)
+        
+        main_layout.addWidget(self.container)
+        
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.fade_anim.start()
+        
+    @staticmethod
+    def question(parent, message):
+        """
+        Static helper that shows the dialog and returns True if 'Yes' is clicked.
+        """
+        dialog = modal_confirm(message, parent)
+        result = dialog.exec()
+        return result == QDialog.DialogCode.Accepted
+
+

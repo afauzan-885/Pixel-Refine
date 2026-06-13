@@ -100,9 +100,9 @@ class MassAlgorithmEditDialog(QDialog):
         grid_layout.setSpacing(15)
 
         range_layout = QHBoxLayout()
-        from_label = QLabel("From Project #:")
+        from_label = QLabel(language_config.LBL_FROM_PROJECT)
         self.from_spinbox = QSpinBox()
-        to_label = QLabel("To Project #:")
+        to_label = QLabel(language_config.LBL_TO_PROJECT)
         self.to_spinbox = QSpinBox()
         if self.seq_to_batch_id:
             min_seq, max_seq = min(self.seq_to_batch_id.keys()), max(
@@ -171,8 +171,8 @@ class MassAlgorithmEditDialog(QDialog):
         if start_seq > end_seq:
             QMessageBox.warning(
                 self,
-                "Invalid Range",
-                "The 'From' value cannot be greater than the 'To' value.",
+                language_config.MSG_WARNING_TITLE,
+                language_config.MSG_INVALID_RANGE,
             )
             return
 

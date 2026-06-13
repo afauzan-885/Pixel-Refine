@@ -37,6 +37,11 @@
   - **GenericUILibrary**: Semua pembuatan atau pengeditan komponen antarmuka pengguna (UI) wajib menggunakan pustaka/framework di path `pixel_refine_desktop/ui/resources/GenericUILibrary` (seperti `Card`, `Button`, `FormGroup`, `ListGroup`, dll.) untuk memastikan keselarasan penuh terhadap sistem tema, tipografi, dan gaya yang telah ditentukan. Jangan membuat styles kustom ad-hoc secara manual.
   - **Animations**: Jika menambahkan desain UI yang memiliki animasi, wajib menggunakan pustaka/library yang ada di dalam path `pixel_refine_desktop/ui/resources/animations`.
   - **Custom UI Component**: Jika ingin membuat UI baru yang bersifat kustom, sebisa mungkin tambahkan komponen tersebut ke dalam skrip yang ada di dalam path `pixel_refine_desktop/ui/resources/GenericUILibrary` daripada membuat berkas/skrip baru.
+  - **Lazy & Eager Loading Strategy**: Untuk meminimalkan visual freeze saat memuat komponen/grid dengan data besar (misalnya banyak batch di Bulk Mode), implementasikan **eager incremental loading** (memuat batch secara bertahap, e.g., 10 batch terlebih dahulu) dikombinasikan dengan `SkeletonLoader` sebagai visual placeholder sebelum data sebenarnya ter-render sepenuhnya.
+  - **Adaptive Empty State & Panel Visibility**: Saat dataset kosong (misal tidak ada batch sama sekali di DB):
+    - Sembunyikan panel kontrol kanan (`right_panel`) secara mulus menggunakan animasi fade-out (`QGraphicsOpacityEffect`) dan set lebar maksimum ke 0 untuk mencegah ruang kosong tidak terpakai.
+    - Sembunyikan tombol aksi global yang tidak dapat digunakan secara visual (menggunakan `QGraphicsOpacityEffect` ber-opacity `0.0`) agar posisi tombol layout lain/toggle di sekitarnya tetap presisi dan tidak bergeser secara tidak konsisten.
+    - Sediakan tombol shortcut kondisional (e.g. "New Batch") di header area utama yang hanya muncul ketika workspace berada dalam kondisi kosong.
 
 > [!IMPORTANT]
 > **i32 Popcount Bug (Vulkan/AOT):** Algoritma parallel popcount (`0x55555555` trick) hanya benar pada **unsigned** integer. Pada `ti.i32`, operator `>>` adalah **arithmetic shift** (propagasi sign bit). Untuk nilai i32 dengan bit-31 aktif, popcount AKAN SALAH. **Fix wajib**: isolasi bit-31 terpisah sebelum menerapkan bit-trick pada 31 bit bawah.

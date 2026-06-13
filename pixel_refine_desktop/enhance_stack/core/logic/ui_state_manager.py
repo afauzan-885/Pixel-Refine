@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt
 from typing import Optional, Callable
 from config import SUPPORTED_FORMATS
 from pixel_refine_desktop.ui.resources.GenericUILibrary import Button
+from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from pixel_refine_desktop.ui.resources.animations.slide import slide
 from pixel_refine_desktop.ui.resources.animations.animation_manager import (
     SlideDirection,
@@ -181,16 +182,16 @@ class UIStateManager:
             on_create_batch: Callback for creating new batch
             on_import_click: Callback for importing images into a new batch
         """
-        placeholder_html = """
+        placeholder_html = f"""
         <div style="text-align: center; max-width: 520px; margin: 0 auto; font-family: 'Segoe UI', Arial, sans-serif;">
             <a href="import_no_batch" style="text-decoration: none; outline: none;">
                 <div style="font-size: 52px; color: #94a3b8; margin-bottom: 16px;">📁</div>
             </a>
             <div style="font-size: 15px; font-weight: 600; color: #1e293b; margin-bottom: 8px; letter-spacing: -0.01em;">
-                No Batches Yet
+                {language_config.MSG_NO_BATCHES_YET}
             </div>
             <div style="font-size: 12.5px; color: #64748b; line-height: 1.7; margin: 0;">
-                Click the <a href="import_no_batch" style="color: #3b82f6; text-decoration: none; font-weight: 500;">folder icon</a> above to select images and create your first batch.
+                {language_config.MSG_NO_BATCHES_YET_DESC}
             </div>
         </div>
         """
@@ -223,14 +224,14 @@ class UIStateManager:
             count: Image count to display
         """
         if not batch_id:
-            self.panel.header_title.setText("No batch selected")
+            self.panel.header_title.setText(language_config.MSG_NO_BATCH_SELECTED)
             return
 
         display_name = batch_name if batch_name else str(batch_id)
 
         # Use provided count or fall back to panel's total_image_count
         actual_count = count if count is not None else self.panel.total_image_count
-        self.panel.header_title.setText(f"{display_name}: ({actual_count} image)")
+        self.panel.header_title.setText(language_config.LBL_BATCH_IMAGE_COUNT_FORMAT.format(display_name, actual_count))
 
     def get_supported_extensions(self) -> tuple:
         """

@@ -173,28 +173,44 @@ class GeneralSettingsPage(Container, SyncMixin):
         if isinstance(self.language_group.input, QComboBox):
             new_lang = self.language_group.input.currentText()
             self.store.set("language", new_lang)
-            self._initial_language = new_lang
             
-            # Dynamically retranslate settings UI
+            # Dynamically reload language config and translate this view
             self.retranslate_ui()
             
-            QMessageBox.information(
-                self,
-                "Setting",
-                getattr(
-                    language_config,
-                    "SETTINGS_SAVED",
-                    "Settings saved successfully!",
-                ),
+            # Broadcast translation to the entire application hierarchy
+            main_win = self.window()
+            if main_win:
+                # Recursively call retranslate_ui on all child widgets
+                def broadcast_retranslate(widget):
+                    for child in widget.findChildren(QWidget):
+                        if hasattr(child, "retranslate_ui") and child != self:
+                            try:
+                                child.retranslate_ui()
+                            except Exception as e:
+                                print(f"Error retranslating {child}: {e}")
+                broadcast_retranslate(main_win)
+            
+            # Trigger dedicated real-time decorator updates
+            from pixel_refine_desktop.ui.resources.GenericUILibrary import trigger_realtime_update
+            trigger_realtime_update()
+            
+            self._initial_language = new_lang
+            
+            from pixel_refine_desktop.ui.resources.GenericUILibrary import Toast
+            toast = Toast(
+                getattr(language_config, "SETTINGS_SAVED", "Settings saved successfully!"),
+                variant="success",
+                parent=self.window()
             )
+            toast.show_toast(duration=3000)
         else:
-            QMessageBox.information(
-                self,
-                "Setting",
-                getattr(
-                    language_config, "SETTINGS_SAVED", "Settings saved successfully!"
-                ),
+            from pixel_refine_desktop.ui.resources.GenericUILibrary import Toast
+            toast = Toast(
+                getattr(language_config, "SETTINGS_SAVED", "Settings saved successfully!"),
+                variant="success",
+                parent=self.window()
             )
+            toast.show_toast(duration=3000)
 
 
 def general_page():

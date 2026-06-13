@@ -180,3 +180,61 @@ class SyncMixin(RealtimeMixin):
         elif hasattr(widget, property_name):
             # Fallback for direct attribute access (non-Qt property style)
             setattr(widget, property_name, value)
+
+
+class AdaptiveSizingMixin:
+    """
+    A reusable mixin for PySide widgets to enable general adaptive layout features:
+    - Dynamic font size calculation based on widget width.
+    - Word wrapping for target labels.
+    - Size policy constraints based on allowed expansion directions (e.g., bottom, right).
+    """
+    def init_adaptive_sizing(self, allowed_directions=None):
+        """
+        Initializes the size policy based on allowed expansion directions.
+        allowed_directions: list of strings (e.g., ['bottom', 'right'])
+        """
+        from PySide6.QtWidgets import QSizePolicy
+        
+        self._allowed_directions = allowed_directions if allowed_directions is not None else ["bottom"]
+        
+        h_policy = (
+            QSizePolicy.Policy.Expanding
+            if "right" in self._allowed_directions
+            else QSizePolicy.Policy.Preferred
+        )
+        v_policy = (
+            QSizePolicy.Policy.Expanding
+            if "bottom" in self._allowed_directions
+            else QSizePolicy.Policy.Preferred
+        )
+        if hasattr(self, "setSizePolicy"):
+            self.setSizePolicy(h_policy, v_policy)
+
+    def calculate_adaptive_font_size(self, current_width, ranges=None):
+        """
+        Helper method to map the current widget width to font sizes.
+        ranges: list of tuples (width_threshold, font_size) ordered by width ascending.
+        Returns the appropriate font size.
+        """
+        if ranges is None:
+            # Default scaling ranges matching FeatureCard
+            ranges = [
+                (180, 8.5),
+                (230, 9.5),
+                (99999, 11)
+            ]
+        for threshold, size in ranges:
+            if current_width < threshold:
+                return size
+        return ranges[-1][1]
+
+    def apply_word_wrap(self, *labels):
+        """
+        Ensures word wrapping is enabled on the target QLabels.
+        """
+        for label in labels:
+            if hasattr(label, "setWordWrap"):
+                label.setWordWrap(True)
+                label.setMinimumWidth(0)
+

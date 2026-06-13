@@ -74,10 +74,17 @@ class EnhanceStackView(QWidget):
         # Connect Bulk Mode toggles between V2 (SinglePageView) and V1 (BatchPageView)
         if hasattr(self.single_page_view, "workspace_panel") and self.single_page_view.workspace_panel:
             dp = self.single_page_view.workspace_panel.display_panel
-            if hasattr(dp, "bulk_mode_switch"):
-                dp.bulk_mode_switch.toggled.connect(self._on_v2_bulk_toggled)
+            if hasattr(dp, "bulk_mode_btn"):
+                dp.bulk_mode_btn.clicked.connect(self._on_v2_bulk_clicked)
 
         self.batch_page_view.bulk_mode_toggled.connect(self._on_legacy_bulk_toggled)
+
+    def _on_v2_bulk_clicked(self):
+        if hasattr(self.single_page_view, "workspace_panel") and self.single_page_view.workspace_panel:
+            dp = self.single_page_view.workspace_panel.display_panel
+            dp.is_bulk_mode = not dp.is_bulk_mode
+            dp.animate_mode_change(dp.is_bulk_mode)
+            self._on_v2_bulk_toggled(dp.is_bulk_mode)
 
     def _on_v2_bulk_toggled(self, checked):
         if checked:
@@ -86,10 +93,6 @@ class EnhanceStackView(QWidget):
             # Synchronize batches: refresh V1
             if hasattr(self.batch_page_view, "batch_layout"):
                 self.batch_page_view.batch_layout.data_changed.emit()
-            # Synchronize switch on legacy header
-            self.batch_page_view.legacy_bulk_switch.blockSignals(True)
-            self.batch_page_view.legacy_bulk_switch.setChecked(True)
-            self.batch_page_view.legacy_bulk_switch.blockSignals(False)
 
     def _on_legacy_bulk_toggled(self, checked):
         if not checked:
@@ -107,10 +110,8 @@ class EnhanceStackView(QWidget):
             # Synchronize switch on V2 header
             if hasattr(self.single_page_view, "workspace_panel") and self.single_page_view.workspace_panel:
                 dp = self.single_page_view.workspace_panel.display_panel
-                if hasattr(dp, "bulk_mode_switch"):
-                    dp.bulk_mode_switch.blockSignals(True)
-                    dp.bulk_mode_switch.setChecked(False)
-                    dp.bulk_mode_switch.blockSignals(False)
+                dp.is_bulk_mode = False
+                dp.animate_mode_change(False)
 
         # Single page buttons
         # self.top_bar.single_page_import_button.clicked.connect(

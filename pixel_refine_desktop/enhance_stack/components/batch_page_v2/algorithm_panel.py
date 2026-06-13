@@ -36,8 +36,13 @@ from pixel_refine_desktop.ui.resources.animations.slide import slide
 from pixel_refine_desktop.enhance_stack.core.logic.algorithm_processor import (
     AlgorithmProcessorThread,
 )
+from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 
 
+from pixel_refine_desktop.ui.resources.GenericUILibrary import realtime_update
+
+
+@realtime_update
 class AlgorithmPanel(QWidget, SyncMixin):
     """
     Algorithm Panel untuk workflow settings dan parameter konfigurasi.
@@ -63,6 +68,10 @@ class AlgorithmPanel(QWidget, SyncMixin):
         self.processor_thread = None
         self._last_target_idx = -1  # Guard for redundant animations
         self._all_process_buttons = []  # Track all instances for dual-mode sync
+        self.align_headers = []
+        self.align_placeholders = []
+        self.algo_headers = []
+        self.algo_placeholders = []
 
         # Debounce timer for rapid setting changes
         self._update_timer = QTimer(self)
@@ -152,14 +161,16 @@ class AlgorithmPanel(QWidget, SyncMixin):
         layout.setSpacing(10)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        header = QLabel("Parameter Alignment")
+        header = QLabel(language_config.LBL_PARAMETER_ALIGNMENT)
         header.setStyleSheet("font-weight: bold; font-size: 12px;")
         layout.addWidget(header)
+        self.align_headers.append(header)
 
-        placeholder = QLabel("Alignment parameters will\nappear here")
+        placeholder = QLabel(language_config.LBL_ALIGNMENT_PLACEHOLDER)
         placeholder.setStyleSheet("color: #999; font-style: italic;")
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(placeholder)
+        self.align_placeholders.append(placeholder)
 
         layout.addStretch()
         return widget
@@ -174,14 +185,16 @@ class AlgorithmPanel(QWidget, SyncMixin):
         layout.setSpacing(10)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        header = QLabel("Parameter Algorithm")
+        header = QLabel(language_config.LBL_PARAMETER_ALGORITHM)
         header.setStyleSheet("font-weight: bold; font-size: 12px;")
         layout.addWidget(header)
+        self.algo_headers.append(header)
 
-        placeholder = QLabel("Parameters will appear here\nbased on selected algorithm")
+        placeholder = QLabel(language_config.LBL_ALGORITHM_PLACEHOLDER)
         placeholder.setStyleSheet("color: #999; font-style: italic;")
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(placeholder)
+        self.algo_placeholders.append(placeholder)
 
         # Process Button (Optimized size)
         btn_container = QWidget()
@@ -190,7 +203,7 @@ class AlgorithmPanel(QWidget, SyncMixin):
         btn_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.process_btn = Button(
-            "▶ Start",
+            f"▶ {language_config.BTN_START}",
             variant="primary",
             bg_color="#2ECC71",
             text_color="#FFFFFF",
@@ -474,3 +487,37 @@ class AlgorithmPanel(QWidget, SyncMixin):
         if self.controller:
             return self.controller.database_manager
         return None
+
+    def retranslate_ui(self):
+        """Update all text dynamically when language changes."""
+        # 1. Update alignment headers and placeholders
+        for header in self.align_headers:
+            try:
+                header.setText(language_config.LBL_PARAMETER_ALIGNMENT)
+            except RuntimeError:
+                pass
+        for placeholder in self.align_placeholders:
+            try:
+                placeholder.setText(language_config.LBL_ALIGNMENT_PLACEHOLDER)
+            except RuntimeError:
+                pass
+
+        # 2. Update algorithm headers and placeholders
+        for header in self.algo_headers:
+            try:
+                header.setText(language_config.LBL_PARAMETER_ALGORITHM)
+            except RuntimeError:
+                pass
+        for placeholder in self.algo_placeholders:
+            try:
+                placeholder.setText(language_config.LBL_ALGORITHM_PLACEHOLDER)
+            except RuntimeError:
+                pass
+
+        # 3. Update process buttons
+        for btn in self._all_process_buttons:
+            try:
+                btn.setText(f"▶ {language_config.BTN_START}")
+            except RuntimeError:
+                pass
+

@@ -1,3 +1,4 @@
+from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QMessageBox
 from PySide6.QtCore import Signal, Qt, Property, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QColor
@@ -54,12 +55,12 @@ class MultipleBatchDeleteWidget(QWidget):
 
         # Explicitly calling _apply_custom_colors resolves variant background color issues
         # Added 30% transparency (0.7 alpha) as requested
-        self.yes_button = Button("Ya, Hapus", variant="danger")
+        self.yes_button = Button(language_config.DELETE_IMAGE_BUTTON, variant="danger")
         self.yes_button._apply_custom_colors(bg_color="rgba(231, 76, 60, 0.7)")
         self.yes_button.clicked.connect(self.yes_clicked)
         button_layout.addWidget(self.yes_button)
 
-        self.no_button = Button("Tidak, Batalkan", variant="secondary")
+        self.no_button = Button(language_config.BTN_NO_CANCEL, variant="secondary")
         self.no_button._apply_custom_colors(bg_color="rgba(149, 165, 166, 0.7)")
         self.no_button.clicked.connect(self.no_clicked)
         button_layout.addWidget(self.no_button)
@@ -106,11 +107,16 @@ class MultipleBatchDeleteWidget(QWidget):
         if count > display_limit:
             table_html += "<br><a href='show_all' style='color: #2563eb; text-decoration: none; font-size: 13px;'><b>(.....)</b></a>"
 
+        # Title/header for selected batches
+        header_text = f"{language_config.UI_BATCH_HEADER} [{count}]"
+        # Question for delete
+        question_text = language_config.MSG_CONFIRM_DELETE_BATCH
+        
         message = (
             f"<div style='text-align: center; font-family: \"Segoe UI\", Arial, sans-serif;'>"
-            f"  <h3 style='font-size: 18px; font-weight: 600; color: #1e293b; margin: 0 0 15px 0;'>Batch Terpilih [{count}]</h3>"
+            f"  <h3 style='font-size: 18px; font-weight: 600; color: #1e293b; margin: 0 0 15px 0;'>{header_text}</h3>"
             f"  {table_html}"
-            f"  <p style='font-size: 13.5px; color: #64748b; margin: 20px 0 0 0;'>Apakah Anda ingin menghapus batch tersebut?</p>"
+            f"  <p style='font-size: 13.5px; color: #64748b; margin: 20px 0 0 0;'>{question_text}</p>"
             f"</div>"
         )
         self.message_label.setText(message)
@@ -119,7 +125,7 @@ class MultipleBatchDeleteWidget(QWidget):
         if link == "show_all" and self.all_batch_names:
             QMessageBox.information(
                 self,
-                "Daftar Lengkap Batch Terpilih",
+                language_config.MSG_CONFIRM_TITLE,
                 "\n".join(f"- {name}" for name in self.all_batch_names),
                 QMessageBox.StandardButton.Ok
             )

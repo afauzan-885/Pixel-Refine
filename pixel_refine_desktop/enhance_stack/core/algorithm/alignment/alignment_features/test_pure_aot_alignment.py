@@ -75,7 +75,7 @@ def test_pure_aot_direct():
                  ref_l0=ref_work, ref_l1=ref_l1, ref_l2=ref_l2,
                  comp_l0=comp_work, comp_l1=comp_l1, comp_l2=comp_l2,
                  flow_l0=f0, flow_l1=f1, flow_l2=f2,
-                 tile_h=16, tile_w=16, search_radius=8, scale=2.0, search_dist=2, downscale=2)
+                 tile_h=16, tile_w=16, max_search_radius=8, scale=2.0, search_dist=2, downscale=2)
     engine.sync()
     
     # 5. Full Res Scaling (Manual Magnitude in NumPy for simplicity, but resize in GPU)

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 import shutil
 
 from pixel_refine_desktop.ui.views.settings.views.settings_view import SettingsView
@@ -110,8 +111,10 @@ from config import SUPPORTED_FORMATS
 
 # Import the new widget
 from .multiple_batch_delete_widget import MultipleBatchDeleteWidget
+from pixel_refine_desktop.ui.resources.GenericUILibrary import realtime_update
 
 
+@realtime_update
 class DisplayPanel(QWidget):
     """
     Panel untuk menampilkan Grid images dan Preview.
@@ -234,41 +237,68 @@ class DisplayPanel(QWidget):
         # === SHARED HEADER ===
         self.header_layout = QHBoxLayout()
         self.header_layout.setContentsMargins(10, 5, 10, 0)
-        self.header_layout.setSpacing(10)
+        self.header_layout.setSpacing(0)  # Spacing handled by sub-layouts
+
+        # Left Column Layout (Sidebar toggle + Title)
+        self.left_header_layout = QHBoxLayout()
+        self.left_header_layout.setContentsMargins(0, 0, 0, 0)
+        self.left_header_layout.setSpacing(10)
+        self.left_header_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         # 0. Sidebar Toggle Button (New)
         self.toggle_btn = Button("☰", variant="ghost")  # Minimalist style
         self.toggle_btn.setFixedWidth(40)
         self.toggle_btn.clicked.connect(self.toggle_sidebar)
-        self.header_layout.addWidget(self.toggle_btn)
+        self.left_header_layout.addWidget(self.toggle_btn)
 
         # Title Label
         self.header_title = QLabel("")
         self.header_title.setStyleSheet(
             "font-weight: bold; font-size: 16px; color: #333; padding: 5px;"
         )
-        self.header_layout.addWidget(self.header_title)
+        self.left_header_layout.addWidget(self.header_title)
         
-        # Stretch to center the Bulk Mode switch
-        self.header_layout.addStretch()
+        # Center Column Layout (Bulk Mode Dynamic Button centered)
+        self.center_header_layout = QHBoxLayout()
+        self.center_header_layout.setContentsMargins(0, 0, 0, 0)
+        self.center_header_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        # Bulk Mode Toggle Switch
-        from pixel_refine_desktop.ui.resources.GenericUILibrary import ToggleSwitch
-        self.bulk_mode_layout = QHBoxLayout()
-        self.bulk_mode_layout.setSpacing(6)
+        # Bulk Mode Dynamic Button
+        from PySide6.QtWidgets import QPushButton
+        self.is_bulk_mode = False
         
-        self.bulk_mode_label = QLabel("Bulk Mode")
-        self.bulk_mode_label.setStyleSheet("font-size: 11pt; color: #555; font-weight: 500;")
-        self.bulk_mode_layout.addWidget(self.bulk_mode_label)
+        self.bulk_mode_btn = QPushButton(language_config.LBL_BATCH_MODE, self)
+        self.bulk_mode_btn.setObjectName("BulkModeBtn")
         
-        self.bulk_mode_switch = ToggleSwitch(self)
-        self.bulk_mode_switch.setChecked(False)
-        self.bulk_mode_layout.addWidget(self.bulk_mode_switch)
+        # Initial Slate/Gray style (Batch mode)
+        self.bulk_mode_btn.setStyleSheet("""
+            QPushButton#BulkModeBtn {
+                background-color: #F1F3F4;
+                color: #5F6368;
+                border: 1px solid #DADCE0;
+                border-radius: 15px;
+                padding: 5px 15px;
+                font-size: 10.5pt;
+                font-weight: 600;
+            }
+            QPushButton#BulkModeBtn:hover {
+                background-color: #E8EAED;
+            }
+            QPushButton#BulkModeBtn:pressed {
+                background-color: #D2D4D7;
+            }
+        """)
         
-        self.header_layout.addLayout(self.bulk_mode_layout)
+        # Add opacity effect for text fading transition
+        opacity_effect = QGraphicsOpacityEffect(self.bulk_mode_btn)
+        self.bulk_mode_btn.setGraphicsEffect(opacity_effect)
+        self.center_header_layout.addWidget(self.bulk_mode_btn)
         
-        # Stretch to push action buttons to the right
-        self.header_layout.addStretch()
+        # Right Column Layout (Tools and Actions aligned to the right)
+        self.right_header_layout = QHBoxLayout()
+        self.right_header_layout.setContentsMargins(0, 0, 0, 0)
+        self.right_header_layout.setSpacing(10)
+        self.right_header_layout.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         # Tools/Actions Area
 
@@ -305,14 +335,14 @@ class DisplayPanel(QWidget):
         )
         self.result_selector.currentTextChanged.connect(self._on_result_changed)
         self.result_selector.setVisible(False)
-        self.header_layout.addWidget(self.result_selector)
+        self.right_header_layout.addWidget(self.result_selector)
 
         # 1. Back to Grid Button
-        self.back_btn = Button("Back to Grid", variant="secondary")
+        self.back_btn = Button(language_config.BTN_BACK_TO_GRID, variant="secondary")
         self.back_btn.setFixedWidth(120)
         self.back_btn.clicked.connect(self.show_grid)
         self.back_btn.setVisible(False)
-        self.header_layout.addWidget(self.back_btn)
+        self.right_header_layout.addWidget(self.back_btn)
 
         # 2. Preview Process Button (Shortcut from Grid)
         self.preview_process_btn = IconButton(
@@ -323,21 +353,26 @@ class DisplayPanel(QWidget):
         self.preview_process_btn.setFixedWidth(40)
         self.preview_process_btn.clicked.connect(self._on_preview_process_clicked)
         self.preview_process_btn.setVisible(False)
-        self.header_layout.addWidget(self.preview_process_btn)
+        self.right_header_layout.addWidget(self.preview_process_btn)
 
         # 3. Import Images Button
-        self.import_button = Button("Import Images", variant="secondary")
+        self.import_button = Button(language_config.TOPBAR_BATCH_IMPORT_BUTTON_TEXT, variant="secondary")
         self.import_button.setFixedWidth(120)
         self.import_button.clicked.connect(self.import_manager.import_images)
         self.import_button.setVisible(False)
-        self.header_layout.addWidget(self.import_button)
+        self.right_header_layout.addWidget(self.import_button)
 
         # 4. New Batch button (shown ONLY when no batches exist / right panel is hidden)
-        self.new_batch_header_btn = Button("New Batch", variant="primary")
+        self.new_batch_header_btn = Button(language_config.BTN_NEW_BATCH, variant="primary")
         self.new_batch_header_btn.setFixedWidth(110)
         self.new_batch_header_btn.clicked.connect(self._create_new_batch)
         self.new_batch_header_btn.setVisible(False)  # Hidden by default; shown from page_layout
-        self.header_layout.addWidget(self.new_batch_header_btn)
+        self.right_header_layout.addWidget(self.new_batch_header_btn)
+
+        # Assemble the header columns with equal stretch factors (1, 1, 1) to force center centering
+        self.header_layout.addLayout(self.left_header_layout, 1)
+        self.header_layout.addLayout(self.center_header_layout, 1)
+        self.header_layout.addLayout(self.right_header_layout, 1)
 
         self.display_container.add_layout(self.header_layout)
 
@@ -1152,11 +1187,11 @@ class DisplayPanel(QWidget):
                     shutil.copy2(self.current_preview_path, save_path)
 
                     QMessageBox.information(
-                        self, "Success", f"Image saved successfully to:\n{save_path}"
+                        self, language_config.MSG_SUCCESS_TITLE, f"{language_config.MSG_SUCCESS_SAVE}\n{save_path}"
                     )
                 except Exception as e:
 
-                    QMessageBox.critical(self, "Error", f"Failed to save image: {e}")
+                    QMessageBox.critical(self, language_config.MSG_ERROR_TITLE, f"{language_config.MSG_FAILED_SAVE_IMAGE} {e}")
 
     def _setup_delete_confirmation_widget(self):
         """Create and configure the delete confirmation widget."""
@@ -1220,7 +1255,7 @@ class DisplayPanel(QWidget):
         if should_accept:
             event.acceptProposedAction()
             # Show overlay and update text
-            self.drop_overlay.setText(f"Jatuhkan {file_count} gambar di sini")
+            self.drop_overlay.setText(f"{language_config.LBL_DRAG_DROP_HERE} ({file_count})")
             self.drop_overlay.show()
             self.drop_overlay.raise_()
         else:
@@ -1244,3 +1279,107 @@ class DisplayPanel(QWidget):
             event.acceptProposedAction()
         else:
             event.ignore()
+
+    def retranslate_ui(self):
+        """Update all text dynamically when language changes."""
+        # 1. Update Bulk Mode Button
+        if hasattr(self, "bulk_mode_btn"):
+            target_text = language_config.LBL_BULK_MODE if self.is_bulk_mode else language_config.LBL_BATCH_MODE
+            self.bulk_mode_btn.setText(target_text)
+            
+        # 2. Update Header Title
+        if hasattr(self, "ui_state_manager"):
+            self.ui_state_manager.update_header_title(
+                batch_id=self.current_batch_id,
+                batch_name=self.current_batch_name,
+                count=self.total_image_count
+            )
+            
+        # 3. Update Action Buttons
+        if hasattr(self, "import_button"):
+            self.import_button.setText(language_config.TOPBAR_BATCH_IMPORT_BUTTON_TEXT)
+        if hasattr(self, "back_btn"):
+            self.back_btn.setText(language_config.BTN_BACK_TO_GRID)
+        if hasattr(self, "new_batch_header_btn"):
+            self.new_batch_header_btn.setText(language_config.BTN_NEW_BATCH)
+            
+        # 4. If placeholder is currently active, recreate it to update its HTML text
+        if hasattr(self, "placeholder_widget") and self.placeholder_widget is not None:
+            if not self.current_batch_id:
+                # No batch selected state
+                self.clear_display()
+            else:
+                # Empty batch state
+                self.ui_state_manager.show_empty_batch_state()
+
+    def animate_mode_change(self, is_bulk):
+        """Animasi perubahan teks tombol mode secara elegan dengan efek fade."""
+        # 1. Tentukan teks target
+        target_text = language_config.LBL_BULK_MODE if is_bulk else language_config.LBL_BATCH_MODE
+        
+        # 2. Tentukan stylesheet matching UI, subtle, tidak mencolok
+        if is_bulk:
+            # Soft Teal style
+            style_sheet = """
+                QPushButton#BulkModeBtn {
+                    background-color: #E6F4EA;
+                    color: #137333;
+                    border: 1px solid #A3E2B8;
+                    border-radius: 15px;
+                    padding: 5px 15px;
+                    font-size: 10.5pt;
+                    font-weight: 600;
+                }
+                QPushButton#BulkModeBtn:hover {
+                    background-color: #D2EBD9;
+                }
+                QPushButton#BulkModeBtn:pressed {
+                    background-color: #C1E2CB;
+                }
+            """
+        else:
+            # Subtle Slate/Gray style
+            style_sheet = """
+                QPushButton#BulkModeBtn {
+                    background-color: #F1F3F4;
+                    color: #5F6368;
+                    border: 1px solid #DADCE0;
+                    border-radius: 15px;
+                    padding: 5px 15px;
+                    font-size: 10.5pt;
+                    font-weight: 600;
+                }
+                QPushButton#BulkModeBtn:hover {
+                    background-color: #E8EAED;
+                }
+                QPushButton#BulkModeBtn:pressed {
+                    background-color: #D2D4D7;
+                }
+            """
+            
+        # 3. Setup opacity effect jika belum ada
+        effect = self.bulk_mode_btn.graphicsEffect()
+        if not effect or not isinstance(effect, QGraphicsOpacityEffect):
+            effect = QGraphicsOpacityEffect(self.bulk_mode_btn)
+            self.bulk_mode_btn.setGraphicsEffect(effect)
+            
+        # 4. Jalankan animasi fade-out
+        self._mode_fade_anim = QPropertyAnimation(effect, b"opacity", self)
+        self._mode_fade_anim.setDuration(120)
+        self._mode_fade_anim.setStartValue(1.0)
+        self._mode_fade_anim.setEndValue(0.0)
+        
+        def swap_content():
+            self.bulk_mode_btn.setText(target_text)
+            self.bulk_mode_btn.setStyleSheet(style_sheet)
+            # Jalankan animasi fade-in
+            self._mode_fade_in = QPropertyAnimation(effect, b"opacity", self)
+            self._mode_fade_in.setDuration(120)
+            self._mode_fade_in.setStartValue(0.0)
+            self._mode_fade_in.setEndValue(1.0)
+            self._mode_fade_in.start()
+            
+        self._mode_fade_anim.finished.connect(swap_content)
+        self._mode_fade_anim.start()
+
+

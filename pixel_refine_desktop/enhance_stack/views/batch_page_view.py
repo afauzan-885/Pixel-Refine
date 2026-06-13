@@ -6,8 +6,11 @@ Wraps legacy BatchPageLayout with a Bulk Mode header.
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGraphicsOpacityEffect
 from PySide6.QtCore import Signal
 
+from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from pixel_refine_desktop.enhance_stack.components.bulk_page import BulkPageLayout # Legacy
+from pixel_refine_desktop.ui.resources.GenericUILibrary import realtime_update, Button
 
+@realtime_update
 class BatchPageView(QWidget):
     """
     Batch page view wrapping V1 (legacy) BatchPageLayout with a Bulk Mode header.
@@ -34,33 +37,44 @@ class BatchPageView(QWidget):
         legacy_header_layout = QHBoxLayout(self.legacy_header)
         legacy_header_layout.setContentsMargins(10, 5, 10, 5)
         
-        legacy_title = QLabel("Bulk Mode")
-        legacy_title.setStyleSheet("font-weight: bold; font-size: 16px; color: #333; padding: 5px;")
-        legacy_header_layout.addWidget(legacy_title)
+        self.legacy_title = QLabel(language_config.LBL_BULK_MODE)
+        self.legacy_title.setStyleSheet("font-weight: bold; font-size: 16px; color: #333; padding: 5px;")
+        legacy_header_layout.addWidget(self.legacy_title)
         
         legacy_header_layout.addStretch()
         
-        # Bulk Mode Toggle Switch for Legacy Wrapper
-        from pixel_refine_desktop.ui.resources.GenericUILibrary import ToggleSwitch, Button
-        legacy_toggle_layout = QHBoxLayout()
-        legacy_toggle_layout.setSpacing(6)
+        # Bulk Mode Button (replacing switch)
+        from PySide6.QtWidgets import QPushButton
+        self.bulk_mode_btn = QPushButton(language_config.LBL_BULK_MODE, self.legacy_header)
+        self.bulk_mode_btn.setObjectName("BulkModeBtn")
         
-        legacy_toggle_label = QLabel("Bulk Mode")
-        legacy_toggle_label.setStyleSheet("font-size: 11pt; color: #555; font-weight: 500;")
-        legacy_toggle_layout.addWidget(legacy_toggle_label)
+        # Soft Teal style for active Bulk Mode
+        self.bulk_mode_btn.setStyleSheet("""
+            QPushButton#BulkModeBtn {
+                background-color: #E6F4EA;
+                color: #137333;
+                border: 1px solid #A3E2B8;
+                border-radius: 15px;
+                padding: 5px 15px;
+                font-size: 10.5pt;
+                font-weight: 600;
+            }
+            QPushButton#BulkModeBtn:hover {
+                background-color: #D2EBD9;
+            }
+            QPushButton#BulkModeBtn:pressed {
+                background-color: #C1E2CB;
+            }
+        """)
+        self.bulk_mode_btn.clicked.connect(self._on_bulk_btn_clicked)
+        legacy_header_layout.addWidget(self.bulk_mode_btn)
         
-        self.legacy_bulk_switch = ToggleSwitch(self.legacy_header)
-        self.legacy_bulk_switch.setChecked(True)
-        self.legacy_bulk_switch.toggled.connect(self.bulk_mode_toggled.emit)
-        legacy_toggle_layout.addWidget(self.legacy_bulk_switch)
-        
-        legacy_header_layout.addLayout(legacy_toggle_layout)
         legacy_header_layout.addStretch()
         
         # Process All Button
         # Uses QGraphicsOpacityEffect to visually hide without removing physical space
         # so that the toggle position remains stable.
-        self.process_all_btn = Button("Process All Batch", variant="primary")
+        self.process_all_btn = Button(language_config.BTN_PROCESS_ALL_BATCH, variant="primary")
         self.process_all_btn.setFixedWidth(150)
         self.process_all_btn.clicked.connect(self._on_process_all_clicked)
         legacy_header_layout.addWidget(self.process_all_btn)
@@ -98,4 +112,24 @@ class BatchPageView(QWidget):
     def _on_process_all_clicked(self):
         if hasattr(self, "batch_layout") and hasattr(self.batch_layout, "process_all_batches"):
             self.batch_layout.process_all_batches()
+
+    def _on_bulk_btn_clicked(self):
+        # When clicked in Bulk View, transition back to Batch (Tunggal) Mode
+        self.bulk_mode_toggled.emit(False)
+
+    def retranslate_ui(self):
+        """Update all text dynamically when language changes."""
+        if hasattr(self, "legacy_title"):
+            self.legacy_title.setText(language_config.LBL_BULK_MODE)
+        if hasattr(self, "bulk_mode_btn"):
+            self.bulk_mode_btn.setText(language_config.LBL_BULK_MODE)
+        if hasattr(self, "process_all_btn"):
+            self.process_all_btn.setText(language_config.BTN_PROCESS_ALL_BATCH)
+        # Refresh inner layout translations if it has retranslate_ui
+        if hasattr(self, "batch_layout") and hasattr(self.batch_layout, "retranslate_ui"):
+            try:
+                self.batch_layout.retranslate_ui()
+            except Exception:
+                pass
+
 

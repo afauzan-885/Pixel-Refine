@@ -1,3 +1,4 @@
+from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from .quick_batch_dialog import QuickBatchDialog
 from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
 from PySide6.QtWidgets import (
@@ -41,6 +42,10 @@ from pixel_refine_desktop.ui.resources.animations.animation_manager import (
 )
 
 
+from pixel_refine_desktop.ui.resources.GenericUILibrary import realtime_update
+
+
+@realtime_update
 class RightPanel(QWidget, SyncMixin):
     """
     Batch List Panel for Enhance Stack.
@@ -160,11 +165,11 @@ class RightPanel(QWidget, SyncMixin):
         action_layout = QHBoxLayout()
         action_layout.setSpacing(5)
 
-        self.new_btn = Button("New Batch", variant="primary")
+        self.new_btn = Button(language_config.BTN_NEW_BATCH, variant="primary")
         self.new_btn.clicked.connect(self._create_new_batch)
         action_layout.addWidget(self.new_btn, 1)
 
-        self.del_btn = Button("Delete Batch", variant="danger")
+        self.del_btn = Button(language_config.BTN_DELETE_BATCH, variant="danger")
         self.del_btn.clicked.connect(self._delete_batch)
         action_layout.addWidget(self.del_btn, 1)
 
@@ -209,11 +214,11 @@ class RightPanel(QWidget, SyncMixin):
         )
         self.scroll_content_layout.setSpacing(10)
 
-        algo_label = QLabel("Algorithm Settings")
-        algo_label.setStyleSheet(
-            "font-weight: bold; margin-top: 5px; margin-bottom: 5px;"
-        )
-        self.scroll_content_layout.addWidget(algo_label)
+        # algo_label = QLabel(language_config.LBL_ALGORITHM_SETTINGS)
+        # algo_label.setStyleSheet(
+        #     "font-weight: bold; margin-top: 5px; margin-bottom: 5px;"
+        # )
+        # self.scroll_content_layout.addWidget(algo_label)
 
         # Alignment FormGroup (keep hidden in background)
         align_names = self.logic.get_algorithm_names("alignment")
@@ -228,8 +233,8 @@ class RightPanel(QWidget, SyncMixin):
         # Super Resolution Feature Card
         sr_names = self.logic.get_algorithm_names("super_resolution")
         self.sr_card = FeatureCard(
-            "SUPER RESOLUTION",
-            "Upscale stack resolution dynamically using high-quality interpolation.",
+            language_config.PARAMETER_BATCH_SUPER_RESOLUTION.upper(),
+            language_config.DESC_SUPER_RESOLUTION_CARD,
             sr_names,
             "No Super Resolution",
             self,
@@ -243,8 +248,8 @@ class RightPanel(QWidget, SyncMixin):
         # Denoising Feature Card
         denoise_names = self.logic.get_algorithm_names("denoising")
         self.denoise_card = FeatureCard(
-            "DENOISING",
-            "Reduce noise and clean image details while preserving edges.",
+            language_config.PARAMETER_BATCH_DENOISING.upper(),
+            language_config.DESC_DENOISING_CARD,
             denoise_names,
             "No Denoising",
             self,
@@ -273,7 +278,7 @@ class RightPanel(QWidget, SyncMixin):
         main_layout.addWidget(self.splitter)
 
         # Process All Batch Button (Fixed at the very bottom of RightPanel, below splitter)
-        self.process_all_btn = Button("Process All Batch", variant="primary")
+        self.process_all_btn = Button(language_config.BTN_PROCESS_ALL_BATCH, variant="primary")
         self.process_all_btn.clicked.connect(self._on_process_all_clicked)
         main_layout.addWidget(self.process_all_btn)
 
@@ -416,16 +421,13 @@ class RightPanel(QWidget, SyncMixin):
         if not selected_ids:
             return
 
-        msg_box = QMessageBox(self)
-        msg_box.setWindowTitle("Confirm Delete")
-        msg_box.setText(f"Delete {len(selected_ids)} selected batch(es)?")
-        msg_box.setIcon(QMessageBox.Icon.Question)
-        msg_box.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowTitleHint)
-        msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        msg_box.setDefaultButton(QMessageBox.StandardButton.No)
-        reply = msg_box.exec()
+        from pixel_refine_desktop.ui.resources.GenericUILibrary import modal_confirm
+        confirmed = modal_confirm.question(
+            self,
+            language_config.CONFIRM_BATCH_ALL_DELETE_BUTTON.format(len(selected_ids))
+        )
 
-        if reply == QMessageBox.StandardButton.Yes:
+        if confirmed:
             for bid in selected_ids:
                 if self.controller.delete_batch(bid):
                     pass  # Handled by list reload or manual remove
@@ -503,7 +505,7 @@ class RightPanel(QWidget, SyncMixin):
 
         if not batches:
             QMessageBox.information(
-                self, "No Batches", "There are no batches available to process."
+                self, language_config.MSG_WARNING_TITLE, language_config.MSG_NO_BATCHES_AVAILABLE
             )
             return
 
@@ -523,8 +525,8 @@ class RightPanel(QWidget, SyncMixin):
             # If update fails (e.g., validation error), reload batches to revert name
             QMessageBox.warning(
                 self,
-                "Rename Failed",
-                "Could not rename the batch. The name may be invalid or already in use.",
+                language_config.MSG_WARNING_TITLE,
+                language_config.MSG_RENAME_FAILED,
             )
             self._load_batches()
 
@@ -559,6 +561,26 @@ class RightPanel(QWidget, SyncMixin):
     def _toggle_move_mode(self):
         # Sync from list_group state if possible, or toggle locally
         self._move_mode = not self.list_group._move_mode
+        self.list_group.set_move_mode(self._move_mode)
+
+    def retranslate_ui(self):
+        """Update all text dynamically when language changes."""
+        # Buttons
+        if hasattr(self, "new_btn"):
+            self.new_btn.setText(language_config.BTN_NEW_BATCH)
+        if hasattr(self, "del_btn"):
+            self.del_btn.setText(language_config.BTN_DELETE_BATCH)
+        if hasattr(self, "process_all_btn"):
+            self.process_all_btn.setText(language_config.BTN_PROCESS_ALL_BATCH)
+
+        # Feature Cards
+        if hasattr(self, "sr_card"):
+            self.sr_card.title_lbl.setText(language_config.PARAMETER_BATCH_SUPER_RESOLUTION.upper())
+            self.sr_card.desc_lbl.setText(language_config.DESC_SUPER_RESOLUTION_CARD)
+        if hasattr(self, "denoise_card"):
+            self.denoise_card.title_lbl.setText(language_config.PARAMETER_BATCH_DENOISING.upper())
+            self.denoise_card.desc_lbl.setText(language_config.DESC_DENOISING_CARD)
+
         self.list_group.set_move_mode(self._move_mode)
         if not self._move_mode:
             self._load_batches()  # Refresh style and order to be safe

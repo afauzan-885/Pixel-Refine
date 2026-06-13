@@ -1,4 +1,5 @@
 from PySide6.QtCore import QObject, QTimer, Signal
+from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 
 
 class BatchSelectionHandler(QObject):
@@ -69,7 +70,7 @@ class BatchSelectionHandler(QObject):
             self.right_panel.splitter.setStretchFactor(0, 1)
             self._splitter_timer.start(300)
 
-            display_panel.set_header_title("No batch selected")
+            display_panel.set_header_title(language_config.MSG_NO_BATCH_SELECTED)
             self.right_panel.current_batch_id = None
             self.right_panel.batch_selection_cleared.emit()
 

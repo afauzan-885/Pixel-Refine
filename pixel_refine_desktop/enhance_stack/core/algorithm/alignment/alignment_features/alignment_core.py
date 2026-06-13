@@ -631,16 +631,8 @@ def perform_alignment_gpu(
                 num_layers=n_layers,
             )
 
-            # Pre-allocate and upload the constant radius map once on the GPU
-            h_l2 = work_res_h // 4
-            w_l2 = work_res_w // 4
-            step_y = max(1, tile_h // 2)
-            step_x = max(1, tile_w // 2)
-
-            grid_h = (h_l2 + step_y - 1) // step_y
-            grid_w = (w_l2 + step_x - 1) // step_x
-            radius_map_np = np.full((grid_h, grid_w, 1), 12.0, dtype=np.float32)
-            ai_radius_gpu = engine.upload(radius_map_np)
+            # Ambil nilai max_search_radius (default 12)
+            max_search_radius = kwargs.get("max_search_radius", 12)
 
             # 3. Allocate Flow Buffers (REUSE ONCE)
             flow_l0 = engine.allocate((h_w, w_w, 2), dtype=np.float32, is_vector=False)
@@ -722,7 +714,7 @@ def perform_alignment_gpu(
                         num_layers=n_layers,
                     )
 
-                    # 🚀 STEP 2: EKSEKUSI GRAF BESAR TAICHI (SUNTIKKAN NDARRAY RADIUS MAP & SCRATCH BUFFERS)
+                    # 🚀 STEP 2: EKSEKUSI GRAF BESAR TAICHI (SUNTIKKAN SCALAR MAX SEARCH RADIUS & SCRATCH BUFFERS)
                     args = {
                         "ref_l0": ref_pyramid[0],
                         "ref_l1": ref_pyramid[1],
@@ -730,7 +722,6 @@ def perform_alignment_gpu(
                         "comp_l0": comp_pyramid[0],
                         "comp_l1": comp_pyramid[1],
                         "comp_l2": comp_pyramid[2],
-                        "ai_radius_map": ai_radius_gpu,
                         "flow_l0": flow_l0,
                         "flow_l1": flow_l1,
                         "flow_l2": flow_l2,
@@ -741,6 +732,7 @@ def perform_alignment_gpu(
                         "scale": 2.0,
                         "search_dist": int(search_dist),
                         "downscale": 2,
+                        "max_search_radius": int(max_search_radius),
                     }
                     mod.run(flow_graph_name, **args)
                     engine.sync()
@@ -925,11 +917,6 @@ def perform_alignment_gpu(
                     writer_thread.join()
 
                 # 5. EXPLICIT RESOUCE DESTROY (Pembersihan VRAM Total)
-                if ai_radius_gpu is not None:
-                    try:
-                        ai_radius_gpu.destroy()
-                    except Exception:
-                        pass
                 for buf in ref_pyramid:
                     buf.destroy()
                 

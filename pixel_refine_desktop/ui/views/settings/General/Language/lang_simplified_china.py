@@ -354,135 +354,58 @@ DEFAULT_PARAMETER_SETTING_LABEL = """选择一个算法以查看其参数。"""
 # --- ORB Parameters ---
 ORB_PARAMETER_SETTING_LABEL = "ORB 参数"
 ORB_NFEATURES_LABEL = "特征点数量"
-ORB_NFEATURES_DESCRIPTION = """特征点的数量决定了在一张图像中能够识别出多少精细的细节。
-
-- 较高的特征点数量可以让算法找到更多细节，从而实现更精确的图像对齐，但这会增加计算时间。
-
-- 通常，500 到 1500 之间的值对于大多数场景已经足够。
-  对于精度要求非常高的需求，选择 2500 到 5000 之间的值可以提高精度。"""
+ORB_NFEATURES_DESCRIPTION = """圖像中識別的特徵點數量。
+- 較高：對齊更精確，但會增加處理時間。
+- 推薦：普通圖像 500 至 1500；高精度需求 2500 至 5000。"""
 ORB_SCALEFACTOR_LABEL = "比例因子"
-ORB_SCALEFACTOR_DESCRIPTION = """比例因子决定了在处理过程中图像被逐步缩小的比率。
-
-- 接近 1.0 的值意味着图像会以更多步骤缓慢缩小。
-  这有助于检测更精细的细节，但耗时更长。
-
-- 较大的值会更快地缩小图像，使处理速度加快，
-  但可能会错过一些微小的细节。
-
-通常，比例因子的值在 1.2 到 1.5 之间。"""
+ORB_SCALEFACTOR_DESCRIPTION = """處理過程中圖像尺寸縮小的速度。
+- 接近 1.0：縮小慢，保留更多細節，但耗時更長。
+- 較高值：處理較快，但可能會遺漏微小細節。
+- 推薦：1.2 至 1.5。"""
 ORB_NLEVELS_LABEL = "金字塔层数"
-ORB_NLEVELS_DESCRIPTION = """金字塔层数指用于检测特征的图像金字塔中的层级数量。
-
-- 更多的层级能让算法在不同尺度上捕捉到更多细节，
-  这在图像尺寸多变时非常有用。
-
-- 然而，层级数越多，处理时间也越长。
-
-对于大多数场景，2 到 4 层是理想的选择。"""
+ORB_NLEVELS_DESCRIPTION = """用於檢測特徵的圖像金字塔層數。
+- 較高：更好適應不同大小的圖像，但會減慢處理速度。
+- 推薦：2 至 4。"""
 ORB_TRANSFORMATION_LABEL = "变换类型"
-ORB_TRANSFORMATION_DESCRIPTION = """根据您的需求选择图像对齐的方法：
-
-可选的类型包括：
-- 单应性变换 (HOMOGRAPHY): 适用于视角差异极大的照片（例如：从顶部和侧面拍摄的桌子）。
-  可以校正“透视”效果。
-
-- 仿射变换 (Affine): 可以旋转、缩放（可以非均匀）和移动图像。
-  例如：修正一张倾斜且需要局部放大的照片。
-
-- 相似性变换 (Similarity): 只允许旋转、均匀缩放和移动。
-  图像的宽高比会保持不变。
-
-- 欧几里得变换 (Euclidean): 最简单的变换：只旋转和移动图像，不改变大小。
-  适用于修正轻微倾斜的照片。
-
-选择建议：
-- 对于大多数情况（尤其是视角差异较大的照片），选择单应性变换。
-- 如果图像只需要简单的位置/旋转调整，欧几里得或相似性变换更合适。
-- 仅在需要灵活的形状调整且无透视效果时使用仿射变换。"""
+ORB_TRANSFORMATION_DESCRIPTION = """根據需求選擇圖像對齊方法：
+- HOMOGRAPHY: 最適合透視變化（如傾斜角度、俯視或側視）。
+- AFFINE: 校正圖像的旋轉、縮放和傾斜。
+- SIMILARITY: 僅允許旋轉、平移和等比例縮放（保持寬高比）。
+- EUCLIDEAN: 僅旋轉和平移，不改變圖像大小。"""
 ORB_RANSAC_LABEL = "RANSAC 阈值"
-ORB_RANSAC_DESCRIPTION = """RANSAC 阈值决定了算法在对齐图像时过滤异常值
-（即偏离正常范围的数据点）的严格程度。
-
-- 较低的值（例如 1-2）意味着过滤更严格，可能会忽略一些重要的特征点。
-
-- 较高的值（例如 4-5）对异常值更宽容，允许使用更多的特征点，
-  但这可能会降低对齐的精度。
-
-通常，根据数据中的噪声水平，1 到 3 之间的值已经足够。"""
+ORB_RANSAC_DESCRIPTION = """過濾未對齊噪點的嚴格程度。
+- 較低 (1-2)：過濾極嚴格，精度高，但特徵少時易失敗。
+- 較高 (4-5)：容忍度高，成功率高，但精度可能略微下降。
+- 推薦：1 至 3。"""
 
 # --- Farneback Optical Flow Parameters ---
 FARNEBACK_PARAMETER_SETTING_LABEL = "Farneback 参数"
 FARNEBACK_PYRAMID_SCALE_LABEL = "金字塔比例"
-FARNEBACK_PYRAMID_SCALE_DESCRIPTION = """金字塔比例是决定图像金字塔中每一层图像
-被缩小程度的因子。
-
-- 这个值决定了从一层到下一层的图像缩小（降采样）比例。
-  例如，值为 0.5 意味着每一层的尺寸都是上一层的一半。
-
-- 较小的值（约 0.10 到 0.5）会导致层与层之间的尺寸差异更大。
-  这可以加快计算速度，但可能会降低捕捉精细运动的精度。
-
-- 接近 1.00 的值会使层间尺寸变化更小，
-  从而实现更精确的运动检测，但计算时间更长。
-
-请根据您的需求调整此值，以在处理速度和运动检测精度之间找到平衡。
-推荐值：0.5
-"""
+FARNEBACK_PYRAMID_SCALE_DESCRIPTION = """金字塔每層圖像縮小的比例。
+- 接近 1.0：尺寸變化微小，運動檢測極精確，但速度慢。
+- 0.5：每層尺寸減半，速度與精度的最佳平衡。
+- 推薦：0.5。"""
 FARNEBACK_LEVELS_LABEL = "金字塔层数"
-FARNEBACK_LEVELS_DESCRIPTION = """在 Farneback 算法中，层数参数指的是用于计算光流的图像金字塔中的层级数量。
-
-- 更多的层级：算法可以检测到不同尺寸和速度的物体运动，
-  包括复杂或大范围的运动。但这需要更长的计算时间。
-
-- 然而，使用的层级越多，所需的计算时间也越长。
-
-您可以根据应用需求在 1 到 10 之间调整。
-通常，值 3 被认为是标准值。
-"""
+FARNEBACK_LEVELS_DESCRIPTION = """用於計算運動的金字塔層數。
+- 層數越多：越能捕捉大範圍或複雜的運動，但增加計算量。
+- 推薦：3。"""
 FARNEBACK_WIN_SIZE_LABEL = "窗口大小"
-FARNEBACK_WIN_SIZE_DESCRIPTION = """窗口大小决定了在光流计算中使用的像素区域（窗口）的大小。
-
-- 较大的窗口尺寸：会产生更稳定和平滑的运动估计，
-  因为信息是从更广的区域计算得出的。然而，微小的运动细节可能会被忽略。
-
-- 较小的窗口尺寸：对微小运动更敏感，
-  但噪声可能会被误判为运动，导致结果不够稳定。
-
-您可以选择一个能在微小运动细节的敏感度与结果的稳定性之间取得平衡的值。
-推荐值：15。
-"""
+FARNEBACK_WIN_SIZE_DESCRIPTION = """計算光流的像素窗口大小。
+- 較大：運動估計更平滑穩定，但會遺漏微小運動。
+- 較小：對微小運動敏感，但易將噪點誤判為運動。
+- 推薦：15。"""
 FARNEBACK_ITERATIONS_LABEL = "迭代次数"
-FARNEBACK_ITERATIONS_DESCRIPTION = """迭代次数决定了在每个金字塔层级上对光流计算进行优化的次数。
-
-- 迭代次数越多，获得的光流结果就越精确。
-- 然而，增加迭代次数也会减慢计算时间。
-
-选择一个既能提高精度又不会过度拖慢处理速度的值。
-推荐值：3。
-"""
+FARNEBACK_ITERATIONS_DESCRIPTION = """金字塔每層運動估計的優化次數。
+- 較高：運動估計更精確，但速度較慢。
+- 推薦：3。"""
 FARNEBACK_POLY_N_LABEL = "多项式展开邻域"
-FARNEBACK_POLY_N_DESCRIPTION = """多项式展开邻域 (poly_n) 决定了用于通过多项式展开法
-来近似运动的像素邻域大小。
-
-- 这个值决定了计算中使用了多少周围的像素数据。
-
-- 较大的值会产生更平滑的运动估计，
-  但可能会降低对微小运动的敏感度。
-
-通常，根据所需的细节和稳定性水平，使用 5 或 7。
-"""
+FARNEBACK_POLY_N_DESCRIPTION = """用於多項式展開的鄰域大小。
+- 較大：運動估計更平滑，但對極微小運動的敏感度降低。
+- 推薦：5 或 7。"""
 FARNEBACK_POLY_SIGMA_LABEL = "多项式 Sigma"
-FARNEBACK_POLY_SIGMA_DESCRIPTION = """多项式 Sigma 控制在进行多项式展开之前
-所应用平滑的程度。
-
-- 这个值是高斯滤波器的标准差，用于减少像素数据中的噪声。
-- 较高的 Sigma 值有助于抑制噪声，
-
-  但如果值过高，可能会消除重要的运动细节。
-
-请仔细调整，以在减少噪声的同时不丢失重要的运动细节。
-推荐值：1.2。
-"""
+FARNEBACK_POLY_SIGMA_DESCRIPTION = """用於平滑圖像細節的高斯標準差。
+- 較高：能更好抑制噪點，但可能模糊關鍵的運動細節。
+- 推薦：1.2。"""
 FARNEBACK_FLAGS_LABEL = "标志位"
 FARNEBACK_FLAGS_DESCRIPTION = """标志位 (Flag) 是一个可选参数，允许在 Farneback 算法中
 启用特定的选项。
@@ -499,72 +422,43 @@ FARNEBACK_FLAGS_DESCRIPTION = """标志位 (Flag) 是一个可选参数，允许
 # --- AKAZE Parameters ---
 AKAZE_PARAMETER_SETTING_LABEL = "AKAZE 参数"
 AKAZE_THRESHOLD_LABEL = "阈值"
-AKAZE_THRESHOLD_DESCRIPTION = """阈值参数决定了检测器在寻找关键点时的敏感度。
-
-- 较低的值会增加检测到的关键点数量，
-  这包括在特征较少或噪声较多的图像中。
-
-- 较高的值会将检测限制在最强的特征点上。
-
-推荐值：0.0010。
-"""
+AKAZE_THRESHOLD_DESCRIPTION = """檢測特徵點的靈敏度閾值。
+- 較低：檢測更多細節（適用於低對比度或高噪點場景）。
+- 較高：僅限檢測最顯著的特徵。
+- 推薦：0.001。"""
 AKAZE_OCTAVE_LABEL = "尺度空间倍频程数"
-AKAZE_OCTAVE_DESCRIPTION = """这个参数控制在图像中寻找重要特征时将分析多少个尺度级别。
-想象一下以不同的缩放级别查看图像；每个缩放级别被称为一个“倍频程 (octave)”。
-
-- 每个倍频程：代表一个不同的缩放级别，允许算法检测不同大小的特征。
-  例如，小特征在放大时可见，而大特征在缩小时可以被识别。
-
-- 更多的倍频程：提供了在更多尺度或尺寸上检测特征的能力。
-  但这需要更多的计算量，处理时间也更长。
-
-推荐值：4。
-"""
+AKAZE_OCTAVE_DESCRIPTION = """分析的縮放層次（八度）數量。
+- 較高：可在更大尺寸差異下檢測特徵，但增加處理時間。
+- 推薦：4。"""
 AKAZE_LAYER_LABEL = "每倍频程的层数"
-AKAZE_LAYER_DESCRIPTION = """每倍频程的层数决定了每个倍频程内的子级别数量。
-
-- 更多的层数可以提供更精细的尺度空间分辨率，
-  从而可以提高在不同尺度下检测特征的准确性。
-
-- 然而，增加层数也会增加计算负担。
-
-推荐值：4。
-"""
+AKAZE_LAYER_DESCRIPTION = """每個縮放層次內的子層數。
+- 較高：尺度檢測更細緻，但增加計算量。
+- 推薦：4。"""
 AKAZE_RATIO_LABEL = "比率阈值"
-AKAZE_RATIO_DESCRIPTION = """比率阈值是在两张图像之间匹配关键点时使用的一个值。
-其目的是确保找到的匹配是真正准确的，而不仅仅是巧合。
-
-- 较低的比率（接近 0.50）：只接受那些非常清晰、明确无疑的匹配。
-  换句话说，它在选择匹配时更具选择性，从而减少了错误匹配（假阳性）的可能性。
-
-- 较高的比率（接近 1.00）：意味着我们对接受匹配更加宽容，
-  因此会接受更多的匹配。但这同时也增加了错误匹配的可能性。
-
-推荐值：0.80。
-"""
+AKAZE_RATIO_DESCRIPTION = """特徵點匹配的嚴格程度。
+- 較低 (0.5 - 0.7)：匹配嚴格，減少錯誤連接。
+- 較高 (0.8 - 0.9)：容忍度高，匹配較多但錯誤連接機率增加。
+- 推薦：0.8。"""
 
 # DENOISING
 # --- Denoising Parameters ---
 OVERLAP_LABEL = "重叠率 %"
-OVERLAP_DESCRIPTION = """用于减少图块伪影（在运动区域产生方块效应）。
-
-增加重叠率可以减少这种效应，但会增加计算时间。"""
+OVERLAP_DESCRIPTION = """分塊處理（Tile）之間的重疊區域比例。
+- 較高：減少運動區域的分塊邊界痕跡，但會增加處理時間。"""
 
 TILE_SIZE_LABEL = "图块大小"
-TILE_SIZE_DESCRIPTION = """图块尺寸越小，检测差异的细节就越丰富。
-
-但这也会增加计算时间，并增加差异检测中出错的可能性。"""
+TILE_SIZE_DESCRIPTION = """圖像分塊處理的大小。
+- 較小：捕捉更細微的細節和差異，但處理速度慢。
+- 較大：處理速度快，但可能會遺漏微小的運動細節。"""
 
 MOTION_SENSIVITY_LABEL = "运动灵敏度"
-MOTION_SENSIVITY_DESCRIPTION = """运动灵敏度控制算法在检测图块内差异时的激进程度。
-
-值越低，检测差异时就越激进或敏感，
-但这可能导致噪声也被视为差异。"""
+MOTION_SENSIVITY_DESCRIPTION = """系統檢測運動差異的靈敏度。
+- 較低值：極靈敏（噪點也可能被誤判為運動）。
+- 較高值：敏感度低（忽略微小運動）。"""
 
 NOISE_OFFSET_LABEL = "噪声偏移量"
-NOISE_OFFSET_DESCRIPTION = """用于忽略图像中噪声水平的阈值，从而使较高的噪声不被视为运动。
-
-值越高，对于有极端噪声的图像，叠加结果可能更干净，但这也会降低对图像运动的检测能力。"""
+NOISE_OFFSET_DESCRIPTION = """忽略圖像噪點的閾值。
+- 較高：極高噪點下圖像疊加更乾淨，但會降低運動檢測能力。"""
 
 # --- General Alignment Options (Edges, Crop, Saving) ---
 KEEP_EDGES_LABEL = "保留边缘"
@@ -651,44 +545,93 @@ MULTI_CORE_CPU = "多核 CPU 加速"
 SETTINGS_SAVED = "设置已成功保存。"
 
 CANT_READ_FILE_SETTINGS = "警告：无法读取设置文件 '{GENERAL_SETTINGS_FILE}'。将使用默认值。"
-MULTI_CORE_CPU_DESCRIPTION = """启用此选项将提高图像处理的计算速度，但会略微增加内存使用量。
+MULTI_CORE_CPU_DESCRIPTION = """啟用多線程並行處理。
+- 開啟：大幅提升速度，但增加內存使用。內存受限時建議關閉。"""
 
-如果您的计算机内存非常有限，建议不勾选此项。"""
-
-GPU_ACCELERATION_DESCRIPTION = """启用此选项将通过使用 GPU 进行处理来显著提高计算速度。
-
-注意：GPU 当前的加速仅限于 Farneback 和 Lightglue 算法，其他算法的实现将陆续推出。"""
+GPU_ACCELERATION_DESCRIPTION = """使用顯卡 (GPU) 加速計算。
+- 注意：目前僅支持 Farneback 和 LightGlue 對齊算法。"""
 
 THUMBNAIL_LABEL = "缩略图"
-THUMBNAIL_DESCRIPTION = """用于批处理的图像预览，仍处于实验阶段。
-添加新批次时，有时可能会导致闪烁或延迟。"""
+THUMBNAIL_DESCRIPTION = """在批處理過程中顯示圖像預覽（實驗性）。
+- 注意：添加新批處理時可能會引起輕微卡頓。"""
 
 NOISE_MAD_OFFSET_LABEL = "MAD 噪声因子"
-NOISE_MAD_OFFSET_DESCRIPTION = """MAD 检测在处理高噪声图像时的敏感度。
-
-较高的值意味着对噪声的容忍度更高（在高噪声区域不那么敏感），
-但如果发生运动，会在这些区域导致鬼影。"""
+NOISE_MAD_OFFSET_DESCRIPTION = """MAD 對高噪點圖像的容忍度。
+- 較高：噪點容忍度高，但運動區域產生重影的風險增加。"""
 
 MAD_SENSITIVITY_LABEL = "MAD 灵敏度"
-MAD_SENSITIVITY_DESCRIPTION = """MAD 在处理图像差异时的敏感度。
-
-较高的值对细微差异会更敏感，但如果输入图像噪声很高，
-会增加检测错误的可能性。"""
+MAD_SENSITIVITY_DESCRIPTION = """MAD 對圖像差異的靈敏度。
+- 較高：對微小變化更敏感，但高噪點下誤檢率會上升。"""
 
 CONF_SKIP_DFT_LABEL = "跳过 DFT 的\n置信度"
-CONF_SKIP_DFT_DESCRIPTION = """如果 MBM（基于块的运动）处理效果良好，则用于跳过 DFT（离散傅里叶变换）的阈值。
-
-值越高，就会有越多的处理由 MAD 完成。但 MAD 是一种粗略检测，
-它对噪声和低对比度区域很敏感，不过更多地使用 MAD 的好处是计算量更轻。"""
+CONF_SKIP_DFT_DESCRIPTION = """當 MBM 足夠好時跳過 DFT 的閾值。
+- 較高：更多任務由 MAD 處理（計算輕量但結果較粗糙）。"""
 
 WIENER_C_FACTOR_LABEL = "维纳 C 因子"
-WIENER_C_FACTOR_DESCRIPTION = """DCT 维纳滤波计算在检测图像差异时的敏感度。
-
-值越低，对检测细微运动就越敏感，但这会导致噪声增加，
-因为噪声本身会引起虚假运动。维纳 C 因子与 MAD 灵敏度协同工作。"""
+WIENER_C_FACTOR_DESCRIPTION = """維納濾波器對運動的靈敏度。
+- 較低：對微小運動敏感，但易受噪點影響。"""
 
 COARSE_MARGIN_LABEL = "粗对齐边距"
-COARSE_MARGIN_DESCRIPTION = """用于图块级别对齐的边距窗口。
+COARSE_MARGIN_DESCRIPTION = """分塊級別的對齊搜索邊距。
+- 較高：疊加更精確，但會顯著減慢處理速度。"""
 
-这能将对齐精度提高到图块级别，从而提升叠加的准确性。
-如果搜索区域过大，会对性能产生较大影响。"""
+# --- Missing UI Keys ---
+LBL_BATCH_MODE = "单批次模式"
+LBL_BULK_MODE = "批量模式"
+LBL_PARAMETER_ALIGNMENT = "圖像对齐设置"
+LBL_ALIGNMENT_PLACEHOLDER = "圖像对齐设置将显示在此处"
+LBL_PARAMETER_ALGORITHM = "处理方法设置"
+LBL_ALGORITHM_PLACEHOLDER = "详细设置将在您选择上述处理方法后显示"
+BTN_START = "开始处理"
+BTN_NEW_BATCH = "创建新批次"
+BTN_DELETE_BATCH = "删除批次"
+LBL_ALGORITHM_SETTINGS = "叠加与对齐方法设置"
+BTN_PROCESS_ALL_BATCH = "处理所有批次"
+LBL_FROM_PROJECT = "从项目编号:"
+LBL_TO_PROJECT = "至项目编号:"
+MSG_INVALID_RANGE = "起始项目编号不能大于结束项目编号。"
+BTN_CLOSE = "关闭"
+LBL_STATUS_PROCESSING = "处理中"
+BTN_BACK_TO_GRID = "返回网格"
+BTN_IMPORT_IMAGES = "导入图像"
+MSG_SUCCESS_SAVE_TO = "图像成功保存至:"
+LBL_DRAG_DROP_HERE = "拖放图像至此处以添加"
+BTN_YES_DELETE = "是，删除"
+BTN_NO_CANCEL = "不，取消"
+LBL_SELECTED_BATCHES_TITLE = "已选批次完整列表"
+LBL_CREATE_NEW_BATCH_TITLE = "创建新批次"
+LBL_BATCH_NAME = "批次名称"
+BTN_CREATE = "创建"
+MSG_CONFIRM_DELETE_BATCH_COUNT = "您确定要删除这 {} 个批次吗？"
+MSG_NO_BATCHES_AVAILABLE = "没有可处理的批次列表。"
+MSG_RENAME_FAILED = "无法重命名批次。名称可能无效或已被使用。"
+TIP_CPU_CORES = "用于并行处理的 CPU 核心数。强烈推荐选择“自动”。"
+LBL_SMART_NOISE_ALPHA = "智能噪声 Alpha (AI):"
+TIP_SMART_NOISE_ALPHA = "控制人工智能 (AI) 对噪点的容忍度。\n较低值 = 对运动更敏感 (减少鬼影)。\n较高值 = 噪点清除更彻底 (有鬼影风险)。"
+LBL_SMART_NOISE_AWARE = "智能感知噪声 (AI):"
+TIP_SMART_NOISE_AWARE = "启用或禁用 AI 对图像噪点的自动分析。"
+LBL_NOISE_CONTRIB = "噪声清除强度 (%):"
+TIP_NOISE_CONTRIB = "调整 AI 过滤噪点的强度 (0% = 禁用，100% = 完全清除)。"
+LBL_LIGHT_GLUE_TITLE = "LightGlue 方法设置"
+LBL_SELECT_REFERENCE_IMAGE = "选择参考图像"
+LBL_DELETE_IMAGES = "删除图像"
+MSG_CONFIRM_DELETE_IMAGE = "您确定要从此批次中删除所选图像吗？"
+TIP_RIGHT_CLICK_COPY = "右键单击以复制文本"
+MSG_UNSUPPORTED_FORMAT_IGNORED = "文件格式不支持或扩展名无效。"
+MSG_NO_VALID_IMAGES_GROUP = "没有可导入的有效图像。"
+LBL_LOGGING_LEVEL = "日志级别:"
+BTN_RESET_TO_DEFAULT = "重置为默认值"
+BTN_CLEAR_CACHE = "清除缓存"
+LBL_STATUS_READY = "就绪"
+LBL_ITEMS_REMAINING = "个进程剩余"
+LBL_SPLASH_LOADING = "正 在 加 载 . . ."
+MSG_EXIFTOOL_NOT_FOUND = "未找到 Exiftool。请确保它已安装并已添加到系统的 PATH 中。"
+MSG_NO_BATCHES_YET = "尚无批次"
+MSG_NO_BATCHES_YET_DESC = "创建一个新批次或导入图像以开始。"
+MSG_NO_BATCH_SELECTED = "没有选择批次"
+LBL_BATCH_IMAGE_COUNT_FORMAT = "批次 {}   -   ({} 张图像)"
+DESC_SUPER_RESOLUTION_CARD = "增强细节并缩放图像分辨率。"
+DESC_DENOISING_CARD = "减少图像噪点并对齐像素层。"
+
+
+

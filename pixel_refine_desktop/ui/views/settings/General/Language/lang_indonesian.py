@@ -371,141 +371,58 @@ DEFAULT_PARAMETER_SETTING_LABEL = """Pilih algoritma untuk melihat parameter."""
 # --- ORB Parameters ---
 ORB_PARAMETER_SETTING_LABEL = "Parameter ORB"
 ORB_NFEATURES_LABEL = "Jumlah Fitur"
-ORB_NFEATURES_DESCRIPTION = """Jumlah fitur mencari seberapa banyak detail halus yang dapat dikenali dalam sebuah gambar.
-
-- Jumlah fitur yang lebih tinggi memungkinkan algoritma untuk mencari lebih banyak detail,
-  menghasilkan penyelarasan gambar yang lebih presisi. Namun, meningkatkan waktu komputasi.
-
-- Biasanya, nilai antara 500 hingga 1500 sudah cukup untuk sebagian besar scene gambar.
-  Untuk kebutuhan akurasi yang sangat tinggi, memilih nilai antara 2500 hingga 5000 dapat meningkatkan akurasi."""
+ORB_NFEATURES_DESCRIPTION = """Jumlah detail gambar yang dikenali.
+- Lebih Tinggi: Penyelarasan lebih presisi, tetapi proses lebih lambat.
+- Rekomendasi: 500 hingga 1500 (standar); 2500 hingga 5000 (akurasi sangat tinggi)."""
 ORB_SCALEFACTOR_LABEL = "Scale Factor"
-ORB_SCALEFACTOR_DESCRIPTION = """Scale Factor menentukan tingkat penurunan skala gambar secara bertahap selama pemrosesan.
-
-- Jika nilainya mendekati 1.0, gambar diperkecil secara perlahan dengan lebih banyak langkah.
-  Hal ini memungkinkan deteksi detail yang lebih halus, tetapi membutuhkan waktu lebih lama.
-
-- Jika nilainya lebih besar, gambar diperkecil lebih cepat, sehingga pemrosesan menjadi lebih singkat,
-  tetapi mungkin ada beberapa detail kecil yang terlewat.
-
-Biasanya, nilai Scale Factor berkisar antara 1.2 hingga 1.5."""
+ORB_SCALEFACTOR_DESCRIPTION = """Kecepatan pengecilan ukuran gambar secara bertahap saat diproses.
+- Mendekati 1.0: Pengecilan perlahan, detail sangat terjaga, tetapi proses lambat.
+- Lebih Tinggi: Proses lebih cepat, namun detail kecil mungkin terlewat.
+- Rekomendasi: 1.2 hingga 1.5."""
 ORB_NLEVELS_LABEL = "Jumlah Level"
-ORB_NLEVELS_DESCRIPTION = """Jumlah level menunjukkan jumlah lapisan dalam piramida gambar yang digunakan untuk mendeteksi fitur.
-
-- Semakin banyak level, semakin banyak detail yang dapat ditangkap algoritma pada berbagai skala, 
-  hal ini berguna jika ukuran gambar bervariasi. 
-  
-- Namun, semakin tinggi jumlah level, semakin lama waktu pemrosesannya.
-
-Untuk sebagian besar scene, nilai antara 2 hingga 4 sudah cukup ideal."""
+ORB_NLEVELS_DESCRIPTION = """Jumlah lapisan ukuran gambar (lapisan piramida) untuk mendeteksi fitur.
+- Lebih Tinggi: Deteksi lebih baik pada gambar dengan ukuran bervariasi, tetapi proses lambat.
+- Rekomendasi: 2 hingga 4."""
 ORB_TRANSFORMATION_LABEL = "Jenis Transformasi"
-ORB_TRANSFORMATION_DESCRIPTION = """Pilih metode untuk menyelaraskan gambar sesuai kebutuhan Anda:
-
-Opsi yang tersedia meliputi:
-- HOMOGRAPHI: Cocok untuk foto dengan perbedaan sudut yang cukup ekstrem (misal: gambar meja dari atas vs. samping).
-  Bisa menyesuaikan efek "perspektif".
-
-- Afine: Bisa diputar, mengubah ukuran (bisa tidak seragam), dan menggeser gambar.
-  Contoh: memperbaiki foto yang miring dan perlu dibesarkan sebagian.
-
-- Similarity: Hanya bolehkan putar, perbesaran/perkecilan yang seragam, dan geser.
-  aspek rasio tetap terjaga.
-  
-- Euclidean: Paling sederhana: hanya putar dan geser gambar tanpa mengubah ukuran.
-  Cocok untuk memperbaiki foto yang sedikit miring.
-
-Saran Pemilihan:
-- Untuk kebanyakan kasus (terutama foto dari sudut yang cukup ekstrem), pilih Homografi.
-- Jika gambar hanya perlu disesuaikan posisi/rotasi sederhana, Euclidean atau Similarity lebih cocok.
-- Gunakan Afine hanya jika perlu penyesuaian bentuk fleksibel tanpa efek perspektif."""
+ORB_TRANSFORMATION_DESCRIPTION = """Pilih metode penyelarasan gambar sesuai kebutuhan:
+- HOMOGRAPHY: Terbaik untuk perbedaan sudut pandang ekstrem (tilted/perspektif).
+- AFFINE: Mengoreksi rotasi, skala, dan kemiringan gambar.
+- SIMILARITY: Membatasi pada rotasi dan pergeseran dengan rasio tetap (presisi).
+- EUCLIDEAN: Hanya memutar dan menggeser gambar tanpa mengubah ukuran."""
 ORB_RANSAC_LABEL = "RANSAC Threshold"
-ORB_RANSAC_DESCRIPTION = """RANSAC Threshold menentukan seberapa ketat algoritma menyaring nilai outlier
-(data yang menyimpang jauh) saat menyelaraskan gambar.
-
-- Nilai lebih rendah (misalnya, 1-2) berarti penyaringan lebih ketat, sehingga beberapa fitur penting mungkin terabaikan.
-
-- Nilai lebih tinggi (misalnya, 4-5) lebih toleran terhadap outlier, memungkinkan lebih banyak fitur digunakan,
-  tetapi bisa mengurangi akurasi penyelarasan.
-
-Biasanya, nilai antara 1 hingga 3 sudah cukup, tergantung pada tingkat noise dalam data."""
+ORB_RANSAC_DESCRIPTION = """Tingkat ketatnya penyaringan titik yang tidak sejajar.
+- Rendah (1-2): Sangat ketat, presisi tinggi, tetapi rentan gagal jika gambar minim detail.
+- Tinggi (4-5): Lebih toleran, memperbesar peluang berhasil tetapi akurasi sedikit berkurang.
+- Rekomendasi: 1 hingga 3."""
 
 # --- Farneback Optical Flow Parameters ---
 FARNEBACK_PARAMETER_SETTING_LABEL = "Parameter Farneback"
 FARNEBACK_PYRAMID_SCALE_LABEL = "Skala Piramida"
-FARNEBACK_PYRAMID_SCALE_DESCRIPTION = """Skala Piramida adalah faktor yang menentukan seberapa banyak gambar
-yang diperkecil pada setiap level piramida.
-
-- Nilai ini menentukan seberapa besar mengurangi ukuran gambar (downscale) dari satu level ke level berikutnya.
-  Misalnya, jika nilainya 0.5, maka setiap level akan memiliki ukuran setengah dari level sebelumnya.
-
-- Nilai yang lebih kecil (sekitar 0.10 hingga 0.5) menyebabkan perbedaan ukuran antar level lebih besar.
-  Ini dapat mempercepat komputasi, tetapi mungkin mengurangi akurasi dalam menangkap gerakan halus.
-
-- Nilai yang mendekati 1.00 menghasilkan perubahan ukuran yang lebih kecil antar level,
-  memungkinkan deteksi gerakan yang lebih akurat, dengan waktu komputasi yang lebih lama.
-
-Sesuaikan nilai ini sesuai kebutuhan Anda untuk menemukan keseimbangan antara kecepatan pemrosesan dan
-akurasi deteksi gerak.
-Nilai yang direkomendasikan: 0.5
-"""
+FARNEBACK_PYRAMID_SCALE_DESCRIPTION = """Faktor skala pengecilan gambar pada setiap level piramida.
+- Mendekati 1.0: Perubahan halus, akurasi gerak tinggi, tetapi proses lambat.
+- Nilai 0.5: Gambar diperkecil setengahnya di tiap tahap, seimbang antara kecepatan dan akurasi.
+- Rekomendasi: 0.5."""
 FARNEBACK_LEVELS_LABEL = "Level"
-FARNEBACK_LEVELS_DESCRIPTION = """Parameter Level dalam algoritma Farneback merujuk pada jumlah lapisan
-  (layers) dalam piramida gambar yang digunakan untuk menghitung optical flow.
-
-- Lebih banyak level: Algoritma dapat mendeteksi gerakan objek pada berbagai ukuran dan kecepatan,
-  termasuk gerakan yang kompleks atau mencakup area yang luas. Namun, ini memerlukan
-  waktu komputasi yang lebih lama.
-  
-- Namun, semakin banyak level yang digunakan, semakin lama waktu komputasi yang dibutuhkan.
-
-Anda dapat menyesuaikannya antara 1 hingga 10 sesuai dengan kebutuhan aplikasi Anda.
-Secara umum, nilai 3 dianggap sebagai standar,
-"""
+FARNEBACK_LEVELS_DESCRIPTION = """Jumlah lapisan piramida untuk menghitung gerakan objek.
+- Lebih Banyak: Mendeteksi gerakan objek besar atau kompleks lebih baik, proses lebih lama.
+- Rekomendasi: 3."""
 FARNEBACK_WIN_SIZE_LABEL = "Ukuran Jendela"
-FARNEBACK_WIN_SIZE_DESCRIPTION = """Ukuran Jendela menentukan seberapa banyak area piksel (jendela)
-yang digunakan dalam perhitungan optical flow.
-
-- Ukuran jendela yang lebih besar: Menghasilkan estimasi pergerakan yang lebih stabil dan halus karena
-  informasi dihitung dari area yang lebih luas. Namun, detail pergerakan kecil mungkin terlewatkan.
-  
-- Ukuran jendela yang lebih kecil: Lebih sensitif terhadap pergerakan kecil, 
-  namun noise bisa dianggap sebagai gerakan dan kurang stabil.
-
-Anda bisa memilih nilai antara sensitif terhadap detail gerakan kecil
-dan hasil yang stabil.
-Nilai yang direkomendasikan: 15.
-"""
+FARNEBACK_WIN_SIZE_DESCRIPTION = """Ukuran jendela piksel yang digunakan untuk mendeteksi gerakan.
+- Lebih Besar: Estimasi gerakan lebih stabil dan halus, detail kecil terlewat.
+- Lebih Kecil: Sensitif terhadap gerakan kecil, tetapi noise mudah terbaca sebagai gerakan.
+- Rekomendasi: 15."""
 FARNEBACK_ITERATIONS_LABEL = "Iterasi"
-FARNEBACK_ITERATIONS_DESCRIPTION = """Iterasi menentukan berapa kali perhitungan optical flow diperbaiki pada setiap level piramida
-
-- Semakin banyak iterasi, semakin akurat hasil optical flow yang diperoleh.
-- Namun, peningkatan jumlah iterasi juga dapat memperlambat waktu komputasi.
-
-Pilih nilai yang dapat meningkatkan akurasi tanpa terlalu memperlambat proses.
-Nilai yang direkomendasikan: 3.
-"""
+FARNEBACK_ITERATIONS_DESCRIPTION = """Jumlah pengulangan perhitungan gerakan di setiap level piramida.
+- Lebih Banyak: Hasil deteksi gerakan lebih akurat, tetapi proses lebih lambat.
+- Rekomendasi: 3."""
 FARNEBACK_POLY_N_LABEL = "Ekspansi Polinomial"
-FARNEBACK_POLY_N_DESCRIPTION = """Ekspansi Polinomial (poly_n) menentukan ukuran area piksel yang digunakan,
-untuk memperkirakan gerakan dengan metode ekspansi polinomial.
-
-- Nilai ini menentukan seberapa banyak data piksel di sekitar yang digunakan dalam perhitungan.
-
-- Nilai yang lebih besar akan menghasilkan estimasi gerakan yang lebih halus,
-  tetapi dapat mengurangi sensitivitas terhadap gerakan kecil.
-
-Biasanya, nilai yang digunakan adalah 5 atau 7, tergantung pada tingkat detail dan kestabilan yang diinginkan.
-"""
+FARNEBACK_POLY_N_DESCRIPTION = """Ukuran area piksel untuk memperkirakan model gerakan.
+- Lebih Besar: Gerakan lebih halus, tetapi kurang peka pada gerakan yang sangat kecil.
+- Rekomendasi: 5 atau 7."""
 FARNEBACK_POLY_SIGMA_LABEL = "Sigma Polinomial"
-FARNEBACK_POLY_SIGMA_DESCRIPTION = """Sigma Polinomial mengontrol seberapa besar perataan
-yang diterapkan sebelum ekspansi polinomial dilakukan.
-
-- Nilai ini merupakan deviasi standar dari filter Gaussian yang digunakan untuk mengurangi noise pada data piksel.
-- Sigma yang lebih tinggi dapat membantu meredam noise,
-
-  tetapi jika terlalu tinggi bisa menghilangkan detail gerakan yang penting.
-
-Atur dengan cermat untuk mengurangi noise tanpa kehilangan detail gerakan yang signifikan.
-Nilai yang direkomendasikan: 1.2.
-"""
+FARNEBACK_POLY_SIGMA_DESCRIPTION = """Ketebalan efek perataan untuk menyaring noise pada gambar.
+- Lebih Tinggi: Noise tersaring lebih bersih, tetapi detail gerakan penting bisa kabur.
+- Rekomendasi: 1.2."""
 FARNEBACK_FLAGS_LABEL = "Flag"
 FARNEBACK_FLAGS_DESCRIPTION = """Flag adalah parameter opsional yang memungkinkan
 mengaktifkan opsi tertentu dalam algoritma Farneback.
@@ -522,78 +439,44 @@ Nilai yang direkomendasikan: 0.
 # --- AKAZE Parameters ---
 AKAZE_PARAMETER_SETTING_LABEL = "Parameter AKAZE"
 AKAZE_THRESHOLD_LABEL = "Threshold"
-AKAZE_THRESHOLD_DESCRIPTION = """Parameter Threshold menentukan seberapa sensitifnya detektor
-untuk mencari sebuah titik kunci (keypoint).
-
-- Nilai yang lebih rendah meningkatkan deteksi titik kunci yang lebih banyak,
-  termasuk gambar yang memiliki fitur yang sedikit dan banyak noise.
-
-- Nilai yang lebih tinggi hanya membatasi deteksi hanya pada fitur yang paling kuat.
-
-Nilai yang direkomendasikan: 0.0010.
-"""
+AKAZE_THRESHOLD_DESCRIPTION = """Sensitivitas detektor dalam mencari titik kunci fitur gambar.
+- Lebih Rendah: Lebih sensitif (cocok untuk gambar minim detail/tinggi noise).
+- Lebih Tinggi: Hanya mendeteksi fitur yang sangat menonjol saja.
+- Rekomendasi: 0.001."""
 AKAZE_OCTAVE_LABEL = "Jumlah Oktav"
-AKAZE_OCTAVE_DESCRIPTION = """ parameter yang mengatur berapa banyak tingkat skala yang akan dianalisis
-saat mencari fitur-fitur penting dalam sebuah gambar. Bayangkan Anda melihat gambar dengan berbagai tingkat zoom;
-setiap tingkat zoom ini disebut "oktav"
-
-- Setiap oktav: Mewakili tingkat zoom yang berbeda, memungkinkan algoritma mendeteksi fitur pada berbagai ukuran.
-  Misalnya, fitur kecil akan terlihat pada saat diperbesar, sedangkan fitur besar dapat dikenali pada Zoom
-  yang lebih jauh.
-
-- Lebih banyak oktav: Memberikan kemampuan untuk mendeteksi fitur pada lebih banyak skala atau ukuran.
-  Namun, komputer perlu bekerja lebih keras dan waktu pemrosesan menjadi lebih lama.
-
-Nilai yang direkomendasikan: 4.
-"""
+AKAZE_OCTAVE_DESCRIPTION = """Jumlah tingkat zoom gambar yang dianalisis.
+- Lebih Banyak: Deteksi lebih konsisten di berbagai ukuran, tetapi proses lebih lambat.
+- Rekomendasi: 4."""
 AKAZE_LAYER_LABEL = "Jumlah Lapisan per Oktav"
-AKAZE_LAYER_DESCRIPTION = """Lapisan per Oktav menentukan jumlah sub-level dalam setiap oktav.
-
-- Lebih banyak lapisan memberikan resolusi ruang skala yang lebih halus,
-  sehingga dapat meningkatkan deteksi fitur di berbagai skala.
-
-- Namun, menambahkan lapisan juga meningkatkan beban komputasi.
-
-Nilai yang direkomendasikan: 4.
-"""
+AKAZE_LAYER_DESCRIPTION = """Jumlah sub-lapisan di dalam setiap tingkat zoom.
+- Lebih Banyak: Deteksi skala gambar lebih halus, komputasi bertambah.
+- Rekomendasi: 4."""
 AKAZE_RATIO_LABEL = "Rasio Threshold"
-AKAZE_RATIO_DESCRIPTION = """Rasio Threshold merupakan nilai yang digunakan saat mencocokkan fitur-fitur penting (keypoint)
-antara dua gambar. Tujuannya untuk memastikan bahwa kecocokan yang ditemukan benar-benar akurat dan bukan sebuah kebetulan.
-
-- Rasio lebih rendah (mendekati 0,50): Hanya menerima kecocokan yang sangat jelas yang tidak diragukan lagi.
-  Dengan kata lain, lebih selektif dalam memilih kecocokan, sehingga kemungkinan mendapatkan kesalahan dalam mencocokan
-  keypoint palsu lebih kecil.
-
-- Rasio lebih tinggi (mendekati 1,00): Berarti kita lebih toleran dalam menerima kecocokan,
-  sehingga lebih banyak kecocokan yang diterima. Namun, ini juga meningkatkan kemungkinan kesalahan
-  dalam mencocokan keypoint.
-
-Nilai yang direkomendasikan: 0.80.
-"""
+AKAZE_RATIO_DESCRIPTION = """Tingkat ketatnya pencocokan fitur antar gambar.
+- Rendah (0.5 - 0.7): Pencocokan sangat ketat, menghindari salah sambung.
+- Tinggi (0.8 - 0.9): Lebih toleran, hasil cocok lebih banyak namun risiko salah sambung naik.
+- Rekomendasi: 0.8."""
 
 
 # DENOISING
 # --- Denoising Parameters ---
 OVERLAP_LABEL = "Overlap %"
-OVERLAP_DESCRIPTION = """Berfungsi untuk mengurangi artefak tile (yang menyebabkan efek kotak-kotak pada area yang bergerak). 
-
-Meningkatkan overlap dapat mengurangi efek tersebut, namun akan meningkatkan waktu komputasi """
+OVERLAP_DESCRIPTION = """Area tumpang tindih antar petak (tile).
+- Lebih Tinggi: Mengurangi efek patah/kotak di area bergerak, waktu proses bertambah."""
 
 TILE_SIZE_LABEL = "Ukurat petak (tile)"
-TILE_SIZE_DESCRIPTION = """Semakin kecil ukuran tile, semakin detail dalam mendeteksi perbedaan. 
-
-Namun ini juga akan meningkatkan waktu komputasi dan meningkatkan kemungkinan kesalahan dalam deteksi perbedaan"""
+TILE_SIZE_DESCRIPTION = """Ukuran blok pemrosesan gambar.
+- Lebih Kecil: Mendeteksi detail perbedaan lebih halus, tetapi proses lebih lambat.
+- Lebih Besar: Proses lebih cepat, namun detail perbedaan kecil bisa terlewat."""
 
 MOTION_SENSIVITY_LABEL = """Sensitivitas Pergerakan"""
-MOTION_SENSIVITY_DESCRIPTION = """Sensivitas pergerakan mengatur seberapa agresifnya algoritma dalam mendeteksi perbedaan dalam sebuah petak. 
-
-Semakin rendah nilainya, semakin agresif atau sensitif dalam mendeteksi perbedaan,
-namun hal ini menyebabkan noise akan ikut dianggap sebagai perbedaan"""
+MOTION_SENSIVITY_DESCRIPTION = """Sensitivitas sistem dalam mendeteksi perbedaan gerakan.
+- Nilai Rendah: Sangat sensitif (noise bisa dianggap sebagai gerakan).
+- Nilai Tinggi: Kurang sensitif (mengabaikan gerakan halus)."""
 
 NOISE_OFFSET_LABEL = """Offset Noise"""
-NOISE_OFFSET_DESCRIPTION = """Ambang batas dalam mengabaikan tingkat noise pada gambar, sehingga noise yang lebih tinggi tidak dianggap sebagai pergerakan.
-
-Semakin tinggi nilainya, hasil stacking bisa lebih bersih untuk gambar dengan noise ekstrim, namun ini juga dapat mengurangi deteksi pergerakan pada gambar."""
+NOISE_OFFSET_DESCRIPTION = """Ambang batas untuk mengabaikan noise gambar.
+- Lebih Tinggi: Hasil tumpuk lebih bersih di kondisi ekstrim, tetapi deteksi gerak menurun."""
 
 
 # --- General Alignment Options (Edges, Crop, Saving) ---
@@ -690,46 +573,94 @@ MULTI_CORE_CPU = "Akselerasi Multi-Core CPU"
 SETTINGS_SAVED = "Pengaturan berhasil disimpan."
 
 CANT_READ_FILE_SETTINGS = "Peringatan: Tidak dapat membaca berkas pengaturan '{GENERAL_SETTINGS_FILE}'. Menggunakan nilai default."
-MULTI_CORE_CPU_DESCRIPTION = """Mengaktifkan akan meningkatkan kecepatan komputasi dalam memproses gambar, namun akan menambah sedikit penggunaan RAM 
+MULTI_CORE_CPU_DESCRIPTION = """Mengaktifkan pemrosesan paralel pada CPU.
+- Aktif: Proses jauh lebih cepat, konsumsi RAM bertambah. Matikan jika RAM terbatas."""
 
-Jika Komputer memiliki RAM yang sangat terbatas, disarankan untuk tidak mencentangnya"""
-
-GPU_ACCELERATION_DESCRIPTION = """Mengaktifkan akan sangat meningkatkan kecepatan komputasi, karena menggunakan GPU dalam prosesnya. 
-
-CATATAN: Penggunaan GPU hanya terbatas pada proses Farneback dan lightglue saja algoritma lain akan menyusul implementasinya"""
+GPU_ACCELERATION_DESCRIPTION = """Menggunakan kartu grafis (GPU) untuk mempercepat proses.
+- Catatan: Saat ini hanya didukung oleh algoritma Farneback dan LightGlue."""
 
 THUMBNAIL_LABEL = "Thumbnail"
-THUMBNAIL_DESCRIPTION = """Preview gambar untuk proses batch, masih bersifat EKSPERIMENTAL
-Terkadang menimbulkan seperti flicker atau lag saat menambahkan batch baru"""
+THUMBNAIL_DESCRIPTION = """Menampilkan pratinjau gambar saat proses batch (Eksperimental).
+- Catatan: Dapat menyebabkan sedikit lag saat menambahkan batch baru."""
 
 NOISE_MAD_OFFSET_LABEL = "MAD Noise Factor"
-NOISE_MAD_OFFSET_DESCRIPTION = """Seberapa sensitifnya deteksi MAD dalam menangani gambar dengan noise tinggi
-
-Nilai yang lebih tinggi menyebabkan toleransi terhadap noise (tidak terlalu sensitif di area dengan noise yang tinggi),
-namun akan menyebabkan ghosting pada area tersebut jika terjadi gerakan."""
+NOISE_MAD_OFFSET_DESCRIPTION = """Toleransi deteksi MAD terhadap gambar dengan noise tinggi.
+- Lebih Tinggi: Lebih toleran noise, risiko bayangan gerakan (ghosting) meningkat."""
 
 MAD_SENSITIVITY_LABEL = "MAD Sensitivity"
-MAD_SENSITIVITY_DESCRIPTION = """Seberapa sensitifnya MAD dalam menangani perbedaan pada sebuah gambar
-
-Nilai yang lebih tinggi akan lebih sensitif terhadap perbedaan halus, namun meningkatkan kesalahan deteksi 
-jika gambar input memiliki noise yang tinggi"""
+MAD_SENSITIVITY_DESCRIPTION = """Sensitivitas MAD terhadap perbedaan gambar.
+- Lebih Tinggi: Lebih peka pada perbedaan halus, tingkat kesalahan deteksi naik jika noise tinggi."""
 
 CONF_SKIP_DFT_LABEL = """Kepercayaan melewati
 Proses DFT"""
-CONF_SKIP_DFT_DESCRIPTION = """Threshold untuk melewati DFT jika proses MBM sudah menangani dengan baik
-
-Semakin tinggi nilainya, maka semakin banyak prosesnya akan dilakukan oleh MAD. Namun MAD adalah deteksi kasar
-ia sensitif terhadap noise dan area kontras rendah, namun keuntungan dengan banyaknya proses MAD adalah komputasi 
-yang lebih ringan"""
+CONF_SKIP_DFT_DESCRIPTION = """Ambang batas melewati proses DFT jika MBM sudah cukup baik.
+- Lebih Tinggi: Lebih banyak proses dikerjakan oleh MAD (komputasi ringan tapi kasar)."""
 
 WIENER_C_FACTOR_LABEL = "Wiener C Factor"
-WIENER_C_FACTOR_DESCRIPTION = """Seberapa sensitifnya perhitungan DCT Wiener dalam mendeteksi perbedaan dalam sebuah gambar
-
-Semakin rendah nilainya, maka semakin sensitifnya dalam mendeteksi pergerakan halus, namun hal ini berdampak dengan peningkatan noise
-karena noise sendiri menyebabkan pergerakan palsu. Nilai Wiener C Factor bekerja sama dengan MAD Sensitivity"""
+WIENER_C_FACTOR_DESCRIPTION = """Sensitivitas filter Wiener terhadap gerakan.
+- Lebih Rendah: Lebih peka gerakan halus, rentan terhadap noise."""
 
 COARSE_MARGIN_LABEL = "Coarse Align Margin"
-COARSE_MARGIN_DESCRIPTION = """Jendela Margin untuk penyelarasan di level tile
+COARSE_MARGIN_DESCRIPTION = """Margin pencarian penyelarasan di level petak (tile).
+- Lebih Tinggi: Stacking lebih presisi, tetapi memperlambat proses secara signifikan."""
 
-Efeknya untuk meningkatkan akurasi hingga level tile, meningkatkan akurasi stacking.
-Akan cukup berdampak pada performa jika area pencarian terlalu luas."""
+# --- Missing UI Keys ---
+LBL_BATCH_MODE = "Mode Batch"
+LBL_BULK_MODE = "Mode Batch Massal"
+LBL_PARAMETER_ALIGNMENT = "Pengaturan Penyelarasan Gambar"
+LBL_ALIGNMENT_PLACEHOLDER = "Pengaturan penyelarasan gambar akan muncul di sini"
+LBL_PARAMETER_ALGORITHM = "Pengaturan Metode Proses"
+LBL_ALGORITHM_PLACEHOLDER = "Pengaturan detail akan muncul setelah Anda memilih metode proses di atas"
+BTN_START = "Mulai Proses"
+BTN_NEW_BATCH = "Buat Batch Baru"
+BTN_DELETE_BATCH = "Hapus Batch"
+LBL_ALGORITHM_SETTINGS = "Pengaturan Metode Stacking & Penyelarasan"
+BTN_PROCESS_ALL_BATCH = "Proses Semua Batch"
+LBL_FROM_PROJECT = "Dari Project No:"
+LBL_TO_PROJECT = "Ke Project No:"
+MSG_INVALID_RANGE = "Nilai nomor awal project tidak boleh lebih besar dari nomor akhir."
+BTN_CLOSE = "Tutup"
+LBL_STATUS_PROCESSING = "Memproses"
+BTN_BACK_TO_GRID = "Kembali ke Grid"
+BTN_IMPORT_IMAGES = "Impor Gambar"
+MSG_SUCCESS_SAVE_TO = "Gambar berhasil disimpan ke:"
+LBL_DRAG_DROP_HERE = "Lepaskan gambar di sini untuk menambahkan"
+BTN_YES_DELETE = "Ya, Hapus"
+BTN_NO_CANCEL = "Tidak, Batalkan"
+LBL_SELECTED_BATCHES_TITLE = "Daftar Lengkap Batch Terpilih"
+LBL_CREATE_NEW_BATCH_TITLE = "Buat Batch Baru"
+LBL_BATCH_NAME = "Nama Batch"
+BTN_CREATE = "Buat"
+MSG_CONFIRM_DELETE_BATCH_COUNT = "Apakah Anda yakin ingin menghapus {} batch?"
+MSG_NO_BATCHES_AVAILABLE = "Tidak ada daftar batch yang dapat diproses."
+MSG_RENAME_FAILED = "Gagal mengubah nama batch. Nama mungkin tidak valid atau sudah digunakan."
+TIP_CPU_CORES = "Jumlah mesin pemroses (CPU) yang digunakan secara bersamaan. Pilihan 'Otomatis' adalah yang paling disarankan."
+LBL_SMART_NOISE_ALPHA = "Smart Noise Alpha (AI):"
+TIP_SMART_NOISE_ALPHA = "Mengatur seberapa toleran kecerdasan buatan (AI) terhadap bintik gangguan (noise).\nNilai rendah = Lebih peka gerakan (kurangi ghosting).\nNilai tinggi = Lebih bersih noise (risiko ghosting)."
+LBL_SMART_NOISE_AWARE = "Smart Noise Aware (AI):"
+TIP_SMART_NOISE_AWARE = "Aktifkan atau nonaktifkan analisis otomatis terhadap gangguan gambar oleh AI."
+LBL_NOISE_CONTRIB = "Noise Contribution Strength (%):"
+TIP_NOISE_CONTRIB = "Mengatur kekuatan AI dalam menyaring bintik gangguan (0% = Tidak Aktif, 100% = Pembersihan Penuh)."
+LBL_LIGHT_GLUE_TITLE = "Pengaturan Metode LightGlue"
+LBL_SELECT_REFERENCE_IMAGE = "Pilih Gambar Referensi"
+LBL_DELETE_IMAGES = "Hapus Gambar"
+MSG_CONFIRM_DELETE_IMAGE = "Apakah Anda yakin ingin menghapus gambar yang dipilih dari batch ini?"
+TIP_RIGHT_CLICK_COPY = "Klik kanan untuk menyalin teks"
+MSG_UNSUPPORTED_FORMAT_IGNORED = "Format file tidak didukung atau ekstensi tidak valid."
+MSG_NO_VALID_IMAGES_GROUP = "Tidak ada gambar yang valid untuk diimpor."
+LBL_LOGGING_LEVEL = "Logging Level:"
+BTN_RESET_TO_DEFAULT = "Reset ke Default"
+BTN_CLEAR_CACHE = "Bersihkan Cache"
+LBL_STATUS_READY = "Siap"
+LBL_ITEMS_REMAINING = "proses tersisa"
+LBL_SPLASH_LOADING = "M E M U A T . . ."
+MSG_EXIFTOOL_NOT_FOUND = "Exiftool tidak ditemukan. Harap pastikan telah terinstal dan terdaftar di PATH sistem Anda."
+MSG_NO_BATCHES_YET = "Belum ada batch"
+MSG_NO_BATCHES_YET_DESC = "Buat batch baru atau impor gambar untuk memulai."
+MSG_NO_BATCH_SELECTED = "Tidak ada batch yang dipilih"
+LBL_BATCH_IMAGE_COUNT_FORMAT = "Batch {}   -   ({} gambar)"
+DESC_SUPER_RESOLUTION_CARD = "Tingkatkan detail dan perbesar resolusi gambar."
+DESC_DENOISING_CARD = "Kurangi noise gambar dan selaraskan lapisan piksel."
+
+
+

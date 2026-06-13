@@ -165,7 +165,7 @@ def test_real_dataset_alignment():
                 ref_l0=ref_pyramid[0], ref_l1=ref_pyramid[1], ref_l2=ref_pyramid[2],
                 comp_l0=comp_pyramid[0], comp_l1=comp_pyramid[1], comp_l2=comp_pyramid[2],
                 flow_l0=f0, flow_l1=f1, flow_l2=f2,
-                tile_h=16, tile_w=16, search_radius=12, scale=2.0, search_dist=3, downscale=2)
+                tile_h=16, tile_w=16, max_search_radius=12, scale=2.0, search_dist=3, downscale=2)
         engine.sync()
         t1 = time.perf_counter()
         print(f"  compute_flow @ {w_work}x{h_work}: {(t1-t0)*1000:.1f}ms")

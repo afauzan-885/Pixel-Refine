@@ -22,7 +22,7 @@ from PySide6.QtCore import (
     QFileSystemWatcher,
 )
 import weakref
-from pixel_refine_desktop.enhance_stack.components.bulk_page.controllers.bulk_process_controller import (
+from pixel_refine_desktop.enhance_stack.components.batch_page_v2.batch_process_dialog import (
     BatchProcessDialog,
 )
 from pixel_refine_desktop.enhance_stack.components.bulk_page.widgets.bulk_combined_panel import (
@@ -601,7 +601,14 @@ class BulkPageLayout(QWidget):
         # Alih-alih melanjutkan pemrosesan di sini, kita panggil dialog.
         # Kita meneruskan 'self' (instance BatchPageLayout) agar dialog dapat mengakses
         # fungsi-fungsi helper seperti _move_single_batch_result dan get_files_in_stack_folder
-        dialog = BatchProcessDialog(panels_to_actually_process, self, self)
+        # Kita bungkus panel ke dalam class pembantu yang memaparkan properti name dan id (kompatibel dengan batch v2)
+        class BatchWrapper:
+            def __init__(self, panel):
+                self.id = panel.batch_id
+                self.name = f"Batch {panel.sequential_batch_number}"
+        
+        batches_wrapper = [BatchWrapper(panel) for panel in panels_to_actually_process]
+        dialog = BatchProcessDialog(batches_wrapper, self, self)
         dialog.exec_()
 
     def _move_single_batch_result(self, source_file_path, target_folder):

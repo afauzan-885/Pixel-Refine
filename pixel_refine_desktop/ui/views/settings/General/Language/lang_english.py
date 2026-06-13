@@ -354,141 +354,58 @@ DEFAULT_PARAMETER_SETTING_LABEL = """Select an algorithm to see its parameters."
 # --- ORB Parameters ---
 ORB_PARAMETER_SETTING_LABEL = "ORB Parameters"
 ORB_NFEATURES_LABEL = "Number of Features"
-ORB_NFEATURES_DESCRIPTION = """The number of features determines how many fine details can be recognized in an image.
-
-- A higher number of features allows the algorithm to find more details,
-  resulting in more precise image alignment, but it increases computation time.
-
-- Typically, a value between 500 and 1500 is sufficient for most scenes.
-  For very high accuracy needs, values between 2500 and 5000 can improve precision."""
+ORB_NFEATURES_DESCRIPTION = """The number of details recognized in an image.
+- Higher: More precise alignment but increases processing time.
+- Recommended: 500 to 1500 for normal images; 2500 to 5000 for high-precision needs."""
 ORB_SCALEFACTOR_LABEL = "Scale Factor"
-ORB_SCALEFACTOR_DESCRIPTION = """The Scale Factor determines the rate at which the image is downscaled during processing.
-
-- A value closer to 1.0 means the image is downscaled slowly with more steps.
-  This allows for the detection of finer details but takes longer.
-
-- A larger value downscales the image more quickly, making processing faster,
-  but some small details might be missed.
-
-Typically, the Scale Factor value ranges from 1.2 to 1.5."""
+ORB_SCALEFACTOR_DESCRIPTION = """How fast the image size is reduced during processing.
+- Closer to 1.0: Slower reduction, detects finer details, but takes longer.
+- Larger value: Faster processing, but small details might be missed.
+- Recommended: 1.2 to 1.5."""
 ORB_NLEVELS_LABEL = "Number of Levels"
-ORB_NLEVELS_DESCRIPTION = """The number of levels indicates the number of layers in the image pyramid used to detect features.
-
-- More levels allow the algorithm to capture details at various scales,
-  which is useful if the image sizes vary.
-
-- However, a higher number of levels increases the processing time.
-
-For most scenes, a value between 2 and 4 is ideal."""
+ORB_NLEVELS_DESCRIPTION = """Number of image pyramid layers used to detect features.
+- Higher: Better detection for varying image sizes, but slows down processing.
+- Recommended: 2 to 4."""
 ORB_TRANSFORMATION_LABEL = "Transformation Type"
-ORB_TRANSFORMATION_DESCRIPTION = """Choose the method for aligning images based on your needs:
-
-Available options include:
-- HOMOGRAPHY: Suitable for photos with significant perspective differences (e.g., a table viewed from the top vs. from the side).
-  It can adjust for "perspective" effects.
-
-- AFFINE: Can rotate, resize (non-uniformly), and shift the image.
-  Example: correcting a tilted photo that needs to be partially enlarged.
-
-- SIMILARITY: Only allows rotation, uniform scaling, and translation.
-  The aspect ratio is preserved.
-
-- EUCLIDEAN: The simplest: only rotates and shifts the image without changing its size.
-  Good for correcting slightly tilted photos.
-
-Selection Advice:
-- For most cases (especially photos with significant perspective changes), choose Homography.
-- If the image only needs simple position/rotation adjustments, Euclidean or Similarity is more suitable.
-- Use Affine only when flexible shape adjustments are needed without perspective effects."""
+ORB_TRANSFORMATION_DESCRIPTION = """Select the alignment method based on your needs:
+- HOMOGRAPHY: Best for perspective changes (e.g., tilted angles, top vs side view).
+- AFFINE: Corrects rotation, scaling, and skewing.
+- SIMILARITY: Allows only rotation, translation, and uniform scaling (aspect ratio is kept).
+- EUCLIDEAN: Simple rotation and translation without changing size."""
 ORB_RANSAC_LABEL = "RANSAC Threshold"
-ORB_RANSAC_DESCRIPTION = """The RANSAC Threshold determines how strictly the algorithm filters out outliers
-(data points that deviate significantly) when aligning images.
-
-- A lower value (e.g., 1-2) means stricter filtering, which might cause some important features to be ignored.
-
-- A higher value (e.g., 4-5) is more tolerant of outliers, allowing more features to be used,
-  but this can reduce alignment accuracy.
-
-Typically, a value between 1 and 3 is sufficient, depending on the level of noise in the data."""
+ORB_RANSAC_DESCRIPTION = """Strictness of filtering out misaligned points.
+- Lower (1-2): Stricter filtering, high precision but might fail if details are low.
+- Higher (4-5): More tolerant, increases success rate but may slightly reduce accuracy.
+- Recommended: 1 to 3."""
 
 # --- Farneback Optical Flow Parameters ---
 FARNEBACK_PARAMETER_SETTING_LABEL = "Farneback Parameters"
 FARNEBACK_PYRAMID_SCALE_LABEL = "Pyramid Scale"
-FARNEBACK_PYRAMID_SCALE_DESCRIPTION = """The Pyramid Scale is the factor that determines how much the image
-is downscaled at each level of the pyramid.
-
-- This value determines the downscale factor from one level to the next.
-  For example, a value of 0.5 means each level will be half the size of the previous one.
-
-- A smaller value (around 0.10 to 0.5) results in a larger size difference between levels.
-  This can speed up computation but may reduce accuracy in capturing fine motion.
-
-- A value closer to 1.00 results in smaller size changes between levels,
-  allowing for more accurate motion detection at the cost of longer computation time.
-
-Adjust this value to find the right balance between processing speed and
-motion detection accuracy.
-Recommended value: 0.5
-"""
+FARNEBACK_PYRAMID_SCALE_DESCRIPTION = """The scale factor to reduce the image size at each level.
+- Closer to 1.0: Fine size steps, high motion detection accuracy, but slower.
+- Value of 0.5: Size is halved at each level, balanced speed and accuracy.
+- Recommended: 0.5."""
 FARNEBACK_LEVELS_LABEL = "Levels"
-FARNEBACK_LEVELS_DESCRIPTION = """The Levels parameter in the Farneback algorithm refers to the number of layers
-in the image pyramid used to calculate optical flow.
-
-- More levels: The algorithm can detect object motion at various sizes and speeds,
-  including complex or large-area movements. However, this requires
-  more computation time.
-
-- As the number of levels increases, the computation time required also increases.
-
-You can adjust it between 1 and 10 according to your application's needs.
-In general, a value of 3 is considered standard.
-"""
+FARNEBACK_LEVELS_DESCRIPTION = """Number of pyramid layers used to calculate motion.
+- More levels: Better at capturing large or complex motion, but increases computation.
+- Recommended: 3."""
 FARNEBACK_WIN_SIZE_LABEL = "Window Size"
-FARNEBACK_WIN_SIZE_DESCRIPTION = """The Window Size determines the size of the pixel area (window)
-used in the optical flow calculation.
-
-- A larger window size: Results in a more stable and smooth motion estimation because
-  information is calculated from a wider area. However, small motion details may be missed.
-
-- A smaller window size: Is more sensitive to small movements,
-  but noise might be misinterpreted as motion, leading to less stable results.
-
-Choose a value that balances sensitivity to small motion details
-with stable results.
-Recommended value: 15.
-"""
+FARNEBACK_WIN_SIZE_DESCRIPTION = """Size of the pixel window used to compute optical flow.
+- Larger: Smoother and more stable motion estimation, but misses fine details.
+- Smaller: Sensitive to small movements, but may interpret noise as motion.
+- Recommended: 15."""
 FARNEBACK_ITERATIONS_LABEL = "Iterations"
-FARNEBACK_ITERATIONS_DESCRIPTION = """Iterations determine how many times the optical flow calculation is refined at each pyramid level.
-
-- The more iterations, the more accurate the resulting optical flow will be.
-- However, increasing the number of iterations can also slow down computation time.
-
-Choose a value that improves accuracy without excessively slowing down the process.
-Recommended value: 3.
-"""
+FARNEBACK_ITERATIONS_DESCRIPTION = """Number of refinement passes at each pyramid level.
+- Higher: More accurate motion estimation, but slower.
+- Recommended: 3."""
 FARNEBACK_POLY_N_LABEL = "Polynomial Expansion"
-FARNEBACK_POLY_N_DESCRIPTION = """Polynomial Expansion (poly_n) determines the size of the pixel neighborhood used
-to approximate motion with a polynomial expansion method.
-
-- This value defines how many neighboring pixel data points are used in the calculation.
-
-- A larger value will result in a smoother motion estimation,
-  but may reduce sensitivity to small movements.
-
-Typically, values of 5 or 7 are used, depending on the desired level of detail and stability.
-"""
+FARNEBACK_POLY_N_DESCRIPTION = """Neighborhood size used to find polynomial expansion.
+- Larger: Smoother motion estimation but less sensitive to tiny movements.
+- Recommended: 5 or 7."""
 FARNEBACK_POLY_SIGMA_LABEL = "Polynomial Sigma"
-FARNEBACK_POLY_SIGMA_DESCRIPTION = """Polynomial Sigma controls the amount of smoothing
-applied before the polynomial expansion is performed.
-
-- This value is the standard deviation of the Gaussian filter used to reduce noise in the pixel data.
-- A higher sigma can help suppress noise,
-
-  but if it's too high, it might eliminate important motion details.
-
-Adjust carefully to reduce noise without losing significant motion details.
-Recommended value: 1.2.
-"""
+FARNEBACK_POLY_SIGMA_DESCRIPTION = """Gaussian standard deviation used to smooth image details.
+- Higher: Suppresses noise better but may blur out motion details.
+- Recommended: 1.2."""
 FARNEBACK_FLAGS_LABEL = "Flags"
 FARNEBACK_FLAGS_DESCRIPTION = """Flags are optional parameters that enable
 specific options within the Farneback algorithm.
@@ -505,74 +422,43 @@ Recommended value: 0.
 # --- AKAZE Parameters ---
 AKAZE_PARAMETER_SETTING_LABEL = "AKAZE Parameters"
 AKAZE_THRESHOLD_LABEL = "Threshold"
-AKAZE_THRESHOLD_DESCRIPTION = """The Threshold parameter determines how sensitive the detector is
-when searching for keypoints.
-
-- A lower value increases the detection of more keypoints,
-  including in images with few features or a lot of noise.
-
-- A higher value restricts detection to only the strongest features.
-
-Recommended value: 0.0010.
-"""
+AKAZE_THRESHOLD_DESCRIPTION = """Sensitivity threshold for detecting keypoints.
+- Lower: Detects more details (useful for low-contrast/noisy scenes).
+- Higher: Restricts detection to only the most prominent features.
+- Recommended: 0.001."""
 AKAZE_OCTAVE_LABEL = "Number of Octaves"
-AKAZE_OCTAVE_DESCRIPTION = """This parameter controls how many scale levels are analyzed
-when searching for important features in an image. Imagine looking at an image at different zoom levels;
-each zoom level is called an "octave".
-
-- Each octave: Represents a different zoom level, allowing the algorithm to detect features at various sizes.
-  For example, small features are visible when zoomed in, while large features can be recognized when zoomed out.
-
-- More octaves: Provide the ability to detect features at more scales or sizes.
-  However, this requires more computational work and increases processing time.
-
-Recommended value: 4.
-"""
+AKAZE_OCTAVE_DESCRIPTION = """Number of zoom levels (octaves) analyzed.
+- Higher: Detects features across wider scale differences, but increases processing time.
+- Recommended: 4."""
 AKAZE_LAYER_LABEL = "Number of Layers per Octave"
-AKAZE_LAYER_DESCRIPTION = """Layers per Octave determines the number of sub-levels within each octave.
-
-- More layers provide a finer scale-space resolution,
-  which can improve feature detection across different scales.
-
-- However, adding layers also increases the computational load.
-
-Recommended value: 4.
-"""
+AKAZE_LAYER_DESCRIPTION = """Number of sub-levels within each octave.
+- Higher: Finer scale detection, but increases computation.
+- Recommended: 4."""
 AKAZE_RATIO_LABEL = "Ratio Threshold"
-AKAZE_RATIO_DESCRIPTION = """The Ratio Threshold is a value used when matching keypoints
-between two images. Its purpose is to ensure that the found matches are truly accurate and not just a coincidence.
-
-- A lower ratio (closer to 0.50): Only accepts very clear, unambiguous matches.
-  In other words, it is more selective, reducing the chance of false positive matches.
-
-- A higher ratio (closer to 1.00): Means we are more tolerant in accepting matches,
-  so more matches are accepted. However, this also increases the likelihood of incorrect matches.
-
-Recommended value: 0.80.
-"""
+AKAZE_RATIO_DESCRIPTION = """Strictness of keypoint matching between images.
+- Lower (0.5 - 0.7): Stricter matching, reduces false connections.
+- Higher (0.8 - 0.9): More tolerant, finds more matches but increases incorrect pairings.
+- Recommended: 0.8."""
 
 # DENOISING
 # --- Denoising Parameters ---
 OVERLAP_LABEL = "Overlap %"
-OVERLAP_DESCRIPTION = """Helps to reduce tile artifacts (which cause a blocky effect in moving areas).
-
-Increasing the overlap can reduce these artifacts but will increase computation time."""
+OVERLAP_DESCRIPTION = """Overlap area between tiles.
+- Higher: Reduces blocky artifacts in moving areas, but increases processing time."""
 
 TILE_SIZE_LABEL = "Tile Size"
-TILE_SIZE_DESCRIPTION = """The smaller the tile size, the more detail can be detected in differences.
-
-However, this will also increase computation time and the likelihood of errors in difference detection."""
+TILE_SIZE_DESCRIPTION = """Processing block size.
+- Smaller: Captures fine details and differences, but increases processing time.
+- Larger: Faster processing, but might miss small motion details."""
 
 MOTION_SENSIVITY_LABEL = "Motion Sensitivity"
-MOTION_SENSIVITY_DESCRIPTION = """Motion sensitivity controls how aggressively the algorithm detects differences within a tile.
-
-The lower the value, the more aggressive or sensitive it is in detecting differences,
-but this may cause noise to be considered a difference."""
+MOTION_SENSIVITY_DESCRIPTION = """How sensitive the algorithm is in detecting movement.
+- Lower value: More aggressive detection (may interpret noise as motion).
+- Higher value: Less sensitive, ignores subtle movements."""
 
 NOISE_OFFSET_LABEL = "Noise Offset"
-NOISE_OFFSET_DESCRIPTION = """A threshold for ignoring the noise level in an image, so that higher noise is not considered as movement.
-
-A higher value can result in a cleaner stack for images with extreme noise, but it may also reduce the detection of movement in the image."""
+NOISE_OFFSET_DESCRIPTION = """Threshold to ignore noise.
+- Higher: Keeps stacks cleaner in extreme noise, but may ignore actual movements."""
 
 # --- General Alignment Options (Edges, Crop, Saving) ---
 KEEP_EDGES_LABEL = "Keep Edges"
@@ -660,44 +546,93 @@ MULTI_CORE_CPU = "Multi-Core CPU Acceleration"
 SETTINGS_SAVED = "Settings saved successfully."
 
 CANT_READ_FILE_SETTINGS = "Warning: Cannot read settings file '{GENERAL_SETTINGS_FILE}'. Using default values."
-MULTI_CORE_CPU_DESCRIPTION = """Enabling this will increase computation speed for image processing, but will slightly increase RAM usage.
+MULTI_CORE_CPU_DESCRIPTION = """Enables multi-thread processing.
+- On: Faster processing, but increases RAM usage. Disable if RAM is limited."""
 
-If your computer has very limited RAM, it is recommended to leave this unchecked."""
-
-GPU_ACCELERATION_DESCRIPTION = """Enabling this will significantly increase computation speed by using the GPU for processing.
-
-NOTE: GPU usage is currently limited to the Farneback and Lightglue only. Implementation for other algorithms will follow."""
+GPU_ACCELERATION_DESCRIPTION = """Uses GPU to speed up computations.
+- Note: Currently supported only for Farneback and LightGlue algorithms."""
 
 THUMBNAIL_LABEL = "Thumbnail"
-THUMBNAIL_DESCRIPTION = """Image preview for the batch process, still EXPERIMENTAL.
-It may sometimes cause flickering or lag when adding a new batch."""
+THUMBNAIL_DESCRIPTION = """Shows image previews during batch processing (Experimental).
+- Note: May cause slight lag or flickering when loading new batches."""
 
 NOISE_MAD_OFFSET_LABEL = "MAD Noise Factor"
-NOISE_MAD_OFFSET_DESCRIPTION = """How sensitive the MAD detection is when handling high-noise images.
-
-A higher value increases tolerance to noise (less sensitive in high-noise areas),
-but will cause ghosting in those areas if motion occurs."""
+NOISE_MAD_OFFSET_DESCRIPTION = """MAD threshold for noisy images.
+- Higher: More tolerant to noise, but increases ghosting risk in moving areas."""
 
 MAD_SENSITIVITY_LABEL = "MAD Sensitivity"
-MAD_SENSITIVITY_DESCRIPTION = """How sensitive MAD is in handling differences in an image.
-
-A higher value will be more sensitive to subtle differences but increases detection errors
-if the input image has high noise."""
+MAD_SENSITIVITY_DESCRIPTION = """MAD sensitivity to differences.
+- Higher: Detects subtle changes, but increases errors in noisy images."""
 
 CONF_SKIP_DFT_LABEL = "DFT Skip\nConfidence"
-CONF_SKIP_DFT_DESCRIPTION = """Threshold for skipping DFT if the MBM process has already handled it well.
-
-The higher the value, the more processing will be done by MAD. However, MAD is a coarse detection method;
-it is sensitive to noise and low-contrast areas, but the advantage of more MAD processing is lighter computation."""
+CONF_SKIP_DFT_DESCRIPTION = """Threshold to skip DFT when MBM is sufficient.
+- Higher: More tasks processed by MAD (lighter computation but less precise)."""
 
 WIENER_C_FACTOR_LABEL = "Wiener C Factor"
-WIENER_C_FACTOR_DESCRIPTION = """How sensitive the DCT Wiener calculation is in detecting differences in an image.
-
-The lower the value, the more sensitive it is to detecting subtle movements, but this results in increased noise
-because noise itself can cause false movements. The Wiener C Factor works in conjunction with MAD Sensitivity."""
+WIENER_C_FACTOR_DESCRIPTION = """Wiener filter sensitivity to differences.
+- Lower: Sensitive to fine movements, but may increase noise."""
 
 COARSE_MARGIN_LABEL = "Coarse Align Margin"
-COARSE_MARGIN_DESCRIPTION = """The margin window for alignment at the tile level.
+COARSE_MARGIN_DESCRIPTION = """Search margin for alignment at the tile level.
+- Higher: More precise stacking, but significantly slows down processing."""
 
-This improves accuracy down to the tile level, enhancing stacking precision.
-It can significantly impact performance if the search area is too large."""
+# --- Missing UI Keys ---
+LBL_BATCH_MODE = "Batch Mode"
+LBL_BULK_MODE = "Bulk Mode"
+LBL_PARAMETER_ALIGNMENT = "Alignment Parameters"
+LBL_ALIGNMENT_PLACEHOLDER = "Alignment parameters will\nappear here"
+LBL_PARAMETER_ALGORITHM = "Algorithm Parameters"
+LBL_ALGORITHM_PLACEHOLDER = "Parameters will appear here\nbased on selected algorithm"
+BTN_START = "Start"
+BTN_NEW_BATCH = "New Batch"
+BTN_DELETE_BATCH = "Delete Batch"
+LBL_ALGORITHM_SETTINGS = "Algorithm Settings"
+BTN_PROCESS_ALL_BATCH = "Process All Batch"
+LBL_FROM_PROJECT = "From Project #:"
+LBL_TO_PROJECT = "To Project #:"
+MSG_INVALID_RANGE = "The 'From' value cannot be greater than the 'To' value."
+BTN_CLOSE = "Close"
+LBL_STATUS_PROCESSING = "Processing"
+BTN_BACK_TO_GRID = "Back to Grid"
+BTN_IMPORT_IMAGES = "Import Images"
+MSG_SUCCESS_SAVE_TO = "Image saved successfully to:"
+LBL_DRAG_DROP_HERE = "Drop images here"
+BTN_YES_DELETE = "Yes, Delete"
+BTN_NO_CANCEL = "No, Cancel"
+LBL_SELECTED_BATCHES_TITLE = "Complete List of Selected Batches"
+LBL_CREATE_NEW_BATCH_TITLE = "Create New Batch"
+LBL_BATCH_NAME = "Batch Name"
+BTN_CREATE = "Create"
+MSG_CONFIRM_DELETE_BATCH_COUNT = "Are you sure you want to delete {} batches?"
+MSG_NO_BATCHES_AVAILABLE = "There are no batches available to process."
+MSG_RENAME_FAILED = "Could not rename the batch. The name may be invalid or already in use."
+TIP_CPU_CORES = "Number of CPU cores used for parallel processing."
+LBL_SMART_NOISE_ALPHA = "Smart Noise Alpha (AI):"
+TIP_SMART_NOISE_ALPHA = "Controls AI tolerance to noise.\nLow value = Sensitive to motion (less ghosting).\nHigh value = More noise cleanup (risk of ghosting)."
+LBL_SMART_NOISE_AWARE = "Smart Noise Aware (AI):"
+TIP_SMART_NOISE_AWARE = "Enable or disable noise estimation contribution to the AI model."
+LBL_NOISE_CONTRIB = "Noise Contribution Strength (%):"
+TIP_NOISE_CONTRIB = "Adjust how strongly noise estimation is applied (0% = Disabled, 100% = Full)."
+LBL_LIGHT_GLUE_TITLE = "Light Glue Parameter Setting"
+LBL_SELECT_REFERENCE_IMAGE = "Select Reference Image"
+LBL_DELETE_IMAGES = "Delete Images"
+MSG_CONFIRM_DELETE_IMAGE = "Are you sure you want to delete the selected images from this batch?"
+TIP_RIGHT_CLICK_COPY = "Right-click to copy text"
+MSG_UNSUPPORTED_FORMAT_IGNORED = "Unsupported file format or no valid extension provided."
+MSG_NO_VALID_IMAGES_GROUP = "No valid images to import."
+LBL_LOGGING_LEVEL = "Logging Level:"
+BTN_RESET_TO_DEFAULT = "Reset to Default"
+BTN_CLEAR_CACHE = "Clear Cache"
+LBL_STATUS_READY = "Ready"
+LBL_ITEMS_REMAINING = "items remaining"
+LBL_SPLASH_LOADING = "L O A D I N G . . ."
+MSG_EXIFTOOL_NOT_FOUND = "Exiftool not found. Please ensure it is installed and in your system's PATH."
+MSG_NO_BATCHES_YET = "No batches yet"
+MSG_NO_BATCHES_YET_DESC = "Create a new batch or import images to get started."
+MSG_NO_BATCH_SELECTED = "No batch selected"
+LBL_BATCH_IMAGE_COUNT_FORMAT = "Batch {}   -   ({} images)"
+DESC_SUPER_RESOLUTION_CARD = "Enhance details and scale image resolution."
+DESC_DENOISING_CARD = "Reduce image noise and align pixel layers."
+
+
+

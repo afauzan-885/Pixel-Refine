@@ -6,14 +6,6 @@ This document provides an exhaustive, directory-by-directory mapping of the enti
 
 ## 📂 Directory: `Root Directory`
 
-### 📄 [# DIRECTORY: .](file:///e:/APP%20Developer/Pixel%20Refine/# DIRECTORY: .)
-
-
---------------------
-
-
-## 📂 Directory: `Root Directory`
-
 ### 📄 [build_android.py](file:///e:/APP%20Developer/Pixel%20Refine/build_android.py)
 
 * **Function**: `run_command(command, shell)`
@@ -498,6 +490,46 @@ This document provides an exhaustive, directory-by-directory mapping of the enti
     *Fungsi ini sekarang akan memblokir sampai semua thread benar-benar berhenti*
     *sebelum membersihkan daftar referensi.*
     *----------------------------------------*
+
+--------------------
+
+
+## 📂 Directory: `Root Directory`
+
+### 📄 [# DIRECTORY: pixel_refine_desktop/enhance_stack/components/bulk_page](file:///e:/APP%20Developer/Pixel%20Refine/# DIRECTORY: pixel_refine_desktop/enhance_stack/components/bulk_page)
+
+
+--------------------
+
+### 📄 [bulk_page_layout.py](file:///e:/APP%20Developer/Pixel%20Refine/pixel_refine_desktop/enhance_stack/components/bulk_page/bulk_page_layout.py)
+
+* **Class**: `BulkPageLayout`
+    *Layout and view orchestrator for Bulk Mode. Includes lazy-loading, thumbnail scrolling, and batch processing integration.*
+
+### 📄 [bulk_process_controller.py](file:///e:/APP%20Developer/Pixel%20Refine/pixel_refine_desktop/enhance_stack/components/bulk_page/controllers/bulk_process_controller.py)
+
+* **Class**: `BulkProcessController`
+    *Controls bulk processing operations, scheduling threads, and tracking tasks.*
+
+### 📄 [bulk_import_service.py](file:///e:/APP%20Developer/Pixel%20Refine/pixel_refine_desktop/enhance_stack/components/bulk_page/services/bulk_import_service.py)
+
+* **Class**: `BulkImportService`
+    *Service handling multi-batch background operations for image importing.*
+
+### 📄 [bulk_thumbnail_service.py](file:///e:/APP%20Developer/Pixel%20Refine/pixel_refine_desktop/enhance_stack/components/bulk_page/services/bulk_thumbnail_service.py)
+
+* **Class**: `BulkThumbnailService`
+    *Service handling asynchronous thumbnail loading with caching.*
+
+### 📄 [bulk_combined_panel.py](file:///e:/APP%20Developer/Pixel%20Refine/pixel_refine_desktop/enhance_stack/components/bulk_page/widgets/bulk_combined_panel.py)
+
+* **Class**: `BulkCombinedPanel`
+    *Combined visual panel showing stacked and unstacked photo grids for multiple batches.*
+
+### 📄 [bulk_thumbnail_widget.py](file:///e:/APP%20Developer/Pixel%20Refine/pixel_refine_desktop/enhance_stack/components/bulk_page/widgets/bulk_thumbnail_widget.py)
+
+* **Class**: `BulkThumbnailWidget`
+    *Single thumbnail item view with Hamilton demosaicing optimization.*
 
 --------------------
 
@@ -6109,6 +6141,12 @@ This document provides an exhaustive, directory-by-directory mapping of the enti
   * Method: `add_grid_item(self, item_id, label)`
   * Method: `_clear_grid(self)`
     *----------------------------------------*
+
+### 📄 [skeleton.py](file:///e:/APP%20Developer/Pixel%20Refine/pixel_refine_desktop/ui/resources/GenericUILibrary/skeleton.py)
+
+* **Class**: `SkeletonLoader`
+    *A pulsing, customizable placeholder skeleton widget for lazy-loading elements asynchronously.*
+  * Method: `__init__(self, height=100, border_radius=6, parent=None)`
 
 --------------------
 

@@ -93,6 +93,7 @@ from .modals import (
     Overlay,
     Toast,
     LoadingSpinner,
+    modal_confirm,
 )
 from .overlays import OverlayContainer, OverlayPosition
 
@@ -128,7 +129,8 @@ from .theme import Theme
 
 # Real-time Core
 from .store import DataStore, get_store
-from .mixins import RealtimeMixin, SyncMixin
+from .mixins import RealtimeMixin, SyncMixin, AdaptiveSizingMixin
+from .realtime_update import realtime_update, trigger_realtime_update
 
 # Define what's available when using "from GenericUILibrary import *"
 __all__ = [
@@ -175,6 +177,7 @@ __all__ = [
     "Overlay",
     "Toast",
     "LoadingSpinner",
+    "modal_confirm",
     # Overlays (New)
     "OverlayContainer",
     "OverlayPosition",
@@ -214,4 +217,8 @@ __all__ = [
     "get_store",
     "RealtimeMixin",
     "SyncMixin",
+    "AdaptiveSizingMixin",
+    "realtime_update",
+    "trigger_realtime_update",
 ]
+

@@ -68,10 +68,10 @@ def compute_regularization_params(
 def block_search_kernel(
     ref_layer: ti.types.ndarray(),
     comp_layer: ti.types.ndarray(),
-    ai_radius_map: ti.types.ndarray(),  # 🚀 PARAMETER BARU DARI AI
     refined_flow: ti.types.ndarray(),
     tile_h: ti.i32,
     tile_w: ti.i32,
+    max_search_radius: ti.i32,
 ):
     h, w = ref_layer.shape[0], ref_layer.shape[1]
     step_y, step_x = ti.max(1, tile_h // 2), ti.max(1, tile_w // 2)
@@ -83,15 +83,29 @@ def block_search_kernel(
             0, ti.min(tile_x_idx * step_x, w - tile_w)
         )
 
-        # 🚀 EFISIENSI: Ganti search_radius kaku dengan sampling langsung dari peta AI
-        # Cast ke integer untuk membatasi ruang loop pencarian secara dinamis
-        local_search_radius = ti.cast(
-            ti.round(ai_radius_map[tile_y_idx, tile_x_idx, 0]), ti.i32
-        )
+        # 🚀 Perhitungan matematika berbasis Mean Absolute Difference (MAD) pada offset (0, 0)
+        mad = 0.0
+        for r, c in ti.ndrange(tile_h, tile_w):
+            y_ref, x_ref = y + r, x + c
+            if 0 <= y_ref < h and 0 <= x_ref < w:
+                mad += ti.abs(ref_layer[y_ref, x_ref] - comp_layer[y_ref, x_ref])
+        mad /= ti.cast(tile_h * tile_w, ti.f32)
+
+        # Normalisasi otomatis rentang piksel (jika input menggunakan rentang [0, 255])
+        normalized_mad = mad
+        if mad > 1.0:
+            normalized_mad = mad / 255.0
+
+        # Radius pencarian dinamis secara matematis
+        local_search_radius = 0
+        if normalized_mad >= 0.005:
+            # Penskalaan linier: jika normalized_mad = 0.1, radius = 8
+            val = normalized_mad * 80.0
+            local_search_radius = ti.cast(ti.min(ti.cast(max_search_radius, ti.f32), ti.round(val)), ti.i32)
 
         best_cost, best_dx, best_dy = 1e10, 0.0, 0.0
 
-        # Jika area statis, local_search_radius bernilai 0, loop kuadrat ini runtuh menjadi 1x eksekusi!
+        # Jika area statis (perbedaan temporal sangat kecil), local_search_radius bernilai 0
         for dy, dx in ti.ndrange(
             (-local_search_radius, local_search_radius + 1),
             (-local_search_radius, local_search_radius + 1),
@@ -502,9 +516,8 @@ def compile_compute_flow():
         ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "flow_l2", dtype=ti.f32, ndim=3),
     )
 
-    # 🚀 DAFTARKAN SYMBOL BARU UNTUK RADUS MAP (Bentuk Grid 3D)
-    sym_ai_radius_map = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "ai_radius_map", dtype=ti.f32, ndim=3
+    sym_max_search_radius = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "max_search_radius", dtype=ti.i32
     )
 
     sym_tile_h, sym_tile_w, sym_scale = (
@@ -518,15 +531,15 @@ def compile_compute_flow():
 
     g_builder = ti.graph.GraphBuilder()
 
-    # Masukkan sym_ai_radius_map menggantikan pencarian radius konvensional kaku
+    # block_search_kernel sekarang menghitung radius dinamis secara matematis dengan batas sym_max_search_radius
     g_builder.dispatch(
         block_search_kernel,
         sym_ref_l2,
         sym_comp_l2,
-        sym_ai_radius_map,
         sym_flow_l2,
         sym_tile_h,
         sym_tile_w,
+        sym_max_search_radius,
     )
     g_builder.dispatch(
         upsample_flow_bicubic_kernel, sym_flow_l2, sym_flow_l1, sym_scale

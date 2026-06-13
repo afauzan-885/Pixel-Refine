@@ -212,7 +212,7 @@ class BatchPageV2Layout(QWidget):
             )
         except Exception as e:
             QMessageBox.critical(
-                self, "Database Error", "Could not retrieve existing image paths."
+                self, language_config.MSG_DATABASE_ERROR, language_config.MSG_DB_RETRIEVE_FAILED
             )
             return
 
@@ -258,8 +258,8 @@ class BatchPageV2Layout(QWidget):
             print(f"Error creating TIFF output folder: {e}")
             QMessageBox.critical(
                 self,
-                "Folder Error",
-                f"Could not create folder for TIFF conversion:\n{e}",
+                language_config.MSG_FOLDER_ERROR,
+                f"{language_config.MSG_CREATE_FOLDER_TIFF_FAILED}\n{e}",
             )
             return
 
@@ -341,8 +341,8 @@ class BatchPageV2Layout(QWidget):
             if tiff_errors:
                 QMessageBox.warning(
                     self,
-                    "TIFF Processing Issues",
-                    f"Could not process some TIFF files:\n{', '.join(tiff_errors)}",
+                    language_config.MSG_TIFF_PROCESSING_ISSUES,
+                    f"{language_config.MSG_TIFF_PROCESS_FAILED_SOME}\n{', '.join(tiff_errors)}",
                 )
 
         # 4. & 5. Seleksi File Akhir (Sekarang berisi semua file valid)
@@ -350,8 +350,8 @@ class BatchPageV2Layout(QWidget):
         if not selected_files:
             QMessageBox.information(
                 self,
-                "Import Failed",
-                "No valid files could be prepared for import after processing.",
+                language_config.MSG_IMPORT_FAILED,
+                language_config.MSG_NO_VALID_FILES_IMPORT,
             )
             return
 
@@ -375,7 +375,7 @@ class BatchPageV2Layout(QWidget):
             self.multi_thread_import_images.start()
 
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Gagal memulai impor: {e}")
+            QMessageBox.critical(self, language_config.MSG_ERROR_TITLE, f"{language_config.MSG_IMPORT_ERROR_OCCURRED}\n{e}")
 
     def on_import_complete(self, successful_images):
         """Dijalankan saat semua proses impor selesai."""
@@ -403,16 +403,15 @@ class BatchPageV2Layout(QWidget):
             QMessageBox.information(self, title, message)
             return
 
-        reply = QMessageBox.question(
+        from pixel_refine_desktop.ui.resources.GenericUILibrary import modal_confirm
+        confirmed = modal_confirm.question(
             self,
-            "Delete Images",
             language_config.HANDLE_DELETE_BUTTON_IMAGE_CONFIRM_DELETE.format(
                 len(selected_paths)
-            ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            )
         )
-        if reply == QMessageBox.StandardButton.Yes:
+        
+        if confirmed:
             self.database_manager.single_process_delete_path_images(selected_paths)
             self.workspace_panel.remove_selected_images()
 
@@ -447,7 +446,7 @@ class BatchPageV2Layout(QWidget):
                 if not batch_mode:
                     QMessageBox.warning(
                         self,
-                        "Caution",
+                        language_config.MSG_CAUTION_TITLE,
                         language_config.PROCESS_ALGORITHM_PROCESS_SKIPPED,
                     )
                 return
@@ -471,7 +470,7 @@ class BatchPageV2Layout(QWidget):
                     if not batch_mode:
                         reply = QMessageBox.question(
                             self,
-                            "Confirm",
+                            language_config.MSG_CONFIRM_TITLE,
                             language_config.NO_ALIGNMENT_PROCESS,
                             QMessageBox.StandardButton.Yes
                             | QMessageBox.StandardButton.No,
@@ -484,8 +483,8 @@ class BatchPageV2Layout(QWidget):
                     if not batch_mode:
                         QMessageBox.warning(
                             self,
-                            "Warning",
-                            f"The alignment algorithm option '{alignment_choice}' is not recognized.",
+                            language_config.MSG_WARNING_TITLE,
+                            language_config.MSG_ALIGN_ALGO_NOT_RECOGNIZED.format(alignment_choice),
                         )
                     return
 
@@ -629,7 +628,7 @@ class BatchPageV2Layout(QWidget):
         if not os.path.exists(folder_path):
             QMessageBox.warning(
                 self,
-                "Error",
+                language_config.MSG_ERROR_TITLE,
                 language_config.UI_SYSTEM_FOLDER_WRONG_TO_SAVE_IMAGE_BATCH,
             )
             return
@@ -642,7 +641,7 @@ class BatchPageV2Layout(QWidget):
 
         if not image_files:
             QMessageBox.warning(
-                self, "No Images", "There are no processed images to save."
+                self, language_config.MSG_WARNING_TITLE, language_config.MSG_NO_PROCESSED_IMAGES_SAVE
             )
             return
 
@@ -678,8 +677,8 @@ class BatchPageV2Layout(QWidget):
             else:
                 QMessageBox.warning(
                     self,
-                    "Invalid Format",
-                    "Unsupported file format or no valid extension provided.",
+                    language_config.MSG_INVALID_FORMAT,
+                    language_config.MSG_UNSUPPORTED_FORMAT_EXTENSION,
                 )
                 return
 
@@ -696,8 +695,8 @@ class BatchPageV2Layout(QWidget):
                 except Exception as tif_read_error:
                     QMessageBox.critical(
                         self,
-                        "Error",
-                        f"{language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED}\nCould not read source: {tif_read_error}",
+                        language_config.MSG_ERROR_TITLE,
+                        f"{language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED}\n{language_config.MSG_COULD_NOT_READ_SOURCE} {tif_read_error}",
                     )
                     return
 
@@ -706,7 +705,7 @@ class BatchPageV2Layout(QWidget):
                     # Jika kedua metode gagal, tampilkan pesan error dan berhenti
                     QMessageBox.critical(
                         self,
-                        "Error",
+                        language_config.MSG_ERROR_TITLE,
                         language_config.LOAD_IMAGES_FROM_PATHS_LOAD_FAILED,
                     )
                     return
@@ -727,21 +726,21 @@ class BatchPageV2Layout(QWidget):
                 except OSError as e:
                     QMessageBox.warning(
                         self,
-                        "Cleanup Error",
-                        f"Could not remove the temporary processed file:\n{latest_image_path}\n\nError: {e}",
+                        language_config.MSG_CLEANUP_ERROR,
+                        f"{language_config.MSG_REMOVE_TEMP_FAILED}\n{latest_image_path}\n\nError: {e}",
                     )
 
             QMessageBox.information(
                 self,
-                "Success",
+                language_config.MSG_SUCCESS_TITLE,
                 language_config.UI_SUCCES_TO_SAVE_IMAGE_BATCH.format(file_path),
             )
 
         except FileNotFoundError:
             QMessageBox.critical(
                 self,
-                "Error",
-                "Exiftool not found. Please ensure it is installed and in your system's PATH.",
+                language_config.MSG_ERROR_TITLE,
+                language_config.MSG_EXIFTOOL_NOT_FOUND,
             )
         except Exception as e:
             error_message = str(e)
@@ -750,7 +749,7 @@ class BatchPageV2Layout(QWidget):
 
             QMessageBox.critical(
                 self,
-                "Error",
+                language_config.MSG_ERROR_TITLE,
                 language_config.UI_FAILED_TO_SAVE_IMAGE_BATCH.format(error_message),
             )
 
@@ -767,7 +766,7 @@ class BatchPageV2Layout(QWidget):
     def on_import_error(self, error_message):
         """Handle errors during image import."""
         QMessageBox.critical(
-            self, "Import Error", f"An error occurred during import:\n{error_message}"
+            self, language_config.MSG_IMPORT_ERROR, f"{language_config.MSG_IMPORT_ERROR_OCCURRED}\n{error_message}"
         )
         if self.workspace_panel and hasattr(self.workspace_panel, "algorithm_panel"):
             algo_panel = self.workspace_panel.algorithm_panel

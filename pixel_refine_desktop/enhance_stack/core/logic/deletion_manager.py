@@ -233,14 +233,13 @@ class DeletionManager(QObject):
         if not selected_ids or not self.panel.current_batch_id:
             return
 
-        reply = QMessageBox.question(
+        from pixel_refine_desktop.ui.resources.GenericUILibrary import modal_confirm
+        confirmed = modal_confirm.question(
             self.panel,
-            "Hapus Gambar",
-            f"Apakah Anda yakin ingin menghapus {len(selected_ids)} gambar yang dipilih dari batch ini?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            f"Apakah Anda yakin ingin menghapus {len(selected_ids)} gambar yang dipilih dari batch ini?"
         )
 
-        if reply == QMessageBox.StandardButton.Yes:
+        if confirmed:
             paths_to_remove = []
             for cid in selected_ids:
                 if cid in self.panel.logic.grid_items:
