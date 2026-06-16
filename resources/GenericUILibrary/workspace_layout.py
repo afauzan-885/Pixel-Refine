@@ -60,3 +60,15 @@ class WorkspaceLayout(QWidget):
             self.anim.finished.connect(on_finished)
         else:
             self.config_container.setMinimumHeight(0)
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        qml = f"{tab}Column {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    spacing: 10\n"
+        if hasattr(self.viewer, 'to_qml'):
+            qml += self.viewer.to_qml(indent + 1) + "\n"
+        if hasattr(self.config_panel, 'to_qml'):
+            qml += self.config_panel.to_qml(indent + 1) + "\n"
+        qml += f"{tab}}}"
+        return qml

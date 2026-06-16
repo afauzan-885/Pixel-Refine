@@ -606,7 +606,7 @@ COARSE_MARGIN_DESCRIPTION = """Margin pencarian penyelarasan di level petak (til
 
 # --- Missing UI Keys ---
 LBL_BATCH_MODE = "Mode Batch"
-LBL_BULK_MODE = "Mode Batch Massal"
+LBL_BULK_MODE = "Mode Bulk"
 LBL_PARAMETER_ALIGNMENT = "Pengaturan Penyelarasan Gambar"
 LBL_ALIGNMENT_PLACEHOLDER = "Pengaturan penyelarasan gambar akan muncul di sini"
 LBL_PARAMETER_ALGORITHM = "Pengaturan Metode Proses"
@@ -664,3 +664,17 @@ DESC_DENOISING_CARD = "Kurangi noise gambar dan selaraskan lapisan piksel."
 
 
 
+
+# --- New UI & Bulk Core Keys ---
+BULK_FROM = "Dari No:"
+BULK_TO = "Ke No:"
+BULK_MSG_RANGE_ERROR = "Nomor awal harus <= nomor akhir."
+BULK_ERR_RETRIEVE = "Gagal memuat gambar proyek."
+BULK_WARN_UNSUPPORTED = "Format tidak didukung akan diabaikan."
+CORE_SELECT_REF_IMAGE = "Jadikan Acuan"
+CORE_DELETE_IMAGES = "Hapus Terpilih"
+CORE_MSG_CONFIRM_DELETE = "Hapus gambar terpilih?"
+CORE_TOOLTIP_COPY = "Klik kanan untuk salin"
+UI_STATUS_READY = "Siap"
+UI_ITEMS_REMAINING = "tersisa"
+UI_SPLASH_LOADING = "Memuat..."

@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QSlider, QHBoxLayou
 from PySide6.QtGui import QFont
 from PySide6.QtCore import Qt
 
-from pixel_refine_desktop.ui.resources.styles.stylesheet import (DROPDOWN_BOX, TOGGLE_BUTTON,
+from resources.styles.stylesheet import (DROPDOWN_BOX, TOGGLE_BUTTON,
                                                 SCROLL_AREA, SLIDER_STYLE, SLIDER_VALUE_LABEL)
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 # Impor path file yang konsisten

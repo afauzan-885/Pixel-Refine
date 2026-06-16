@@ -48,3 +48,27 @@ class ConfigPanel(QWidget):
 
     def _on_apply(self):
         self.apply_clicked.emit({"method": self.cmb_method.currentText()})
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        qml = f"{tab}Column {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    spacing: 10\n"
+        qml += f"{tab}    TabBar {{\n"
+        qml += f"{tab}        id: configTabs\n"
+        qml += f"{tab}        width: parent.width\n"
+        qml += f"{tab}        TabButton {{ text: 'Alignment' }}\n"
+        qml += f"{tab}        TabButton {{ text: 'Projection' }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}    StackLayout {{\n"
+        qml += f"{tab}        width: parent.width\n"
+        qml += f"{tab}        currentIndex: configTabs.currentIndex\n"
+        qml += f"{tab}        Column {{ ComboBox {{ model: ['AKAZE', 'SIFT', 'ORB']; width: parent.width }} }}\n"
+        qml += f"{tab}        Column {{ ComboBox {{ model: []; width: parent.width }} }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}    Row {{\n"
+        qml += f"{tab}        Item {{ Layout.fillWidth: true }}\n"
+        qml += f"{tab}        Rectangle {{ width: 100; height: 36; radius: genericTheme.radiusMd; color: genericTheme.primary; Text {{ text: 'Run Process'; color: 'white'; anchors.centerIn: parent }} MouseArea {{ anchors.fill: parent; onClicked: appBridge.openTool('Run Process') }} }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml

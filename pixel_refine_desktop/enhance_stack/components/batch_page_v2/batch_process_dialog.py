@@ -22,12 +22,12 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QGuiApplication
 
 # Generic UI Library
-from pixel_refine_desktop.ui.resources.GenericUILibrary import (
+from resources.GenericUILibrary import (
     DataTable,
     Button,
     get_store,
 )
-from pixel_refine_desktop.ui.resources.styles.stylesheet import (
+from resources.styles.stylesheet import (
     CHECKBOX_SWITCH_STYLE,
     PROGRESS_BAR,
     stylesheet_global_page,

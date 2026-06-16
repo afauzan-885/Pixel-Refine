@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import QMainWindow, QWidget, QHBoxLayout
 from pixel_refine_desktop.ui.views.panorama.working_left_panel import WorkingLeftPanel
 from pixel_refine_desktop.ui.views.panorama.working_right_panel import WorkingRightPanel
-from pixel_refine_desktop.ui.resources.styles.stylesheet import stylesheet_global_page
+from resources.styles.stylesheet import stylesheet_global_page
 
 
 class PanoramaPage(QMainWindow):

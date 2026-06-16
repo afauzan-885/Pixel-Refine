@@ -3,8 +3,13 @@ import numpy as np
 import os
 import shutil
 import zipfile
-from .aot.cost_function import compute_zmssd_cost_func
+from .aot.cost_function import compute_ssd_cost_func, compute_sad_cost_func
 from .aot.refinement import parabolic_refinement
+
+# Use standard SSD/SAD metrics as default stable configuration
+compute_alignment_ssd = compute_ssd_cost_func
+compute_alignment_sad = compute_sad_cost_func
+
 
 
 @ti.func
@@ -83,116 +88,165 @@ def block_search_kernel(
             0, ti.min(tile_x_idx * step_x, w - tile_w)
         )
 
-        # 🚀 Perhitungan matematika berbasis Mean Absolute Difference (MAD) pada offset (0, 0)
-        mad = 0.0
-        for r, c in ti.ndrange(tile_h, tile_w):
-            y_ref, x_ref = y + r, x + c
-            if 0 <= y_ref < h and 0 <= x_ref < w:
-                mad += ti.abs(ref_layer[y_ref, x_ref] - comp_layer[y_ref, x_ref])
-        mad /= ti.cast(tile_h * tile_w, ti.f32)
-
-        # Normalisasi otomatis rentang piksel (jika input menggunakan rentang [0, 255])
-        normalized_mad = mad
-        if mad > 1.0:
-            normalized_mad = mad / 255.0
-
-        # Radius pencarian dinamis secara matematis
-        local_search_radius = 0
-        if normalized_mad >= 0.005:
-            # Penskalaan linier: jika normalized_mad = 0.1, radius = 8
-            val = normalized_mad * 80.0
-            local_search_radius = ti.cast(ti.min(ti.cast(max_search_radius, ti.f32), ti.round(val)), ti.i32)
+        # 🚀 Jangkauan agresif skala kasar 1/4: Cari secara full range untuk induk
+        local_search_radius = max_search_radius
 
         best_cost, best_dx, best_dy = 1e10, 0.0, 0.0
 
-        # Jika area statis (perbedaan temporal sangat kecil), local_search_radius bernilai 0
         for dy, dx in ti.ndrange(
             (-local_search_radius, local_search_radius + 1),
             (-local_search_radius, local_search_radius + 1),
         ):
-            windowed_cost = 0.0
-            window_sum = 0.0
-            for r, c in ti.ndrange(tile_h, tile_w):
-                y_ref, x_ref = y + r, x + c
-                y_comp, x_comp = y + r + dy, x + c + dx
-                if (
-                    0 <= y_ref < h
-                    and 0 <= x_ref < w
-                    and 0 <= y_comp < h
-                    and 0 <= x_comp < w
-                ):
-                    win = hanning_window_2d(r, c, tile_h, tile_w)
-                    diff = ref_layer[y_ref, x_ref] - comp_layer[y_comp, x_comp]
-                    windowed_cost += win * diff * diff
-                    window_sum += win
-            if window_sum > 1e-6:
-                windowed_cost /= window_sum
-            else:
-                windowed_cost = 1e10
-
+            cost = compute_alignment_ssd(
+                ref_layer, comp_layer, y, x, y + dy, x + dx, tile_h, tile_w, 1
+            )
             if dx == 0 and dy == 0:
-                windowed_cost *= 0.99
-            if windowed_cost < best_cost:
-                best_cost, best_dx, best_dy = windowed_cost, float(dx), float(dy)
+                cost *= 0.99
+            if cost < best_cost:
+                best_cost, best_dx, best_dy = cost, float(dx), float(dy)
 
-        # ... (Sisa sub-pixel parabolic refinement Anda tetap sama di bawah) ...
-        if (
-            -local_search_radius < best_dx < local_search_radius
-            and -local_search_radius < best_dy < local_search_radius
-        ):
-            c0 = best_cost
-            cx_m1 = compute_zmssd_cost_func(
-                ref_layer,
-                comp_layer,
-                y,
-                x,
-                y + int(best_dy),
-                x + int(best_dx) - 1,
-                tile_h,
-                tile_w,
-                1,
+        # 🚀 TINGKAT 2: Evaluasi pemecahan menjadi 4 sub-blok (16x16 jika parent 32x32)
+        sub_h, sub_w = tile_h // 2, tile_w // 2
+        
+        sub_cost0, sub_dx0, sub_dy0 = 1e10, best_dx, best_dy
+        sub_cost1, sub_dx1, sub_dy1 = 1e10, best_dx, best_dy
+        sub_cost2, sub_dx2, sub_dy2 = 1e10, best_dx, best_dy
+        sub_cost3, sub_dx3, sub_dy3 = 1e10, best_dx, best_dy
+        
+        # Jangkauan pencarian lokal sub-blok: +/- 2 piksel di sekitar vektor induk
+        local_refine_dist = 2
+        
+        # Pencarian Sub-blok 0
+        for dy, dx in ti.ndrange((-local_refine_dist, local_refine_dist + 1), (-local_refine_dist, local_refine_dist + 1)):
+            cand_dx = best_dx + float(dx)
+            cand_dy = best_dy + float(dy)
+            c_dy, c_dx = ti.cast(ti.round(cand_dy), ti.i32), ti.cast(ti.round(cand_dx), ti.i32)
+            cost = compute_alignment_ssd(
+                ref_layer, comp_layer, y, x, y + c_dy, x + c_dx, sub_h, sub_w, 1
             )
-            cx_p1 = compute_zmssd_cost_func(
-                ref_layer,
-                comp_layer,
-                y,
-                x,
-                y + int(best_dy),
-                x + int(best_dx) + 1,
-                tile_h,
-                tile_w,
-                1,
+            if cost < sub_cost0:
+                sub_cost0, sub_dx0, sub_dy0 = cost, cand_dx, cand_dy
+
+        # Pencarian Sub-blok 1
+        for dy, dx in ti.ndrange((-local_refine_dist, local_refine_dist + 1), (-local_refine_dist, local_refine_dist + 1)):
+            cand_dx = best_dx + float(dx)
+            cand_dy = best_dy + float(dy)
+            c_dy, c_dx = ti.cast(ti.round(cand_dy), ti.i32), ti.cast(ti.round(cand_dx), ti.i32)
+            cost = compute_alignment_ssd(
+                ref_layer, comp_layer, y, x + sub_w, y + c_dy, x + sub_w + c_dx, sub_h, sub_w, 1
             )
-            cy_m1 = compute_zmssd_cost_func(
-                ref_layer,
-                comp_layer,
-                y,
-                x,
-                y + int(best_dy) - 1,
-                x + int(best_dx),
-                tile_h,
-                tile_w,
-                1,
+            if cost < sub_cost1:
+                sub_cost1, sub_dx1, sub_dy1 = cost, cand_dx, cand_dy
+
+        # Pencarian Sub-blok 2
+        for dy, dx in ti.ndrange((-local_refine_dist, local_refine_dist + 1), (-local_refine_dist, local_refine_dist + 1)):
+            cand_dx = best_dx + float(dx)
+            cand_dy = best_dy + float(dy)
+            c_dy, c_dx = ti.cast(ti.round(cand_dy), ti.i32), ti.cast(ti.round(cand_dx), ti.i32)
+            cost = compute_alignment_ssd(
+                ref_layer, comp_layer, y + sub_h, x, y + sub_h + c_dy, x + c_dx, sub_h, sub_w, 1
             )
-            cy_p1 = compute_zmssd_cost_func(
-                ref_layer,
-                comp_layer,
-                y,
-                x,
-                y + int(best_dy) + 1,
-                x + int(best_dx),
-                tile_h,
-                tile_w,
-                1,
+            if cost < sub_cost2:
+                sub_cost2, sub_dx2, sub_dy2 = cost, cand_dx, cand_dy
+
+        # Pencarian Sub-blok 3
+        for dy, dx in ti.ndrange((-local_refine_dist, local_refine_dist + 1), (-local_refine_dist, local_refine_dist + 1)):
+            cand_dx = best_dx + float(dx)
+            cand_dy = best_dy + float(dy)
+            c_dy, c_dx = ti.cast(ti.round(cand_dy), ti.i32), ti.cast(ti.round(cand_dx), ti.i32)
+            cost = compute_alignment_ssd(
+                ref_layer, comp_layer, y + sub_h, x + sub_w, y + sub_h + c_dy, x + sub_w + c_dx, sub_h, sub_w, 1
             )
-            best_dx += parabolic_refinement(cx_m1, c0, cx_p1)
-            best_dy += parabolic_refinement(cy_m1, c0, cy_p1)
-        for r, c in ti.ndrange(tile_h, tile_w):
-            if y + r < h and x + c < w:
-                refined_flow[y + r, x + c, 0], refined_flow[y + r, x + c, 1] = (
-                    -best_dx,
-                    best_dy,
+            if cost < sub_cost3:
+                sub_cost3, sub_dx3, sub_dy3 = cost, cand_dx, cand_dy
+
+        # Bandingkan total cost pemisahan dengan cost parent
+        avg_sub_cost = (sub_cost0 + sub_cost1 + sub_cost2 + sub_cost3) / 4.0
+
+        if avg_sub_cost < 0.85 * best_cost:
+            # 🚀 Gunakan pembagian (Split): Lakukan sub-pixel refinement untuk setiap sub-blok
+            sub_dx0 += parabolic_refinement(
+                compute_alignment_ssd(ref_layer, comp_layer, y, x, y + int(sub_dy0), x + int(sub_dx0) - 1, sub_h, sub_w, 1),
+                sub_cost0,
+                compute_alignment_ssd(ref_layer, comp_layer, y, x, y + int(sub_dy0), x + int(sub_dx0) + 1, sub_h, sub_w, 1)
+            )
+            sub_dy0 += parabolic_refinement(
+                compute_alignment_ssd(ref_layer, comp_layer, y, x, y + int(sub_dy0) - 1, x + int(sub_dx0), sub_h, sub_w, 1),
+                sub_cost0,
+                compute_alignment_ssd(ref_layer, comp_layer, y, x, y + int(sub_dy0) + 1, x + int(sub_dx0), sub_h, sub_w, 1)
+            )
+            for r, c in ti.ndrange(sub_h, sub_w):
+                if y + r < h and x + c < w:
+                    refined_flow[y + r, x + c, 0], refined_flow[y + r, x + c, 1] = -sub_dx0, sub_dy0
+
+            sub_dx1 += parabolic_refinement(
+                compute_alignment_ssd(ref_layer, comp_layer, y, x + sub_w, y + int(sub_dy1), x + sub_w + int(sub_dx1) - 1, sub_h, sub_w, 1),
+                sub_cost1,
+                compute_alignment_ssd(ref_layer, comp_layer, y, x + sub_w, y + int(sub_dy1), x + sub_w + int(sub_dx1) + 1, sub_h, sub_w, 1)
+            )
+            sub_dy1 += parabolic_refinement(
+                compute_alignment_ssd(ref_layer, comp_layer, y, x + sub_w, y + int(sub_dy1) - 1, x + sub_w + int(sub_dx1), sub_h, sub_w, 1),
+                sub_cost1,
+                compute_alignment_ssd(ref_layer, comp_layer, y, x + sub_w, y + int(sub_dy1) + 1, x + sub_w + int(sub_dx1), sub_h, sub_w, 1)
+            )
+            for r, c in ti.ndrange(sub_h, sub_w):
+                if y + r < h and x + sub_w + c < w:
+                    refined_flow[y + r, x + sub_w + c, 0], refined_flow[y + r, x + sub_w + c, 1] = -sub_dx1, sub_dy1
+
+            sub_dx2 += parabolic_refinement(
+                compute_alignment_ssd(ref_layer, comp_layer, y + sub_h, x, y + sub_h + int(sub_dy2), x + int(sub_dx2) - 1, sub_h, sub_w, 1),
+                sub_cost2,
+                compute_alignment_ssd(ref_layer, comp_layer, y + sub_h, x, y + sub_h + int(sub_dy2), x + int(sub_dx2) + 1, sub_h, sub_w, 1)
+            )
+            sub_dy2 += parabolic_refinement(
+                compute_alignment_ssd(ref_layer, comp_layer, y + sub_h, x, y + sub_h + int(sub_dy2) - 1, x + int(sub_dx2), sub_h, sub_w, 1),
+                sub_cost2,
+                compute_alignment_ssd(ref_layer, comp_layer, y + sub_h, x, y + sub_h + int(sub_dy2) + 1, x + int(sub_dx2), sub_h, sub_w, 1)
+            )
+            for r, c in ti.ndrange(sub_h, sub_w):
+                if y + sub_h + r < h and x + c < w:
+                    refined_flow[y + sub_h + r, x + c, 0], refined_flow[y + sub_h + r, x + c, 1] = -sub_dx2, sub_dy2
+
+            sub_dx3 += parabolic_refinement(
+                compute_alignment_ssd(ref_layer, comp_layer, y + sub_h, x + sub_w, y + sub_h + int(sub_dy3), x + sub_w + int(sub_dx3) - 1, sub_h, sub_w, 1),
+                sub_cost3,
+                compute_alignment_ssd(ref_layer, comp_layer, y + sub_h, x + sub_w, y + sub_h + int(sub_dy3), x + sub_w + int(sub_dx3) + 1, sub_h, sub_w, 1)
+            )
+            sub_dy3 += parabolic_refinement(
+                compute_alignment_ssd(ref_layer, comp_layer, y + sub_h, x + sub_w, y + sub_h + int(sub_dy3) - 1, x + sub_w + int(sub_dx3), sub_h, sub_w, 1),
+                sub_cost3,
+                compute_alignment_ssd(ref_layer, comp_layer, y + sub_h, x + sub_w, y + sub_h + int(sub_dy3) + 1, x + sub_w + int(sub_dx3), sub_h, sub_w, 1)
+            )
+            for r, c in ti.ndrange(sub_h, sub_w):
+                if y + sub_h + r < h and x + sub_w + c < w:
+                    refined_flow[y + sub_h + r, x + sub_w + c, 0], refined_flow[y + sub_h + r, x + sub_w + c, 1] = -sub_dx3, sub_dy3
+        else:
+            # Tidak di-split: Gunakan vektor induk
+            if (
+                -local_search_radius < best_dx < local_search_radius
+                and -local_search_radius < best_dy < local_search_radius
+            ):
+                c0 = best_cost
+                cx_m1 = compute_alignment_ssd(
+                    ref_layer, comp_layer, y, x, y + int(best_dy), x + int(best_dx) - 1, tile_h, tile_w, 1
                 )
+                cx_p1 = compute_alignment_ssd(
+                    ref_layer, comp_layer, y, x, y + int(best_dy), x + int(best_dx) + 1, tile_h, tile_w, 1
+                )
+                cy_m1 = compute_alignment_ssd(
+                    ref_layer, comp_layer, y, x, y + int(best_dy) - 1, x + int(best_dx), tile_h, tile_w, 1
+                )
+                cy_p1 = compute_alignment_ssd(
+                    ref_layer, comp_layer, y, x, y + int(best_dy) + 1, x + int(best_dx), tile_h, tile_w, 1
+                )
+                best_dx += parabolic_refinement(cx_m1, c0, cx_p1)
+                best_dy += parabolic_refinement(cy_m1, c0, cy_p1)
+            for r, c in ti.ndrange(tile_h, tile_w):
+                if y + r < h and x + c < w:
+                    refined_flow[y + r, x + c, 0], refined_flow[y + r, x + c, 1] = (
+                        -best_dx,
+                        best_dy,
+                    )
 
 
 @ti.kernel
@@ -268,7 +322,7 @@ def search_coarse_level_kernel(
                         previous_flow[cy, cx, 0] * downscale_factor, ti.i32
                     ), ti.round(previous_flow[cy, cx, 1] * downscale_factor, ti.i32)
             cost = (
-                compute_zmssd_cost_func(
+                compute_alignment_sad(
                     ref_layer,
                     comp_layer,
                     y,
@@ -288,13 +342,19 @@ def search_coarse_level_kernel(
             float(best_cand_dx),
             float(best_cand_dy),
         )
-        if best_cand_cost >= 0.0001:
+        
+        # 🚀 HANYA MENCARI SETENGAH DARI JANGKAUAN MAKSIMAL
+        local_search_dist = ti.max(1, search_dist // 2)
+
+        # 🚀 EARLY STOPPING: Berhenti jika MV sudah memiliki akurasi bagus (melenceng 1-2 piksel)
+        # Threshold 0.003 pada ZMSAD merepresentasikan tingkat ketidakcocokan rata-rata di bawah 0.3%
+        if best_cand_cost >= 0.003:
             for dy, dx in ti.ndrange(
-                (-search_dist, search_dist + 1), (-search_dist, search_dist + 1)
+                (-local_search_dist, local_search_dist + 1), (-local_search_dist, local_search_dist + 1)
             ):
                 cur_dx, cur_dy = best_cand_dx + dx, best_cand_dy + dy
                 visual_cost = (
-                    compute_zmssd_cost_func(
+                    compute_alignment_sad(
                         ref_layer,
                         comp_layer,
                         y,
@@ -397,7 +457,7 @@ def search_fine_level_kernel(
                         previous_flow[cy, cx, 0] * downscale_factor, ti.i32
                     ), ti.round(previous_flow[cy, cx, 1] * downscale_factor, ti.i32)
             cost = (
-                compute_zmssd_cost_func(
+                compute_alignment_sad(
                     ref_layer,
                     comp_layer,
                     y,
@@ -421,7 +481,7 @@ def search_fine_level_kernel(
             for dy, dx in ti.ndrange((-1, 2), (-1, 2)):
                 cur_dx, cur_dy = best_cand_dx + dx, best_cand_dy + dy
                 visual_cost = (
-                    compute_zmssd_cost_func(
+                    compute_alignment_sad(
                         ref_layer,
                         comp_layer,
                         y,
@@ -445,19 +505,19 @@ def search_fine_level_kernel(
                         float(cur_dy),
                     )
         int_dx, int_dy = ti.round(final_dx, ti.i32), ti.round(final_dy, ti.i32)
-        c0 = compute_zmssd_cost_func(
+        c0 = compute_alignment_sad(
             ref_layer, comp_layer, y, x, y + int_dy, x + int_dx, tile_h, tile_w, 1
         )
-        c_m1_x = compute_zmssd_cost_func(
+        c_m1_x = compute_alignment_sad(
             ref_layer, comp_layer, y, x, y + int_dy, x + int_dx - 1, tile_h, tile_w, 1
         )
-        c_p1_x = compute_zmssd_cost_func(
+        c_p1_x = compute_alignment_sad(
             ref_layer, comp_layer, y, x, y + int_dy, x + int_dx + 1, tile_h, tile_w, 1
         )
-        c_m1_y = compute_zmssd_cost_func(
+        c_m1_y = compute_alignment_sad(
             ref_layer, comp_layer, y, x, y + int_dy - 1, x + int_dx, tile_h, tile_w, 1
         )
-        c_p1_y = compute_zmssd_cost_func(
+        c_p1_y = compute_alignment_sad(
             ref_layer, comp_layer, y, x, y + int_dy + 1, x + int_dx, tile_h, tile_w, 1
         )
         final_dx, final_dy = float(int_dx) + parabolic_refinement(
@@ -531,7 +591,7 @@ def compile_compute_flow():
 
     g_builder = ti.graph.GraphBuilder()
 
-    # block_search_kernel sekarang menghitung radius dinamis secara matematis dengan batas sym_max_search_radius
+    # block_search_kernel di Level 2 (1/4 skala)
     g_builder.dispatch(
         block_search_kernel,
         sym_ref_l2,

@@ -60,8 +60,14 @@ def _preprocess_bayer_kernel(
 
         wb_bayer[r, c] = val * gain
 
+@ti.func
+def _fast_gamma(x: ti.f32) -> ti.f32:
+    t = ti.math.sqrt(x)
+    return t * (1.30547177 + t * (-0.78947190 + t * (0.79064221 - 0.30664208 * t)))
+
 
 @ti.kernel
+
 def _ha_green_interpolation_kernel_opt(
     wb_bayer: ti.types.ndarray(),
     green: ti.types.ndarray(),
@@ -154,6 +160,10 @@ def _ha_red_blue_interpolation_kernel_opt(
     """Pass 2: Red and Blue Reconstruction using Directional Color Difference Interpolation.
     Uses cached preprocessed wb_bayer for maximum performance.
     """
+    inv_wb_r = 1.0 / ti.max(0.1, wb_r)
+    inv_wb_g = 1.0 / ti.max(0.1, (wb_g1 + wb_g2) * 0.5)
+    inv_wb_b = 1.0 / ti.max(0.1, wb_b)
+
     for r, c in ti.ndrange(h, w):
         color_idx = 1
         r_mod = r % 2
@@ -230,9 +240,9 @@ def _ha_red_blue_interpolation_kernel_opt(
                     B = G
 
         # --- Advanced Highlight Recovery & Desaturation (from commit 1106566) ---
-        R_raw = R / ti.max(0.1, wb_r)
-        G_raw = G / ti.max(0.1, (wb_g1 + wb_g2) * 0.5)
-        B_raw = B / ti.max(0.1, wb_b)
+        R_raw = R * inv_wb_r
+        G_raw = G * inv_wb_g
+        B_raw = B * inv_wb_b
 
         max_raw = ti.max(R_raw, ti.max(G_raw, B_raw))
         min_raw = ti.min(R_raw, ti.min(G_raw, B_raw))
@@ -260,9 +270,185 @@ def _ha_red_blue_interpolation_kernel_opt(
         sG = sG / ti.math.sqrt(1.0 + sG * sG)
         sB = sB / ti.math.sqrt(1.0 + sB * sB)
 
-        dst[r, c, 0] = ti.math.pow(ti.math.clamp(sR, 0.0, 1.0), 1.0 / 2.22)
-        dst[r, c, 1] = ti.math.pow(ti.math.clamp(sG, 0.0, 1.0), 1.0 / 2.22)
-        dst[r, c, 2] = ti.math.pow(ti.math.clamp(sB, 0.0, 1.0), 1.0 / 2.22)
+        dst[r, c, 0] = _fast_gamma(ti.math.clamp(sR, 0.0, 1.0))
+        dst[r, c, 1] = _fast_gamma(ti.math.clamp(sG, 0.0, 1.0))
+        dst[r, c, 2] = _fast_gamma(ti.math.clamp(sB, 0.0, 1.0))
+
+
+
+@ti.kernel
+def _ha_red_blue_diff_kernel(
+    wb_bayer: ti.types.ndarray(),
+    green: ti.types.ndarray(),
+    r_diff: ti.types.ndarray(),
+    b_diff: ti.types.ndarray(),
+    h: ti.i32,
+    w: ti.i32,
+    c00: ti.i32,
+    c01: ti.i32,
+    c10: ti.i32,
+    c11: ti.i32,
+):
+    """Pass 2a: Red and Blue Reconstruction to Color Differences (R-G and B-G)"""
+    for r, c in ti.ndrange(h, w):
+        color_idx = 1
+        r_mod = r % 2
+        c_mod = c % 2
+        if r_mod == 0:
+            color_idx = c00 if c_mod == 0 else c01
+        else:
+            color_idx = c10 if c_mod == 0 else c11
+
+        R, G, B = 0.0, 0.0, 0.0
+        G = green[r, c]
+
+        if color_idx == 0:  # Red pixel
+            R = wb_bayer[r, c]
+            if r > 0 and r < h - 1 and c > 0 and c < w - 1:
+                g_diff_diag1 = ti.abs(green[r - 1, c - 1] - green[r + 1, c + 1])
+                g_diff_diag2 = ti.abs(green[r - 1, c + 1] - green[r + 1, c - 1])
+                w1 = 1.0 / (1.0 + g_diff_diag1)
+                w2 = 1.0 / (1.0 + g_diff_diag2)
+                
+                b_diff_val = (
+                    w1 * (wb_bayer[r - 1, c - 1] - green[r - 1, c - 1] + wb_bayer[r + 1, c + 1] - green[r + 1, c + 1]) +
+                    w2 * (wb_bayer[r - 1, c + 1] - green[r - 1, c + 1] + wb_bayer[r + 1, c - 1] - green[r + 1, c - 1])
+                ) / (2.0 * (w1 + w2))
+                B = G + b_diff_val
+            else:
+                B = G
+
+        elif color_idx == 2:  # Blue pixel
+            B = wb_bayer[r, c]
+            if r > 0 and r < h - 1 and c > 0 and c < w - 1:
+                g_diff_diag1 = ti.abs(green[r - 1, c - 1] - green[r + 1, c + 1])
+                g_diff_diag2 = ti.abs(green[r - 1, c + 1] - green[r + 1, c - 1])
+                w1 = 1.0 / (1.0 + g_diff_diag1)
+                w2 = 1.0 / (1.0 + g_diff_diag2)
+
+                r_diff_val = (
+                    w1 * (wb_bayer[r - 1, c - 1] - green[r - 1, c - 1] + wb_bayer[r + 1, c + 1] - green[r + 1, c + 1]) +
+                    w2 * (wb_bayer[r - 1, c + 1] - green[r - 1, c + 1] + wb_bayer[r + 1, c - 1] - green[r + 1, c - 1])
+                ) / (2.0 * (w1 + w2))
+                R = G + r_diff_val
+            else:
+                R = G
+
+        else:  # Green pixel
+            is_red_horizontal = False
+            if r_mod == 0:
+                other_color = c00 if c_mod == 1 else c01
+                is_red_horizontal = other_color == 0
+            else:
+                other_color = c10 if c_mod == 1 else c11
+                is_red_horizontal = other_color == 0
+
+            if is_red_horizontal:  # Red is Horizontal, Blue is Vertical
+                if c > 0 and c < w - 1:
+                    R = G + (wb_bayer[r, c - 1] - green[r, c - 1] + wb_bayer[r, c + 1] - green[r, c + 1]) * 0.5
+                else:
+                    R = G
+
+                if r > 0 and r < h - 1:
+                    B = G + (wb_bayer[r - 1, c] - green[r - 1, c] + wb_bayer[r + 1, c] - green[r + 1, c]) * 0.5
+                else:
+                    B = G
+
+            else:  # Blue is Horizontal, Red is Vertical
+                if r > 0 and r < h - 1:
+                    R = G + (wb_bayer[r - 1, c] - green[r - 1, c] + wb_bayer[r + 1, c] - green[r + 1, c]) * 0.5
+                else:
+                    R = G
+
+                if c > 0 and c < w - 1:
+                    B = G + (wb_bayer[r, c - 1] - green[r, c - 1] + wb_bayer[r, c + 1] - green[r, c + 1]) * 0.5
+                else:
+                    B = G
+
+        r_diff[r, c] = R - G
+        b_diff[r, c] = B - G
+
+
+@ti.kernel
+def _median_filter_3x3_kernel(
+    src: ti.types.ndarray(), dst: ti.types.ndarray(), h: int, w: int
+):
+    """Pass 2b/2c: Highly optimized 3x3 Median Filter on differences"""
+    for y, x in ti.ndrange(h, w):
+        vals = ti.Vector([0.0] * 9)
+        idx = 0
+        for dy in ti.static(range(-1, 2)):
+            for dx in ti.static(range(-1, 2)):
+                ny = ti.math.clamp(y + dy, 0, h - 1)
+                nx = ti.math.clamp(x + dx, 0, w - 1)
+                vals[idx] = src[ny, nx]
+                idx += 1
+        for i in range(9):
+            for j in range(i + 1, 9):
+                if vals[j] < vals[i]:
+                    vals[i], vals[j] = vals[j], vals[i]
+        dst[y, x] = vals[4]
+
+
+@ti.kernel
+def _ha_reconstruct_and_postprocess_kernel(
+    green: ti.types.ndarray(),
+    r_diff_filtered: ti.types.ndarray(),
+    b_diff_filtered: ti.types.ndarray(),
+    cmatrix: ti.types.ndarray(),
+    dst: ti.types.ndarray(),
+    wb_r: ti.f32,
+    wb_g1: ti.f32,
+    wb_b: ti.f32,
+    wb_g2: ti.f32,
+    h: ti.i32,
+    w: ti.i32,
+):
+    """Pass 3: Final RGB Reconstruction from filtered differences and Color/Gamma transformations"""
+    inv_wb_r = 1.0 / ti.max(0.1, wb_r)
+    inv_wb_g = 1.0 / ti.max(0.1, (wb_g1 + wb_g2) * 0.5)
+    inv_wb_b = 1.0 / ti.max(0.1, wb_b)
+
+    for r, c in ti.ndrange(h, w):
+        G = green[r, c]
+        R = G + r_diff_filtered[r, c]
+        B = G + b_diff_filtered[r, c]
+
+        # --- Advanced Highlight Recovery & Desaturation ---
+        R_raw = R * inv_wb_r
+        G_raw = G * inv_wb_g
+        B_raw = B * inv_wb_b
+
+        max_raw = ti.max(R_raw, ti.max(G_raw, B_raw))
+        min_raw = ti.min(R_raw, ti.min(G_raw, B_raw))
+
+        factor = ti.math.clamp((max_raw - 0.55) / 0.43, 0.0, 1.0)
+        factor = factor * factor * (3.0 - 2.0 * factor)
+
+        ratio = min_raw / ti.max(1e-5, max_raw)
+        neutrality = ti.math.clamp((ratio - 0.40) / 0.45, 0.0, 1.0)
+        neutrality = neutrality * neutrality * (3.0 - 2.0 * neutrality)
+
+        final_factor = factor * neutrality
+
+        L = ti.max(R, ti.max(G, B))
+        R = R * (1.0 - final_factor) + L * final_factor
+        G = G * (1.0 - final_factor) + L * final_factor
+        B = B * (1.0 - final_factor) + L * final_factor
+
+        # sRGB conversion & Gamma curve
+        sR = cmatrix[0, 0] * R + cmatrix[0, 1] * G + cmatrix[0, 2] * B
+        sG = cmatrix[1, 0] * R + cmatrix[1, 1] * G + cmatrix[1, 2] * B
+        sB = cmatrix[2, 0] * R + cmatrix[2, 1] * G + cmatrix[2, 2] * B
+
+        sR = sR / ti.math.sqrt(1.0 + sR * sR)
+        sG = sG / ti.math.sqrt(1.0 + sG * sG)
+        sB = sB / ti.math.sqrt(1.0 + sB * sB)
+
+        dst[r, c, 0] = _fast_gamma(ti.math.clamp(sR, 0.0, 1.0))
+        dst[r, c, 1] = _fast_gamma(ti.math.clamp(sG, 0.0, 1.0))
+        dst[r, c, 2] = _fast_gamma(ti.math.clamp(sB, 0.0, 1.0))
+
 
 
 @ti.func
@@ -472,9 +658,10 @@ def _ha_rgb_half_res_fused_kernel(
         sG = sG / ti.math.sqrt(1.0 + sG * sG)
         sB = sB / ti.math.sqrt(1.0 + sB * sB)
         
-        dst[r, c, 0] = ti.math.pow(ti.math.clamp(sR, 0.0, 1.0), 1.0 / 2.22)
-        dst[r, c, 1] = ti.math.pow(ti.math.clamp(sG, 0.0, 1.0), 1.0 / 2.22)
-        dst[r, c, 2] = ti.math.pow(ti.math.clamp(sB, 0.0, 1.0), 1.0 / 2.22)
+        dst[r, c, 0] = _fast_gamma(ti.math.clamp(sR, 0.0, 1.0))
+        dst[r, c, 1] = _fast_gamma(ti.math.clamp(sG, 0.0, 1.0))
+        dst[r, c, 2] = _fast_gamma(ti.math.clamp(sB, 0.0, 1.0))
+
 
 
 @ti.kernel
@@ -586,11 +773,12 @@ def _ha_to_grayscale_3channel_kernel(
         sB = sB / ti.math.sqrt(1.0 + sB * sB)
 
         luma = (
-            0.299 * ti.math.pow(ti.math.clamp(sR, 0.0, 1.0), 1.0 / 2.22) +
-            0.587 * ti.math.pow(ti.math.clamp(sG, 0.0, 1.0), 1.0 / 2.22) +
-            0.114 * ti.math.pow(ti.math.clamp(sB, 0.0, 1.0), 1.0 / 2.22)
+            0.299 * _fast_gamma(ti.math.clamp(sR, 0.0, 1.0)) +
+            0.587 * _fast_gamma(ti.math.clamp(sG, 0.0, 1.0)) +
+            0.114 * _fast_gamma(ti.math.clamp(sB, 0.0, 1.0))
         )
         dst[r, c] = luma
+
 
 
 @ti.kernel
@@ -625,6 +813,11 @@ def compile_hamilton_tcm(arch=ti.vulkan, save_path="hamilton_vulkan.tcm"):
     green_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "green", ti.f32, ndim=2)
     cmatrix_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "cmatrix", ti.f32, ndim=2)
     dst_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
+
+    r_diff_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "r_diff", ti.f32, ndim=2)
+    b_diff_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "b_diff", ti.f32, ndim=2)
+    r_diff_filtered_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "r_diff_filtered", ti.f32, ndim=2)
+    b_diff_filtered_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "b_diff_filtered", ti.f32, ndim=2)
 
     # Scalars
     wb_r_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "wb_r", ti.f32)
@@ -674,11 +867,45 @@ def compile_hamilton_tcm(arch=ti.vulkan, save_path="hamilton_vulkan.tcm"):
         c11_arg,
     )
 
-    # Dispatch Pass 2: Red/Blue Reconstruction using cached wb_bayer
+    # Dispatch Pass 2a: Red and Blue difference calculation
     g_hamilton.dispatch(
-        _ha_red_blue_interpolation_kernel_opt,
+        _ha_red_blue_diff_kernel,
         wb_bayer_arg,
         green_arg,
+        r_diff_arg,
+        b_diff_arg,
+        h_arg,
+        w_arg,
+        c00_arg,
+        c01_arg,
+        c10_arg,
+        c11_arg,
+    )
+
+    # Dispatch Pass 2b: Median filter 3x3 on R difference
+    g_hamilton.dispatch(
+        _median_filter_3x3_kernel,
+        r_diff_arg,
+        r_diff_filtered_arg,
+        h_arg,
+        w_arg,
+    )
+
+    # Dispatch Pass 2c: Median filter 3x3 on B difference
+    g_hamilton.dispatch(
+        _median_filter_3x3_kernel,
+        b_diff_arg,
+        b_diff_filtered_arg,
+        h_arg,
+        w_arg,
+    )
+
+    # Dispatch Pass 3: Final RGB Reconstruction and postprocessing
+    g_hamilton.dispatch(
+        _ha_reconstruct_and_postprocess_kernel,
+        green_arg,
+        r_diff_filtered_arg,
+        b_diff_filtered_arg,
         cmatrix_arg,
         dst_arg,
         wb_r_arg,
@@ -687,10 +914,6 @@ def compile_hamilton_tcm(arch=ti.vulkan, save_path="hamilton_vulkan.tcm"):
         wb_g2_arg,
         h_arg,
         w_arg,
-        c00_arg,
-        c01_arg,
-        c10_arg,
-        c11_arg,
     )
 
     module.add_graph("hamilton_demosaic", g_hamilton.compile())

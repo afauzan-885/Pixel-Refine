@@ -6,8 +6,8 @@ Reusable Sidebar Component (MVC).
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QPushButton
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import Slot, QEasingCurve, Signal, Qt, QSize
-from pixel_refine_desktop.ui.resources.animations.animation_manager import WidthAnimator
-from pixel_refine_desktop.ui.resources.styles import stylesheet
+from resources.animations.animation_manager import WidthAnimator
+from resources.styles import stylesheet
 
 
 class Sidebar(QWidget):

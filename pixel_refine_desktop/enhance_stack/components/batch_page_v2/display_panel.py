@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QGraphicsScene,
     QMenu,
+    QGraphicsPixmapItem,
 )
 from PySide6.QtCore import (
     Slot,
@@ -38,11 +39,11 @@ from PySide6.QtCore import (
     QEasingCurve,
 )
 from typing import Optional, TYPE_CHECKING, Any
-from PySide6.QtGui import QPixmap, QColor, QAction
+from PySide6.QtGui import QPixmap, QColor, QAction, QImage
 import os
 
 # Generic UI Library
-from pixel_refine_desktop.ui.resources.GenericUILibrary import (
+from resources.GenericUILibrary import (
     ImageCard,
     Button,
     IconButton,
@@ -51,13 +52,13 @@ from pixel_refine_desktop.ui.resources.GenericUILibrary import (
     OverlayPosition,
     ImageCompareItem,
 )
-from pixel_refine_desktop.ui.resources.GenericUILibrary.grids import GridContainer
-from pixel_refine_desktop.ui.resources.animations.slide import slide
-from pixel_refine_desktop.ui.resources.animations.animation_manager import (
+from resources.GenericUILibrary.grids import GridContainer
+from resources.animations.slide import slide
+from resources.animations.animation_manager import (
     SlideDirection,
     StackedWidgetAnimator,
 )
-from pixel_refine_desktop.ui.resources.GenericUILibrary.forms import FormGroup
+from resources.GenericUILibrary.forms import FormGroup
 from pixel_refine_desktop.ui.components.common.sidebar import Sidebar
 
 # Logic
@@ -94,13 +95,13 @@ from pixel_refine_desktop.enhance_stack.core.logic.Zoomable_Handler import Zooma
 from PySide6.QtWidgets import QGraphicsScene
 
 # Animations
-from pixel_refine_desktop.ui.resources.animations.animation_manager import (
+from resources.animations.animation_manager import (
     StackedWidgetAnimator,
     SlideDirection,
 )
-from pixel_refine_desktop.ui.resources.animations.slide import slide
-from pixel_refine_desktop.ui.resources.animations.fade import fade_out, fade_in
-from pixel_refine_desktop.ui.resources.animations.toast.toast_manager import (
+from resources.animations.slide import slide
+from resources.animations.fade import fade_out, fade_in
+from resources.animations.toast.toast_manager import (
     ToastManager,
     ToastPosition,
     ToastAnimation,
@@ -111,10 +112,148 @@ from config import SUPPORTED_FORMATS
 
 # Import the new widget
 from .multiple_batch_delete_widget import MultipleBatchDeleteWidget
-from pixel_refine_desktop.ui.resources.GenericUILibrary import realtime_update
+from resources.GenericUILibrary import live_update
+import numpy as np
+
+class BurstCacheWorker(QThread):
+    image_cached = Signal(str, QImage)  # (path, q_image)
+    
+    def __init__(self, paths, parent=None):
+        super().__init__(parent)
+        self.paths = paths
+        self._is_cancelled = False
+        
+    def run(self):
+        for path in self.paths:
+            if self._is_cancelled:
+                break
+            try:
+                # Load array using half_res helper logic
+                ext = os.path.splitext(path)[1].lower()
+                image_array = None
+                
+                # Check format
+                if ext in SUPPORTED_FORMATS.get("jpg", []) + SUPPORTED_FORMATS.get("png", []) + SUPPORTED_FORMATS.get("tiff", []):
+                    # Load with PIL
+                    from PIL import Image, ImageOps
+                    import cv2
+                    with Image.open(path) as img:
+                        img = ImageOps.exif_transpose(img)
+                        if img.mode in ("RGBA", "LA", "P"):
+                            img = img.convert("RGB")
+                        elif img.mode == "L":
+                            img = img.convert("RGB")
+                        image_array = np.array(img)
+                        # Resize to half resolution
+                        h, w = image_array.shape[:2]
+                        image_array = cv2.resize(image_array, (w // 2, h // 2), interpolation=cv2.INTER_AREA)
+                        # Convert to BGR for uniform channel format
+                        image_array = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
+                        
+                elif ext in SUPPORTED_FORMATS.get("raw", []):
+                    from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import load_raw_as_8bit_rgb_half_res
+                    import cv2
+                    img_rgb = load_raw_as_8bit_rgb_half_res(path)
+                    image_array = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+                
+                if image_array is not None:
+                    # Convert to QImage
+                    height, width = image_array.shape[:2]
+                    # Ensure we convert BGR to RGB for QImage
+                    image_array = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
+                    bytes_per_line = 3 * width
+                    # Use QImage copy to duplicate bytes safely
+                    q_image = QImage(
+                        image_array.data.tobytes(),
+                        width,
+                        height,
+                        bytes_per_line,
+                        QImage.Format.Format_RGB888
+                    ).copy()
+                    
+                    self.image_cached.emit(path, q_image)
+            except Exception as e:
+                print(f"Error pre-caching {path}: {e}")
+                
+    def cancel(self):
+        self._is_cancelled = True
 
 
-@realtime_update
+class BackgroundBatchPreloader(QThread):
+    """
+    Background thread untuk pre-generate thumbnail batch baru secara diam-diam.
+
+    Dipanggil otomatis saat batch baru dibuat atau gambar baru diimpor.
+    Menggunakan GlobalThumbnailCache dari thumbnail_processor agar saat user
+    membuka batch tersebut, thumbnailnya sudah siap di RAM — tampil instan.
+
+    Prioritas thread: LowestPriority sehingga tidak mengganggu rendering aktif.
+    Throttle RAW: memanfaatkan RawDemosaicThrottle (maks 2 paralel) secara otomatis
+    melalui process_thumbnail_logic.
+    """
+    thumbnail_preloaded = Signal(str, str)  # (batch_id, image_path)
+
+    def __init__(self, batch_id, image_paths, parent=None):
+        super().__init__(parent)
+        self.batch_id = str(batch_id)
+        self.image_paths = list(image_paths)
+        self._is_cancelled = False
+        self.setPriority(QThread.Priority.LowestPriority)
+
+    def cancel(self):
+        self._is_cancelled = True
+
+    def run(self):
+        """Pre-load thumbnails ke GlobalThumbnailCache secara diam-diam di background."""
+        try:
+            from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_processor import (
+                get_global_cache,
+                process_thumbnail_logic,
+                convert_pil_to_qimage,
+                get_thumbnail_repo,
+            )
+        except ImportError:
+            return
+
+        global_cache = get_global_cache()
+
+        for path in self.image_paths:
+            if self._is_cancelled:
+                break
+
+            # Skip jika sudah ada di L0 cache
+            if global_cache.has(path):
+                continue
+
+            try:
+                # Cek L2 disk cache dulu (lebih cepat dari decode)
+                repo = get_thumbnail_repo()
+                cached_disk = repo.get_thumbnail(path)
+                if not cached_disk.isNull():
+                    global_cache.put(path, cached_disk)
+                    if not self._is_cancelled:
+                        self.thumbnail_preloaded.emit(self.batch_id, path)
+                    continue
+
+                # Decode thumbnail (process_thumbnail_logic otomatis pakai RawDemosaicThrottle)
+                pil_thumb = process_thumbnail_logic(path, (128, 128))
+                if self._is_cancelled:
+                    break
+                if pil_thumb:
+                    q_image = convert_pil_to_qimage(pil_thumb)
+                    if not q_image.isNull():
+                        # Simpan ke disk dan L0
+                        repo.save_thumbnail(path, q_image)
+                        global_cache.put(path, q_image)
+                        if not self._is_cancelled:
+                            self.thumbnail_preloaded.emit(self.batch_id, path)
+            except Exception as e:
+                if not self._is_cancelled:
+                    print(f"[BackgroundBatchPreloader] Error pre-loading {path}: {e}")
+
+
+
+@live_update
 class DisplayPanel(QWidget):
     """
     Panel untuk menampilkan Grid images dan Preview.
@@ -148,13 +287,6 @@ class DisplayPanel(QWidget):
             Qt.WidgetAttribute.WA_StyledBackground, True
         )
         self.display_container.setObjectName("DisplayContainerBase")
-        self.display_container.setStyleSheet(
-            """
-            #DisplayContainerBase {
-                background-color: #FFFFFF;
-            }
-        """
-        )
 
         self.controller = controller
         self.logic = DisplayLogic()
@@ -182,10 +314,15 @@ class DisplayPanel(QWidget):
         self.current_preview_path = None
         self.current_results_map = {}
         self.zoom_states = {}
+        self.playback_cache = {}
+        self.cache_worker = None
         self.toast = ToastManager(self)
         self.active_deletions = {}  # {batch_id: [paths]} for resume logic
         self.right_panel: Any = None
         self.placeholder_widget = None
+        # Track active background preloaders (satu per batch_id)
+        self._bg_preloaders: dict = {}  # batch_id (str) -> BackgroundBatchPreloader
+        
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._setup_ui()
@@ -205,6 +342,9 @@ class DisplayPanel(QWidget):
         # Connect internal proxy signals
         # self._worker_finished_proxy_signal.connect(self._on_worker_finished)
         # self._worker_error_proxy_signal.connect(self._on_worker_error)
+
+        # Connect import_finished -> background pre-loader (otomatis, silent)
+        self.import_manager.import_finished.connect(self._start_background_preload)
 
         self.setAcceptDrops(True)
         self.clear_display()
@@ -246,16 +386,14 @@ class DisplayPanel(QWidget):
         self.left_header_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         # 0. Sidebar Toggle Button (New)
-        self.toggle_btn = Button("☰", variant="ghost")  # Minimalist style
+        self.toggle_btn = Button("☰", object_name="SidebarToggleBtn")
         self.toggle_btn.setFixedWidth(40)
         self.toggle_btn.clicked.connect(self.toggle_sidebar)
         self.left_header_layout.addWidget(self.toggle_btn)
 
         # Title Label
         self.header_title = QLabel("")
-        self.header_title.setStyleSheet(
-            "font-weight: bold; font-size: 16px; color: #333; padding: 5px;"
-        )
+        self.header_title.setObjectName("DisplayHeaderTitle")
         self.left_header_layout.addWidget(self.header_title)
         
         # Center Column Layout (Bulk Mode Dynamic Button centered)
@@ -346,7 +484,7 @@ class DisplayPanel(QWidget):
 
         # 2. Preview Process Button (Shortcut from Grid)
         self.preview_process_btn = IconButton(
-            icon_path="pixel_refine_desktop/ui/resources/assets/icons/play-preview.png",
+            icon_path="resources/assets/icons/play-preview.png",
             variant="primary",
         )
         self.preview_process_btn.setToolTip("Image Process")
@@ -356,7 +494,7 @@ class DisplayPanel(QWidget):
         self.right_header_layout.addWidget(self.preview_process_btn)
 
         # 3. Import Images Button
-        self.import_button = Button(language_config.TOPBAR_BATCH_IMPORT_BUTTON_TEXT, variant="secondary")
+        self.import_button = Button(language_config.TOPBAR_BATCH_IMPORT_BUTTON_TEXT, object_name="ImportImageBtn")
         self.import_button.setFixedWidth(120)
         self.import_button.clicked.connect(self.import_manager.import_images)
         self.import_button.setVisible(False)
@@ -365,6 +503,8 @@ class DisplayPanel(QWidget):
         # 4. New Batch button (shown ONLY when no batches exist / right panel is hidden)
         self.new_batch_header_btn = Button(language_config.BTN_NEW_BATCH, variant="primary")
         self.new_batch_header_btn.setFixedWidth(110)
+        self.new_batch_header_btn.setFixedHeight(25)
+        self.new_batch_header_btn.setStyleSheet(self.new_batch_header_btn.styleSheet() + " QPushButton { padding: 4px 8px; font-size: 8pt; }")
         self.new_batch_header_btn.clicked.connect(self._create_new_batch)
         self.new_batch_header_btn.setVisible(False)  # Hidden by default; shown from page_layout
         self.right_header_layout.addWidget(self.new_batch_header_btn)
@@ -450,54 +590,100 @@ class DisplayPanel(QWidget):
             self.preview_scene.update
         )
 
-        self.display_stack.addWidget(preview_wrapper)
+        # Playback controls container (Floating over preview_wrapper)
+        self.controls_bar = QWidget()
+        self.controls_bar.setObjectName("ControlsBar")
+        self.controls_bar.setStyleSheet("""
+            #ControlsBar {
+                background-color: rgba(255, 255, 255, 220);
+                border: 1px solid rgba(0, 0, 0, 40);
+                border-radius: 8px;
+            }
+        """)
+        
+        self.controls_bar_layout = QHBoxLayout(self.controls_bar)
+        self.controls_bar_layout.setContentsMargins(8, 4, 8, 4)
+        self.controls_bar_layout.setSpacing(8)
+        # SizePolicy: Shrink to fit content dynamically
+        from PySide6.QtWidgets import QSizePolicy as _SP
+        self.controls_bar.setSizePolicy(_SP.Policy.Minimum, _SP.Policy.Minimum)
 
-        # --- FLOATING SAVE BUTTON (For Processed Results) ---
-        self.save_overlay = OverlayContainer(
-            parent=preview_wrapper,
-            position=OverlayPosition.BOTTOM_RIGHT,
-            margin=0,
-            shadow_enabled=True,
-        )
-        # 1. Inisialisasi seperti biasa
-        self.save_btn = IconButton(
-            text="",
-            icon_path="pixel_refine_desktop/ui/resources/assets/icons/image-save.png",
-            variant="secondary",
-            text_tooltip="Saving",
-            square_size=35,
-        )
-
-        # 2. PAKSA gaya via Stylesheet (Menghilangkan background & Memperbaiki Tooltip)
-        self.save_btn.setStyleSheet(
-            """
+        # Initialize playback buttons (using emojis as requested, wrapping tightly with size 36x36)
+        from PySide6.QtWidgets import QPushButton
+        
+        self.prev_frame_btn = QPushButton("⏮")
+        # No fixed size — button auto-sizes to emoji font via CSS padding
+        self.prev_frame_btn.setStyleSheet("""
             QPushButton {
-                background-color: transparent !important;
-                border: none !important;
-                padding: 0px;
+                background: transparent;
+                border: none;
+                font-size: 18px;
+                padding: 4px 6px;
             }
             QPushButton:hover {
-                background-color: rgba(0, 0, 0, 10) !important; /* Efek hover halus */
-                border-radius: 4px;
+                background-color: rgba(0, 0, 0, 15);
+                border-radius: 6px;
             }
-            QToolTip {
-                background-color: #FFF9C4; /* Kuning Kertas */
-                color: #202020;            /* Warna teks hitam agar terlihat */
-                border: 1px solid #D4C489;
-                padding: 2px;
-                border-radius: 3px;
-                font-family: sans-serif;
+        """)
+        self.prev_frame_btn.clicked.connect(self._show_prev_frame)
+
+        self.play_btn = QPushButton("▶")
+        # No fixed size — button auto-sizes to emoji font
+        self.play_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                font-size: 18px;
+                padding: 4px 6px;
             }
-        """
+            QPushButton:hover {
+                background-color: rgba(0, 0, 0, 15);
+                border-radius: 6px;
+            }
+        """)
+        self.play_btn.clicked.connect(self._toggle_playback)
+
+        self.next_frame_btn = QPushButton("⏭")
+        # No fixed size — button auto-sizes to emoji font
+        self.next_frame_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                font-size: 18px;
+                padding: 4px 6px;
+            }
+            QPushButton:hover {
+                background-color: rgba(0, 0, 0, 15);
+                border-radius: 6px;
+            }
+        """)
+        self.next_frame_btn.clicked.connect(self._show_next_frame)
+
+        # Center layout for playback buttons
+        playback_layout = QHBoxLayout()
+        playback_layout.setSpacing(4)
+        playback_layout.addWidget(self.prev_frame_btn)
+        playback_layout.addWidget(self.play_btn)
+        playback_layout.addWidget(self.next_frame_btn)
+
+        self.controls_bar_layout.addLayout(playback_layout)
+        
+        self.save_btn_ref = Button("Save", variant="secondary")
+        # No fixed width — button auto-sizes to text/font dynamically
+        self.save_btn_ref.clicked.connect(self._on_save_clicked)
+        self.controls_bar_layout.addWidget(self.save_btn_ref)
+
+        self.controls_overlay = OverlayContainer(
+            parent=preview_wrapper,
+            position=OverlayPosition.BOTTOM_CENTER,
+            margin=15,
+            shadow_enabled=True,
         )
+        self.controls_overlay.set_content(self.controls_bar)
+        self.controls_overlay.hide()
+        self.save_overlay = self.controls_overlay
 
-        # 3. Pastikan ukuran icon pas di tengah kotak 35px
-        self.save_btn.setIconSize(QSize(24, 24))
-
-        # Lanjutkan sisa kodenya
-        self.save_btn.clicked.connect(self._on_save_clicked)
-        self.save_overlay.set_content(self.save_btn)
-        self.save_overlay.hide()
+        self.display_stack.addWidget(preview_wrapper)
 
         # --- INDEX 2: MULTIPLE BATCH DELETE CONFIRMATION ---
         self._setup_delete_confirmation_widget()
@@ -513,10 +699,10 @@ class DisplayPanel(QWidget):
         pages = [
             (
                 "Enhance Stack",
-                "pixel_refine_desktop/ui/resources/assets/icons/enhance_stack.png",
+                "resources/assets/icons/enhance_stack.png",
             ),
-            # ("Panorama", "pixel_refine_desktop/ui/resources/assets/icons/panorama.png"), # Removed
-            ("Settings", "pixel_refine_desktop/ui/resources/assets/icons/setting.png"),
+            # ("Panorama", "resources/assets/icons/panorama.png"), # Removed
+            ("Settings", "resources/assets/icons/setting.png"),
         ]
 
         # Create Sidebar
@@ -588,7 +774,7 @@ class DisplayPanel(QWidget):
 
         # Optimize settings view size for overlay
         self.settings_view.setMinimumSize(600, 500)
-        self.settings_view.setStyleSheet("background-color: white; border-radius: 8px;")
+        self.settings_view.setObjectName("SettingsViewDialog")
 
         self.settings_overlay.set_content(self.settings_view)
         self.settings_overlay.hide()
@@ -766,6 +952,24 @@ class DisplayPanel(QWidget):
 
         # Aktifkan watchdog recovery untuk retry thumbnail yang tertinggal
         self.grid_manager.start_recovery_timer()
+        
+        # Start preloading burst sequence images in background
+        if hasattr(self, "cache_worker") and self.cache_worker is not None:
+            try:
+                self.cache_worker.cancel()
+                self.cache_worker.wait()
+            except Exception:
+                pass
+        
+        self.playback_cache.clear()
+        
+        paths = [img.path for img in images if hasattr(img, "path") and img.path]
+        if paths:
+            self.cache_worker = BurstCacheWorker(paths, self)
+            self.cache_worker.image_cached.connect(self._on_image_pre_cached)
+            self.cache_worker.start()
+
+        self.update_save_button_state()
 
     @Slot()
     def clear_display(self):
@@ -796,6 +1000,7 @@ class DisplayPanel(QWidget):
             self.preview_scene.clear()
 
         self.show_grid()
+        self.update_save_button_state()
 
         pass
 
@@ -1045,6 +1250,34 @@ class DisplayPanel(QWidget):
         # Just refresh to be safe.
         self._refresh_current_batch()
 
+    def _enter_preview_mode(self):
+        """Masuk ke Preview Mode: tampilkan tombol playback, sembunyikan tombol Save."""
+        if hasattr(self, "prev_frame_btn"):
+            self.prev_frame_btn.setVisible(True)
+        if hasattr(self, "play_btn"):
+            self.play_btn.setVisible(True)
+        if hasattr(self, "next_frame_btn"):
+            self.next_frame_btn.setVisible(True)
+        if hasattr(self, "save_btn_ref"):
+            self.save_btn_ref.setVisible(False)
+
+    def _enter_result_mode(self):
+        """Masuk ke Result Mode: tampilkan tombol Save, sembunyikan tombol playback."""
+        # Stop playback dulu kalau sedang berjalan
+        if hasattr(self, "playback_timer") and self.playback_timer.isActive():
+            self.playback_timer.stop()
+            self.is_playing = False
+            if hasattr(self, "play_btn"):
+                self.play_btn.setText("▶")
+        if hasattr(self, "prev_frame_btn"):
+            self.prev_frame_btn.setVisible(False)
+        if hasattr(self, "play_btn"):
+            self.play_btn.setVisible(False)
+        if hasattr(self, "next_frame_btn"):
+            self.next_frame_btn.setVisible(False)
+        if hasattr(self, "save_btn_ref"):
+            self.save_btn_ref.setVisible(True)
+
     def _display_image_preview(self, image_path):
         """
         Display single image preview di Zoomable view dengan full resolution.
@@ -1057,10 +1290,11 @@ class DisplayPanel(QWidget):
 
         # Explicitly HIDE result selector for single image preview (as requested)
         self.result_selector.setVisible(False)
-        self.save_overlay.hide()  # Hide save button for original image
 
         self.logic.display_preview(self.zoomable_preview, image_path)
         self.show_preview(show_dropdown=False)
+        # Masuk ke Preview Mode: tampilkan playback controls, sembunyikan Save
+        self._enter_preview_mode()
 
     # =========================================================================
     # === 4. PUBLIC HELPER METHODS ===
@@ -1093,6 +1327,9 @@ class DisplayPanel(QWidget):
         Loads Original + Processed into ComparisonGraphicsItem.
         """
         display_manager.display_processed_result(self, image_path, update_dropdown)
+        # Masuk ke Result Mode: sembunyikan playback controls, tampilkan Save
+        self._enter_result_mode()
+        self.update_save_button_state()
 
     def check_result_availability(self):
         """Check if results exist for current batch and update 'Preview Process' button."""
@@ -1106,6 +1343,12 @@ class DisplayPanel(QWidget):
 
     def show_grid(self):
         """Switch ke Grid View."""
+        # Stop playback if playing
+        if hasattr(self, "playback_timer") and self.playback_timer.isActive():
+            self.playback_timer.stop()
+            self.is_playing = False
+            self.play_btn.setText("▶")
+
         # Save state before exiting preview
         if hasattr(self, "current_preview_path") and self.current_preview_path:
             if hasattr(self, "zoomable_preview") and self.preview_scene.items():
@@ -1120,7 +1363,8 @@ class DisplayPanel(QWidget):
         # Update Header buttons
         self.back_btn.setVisible(False)
         self.result_selector.setVisible(False)  # Hide dropdown
-        self.save_overlay.hide()  # Hide save button on grid
+        if hasattr(self, "controls_overlay"):
+            self.controls_overlay.hide()  # Hide controls overlay on grid
         self.check_result_availability()  # Update preview button visibility
 
         if self.current_batch_id:
@@ -1135,6 +1379,9 @@ class DisplayPanel(QWidget):
         self.result_selector.setVisible(show_dropdown)  # Only show if requested
         self.import_button.setVisible(False)
         self.preview_process_btn.setVisible(False)
+        if hasattr(self, "controls_overlay"):
+            self.controls_overlay.show()
+            self.controls_overlay.raise_()
 
     def remove_selected_images(self):
         """Remove currently selected images dari grid via Logic."""
@@ -1284,7 +1531,7 @@ class DisplayPanel(QWidget):
         """Update all text dynamically when language changes."""
         # 1. Update Bulk Mode Button
         if hasattr(self, "bulk_mode_btn"):
-            target_text = language_config.LBL_BULK_MODE if self.is_bulk_mode else language_config.LBL_BATCH_MODE
+            target_text = language_config.LBL_BATCH_MODE if self.is_bulk_mode else language_config.LBL_BULK_MODE
             self.bulk_mode_btn.setText(target_text)
             
         # 2. Update Header Title
@@ -1315,46 +1562,49 @@ class DisplayPanel(QWidget):
     def animate_mode_change(self, is_bulk):
         """Animasi perubahan teks tombol mode secara elegan dengan efek fade."""
         # 1. Tentukan teks target
-        target_text = language_config.LBL_BULK_MODE if is_bulk else language_config.LBL_BATCH_MODE
+        target_text = language_config.LBL_BATCH_MODE if is_bulk else language_config.LBL_BULK_MODE
         
+        from resources.GenericUILibrary.theme import get_theme
+        theme = get_theme()
+
         # 2. Tentukan stylesheet matching UI, subtle, tidak mencolok
         if is_bulk:
             # Soft Teal style
-            style_sheet = """
-                QPushButton#BulkModeBtn {
-                    background-color: #E6F4EA;
-                    color: #137333;
-                    border: 1px solid #A3E2B8;
+            style_sheet = f"""
+                QPushButton#BulkModeBtn {{
+                    background-color: {theme.primary}2D;
+                    color: {theme.primary};
+                    border: 1px solid {theme.primary};
                     border-radius: 15px;
                     padding: 5px 15px;
                     font-size: 10.5pt;
                     font-weight: 600;
-                }
-                QPushButton#BulkModeBtn:hover {
-                    background-color: #D2EBD9;
-                }
-                QPushButton#BulkModeBtn:pressed {
-                    background-color: #C1E2CB;
-                }
+                }}
+                QPushButton#BulkModeBtn:hover {{
+                    background-color: {theme.primary}4D;
+                }}
+                QPushButton#BulkModeBtn:pressed {{
+                    background-color: {theme.primary}6D;
+                }}
             """
         else:
             # Subtle Slate/Gray style
-            style_sheet = """
-                QPushButton#BulkModeBtn {
-                    background-color: #F1F3F4;
-                    color: #5F6368;
-                    border: 1px solid #DADCE0;
+            style_sheet = f"""
+                QPushButton#BulkModeBtn {{
+                    background-color: {theme.bg_secondary};
+                    color: {theme.text_secondary};
+                    border: 1px solid {theme.border_color};
                     border-radius: 15px;
                     padding: 5px 15px;
                     font-size: 10.5pt;
                     font-weight: 600;
-                }
-                QPushButton#BulkModeBtn:hover {
-                    background-color: #E8EAED;
-                }
-                QPushButton#BulkModeBtn:pressed {
-                    background-color: #D2D4D7;
-                }
+                }}
+                QPushButton#BulkModeBtn:hover {{
+                    background-color: {theme.hover_overlay};
+                }}
+                QPushButton#BulkModeBtn:pressed {{
+                    background-color: {theme.active_overlay};
+                }}
             """
             
         # 3. Setup opacity effect jika belum ada
@@ -1381,5 +1631,216 @@ class DisplayPanel(QWidget):
             
         self._mode_fade_anim.finished.connect(swap_content)
         self._mode_fade_anim.start()
+
+    def _on_image_pre_cached(self, path, q_image):
+        """Callback when an image is successfully pre-loaded and decoded in the background."""
+        pixmap = QPixmap.fromImage(q_image)
+        self.playback_cache[path] = pixmap
+
+    def _start_background_preload(self, batch_id):
+        """
+        Dipanggil otomatis setelah import batch selesai (import_manager.import_finished).
+
+        Meluncurkan BackgroundBatchPreloader pada prioritas terendah untuk memuat
+        semua thumbnail batch ke GlobalThumbnailCache diam-diam di background.
+        Hasilnya: saat user mengklik batch tersebut, thumbnail sudah di RAM — instan.
+
+        Maks 1 preloader per batch_id. Jika preloader sebelumnya masih berjalan, ia di-cancel
+        dulu sebelum preloader baru dimulai (karena gambar mungkin berubah).
+        """
+        try:
+            batch_id_str = str(batch_id)
+
+            # Hentikan preloader lama jika masih berjalan
+            old_preloader = self._bg_preloaders.pop(batch_id_str, None)
+            if old_preloader is not None:
+                old_preloader.cancel()
+                # Tidak perlu wait() — thread berjalan di LowestPriority, biarkan selesai sendiri
+
+            # Ambil semua path gambar untuk batch ini
+            paths = []
+            try:
+                if hasattr(self, "controller") and self.controller:
+                    images = self.controller.get_images(batch_id)
+                    paths = [img.path for img in images if hasattr(img, "path") and img.path]
+            except Exception:
+                pass
+
+            if not paths:
+                return
+
+            # Buat dan mulai preloader baru
+            preloader = BackgroundBatchPreloader(batch_id_str, paths, self)
+            preloader.thumbnail_preloaded.connect(self._on_bg_thumbnail_preloaded)
+            preloader.finished.connect(
+                lambda bid=batch_id_str: self._bg_preloaders.pop(bid, None)
+            )
+            self._bg_preloaders[batch_id_str] = preloader
+            preloader.start()
+            print(f"[BackgroundPreloader] Started for batch {batch_id_str} ({len(paths)} images)")
+        except Exception as e:
+            print(f"[BackgroundPreloader] Error starting for batch {batch_id}: {e}")
+
+    def _on_bg_thumbnail_preloaded(self, batch_id: str, image_path: str):
+        """
+        Dipanggil saat satu thumbnail berhasil di-preload ke GlobalThumbnailCache.
+        Jika batch ini sedang aktif ditampilkan, update card-nya secara langsung.
+        """
+        if str(batch_id) != str(self.current_batch_id):
+            return  # Batch tidak aktif, cukup cache di L0 — tidak perlu update UI
+
+        # Cari card yang sesuai dan update thumbnail-nya jika belum ter-load
+        for card_id, card in self.all_cards.items():
+            try:
+                if hasattr(card, "_image_path") and card._image_path == image_path:
+                    if not card.has_thumbnail():
+                        from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_processor import get_global_cache
+                        q_img = get_global_cache().get(image_path)
+                        if q_img and not q_img.isNull():
+                            card.set_thumbnail(QPixmap.fromImage(q_img))
+                    break
+            except Exception:
+                pass
+
+    def _toggle_playback(self):
+        """Toggle play/pause state for preview burst sequence."""
+        if not hasattr(self, "playback_timer"):
+            self.playback_timer = QTimer(self)
+            self.playback_timer.setInterval(120)  # ~8 FPS (120ms interval)
+            self.playback_timer.timeout.connect(self._show_next_frame)
+            self.is_playing = False
+
+        if self.is_playing:
+            self.playback_timer.stop()
+            self.play_btn.setText("▶")
+            self.is_playing = False
+        else:
+            self.playback_timer.start()
+            self.play_btn.setText("⏸")
+            self.is_playing = True
+
+    def _get_current_image_index(self):
+        """Get the index of the currently shown preview image in the batch list."""
+        if not self.logic.current_images or not hasattr(self, "current_preview_path") or not self.current_preview_path:
+            return 0
+        
+        for i, img in enumerate(self.logic.current_images):
+            if os.path.normpath(img.path) == os.path.normpath(self.current_preview_path):
+                return i
+        return 0
+
+    def _show_next_frame(self):
+        """Show the next frame in the burst sequence."""
+        if not self.logic.current_images:
+            return
+        current_idx = self._get_current_image_index()
+        next_idx = (current_idx + 1) % len(self.logic.current_images)
+        next_path = self.logic.current_images[next_idx].path
+        self._display_fast_preview(next_path)
+
+    def _show_prev_frame(self):
+        """Show the previous frame in the burst sequence."""
+        if not self.logic.current_images:
+            return
+        current_idx = self._get_current_image_index()
+        prev_idx = (current_idx - 1) % len(self.logic.current_images)
+        prev_path = self.logic.current_images[prev_idx].path
+        self._display_fast_preview(prev_path)
+
+    def _display_fast_preview(self, image_path):
+        """High-efficiency loader specifically for burst previews using preloaded cache or Hamilton Adams half-res demosaicing."""
+        if not self.logic.prepare_preview(image_path):
+            return
+            
+        self.current_preview_path = image_path
+        
+        # Stop previous loader thread
+        if self.logic.image_loader_thread and self.logic.image_loader_thread.isRunning():
+            self.logic.image_loader_thread.quit()
+            self.logic.image_loader_thread.wait()
+            
+        # Check if we have preloaded cache for zero-flicker instant rendering
+        if image_path in self.playback_cache:
+            pixmap = self.playback_cache[image_path]
+            self.preview_scene.clear()
+            
+            # Create and add pixmap item
+            pixmap_item = QGraphicsPixmapItem(pixmap)
+            pixmap_item.setShapeMode(QGraphicsPixmapItem.ShapeMode.BoundingRectShape)
+            self.preview_scene.addItem(pixmap_item)
+            
+            # Set scene rect
+            self.preview_scene.setSceneRect(pixmap_item.boundingRect())
+            
+            # Fit in view
+            self.zoomable_preview.fitInView(
+                self.preview_scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio
+            )
+        else:
+            # Fallback loader
+            from pixel_refine_desktop.enhance_stack.core.logic.image_display_helper import display_image_in_zoomable
+            self.logic.image_loader_thread = display_image_in_zoomable(
+                self.zoomable_preview, image_path, half_res=True
+            )
+            
+        self.show_preview(show_dropdown=False)
+        # Burst/frame preview selalu masuk Preview Mode
+        self._enter_preview_mode()
+
+    def update_save_button_state(self):
+        """Update Save button styling based on whether processed results are available.
+        
+        Dipanggil saat:
+        - Batch dimuat (grid view) → tombol save disembunyikan via mode logic
+        - Algoritma selesai + hasil tersedia → _enter_result_mode() dipanggil dari luar,
+          lalu update_save_button_state() memperbarui style-nya
+        """
+        if not hasattr(self, "save_btn_ref"):
+            return
+
+        has_results = False
+        if self.logic.current_images:
+            first_img_path = self.logic.current_images[0].path
+            results = self.logic.detect_processed_results(first_img_path)
+            if results:
+                has_results = True
+
+        # Jika has_results (ada hasil), pastikan save button terlihat & aktif
+        # (hanya berlaku jika kita sedang dalam Result Mode, tapi styling harus
+        # mencerminkan kondisi aktual sehingga tombol terlihat benar ketika muncul)
+        if has_results:
+            self.save_btn_ref.setEnabled(True)
+            self.save_btn_ref.setStyleSheet("""
+                QPushButton {
+                    background-color: #555555;
+                    color: #FFFFFF;
+                    border: 1px solid #333333;
+                    border-radius: 4px;
+                    font-weight: bold;
+                    padding: 6px 12px;
+                }
+                QPushButton:hover {
+                    background-color: #666666;
+                }
+                QPushButton:pressed {
+                    background-color: #444444;
+                }
+            """)
+            # Jika kita sedang di preview view dan has_results, switch ke result mode
+            # (misalnya saat algoritma selesai saat user sedang di preview)
+            if self.display_stack.currentIndex() == 1:
+                self._enter_result_mode()
+        else:
+            self.save_btn_ref.setEnabled(False)
+            self.save_btn_ref.setStyleSheet("""
+                QPushButton {
+                    background-color: #D3D3D3;
+                    color: #888888;
+                    border: 1px solid #C0C0C0;
+                    border-radius: 4px;
+                    padding: 6px 12px;
+                }
+            """)
+
 
 

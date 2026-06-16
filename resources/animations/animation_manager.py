@@ -1,5 +1,5 @@
 import weakref
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 from PySide6.QtWidgets import (
     QStackedWidget,
     QGraphicsOpacityEffect,
@@ -12,7 +12,6 @@ from PySide6.QtCore import (
     QObject,
     QPropertyAnimation,
     QEasingCurve,
-    QSequentialAnimationGroup,
     Qt,
     Slot,
     QParallelAnimationGroup,
@@ -69,6 +68,7 @@ class StackedWidgetAnimator(QObject):
         self._all_ghosts = []  # Strong refs for final cleanup
         self._animation_queue = []  # Queue untuk animasi yang ditunda
         self._concurrent_count = 0  # Counter animasi aktif
+        self._last_transition_time = {}  # Throttle rapid changes
 
         self.destroyed.connect(self._on_animator_destroyed)
 
@@ -378,6 +378,27 @@ class StackedWidgetAnimator(QObject):
         curve_in: QEasingCurve.Type = DEFAULT_CURVE_IN,
         on_mid_transition: Optional[Callable] = None,
     ):
+        import time
+
+        now = time.time()
+        last_time = self._last_transition_time.get(stack_widget, 0.0)
+        self._last_transition_time[stack_widget] = now
+
+        # Throttling rapid changes (< 500ms) or overlapping animations: transition instantly to save CPU & avoid painter collisions
+        if self._is_animating(stack_widget) or (now - last_time) < 0.50:
+            if self._is_animating(stack_widget):
+                self._interrupt_transition(stack_widget)
+            new_widget, new_index = self._validate_target(stack_widget, target)
+            if new_widget:
+                old_widget = stack_widget.currentWidget()
+                if on_mid_transition:
+                    on_mid_transition()
+                stack_widget.setCurrentIndex(new_index)
+                self._reset_widget_state(new_widget, visible=True)
+                if old_widget and old_widget != new_widget:
+                    self._reset_widget_state(old_widget, visible=False)
+            return
+
         if self._is_animating(stack_widget):
             self._interrupt_transition(stack_widget)
 
@@ -684,16 +705,14 @@ class StackedWidgetAnimator(QObject):
                 except RuntimeError:
                     pass
 
-        # Atur ulang state widget lama dan baru dengan aman
+        # Atur ulang state widget lama dan baru secara sinkron & instan
         old_widget = state["old_widget_ref"]() if state["old_widget_ref"] else None
         if old_widget:
-            QTimer.singleShot(0, lambda w=old_widget: self._reset_widget_state(w))
+            self._reset_widget_state(old_widget)
 
         new_widget = state["new_widget_ref"]()
         if new_widget:
-            QTimer.singleShot(
-                0, lambda w=new_widget: self._reset_widget_state(w, visible=True)
-            )
+            self._reset_widget_state(new_widget, visible=True)
             try:
                 # Pastikan widget baru berada di atas setelah interupsi
                 stack_widget.setCurrentIndex(state["new_index"])
@@ -939,6 +958,17 @@ class WidgetLifecycleAnimator(QObject):
         if not widget:
             return
 
+        # Throttling delete animations if too many are active to prevent CPU overload and QPainter errors
+        if len(self._ghosts) >= 3:
+            try:
+                widget.hide()
+                widget.deleteLater()
+            except RuntimeError:
+                pass
+            if on_finished_callback:
+                on_finished_callback()
+            return
+
         # STRATEGI BARU: GHOST / SNAPSHOT MODE
         # Alih-alih menganimasikan widget asli (yang kompleks dan mungkin sedang repainting),
         # kita ambil screenshot (grab), buat label palsu (Ghost), sembunyikan widget asli,
@@ -1177,4 +1207,3 @@ class HeightAnimator(QObject):
                     p.adjustSize()
         except RuntimeError:
             pass
-

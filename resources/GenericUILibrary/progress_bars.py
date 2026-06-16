@@ -26,10 +26,10 @@ from .mixins import RealtimeMixin
 
 # Try to import existing progress components
 try:
-    from pixel_refine_desktop.ui.resources.animations.loading.circular_progress import (
+    from resources.animations.loading.circular_progress import (
         CircularProgress,
     )
-    from pixel_refine_desktop.ui.resources.animations.loading.modern_progress_bar import (
+    from resources.animations.loading.modern_progress_bar import (
         ModernProgressBar,
     )
 
@@ -262,6 +262,40 @@ class ProgressBar(QWidget, RealtimeMixin):
         if isinstance(value, (int, float)):
             self.set_value(int(value))
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        if self.style_type == "circular":
+            qml = f"{tab}BusyIndicator {{\n"
+            qml += f"{tab}    running: true\n"
+            qml += f"{tab}    width: 100\n"
+            qml += f"{tab}    height: 100\n"
+            qml += f"{tab}}}"
+            return qml
+        color = self._get_variant_color().name()
+        qml = f"{tab}Column {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    spacing: 5\n"
+        qml += f"{tab}    Rectangle {{\n"
+        qml += f"{tab}        width: parent.width\n"
+        qml += f"{tab}        height: {4 if self.minimalist else 20}\n"
+        qml += f"{tab}        radius: {2 if self.minimalist else 10}\n"
+        qml += f"{tab}        color: '#F5F8FA'\n"
+        qml += f"{tab}        border.color: '#E8EDF2'\n"
+        qml += f"{tab}        border.width: 1\n"
+        qml += f"{tab}        Rectangle {{\n"
+        qml += f"{tab}            x: 1\n"
+        qml += f"{tab}            y: 1\n"
+        qml += f"{tab}            width: (parent.width - 2) * {self._value / self._max_value}\n"
+        qml += f"{tab}            height: parent.height - 2\n"
+        qml += f"{tab}            radius: parent.radius - 1\n"
+        qml += f"{tab}            color: '{color}'\n"
+        qml += f"{tab}        }}\n"
+        qml += f"{tab}    }}\n"
+        if self.show_label:
+            qml += f"{tab}    Text {{ text: '{self._value}%'; font.bold: true; color: '#666'; horizontalAlignment: Text.AlignHCenter; width: parent.width }}\n"
+        qml += f"{tab}}}"
+        return qml
+
 
 class CustomProgressBar(QWidget):
     """Custom painted progress bar with stripes and gradients"""
@@ -356,6 +390,24 @@ class CustomProgressBar(QWidget):
                         )
                         painter.drawPolygon(polygon)
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        # style:
+        color = self._get_variant_color().name()
+        qml = f"{tab}Rectangle {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    height: 20\n"
+        qml += f"{tab}    radius: 10\n"
+        qml += f"{tab}    color: '#F5F8FA'\n"
+        qml += f"{tab}    Rectangle {{\n"
+        qml += f"{tab}        width: parent.width * {self._value / 100.0}\n"
+        qml += f"{tab}        height: parent.height\n"
+        qml += f"{tab}        radius: 10\n"
+        qml += f"{tab}        color: '{color}'\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
+
 
 class CircularProgressFallback(QWidget):
     """Fallback circular progress if custom not available"""
@@ -373,6 +425,15 @@ class CircularProgressFallback(QWidget):
     def value(self):
         """Get value"""
         return self._value
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        qml = f"{tab}BusyIndicator {{\n"
+        qml += f"{tab}    running: true\n"
+        qml += f"{tab}    width: 100\n"
+        qml += f"{tab}    height: 100\n"
+        qml += f"{tab}}}"
+        return qml
 
     def paintEvent(self, event):
         """Paint circular progress"""
@@ -495,6 +556,17 @@ class IndeterminateProgress(QWidget):
                 int(dot_radius),
             )
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        # style:
+        size = self.width()
+        qml = f"{tab}BusyIndicator {{\n"
+        qml += f"{tab}    running: {str(self._running).lower()}\n"
+        qml += f"{tab}    width: {size}\n"
+        qml += f"{tab}    height: {size}\n"
+        qml += f"{tab}}}"
+        return qml
+
 
 class ProgressGroup(QWidget, RealtimeMixin):
     """
@@ -582,3 +654,33 @@ class ProgressGroup(QWidget, RealtimeMixin):
         for bar in self.progress_bars:
             bar["container"].deleteLater()
         self.progress_bars.clear()
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        qml = f"{tab}Column {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    spacing: 10\n"
+        for bar_info in self.progress_bars:
+            label = bar_info["label"].text().replace("'", "\\'")
+            progress = bar_info["progress"]
+            val = progress.get_value() if hasattr(progress, 'get_value') else 0
+            qml += f"{tab}    Column {{\n"
+            qml += f"{tab}        width: parent.width\n"
+            qml += f"{tab}        spacing: 3\n"
+            qml += f"{tab}        Text {{ text: '{label}'; font.bold: true; color: '#333' }}\n"
+            qml += f"{tab}        Rectangle {{\n"
+            qml += f"{tab}            width: parent.width\n"
+            qml += f"{tab}            height: 20\n"
+            qml += f"{tab}            radius: 10\n"
+            qml += f"{tab}            color: '#F5F8FA'\n"
+            qml += f"{tab}            Rectangle {{\n"
+            qml += f"{tab}                width: parent.width * {val / 100.0}\n"
+            qml += f"{tab}                height: parent.height\n"
+            qml += f"{tab}                radius: 10\n"
+            qml += f"{tab}                color: genericTheme.primary\n"
+            qml += f"{tab}            }}\n"
+            qml += f"{tab}        }}\n"
+            qml += f"{tab}        Text {{ text: '{val}%'; horizontalAlignment: Text.AlignRight; color: '#666'; width: parent.width }}\n"
+            qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml

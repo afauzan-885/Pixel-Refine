@@ -58,7 +58,7 @@ class CenteredScrollArea(QScrollArea):
 def setup_main_panel(layout_instance, scroll_area_style):
     """Creates the main panel with the given layout."""
     main_panel = QWidget()
-    main_panel.setStyleSheet("background-color: white;")
+    main_panel.setObjectName("BulkMainPanel")
     layout_instance.setContentsMargins(10, 10, 10, 10)
     layout_instance.setSpacing(30)
     main_panel.setLayout(layout_instance)
@@ -67,14 +67,17 @@ def setup_main_panel(layout_instance, scroll_area_style):
     scroll_area.setWidget(main_panel)
     scroll_area.setStyleSheet(scroll_area_style)
     return scroll_area
+
+
 from pixel_refine_desktop.enhance_stack.core.logic.database_manager import (
     DatabaseManager,
 )
-from pixel_refine_desktop.ui.resources.animations.animation_manager import (
+from resources.animations.animation_manager import (
     StackedWidgetAnimator,
 )
-from pixel_refine_desktop.ui.resources.animations.fade import fade_out
-from pixel_refine_desktop.ui.resources.styles import stylesheet
+from resources.animations.fade import fade_out
+from resources.styles import stylesheet
+from resources.GenericUILibrary import live_update
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from config import CACHE_DIR, SUPPORTED_FORMATS
 
@@ -109,6 +112,7 @@ def safe_hide_widget(widget):
         pass
 
 
+@live_update
 class BulkPageLayout(QWidget):
     data_changed = Signal()
     show_toast_requested = Signal(str, object, bool)
@@ -147,6 +151,9 @@ class BulkPageLayout(QWidget):
         self._total_pending_imports = 0
         self._total_processed_imports = 0
         self._active_import_threads = []
+        # Cache panel by batch_id for instant mode switching
+        # Uses regular dict (strong ref) so panels survive hide/show cycles
+        self._panel_cache: dict = {}
 
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 5, 0, 0)
@@ -168,7 +175,9 @@ class BulkPageLayout(QWidget):
         # Hook scroll listener for lazy loading (Task 4)
         self.limit = 10
         self.load_timer_running = False
-        self.main_scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
+        self.main_scroll_area.verticalScrollBar().valueChanged.connect(
+            self._on_scroll_changed
+        )
 
         self.layout.addWidget(self.main_scroll_area)
 
@@ -181,11 +190,13 @@ class BulkPageLayout(QWidget):
                 self.update_batch_view()
 
     def _load_next_batch_incrementally(self):
-        from pixel_refine_desktop.enhance_stack.core.logic.process_manager import is_widget_alive
+        from pixel_refine_desktop.enhance_stack.core.logic.process_manager import (
+            is_widget_alive,
+        )
+
         if not self.loading_queue:
             self.load_timer_running = False
             return
-
 
         batch_id = self.loading_queue.pop(0)
         skeleton = self.active_skeletons.pop(batch_id, None)
@@ -226,10 +237,12 @@ class BulkPageLayout(QWidget):
         db_ids = self.database_manager.get_all_batch_ids()
         if not hasattr(self, "limit"):
             self.limit = 10
-        visible_db_ids = db_ids[:self.limit]
+        visible_db_ids = db_ids[: self.limit]
         ui_ids = set(self.active_batch_panels.keys())
 
         # 2. Identifikasi batch yang perlu dihapus dari UI
+        # Termasuk batch yang sudah tidak ada di DB (cache stale eviction)
+        db_ids_set = set(db_ids)
         ids_to_remove = ui_ids - set(visible_db_ids)
         for batch_id in ids_to_remove:
             panel_to_remove = self.active_batch_panels.pop(batch_id, None)
@@ -243,6 +256,15 @@ class BulkPageLayout(QWidget):
                 # Jadwalkan penghapusan memori widget
                 panel_to_remove.deleteLater()
 
+            # Jika batch sudah tidak ada di DB sama sekali, hapus dari cache juga
+            if batch_id not in db_ids_set:
+                stale = self._panel_cache.pop(batch_id, None)
+                if stale and stale is not panel_to_remove:
+                    try:
+                        stale.deleteLater()
+                    except RuntimeError:
+                        pass
+
         # Remove skeletons that are no longer in visible list
         for bid in list(self.active_skeletons.keys()):
             if bid not in visible_db_ids:
@@ -252,8 +274,12 @@ class BulkPageLayout(QWidget):
                     skel.hide()
                     skel.deleteLater()
 
-        # 3. Identifikasi batch yang perlu ditambahkan ke UI (menggunakan Skeleton loader)
-        ids_to_add = [bid for bid in visible_db_ids if bid not in ui_ids and bid not in self.active_skeletons]
+        # 3. Identifikasi batch yang perlu ditambahkan ke UI
+        ids_to_add = [
+            bid
+            for bid in visible_db_ids
+            if bid not in ui_ids and bid not in self.active_skeletons
+        ]
         for batch_id in ids_to_add:
             # Simpan state saat ini dari panel lain sebelum membuat yang baru
             for bid, panel in self.active_batch_panels.items():
@@ -262,7 +288,27 @@ class BulkPageLayout(QWidget):
                 except Exception:
                     pass
 
-            # Buat skeleton loader panel
+            # --- CACHE HIT: Reuse panel yang sudah pernah dibuat ---
+            cached_panel = self._panel_cache.get(batch_id)
+            if cached_panel is not None:
+                try:
+                    _ = cached_panel.isVisible()  # cek masih hidup
+                    # Panel valid: re-insert ke layout dan tampilkan langsung
+                    if self._spacer_item:
+                        insert_idx = self.main_panel_container.count() - 1
+                        self.main_panel_container.insertWidget(insert_idx, cached_panel)
+                    else:
+                        self.main_panel_container.addWidget(cached_panel)
+                    cached_panel.show()
+                    self.active_batch_panels[batch_id] = cached_panel
+                    self._reorder_visual_batch_numbers()
+                    self._manage_placeholder_and_spacer()
+                    continue  # langsung ke batch_id berikutnya, tanpa skeleton
+                except RuntimeError:
+                    # Panel sudah dihancurkan, hapus dari cache
+                    self._panel_cache.pop(batch_id, None)
+
+            # --- CACHE MISS: Buat skeleton dulu, lalu load panel asli ---
             skeleton = SkeletonCombinedPanel(self)
             self.active_skeletons[batch_id] = skeleton
 
@@ -276,10 +322,10 @@ class BulkPageLayout(QWidget):
 
             self.loading_queue.append(batch_id)
 
-        # Trigger incremental loading timer if not already running
+        # Trigger incremental loading timer tanpa delay (langsung mulai render)
         if self.loading_queue and not self.load_timer_running:
             self.load_timer_running = True
-            QTimer.singleShot(50, self._load_next_batch_incrementally)
+            QTimer.singleShot(0, self._load_next_batch_incrementally)
 
         # 4. Atur ulang nomor urut visual untuk semua panel yang ada
         self._reorder_visual_batch_numbers()
@@ -303,7 +349,9 @@ class BulkPageLayout(QWidget):
 
     def _manage_placeholder_and_spacer(self):
         """Menampilkan placeholder jika tidak ada batch, atau spacer jika ada batch."""
-        has_batches = (len(self.active_batch_panels) > 0 or len(self.active_skeletons) > 0)
+        has_batches = (
+            len(self.active_batch_panels) > 0 or len(self.active_skeletons) > 0
+        )
 
         # Jika ada batch
         if has_batches:
@@ -333,7 +381,9 @@ class BulkPageLayout(QWidget):
 
             # Tampilkan placeholder jika belum ada
             if not self._placeholder_wrapper:
-                self._placeholder_wrapper, self._placeholder_widget = self._create_viewport_centered_placeholder()
+                self._placeholder_wrapper, self._placeholder_widget = (
+                    self._create_viewport_centered_placeholder()
+                )
                 self.main_panel_container.addWidget(self._placeholder_wrapper)
 
     def _create_viewport_centered_placeholder(self):
@@ -363,7 +413,9 @@ class BulkPageLayout(QWidget):
 
         # Wrapper yang mengisi seluruh layout dan memusatkan label
         wrapper = QWidget()
-        wrapper.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        wrapper.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         v_layout = QVBoxLayout(wrapper)
         v_layout.setContentsMargins(0, 0, 0, 0)
         v_layout.addStretch(1)
@@ -436,6 +488,8 @@ class BulkPageLayout(QWidget):
             initial_state=initial_state,
         )
         self.active_batch_panels[batch_id] = combined_panel
+        # Simpan ke cache untuk instant restore pada re-entry mode bulk
+        self._panel_cache[batch_id] = combined_panel
         self.parameters_changed.connect(combined_panel.refresh_ui_from_broadcast)
         return combined_panel
 
@@ -606,7 +660,7 @@ class BulkPageLayout(QWidget):
             def __init__(self, panel):
                 self.id = panel.batch_id
                 self.name = f"Batch {panel.sequential_batch_number}"
-        
+
         batches_wrapper = [BatchWrapper(panel) for panel in panels_to_actually_process]
         dialog = BatchProcessDialog(batches_wrapper, self, self)
         dialog.exec_()
@@ -681,11 +735,16 @@ class BulkPageLayout(QWidget):
         msg_box.setWindowTitle(title)
         msg_box.setText(message)
         msg_box.setIcon(QMessageBox.Icon.Question)
-        msg_box.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowTitleHint)
-        msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        msg_box.setWindowFlags(
+            Qt.WindowType.Dialog
+            | Qt.WindowType.CustomizeWindowHint
+            | Qt.WindowType.WindowTitleHint
+        )
+        msg_box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
         msg_box.setDefaultButton(QMessageBox.StandardButton.No)
         reply = msg_box.exec()
-
 
         if reply == QMessageBox.StandardButton.Yes:
             if batch_id in self.batch_states:
@@ -736,11 +795,16 @@ class BulkPageLayout(QWidget):
         msg_box.setWindowTitle(title)
         msg_box.setText(message)
         msg_box.setIcon(QMessageBox.Icon.Question)
-        msg_box.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowTitleHint)
-        msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        msg_box.setWindowFlags(
+            Qt.WindowType.Dialog
+            | Qt.WindowType.CustomizeWindowHint
+            | Qt.WindowType.WindowTitleHint
+        )
+        msg_box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
         msg_box.setDefaultButton(QMessageBox.StandardButton.No)
         reply = msg_box.exec()
-
 
         if reply == QMessageBox.StandardButton.Yes:
             self.batch_states.clear()
@@ -762,6 +826,13 @@ class BulkPageLayout(QWidget):
 
     def _start_bulk_background_delete_process(self):
         """Memulai proses penghapusan semua batch di background."""
+        # Hapus seluruh cache panel karena semua batch akan dihapus
+        for bid, panel in list(self._panel_cache.items()):
+            try:
+                panel.deleteLater()
+            except RuntimeError:
+                pass
+        self._panel_cache.clear()
         deleter = BulkDeleteProcess(
             self.database_manager, None, CACHE_DIR, self.thumbnail_threads
         )
@@ -793,12 +864,25 @@ class BulkPageLayout(QWidget):
     def _bulk_delete_post_single_animation(self, panel_ref):
         panel = panel_ref() if panel_ref else None
         safe_hide_widget(panel)
+        # Hapus panel dari cache jika ada
+        if panel is not None:
+            for bid, cached in list(self._panel_cache.items()):
+                if cached is panel:
+                    self._panel_cache.pop(bid, None)
+                    break
         self._check_bulk_delete_animations_finished()
 
     def _individual_delete_post_animation(self, batch_id, panel_ref):
         """Callback setelah animasi fade-out individual selesai."""
         panel = panel_ref() if panel_ref else None
         safe_hide_widget(panel)
+        # Hapus dari cache agar tidak di-restore saat re-entry
+        stale = self._panel_cache.pop(batch_id, None)
+        if stale and stale is not panel:
+            try:
+                stale.deleteLater()
+            except RuntimeError:
+                pass
         self._start_background_delete_process(batch_id)
 
     def _start_background_delete_process(self, batch_id):
@@ -857,15 +941,23 @@ class BulkPageLayout(QWidget):
 
     # --- Helper Methods ---
     def stop_thumbnail(self):
-        """Menghentikan semua thread thumbnail yang sedang berjalan dan antrian loading skeleton."""
-        stop_process_thumbnails(self.thumbnail_threads)
+        """Menghentikan semua thread thumbnail dan menyimpan panel ke cache untuk instant restore.
         
-        # Clear incremental loading queue (Task 4)
+        Panel TIDAK dihancurkan — disimpan ke _panel_cache berdasarkan batch_id.
+        Saat user kembali ke bulk mode, update_batch_view() akan langsung menampilkan
+        panel dari cache tanpa skeleton/delay (instant mode switching).
+        """
+        stop_process_thumbnails(self.thumbnail_threads)
+
+        # Clear incremental loading queue
         self.loading_queue.clear()
         self.load_timer_running = False
-        
-        # Safely remove active skeletons from layout
-        from pixel_refine_desktop.enhance_stack.core.logic.process_manager import is_widget_alive
+
+        # Safely remove active skeletons from layout (skeleton tidak di-cache)
+        from pixel_refine_desktop.enhance_stack.core.logic.process_manager import (
+            is_widget_alive,
+        )
+
         for bid, skel in list(self.active_skeletons.items()):
             if skel and is_widget_alive(skel):
                 try:
@@ -876,20 +968,37 @@ class BulkPageLayout(QWidget):
                     pass
         self.active_skeletons.clear()
 
-        # Remove ALL active batch panels from the layout so that when the user returns to
-        # bulk mode, update_batch_view treats them as new and re-creates them via skeleton
-        # loader (this also fixes the "batches don't appear on re-entry" bug).
+        # Simpan panel ke cache SEBELUM lepas dari layout
+        # Panel disembunyikan (bukan dihancurkan) → siap di-reuse saat kembali
         for bid, panel in list(self.active_batch_panels.items()):
             if is_widget_alive(panel):
                 try:
                     self.main_panel_container.removeWidget(panel)
                     panel.hide()
-                    panel.deleteLater()
+                    # Simpan ke cache (kuat/strong ref) agar tidak di-GC
+                    self._panel_cache[bid] = panel
                 except RuntimeError:
-                    pass
+                    # Panel sudah rusak, jangan cache
+                    self._panel_cache.pop(bid, None)
+            else:
+                self._panel_cache.pop(bid, None)
         self.active_batch_panels = weakref.WeakValueDictionary()
 
-        # Also reset placeholder so it is re-created fresh on re-entry
+        # Bersihkan panel cache untuk batch yang sudah tidak ada di DB
+        try:
+            db_ids = set(self.database_manager.get_all_batch_ids())
+            for stale_id in list(self._panel_cache.keys()):
+                if stale_id not in db_ids:
+                    stale_panel = self._panel_cache.pop(stale_id, None)
+                    if stale_panel and is_widget_alive(stale_panel):
+                        try:
+                            stale_panel.deleteLater()
+                        except RuntimeError:
+                            pass
+        except Exception:
+            pass  # DB query optional — tidak gagalkan operasi utama
+
+        # Reset placeholder sehingga dibuat ulang jika tidak ada batch
         if self._placeholder_wrapper:
             try:
                 self.main_panel_container.removeWidget(self._placeholder_wrapper)
@@ -900,7 +1009,7 @@ class BulkPageLayout(QWidget):
             self._placeholder_wrapper = None
             self._placeholder_widget = None
 
-        # Remove the bottom spacer too so layout starts fresh
+        # Lepas spacer bawah agar layout bersih
         if self._spacer_item:
             self.main_panel_container.removeItem(self._spacer_item)
             self._spacer_item = None
@@ -980,3 +1089,22 @@ class BulkPageLayout(QWidget):
         self.show_toast_requested.emit(completion_msg, 3000, False)
 
         self.data_changed.emit()
+
+    def retranslate_ui(self):
+        """Translate bulk page layout and refresh visual themes."""
+        for panel in self.active_batch_panels.values():
+            if is_widget_valid(panel) and hasattr(panel, "retranslate_ui"):
+                try:
+                    panel.retranslate_ui()
+                except Exception as e:
+                    print(f"Error retranslating panel: {e}")
+        self.update_theme()
+
+    def update_theme(self):
+        """Update stylesheets and themes for all child widgets dynamically."""
+        for child in self.findChildren(QWidget):
+            if hasattr(child, "update_theme") and child != self:
+                try:
+                    child.update_theme()
+                except Exception as e:
+                    pass

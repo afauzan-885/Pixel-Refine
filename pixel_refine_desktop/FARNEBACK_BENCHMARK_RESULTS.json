@@ -1,0 +1,332 @@
+[
+  {
+    "test_name": "Test1_Default",
+    "config": {
+      "pyr_scale": 0.5,
+      "levels": 3,
+      "winsize": 15,
+      "iterations": 3,
+      "poly_n": 5,
+      "poly_sigma": 1.2,
+      "flags": 0,
+      "cpu_num_blocks_x": 10,
+      "cpu_num_blocks_y": 8,
+      "cpu_overlap_ratio": 0.3,
+      "flow_smoothing_kernel": 5
+    },
+    "time_a_ms": 509.8,
+    "flow_a_mean_mag": 2.2096,
+    "flow_a_max_mag": 6.0577,
+    "flow_a_range_x": [
+      -5.191,
+      -0.007
+    ],
+    "flow_a_range_y": [
+      -4.831,
+      0.99
+    ],
+    "time_b_ms": 1938.0,
+    "speedup_ratio": 3.8,
+    "flow_b_mean_mag": 4.4617,
+    "flow_b_max_mag": 6.5765,
+    "flow_b_range_x": [
+      0.02,
+      4.336
+    ],
+    "flow_b_range_y": [
+      0.387,
+      5.11
+    ],
+    "flow_diff_mean": 6.4854,
+    "flow_diff_max": 7.7149,
+    "flow_diff_std": 0.1431,
+    "psnr_a_vs_b": 19.59,
+    "ssim_a_vs_b": 0.6955,
+    "psnr_target_vs_a": 16.76,
+    "psnr_target_vs_b": 26.03,
+    "ssim_target_vs_a": 0.4927,
+    "ssim_target_vs_b": 0.8909,
+    "epe_a_mean": 8.0263,
+    "epe_a_median": 7.9589,
+    "epe_a_max": 11.8781,
+    "epe_b_mean": 2.4338,
+    "epe_b_median": 2.3615,
+    "epe_b_max": 5.1194,
+    "pipeline_improvement_pct": 69.68
+  },
+  {
+    "test_name": "Test2_Aggressive",
+    "config": {
+      "pyr_scale": 0.5,
+      "levels": 5,
+      "winsize": 21,
+      "iterations": 5,
+      "poly_n": 7,
+      "poly_sigma": 1.5,
+      "flags": 0,
+      "cpu_num_blocks_x": 16,
+      "cpu_num_blocks_y": 12,
+      "cpu_overlap_ratio": 0.4,
+      "flow_smoothing_kernel": 7
+    },
+    "time_a_ms": 551.1,
+    "flow_a_mean_mag": 2.0619,
+    "flow_a_max_mag": 5.933,
+    "flow_a_range_x": [
+      -5.108,
+      -0.013
+    ],
+    "flow_a_range_y": [
+      -3.759,
+      0.683
+    ],
+    "time_b_ms": 1994.6,
+    "speedup_ratio": 3.62,
+    "flow_b_mean_mag": 4.6561,
+    "flow_b_max_mag": 6.62,
+    "flow_b_range_x": [
+      0.0,
+      4.487
+    ],
+    "flow_b_range_y": [
+      1.342,
+      5.028
+    ],
+    "flow_diff_mean": 6.5943,
+    "flow_diff_max": 7.9345,
+    "flow_diff_std": 0.1126,
+    "psnr_a_vs_b": 19.53,
+    "ssim_a_vs_b": 0.6912,
+    "psnr_target_vs_a": 16.79,
+    "psnr_target_vs_b": 26.4,
+    "ssim_target_vs_a": 0.5024,
+    "ssim_target_vs_b": 0.9033,
+    "epe_a_mean": 7.8893,
+    "epe_a_median": 7.8133,
+    "epe_a_max": 11.7594,
+    "epe_b_mean": 2.2484,
+    "epe_b_median": 2.1543,
+    "epe_b_max": 5.1277,
+    "pipeline_improvement_pct": 71.5
+  },
+  {
+    "test_name": "Test3_Mild",
+    "config": {
+      "pyr_scale": 0.5,
+      "levels": 2,
+      "winsize": 11,
+      "iterations": 2,
+      "poly_n": 5,
+      "poly_sigma": 1.1,
+      "flags": 0,
+      "cpu_num_blocks_x": 4,
+      "cpu_num_blocks_y": 4,
+      "cpu_overlap_ratio": 0.2,
+      "flow_smoothing_kernel": 3
+    },
+    "time_a_ms": 365.0,
+    "flow_a_mean_mag": 2.2698,
+    "flow_a_max_mag": 6.1103,
+    "flow_a_range_x": [
+      -5.248,
+      -0.0
+    ],
+    "flow_a_range_y": [
+      -4.558,
+      1.615
+    ],
+    "time_b_ms": 1595.2,
+    "speedup_ratio": 4.37,
+    "flow_b_mean_mag": 4.1032,
+    "flow_b_max_mag": 6.2897,
+    "flow_b_range_x": [
+      0.0,
+      4.013
+    ],
+    "flow_b_range_y": [
+      0.597,
+      5.207
+    ],
+    "flow_diff_mean": 6.1791,
+    "flow_diff_max": 7.4719,
+    "flow_diff_std": 0.205,
+    "psnr_a_vs_b": 19.91,
+    "ssim_a_vs_b": 0.7132,
+    "psnr_target_vs_a": 16.86,
+    "psnr_target_vs_b": 25.6,
+    "ssim_target_vs_a": 0.494,
+    "ssim_target_vs_b": 0.8761,
+    "epe_a_mean": 8.0836,
+    "epe_a_median": 7.9955,
+    "epe_a_max": 11.9316,
+    "epe_b_mean": 2.5992,
+    "epe_b_median": 2.532,
+    "epe_b_max": 5.1642,
+    "pipeline_improvement_pct": 67.85
+  },
+  {
+    "test_name": "Test4_SingleBlock_NoSmooth",
+    "config": {
+      "pyr_scale": 0.5,
+      "levels": 3,
+      "winsize": 15,
+      "iterations": 3,
+      "poly_n": 5,
+      "poly_sigma": 1.2,
+      "flags": 0,
+      "cpu_num_blocks_x": 1,
+      "cpu_num_blocks_y": 1,
+      "cpu_overlap_ratio": 0.0,
+      "flow_smoothing_kernel": 0
+    },
+    "time_a_ms": 389.6,
+    "flow_a_mean_mag": 2.2096,
+    "flow_a_max_mag": 6.0577,
+    "flow_a_range_x": [
+      -5.191,
+      -0.007
+    ],
+    "flow_a_range_y": [
+      -4.831,
+      0.99
+    ],
+    "time_b_ms": 1017.0,
+    "speedup_ratio": 2.61,
+    "flow_b_mean_mag": 4.4616,
+    "flow_b_max_mag": 6.6069,
+    "flow_b_range_x": [
+      0.0,
+      4.336
+    ],
+    "flow_b_range_y": [
+      0.285,
+      5.191
+    ],
+    "flow_diff_mean": 6.4849,
+    "flow_diff_max": 7.1153,
+    "flow_diff_std": 0.1305,
+    "psnr_a_vs_b": 19.58,
+    "ssim_a_vs_b": 0.6955,
+    "psnr_target_vs_a": 16.76,
+    "psnr_target_vs_b": 26.03,
+    "ssim_target_vs_a": 0.4927,
+    "ssim_target_vs_b": 0.8906,
+    "epe_a_mean": 8.0263,
+    "epe_a_median": 7.9589,
+    "epe_a_max": 11.8781,
+    "epe_b_mean": 2.4352,
+    "epe_b_median": 2.3615,
+    "epe_b_max": 5.1392,
+    "pipeline_improvement_pct": 69.66
+  },
+  {
+    "test_name": "Test5_HighRes_4x4blocks",
+    "config": {
+      "pyr_scale": 0.5,
+      "levels": 3,
+      "winsize": 15,
+      "iterations": 3,
+      "poly_n": 5,
+      "poly_sigma": 1.2,
+      "flags": 0,
+      "cpu_num_blocks_x": 4,
+      "cpu_num_blocks_y": 4,
+      "cpu_overlap_ratio": 0.3,
+      "flow_smoothing_kernel": 5
+    },
+    "time_a_ms": 381.8,
+    "flow_a_mean_mag": 2.2096,
+    "flow_a_max_mag": 6.0577,
+    "flow_a_range_x": [
+      -5.191,
+      -0.007
+    ],
+    "flow_a_range_y": [
+      -4.831,
+      0.99
+    ],
+    "time_b_ms": 1219.4,
+    "speedup_ratio": 3.19,
+    "flow_b_mean_mag": 4.4617,
+    "flow_b_max_mag": 6.5765,
+    "flow_b_range_x": [
+      0.02,
+      4.336
+    ],
+    "flow_b_range_y": [
+      0.387,
+      5.11
+    ],
+    "flow_diff_mean": 6.4854,
+    "flow_diff_max": 7.7149,
+    "flow_diff_std": 0.1431,
+    "psnr_a_vs_b": 19.59,
+    "ssim_a_vs_b": 0.6955,
+    "psnr_target_vs_a": 16.76,
+    "psnr_target_vs_b": 26.03,
+    "ssim_target_vs_a": 0.4927,
+    "ssim_target_vs_b": 0.8909,
+    "epe_a_mean": 8.0263,
+    "epe_a_median": 7.9589,
+    "epe_a_max": 11.8781,
+    "epe_b_mean": 2.4338,
+    "epe_b_median": 2.3615,
+    "epe_b_max": 5.1194,
+    "pipeline_improvement_pct": 69.68
+  },
+  {
+    "test_name": "Test6_HighDetail",
+    "config": {
+      "pyr_scale": 0.5,
+      "levels": 4,
+      "winsize": 19,
+      "iterations": 4,
+      "poly_n": 7,
+      "poly_sigma": 1.5,
+      "flags": 0,
+      "cpu_num_blocks_x": 8,
+      "cpu_num_blocks_y": 6,
+      "cpu_overlap_ratio": 0.3,
+      "flow_smoothing_kernel": 5
+    },
+    "time_a_ms": 533.5,
+    "flow_a_mean_mag": 2.0056,
+    "flow_a_max_mag": 5.9593,
+    "flow_a_range_x": [
+      -5.119,
+      -0.014
+    ],
+    "flow_a_range_y": [
+      -3.919,
+      0.753
+    ],
+    "time_b_ms": 1704.6,
+    "speedup_ratio": 3.2,
+    "flow_b_mean_mag": 4.6599,
+    "flow_b_max_mag": 6.647,
+    "flow_b_range_x": [
+      0.0,
+      4.436
+    ],
+    "flow_b_range_y": [
+      1.144,
+      5.058
+    ],
+    "flow_diff_mean": 6.5444,
+    "flow_diff_max": 7.4776,
+    "flow_diff_std": 0.1127,
+    "psnr_a_vs_b": 19.58,
+    "ssim_a_vs_b": 0.6943,
+    "psnr_target_vs_a": 16.87,
+    "psnr_target_vs_b": 26.53,
+    "ssim_target_vs_a": 0.5073,
+    "ssim_target_vs_b": 0.9039,
+    "epe_a_mean": 7.8324,
+    "epe_a_median": 7.7385,
+    "epe_a_max": 11.7852,
+    "epe_b_mean": 2.233,
+    "epe_b_median": 2.1257,
+    "epe_b_max": 5.1313,
+    "pipeline_improvement_pct": 71.49
+  }
+]

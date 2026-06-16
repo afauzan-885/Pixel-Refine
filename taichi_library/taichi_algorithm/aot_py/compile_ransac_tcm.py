@@ -2,54 +2,64 @@ import os
 os.environ["AOT_MODE"] = "0"
 
 import taichi as ti
-import os
 import sys
 
 file_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
+project_root = os.path.abspath(os.path.join(file_dir, "../../../"))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
+# Impor kernel homography solver dari ransac
+from taichi_library.taichi_algorithm.ransac import (
+    ransac_homography_kernel,
+    generate_inlier_mask_kernel,
+    refine_homography_kernel,
+)
 
-import importlib
-ransac_mod = importlib.import_module("taichi_library.taichi_algorithm.ransac")
-
-def compile_ransac_aot(arch, save_path):
-    print(f"\n>>> Compiling RANSAC AOT for: {arch}")
+def compile_ransac_tcm(arch=ti.vulkan, save_path="ransac_vulkan.tcm"):
+    print(f"\n>>> Compiling RANSAC/MAGSAC++ AOT for: {arch}")
     ti.init(arch=arch, offline_cache=False)
 
     module = ti.aot.Module(arch)
 
-    h_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
-    w_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
-    thr = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "threshold", ti.f32)
+    # 1. RANSAC Homography Graph
+    g_ransac = ti.graph.GraphBuilder()
+    rpts1_arg    = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pts1",           ti.f32, ndim=2)
+    rpts2_arg    = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pts2",           ti.f32, ndim=2)
+    rnpts_arg    = ti.graph.Arg(ti.graph.ArgKind.SCALAR,  "n_pts",          ti.i32)
+    rnhyp_arg    = ti.graph.Arg(ti.graph.ArgKind.SCALAR,  "n_hypotheses",   ti.i32)
+    rrthresh_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR,  "reproj_threshold",ti.f32)
+    rHcand_arg   = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "H_candidates",   ti.f32, ndim=2)
+    ricnt_arg    = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "inlier_counts",  ti.i32, ndim=1)
+    rseed_arg    = ti.graph.Arg(ti.graph.ArgKind.SCALAR,  "seed_offset",    ti.i32)
+    g_ransac.dispatch(ransac_homography_kernel, rpts1_arg, rpts2_arg, rnpts_arg, rnhyp_arg, rrthresh_arg, rHcand_arg, ricnt_arg, rseed_arg)
+    module.add_graph("ransac_homography", g_ransac.compile())
 
-    # 1. Main Fused RANSAC Graph
-    g_fused = ti.graph.GraphBuilder()
-    flow = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "flow", ti.types.vector(2, ti.f32), ndim=2)
-    mask = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "inlier_mask", ti.i32, ndim=2)
-    model = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "model", ti.f32, ndim=1) # [x, y]
-    output = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.types.vector(2, ti.f32), ndim=2)
+    # 2. Generate Inlier Mask Graph
+    g_mask = ti.graph.GraphBuilder()
+    mpts1_arg   = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pts1",           ti.f32, ndim=2)
+    mpts2_arg   = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pts2",           ti.f32, ndim=2)
+    mhbest_arg  = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "H_best",         ti.f32, ndim=1)
+    mnpts_arg   = ti.graph.Arg(ti.graph.ArgKind.SCALAR,  "n_pts",          ti.i32)
+    mrthresh_arg= ti.graph.Arg(ti.graph.ArgKind.SCALAR,  "reproj_threshold",ti.f32)
+    mmask_arg   = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mask_out",       ti.i32, ndim=1)
+    g_mask.dispatch(generate_inlier_mask_kernel, mpts1_arg, mpts2_arg, mhbest_arg, mnpts_arg, mrthresh_arg, mmask_arg)
+    module.add_graph("generate_inlier_mask", g_mask.compile())
 
-    st_refine = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "stride_refine", ti.i32)
-    st_final = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "stride_final", ti.i32)
-
-    # Step A: Initial Model (Mean of all flow - Sparse)
-    g_fused.dispatch(ransac_mod._compute_mean_flow_kernel, flow, model, h_arg, w_arg, st_refine)
-
-    # Step B: Iterative Refinement (Unrolled 5 iterations - Sparse)
-    for _ in range(5):
-        g_fused.dispatch(ransac_mod._count_inliers_kernel, flow, model, thr, mask, h_arg, w_arg, st_refine)
-        g_fused.dispatch(ransac_mod._compute_inlier_mean_kernel, flow, mask, model, h_arg, w_arg, st_refine)
-
-    # Step C: Final Apply (Full Resolution)
-    g_fused.dispatch(ransac_mod._count_inliers_kernel, flow, model, thr, mask, h_arg, w_arg, st_final)
-    g_fused.dispatch(ransac_mod._apply_ransac_result_kernel, flow, mask, model, output, h_arg, w_arg)
-
-    module.add_graph("ransac_flow_cleanup_f32", g_fused.compile())
+    # 3. Refine Homography Graph (Least-Squares over all inliers)
+    g_refine = ti.graph.GraphBuilder()
+    rfpts1_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pts1",   ti.f32, ndim=2)
+    rfpts2_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pts2",   ti.f32, ndim=2)
+    rfmask_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mask",   ti.i32, ndim=1)
+    rfnpts_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR,  "n_pts",  ti.i32)
+    rfthresh_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "reproj_threshold", ti.f32)
+    rfATA_arg  = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ATA_out",ti.f32, ndim=2)
+    rfATb_arg  = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ATb_out",ti.f32, ndim=1)
+    g_refine.dispatch(refine_homography_kernel, rfpts1_arg, rfpts2_arg, rfmask_arg, rfnpts_arg, rfthresh_arg, rfATA_arg, rfATb_arg)
+    module.add_graph("refine_homography", g_refine.compile())
 
     module.archive(save_path)
-    print(f"Successfully compiled fused graph to: {save_path}")
+    print(f"Successfully compiled RANSAC/MAGSAC++ AOT and archived to: {save_path}")
     ti.reset()
 
 if __name__ == "__main__":
@@ -60,12 +70,12 @@ if __name__ == "__main__":
     archs = [
         (ti.vulkan, "vulkan"),
         (ti.cuda, "cuda"),
-        (ti.cpu, "cpu")
+        (ti.cpu, "cpu"),
     ]
     
     for arch, suffix in archs:
         save_path = os.path.abspath(os.path.join(assets_dir, f"ransac_{suffix}.tcm"))
         try:
-            compile_ransac_aot(arch, save_path)
+            compile_ransac_tcm(arch=arch, save_path=save_path)
         except Exception as e:
             print(f"Skipping {suffix} due to error: {e}")

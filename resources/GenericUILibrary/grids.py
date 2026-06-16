@@ -363,6 +363,39 @@ class GridContainer(QScrollArea, RealtimeMixin):
                 if not self._resize_timer.isActive():
                     self._resize_timer.start()
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        # wrap_mode='vertical' -> vertical scroll (default)
+        # wrap_mode='horizontal' -> horizontal scroll
+        scroll_orient = "vertical" if self.wrap_mode == "vertical" else "horizontal"
+
+        # column_mode='responsive' -> columns dihitung otomatis dari item_width
+        # column_mode='fixed'      -> gunakan self.columns langsung
+        if self.column_mode == "responsive" and self.item_width and self.item_width > 0:
+            # Estimasi kolom untuk preview QML (parent.width / item_width)
+            col_expr = f"Math.max(1, Math.floor(parent.width / {self.item_width}))"
+        else:
+            col_expr = str(self.columns)
+
+        qml = f"{tab}ScrollView {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    height: parent.height\n"
+        qml += f"{tab}    clip: true\n"
+        if scroll_orient == "horizontal":
+            qml += f"{tab}    contentHeight: parent.height\n"
+        else:
+            qml += f"{tab}    contentWidth: parent.width\n"
+        qml += f"{tab}    Grid {{\n"
+        qml += f"{tab}        columns: {col_expr}  // column_mode='{self.column_mode}', item_width={self.item_width}\n"
+        qml += f"{tab}        spacing: {self.spacing}\n"
+        qml += f"{tab}        width: parent.width\n"
+        for w in self._stored_widgets:
+            if hasattr(w, "to_qml"):
+                qml += w.to_qml(indent + 2) + "\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
+
 
 class GridItem(QWidget):
     """
@@ -458,6 +491,32 @@ class GridItem(QWidget):
         """Handle double click"""
         self.double_clicked.emit(self.item_id)
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        label = self.visual_box.text() if isinstance(self.visual_box, QLabel) else ""
+        label_escaped = label.replace("'", "\\'")
+        item_id_escaped = str(self.item_id).replace("'", "\\'")
+        selected = self._is_selected
+        size = self.width() if self.width() > 0 else 110
+        border_color = "genericTheme.primary" if selected else "'#bbb'"
+        border_width = 2 if selected else 1
+        qml = f"{tab}Rectangle {{\n"
+        qml += f"{tab}    // item_id: '{item_id_escaped}'\n"
+        qml += f"{tab}    width: {size}\n"
+        qml += f"{tab}    height: {size}\n"
+        qml += f"{tab}    radius: genericTheme.radiusSm\n"
+        qml += f"{tab}    color: genericTheme.bgSecondary\n"
+        qml += f"{tab}    border.color: {border_color}\n"
+        qml += f"{tab}    border.width: {border_width}\n"
+        qml += f"{tab}    Text {{ text: '{label_escaped}'; anchors.centerIn: parent; color: genericTheme.textPrimary; wrapMode: Text.WordWrap; width: parent.width - 10; horizontalAlignment: Text.AlignHCenter }}\n"
+        qml += f"{tab}    MouseArea {{\n"
+        qml += f"{tab}        anchors.fill: parent\n"
+        # Gunakan item_id sebagai identifier — identik dengan signal clicked(item_id) di desktop
+        qml += f"{tab}        onClicked: appBridge.openTool('{item_id_escaped}')\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
+
 
 class Gallery(QFrame):
     """
@@ -476,6 +535,8 @@ class Gallery(QFrame):
         super().__init__(parent)
 
         self.setObjectName("displayContainer")
+        # Simpan show_header untuk digunakan oleh to_qml()
+        self._show_header = show_header
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -537,6 +598,38 @@ class Gallery(QFrame):
         if item_id in self.items:
             self.items[item_id].set_selected(selected)
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        title = self.title_label.text() if self.title_label else ""
+        title_escaped = title.replace("'", "\'")
+        show_header = getattr(self, "_show_header", True)
+        qml = f"{tab}Rectangle {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    height: 300\n"
+        qml += f"{tab}    color: genericTheme.bgPrimary\n"
+        qml += f"{tab}    radius: genericTheme.radiusLg\n"
+        qml += f"{tab}    border.color: genericTheme.borderColor\n"
+        qml += f"{tab}    border.width: 1\n"
+        qml += f"{tab}    Column {{\n"
+        qml += f"{tab}        anchors.fill: parent\n"
+        qml += f"{tab}        anchors.margins: 10\n"
+        qml += f"{tab}        spacing: 10\n"
+        # Render header hanya jika show_header=True — selaras dengan desktop
+        if show_header and title_escaped:
+            qml += f"{tab}        Text {{ text: '{title_escaped}'; font.bold: true; font.pixelSize: 16; color: genericTheme.textPrimary }}\n"
+        qml += f"{tab}        Grid {{\n"
+        qml += f"{tab}            columns: {self.grid.columns}\n"
+        qml += f"{tab}            spacing: {self.grid.spacing}\n"
+        qml += f"{tab}            width: parent.width\n"
+        for item_id, item in self.items.items():
+            if hasattr(item, "to_qml"):
+                qml += item.to_qml(indent + 3) + "\n"
+        qml += f"{tab}        }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
+
+
 
 class ThumbnailGrid(GridContainer):
     """
@@ -573,3 +666,20 @@ class ThumbnailGrid(GridContainer):
         """Clear all thumbnails"""
         self.clear_items()
         self.thumbnails.clear()
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        qml = f"{tab}ScrollView {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    height: parent.height\n"
+        qml += f"{tab}    clip: true\n"
+        qml += f"{tab}    Grid {{\n"
+        qml += f"{tab}        columns: {self.columns}\n"
+        qml += f"{tab}        spacing: {self.spacing}\n"
+        qml += f"{tab}        width: parent.width\n"
+        for w in self._stored_widgets:
+            if hasattr(w, "to_qml"):
+                qml += w.to_qml(indent + 2) + "\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml

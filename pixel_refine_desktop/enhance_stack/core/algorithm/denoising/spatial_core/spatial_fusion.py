@@ -159,7 +159,7 @@ class SpatialFusionProcessor:
             "total_overall_images": total_overall_images,
             "enable_alignment": enable_alignment,
             "num_workers": num_workers,
-            "alignment_tile_size": 8,
+            "alignment_tile_size": 32,
             "lib_path": lib_path,
             "return_raw": return_raw,
             **unused_kwargs,

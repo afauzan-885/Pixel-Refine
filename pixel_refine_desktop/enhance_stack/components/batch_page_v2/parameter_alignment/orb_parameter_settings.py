@@ -16,10 +16,10 @@ from PySide6.QtCore import Qt
 
 # Asumsikan ORBAlgorithm diimpor dengan benar
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.ORB import ORBAlgorithm
-from pixel_refine_desktop.ui.resources.GenericUILibrary import FormGroup
+from resources.GenericUILibrary import FormGroup
 
 # APPLY_BUTTON tidak diperlukan lagi
-from pixel_refine_desktop.ui.resources.styles.stylesheet import (
+from resources.styles.stylesheet import (
     DROPDOWN_BOX,
     TOGGLE_BUTTON,
     SCROLL_AREA,

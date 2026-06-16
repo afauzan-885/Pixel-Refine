@@ -192,6 +192,47 @@ class FormGroup(QWidget, RealtimeMixin):
         if self.auto_sync:
             self.set_data(value)
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        label_text = self.label.text() if self.label else ""
+        qml = f"{tab}Column {{\n"
+        qml += f"{tab}    spacing: 5\n"
+        qml += f"{tab}    width: parent.width\n"
+        if label_text:
+            qml += f"{tab}    Text {{ text: '{label_text}'; font.bold: true; color: genericTheme.textPrimary }}\n"
+        if self.input_type == "select":
+            options = []
+            if hasattr(self.input, 'count'):
+                for i in range(self.input.count()):
+                    options.append(self.input.itemText(i))
+            model_str = "[" + ", ".join(f"'{o}'" for o in options) + "]"
+            qml += f"{tab}    ComboBox {{\n"
+            qml += f"{tab}        width: parent.width\n"
+            qml += f"{tab}        model: {model_str}\n"
+            qml += f"{tab}    }}\n"
+        elif self.input_type == "textarea":
+            qml += f"{tab}    TextArea {{\n"
+            qml += f"{tab}        width: parent.width\n"
+            qml += f"{tab}        height: 100\n"
+            qml += f"{tab}        placeholderText: ''\n"
+            qml += f"{tab}    }}\n"
+        else:
+            # text, number, decimal -> TextInput
+            qml += f"{tab}    TextField {{\n"
+            qml += f"{tab}        width: parent.width\n"
+            qml += f"{tab}        height: 36\n"
+            qml += f"{tab}        placeholderText: ''\n"
+            qml += f"{tab}        color: genericTheme.textPrimary\n"
+            qml += f"{tab}        background: Rectangle {{\n"
+            qml += f"{tab}            color: genericTheme.bgPrimary\n"
+            qml += f"{tab}            border.color: genericTheme.borderColor\n"
+            qml += f"{tab}            border.width: 1\n"
+            qml += f"{tab}            radius: genericTheme.radiusSm\n"
+            qml += f"{tab}        }}\n"
+            qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
+
 
 class Input(QLineEdit):
     """
@@ -219,6 +260,25 @@ class Input(QLineEdit):
             self.setStyleSheet("border-bottom: 2px solid #f39c12;")
         else:
             self.setStyleSheet("")
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        state_colors = {"valid": "#2ecc71", "invalid": "#e74c3c", "warning": "#f39c12", "normal": "genericTheme.borderColor"}
+        border_color = state_colors.get(self._state, "genericTheme.borderColor")
+        ph = self.placeholderText().replace("'", "\\'")
+        qml = f"{tab}TextField {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    height: 36\n"
+        qml += f"{tab}    placeholderText: '{ph}'\n"
+        qml += f"{tab}    color: genericTheme.textPrimary\n"
+        qml += f"{tab}    background: Rectangle {{\n"
+        qml += f"{tab}        color: genericTheme.bgPrimary\n"
+        qml += f"{tab}        border.color: {border_color}\n"
+        qml += f"{tab}        border.width: 1\n"
+        qml += f"{tab}        radius: genericTheme.radiusSm\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
 
 
 class Select(QComboBox):
@@ -250,6 +310,26 @@ class Select(QComboBox):
         """Replace all options"""
         self.clear()
         self.addItems(options)
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        options = []
+        for i in range(self.count()):
+            options.append(self.itemText(i))
+        model_str = "[" + ", ".join(f"'{o}'" for o in options) + "]"
+        qml = f"{tab}ComboBox {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    height: 32\n"
+        qml += f"{tab}    model: {model_str}\n"
+        qml += f"{tab}    currentIndex: {self.currentIndex()}\n"
+        qml += f"{tab}    background: Rectangle {{\n"
+        qml += f"{tab}        color: genericTheme.bgPrimary\n"
+        qml += f"{tab}        border.color: genericTheme.borderColor\n"
+        qml += f"{tab}        border.width: 1\n"
+        qml += f"{tab}        radius: genericTheme.radiusSm\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
 
 
 class Checkbox(QWidget, RealtimeMixin):
@@ -297,6 +377,16 @@ class Checkbox(QWidget, RealtimeMixin):
         if self.auto_sync:
             self.set_data(checked)
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        text = self.checkbox.text()
+        checked = str(self.checkbox.isChecked()).lower()
+        qml = f"{tab}CheckBox {{\n"
+        qml += f"{tab}    text: '{text}'\n"
+        qml += f"{tab}    checked: {checked}\n"
+        qml += f"{tab}}}"
+        return qml
+
 
 class Radio(QWidget):
     """
@@ -327,6 +417,16 @@ class Radio(QWidget):
 
     def set_checked(self, checked):
         self.radio.setChecked(checked)
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        text = self.radio.text()
+        checked = str(self.radio.isChecked()).lower()
+        qml = f"{tab}RadioButton {{\n"
+        qml += f"{tab}    text: '{text}'\n"
+        qml += f"{tab}    checked: {checked}\n"
+        qml += f"{tab}}}"
+        return qml
 
 
 class RadioGroup(QWidget, RealtimeMixin):
@@ -419,6 +519,18 @@ class RadioGroup(QWidget, RealtimeMixin):
             # but usually it matches what's in the store.
             self.set_data(index)
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        # options:
+        layout_type = "Column" if self.layout().__class__.__name__ == "QVBoxLayout" else "Row"
+        qml = f"{tab}{layout_type} {{\n"
+        qml += f"{tab}    spacing: 5\n"
+        for radio in self.radios:
+            checked = str(radio.isChecked()).lower()
+            qml += f"{tab}    RadioButton {{ text: '{radio.text()}'; checked: {checked} }}\n"
+        qml += f"{tab}}}"
+        return qml
+
 
 class FormRow(QWidget):
     """
@@ -444,3 +556,31 @@ class FormRow(QWidget):
     def add_row(self, widget):
         """Add a full-width row"""
         self.form_layout.addRow(widget)
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        qml = f"{tab}Column {{\n"
+        qml += f"{tab}    spacing: 5\n"
+        qml += f"{tab}    width: parent.width\n"
+        for i in range(self.form_layout.rowCount()):
+            label_item = self.form_layout.itemAt(i * 2) if self.form_layout.itemAt(i * 2) else None
+            field_item = self.form_layout.itemAt(i * 2 + 1) if self.form_layout.itemAt(i * 2 + 1) else None
+            if label_item and field_item:
+                label_widget = label_item.widget()
+                field_widget = field_item.widget()
+                label_text = label_widget.text() if label_widget else ""
+                qml += f"{tab}    Row {{\n"
+                qml += f"{tab}        spacing: 10\n"
+                qml += f"{tab}        width: parent.width\n"
+                qml += f"{tab}        Text {{ text: '{label_text}'; width: 100; color: genericTheme.textPrimary }}\n"
+                if field_widget and hasattr(field_widget, "to_qml"):
+                    qml += field_widget.to_qml(indent + 2) + "\n"
+                else:
+                    qml += f"{tab}        Item {{ Layout.fillWidth: true }}\n"
+                qml += f"{tab}    }}\n"
+            elif field_item:
+                w = field_item.widget()
+                if w and hasattr(w, "to_qml"):
+                    qml += w.to_qml(indent + 1) + "\n"
+        qml += f"{tab}}}"
+        return qml

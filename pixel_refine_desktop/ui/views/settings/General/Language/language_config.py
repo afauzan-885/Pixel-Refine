@@ -18,13 +18,18 @@ def load_language_setting():
 
 LANGUAGE = load_language_setting()
 
-def reload_language():
+def reload_language(lang_str=None):
     global LANGUAGE
-    LANGUAGE = load_language_setting()
+    if lang_str:
+        LANGUAGE = lang_str.lower()
+    else:
+        LANGUAGE = load_language_setting()
     
     import sys
+    import importlib
     current_module = sys.modules[__name__]
     
+    # Tentukan nama module yang akan digunakan
     if LANGUAGE == "indonesian":
         from . import lang_indonesian as lang
     elif LANGUAGE == "melayu":
@@ -33,11 +38,30 @@ def reload_language():
         from . import lang_simplified_china as lang
     else:
         from . import lang_english as lang
+
+    # KUNCI: Paksa Python baca ulang file module dari disk.
+    # Ini mencegah bug "stuck language" akibat Python module cache —
+    # dimana lang.__dict__ ter-overwrite oleh bahasa terakhir yang di-import.
+    importlib.reload(lang)
         
+    # Salin semua konstanta huruf besar ke module language_config
+    translations = {}
     for key, val in lang.__dict__.items():
         if key.isupper():
+            translations[key] = val
             setattr(current_module, key, val)
+            
+    # Suntikkan terjemahan ke semua modul aplikasi yang sudah mengimpor konstanta bahasa
+    for name, module in list(sys.modules.items()):
+        if module and (name.startswith("pixel_refine_desktop") or name == "main_desktop"):
+            for key, val in translations.items():
+                if hasattr(module, key):
+                    setattr(module, key, val)
+                # Update referensi language_config di modul lain
+                if hasattr(module, "language_config"):
+                    sub_cfg = getattr(module, "language_config")
+                    if sub_cfg and sub_cfg is not current_module:
+                        setattr(sub_cfg, key, val)
 
 # Initial load
 reload_language()
-

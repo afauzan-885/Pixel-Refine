@@ -11,10 +11,10 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QLabel
 from PySide6.QtCore import Qt
 
 # Import stylesheet
-from pixel_refine_desktop.ui.resources.styles.stylesheet import stylesheet_global_page
+from resources.styles.stylesheet import stylesheet_global_page
 
 # Import components
-from pixel_refine_desktop.ui.resources.GenericUILibrary import (
+from resources.GenericUILibrary import (
     Container,
     Row,
     Button,
@@ -39,7 +39,7 @@ class ColorCustomizationExample(QMainWindow):
         self.setCentralWidget(central_widget)
 
         main_container = Container(padding=15)
-        from pixel_refine_desktop.ui.resources.GenericUILibrary.containers import Stack
+        from resources.GenericUILibrary.containers import Stack
 
         layout = Stack(orientation="vertical")
         central_widget.setLayout(layout.layout)

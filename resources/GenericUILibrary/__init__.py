@@ -47,7 +47,7 @@ def apply_stylesheet():
     try:
         app = QApplication.instance()
         if app is not None and isinstance(app, QApplication):
-            from pixel_refine_desktop.ui.resources.styles.stylesheet import (
+            from resources.styles.stylesheet import (
                 stylesheet_global_page,
             )
 
@@ -125,12 +125,12 @@ from .progress_bars import (
 from .comparison import ImageCompareItem, ImageCompareWidget
 
 # Theme
-from .theme import Theme
+from .theme import Theme, DarkTheme, LightTheme
 
-# Real-time Core
+# Live-update Core
 from .store import DataStore, get_store
 from .mixins import RealtimeMixin, SyncMixin, AdaptiveSizingMixin
-from .realtime_update import realtime_update, trigger_realtime_update
+from .live_update import live_update, trigger_live_update
 
 # Define what's available when using "from GenericUILibrary import *"
 __all__ = [
@@ -209,6 +209,8 @@ __all__ = [
     "ProgressGroup",
     # Theme
     "Theme",
+    "DarkTheme",
+    "LightTheme",
     # Comparison
     "ImageCompareItem",
     "ImageCompareWidget",
@@ -218,7 +220,7 @@ __all__ = [
     "RealtimeMixin",
     "SyncMixin",
     "AdaptiveSizingMixin",
-    "realtime_update",
-    "trigger_realtime_update",
+    "live_update",
+    "trigger_live_update",
 ]
 

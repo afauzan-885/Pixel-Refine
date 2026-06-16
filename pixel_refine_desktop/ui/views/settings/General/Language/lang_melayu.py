@@ -577,8 +577,8 @@ COARSE_MARGIN_DESCRIPTION = """Margin carian penyelarasan pada tahap petak (tile
 - Lebih Tinggi: Stacking lebih tepat, tetapi melambatkan proses dengan ketara."""
 
 # --- Missing UI Keys ---
-LBL_BATCH_MODE = "Mod Batch"
-LBL_BULK_MODE = "Mod Batch Massal"
+LBL_BATCH_MODE = "Mode Batch"
+LBL_BULK_MODE = "Mode Bulk"
 LBL_PARAMETER_ALIGNMENT = "Tetapan Penjajaran Imej"
 LBL_ALIGNMENT_PLACEHOLDER = "Tetapan penjajaran imej akan dipaparkan di sini"
 LBL_PARAMETER_ALGORITHM = "Tetapan Kaedah Proses"
@@ -636,3 +636,17 @@ DESC_DENOISING_CARD = "Kurangkan hingar imej dan jajarkan lapisan piksel."
 
 
 
+
+# --- New UI & Bulk Core Keys ---
+BULK_FROM = "Dari No:"
+BULK_TO = "Ke No:"
+BULK_MSG_RANGE_ERROR = "Nombor awal mestilah <= nombor akhir."
+BULK_ERR_RETRIEVE = "Gagal memuatkan imej projek."
+BULK_WARN_UNSUPPORTED = "Format tidak disokong akan diabaikan."
+CORE_SELECT_REF_IMAGE = "Set Rujukan"
+CORE_DELETE_IMAGES = "Padam Terpilih"
+CORE_MSG_CONFIRM_DELETE = "Padam imej terpilih?"
+CORE_TOOLTIP_COPY = "Klik kanan untuk salin"
+UI_STATUS_READY = "Sedia"
+UI_ITEMS_REMAINING = "berbaki"
+UI_SPLASH_LOADING = "Memuatkan..."

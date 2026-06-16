@@ -19,7 +19,7 @@ from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QPainter, QColor, QBrush
 from .mixins import RealtimeMixin
 from .theme import create_checkbox_style, create_select_style
-from pixel_refine_desktop.ui.resources.animations.animation_manager import (
+from resources.animations.animation_manager import (
     HeightAnimator,
 )
 
@@ -36,6 +36,8 @@ class Card(QFrame):
 
     def __init__(self, title="", bg_color=None, border_color=None, parent=None):
         super().__init__(parent)
+        self._qml_children = []
+        self._title = title
 
         self.setObjectName("displayContainer")  # Use existing style
 
@@ -53,13 +55,14 @@ class Card(QFrame):
         self.header_layout = QHBoxLayout(self.header)
         self.header_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.title_label = QLabel(title)
-        self.title_label.setObjectName("sectionTitle")
-        self.header_layout.addWidget(self.title_label)
-        self.header_layout.addStretch()
-
         if title:
+            self.title_label = QLabel(title)
+            self.title_label.setObjectName("sectionTitle")
+            self.header_layout.addWidget(self.title_label)
+            self.header_layout.addStretch()
             self.main_layout.addWidget(self.header)
+        else:
+            self.title_label = QLabel("")
 
         # Body
         self.body = QWidget()
@@ -80,6 +83,7 @@ class Card(QFrame):
 
     def set_title(self, title):
         """Set card title"""
+        self._title = title
         self.title_label.setText(title)
         self.header.setVisible(bool(title))
 
@@ -90,6 +94,7 @@ class Card(QFrame):
     def set_body_content(self, content):
         """Set body content (text or widget)"""
         # Clear existing body
+        self._qml_children.clear()
         while self.body_layout.count():
             item = self.body_layout.takeAt(0)
             if item.widget():
@@ -100,10 +105,12 @@ class Card(QFrame):
             label.setWordWrap(True)
             self.body_layout.addWidget(label)
         elif isinstance(content, QWidget):
+            self._qml_children.append(content)
             self.body_layout.addWidget(content)
 
     def add_body_widget(self, widget, stretch=0):
         """Add widget to body"""
+        self._qml_children.append(widget)
         self.body_layout.addWidget(widget, stretch)
 
     def add_footer_widget(self, widget):
@@ -113,6 +120,7 @@ class Card(QFrame):
 
     def clear_body(self):
         """Clear body content"""
+        self._qml_children.clear()
         while self.body_layout.count():
             item = self.body_layout.takeAt(0)
             if item.widget():
@@ -134,6 +142,28 @@ class Card(QFrame):
         """
         self.setStyleSheet(style)
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        qml = f"{tab}Rectangle {{\n"
+        qml += f"{tab}    width: parent.width - 32\n"
+        qml += f"{tab}    height: {120 + len(self._qml_children) * 50}\n"
+        qml += f"{tab}    color: genericTheme.bgPrimary\n"
+        qml += f"{tab}    radius: genericTheme.radiusLg\n"
+        qml += f"{tab}    border.color: genericTheme.borderColor\n"
+        qml += f"{tab}    border.width: 1\n"
+        qml += f"{tab}    Column {{\n"
+        qml += f"{tab}        anchors.fill: parent\n"
+        qml += f"{tab}        anchors.margins: 16\n"
+        qml += f"{tab}        spacing: 8\n"
+        if self._title:
+            qml += f"{tab}        Text {{ text: '{self._title}'; font.bold: true; font.pixelSize: 16; color: genericTheme.textPrimary }}\n"
+        for child in self._qml_children:
+            if hasattr(child, "to_qml"):
+                qml += child.to_qml(indent + 2) + "\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
+
 
 class CardHeader(QWidget):
     """
@@ -146,6 +176,8 @@ class CardHeader(QWidget):
 
     def __init__(self, title="", parent=None):
         super().__init__(parent)
+        self._title = title
+        self._qml_children = []
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 5)
@@ -158,11 +190,26 @@ class CardHeader(QWidget):
 
     def set_title(self, title):
         """Set header title"""
+        self._title = title
         self.title_label.setText(title)
 
     def add_action(self, widget):
         """Add action widget (button, etc.)"""
+        self._qml_children.append(widget)
         self.layout().addWidget(widget)
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        qml = f"{tab}Row {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    spacing: 8\n"
+        qml += f"{tab}    Text {{ text: '{self._title}'; font.bold: true; font.pixelSize: 16; color: genericTheme.textPrimary }}\n"
+        qml += f"{tab}    Item {{ Layout.fillWidth: true }}\n"
+        for child in self._qml_children:
+            if hasattr(child, "to_qml"):
+                qml += child.to_qml(indent + 1) + "\n"
+        qml += f"{tab}}}"
+        return qml
 
 
 class CardBody(QWidget):
@@ -176,6 +223,7 @@ class CardBody(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._qml_children = []
 
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
@@ -183,11 +231,13 @@ class CardBody(QWidget):
 
     def add_widget(self, widget, stretch=0):
         """Add widget to body"""
+        self._qml_children.append(widget)
         self.layout.addWidget(widget, stretch)
 
     def set_content(self, content):
         """Set content (text or widget)"""
         # Clear existing
+        self._qml_children.clear()
         while self.layout.count():
             item = self.layout.takeAt(0)
             if item.widget():
@@ -198,7 +248,19 @@ class CardBody(QWidget):
             label.setWordWrap(True)
             self.layout.addWidget(label)
         elif isinstance(content, QWidget):
+            self._qml_children.append(content)
             self.layout.addWidget(content)
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        qml = f"{tab}Column {{\n"
+        qml += f"{tab}    spacing: 5\n"
+        qml += f"{tab}    width: parent.width\n"
+        for child in self._qml_children:
+            if hasattr(child, "to_qml"):
+                qml += child.to_qml(indent + 1) + "\n"
+        qml += f"{tab}}}"
+        return qml
 
 
 class CardFooter(QWidget):
@@ -213,6 +275,7 @@ class CardFooter(QWidget):
 
     def __init__(self, align="right", parent=None):
         super().__init__(parent)
+        self._qml_children = []
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 5, 0, 0)
@@ -225,10 +288,24 @@ class CardFooter(QWidget):
 
     def add_action(self, widget):
         """Add action widget"""
+        self._qml_children.append(widget)
         if self.align == "left":
             self.layout().insertWidget(0, widget)
         else:
             self.layout().addWidget(widget)
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        qml = f"{tab}Row {{\n"
+        qml += f"{tab}    spacing: 5\n"
+        qml += f"{tab}    width: parent.width\n"
+        if self.align == "right":
+            qml += f"{tab}    Item {{ Layout.fillWidth: true }}\n"
+        for child in self._qml_children:
+            if hasattr(child, "to_qml"):
+                qml += child.to_qml(indent + 1) + "\n"
+        qml += f"{tab}}}"
+        return qml
 
 
 class CardGroup(QWidget):
@@ -243,6 +320,8 @@ class CardGroup(QWidget):
 
     def __init__(self, spacing=10, parent=None):
         super().__init__(parent)
+        self._qml_children = []
+        self._spacing = spacing
 
         self.layout = QHBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
@@ -250,7 +329,19 @@ class CardGroup(QWidget):
 
     def add_card(self, card, stretch=1):
         """Add card to group"""
+        self._qml_children.append(card)
         self.layout.addWidget(card, stretch)
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        qml = f"{tab}Row {{\n"
+        qml += f"{tab}    spacing: {self._spacing}\n"
+        qml += f"{tab}    width: parent.width\n"
+        for child in self._qml_children:
+            if hasattr(child, "to_qml"):
+                qml += child.to_qml(indent + 1) + "\n"
+        qml += f"{tab}}}"
+        return qml
 
 
 from .buttons import ToggleSwitch
@@ -301,11 +392,7 @@ class FeatureCard(QFrame, RealtimeMixin):
             if "right" in self.adaptive_directions
             else QSizePolicy.Policy.Preferred
         )
-        v_policy = (
-            QSizePolicy.Policy.Expanding
-            if "bottom" in self.adaptive_directions
-            else QSizePolicy.Policy.Preferred
-        )
+        v_policy = QSizePolicy.Policy.Preferred
         self.setSizePolicy(h_policy, v_policy)
 
         self.main_layout = QVBoxLayout(self)
@@ -377,8 +464,11 @@ class FeatureCard(QFrame, RealtimeMixin):
             self.setGraphicsEffect(None)
 
     def resizeEvent(self, event):
-        super().resizeEvent(event)
+        if event:
+            super().resizeEvent(event)
         import config
+        from resources.GenericUILibrary.theme import get_theme
+        theme = get_theme()
 
         threshold = getattr(config, "FEATURE_CARD_COLLAPSE_THRESHOLD", 230)
 
@@ -395,10 +485,10 @@ class FeatureCard(QFrame, RealtimeMixin):
             desc_sz = 9.5
 
         self.title_lbl.setStyleSheet(
-            f"font-weight: bold; font-size: {title_sz}pt; color: #2C3E50; background: transparent;"
+            f"font-weight: bold; font-size: {title_sz}pt; color: {theme.card_text_title}; background: transparent;"
         )
         self.desc_lbl.setStyleSheet(
-            f"color: #7F8C8D; font-size: {desc_sz}pt; background: transparent;"
+            f"color: {theme.card_text_desc}; font-size: {desc_sz}pt; background: transparent;"
         )
 
     def _emit_debounced_value(self):
@@ -480,42 +570,112 @@ class FeatureCard(QFrame, RealtimeMixin):
         self.blockSignals(False)
 
     def update_styles(self):
+        from resources.GenericUILibrary.theme import get_theme
+        theme = get_theme()
         if not self.isEnabled():
             self.setStyleSheet(
-                """
-                QFrame#featureCard {
-                    background-color: #F8F9FA;
-                    border: 1px solid #E8EDF2;
+                f"""
+                QFrame#featureCard {{
+                    background-color: {theme.card_disabled_bg};
+                    border: 1px solid {theme.card_disabled_border};
                     border-radius: 8px;
-                }
-                QLabel {
-                    color: #BDC3C7;
-                }
+                }}
+                QLabel {{
+                    color: {theme.text_muted};
+                }}
             """
             )
         elif self.is_checked:
             self.setStyleSheet(
-                """
-                QFrame#featureCard {
-                    background-color: #F0FDF4;
-                    border: 2px solid #2ECC71;
+                f"""
+                QFrame#featureCard {{
+                    background-color: {theme.card_checked_bg};
+                    border: 2px solid {theme.card_checked_border};
                     border-radius: 8px;
-                }
-                QLabel {
-                    color: #2C3E50;
-                }
+                }}
+                QLabel {{
+                    color: {theme.card_text_title};
+                }}
             """
             )
         else:
             self.setStyleSheet(
-                """
-                QFrame#featureCard {
-                    background-color: #FFFFFF;
-                    border: 1px solid #E8EDF2;
+                f"""
+                QFrame#featureCard {{
+                    background-color: {theme.card_unchecked_bg};
+                    border: 1px solid {theme.card_unchecked_border};
                     border-radius: 8px;
-                }
-                QLabel {
-                    color: #2C3E50;
-                }
+                }}
+                QLabel {{
+                    color: {theme.card_text_title};
+                }}
             """
             )
+
+    def update_theme(self):
+        """Update styles dynamically when theme switches."""
+        self.update_styles()
+        self.resizeEvent(None)
+        if hasattr(self, "combo"):
+            from resources.GenericUILibrary.theme import create_select_style
+            self.combo.setStyleSheet(create_select_style())
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        title = self.title_lbl.text()
+        desc = self.desc_lbl.text()
+        # description, fallback_val, adaptive_directions:
+        _ = getattr(self, "fallback_val", None)
+        _ = getattr(self, "adaptive_directions", None)
+        checked = str(self.is_checked).lower()
+        options_str = "[" + ", ".join(f"'{o}'" for o in self.options) + "]"
+        bg = "'#F0FDF4'" if self.is_checked else "'#FFFFFF'"
+        border = "'#2ECC71'" if self.is_checked else "'#E8EDF2'"
+        qml = f"{tab}Rectangle {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    height: contentCol.height + 14\n"
+        qml += f"{tab}    color: {bg}\n"
+        qml += f"{tab}    radius: genericTheme.radiusLg\n"
+        qml += f"{tab}    border.color: {border}\n"
+        qml += f"{tab}    border.width: {2 if self.is_checked else 1}\n"
+        qml += f"{tab}    Column {{\n"
+        qml += f"{tab}        id: contentCol\n"
+        qml += f"{tab}        x: 8\n"
+        qml += f"{tab}        y: 6\n"
+        qml += f"{tab}        width: parent.width - 16\n"
+        qml += f"{tab}        spacing: 4\n"
+        qml += f"{tab}        Row {{\n"
+        qml += f"{tab}            spacing: 8\n"
+        qml += f"{tab}            Rectangle {{\n"
+        qml += f"{tab}                id: toggleCapsule\n"
+        qml += f"{tab}                width: 36\n"
+        qml += f"{tab}                height: 20\n"
+        qml += f"{tab}                radius: 10\n"
+        qml += f"{tab}                color: toggleCapsule.checked ? '#2ECC71' : '#BDC3C7'\n"
+        qml += f"{tab}                property bool checked: {checked}\n"
+        qml += f"{tab}                anchors.verticalCenter: parent.verticalCenter\n"
+        qml += f"{tab}                Rectangle {{\n"
+        qml += f"{tab}                    x: toggleCapsule.checked ? 18 : 2\n"
+        qml += f"{tab}                    y: 2\n"
+        qml += f"{tab}                    width: 16\n"
+        qml += f"{tab}                    height: 16\n"
+        qml += f"{tab}                    radius: 8\n"
+        qml += f"{tab}                    color: '#FFFFFF'\n"
+        qml += f"{tab}                    Behavior on x {{ NumberAnimation {{ duration: 150 }} }}\n"
+        qml += f"{tab}                }}\n"
+        qml += f"{tab}                MouseArea {{\n"
+        qml += f"{tab}                    anchors.fill: parent\n"
+        qml += f"{tab}                    onClicked: parent.checked = !parent.checked\n"
+        qml += f"{tab}                }}\n"
+        qml += f"{tab}            }}\n"
+        qml += f"{tab}            Text {{ text: '{title}'; font.bold: true; font.pointSize: 11; color: '#2C3E50'; anchors.verticalCenter: parent.verticalCenter }}\n"
+        qml += f"{tab}        }}\n"
+        qml += f"{tab}        Text {{ text: '{desc}'; font.pointSize: 9.5; color: '#2C3E50'; wrapMode: Text.WordWrap; width: parent.width }}\n"
+        qml += f"{tab}        ComboBox {{\n"
+        qml += f"{tab}            model: {options_str}\n"
+        qml += f"{tab}            visible: {checked}\n"
+        qml += f"{tab}            width: parent.width\n"
+        qml += f"{tab}        }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml

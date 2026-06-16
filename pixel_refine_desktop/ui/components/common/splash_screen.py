@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QSplashScreen, QVBoxLayout, QLabel, QApplication
 from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Qt
 
-from pixel_refine_desktop.ui.resources.animations.loading.circular_progress import CircularProgress
+from resources.animations.loading.circular_progress import CircularProgress
 
 
 class SplashScreen(QSplashScreen):
@@ -37,8 +37,9 @@ class SplashScreen(QSplashScreen):
         self.progress_indicator.setFixedSize(120, 120) 
         main_layout.addWidget(self.progress_indicator, alignment=Qt.AlignmentFlag.AlignCenter)
 
+        from pixel_refine_desktop.ui.views.settings.General.Language import language_config
         # Label for "LOADING..."
-        self.status_label = QLabel("L O A D I N G . . .", self)
+        self.status_label = QLabel(language_config.UI_SPLASH_LOADING, self)
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_label.setStyleSheet("""
             color: white; 

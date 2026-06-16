@@ -36,6 +36,18 @@ from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from concurrent.futures import ThreadPoolExecutor
 
+# --- Taichi GPU Acceleration (opsional, fallback ke CPU jika tidak tersedia) ---
+TAICHI_AVAILABLE = False
+try:
+    os.environ["AOT_MODE"] = "0"
+    from taichi_algorithm.bilateral_grid import bilateral_grid_filter
+    from taichi_algorithm.median_filter import median_filter as ta_median_filter
+    from taichi_algorithm.gaussian import gaussian_blur as ta_gaussian_blur
+    from taichi_algorithm.remap import remap_with_flow as ta_remap_with_flow
+    TAICHI_AVAILABLE = True
+except Exception:
+    pass
+
 
 class FarnebackAlgorithm:
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
@@ -226,28 +238,48 @@ class FarnebackAlgorithm:
                     # 2. Estimasi noise
                     noise_level = estimate_noise_variance(gray_8bit)
 
-                    # 3. Logika filter adaptif
-                    min_noise_threshold = 200.0
-                    max_noise_threshold = 700.0
-                    min_d, max_d = 5, 9
-                    min_sigma, max_sigma = 20, 75
-
+                    # 3. Logika denoise adaptif (Taichi GPU dengan fallback CPU)
                     denoised_image = None
-                    if noise_level > min_noise_threshold:
-                        d, sigma_color, sigma_space = get_adaptive_bilateral(
-                            noise_level,
-                            min_noise_threshold,
-                            max_noise_threshold,
-                            min_d,
-                            max_d,
-                            min_sigma,
-                            max_sigma,
-                        )
-                        denoised_image = cv2.bilateralFilter(
-                            gray_8bit, d, sigma_color, sigma_space
-                        )
-                    else:
-                        denoised_image = gray_8bit
+
+                    if TAICHI_AVAILABLE:
+                        try:
+                            # --- Taichi GPU Path ---
+                            # bilateral_grid_filter: edge-preserving smoothing di GPU
+                            # s_s=8: spatial grid ringan, menjaga texture detail
+                            # s_r=16: intensity range bins
+                            # sigma_r=0.5: range blur kecil = lebih banyak detail
+                            gray_f32 = gray_8bit.astype(np.float32)
+                            denoised_f32 = bilateral_grid_filter(
+                                gray_f32, s_s=8, s_r=16, sigma_s=1.0, sigma_r=0.5
+                            )
+                            denoised_image = np.clip(denoised_f32, 0, 255).astype(np.uint8)
+                        except Exception:
+                            # Fallback ke CPU jika Taichi error
+                            denoised_image = gray_8bit
+
+                    if denoised_image is None:
+                        # --- OpenCV CPU Path (fallback / default) ---
+                        noise_level = estimate_noise_variance(gray_8bit)
+                        min_noise_threshold = 200.0
+                        max_noise_threshold = 700.0
+                        min_d, max_d = 5, 9
+                        min_sigma, max_sigma = 20, 75
+
+                        if noise_level > min_noise_threshold:
+                            d, sigma_color, sigma_space = get_adaptive_bilateral(
+                                noise_level,
+                                min_noise_threshold,
+                                max_noise_threshold,
+                                min_d,
+                                max_d,
+                                min_sigma,
+                                max_sigma,
+                            )
+                            denoised_image = cv2.bilateralFilter(
+                                gray_8bit, d, sigma_color, sigma_space
+                            )
+                        else:
+                            denoised_image = gray_8bit
 
                     # Hasil akhir dijamin uint8, aman untuk Farneback
                     result_q.put((image_type, denoised_image))
@@ -434,15 +466,39 @@ class FarnebackAlgorithm:
                 if kernel_size % 2 == 0:
                     kernel_size += 1
 
-                # 1. Pisahkan peta flow menjadi channel X dan Y
+                # 2. Terapkan Median Blur pada setiap channel secara terpisah
                 flow_x, flow_y = cv2.split(flow_full)
 
-                # 2. Terapkan Median Blur pada setiap channel secara terpisah
-                flow_x_smoothed = cv2.medianBlur(flow_x, kernel_size)
-                flow_y_smoothed = cv2.medianBlur(flow_y, kernel_size)
+                if TAICHI_AVAILABLE:
+                    try:
+                        # --- Taichi GPU Path: median_filter float32 native ---
+                        # TANPA quantization loss (tidak perlu uint8 scale)
+                        flow_x_smoothed = ta_median_filter(flow_x, kernel_size=3)
+                        flow_y_smoothed = ta_median_filter(flow_y, kernel_size=3)
+                    except Exception:
+                        # Fallback ke OpenCV CPU dengan uint8 scale
+                        flow_abs_max = max(np.abs(flow_full).max(), 1e-6)
+                        flow_x_u8 = cv2.normalize(flow_x, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                        flow_y_u8 = cv2.normalize(flow_y, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                        flow_x_smoothed = cv2.medianBlur(flow_x_u8, kernel_size).astype(np.float32) * (flow_abs_max / 255.0)
+                        flow_y_smoothed = cv2.medianBlur(flow_y_u8, kernel_size).astype(np.float32) * (flow_abs_max / 255.0)
+                else:
+                    # --- OpenCV CPU Path (default) ---
+                    flow_abs_max = max(np.abs(flow_full).max(), 1e-6)
+                    flow_x_u8 = cv2.normalize(flow_x, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                    flow_y_u8 = cv2.normalize(flow_y, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                    flow_x_smoothed = cv2.medianBlur(flow_x_u8, kernel_size).astype(np.float32) * (flow_abs_max / 255.0)
+                    flow_y_smoothed = cv2.medianBlur(flow_y_u8, kernel_size).astype(np.float32) * (flow_abs_max / 255.0)
 
                 # 3. Gabungkan kembali channel yang sudah diperhalus
                 flow_full = cv2.merge([flow_x_smoothed, flow_y_smoothed])
+
+            # --- Tahap 4: Gaussian Blur ringan untuk haluskan seam antar blok ---
+            if flow_full is not None and TAICHI_AVAILABLE:
+                try:
+                    flow_full = ta_gaussian_blur(flow_full, sigma=0.8, kernel_size=3)
+                except Exception:
+                    pass  # Skip jika error, flow sudah cukup baik dari median
 
             return flow_full
 
@@ -487,6 +543,18 @@ class FarnebackAlgorithm:
             grid_y, grid_x = np.mgrid[0:h, 0:w]
             remap_x = (grid_x + flow[:, :, 0]).astype(np.float32)
             remap_y = (grid_y + flow[:, :, 1]).astype(np.float32)
+
+            # --- Taichi GPU Path: remap_with_flow (bilinear, zero-copy) ---
+            if TAICHI_AVAILABLE:
+                try:
+                    base_f32 = base_image_input.astype(np.float32)
+                    flow_f32 = flow if flow.dtype == np.float32 else flow.astype(np.float32)
+                    compensated_f32 = ta_remap_with_flow(base_f32, flow_f32, h, w)
+                    if compensated_f32.dtype != base_image_input.dtype:
+                        return np.clip(compensated_f32, 0, 255).astype(base_image_input.dtype)
+                    return compensated_f32
+                except Exception:
+                    pass  # Fallback ke OpenCV CPU path di bawah
 
             fb_config = self.load_farneback_config(config_filename)
             use_gpu = fb_config.get("use_gpu", False) and cv2.ocl.haveOpenCL()

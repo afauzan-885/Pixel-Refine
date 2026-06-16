@@ -12,7 +12,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
     get_all_image_paths_for_single_process,
     save_image,
 )
-from pixel_refine_desktop.ui.resources.styles.stylesheet import PROGRESS_BAR
+from resources.styles.stylesheet import PROGRESS_BAR
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 
 

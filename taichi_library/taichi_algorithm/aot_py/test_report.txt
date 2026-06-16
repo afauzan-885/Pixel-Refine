@@ -1,10 +1,8 @@
-[Taichi] version 1.7.4, llvm 15.0.1, commit b4b956fd, win, python 3.12.9
 [AOTEngine] Successfully loaded backend bridge: taichi_aot_engine.dll
-WARNING: [Loader Message] Code 0 : windows_read_data_files_in_registry: Registry lookup failed to get layer manifest files.
-[AOTEngine] Auto-selected NVIDIA GPU at Device index: 2 (NVIDIA GeForce MX150)
-[AOTEngine] Runtime initialized on 'VULKAN' (Device 2)
-[TaichiWorker] Using project-level cache at: e:/APP Developer/Pixel Refine/taichi_cache
+[AOTEngine] Runtime initialized on 'VULKAN' (Device 0)
+[TaichiWorker] Using project-level cache at: e://taichi_cache
 [TaichiWorker] AOT Compilation Mode Detected: Disabled JIT Worker and Cache Envs.
+[Taichi] version 1.7.4, llvm 15.0.1, commit b4b956fd, win, python 3.12.9
 
 ======================================================================
  TAICHI AOT MASTER COMPREHENSIVE TEST
@@ -17,17 +15,17 @@ Warning: Test image not found. Using random data.
 [AOTEngine] Loaded TCM module: bilinear_vulkan.tcm
 [PASS] Bilinear Resize (RGB 2x)            | MAE:   0.000000 | Limit: 0.5
 [AOTEngine] Loaded TCM module: gaussian_vulkan.tcm
-[PASS] Gaussian Blur (RGB, sigma=1.5)      | MAE:   0.000371 | Limit: 0.5
+[PASS] Gaussian Blur (RGB, sigma=1.5)      | MAE:   0.000375 | Limit: 0.5
 [AOTEngine] Loaded TCM module: box_filter_vulkan.tcm
-[PASS] Box Filter (RGB, k=5)               | MAE:   0.000232 | Limit: 0.5
+[PASS] Box Filter (RGB, k=5)               | MAE:   0.000235 | Limit: 0.5
 [AOTEngine] Loaded TCM module: pyramid_vulkan.tcm
 [PASS] Image Pyramid (3 levels)            | MAE:   0.000000 | Limit: 0.1
 [AOTEngine] Loaded TCM module: ncc_vulkan.tcm
 [PASS] NCC Alignment (Zero Shift)          | MAE:   0.000000 | Limit: 0.1
 [AOTEngine] Loaded TCM module: median_filter_vulkan.tcm
-[PASS] Median Filter (RGB 3x3)             | MAE:   0.001963 | Limit: 0.01
+[PASS] Median Filter (RGB 3x3)             | MAE:   0.001961 | Limit: 0.01
 [AOTEngine] Loaded TCM module: bilateral_grid_vulkan.tcm
-[PASS] Bilateral Grid (Gray, Med)          | MAE:   0.085196 | Limit: 0.2
+[PASS] Bilateral Grid (Gray, Med)          | MAE:   0.085283 | Limit: 0.2
 [AOTEngine] Loaded TCM module: jbf_vulkan.tcm
 [PASS] Joint Bilateral Filter              | MAE:   0.000000 | Limit: 0.1
 [PASS] Joint Bilateral Upsample            | MAE:   0.000000 | Limit: 0.5
@@ -35,13 +33,25 @@ Warning: Test image not found. Using random data.
 [AOTEngine] Loaded TCM module: common_vulkan.tcm
 [PASS] Phase Correlation (Shift 5, -3)     | MAE:   0.000000 | Limit: 0.1
 [AOTEngine] Loaded TCM module: ransac_vulkan.tcm
+[W 06/16/26 18:46:14.755 1412] [taichi_core_impl.cpp:ti_set_last_error@233] C-API error: (name not found) ransac_flow_cleanup_f32
+[W 06/16/26 18:46:14.755 1412] [taichi_core_impl.cpp:ti_set_last_error@233] C-API error: (argument null) compute_graph
+[C++ Engine] ERROR in run_aot_graph launch: compute_graph
 [PASS] RANSAC Flow Cleanup                 | MAE:   0.000000 | Limit: 1.0
 [AOTEngine] Loaded TCM module: gradients_vulkan.tcm
+[C++ Engine] ERROR in run_aot_graph launch: compute_graph
 [PASS] Sobel DX (Gray)                     | MAE:   0.000000 | Limit: 0.5
+[C++ Engine] ERROR in run_aot_graph launch: compute_graph
 [PASS] Laplacian (Gray)                    | MAE:   0.000000 | Limit: 1.0
+
+======================================================================
+ NEW ALGORITHMS (JIT Mode)
+======================================================================
+[SKIP] Taichi not available for JIT tests
 
 ======================================================================
  FINAL VERDICT
 ======================================================================
 >>> ALL TESTS PASSED! AOT System is Healthy and Accurate.
+>>> Results: 15/15 tests passed.
 ======================================================================
+[AOTEngine] GPU cleanup triggered (reason=atexit)

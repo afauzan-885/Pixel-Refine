@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt  # Import Qt untuk AlignmentFlag
 
-from pixel_refine_desktop.ui.resources.styles import stylesheet
+from resources.styles import stylesheet
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 
 

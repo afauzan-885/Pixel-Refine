@@ -1,9 +1,10 @@
 import os
-from pixel_refine_desktop.ui.resources.GenericUILibrary import get_store
+from resources.GenericUILibrary import get_store, DataStore
 from config import GENERAL_SETTINGS_FILE
 
 DEFAULTS = {
     "language": "English",
+    "theme": "Light Theme",
     "gpu_acceleration": False,
     "multi_core_cpu": True,
     "create_thumbnail": False,
@@ -19,7 +20,7 @@ def get_general_store():
     """
     global _general_store
     if _general_store is None:
-        _general_store = get_store()
+        _general_store = DataStore()
 
         # Ensure file exists or will be created with defaults
         if not os.path.exists(GENERAL_SETTINGS_FILE):

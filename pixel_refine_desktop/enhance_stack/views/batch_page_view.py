@@ -8,9 +8,9 @@ from PySide6.QtCore import Signal
 
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from pixel_refine_desktop.enhance_stack.components.bulk_page import BulkPageLayout # Legacy
-from pixel_refine_desktop.ui.resources.GenericUILibrary import realtime_update, Button
+from resources.GenericUILibrary import live_update, Button
 
-@realtime_update
+@live_update
 class BatchPageView(QWidget):
     """
     Batch page view wrapping V1 (legacy) BatchPageLayout with a Bulk Mode header.
@@ -38,14 +38,14 @@ class BatchPageView(QWidget):
         legacy_header_layout.setContentsMargins(10, 5, 10, 5)
         
         self.legacy_title = QLabel(language_config.LBL_BULK_MODE)
-        self.legacy_title.setStyleSheet("font-weight: bold; font-size: 16px; color: #333; padding: 5px;")
+        self.legacy_title.setObjectName("DisplayHeaderTitle")
         legacy_header_layout.addWidget(self.legacy_title)
         
         legacy_header_layout.addStretch()
         
         # Bulk Mode Button (replacing switch)
         from PySide6.QtWidgets import QPushButton
-        self.bulk_mode_btn = QPushButton(language_config.LBL_BULK_MODE, self.legacy_header)
+        self.bulk_mode_btn = QPushButton(language_config.LBL_BATCH_MODE, self.legacy_header)
         self.bulk_mode_btn.setObjectName("BulkModeBtn")
         
         # Soft Teal style for active Bulk Mode
@@ -76,6 +76,8 @@ class BatchPageView(QWidget):
         # so that the toggle position remains stable.
         self.process_all_btn = Button(language_config.BTN_PROCESS_ALL_BATCH, variant="primary")
         self.process_all_btn.setFixedWidth(150)
+        self.process_all_btn.setFixedHeight(22)
+        self.process_all_btn.setStyleSheet(self.process_all_btn.styleSheet() + " QPushButton { padding: 2px 4px; font-size: 8pt; }")
         self.process_all_btn.clicked.connect(self._on_process_all_clicked)
         legacy_header_layout.addWidget(self.process_all_btn)
 
@@ -95,6 +97,9 @@ class BatchPageView(QWidget):
 
         # Set initial visibility after batch_layout is ready
         self._update_process_all_visibility()
+
+        # Apply initial theme styling
+        self.update_theme()
 
     def _update_process_all_visibility(self):
         """Show or hide Process All Batch button based on whether any batch exists.
@@ -122,7 +127,7 @@ class BatchPageView(QWidget):
         if hasattr(self, "legacy_title"):
             self.legacy_title.setText(language_config.LBL_BULK_MODE)
         if hasattr(self, "bulk_mode_btn"):
-            self.bulk_mode_btn.setText(language_config.LBL_BULK_MODE)
+            self.bulk_mode_btn.setText(language_config.LBL_BATCH_MODE)
         if hasattr(self, "process_all_btn"):
             self.process_all_btn.setText(language_config.BTN_PROCESS_ALL_BATCH)
         # Refresh inner layout translations if it has retranslate_ui
@@ -131,5 +136,52 @@ class BatchPageView(QWidget):
                 self.batch_layout.retranslate_ui()
             except Exception:
                 pass
+        self.update_theme()
+
+    def update_theme(self):
+        """Update stylesheets of bulk header elements dynamically on theme changes."""
+        from resources.GenericUILibrary.theme import get_theme
+        theme = get_theme()
+
+        # Update header container background
+        self.legacy_header.setStyleSheet(f"#LegacyHeader {{ background-color: {theme.bg_card}; border-radius: 4px; }}")
+
+        # Soft Teal or Success style for Bulk/Batch Mode transition button
+        if theme.bg_card == "#1E272C": # Dark Theme
+            self.bulk_mode_btn.setStyleSheet(f"""
+                QPushButton#BulkModeBtn {{
+                    background-color: {theme.btn_success_bg};
+                    color: {theme.btn_success_text};
+                    border: {theme.btn_success_border};
+                    border-radius: 15px;
+                    padding: 5px 15px;
+                    font-size: 10.5pt;
+                    font-weight: 600;
+                }}
+                QPushButton#BulkModeBtn:hover {{
+                    background-color: {theme.get_variant_hover_color("success")};
+                }}
+            """)
+        else: # Light Theme
+            self.bulk_mode_btn.setStyleSheet("""
+                QPushButton#BulkModeBtn {
+                    background-color: #E6F4EA;
+                    color: #137333;
+                    border: 1px solid #A3E2B8;
+                    border-radius: 15px;
+                    padding: 5px 15px;
+                    font-size: 10.5pt;
+                    font-weight: 600;
+                }
+                QPushButton#BulkModeBtn:hover {
+                    background-color: #D2EBD9;
+                }
+            """)
+
+        # Process All Button styling
+        if hasattr(self, "process_all_btn"):
+            from resources.GenericUILibrary.theme import create_button_style
+            self.process_all_btn.setStyleSheet(create_button_style("primary", theme) + " QPushButton { padding: 4px 8px; font-size: 8pt; }")
+
 
 

@@ -18,7 +18,7 @@ from PySide6.QtGui import QColor
 
 # Import animations
 try:
-    from pixel_refine_desktop.ui.resources.animations.animation_manager import (
+    from resources.animations.animation_manager import (
         StackedWidgetAnimator,
         AnimationType,
         SlideDirection,
@@ -173,6 +173,36 @@ class AnimatedTabContainer(QTabWidget):
             self.tab_bar_animation.setEasingCurve(QEasingCurve.Type.OutQuad)
             self.tab_bar_animation.start()
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        anim_enabled = getattr(self, "enable_animations", True)
+        qml = f"{tab}Column {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    TabBar {{\n"
+        qml += f"{tab}        id: tabBar\n"
+        qml += f"{tab}        width: parent.width\n"
+        for i in range(self.count()):
+            title = self.tabText(i).replace("'", "\\'")
+            qml += f"{tab}        TabButton {{ text: '{title}' }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}    StackLayout {{\n"
+        qml += f"{tab}        width: parent.width\n"
+        qml += f"{tab}        currentIndex: tabBar.currentIndex\n"
+        # Tambahkan animasi transisi jika enable_animations=True
+        if anim_enabled:
+            qml += f"{tab}        Behavior on currentIndex {{\n"
+            qml += f"{tab}            NumberAnimation {{ duration: 250; easing.type: Easing.OutExpo }}\n"
+            qml += f"{tab}        }}\n"
+        for i in range(self.count()):
+            w = self.widget(i)
+            if w and hasattr(w, "to_qml"):
+                qml += w.to_qml(indent + 2) + "\n"
+            else:
+                qml += f"{tab}        Item {{ }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
+
 
 # Alias for backward compatibility
 TabContainer = AnimatedTabContainer
@@ -189,6 +219,7 @@ class TabPane(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._qml_children = []
 
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(10, 10, 10, 10)
@@ -196,18 +227,35 @@ class TabPane(QWidget):
 
     def add_widget(self, widget, stretch=0):
         """Add widget to pane"""
+        self._qml_children.append(widget)
         self.layout.addWidget(widget, stretch)
 
     def set_content(self, widget):
         """Set pane content (replaces existing)"""
         # Clear existing
+        self._qml_children.clear()
         while self.layout.count():
             item = self.layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
         # Add new widget
+        self._qml_children.append(widget)
         self.layout.addWidget(widget)
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        qml = f"{tab}Item {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    Column {{\n"
+        qml += f"{tab}        width: parent.width\n"
+        qml += f"{tab}        spacing: 10\n"
+        for child in self._qml_children:
+            if hasattr(child, "to_qml"):
+                qml += child.to_qml(indent + 2) + "\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
 
 
 class SimpleTabs(QWidget):
@@ -246,3 +294,6 @@ class SimpleTabs(QWidget):
     def get_tab_widget(self, index):
         """Get tab widget by index"""
         return self.tab_widget.widget(index)
+
+    def to_qml(self, indent=0):
+        return self.tab_widget.to_qml(indent)

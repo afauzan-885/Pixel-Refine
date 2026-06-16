@@ -36,7 +36,7 @@ from PIL import Image, ImageOps
 import weakref
 
 from config import CACHE_DIR, SUPPORTED_FORMATS
-from pixel_refine_desktop.ui.resources.animations.fade import fade_in
+from resources.animations.fade import fade_in
 from pixel_refine_desktop.enhance_stack.core.logic.display_manager import (
     DisplayThreadManager,
 )
@@ -47,6 +47,108 @@ from pixel_refine_desktop.enhance_stack.models.data_access.thumbnail_repository 
 
 # Max worker threads (standard 4 for balanced I/O and CPU)
 MAX_THUMBNAIL_WORKERS = 4
+
+# ---------------------------------------------------------------------------
+# GLOBAL THUMBNAIL CACHE (L0) — RAM cache lintas batch, survive switch batch
+# ---------------------------------------------------------------------------
+
+class GlobalThumbnailCache:
+    """
+    Singleton RAM cache untuk thumbnail QImage.
+    
+    Cache bersifat global dan persist selama aplikasi berjalan — tidak
+    di-reset saat user pindah batch. Ini memungkinkan navigasi instan
+    antar batch tanpa decode ulang.
+    
+    Ukuran cache dibatasi (LRU-like eviction) untuk mengendalikan memori.
+    Default: 500 gambar maks (~500 * 128x128 * 3 bytes ≈ 24 MB)
+    """
+    _instance = None
+    MAX_SIZE = 500
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._cache: dict = {}   # path -> QImage
+            cls._instance._order: list = []   # insertion order untuk LRU eviction
+        return cls._instance
+
+    def get(self, path: str):
+        """Return cached QImage or None."""
+        return self._cache.get(path)
+
+    def put(self, path: str, q_image):
+        """Store QImage in cache, evicting oldest if at capacity."""
+        if path in self._cache:
+            # Refresh order
+            try:
+                self._order.remove(path)
+            except ValueError:
+                pass
+        elif len(self._cache) >= self.MAX_SIZE:
+            # Evict least-recently-used entry
+            oldest = self._order.pop(0)
+            self._cache.pop(oldest, None)
+        self._cache[path] = q_image
+        self._order.append(path)
+
+    def has(self, path: str) -> bool:
+        return path in self._cache
+
+    def clear(self):
+        """Hapus seluruh cache (misalnya saat aplikasi shutdown)."""
+        self._cache.clear()
+        self._order.clear()
+
+    def __len__(self):
+        return len(self._cache)
+
+
+# Module-level singleton accessor
+def get_global_cache() -> GlobalThumbnailCache:
+    return GlobalThumbnailCache()
+
+
+# ---------------------------------------------------------------------------
+# RAW DEMOSAIC THROTTLE — batasi maks 2 demosaic GPU paralel sekaligus
+# ---------------------------------------------------------------------------
+import threading
+
+class RawDemosaicThrottle:
+    """
+    Singleton semaphore yang membatasi jumlah demosaic GPU/CPU yang berjalan
+    paralel menjadi MAX_PARALLEL (default 2).
+    
+    Tanpa throttle, saat user membuat banyak batch cepat (batch 4-5-6
+    dengan drag-drop), seluruh thread pool akan diisi job demosaic berat
+    sehingga UI lag dan tidak responsif.
+    """
+    _instance = None
+    MAX_PARALLEL = 2
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._sem = threading.Semaphore(cls.MAX_PARALLEL)
+        return cls._instance
+
+    def acquire(self):
+        self._sem.acquire()
+
+    def release(self):
+        self._sem.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *args):
+        self.release()
+
+
+def get_demosaic_throttle() -> RawDemosaicThrottle:
+    return RawDemosaicThrottle()
+
 
 # Thumbnail repository initialization
 
@@ -114,11 +216,19 @@ class ThumbnailWorker(QRunnable):
         result_image = QImage()
 
         try:
+            # 0. Cek GlobalThumbnailCache (L0 — paling cepat, persist lintas batch)
+            global_cache = get_global_cache()
+            cached_l0 = global_cache.get(self.image_path)
+            if cached_l0 is not None and not cached_l0.isNull():
+                result_image = cached_l0
+                return  # langsung ke finally
+
             # 1. Cek Disk Cache (JPG di database/cache/thumbnails)
             repo = get_thumbnail_repo()
             cached_image = repo.get_thumbnail(self.image_path)
             if not cached_image.isNull():
-                # Cache hit: langsung set result agar finally bisa emit
+                # Cache hit disk: simpan ke L0 agar batch switch berikutnya instan
+                global_cache.put(self.image_path, cached_image)
                 result_image = cached_image
                 return
 
@@ -137,6 +247,9 @@ class ThumbnailWorker(QRunnable):
                 if not temp_image.isNull():
                     repo.save_thumbnail(self.image_path, temp_image)
                     result_image = repo.get_thumbnail(self.image_path)
+                    # Simpan ke L0 cache untuk akses instan ke depannya
+                    if not result_image.isNull():
+                        global_cache.put(self.image_path, result_image)
 
         except Exception as e:
             if not self._should_abort():
@@ -190,12 +303,22 @@ class ThumbnailBulkWorker(QRunnable):
         return False
 
     def run(self):
+        global_cache = get_global_cache()
         for path in self.image_paths:
             if self._should_abort():
                 return
 
             q_img_to_emit = QImage()
             try:
+                # 0. Cek L0 RAM cache (GlobalThumbnailCache) — instan, lintas batch
+                cached_l0 = global_cache.get(path)
+                if cached_l0 is not None and not cached_l0.isNull():
+                    q_img_to_emit = cached_l0
+                    # Langsung lanjut ke emit, tidak perlu decode
+                    if not self._should_abort():
+                        self._safe_emit(q_img_to_emit, path)
+                    continue
+
                 # 1. Decode gambar (process_batch sudah filter cache miss sebelumnya)
                 pil_thumb = process_thumbnail_logic(path, self.thumbnail_size)
 
@@ -209,6 +332,9 @@ class ThumbnailBulkWorker(QRunnable):
                         repo = get_thumbnail_repo()
                         repo.save_thumbnail(path, temp_image)
                         q_img_to_emit = repo.get_thumbnail(path)
+                        # Simpan ke L0 untuk akses instan selanjutnya
+                        if not q_img_to_emit.isNull():
+                            global_cache.put(path, q_img_to_emit)
                 else:
                     print(f"[ThumbnailBulkWorker] Failed to decode image: {path}")
 
@@ -241,7 +367,23 @@ class ThumbnailBulkWorker(QRunnable):
 
 
 def process_thumbnail_logic(image_path, thumbnail_size):
-    """Core logic to process a single thumbnail, used by both workers."""
+    """Core logic to process a single thumbnail, used by both workers.
+    
+    Untuk file RAW: menggunakan RawDemosaicThrottle agar maks 2 demosaic
+    GPU/CPU berjalan paralel, mencegah overload saat pembuatan batch cepat.
+    Hasil thumbnail langsung disimpan ke GlobalThumbnailCache (L0).
+    """
+    global_cache = get_global_cache()
+
+    # L0 check — return immediately if already in global RAM cache
+    cached = global_cache.get(image_path)
+    if cached is not None:
+        # Kembalikan PIL-compatible via convert dari QImage
+        # Catatan: caller mengharap PIL Image, jadi kita skip L0 di sini
+        # dan biarkan ThumbnailWorker/BulkWorker handle cache hit via
+        # process_image/process_batch yang sudah cek global_cache lebih awal.
+        pass
+
     try:
         # 1. Fast path for common formats using OpenCV
         if image_path.lower().endswith((".jpg", ".jpeg", ".png")):
@@ -254,14 +396,17 @@ def process_thumbnail_logic(image_path, thumbnail_size):
         # 2. Fallback to PIL for TIFF, RAW, etc.
         ext = os.path.splitext(image_path)[1].lower()
         if ext in SUPPORTED_FORMATS.get("raw", []):
+            throttle = get_demosaic_throttle()
             try:
                 from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import taichi_lock
                 from taichi_library import taichi_aot
-                
-                with taichi_lock:
-                    # Direct GPU demosaic half resolution (always consistent with full preview)
-                    rgb_f32 = taichi_aot.demosaic(image_path, method="hamilton-rgb-half-res")
-                
+
+                # Gunakan throttle: maks 2 demosaic GPU paralel
+                with throttle:
+                    with taichi_lock:
+                        # Direct GPU demosaic half resolution (always consistent with full preview)
+                        rgb_f32 = taichi_aot.demosaic(image_path, method="hamilton-rgb-half-res")
+
                 if rgb_f32 is not None:
                     img_array = np.clip(rgb_f32 * 255.0, 0, 255).astype(np.uint8)
                     pil_img = Image.fromarray(img_array, "RGB")
@@ -275,7 +420,10 @@ def process_thumbnail_logic(image_path, thumbnail_size):
             from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
                 load_raw_as_8bit_rgb,
             )
-            img_array = load_raw_as_8bit_rgb(image_path)
+            # Full demosaic juga dibatasi oleh throttle
+            throttle = get_demosaic_throttle()
+            with throttle:
+                img_array = load_raw_as_8bit_rgb(image_path)
             pil_img = Image.fromarray(img_array, "RGB")
             return ImageOps.fit(pil_img, thumbnail_size, Image.Resampling.BILINEAR)
 
@@ -473,13 +621,25 @@ class ThumbnailBatchProcessor(QObject):
 
     def process_image(self, image_path, callback=None):
         """
-        Process single image thumbnail dengan sistem cache 2 level (RAM -> Disk).
+        Process single image thumbnail dengan sistem cache 3 level (L0 Global -> L1 RAM -> L2 Disk).
         """
         # Map path to current batch context for single process too
         self.path_to_batch[image_path] = self.current_batch_id
 
-        # 1. CEK RAM CACHE (L1 - Paling Cepat)
+        # 0. CEK GLOBAL RAM CACHE (L0 - Persist lintas batch)
+        global_cache = get_global_cache()
+        cached_l0 = global_cache.get(image_path)
+        if cached_l0 is not None and not cached_l0.isNull():
+            # Sinkronisasikan ke L1 juga
+            self.ram_cache[image_path] = cached_l0
+            if callback:
+                callback(cached_l0, image_path)
+            return
+
+        # 1. CEK RAM CACHE (L1 - Paling Cepat, session ini)
         if image_path in self.ram_cache:
+            # Populasi ke L0 jika belum ada
+            global_cache.put(image_path, self.ram_cache[image_path])
             if callback:
                 callback(self.ram_cache[image_path], image_path)
             return
@@ -490,8 +650,9 @@ class ThumbnailBatchProcessor(QObject):
             cached_image = repo.get_thumbnail(image_path)
 
             if not cached_image.isNull():
-                # Masukkan ke RAM agar akses berikutnya instan
+                # Masukkan ke L1 dan L0 agar akses berikutnya instan
                 self.ram_cache[image_path] = cached_image
+                global_cache.put(image_path, cached_image)
                 callback(cached_image, image_path)
                 return
 
@@ -541,19 +702,48 @@ class ThumbnailBatchProcessor(QObject):
 
     def process_batch(self, image_paths, callback=None):
         """
-        Process multiple images dengan Bulk Load dari RAM & Disk.
+        Process multiple images dengan Bulk Load dari L0 Global -> L1 RAM -> L2 Disk.
         """
         if not image_paths:
             return
 
         remaining_paths = []
+        global_cache = get_global_cache()
 
-        # 1. BULK LOAD DARI RAM (L1)
+        # 0. BULK LOAD DARI GLOBAL RAM CACHE (L0 - Persist lintas batch)
+        #    Ini adalah tier pertama dan tercepat — tidak ada I/O sama sekali.
         for path in image_paths:
             # Map path to current batch context
             self.path_to_batch[path] = self.current_batch_id
 
+            cached_l0 = global_cache.get(path)
+            if cached_l0 is not None and not cached_l0.isNull():
+                # L0 hit: sinkronisasikan ke L1 juga
+                self.ram_cache[path] = cached_l0
+                if callback:
+                    callback(cached_l0, path)
+
+                # Update progress (Avoid double counting)
+                if path not in self._processed_paths:
+                    self._processed_paths.add(path)
+                    self.decoded_count += 1
+
+                if path not in self._persisted_paths:
+                    self._persisted_paths.add(path)
+                    self.saved_count += 1
+            else:
+                remaining_paths.append(path)
+
+        if not remaining_paths:
+            self._emit_progress()
+            return
+
+        # 1. BULK LOAD DARI RAM (L1)
+        still_remaining = []
+        for path in remaining_paths:
             if path in self.ram_cache:
+                # L1 hit: populasikan ke L0
+                global_cache.put(path, self.ram_cache[path])
                 if callback:
                     callback(self.ram_cache[path], path)
 
@@ -566,7 +756,9 @@ class ThumbnailBatchProcessor(QObject):
                     self._persisted_paths.add(path)
                     self.saved_count += 1
             else:
-                remaining_paths.append(path)
+                still_remaining.append(path)
+
+        remaining_paths = still_remaining
 
         if not remaining_paths:
             self._emit_progress()
@@ -596,6 +788,7 @@ class ThumbnailBatchProcessor(QObject):
             if path in cached_thumbnails:
                 img = cached_thumbnails[path]
                 self.ram_cache[path] = img  # Simpan ke L1
+                global_cache.put(path, img)  # Simpan ke L0 untuk instan lintas batch
                 if callback:
                     callback(img, path)
 
@@ -607,6 +800,7 @@ class ThumbnailBatchProcessor(QObject):
                 if path not in self._persisted_paths:
                     self._persisted_paths.add(path)
                     self.saved_count += 1
+
             else:
                 # Cek apakah sedang dalam antrean (in-flight)
                 if path not in self._in_flight:

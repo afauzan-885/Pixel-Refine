@@ -44,8 +44,28 @@ from .phase_correlation import phase_correlation
 from .fft import fft2, ifft2
 from .ncc import zncc, match_template, global_translate_zncc
 from .remap import remap
-from .enhance_image import enhance_grayscale
 from .Hamilton_demosaice import hamilton_demosaic
+from .arm_demosaice import arm_demosaic
+from .mtb import align_mtb
+from .enhance_image import enhance_grayscale
+from .color_convert import (
+    cvtColor_extended,
+    COLOR_BGR2HSV,
+    COLOR_HSV2BGR,
+    COLOR_BGR2LAB,
+    COLOR_LAB2BGR,
+    COLOR_BGR2YCrCb,
+    COLOR_YCrCb2BGR,
+)
+from .otsu import otsu_threshold, THRESH_BINARY, THRESH_BINARY_INV, THRESH_OTSU
+from .guided_filter import guided_filter
+from .clahe import clahe
+from .canny import canny
+from .hough import hough_lines, hough_lines_with_canny
+from .nlm import non_local_means
+from .inpaint import inpaint, INPAINT_TELEA, INPAINT_NS
+from .seamless_clone import seamless_clone, NORMAL_CLONE, MIXED_CLONE, MONOCHROME_TRANSFER
+
 
 # --- Constants ---
 INTER_LINEAR = 1
@@ -57,6 +77,9 @@ COLOR_BGR2GRAY = common.COLOR_BGR2GRAY
 COLOR_RGB2GRAY = common.COLOR_RGB2GRAY
 COLOR_GRAY2BGR = common.COLOR_GRAY2BGR
 COLOR_GRAY2RGB = common.COLOR_GRAY2RGB
+
+# Extended Color Conversion Constants
+# (Imported from color_convert module above)
 
 
 # --- Helper: Universal Channel Handler ---
@@ -288,6 +311,27 @@ __all__ = [
     "COLOR_RGB2GRAY",
     "COLOR_GRAY2BGR",
     "COLOR_GRAY2RGB",
+    # Extended color conversions
+    "COLOR_BGR2HSV",
+    "COLOR_HSV2BGR",
+    "COLOR_BGR2LAB",
+    "COLOR_LAB2BGR",
+    "COLOR_BGR2YCrCb",
+    "COLOR_YCrCb2BGR",
+    "cvtColor_extended",
+    # Thresholding
+    "THRESH_BINARY",
+    "THRESH_BINARY_INV",
+    "THRESH_OTSU",
+    "otsu_threshold",
+    # Inpainting flags
+    "INPAINT_TELEA",
+    "INPAINT_NS",
+    # Seamless clone flags
+    "NORMAL_CLONE",
+    "MIXED_CLONE",
+    "MONOCHROME_TRANSFER",
+    # Core API
     "resize",
     "median",
     "gaussian",
@@ -299,6 +343,15 @@ __all__ = [
     "cvtColor",
     "absdiff",
     "remap",
+    # New algorithms
+    "guided_filter",
+    "clahe",
+    "canny",
+    "hough_lines",
+    "hough_lines_with_canny",
+    "non_local_means",
+    "inpaint",
+    "seamless_clone",
     # Pyramid APIs
     "build_image_pyramid",
     "build_image_pyramid_gpu",
@@ -324,4 +377,6 @@ __all__ = [
     "ncc",
     "enhance_grayscale",
     "hamilton_demosaic",
+    "arm_demosaic",
+    "align_mtb",
 ]

@@ -22,12 +22,17 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Average import 
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
     running_median,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Similarity import (
-    running_similarity,
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
+    running_mf_denoiser as running_similarity,
+)
+from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.WeightedSR import (
+    running_weighted_sr,
 )
 
 
+
 class AlgorithmProcessorThread(QThread):
+
     """
     Background thread to execute selected algorithms for a batch.
 
@@ -116,9 +121,18 @@ class AlgorithmProcessorThread(QThread):
                     "None": lambda: None,
                 },
                 "super_resolution": {
+                    "WSR": lambda: running_weighted_sr(
+                        self.parent_panel,
+                        single_process=self.single_process,
+                        batch_id=self.batch_id,
+                        progress_callback=progress_callback,
+                        stop_callback=get_stop_cb,
+                    ),
                     "No Super Resolution": lambda: None,
                     "None": lambda: None,
                 },
+
+
                 "denoising": {
                     "Average": lambda: running_average(
                         self.parent_panel,

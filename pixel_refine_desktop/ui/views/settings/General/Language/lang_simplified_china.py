@@ -576,8 +576,8 @@ COARSE_MARGIN_DESCRIPTION = """分塊級別的對齊搜索邊距。
 - 較高：疊加更精確，但會顯著減慢處理速度。"""
 
 # --- Missing UI Keys ---
-LBL_BATCH_MODE = "单批次模式"
-LBL_BULK_MODE = "批量模式"
+LBL_BATCH_MODE = "Mode Batch"
+LBL_BULK_MODE = "Mode Bulk"
 LBL_PARAMETER_ALIGNMENT = "圖像对齐设置"
 LBL_ALIGNMENT_PLACEHOLDER = "圖像对齐设置将显示在此处"
 LBL_PARAMETER_ALGORITHM = "处理方法设置"
@@ -635,3 +635,17 @@ DESC_DENOISING_CARD = "减少图像噪点并对齐像素层。"
 
 
 
+
+# --- New UI & Bulk Core Keys ---
+BULK_FROM = "从编号:"
+BULK_TO = "至编号:"
+BULK_MSG_RANGE_ERROR = "起始编号必须 <= 结束编号。"
+BULK_ERR_RETRIEVE = "加载项目图像失败。"
+BULK_WARN_UNSUPPORTED = "不支持的格式将被忽略。"
+CORE_SELECT_REF_IMAGE = "设为基准"
+CORE_DELETE_IMAGES = "删除所选"
+CORE_MSG_CONFIRM_DELETE = "确认删除所选图像吗？"
+CORE_TOOLTIP_COPY = "右键复制"
+UI_STATUS_READY = "就绪"
+UI_ITEMS_REMAINING = "剩余"
+UI_SPLASH_LOADING = "正在加载..."

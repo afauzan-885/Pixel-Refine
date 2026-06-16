@@ -5,11 +5,11 @@ import taichi as ti
 import os
 import sys
 
-# Setup path to find taichi_algorithm
 file_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
+project_root = os.path.abspath(os.path.join(file_dir, "../../../"))
 if project_root not in sys.path:
     sys.path.append(project_root)
+
 
 # Set AOT Mode for the algorithm imports
 
@@ -18,10 +18,12 @@ from taichi_library.taichi_algorithm.remap import (
     _build_flow_maps_kernel, _build_flow_maps_from_2ch_kernel,
     _smooth_flow_kernel, _smooth_flow_y_kernel,
     _remap_with_flow_kernel, _remap_with_flow_kernel_vec3,
+    _warp_perspective_kernel, _warp_perspective_kernel_vec3,
 )
 from taichi_library.taichi_algorithm.enhance_image import (
     _enhance_grayscale_kernel,
 )
+
 
 def compile_remap_tcm(arch=ti.vulkan, save_path="remap_vulkan.tcm"):
     print(f"\n>>> Compiling Remap AOT for: {arch}")
@@ -110,12 +112,14 @@ def compile_remap_tcm(arch=ti.vulkan, save_path="remap_vulkan.tcm"):
     enh_dst     = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
     enh_mc      = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "micro_contrast", ti.f32)
     enh_clarity = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "clarity", ti.f32)
+    enh_noise   = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "noise_coring", ti.f32)
     enh_h       = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
     enh_w       = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
     g_enhance.dispatch(
-        _enhance_grayscale_kernel, enh_src, enh_blur, enh_lut, enh_dst, enh_mc, enh_clarity, enh_h, enh_w
+        _enhance_grayscale_kernel, enh_src, enh_blur, enh_lut, enh_dst, enh_mc, enh_clarity, enh_noise, enh_h, enh_w
     )
     module.add_graph("enhance_grayscale", g_enhance.compile())
+
 
     # 7. Fused Remap with Flow (Grayscale & Color, support f32 & u16)
     # Common arguments for all remap_with_flow graphs
@@ -168,6 +172,28 @@ def compile_remap_tcm(arch=ti.vulkan, save_path="remap_vulkan.tcm"):
         h_src_f, w_src_f, h_dst_f, w_dst_f, h_flow_f, w_flow_f, sc_x, sc_y
     )
     module.add_graph("remap_with_flow_u16_3d", g_rwf_u16_3d.compile())
+
+    # 8. Warp Perspective Graph (Grayscale & Color f32)
+    minv_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "M_inv", ti.f32, ndim=2)
+    h_src_w  = ti.graph.Arg(ti.graph.ArgKind.SCALAR,  "h_src", ti.i32)
+    w_src_w  = ti.graph.Arg(ti.graph.ArgKind.SCALAR,  "w_src", ti.i32)
+    h_dst_w  = ti.graph.Arg(ti.graph.ArgKind.SCALAR,  "h_dst", ti.i32)
+    w_dst_w  = ti.graph.Arg(ti.graph.ArgKind.SCALAR,  "w_dst", ti.i32)
+
+    # 8.1 Grayscale 2D
+    g_warp_2d = ti.graph.GraphBuilder()
+    src_w_2d  = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=2)
+    dst_w_2d  = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
+    g_warp_2d.dispatch(_warp_perspective_kernel, src_w_2d, minv_arg, dst_w_2d, h_src_w, w_src_w, h_dst_w, w_dst_w)
+    module.add_graph("warp_perspective_f32_2d", g_warp_2d.compile())
+
+    # 8.2 Color 3D (Vector3)
+    g_warp_3d = ti.graph.GraphBuilder()
+    src_w_3d  = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.types.vector(3, ti.f32), ndim=2)
+    dst_w_3d  = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.types.vector(3, ti.f32), ndim=2)
+    g_warp_3d.dispatch(_warp_perspective_kernel_vec3, src_w_3d, minv_arg, dst_w_3d, h_src_w, w_src_w, h_dst_w, w_dst_w)
+    module.add_graph("warp_perspective_f32_3d", g_warp_3d.compile())
+
 
 
     # Archive the module

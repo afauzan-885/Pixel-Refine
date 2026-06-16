@@ -40,17 +40,20 @@ class GridItemWidget(QWidget):
         super().paintEvent(event)
         if self._is_selected:
             painter = QPainter(self)
-            painter.setRenderHint(QPainter.Antialiasing)
-            
-            # Warna Highlight Biru
-            border_pen = QPen(QColor(0, 120, 215)) 
-            border_pen.setWidth(3)
-            
-            painter.setPen(border_pen)
-            painter.setBrush(Qt.NoBrush)
-            
-            rect = self.rect().adjusted(2, 2, -2, -2)
-            painter.drawRoundedRect(rect, 4, 4)
+            try:
+                painter.setRenderHint(QPainter.Antialiasing)
+                
+                # Warna Highlight Biru
+                border_pen = QPen(QColor(0, 120, 215)) 
+                border_pen.setWidth(3)
+                
+                painter.setPen(border_pen)
+                painter.setBrush(Qt.NoBrush)
+                
+                rect = self.rect().adjusted(2, 2, -2, -2)
+                painter.drawRoundedRect(rect, 4, 4)
+            finally:
+                painter.end()
 
     def mousePressEvent(self, event: QMouseEvent):
         self.clicked.emit(self.item_id)

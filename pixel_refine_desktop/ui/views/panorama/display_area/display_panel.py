@@ -23,7 +23,7 @@ import os
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.multiple_batch_delete_widget import (
     MultipleBatchDeleteWidget,
 )
-from pixel_refine_desktop.ui.resources.GenericUILibrary import (
+from resources.GenericUILibrary import (
     ImageCard,
     Button,
     Container,
@@ -31,8 +31,8 @@ from pixel_refine_desktop.ui.resources.GenericUILibrary import (
     OverlayPosition,
     ImageCompareItem,
 )
-from pixel_refine_desktop.ui.resources.GenericUILibrary.grids import GridContainer
-from pixel_refine_desktop.ui.resources.GenericUILibrary.forms import FormGroup
+from resources.GenericUILibrary.grids import GridContainer
+from resources.GenericUILibrary.forms import FormGroup
 from pixel_refine_desktop.ui.components.common.sidebar import Sidebar
 
 # Display logic
@@ -43,11 +43,11 @@ from pixel_refine_desktop.enhance_stack.core.logic.Zoomable_Handler import Zooma
 from PySide6.QtWidgets import QGraphicsScene
 
 # Animations
-from pixel_refine_desktop.ui.resources.animations.animation_manager import (
+from resources.animations.animation_manager import (
     StackedWidgetAnimator,
     SlideDirection,
 )
-from pixel_refine_desktop.ui.resources.animations.slide import slide
+from resources.animations.slide import slide
 
 # Config untuk supported image formats
 from config import SUPPORTED_FORMATS
@@ -84,13 +84,6 @@ class DisplayPanel(QWidget):
             Qt.WidgetAttribute.WA_StyledBackground, True
         )
         self.display_container.setObjectName("DisplayContainerBase")
-        self.display_container.setStyleSheet(
-            """
-            #DisplayContainerBase {
-                background-color: #333;
-            }
-        """
-        )
 
         self.controller = controller
         self.logic = DisplayLogic()
@@ -272,10 +265,10 @@ class DisplayPanel(QWidget):
         pages = [
             (
                 "Enhance Stack",
-                "pixel_refine_desktop/ui/resources/assets/icons/enhance_stack.png",
+                "resources/assets/icons/enhance_stack.png",
             ),
-            # ("Panorama", "pixel_refine_desktop/ui/resources/assets/icons/panorama.png"), # Removed
-            ("Settings", "pixel_refine_desktop/ui/resources/assets/icons/setting.png"),
+            # ("Panorama", "resources/assets/icons/panorama.png"), # Removed
+            ("Settings", "resources/assets/icons/setting.png"),
         ]
 
         # Create Sidebar
@@ -350,7 +343,7 @@ class DisplayPanel(QWidget):
 
         # Optimize settings view size for overlay
         self.settings_view.setMinimumSize(600, 500)
-        self.settings_view.setStyleSheet("background-color: white; border-radius: 8px;")
+        self.settings_view.setObjectName("SettingsViewDialog")
 
         self.settings_overlay.set_content(self.settings_view)
         self.settings_overlay.hide()

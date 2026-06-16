@@ -121,3 +121,29 @@ class EmptyState(QWidget):
             # Insert after title (or at position 1 if title exists)
             insert_pos = 1 if self.title_label else 0
             self.layout().insertWidget(insert_pos, self.message_label)
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        # button_text, button_variant, on_click
+        title_text = self.title_label.text() if self.title_label else ""
+        msg_text = self.message_label.text() if self.message_label else ""
+        btn_text = self.action_button.text() if self.action_button else ""
+        qml = f"{tab}Column {{\n"
+        qml += f"{tab}    anchors.centerIn: parent\n"
+        qml += f"{tab}    spacing: 15\n"
+        if title_text:
+            qml += f"{tab}    Text {{ text: '{title_text}'; font.bold: true; font.pixelSize: 18; horizontalAlignment: Text.AlignHCenter; color: genericTheme.textPrimary }}\n"
+        if msg_text:
+            qml += f"{tab}    Text {{ text: '{msg_text}'; font.pixelSize: 14; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap; width: 300; color: genericTheme.textSecondary }}\n"
+        if btn_text:
+            qml += f"{tab}    Rectangle {{\n"
+            qml += f"{tab}        width: 150\n"
+            qml += f"{tab}        height: 40\n"
+            qml += f"{tab}        radius: genericTheme.radiusMd\n"
+            qml += f"{tab}        color: genericTheme.primary\n"
+            qml += f"{tab}        anchors.horizontalCenter: parent.horizontalCenter\n"
+            qml += f"{tab}        Text {{ text: '{btn_text}'; color: 'white'; font.bold: true; anchors.centerIn: parent }}\n"
+            qml += f"{tab}        MouseArea {{ anchors.fill: parent; onClicked: appBridge.openTool('{btn_text}') }}\n"
+            qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml

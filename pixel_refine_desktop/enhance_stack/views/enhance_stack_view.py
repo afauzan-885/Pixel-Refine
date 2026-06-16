@@ -8,13 +8,13 @@ from PySide6.QtCore import Signal
 from .top_bar import TopBar
 from .single_page_view import SinglePageView
 from .batch_page_view import BatchPageView
-from pixel_refine_desktop.ui.resources.animations.animation_manager import (
+from resources.animations.animation_manager import (
     SlideDirection,
     StackedWidgetAnimator,
 )
-from pixel_refine_desktop.ui.resources.animations.slide import slide
-from pixel_refine_desktop.ui.resources.animations.fade import fade_in
-from pixel_refine_desktop.ui.resources.animations.toast.toast_manager import (
+from resources.animations.slide import slide
+from resources.animations.fade import fade_in
+from resources.animations.toast.toast_manager import (
     ToastManager,
 )
 

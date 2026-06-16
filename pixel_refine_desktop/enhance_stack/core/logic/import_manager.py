@@ -4,10 +4,10 @@ import os
 from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtWidgets import QFileDialog
 
-from pixel_refine_desktop.ui.resources.animations.toast.toast_manager import (
+from resources.animations.toast.toast_manager import (
     ToastPosition,
 )
-from pixel_refine_desktop.ui.resources.GenericUILibrary import ImageCard
+from resources.GenericUILibrary import ImageCard
 from config import SUPPORTED_FORMATS
 
 

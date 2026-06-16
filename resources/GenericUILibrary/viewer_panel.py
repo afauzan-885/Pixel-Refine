@@ -99,3 +99,30 @@ class ViewerPanel(QWidget):
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        title = self.lbl_title.text().replace("'", "\\'")
+        qml = f"{tab}Column {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    Rectangle {{\n"
+        qml += f"{tab}        width: parent.width\n"
+        qml += f"{tab}        height: 400\n"
+        qml += f"{tab}        color: genericTheme.bgPrimary\n"
+        qml += f"{tab}        radius: genericTheme.radiusLg\n"
+        qml += f"{tab}        border.color: genericTheme.borderColor\n"
+        qml += f"{tab}        border.width: 1\n"
+        qml += f"{tab}        Column {{\n"
+        qml += f"{tab}            anchors.fill: parent\n"
+        qml += f"{tab}            anchors.margins: 10\n"
+        qml += f"{tab}            Row {{\n"
+        qml += f"{tab}                width: parent.width\n"
+        qml += f"{tab}                Text {{ text: '{title}'; font.bold: true; font.pixelSize: 16; color: genericTheme.textPrimary }}\n"
+        qml += f"{tab}                Item {{ Layout.fillWidth: true }}\n"
+        qml += f"{tab}                Rectangle {{ width: 100; height: 30; radius: genericTheme.radiusSm; color: genericTheme.info; Text {{ text: 'Import Images'; color: 'white'; anchors.centerIn: parent; font.pixelSize: 10 }} MouseArea {{ anchors.fill: parent; onClicked: appBridge.openTool('Import Images') }} }}\n"
+        qml += f"{tab}            }}\n"
+        qml += f"{tab}            Grid {{ columns: 5; spacing: 10; width: parent.width }}\n"
+        qml += f"{tab}        }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml

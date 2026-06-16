@@ -1,3 +1,5 @@
+# DEPRECATED: File ini dijaga sebagai backup. Gunakan MFDenoiser.py sebagai orchestrator utama.
+
 import os
 import gc
 import time
@@ -21,7 +23,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.sp
 from pixel_refine_desktop.enhance_stack.core.algorithm.base_worker import (
     BaseAlgorithmWorker,
 )
-from pixel_refine_desktop.ui.resources.styles.stylesheet import PROGRESS_BAR
+from resources.styles.stylesheet import PROGRESS_BAR
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
     extract_all_metadata,
     normalize_image,

@@ -172,3 +172,30 @@ class ImageCard(QWidget):
 
     def mouseDoubleClickEvent(self, event: QMouseEvent):
         self.double_clicked.emit(self.card_id)
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        size = self.width()
+        img_source = self._image_path or ""
+        selected = str(self._is_selected).lower()
+        qml = f"{tab}Rectangle {{\n"
+        qml += f"{tab}    width: {size}\n"
+        qml += f"{tab}    height: {size}\n"
+        qml += f"{tab}    radius: 4\n"
+        qml += f"{tab}    color: 'transparent'\n"
+        qml += f"{tab}    border.color: {selected == 'true' and 'genericTheme.primary' or 'transparent'}\n"
+        qml += f"{tab}    border.width: 2\n"
+        qml += f"{tab}    Image {{\n"
+        qml += f"{tab}        anchors.fill: parent\n"
+        qml += f"{tab}        anchors.margins: 5\n"
+        qml += f"{tab}        source: '{img_source}'\n"
+        qml += f"{tab}        fillMode: Image.PreserveAspectFit\n"
+        qml += f"{tab}    }}\n"
+        if self._is_loading:
+            qml += f"{tab}    Text {{ text: 'Loading..'; anchors.centerIn: parent; color: genericTheme.textSecondary }}\n"
+        qml += f"{tab}    MouseArea {{\n"
+        qml += f"{tab}        anchors.fill: parent\n"
+        qml += f"{tab}        onClicked: appBridge.openTool('{self.card_id}')\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml

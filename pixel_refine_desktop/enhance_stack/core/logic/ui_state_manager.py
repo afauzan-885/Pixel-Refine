@@ -7,10 +7,10 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
 from PySide6.QtCore import Qt
 from typing import Optional, Callable
 from config import SUPPORTED_FORMATS
-from pixel_refine_desktop.ui.resources.GenericUILibrary import Button
+from resources.GenericUILibrary import Button
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
-from pixel_refine_desktop.ui.resources.animations.slide import slide
-from pixel_refine_desktop.ui.resources.animations.animation_manager import (
+from resources.animations.slide import slide
+from resources.animations.animation_manager import (
     SlideDirection,
 )
 

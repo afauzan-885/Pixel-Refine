@@ -25,7 +25,9 @@ class ProgressPanel(QWidget):
         layout.setSpacing(8)
         
         # Status label
-        self.status_label = QLabel("Ready")
+        from pixel_refine_desktop.ui.views.settings.General.Language import language_config
+        # Status label
+        self.status_label = QLabel(language_config.UI_STATUS_READY)
         self.status_label.setObjectName("statusLabel")
         layout.addWidget(self.status_label)
         
@@ -41,7 +43,7 @@ class ProgressPanel(QWidget):
         self.progress_bar.setTextVisible(True)
         progress_row.addWidget(self.progress_bar, 1)
         
-        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button = QPushButton(language_config.BTN_CANCEL)
         self.cancel_button.setObjectName("cancelButton")
         self.cancel_button.setVisible(False)
         self.cancel_button.clicked.connect(self.cancel_requested.emit)
@@ -64,21 +66,23 @@ class ProgressPanel(QWidget):
             message: Status message
             remaining: Number of items remaining (-1 to hide)
         """
+        from pixel_refine_desktop.ui.views.settings.General.Language import language_config
         self.progress_bar.setValue(value)
         
         if message:
             self.status_label.setText(message)
         
         if remaining >= 0:
-            self.remaining_label.setText(f"{remaining} items remaining")
+            self.remaining_label.setText(f"{remaining} {language_config.UI_ITEMS_REMAINING}")
             self.remaining_label.setVisible(True)
         else:
             self.remaining_label.setVisible(False)
     
     def reset(self):
         """Reset progress to initial state."""
+        from pixel_refine_desktop.ui.views.settings.General.Language import language_config
         self.progress_bar.setValue(0)
-        self.status_label.setText("Ready")
+        self.status_label.setText(language_config.UI_STATUS_READY)
         self.remaining_label.setText("")
         self.remaining_label.setVisible(False)
     

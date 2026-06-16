@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QMenu,
 )
 from PySide6.QtCore import Signal, Qt, QTimer
-from pixel_refine_desktop.ui.resources.animations.animation_manager import (
+from resources.animations.animation_manager import (
     StackedWidgetAnimator,
 )
 import json
@@ -21,13 +21,13 @@ import os
 
 
 # Generic UI Library
-from pixel_refine_desktop.ui.resources.GenericUILibrary import (
+from resources.GenericUILibrary import (
     ListGroup,
     Button,
     FormGroup,
     FeatureCard,
 )
-from pixel_refine_desktop.ui.resources.GenericUILibrary.mixins import SyncMixin
+from resources.GenericUILibrary.mixins import SyncMixin
 
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.batch_process_dialog import (
     BatchProcessDialog,
@@ -37,15 +37,15 @@ from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manage
 from pixel_refine_desktop.enhance_stack.core.logic.batch_selection_handler import (
     BatchSelectionHandler,
 )
-from pixel_refine_desktop.ui.resources.animations.animation_manager import (
+from resources.animations.animation_manager import (
     HeightAnimator,
 )
 
 
-from pixel_refine_desktop.ui.resources.GenericUILibrary import realtime_update
+from resources.GenericUILibrary import live_update
 
 
-@realtime_update
+@live_update
 class RightPanel(QWidget, SyncMixin):
     """
     Batch List Panel for Enhance Stack.
@@ -166,10 +166,14 @@ class RightPanel(QWidget, SyncMixin):
         action_layout.setSpacing(5)
 
         self.new_btn = Button(language_config.BTN_NEW_BATCH, variant="primary")
+        self.new_btn.setFixedHeight(22)
+        self.new_btn.setStyleSheet(self.new_btn.styleSheet() + " QPushButton { padding: 2px 4px; font-size: 8pt; }")
         self.new_btn.clicked.connect(self._create_new_batch)
         action_layout.addWidget(self.new_btn, 1)
 
         self.del_btn = Button(language_config.BTN_DELETE_BATCH, variant="danger")
+        self.del_btn.setFixedHeight(22)
+        self.del_btn.setStyleSheet(self.del_btn.styleSheet() + " QPushButton { padding: 2px 4px; font-size: 8pt; }")
         self.del_btn.clicked.connect(self._delete_batch)
         action_layout.addWidget(self.del_btn, 1)
 
@@ -279,6 +283,8 @@ class RightPanel(QWidget, SyncMixin):
 
         # Process All Batch Button (Fixed at the very bottom of RightPanel, below splitter)
         self.process_all_btn = Button(language_config.BTN_PROCESS_ALL_BATCH, variant="primary")
+        self.process_all_btn.setFixedHeight(22)
+        self.process_all_btn.setStyleSheet(self.process_all_btn.styleSheet() + " QPushButton { padding: 2px 4px; font-size: 8pt; }")
         self.process_all_btn.clicked.connect(self._on_process_all_clicked)
         main_layout.addWidget(self.process_all_btn)
 
@@ -421,7 +427,7 @@ class RightPanel(QWidget, SyncMixin):
         if not selected_ids:
             return
 
-        from pixel_refine_desktop.ui.resources.GenericUILibrary import modal_confirm
+        from resources.GenericUILibrary import modal_confirm
         confirmed = modal_confirm.question(
             self,
             language_config.CONFIRM_BATCH_ALL_DELETE_BUTTON.format(len(selected_ids))
@@ -584,3 +590,24 @@ class RightPanel(QWidget, SyncMixin):
         self.list_group.set_move_mode(self._move_mode)
         if not self._move_mode:
             self._load_batches()  # Refresh style and order to be safe
+        
+        self.update_theme()
+
+    def update_theme(self):
+        """Update styles of child cards and widgets dynamically on theme changes."""
+        from resources.styles.stylesheet import SCROLL_AREA
+        from PySide6.QtWidgets import QScrollArea
+        # 1. Update Scroll Area
+        if hasattr(self, "scroll_area"):
+            self.scroll_area.setStyleSheet(SCROLL_AREA)
+        # 2. Update Feature Cards
+        if hasattr(self, "sr_card") and hasattr(self.sr_card, "update_theme"):
+            self.sr_card.update_theme()
+        if hasattr(self, "denoise_card") and hasattr(self.denoise_card, "update_theme"):
+            self.denoise_card.update_theme()
+        # 3. Update buttons
+        from resources.GenericUILibrary.theme import get_theme, create_button_style
+        theme = get_theme()
+        for btn in [self.new_btn, self.del_btn, self.process_all_btn]:
+            if btn:
+                btn.setStyleSheet(create_button_style(btn.variant, theme) + " QPushButton { padding: 4px 8px; font-size: 8pt; }")

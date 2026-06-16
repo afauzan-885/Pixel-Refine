@@ -9,10 +9,10 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
 from PySide6.QtCore import Qt
 
 # Import stylesheet
-from pixel_refine_desktop.ui.resources.styles.stylesheet import stylesheet_global_page
+from resources.styles.stylesheet import stylesheet_global_page
 
 # Import components
-from pixel_refine_desktop.ui.resources.GenericUILibrary import (
+from resources.GenericUILibrary import (
     # Layouts
     Container,
     Row,

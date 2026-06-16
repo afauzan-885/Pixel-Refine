@@ -1,4 +1,6 @@
 import os
+# Suppress Vulkan loader registry warnings on Windows
+os.environ["VK_LOADER_DEBUG"] = "error"
 import sys
 import numpy as np
 
@@ -1558,6 +1560,10 @@ def hamilton_demosaic(
     # Pre-allocate temporary intermediate buffers in VRAM to keep it blazing fast!
     wb_bayer_buf = engine.allocate((h, w), dtype=np.float32)
     green_buf    = engine.allocate((h, w), dtype=np.float32)
+    r_diff_buf   = engine.allocate((h, w), dtype=np.float32)
+    b_diff_buf   = engine.allocate((h, w), dtype=np.float32)
+    r_diff_f_buf = engine.allocate((h, w), dtype=np.float32)
+    b_diff_f_buf = engine.allocate((h, w), dtype=np.float32)
     
     # Destination output RGB float32 buffer
     if dst is not None and dst.shape == (h, w, 3) and dst.dtype == np.float32:
@@ -1572,6 +1578,10 @@ def hamilton_demosaic(
         green=green_buf,
         cmatrix=cmatrix_buf,
         dst=dst_buf,
+        r_diff=r_diff_buf,
+        b_diff=b_diff_buf,
+        r_diff_filtered=r_diff_f_buf,
+        b_diff_filtered=b_diff_f_buf,
         wb_r=float(wb_r),
         wb_g1=float(wb_g1),
         wb_b=float(wb_b),
@@ -1590,6 +1600,10 @@ def hamilton_demosaic(
     engine.sync()
     wb_bayer_buf.release()
     green_buf.release()
+    r_diff_buf.release()
+    b_diff_buf.release()
+    r_diff_f_buf.release()
+    b_diff_f_buf.release()
     if bayer_buf is not bayer and hasattr(bayer_buf, "release"):
         bayer_buf.release()
     elif bayer_buf is not bayer and hasattr(bayer_buf, "destroy"):
@@ -1782,6 +1796,245 @@ def hamilton_demosaic_3channel(
         cmatrix_buf.release()
     elif cmatrix_buf is not cmatrix and hasattr(cmatrix_buf, "destroy"):
         cmatrix_buf.destroy()
+        
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+@ti_thread
+def arm_demosaic(
+    bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
+    """Taichi AOT ARM Demosaicing & sRGB / Gamma transform API"""
+    bayer_buf   = InputArray(bayer)
+    cmatrix_buf = InputArray(cmatrix)
+    
+    h, w = bayer_buf.shape[:2]
+    
+    # Pre-allocate temporary intermediate buffers in VRAM
+    wb_bayer_buf = engine.allocate((h, w), dtype=np.float32)
+    green_buf    = engine.allocate((h, w), dtype=np.float32)
+    r_diff_buf   = engine.allocate((h, w), dtype=np.float32)
+    b_diff_buf   = engine.allocate((h, w), dtype=np.float32)
+    r_diff_f_buf = engine.allocate((h, w), dtype=np.float32)
+    b_diff_f_buf = engine.allocate((h, w), dtype=np.float32)
+    
+    # Destination output RGB float32 buffer
+    if dst is not None and dst.shape == (h, w, 3) and dst.dtype == np.float32:
+        dst_buf = dst
+    else:
+        dst_buf = OutputArray((h, w, 3), dtype=np.float32)
+        
+    _mod("arm").run(
+        "arm_demosaic",
+        bayer=bayer_buf,
+        wb_bayer=wb_bayer_buf,
+        green=green_buf,
+        r_diff=r_diff_buf,
+        b_diff=b_diff_buf,
+        r_diff_filtered=r_diff_f_buf,
+        b_diff_filtered=b_diff_f_buf,
+        cmatrix=cmatrix_buf,
+        dst=dst_buf,
+        wb_r=float(wb_r),
+        wb_g1=float(wb_g1),
+        wb_b=float(wb_b),
+        wb_g2=float(wb_g2),
+        black=float(black_level),
+        white=float(white_level),
+        h=int(h),
+        w=int(w),
+        c00=int(c00),
+        c01=int(c01),
+        c10=int(c10),
+        c11=int(c11)
+    )
+    
+    # Immediately release intermediate VRAM buffers back to pool
+    engine.sync()
+    wb_bayer_buf.release()
+    green_buf.release()
+    r_diff_buf.release()
+    b_diff_buf.release()
+    r_diff_f_buf.release()
+    b_diff_f_buf.release()
+    
+    if bayer_buf is not bayer and hasattr(bayer_buf, "release"):
+        bayer_buf.release()
+    elif bayer_buf is not bayer and hasattr(bayer_buf, "destroy"):
+        bayer_buf.destroy()
+    if cmatrix_buf is not cmatrix and hasattr(cmatrix_buf, "release"):
+        cmatrix_buf.release()
+    elif cmatrix_buf is not cmatrix and hasattr(cmatrix_buf, "destroy"):
+        cmatrix_buf.destroy()
+    
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+@ti_thread
+def arm_demosaic_1channel(
+    bayer, wb_r, wb_g1, wb_b, wb_g2,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
+    """Fast Green-Only ARM Demosaic to Grayscale 1-channel."""
+    bayer_buf = InputArray(bayer)
+    h, w = bayer_buf.shape[:2]
+    
+    if dst is not None and dst.shape == (h, w) and dst.dtype == np.float32:
+        dst_buf = dst
+    else:
+        dst_buf = OutputArray((h, w), dtype=np.float32)
+        
+    _mod("arm").run(
+        "arm_demosaic_1channel",
+        bayer=bayer_buf,
+        dst=dst_buf,
+        wb_r=float(wb_r),
+        wb_g1=float(wb_g1),
+        wb_b=float(wb_b),
+        wb_g2=float(wb_g2),
+        black=float(black_level),
+        white=float(white_level),
+        h=int(h),
+        w=int(w),
+        c00=int(c00),
+        c01=int(c01),
+        c10=int(c10),
+        c11=int(c11)
+    )
+    
+    engine.sync()
+    if bayer_buf is not bayer and hasattr(bayer_buf, "release"):
+        bayer_buf.release()
+    elif bayer_buf is not bayer and hasattr(bayer_buf, "destroy"):
+        bayer_buf.destroy()
+        
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+@ti_thread
+def arm_demosaic_half_res(
+    bayer, wb_r, wb_g1, wb_b, wb_g2,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
+    """Bypass Demosaicing: Extract Green Sub-Sampling to 1/2 size (half_res) grayscale (ARM)."""
+    bayer_buf = InputArray(bayer)
+    h, w = bayer_buf.shape[:2]
+    
+    if dst is not None and dst.shape == (h // 2, w // 2) and dst.dtype == np.float32:
+        dst_buf = dst
+    else:
+        dst_buf = OutputArray((h // 2, w // 2), dtype=np.float32)
+        
+    _mod("arm").run(
+        "arm_demosaic_half_res",
+        bayer=bayer_buf,
+        dst=dst_buf,
+        wb_r=float(wb_r),
+        wb_g1=float(wb_g1),
+        wb_b=float(wb_b),
+        wb_g2=float(wb_g2),
+        black=float(black_level),
+        white=float(white_level),
+        h=int(h),
+        w=int(w),
+        c00=int(c00),
+        c01=int(c01),
+        c10=int(c10),
+        c11=int(c11)
+    )
+    
+    engine.sync()
+    if bayer_buf is not bayer and hasattr(bayer_buf, "release"):
+        bayer_buf.release()
+    elif bayer_buf is not bayer and hasattr(bayer_buf, "destroy"):
+        bayer_buf.destroy()
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+@ti_thread
+def arm_demosaic_rgb_half_res(
+    bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
+    """Bypass Demosaicing: Extract RGB Direct Sub-Sampling to 1/2 size (half_res) RGB (ARM)."""
+    bayer_buf = InputArray(bayer)
+    cmatrix_buf = InputArray(cmatrix)
+    h, w = bayer_buf.shape[:2]
+    
+    if dst is not None and dst.shape == (h // 2, w // 2, 3) and dst.dtype == np.float32:
+        dst_buf = dst
+    else:
+        dst_buf = OutputArray((h // 2, w // 2, 3), dtype=np.float32)
+        
+    _mod("arm").run(
+        "arm_demosaic_rgb_half_res",
+        bayer=bayer_buf,
+        cmatrix=cmatrix_buf,
+        dst=dst_buf,
+        wb_r=float(wb_r),
+        wb_g1=float(wb_g1),
+        wb_b=float(wb_b),
+        wb_g2=float(wb_g2),
+        black=float(black_level),
+        white=float(white_level),
+        h=int(h),
+        w=int(w),
+        c00=int(c00),
+        c01=int(c01),
+        c10=int(c10),
+        c11=int(c11)
+    )
+    
+    engine.sync()
+    if bayer_buf is not bayer and hasattr(bayer_buf, "release"):
+        bayer_buf.release()
+    elif bayer_buf is not bayer and hasattr(bayer_buf, "destroy"):
+        bayer_buf.destroy()
+    if cmatrix_buf is not cmatrix and hasattr(cmatrix_buf, "release"):
+        cmatrix_buf.release()
+    elif cmatrix_buf is not cmatrix and hasattr(cmatrix_buf, "destroy"):
+        cmatrix_buf.destroy()
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+@ti_thread
+def pure_arm_demosaic(
+    bayer, black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
+    """Taichi AOT Pure ARM Demosaicing (no color space or gamma)"""
+    bayer_buf = InputArray(bayer)
+    h, w = bayer_buf.shape[:2]
+    
+    if dst is not None and dst.shape == (h, w, 3) and dst.dtype == np.float32:
+        dst_buf = dst
+    else:
+        dst_buf = OutputArray((h, w, 3), dtype=np.float32)
+        
+    _mod("arm").run(
+        "pure_arm_demosaic",
+        bayer=bayer_buf,
+        dst=dst_buf,
+        black=float(black_level),
+        white=float(white_level),
+        h=int(h),
+        w=int(w),
+        c00=int(c00),
+        c01=int(c01),
+        c10=int(c10),
+        c11=int(c11)
+    )
+    
+    engine.sync()
+    if bayer_buf is not bayer and hasattr(bayer_buf, "release"):
+        bayer_buf.release()
+    elif bayer_buf is not bayer and hasattr(bayer_buf, "destroy"):
+        bayer_buf.destroy()
         
     return dst_buf if return_gpu else dst_buf.to_numpy()
 
@@ -1992,13 +2245,94 @@ def demosaic(
         if not return_gpu and flip != 0:
             res = rotate_by_flip(res, flip)
         return res
+    elif method_lower in ("arm", "arm-demosaic", "arm_demosaic"):
+        if output_bgr_u16:
+            rgb_f32_gpu = arm_demosaic(
+                bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+                black_level, white_level, c00, c01, c10, c11,
+                return_gpu=True, dst=None
+            )
+            h, w = rgb_f32_gpu.shape[:2]
+            bgr_i32_gpu = engine.allocate((h, w, 3), dtype=np.int32, host_accessible=True)
+            _mod("arm").run(
+                "rgb_to_bgr_i32",
+                src=rgb_f32_gpu,
+                dst=bgr_i32_gpu,
+                h=int(h),
+                w=int(w)
+            )
+            engine.sync()
+            rgb_f32_gpu.release()
+            if not return_gpu:
+                engine.sync()
+                bgr_u16_gpu = bgr_i32_gpu.cast(np.uint16, host_accessible=True)
+                bgr_u16_cpu = bgr_u16_gpu.to_numpy()
+                bgr_u16_gpu.release()
+                bgr_i32_gpu.release()
+                if flip != 0:
+                    bgr_u16_cpu = rotate_by_flip(bgr_u16_cpu, flip)
+                return bgr_u16_cpu
+            else:
+                engine.sync()
+                bgr_u16_gpu = bgr_i32_gpu.cast(np.uint16, host_accessible=True)
+                bgr_i32_gpu.release()
+                return bgr_u16_gpu
+        else:
+            res = arm_demosaic(
+                bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+                black_level, white_level, c00, c01, c10, c11,
+                return_gpu=return_gpu, dst=dst
+            )
+            if not return_gpu and flip != 0:
+                res = rotate_by_flip(res, flip)
+            return res
+    elif method_lower in ("arm-1channel", "arm-1ch", "arm_demosaic_1channel"):
+        res = arm_demosaic_1channel(
+            bayer, wb_r, wb_g1, wb_b, wb_g2,
+            black_level, white_level, c00, c01, c10, c11,
+            return_gpu=return_gpu, dst=dst
+        )
+        if not return_gpu and flip != 0:
+            res = rotate_by_flip(res, flip)
+        return res
+    elif method_lower in ("arm-half-res", "arm-half", "arm_demosaic_half_res"):
+        res = arm_demosaic_half_res(
+            bayer, wb_r, wb_g1, wb_b, wb_g2,
+            black_level, white_level, c00, c01, c10, c11,
+            return_gpu=return_gpu, dst=dst
+        )
+        if not return_gpu and flip != 0:
+            res = rotate_by_flip(res, flip)
+        return res
+    elif method_lower in ("arm-rgb-half-res", "arm-rgb-half", "arm_demosaic_rgb_half_res"):
+        res = arm_demosaic_rgb_half_res(
+            bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+            black_level, white_level, c00, c01, c10, c11,
+            return_gpu=return_gpu, dst=dst
+        )
+        if not return_gpu and flip != 0:
+            res = rotate_by_flip(res, flip)
+        return res
+    elif method_lower in ("pure-arm", "pure-arm-demosaic", "pure_arm_demosaic"):
+        res = pure_arm_demosaic(
+            bayer, black_level, white_level, c00, c01, c10, c11,
+            return_gpu=return_gpu, dst=dst
+        )
+        if not return_gpu and flip != 0:
+            res = rotate_by_flip(res, flip)
+        return res
     else:
         supported = [
             "'hamilton' (aliases: 'hamilton-adams', 'ha', 'ppg')",
             "'hamilton-1channel' (aliases: 'hamilton-1ch', 'ha-1ch')",
             "'hamilton-half-res' (aliases: 'hamilton-half', 'ha-half-res', 'half-res')",
             "'hamilton-rgb-half-res' (aliases: 'hamilton-rgb-half', 'ha-rgb-half-res', 'rgb-half-res')",
-            "'hamilton-3channel' (aliases: 'hamilton-3ch', 'ha-3ch')"
+            "'hamilton-3channel' (aliases: 'hamilton-3ch', 'ha-3ch')",
+            "'arm' (aliases: 'arm-demosaic', 'arm_demosaic')",
+            "'arm-1channel' (aliases: 'arm-1ch')",
+            "'arm-half-res' (aliases: 'arm-half')",
+            "'arm-rgb-half-res' (aliases: 'arm-rgb-half')",
+            "'pure-arm'"
         ]
         raise ValueError(
             f"\n[Taichi AOT] Unsupported demosaicing method: '{method}'.\n"
@@ -2006,4 +2340,831 @@ def demosaic(
         )
 
 
+def generate_brief_pattern(num_pairs=256, patch_size=31, seed=42):
+    """Generate BRIEF descriptor pattern coordinates."""
+    np.random.seed(seed)
+    sigma = patch_size / 5.0
+    x1 = np.random.normal(0, sigma, num_pairs)
+    y1 = np.random.normal(0, sigma, num_pairs)
+    x2 = np.random.normal(0, sigma, num_pairs)
+    y2 = np.random.normal(0, sigma, num_pairs)
+    
+    radius = patch_size // 2
+    x1 = np.clip(np.round(x1), -radius, radius)
+    y1 = np.clip(np.round(y1), -radius, radius)
+    x2 = np.clip(np.round(x2), -radius, radius)
+    y2 = np.clip(np.round(y2), -radius, radius)
+    
+    pattern = np.stack([x1, y1, x2, y2], axis=1).astype(np.float32)
+    return pattern
 
+
+def ofb(src1, src2, ratio_threshold=0.8, grid_size=32, threshold=0.015, margin=15, max_keypoints=1500):
+    """
+    Scale-Invariant Multi-Scale O-FAST-BRIEF Feature Matching on GPU.
+    Automatically handles super low resolution images (< 240px) using adaptive parameters.
+    
+    Args:
+        src1, src2: Grayscale input images (np.ndarray or TaichiGPUBuffer) [H, W] normalized to [0, 1].
+        ratio_threshold: Lowe's ratio test threshold (default 0.8).
+        grid_size: ANMS grid size (default 32).
+        threshold: FAST score threshold (default 0.015).
+        margin: Sensor margin to avoid border keypoints (default 15).
+        max_keypoints: Maximum number of keypoints to extract (default 1500).
+        
+    Returns:
+        pts1: Matched points from src1 (N, 2) in (x, y) coordinates.
+        pts2: Matched points from src2 (N, 2) in (x, y) coordinates.
+        scores: Matching scores / Hamming distances (N,).
+    """
+    img1_gpu = upload(src1) if not isinstance(src1, TaichiGPUBuffer) else src1
+    img2_gpu = upload(src2) if not isinstance(src2, TaichiGPUBuffer) else src2
+    
+    h_orig, w_orig = img1_gpu.shape[:2]
+    min_dim = min(h_orig, w_orig)
+    
+    # 1. Determine number of scale pyramid levels dynamically
+    if min_dim < 240:
+        num_levels = 1
+    elif min_dim < 512:
+        num_levels = 2
+    else:
+        num_levels = 3
+        
+    pattern_np = generate_brief_pattern(num_pairs=256, patch_size=31, seed=42)
+    pattern_gpu = engine.upload(pattern_np)
+    
+    kps1_list = []
+    kps2_list = []
+    desc1_list = []
+    
+    for level in range(num_levels):
+        if level > 0:
+            dh, dw = h_orig // (2**level), w_orig // (2**level)
+            curr1 = resize(img1_gpu, (dw, dh), interpolation=INTER_AREA, return_gpu=True)
+            curr2 = resize(img2_gpu, (dw, dh), interpolation=INTER_AREA, return_gpu=True)
+        else:
+            curr1 = img1_gpu
+            curr2 = img2_gpu
+            
+        h_l, w_l = curr1.shape[:2]
+        
+        # Adaptive parameters for this scale level
+        grid_size_l = max(8, grid_size // (2**level))
+        margin_l = max(4, margin // (2**level))
+        threshold_l = threshold * (0.8 ** level)
+        
+        # Apply Median Filter to remove hot pixels
+        img1_med = median_filter(curr1, return_gpu=True)
+        img2_med = median_filter(curr2, return_gpu=True)
+        
+        # Apply Gaussian Blur to smooth noise for BRIEF descriptor
+        img1_blur = gaussian_blur(curr1, sigma=2.0, return_gpu=True)
+        img2_blur = gaussian_blur(curr2, sigma=2.0, return_gpu=True)
+        
+        # Allocate keypoint and descriptor buffers for this scale
+        max_kps_l = max(100, max_keypoints // (2**level))
+        
+        kps1_gpu = engine.allocate((max_kps_l, 2), dtype=np.float32)
+        kps2_gpu = engine.allocate((max_kps_l, 2), dtype=np.float32)
+        
+        score_map1 = engine.allocate((h_l, w_l), dtype=np.float32)
+        score_map2 = engine.allocate((h_l, w_l), dtype=np.float32)
+        
+        counter1 = upload(np.zeros(1, dtype=np.int32))
+        counter2 = upload(np.zeros(1, dtype=np.int32))
+        
+        # Detect keypoints
+        _mod("ofb").run("detect_keypoints", src=img1_med, score_map=score_map1, keypoints=kps1_gpu, counter=counter1, h=h_l, w=w_l, grid_size=grid_size_l, margin=margin_l, threshold=threshold_l)
+        _mod("ofb").run("detect_keypoints", src=img2_med, score_map=score_map2, keypoints=kps2_gpu, counter=counter2, h=h_l, w=w_l, grid_size=grid_size_l, margin=margin_l, threshold=threshold_l)
+        
+        desc1_gpu = engine.allocate((max_kps_l, 8), dtype=np.int32)
+        desc2_gpu = engine.allocate((max_kps_l, 8), dtype=np.int32)
+        matches_gpu = engine.allocate((max_kps_l, 2), dtype=np.int32)
+        
+        # Compute descriptors on GPU (fully async)
+        _mod("ofb").run("compute_descriptors", src=img1_blur, kps=kps1_gpu, pattern=pattern_gpu, desc=desc1_gpu, counter=counter1, h=h_l, w=w_l)
+        _mod("ofb").run("compute_descriptors", src=img2_blur, kps=kps2_gpu, pattern=pattern_gpu, desc=desc2_gpu, counter=counter2, h=h_l, w=w_l)
+        
+        # Match descriptors on GPU (fully async)
+        _mod("ofb").run("match_descriptors", desc1=desc1_gpu, desc2=desc2_gpu, matches=matches_gpu, counter1=counter1, counter2=counter2, ratio_threshold=ratio_threshold)
+        
+        results_gpu = engine.allocate((max_kps_l, 6), dtype=np.float32)
+        
+        # Pack matches on GPU (fully async)
+        _mod("ofb").run("pack_matches", kps1=kps1_gpu, kps2=kps2_gpu, matches=matches_gpu, counter1=counter1, counter2=counter2, results=results_gpu)
+        
+        # Download results (causes exactly one sync step per level)
+        results_np = results_gpu.to_numpy()
+        
+        valid_mask = results_np[:, 5] == 1.0
+        if np.any(valid_mask):
+            pts1_level = results_np[valid_mask, 0:2]
+            pts2_level = results_np[valid_mask, 2:4]
+            dists_level = results_np[valid_mask, 4]
+            
+            scale_factor = float(2**level)
+            for idx in range(len(pts1_level)):
+                kps1_list.append([pts1_level[idx, 0] * scale_factor, pts1_level[idx, 1] * scale_factor])
+                kps2_list.append([pts2_level[idx, 0] * scale_factor, pts2_level[idx, 1] * scale_factor])
+                desc1_list.append(dists_level[idx])
+            
+        # Clean up this scale's temporary buffers
+        results_gpu.release()
+        desc1_gpu.release()
+        desc2_gpu.release()
+        matches_gpu.release()
+        score_map1.release()
+        score_map2.release()
+        kps1_gpu.release()
+        kps2_gpu.release()
+        counter1.release()
+        counter2.release()
+        img1_med.release()
+        img2_med.release()
+        img1_blur.release()
+        img2_blur.release()
+        
+        # Release downsampled images if allocated
+        if level > 0:
+            curr1.release()
+            curr2.release()
+
+    pattern_gpu.release()
+    
+    if len(kps1_list) == 0:
+        return None, None, None
+        
+    return np.array(kps1_list, dtype=np.float32), np.array(kps2_list, dtype=np.float32), np.array(desc1_list, dtype=np.float32)
+
+
+def get_fed_step_sizes(n=8):
+    """Generate cycle of step sizes for Fast Explicit Diffusion (FED)."""
+    tau_max = 0.25
+    steps = []
+    for j in range(n):
+        tau = tau_max / (np.cos((2 * j + 1) * np.pi / (4 * n + 2)) ** 2)
+        steps.append(float(tau))
+    return steps
+
+
+def akaze(src1, src2, ratio_threshold=0.8, grid_size=32, threshold=0.008, margin=15, max_keypoints=1500, k_contrast=0.02, num_fed_steps=8):
+    """
+    Scale-Invariant Multi-Scale A-KAZE (Accelerated KAZE) Feature Matching on GPU.
+    Uses Non-Linear Scale Space via FED (Fast Explicit Diffusion) for superior keypoint quality
+    under extreme noise, low contrast, and medical/microscopic images.
+    
+    Args:
+        src1, src2: Grayscale input images (np.ndarray or TaichiGPUBuffer) [H, W] normalized to [0, 1].
+        ratio_threshold: Lowe's ratio test threshold (default 0.8).
+        grid_size: ANMS grid size (default 32).
+        threshold: Hessian determinant score threshold (default 0.008).
+        margin: Sensor margin to avoid border keypoints (default 15).
+        max_keypoints: Maximum number of keypoints to extract (default 1500).
+        k_contrast: Contrast threshold for non-linear conductivity (default 0.02).
+        num_fed_steps: Number of FED steps per pyramid level (default 8).
+        
+    Returns:
+        pts1: Matched points from src1 (N, 2) in (x, y) coordinates.
+        pts2: Matched points from src2 (N, 2) in (x, y) coordinates.
+        scores: Matching scores / Hamming distances (N,).
+    """
+    img1_gpu = upload(src1) if not isinstance(src1, TaichiGPUBuffer) else src1
+    img2_gpu = upload(src2) if not isinstance(src2, TaichiGPUBuffer) else src2
+    
+    h_orig, w_orig = img1_gpu.shape[:2]
+    min_dim = min(h_orig, w_orig)
+    
+    # Determine scale levels dynamically
+    if min_dim < 240:
+        num_levels = 1
+    elif min_dim < 512:
+        num_levels = 2
+    else:
+        num_levels = 3
+        
+    pattern_np = generate_brief_pattern(num_pairs=256, patch_size=31, seed=42)
+    pattern_gpu = engine.upload(pattern_np)
+    
+    kps1_list = []
+    kps2_list = []
+    desc1_list = []
+    
+    fed_taus = get_fed_step_sizes(num_fed_steps)
+    
+    for level in range(num_levels):
+        if level > 0:
+            dh, dw = h_orig // (2**level), w_orig // (2**level)
+            curr1 = resize(img1_gpu, (dw, dh), interpolation=INTER_AREA, return_gpu=True)
+            curr2 = resize(img2_gpu, (dw, dh), interpolation=INTER_AREA, return_gpu=True)
+        else:
+            # We must copy to avoid modifying original inputs during diffusion
+            curr1 = engine.allocate((h_orig, w_orig), dtype=np.float32)
+            curr2 = engine.allocate((h_orig, w_orig), dtype=np.float32)
+            copy_field(img1_gpu, curr1)
+            copy_field(img2_gpu, curr2)
+            
+        h_l, w_l = curr1.shape[:2]
+        
+        # Allocate temporary buffers for Non-Linear Scale Space Diffusion
+        temp1 = engine.allocate((h_l, w_l), dtype=np.float32)
+        temp2 = engine.allocate((h_l, w_l), dtype=np.float32)
+        cond1 = engine.allocate((h_l, w_l), dtype=np.float32)
+        cond2 = engine.allocate((h_l, w_l), dtype=np.float32)
+        
+        # 1. Compute conductivity map at this scale level
+        _mod("akaze").run("compute_conductivity_map", src=curr1, conductivity=cond1, h=h_l, w=w_l, k=float(k_contrast))
+        _mod("akaze").run("compute_conductivity_map", src=curr2, conductivity=cond2, h=h_l, w=w_l, k=float(k_contrast))
+        
+        # 2. Run FED explicit diffusion iterations on GPU
+        for tau in fed_taus:
+            # Step on image 1
+            _mod("akaze").run("fed_diffusion_step", src=curr1, dst=temp1, conductivity=cond1, h=h_l, w=w_l, tau=tau)
+            curr1, temp1 = temp1, curr1 # zero-cost swap
+            
+            # Step on image 2
+            _mod("akaze").run("fed_diffusion_step", src=curr2, dst=temp2, conductivity=cond2, h=h_l, w=w_l, tau=tau)
+            curr2, temp2 = temp2, curr2 # zero-cost swap
+            
+        # 3. Compute Hessian Determinant Map
+        score_map1 = engine.allocate((h_l, w_l), dtype=np.float32)
+        score_map2 = engine.allocate((h_l, w_l), dtype=np.float32)
+        
+        _mod("akaze").run("compute_hessian_determinant", src=curr1, hessian_map=score_map1, h=h_l, w=w_l)
+        _mod("akaze").run("compute_hessian_determinant", src=curr2, hessian_map=score_map2, h=h_l, w=w_l)
+        
+        # Adaptive parameters for this scale level
+        grid_size_l = max(8, grid_size // (2**level))
+        margin_l = max(4, margin // (2**level))
+        threshold_l = threshold * (0.8 ** level)
+        
+        max_kps_l = max(100, max_keypoints // (2**level))
+        
+        kps1_gpu = engine.allocate((max_kps_l, 2), dtype=np.float32)
+        kps2_gpu = engine.allocate((max_kps_l, 2), dtype=np.float32)
+        
+        counter1 = upload(np.zeros(1, dtype=np.int32))
+        counter2 = upload(np.zeros(1, dtype=np.int32))
+        
+        # Detect keypoints (ANMS)
+        _mod("akaze").run("detect_keypoints", hessian_map=score_map1, keypoints=kps1_gpu, counter=counter1, h=h_l, w=w_l, grid_size=grid_size_l, threshold=threshold_l)
+        _mod("akaze").run("detect_keypoints", hessian_map=score_map2, keypoints=kps2_gpu, counter=counter2, h=h_l, w=w_l, grid_size=grid_size_l, threshold=threshold_l)
+        
+        desc1_gpu = engine.allocate((max_kps_l, 16), dtype=np.int32)
+        desc2_gpu = engine.allocate((max_kps_l, 16), dtype=np.int32)
+        matches_gpu = engine.allocate((max_kps_l, 2), dtype=np.int32)
+        
+        # Compute descriptors on GPU (fully async)
+        _mod("akaze").run("compute_descriptors", src=curr1, kps=kps1_gpu, pattern=pattern_gpu, desc=desc1_gpu, counter=counter1, h=h_l, w=w_l)
+        _mod("akaze").run("compute_descriptors", src=curr2, kps=kps2_gpu, pattern=pattern_gpu, desc=desc2_gpu, counter=counter2, h=h_l, w=w_l)
+        
+        # Match descriptors on GPU (fully async)
+        _mod("akaze").run("match_descriptors", desc1=desc1_gpu, desc2=desc2_gpu, matches=matches_gpu, counter1=counter1, counter2=counter2, ratio_threshold=ratio_threshold)
+        
+        results_gpu = engine.allocate((max_kps_l, 6), dtype=np.float32)
+        
+        # Pack matches on GPU (fully async)
+        _mod("akaze").run("pack_matches", kps1=kps1_gpu, kps2=kps2_gpu, matches=matches_gpu, counter1=counter1, counter2=counter2, results=results_gpu)
+        
+        # Download results (causes exactly one sync step per level)
+        results_np = results_gpu.to_numpy()
+        
+        valid_mask = results_np[:, 5] == 1.0
+        if np.any(valid_mask):
+            pts1_level = results_np[valid_mask, 0:2]
+            pts2_level = results_np[valid_mask, 2:4]
+            dists_level = results_np[valid_mask, 4]
+            
+            scale_factor = float(2**level)
+            for idx in range(len(pts1_level)):
+                kps1_list.append([pts1_level[idx, 0] * scale_factor, pts1_level[idx, 1] * scale_factor])
+                kps2_list.append([pts2_level[idx, 0] * scale_factor, pts2_level[idx, 1] * scale_factor])
+                desc1_list.append(dists_level[idx])
+                
+        # Clean up temporary buffers
+        results_gpu.release()
+        desc1_gpu.release()
+        desc2_gpu.release()
+        matches_gpu.release()
+        score_map1.release()
+        score_map2.release()
+        kps1_gpu.release()
+        kps2_gpu.release()
+        counter1.release()
+        counter2.release()
+        
+        temp1.release()
+        temp2.release()
+        cond1.release()
+        cond2.release()
+        curr1.release()
+        curr2.release()
+
+    pattern_gpu.release()
+    
+    if len(kps1_list) == 0:
+        return None, None, None
+        
+    return np.array(kps1_list, dtype=np.float32), np.array(kps2_list, dtype=np.float32), np.array(desc1_list, dtype=np.float32)
+
+
+def find_homography(
+    pts1,
+    pts2,
+    method: str = "MAGSAC++",
+    ransacReprojThreshold: float = 3.0,
+    n_hypotheses: int = 1024,
+    max_iters: int = 1,
+    return_gpu: bool = False
+) -> tuple:
+    """
+    Estimasi matriks Homografi 3x3 menggunakan GPU RANSAC / MAGSAC++.
+    API menyerupai cv2.findHomography(pts1, pts2, cv2.RANSAC, ransacReprojThreshold).
+    
+    Args:
+        pts1  (np.ndarray | TaichiGPUBuffer): Array titik sumber, shape (N, 2) float32 [x, y].
+        pts2  (np.ndarray | TaichiGPUBuffer): Array titik tujuan, shape (N, 2) float32 [x, y].
+        method (str)      : 'RANSAC' atau 'MAGSAC++' (default MAGSAC++).
+        ransacReprojThreshold (float): Jarak re-proyeksi maksimum inlier (piksel).
+        n_hypotheses (int): Jumlah iterasi RANSAC paralel di GPU (default 1024).
+        max_iters (int)   : Jumlah putaran pencarian ulang untuk memperbaiki akurasi.
+        return_gpu (bool) : Jika True, mengembalikan mask dalam TaichiGPUBuffer (zero-copy VRAM).
+    
+    Returns:
+        H    (np.ndarray | None): Matriks Homografi 3x3 float64, atau None jika gagal.
+        mask (np.ndarray | TaichiGPUBuffer | None): Mask biner inlier shape (N, 1) uint8 atau TaichiGPUBuffer.
+    """
+    if pts1 is None or pts2 is None:
+        return None, None
+
+    # Deteksi input dari GPU Buffer atau NumPy
+    is_pts1_gpu = isinstance(pts1, TaichiGPUBuffer)
+    is_pts2_gpu = isinstance(pts2, TaichiGPUBuffer)
+
+    n_pts = pts1.shape[0]
+    if n_pts < 4:
+        return None, None
+
+    # Handle Upload ke GPU jika input berupa numpy array
+    pts1_gpu = pts1 if is_pts1_gpu else upload(np.ascontiguousarray(pts1.reshape(-1, 2), dtype=np.float32))
+    pts2_gpu = pts2 if is_pts2_gpu else upload(np.ascontiguousarray(pts2.reshape(-1, 2), dtype=np.float32))
+
+    H_cand_gpu     = engine.allocate((n_hypotheses, 9), dtype=np.float32)
+    inlier_cnt_gpu = engine.allocate((n_hypotheses,),   dtype=np.int32)
+
+    best_H_flat  = None
+    best_inliers = -1
+
+    import time
+    seed_base = int(time.time() * 1000) & 0x7FFFFFFF
+
+    for iteration in range(max_iters):
+        seed_offset = (seed_base + iteration * 31337) & 0x7FFFFFFF
+
+        # Jalankan 1024 hipotesis RANSAC secara paralel di GPU (dari modul ransac)
+        _mod("ransac").run(
+            "ransac_homography",
+            pts1=pts1_gpu, pts2=pts2_gpu,
+            n_pts=n_pts, n_hypotheses=n_hypotheses,
+            reproj_threshold=float(ransacReprojThreshold),
+            H_candidates=H_cand_gpu, inlier_counts=inlier_cnt_gpu,
+            seed_offset=seed_offset
+        )
+
+        # Download hanya vektor inlier count kecil (1024 int) — sangat cepat
+        inlier_counts_np = inlier_cnt_gpu.to_numpy()
+        best_idx         = int(np.argmax(inlier_counts_np))
+        best_count       = int(inlier_counts_np[best_idx])
+
+        if best_count > best_inliers:
+            best_inliers = best_count
+            H_cand_np    = H_cand_gpu.to_numpy()
+            best_H_flat  = H_cand_np[best_idx]  # 9-element flat
+
+    H_cand_gpu.release()
+    inlier_cnt_gpu.release()
+
+    if best_H_flat is None:
+        if not is_pts1_gpu: pts1_gpu.release()
+        if not is_pts2_gpu: pts2_gpu.release()
+        return None, None
+
+    # Hasilkan mask inlier pada GPU menggunakan matriks RANSAC terbaik
+    H_flat_gpu = upload(best_H_flat)
+    mask_gpu   = engine.allocate((n_pts,), dtype=np.int32)
+
+    _mod("ransac").run(
+        "generate_inlier_mask",
+        pts1=pts1_gpu, pts2=pts2_gpu,
+        H_best=H_flat_gpu, n_pts=n_pts,
+        reproj_threshold=float(ransacReprojThreshold),
+        mask_out=mask_gpu
+    )
+
+    # ── Least-Squares refinement (Weighted Least Squares) ───────────
+    ATA_gpu = engine.allocate((8, 8), dtype=np.float32)
+    ATb_gpu = engine.allocate((8,),   dtype=np.float32)
+
+    _mod("ransac").run(
+        "refine_homography",
+        pts1=pts1_gpu, pts2=pts2_gpu,
+        mask=mask_gpu, n_pts=n_pts,
+        reproj_threshold=float(ransacReprojThreshold),
+        ATA_out=ATA_gpu, ATb_out=ATb_gpu
+    )
+
+    ATA_np = ATA_gpu.to_numpy().astype(np.float64)
+    ATb_np = ATb_gpu.to_numpy().astype(np.float64)
+
+    ATA_gpu.release()
+    ATb_gpu.release()
+
+    H = best_H_flat.reshape(3, 3).astype(np.float64)
+
+    # Selesaikan ATA*h = ATb di CPU
+    try:
+        h_refined = np.linalg.solve(ATA_np, ATb_np)
+        H_refined = np.array([
+            [h_refined[0], h_refined[1], h_refined[2]],
+            [h_refined[3], h_refined[4], h_refined[5]],
+            [h_refined[6], h_refined[7], 1.0],
+        ], dtype=np.float64)
+        H = H_refined
+    except np.linalg.LinAlgError:
+        pass  # Gunakan H dari RANSAC jika LS singular
+
+    # Re-generate mask final menggunakan H yang sudah di-refine
+    H_flat_refined = H.ravel().astype(np.float32)
+    H_flat_gpu2    = upload(H_flat_refined)
+    mask_gpu2      = engine.allocate((n_pts,), dtype=np.int32)
+
+    _mod("ransac").run(
+        "generate_inlier_mask",
+        pts1=pts1_gpu, pts2=pts2_gpu,
+        H_best=H_flat_gpu2, n_pts=n_pts,
+        reproj_threshold=float(ransacReprojThreshold),
+        mask_out=mask_gpu2
+    )
+
+    # Bersihkan input GPU Buffer jika kita yang mengalokasikannya secara lokal
+    if not is_pts1_gpu: pts1_gpu.release()
+    if not is_pts2_gpu: pts2_gpu.release()
+    H_flat_gpu.release()
+    mask_gpu.release()
+    H_flat_gpu2.release()
+
+    if return_gpu:
+        return H, mask_gpu2
+    else:
+        mask_np = mask_gpu2.to_numpy().astype(np.uint8).reshape(-1, 1)
+        mask_gpu2.release()
+        return H, mask_np
+
+
+def warp_perspective(src, M, dsize, return_gpu=False, dst=None):
+    """
+    GPU-accelerated Warp Perspective menggunakan Taichi AOT.
+    API menyerupai cv2.warpPerspective(src, M, dsize).
+    """
+    is_gpu = isinstance(src, TaichiGPUBuffer)
+    src_buf = src if is_gpu else upload(src)
+
+    h_src, w_src = src_buf.shape[:2]
+    w_dst, h_dst = dsize
+
+    # Hitung inverse matriks di CPU menggunakan NumPy
+    M_np = np.asarray(M, dtype=np.float32)
+    try:
+        M_inv = np.linalg.inv(M_np)
+    except np.linalg.LinAlgError:
+        M_inv = np.eye(3, dtype=np.float32)
+
+    M_inv_gpu = upload(M_inv)
+
+    is_vec = getattr(src_buf, "is_vector", False)
+    is_3d = len(src_buf.shape) == 3 or is_vec
+    v_dim = src_buf.vector_dim if is_vec else (src_buf.shape[2] if len(src_buf.shape) == 3 else 1)
+
+    if dst is None:
+        if is_3d:
+            dst_buf = OutputArray((h_dst, w_dst, v_dim), dtype=src_buf.dtype, is_vector=is_vec, vector_dim=v_dim)
+        else:
+            dst_buf = OutputArray((h_dst, w_dst), dtype=src_buf.dtype)
+    else:
+        dst_buf = dst
+
+    src_v = src_buf
+    dst_v = dst_buf
+    if is_3d:
+        if not getattr(src_buf, "is_vector", False):
+            src_v = src_buf.view_as_vector(True)
+        if not getattr(dst_buf, "is_vector", False):
+            dst_v = dst_buf.view_as_vector(True)
+
+    graph = "warp_perspective_f32_3d" if is_3d else "warp_perspective_f32_2d"
+
+    _mod("remap").run(
+        graph,
+        src=src_v,
+        M_inv=M_inv_gpu,
+        dst=dst_v,
+        h_src=h_src,
+        w_src=w_src,
+        h_dst=h_dst,
+        w_dst=w_dst
+    )
+
+    M_inv_gpu.release()
+    if not is_gpu:
+        src_buf.release()
+
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+# ===========================================================================
+# AOT Dispatch: Non-Local Means Denoising
+# ===========================================================================
+def non_local_means(src, h_param=10.0, search_window=7, patch_size=5,
+                     return_gpu=False):
+    """
+    Taichi AOT Non-Local Means Denoising.
+    Dispatches to pre-compiled fixed-parameter kernel variants.
+    Supports: search_window in {3,5,7}, patch_size in {1,2,3}.
+    Falls back to JIT for unsupported parameter combinations.
+    """
+    is_numpy = isinstance(src, np.ndarray)
+    is_3d = len(src.shape) == 3 and src.shape[2] == 3
+
+    # Round to nearest supported variant
+    sr = min(search_window, 7)
+    if sr <= 3:
+        sr = 3
+    elif sr <= 5:
+        sr = 5
+    else:
+        sr = 7
+
+    pr = min(patch_size, 3)
+    if pr <= 1:
+        pr = 1
+    elif pr <= 2:
+        pr = 2
+    else:
+        pr = 3
+
+    h, w = src.shape[:2]
+
+    src_buf = InputArray(src)
+    if is_3d:
+        src_buf = src_buf.view_as_vector(True)
+        dst_buf = OutputArray((h, w, 3), dtype=np.float32, is_vector=True, vector_dim=3)
+        graph_name = f"nlm_3ch_s{sr}_p{pr}_f32"
+    else:
+        dst_buf = OutputArray((h, w), dtype=np.float32)
+        graph_name = f"nlm_1ch_s{sr}_p{pr}_f32"
+
+    _mod("nlm").run(
+        graph_name,
+        src=src_buf,
+        dst=dst_buf,
+        h=h,
+        w=w,
+        h_param=float(h_param),
+    )
+
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+# ===========================================================================
+# AOT Dispatch: Inpainting
+# ===========================================================================
+def inpaint(src, mask, inpaint_radius=3, flags=0, return_gpu=False):
+    """
+    Taichi AOT Inpainting.
+    Dispatches individual kernels in sequence (distance transform, dilate, fill).
+    """
+    is_numpy = isinstance(src, np.ndarray)
+    is_3d = len(src.shape) == 3 and src.shape[2] == 3
+
+    src_buf, src_is_temp2 = _ensure_upload(src)
+    mask_buf = InputArray(mask.astype(np.float32) if isinstance(mask, np.ndarray) else mask)
+
+    h, w = src_buf.shape[:2]
+    max_dist = max(h, w) // 2 + 1
+
+    # Allocate intermediate buffers
+    dist_buf = OutputArray((h, w), dtype=np.float32)
+    dist_tmp = OutputArray((h, w), dtype=np.float32)
+    boundary_buf = OutputArray((h, w), dtype=np.float32)
+    filled_buf = OutputArray((h, w), dtype=np.float32)
+
+    # Stage 1: Init distance
+    _mod("inpaint").run("inpaint_init_distance_f32",
+        mask=mask_buf, dist=dist_buf, boundary=boundary_buf, h=h, w=w)
+
+    # Iterative dilation to compute distance map
+    for level in range(max_dist):
+        _mod("inpaint").run("inpaint_dilate_distance_f32",
+            dist_in=dist_buf, dist_out=dist_tmp, h=h, w=w,
+            current_level=float(level))
+        dist_buf, dist_tmp = dist_tmp, dist_buf
+
+    # Stage 2: Init filled mask
+    _mod("inpaint").run("inpaint_init_distance_f32",
+        mask=mask_buf, dist=filled_buf, boundary=boundary_buf, h=h, w=w)
+    _mod("inpaint").run("inpaint_set_filled_f32",
+        mask=mask_buf, filled=filled_buf, h=h, w=w)
+
+    # Stage 3: Iterative inpainting
+    if is_3d:
+        for level in range(1, max_dist + 1):
+            _mod("inpaint").run("inpaint_level_3ch_f32",
+                src=src_buf, dist=dist_buf, filled=filled_buf,
+                h=h, w=w, target_level=float(level),
+                inpaint_radius=float(inpaint_radius))
+            _mod("inpaint").run("inpaint_mark_filled_f32",
+                dist=dist_buf, filled=filled_buf, h=h, w=w,
+                target_level=float(level))
+    else:
+        for level in range(1, max_dist + 1):
+            _mod("inpaint").run("inpaint_level_1ch_f32",
+                src=src_buf, dist=dist_buf, filled=filled_buf,
+                h=h, w=w, target_level=float(level),
+                inpaint_radius=float(inpaint_radius))
+            _mod("inpaint").run("inpaint_mark_filled_f32",
+                dist=dist_buf, filled=filled_buf, h=h, w=w,
+                target_level=float(level))
+
+    return src_buf if return_gpu else src_buf.to_numpy()
+
+
+# ===========================================================================
+# AOT Dispatch: Seamless Clone (Poisson Image Editing)
+# ===========================================================================
+def seamless_clone(src, dst, mask, center=(0, 0), flags=1,
+                    max_iterations=200, return_gpu=False):
+    """
+    Taichi AOT Seamless Clone.
+    Dispatches Jacobi iterations for Poisson blending.
+    """
+    is_numpy = isinstance(dst, np.ndarray)
+
+    src_buf = InputArray(src)
+    dst_buf = InputArray(dst)
+    mask_buf = InputArray(mask.astype(np.float32) if isinstance(mask, np.ndarray) else mask)
+
+    src_buf = src_buf.view_as_vector(True) if len(src_buf.shape) == 3 else src_buf
+    dst_buf_v = dst_buf.view_as_vector(True) if len(dst_buf.shape) == 3 else dst_buf
+
+    h, w = dst_buf.shape[:2]
+
+    # Output = copy of dst
+    out_buf = OutputArray((h, w, 3), dtype=np.float32, is_vector=True, vector_dim=3)
+    _mod("seamless_clone").run("seamless_copy_f32",
+        s=dst_buf_v, d=out_buf, h=h, w=w)
+
+    # Intermediate buffers
+    div_x = OutputArray((h, w), dtype=np.float32)
+    div_y = OutputArray((h, w), dtype=np.float32)
+    lap_buf = OutputArray((h, w), dtype=np.float32)
+    f_in_buf = OutputArray((h, w), dtype=np.float32)
+    f_out_buf = OutputArray((h, w), dtype=np.float32)
+
+    num_channels = 3 if flags != 3 else 1  # MONOCHROME_TRANSFER = 3
+
+    for ch in range(num_channels):
+        # Compute guidance gradient
+        if flags == 1 or flags == 3:  # NORMAL_CLONE or MONOCHROME_TRANSFER
+            _mod("seamless_clone").run("seamless_divergence_normal_f32",
+                src=src_buf, div_x=div_x, div_y=div_y, h=h, w=w, ch=ch)
+        elif flags == 2:  # MIXED_CLONE
+            _mod("seamless_clone").run("seamless_divergence_mixed_f32",
+                src=src_buf, dst=dst_buf_v, div_x=div_x, div_y=div_y, h=h, w=w, ch=ch)
+
+        # Compute Laplacian
+        _mod("seamless_clone").run("seamless_laplacian_f32",
+            div_x=div_x, div_y=div_y, lap=lap_buf, h=h, w=w)
+
+        # Init f from destination channel
+        _mod("seamless_clone").run("seamless_init_f_channel_f32",
+            dst_arr=out_buf, f=f_in_buf, h=h, w=w, c=ch)
+
+        # Jacobi iterations
+        for _ in range(max_iterations):
+            _mod("seamless_clone").run("seamless_jacobi_step_f32",
+                f_in=f_in_buf, f_out=f_out_buf, lap=lap_buf,
+                mask=mask_buf, h=h, w=w)
+            f_in_buf, f_out_buf = f_out_buf, f_in_buf
+
+        # Composite
+        _mod("seamless_clone").run("seamless_composite_f32",
+            f=f_in_buf, dst_out=out_buf, mask=mask_buf, h=h, w=w, ch=ch)
+
+    return out_buf if return_gpu else out_buf.to_numpy()
+
+
+# ===========================================================================
+# AOT Dispatch: MTB (Median Threshold Bitmap) Alignment
+# ===========================================================================
+def align_mtb(ref_img, target_img, max_levels=6, tolerance=4.0/255.0):
+    """
+    Taichi AOT MTB Alignment.
+    Returns: (dx, dy) integer shift.
+    Uses pre-compiled histogram, bitmap, and error kernels.
+    """
+    import cv2
+
+    # Convert to grayscale
+    if len(ref_img.shape) == 3:
+        ref_gray = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    else:
+        ref_gray = ref_img.astype(np.float32) / 255.0 if ref_img.dtype != np.float32 else ref_img
+
+    if len(target_img.shape) == 3:
+        tgt_gray = cv2.cvtColor(target_img, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    else:
+        tgt_gray = target_img.astype(np.float32) / 255.0 if target_img.dtype != np.float32 else target_img
+
+    # Build image pyramids (CPU-based for AOT simplicity)
+    def _build_pyr(img, levels):
+        pyr = [img]
+        for _ in range(levels - 1):
+            img = cv2.pyrDown(img)
+            pyr.append(img)
+        return pyr
+
+    ref_pyr = _build_pyr(ref_gray, max_levels)
+    tgt_pyr = _build_pyr(tgt_gray, max_levels)
+
+    current_dx, current_dy = 0, 0
+
+    for level in reversed(range(len(ref_pyr))):
+        ref_level = ref_pyr[level]
+        tgt_level = tgt_pyr[level]
+        h, w = ref_level.shape
+
+        current_dx *= 2
+        current_dy *= 2
+
+        ref_buf = InputArray(ref_level)
+        tgt_buf = InputArray(tgt_level)
+
+        # Compute histograms
+        ref_hist = OutputArray((256,), dtype=np.int32)
+        tgt_hist = OutputArray((256,), dtype=np.int32)
+        _mod("mtb").run("mtb_histogram_f32", img=ref_buf, hist=ref_hist)
+        _mod("mtb").run("mtb_histogram_f32", img=tgt_buf, hist=tgt_hist)
+
+        # Find medians (CPU)
+        def _find_median(hist_np):
+            total = h * w
+            cum = 0
+            for i in range(256):
+                cum += int(hist_np[i])
+                if cum >= total // 2:
+                    return i / 255.0
+            return 0.5
+
+        ref_med = _find_median(ref_hist.to_numpy())
+        tgt_med = _find_median(tgt_hist.to_numpy())
+
+        # Compute bitmaps and exclusion maps
+        ref_bitmap = OutputArray((h, w), dtype=np.int32)
+        ref_excl = OutputArray((h, w), dtype=np.int32)
+        tgt_bitmap = OutputArray((h, w), dtype=np.int32)
+        tgt_excl = OutputArray((h, w), dtype=np.int32)
+
+        _mod("mtb").run("mtb_bitmaps_f32", img=ref_buf, bitmap=ref_bitmap,
+            exclusion=ref_excl, median_val=float(ref_med), tolerance=float(tolerance))
+        _mod("mtb").run("mtb_bitmaps_f32", img=tgt_buf, bitmap=tgt_bitmap,
+            exclusion=tgt_excl, median_val=float(tgt_med), tolerance=float(tolerance))
+
+        # Search 3x3 neighborhood
+        best_err = 2**31 - 1
+        best_ox, best_oy = 0, 0
+        err_buf = OutputArray((1,), dtype=np.int32)
+
+        for oy in [-1, 0, 1]:
+            for ox in [-1, 0, 1]:
+                test_dx = current_dx + ox
+                test_dy = current_dy + oy
+                _mod("mtb").run("mtb_error_f32",
+                    bitmap1=ref_bitmap, exclusion1=ref_excl,
+                    bitmap2=tgt_bitmap, exclusion2=tgt_excl,
+                    error_buf=err_buf, dx=test_dx, dy=test_dy)
+                err_val = int(err_buf.to_numpy()[0])
+                if err_val < best_err:
+                    best_err = err_val
+                    best_ox, best_oy = ox, oy
+
+        current_dx += best_ox
+        current_dy += best_oy
+
+    return current_dx, current_dy
+
+
+def _ensure_upload(arr):
+    """Helper: upload ndarray to InputArray if needed."""
+    if isinstance(arr, TaichiGPUBuffer):
+        return arr, False
+    return InputArray(arr), True

@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor, QGuiApplication
-from pixel_refine_desktop.ui.resources.styles.stylesheet import (
+from resources.styles.stylesheet import (
     CHECKBOX_SWITCH_STYLE,
     PROGRESS_BAR,
     stylesheet_global_page,

@@ -203,6 +203,32 @@ class ImageCompareItem(QGraphicsObject):
         else:
             event.ignore()
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        # left_pixmap, right_pixmap:
+        _ = getattr(self, "left_pixmap", None)
+        _ = getattr(self, "right_pixmap", None)
+        qml = f"{tab}Item {{\n"
+        qml += f"{tab}    width: {self.width}\n"
+        qml += f"{tab}    height: {self.height}\n"
+        qml += f"{tab}    property real sliderPos: {self.slider_pos}\n"
+        qml += f"{tab}    Image {{ source: ''; anchors.fill: parent; fillMode: Image.PreserveAspectFit }}\n"
+        qml += f"{tab}    Item {{\n"
+        qml += f"{tab}        clip: true\n"
+        qml += f"{tab}        width: parent.width * sliderPos\n"
+        qml += f"{tab}        height: parent.height\n"
+        qml += f"{tab}        Image {{ source: ''; width: parent.parent.width; height: parent.parent.height; fillMode: Image.PreserveAspectFit }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}    Rectangle {{ x: parent.width * sliderPos - 1; width: 2; height: parent.height; color: 'white' }}\n"
+        qml += f"{tab}    Text {{ text: '{self.left_label}'; x: 15; y: 15; color: 'white'; font.bold: true }}\n"
+        qml += f"{tab}    Text {{ text: '{self.right_label}'; x: parent.width - width - 15; y: 15; color: 'white'; font.bold: true }}\n"
+        qml += f"{tab}    MouseArea {{\n"
+        qml += f"{tab}        anchors.fill: parent\n"
+        qml += f"{tab}        onPositionChanged: parent.sliderPos = Math.max(0, Math.min(1, mouseX / parent.width))\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
+
 
 class ImageCompareWidget(QWidget):
     """
@@ -349,3 +375,29 @@ class ImageCompareWidget(QWidget):
         pos = local_x / draw_w
         self.slider_pos = max(0.0, min(1.0, pos))
         self.update()
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        # left_pixmap, right_pixmap:
+        _ = getattr(self, "left_pixmap", None)
+        _ = getattr(self, "right_pixmap", None)
+        qml = f"{tab}Item {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    height: parent.height\n"
+        qml += f"{tab}    property real sliderPos: {self.slider_pos}\n"
+        qml += f"{tab}    Image {{ source: ''; anchors.fill: parent; fillMode: Image.PreserveAspectFit }}\n"
+        qml += f"{tab}    Item {{\n"
+        qml += f"{tab}        clip: true\n"
+        qml += f"{tab}        width: parent.width * sliderPos\n"
+        qml += f"{tab}        height: parent.height\n"
+        qml += f"{tab}        Image {{ source: ''; width: parent.parent.width; height: parent.parent.height; fillMode: Image.PreserveAspectFit }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}    Rectangle {{ x: parent.width * sliderPos - 1; width: 2; height: parent.height; color: 'white' }}\n"
+        qml += f"{tab}    Text {{ text: '{self.left_label}'; x: 15; y: 15; color: 'white'; font.bold: true }}\n"
+        qml += f"{tab}    Text {{ text: '{self.right_label}'; x: parent.width - width - 15; y: 15; color: 'white'; font.bold: true }}\n"
+        qml += f"{tab}    MouseArea {{\n"
+        qml += f"{tab}        anchors.fill: parent\n"
+        qml += f"{tab}        onPositionChanged: parent.sliderPos = Math.max(0, Math.min(1, mouseX / parent.width))\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml

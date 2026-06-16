@@ -58,10 +58,11 @@ class ContextMenuHandler:
         """
         )
 
+        from pixel_refine_desktop.ui.views.settings.General.Language import language_config
         # 1. Select Reference Image (Only if exactly one card is right-clicked)
         if card_under_mouse:
             ref_path = card_under_mouse._image_path
-            action_ref = QAction("Select Reference Image", self.panel)
+            action_ref = QAction(language_config.CORE_SELECT_REF_IMAGE, self.panel)
             action_ref.triggered.connect(lambda: self.set_as_reference(ref_path))
             menu.addAction(action_ref)
             menu.addSeparator()
@@ -69,7 +70,7 @@ class ContextMenuHandler:
         # 2. Delete Selected Images
         if self.panel.selection_manager.selected_thumbnails:
             action_del = QAction(
-                f"Delete Images ({len(self.panel.selection_manager.selected_thumbnails)})",
+                f"{language_config.CORE_DELETE_IMAGES} ({len(self.panel.selection_manager.selected_thumbnails)})",
                 self.panel,
             )
             action_del.triggered.connect(self.panel._handle_delete_action)

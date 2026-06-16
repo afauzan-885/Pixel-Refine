@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
 )
 from PySide6.QtCore import Qt
-from pixel_refine_desktop.ui.resources.GenericUILibrary import Button
+from resources.GenericUILibrary import Button
 
 
 class QuickBatchDialog(QDialog):

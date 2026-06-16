@@ -23,7 +23,7 @@ from PySide6.QtCore import (
 )
 
 # Generic UI Library
-from pixel_refine_desktop.ui.resources.GenericUILibrary.store import (
+from resources.GenericUILibrary.store import (
     get_store,
     DataStore,
 )
@@ -51,8 +51,8 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Average import 
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
     running_median,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Similarity import (
-    running_similarity,
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
+    running_mf_denoiser as running_similarity,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.Interpolation import (
     running_interpolation,
@@ -117,7 +117,7 @@ class BatchPageV2Layout(QWidget):
         self.store.bind_to_file(json_path)
 
         self.main_layout = QVBoxLayout(self)
-        self.main_layout.setContentsMargins(0, 5, 5, 5)
+        self.main_layout.setContentsMargins(0, 5, 0, 0)
 
         setup_main_layout(self, self.database_manager)
         setup_signals(self)  # Menghubungkan sinyal tombol proses/simpan
@@ -403,7 +403,7 @@ class BatchPageV2Layout(QWidget):
             QMessageBox.information(self, title, message)
             return
 
-        from pixel_refine_desktop.ui.resources.GenericUILibrary import modal_confirm
+        from resources.GenericUILibrary import modal_confirm
         confirmed = modal_confirm.question(
             self,
             language_config.HANDLE_DELETE_BUTTON_IMAGE_CONFIRM_DELETE.format(

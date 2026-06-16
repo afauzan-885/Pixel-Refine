@@ -34,9 +34,16 @@
 - **Smart Image IO**: Direct C++ decoding to VRAM (imread/imwrite) menggunakan Windows Imaging Component (WIC).
 - **Single Source of Truth (`engine.py`)**: `engine.py` adalah jembatan backend C++ yang bersifat *single source of truth*. Logika dan perilakunya tidak boleh diubah kecuali atas instruksi/keputusan eksplisit dari user. Semua algoritma baru atau modifikasi yang menggunakan backend ini harus mematuhi aturan dan perilaku yang ditetapkan oleh `engine.py`.
 - **UI Style Consistency (GenericUILibrary & Animations)**:
-  - **GenericUILibrary**: Semua pembuatan atau pengeditan komponen antarmuka pengguna (UI) wajib menggunakan pustaka/framework di path `pixel_refine_desktop/ui/resources/GenericUILibrary` (seperti `Card`, `Button`, `FormGroup`, `ListGroup`, dll.) untuk memastikan keselarasan penuh terhadap sistem tema, tipografi, dan gaya yang telah ditentukan. Jangan membuat styles kustom ad-hoc secara manual.
-  - **Animations**: Jika menambahkan desain UI yang memiliki animasi, wajib menggunakan pustaka/library yang ada di dalam path `pixel_refine_desktop/ui/resources/animations`.
-  - **Custom UI Component**: Jika ingin membuat UI baru yang bersifat kustom, sebisa mungkin tambahkan komponen tersebut ke dalam skrip yang ada di dalam path `pixel_refine_desktop/ui/resources/GenericUILibrary` daripada membuat berkas/skrip baru.
+  - **GenericUILibrary**: Semua pembuatan atau pengeditan komponen antarmuka pengguna (UI) wajib menggunakan pustaka/framework di path `resources/GenericUILibrary` (seperti `Card`, `Button`, `FormGroup`, `ListGroup`, dll.) untuk memastikan keselarasan penuh terhadap sistem tema, tipografi, dan gaya yang telah ditentukan. Jangan membuat styles kustom ad-hoc secara manual.
+  - **Animations**: Jika menambahkan desain UI yang memiliki animasi, wajib menggunakan pustaka/library yang ada di dalam path `resources/animations`.
+  - **Custom UI Component**: Jika ingin membuat UI baru yang bersifat kustom, sebisa mungkin tambahkan komponen tersebut ke dalam skrip yang ada di dalam path `resources/GenericUILibrary` daripada membuat berkas/skrip baru.
+  - **Real-time Setting & Translation Broadcast**: Daftarkan parent container utama (seperti `EnhanceStackView`) menggunakan `@live_update` (atau kustom metode seperti `@live_update("retranslate_ui")`). Pemanggilan pemicu secara otomatis melakukan *cascade* pembaruan secara rekursif ke seluruh widget anak di bawahnya yang mengimplementasikan metode pembaruan tersebut. Pengembang tidak perlu mendekorasi sub-widget secara manual.
+    - **Language Configuration Race Bypass**: Gunakan `language_config.reload_language(lang_str)` secara langsung dengan melewatkan string bahasa baru (misalnya "Indonesian") sebelum memanggil `retranslate_ui` atau menyebarkan pembaruan global. Ini mencegah bug race condition I/O berkas pada disk.
+    - **Dynamic Child retranslate_ui**: Untuk container dinamis seperti `BulkPageLayout` yang menampung daftar widget anak independen (seperti `CombinedPanel`), override `retranslate_ui()` untuk mengulang secara eksplisit dan memanggil `retranslate_ui()` pada daftar panel aktif (`self.active_batch_panels.values()`).
+    - **Compact Sizing on Action Buttons**: Tombol aksi batch (`Buat Batch Baru`, `Hapus Batch`, `Proses Semua Batch`) wajib disusutkan ukurannya sebesar 50% dengan mengatur tinggi tetap menjadi `22px` dan padding `2px 4px` dengan ukuran font `8pt` di kedua tema gelap/terang.
+    - **Style consistency in update_theme**: Di dalam metode `update_theme`, gunakan `create_button_style(variant, theme)` untuk menerapkan style warna latar belakang, teks, dan border yang harmonis untuk tombol-tombol bertema.
+  - **Absolute Centering Layout Rule**: Layout header utama wajib menggunakan pembagian 3 sub-layout (kiri, tengah, kanan) dengan stretch factor `(1, 1, 1)` untuk menjaga visual tombol mode absolut berada di tengah secara konsisten di semua dimensi layar.
+  - **Dynamic Mode Buttons**: Lebih menyukai tombol status dinamis kustom berbasis QPushButton dengan transisi animasi opacity fade daripada ToggleSwitch biasa untuk transisi mode yang premium.
   - **Lazy & Eager Loading Strategy**: Untuk meminimalkan visual freeze saat memuat komponen/grid dengan data besar (misalnya banyak batch di Bulk Mode), implementasikan **eager incremental loading** (memuat batch secara bertahap, e.g., 10 batch terlebih dahulu) dikombinasikan dengan `SkeletonLoader` sebagai visual placeholder sebelum data sebenarnya ter-render sepenuhnya.
   - **Adaptive Empty State & Panel Visibility**: Saat dataset kosong (misal tidak ada batch sama sekali di DB):
     - Sembunyikan panel kontrol kanan (`right_panel`) secara mulus menggunakan animasi fade-out (`QGraphicsOpacityEffect`) dan set lebar maksimum ke 0 untuk mencegah ruang kosong tidak terpakai.
@@ -119,25 +126,42 @@
 
 ---
 
-## 🆕 Algoritma Baru: GPU WarpAffine (Taichi AOT)
+## 🆕 Algoritma Baru: GPU WarpPerspective & WarpAffine (Taichi AOT)
 
 **Modul**: `remap.py` → `compile_remap_tcm.py` → `remap_{backend}.tcm`
 
 **API Publik** (`taichi_aot/__init__.py`):
 ```python
+# Warp Affine (2x3 Matrix)
 result = taichi_aot.warp_affine(src, M, dsize, flags=cv2.INTER_LINEAR, border_mode=cv2.BORDER_REFLECT_101)
+
+# Warp Perspective (3x3 Matrix)
+result = taichi_aot.warp_perspective(src, H, dsize, return_gpu=False)
 ```
 
 **Spesifikasi Teknis:**
-- Kernel mengimplementasikan inverse mapping: untuk setiap piksel output, hitung koordinat di input via `M_inv @ [x, y, 1]`
-- Interpolasi bilinear dengan `BORDER_REFLECT_101` (default OpenCV)
-- Mendukung grayscale (2D) dan RGB (3D)
-- **Parity**: Bit-perfect match dengan `cv2.warpAffine` (MAE < 0.5/255)
-- **Backend**: Vulkan, CUDA, CPU
+- Kernel `_warp_perspective_kernel` & `_warp_perspective_kernel_vec3` mengimplementasikan proyeksi homogen inverse mapping: `u = H_inv @ [x, y, 1]` secara *on-the-fly* di GPU.
+- Menghilangkan overhead pembuatan koordinat map spasial 12MP di CPU, sehingga zero-alloc/hemat memori.
+- Interpolasi bilinear dengan `BORDER_REFLECT_101` (default OpenCV) atau Clamp.
+- Mendukung gambar Grayscale (2D) dan RGB/BGR Multi-channel (3D).
+- **Parity**: Geometris bit-perfect dengan `cv2.warpPerspective` dan `cv2.warpAffine`.
 
-**Catatan Implementasi:**
-- Matriks affine M disediakan sebagai (2×3) → di-inverse secara Python sebelum dikirim ke kernel
-- Kernel menyimpan M_inv sebagai 6 scalar NDARRAY 1D untuk AOT compatibility
+---
+
+## 🆕 Algoritma Baru: GPU MAGSAC++ Homography Solver & Consensus
+
+**Modul**: `ransac.py` → `compile_ransac_tcm.py` → `ransac_{backend}.tcm`
+
+**API Publik** (`taichi_aot/__init__.py`):
+```python
+H, mask = taichi_aot.find_homography(pts1, pts2, method="MAGSAC++", ransacReprojThreshold=3.0, n_hypotheses=1024, return_gpu=False)
+```
+
+**Spesifikasi Teknis:**
+- **Tukey's Biweight Soft Scoring**: Menilai kualitas hipotesis menggunakan pembobotan kontinu $(1 - err^2/\theta^2)^2$ untuk inlier yang dekat dengan model, mengeliminasi threshold kaku RANSAC standar.
+- **Weighted Least Squares (WLS) Refinement**: Optimasi persamaan normal $A^T W A h = A^T W b$ secara langsung di GPU.
+- **Zero-Copy VRAM (`return_gpu=True`)**: Menerima input `TaichiGPUBuffer` koordinat dan mengembalikan mask inlier dalam bentuk GPU buffer langsung di VRAM.
+- **Hasil Validasi**: Menghasilkan **897 inliers** (vs OpenCV 896) dengan reproj error **1.095 px** (vs OpenCV 1.109 px).
 
 ---
 
@@ -145,6 +169,7 @@ result = taichi_aot.warp_affine(src, M, dsize, flags=cv2.INTER_LINEAR, border_mo
 
 **Nama resmi**: O-FAST-BRIEF | **Alias**: OFB
 **Modul**: `ofb.py` → `compile_ofb_tcm.py` → `ofb_{backend}.tcm`
+
 
 **API Publik** (`taichi_aot/__init__.py`):
 ```python
@@ -157,12 +182,13 @@ sky_ref, sky_comp, land_ref, land_comp = taichi_aot.ofb(img_ref, img_comp, thres
 
 **Komponen Algoritma & Fitur Tangguh:**
 
-| Komponen | Implementasi | Catatan |
-|---|---|---|
-| **Keypoint Detector** | FAST-9 (Bresenham circle 16px) | SAD score untuk NMS |
-| **Vision Booster** | Local Contrast Normalization di GPU | Meregangkan kontras pada detail redup (bintang gelap/siluet gunung) berdasarkan noise floor (`local_contrast > 0.003`) tanpa mengubah gambar asli. |
-| **Star/Feature Filter** | Unboosted score thresholding | FAST-9 mendeteksi dengan kontras ter-boost, namun akumulasi skor keypoint tetap menggunakan selisih intensitas asli (*unboosted*). Ini membedakan bintang nyata dari derau sensor ber-skor rendah. |
-| **Margin Sensor** | Batas tepi sensor | Parameter `margin` (default 32px) mengabaikan tepi sensor agar keypoint tidak tersumbat oleh derau sensor terluar. |
+| **Keypoint Detector** | FAST-9 dengan **Sub-pixel Refinement** (paraboloid fitting 3x3 score map) | Menghasilkan sub-pixel coordinates berakurasi tinggi dengan 2D quadratic interpolation. |
+| **Scale Invariance** | Multi-Scale Image Pyramid (L0, L1, L2) | Mendeteksi keypoints pada berbagai skala level citra secara dinamis (misal, 3 skala untuk resolusi normal, adaptif 2 atau 1 skala untuk resolusi sangat rendah di bawah 240px). |
+| **Rotation Invariance** | Intensity Centroid Angle Alignment | Menghitung sudut orientasi centroid intensitas lokal melalui `compute_centroid_angle` untuk memutar BRIEF sampling pattern secara dinamis sebelum pencocokan deskriptor. |
+| **ANMS** | Grid-based Adaptive Non-Maximal Suppression | Mendistribusikan keypoints secara homogen ke seluruh area gambar, menghindari penumpukan keypoint pada satu cluster tekstur tinggi. |
+| **Vision Booster & Filter** | Local Contrast Normalization di GPU & Unboosted Score | Meregangkan kontras pada detail redup (bintang gelap/siluet gunung) berdasarkan noise floor (`local_contrast > 0.003`) tanpa mengubah gambar asli. Filter membedakan bintang nyata dari derau sensor menggunakan *unboosted* FAST score. |
+| **Median & Blur Pre-pass** | Fused GPU Filter Stack | Integrasi Median Filter untuk menyapu hot pixels sebelum deteksi keypoints, dipadukan dengan Gaussian Blur (sigma=2.0) pada citra deskriptor untuk meredam noise berfrekuensi tinggi. |
+| **Margin Sensor** | Batas tepi sensor adaptif | Parameter `margin` yang terskala secara adaptif tiap level pyramid untuk mengabaikan noise di tepi sensor. |
 | **Matcher** | Bidirectional Cross-Check | Pencocokan dua arah (forward/backward) untuk membuang pencocokan ganda (*many-to-one*). |
 | **Astro Fallback** | Spatiotemporal Geometric Matcher | Jika pencocokan deskriptor BRIEF menghasilkan `< 30` pasang titik (karena patch bintang didominasi oleh langit gelap tanpa tekstur), otomatis fallback ke *Nearest-Neighbor* dalam radius 50px. |
 | **Dual-RANSAC Split** | Horizon/Motion clustering | Membagi inliers menjadi dua kelompok gerakan terpisah: **Landscape** (tripod: dx=0, dy=0) dan **Sky/Stars** (drift akibat rotasi bumi). |
@@ -172,10 +198,11 @@ sky_ref, sky_comp, land_ref, land_comp = taichi_aot.ofb(img_ref, img_comp, thres
 * **i32 Popcount Bug (Vulkan/AOT)**: Lihat constraint `i32 Popcount Bug` di bagian atas.
 * FAST score: Gunakan SAD sederhana (bukan nested `ti.static` 16×9 — menyebabkan compile hang).
 
-**Hasil Verifikasi (Tripod Night Burst):**
+**Hasil Verifikasi (Tripod Night & Low-Res Align):**
 * **Landscape Matches (dx=0.0, dy=0.0)**: **415 Matches**
-* **Sky/Star Matches (dx=+8.0, dy=+15.0)**: **14 Matches**
+* **Low-Res Alignment (< 240px)**: Teruji sukses pada 180x120px dengan akurasi sub-pixel dan visual alignment sangat presisi.
 * **TCM yang dikompilasi**: `ofb_vulkan.tcm` (~103 KB) & `ofb_cuda.tcm` (~255 KB) dengan dukungan parameter `margin` dan `threshold`.
+
 
 ---
 
@@ -213,3 +240,78 @@ warped = taichi_aot.warp_affine(src_img, M, dsize=(w, h))
 pts_ref, pts_comp = taichi_aot.ofb(img_ref, img_comp, max_kps=2000, threshold=0.08)
 H, inliers = cv2.findHomography(pts_ref, pts_comp, cv2.RANSAC, 5.0)
 ```
+
+### A-KAZE (Accelerated KAZE) Feature Matching
+```python
+pts_ref, pts_comp, scores = taichi_aot.akaze(img_ref, img_comp, threshold=0.008, k_contrast=0.02)
+H, inliers = cv2.findHomography(pts_ref, pts_comp, cv2.RANSAC, 5.0)
+```
+
+---
+
+## 🆕 Algoritma Baru: A-KAZE GPU Feature Matcher (Superior Quality)
+
+**Nama resmi**: A-KAZE | **Alias**: AKAZE
+**Modul**: `akaze.py` → `compile_akaze_tcm.py` → `akaze_{backend}.tcm`
+
+**API Publik** (`taichi_aot/__init__.py`):
+```python
+pts_ref, pts_comp, scores = taichi_aot.akaze(img_ref, img_comp, ratio_threshold=0.8, grid_size=32, threshold=0.008, k_contrast=0.02)
+```
+
+**Spesifikasi Teknis:**
+* **Non-Linear Scale Space (FED)**: Menggunakan Fast Explicit Diffusion (8 langkah FED per level piramida) untuk meredam noise sensor tinggi sembari mempertahankan detail tepi struktur medis/mikroskopik halus yang biasanya hilang pada Gaussian blur.
+* **Hessian Determinant Detector**: Respon fitur dihitung berdasarkan determinan Hessian orde-dua untuk stabilitas struktural organik yang superior.
+* **M-SURF Binary Descriptor**: Menggunakan deskriptor biner 256-bit berbasis tanggapan wavelet Haar yang dirotasikan terhadap sudut centroid lokal untuk pencocokan Hamming dua arah yang sangat tangguh.
+* **GPU Packing (pack_matches)**: Seluruh koordinat keypoint dan matches dipaketkan langsung pada memori VRAM GPU, menghasilkan jeda sinkronisasi seminimal mungkin (hanya 1 pemanggilan `to_numpy()` per level piramida).
+* **Paritas Kualitas**: Teruji memberikan rasio inlier RANSAC sebesar **13.64%** pada gambar medis terdegradasi parah, mengungguli OFB (**5.19%**) secara signifikan.
+
+---
+
+## 🚀 Fitur Paralel & Watchdog VRAM (Session 3)
+
+### Fitur Saat Ini:
+* **Multi-threaded Execute (`async_run`)**: Thread pool asinkron untuk submit shader Vulkan paralel tanpa UI freezing.
+* **Thread-safe Resource Pool**: Penyekatan akses pointer memori CPU <-> GPU menggunakan `threading.RLock` dan pooling dinamis.
+* **3-Layer Auto-Cleanup Guard**: Proteksi runtime dengan menangkap sinyal `SIGSEGV`/`SIGILL`/`SIGABRT`/`SIGFPE` dan monitoring watchdog daemon (2 detik heartbeat) untuk memaksa pelepasan VRAM di Windows.
+  * **Stateful Smart VRAM Reclamation**: Ketika aplikasi idle (>10 detik), watchdog melakukan pembersihan VRAM pintar (buffer pool, staging, GC) secara **satu kali** per sesi idle (guarded by `_vram_reclaimed`) agar tidak berulang-ulang tanpa mematikan aplikasi.
+* **Vulkaninfo Bypass**: Bypassing pemanggilan `vulkaninfo.exe` dinamis dengan mengunci ID device GPU ke `0` via `PIXEL_REFINE_AOT_DEVICE = 0`.
+
+### Batasan-Batasan (Limitations):
+1. **Thread vs Process**: Paralelisme hanya aman jika menggunakan **Multi-threading** (`ThreadPoolExecutor`). Jika dijalankan menggunakan multi-proses (`ProcessPoolExecutor` / `multiprocessing`), sistem akan men-spawn proses `python.exe` baru secara independen yang memuat konteks Vulkan terpisah, berpotensi memicu overhead inisialisasi ganda di driver GPU.
+2. **Crash Keras Tingkat Kernel**: Jika sistem mengalami **BSOD (Blue Screen)** atau kernel Windows crash secara fisik, proteksi pembersihan level user-space tidak akan sempat dipanggil, sehingga restart fisik PC tetap diperlukan.
+3. **iGPU Memory Swapping**: Laptop dengan memori GPU terintegrasi (iGPU Intel/AMD) yang membagi RAM sistem (Shared VRAM) dapat mengalami *throttling* atau kegagalan alokasi memori cepat jika ukuran antrean paralel melebihi kapasitas memori fisik yang dialokasikan. Disarankan membatasi ukuran batch asinkron di bawah 10 gambar pada iGPU.
+4. **Vulkan Queue Lock**: Fungsi sinkronisasi `engine.sync()` wajib digunakan sebelum melepas buffer intermediate antar pipeline untuk mencegah race condition pembacaan VRAM.
+
+
+---
+
+## 🆕 Algoritma & Modul Baru: Multi-size BMA & Generic AOT Template
+
+### 1. Multi-size Block Matching Alignment (BMA)
+*   **Modul**: `compute_flow.py` → `compute_flow_vulkan.tcm`
+*   **Detail**: 
+    *   Mengevaluasi pencocokan ubin secara hierarkis (induk $32 \times 32$ dan $4 \times$ sub-ubin $16 \times 16$).
+    *   Jika rata-rata cost dari 4 sub-ubin lebih baik 15% dari ubin induk (`avg_sub_cost < 0.85 * best_cost`), maka struktur sub-blok diterima (Split) dan dilakukan refinement sub-pixel paraboloid individu.
+    *   Menggunakan metrik pencocokan standar **SAD** dan **SSD** untuk akurasi dan performa stabil serta menghemat memori GPU.
+
+### 2. Generic Optical Flow Template
+*   **Modul**: [template_flow.py](file:///E:/APP%20Developer/Pixel%20Refine/pixel_refine_desktop/enhance_stack/core/algorithm/alignment/alignment_tile/template_flow.py) → `template_flow_vulkan.tcm`
+*   **Detail**:
+    *   Template bersih yang memisahkan device math/cost functions (`custom_matching_cost`), kernel pencarian kasar & halus (`initial_coarse_search_kernel`, `hierarchical_refine_kernel`), dan builder graf AOT.
+    *   Berfungsi sebagai kerangka kerja awal untuk membangun variasi algoritma estimasi gerakan/aliran spasial (optical flow) berbasis piramida di Taichi GPU.
+
+---
+
+## 📱 Mobile QML Integration & Visual Parity (Session 4)
+
+### Kendala & Solusi Penting:
+1. **Kesalahan Kustomisasi Gaya QML (`The current style does not support customization...`)**:
+   * **Penyebab**: Engine QML memuat gaya native (Windows style) secara default jika modul PySide6/QtQuick di-import sebelum environment variable penyetelan gaya diatur.
+   * **Solusi**: Wajib menyetel `os.environ["QT_QUICK_CONTROLS_STYLE"] = "Basic"` di baris paling atas berkas entri pengujian/aplikasi sebelum meng-import library PySide6 apa pun.
+2. **TypeError Properti Null (`TypeError: Cannot read property '...' of null`)**:
+   * **Penyebab**: Objek jembatan C++ yang didaftarkan ke QML Context via `setContextProperty` (`theme_bridge` & `app_bridge`) terhapus oleh Python/C++ Garbage Collector jika di-parent-kan menggunakan `.setParent(quick_widget.engine())` karena siklus hidup engine bersifat dinamis.
+   * **Solusi**: Parent-kan objek jembatan langsung ke kontainer visual utama, yaitu objek `QQuickWidget` sendiri menggunakan `.setParent(quick_widget)`. Ini memastikan referensi tetap ada selama antarmuka ditampilkan.
+
+
+

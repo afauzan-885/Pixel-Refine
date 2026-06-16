@@ -138,8 +138,46 @@ def load_raw_as_8bit_rgb(image_path: str) -> np.ndarray:
                 return img_array
         except rawpy.LibRawError as e:
             raise RuntimeError(f"Rawpy Error for {filename}: {e}")  # type: ignore
+    except Exception as e:
+            raise RuntimeError(f"Unexpected DNG error for {filename}: {e}")
+
+
+def load_raw_as_8bit_rgb_half_res(image_path: str) -> np.ndarray:
+    """Loads a RAW/DNG image and returns it as an 8-bit half-resolution RGB numpy array using Hamilton Demosaic with rawpy fallback."""
+    filename = os.path.basename(image_path)
+    try:
+        from taichi_library import taichi_aot
+
+        with taichi_lock:
+            rgb_f32 = taichi_aot.demosaic(image_path, method="hamilton-rgb-half-res")
+        if rgb_f32 is not None:
+            return np.clip(rgb_f32 * 255.0, 0, 255).astype(np.uint8)
+        else:
+            raise RuntimeError("Hamilton demosaic half res returned None")
+    except Exception as e_ta:
+        print(
+            f"[Fallback] Taichi Hamilton half res demosaic failed ({e_ta}), falling back to rawpy half-res."
+        )
+        try:
+            with rawpy.imread(image_path) as raw:
+                gamma_setting = (2.222, 4.5)
+                img_array = raw.postprocess(
+                    demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,  # type: ignore
+                    half_size=True,  # Extracted at half size for speed!
+                    use_camera_wb=True,
+                    gamma=gamma_setting,
+                    output_bps=8,
+                    output_color=rawpy.ColorSpace.sRGB,  # type: ignore
+                    highlight_mode=rawpy.HighlightMode.Blend,  # type: ignore
+                )
+                if img_array is None:
+                    raise RuntimeError(f"Rawpy postprocessing failed for {filename}")
+                return img_array
+        except rawpy.LibRawError as e:
+            raise RuntimeError(f"Rawpy Error for {filename}: {e}")  # type: ignore
         except Exception as e:
             raise RuntimeError(f"Unexpected DNG error for {filename}: {e}")
+
 
 
 class RawImageProcessingThread(BaseMultiThreading):

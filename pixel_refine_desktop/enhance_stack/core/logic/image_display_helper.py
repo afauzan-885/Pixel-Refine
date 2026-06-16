@@ -108,6 +108,7 @@ class ImageLoaderThread(QThread):
         max_height=None,
         is_reference=False,
         batch_id=None,
+        half_res=False,
         parent=None,
     ):
         """
@@ -119,6 +120,7 @@ class ImageLoaderThread(QThread):
             max_height: Max height untuk resize (optional)
             is_reference: Jika True, gunakan/update comparison cache
             batch_id: ID batch untuk caching referensi
+            half_res: Jika True, load resolusi rendah (cepat) untuk preview burst
             parent: Parent widget
         """
         super().__init__(parent)
@@ -127,6 +129,7 @@ class ImageLoaderThread(QThread):
         self.max_height = max_height
         self.is_reference = is_reference
         self.batch_id = batch_id
+        self.half_res = half_res
 
     def run(self):
         """Metode utama untuk loading gambar di background thread."""
@@ -204,11 +207,20 @@ class ImageLoaderThread(QThread):
                     image_array = np.array(img)
                     # Convert RGB to BGR for OpenCV compatibility
                     image_array = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
+                    
+                    # If half_res requested, downsample for quick preview
+                    if getattr(self, "half_res", False):
+                        h, w = image_array.shape[:2]
+                        image_array = cv2.resize(image_array, (w // 2, h // 2), interpolation=cv2.INTER_AREA)
 
             # Handle RAW formats
             elif ext in SUPPORTED_FORMATS.get("raw", []):
-                from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import load_raw_as_8bit_rgb
-                img_rgb = load_raw_as_8bit_rgb(self.image_path)
+                if getattr(self, "half_res", False):
+                    from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import load_raw_as_8bit_rgb_half_res
+                    img_rgb = load_raw_as_8bit_rgb_half_res(self.image_path)
+                else:
+                    from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import load_raw_as_8bit_rgb
+                    img_rgb = load_raw_as_8bit_rgb(self.image_path)
                 image_array = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
         except Exception as e:
@@ -275,7 +287,7 @@ class ImageLoaderThread(QThread):
 
 
 def setup_zoomable_preview(
-    zoomable_widget, image_path, is_reference=False, batch_id=None
+    zoomable_widget, image_path, is_reference=False, batch_id=None, half_res=False
 ):
     """
     Setup Zoomable widget untuk display gambar.
@@ -285,6 +297,7 @@ def setup_zoomable_preview(
         image_path: Path ke file gambar
         is_reference: Jika True, gunakan/update comparison cache
         batch_id: ID batch untuk caching referensi
+        half_res: Jika True, load resolusi rendah (cepat) untuk preview burst
     """
     # Clear scene
     zoomable_widget.scene().clear()
@@ -326,6 +339,7 @@ def setup_zoomable_preview(
         max_height=4000,
         is_reference=is_reference,
         batch_id=batch_id,
+        half_res=half_res,
     )
     loader.image_loaded.connect(on_image_loaded)
     loader.error_occurred.connect(on_error)
@@ -335,7 +349,7 @@ def setup_zoomable_preview(
 
 
 def display_image_in_zoomable(
-    zoomable_widget, image_path, callback=None, is_reference=False, batch_id=None
+    zoomable_widget, image_path, callback=None, is_reference=False, batch_id=None, half_res=False
 ):
     """
     Display gambar di Zoomable widget dengan loading indicator.
@@ -346,9 +360,10 @@ def display_image_in_zoomable(
         callback: Optional callback saat image loaded (pixmap, path) -> None
         is_reference: Jika True, gunakan/update comparison cache
         batch_id: ID batch untuk caching referensi
+        half_res: Jika True, load resolusi rendah (cepat) untuk preview burst
     """
     loader = setup_zoomable_preview(
-        zoomable_widget, image_path, is_reference=is_reference, batch_id=batch_id
+        zoomable_widget, image_path, is_reference=is_reference, batch_id=batch_id, half_res=half_res
     )
 
     if callback:

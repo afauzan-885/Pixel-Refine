@@ -14,7 +14,7 @@ from PySide6.QtCore import Qt
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.Farneback_optical_flow import (
     FarnebackAlgorithm,
 )
-from pixel_refine_desktop.ui.resources.styles.stylesheet import (
+from resources.styles.stylesheet import (
     SCROLL_AREA,
     SLIDER_STYLE,
     SLIDER_VALUE_LABEL,

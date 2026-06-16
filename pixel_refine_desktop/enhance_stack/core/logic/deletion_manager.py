@@ -20,7 +20,7 @@ from pixel_refine_desktop.enhance_stack.core.logic.process_manager import (
     ProcessManager,
     is_widget_alive,
 )
-from pixel_refine_desktop.ui.resources.animations.toast.toast_manager import (
+from resources.animations.toast.toast_manager import (
     ToastPosition,
 )
 
@@ -233,10 +233,11 @@ class DeletionManager(QObject):
         if not selected_ids or not self.panel.current_batch_id:
             return
 
-        from pixel_refine_desktop.ui.resources.GenericUILibrary import modal_confirm
+        from resources.GenericUILibrary import modal_confirm
+        from pixel_refine_desktop.ui.views.settings.General.Language import language_config
         confirmed = modal_confirm.question(
             self.panel,
-            f"Apakah Anda yakin ingin menghapus {len(selected_ids)} gambar yang dipilih dari batch ini?"
+            f"{language_config.CORE_MSG_CONFIRM_DELETE} ({len(selected_ids)})"
         )
 
         if confirmed:

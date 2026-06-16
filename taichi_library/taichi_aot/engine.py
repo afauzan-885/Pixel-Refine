@@ -1,21 +1,334 @@
 import ctypes
 import os
 import sys
+import atexit
+import signal
+import weakref
 import numpy as np
 import typing
-import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, Future
+
+
+# -------------------------------------------------------------------------
+# Auto-Destruction Configuration
+# -------------------------------------------------------------------------
+def _env_float(name, default):
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+_HEARTBEAT_TIMEOUT_S = _env_float("PIXEL_REFINE_HEARTBEAT_TIMEOUT", 10.0)
+_OP_TIMEOUT_S = _env_float("PIXEL_REFINE_OP_TIMEOUT", 120.0)
+_LOCK_CONTENTION_S = _env_float("PIXEL_REFINE_LOCK_TIMEOUT", 30.0)
+_ERROR_WINDOW_S = _env_float("PIXEL_REFINE_ERROR_WINDOW", 30.0)
+_ERROR_THRESHOLD = _env_int("PIXEL_REFINE_ERROR_THRESHOLD", 5)
+_AUTO_DESTROY_ENABLED = os.environ.get("PIXEL_REFINE_AUTO_DESTROY", "1") != "0"
+_INIT_TIMEOUT_S = _env_float("PIXEL_REFINE_INIT_TIMEOUT", 30.0)
+_CLEAN_ZOMBIES = os.environ.get("PIXEL_REFINE_CLEAN_ZOMBIES", "1") != "0"
+
+
+def configure_auto_destroy(
+    heartbeat_timeout=None,
+    op_timeout=None,
+    lock_timeout=None,
+    error_threshold=None,
+    error_window=None,
+    enabled=None,
+):
+    """Runtime configuration override for auto-destruction system.
+
+    Call before any GPU operations to adjust timeouts.
+
+    Args:
+        heartbeat_timeout: Max idle seconds before auto-destruction (default 60)
+        op_timeout: Max seconds for a single DLL operation (default 120)
+        lock_timeout: Max seconds waiting on lock before deadlock detection (default 30)
+        error_threshold: Error count within error_window to trigger cleanup (default 5)
+        error_window: Rolling window in seconds for error counting (default 30)
+        enabled: Set False to disable all auto-destruction
+    """
+    global _HEARTBEAT_TIMEOUT_S, _OP_TIMEOUT_S, _LOCK_CONTENTION_S
+    global _ERROR_THRESHOLD, _ERROR_WINDOW_S, _AUTO_DESTROY_ENABLED
+    global _INIT_TIMEOUT_S, _CLEAN_ZOMBIES
+    if heartbeat_timeout is not None:
+        _HEARTBEAT_TIMEOUT_S = float(heartbeat_timeout)
+    if op_timeout is not None:
+        _OP_TIMEOUT_S = float(op_timeout)
+    if lock_timeout is not None:
+        _LOCK_CONTENTION_S = float(lock_timeout)
+    if error_threshold is not None:
+        _ERROR_THRESHOLD = int(error_threshold)
+    if error_window is not None:
+        _ERROR_WINDOW_S = float(error_window)
+    if enabled is not None:
+        _AUTO_DESTROY_ENABLED = bool(enabled)
+
+
+# -------------------------------------------------------------------------
+# Heartbeat & Operation Tracking State
+# -------------------------------------------------------------------------
+_heartbeat_lock = threading.Lock()
+_last_activity_time = time.monotonic()  # updated on every GPU op entry/exit
+_op_start_time = 0.0  # 0.0 = no operation in progress
+_op_name = ""  # human-readable label for logging
+_lock_wait_start = 0.0  # when a thread started waiting for _lock
+_lock_wait_name = ""  # what operation is waiting for lock
+_error_timestamps = []  # rolling list of time.monotonic() for circuit breaker
+_vram_reclaimed = False  # Track if VRAM was already cleared during the current idle session
+
+
+def _heartbeat():
+    """Record activity. Call at entry and exit of every GPU operation."""
+    global _last_activity_time, _vram_reclaimed
+    if not _AUTO_DESTROY_ENABLED:
+        return
+    with _heartbeat_lock:
+        _last_activity_time = time.monotonic()
+        _vram_reclaimed = False
+
+
+def _op_begin(name: str):
+    """Mark the start of a blocking GPU/DLL operation."""
+    global _op_start_time, _op_name, _last_activity_time, _vram_reclaimed
+    if not _AUTO_DESTROY_ENABLED:
+        return
+    with _heartbeat_lock:
+        _op_start_time = time.monotonic()
+        _op_name = name
+        _last_activity_time = _op_start_time
+        _vram_reclaimed = False
+
+
+def _op_end():
+    """Mark the end of a blocking GPU/DLL operation."""
+    global _op_start_time, _op_name, _last_activity_time, _vram_reclaimed
+    if not _AUTO_DESTROY_ENABLED:
+        return
+    with _heartbeat_lock:
+        _op_start_time = 0.0
+        _op_name = ""
+        _last_activity_time = time.monotonic()
+        _vram_reclaimed = False
+
+
+def _lock_wait_begin(name: str):
+    """Track when a thread starts blocking on engine._lock."""
+    global _lock_wait_start, _lock_wait_name
+    if not _AUTO_DESTROY_ENABLED:
+        return
+    with _heartbeat_lock:
+        _lock_wait_start = time.monotonic()
+        _lock_wait_name = name
+
+
+def _lock_wait_end():
+    """Clear lock wait tracking (called immediately after lock acquired)."""
+    global _lock_wait_start, _lock_wait_name
+    if not _AUTO_DESTROY_ENABLED:
+        return
+    with _heartbeat_lock:
+        _lock_wait_start = 0.0
+        _lock_wait_name = ""
+
+
+def _record_error():
+    """Register an error occurrence for the circuit breaker."""
+    if not _AUTO_DESTROY_ENABLED:
+        return
+    now = time.monotonic()
+    with _heartbeat_lock:
+        _error_timestamps.append(now)
+        # Prune old entries outside the window
+        cutoff = now - _ERROR_WINDOW_S
+        while _error_timestamps and _error_timestamps[0] < cutoff:
+            _error_timestamps.pop(0)
+
+
+# -------------------------------------------------------------------------
+# Early Watchdog: started BEFORE any DLL/GPU initialization so it can
+# detect and recover from hangs during AOTEngine() Vulkan init.
+# -------------------------------------------------------------------------
+_WATCHDOG_INTERVAL_S = 2.0  # check every 2 seconds
+
+
+def _watchdog_run():
+    global _last_activity_time, _vram_reclaimed
+    main_thread = threading.main_thread()
+    while True:
+        time.sleep(_WATCHDOG_INTERVAL_S)
+        if not _AUTO_DESTROY_ENABLED:
+            # If auto-destroy is disabled, only check main thread liveness
+            if not main_thread.is_alive():
+                _global_cleanup("watchdog-main-thread-dead")
+                os._exit(1)  # Hard kill when auto-destroy disabled
+                break
+            continue
+
+        now = time.monotonic()
+
+        # Snapshot all monitored state atomically under the heartbeat lock
+        with _heartbeat_lock:
+            activity_age = now - _last_activity_time
+            op_elapsed = (now - _op_start_time) if _op_start_time > 0 else 0.0
+            current_op = _op_name
+            lock_wait_elapsed = (
+                (now - _lock_wait_start) if _lock_wait_start > 0 else 0.0
+            )
+            lock_wait_op = _lock_wait_name
+            recent_errors = len(_error_timestamps)
+
+        # --- Condition 1: Main thread dead (original behavior) ---
+        if not main_thread.is_alive():
+            try:
+                sys.stderr.write(
+                    f"[AOTEngine Watchdog] Main thread is dead. "
+                    f"Triggering VRAM destruction.\n"
+                )
+                sys.stderr.flush()
+            except Exception:
+                pass
+            _force_global_cleanup("watchdog-main-thread-dead")
+            os._exit(
+                1
+            )  # Hard kill: os._exit bypasses signal delivery (main thread may be dead)
+            break
+
+        # --- Condition 2: Single operation hung beyond timeout ---
+        if op_elapsed > _OP_TIMEOUT_S:
+            try:
+                sys.stderr.write(
+                    f"[AOTEngine Watchdog] Operation '{current_op}' hung for "
+                    f"{op_elapsed:.1f}s (limit {_OP_TIMEOUT_S}s). "
+                    f"Triggering auto-destruction.\n"
+                )
+                sys.stderr.flush()
+            except Exception:
+                pass
+            _force_global_cleanup(f"op-timeout:{current_op}:{op_elapsed:.0f}s")
+            os._exit(
+                1
+            )  # Hard kill: os._exit bypasses signal delivery (main thread may be blocked)
+            break
+
+        # --- Condition 3: Lock contention beyond timeout (deadlock detection) ---
+        if lock_wait_elapsed > _LOCK_CONTENTION_S:
+            try:
+                sys.stderr.write(
+                    f"[AOTEngine Watchdog] Lock contention in '{lock_wait_op}' for "
+                    f"{lock_wait_elapsed:.1f}s (limit {_LOCK_CONTENTION_S}s). "
+                    f"Triggering auto-destruction.\n"
+                )
+                sys.stderr.flush()
+            except Exception:
+                pass
+            _force_global_cleanup(
+                f"lock-contention:{lock_wait_op}:{lock_wait_elapsed:.0f}s"
+            )
+            os._exit(
+                1
+            )  # Hard kill: os._exit is REQUIRED here (main thread is blocked on RLock)
+            break
+
+        # --- Condition 4: Heartbeat stale (no GPU activity at all -> Idle) ---
+        # When the application is idle, we don't want to shut down the application.
+        # Instead, we perform a smart VRAM cleanup (clear buffer pools, collect GC) to
+        # minimize VRAM footprint, while keeping the application fully alive and functional.
+        # Note: We only run reclamation once per idle session (guarded by _vram_reclaimed).
+        if activity_age > _HEARTBEAT_TIMEOUT_S and op_elapsed == 0.0:
+            if not _vram_reclaimed:
+                try:
+                    sys.stderr.write(
+                        f"[AOTEngine Watchdog] No GPU activity for {activity_age:.1f}s "
+                        f"(limit {_HEARTBEAT_TIMEOUT_S}s). Triggering smart VRAM reclamation.\n"
+                    )
+                    sys.stderr.flush()
+                except Exception:
+                    pass
+                
+                # Smart VRAM reclamation logic:
+                try:
+                    # Obtain the global engine instance if it exists and clear its pools
+                    for key, inst in list(AOTEngine._instances.items()):
+                        with inst._lock:
+                            # 1. Clear cached staging buffers
+                            for entries in list(getattr(inst, '_staging_pool', {}).values()):
+                                for entry in entries:
+                                    buf = entry.get('buffer')
+                                    if buf and buf.handle is not None and buf.is_owner:
+                                        try:
+                                            _LIB.free_gpu_buffer(inst.runtime, buf.handle)
+                                            buf.handle = None
+                                            buf.is_owner = False
+                                        except Exception:
+                                            pass
+                            inst._staging_pool = {}
+                            
+                            # 2. Clear buffer pool
+                            inst.buffer_pool.clear()
+                    
+                    # 3. Trigger Python garbage collection to free unreferenced wrappers
+                    import gc as _gc
+                    _gc.collect()
+                except Exception as e:
+                    try:
+                        sys.stderr.write(f"[AOTEngine Watchdog] Smart VRAM reclamation error: {e}\n")
+                        sys.stderr.flush()
+                    except Exception:
+                        pass
+                
+                # Mark VRAM as reclaimed for the current idle session
+                with _heartbeat_lock:
+                    _vram_reclaimed = True
+            
+            # Reset heartbeat timer so we don't spin-poll the check
+            with _heartbeat_lock:
+                _last_activity_time = now
+            continue
+
+        # --- Condition 5: Error circuit breaker ---
+        if recent_errors >= _ERROR_THRESHOLD:
+            try:
+                sys.stderr.write(
+                    f"[AOTEngine Watchdog] {recent_errors} errors within "
+                    f"{_ERROR_WINDOW_S}s window (threshold {_ERROR_THRESHOLD}). "
+                    f"Triggering auto-destruction.\n"
+                )
+                sys.stderr.flush()
+            except Exception:
+                pass
+            _force_global_cleanup(f"error-breaker:{recent_errors}-errors")
+            os._exit(1)  # Hard kill: os._exit bypasses signal delivery
+            break
+
+
+_watchdog = threading.Thread(
+    target=_watchdog_run, name="AOTEngine-GPU-Watchdog", daemon=True
+)
+_watchdog.start()
 
 # -------------------------------------------------------------------------
 # OpenCV-style Constants for Standardization
 # -------------------------------------------------------------------------
 INTER_NEAREST = 0
-INTER_LINEAR  = 1
-INTER_CUBIC   = 2
-INTER_AREA    = 3
+INTER_LINEAR = 1
+INTER_CUBIC = 2
+INTER_AREA = 3
 
 COLOR_BGR2GRAY = 6
 COLOR_RGB2GRAY = 7
 COLOR_GRAY2BGR = 8
+
 
 # -------------------------------------------------------------------------
 # Dynamic Argument Structure for C++ Engine
@@ -23,24 +336,26 @@ COLOR_GRAY2BGR = 8
 class DynamicArg(ctypes.Structure):
     _fields_ = [
         ("name", ctypes.c_char_p),
-        ("arg_type", ctypes.c_int), # 0: ndarray, 1: scalar
-        ("dtype", ctypes.c_int),    # 0: f32, 1: i32, 2: u8, 3: u16
+        ("arg_type", ctypes.c_int),  # 0: ndarray, 1: scalar
+        ("dtype", ctypes.c_int),  # 0: f32, 1: i32, 2: u8, 3: u16
         ("dim_count", ctypes.c_int),
         ("shape", ctypes.c_int * 8),
         ("elem_dim_count", ctypes.c_int),
         ("elem_shape", ctypes.c_int * 8),
         ("is_vector", ctypes.c_int),
         ("vector_dim", ctypes.c_int),
-        ("val_u64", ctypes.c_uint64)
+        ("val_u64", ctypes.c_uint64),
     ]
+
 
 dtype_map = {
     np.float32: 0,
     np.int32: 1,
     np.uint8: 2,
     np.uint16: 3,
-    np.float64: 0, # Fallback
+    np.float64: 0,  # Fallback
 }
+
 
 # -------------------------------------------------------------------------
 # Dynamic Argument Population Helper
@@ -48,24 +363,27 @@ dtype_map = {
 def _populate_dynamic_arg(arg: DynamicArg, name_bytes, value, context_name="Unknown"):
     """Internal helper to fill DynamicArg metadata consistently."""
     arg.name = name_bytes
-    
+
     if isinstance(value, (int, np.integer)):
         arg.arg_type = 1
-        arg.dtype = 1 # i32
+        arg.dtype = 1  # i32
         arg.val_u64 = int(value)
     elif isinstance(value, (float, np.floating)):
         arg.arg_type = 1
-        arg.dtype = 0 # f32
-        arg.val_u64 = ctypes.cast(ctypes.pointer(ctypes.c_float(float(value))), ctypes.POINTER(ctypes.c_uint64)).contents.value
+        arg.dtype = 0  # f32
+        arg.val_u64 = ctypes.cast(
+            ctypes.pointer(ctypes.c_float(float(value))),
+            ctypes.POINTER(ctypes.c_uint64),
+        ).contents.value
     elif isinstance(value, (TaichiGPUBuffer, TaichiPlaceholder)):
         arg.arg_type = 0
-        
+
         # Strict Metadata Alignment for AOT
         is_vec = getattr(value, "is_vector", False)
         v_dim = getattr(value, "vector_dim", 1)
-        
-        val_dtype = value.dtype if hasattr(value, 'dtype') else np.float32
-        if hasattr(val_dtype, 'type'):
+
+        val_dtype = value.dtype if hasattr(value, "dtype") else np.float32
+        if hasattr(val_dtype, "type"):
             val_dtype = val_dtype.type
         arg.dtype = dtype_map.get(val_dtype, 0)
         arg.is_vector = 1 if is_vec else 0
@@ -73,39 +391,47 @@ def _populate_dynamic_arg(arg: DynamicArg, name_bytes, value, context_name="Unkn
 
         shape = value.shape
         dim_count = len(shape)
-        
+
         if is_vec:
             # Vector field: Distinguish between spatial and vector components
             if dim_count >= 2 and shape[-1] == v_dim:
                 # Shape explicitly includes vector dim (e.g. H, W, 3) -> Strip it for Taichi
                 arg.dim_count = dim_count - 1
-                for d in range(dim_count - 1): arg.shape[d] = shape[d]
+                for d in range(dim_count - 1):
+                    arg.shape[d] = shape[d]
                 arg.elem_dim_count = 1
                 arg.elem_shape[0] = v_dim
             else:
                 # Shape is implicitly a grid of vectors (e.g. gn, gm, gl containing vec2)
                 arg.dim_count = dim_count
-                for d in range(dim_count): arg.shape[d] = shape[d]
+                for d in range(dim_count):
+                    arg.shape[d] = shape[d]
                 arg.elem_dim_count = 1
                 arg.elem_shape[0] = v_dim
         else:
             # Scalar field
             arg.dim_count = dim_count
-            for d in range(dim_count): arg.shape[d] = shape[d]
+            for d in range(dim_count):
+                arg.shape[d] = shape[d]
             arg.elem_dim_count = 0
-            
+
         arg.val_u64 = ctypes.c_uint64(value.handle)
     else:
         # Backward compatibility for direct Taichi NDArrays (if any)
         if hasattr(value, "ptr"):
             arg.arg_type = 0
             arg.val_u64 = value.ptr
-            arg.dtype = 0 # Assume f32
+            arg.dtype = 0  # Assume f32
             arg.dim_count = len(value.shape)
-            for d, s in enumerate(value.shape): arg.shape[d] = s
+            for d, s in enumerate(value.shape):
+                arg.shape[d] = s
             arg.elem_dim_count = 0
         else:
-            name_str = name_bytes.decode('utf-8') if isinstance(name_bytes, bytes) else str(name_bytes)
+            name_str = (
+                name_bytes.decode("utf-8")
+                if isinstance(name_bytes, bytes)
+                else str(name_bytes)
+            )
             raise TypeError(
                 f"\n[AOTEngine Error] {context_name}: Unsupported object type for argument '{name_str}'.\n"
                 f"  EXPECTED: TaichiGPUBuffer, TaichiPlaceholder, int, or float.\n"
@@ -113,55 +439,76 @@ def _populate_dynamic_arg(arg: DynamicArg, name_bytes, value, context_name="Unkn
                 f"  HINT    : If using NumPy, ensure you upload it via 'InputArray(data)' first."
             )
 
+
 # -------------------------------------------------------------------------
 # Global State
 # -------------------------------------------------------------------------
 _LIB = None
 _RUNTIME = None
 
+
 def _init_aot_bridge():
     global _LIB, _RUNTIME
     if _LIB is not None:
         return
-        
+
+    # Suppress loader registry warnings on Windows before Vulkan DLL gets loaded
+    os.environ["VK_LOADER_DEBUG"] = "error"
+    if os.name == "nt":
+        try:
+            # Force setting the environment variable directly into the Windows CRT process environment block
+            # This ensures that compiled C++ modules loaded via ctypes/LoadLibrary also inherit it.
+            ctypes.CDLL("msvcrt.dll")._putenv(b"VK_LOADER_DEBUG=error")
+        except Exception:
+            pass
+
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    aot_dll_dir = os.path.abspath(os.path.join(script_dir, "../taichi_algorithm/aot_py/aot_dll"))
+    aot_dll_dir = os.path.abspath(
+        os.path.join(script_dir, "../taichi_algorithm/aot_py/aot_dll")
+    )
     engine_dll_path = os.path.join(aot_dll_dir, "taichi_aot_engine.dll")
-    
-    if os.name == 'nt' and os.path.exists(aot_dll_dir):
+
+    if os.name == "nt" and os.path.exists(aot_dll_dir):
         os.add_dll_directory(aot_dll_dir)
-        
+
         # Add Taichi runtime bin for DLL resolution without importing it (avoid printing banner/startup JIT check)
         try:
             import importlib.util
+
             spec = importlib.util.find_spec("taichi")
             if spec is not None and spec.origin is not None:
                 ti_root = os.path.dirname(spec.origin)
                 ti_bin = os.path.join(ti_root, "_lib", "c_api", "bin")
-                if os.path.exists(ti_bin): os.add_dll_directory(ti_bin)
-                
+                if os.path.exists(ti_bin):
+                    os.add_dll_directory(ti_bin)
+
                 # CRITICAL: Set TI_LIB_DIR for the C++ Engine to find SPIR-V/CUDA runtimes
                 ti_runtime = os.path.join(ti_root, "_lib", "runtime")
                 if os.path.exists(ti_runtime):
                     os.environ["TI_LIB_DIR"] = ti_runtime
-        except: pass
+        except:
+            pass
 
     try:
         _LIB = ctypes.CDLL(engine_dll_path)
-        print(f"[AOTEngine] Successfully loaded backend bridge: {os.path.basename(engine_dll_path)}")
+        print(
+            f"[AOTEngine] Successfully loaded backend bridge: {os.path.basename(engine_dll_path)}"
+        )
     except Exception as e:
-        raise RuntimeError(f"Failed to load Generic AOT Engine DLL at {engine_dll_path}\nError: {e}")
+        raise RuntimeError(
+            f"Failed to load Generic AOT Engine DLL at {engine_dll_path}\nError: {e}"
+        )
 
     # Setup C-API Function Prototypes
     _LIB.init_aot_engine.argtypes = [ctypes.c_int, ctypes.c_int]
     _LIB.init_aot_engine.restype = ctypes.c_void_p
-    
+
     _LIB.scan_vulkan_devices.argtypes = []
     _LIB.scan_vulkan_devices.restype = ctypes.c_char_p
-    
+
     _LIB.load_aot_module.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
     _LIB.load_aot_module.restype = ctypes.c_void_p
-    
+
     _LIB.destroy_aot_module.argtypes = [ctypes.c_void_p]
     _LIB.destroy_aot_module.restype = None
 
@@ -171,10 +518,20 @@ def _init_aot_bridge():
     _LIB.free_gpu_buffer.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     _LIB.free_gpu_buffer.restype = None
 
-    _LIB.write_to_gpu_buffer.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint64]
+    _LIB.write_to_gpu_buffer.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_uint64,
+    ]
     _LIB.write_to_gpu_buffer.restype = None
 
-    _LIB.read_from_gpu_buffer.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint64]
+    _LIB.read_from_gpu_buffer.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_uint64,
+    ]
     _LIB.read_from_gpu_buffer.restype = None
 
     _LIB.map_gpu_buffer.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
@@ -183,10 +540,21 @@ def _init_aot_bridge():
     _LIB.unmap_gpu_buffer.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     _LIB.unmap_gpu_buffer.restype = None
 
-    _LIB.copy_gpu_buffer.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint64]
+    _LIB.copy_gpu_buffer.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_uint64,
+    ]
     _LIB.copy_gpu_buffer.restype = None
 
-    _LIB.run_aot_graph.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(DynamicArg), ctypes.c_int]
+    _LIB.run_aot_graph.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.POINTER(DynamicArg),
+        ctypes.c_int,
+    ]
     _LIB.run_aot_graph.restype = None
 
     _LIB.sync_runtime.argtypes = [ctypes.c_void_p]
@@ -195,46 +563,53 @@ def _init_aot_bridge():
     _LIB.clear_pipeline.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
     _LIB.clear_pipeline.restype = None
 
-    _LIB.add_to_pipeline.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(DynamicArg), ctypes.c_int]
+    _LIB.add_to_pipeline.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.POINTER(DynamicArg),
+        ctypes.c_int,
+    ]
     _LIB.add_to_pipeline.restype = None
 
-    _LIB.run_pipeline.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(DynamicArg), ctypes.c_int]
+    _LIB.run_pipeline.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(DynamicArg),
+        ctypes.c_int,
+    ]
     _LIB.run_pipeline.restype = None
 
-    _LIB.ti_imread_to_gpu.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+    _LIB.ti_imread_to_gpu.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+    ]
     _LIB.ti_imread_to_gpu.restype = ctypes.c_void_p
 
-    _LIB.ti_imwrite_from_gpu.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    _LIB.ti_imwrite_from_gpu.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+    ]
     _LIB.ti_imwrite_from_gpu.restype = ctypes.c_bool
 
-    _LIB.ti_cast_buffer.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    _LIB.ti_cast_buffer.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+    ]
     _LIB.ti_cast_buffer.restype = ctypes.c_bool
-
-    # Initialization
-    arch_str = "vulkan"
-    arch_id = 0
-    
-    device_id = 0
-    env_device = os.environ.get("PIXEL_REFINE_AOT_DEVICE")
-    if env_device is not None:
-        device_id = int(env_device)
-    else:
-        try:
-            devices_str = _LIB.scan_vulkan_devices().decode('utf-8')
-            device_list = [d.strip().lower() for d in devices_str.split(';')]
-            for idx, dev_name in enumerate(device_list):
-                if "nvidia" in dev_name or "geforce" in dev_name:
-                    device_id = idx
-                    print(f"[AOTEngine] Auto-selected NVIDIA GPU at Device index: {device_id} ({devices_str.split(';')[idx].strip()})")
-                    break
-        except Exception as e:
-            print(f"[AOTEngine WARNING] Failed to auto-scan GPUs: {e}. Falling back to default Device 0.")
-            
-    _RUNTIME = _LIB.init_aot_engine(arch_id, device_id)
-    if not _RUNTIME:
-        raise RuntimeError(f"Failed to initialize {arch_str.upper()} AOT Runtime.")
-    print(f"[AOTEngine] Runtime initialized on '{arch_str.upper()}' (Device {device_id})")
-    AOTEngine._active_arch = arch_str
 
 
 def configure_taichi_backend(prefer: str = None, device_memory_GB: float = None):
@@ -258,32 +633,38 @@ def configure_taichi_backend(prefer: str = None, device_memory_GB: float = None)
 
     # Map string to taichi arch constant
     arch_map = {
-        'vulkan': getattr(ti, 'vulkan', getattr(ti, 'gpu', None)),
-        'cuda': getattr(ti, 'cuda', None),
-        'gpu': getattr(ti, 'gpu', None),
-        'cpu': getattr(ti, 'cpu', None),
+        "vulkan": getattr(ti, "vulkan", getattr(ti, "gpu", None)),
+        "cuda": getattr(ti, "cuda", None),
+        "gpu": getattr(ti, "gpu", None),
+        "cpu": getattr(ti, "cpu", None),
     }
 
     arch = arch_map.get(arch_choice, None)
     if arch is None:
-        arch = getattr(ti, 'vulkan', getattr(ti, 'gpu', ti.cpu))
+        arch = getattr(ti, "vulkan", getattr(ti, "gpu", ti.cpu))
 
-    init_kwargs = {'default_fp': ti.f32}
+    init_kwargs = {"default_fp": ti.f32}
     if device_memory_GB is not None:
-        init_kwargs['device_memory_GB'] = device_memory_GB
+        init_kwargs["device_memory_GB"] = device_memory_GB
 
     # Provide a friendly log
-    print(f"[engine.configure_taichi_backend] Initializing Taichi with arch={arch_choice}")
+    print(
+        f"[engine.configure_taichi_backend] Initializing Taichi with arch={arch_choice}"
+    )
     ti.init(arch=arch, **init_kwargs)
+
 
 # -------------------------------------------------------------------------
 # GPU Buffer Manager
 # -------------------------------------------------------------------------
 class BufferPool:
     """Lightweight pool: tracks handles for potential reuse by exact size match."""
-    def __init__(self):
+
+    def __init__(self, engine=None):
+        self.engine = engine
         self.free_buffers = {}  # size -> list of handles
         import threading
+
         self._lock = threading.Lock()
 
     def acquire(self, size):
@@ -303,14 +684,27 @@ class BufferPool:
         """Force-free all pooled handles from VRAM."""
         global _LIB, _RUNTIME
         with self._lock:
-            if _LIB and _RUNTIME:
+            runtime = self.engine.runtime if self.engine else _RUNTIME
+            if _LIB and runtime:
                 for handles in self.free_buffers.values():
                     for h in handles:
-                        _LIB.free_gpu_buffer(_RUNTIME, h)
+                        _LIB.free_gpu_buffer(runtime, h)
             self.free_buffers = {}
 
+
 class TaichiGPUBuffer:
-    def __init__(self, size_bytes, handle, shape, dtype=np.float32, is_vector=False, engine=None, is_owner=True, host_accessible=False, vector_dim=3):
+    def __init__(
+        self,
+        size_bytes,
+        handle,
+        shape,
+        dtype=np.float32,
+        is_vector=False,
+        engine=None,
+        is_owner=True,
+        host_accessible=False,
+        vector_dim=3,
+    ):
         self.size_bytes = size_bytes
         self.handle = handle
         self.shape = shape
@@ -327,9 +721,11 @@ class TaichiGPUBuffer:
         if self.handle is not None and self.is_owner:
             if self.engine and self.engine.current_pipeline:
                 # Bypass/protect buffers during recording to prevent use-after-free
-                if getattr(self, "is_pipeline_intermediate", False) or (self.engine.current_pipeline in self.associated_pipelines):
+                if getattr(self, "is_pipeline_intermediate", False) or (
+                    self.engine.current_pipeline in self.associated_pipelines
+                ):
                     return
-            
+
             if self.engine and not self.host_accessible:
                 self.engine.buffer_pool.store(self.size_bytes, self.handle)
                 self.handle = None
@@ -339,10 +735,13 @@ class TaichiGPUBuffer:
 
     def destroy(self):
         """Immediately release GPU VRAM. Does NOT use buffer pool reuse."""
+        _heartbeat()
         if self.handle is not None and self.is_owner:
             # Bypass/protect buffers during recording to prevent use-after-free
             if self.engine and self.engine.current_pipeline:
-                if getattr(self, "is_pipeline_intermediate", False) or (self.engine.current_pipeline in self.associated_pipelines):
+                if getattr(self, "is_pipeline_intermediate", False) or (
+                    self.engine.current_pipeline in self.associated_pipelines
+                ):
                     return
 
             # Auto-clear associated pipelines: if buffer is destroyed outside of recording,
@@ -355,12 +754,13 @@ class TaichiGPUBuffer:
                         self.engine.clear_pipeline_by_name(pipe_name)
 
             global _LIB, _RUNTIME
-            if _LIB and _RUNTIME:
+            runtime = self.engine.runtime if self.engine else _RUNTIME
+            if _LIB and runtime:
                 if self.engine and hasattr(self.engine, "_lock"):
                     with self.engine._lock:
-                        _LIB.free_gpu_buffer(_RUNTIME, self.handle)
+                        _LIB.free_gpu_buffer(runtime, self.handle)
                 else:
-                    _LIB.free_gpu_buffer(_RUNTIME, self.handle)
+                    _LIB.free_gpu_buffer(runtime, self.handle)
             self.handle = None
             self.is_owner = False
 
@@ -373,164 +773,410 @@ class TaichiGPUBuffer:
     def __del__(self):
         self.destroy()
 
-
     @property
     def ndim(self):
         return len(self.shape)
 
     @property
-    def nbytes(self): return self.size_bytes
+    def nbytes(self):
+        return self.size_bytes
 
     def to_numpy(self):
         """Read GPU data. Automatically handles staging for VRAM-only buffers."""
+        _heartbeat()
         out = np.zeros(self.shape, dtype=self.dtype)
-        if self.host_accessible:
-            if self.engine and hasattr(self.engine, "_lock"):
-                with self.engine._lock:
-                    _LIB.read_from_gpu_buffer(_RUNTIME, self.handle, out.ctypes.data, self.size_bytes)
-            else:
-                _LIB.read_from_gpu_buffer(_RUNTIME, self.handle, out.ctypes.data, self.size_bytes)
-        elif self.engine:
-            with self.engine._lock:
-                staging = self.engine.get_staging_buffer(self.shape, self.dtype)
-                _LIB.copy_gpu_buffer(_RUNTIME, self.handle, staging.handle, self.size_bytes)
-                _LIB.read_from_gpu_buffer(_RUNTIME, staging.handle, out.ctypes.data, self.size_bytes)
+        runtime = self.engine.runtime if self.engine else _RUNTIME
+        engine = self.engine
+        if engine and hasattr(engine, "_lock"):
+            _lock_wait_begin("to_numpy")
+            with engine._lock:
+                _lock_wait_end()
+                if self.host_accessible:
+                    _op_begin("read_from_gpu_buffer")
+                    try:
+                        _LIB.read_from_gpu_buffer(
+                            runtime, self.handle, out.ctypes.data, self.size_bytes
+                        )
+                    except Exception:
+                        _record_error()
+                        raise
+                    finally:
+                        _op_end()
+                else:
+                    staging = engine.acquire_staging_buffer(self.shape, self.dtype)
+                    try:
+                        _op_begin("copy+read_gpu_buffer")
+                        try:
+                            _LIB.copy_gpu_buffer(
+                                runtime, self.handle, staging.handle, self.size_bytes
+                            )
+                            _LIB.read_from_gpu_buffer(
+                                runtime,
+                                staging.handle,
+                                out.ctypes.data,
+                                self.size_bytes,
+                            )
+                        except Exception:
+                            _record_error()
+                            raise
+                        finally:
+                            _op_end()
+                    finally:
+                        engine.release_staging_buffer(staging)
         else:
-            raise RuntimeError("VRAM-only read requires engine for staging.")
+            if self.host_accessible:
+                _op_begin("read_from_gpu_buffer")
+                try:
+                    _LIB.read_from_gpu_buffer(
+                        runtime, self.handle, out.ctypes.data, self.size_bytes
+                    )
+                except Exception:
+                    _record_error()
+                    raise
+                finally:
+                    _op_end()
+            else:
+                raise RuntimeError("VRAM-only read requires engine for staging.")
         return out
 
     def map(self):
+        runtime = self.engine.runtime if self.engine else _RUNTIME
         if self.engine and hasattr(self.engine, "_lock"):
             with self.engine._lock:
-                return _LIB.map_gpu_buffer(_RUNTIME, self.handle)
-        return _LIB.map_gpu_buffer(_RUNTIME, self.handle)
+                return _LIB.map_gpu_buffer(runtime, self.handle)
+        return _LIB.map_gpu_buffer(runtime, self.handle)
 
     def unmap(self):
+        runtime = self.engine.runtime if self.engine else _RUNTIME
         if self.engine and hasattr(self.engine, "_lock"):
             with self.engine._lock:
-                _LIB.unmap_gpu_buffer(_RUNTIME, self.handle)
+                _LIB.unmap_gpu_buffer(runtime, self.handle)
         else:
-            _LIB.unmap_gpu_buffer(_RUNTIME, self.handle)
-    
+            _LIB.unmap_gpu_buffer(runtime, self.handle)
+
     def cast(self, target_dtype, host_accessible=False):
-        target_dtype = np.dtype(target_dtype).type
-        if self.dtype == target_dtype: return self
+        self_dtype_type = np.dtype(self.dtype).type
+        target_dtype_type = np.dtype(target_dtype).type
+        if self_dtype_type == target_dtype_type:
+            return self
         dtype_map = {np.float32: 0, np.int32: 1, np.uint8: 2, np.uint16: 3}
-        if self.dtype not in dtype_map or target_dtype not in dtype_map:
+        if (
+            self_dtype_type not in dtype_map
+            or target_dtype_type not in dtype_map
+            or not self.host_accessible
+            or not host_accessible
+        ):
             return self.engine.upload(self.to_numpy().astype(target_dtype))
-        if self.engine and hasattr(self.engine, "_lock"):
-            with self.engine._lock:
-                dst = self.engine.allocate(self.shape, dtype=target_dtype, host_accessible=host_accessible)
+
+        engine = self.engine if self.engine is not None else AOTEngine()
+        with engine._lock:
+            dst = engine.allocate(
+                self.shape, dtype=target_dtype, host_accessible=host_accessible
+            )
+            src_ptr = self.map()
+            dst_ptr = dst.map()
+            try:
                 num_elements = np.prod(self.shape)
-                _LIB.ti_cast_buffer(_RUNTIME, self.handle, dst.handle, int(num_elements), dtype_map[self.dtype], dtype_map[target_dtype])
-                return dst
-        else:
-            dst = self.engine.allocate(self.shape, dtype=target_dtype, host_accessible=host_accessible)
-            num_elements = np.prod(self.shape)
-            _LIB.ti_cast_buffer(_RUNTIME, self.handle, dst.handle, int(num_elements), dtype_map[self.dtype], dtype_map[target_dtype])
+                _LIB.ti_cast_buffer(
+                    ctypes.c_void_p(src_ptr),
+                    ctypes.c_void_p(dst_ptr),
+                    int(num_elements),
+                    dtype_map[self_dtype_type],
+                    dtype_map[target_dtype_type],
+                )
+            finally:
+                self.unmap()
+                dst.unmap()
             return dst
 
     def view_as_vector(self, is_vector=True, vector_dim=3):
-        return TaichiGPUBuffer(self.size_bytes, self.handle, self.shape, self.dtype, is_vector, self.engine, False, self.host_accessible, vector_dim)
+        buf = TaichiGPUBuffer(
+            self.size_bytes,
+            self.handle,
+            self.shape,
+            self.dtype,
+            is_vector,
+            self.engine,
+            False,
+            self.host_accessible,
+            vector_dim,
+        )
+        buf._parent_ref = self
+        return buf
+
 
 class TaichiPlaceholder(TaichiGPUBuffer):
     def __init__(self, placeholder_id, shape, dtype, is_vector=False, vector_dim=3):
-        super().__init__(0, placeholder_id, shape, dtype, is_vector, None, False, False, vector_dim)
+        super().__init__(
+            0, placeholder_id, shape, dtype, is_vector, None, False, False, vector_dim
+        )
+
 
 # -------------------------------------------------------------------------
 # AOT Engine and Wrappers
 # -------------------------------------------------------------------------
 class AOTModuleWrapper:
-    def __init__(self, module_ptr): self.module_ptr = module_ptr
+    def __init__(self, module_ptr, engine=None):
+        self.module_ptr = module_ptr
+        self.engine = engine
+
     def __del__(self):
-        if self.module_ptr: _LIB.destroy_aot_module(self.module_ptr)
+        if self.module_ptr:
+            _LIB.destroy_aot_module(self.module_ptr)
+
     def run(self, graph_name, **kwargs):
         """Menjalankan grafik Taichi AOT dengan validasi argumen yang informatif."""
         num_args = len(kwargs)
         args_array = (DynamicArg * num_args)()
         # CRITICAL: Keep names alive during the C++ call to prevent dangling pointers
-        arg_names = [k.encode('utf-8') for k in kwargs.keys()]
-        
-        for i, (k, v) in enumerate(kwargs.items()): 
+        arg_names = [k.encode("utf-8") for k in kwargs.keys()]
+
+        for i, (k, v) in enumerate(kwargs.items()):
             try:
-                _populate_dynamic_arg(args_array[i], arg_names[i], v, context_name=graph_name)
+                _populate_dynamic_arg(
+                    args_array[i], arg_names[i], v, context_name=graph_name
+                )
             except Exception as e:
                 # Wrap error with clearer context
-                raise ValueError(f"Failed to prepare argument '{k}' for kernel '{graph_name}':\n{str(e)}")
-            
-        engine = AOTEngine()
-        with engine._lock:
-            if engine.current_pipeline:
+                raise ValueError(
+                    f"Failed to prepare argument '{k}' for kernel '{graph_name}':\n{str(e)}"
+                )
+
+        engine = self.engine if self.engine is not None else AOTEngine()
+        if engine.current_pipeline:
+            _lock_wait_begin(f"run:{graph_name}:pipeline")
+            with engine._lock:
+                _lock_wait_end()
                 # Associate and track any TaichiGPUBuffer arguments with the current pipeline during recording
                 for arg_val in kwargs.values():
                     if isinstance(arg_val, TaichiGPUBuffer):
                         arg_val.associated_pipelines.add(engine.current_pipeline)
-                        if engine.current_pipeline not in engine._pipeline_intermediates:
+                        if (
+                            engine.current_pipeline
+                            not in engine._pipeline_intermediates
+                        ):
                             engine._pipeline_intermediates[engine.current_pipeline] = []
-                        if arg_val not in engine._pipeline_intermediates[engine.current_pipeline]:
-                            engine._pipeline_intermediates[engine.current_pipeline].append(arg_val)
+                        if (
+                            arg_val
+                            not in engine._pipeline_intermediates[
+                                engine.current_pipeline
+                            ]
+                        ):
+                            engine._pipeline_intermediates[
+                                engine.current_pipeline
+                            ].append(arg_val)
 
-                _LIB.add_to_pipeline(self.module_ptr, engine.current_pipeline.encode('utf-8'), graph_name.encode('utf-8'), args_array, num_args)
-            else:
+                _op_begin(f"add_to_pipeline:{graph_name}")
                 try:
-                    _LIB.run_aot_graph(_RUNTIME, self.module_ptr, graph_name.encode('utf-8'), args_array, num_args)
-                except Exception as e:
-                    raise RuntimeError(
-                        f"\n[AOTEngine Execution Error] Kernel '{graph_name}' gagal dijalankan!\n"
-                        f"  ERROR: {str(e)}\n"
-                        f"  HINT : Periksa apakah ukuran (shape) dan tipe data input sudah sesuai dengan definisi kernel di C++."
+                    _LIB.add_to_pipeline(
+                        self.module_ptr,
+                        engine.current_pipeline.encode("utf-8"),
+                        graph_name.encode("utf-8"),
+                        args_array,
+                        num_args,
                     )
+                except Exception:
+                    _record_error()
+                    raise
+                finally:
+                    _op_end()
+        else:
+            _lock_wait_begin(f"run:{graph_name}")
+            try:
+                with engine._lock:
+                    _lock_wait_end()
+                    _op_begin(f"run_aot_graph:{graph_name}")
+                    try:
+                        _LIB.run_aot_graph(
+                            engine.runtime,
+                            self.module_ptr,
+                            graph_name.encode("utf-8"),
+                            args_array,
+                            num_args,
+                        )
+                    except Exception as e:
+                        _record_error()
+                        raise RuntimeError(
+                            f"\n[AOTEngine Execution Error] Kernel '{graph_name}' gagal dijalankan!\n"
+                            f"  ERROR: {str(e)}\n"
+                            f"  HINT : Periksa apakah ukuran (shape) dan tipe data input sudah sesuai dengan definisi kernel di C++."
+                        )
+                    finally:
+                        _op_end()
+            except RuntimeError:
+                raise
+            except Exception as e:
+                _record_error()
+                raise RuntimeError(
+                    f"\n[AOTEngine Execution Error] Kernel '{graph_name}' gagal dijalankan!\n"
+                    f"  ERROR: {str(e)}\n"
+                    f"  HINT : Periksa apakah ukuran (shape) dan tipe data input sudah sesuai dengan definisi kernel di C++."
+                )
 
-    def _dummy_run(self): pass # For keeping refs if needed
+    def async_run(self, graph_name, **kwargs):
+        """Menjalankan grafik Taichi AOT secara asinkron menggunakan ThreadPoolExecutor."""
+        _heartbeat()
+        engine = self.engine if self.engine is not None else AOTEngine()
+        if getattr(engine, "_executor", None) is None:
+            with engine._lock:
+                if getattr(engine, "_executor", None) is None:
+                    engine._executor = ThreadPoolExecutor(max_workers=8)
+
+        def _run_and_sync():
+            with engine._lock:
+                self.run(graph_name, **kwargs)
+                engine.sync()
+
+        return engine._executor.submit(_run_and_sync)
+
+    def _dummy_run(self):
+        pass  # For keeping refs if needed
+
 
 class AOTEngine:
-    _instance = None
+    _instances = {}
     _active_arch = "vulkan"
     _placeholder_id_counter = 0xFFFFFF00
 
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super(AOTEngine, cls).__new__(cls)
-            _init_aot_bridge()
-            cls._instance.modules = {}
-            cls._instance.buffer_pool = BufferPool()
-            cls._instance.current_pipeline = None
-            cls._instance._pipeline_intermediates = {}
-            cls._instance.recorded_pipelines = set()
-            cls._instance._staging_pool = {}
-            import threading
-            cls._instance._lock = threading.RLock()
-        return cls._instance
+    def __new__(cls, arch="vulkan", device_id=None):
+        _init_aot_bridge()
+
+        # If device_id is not specified, auto-detect
+        if device_id is None:
+            env_device = os.environ.get("PIXEL_REFINE_AOT_DEVICE")
+            if env_device is not None:
+                device_id = int(env_device)
+            else:
+                device_id = 0
+                try:
+                    devices_str = _LIB.scan_vulkan_devices().decode("utf-8")
+                    device_list = [d.strip().lower() for d in devices_str.split(";")]
+                    for idx, dev_name in enumerate(device_list):
+                        if "nvidia" in dev_name or "geforce" in dev_name:
+                            device_id = idx
+                            break
+                except Exception:
+                    pass
+
+        key = (arch.lower(), device_id)
+        if key not in cls._instances:
+            instance = super(AOTEngine, cls).__new__(cls)
+            instance.arch = arch
+            instance.device_id = device_id
+
+            # Map arch to arch_id
+            arch_id = {"vulkan": 0, "cuda": 1, "cpu": 2}.get(arch.lower(), 0)
+
+            # Wrap init_aot_engine in a thread with timeout to detect hung Vulkan driver.
+            # ctypes releases the GIL during C calls, so this timeout mechanism works
+            # even if the C function hangs. The early watchdog is a secondary safety net.
+            _op_begin("init_aot_engine")
+            _init_result = [None]
+            _init_error = [None]
+
+            def _do_init():
+                try:
+                    _init_result[0] = _LIB.init_aot_engine(arch_id, device_id)
+                except Exception as e:
+                    _init_error[0] = e
+
+            _init_thread = threading.Thread(target=_do_init, daemon=True)
+            _init_thread.start()
+            _init_thread.join(timeout=_INIT_TIMEOUT_S)
+            _op_end()
+
+            if _init_thread.is_alive():
+                # init_aot_engine hung beyond timeout — Vulkan driver is likely broken
+                sys.stderr.write(
+                    f"[AOTEngine] CRITICAL: init_aot_engine() hung for >{_INIT_TIMEOUT_S}s. "
+                    f"Vulkan driver may be in a bad state (zombie GPU processes?).\n"
+                    f"  HINT: Kill zombie processes or set PIXEL_REFINE_INIT_TIMEOUT to increase limit.\n"
+                )
+                sys.stderr.flush()
+                raise RuntimeError(
+                    f"init_aot_engine() timed out after {_INIT_TIMEOUT_S}s. "
+                    f"GPU driver is likely hung. Run emergency_cleanup() or restart."
+                )
+
+            if _init_error[0] is not None:
+                raise RuntimeError(f"init_aot_engine() failed: {_init_error[0]}")
+
+            instance.runtime = _init_result[0]
+            if not instance.runtime:
+                raise RuntimeError(
+                    f"Failed to initialize {arch.upper()} AOT Runtime on device {device_id}."
+                )
+
+            print(
+                f"[AOTEngine] Runtime initialized on '{arch.upper()}' (Device {device_id})"
+            )
+
+            instance.modules = {}
+            instance.buffer_pool = BufferPool(instance)
+            instance._local = threading.local()
+            instance._staging_pool = {}
+            instance._pipeline_intermediates = {}
+            instance.recorded_pipelines = set()
+            instance._executor = None
+            instance._lock = threading.RLock()
+
+            cls._instances[key] = instance
+        return cls._instances[key]
+
+    @property
+    def current_pipeline(self):
+        if not hasattr(self._local, "current_pipeline"):
+            self._local.current_pipeline = None
+        return self._local.current_pipeline
+
+    @current_pipeline.setter
+    def current_pipeline(self, val):
+        self._local.current_pipeline = val
 
     def placeholder(self, shape, dtype=np.float32, is_vector=False, vector_dim=3):
-        p = TaichiPlaceholder(self._placeholder_id_counter, shape, dtype, is_vector, vector_dim)
+        p = TaichiPlaceholder(
+            self._placeholder_id_counter, shape, dtype, is_vector, vector_dim
+        )
         self._placeholder_id_counter += 1
         return p
 
     def rec_pipeline(self, name):
         class Recorder:
-            def __init__(self, engine, name): self.engine, self.name = engine, name
+            def __init__(self, engine, name):
+                self.engine, self.name = engine, name
+
             def __enter__(self):
-                module = next(iter(self.engine.modules.values())) if self.engine.modules else None
-                _LIB.clear_pipeline(module.module_ptr if module else None, self.name.encode('utf-8'))
+                module = (
+                    next(iter(self.engine.modules.values()))
+                    if self.engine.modules
+                    else None
+                )
+                _LIB.clear_pipeline(
+                    module.module_ptr if module else None, self.name.encode("utf-8")
+                )
                 self.engine.current_pipeline = self.name
                 self.engine.recorded_pipelines.add(self.name)
-                
+
                 # Clear previous intermediates for this pipeline
                 if self.name in self.engine._pipeline_intermediates:
                     for buf in self.engine._pipeline_intermediates[self.name]:
                         buf._force_destroy()
                     del self.engine._pipeline_intermediates[self.name]
                 return self
-            def __exit__(self, *args): self.engine.current_pipeline = None
+
+            def __exit__(self, *args):
+                self.engine.current_pipeline = None
+
         return Recorder(self, name)
 
     def use_pipeline(self, name, overrides=None):
         _init_aot_bridge()
         if name not in self.recorded_pipelines:
-            print(f"[AOTEngine WARNING] Pipeline '{name}' is not recorded or has been invalidated (one of its buffers was destroyed). Skipping execution.")
+            print(
+                f"[AOTEngine WARNING] Pipeline '{name}' is not recorded or has been invalidated (one of its buffers was destroyed). Skipping execution."
+            )
             return
-            
+
         ovr = overrides or {}
         n = len(ovr)
         handles = (ctypes.c_uint64 * n)()
@@ -540,26 +1186,65 @@ class AOTEngine:
         for i, (p, b) in enumerate(ovr.items()):
             handles[i] = ctypes.c_uint64(p.handle)
             _populate_dynamic_arg(args[i], arg_names[i], b)
+        _lock_wait_begin(f"use_pipeline:{name}")
         with self._lock:
-            _LIB.run_pipeline(_RUNTIME, name.encode('utf-8'), handles, args, n)
+            _lock_wait_end()
+            _op_begin(f"run_pipeline:{name}")
+            try:
+                _LIB.run_pipeline(self.runtime, name.encode("utf-8"), handles, args, n)
+            except Exception:
+                _record_error()
+                raise
+            finally:
+                _op_end()
 
-    def allocate(self, shape, dtype=np.float32, is_vector=False, host_accessible=False, vector_dim=None):
+    def allocate(
+        self,
+        shape,
+        dtype=np.float32,
+        is_vector=False,
+        host_accessible=False,
+        vector_dim=None,
+    ):
+        _lock_wait_begin("allocate")
         with self._lock:
+            _lock_wait_end()
             size = int(np.prod(shape) * np.dtype(dtype).itemsize)
-            v_dim = vector_dim if vector_dim is not None else (shape[-1] if is_vector and len(shape) >= 2 else 1)
+            v_dim = (
+                vector_dim
+                if vector_dim is not None
+                else (shape[-1] if is_vector and len(shape) >= 2 else 1)
+            )
             handle = self.buffer_pool.acquire(size) if not host_accessible else None
-            if not handle: 
-                handle = _LIB.allocate_gpu_buffer(_RUNTIME, size, 1 if host_accessible else 0)
-            
+            if not handle:
+                _op_begin("allocate_gpu_buffer")
+                try:
+                    handle = _LIB.allocate_gpu_buffer(
+                        self.runtime, size, 1 if host_accessible else 0
+                    )
+                except Exception:
+                    _record_error()
+                    raise
+                finally:
+                    _op_end()
+
             if handle is None or handle == 0:
-                arch = getattr(self, "_active_arch", "unknown")
+                _record_error()
                 raise RuntimeError(
-                    f"\n[AOTEngine Memory Error] Failed to allocate {size/1024/1024:.2f} MB on GPU ({arch}).\n"
+                    f"\n[AOTEngine Memory Error] Failed to allocate {size/1024/1024:.2f} MB on GPU ({self.arch.upper()}, Device {self.device_id}).\n"
                     f"  HINT: VRAM might be exhausted. Try calling 'engine.buffer_pool.clear()' or 'gc.collect()' to free idle buffers."
                 )
-            
-            # print(f"[AOTEngine] New VRAM allocation: {size/1024/1024:.2f} MB ({dtype})")
-            buf = TaichiGPUBuffer(size, handle, shape, dtype, is_vector, self, host_accessible=host_accessible, vector_dim=v_dim)
+
+            buf = TaichiGPUBuffer(
+                size,
+                handle,
+                shape,
+                dtype,
+                is_vector,
+                self,
+                host_accessible=host_accessible,
+                vector_dim=v_dim,
+            )
             if self.current_pipeline:
                 buf.is_pipeline_intermediate = True
                 buf.associated_pipelines.add(self.current_pipeline)
@@ -573,7 +1258,7 @@ class AOTEngine:
         with self._lock:
             if name in self.recorded_pipelines:
                 self.recorded_pipelines.remove(name)
-            _LIB.clear_pipeline(None, name.encode('utf-8'))
+            _LIB.clear_pipeline(None, name.encode("utf-8"))
             if name in self._pipeline_intermediates:
                 bufs = self._pipeline_intermediates[name]
                 for buf in bufs:
@@ -591,52 +1276,107 @@ class AOTEngine:
             self.recorded_pipelines.clear()
 
     def get_staging_buffer(self, shape, dtype):
+        """Deprecated: use acquire_staging_buffer instead for thread safety."""
+        return self.acquire_staging_buffer(shape, dtype)
+
+    def acquire_staging_buffer(self, shape, dtype):
         size = int(np.prod(shape) * np.dtype(dtype).itemsize)
         key = (size, np.dtype(dtype).name)
-        if key not in self._staging_pool: self._staging_pool[key] = self.allocate(shape, dtype, host_accessible=True)
-        return self._staging_pool[key]
+        with self._lock:
+            if key not in self._staging_pool:
+                self._staging_pool[key] = []
+
+            # Find an unleased buffer
+            for entry in self._staging_pool[key]:
+                if not entry["leased"]:
+                    entry["leased"] = True
+                    return entry["buffer"]
+
+            # None found, allocate a new one
+            buf = self.allocate(shape, dtype, host_accessible=True)
+            self._staging_pool[key].append({"leased": True, "buffer": buf})
+            return buf
+
+    def release_staging_buffer(self, staging_buf):
+        size = staging_buf.size_bytes
+        dtype_name = np.dtype(staging_buf.dtype).name
+        key = (size, dtype_name)
+        with self._lock:
+            if key in self._staging_pool:
+                for entry in self._staging_pool[key]:
+                    if entry["buffer"] is staging_buf:
+                        entry["leased"] = False
+                        break
 
     def _is_external_gpu_obj(self, data):
-        if hasattr(data, "is_cuda") and data.is_cuda: return "pytorch"
-        if type(data).__name__ == "UMat": return "opencv"
-        if type(data).__name__ == "OrtValue": return "onnx"
-        if hasattr(data, "__cuda_array_interface__"): return "cuda"
+        if hasattr(data, "is_cuda") and data.is_cuda:
+            return "pytorch"
+        if type(data).__name__ == "UMat":
+            return "opencv"
+        if type(data).__name__ == "OrtValue":
+            return "onnx"
+        if hasattr(data, "__cuda_array_interface__"):
+            return "cuda"
         return None
 
-    def _upload_fast_interop(self, data, is_vector=False, vector_dim=3) -> TaichiGPUBuffer:
+    def _upload_fast_interop(
+        self, data, is_vector=False, vector_dim=3
+    ) -> TaichiGPUBuffer:
         """Universal Fast-Copy bridge using Pinned Memory DMA."""
         obj_type = self._is_external_gpu_obj(data)
         shape = getattr(data, "shape", (1,))
-        dtype = np.float32 
-        
+        dtype = np.float32
+
         if obj_type == "pytorch":
             import torch
-            dtype_map = {torch.float32: np.float32, torch.uint8: np.uint8, torch.int32: np.int32}
+
+            dtype_map = {
+                torch.float32: np.float32,
+                torch.uint8: np.uint8,
+                torch.int32: np.int32,
+            }
             dtype = dtype_map.get(data.dtype, np.float32)
         elif hasattr(data, "dtype"):
             dtype = data.dtype
 
-        with self._lock:
-            staging = self.get_staging_buffer(shape, dtype)
+        staging = self.acquire_staging_buffer(shape, dtype)
+        try:
             ptr = staging.map()
-            
+
             if obj_type == "pytorch":
                 import torch
-                target_view = torch.from_blob(ptr, shape, dtype=data.dtype, device='cpu')
-                target_view.copy_(data.detach(), non_blocking=False) 
+
+                target_view = torch.from_blob(
+                    ptr, shape, dtype=data.dtype, device="cpu"
+                )
+                target_view.copy_(data.detach(), non_blocking=False)
             elif hasattr(data, "__cuda_array_interface__"):
-                src_ptr = data.__cuda_array_interface__['data'][0]
+                src_ptr = data.__cuda_array_interface__["data"][0]
                 ctypes.memmove(ptr, src_ptr, staging.nbytes)
             else:
                 temp = np.ascontiguousarray(data)
                 ctypes.memmove(ptr, temp.ctypes.data, temp.nbytes)
-                
+
             staging.unmap()
-            vram_target = self.allocate(shape, dtype, is_vector=is_vector, vector_dim=vector_dim)
-            _LIB.copy_gpu_buffer(_RUNTIME, staging.handle, vram_target.handle, staging.nbytes)
+            vram_target = self.allocate(
+                shape, dtype, is_vector=is_vector, vector_dim=vector_dim
+            )
+            _op_begin("copy_gpu_buffer:fast_interop")
+            try:
+                _LIB.copy_gpu_buffer(
+                    self.runtime, staging.handle, vram_target.handle, staging.nbytes
+                )
+            except Exception:
+                _record_error()
+                raise
+            finally:
+                _op_end()
+        finally:
+            self.release_staging_buffer(staging)
         return vram_target
 
     def upload(self, data, is_vector=False, vector_dim=3):
+        _heartbeat()
         _init_aot_bridge()
 
         # Short-circuit: if already a TaichiGPUBuffer, return as-is (zero-copy passthrough)
@@ -644,7 +1384,7 @@ class AOTEngine:
             return data
 
         ext_type = self._is_external_gpu_obj(data)
-        
+
         # Auto-detect Vector Fields (RGB=3, Flow=2)
         if not is_vector and hasattr(data, "shape"):
             if len(data.shape) == 3:
@@ -656,59 +1396,458 @@ class AOTEngine:
                     vector_dim = 2
 
         if ext_type:
-            return self._upload_fast_interop(data, is_vector=is_vector, vector_dim=vector_dim)
-        
-        arr = np.ascontiguousarray(data)
-        buf = self.allocate(arr.shape, arr.dtype, is_vector=is_vector, host_accessible=True, vector_dim=vector_dim)
-        _LIB.write_to_gpu_buffer(_RUNTIME, buf.handle, arr.ctypes.data, buf.nbytes)
-        return buf
+            return self._upload_fast_interop(
+                data, is_vector=is_vector, vector_dim=vector_dim
+            )
 
+        arr = np.ascontiguousarray(data)
+        buf = self.allocate(
+            arr.shape,
+            arr.dtype,
+            is_vector=is_vector,
+            host_accessible=True,
+            vector_dim=vector_dim,
+        )
+        _op_begin("write_to_gpu_buffer")
+        try:
+            _LIB.write_to_gpu_buffer(
+                self.runtime, buf.handle, arr.ctypes.data, buf.nbytes
+            )
+        except Exception:
+            _record_error()
+            raise
+        finally:
+            _op_end()
+        return buf
 
     def load(self, path):
         with self._lock:
             base, ext = os.path.splitext(path)
-            p = f"{base}_{self._active_arch}{ext}" if os.path.exists(f"{base}_{self._active_arch}{ext}") else path
-            if p in self.modules: return self.modules[p]
-            ptr = _LIB.load_aot_module(_RUNTIME, p.encode('utf-8'))
-            if not ptr: 
+            p = (
+                f"{base}_{self.arch.lower()}{ext}"
+                if os.path.exists(f"{base}_{self.arch.lower()}{ext}")
+                else path
+            )
+            if p in self.modules:
+                return self.modules[p]
+            ptr = _LIB.load_aot_module(self.runtime, p.encode("utf-8"))
+            if not ptr:
                 raise RuntimeError(
                     f"\n[AOTEngine Load Error] Failed to load TCM module at: {p}\n"
-                    f"  HINT: Ensure the .tcm file exists and is compatible with the active GPU backend ({self._active_arch})."
+                    f"  HINT: Ensure the .tcm file exists and is compatible with the active GPU backend ({self.arch.upper()})."
                 )
             print(f"[AOTEngine] Loaded TCM module: {os.path.basename(p)}")
-            self.modules[p] = AOTModuleWrapper(ptr)
+            self.modules[p] = AOTModuleWrapper(ptr, self)
             return self.modules[p]
 
     def imread(self, path):
+        _heartbeat()
         _init_aot_bridge()
         w, h, c, d = ctypes.c_int(0), ctypes.c_int(0), ctypes.c_int(0), ctypes.c_int(0)
+        _lock_wait_begin("imread")
         with self._lock:
-            handle = _LIB.ti_imread_to_gpu(_RUNTIME, path.encode('utf-8'), ctypes.byref(w), ctypes.byref(h), ctypes.byref(c), ctypes.byref(d))
-        if not handle: raise RuntimeError(f"Failed to load image: {path}")
+            _lock_wait_end()
+            _op_begin(f"imread:{os.path.basename(path)}")
+            try:
+                handle = _LIB.ti_imread_to_gpu(
+                    self.runtime,
+                    path.encode("utf-8"),
+                    ctypes.byref(w),
+                    ctypes.byref(h),
+                    ctypes.byref(c),
+                    ctypes.byref(d),
+                )
+            except Exception:
+                _record_error()
+                raise
+            finally:
+                _op_end()
+        if not handle:
+            raise RuntimeError(f"Failed to load image: {path}")
         dtype = np.uint8 if d.value == 8 else np.uint16
         shape = (h.value, w.value) if c.value == 1 else (h.value, w.value, c.value)
-        return TaichiGPUBuffer(w.value*h.value*c.value*(d.value//8), handle, shape, dtype, engine=self, host_accessible=False)
+        return TaichiGPUBuffer(
+            w.value * h.value * c.value * (d.value // 8),
+            handle,
+            shape,
+            dtype,
+            engine=self,
+            host_accessible=False,
+        )
 
     def imwrite(self, path, buf):
+        _heartbeat()
         _init_aot_bridge()
         h, w = buf.shape[0], buf.shape[1]
         c = 1 if len(buf.shape) == 2 else buf.shape[2]
         d = 8 if buf.dtype == np.uint8 else 16
+        _lock_wait_begin("imwrite")
         with self._lock:
-            res = _LIB.ti_imwrite_from_gpu(_RUNTIME, path.encode('utf-8'), buf.handle, w, h, c, d)
+            _lock_wait_end()
+            _op_begin(f"imwrite:{os.path.basename(path)}")
+            try:
+                res = _LIB.ti_imwrite_from_gpu(
+                    self.runtime, path.encode("utf-8"), buf.handle, w, h, c, d
+                )
+            except Exception:
+                _record_error()
+                raise
+            finally:
+                _op_end()
         if not res:
             raise RuntimeError(f"Failed to save image: {path}")
 
     def sync(self):
+        _lock_wait_begin("sync")
         with self._lock:
-            _LIB.sync_runtime(_RUNTIME)
+            _lock_wait_end()
+            _op_begin("sync_runtime")
+            try:
+                _LIB.sync_runtime(self.runtime)
+            except Exception:
+                _record_error()
+                raise
+            finally:
+                _op_end()
+
     def reinit(self, device_id=0):
         with self._lock:
-            global _RUNTIME
-            _RUNTIME = _LIB.init_aot_engine({"vulkan":0,"cuda":1,"cpu":2}.get(self._active_arch, 0), device_id)
+            self.runtime = _LIB.init_aot_engine(
+                {"vulkan": 0, "cuda": 1, "cpu": 2}.get(self.arch.lower(), 0), device_id
+            )
+            self.device_id = device_id
             self.modules = {}
 
+    def destroy(self):
+        """Full GPU context teardown: free all buffers, clear pipelines, shutdown executor.
+
+        Safe to call multiple times. After this call the engine instance is invalidated.
+        This is called automatically by the global atexit / signal cleanup handler.
+        """
+        with self._lock:
+            if not getattr(self, "_destroyed", False):
+                self._destroyed = True
+
+                # 1. Shutdown async executor gracefully (no new jobs)
+                if self._executor is not None:
+                    try:
+                        self._executor.shutdown(wait=False, cancel_futures=True)
+                    except TypeError:
+                        # Python < 3.9 does not support cancel_futures
+                        self._executor.shutdown(wait=False)
+                    self._executor = None
+
+                # 2. Clear all pipelines and their intermediate GPU buffers
+                for name in list(getattr(self, "_pipeline_intermediates", {}).keys()):
+                    try:
+                        bufs = self._pipeline_intermediates.pop(name, [])
+                        for buf in bufs:
+                            buf.is_pipeline_intermediate = False
+                            buf.associated_pipelines.discard(name)
+                            if buf.handle is not None and buf.is_owner:
+                                _LIB.free_gpu_buffer(self.runtime, buf.handle)
+                                buf.handle = None
+                                buf.is_owner = False
+                    except Exception:
+                        pass
+                self.recorded_pipelines.clear()
+
+                # 3. Free all staging pool buffers
+                for entries in list(getattr(self, "_staging_pool", {}).values()):
+                    for entry in entries:
+                        buf = entry.get("buffer")
+                        if buf and buf.handle is not None and buf.is_owner:
+                            try:
+                                _LIB.free_gpu_buffer(self.runtime, buf.handle)
+                                buf.handle = None
+                                buf.is_owner = False
+                            except Exception:
+                                pass
+                self._staging_pool = {}
+
+                # 4. Drain buffer pool free list
+                try:
+                    self.buffer_pool.clear()
+                except Exception:
+                    pass
+
+                # 5. Unload all AOT modules
+                for mod in list(self.modules.values()):
+                    try:
+                        if mod.module_ptr:
+                            _LIB.destroy_aot_module(mod.module_ptr)
+                            mod.module_ptr = None
+                    except Exception:
+                        pass
+                self.modules = {}
+
+                # 6. Sync and signal runtime is gone
+                try:
+                    if self.runtime:
+                        _LIB.sync_runtime(self.runtime)
+                except Exception:
+                    pass
+                self.runtime = None
+
+                # 7. Kill tracked child processes (vulkaninfo, etc.)
+                _kill_tracked_children()
+
+
+# =========================================================================
+# Zombie GPU Process Cleanup
+# =========================================================================
+# Prevents zombie processes (vulkaninfo.exe, orphaned python.exe) from
+# accumulating and corrupting the GPU driver state.
+
+import subprocess as _subprocess
+import gc as _gc
+
+_child_pids = set()  # PIDs spawned by this process (tracked for cleanup)
+_child_pids_lock = threading.Lock()
+
+
+def _track_child_pid(pid):
+    """Register a child process PID for later cleanup."""
+    with _child_pids_lock:
+        _child_pids.add(pid)
+
+
+def _kill_tracked_children():
+    """Kill all tracked child processes to prevent zombies."""
+    with _child_pids_lock:
+        pids = list(_child_pids)
+        _child_pids.clear()
+    for pid in pids:
+        try:
+            if os.name == "nt":
+                _subprocess.run(
+                    ["taskkill", "/F", "/PID", str(pid)], capture_output=True, timeout=5
+                )
+            else:
+                os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+
+
+def _cleanup_zombie_gpu_processes():
+    """Kill zombie GPU processes (vulkaninfo.exe, orphaned python.exe) that
+    are holding VRAM but are no longer responsive.
+
+    This prevents the NVIDIA WDDM driver from accumulating ghost GPU context
+    entries that block future Vulkan init and consume VRAM reservations.
+    """
+    if not _CLEAN_ZOMBIES:
+        return
+
+    my_pid = os.getpid()
+    killed = []
+
+    try:
+        if os.name == "nt":
+            # Windows: use tasklist to find GPU-holding zombie processes
+            result = _subprocess.run(
+                ["tasklist", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            for line in result.stdout.strip().split("\n"):
+                parts = line.strip().strip('"').split('","')
+                if len(parts) < 2:
+                    continue
+                proc_name = parts[0].lower()
+                try:
+                    pid = int(parts[1])
+                except (ValueError, IndexError):
+                    continue
+
+                # Skip our own process
+                if pid == my_pid:
+                    continue
+
+                # Kill vulkaninfo.exe zombies (spawned by Vulkan device scanning)
+                if "vulkaninfo" in proc_name:
+                    try:
+                        _subprocess.run(
+                            ["taskkill", "/F", "/PID", str(pid)],
+                            capture_output=True,
+                            timeout=5,
+                        )
+                        killed.append((pid, proc_name))
+                    except Exception:
+                        pass
+        else:
+            # Linux: use ps to find zombie GPU processes
+            result = _subprocess.run(
+                ["ps", "-eo", "pid,comm,state", "--no-headers"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            for line in result.stdout.strip().split("\n"):
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                try:
+                    pid = int(parts[0])
+                except ValueError:
+                    continue
+                comm = parts[1].lower()
+                state = parts[2]
+
+                if pid == my_pid:
+                    continue
+
+                # Kill zombie state processes related to GPU
+                if state == "Z" and ("vulkan" in comm or "python" in comm):
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                        killed.append((pid, comm))
+                    except Exception:
+                        pass
+    except Exception as e:
+        sys.stderr.write(f"[AOTEngine] Zombie cleanup scan failed: {e}\n")
+        sys.stderr.flush()
+
+    if killed:
+        sys.stderr.write(
+            f"[AOTEngine] Cleaned {len(killed)} zombie GPU process(es): "
+            f"{', '.join(f'{name}(pid={pid})' for pid, name in killed)}\n"
+        )
+        sys.stderr.flush()
+
+
+def emergency_cleanup():
+    """Full emergency cleanup: free all VRAM + kill zombie processes + GC.
+
+    Call this when the GPU is in a bad state to recover without a reboot.
+    Safe to call multiple times.
+    """
+    # 1. Force-free all GPU resources
+    _force_global_cleanup("emergency")
+
+    # 2. Kill zombie GPU processes
+    _cleanup_zombie_gpu_processes()
+
+    # 3. Kill any tracked child processes
+    _kill_tracked_children()
+
+    # 4. Force Python garbage collection
+    _gc.collect()
+
+    sys.stderr.write("[AOTEngine] Emergency cleanup complete.\n")
+    sys.stderr.flush()
+
+
+# Pre-init zombie cleanup: clear any pre-existing zombies that could block Vulkan init
+if _CLEAN_ZOMBIES:
+    _cleanup_zombie_gpu_processes()
+
 engine = AOTEngine()
+_RUNTIME = engine.runtime
+
+# =========================================================================
+# Global Resource Cleanup Guard
+# =========================================================================
+# This multi-layer guard ensures VRAM is freed even when the host process
+# is killed unexpectedly (Task Manager, OS shutdown, Python crash).
+# Without this, Windows holds the Vulkan/CUDA memory reservation until
+# a full reboot, blocking shutdown/restart on systems with discrete GPUs.
+
+_CLEANUP_LOCK = threading.Lock()
+_CLEANUP_DONE = False
+
+
+def _global_cleanup(reason: str = "atexit", force: bool = False):
+    """Release all GPU resources for every live AOTEngine instance.
+
+    Idempotent — safe to call from multiple signal handlers.
+
+    Args:
+        reason: Human-readable label for diagnostic logging.
+        force: If True, bypass the one-shot _CLEANUP_DONE guard.
+               Used by the watchdog to trigger cleanup while the
+               interpreter is still alive (e.g. hung GPU operation).
+    """
+    global _CLEANUP_DONE
+    with _CLEANUP_LOCK:
+        if _CLEANUP_DONE and not force:
+            return
+        _CLEANUP_DONE = True
+
+    try:
+        sys.stderr.write(f"[AOTEngine] GPU cleanup triggered (reason={reason})\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+    # Destroy every engine instance registered in the class-level dict
+    for key, inst in list(AOTEngine._instances.items()):
+        try:
+            inst.destroy()
+        except Exception:
+            pass
+    AOTEngine._instances.clear()
+
+    # Kill zombie GPU processes and tracked children to prevent VRAM leaks
+    try:
+        _kill_tracked_children()
+    except Exception:
+        pass
+    try:
+        _cleanup_zombie_gpu_processes()
+    except Exception:
+        pass
+    try:
+        _gc.collect()
+    except Exception:
+        pass
+
+
+def _force_global_cleanup(reason: str):
+    """Watchdog entry point: always runs, bypasses one-shot guard.
+
+    Called by the enhanced watchdog when a fatal condition is detected
+    (operation timeout, lock contention, heartbeat stale, error storm).
+    """
+    _global_cleanup(reason=reason, force=True)
+
+
+# --- atexit: runs on normal exit AND uncaught exceptions ---
+atexit.register(_global_cleanup, "atexit")
+
+
+# --- Signal handlers: SIGTERM / SIGBREAK (Windows) / SIGINT / Hardware Crash Signals ---
+def _signal_cleanup_handler(signum, frame):
+    _global_cleanup(f"signal-{signum}")
+    # Re-raise default behaviour so the OS knows the process ended
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+
+# Register normal exit signals and critical crash signals (like Access Violation / Segfault)
+# to catch C++ DLL crashes and cleanly free VRAM before Windows freezes the process context.
+crash_signals = [signal.SIGTERM, signal.SIGINT]
+for name in ("SIGSEGV", "SIGILL", "SIGABRT", "SIGFPE"):
+    if hasattr(signal, name):
+        crash_signals.append(getattr(signal, name))
+
+for _sig in crash_signals:
+    try:
+        signal.signal(_sig, _signal_cleanup_handler)
+    except (OSError, ValueError):
+        pass  # Cannot set handlers on non-main threads; skip gracefully
+
+# SIGBREAK is Windows-specific (Ctrl+Break / console close)
+if hasattr(signal, "SIGBREAK"):
+    try:
+        signal.signal(signal.SIGBREAK, _signal_cleanup_handler)
+    except (OSError, ValueError):
+        pass
+
+
+# --- Watchdog is started EARLY (before DLL/GPU init) — see top of file ---
+
 
 # -------------------------------------------------------------------------
 # OpenCV-style Data Unification (InputArray / OutputArray)
@@ -716,22 +1855,27 @@ engine = AOTEngine()
 def InputArray(data, is_vector=False, vector_dim=None) -> TaichiGPUBuffer:
     """
     OpenCV-style Data Input Unification.
-    Automatically handles NumPy arrays, PyTorch tensors, OpenCV UMats, 
+    Automatically handles NumPy arrays, PyTorch tensors, OpenCV UMats,
     native Python lists, or existing TaichiGPUBuffer instances.
     """
     if isinstance(data, (TaichiGPUBuffer, TaichiPlaceholder)):
         return data
-    
+
     # Auto-convert native Python structures
     if isinstance(data, (list, tuple, int, float)):
         data = np.array(data, dtype=np.float32)
-        
+
     # Delegate to universal fast-interop bridge
     return engine.upload(data, is_vector=is_vector, vector_dim=vector_dim)
 
-def OutputArray(shape, dtype=np.float32, is_vector=False, vector_dim=None) -> TaichiGPUBuffer:
+
+def OutputArray(
+    shape, dtype=np.float32, is_vector=False, vector_dim=None
+) -> TaichiGPUBuffer:
     """
     OpenCV-style Data Output Allocation.
     Creates an empty GPU VRAM buffer ready for writing.
     """
-    return engine.allocate(shape, dtype=dtype, is_vector=is_vector, vector_dim=vector_dim)
+    return engine.allocate(
+        shape, dtype=dtype, is_vector=is_vector, vector_dim=vector_dim
+    )

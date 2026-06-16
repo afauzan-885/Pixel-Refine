@@ -86,3 +86,31 @@ class SelectorPanel(QWidget):
             self.item_selected.emit(selected[0].data(Qt.UserRole), selected[0].text())
         else:
             self.selection_cleared.emit()
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        qml = f"{tab}Column {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    spacing: 10\n"
+        qml += f"{tab}    Row {{\n"
+        qml += f"{tab}        spacing: 5\n"
+        qml += f"{tab}        Rectangle {{ width: 80; height: 32; radius: genericTheme.radiusSm; color: genericTheme.success; Text {{ text: 'Add Pano'; color: 'white'; anchors.centerIn: parent }} MouseArea {{ anchors.fill: parent; onClicked: appBridge.openTool('Add Pano') }} }}\n"
+        qml += f"{tab}        Rectangle {{ width: 80; height: 32; radius: genericTheme.radiusSm; color: genericTheme.danger; Text {{ text: 'Delete Pano'; color: 'white'; anchors.centerIn: parent }} MouseArea {{ anchors.fill: parent; onClicked: appBridge.openTool('Delete Pano') }} }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}    ListView {{\n"
+        qml += f"{tab}        width: parent.width\n"
+        qml += f"{tab}        height: 300\n"
+        qml += f"{tab}        clip: true\n"
+        qml += f"{tab}        model: ListModel {{ }}\n"
+        qml += f"{tab}        delegate: Rectangle {{ width: ListView.view.width; height: 36; Text {{ text: model.text; anchors.verticalCenter: parent.verticalCenter; leftPadding: 8; color: genericTheme.textPrimary }} MouseArea {{ anchors.fill: parent; onClicked: appBridge.openTool(model.text) }} }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}    Rectangle {{\n"
+        qml += f"{tab}        width: parent.width\n"
+        qml += f"{tab}        height: 40\n"
+        qml += f"{tab}        radius: genericTheme.radiusMd\n"
+        qml += f"{tab}        color: genericTheme.primary\n"
+        qml += f"{tab}        Text {{ text: '{self.btn_action.text()}'; color: 'white'; font.bold: true; anchors.centerIn: parent }}\n"
+        qml += f"{tab}        MouseArea {{ anchors.fill: parent; onClicked: appBridge.openTool('{self.btn_action.text()}') }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml

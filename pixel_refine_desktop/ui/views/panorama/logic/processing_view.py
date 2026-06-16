@@ -3,7 +3,7 @@
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QVBoxLayout, QLabel, QApplication, QFrame
 
-from pixel_refine_desktop.ui.resources.animations.loading.modern_progress_bar import ModernProgressBar
+from resources.animations.loading.modern_progress_bar import ModernProgressBar
 
 class ProcessingView(QFrame):
     """

@@ -1,3 +1,9 @@
+from resources.GenericUILibrary.skeleton import SkeletonLoader
+from resources.styles.stylesheet import CHECKBOX_SWITCH_STYLE
+from resources.styles.stylesheet import DROPDOWN_BOX
+from resources.animations.fade import fade_out
+from resources.styles.stylesheet import SCROLL_AREA
+from resources.animations.animation_manager import StackedWidgetAnimator
 import json
 import os
 
@@ -37,8 +43,8 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Average import 
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
     running_median,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Similarity import (
-    running_similarity,
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
+    running_mf_denoiser as running_similarity,
 )
 
 # from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Similarity_V2 import (
@@ -63,15 +69,6 @@ from pixel_refine_desktop.enhance_stack.components.bulk_page.widgets.bulk_thumbn
 from pixel_refine_desktop.enhance_stack.core.logic.workflow_process import (
     ImageViewer,
     get_last_image,
-)
-from pixel_refine_desktop.ui.resources.animations.animation_manager import (
-    StackedWidgetAnimator,
-)
-from pixel_refine_desktop.ui.resources.animations.fade import fade_out
-from pixel_refine_desktop.ui.resources.styles.stylesheet import (
-    DROPDOWN_BOX,
-    SCROLL_AREA,
-    CHECKBOX_SWITCH_STYLE,
 )
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from config import GENERAL_SETTINGS_FILE
@@ -101,27 +98,26 @@ class ClickableLabel(QLabel):
         super().mousePressEvent(event)
 
 
-from pixel_refine_desktop.ui.resources.GenericUILibrary.skeleton import SkeletonLoader
-
 class SkeletonCombinedPanel(QWidget):
     """
     A specific Skeleton loader for CombinedPanel matching its size and layout geometry.
     """
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(115)
-        
+
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(5, 5, 5, 5)
         main_layout.setSpacing(10)
-        
+
         # Left side: parameter area skeleton
         self.param_skeleton = SkeletonLoader(height=105, border_radius=4, parent=self)
         self.param_skeleton.setMinimumWidth(430)
-        
+
         # Right side: image list area skeleton
         self.list_skeleton = SkeletonLoader(height=105, border_radius=4, parent=self)
-        
+
         main_layout.addWidget(self.param_skeleton, 1)
         main_layout.addWidget(self.list_skeleton, 2)
 
@@ -192,8 +188,12 @@ class CombinedPanel(QWidget):
                 # Cek keberadaan file di disk secara sangat efisien
                 missing_paths = [p for p in raw_paths if not os.path.exists(p)]
                 if missing_paths:
-                    self.database_manager.batch_process_delete_selected_images(self.batch_id, missing_paths)
-                    self.image_paths_in_batch = self.database_manager.get_images_by_batch(self.batch_id)
+                    self.database_manager.batch_process_delete_selected_images(
+                        self.batch_id, missing_paths
+                    )
+                    self.image_paths_in_batch = (
+                        self.database_manager.get_images_by_batch(self.batch_id)
+                    )
                 else:
                     self.image_paths_in_batch = raw_paths
                 self.image_count_in_batch = len(self.image_paths_in_batch)
@@ -235,7 +235,7 @@ class CombinedPanel(QWidget):
 
         # === Thumbnail list panel (kanan)
         self.list_panel = QWidget()
-        self.list_panel.setStyleSheet("background-color: #DBDBDB")
+        self.list_panel.setObjectName("BulkListPanel")
         self.list_panel.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
@@ -582,17 +582,7 @@ class CombinedPanel(QWidget):
         font.setPointSize(8)
         font.setBold(True)
         self.batch_info_label.setFont(font)
-        self.batch_info_label.setStyleSheet(
-            """
-            QLabel {
-                background-color: #607D8B;
-                color: white;
-                padding: 3px 5px;
-                border-top-left-radius: 3px;
-                border-top-right-radius: 3px;
-            }
-        """
-        )
+        self.batch_info_label.setObjectName("BulkBatchInfoLabel")
 
         # 3. Tambahkan widget yang benar ke layout
         algorithm_area_v_layout.addWidget(self.batch_info_label)
@@ -609,27 +599,15 @@ class CombinedPanel(QWidget):
         button_layout.setContentsMargins(0, 0, 0, 0)
 
         # Tombol Add
-        add_button = QPushButton()
-        add_button.setFixedSize(30, 30)
-        add_button.setIcon(
-            QIcon("pixel_refine_desktop/ui/resources/assets/icons/add-image.png")
+        self.add_btn = QPushButton()
+        self.add_btn.setObjectName("addButton")
+        self.add_btn.setFixedSize(30, 30)
+        self.add_btn.setIcon(
+            QIcon("resources/assets/icons/add-image.png")
         )
-        add_button.setIconSize(QSize(25, 25))
-        add_button.setStyleSheet(
-            """
-            QPushButton {
-                background-color: #4CAF50; 
-                border-radius: 5px; 
-                color: white; 
-                font-weight: semi-bold;
-            }
-            QPushButton:hover {
-                background-color: #347A36;
-            }
-        """
-        )
-        add_button.setToolTip(language_config.ADD_IMAGE_BUTTON)
-        add_button.clicked.connect(
+        self.add_btn.setIconSize(QSize(20, 20))
+        self.add_btn.setToolTip(language_config.ADD_IMAGE_BUTTON)
+        self.add_btn.clicked.connect(
             lambda: handle_add_image_to_batch(
                 self.parent_widget,
                 self.database_manager,
@@ -640,56 +618,32 @@ class CombinedPanel(QWidget):
         )
 
         # Tombol Preview
-        preview_button = QPushButton()
-        preview_button.setFixedSize(30, 30)
-        preview_button.setIcon(
-            QIcon("pixel_refine_desktop/ui/resources/assets/icons/play-preview.png")
+        self.preview_btn = QPushButton()
+        self.preview_btn.setObjectName("processButton")
+        self.preview_btn.setFixedSize(30, 30)
+        self.preview_btn.setIcon(
+            QIcon("resources/assets/icons/play-preview.png")
         )
-        preview_button.setIconSize(QSize(15, 15))
-        preview_button.setStyleSheet(
-            """
-            QPushButton {
-                background-color: #FFA500; 
-                border-radius: 5px; 
-                color: white; 
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #CC8400;
-            }
-        """
-        )
-
-        preview_button.setToolTip(language_config.PREVIEW_IMAGE_BUTTON)
-        preview_button.clicked.connect(self.process_and_preview)
+        self.preview_btn.setIconSize(QSize(20, 20))
+        self.preview_btn.setToolTip(language_config.PREVIEW_IMAGE_BUTTON)
+        self.preview_btn.clicked.connect(self.process_and_preview)
 
         # Tombol Delete
-        delete_button = QPushButton()
-        delete_button.setFixedSize(30, 30)
-        delete_button.setIcon(
-            QIcon("pixel_refine_desktop/ui/resources/assets/icons/delete-image.png")
+        self.delete_btn = QPushButton()
+        self.delete_btn.setObjectName("deleteButton")
+        self.delete_btn.setFixedSize(30, 30)
+        self.delete_btn.setIcon(
+            QIcon("resources/assets/icons/delete-image.png")
         )
-        delete_button.setStyleSheet(
-            """
-            QPushButton {
-                background-color: #F44336; 
-                border-radius: 5px; 
-                color: white; 
-                font-weight: semi-bold;
-            }
-            QPushButton:hover {
-                background-color: #B9332A;
-            }
-        """
-        )
-        delete_button.setToolTip(language_config.DELETE_IMAGE_BUTTON)
-        delete_button.clicked.connect(
+        self.delete_btn.setIconSize(QSize(20, 20))
+        self.delete_btn.setToolTip(language_config.DELETE_IMAGE_BUTTON)
+        self.delete_btn.clicked.connect(
             lambda: self.parent_widget.handle_delete_individual_batch(self.batch_id)
         )
 
-        button_layout.addWidget(add_button)
-        button_layout.addWidget(preview_button)
-        button_layout.addWidget(delete_button)
+        button_layout.addWidget(self.add_btn)
+        button_layout.addWidget(self.preview_btn)
+        button_layout.addWidget(self.delete_btn)
 
         button_widget = QWidget()
         button_widget.setLayout(button_layout)
@@ -944,12 +898,18 @@ class CombinedPanel(QWidget):
             # Validasi cepat keberadaan file fisik di disk
             missing_paths = [p for p in raw_paths if not os.path.exists(p)]
             if missing_paths:
-                self.database_manager.batch_process_delete_selected_images(self.batch_id, missing_paths)
+                self.database_manager.batch_process_delete_selected_images(
+                    self.batch_id, missing_paths
+                )
                 images_in_db = self.database_manager.get_images_by_batch(self.batch_id)
                 # Refresh data internal dan UI label info batch
                 self.image_paths_in_batch = images_in_db
                 self.image_count_in_batch = len(images_in_db)
-                if hasattr(self, "batch_info_label") and self.batch_info_label and self.sequential_batch_number is not None:
+                if (
+                    hasattr(self, "batch_info_label")
+                    and self.batch_info_label
+                    and self.sequential_batch_number is not None
+                ):
                     batch_label_text = language_config.BATCH_LABEL_FORMAT.format(
                         self.sequential_batch_number, self.image_count_in_batch
                     )
@@ -1095,7 +1055,7 @@ class CombinedPanel(QWidget):
         Diperbaiki untuk menggunakan pemetaan kunci yang stabil untuk penyimpanan state.
         """
         algorithm_panel = QWidget()
-        algorithm_panel.setStyleSheet("background-color: #EBEAEA")
+        algorithm_panel.setObjectName("BulkAlgorithmPanel")
         algorithm_panel.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
@@ -1219,3 +1179,93 @@ class CombinedPanel(QWidget):
             self._update_visibility_internal()
 
         return algorithm_panel
+
+    def update_theme(self):
+        """Update stylesheets dynamically when theme changes."""
+        from resources.styles.stylesheet import CHECKBOX_SWITCH_STYLE, DROPDOWN_BOX, SCROLL_AREA
+        from PySide6.QtWidgets import QCheckBox, QComboBox, QScrollArea, QPushButton
+        from resources.GenericUILibrary.theme import get_theme, create_button_style
+        theme = get_theme()
+
+        # Update QCheckBox styles
+        for cb in self.findChildren(QCheckBox):
+            cb.setStyleSheet(CHECKBOX_SWITCH_STYLE)
+
+        # Update QComboBox styles
+        for combo in self.findChildren(QComboBox):
+            combo.setStyleSheet(DROPDOWN_BOX)
+
+        # Update QScrollArea styles
+        for scroll in self.findChildren(QScrollArea):
+            scroll.setStyleSheet(SCROLL_AREA)
+
+        # Update buttons
+        for btn in self.findChildren(QPushButton):
+            if btn.objectName() in ["addButton", "deleteButton", "processButton", "importButton"]:
+                # Map to variant name: addButton -> success, processButton -> primary, deleteButton -> danger, importButton -> info
+                variant_map = {
+                    "addButton": "success",
+                    "processButton": "primary",
+                    "deleteButton": "danger",
+                    "importButton": "info"
+                }
+                variant = variant_map.get(btn.objectName(), "secondary")
+                btn.setStyleSheet(create_button_style(variant, theme))
+
+    def retranslate_ui(self):
+        """Translate all UI texts inside this batch panel dynamically."""
+        # Update batch info label text
+        if hasattr(self, "batch_info_label") and self.batch_info_label and self.sequential_batch_number is not None:
+            batch_label_text = language_config.BATCH_LABEL_FORMAT.format(
+                self.sequential_batch_number, self.image_count_in_batch
+            )
+            self.batch_info_label.setText(batch_label_text)
+
+        # Update button tooltips
+        if hasattr(self, "add_btn") and self.add_btn:
+            self.add_btn.setToolTip(language_config.ADD_IMAGE_BUTTON)
+        if hasattr(self, "preview_btn") and self.preview_btn:
+            self.preview_btn.setToolTip(language_config.PREVIEW_IMAGE_BUTTON)
+        if hasattr(self, "delete_btn") and self.delete_btn:
+            self.delete_btn.setToolTip(language_config.DELETE_IMAGE_BUTTON)
+
+        # Update checkbox labels dynamically
+        if hasattr(self, "checkboxes") and hasattr(self, "label_to_key_map"):
+            # Update the labels in self.checkboxes mapping
+            # We mapped language strings directly as dictionary keys.
+            # To retranslate, we reconstruct the dictionary using new translation strings
+            # and update the text of the ClickableLabels.
+            new_label_to_key_map = {
+                language_config.PARAMETER_BATCH_ALIGNMENT: "checkbox_align_images",
+                language_config.PARAMETER_BATCH_ALIGNMENT_TO_FOLDER: "checkbox_save_alignment_to_folder",
+                language_config.PARAMETER_BATCH_DENOISING: "checkbox_denoising",
+                language_config.PARAMETER_BATCH_SUPER_RESOLUTION: "checkbox_super_resolution",
+                language_config.PARAMETER_BATCH_CROP_EDGE: "checkbox_crop_edges",
+                language_config.PARAMETER_BATCH_KEEP_EDGE: "checkbox_keep_edges",
+            }
+            
+            # Map old translation string -> new translation string based on JSON keys
+            reverse_old_map = {val: key for key, val in self.label_to_key_map.items()}
+            
+            new_checkboxes = {}
+            for new_text, json_key in new_label_to_key_map.items():
+                # Find old text for this json_key
+                old_text = reverse_old_map.get(json_key)
+                if old_text and old_text in self.checkboxes:
+                    cb = self.checkboxes[old_text]
+                    new_checkboxes[new_text] = cb
+                    # Find and update corresponding label's text
+                    # Since ClickableLabel is in the layout of the widget containing option_checkbox and option_label,
+                    # we can find it by looking at parent layout of option_checkbox
+                    parent_layout = cb.parent().layout()
+                    if parent_layout:
+                        for i in range(parent_layout.count()):
+                            item = parent_layout.itemAt(i)
+                            widget = item.widget()
+                            if isinstance(widget, ClickableLabel):
+                                widget.setText(new_text)
+            
+            self.checkboxes = new_checkboxes
+            self.label_to_key_map = new_label_to_key_map
+            
+        self.update_theme()

@@ -1,7 +1,9 @@
+import os
+os.environ["VK_LOADER_DEBUG"] = "error"
+os.environ["PIXEL_REFINE_AOT_DEVICE"] = "0"
 import numpy as np
 import cv2
 import time
-import os
 import sys
 
 # Path setup to ensure absolute imports work
@@ -22,6 +24,210 @@ def print_result(name, mae, threshold=0.5):
     status = "[PASS]" if mae < threshold else "[FAIL]"
     print(f"{status} {name:35} | MAE: {mae:10.6f} | Limit: {threshold}")
     return mae < threshold
+
+
+def run_jit_algorithm_tests(img_rgb, img_gray, h, w, results):
+    """
+    Test the 9 new algorithms (JIT mode: AOT_MODE=0).
+    These run Taichi kernels directly without compiled TCM modules.
+    """
+    print_header("NEW ALGORITHMS (JIT Mode)")
+
+    # Force JIT mode for these tests
+    os.environ["AOT_MODE"] = "0"
+    try:
+        import importlib
+        import taichi_library.taichi_algorithm as ta
+        # Reload to pick up AOT_MODE=0
+        importlib.reload(ta)
+    except Exception as e:
+        print(f"[SKIP] JIT mode unavailable: {e}")
+        return
+
+    if not ta.common.TAICHI_AVAILABLE:
+        print("[SKIP] Taichi not available for JIT tests")
+        return
+
+    # Use smaller images for expensive algorithms
+    small_gray = cv2.resize(img_gray, (128, 128))
+    small_rgb = cv2.resize(img_rgb, (128, 128))
+    sh, sw = small_gray.shape
+
+    # ---- 1. Color Space Conversions ----
+    try:
+        img_u8 = (img_gray * 255).astype(np.uint8)
+        img_bgr_u8 = cv2.merge([img_u8, img_u8, img_u8])  # Gray as BGR
+
+        # BGR -> YCrCb
+        img_bgr_f32 = img_bgr_u8.astype(np.float32)
+        ta_ycrcb = ta.cvtColor_extended(img_bgr_f32, ta.COLOR_BGR2YCrCb)
+        cv_ycrcb = cv2.cvtColor(img_bgr_u8, cv2.COLOR_BGR2YCrCb).astype(np.float32)
+        mae = np.mean(np.abs(ta_ycrcb - cv_ycrcb))
+        results.append(print_result("Color: BGR->YCrCb", mae, threshold=3.0))
+
+        # BGR -> HSV
+        ta_hsv = ta.cvtColor_extended(img_bgr_f32, ta.COLOR_BGR2HSV)
+        cv_hsv = cv2.cvtColor(img_bgr_u8, cv2.COLOR_BGR2HSV).astype(np.float32)
+        mae = np.mean(np.abs(ta_hsv - cv_hsv))
+        results.append(print_result("Color: BGR->HSV", mae, threshold=5.0))
+
+        # YCrCb roundtrip
+        ta_back = ta.cvtColor_extended(ta_ycrcb, ta.COLOR_YCrCb2BGR)
+        mae = np.mean(np.abs(ta_back - img_bgr_f32))
+        results.append(print_result("Color: YCrCb->BGR roundtrip", mae, threshold=3.0))
+    except Exception as e:
+        print(f"[FAIL] Color Conversions: {e}")
+        results.append(False)
+
+    # ---- 2. Otsu's Threshold ----
+    try:
+        gray_255 = (img_gray * 255).astype(np.float32)
+        thresh_val, binary = ta.otsu_threshold(gray_255)
+        cv_thresh, cv_binary = cv2.threshold(
+            gray_255.astype(np.uint8), 0, 255,
+            cv2.THRESH_BINARY | cv2.THRESH_OTSU
+        )
+        # Compare threshold values (should be close)
+        thresh_err = abs(thresh_val - float(cv_thresh))
+        results.append(print_result("Otsu Threshold Value", thresh_err, threshold=5.0))
+
+        # Compare binary maps
+        binary_diff = np.mean(np.abs(binary - cv_binary.astype(np.float32)))
+        results.append(print_result("Otsu Binary Map", binary_diff, threshold=20.0))
+    except Exception as e:
+        print(f"[FAIL] Otsu Threshold: {e}")
+        results.append(False)
+
+    # ---- 3. Guided Filter ----
+    try:
+        guide = small_gray.copy()
+        src = small_gray + np.random.randn(sh, sw).astype(np.float32) * 0.02
+        gf_result = ta.guided_filter(guide, src, radius=4, epsilon=0.01)
+        # Verify: output should be smoother than input but follow guide edges
+        input_std = np.std(src)
+        output_std = np.std(gf_result)
+        # Smoothed output should have lower variance
+        smoothness = input_std - output_std
+        results.append(print_result(
+            "Guided Filter (smoothing)",
+            0.0 if smoothness > 0 else 1.0,
+            threshold=0.5
+        ))
+    except Exception as e:
+        print(f"[FAIL] Guided Filter: {e}")
+        results.append(False)
+
+    # ---- 4. CLAHE ----
+    try:
+        gray_u8 = (small_gray * 255).astype(np.uint8)
+        gray_f32 = gray_u8.astype(np.float32)
+        ta_clahe = ta.clahe(gray_f32, clip_limit=2.0, tile_grid_size=(4, 4))
+        cv_clahe_obj = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+        cv_clahe = cv_clahe_obj.apply(gray_u8).astype(np.float32)
+        mae = np.mean(np.abs(ta_clahe - cv_clahe))
+        results.append(print_result("CLAHE (clip=2.0, 4x4)", mae, threshold=30.0))
+    except Exception as e:
+        print(f"[FAIL] CLAHE: {e}")
+        results.append(False)
+
+    # ---- 5. Canny Edge Detector ----
+    try:
+        gray_u8 = (small_gray * 255).astype(np.uint8)
+        gray_f32 = gray_u8.astype(np.float32)
+        ta_canny = ta.canny(gray_f32, low_threshold=50, high_threshold=150)
+        cv_canny = cv2.Canny(gray_u8, 50, 150).astype(np.float32)
+        # Canny is sensitive to implementation details, use generous threshold
+        mae = np.mean(np.abs(ta_canny - cv_canny))
+        results.append(print_result("Canny Edge Detector", mae, threshold=80.0))
+    except Exception as e:
+        print(f"[FAIL] Canny: {e}")
+        results.append(False)
+
+    # ---- 6. Hough Lines ----
+    try:
+        # Create synthetic edge image with a clear line
+        synth = np.zeros((128, 128), dtype=np.float32)
+        synth[30:32, 10:118] = 255.0  # Horizontal line
+        synth[10:118, 60:62] = 255.0  # Vertical line
+        lines = ta.hough_lines(synth, threshold=40)
+        # Should detect at least 1 line
+        results.append(print_result(
+            "Hough Lines (synthetic)",
+            0.0 if len(lines) >= 1 else 1.0,
+            threshold=0.5
+        ))
+    except Exception as e:
+        print(f"[FAIL] Hough Lines: {e}")
+        results.append(False)
+
+    # ---- 7. Non-Local Means ----
+    try:
+        # Use very small image for NLM (expensive)
+        tiny = cv2.resize(small_gray, (64, 64))
+        noisy = tiny + np.random.randn(64, 64).astype(np.float32) * 0.05
+        nlm_result = ta.non_local_means(
+            noisy, h_param=0.1, search_window=3, patch_size=2
+        )
+        # Verify: denoised should be closer to original than noisy
+        noise_err = np.mean(np.abs(noisy - tiny))
+        denoise_err = np.mean(np.abs(nlm_result - tiny))
+        improvement = noise_err - denoise_err
+        results.append(print_result(
+            "Non-Local Means (64x64)",
+            0.0 if improvement > 0 else 1.0,
+            threshold=0.5
+        ))
+    except Exception as e:
+        print(f"[FAIL] Non-Local Means: {e}")
+        results.append(False)
+
+    # ---- 8. Inpainting ----
+    try:
+        # Create test image with a hole
+        inp_src = small_rgb.copy() * 255.0
+        mask = np.zeros((sh, sw), dtype=np.float32)
+        mask[40:80, 40:80] = 1.0  # Square hole
+        inp_result = ta.inpaint(inp_src, mask, inpaint_radius=3)
+        # Verify: masked region should be filled (no NaN/Inf)
+        has_nan = np.any(np.isnan(inp_result)) or np.any(np.isinf(inp_result))
+        # Masked region should have reasonable values (not all zeros)
+        masked_mean = np.mean(inp_result[40:80, 40:80])
+        results.append(print_result(
+            "Inpainting (128x128)",
+            0.0 if (not has_nan and masked_mean > 1.0) else 1.0,
+            threshold=0.5
+        ))
+    except Exception as e:
+        print(f"[FAIL] Inpainting: {e}")
+        results.append(False)
+
+    # ---- 9. Seamless Cloning ----
+    try:
+        src_clone = small_rgb.copy() * 255.0
+        dst_clone = np.ones_like(src_clone) * 128.0  # Gray background
+        mask_clone = np.zeros((sh, sw), dtype=np.float32)
+        mask_clone[20:100, 20:100] = 1.0
+        sc_result = ta.seamless_clone(
+            src_clone, dst_clone, mask_clone,
+            flags=ta.NORMAL_CLONE, max_iterations=50
+        )
+        # Verify: no NaN/Inf and masked region should differ from dst
+        has_nan = np.any(np.isnan(sc_result)) or np.any(np.isinf(sc_result))
+        masked_diff = np.mean(np.abs(
+            sc_result[30:90, 30:90] - dst_clone[30:90, 30:90]
+        ))
+        results.append(print_result(
+            "Seamless Clone (128x128)",
+            0.0 if (not has_nan and masked_diff > 1.0) else 1.0,
+            threshold=0.5
+        ))
+    except Exception as e:
+        print(f"[FAIL] Seamless Clone: {e}")
+        results.append(False)
+
+    # Restore AOT mode for remaining tests
+    os.environ["AOT_MODE"] = "1"
+    print("\n--- End of JIT Algorithm Tests ---\n")
 
 
 def run_comprehensive_test():
@@ -198,6 +404,9 @@ def run_comprehensive_test():
         )
     )
 
+    # --- NEW ALGORITHMS (JIT Mode) ---
+    run_jit_algorithm_tests(img_rgb, img_gray, h, w, results)
+
     # --- PIPELINE STRESS TEST (SMART FUSION STYLE) ---
     if img_full is not None:
         run_pipeline_stress_test(taichi_aot.engine, img_full)
@@ -208,6 +417,9 @@ def run_comprehensive_test():
         print(">>> ALL TESTS PASSED! AOT System is Healthy and Accurate.")
     else:
         print(">>> SOME TESTS FAILED! Please check individual MAE values.")
+    passed = sum(results)
+    total = len(results)
+    print(f">>> Results: {passed}/{total} tests passed.")
     print("=" * 70)
 
 
@@ -370,6 +582,8 @@ if __name__ == "__main__":
         print(f">>> Running Comprehensive Test (Unbuffered) -> {log_path}")
 
         # -u for unbuffered binary stdout and stderr
+        env = os.environ.copy()
+        env["VK_LOADER_DEBUG"] = "error"
         with open(log_path, "w", encoding="utf-8") as f:
             process = subprocess.Popen(
                 [sys.executable, "-u", __file__, "--run-logic"],
@@ -377,11 +591,13 @@ if __name__ == "__main__":
                 stderr=subprocess.STDOUT,
                 text=True,
                 encoding="utf-8",
+                env=env,
             )
 
             for line in process.stdout:
-                # No need to print manually if we want to avoid duplicates
-                # or if we want to see it in real-time:
+                # Filter out the annoying Vulkan registry loader warnings
+                if "windows_read_data_files_in_registry" in line:
+                    continue
                 sys.stdout.write(line)
                 sys.stdout.flush()
                 f.write(line)

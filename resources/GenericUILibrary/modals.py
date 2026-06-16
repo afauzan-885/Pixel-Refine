@@ -34,6 +34,8 @@ class Modal(QDialog):
 
         self.setWindowTitle(title)
         self.setModal(True)
+        # Simpan size string untuk digunakan oleh to_qml()
+        self._size_str = size
 
         # Set size
         if size == "small":
@@ -88,6 +90,31 @@ class Modal(QDialog):
         self.footer.add_action(btn)
         return btn
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        title = self.windowTitle().replace("'", "\\'")
+        # Gunakan size string yang sudah disimpan saat __init__ (small/medium/large)
+        size_str = getattr(self, "_size_str", "medium")
+        size_map = {"small": (320, 240), "medium": (480, 320), "large": (640, 480)}
+        w, h = size_map.get(size_str, (480, 320))
+        qml = f"{tab}Popup {{\n"
+        qml += f"{tab}    id: modal\n"
+        qml += f"{tab}    width: {w}   // size='{size_str}'\n"
+        qml += f"{tab}    height: {h}\n"
+        qml += f"{tab}    modal: true\n"
+        qml += f"{tab}    anchors.centerIn: parent\n"
+        qml += f"{tab}    background: Rectangle {{ color: genericTheme.bgPrimary; radius: genericTheme.radiusLg; border.color: genericTheme.borderColor; border.width: 1 }}\n"
+        qml += f"{tab}    Column {{\n"
+        qml += f"{tab}        anchors.fill: parent\n"
+        qml += f"{tab}        anchors.margins: 16\n"
+        qml += f"{tab}        spacing: 12\n"
+        qml += f"{tab}        Row {{ width: parent.width; Text {{ text: '{title}'; font.bold: true; font.pixelSize: 16; color: genericTheme.textPrimary }} }}\n"
+        qml += f"{tab}        Item {{ width: 1; height: 1 }}\n"
+        qml += f"{tab}        Column {{ width: parent.width; spacing: 10 }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
+
 
 class ModalHeader(QWidget):
     """Modal header component"""
@@ -108,12 +135,22 @@ class ModalHeader(QWidget):
         """Set title"""
         self.title_label.setText(title)
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        qml = f"{tab}Row {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    Text {{ text: '{self.title_label.text()}'; font.bold: true; font.pixelSize: 16; color: genericTheme.textPrimary }}\n"
+        qml += f"{tab}    Item {{ Layout.fillWidth: true }}\n"
+        qml += f"{tab}}}"
+        return qml
+
 
 class ModalBody(QWidget):
     """Modal body component"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._qml_children = []
 
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(15, 15, 15, 15)
@@ -122,6 +159,7 @@ class ModalBody(QWidget):
     def set_content(self, content):
         """Set content (text or widget)"""
         # Clear existing
+        self._qml_children.clear()
         while self.layout.count():
             item = self.layout.takeAt(0)
             if item.widget():
@@ -132,11 +170,24 @@ class ModalBody(QWidget):
             label.setWordWrap(True)
             self.layout.addWidget(label)
         elif isinstance(content, QWidget):
+            self._qml_children.append(content)
             self.layout.addWidget(content)
 
     def add_widget(self, widget, stretch=0):
         """Add widget to body"""
+        self._qml_children.append(widget)
         self.layout.addWidget(widget, stretch)
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        qml = f"{tab}Column {{\n"
+        qml += f"{tab}    spacing: 10\n"
+        qml += f"{tab}    width: parent.width\n"
+        for child in self._qml_children:
+            if hasattr(child, "to_qml"):
+                qml += child.to_qml(indent + 1) + "\n"
+        qml += f"{tab}}}"
+        return qml
 
 
 class ModalFooter(QWidget):
@@ -144,6 +195,7 @@ class ModalFooter(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._qml_children = []
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(15, 10, 15, 10)
@@ -152,7 +204,20 @@ class ModalFooter(QWidget):
 
     def add_action(self, widget):
         """Add action widget"""
+        self._qml_children.append(widget)
         self.layout().addWidget(widget)
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        qml = f"{tab}Row {{\n"
+        qml += f"{tab}    spacing: 5\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    Item {{ Layout.fillWidth: true }}\n"
+        for child in self._qml_children:
+            if hasattr(child, "to_qml"):
+                qml += child.to_qml(indent + 1) + "\n"
+        qml += f"{tab}}}"
+        return qml
 
 
 class Overlay(QWidget):
@@ -201,6 +266,23 @@ class Overlay(QWidget):
         """Hide overlay"""
         self.hide()
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        msg = self.message_label.text().replace("'", "\\'")
+        qml = f"{tab}Rectangle {{\n"
+        qml += f"{tab}    anchors.fill: parent\n"
+        qml += f"{tab}    color: '#80000000'\n"
+        qml += f"{tab}    Rectangle {{\n"
+        qml += f"{tab}        anchors.centerIn: parent\n"
+        qml += f"{tab}        width: 250\n"
+        qml += f"{tab}        height: 80\n"
+        qml += f"{tab}        radius: genericTheme.radiusLg\n"
+        qml += f"{tab}        color: 'white'\n"
+        qml += f"{tab}        Text {{ text: '{msg}'; anchors.centerIn: parent; color: '#555' }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
+
 
 class Toast(QWidget):
     """
@@ -213,6 +295,7 @@ class Toast(QWidget):
 
     def __init__(self, message="", variant="info", parent=None):
         super().__init__(parent)
+        self._variant = variant
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -263,6 +346,24 @@ class Toast(QWidget):
 
         QTimer.singleShot(duration, self._hide_toast)
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        msg = self.message_label.text().replace("'", "\\'")
+        color = self._get_color(self._variant) if hasattr(self, '_variant') else '#3498db'
+        qml = f"{tab}Popup {{\n"
+        qml += f"{tab}    width: 300\n"
+        qml += f"{tab}    height: 50\n"
+        qml += f"{tab}    anchors.centerIn: parent\n"
+        qml += f"{tab}    Rectangle {{\n"
+        qml += f"{tab}        anchors.fill: parent\n"
+        qml += f"{tab}        radius: genericTheme.radiusMd\n"
+        qml += f"{tab}        color: '{color}'\n"
+        qml += f"{tab}        Text {{ text: '{msg}'; color: 'white'; font.bold: true; anchors.centerIn: parent }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}    Timer {{ interval: 3000; running: true; onTriggered: parent.close() }}\n"
+        qml += f"{tab}}}"
+        return qml
+
     def _hide_toast(self):
         """Hide toast with fade out"""
         self.fade_animation.setStartValue(1.0)
@@ -300,6 +401,17 @@ class LoadingSpinner(QWidget):
     def set_message(self, message):
         """Update loading message"""
         self.message_label.setText(message)
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        msg = self.message_label.text().replace("'", "\\'")
+        qml = f"{tab}Column {{\n"
+        qml += f"{tab}    anchors.centerIn: parent\n"
+        qml += f"{tab}    spacing: 10\n"
+        qml += f"{tab}    BusyIndicator {{ running: true; width: 48; height: 48; anchors.horizontalCenter: parent.horizontalCenter }}\n"
+        qml += f"{tab}    Text {{ text: '{msg}'; color: genericTheme.textSecondary; anchors.horizontalCenter: parent.horizontalCenter }}\n"
+        qml += f"{tab}}}"
+        return qml
 
 
 class modal_confirm(QDialog):
@@ -439,5 +551,24 @@ class modal_confirm(QDialog):
         dialog = modal_confirm(message, parent)
         result = dialog.exec()
         return result == QDialog.DialogCode.Accepted
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        msg = self.message_label.text().replace("'", "\\'")
+        qml = f"{tab}Dialog {{\n"
+        qml += f"{tab}    width: 400\n"
+        qml += f"{tab}    height: 150\n"
+        qml += f"{tab}    modal: true\n"
+        qml += f"{tab}    anchors.centerIn: parent\n"
+        qml += f"{tab}    title: 'Confirm'\n"
+        qml += f"{tab}    Text {{ text: '{msg}'; wrapMode: Text.WordWrap; width: parent.width; color: genericTheme.textPrimary }}\n"
+        qml += f"{tab}    footer: Row {{\n"
+        qml += f"{tab}        spacing: 8\n"
+        qml += f"{tab}        Item {{ Layout.fillWidth: true }}\n"
+        qml += f"{tab}        Button {{ text: 'Yes'; onClicked: parent.parent.accept() }}\n"
+        qml += f"{tab}        Button {{ text: 'No'; onClicked: parent.parent.reject() }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
 
 

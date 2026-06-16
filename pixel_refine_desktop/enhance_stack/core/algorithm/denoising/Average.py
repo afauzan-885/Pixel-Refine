@@ -20,7 +20,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
     setup_balanced_batching,
     cleanup_old_hdf5_files,
 )
-from pixel_refine_desktop.ui.resources.styles.stylesheet import PROGRESS_BAR
+from resources.styles.stylesheet import PROGRESS_BAR
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 
 

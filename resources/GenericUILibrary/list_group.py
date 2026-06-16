@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QLabel,
 )
 from PySide6.QtCore import QEvent, Qt, Signal, Slot, QTimer, QRect
-from pixel_refine_desktop.ui.resources.animations.animation_manager import (
+from resources.animations.animation_manager import (
     StackedWidgetAnimator,
 )
 
@@ -424,3 +424,42 @@ class ListGroup(QWidget, RealtimeMixin):
     @property
     def widget(self):
         return self._list_widget
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        reordering = getattr(self, "_reordering_animation", False) or \
+                     getattr(self, "reordering_animation", False)
+        qml = f"{tab}ListView {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    height: {max(200, self._list_widget.count() * 40)}\n"
+        qml += f"{tab}    clip: true\n"
+        qml += f"{tab}    spacing: 2\n"
+        # reordering=True -> aktifkan drag handle di QML
+        if reordering:
+            qml += f"{tab}    // reordering enabled — items bisa di-drag untuk diurutkan ulang\n"
+        qml += f"{tab}    model: ListModel {{\n"
+        for i in range(self._list_widget.count()):
+            item = self._list_widget.item(i)
+            text = item.text().replace("'", "\\'")
+            qml += f"{tab}        ListElement {{ text: '{text}' }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}    delegate: Rectangle {{\n"
+        qml += f"{tab}        width: ListView.view.width\n"
+        qml += f"{tab}        height: 36\n"
+        qml += f"{tab}        radius: genericTheme.radiusSm\n"
+        qml += f"{tab}        color: genericTheme.bgPrimary\n"
+        qml += f"{tab}        border.color: genericTheme.borderColor\n"
+        qml += f"{tab}        border.width: 1\n"
+        qml += f"{tab}        Row {{\n"
+        qml += f"{tab}            anchors.fill: parent\n"
+        qml += f"{tab}            anchors.leftMargin: 12\n"
+        qml += f"{tab}            spacing: 8\n"
+        if reordering:
+            # Tambahkan drag handle visual jika reordering aktif
+            qml += f"{tab}            Text {{ text: '⠿'; color: genericTheme.textMuted; anchors.verticalCenter: parent.verticalCenter; font.pixelSize: 14 }}\n"
+        qml += f"{tab}            Text {{ text: model.text; anchors.verticalCenter: parent.verticalCenter; color: genericTheme.textPrimary; elide: Text.ElideRight }}\n"
+        qml += f"{tab}        }}\n"
+        qml += f"{tab}        MouseArea {{ anchors.fill: parent; onClicked: appBridge.openTool(model.text) }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml

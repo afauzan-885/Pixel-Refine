@@ -73,6 +73,24 @@ class MainAppWindow(QMainWindow):
         print(f"Processing with data: {data}")
         self.workspace.viewer.show_loading(f"Processing {data['name']}...")
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        qml = f"{tab}Row {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    spacing: 0\n"
+        qml += f"{tab}    Column {{\n"
+        qml += f"{tab}        width: parent.width * 0.75\n"
+        if hasattr(self.workspace, 'to_qml'):
+            qml += self.workspace.to_qml(indent + 2) + "\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}    Column {{\n"
+        qml += f"{tab}        width: parent.width * 0.25\n"
+        if hasattr(self.selector, 'to_qml'):
+            qml += self.selector.to_qml(indent + 2) + "\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

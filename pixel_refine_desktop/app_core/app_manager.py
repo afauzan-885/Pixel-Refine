@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QMessageBox
 from pixel_refine_desktop.enhance_stack.core.logic.database_manager import (
     DatabaseManager,
 )
-from pixel_refine_desktop.ui.resources.animations.animation_manager import (
+from resources.animations.animation_manager import (
     StackedWidgetAnimator,
 )
 from pixel_refine_desktop.enhance_stack.models.algorithm_list import ALGORITHM_DATA
@@ -33,7 +33,7 @@ class ApplicationManager:
 
         # Auto-apply GenericUILibrary stylesheet
         try:
-            from pixel_refine_desktop.ui.resources.GenericUILibrary import (
+            from resources.GenericUILibrary import (
                 apply_stylesheet,
             )
 

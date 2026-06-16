@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
 )
 from PySide6.QtCore import Qt, Signal, QPropertyAnimation, QEasingCurve, QTimer
-from pixel_refine_desktop.ui.resources.GenericUILibrary.store import get_store
+from resources.GenericUILibrary.store import get_store
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -123,6 +123,8 @@ def setup_main_layout(layout_instance: Any, database_manager: DatabaseManager):
     Menginisialisasi Controller dan menghubungkan sinyal antar panel.
     """
     layout_instance.single_page_layout = QHBoxLayout()
+    layout_instance.single_page_layout.setSpacing(0)
+    layout_instance.single_page_layout.setContentsMargins(0, 0, 0, 0)
 
     # Init Controller (Backend Logic)
     layout_instance.controller = BatchPageController(database_manager.db_path)

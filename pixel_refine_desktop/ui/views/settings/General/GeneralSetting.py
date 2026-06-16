@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import QWidget, QMessageBox, QComboBox
 from PySide6.QtCore import Qt
 
-from pixel_refine_desktop.ui.resources.GenericUILibrary import (
+from resources.GenericUILibrary import (
     Container,
     Stack,
     FormRow,
@@ -26,7 +26,7 @@ class GeneralSettingsPage(Container, SyncMixin):
         super().__init__(padding=20, parent=parent)
         self.setObjectName("GeneralSettingsPage")
         self.setStyleSheet(
-            "#GeneralSettingsPage { background-color: #ffffff; border: none; }"
+            "#GeneralSettingsPage { background-color: transparent; border: none; }"
         )
 
         self.store = get_general_store()
@@ -55,6 +55,14 @@ class GeneralSettingsPage(Container, SyncMixin):
         # We don't use auto_sync for language because we want to control the restart prompt
         self.language_group.bind_store(self.store, "language")
         form.add_row(self.language_group)
+
+        # Themes Selection
+        theme_label = "Theme:"
+        self.theme_group = FormGroup(label=theme_label, input_type="select")
+        if isinstance(self.theme_group.input, QComboBox):
+            self.theme_group.input.addItems(["Light Theme", "Dark Theme"])
+        self.theme_group.bind_store(self.store, "theme")
+        form.add_row(self.theme_group)
 
         # GPU Acceleration
         gpu_label = getattr(
@@ -92,27 +100,9 @@ class GeneralSettingsPage(Container, SyncMixin):
         apply_text = getattr(
             language_config, "APPLY_PARAMETER_BUTTON_TEXT", "Apply Settings"
         )
-        self.apply_btn = Button(apply_text, variant="ghost")
+        self.apply_btn = Button(apply_text, variant="success")
+        self.apply_btn.setObjectName("ApplySettingsBtn")
         self.apply_btn.setMinimumHeight(35)
-        self.apply_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #FFFFFF;
-                color: #2ECC71;
-                border: 2px solid #2ECC71;
-                border-radius: 6px;
-                padding: 6px 16px;
-                font-weight: bold;
-                font-size: 11pt;
-            }
-            QPushButton:hover {
-                background-color: #2ECC71;
-                color: #FFFFFF;
-            }
-            QPushButton:pressed {
-                background-color: #27AE60;
-                color: #FFFFFF;
-            }
-        """)
         self.apply_btn.clicked.connect(self._on_apply_clicked)
 
         actions.add_item(self.apply_btn)
@@ -163,6 +153,20 @@ class GeneralSettingsPage(Container, SyncMixin):
         if main_win:
             from config import APP_VERSION
             main_win.setWindowTitle(f"Pixel Refine - Version {APP_VERSION}")
+        
+        self.update_theme()
+
+    def update_theme(self):
+        """Update checkbox styles and apply button variant styles dynamically on theme changes."""
+        from resources.GenericUILibrary.theme import create_checkbox_style, create_button_style
+        style = create_checkbox_style()
+        for cb in [self.gpu_cb, self.cpu_cb, self.thumb_cb]:
+            if hasattr(cb, "checkbox"):
+                cb.checkbox.setStyleSheet(style)
+        
+        # Apply variant styling for apply button dynamically
+        if hasattr(self, "apply_btn") and self.apply_btn:
+            self.apply_btn.setStyleSheet(create_button_style("success"))
 
     def _on_apply_clicked(self):
         """
@@ -174,12 +178,31 @@ class GeneralSettingsPage(Container, SyncMixin):
             new_lang = self.language_group.input.currentText()
             self.store.set("language", new_lang)
             
+            # Apply Theme
+            if isinstance(self.theme_group.input, QComboBox):
+                new_theme_str = self.theme_group.input.currentText()
+                self.store.set("theme", new_theme_str)
+                from resources.GenericUILibrary.theme import set_theme, DarkTheme, LightTheme
+                if new_theme_str == "Dark Theme":
+                    set_theme(DarkTheme())
+                else:
+                    set_theme(LightTheme())
+
+            # Explicitly force save general store to disk
+            if hasattr(self.store, "save_to_file"):
+                self.store.save_to_file()
+
             # Dynamically reload language config and translate this view
+            language_config.reload_language(new_lang)
             self.retranslate_ui()
             
             # Broadcast translation to the entire application hierarchy
             main_win = self.window()
             if main_win:
+                # Re-apply global stylesheet with new theme colors
+                from resources.styles.stylesheet import stylesheet_global_page
+                main_win.setStyleSheet(stylesheet_global_page())
+
                 # Recursively call retranslate_ui on all child widgets
                 def broadcast_retranslate(widget):
                     for child in widget.findChildren(QWidget):
@@ -190,13 +213,14 @@ class GeneralSettingsPage(Container, SyncMixin):
                                 print(f"Error retranslating {child}: {e}")
                 broadcast_retranslate(main_win)
             
-            # Trigger dedicated real-time decorator updates
-            from pixel_refine_desktop.ui.resources.GenericUILibrary import trigger_realtime_update
-            trigger_realtime_update()
+            # Trigger dedicated live decorator updates
+            from resources.GenericUILibrary import trigger_live_update
+            trigger_live_update()
+            trigger_live_update("update_theme")
             
             self._initial_language = new_lang
             
-            from pixel_refine_desktop.ui.resources.GenericUILibrary import Toast
+            from resources.GenericUILibrary import Toast
             toast = Toast(
                 getattr(language_config, "SETTINGS_SAVED", "Settings saved successfully!"),
                 variant="success",
@@ -204,7 +228,7 @@ class GeneralSettingsPage(Container, SyncMixin):
             )
             toast.show_toast(duration=3000)
         else:
-            from pixel_refine_desktop.ui.resources.GenericUILibrary import Toast
+            from resources.GenericUILibrary import Toast
             toast = Toast(
                 getattr(language_config, "SETTINGS_SAVED", "Settings saved successfully!"),
                 variant="success",

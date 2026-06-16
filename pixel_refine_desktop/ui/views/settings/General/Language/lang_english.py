@@ -636,3 +636,17 @@ DESC_DENOISING_CARD = "Reduce image noise and align pixel layers."
 
 
 
+
+# --- New UI & Bulk Core Keys ---
+BULK_FROM = "From Project #:"
+BULK_TO = "To Project #:"
+BULK_MSG_RANGE_ERROR = "Start project number must be <= end number."
+BULK_ERR_RETRIEVE = "Failed to load project images."
+BULK_WARN_UNSUPPORTED = "Unsupported formats will be ignored."
+CORE_SELECT_REF_IMAGE = "Set Reference"
+CORE_DELETE_IMAGES = "Delete Selected"
+CORE_MSG_CONFIRM_DELETE = "Delete selected images?"
+CORE_TOOLTIP_COPY = "Right-click to copy"
+UI_STATUS_READY = "Ready"
+UI_ITEMS_REMAINING = "remaining"
+UI_SPLASH_LOADING = "Loading..."

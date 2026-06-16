@@ -2,7 +2,7 @@ from pixel_refine_desktop.ui.views.settings.General.Language import language_con
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QMessageBox
 from PySide6.QtCore import Signal, Qt, Property, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QColor
-from pixel_refine_desktop.ui.resources.GenericUILibrary import Button
+from resources.GenericUILibrary import Button
 
 
 class MultipleBatchDeleteWidget(QWidget):

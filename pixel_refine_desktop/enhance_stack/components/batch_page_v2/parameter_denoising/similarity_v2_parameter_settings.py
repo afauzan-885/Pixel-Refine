@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QSlider, QHBoxLayou
 from PySide6.QtGui import QFont, QDoubleValidator, QIntValidator
 from PySide6.QtCore import Qt, QLocale
 
-from pixel_refine_desktop.ui.resources.styles.stylesheet import (SCROLL_AREA, SLIDER_STYLE, DROPDOWN_BOX,
+from resources.styles.stylesheet import (SCROLL_AREA, SLIDER_STYLE, DROPDOWN_BOX,
                                                 APPLY_BUTTON, VALUE_EDIT_LABEL)
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from config import CONFIG_DIR, ALGORITHM_PARAMETER_SETTINGS_FILE, GENERAL_SETTINGS_FILE

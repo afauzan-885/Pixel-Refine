@@ -142,3 +142,55 @@ class DataTable(QTableWidget):
                 )
         else:
             self.resizeColumnsToContents()
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        # columns:
+        col_count = self.columnCount()
+        row_count = self.rowCount()
+        headers = []
+        for c in range(col_count):
+            h_item = self.horizontalHeaderItem(c)
+            headers.append(h_item.text() if h_item else "")
+        qml = f"{tab}Rectangle {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    height: {44 + min(row_count, 50) * 30}\n"
+        qml += f"{tab}    border.color: '#dee2e6'\n"
+        qml += f"{tab}    border.width: 1\n"
+        qml += f"{tab}    radius: 4\n"
+        qml += f"{tab}    clip: true\n"
+        qml += f"{tab}    Column {{\n"
+        qml += f"{tab}        anchors.fill: parent\n"
+        qml += f"{tab}        spacing: 0\n"
+        # Header row
+        qml += f"{tab}        Rectangle {{\n"
+        qml += f"{tab}            width: parent.width\n"
+        qml += f"{tab}            height: 44\n"
+        qml += f"{tab}            color: '#f8f9fa'\n"
+        qml += f"{tab}            Rectangle {{ anchors.bottom: parent.bottom; width: parent.width; height: 2; color: '#dee2e6' }}\n"
+        qml += f"{tab}            Row {{\n"
+        qml += f"{tab}                anchors.fill: parent\n"
+        for h in headers:
+            qml += f"{tab}                Text {{ text: '{h}'; font.bold: true; width: parent.width / {col_count}; color: '#495057'; verticalAlignment: Text.AlignVCenter; leftPadding: 8; anchors.verticalCenter: parent.verticalCenter }}\n"
+        qml += f"{tab}            }}\n"
+        qml += f"{tab}        }}\n"
+        # Data rows
+        for r in range(min(row_count, 50)):
+            bg = "'#ffffff'" if r % 2 == 0 else "'#f8f9fa'"
+            qml += f"{tab}        Rectangle {{\n"
+            qml += f"{tab}            width: parent.width\n"
+            qml += f"{tab}            height: 30\n"
+            qml += f"{tab}            color: {bg}\n"
+            qml += f"{tab}            Rectangle {{ anchors.bottom: parent.bottom; width: parent.width; height: 1; color: '#f2f2f2' }}\n"
+            qml += f"{tab}            Row {{\n"
+            qml += f"{tab}                anchors.fill: parent\n"
+            for c in range(col_count):
+                item = self.item(r, c)
+                cell_text = item.text() if item else ""
+                cell_text = cell_text.replace("'", "\\'")
+                qml += f"{tab}                Text {{ text: '{cell_text}'; width: parent.width / {col_count}; verticalAlignment: Text.AlignVCenter; leftPadding: 5; color: genericTheme.textPrimary; anchors.verticalCenter: parent.verticalCenter }}\n"
+            qml += f"{tab}            }}\n"
+            qml += f"{tab}        }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml

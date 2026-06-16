@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
 )
 from PySide6.QtGui import QColor, QPixmap
-from pixel_refine_desktop.ui.resources.animations.loading.modern_progress_bar import (
+from resources.animations.loading.modern_progress_bar import (
     ModernProgressBar,
 )
 

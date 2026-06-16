@@ -13,7 +13,7 @@ from PySide6.QtCore import Qt, QObject, QMutex, QMutexLocker, QThread
 from PySide6.QtGui import QPixmap
 
 # Generic UI Library
-from pixel_refine_desktop.ui.resources.GenericUILibrary import ImageCompareItem
+from resources.GenericUILibrary import ImageCompareItem
 
 # Image loading helper for RAW support
 from pixel_refine_desktop.enhance_stack.core.logic.image_display_helper import (

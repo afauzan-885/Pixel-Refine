@@ -7,12 +7,12 @@ from pixel_refine_desktop.ui.views.panorama.display_area.display_panel import (
 from pixel_refine_desktop.ui.views.panorama.workflow_area.workflow_panel import (
     WorkflowPanel,
 )
-from pixel_refine_desktop.ui.resources.animations.animation_manager import (
+from resources.animations.animation_manager import (
     HeightAnimator,
     SlideDirection,
     StackedWidgetAnimator,
 )
-from pixel_refine_desktop.ui.resources.animations.slide import slide
+from resources.animations.slide import slide
 
 
 class WorkingLeftPanel(QWidget):

@@ -8,16 +8,15 @@ import sys
 import os
 import time
 
+# Suppress Vulkan loader registry warnings on Windows
+os.environ["VK_LOADER_DEBUG"] = "error"
+
+# Explicitly lock Vulkan device to device 0 to bypass dynamic scan (vulkaninfo)
+os.environ["PIXEL_REFINE_AOT_DEVICE"] = "0"
+
 # --- Taichi Cache Configuration ---
-# Store Taichi kernels in the project root to prevent auto-deletion and speed up JIT.
-# Using forward slashes and a standard folder name for maximum compatibility on Windows.
-_current_dir = os.path.dirname(os.path.abspath(__file__)).replace("\\", "/")
-_cache_path = f"{_current_dir}/taichi_cache"
-if not os.path.exists(_cache_path):
-    os.makedirs(_cache_path, exist_ok=True)
-os.environ["TI_OFFLINE_CACHE"] = "1"
-os.environ["TI_OFFLINE_CACHE_FILE_PATH"] = _cache_path
-os.environ["TI_OFFLINE_CACHE_DIR"] = _cache_path
+# Offline cache disabled per request.
+os.environ["TI_OFFLINE_CACHE"] = "0"
 
 # --- Backend Configuration for AOT/TiRT ---
 # Disable CUDA Async Malloc for Taichi stability before any other imports
@@ -46,8 +45,8 @@ from pixel_refine_desktop.ui import (
     SettingsView,
     Sidebar,
     SplashScreen,
-    fade_in,
 )
+from resources.animations.fade import fade_in
 
 # from pixel_refine_desktop.ui.views.panorama import PanoramaPage
 import config
@@ -121,6 +120,10 @@ class ToolTipFilter(QObject):
 # ============================================================================
 
 
+from resources.GenericUILibrary import live_update
+
+
+@live_update
 class PixelRefineMain(QMainWindow):
     """Main application window for Pixel Refine."""
 
@@ -179,7 +182,7 @@ class PixelRefineMain(QMainWindow):
 
         # Window icon and title
         self.setWindowIcon(
-            QIcon("pixel_refine_desktop/ui/resources/assets/icons/enhance_stack.png")
+            QIcon("resources/assets/icons/enhance_stack.png")
         )
         self.setWindowTitle(f"Pixel Refine - Version {config.APP_VERSION}")
 
@@ -292,6 +295,11 @@ class PixelRefineMain(QMainWindow):
         """Toggle sidebar visibility (placeholder for future implementation)."""
         pass
 
+    def retranslate_ui(self):
+        """Update window title dynamically when language changes."""
+        self.setWindowTitle(f"Pixel Refine - Version {config.APP_VERSION}")
+
+
 
 # ============================================================================
 # APPLICATION ENTRY POINT
@@ -300,8 +308,33 @@ class PixelRefineMain(QMainWindow):
 
 def main():
     """Main application entry point."""
+    # Suppress native Vulkan loader registry warnings by wrapping stderr
+    class VulkanWarningFilter:
+        def __init__(self, target):
+            self.target = target
+        def write(self, message):
+            if "windows_read_data_files_in_registry" not in message:
+                self.target.write(message)
+        def flush(self):
+            self.target.flush()
+
+    sys.stderr = VulkanWarningFilter(sys.stderr)
+
     # Create application
     app = QApplication(sys.argv)
+
+    # Load and apply theme from settings on startup
+    try:
+        from pixel_refine_desktop.ui.views.settings.General.general_store import get_general_store
+        from resources.GenericUILibrary.theme import set_theme, DarkTheme, LightTheme
+        store = get_general_store()
+        saved_theme = store.get("theme", "Light Theme")
+        if saved_theme == "Dark Theme":
+            set_theme(DarkTheme())
+        else:
+            set_theme(LightTheme())
+    except Exception as e:
+        print(f"Error loading initial theme: {e}")
 
     # Apply custom styles
     app.setStyle(CustomStyle())
@@ -326,7 +359,7 @@ def main():
     # Setup splash screen
     screen_geometry = app.primaryScreen().geometry()
     original_pixmap = QPixmap(
-        "pixel_refine_desktop/ui/resources/assets/images/Logo_Pixel_Refine.png"
+        "resources/assets/images/Logo_Pixel_Refine.png"
     )
 
     splash_width = int(screen_geometry.width() * 0.25)
@@ -343,6 +376,16 @@ def main():
     # Create and setup main window
     window = PixelRefineMain()
     window.setup_ui_and_logic(splash)
+
+    # Load and apply initial stylesheet & theme triggers at startup
+    try:
+        from resources.styles.stylesheet import stylesheet_global_page
+        from resources.GenericUILibrary import trigger_live_update
+        window.setStyleSheet(stylesheet_global_page())
+        trigger_live_update()
+        trigger_live_update("update_theme")
+    except Exception as e:
+        print(f"Error applying startup stylesheet/theme updates: {e}")
 
     # Show main window and close splash
     window.show()

@@ -16,8 +16,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QFont, QDoubleValidator, QIntValidator
 from PySide6.QtCore import Qt, QLocale
 
-from pixel_refine_desktop.ui.resources.GenericUILibrary import FormGroup
-from pixel_refine_desktop.ui.resources.styles.stylesheet import (
+from resources.GenericUILibrary import FormGroup
+from resources.styles.stylesheet import (
     SCROLL_AREA,
     SLIDER_STYLE,
     DROPDOWN_BOX,

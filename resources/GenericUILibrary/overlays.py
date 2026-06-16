@@ -265,16 +265,18 @@ class OverlayContainer(QWidget):
             return
 
         painter = QPainter(self)
+        try:
+            # Draw Blurred BG
+            if self.blur_background and self._bg_pixmap:
+                painter.drawPixmap(self.rect(), self._bg_pixmap)
 
-        # Draw Blurred BG
-        if self.blur_background and self._bg_pixmap:
-            painter.drawPixmap(self.rect(), self._bg_pixmap)
-
-        # Draw Dim
-        if self.dim_background:
-            color = QColor(0, 0, 0)
-            color.setAlphaF(self.dim_opacity)
-            painter.fillRect(self.rect(), color)
+            # Draw Dim
+            if self.dim_background:
+                color = QColor(0, 0, 0)
+                color.setAlphaF(self.dim_opacity)
+                painter.fillRect(self.rect(), color)
+        finally:
+            painter.end()
 
     def mousePressEvent(self, event):
         if self.is_modal and self.close_on_click_outside:
@@ -400,3 +402,26 @@ class OverlayContainer(QWidget):
         final_x = max(0, min(natural_pos.x(), p_rect.width() - w))
         final_y = max(0, min(natural_pos.y(), p_rect.height() - h))
         return QPoint(final_x, final_y)
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        # position, margin, smart_positioning, close_on_click_outside:
+        # blur_background, blur_radius, shadow_enabled, shadow_blur_radius, shadow_color, shadow_offset:
+        qml = f"{tab}Popup {{\n"
+        qml += f"{tab}    modal: {str(self.is_modal).lower()}\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    height: parent.height\n"
+        qml += f"{tab}    background: Rectangle {{\n"
+        if self.dim_background:
+            qml += f"{tab}        color: '#{int(self.dim_opacity * 255):02x}000000'\n"
+        else:
+            qml += f"{tab}        color: 'transparent'\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}    Rectangle {{\n"
+        qml += f"{tab}        anchors.centerIn: parent\n"
+        qml += f"{tab}        width: childrenRect.width\n"
+        qml += f"{tab}        height: childrenRect.height\n"
+        qml += f"{tab}        color: 'transparent'\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml

@@ -23,11 +23,11 @@ from pixel_refine_desktop.enhance_stack.components.batch_page_v2.algorithm_panel
 )
 
 # Animation support
-from pixel_refine_desktop.ui.resources.animations.animation_manager import (
+from resources.animations.animation_manager import (
     StackedWidgetAnimator,
     SlideDirection,
 )
-from pixel_refine_desktop.ui.resources.animations.slide import slide
+from resources.animations.slide import slide
 
 
 class AdaptiveStackedWidget(QStackedWidget):

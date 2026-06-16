@@ -122,6 +122,27 @@ class Button(QPushButton):
         self.style().unpolish(self)
         self.style().polish(self)
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        qml = f"{tab}Rectangle {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    height: 28\n"
+        qml += f"{tab}    color: genericTheme.{self.variant} // dynamic map\n"
+        qml += f"{tab}    radius: genericTheme.radiusMd\n"
+        qml += f"{tab}    Text {{\n"
+        qml += f"{tab}        text: '{self.text()}'\n"
+        qml += f"{tab}        color: 'white'\n"
+        qml += f"{tab}        font.bold: true\n"
+        qml += f"{tab}        font.pointSize: 11\n"
+        qml += f"{tab}        anchors.centerIn: parent\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}    MouseArea {{\n"
+        qml += f"{tab}        anchors.fill: parent\n"
+        qml += f"{tab}        onClicked: appBridge.openTool('{self.text()}')\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
+
 
 class IconButton(Button):
     """
@@ -140,9 +161,21 @@ class IconButton(Button):
         variant="secondary",
         text_tooltip=None,
         square_size=None,
+        bg_color=None,
+        text_color=None,
+        hover_color=None,
         parent=None,
     ):
-        super().__init__(text=text, variant=variant, parent=parent)
+        super().__init__(
+            text=text,
+            variant=variant,
+            bg_color=bg_color,
+            text_color=text_color,
+            hover_color=hover_color,
+            parent=parent
+        )
+        self._icon_path = icon_path
+        self._square_size = square_size
 
         if icon:
             self.setIcon(icon)
@@ -152,7 +185,6 @@ class IconButton(Button):
             self.setIcon(QIcon(icon_path))
 
         if square_size:
-
             self.setFixedSize(square_size, square_size)
             # 2px padding each side = 4px total reduction
             self.setIconSize(QSize(square_size - 4, square_size - 4))
@@ -177,8 +209,32 @@ class IconButton(Button):
                 f"{text_tooltip}</div></html>"
             )
 
-        # Re-apply variant styling to ensure it's used
-        self._apply_custom_colors()
+        # Apply inline colors only if custom colors are explicitly provided
+        if bg_color or text_color or hover_color:
+            self._apply_custom_colors(bg_color, text_color, hover_color)
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        w = self._square_size if self._square_size else "parent.width"
+        h = self._square_size if self._square_size else 28
+        qml = f"{tab}Rectangle {{\n"
+        qml += f"{tab}    width: {w}\n"
+        qml += f"{tab}    height: {h}\n"
+        qml += f"{tab}    color: genericTheme.{self.variant}\n"
+        qml += f"{tab}    radius: genericTheme.radiusMd\n"
+        qml += f"{tab}    Row {{\n"
+        qml += f"{tab}        anchors.centerIn: parent\n"
+        qml += f"{tab}        spacing: 6\n"
+        if self._icon_path:
+            qml += f"{tab}        Image {{ source: '{self._icon_path}'; width: 20; height: 20; fillMode: Image.PreserveAspectFit }}\n"
+        qml += f"{tab}        Text {{ text: '{self.text()}'; color: 'white'; font.bold: true; anchors.verticalCenter: parent.verticalCenter }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}    MouseArea {{\n"
+        qml += f"{tab}        anchors.fill: parent\n"
+        qml += f"{tab}        onClicked: appBridge.openTool('{self.text()}')\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
 
 
 class ButtonGroup(QWidget):
@@ -239,6 +295,23 @@ class ButtonGroup(QWidget):
             if btn.isCheckable():
                 btn.setChecked(i == index)
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        layout_type = "Row" if self.orientation == "horizontal" else "Column"
+        qml = f"{tab}{layout_type} {{\n"
+        qml += f"{tab}    spacing: 0\n"
+        qml += f"{tab}    width: parent.width\n"
+        for btn in self.buttons:
+            # Gunakan representasi button QML sederhana
+            qml += f"{tab}    Rectangle {{\n"
+            qml += f"{tab}        width: parent.width / {len(self.buttons) if self.orientation == 'horizontal' else 1}\n"
+            qml += f"{tab}        height: 38\n"
+            qml += f"{tab}        color: '#E5E7EB'\n"
+            qml += f"{tab}        Text {{ text: '{btn.text()}'; anchors.centerIn: parent }}\n"
+            qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
+
 
 class ToggleButton(QPushButton):
     """
@@ -262,6 +335,28 @@ class ToggleButton(QPushButton):
         """Update button appearance based on state"""
         # You can customize this behavior
         pass
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        qml = f"{tab}Rectangle {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    height: 28\n"
+        qml += f"{tab}    property bool checked: {str(self.isChecked()).lower()}\n"
+        qml += f"{tab}    color: checked ? genericTheme.primary : genericTheme.secondary\n"
+        qml += f"{tab}    radius: genericTheme.radiusMd\n"
+        qml += f"{tab}    Text {{\n"
+        qml += f"{tab}        text: '{self.text()}'\n"
+        qml += f"{tab}        color: 'white'\n"
+        qml += f"{tab}        font.bold: true\n"
+        qml += f"{tab}        font.pointSize: 11\n"
+        qml += f"{tab}        anchors.centerIn: parent\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}    MouseArea {{\n"
+        qml += f"{tab}        anchors.fill: parent\n"
+        qml += f"{tab}        onClicked: parent.checked = !parent.checked\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
 
 
 class ToggleSwitch(QWidget):
@@ -318,3 +413,28 @@ class ToggleSwitch(QWidget):
         painter.setBrush(QBrush(QColor("#FFFFFF")))
         thumb_size = self.height() - 4
         painter.drawEllipse(self._thumb_position, 2, thumb_size, thumb_size)
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        checked_str = str(self._checked).lower()
+        qml = f"{tab}Rectangle {{\n"
+        qml += f"{tab}    width: 36\n"
+        qml += f"{tab}    height: 20\n"
+        qml += f"{tab}    radius: 10\n"
+        qml += f"{tab}    color: checked ? '#2ECC71' : '#BDC3C7'\n"
+        qml += f"{tab}    property bool checked: {checked_str}\n"
+        qml += f"{tab}    Rectangle {{\n"
+        qml += f"{tab}        x: parent.checked ? 18 : 2\n"
+        qml += f"{tab}        y: 2\n"
+        qml += f"{tab}        width: 16\n"
+        qml += f"{tab}        height: 16\n"
+        qml += f"{tab}        radius: 8\n"
+        qml += f"{tab}        color: '#FFFFFF'\n"
+        qml += f"{tab}        Behavior on x {{ NumberAnimation {{ duration: 150 }} }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}    MouseArea {{\n"
+        qml += f"{tab}        anchors.fill: parent\n"
+        qml += f"{tab}        onClicked: parent.checked = !parent.checked\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml

@@ -104,6 +104,32 @@ class Navbar(QFrame):
         for i, item in enumerate(self.nav_items):
             item.set_active(i == index)
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        brand_text = self.brand_label.text() if self.brand_label else ""
+        qml = f"{tab}Rectangle {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    height: {self.height()}\n"
+        qml += f"{tab}    color: '#2c3e50'\n"
+        qml += f"{tab}    Row {{\n"
+        qml += f"{tab}        anchors.fill: parent\n"
+        qml += f"{tab}        anchors.margins: 5\n"
+        qml += f"{tab}        spacing: 10\n"
+        if brand_text:
+            qml += f"{tab}        Text {{ text: '{brand_text}'; color: 'white'; font.bold: true; font.pixelSize: 18; anchors.verticalCenter: parent.verticalCenter }}\n"
+        for item in self.nav_items:
+            text = item.text().replace("'", "\\'")
+            qml += f"{tab}        Rectangle {{\n"
+            qml += f"{tab}            width: 80; height: 36\n"
+            qml += f"{tab}            radius: genericTheme.radiusSm\n"
+            qml += f"{tab}            color: 'transparent'\n"
+            qml += f"{tab}            Text {{ text: '{text}'; color: 'white'; anchors.centerIn: parent }}\n"
+            qml += f"{tab}            MouseArea {{ anchors.fill: parent; onClicked: appBridge.openTool('{text}') }}\n"
+            qml += f"{tab}        }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
+
 
 class NavItem(QPushButton):
     """
@@ -179,6 +205,19 @@ class NavItem(QPushButton):
             """
             )
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        text = self.text().replace("'", "\\'")
+        bg = "'rgba(255,255,255,0.15)'" if self.is_active else "'transparent'"
+        qml = f"{tab}Rectangle {{\n"
+        qml += f"{tab}    width: 80; height: 36\n"
+        qml += f"{tab}    radius: genericTheme.radiusSm\n"
+        qml += f"{tab}    color: {bg}\n"
+        qml += f"{tab}    Text {{ text: '{text}'; color: 'white'; anchors.centerIn: parent }}\n"
+        qml += f"{tab}    MouseArea {{ anchors.fill: parent; onClicked: appBridge.openTool('{text}') }}\n"
+        qml += f"{tab}}}"
+        return qml
+
 
 class Sidebar(QFrame):
     """
@@ -248,6 +287,22 @@ class Sidebar(QFrame):
         self.set_active_item(index)
         self.item_clicked.emit(index, text)
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        qml = f"{tab}Rectangle {{\n"
+        qml += f"{tab}    width: {self.width()}\n"
+        qml += f"{tab}    height: parent.height\n"
+        qml += f"{tab}    color: '#2c3e50'\n"
+        qml += f"{tab}    Column {{\n"
+        qml += f"{tab}        width: parent.width\n"
+        qml += f"{tab}        spacing: 0\n"
+        for item in self.items:
+            if hasattr(item, "to_qml"):
+                qml += item.to_qml(indent + 2) + "\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
+
 
 class SidebarItem(QPushButton):
     """
@@ -260,6 +315,9 @@ class SidebarItem(QPushButton):
 
     def __init__(self, text, icon_path=None, parent=None):
         super().__init__(text, parent)
+
+        # Simpan icon_path untuk digunakan oleh to_qml()
+        self._icon_path = icon_path
 
         if icon_path:
             from PySide6.QtGui import QIcon
@@ -321,3 +379,28 @@ class SidebarItem(QPushButton):
                 }
             """
             )
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        text = self.text().replace("'", "\\'")
+        bg = "'#3498db'" if self.is_active else "'transparent'"
+        # Ambil icon path jika ada (disimpan saat __init__)
+        icon_path = getattr(self, "_icon_path", None)
+
+        qml = f"{tab}Rectangle {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    height: 50\n"
+        qml += f"{tab}    color: {bg}\n"
+        qml += f"{tab}    Row {{\n"
+        qml += f"{tab}        anchors.verticalCenter: parent.verticalCenter\n"
+        qml += f"{tab}        leftPadding: 20\n"
+        qml += f"{tab}        spacing: 10\n"
+        if icon_path:
+            # Render icon jika icon_path tersedia
+            icon_path_escaped = icon_path.replace("\\", "/").replace("'", "\\'")
+            qml += f"{tab}        Image {{ source: 'file:///{icon_path_escaped}'; width: 18; height: 18; anchors.verticalCenter: parent.verticalCenter; fillMode: Image.PreserveAspectFit }}\n"
+        qml += f"{tab}        Text {{ text: '{text}'; color: 'white'; anchors.verticalCenter: parent.verticalCenter }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}    MouseArea {{ anchors.fill: parent; onClicked: appBridge.openTool('{text}') }}\n"
+        qml += f"{tab}}}"
+        return qml

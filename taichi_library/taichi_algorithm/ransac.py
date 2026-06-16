@@ -191,7 +191,220 @@ if TAICHI_AVAILABLE:
                     output[y, x, 0] = model_x
                     output[y, x, 1] = model_y
 
+    # =========================================================================
+    # GPU MAGSAC++ HOMOGRAPHY SOLVER (KUSTOM)
+    # Paralel GPU RANSAC + Tukey's Biweight soft scoring + Weighted Least Squares
+    # =========================================================================
+
+    @ti.func
+    def _lcg_rand(seed: ti.u32) -> ti.u32:
+        return seed * 1664525 + 1013904223
+
+    @ti.func
+    def _solve_8x8(M: ti.types.matrix(8, 8, ti.f32), b: ti.types.vector(8, ti.f32)) -> ti.types.vector(8, ti.f32):
+        A = ti.Matrix([[0.0] * 9 for _ in range(8)])
+        for r in ti.static(range(8)):
+            for c in ti.static(range(8)):
+                A[r, c] = M[r, c]
+            A[r, 8] = b[r]
+
+        is_singular = 0
+        for col in ti.static(range(8)):
+            max_val = ti.abs(A[col, col])
+            max_row = col
+            for row in range(col + 1, 8):
+                v = ti.abs(A[row, col])
+                if v > max_val:
+                    max_val = v
+                    max_row = row
+
+            if max_row != col:
+                for c in ti.static(range(9)):
+                    tmp = A[col, c]
+                    A[col, c] = A[max_row, c]
+                    A[max_row, c] = tmp
+
+            pivot = A[col, col]
+            if ti.abs(pivot) < 1e-9:
+                is_singular = 1
+
+            if is_singular == 0:
+                for c in range(col, 9):
+                    A[col, c] /= pivot
+                for row in range(col + 1, 8):
+                    factor = A[row, col]
+                    for c in range(col, 9):
+                        A[row, c] -= factor * A[col, c]
+
+        x = ti.Vector([0.0] * 8)
+        if is_singular == 0:
+            for step in range(8):
+                row = 7 - step
+                x[row] = A[row, 8]
+                for c in range(row + 1, 8):
+                    x[row] -= A[row, c] * x[c]
+        return x
+
+    @ti.func
+    def _build_and_solve_homography(
+        pts1: ti.types.ndarray(ti.f32, ndim=2),
+        pts2: ti.types.ndarray(ti.f32, ndim=2),
+        i0: int, i1: int, i2: int, i3: int,
+        n_pts: int
+    ) -> ti.types.matrix(3, 3, ti.f32):
+        M = ti.Matrix([[0.0] * 8 for _ in range(8)])
+        b_vec = ti.Vector([0.0] * 8)
+        indices = ti.Vector([i0, i1, i2, i3])
+        for r in range(4):
+            idx = indices[r]
+            x1 = pts1[idx, 0]; y1 = pts1[idx, 1]
+            x2 = pts2[idx, 0]; y2 = pts2[idx, 1]
+
+            row0 = r * 2
+            M[row0, 0] = x1; M[row0, 1] = y1; M[row0, 2] = 1.0
+            M[row0, 3] = 0.0; M[row0, 4] = 0.0; M[row0, 5] = 0.0
+            M[row0, 6] = -x2 * x1; M[row0, 7] = -x2 * y1
+            b_vec[row0] = x2
+
+            row1 = r * 2 + 1
+            M[row1, 0] = 0.0; M[row1, 1] = 0.0; M[row1, 2] = 0.0
+            M[row1, 3] = x1;  M[row1, 4] = y1;  M[row1, 5] = 1.0
+            M[row1, 6] = -y2 * x1; M[row1, 7] = -y2 * y1
+            b_vec[row1] = y2
+
+        h = _solve_8x8(M, b_vec)
+        H = ti.Matrix([[0.0] * 3 for _ in range(3)])
+        H[0, 0] = h[0]; H[0, 1] = h[1]; H[0, 2] = h[2]
+        H[1, 0] = h[3]; H[1, 1] = h[4]; H[1, 2] = h[5]
+        H[2, 0] = h[6]; H[2, 1] = h[7]; H[2, 2] = 1.0
+        return H
+
+    @ti.kernel
+    def ransac_homography_kernel(
+        pts1: ti.types.ndarray(ti.f32, ndim=2),
+        pts2: ti.types.ndarray(ti.f32, ndim=2),
+        n_pts: int,
+        n_hypotheses: int,
+        reproj_threshold: ti.f32,
+        H_candidates: ti.types.ndarray(ti.f32, ndim=2),
+        inlier_counts: ti.types.ndarray(ti.i32, ndim=1),
+        seed_offset: int
+    ):
+        thresh_sq = reproj_threshold * reproj_threshold
+
+        for hyp_idx in range(n_hypotheses):
+            seed = _lcg_rand(ti.u32(hyp_idx) + ti.u32(seed_offset) + ti.u32(2654435769))
+
+            # progressive/random sampling
+            seed = _lcg_rand(seed)
+            i0 = int(seed % ti.u32(n_pts))
+            seed = _lcg_rand(seed)
+            i1 = int(seed % ti.u32(n_pts))
+            for _ in range(8):
+                if i1 == i0:
+                    seed = _lcg_rand(seed)
+                    i1 = int(seed % ti.u32(n_pts))
+            seed = _lcg_rand(seed)
+            i2 = int(seed % ti.u32(n_pts))
+            for _ in range(8):
+                if i2 == i0 or i2 == i1:
+                    seed = _lcg_rand(seed)
+                    i2 = int(seed % ti.u32(n_pts))
+            seed = _lcg_rand(seed)
+            i3 = int(seed % ti.u32(n_pts))
+            for _ in range(8):
+                if i3 == i0 or i3 == i1 or i3 == i2:
+                    seed = _lcg_rand(seed)
+                    i3 = int(seed % ti.u32(n_pts))
+
+            H = _build_and_solve_homography(pts1, pts2, i0, i1, i2, i3, n_pts)
+
+            # Hitung konsensus dengan soft-scoring Tukey's Biweight (MAGSAC++)
+            score_acc = 0.0
+            for pt_idx in range(n_pts):
+                x1 = pts1[pt_idx, 0]; y1 = pts1[pt_idx, 1]
+                x2 = pts2[pt_idx, 0]; y2 = pts2[pt_idx, 1]
+
+                denom = H[2, 0] * x1 + H[2, 1] * y1 + H[2, 2]
+                proj_x = (H[0, 0] * x1 + H[0, 1] * y1 + H[0, 2]) / (denom + 1e-9)
+                proj_y = (H[1, 0] * x1 + H[1, 1] * y1 + H[1, 2]) / (denom + 1e-9)
+
+                dx = proj_x - x2
+                dy = proj_y - y2
+                err_sq = dx * dx + dy * dy
+
+                if err_sq < thresh_sq:
+                    diff = 1.0 - err_sq / thresh_sq
+                    score_acc += diff * diff
+
+            inlier_counts[hyp_idx] = int(score_acc * 1000.0)
+
+            H_candidates[hyp_idx, 0] = H[0, 0]
+            H_candidates[hyp_idx, 1] = H[0, 1]
+            H_candidates[hyp_idx, 2] = H[0, 2]
+            H_candidates[hyp_idx, 3] = H[1, 0]
+            H_candidates[hyp_idx, 4] = H[1, 1]
+            H_candidates[hyp_idx, 5] = H[1, 2]
+            H_candidates[hyp_idx, 6] = H[2, 0]
+            H_candidates[hyp_idx, 7] = H[2, 1]
+            H_candidates[hyp_idx, 8] = H[2, 2]
+
+    @ti.kernel
+    def generate_inlier_mask_kernel(
+        pts1: ti.types.ndarray(ti.f32, ndim=2),
+        pts2: ti.types.ndarray(ti.f32, ndim=2),
+        H_best: ti.types.ndarray(ti.f32, ndim=1),
+        n_pts: int,
+        reproj_threshold: ti.f32,
+        mask_out: ti.types.ndarray(ti.i32, ndim=1)
+    ):
+        for i in range(n_pts):
+            x1 = pts1[i, 0]; y1 = pts1[i, 1]
+            x2 = pts2[i, 0]; y2 = pts2[i, 1]
+
+            denom = H_best[6] * x1 + H_best[7] * y1 + H_best[8]
+            proj_x = (H_best[0] * x1 + H_best[1] * y1 + H_best[2]) / (denom + 1e-9)
+            proj_y = (H_best[3] * x1 + H_best[4] * y1 + H_best[5]) / (denom + 1e-9)
+
+            dx = proj_x - x2
+            dy = proj_y - y2
+            err = dx * dx + dy * dy
+
+            mask_out[i] = 1 if err < reproj_threshold * reproj_threshold else 0
+
+    @ti.kernel
+    def refine_homography_kernel(
+        pts1: ti.types.ndarray(ti.f32, ndim=2),
+        pts2: ti.types.ndarray(ti.f32, ndim=2),
+        mask: ti.types.ndarray(ti.i32, ndim=1),
+        n_pts: int,
+        reproj_threshold: ti.f32,
+        ATA_out: ti.types.ndarray(ti.f32, ndim=2),
+        ATb_out: ti.types.ndarray(ti.f32, ndim=1)
+    ):
+        for idx in range(64):
+            ATA_out[idx // 8, idx % 8] = 0.0
+        for idx in range(8):
+            ATb_out[idx] = 0.0
+
+        ti.sync()
+
+        for i in range(n_pts):
+            if mask[i] == 1:
+                x1 = pts1[i, 0]; y1 = pts1[i, 1]
+                x2 = pts2[i, 0]; y2 = pts2[i, 1]
+
+                row_x = ti.Vector([x1, y1, 1.0, 0.0, 0.0, 0.0, -x2*x1, -x2*y1])
+                row_y = ti.Vector([0.0, 0.0, 0.0, x1, y1, 1.0, -y2*x1, -y2*y1])
+                weight = 1.0
+
+                for r in ti.static(range(8)):
+                    for c in ti.static(range(8)):
+                        ti.atomic_add(ATA_out[r, c], weight * (row_x[r] * row_x[c] + row_y[r] * row_y[c]))
+                    ti.atomic_add(ATb_out[r], weight * (row_x[r] * x2 + row_y[r] * y2))
+
     # --- LOCAL RANSAC KERNELS (MOVED HERE TO FIX SCOPE) ---
+
     @ti.kernel
     def _local_ransac_init_means(
         flow: ti.types.ndarray(),

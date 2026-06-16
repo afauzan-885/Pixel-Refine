@@ -222,6 +222,72 @@ if TAICHI_AVAILABLE:
             dst[r, c] = bilinear_at_vec3(src, src_x, src_y, h_src, w_src)
 
 
+    @ti.kernel
+    def _warp_perspective_kernel(
+        src: ti.types.ndarray(),
+        M_inv: ti.types.ndarray(),
+        dst: ti.types.ndarray(),
+        h_src: int,
+        w_src: int,
+        h_dst: int,
+        w_dst: int,
+    ):
+        """Warp Perspective Bilinear untuk gambar Grayscale (2D)."""
+        for r, c in ti.ndrange(h_dst, w_dst):
+            # Proyeksi homogen menggunakan matriks invers M_inv (3x3)
+            u = M_inv[0, 0] * float(c) + M_inv[0, 1] * float(r) + M_inv[0, 2]
+            v = M_inv[1, 0] * float(c) + M_inv[1, 1] * float(r) + M_inv[1, 2]
+            w = M_inv[2, 0] * float(c) + M_inv[2, 1] * float(r) + M_inv[2, 2]
+
+            src_x = u / (w + 1e-9)
+            src_y = v / (w + 1e-9)
+
+            dst[r, c] = bilinear_at(src, src_x, src_y, h_src, w_src)
+
+    @ti.kernel
+    def _warp_perspective_kernel_3d(
+        src: ti.types.ndarray(),
+        M_inv: ti.types.ndarray(),
+        dst: ti.types.ndarray(),
+        h_src: int,
+        w_src: int,
+        h_dst: int,
+        w_dst: int,
+    ):
+        """Warp Perspective Bilinear untuk gambar Multi-channel (3D)."""
+        for r, c, ch in ti.ndrange(h_dst, w_dst, dst.shape[2]):
+            u = M_inv[0, 0] * float(c) + M_inv[0, 1] * float(r) + M_inv[0, 2]
+            v = M_inv[1, 0] * float(c) + M_inv[1, 1] * float(r) + M_inv[1, 2]
+            w = M_inv[2, 0] * float(c) + M_inv[2, 1] * float(r) + M_inv[2, 2]
+
+            src_x = u / (w + 1e-9)
+            src_y = v / (w + 1e-9)
+
+            dst[r, c, ch] = bilinear_at_3ch(src, src_x, src_y, h_src, w_src, ch)
+
+    @ti.kernel
+    def _warp_perspective_kernel_vec3(
+        src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        M_inv: ti.types.ndarray(),
+        dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        h_src: int,
+        w_src: int,
+        h_dst: int,
+        w_dst: int,
+    ):
+        """Warp Perspective Bilinear untuk gambar Vector3 (3D)."""
+        for r, c in ti.ndrange(h_dst, w_dst):
+            u = M_inv[0, 0] * float(c) + M_inv[0, 1] * float(r) + M_inv[0, 2]
+            v = M_inv[1, 0] * float(c) + M_inv[1, 1] * float(r) + M_inv[1, 2]
+            w = M_inv[2, 0] * float(c) + M_inv[2, 1] * float(r) + M_inv[2, 2]
+
+            src_x = u / (w + 1e-9)
+            src_y = v / (w + 1e-9)
+
+            dst[r, c] = bilinear_at_vec3(src, src_x, src_y, h_src, w_src)
+
+
+
 def remap(src, map_x, map_y, dst=None, buffer_provider="pool"):
     """
     GPU-accelerated Remap (Warping) API.
@@ -383,4 +449,83 @@ def remap_with_flow(src, flow, full_h, full_w, dst=None, buffer_provider="pool")
         return dst_gpu
 
     return _run_gpu_remap_with_flow(src, flow, dst)
+
+
+def warp_perspective(src, M, dsize, dst=None, buffer_provider="pool"):
+    """
+    GPU-accelerated Warp Perspective API.
+    API menyerupai cv2.warpPerspective(src, M, dsize).
+    
+    Menghitung inversi matriks transformasi M di CPU, kemudian memproyeksikan
+    setiap piksel output kembali ke koordinat input secara on-the-fly di GPU.
+
+    Args:
+        src: NumPy array atau Taichi GPU buffer.
+        M: Matriks homografi 3x3 (float32/float64).
+        dsize: Tuple ukuran hasil warping (width, height).
+        dst: Buffer output opsional.
+    """
+    import os
+    if os.environ.get("AOT_MODE", "1") == "1":
+        from .common import _get_aot
+        aot = _get_aot()
+        if aot and hasattr(aot, "warp_perspective"):
+            is_taichi = hasattr(src, "to_numpy") or hasattr(M, "to_numpy")
+            res_buf = aot.warp_perspective(src, M, dsize, return_gpu=is_taichi, dst=dst)
+            return res_buf
+
+    if not TAICHI_AVAILABLE:
+        raise ImportError("Taichi not available")
+
+    from .common import get_temp_buffer, release_temp_buffer, ensure_taichi_field
+
+    is_taichi_input = hasattr(src, "to_numpy")
+    w_dst, h_dst = dsize
+
+    # Hitung invers matriks homografi di CPU (M_inv = M^-1)
+    M_np = np.asarray(M, dtype=np.float32)
+    try:
+        M_inv_np = np.linalg.inv(M_np)
+    except np.linalg.LinAlgError:
+        M_inv_np = np.eye(3, dtype=np.float32)
+
+    @ti_thread
+    def _run_gpu_warp(src_data, m_inv_data, dst_data=None):
+        src_gpu, src_is_temp = ensure_taichi_field(src_data, dtype=ti.f32, buffer_provider=buffer_provider)
+        # Upload matriks invers 3x3 ke GPU
+        minv_gpu, minv_is_temp = ensure_taichi_field(m_inv_data, dtype=ti.f32, buffer_provider=buffer_provider)
+
+        h_src, w_src = src_gpu.shape[:2]
+        is_3d = len(src_gpu.shape) == 3
+        c_count = src_gpu.shape[2] if is_3d else 1
+
+        if dst_data is None:
+            out_shape = (h_dst, w_dst, c_count) if is_3d else (h_dst, w_dst)
+            dst_gpu = get_temp_buffer(out_shape, ti.f32, buffer_provider)
+        else:
+            dst_gpu, _ = ensure_taichi_field(dst_data, dtype=ti.f32, buffer_provider=buffer_provider)
+
+        # Dispatch kernel yang sesuai
+        if is_3d:
+            _warp_perspective_kernel_3d(src_gpu, minv_gpu, dst_gpu, h_src, w_src, h_dst, w_dst)
+        else:
+            _warp_perspective_kernel(src_gpu, minv_gpu, dst_gpu, h_src, w_src, h_dst, w_dst)
+
+        if src_is_temp:
+            release_temp_buffer(src_gpu)
+        if minv_is_temp:
+            release_temp_buffer(minv_gpu)
+
+        if not is_taichi_input:
+            res = dst_gpu.to_numpy()
+            release_temp_buffer(dst_gpu)
+            if dst_data is not None:
+                dst_data[:] = res
+                return dst_data
+            return res
+
+        return dst_gpu
+
+    return _run_gpu_warp(src, M_inv_np, dst)
+
 

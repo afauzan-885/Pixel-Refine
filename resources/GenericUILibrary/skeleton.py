@@ -43,3 +43,25 @@ class SkeletonLoader(QWidget):
         
         self.anim_group.setLoopCount(-1)
         self.anim_group.start()
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        h = self.height()
+        qml = f"{tab}Rectangle {{\n"
+        qml += f"{tab}    id: skeleton\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    height: {h}\n"
+        qml += f"{tab}    radius: 6\n"
+        qml += f"{tab}    color: '#E8E8E8'\n"
+        qml += f"{tab}    border.color: '#D8D8D8'\n"
+        qml += f"{tab}    border.width: 1\n"
+        qml += f"{tab}    OpacityAnimator {{\n"
+        qml += f"{tab}        target: skeleton\n"
+        qml += f"{tab}        from: 0.4\n"
+        qml += f"{tab}        to: 0.8\n"
+        qml += f"{tab}        duration: 800\n"
+        qml += f"{tab}        loops: Animation.Infinite\n"
+        qml += f"{tab}        running: true\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml

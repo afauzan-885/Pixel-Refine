@@ -15,22 +15,22 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QThread, Qt, Signal, QTimer
 
 # Generic UI Library
-from pixel_refine_desktop.ui.resources.GenericUILibrary import (
+from resources.GenericUILibrary import (
     FormGroup,
     Button,
     ProgressBar as ModernProgressBar,
 )
-from pixel_refine_desktop.ui.resources.GenericUILibrary.mixins import SyncMixin
+from resources.GenericUILibrary.mixins import SyncMixin
 
 # Algorithm logic
 from pixel_refine_desktop.enhance_stack.core.logic.algorithm_logic import AlgorithmLogic
 
 # Animation support
-from pixel_refine_desktop.ui.resources.animations.animation_manager import (
+from resources.animations.animation_manager import (
     StackedWidgetAnimator,
     SlideDirection,
 )
-from pixel_refine_desktop.ui.resources.animations.slide import slide
+from resources.animations.slide import slide
 
 # Import AlgorithmProcessorThread from core logic
 from pixel_refine_desktop.enhance_stack.core.logic.algorithm_processor import (
@@ -39,10 +39,10 @@ from pixel_refine_desktop.enhance_stack.core.logic.algorithm_processor import (
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 
 
-from pixel_refine_desktop.ui.resources.GenericUILibrary import realtime_update
+from resources.GenericUILibrary import live_update
 
 
-@realtime_update
+@live_update
 class AlgorithmPanel(QWidget, SyncMixin):
     """
     Algorithm Panel untuk workflow settings dan parameter konfigurasi.
@@ -134,8 +134,8 @@ class AlgorithmPanel(QWidget, SyncMixin):
 
         # --- Progress Bar ---
         self.progress_container = QWidget()
+        self.progress_container.setObjectName("progressContainer")
         self.progress_container.setFixedHeight(4)
-        self.progress_container.setStyleSheet("background-color: #FFFFFF;")
 
         container_layout = QVBoxLayout(self.progress_container)
         container_layout.setContentsMargins(0, 0, 0, 0)
@@ -155,7 +155,6 @@ class AlgorithmPanel(QWidget, SyncMixin):
         """Create column for alignment parameters."""
         widget = QWidget()
         widget.setObjectName("paramAlignWidget")
-        widget.setStyleSheet("#paramAlignWidget { background-color: #FFFFFF; }")
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(10)
@@ -179,7 +178,6 @@ class AlgorithmPanel(QWidget, SyncMixin):
         """Create column for algorithm parameters."""
         widget = QWidget()
         widget.setObjectName("paramAlgoWidget")
-        widget.setStyleSheet("#paramAlgoWidget { background-color: #FFFFFF; }")
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(10)
@@ -205,13 +203,13 @@ class AlgorithmPanel(QWidget, SyncMixin):
         self.process_btn = Button(
             f"▶ {language_config.BTN_START}",
             variant="primary",
-            bg_color="#2ECC71",
-            text_color="#FFFFFF",
-            hover_color="#28B463",
         )
         self.process_btn.setFixedWidth(180)  # Make it smaller and elegant
+        
+        from resources.GenericUILibrary.theme import get_theme, create_button_style
+        theme = get_theme()
         self.process_btn.setStyleSheet(
-            self.process_btn.styleSheet()
+            create_button_style(self.process_btn.variant, theme)
             + """
             QPushButton {
                 padding: 6px 12px;
@@ -262,8 +260,6 @@ class AlgorithmPanel(QWidget, SyncMixin):
                 enabled=True,
                 text="✖ Cancel",
                 variant="danger",
-                bg="#E74C3C",
-                hover="#C0392B",
             )
 
     def _on_cancel_requested(self):
@@ -281,6 +277,8 @@ class AlgorithmPanel(QWidget, SyncMixin):
         self, enabled=None, text=None, variant=None, bg=None, hover=None
     ):
         """Helper to sync all process button instances."""
+        from resources.GenericUILibrary.theme import get_theme
+        theme = get_theme()
         for btn in self._all_process_buttons:
             try:
                 if enabled is not None:
@@ -289,11 +287,23 @@ class AlgorithmPanel(QWidget, SyncMixin):
                     btn.setText(text)
                 if variant is not None:
                     btn.variant = variant
+                    # Update objectName to match the correct QSS selector for dynamic styling
+                    btn.setObjectName("deleteButton" if variant == "danger" else "processButton")
+                    from resources.GenericUILibrary.theme import get_theme, create_button_style
+                    theme = get_theme()
+                    btn.setStyleSheet(
+                        create_button_style(btn.variant, theme)
+                        + """
+                        QPushButton {
+                            padding: 6px 12px;
+                            font-size: 10pt;
+                        }
+                        """
+                    )
+                    btn.style().unpolish(btn)
+                    btn.style().polish(btn)
                 if bg or hover:
                     btn._apply_custom_colors(bg_color=bg, hover_color=hover)
-                elif variant == "primary":
-                    # Force reset to default primary theme
-                    btn._apply_custom_colors(bg_color="#2ECC71", hover_color="#28B463")
             except RuntimeError:
                 continue  # Widget might be deleted
 
@@ -518,6 +528,35 @@ class AlgorithmPanel(QWidget, SyncMixin):
         for btn in self._all_process_buttons:
             try:
                 btn.setText(f"▶ {language_config.BTN_START}")
+            except RuntimeError:
+                pass
+
+        # 4. Update theme
+        self.update_theme()
+
+    def update_theme(self):
+        """Update stylesheets of child widgets dynamically when theme changes."""
+        from resources.styles.stylesheet import SLIDER_STYLE, SLIDER_VALUE_LABEL, VALUE_EDIT_LABEL
+        from PySide6.QtWidgets import QSlider, QLabel, QLineEdit
+
+        # Re-apply styles for QSliders and their value labels/edits
+        for slider in self.findChildren(QSlider):
+            try:
+                slider.setStyleSheet(SLIDER_STYLE)
+            except RuntimeError:
+                pass
+
+        for label in self.findChildren(QLabel):
+            try:
+                if label.styleSheet() and "min-width: 40px" in label.styleSheet():
+                    label.setStyleSheet(SLIDER_VALUE_LABEL)
+            except RuntimeError:
+                pass
+
+        for edit in self.findChildren(QLineEdit):
+            try:
+                if edit.styleSheet() and "min-width: 40px" in edit.styleSheet():
+                    edit.setStyleSheet(VALUE_EDIT_LABEL)
             except RuntimeError:
                 pass
 

@@ -30,6 +30,8 @@ class Collapse(QWidget):
         super().__init__(parent)
 
         self.is_expanded = expanded
+        self._title = title
+        self._qml_child = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -74,11 +76,13 @@ class Collapse(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
+        self._qml_child = widget
         # Add new widget
         self.content_layout.addWidget(widget)
 
     def add_widget(self, widget):
         """Add widget to content"""
+        self._qml_child = widget
         self.content_layout.addWidget(widget)
 
     @Slot()
@@ -119,6 +123,32 @@ class Collapse(QWidget):
         self.animation.start()
 
         self.toggled.emit(False)
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        expanded = str(self.is_expanded).lower()
+        qml = f"{tab}Column {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    Rectangle {{\n"
+        qml += f"{tab}        width: parent.width\n"
+        qml += f"{tab}        height: 40\n"
+        qml += f"{tab}        color: genericTheme.bgPrimary\n"
+        qml += f"{tab}        Text {{ text: '{self._title}'; anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left; anchors.leftMargin: 10; font.bold: true; color: genericTheme.textPrimary }}\n"
+        qml += f"{tab}        MouseArea {{ anchors.fill: parent; onClicked: content.visible = !content.visible }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}    Column {{\n"
+        qml += f"{tab}        id: content\n"
+        qml += f"{tab}        visible: {expanded}\n"
+        qml += f"{tab}        width: parent.width\n"
+        qml += f"{tab}        leftPadding: 10\n"
+        qml += f"{tab}        rightPadding: 10\n"
+        qml += f"{tab}        topPadding: 5\n"
+        qml += f"{tab}        bottomPadding: 5\n"
+        if self._qml_child and hasattr(self._qml_child, "to_qml"):
+            qml += self._qml_child.to_qml(indent + 2) + "\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
 
 
 class Accordion(QWidget):
@@ -187,6 +217,17 @@ class Accordion(QWidget):
         else:
             self.current_expanded = -1
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        qml = f"{tab}Column {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    spacing: 5\n"
+        for item in self.items:
+            if hasattr(item, "to_qml"):
+                qml += item.to_qml(indent + 1) + "\n"
+        qml += f"{tab}}}"
+        return qml
+
 
 class AccordionItem(QFrame):
     """
@@ -204,6 +245,8 @@ class AccordionItem(QFrame):
 
         self.setFrameShape(QFrame.StyledPanel)
         self.is_expanded = False
+        self._title = title
+        self._qml_child = widget
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -263,6 +306,7 @@ class AccordionItem(QFrame):
             if item.widget():
                 item.widget().deleteLater()
 
+        self._qml_child = widget
         self.content_layout.addWidget(widget)
 
     def toggle(self):
@@ -301,3 +345,33 @@ class AccordionItem(QFrame):
         self.animation.start()
 
         self.toggled.emit(False)
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        # widget:
+        _ = getattr(self, "widget", None)
+        expanded = str(self.is_expanded).lower()
+        qml = f"{tab}Column {{\n"
+        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    Rectangle {{\n"
+        qml += f"{tab}        width: parent.width\n"
+        qml += f"{tab}        height: 40\n"
+        qml += f"{tab}        color: genericTheme.bgPrimary\n"
+        qml += f"{tab}        border.color: genericTheme.borderColor\n"
+        qml += f"{tab}        border.width: 1\n"
+        qml += f"{tab}        Text {{ text: '{self._title}'; anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left; anchors.leftMargin: 10; font.bold: true; color: genericTheme.textPrimary }}\n"
+        qml += f"{tab}        MouseArea {{ anchors.fill: parent; onClicked: content.visible = !content.visible }}\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}    Column {{\n"
+        qml += f"{tab}        id: content\n"
+        qml += f"{tab}        visible: {expanded}\n"
+        qml += f"{tab}        width: parent.width\n"
+        qml += f"{tab}        leftPadding: 10\n"
+        qml += f"{tab}        rightPadding: 10\n"
+        qml += f"{tab}        topPadding: 10\n"
+        qml += f"{tab}        bottomPadding: 10\n"
+        if self._qml_child and hasattr(self._qml_child, "to_qml"):
+            qml += self._qml_child.to_qml(indent + 2) + "\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml

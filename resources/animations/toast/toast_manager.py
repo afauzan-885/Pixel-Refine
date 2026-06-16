@@ -26,9 +26,10 @@ from PySide6.QtCore import (
     QSize,
     Property,
     QParallelAnimationGroup,
+    QEvent,
 )
 from PySide6.QtGui import QFont, QColor
-from pixel_refine_desktop.ui.resources.animations.animation_manager import (
+from resources.animations.animation_manager import (
     WidgetLifecycleAnimator,
 )
 
@@ -87,34 +88,37 @@ class ToastWidget(QFrame):
         self.content_frame = QFrame()
         self.content_frame.setObjectName("ToastContent")
 
+        # Setup theme-aware backgrounds
+        from resources.GenericUILibrary.theme import get_theme
+        theme = get_theme()
+
         # Color based on priority
-        border_color = "#ECEDED"
         accent_color = "#7DDA58"  # NORMAL (Green)
 
         if priority == ToastPriority.URGENT:
             accent_color = "#FF4B4B"  # Red
-            border_color = "#FFCDCD"
         elif priority == ToastPriority.HIGH:
             accent_color = "#FFA500"  # Orange
-            border_color = "#FFE0B2"
         elif priority == ToastPriority.LOW:
             accent_color = "#A0A0A0"  # Grey
 
-        # User request: "warna backgroundnya transparant"
-        # Kita ubah ke rgba dengan alpha channel agar semi-transparent (Glass effect)
-        # Jika user ingin 100% transparan, ganti 240 menjadi 0.
-        # Namun untuk readability shadow, 240 (95%) atau 230 (90%) lebih baik untuk 'look' transparan tapi tetap solid.
-        # User bilang "pada widget untuk shadow", ini refer ke content frame.
-        # Kita set ke TRANSPARAN murni jika itu yang diminta, tapi text shadow harus kuat.
-        # Asumsi safety: Gunakan background semi-transparan (Glass) yang terlihat "transparan" tapi tetap bacaable.
-        # Kalau benar-benar transparent, shadow akan mengikuti TEXT dan LINE, bukan KOTAK.
-        # Jika user mau kotak bayangan tapi tengah bolong, itu aneh.
-        # Kemungkinan besar user melihat 'kotak putih' dan ingin itu transparan.
+        # Convert hex background to rgba for translucent effect
+        def hex_to_rgba(hex_str, alpha=235):
+            hex_str = hex_str.lstrip('#')
+            if len(hex_str) == 3:
+                hex_str = ''.join(c*2 for c in hex_str)
+            r = int(hex_str[0:2], 16)
+            g = int(hex_str[2:4], 16)
+            b = int(hex_str[4:6], 16)
+            return f"rgba({r}, {g}, {b}, {alpha})"
+
+        bg_rgba = hex_to_rgba(theme.bg_card, 235)
+        border_color = theme.border_color
 
         self.content_frame.setStyleSheet(
             f"""
             #ToastContent {{
-                background-color: rgba(252, 254, 255, 235); 
+                background-color: {bg_rgba}; 
                 border: 1px solid {border_color};
                 border-radius: 4px; 
             }}
@@ -149,7 +153,7 @@ class ToastWidget(QFrame):
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
         self.label.setStyleSheet(
-            "background: transparent; color: #212529; border: none; font-weight: 600;"
+            f"background: transparent; color: {theme.text_primary}; border: none; font-weight: 600;"
         )
 
         content_layout.addWidget(self.accent_line)
@@ -178,10 +182,15 @@ class ToastManager(QObject):
         self._timers = {}  # widget -> QTimer
         self._last_update_time = {}  # category -> time (For throttling)
         self.max_toasts = 5
-        self._last_update_time = {}  # category -> time (For throttling)
-        self.max_toasts = 5
         self.spacing = 5
         self.lifecycle_animator = WidgetLifecycleAnimator(self)
+        if parent:
+            parent.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if watched == self.parent_widget and event.type() == QEvent.Type.Resize:
+            self._reposition_toasts(animate=False)
+        return super().eventFilter(watched, event)
 
     @property
     def parent_widget(self) -> QWidget | None:
@@ -423,7 +432,7 @@ class ToastManager(QObject):
         # Shift sisanya
         self._reposition_toasts()
 
-    def _reposition_toasts(self):
+    def _reposition_toasts(self, animate: bool = True):
         """Mengatur ulang posisi semua toast berdasarkan urutan di list."""
         parent = self.parent_widget
         if not parent:
@@ -444,7 +453,6 @@ class ToastManager(QObject):
         right_x = parent_rect.width() - margin_x
 
         # Iterate sorted list (Index 0 = Bottom-most / Prime)
-        # Iterate sorted list (Index 0 = Bottom-most / Prime)
         for i, toast in enumerate(self._active_toasts):
             # FIX TRUNCATION: Use sizeHint() because actual width() might be
             # frozen to old size by geometry animation logic in show_progress.
@@ -458,9 +466,25 @@ class ToastManager(QObject):
             # Update base for next item (stacking UP)
             bottom_y = target_y - self.spacing
 
-            # Animasi pergeseran ke target posisi
-            # Animasi pergeseran ke target posisi (GEOMETRY ANIMATION: Pos + Size)
+            # Target geometry
             target_geo = QRect(int(target_x), int(target_y), t_width, t_height)
+
+            if not animate:
+                # Stop any existing geometry animations to avoid conflicts
+                for attr_name in list(toast.__dict__.keys()):
+                    if attr_name.startswith("_pos_anim_"):
+                        anim = getattr(toast, attr_name)
+                        if anim:
+                            try:
+                                anim.stop()
+                            except Exception:
+                                pass
+                        try:
+                            delattr(toast, attr_name)
+                        except AttributeError:
+                            pass
+                toast.setGeometry(target_geo)
+                continue
 
             if toast.pos().isNull():
                 # First show: start slightly below (Slide Up effect)

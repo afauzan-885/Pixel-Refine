@@ -5,7 +5,7 @@ import taichi as ti
 import sys
 
 file_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
+project_root = os.path.abspath(os.path.join(file_dir, "../../../"))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
@@ -14,6 +14,7 @@ from taichi_library.taichi_algorithm.ofb import (
     extract_grid_keypoints,
     _compute_descriptors_kernel,
     _hamming_matcher_kernel,
+    pack_matches_kernel,
 )
 
 def compile_ofb_tcm(arch=ti.vulkan, save_path="ofb_vulkan.tcm"):
@@ -44,23 +45,34 @@ def compile_ofb_tcm(arch=ti.vulkan, save_path="ofb_vulkan.tcm"):
     kps_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "kps", ti.f32, ndim=2)
     pattern_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pattern", ti.f32, ndim=2)
     desc_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "desc", ti.i32, ndim=2)
+    counter_arg2 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "counter", ti.i32, ndim=1)
     h_arg2 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
     w_arg2 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
-    num_kps_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "num_kps", ti.i32)
     
-    g_desc.dispatch(_compute_descriptors_kernel, src_arg2, kps_arg, pattern_arg, desc_arg, h_arg2, w_arg2, num_kps_arg)
+    g_desc.dispatch(_compute_descriptors_kernel, src_arg2, kps_arg, pattern_arg, desc_arg, counter_arg2, h_arg2, w_arg2)
     module.add_graph("compute_descriptors", g_desc.compile())
 
     g_match = ti.graph.GraphBuilder()
     d1_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "desc1", ti.i32, ndim=2)
     d2_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "desc2", ti.i32, ndim=2)
     m_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "matches", ti.i32, ndim=2)
-    n1_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "num_kps1", ti.i32)
-    n2_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "num_kps2", ti.i32)
+    c1_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "counter1", ti.i32, ndim=1)
+    c2_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "counter2", ti.i32, ndim=1)
     ratio_thresh_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "ratio_threshold", ti.f32)
     
-    g_match.dispatch(_hamming_matcher_kernel, d1_arg, d2_arg, m_arg, n1_arg, n2_arg, ratio_thresh_arg)
+    g_match.dispatch(_hamming_matcher_kernel, d1_arg, d2_arg, m_arg, c1_arg, c2_arg, ratio_thresh_arg)
     module.add_graph("match_descriptors", g_match.compile())
+
+    g_pack = ti.graph.GraphBuilder()
+    kps1_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "kps1", ti.f32, ndim=2)
+    kps2_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "kps2", ti.f32, ndim=2)
+    matches_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "matches", ti.i32, ndim=2)
+    counter1_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "counter1", ti.i32, ndim=1)
+    counter2_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "counter2", ti.i32, ndim=1)
+    results_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "results", ti.f32, ndim=2)
+
+    g_pack.dispatch(pack_matches_kernel, kps1_arg, kps2_arg, matches_arg, counter1_arg, counter2_arg, results_arg)
+    module.add_graph("pack_matches", g_pack.compile())
 
     module.archive(save_path)
     print(f"Successfully compiled O-FAST-BRIEF and archived to: {save_path}")
@@ -74,6 +86,7 @@ if __name__ == "__main__":
     archs = [
         (ti.vulkan, "vulkan"),
         (ti.cuda, "cuda"),
+        (ti.cpu, "cpu"),
     ]
     
     for arch, suffix in archs:

@@ -65,25 +65,28 @@ class ThumbnailWidget(QWidget):
 
         if self._is_selected:
             painter = QPainter(self)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            try:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-            overlay_color = QColor(173, 216, 230, 128)
+                overlay_color = QColor(173, 216, 230, 128)
 
-            border_color = QColor(0, 84, 166)
-            
-            border_pen = QPen(border_color)
-            border_pen.setWidth(2)
+                border_color = QColor(0, 84, 166)
+                
+                border_pen = QPen(border_color)
+                border_pen.setWidth(2)
 
-            painter.setPen(border_pen)
-            painter.setBrush(overlay_color)
+                painter.setPen(border_pen)
+                painter.setBrush(overlay_color)
 
-            pen_half_width = border_pen.width() / 2.0
-            draw_rect = self.rect().adjusted(
-                pen_half_width, pen_half_width, 
-                -pen_half_width, -pen_half_width
-            )
-            
-            painter.drawRoundedRect(draw_rect, 4.0, 4.0)
+                pen_half_width = border_pen.width() / 2.0
+                draw_rect = self.rect().adjusted(
+                    pen_half_width, pen_half_width, 
+                    -pen_half_width, -pen_half_width
+                )
+                
+                painter.drawRoundedRect(draw_rect, 4.0, 4.0)
+            finally:
+                painter.end()
 
 
     def mousePressEvent(self, event: QMouseEvent):

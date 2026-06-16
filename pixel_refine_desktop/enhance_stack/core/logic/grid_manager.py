@@ -116,7 +116,7 @@ class GridManager:
                 hasattr(img, "__class__") and img.__class__.__name__ == "ZombieImg"
             )
 
-            from pixel_refine_desktop.ui.resources.GenericUILibrary import ImageCard
+            from resources.GenericUILibrary import ImageCard
 
             card = ImageCard(card_id=str(img.id), size=110)
             card._image_path = img.path

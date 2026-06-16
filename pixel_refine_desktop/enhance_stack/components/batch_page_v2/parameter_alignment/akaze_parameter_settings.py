@@ -17,8 +17,8 @@ from PySide6.QtCore import Qt
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.AKAZE import (
     AKAZEAlgorithm,
 )
-from pixel_refine_desktop.ui.resources.GenericUILibrary import FormGroup
-from pixel_refine_desktop.ui.resources.styles.stylesheet import (
+from resources.GenericUILibrary import FormGroup
+from resources.styles.stylesheet import (
     DROPDOWN_BOX,
     TOGGLE_BUTTON,
     SCROLL_AREA,
