@@ -112,6 +112,11 @@ from .collapse import Collapse, Accordion, AccordionItem
 # Navigation
 from .navbar import Navbar, NavItem, Sidebar, SidebarItem
 
+# Mobile-specific components
+from .horizontal_scroll import HorizontalScrollRow, BatchCard, NewBatchCard
+from .dot_indicator import DotIndicator
+from .bottom_action_bar import BottomActionBar
+
 # Progress Bars
 from .progress_bars import (
     ProgressBar,
@@ -123,6 +128,9 @@ from .progress_bars import (
 
 # Comparison
 from .comparison import ImageCompareItem, ImageCompareWidget
+
+# UI Components (used by ViewerPanel)
+from .ui_component import GridItemWidget, LoadingOverlay
 
 # Theme
 from .theme import Theme, DarkTheme, LightTheme
@@ -214,6 +222,15 @@ __all__ = [
     # Comparison
     "ImageCompareItem",
     "ImageCompareWidget",
+    # UI Components
+    "GridItemWidget",
+    "LoadingOverlay",
+    # Mobile-specific
+    "HorizontalScrollRow",
+    "BatchCard",
+    "NewBatchCard",
+    "DotIndicator",
+    "BottomActionBar",
     # Real-time
     "DataStore",
     "get_store",

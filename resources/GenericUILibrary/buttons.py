@@ -301,13 +301,16 @@ class ButtonGroup(QWidget):
         qml = f"{tab}{layout_type} {{\n"
         qml += f"{tab}    spacing: 0\n"
         qml += f"{tab}    width: parent.width\n"
-        for btn in self.buttons:
-            # Gunakan representasi button QML sederhana
+        for i, btn in enumerate(self.buttons):
             qml += f"{tab}    Rectangle {{\n"
             qml += f"{tab}        width: parent.width / {len(self.buttons) if self.orientation == 'horizontal' else 1}\n"
             qml += f"{tab}        height: 38\n"
             qml += f"{tab}        color: '#E5E7EB'\n"
             qml += f"{tab}        Text {{ text: '{btn.text()}'; anchors.centerIn: parent }}\n"
+            qml += f"{tab}        MouseArea {{\n"
+            qml += f"{tab}            anchors.fill: parent\n"
+            qml += f"{tab}            onClicked: appBridge.openTool('{btn.text()}')\n"
+            qml += f"{tab}        }}\n"
             qml += f"{tab}    }}\n"
         qml += f"{tab}}}"
         return qml

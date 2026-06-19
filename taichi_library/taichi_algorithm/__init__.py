@@ -63,8 +63,10 @@ from .clahe import clahe
 from .canny import canny
 from .hough import hough_lines, hough_lines_with_canny
 from .nlm import non_local_means
+from .bm3d import hfcd_denoise, build_dct_matrix
 from .inpaint import inpaint, INPAINT_TELEA, INPAINT_NS
 from .seamless_clone import seamless_clone, NORMAL_CLONE, MIXED_CLONE, MONOCHROME_TRANSFER
+from .farneback_flow import farneback_flow
 
 
 # --- Constants ---
@@ -350,6 +352,8 @@ __all__ = [
     "hough_lines",
     "hough_lines_with_canny",
     "non_local_means",
+    "hfcd_denoise",
+    "build_dct_matrix",
     "inpaint",
     "seamless_clone",
     # Pyramid APIs
@@ -379,4 +383,5 @@ __all__ = [
     "hamilton_demosaic",
     "arm_demosaic",
     "align_mtb",
+    "farneback_flow",
 ]

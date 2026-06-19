@@ -1,69 +1,62 @@
 """
 main_mobile.py
 --------------
-Entry point aplikasi Pixel Refine Mobile.
+Entry point for Pixel Refine Mobile.
 
-Cara menjalankan:
+Usage:
     python main_mobile.py
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Pola pemanggilan komponen IDENTIK dengan Desktop (main_desktop.py):
-
-  Desktop                          Mobile
-  ─────────────────────────────────────────────────────────────
-  Card(title="...")            ↔   Card(title="...")
-  Button("text", variant=...)  ↔   Button("text", variant=...)
-  Container(padding=16)        ↔   Container(padding=16)
-  card.add_body_widget(btn)    ↔   card.add_body_widget(btn)
-  layout.add_widget(card)      ↔   layout.add_widget(card)
-  window = QMainWindow()       ↔   window = MobileApp()      ← satu-satunya beda
-  window.setCentralWidget(l)   ↔   window.setCentralWidget(l)
-  window.show()                ↔   window.show()
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Architecture mirrors desktop — same GenericUI components, same API.
+Only difference: MobileApp() instead of QMainWindow().
 """
 
 import sys
 from PySide6.QtWidgets import QApplication
 
-# ── MobileApp wrapper (satu-satunya perbedaan dengan Desktop) ─────────────────
-from pixel_refine_mobile.core import MobileApp
+from pixel_refine_mobile.core import MobileApp, AppState
+from pixel_refine_mobile.ui.screens.home_page import build_home_page
+from pixel_refine_mobile.ui.screens.workspace_page import build_workspace_page
+from pixel_refine_mobile.ui.screens.settings_page import build_settings_page
 
-# ── Komponen Generic UI — import IDENTIK dengan Desktop ──────────────────────
-from resources.GenericUILibrary.containers import Container
-from resources.GenericUILibrary.cards      import Card
-from resources.GenericUILibrary.buttons    import Button
+
+def on_tool_selected(tool_name):
+    """Handle tool selection from bridge signal."""
+    print(f"[Mobile] Tool selected: {tool_name}")
 
 
 def main():
     app = QApplication(sys.argv)
 
-    # ── 1. Compose UI — IDENTIK dengan cara Desktop ───────────────────────────
-
-    layout = Container(padding=16)
-
-    # Card: Denoising Process
-    card_denoise = Card(title="Denoising Process")
-    btn_denoise  = Button("Start Denoising", variant="primary")
-    card_denoise.add_body_widget(btn_denoise)
-
-    # Card: HDR Stack Process
-    card_hdr = Card(title="HDR Stack Process")
-    btn_hdr  = Button("Start HDR Stack", variant="success")
-    card_hdr.add_body_widget(btn_hdr)
-
-    # Susun layout
-    layout.add_widget(card_denoise)
-    layout.add_widget(card_hdr)
-
-    # ── 2. Launch window — satu-satunya perbedaan: MobileApp vs QMainWindow ───
-
     window = MobileApp()
-    window.setWindowTitle("Pixel Refine Mobile (Dynamic UI)")
-    window.setCentralWidget(layout)       # identik dengan Desktop!
+    window.setWindowTitle("Pixel Refine Mobile")
 
-    # (Opsional) Connect signal tool_requested — identik dengan Desktop clicked.connect()
-    window.bridge.tool_requested.connect(lambda name: print(f"[Mobile] Tool dipilih: {name}"))
+    # Setup page router
+    state = AppState(window.bridge)
+    state.register_page("Home", build_home_page)
+    state.register_page("MFDenoiser", build_workspace_page)
+    state.register_page("MFResolution", build_workspace_page)
+    state.register_page("HDR", build_workspace_page)
+    state.register_page("Panorama", build_workspace_page)
+    state.register_page("Settings", build_settings_page)
 
+    def navigate(tool_name):
+        print(f"[Navigation] Navigating to: {tool_name}")
+        state.navigate_to(tool_name)
+        if tool_name == "Home":
+            page = build_home_page(window.bridge)
+        elif tool_name == "Settings":
+            page = build_settings_page(window.bridge)
+        else:
+            page = build_workspace_page(window.bridge)
+        window.setCentralWidget(page)
+        window.show()
+
+    # Connect navigation
+    window.bridge.tool_requested.connect(navigate)
+    window.bridge.tool_requested.connect(on_tool_selected)
+
+    # Show home page
+    window.setCentralWidget(build_home_page(window.bridge))
     window.show()
 
     sys.exit(app.exec())

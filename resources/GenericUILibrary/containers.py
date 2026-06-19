@@ -57,7 +57,8 @@ class Container(QWidget):
         pad = 5 if self._fluid else self._padding
         qml = f"{tab}Column {{\n"
         qml += f"{tab}    spacing: 10\n"
-        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    width: parent ? parent.width : 360\n"
+        qml += f"{tab}    height: childrenRect.height + {pad * 2}\n"
         qml += f"{tab}    leftPadding: {pad}\n"
         qml += f"{tab}    rightPadding: {pad}\n"
         qml += f"{tab}    topPadding: {pad}\n"
@@ -207,7 +208,7 @@ class Stack(QWidget):
         layout_type = "Column" if self.orientation == "vertical" else "Row"
         qml = f"{tab}{layout_type} {{\n"
         qml += f"{tab}    spacing: {self._spacing}\n"
-        qml += f"{tab}    width: parent.width\n"
+        qml += f"{tab}    width: parent ? parent.width : 360\n"
         for child in self._qml_children:
             if hasattr(child, "to_qml"):
                 qml += child.to_qml(indent + 1) + "\n"
@@ -258,11 +259,16 @@ class ScrollContainer(QScrollArea):
     def to_qml(self, indent=0):
         tab = "    " * indent
         qml = f"{tab}ScrollView {{\n"
-        qml += f"{tab}    width: parent.width\n"
-        qml += f"{tab}    height: parent.height\n"
+        qml += f"{tab}    width: parent ? parent.width : 360\n"
+        qml += f"{tab}    height: parent ? parent.height : 640\n"
         qml += f"{tab}    clip: true\n"
+        qml += f"{tab}    contentHeight: childrenRect.height\n"
+        qml += f"{tab}    ScrollBar.vertical.policy: ScrollBar.AsNeeded\n"
         if self._qml_child and hasattr(self._qml_child, "to_qml"):
-            qml += self._qml_child.to_qml(indent + 1) + "\n"
+            qml += f"{tab}    Column {{\n"
+            qml += f"{tab}        width: parent.width\n"
+            qml += self._qml_child.to_qml(indent + 2) + "\n"
+            qml += f"{tab}    }}\n"
         qml += f"{tab}}}"
         return qml
 

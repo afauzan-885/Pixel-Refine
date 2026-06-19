@@ -555,17 +555,25 @@ def perform_alignment_gpu(
     flow_backend = kwargs.get("flow_backend", optical_flow_type)
     active_arch = engine._active_arch if hasattr(engine, "_active_arch") else "vulkan"
 
-    flow_module_name = (
-        f"block_align_{active_arch}.tcm"
-        if flow_backend == "block_align"
-        else "compute_flow_vulkan.tcm"
-    )
-    flow_graph_name = (
-        "block_align_end_to_end_3layer"
-        if flow_backend == "block_align"
-        else "align_end_to_end_3layer"
-    )
-    save_backend_name = "BLOCK_ALIGN" if flow_backend == "block_align" else "GPU_AOT"
+    if flow_backend == "horn_schunck":
+        # Horn-Schunck: TCM ada di taichi_library/taichi_algorithm/aot_tcm/
+        hs_iters = kwargs.get("hs_iters", 20)
+        flow_module_name = "template_flow_vulkan.tcm"
+        flow_graph_name = f"hs_align_3layer_{hs_iters}"
+        save_backend_name = "HORN_SCHUNCK"
+    elif flow_backend == "block_align":
+        flow_module_name = f"block_align_{active_arch}.tcm"
+        flow_graph_name = "block_align_end_to_end_3layer"
+        save_backend_name = "BLOCK_ALIGN"
+    elif flow_backend in ("farneback_jit", "farneback_aot"):
+        # Farneback AOT: pre-compiled TCM module via engine.py
+        flow_module_name = "farneback_flow_vulkan.tcm"
+        flow_graph_name = "farneback_multi_3"  # 3 iterations per pyramid level
+        save_backend_name = "FARNEBACK_AOT"
+    else:
+        flow_module_name = "compute_flow_vulkan.tcm"
+        flow_graph_name = "align_end_to_end_3layer"
+        save_backend_name = "GPU_AOT"
     index_offset = kwargs.get("index_offset", 0)
     save_prefix = kwargs.get("save_prefix", None)
     save_folder = kwargs.get("save_folder", "save_align_image")
@@ -597,14 +605,27 @@ def perform_alignment_gpu(
             import taichi_library.taichi_aot as taichi_aot
 
             file_dir = os.path.dirname(os.path.abspath(__file__))
-            tcm_path = os.path.abspath(
-                os.path.join(
-                    file_dir,
-                    "../../../../../ui/data/aot_assets",
-                    flow_module_name,
-                )
-            )
-            mod = engine.load(tcm_path)
+            mod = None
+            if flow_module_name is not None:
+                if flow_backend in ("horn_schunck", "farneback_jit", "farneback_aot"):
+                    # Horn-Schunck & Farneback AOT TCM ada di taichi_library/taichi_algorithm/aot_tcm/
+                    tcm_path = os.path.abspath(
+                        os.path.join(
+                            file_dir,
+                            "../../../../../../taichi_library/taichi_algorithm/aot_tcm",
+                            flow_module_name,
+                        )
+                    )
+                else:
+                    tcm_path = os.path.abspath(
+                        os.path.join(
+                            file_dir,
+                            "../../../../../ui/data/aot_assets",
+                            flow_module_name,
+                        )
+                    )
+                mod = engine.load(tcm_path)
+                print(f"[GPU Alignment] Loaded AOT module: {flow_module_name}")
 
             # [LUMA ENHANCEMENT CACHE] Pre-allocate LUT untuk optimasi kontras
             lut_np = np.zeros(256, dtype=np.float32)
@@ -642,6 +663,19 @@ def perform_alignment_gpu(
             flow_l2 = engine.allocate(
                 (h_w // 4, w_w // 4, 2), dtype=np.float32, is_vector=False
             )
+
+            # Horn-Schunck: Allocate temp flow buffers (same shapes as flow)
+            flow_temp_l0 = None
+            flow_temp_l1 = None
+            flow_temp_l2 = None
+            if flow_backend == "horn_schunck":
+                flow_temp_l0 = engine.allocate((h_w, w_w, 2), dtype=np.float32, is_vector=False)
+                flow_temp_l1 = engine.allocate(
+                    (h_w // 2, w_w // 2, 2), dtype=np.float32, is_vector=False
+                )
+                flow_temp_l2 = engine.allocate(
+                    (h_w // 4, w_w // 4, 2), dtype=np.float32, is_vector=False
+                )
 
             # Iterative Warping Grayscale Scratch Buffers
             comp_l1_warped = engine.allocate((h_w // 2, w_w // 2), dtype=np.float32, is_vector=False)
@@ -715,27 +749,143 @@ def perform_alignment_gpu(
                     )
 
                     # 🚀 STEP 2: EKSEKUSI GRAF BESAR TAICHI (SUNTIKKAN SCALAR MAX SEARCH RADIUS & SCRATCH BUFFERS)
-                    args = {
-                        "ref_l0": ref_pyramid[0],
-                        "ref_l1": ref_pyramid[1],
-                        "ref_l2": ref_pyramid[2],
-                        "comp_l0": comp_pyramid[0],
-                        "comp_l1": comp_pyramid[1],
-                        "comp_l2": comp_pyramid[2],
-                        "flow_l0": flow_l0,
-                        "flow_l1": flow_l1,
-                        "flow_l2": flow_l2,
-                        "comp_l1_warped": comp_l1_warped,
-                        "comp_l0_warped": comp_l0_warped,
-                        "tile_h": int(tile_h),
-                        "tile_w": int(tile_w),
-                        "scale": 2.0,
-                        "search_dist": int(search_dist),
-                        "downscale": 2,
-                        "max_search_radius": int(max_search_radius),
-                    }
-                    mod.run(flow_graph_name, **args)
-                    engine.sync()
+                    # Build graph arguments based on flow backend
+                    if flow_backend in ("farneback_jit", "farneback_aot"):
+                        # Farneback AOT: multi-step pipeline using pre-compiled TCM graphs
+                        # 1. Pre-compute Gaussian constants for polynomial expansion
+                        from taichi_library.taichi_algorithm.farneback_flow import (
+                            prepare_gaussian_constants,
+                            compute_smoothing_weights,
+                        )
+                        poly_n = 5
+                        poly_sigma = 1.2
+                        win_size = 15
+                        g_w, xg_w, xxg_w, ig11, ig03, ig33, ig55 = prepare_gaussian_constants(poly_n, poly_sigma)
+                        smooth_w, smooth_radius = compute_smoothing_weights(win_size)
+                        poly_radius = poly_n // 2
+
+                        # Upload constants to GPU
+                        g_gpu = engine.upload(g_w[:poly_radius + 1])
+                        xg_gpu = engine.upload(xg_w[:poly_radius + 1])
+                        xxg_gpu = engine.upload(xxg_w[:poly_radius + 1])
+                        smooth_gpu = engine.upload(smooth_w[:smooth_radius + 1])
+
+                        # Allocate temp buffers for each pyramid level
+                        h0, w0 = work_res_h, work_res_w
+                        h1, w1 = h0 // 2, w0 // 2
+                        h2, w2 = h0 // 4, w0 // 4
+
+                        # Process each pyramid level (coarse to fine)
+                        for lvl in range(3):
+                            if lvl == 2:
+                                hl, wl = h2, w2
+                                ref_lvl = ref_pyramid[2]
+                                comp_lvl = comp_pyramid[2]
+                            elif lvl == 1:
+                                hl, wl = h1, w1
+                                ref_lvl = ref_pyramid[1]
+                                comp_lvl = comp_pyramid[1]
+                            else:
+                                hl, wl = h0, w0
+                                ref_lvl = ref_pyramid[0]
+                                comp_lvl = comp_pyramid[0]
+
+                            # Allocate level-specific buffers
+                            vert_buf = engine.allocate((hl, wl, 3), dtype=np.float32)
+                            R0 = engine.allocate((hl, wl, 5), dtype=np.float32)
+                            R1 = engine.allocate((hl, wl, 5), dtype=np.float32)
+                            M_buf = engine.allocate((hl, wl, 5), dtype=np.float32)
+                            M_smooth = engine.allocate((hl, wl, 5), dtype=np.float32)
+                            flow_lvl = engine.allocate((hl, wl, 2), dtype=np.float32)
+
+                            # Polynomial expansion for ref and comp
+                            mod.run("poly_expansion_f32",
+                                    src=ref_lvl, vert=vert_buf, poly=R0,
+                                    h=hl, w=wl, g=g_gpu, xg=xg_gpu, xxg=xxg_gpu,
+                                    ig11=ig11, ig03=ig03, ig33=ig33, ig55=ig55,
+                                    poly_radius=poly_radius)
+                            mod.run("poly_expansion_f32",
+                                    src=comp_lvl, vert=vert_buf, poly=R1,
+                                    h=hl, w=wl, g=g_gpu, xg=xg_gpu, xxg=xxg_gpu,
+                                    ig11=ig11, ig03=ig03, ig33=ig33, ig55=ig55,
+                                    poly_radius=poly_radius)
+
+                            # Initialize flow: upsample from coarser or clear
+                            if lvl == 2:
+                                mod.run("farneback_clear_flow", flow=flow_lvl)
+                            else:
+                                # Upsample flow from coarser level
+                                flow_prev = flow_l1 if lvl == 1 else flow_l0
+                                scale_up = float(hl) / float(flow_prev.shape[0])
+                                mod.run("farneback_upsample_flow",
+                                        flow_coarse=flow_prev, flow_fine=flow_lvl, scale=scale_up)
+
+                            # Run 3 iterations of Farneback
+                            mod.run("farneback_multi_3",
+                                    R0=R0, R1=R1, flow=flow_lvl, M=M_buf, M_smooth=M_smooth,
+                                    h=hl, w=wl, smooth_weights=smooth_gpu, smooth_radius=smooth_radius)
+                            engine.sync()
+
+                            # Copy flow to appropriate buffer for next level
+                            if lvl == 2:
+                                taichi_aot.copy_field(flow_lvl, flow_l2)
+                            elif lvl == 1:
+                                taichi_aot.copy_field(flow_lvl, flow_l1)
+                            else:
+                                taichi_aot.copy_field(flow_lvl, flow_l0)
+
+                            # Release level-specific buffers
+                            for buf in [vert_buf, R0, R1, M_buf, M_smooth, flow_lvl]:
+                                buf.release()
+
+                        # Release constant buffers
+                        for buf in [g_gpu, xg_gpu, xxg_gpu, smooth_gpu]:
+                            buf.release()
+                    elif flow_backend == "horn_schunck":
+                        hs_alpha = kwargs.get("hs_alpha", 1.0)
+                        hs_iters_val = kwargs.get("hs_iters", 20)
+                        args = {
+                            "ref_l0": ref_pyramid[0],
+                            "ref_l1": ref_pyramid[1],
+                            "ref_l2": ref_pyramid[2],
+                            "comp_l0": comp_pyramid[0],
+                            "comp_l1": comp_pyramid[1],
+                            "comp_l2": comp_pyramid[2],
+                            "flow_l0": flow_l0,
+                            "flow_l1": flow_l1,
+                            "flow_l2": flow_l2,
+                            "flow_temp_l0": flow_temp_l0,
+                            "flow_temp_l1": flow_temp_l1,
+                            "flow_temp_l2": flow_temp_l2,
+                            "alpha": float(hs_alpha),
+                            "num_iters": int(hs_iters_val),
+                            "scale": 2.0,
+                            "downscale": 2,
+                        }
+                        mod.run(flow_graph_name, **args)
+                        engine.sync()
+                    else:
+                        args = {
+                            "ref_l0": ref_pyramid[0],
+                            "ref_l1": ref_pyramid[1],
+                            "ref_l2": ref_pyramid[2],
+                            "comp_l0": comp_pyramid[0],
+                            "comp_l1": comp_pyramid[1],
+                            "comp_l2": comp_pyramid[2],
+                            "flow_l0": flow_l0,
+                            "flow_l1": flow_l1,
+                            "flow_l2": flow_l2,
+                            "comp_l1_warped": comp_l1_warped,
+                            "comp_l0_warped": comp_l0_warped,
+                            "tile_h": int(tile_h),
+                            "tile_w": int(tile_w),
+                            "scale": 2.0,
+                            "search_dist": int(search_dist),
+                            "downscale": 2,
+                            "max_search_radius": int(max_search_radius),
+                        }
+                        mod.run(flow_graph_name, **args)
+                        engine.sync()
 
                     # B. Pure GPU Remap Warping Pipeline
                     smooth_flow_buf = taichi_aot.smooth_flow_gpu(
@@ -920,7 +1070,7 @@ def perform_alignment_gpu(
                 for buf in ref_pyramid:
                     buf.destroy()
                 
-                for buf in [flow_l0, flow_l1, flow_l2]:
+                for buf in [flow_l0, flow_l1, flow_l2, flow_temp_l0, flow_temp_l1, flow_temp_l2]:
                     try:
                         if buf is not None:
                             buf.destroy()
@@ -991,7 +1141,7 @@ def perform_image_alignment(
 
     """
     Menyelaraskan (align) gambar dengan manajemen sumber daya yang aman.
-    Supported types: 'raft', 'alignment_tile', 'block_align', 'farneback'
+    Supported types: 'raft', 'alignment_tile', 'block_align', 'farneback', 'farneback_jit', 'farneback_aot'
     """
 
     num_images = len(images)
@@ -1004,9 +1154,9 @@ def perform_image_alignment(
     save_prefix = kwargs.get("save_prefix", None)
     save_folder = kwargs.get("save_folder", "save_align_image")
 
-    # [GPU-AUTO] Redirect to Taichi AOT GPU if type is alignment_tile/block_align
+    # [GPU-AUTO] Redirect to Taichi AOT GPU if type is alignment_tile/block_align/horn_schunck/farneback_jit/farneback_aot
     # This ensures that high-level pipelines (SimilarityMNFR) automatically use GPU acceleration.
-    if optical_flow_type in ("alignment_tile", "block_align"):
+    if optical_flow_type in ("alignment_tile", "block_align", "horn_schunck", "farneback_jit", "farneback_aot"):
         # print("[Alignment Core] Redirecting to GPU Alignment Pipeline (AOT)...")
         gpu_kwargs = dict(kwargs)
         gpu_kwargs["search_dist"] = kwargs.get("search_dist", 2)

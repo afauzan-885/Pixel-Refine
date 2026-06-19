@@ -275,6 +275,8 @@ pts_ref, pts_comp, scores = taichi_aot.akaze(img_ref, img_comp, ratio_threshold=
 * **Thread-safe Resource Pool**: Penyekatan akses pointer memori CPU <-> GPU menggunakan `threading.RLock` dan pooling dinamis.
 * **3-Layer Auto-Cleanup Guard**: Proteksi runtime dengan menangkap sinyal `SIGSEGV`/`SIGILL`/`SIGABRT`/`SIGFPE` dan monitoring watchdog daemon (2 detik heartbeat) untuk memaksa pelepasan VRAM di Windows.
   * **Stateful Smart VRAM Reclamation**: Ketika aplikasi idle (>10 detik), watchdog melakukan pembersihan VRAM pintar (buffer pool, staging, GC) secara **satu kali** per sesi idle (guarded by `_vram_reclaimed`) agar tidak berulang-ulang tanpa mematikan aplikasi.
+* **Staging Eviction Cap**: Batas tampungan staging buffer pool diatur maksimal `_MAX_STAGING_POOL_ENTRIES = 8` untuk mencegah konsumsi berlebih *pinned memory* pada GPU.
+* **Context Staging Manager**: Mendukung dekorator `with engine.staging_buffer(shape, dtype) as buf:` untuk sewa dan pelepasan otomatis staging buffer.
 * **Vulkaninfo Bypass**: Bypassing pemanggilan `vulkaninfo.exe` dinamis dengan mengunci ID device GPU ke `0` via `PIXEL_REFINE_AOT_DEVICE = 0`.
 
 ### Batasan-Batasan (Limitations):
@@ -301,6 +303,117 @@ pts_ref, pts_comp, scores = taichi_aot.akaze(img_ref, img_comp, ratio_threshold=
     *   Template bersih yang memisahkan device math/cost functions (`custom_matching_cost`), kernel pencarian kasar & halus (`initial_coarse_search_kernel`, `hierarchical_refine_kernel`), dan builder graf AOT.
     *   Berfungsi sebagai kerangka kerja awal untuk membangun variasi algoritma estimasi gerakan/aliran spasial (optical flow) berbasis piramida di Taichi GPU.
 
+### 3. GPU Farneback Optical Flow
+*   **Modul**: [farneback_flow.py](file:///E:/APP%20Developer/Pixel%20Refine/taichi_library/taichi_algorithm/farneback_flow.py) → `farneback_flow_vulkan.tcm`
+*   **Detail**:
+    *   Implementasi AOT Farneback GPU yang telah diselaraskan secara matematis dengan OpenCV Farneback.
+    *   Menggunakan filter Gaussian separable ($O(N)$ horizontal + vertikal) untuk efisiensi komputasi sistem tensor di GPU, menggantikan operasi non-separable $O(N^2)$ yang lambat.
+    *   Mengimplementasikan estimasi polinomial kuadratik least-squares berbasis bobot Gaussian $5 \times 5$ dinamis melalui proyeksi matriks filter konvolusi.
+
+---
+
+## 🆕 MFDenoiser: Single Truth Orchestrator & Spatial Fusion (Session 5)
+
+### Arsitektur MFDenoiser Algorithm
+
+`MFDenoiserAlgorithm` adalah orchestrator pipeline multi-frame denoising yang menggantikan `Similarity.py` sebagai entry point utama. Pipeline: **Load → Align → Merge → PostProcess → Save**.
+
+**Single Truth Source (`_load_params()`)**:
+```python
+def _load_params(self):
+    """Reads from load_similarity_config() — same config as Similarity.py."""
+    sim_config = load_similarity_config()
+    params = {
+        # Tiling
+        "tile_size": (tile_val, tile_val),           # (h, w) tuple
+        "overlap": 0.30,                              # 0.0-1.0
+        # Ghost Rejection
+        "motion_sensitivity": 150.0,                  # Higher = more aggressive
+        "noise_offset_factor": 0.15,                  # Noise floor offset
+        # Backend Selection
+        "merging_mode": "spatial_fusion",             # Default backend
+        "optical_flow_type": "alignment_tile",        # Farneback/Horn-Schunck/BMA
+        "alignment_backend": "taichi_gpu",
+        # Smart Fusion (AI)
+        "similarity_smart_noise_alpha": 1.0,
+        # Spatial Fusion specific
+        "early_exit_threshold": 0.05,
+        "equalize_brightness": False,
+    }
+    return params
+```
+
+### Backend Selection (Pluggable via `ctx.params`)
+
+| Stage | Parameter | Options | Default |
+|-------|-----------|---------|---------|
+| **Align** | `alignment_backend` | `"taichi_gpu"`, `"none"`, callable | `"taichi_gpu"` |
+| **Align** | `optical_flow_type` | `"alignment_tile"` (BMA), `"horn_schunck"`, `"farneback_aot"`, `"farneback_jit"`, `"block_align"` | `"alignment_tile"` |
+| **Merge** | `merging_mode` | `"spatial_fusion"`, `"average"`, `"smart"`, `"super_resolution"`, `"spatial"` | `"spatial_fusion"` |
+| **Post** | `postprocessor` | `"adaptive_box"`, `"none"`, callable | `"adaptive_box"` |
+
+### Spatial Fusion Processor (GPU AOT Ghost Rejection)
+
+**Modul**: [spatial_fusion_processor.py](file:///E:/APP%20Developer/Pixel%20Refine/pixel_refine_desktop/enhance_stack/core/algorithm/denoising/spatial_core/spatial_fusion_processor.py)
+
+`SpatialFusionProcessor` menggunakan kernel Taichi AOT dari `compute_spatial.py` untuk ghost rejection berbasis hybrid gradient MAD score dengan analisis coarse-to-fine.
+
+**Pipeline per Frame**:
+```
+1. Precompute gradients (GPU AOT) → grad_x, grad_y
+2. Coarse analysis (1/4 res) → guidance map
+3. Fine analysis (4-pass sliding window MAD) → per-frame weight map
+4. Bilinear upsample work-res weights → full-res
+5. Accumulate: sum += frame * weight
+6. Finalize: result = sum / weight_sum
+```
+
+**AOT Graphs (dari `spatial_vulkan.tcm`)**:
+| Graph | Fungsi |
+|-------|--------|
+| `precompute_gradients` | Sobel DX/DY gradients |
+| `equalize_brightness` | Brightness equalization (optional) |
+| `phase1_coarse_analysis` | Coarse confidence map (1/4 res) |
+| `phase2_fine_analysis` | Fine weight map (4-pass sliding window) |
+| `generate_fine_weights_4passes` | Fused 4-pass fine analysis |
+| `accumulate_spatial_merging` | Bilinear upsample + accumulate |
+| `fine_analysis_and_accumulate` | Fused fine + accumulate |
+
+**Error Handling**: Jika GPU AOT engine tidak tersedia, raise `RuntimeError` dengan pesan jelas.
+
+### Optical Flow AOT Modules
+
+| Module | TCM File | Graph | Deskripsi |
+|--------|----------|-------|-----------|
+| **BMA** | `compute_flow_vulkan.tcm` | `align_end_to_end_3layer` | Multi-size Block Matching Alignment (SAD/SSD, 3-layer pyramid) |
+| **Horn-Schunck** | `template_flow_vulkan.tcm` | `hs_align_3layer_10`, `hs_align_3layer_20` | Horn-Schunck GPU dengan Jacobi solver (10/20 iterations) |
+| **Farneback AOT** | `farneback_flow_vulkan.tcm` | `farneback_multi_3`, `farneback_clear_flow`, `farneback_upsample_flow` | Farneback GPU AOT (polynomial expansion, 3 iterations) |
+| **Farneback JIT** | N/A | N/A | Farneback JIT via `taichi_algorithm.farneback_flow()` (requires `AOT_MODE=0`) |
+
+### Cara Penggunaan
+
+**Via UI Settings (JSON config)**:
+```json
+{
+    "merging_mode": "spatial_fusion",
+    "optical_flow_type": "alignment_tile",
+    "similarity_spatial_tile_size": 16,
+    "similarity_spatial_motion_sensitivity": 150.0,
+    "similarity_spatial_noise_mad_offset_factor": 0.15,
+    "similarity_spatial_overlap_percent": 0.30
+}
+```
+
+**Via Code Override**:
+```python
+processor = MFDenoiserAlgorithm(db_path)
+output_path = processor.run_pipeline(
+    single_process=True,
+    merging_mode="spatial_fusion",  # Override backend
+)
+```
+
+
 ---
 
 ## 📱 Mobile QML Integration & Visual Parity (Session 4)
@@ -312,6 +425,132 @@ pts_ref, pts_comp, scores = taichi_aot.akaze(img_ref, img_comp, ratio_threshold=
 2. **TypeError Properti Null (`TypeError: Cannot read property '...' of null`)**:
    * **Penyebab**: Objek jembatan C++ yang didaftarkan ke QML Context via `setContextProperty` (`theme_bridge` & `app_bridge`) terhapus oleh Python/C++ Garbage Collector jika di-parent-kan menggunakan `.setParent(quick_widget.engine())` karena siklus hidup engine bersifat dinamis.
    * **Solusi**: Parent-kan objek jembatan langsung ke kontainer visual utama, yaitu objek `QQuickWidget` sendiri menggunakan `.setParent(quick_widget)`. Ini memastikan referensi tetap ada selama antarmuka ditampilkan.
+
+---
+
+## 📐 Coding Conventions — Code Simplicity Rules
+
+> **Prinsip utama**: Tulis kode sesederhana mungkin, hindari boilerplate dan sintaks tidak perlu.
+
+### 1. Hindari Lambda untuk Koneksi Signal
+
+**Salah:**
+```python
+window.bridge.tool_requested.connect(
+    lambda name: state.navigate_to(name)
+)
+```
+
+**Benar:**
+```python
+window.bridge.tool_requested.connect(state.navigate_to)
+```
+
+### 2. Hindari Lambda untuk Function Reference
+
+**Salah:**
+```python
+state.register_page("MFDenoiser", lambda b: build_workspace_page(b, "MFDenoiser"))
+```
+
+**Benar:**
+```python
+state.register_page("MFDenoiser", build_workspace_page)
+```
+
+### 3. Gunakan Fungsi Terpisah untuk Callback
+
+**Salah:**
+```python
+window.bridge.tool_requested.connect(
+    lambda name: print(f"[Mobile] Tool selected: {name}")
+)
+```
+
+**Benar:**
+```python
+def on_tool_selected(tool_name):
+    print(f"[Mobile] Tool selected: {tool_name}")
+
+window.bridge.tool_requested.connect(on_tool_selected)
+```
+
+### 4. Hindari Komentar Berlebihan
+
+**Salah:**
+```python
+# Register pages
+state.register_page("Home", build_home_page)
+
+# Connect navigation
+window.bridge.tool_requested.connect(state.navigate_to)
+
+# Show home page
+window.setCentralWidget(build_home_page(window.bridge))
+```
+
+**Benar:**
+```python
+state.register_page("Home", build_home_page)
+window.bridge.tool_requested.connect(state.navigate_to)
+window.setCentralWidget(build_home_page(window.bridge))
+```
+
+### 5. Hindari Docstring Berlebihan
+
+**Salah:**
+```python
+def build_workspace_page(bridge, tool_type: str = "MFDenoiser") -> Container:
+    """
+    Build the Workspace Page layout.
+
+    Args:
+        bridge: AppBridge instance
+        tool_type: Current tool type
+
+    Returns:
+        Container with all workspace components
+    """
+```
+
+**Benar:**
+```python
+def build_workspace_page(bridge) -> Container:
+    """Build the Workspace Page layout."""
+```
+
+### 6. Hindari Duplikasi Code
+
+**Salah:**
+```python
+# File memiliki dua blok kode yang sama
+import sys
+from PySide6.QtWidgets import QApplication
+...
+import sys
+from PySide6.QtWidgets import QApplication
+```
+
+**Benar:**
+```python
+# Hanya satu blok import
+import sys
+from PySide6.QtWidgets import QApplication
+```
+
+### 7. Simpulkan Variabel yang Sering Dipakai
+
+**Salah:**
+```python
+title_card = Card(title="Settings")
+title_card.set_body_content("App preferences and configuration")
+layout.add_widget(title_card)
+```
+
+**Benar:**
+```python
+layout.add_widget(Card(title="Settings"))
+```
 
 
 

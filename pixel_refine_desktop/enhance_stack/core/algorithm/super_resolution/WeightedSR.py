@@ -24,8 +24,6 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
     cleanup_old_hdf5_files,
 )
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
-import taichi_library.taichi_algorithm as ta
-from .weighted_sr import TaichiWSR
 
 class WeightedSRAlgorithm:
 
@@ -76,10 +74,8 @@ class WeightedSRAlgorithm:
         for k in range(1, num_frames):
             diff = lr_gray[k] - ref_frame
 
-            # Compute Local MSE via Gaussian Blur on GPU
-            local_mse = ta.gaussian(diff * diff, (5, 5), sigmaX=1.0)
-            if hasattr(local_mse, "to_numpy"):
-                local_mse = local_mse.to_numpy()
+            # Compute Local MSE via Gaussian Blur
+            local_mse = cv2.GaussianBlur((diff * diff).astype(np.float32), (5, 5), sigmaX=1.0)
             
             # Tile rejection mapping formula
             # Areas with high Local-MSE (movement/misalignment) get weights near 0
@@ -104,16 +100,7 @@ class WeightedSRAlgorithm:
         if not isinstance(images, list) or not images:
             return None
 
-        import taichi as ti
-        from taichi_library.taichi_algorithm.common import generate_hanning_window_2d
-        # Reset and initialize Taichi JIT on this background worker thread
-        ti.reset()
-        use_gpu = True
-        try:
-            ti.init(arch=ti.vulkan)
-        except Exception:
-            ti.init(arch=ti.cpu)
-            use_gpu = False
+        from .weighted_sr import TaichiWSR
 
         try:
             ref_image = images[0]
@@ -203,58 +190,26 @@ class WeightedSRAlgorithm:
                     if stop_requested and stop_requested():
                         return None
                         
-                    # Re-initialize Taichi JIT context for this tile
-                    ti.reset()
-                    if use_gpu:
-                        try:
-                            ti.init(arch=ti.vulkan)
-                        except Exception:
-                            ti.init(arch=ti.cpu)
-                            use_gpu = False
-                    else:
-                        ti.init(arch=ti.cpu)
-                        
                     tile_lr = lr_frames[:, y_start:y_start+tile_h, x_start:x_start+tile_w]
                     tile_weight = weight_maps[:, y_start:y_start+tile_h, x_start:x_start+tile_w]
                     
                     tile_hr_h = tile_h * scale
                     tile_hr_w = tile_w * scale
                     
-                    # Run Solver for current tile
-                    try:
-                        solver = TaichiWSR(
-                            lr_shape=(tile_h, tile_w),
-                            hr_shape=(tile_hr_h, tile_hr_w),
-                            num_frames=num_frames,
-                            scale=scale,
-                            alpha=0.7,
-                            beta=0.005,
-                            btv_window=2
-                        )
-                        solver.set_lr_data(tile_lr, tile_weight, shifts)
-                    except RuntimeError as e:
-                        if use_gpu:
-                            print("VRAM Allocation failed. Falling back to CPU backend for tiling...", flush=True)
-                            ti.reset()
-                            ti.init(arch=ti.cpu)
-                            use_gpu = False
-                            solver = TaichiWSR(
-                                lr_shape=(tile_h, tile_w),
-                                hr_shape=(tile_hr_h, tile_hr_w),
-                                num_frames=num_frames,
-                                scale=scale,
-                                alpha=0.7,
-                                beta=0.005,
-                                btv_window=2
-                            )
-                            solver.set_lr_data(tile_lr, tile_weight, shifts)
-                        else:
-                            raise e
+                    # Create SR solver (AOT engine handles GPU allocation)
+                    solver = TaichiWSR(
+                        lr_shape=(tile_h, tile_w),
+                        hr_shape=(tile_hr_h, tile_hr_w),
+                        num_frames=num_frames,
+                        scale=scale,
+                        alpha=0.7,
+                        beta=0.005,
+                        btv_window=2
+                    )
+                    solver.set_lr_data(tile_lr, tile_weight, shifts)
                             
                     # Set initial estimate via bicubic upsampling
-                    init_hr = ta.resize(tile_lr[0], (tile_hr_w, tile_hr_h), interpolation=ta.INTER_CUBIC)
-                    if hasattr(init_hr, "to_numpy"):
-                        init_hr = init_hr.to_numpy()
+                    init_hr = cv2.resize(tile_lr[0], (tile_hr_w, tile_hr_h), interpolation=cv2.INTER_CUBIC)
                     if init_hr.ndim == 3:
                         init_hr = init_hr[:, :, 0]
                         
@@ -271,9 +226,9 @@ class WeightedSRAlgorithm:
                     tile_hr_res = solver.get_hr_image()
                     
                     # Generate Hanning window for tile stitching
-                    win = generate_hanning_window_2d((tile_hr_h, tile_hr_w))
-                    if hasattr(win, "to_numpy"):
-                        win = win.to_numpy()
+                    win_y = np.hanning(tile_hr_h + 2)[1:-1].astype(np.float32)
+                    win_x = np.hanning(tile_hr_w + 2)[1:-1].astype(np.float32)
+                    win = np.outer(win_y, win_x)
                         
                     # Accumulate to global high-resolution buffers
                     y_hr_start = y_start * scale
@@ -281,11 +236,10 @@ class WeightedSRAlgorithm:
                     hr_accumulator[y_hr_start:y_hr_start+tile_hr_h, x_hr_start:x_hr_start+tile_hr_w] += tile_hr_res * win
                     weight_accumulator[y_hr_start:y_hr_start+tile_hr_h, x_hr_start:x_hr_start+tile_hr_w] += win
                     
-                    # Release GPU JIT VRAM immediately for this tile
+                    # Release solver resources
                     del solver
                     del tile_hr_res
                     del win
-                    ti.reset()
                     gc.collect()
                     
                     processed_tiles += 1
@@ -318,12 +272,6 @@ class WeightedSRAlgorithm:
         except Exception as e:
             traceback.print_exc()
             raise e
-        finally:
-            # Safely release the Taichi runtime from this thread
-            try:
-                ti.reset()
-            except:
-                pass
 
 
 def main(

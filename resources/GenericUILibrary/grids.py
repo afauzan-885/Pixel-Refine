@@ -498,7 +498,7 @@ class GridItem(QWidget):
         item_id_escaped = str(self.item_id).replace("'", "\\'")
         selected = self._is_selected
         size = self.width() if self.width() > 0 else 110
-        border_color = "genericTheme.primary" if selected else "'#bbb'"
+        border_color = "genericTheme.primary" if selected else "genericTheme.borderColor"
         border_width = 2 if selected else 1
         qml = f"{tab}Rectangle {{\n"
         qml += f"{tab}    // item_id: '{item_id_escaped}'\n"

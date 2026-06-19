@@ -70,12 +70,11 @@ if TAICHI_AVAILABLE:
                 is_boundary = False
                 for dy in ti.static(range(-1, 2)):
                     for dx in ti.static(range(-1, 2)):
-                        if dy == 0 and dx == 0:
-                            continue
-                        ny = tm.clamp(y + dy, 0, h - 1)
-                        nx = tm.clamp(x + dx, 0, w - 1)
-                        if mask[ny, nx] > 0.5:
-                            is_boundary = True
+                        if not (dy == 0 and dx == 0):
+                            ny = tm.clamp(y + dy, 0, h - 1)
+                            nx = tm.clamp(x + dx, 0, w - 1)
+                            if mask[ny, nx] > 0.5:
+                                is_boundary = True
                 if is_boundary:
                     boundary[y, x] = 1.0
                     dist[y, x] = 0.0
@@ -118,26 +117,22 @@ if TAICHI_AVAILABLE:
         for y, x in ti.ndrange(h, w):
             if dist_in[y, x] >= 0.0:
                 dist_out[y, x] = dist_in[y, x]
-                continue
-
-            # Check if any neighbor has been assigned
-            min_neighbor = 1e10
-            found = False
-            for dy in ti.static(range(-1, 2)):
-                for dx in ti.static(range(-1, 2)):
-                    if dy == 0 and dx == 0:
-                        continue
-                    ny = tm.clamp(y + dy, 0, h - 1)
-                    nx = tm.clamp(x + dx, 0, w - 1)
-                    val = dist_in[ny, nx]
-                    if val >= 0.0 and val < min_neighbor:
-                        min_neighbor = val
-                        found = True
-
-            if found:
-                dist_out[y, x] = min_neighbor + 1.0
             else:
-                dist_out[y, x] = -1.0
+                min_neighbor = 1e10
+                found = False
+                for dy in ti.static(range(-1, 2)):
+                    for dx in ti.static(range(-1, 2)):
+                        if not (dy == 0 and dx == 0):
+                            ny = tm.clamp(y + dy, 0, h - 1)
+                            nx = tm.clamp(x + dx, 0, w - 1)
+                            val = dist_in[ny, nx]
+                            if val >= 0.0 and val < min_neighbor:
+                                min_neighbor = val
+                                found = True
+                if found:
+                    dist_out[y, x] = min_neighbor + 1.0
+                else:
+                    dist_out[y, x] = -1.0
 
     # =========================================================================
     # Stage 2: Iterative Inpainting (fill from boundary inward)

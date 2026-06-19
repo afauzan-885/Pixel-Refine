@@ -16,14 +16,12 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.ORB import runn
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.Light_Glue import (
     running_light_glue,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Average import (
-    running_average,
-)
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
     running_median,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
     running_mf_denoiser as running_similarity,
+    running_mf_denoiser,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.WeightedSR import (
     running_weighted_sr,
@@ -134,12 +132,14 @@ class AlgorithmProcessorThread(QThread):
 
 
                 "denoising": {
-                    "Average": lambda: running_average(
+                    "Average": lambda: running_mf_denoiser(
                         self.parent_panel,
                         single_process=self.single_process,
                         batch_id=self.batch_id,
                         progress_callback=progress_callback,
                         stop_callback=get_stop_cb,
+                        merging_mode="average",
+                        output_suffix="average",
                     ),
                     "Median": lambda: running_median(
                         self.parent_panel,

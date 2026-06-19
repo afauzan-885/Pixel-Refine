@@ -53,7 +53,8 @@ def _get_project_cache_path():
         if not os.path.exists(cache_path):
             os.makedirs(cache_path, exist_ok=True)
             
-        print(f"[TaichiWorker] Using project-level cache at: {cache_path}")
+        if not _IS_AOT_MODE:
+            print(f"[TaichiWorker] Using project-level cache at: {cache_path}")
         return cache_path
     except Exception as e:
         print(f"[TaichiWorker] Could not resolve project root for cache: {e}")
@@ -64,7 +65,7 @@ def _get_project_cache_path():
 _global_cache_path = _get_project_cache_path()
 
 if _IS_AOT_MODE:
-    print("[TaichiWorker] AOT Compilation Mode Detected: Disabled JIT Worker and Cache Envs.")
+    pass  # AOT mode: JIT worker and cache envs disabled silently
 elif _global_cache_path:
     os.environ["TI_OFFLINE_CACHE_FILE_PATH"] = _global_cache_path
     os.environ["TI_OFFLINE_CACHE_DIR"] = _global_cache_path

@@ -772,6 +772,24 @@ def stylesheet_global_page(theme=None):
             #progressContainer {{
                 background-color: {theme.bg_secondary};
             }}
+
+            /* === ConfigPanel === */
+            #workflowContainer {{
+                background-color: {theme.bg_card};
+                border: 1px solid {theme.border_color};
+                border-radius: 8px;
+            }}
+
+            /* === modal_confirm Dialog === */
+            #ConfirmContainer {{
+                background-color: {theme.bg_card};
+                border: 1px solid {theme.border_color};
+                border-radius: 6px;
+            }}
+            #TitleBar {{
+                background-color: {theme.bg_primary};
+                border-bottom: 1px solid {theme.border_color};
+            }}
         """
 
 
@@ -806,37 +824,6 @@ TRANSPARENT_BACKGROUND_STYLE = """
     background-color: transparent;
 """
 
-SIDEBAR_STYLE = """
-    QWidget {
-        background-color: #e0e0e0;
-        color: #333;
-    }
-"""
-
-SIDEBAR_TOGGLE_BUTTON_STYLE = """
-    QPushButton {
-        background-color: #c8d6e5;
-        border: none;
-        color: #333;
-        font-size: 18px;
-        padding: 5px;
-    }
-    QPushButton:hover {
-        background-color: #b2bec3;
-    }
-"""
-
-SIDEBAR_NAV_BUTTON_STYLE = """
-    QPushButton {
-        qproperty-iconSize: 28px;
-        padding: 12px;
-        border: none;
-        background-color: #e0e0e0;
-    }
-    QPushButton:hover {
-        background-color: #dfe6e9;
-    }
-    QPushButton:checked {
-        background-color: #74b9ff;
-    }
-"""
+# NOTE: SIDEBAR_STYLE, SIDEBAR_TOGGLE_BUTTON_STYLE, SIDEBAR_NAV_BUTTON_STYLE
+# are set by update_stylesheet_constants() using theme-aware values.
+# Do NOT reassign them here with hardcoded colors.

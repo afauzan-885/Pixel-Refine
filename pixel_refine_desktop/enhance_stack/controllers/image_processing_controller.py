@@ -281,18 +281,16 @@ class ImageProcessingController(QObject):
         self, algorithm_name: str, parameters: Dict, single_process: bool
     ) -> Optional[str]:
         """Internal method to run denoising algorithm."""
-        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Average import (
-            running_average,
-        )
         from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
             running_median,
         )
         from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
             running_mf_denoiser as running_similarity,
+            running_mf_denoiser,
         )
 
         algorithm_map = {
-            "Average": running_average,
+            "Average": running_mf_denoiser,
             "Median": running_median,
             "Similarity": running_similarity,
         }

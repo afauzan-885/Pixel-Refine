@@ -28,14 +28,16 @@ class Navbar(QFrame):
 
     def __init__(self, brand="", height=50, parent=None):
         super().__init__(parent)
+        from .theme import get_theme
+        self._theme = get_theme()
 
         self.setFixedHeight(height)
         self.setStyleSheet(
-            """
-            QFrame {
-                background-color: #2c3e50;
-                border-bottom: 2px solid #34495e;
-            }
+            f"""
+            QFrame {{
+                background-color: {self._theme.bg_dark};
+                border-bottom: 2px solid {self._theme.border_dark};
+            }}
         """
         )
 
@@ -110,7 +112,7 @@ class Navbar(QFrame):
         qml = f"{tab}Rectangle {{\n"
         qml += f"{tab}    width: parent.width\n"
         qml += f"{tab}    height: {self.height()}\n"
-        qml += f"{tab}    color: '#2c3e50'\n"
+        qml += f"{tab}    color: genericTheme.bgDark\n"
         qml += f"{tab}    Row {{\n"
         qml += f"{tab}        anchors.fill: parent\n"
         qml += f"{tab}        anchors.margins: 5\n"
@@ -167,22 +169,24 @@ class NavItem(QPushButton):
     def set_active(self, active):
         """Set active state"""
         self.is_active = active
+        from .theme import get_theme
+        theme = get_theme()
 
         if active:
             self.setStyleSheet(
-                """
-                QPushButton {
+                f"""
+                QPushButton {{
                     background-color: rgba(255, 255, 255, 0.15);
                     color: white;
                     border: none;
                     padding: 8px 15px;
                     font-size: 11pt;
                     border-radius: 4px;
-                    border-bottom: 3px solid #3498db;
-                }
-                QPushButton:hover {
+                    border-bottom: 3px solid {theme.info};
+                }}
+                QPushButton:hover {{
                     background-color: rgba(255, 255, 255, 0.2);
-                }
+                }}
             """
             )
         else:
@@ -234,14 +238,16 @@ class Sidebar(QFrame):
 
     def __init__(self, width=200, parent=None):
         super().__init__(parent)
+        from .theme import get_theme
+        self._theme = get_theme()
 
         self.setFixedWidth(width)
         self.setStyleSheet(
-            """
-            QFrame {
-                background-color: #2c3e50;
-                border-right: 1px solid #34495e;
-            }
+            f"""
+            QFrame {{
+                background-color: {self._theme.bg_dark};
+                border-right: 1px solid {self._theme.border_dark};
+            }}
         """
         )
 
@@ -266,9 +272,11 @@ class Sidebar(QFrame):
 
     def add_separator(self):
         """Add separator line"""
+        from .theme import get_theme
+        theme = get_theme()
         separator = QFrame()
         separator.setFrameShape(QFrame.HLine)
-        separator.setStyleSheet("background-color: #34495e;")
+        separator.setStyleSheet(f"background-color: {theme.border_dark};")
         separator.setFixedHeight(1)
         self.layout().addWidget(separator)
 
@@ -292,7 +300,7 @@ class Sidebar(QFrame):
         qml = f"{tab}Rectangle {{\n"
         qml += f"{tab}    width: {self.width()}\n"
         qml += f"{tab}    height: parent.height\n"
-        qml += f"{tab}    color: '#2c3e50'\n"
+        qml += f"{tab}    color: genericTheme.bgDark\n"
         qml += f"{tab}    Column {{\n"
         qml += f"{tab}        width: parent.width\n"
         qml += f"{tab}        spacing: 0\n"
@@ -345,22 +353,24 @@ class SidebarItem(QPushButton):
     def set_active(self, active):
         """Set active state"""
         self.is_active = active
+        from .theme import get_theme
+        theme = get_theme()
 
         if active:
             self.setStyleSheet(
-                """
-                QPushButton {
-                    background-color: #3498db;
+                f"""
+                QPushButton {{
+                    background-color: {theme.sidebar_nav_checked_bg};
                     color: white;
                     border: none;
                     padding: 15px 20px;
                     text-align: left;
                     font-size: 11pt;
-                    border-left: 4px solid #2980b9;
-                }
-                QPushButton:hover {
-                    background-color: #2980b9;
-                }
+                    border-left: 4px solid {theme.sidebar_nav_hover_bg};
+                }}
+                QPushButton:hover {{
+                    background-color: {theme.sidebar_nav_hover_bg};
+                }}
             """
             )
         else:
@@ -383,7 +393,7 @@ class SidebarItem(QPushButton):
     def to_qml(self, indent=0):
         tab = "    " * indent
         text = self.text().replace("'", "\\'")
-        bg = "'#3498db'" if self.is_active else "'transparent'"
+        bg = "genericTheme.sidebarNavCheckedBg" if self.is_active else "'transparent'"
         # Ambil icon path jika ada (disimpan saat __init__)
         icon_path = getattr(self, "_icon_path", None)
 

@@ -125,12 +125,11 @@ if TAICHI_AVAILABLE:
             is_boundary = False
             for dy in ti.static(range(-1, 2)):
                 for dx in ti.static(range(-1, 2)):
-                    if dy == 0 and dx == 0:
-                        continue
-                    ny = tm.clamp(y + dy, 0, h - 1)
-                    nx = tm.clamp(x + dx, 0, w - 1)
-                    if mask[ny, nx] < 0.5:
-                        is_boundary = True
+                    if not (dy == 0 and dx == 0):
+                        ny = tm.clamp(y + dy, 0, h - 1)
+                        nx = tm.clamp(x + dx, 0, w - 1)
+                        if mask[ny, nx] < 0.5:
+                            is_boundary = True
 
             if is_boundary:
                 # Boundary: keep Dirichlet BC (dst value)

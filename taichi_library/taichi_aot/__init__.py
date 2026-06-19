@@ -2890,10 +2890,18 @@ def non_local_means(src, h_param=10.0, search_window=7, patch_size=5,
     Taichi AOT Non-Local Means Denoising.
     Dispatches to pre-compiled fixed-parameter kernel variants.
     Supports: search_window in {3,5,7}, patch_size in {1,2,3}.
-    Falls back to JIT for unsupported parameter combinations.
+    Auto-cast: uint8/uint16 input is normalized to [0,1] float32,
+    processed, then cast back to original dtype.
     """
     is_numpy = isinstance(src, np.ndarray)
     is_3d = len(src.shape) == 3 and src.shape[2] == 3
+
+    # --- Auto-cast: normalize integer types to float32 [0,1] ---
+    orig_dtype = src.dtype if isinstance(src, np.ndarray) else np.float32
+    if isinstance(src, np.ndarray) and src.dtype == np.uint8:
+        src = src.astype(np.float32) / 255.0
+    elif isinstance(src, np.ndarray) and src.dtype == np.uint16:
+        src = src.astype(np.float32) / 65535.0
 
     # Round to nearest supported variant
     sr = min(search_window, 7)
@@ -2914,12 +2922,19 @@ def non_local_means(src, h_param=10.0, search_window=7, patch_size=5,
 
     h, w = src.shape[:2]
 
-    src_buf = InputArray(src)
+    src_np = np.ascontiguousarray(src, dtype=np.float32)
+    h, w = src_np.shape[:2]
+
     if is_3d:
-        src_buf = src_buf.view_as_vector(True)
-        dst_buf = OutputArray((h, w, 3), dtype=np.float32, is_vector=True, vector_dim=3)
+        # Bypass engine.upload auto-vectorization (it forces is_vector=True for 3ch)
+        # The AOT graph was compiled with ndim=3 raw ndarray, not vector.
+        from taichi_library.taichi_aot.engine import _LIB, _RUNTIME
+        src_buf = engine.allocate((h, w, 3), dtype=np.float32, is_vector=False, host_accessible=True)
+        dst_buf = engine.allocate((h, w, 3), dtype=np.float32, is_vector=False)
+        _LIB.write_to_gpu_buffer(_RUNTIME, src_buf.handle, src_np.ctypes.data, src_buf.nbytes)
         graph_name = f"nlm_3ch_s{sr}_p{pr}_f32"
     else:
+        src_buf = InputArray(src_np)
         dst_buf = OutputArray((h, w), dtype=np.float32)
         graph_name = f"nlm_1ch_s{sr}_p{pr}_f32"
 
@@ -2932,7 +2947,17 @@ def non_local_means(src, h_param=10.0, search_window=7, patch_size=5,
         h_param=float(h_param),
     )
 
-    return dst_buf if return_gpu else dst_buf.to_numpy()
+    if return_gpu:
+        return dst_buf
+
+    result = dst_buf.to_numpy()
+
+    # --- Auto-cast back to original dtype ---
+    if orig_dtype == np.uint8:
+        return np.clip(result * 255.0, 0, 255).astype(np.uint8)
+    elif orig_dtype == np.uint16:
+        return np.clip(result * 65535.0, 0, 65535).astype(np.uint16)
+    return result
 
 
 # ===========================================================================
@@ -3168,3 +3193,796 @@ def _ensure_upload(arr):
     if isinstance(arr, TaichiGPUBuffer):
         return arr, False
     return InputArray(arr), True
+
+
+# =========================================================================
+# NEW ALGORITHMS — AOT Bridge Wrappers
+# =========================================================================
+
+# --- Color Space Conversion Constants ---
+COLOR_BGR2HSV = 40
+COLOR_HSV2BGR = 54
+COLOR_BGR2YCrCb = 36
+COLOR_YCrCb2BGR = 38
+COLOR_BGR2LAB = 44
+COLOR_LAB2BGR = 55
+
+
+# --- Inpainting Flags ---
+INPAINT_TELEA = 0
+INPAINT_NS = 1
+
+# --- Seamless Clone Flags ---
+NORMAL_CLONE = 1
+MIXED_CLONE = 2
+MONOCHROME_TRANSFER = 3
+
+
+def cvtColor_extended(src, code, return_gpu=False):
+    """AOT Color Space Conversion (BGR<->HSV, BGR<->YCrCb, BGR<->LAB)."""
+    is_gpu = isinstance(src, TaichiGPUBuffer)
+    src_buf = src if is_gpu else engine.upload(src)
+    # Override auto-detected is_vector for ndim=3 graphs:
+    # engine.upload auto-sets is_vector=True for (H,W,3) arrays,
+    # but the TCM graph expects plain ndim=3 (not vector field).
+    if getattr(src_buf, 'is_vector', False):
+        src_buf = src_buf.view_as_vector(False)
+    h, w = src_buf.shape[:2]
+    # Allocate dst as plain ndarray (is_vector=False) to match ndim=3 graph
+    dst = engine.allocate((h, w, 3))
+
+    graph_map = {
+        COLOR_BGR2HSV: "bgr2hsv_f32",
+        COLOR_HSV2BGR: "hsv2bgr_f32",
+        COLOR_BGR2YCrCb: "bgr2ycrcb_f32",
+        COLOR_YCrCb2BGR: "ycrcb2bgr_f32",
+        COLOR_BGR2LAB: "bgr2lab_f32",
+        COLOR_LAB2BGR: "lab2bgr_f32",
+    }
+    graph_name = graph_map.get(code)
+    if graph_name is None:
+        raise ValueError(f"Unsupported color conversion code: {code}")
+
+    _mod("color_convert").run(graph_name, src=src_buf, dst=dst, h=h, w=w)
+    return dst if return_gpu else dst.to_numpy()
+
+
+def otsu_threshold_aot(src, thresh_type=0, max_val=255.0, return_gpu=False):
+    """AOT Otsu's Thresholding. Returns (threshold_value, binary_image)."""
+    is_gpu = isinstance(src, TaichiGPUBuffer)
+    src_buf = src if is_gpu else engine.upload(src)
+    h, w = src_buf.shape[:2]
+    dst = engine.allocate((h, w))
+
+    # Histogram — zero-initialize to avoid garbage data from buffer pool reuse
+    num_bins = 256
+    hist = engine.allocate((num_bins,), dtype=np.int32)
+    zero_np = np.zeros(num_bins, dtype=np.int32)
+    zero_buf = engine.upload(zero_np)
+    copy_field(zero_buf, hist)
+    zero_buf.destroy()
+
+    _mod("otsu").run("otsu_histogram_f32", src=src_buf, hist=hist, h=h, w=w,
+                      max_val=float(max_val), num_bins=num_bins)
+
+    # Find threshold on CPU — use float64 to avoid int32 overflow
+    hist_np = hist.to_numpy().astype(np.float64)
+    total = float(hist_np.sum())
+    if total == 0:
+        threshold_val = 0.0
+    else:
+        mu_T = sum(float(i) * hist_np[i] for i in range(256)) / total
+        w0, sum_0, max_sigma, best_t = 0.0, 0.0, -1.0, 0
+        for t in range(256):
+            w0 += hist_np[t]
+            if w0 == 0: continue
+            w1 = total - w0
+            if w1 == 0: break
+            sum_0 += float(t) * hist_np[t]
+            mu0 = sum_0 / w0
+            mu1 = (mu_T * total - sum_0) / w1
+            sigma_B = w0 * w1 * (mu0 - mu1) ** 2
+            if sigma_B > max_sigma:
+                max_sigma = sigma_B
+                best_t = t
+        threshold_val = float(best_t)
+
+    # Apply threshold
+    _mod("otsu").run("otsu_threshold_f32", src=src_buf, dst=dst,
+                      threshold=threshold_val, max_val=float(max_val),
+                      thresh_type=thresh_type, h=h, w=w)
+    result = dst if return_gpu else dst.to_numpy()
+    return threshold_val, result
+
+
+def clahe_aot(src, clip_limit=2.0, tile_grid_size=(8, 8), return_gpu=False):
+    """AOT CLAHE - Contrast Limited Adaptive Histogram Equalization."""
+    is_gpu = isinstance(src, TaichiGPUBuffer)
+    src_buf = src if is_gpu else engine.upload(src)
+    h, w = src_buf.shape[:2]
+    tiles_x, tiles_y = tile_grid_size
+    total_tiles = tiles_x * tiles_y
+    num_bins = 256
+    tile_h = (h + tiles_y - 1) // tiles_y
+    tile_w = (w + tiles_x - 1) // tiles_x
+    tile_pixels = tile_h * tile_w
+    beta = max(int(clip_limit * tile_pixels / num_bins), 1)
+
+    hist = engine.allocate((total_tiles, num_bins), dtype=np.int32)
+    lut = engine.allocate((total_tiles, num_bins))
+    dst = engine.allocate((h, w))
+
+    # Zero-initialize hist and lut to avoid garbage from buffer pool reuse
+    zero_hist = engine.upload(np.zeros((total_tiles, num_bins), dtype=np.int32))
+    copy_field(zero_hist, hist)
+    zero_hist.destroy()
+    zero_lut = engine.upload(np.zeros((total_tiles, num_bins), dtype=np.float32))
+    copy_field(zero_lut, lut)
+    zero_lut.destroy()
+
+    _mod("clahe").run("clahe_pipeline_f32",
+                       src=src_buf, hist=hist, lut=lut, dst=dst,
+                       h=h, w=w, tile_h=tile_h, tile_w=tile_w,
+                       tiles_x=tiles_x, tiles_y=tiles_y,
+                       total_tiles=total_tiles, num_bins=num_bins,
+                       clip_limit=beta, tile_pixels=tile_pixels,
+                       max_val=255.0)
+    return dst if return_gpu else dst.to_numpy()
+
+
+def canny_aot(src, low_threshold=50.0, high_threshold=150.0, return_gpu=False):
+    """AOT Canny Edge Detector."""
+    is_gpu = isinstance(src, TaichiGPUBuffer)
+    src_buf = src if is_gpu else engine.upload(src)
+    h, w = src_buf.shape[:2]
+
+    # Step 0: Gaussian pre-smoothing (matches OpenCV cv2.Canny and JIT implementation)
+    blurred_buf = gaussian_blur(src_buf, sigma=1.0, kernel_size=5, return_gpu=True)
+
+    # Internal buffers
+    gx = engine.allocate((h, w))
+    gy = engine.allocate((h, w))
+    mag = engine.allocate((h, w))
+    nms = engine.allocate((h, w))
+    edges = engine.allocate((h, w))
+    dst = engine.allocate((h, w))
+
+    # Step 1: Sobel gradients on pre-smoothed image
+    _mod("gradients").run("sobel_f32", src=blurred_buf, dst_dx=gx, dst_dy=gy, h=h, w=w)
+    blurred_buf.release()
+
+    # Step 2: Mag + NMS
+    _mod("canny").run("canny_mag_nms_f32", gx=gx, gy=gy, mag=mag, nms=nms, h=h, w=w)
+
+    # Step 3: Double threshold
+    _mod("canny").run("canny_threshold_f32", nms=nms, edges=edges,
+                       low_thresh=low_threshold, high_thresh=high_threshold, h=h, w=w)
+
+    # Step 4: Iterative hysteresis
+    for _ in range(h + w):  # max iterations
+        zero_np = np.zeros(1, dtype=np.int32)
+        changed_buf = engine.upload(zero_np)
+        _mod("canny").run("canny_hysteresis_f32", edges=edges, changed=changed_buf, h=h, w=w)
+        if changed_buf.to_numpy()[0] == 0:
+            changed_buf.release()
+            break
+        changed_buf.release()
+
+    # Step 5: Finalize
+    _mod("canny").run("canny_finalize_f32", edges=edges, dst=dst, h=h, w=w)
+    return dst if return_gpu else dst.to_numpy()
+
+
+def hough_lines_aot(edge_image, rho_resolution=1.0, theta_resolution=1.0,
+                     threshold=80, return_gpu=False):
+    """AOT Hough Line Transform. Returns list of (rho, theta) pairs."""
+    is_gpu = isinstance(edge_image, TaichiGPUBuffer)
+    src_buf = edge_image if is_gpu else engine.upload(edge_image)
+    h, w = src_buf.shape[:2]
+
+    import math
+    num_theta = int(180.0 / theta_resolution)
+    diag = int(math.sqrt(h * h + w * w))
+    num_rho = int(2 * diag / rho_resolution) + 1
+    rho_offset = diag
+
+    acc = engine.allocate((num_rho, num_theta), dtype=np.int32)
+    cos_table = engine.allocate((num_theta,))
+    sin_table = engine.allocate((num_theta,))
+    peaks_buf = engine.allocate((500, 3))  # max 500 peaks
+    peak_count = engine.allocate((1,), dtype=np.int32)
+
+    # Fill trig tables
+    cos_np = np.array([math.cos(math.radians(t * theta_resolution)) for t in range(num_theta)], dtype=np.float32)
+    sin_np = np.array([math.sin(math.radians(t * theta_resolution)) for t in range(num_theta)], dtype=np.float32)
+    cos_table_buf = engine.upload(cos_np)
+    sin_table_buf = engine.upload(sin_np)
+
+    # Vote
+    _mod("hough").run("hough_vote_f32", edges=src_buf, accumulator=acc,
+                       cos_table=cos_table_buf, sin_table=sin_table_buf,
+                       h=h, w=w, num_theta=num_theta, rho_offset=rho_offset,
+                       edge_threshold=128.0)
+
+    # Find peaks
+    _mod("hough").run("hough_peaks_f32", accumulator=acc, peaks=peaks_buf,
+                       peak_count=peak_count, num_rho=num_rho, num_theta=num_theta,
+                       threshold=threshold, nms_radius=10, max_peaks=500)
+
+    peaks_np = peaks_buf.to_numpy()
+    count = min(int(peak_count.to_numpy()[0]), 500)  # Clamp to buffer size
+    lines = []
+    for i in range(count):
+        rho = (peaks_np[i, 0] - rho_offset) * rho_resolution
+        theta = peaks_np[i, 1] * theta_resolution * math.pi / 180.0
+        lines.append((rho, theta))
+    return lines
+
+
+def guided_filter_aot(guide, src, radius=8, epsilon=1e-4, return_gpu=False):
+    """AOT Guided Filter (edge-preserving smoothing).
+    Uses box_filter module for box averaging and guided_filter module for element-wise ops.
+    """
+    is_gpu_src = isinstance(src, TaichiGPUBuffer)
+    is_gpu_guide = isinstance(guide, TaichiGPUBuffer)
+    src_buf = src if is_gpu_src else engine.upload(src)
+    guide_buf = guide if is_gpu_guide else engine.upload(guide)
+    h, w = src_buf.shape[:2]
+
+    # Box filter helper (separable) — use 1ch generic graph
+    ks = 2 * radius + 1
+    radius_bf = ks // 2
+
+    def _box_filter_1ch(input_buf):
+        """Apply separable box filter on a single-channel buffer using box_filter module."""
+        out = engine.allocate((h, w))
+        tmp = engine.allocate((h, w))
+        _mod("box_filter").run("box_filter_separable_generic_1ch_f32",
+                               src=input_buf, tmp=tmp, dst=out, h=h, w=w, radius=radius_bf)
+        tmp.destroy()
+        return out
+
+    # Step 1: Compute means via box filter
+    mean_I = _box_filter_1ch(guide_buf)
+    mean_p = _box_filter_1ch(src_buf)
+
+    # Element-wise products
+    II = engine.allocate((h, w))
+    Ip = engine.allocate((h, w))
+    _mod("guided_filter").run("gf_mul_f32", a=guide_buf, b=guide_buf, dst=II, h=h, w=w)
+    _mod("guided_filter").run("gf_mul_f32", a=guide_buf, b=src_buf, dst=Ip, h=h, w=w)
+    mean_II = _box_filter_1ch(II)
+    mean_Ip = _box_filter_1ch(Ip)
+    II.destroy()
+    Ip.destroy()
+
+    # Step 2: Compute var and cov
+    var_I = engine.allocate((h, w))
+    cov_Ip = engine.allocate((h, w))
+    _mod("guided_filter").run("gf_var_cov_f32",
+                               mean_I=mean_I, mean_p=mean_p,
+                               mean_II=mean_II, mean_Ip=mean_Ip,
+                               var_I=var_I, cov_Ip=cov_Ip, h=h, w=w)
+
+    # Step 3: Compute a, b coefficients
+    a = engine.allocate((h, w))
+    b = engine.allocate((h, w))
+    _mod("guided_filter").run("gf_ab_f32", var_I=var_I, cov_Ip=cov_Ip,
+                               mean_I=mean_I, mean_p=mean_p,
+                               a=a, b=b, epsilon=float(epsilon), h=h, w=w)
+
+    # Step 4: Average a, b via box filter
+    mean_a = _box_filter_1ch(a)
+    mean_b = _box_filter_1ch(b)
+    a.destroy()
+    b.destroy()
+
+    # Step 5: Compute output
+    dst = engine.allocate((h, w))
+    _mod("guided_filter").run("gf_output_f32", mean_a=mean_a, mean_b=mean_b,
+                               I=guide_buf, dst=dst, h=h, w=w)
+
+    # Cleanup
+    mean_I.destroy()
+    mean_p.destroy()
+    mean_II.destroy()
+    mean_Ip.destroy()
+    var_I.destroy()
+    cov_Ip.destroy()
+    mean_a.destroy()
+    mean_b.destroy()
+
+    return dst if return_gpu else dst.to_numpy()
+
+
+def non_local_means_aot(src, h_param=10.0, search_window=7, patch_size=5,
+                         return_gpu=False):
+    """AOT Non-Local Means Denoising (fixed-parameter variants)."""
+    is_gpu = isinstance(src, TaichiGPUBuffer)
+    src_buf = src if is_gpu else engine.upload(src)
+    h, w = src_buf.shape[:2]
+    is_3d = len(src_buf.shape) == 3
+
+    # Select AOT variant based on search_window and patch_size
+    sr = search_window
+    pr = patch_size
+    valid_configs = [(3, 1), (5, 2), (7, 3)]
+    # Find closest valid config
+    best = min(valid_configs, key=lambda c: abs(c[0] - sr) + abs(c[1] - pr))
+    sr, pr = best
+
+    if is_3d:
+        dst = engine.allocate((h, w, 3), is_vector=True)
+        graph = f"nlm_3ch_s{sr}_p{pr}_f32"
+    else:
+        dst = engine.allocate((h, w))
+        graph = f"nlm_1ch_s{sr}_p{pr}_f32"
+
+    _mod("nlm").run(graph, src=src_buf, dst=dst, h=h, w=w, h_param=float(h_param))
+    return dst if return_gpu else dst.to_numpy()
+
+
+def inpaint_aot(src, mask, inpaint_radius=3, return_gpu=False):
+    """AOT Image Inpainting (iterative diffusion)."""
+    is_gpu_src = isinstance(src, TaichiGPUBuffer)
+    is_gpu_mask = isinstance(mask, TaichiGPUBuffer)
+    src_buf = src if is_gpu_src else engine.upload(src)
+    # Override auto-detected is_vector for ndim=3 graphs (3ch inpaint)
+    if getattr(src_buf, 'is_vector', False):
+        src_buf = src_buf.view_as_vector(False)
+    mask_buf = mask if is_gpu_mask else engine.upload(mask)
+    h, w = src_buf.shape[:2]
+    is_3d = len(src_buf.shape) == 3
+
+    # Working buffers
+    dist = engine.allocate((h, w))
+    boundary = engine.allocate((h, w))
+    filled = engine.allocate((h, w))
+
+    # Step 1: Initialize
+    _mod("inpaint").run("inpaint_init_distance_f32", mask=mask_buf, dist=dist,
+                         boundary=boundary, h=h, w=w)
+    _mod("inpaint").run("inpaint_set_filled_f32", mask=mask_buf, filled=filled, h=h, w=w)
+
+    # Step 2: Iterative dilation + inpainting
+    max_level = int(max(h, w))
+    for level in range(1, max_level + 1):
+        dist2 = engine.allocate((h, w))
+        _mod("inpaint").run("inpaint_dilate_distance_f32",
+                             dist_in=dist, dist_out=dist2, h=h, w=w,
+                             current_level=float(level - 1))
+        copy_field(dist2, dist)
+        dist2.destroy()
+
+        if is_3d:
+            _mod("inpaint").run("inpaint_level_3ch_f32", src=src_buf, dist=dist,
+                                 filled=filled, h=h, w=w,
+                                 target_level=float(level),
+                                 inpaint_radius=float(inpaint_radius))
+        else:
+            _mod("inpaint").run("inpaint_level_1ch_f32", src=src_buf, dist=dist,
+                                 filled=filled, h=h, w=w,
+                                 target_level=float(level),
+                                 inpaint_radius=float(inpaint_radius))
+
+        _mod("inpaint").run("inpaint_mark_filled_f32", dist=dist, filled=filled,
+                             h=h, w=w, target_level=float(level))
+
+    return src_buf if return_gpu else src_buf.to_numpy()
+
+
+def seamless_clone_aot(src, dst_img, mask, center=(0, 0),
+                         flags=NORMAL_CLONE, max_iterations=200, return_gpu=False):
+    """AOT Seamless Cloning (Poisson Image Editing)."""
+    is_gpu_src = isinstance(src, TaichiGPUBuffer)
+    is_gpu_dst = isinstance(dst_img, TaichiGPUBuffer)
+    src_buf = src if is_gpu_src else engine.upload(src)
+    dst_buf = dst_img if is_gpu_dst else engine.upload(dst_img)
+    # Override auto-detected is_vector for ndim=3 graphs
+    if getattr(src_buf, 'is_vector', False):
+        src_buf = src_buf.view_as_vector(False)
+    if getattr(dst_buf, 'is_vector', False):
+        dst_buf = dst_buf.view_as_vector(False)
+    mask_buf = mask if isinstance(mask, TaichiGPUBuffer) else engine.upload(mask)
+    h, w = dst_buf.shape[:2]
+
+    # Copy destination to output (plain ndim=3, not vector)
+    result = engine.allocate((h, w, 3))
+    _mod("seamless_clone").run("seamless_copy_f32", s=dst_buf, d=result, h=h, w=w)
+
+    # Grayscale source for MONOCHROME_TRANSFER
+    if flags == MONOCHROME_TRANSFER:
+        src_buf_copy = engine.allocate((h, w, 3))
+        _mod("seamless_clone").run("seamless_copy_f32", s=src_buf, d=src_buf_copy, h=h, w=w)
+        gray = engine.allocate((h, w))
+        _mod("seamless_clone").run("seamless_to_grayscale_f32", s=src_buf_copy, g=gray, h=h, w=w)
+        # Create 3ch grayscale source
+        src_buf = engine.allocate((h, w, 3))
+        for c in range(3):
+            _mod("seamless_clone").run("seamless_init_f_channel_f32",
+                                       dst_arr=src_buf, f_arr=gray, h=h, w=w, c=c)
+        gray.destroy()
+        src_buf_copy.destroy()
+
+    # Solve per channel
+    for ch in range(3):
+        div_x = engine.allocate((h, w))
+        div_y = engine.allocate((h, w))
+        lap = engine.allocate((h, w))
+
+        # Compute divergence
+        if flags == MIXED_CLONE:
+            _mod("seamless_clone").run("seamless_divergence_mixed_f32",
+                                       src=src_buf, dst=result, div_x=div_x, div_y=div_y,
+                                       h=h, w=w, ch=ch)
+        else:
+            _mod("seamless_clone").run("seamless_divergence_normal_f32",
+                                       src=src_buf, div_x=div_x, div_y=div_y,
+                                       h=h, w=w, ch=ch)
+
+        # Compute Laplacian of divergence
+        _mod("seamless_clone").run("seamless_laplacian_f32",
+                                   div_x=div_x, div_y=div_y, lap=lap, h=h, w=w)
+
+        # Initialize f from destination channel
+        f_in = engine.allocate((h, w))
+        f_out = engine.allocate((h, w))
+        _mod("seamless_clone").run("seamless_init_f_channel_f32",
+                                   dst_arr=result, f_arr=f_in, h=h, w=w, c=ch)
+
+        # Jacobi iteration
+        for _ in range(max_iterations):
+            _mod("seamless_clone").run("seamless_jacobi_step_f32",
+                                       f_in=f_in, f_out=f_out, lap=lap, mask=mask_buf,
+                                       h=h, w=w)
+            copy_field(f_out, f_in)
+
+        # Composite
+        _mod("seamless_clone").run("seamless_composite_f32",
+                                   f=f_in, dst_out=result, mask=mask_buf,
+                                   h=h, w=w, ch=ch)
+
+        # Cleanup
+        div_x.destroy()
+        div_y.destroy()
+        lap.destroy()
+        f_in.destroy()
+        f_out.destroy()
+
+    return result if return_gpu else result.to_numpy()
+
+
+# ---------------------------------------------------------------------------
+# Farneback Optical Flow (AOT)
+# ---------------------------------------------------------------------------
+
+def farneback_flow(
+    ref_gray,
+    comp_gray,
+    pyr_scale=0.5,
+    num_levels=3,
+    win_size=15,
+    num_iters=3,
+    poly_n=5,
+    poly_sigma=1.2,
+    flags=0,
+    flow_init=None,
+    return_gpu=False,
+):
+    """
+    AOT Farneback Dense Optical Flow (OpenCV-compatible).
+
+    Computes a dense flow field from ref_gray to comp_gray.
+
+    Parameters
+    ----------
+    ref_gray  : ndarray (H, W) float32 – reference frame [0, 255].
+    comp_gray : ndarray (H, W) float32 – comparison frame [0, 255].
+    pyr_scale : float – pyramid scale factor (default 0.5).
+    num_levels: int   – number of pyramid levels (default 3).
+    win_size  : int   – smoothing window size (default 15).
+    num_iters : int   – iterations per pyramid level (default 3).
+    poly_n    : int   – polynomial expansion neighborhood (default 5).
+    poly_sigma: float – polynomial expansion sigma (default 1.2).
+    flags     : int   – reserved.
+    flow_init : ndarray (H,W,2) or TaichiGPUBuffer – optional initial flow.
+    return_gpu: bool  – if True, return TaichiGPUBuffer; else np.ndarray.
+
+    Returns
+    -------
+    flow : (H, W, 2) float32 – flow field where flow[:,:,0]=dx, flow[:,:,1]=dy.
+    """
+    from taichi_library.taichi_algorithm.farneback_flow import (
+        prepare_gaussian_constants,
+        compute_smoothing_weights,
+    )
+    from taichi_library.taichi_algorithm.pyramid import build_image_pyramid_gpu
+
+    # Upload images
+    ref_buf = InputArray(ref_gray)
+    comp_buf = InputArray(comp_gray)
+    h_orig, w_orig = ref_buf.shape[:2]
+
+    # Build pyramids
+    downscale_factor = 1.0 / pyr_scale
+    ref_pyr = build_image_pyramid_gpu(
+        ref_buf, n_levels=num_levels, min_size=32,
+        downscale_factor=downscale_factor,
+    )
+    comp_pyr = build_image_pyramid_gpu(
+        comp_buf, n_levels=num_levels, min_size=32,
+        downscale_factor=downscale_factor,
+    )
+    actual_levels = len(ref_pyr)
+
+    # Pre-compute constants on CPU, upload to GPU
+    g_w, xg_w, xxg_w, ig11, ig03, ig33, ig55 = prepare_gaussian_constants(poly_n, poly_sigma)
+    smooth_w, smooth_radius = compute_smoothing_weights(win_size)
+    poly_radius = poly_n // 2
+
+    g_gpu = InputArray(g_w)
+    xg_gpu = InputArray(xg_w)
+    xxg_gpu = InputArray(xxg_w)
+    smooth_gpu = InputArray(smooth_w[:smooth_radius + 1])
+
+    mod = _mod("farneback_flow")
+    if mod is None:
+        raise RuntimeError("farneback_flow TCM not found in aot_tcm/")
+
+    # Coarse-to-fine
+    prev_flow = None
+    for lvl in range(actual_levels - 1, -1, -1):
+        ref_lvl = ref_pyr[lvl]
+        comp_lvl = comp_pyr[lvl]
+        hl, wl = ref_lvl.shape[0], ref_lvl.shape[1]
+
+        flow_buf = engine.allocate((hl, wl, 2), dtype=np.float32)
+
+        if prev_flow is not None:
+            scale_up = float(ref_lvl.shape[0]) / float(prev_flow.shape[0])
+            mod.run("farneback_upsample_flow",
+                    flow_coarse=prev_flow, flow_fine=flow_buf, scale=float(scale_up))
+        else:
+            mod.run("farneback_clear_flow", flow=flow_buf)
+
+        # Polynomial expansion for both images
+        vert_buf = engine.allocate((hl, wl, 3), dtype=np.float32)
+        R0 = engine.allocate((hl, wl, 5), dtype=np.float32)
+        R1 = engine.allocate((hl, wl, 5), dtype=np.float32)
+
+        # Polynomial expansion: ref (writes to R0), comp (writes to R1)
+        # poly_expansion_f32 graph: src -> vert (vertical) -> poly (horizontal)
+        mod.run("poly_expansion_f32",
+                src=ref_lvl, vert=vert_buf, poly=R0,
+                h=hl, w=wl, g=g_gpu, xg=xg_gpu, xxg=xxg_gpu, poly_radius=poly_radius)
+        mod.run("poly_expansion_f32",
+                src=comp_lvl, vert=vert_buf, poly=R1,
+                h=hl, w=wl, g=g_gpu, xg=xg_gpu, xxg=xxg_gpu, poly_radius=poly_radius)
+
+        vert_buf.destroy()
+
+        # Allocate tensor scratch buffers
+        M = engine.allocate((hl, wl, 5), dtype=np.float32)
+        M_smooth = engine.allocate((hl, wl, 5), dtype=np.float32)
+
+        # Choose batched multi-iteration graph for efficiency
+        iter_args = dict(R0=R0, R1=R1, flow=flow_buf, M=M, M_smooth=M_smooth,
+                         h=hl, w=wl, smooth_weights=smooth_gpu,
+                         smooth_radius=smooth_radius)
+
+        remaining = num_iters
+        while remaining > 0:
+            if remaining >= 5:
+                batch_key = "farneback_multi_5"
+                batch_size = 5
+            elif remaining >= 3:
+                batch_key = "farneback_multi_3"
+                batch_size = 3
+            elif remaining >= 2:
+                batch_key = "farneback_multi_2"
+                batch_size = 2
+            else:
+                batch_key = "farneback_iteration"
+                batch_size = 1
+            try:
+                mod.run(batch_key, **iter_args)
+            except Exception:
+                # Fallback to single iteration if batch graph not found
+                mod.run("farneback_iteration", **iter_args)
+            remaining -= batch_size
+
+        R0.destroy()
+        R1.destroy()
+        M.destroy()
+        M_smooth.destroy()
+
+        if prev_flow is not None and lvl < actual_levels - 1:
+            prev_flow.destroy()
+        prev_flow = flow_buf
+
+    engine.sync()
+    result = prev_flow
+
+    # Cleanup pyramid buffers (except level 0 which shares ref/comp_buf)
+    for lvl_buf in ref_pyr[1:]:
+        lvl_buf.destroy()
+    for lvl_buf in comp_pyr[1:]:
+        lvl_buf.destroy()
+    for buf in (g_gpu, xg_gpu, xxg_gpu, smooth_gpu):
+        try: buf.destroy()
+        except Exception: pass
+
+    return result if return_gpu else result.to_numpy()
+
+# ===========================================================================
+# AOT Dispatch: BM3D (Hybrid Fast Collaborative Denoising)
+# ===========================================================================
+def bm3d(src, sigma, block_size=8, search_radius=15,
+         max_matches=16, lambda_3d=2.7, cycle_spins=1,
+         return_gpu=False):
+    """
+    Taichi AOT BM3D Denoising (Hybrid Fast Collaborative Denoising).
+
+    Self-contained — no external fallback. Handles edge cases internally.
+    Supports: uint8, uint16, float32 | grayscale (H,W), RGB (H,W,3).
+
+    Pipeline per spin:
+      1. Zero output + weight_sum buffers
+      2. Block matching (brute-force L2 + Top-K)
+      3. 2D DCT hard thresholding per group
+      4. Weighted overlap-add aggregation
+      5. Normalize output
+    """
+    is_numpy = isinstance(src, np.ndarray)
+    orig_dtype = src.dtype if is_numpy else np.float32
+
+    # --- Auto-cast dtype ---
+    if is_numpy and src.dtype == np.uint8:
+        src = src.astype(np.float32) / 255.0
+        sigma = float(sigma) / 255.0
+    elif is_numpy and src.dtype == np.uint16:
+        src = src.astype(np.float32) / 65535.0
+        sigma = float(sigma) / 65535.0
+    else:
+        sigma = float(sigma)
+
+    # --- Auto-repair: sanitize ---
+    if is_numpy and src.dtype in (np.float32, np.float64):
+        if np.any(np.isnan(src)) or np.any(np.isinf(src)):
+            src = np.nan_to_num(src, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
+    if is_numpy:
+        src = np.ascontiguousarray(src, dtype=np.float32)
+        src = np.clip(src, 0.0, 1.0)
+
+    # --- Validate sigma ---
+    if not np.isfinite(sigma) or sigma <= 0:
+        if return_gpu:
+            return InputArray(src) if is_numpy else src
+        return src.copy() if is_numpy else src.to_numpy()
+
+    # --- Handle multi-channel (RGB) ---
+    if len(src.shape) == 3 and src.shape[2] == 3:
+        h, w = src.shape[:2]
+        result_np = np.zeros((h, w, 3), dtype=np.float32)
+        for c in range(3):
+            ch_np = np.ascontiguousarray(src[:, :, c], dtype=np.float32)
+            result_np[:, :, c] = bm3d(
+                ch_np, sigma, block_size=block_size,
+                search_radius=search_radius, max_matches=max_matches,
+                lambda_3d=lambda_3d, cycle_spins=cycle_spins,
+                return_gpu=False)
+        if orig_dtype == np.uint8:
+            return np.clip(result_np * 255.0, 0, 255).astype(np.uint8)
+        elif orig_dtype == np.uint16:
+            return np.clip(result_np * 65535.0, 0, 65535).astype(np.uint16)
+        return result_np
+
+    # --- Single channel processing ---
+    H, W = src.shape[:2]
+    N = min(block_size, H, W)
+    search_radius = min(search_radius, max(1, min(H, W) // 2))
+    max_area = (2 * search_radius + 1) ** 2
+    K = min(max_matches, max(1, max_area), 32)
+
+    step = N
+    ref_positions_list = []
+    for ry in range(0, H - N + 1, step):
+        for rx in range(0, W - N + 1, step):
+            ref_positions_list.append((ry, rx))
+    num_refs = len(ref_positions_list)
+
+    if num_refs == 0:
+        if return_gpu:
+            return InputArray(src) if is_numpy else src
+        return src.copy() if is_numpy else src.to_numpy()
+
+    src_np = np.ascontiguousarray(src, dtype=np.float32)
+    src_buf = InputArray(src_np)
+    ref_pos_np = np.array(ref_positions_list, dtype=np.int32)
+    ref_pos_buf = InputArray(ref_pos_np)
+
+    from taichi_library.taichi_algorithm.bm3d import _get_dct_matrix
+    T_np = _get_dct_matrix(N)
+    T_buf = InputArray(T_np)
+
+    groups_buf = OutputArray((num_refs, K, N, N), dtype=np.float32)
+    match_y_buf = OutputArray((num_refs, K), dtype=np.int32)
+    match_x_buf = OutputArray((num_refs, K), dtype=np.int32)
+    valid_buf = OutputArray((num_refs, K), dtype=np.int32)
+    filtered_buf = OutputArray((num_refs, K, N, N), dtype=np.float32)
+    weights_buf = OutputArray((num_refs,), dtype=np.float32)
+    temp_buf = OutputArray((num_refs, K, N, N), dtype=np.float32)
+    output_buf = OutputArray((H, W), dtype=np.float32)
+    wsum_buf = OutputArray((H, W), dtype=np.float32)
+    final_buf = OutputArray((H, W), dtype=np.float32)
+
+    mod = _mod("bm3d")
+    mod.run("bm3d_zero_f32", dst=final_buf, H=H, W=W)
+
+    for spin in range(cycle_spins):
+        shift_x = (spin * N // 2) % W if spin > 0 else 0
+        shift_y = (spin * N // 2) % H if spin > 0 else 0
+
+        mod.run("bm3d_zero_f32", dst=output_buf, H=H, W=W)
+        mod.run("bm3d_zero_f32", dst=wsum_buf, H=H, W=W)
+
+        if shift_x != 0 or shift_y != 0:
+            shifted_buf = OutputArray((H, W), dtype=np.float32)
+            mod.run("bm3d_shift_f32", src=src_buf, dst=shifted_buf,
+                    H=H, W=W, sy=shift_y, sx=shift_x)
+            work_buf = shifted_buf
+        else:
+            work_buf = src_buf
+
+        mod.run("bm3d_block_match_f32",
+                src=work_buf, groups=groups_buf,
+                match_y=match_y_buf, match_x=match_x_buf,
+                valid_mask=valid_buf, ref_positions=ref_pos_buf,
+                num_refs=num_refs, K=K, N=N,
+                search_r=search_radius, H=H, W=W)
+
+        mod.run("bm3d_dct_filter_f32",
+                groups=groups_buf, filtered=filtered_buf,
+                group_weights=weights_buf, T_dct=T_buf, temp_buf=temp_buf,
+                num_refs=num_refs, K=K, N=N,
+                sigma=sigma, lambda_3d=lambda_3d)
+
+        mod.run("bm3d_aggregate_f32",
+                filtered=filtered_buf, group_weights=weights_buf,
+                match_y=match_y_buf, match_x=match_x_buf, valid_mask=valid_buf,
+                output=output_buf, weight_sum=wsum_buf,
+                num_refs=num_refs, K=K, N=N, H=H, W=W)
+
+        mod.run("bm3d_normalize_f32",
+                output=output_buf, weight_sum=wsum_buf,
+                src=work_buf, H=H, W=W)
+
+        if shift_x != 0 or shift_y != 0:
+            unshifted_buf = OutputArray((H, W), dtype=np.float32)
+            mod.run("bm3d_shift_f32", src=output_buf, dst=unshifted_buf,
+                    H=H, W=W, sy=-shift_y, sx=-shift_x)
+            mod.run("bm3d_accumulate_f32", dst=final_buf,
+                    src=unshifted_buf, H=H, W=W)
+            shifted_buf.destroy()
+            unshifted_buf.destroy()
+        else:
+            mod.run("bm3d_accumulate_f32", dst=final_buf,
+                    src=output_buf, H=H, W=W)
+
+    if cycle_spins > 1:
+        mod.run("bm3d_scale_f32", data=final_buf,
+                scale=1.0 / cycle_spins, H=H, W=W)
+
+    for buf in [groups_buf, match_y_buf, match_x_buf, valid_buf,
+                filtered_buf, weights_buf, temp_buf, output_buf, wsum_buf]:
+        buf.destroy()
+
+    if return_gpu:
+        return final_buf
+
+    result = final_buf.to_numpy()
+    if orig_dtype == np.uint8:
+        return np.clip(result * 255.0, 0, 255).astype(np.uint8)
+    elif orig_dtype == np.uint16:
+        return np.clip(result * 65535.0, 0, 65535).astype(np.uint16)
+    return result

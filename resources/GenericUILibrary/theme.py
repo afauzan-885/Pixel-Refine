@@ -608,11 +608,15 @@ try:
         infoChanged            = Signal()
         bgPrimaryChanged       = Signal()
         bgSecondaryChanged     = Signal()
+        bgDarkChanged          = Signal()
         textPrimaryChanged     = Signal()
         textSecondaryChanged   = Signal()
         textMutedChanged       = Signal()
         textWhiteChanged       = Signal()
         borderColorChanged     = Signal()
+        borderDarkChanged      = Signal()
+        sidebarNavCheckedBgChanged = Signal()
+        sidebarNavHoverBgChanged   = Signal()
         radiusSmChanged        = Signal()
         radiusMdChanged        = Signal()
         radiusLgChanged        = Signal()
@@ -632,11 +636,15 @@ try:
             self.infoChanged.emit()
             self.bgPrimaryChanged.emit()
             self.bgSecondaryChanged.emit()
+            self.bgDarkChanged.emit()
             self.textPrimaryChanged.emit()
             self.textSecondaryChanged.emit()
             self.textMutedChanged.emit()
             self.textWhiteChanged.emit()
             self.borderColorChanged.emit()
+            self.borderDarkChanged.emit()
+            self.sidebarNavCheckedBgChanged.emit()
+            self.sidebarNavHoverBgChanged.emit()
             self.radiusSmChanged.emit()
             self.radiusMdChanged.emit()
             self.radiusLgChanged.emit()
@@ -659,11 +667,15 @@ try:
         def _get_info(self):            return self._theme.info
         def _get_bgPrimary(self):       return self._theme.bg_primary
         def _get_bgSecondary(self):     return self._theme.bg_secondary
+        def _get_bgDark(self):          return self._theme.bg_dark
         def _get_textPrimary(self):     return self._theme.text_primary
         def _get_textSecondary(self):   return self._theme.text_secondary
         def _get_textMuted(self):       return self._theme.text_muted
         def _get_textWhite(self):       return self._theme.text_white
         def _get_borderColor(self):     return self._theme.border_color
+        def _get_borderDark(self):      return self._theme.border_dark
+        def _get_sidebarNavCheckedBg(self): return self._theme.sidebar_nav_checked_bg
+        def _get_sidebarNavHoverBg(self):   return self._theme.sidebar_nav_hover_bg
         def _get_radiusSm(self):        return self._theme.radius_sm
         def _get_radiusMd(self):        return self._theme.radius_md
         def _get_radiusLg(self):        return self._theme.radius_lg
@@ -677,11 +689,15 @@ try:
         info          = Property(str, _get_info,          notify=infoChanged)
         bgPrimary     = Property(str, _get_bgPrimary,     notify=bgPrimaryChanged)
         bgSecondary   = Property(str, _get_bgSecondary,   notify=bgSecondaryChanged)
+        bgDark        = Property(str, _get_bgDark,        notify=bgDarkChanged)
         textPrimary   = Property(str, _get_textPrimary,   notify=textPrimaryChanged)
         textSecondary = Property(str, _get_textSecondary, notify=textSecondaryChanged)
         textMuted     = Property(str, _get_textMuted,     notify=textMutedChanged)
         textWhite     = Property(str, _get_textWhite,     notify=textWhiteChanged)
         borderColor   = Property(str, _get_borderColor,   notify=borderColorChanged)
+        borderDark    = Property(str, _get_borderDark,    notify=borderDarkChanged)
+        sidebarNavCheckedBg = Property(str, _get_sidebarNavCheckedBg, notify=sidebarNavCheckedBgChanged)
+        sidebarNavHoverBg   = Property(str, _get_sidebarNavHoverBg,   notify=sidebarNavHoverBgChanged)
         radiusSm      = Property(int, _get_radiusSm,      notify=radiusSmChanged)
         radiusMd      = Property(int, _get_radiusMd,      notify=radiusMdChanged)
         radiusLg      = Property(int, _get_radiusLg,      notify=radiusLgChanged)

@@ -466,6 +466,14 @@ def non_local_means(src, h_param=10.0, search_window=7, patch_size=5,
         Denoised image in same format as input.
     """
     is_numpy = isinstance(src, np.ndarray)
+
+    # --- Auto-cast: normalize integer types to float32 [0,1] ---
+    orig_dtype = src.dtype if is_numpy else np.float32
+    if is_numpy and src.dtype == np.uint8:
+        src = src.astype(np.float32) / 255.0
+    elif is_numpy and src.dtype == np.uint16:
+        src = src.astype(np.float32) / 65535.0
+
     is_3ch = len(src.shape) == 3 and src.shape[2] == 3
 
     search_r = search_window
@@ -505,4 +513,12 @@ def non_local_means(src, h_param=10.0, search_window=7, patch_size=5,
     if src_is_temp:
         common.release_temp_buffer(src_gpu)
 
-    return common.to_numpy_if_needed(dst_gpu, is_numpy)
+    result = common.to_numpy_if_needed(dst_gpu, is_numpy)
+
+    # --- Auto-cast back to original dtype ---
+    if isinstance(result, np.ndarray):
+        if orig_dtype == np.uint8:
+            return np.clip(result * 255.0, 0, 255).astype(np.uint8)
+        elif orig_dtype == np.uint16:
+            return np.clip(result * 65535.0, 0, 65535).astype(np.uint16)
+    return result

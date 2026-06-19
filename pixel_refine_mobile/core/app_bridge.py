@@ -1,15 +1,8 @@
 """
-pixel_refine_mobile/core/app_bridge.py
----------------------------------------
-Bridge antara QML dan logika Python untuk versi Mobile.
-
-Identik dengan pola signal-slot yang digunakan di Desktop,
-sehingga handler yang sama bisa dipakai di kedua platform.
-
-Cara pakai:
-    from pixel_refine_mobile.core.app_bridge import AppBridge
-    bridge = AppBridge()
-    bridge.tool_requested.connect(on_tool_requested)
+app_bridge.py
+-------------
+Bridge between QML and Python logic for Mobile.
+Stores current tool state for screen navigation.
 """
 
 from PySide6.QtCore import QObject, Signal, Slot, Property
@@ -17,30 +10,23 @@ from PySide6.QtCore import QObject, Signal, Slot, Property
 
 class AppBridge(QObject):
     """
-    Bridge data antara QML (Mobile) dan Python.
+    Bridge data between QML (Mobile) and Python.
 
-    Signal:
-        tool_requested(str)  — dipancarkan saat user menekan tombol di QML.
-                               Setara dengan clicked.connect() di Desktop.
-        progress_changed(int)— dipancarkan saat loading progress berubah.
-
-    Slot (dapat dipanggil dari QML):
-        openTool(name)       — membuka tool berdasarkan nama.
-        setProgress(value)   — update progress bar.
+    Signals:
+        tool_requested(str)  — Emitted when user taps a tool button.
+        progress_changed(int)— Emitted when loading progress changes.
     """
 
-    # ── Signals ───────────────────────────────────────────────────────────────
-    tool_requested   = Signal(str)    # dipancarkan oleh openTool()
-    progress_changed = Signal(int)    # alias untuk loadingProgressChanged
+    tool_requested = Signal(str)
+    progress_changed = Signal(int)
 
-    # ── Internal ──────────────────────────────────────────────────────────────
     loadingProgressChanged = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._loading_progress = 0
+        self._current_tool = "Home"
 
-    # ── Property: loadingProgress (dengan NOTIFY agar QML bisa bind) ──────────
     def _get_progress(self) -> int:
         return self._loading_progress
 
@@ -51,29 +37,20 @@ class AppBridge(QObject):
             self.progress_changed.emit(val)
 
     loadingProgress = Property(
-        int,
-        _get_progress,
-        _set_progress,
-        notify=loadingProgressChanged,
+        int, _get_progress, _set_progress, notify=loadingProgressChanged,
     )
-
-    # ── Slots (dipanggil dari QML via MouseArea.onClicked, dll.) ──────────────
 
     @Slot(str)
     def openTool(self, tool_name: str):
-        """
-        Dipanggil dari QML saat user menekan tombol.
-        Memancarkan sinyal tool_requested ke handler Python.
-
-        Contoh di QML:
-            MouseArea { onClicked: appBridge.openTool("Denoising") }
-
-        Contoh connect di Python (identik dengan Desktop):
-            bridge.tool_requested.connect(on_tool_click)
-        """
+        """Called from QML when user taps a tool button."""
+        self._current_tool = tool_name
         self.tool_requested.emit(tool_name)
 
     @Slot(int)
     def setProgress(self, value: int):
-        """Update loading progress dari Python atau QML."""
+        """Update loading progress from Python or QML."""
         self._set_progress(value)
+
+    @property
+    def current_tool(self):
+        return self._current_tool

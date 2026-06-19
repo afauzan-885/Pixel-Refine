@@ -53,15 +53,16 @@ if TAICHI_AVAILABLE:
                                  hist: ti.types.ndarray(),
                                  h: int, w: int,
                                  tile_h: int, tile_w: int,
-                                 tiles_x: int, tiles_y: int):
+                                 tiles_x: int, tiles_y: int,
+                                 max_val: float, num_bins: int):
         """Compute per-tile histogram. Each pixel atomically adds to its tile's bin."""
         for y, x in ti.ndrange(h, w):
-            val = ti.cast(tm.clamp(src[y, x], 0.0, 255.0), ti.i32)
-            # Determine which tile this pixel belongs to
+            val = tm.clamp(src[y, x], 0.0, max_val)
+            bin_idx = ti.min(ti.cast(val * float(num_bins) / max_val, ti.i32), num_bins - 1)
             ty = ti.min(y // tile_h, tiles_y - 1)
             tx = ti.min(x // tile_w, tiles_x - 1)
             tile_idx = ty * tiles_x + tx
-            ti.atomic_add(hist[tile_idx, val], 1)
+            ti.atomic_add(hist[tile_idx, bin_idx], 1)
 
     # =========================================================================
     # Stage 2: Clip + Redistribute + CDF (one thread per tile)
@@ -114,10 +115,12 @@ if TAICHI_AVAILABLE:
                                     dst: ti.types.ndarray(),
                                     h: int, w: int,
                                     tile_h: int, tile_w: int,
-                                    tiles_x: int, tiles_y: int):
+                                    tiles_x: int, tiles_y: int,
+                                    max_val: float, num_bins: int):
         """Bilinear interpolation between 4 nearest tile LUTs."""
         for y, x in ti.ndrange(h, w):
-            val = ti.cast(tm.clamp(src[y, x], 0.0, 255.0), ti.i32)
+            val = tm.clamp(src[y, x], 0.0, max_val)
+            bin_idx = ti.min(ti.cast(val * float(num_bins) / max_val, ti.i32), num_bins - 1)
 
             # Compute tile center positions
             # Tile center for tile i: i * tile_w + tile_w/2
@@ -150,36 +153,41 @@ if TAICHI_AVAILABLE:
             tile_bl = ty1 * tiles_x + tx0
             tile_br = ty1 * tiles_x + tx1
 
-            v_tl = lut[tile_tl, val]
-            v_tr = lut[tile_tr, val]
-            v_bl = lut[tile_bl, val]
-            v_br = lut[tile_br, val]
+            v_tl = lut[tile_tl, bin_idx]
+            v_tr = lut[tile_tr, bin_idx]
+            v_bl = lut[tile_bl, bin_idx]
+            v_br = lut[tile_br, bin_idx]
 
             # Bilinear interpolation
             top = v_tl * (1.0 - wx) + v_tr * wx
             bot = v_bl * (1.0 - wx) + v_br * wx
-            result = top * (1.0 - wy) + bot * wy
+            lut_val = top * (1.0 - wy) + bot * wy
 
-            dst[y, x] = result
+            # Scale LUT value back to original range
+            dst[y, x] = lut_val * max_val / float(num_bins - 1)
 
 
 @ti_thread
-def clahe(src, clip_limit=2.0, tile_grid_size=(8, 8), dst=None, buffer_provider="pool"):
+def clahe(src, clip_limit=2.0, tile_grid_size=(8, 8), num_bins=0,
+           dst=None, buffer_provider="pool"):
     """
     CLAHE - Contrast Limited Adaptive Histogram Equalization (GPU-accelerated).
     OpenCV-compatible: Similar to cv2.createCLAHE(clipLimit, tileGridSize).apply()
 
     Args:
-        src: Input grayscale image (H, W), uint8 or float32 [0, 255].
+        src: Input grayscale image (H, W), uint8 or float32.
+             Supports 8-bit [0,255] and 16-bit [0,65535] ranges.
         clip_limit: Contrast clip limit (typical: 1.0 - 4.0, default 2.0).
                     Higher = more aggressive contrast, risk of noise amplification.
         tile_grid_size: Tuple (tiles_x, tiles_y) defining the grid.
                         Default (8, 8) = 64 tiles.
+        num_bins: Histogram bins. 0=auto (256 for <=255 range, 1024 for >255).
+                  Use 1024 for 16-bit images.
         dst: Optional output buffer (H, W).
         buffer_provider: Buffer pool provider.
 
     Returns:
-        CLAHE-enhanced image in same format as input, values [0, 255].
+        CLAHE-enhanced image in same format as input.
     """
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
@@ -190,7 +198,16 @@ def clahe(src, clip_limit=2.0, tile_grid_size=(8, 8), dst=None, buffer_provider=
     h, w = src_gpu.shape[:2]
     tiles_x, tiles_y = tile_grid_size
     total_tiles = tiles_x * tiles_y
-    num_bins = 256
+
+    # Auto-detect range and bins
+    src_max = float(src.max()) if is_numpy else 255.0
+    if src_max <= 255.0:
+        max_val = 255.0
+    else:
+        max_val = 65535.0
+
+    if num_bins <= 0:
+        num_bins = 256 if max_val <= 255.0 else 1024
 
     # Tile dimensions
     tile_h = (h + tiles_y - 1) // tiles_y
@@ -206,7 +223,8 @@ def clahe(src, clip_limit=2.0, tile_grid_size=(8, 8), dst=None, buffer_provider=
     lut_gpu = ti.ndarray(dtype=ti.f32, shape=(total_tiles, num_bins))
 
     # Stage 1: Compute histograms
-    _clahe_histogram_kernel(src_gpu, hist_gpu, h, w, tile_h, tile_w, tiles_x, tiles_y)
+    _clahe_histogram_kernel(src_gpu, hist_gpu, h, w, tile_h, tile_w, tiles_x, tiles_y,
+                             max_val, num_bins)
 
     # Stage 2: Clip + redistribute + CDF
     _clahe_clip_cdf_kernel(hist_gpu, lut_gpu, total_tiles, num_bins, beta, tile_pixels)
@@ -219,7 +237,7 @@ def clahe(src, clip_limit=2.0, tile_grid_size=(8, 8), dst=None, buffer_provider=
         dst_gpu = common.get_temp_buffer((h, w), ti.f32, buffer_provider)
 
     _clahe_interpolate_kernel(src_gpu, lut_gpu, dst_gpu, h, w,
-                                tile_h, tile_w, tiles_x, tiles_y)
+                                tile_h, tile_w, tiles_x, tiles_y, max_val, num_bins)
 
     if src_is_temp:
         common.release_temp_buffer(src_gpu)

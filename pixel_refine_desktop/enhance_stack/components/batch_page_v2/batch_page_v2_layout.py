@@ -45,14 +45,12 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.ORB import runn
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
     save_special_jpg_and_png,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Average import (
-    running_average,
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
+    running_mf_denoiser,
+    running_mf_denoiser as running_similarity,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
     running_median,
-)
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
-    running_mf_denoiser as running_similarity,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.Interpolation import (
     running_interpolation,
@@ -507,7 +505,8 @@ class BatchPageV2Layout(QWidget):
             # Proses untuk Denoising
             denoising_executed = False
             if denoising_choice == "Average":
-                running_average(self, single_process=True)
+                print("[TRACE] batch_page_v2_layout: routing 'Average' → running_mf_denoiser(merging_mode='average')")
+                running_mf_denoiser(self, single_process=True, merging_mode="average", output_suffix="average")
                 denoising_executed = True
             elif denoising_choice == "Median":
                 running_median(self, single_process=True)

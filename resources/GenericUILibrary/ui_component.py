@@ -61,6 +61,27 @@ class GridItemWidget(QWidget):
     def mouseDoubleClickEvent(self, event: QMouseEvent):
         self.double_clicked.emit(self.item_id)
 
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        label = self.visual_box.text() if self.visual_box else ""
+        selected = self._is_selected
+        border_color = "genericTheme.primary" if selected else "genericTheme.borderColor"
+        border_width = 2 if selected else 1
+        qml = f"{tab}Rectangle {{\n"
+        qml += f"{tab}    width: 110\n"
+        qml += f"{tab}    height: 110\n"
+        qml += f"{tab}    radius: 4\n"
+        qml += f"{tab}    color: genericTheme.bgSecondary\n"
+        qml += f"{tab}    border.color: {border_color}\n"
+        qml += f"{tab}    border.width: {border_width}\n"
+        qml += f"{tab}    Text {{ text: '{label}'; anchors.centerIn: parent; color: genericTheme.textPrimary; wrapMode: Text.WordWrap; width: parent.width - 10 }}\n"
+        qml += f"{tab}    MouseArea {{\n"
+        qml += f"{tab}        anchors.fill: parent\n"
+        qml += f"{tab}        onClicked: appBridge.openTool('{self.item_id}')\n"
+        qml += f"{tab}    }}\n"
+        qml += f"{tab}}}"
+        return qml
+
 # --- 2. Simple Loading View (Dulu ProcessingView) ---
 class LoadingOverlay(QWidget):
     """Tampilan Loading Generik."""
@@ -81,3 +102,14 @@ class LoadingOverlay(QWidget):
 
     def set_status(self, text, percentage=0):
         self.lbl_text.setText(f"{text} ({percentage}%)")
+
+    def to_qml(self, indent=0):
+        tab = "    " * indent
+        msg = self.lbl_text.text().replace("'", "\\'")
+        qml = f"{tab}Column {{\n"
+        qml += f"{tab}    anchors.centerIn: parent\n"
+        qml += f"{tab}    spacing: 10\n"
+        qml += f"{tab}    BusyIndicator {{ running: true; width: 48; height: 48; anchors.horizontalCenter: parent.horizontalCenter }}\n"
+        qml += f"{tab}    Text {{ text: '{msg}'; color: genericTheme.textSecondary; anchors.horizontalCenter: parent.horizontalCenter }}\n"
+        qml += f"{tab}}}"
+        return qml

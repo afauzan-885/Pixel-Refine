@@ -42,34 +42,33 @@ THRESH_BINARY_INV = 1
 THRESH_OTSU = 8  # Flag to combine with THRESH_BINARY
 
 
-def _otsu_threshold_cpu(hist):
+def _otsu_threshold_cpu(hist, num_bins=256):
     """
-    Compute optimal Otsu threshold from a 256-bin histogram on CPU.
+    Compute optimal Otsu threshold from a histogram on CPU.
     Maximizes between-class variance: sigma_B^2 = w0 * w1 * (mu0 - mu1)^2
 
     Args:
-        hist: numpy array of shape (256,) with bin counts.
+        hist: numpy array of shape (num_bins,) with bin counts.
+        num_bins: Number of histogram bins.
 
     Returns:
-        Optimal threshold value (int, 0-255).
+        Optimal threshold bin index (int).
     """
     total = hist.sum()
     if total == 0:
         return 0
 
-    # Compute total mean
     mu_T = 0.0
-    for i in range(256):
+    for i in range(num_bins):
         mu_T += i * hist[i]
     mu_T /= total
 
-    # Incremental search
     w0 = 0.0
     sum_0 = 0.0
     max_sigma_B = -1.0
     best_t = 0
 
-    for t in range(256):
+    for t in range(num_bins):
         w0 += hist[t]
         if w0 == 0:
             continue
@@ -96,11 +95,12 @@ if TAICHI_AVAILABLE:
     # =========================================================================
     @ti.kernel
     def _compute_histogram_kernel(src: ti.types.ndarray(), hist: ti.types.ndarray(),
-                                   h: int, w: int):
-        """Compute 256-bin histogram using atomic operations."""
+                                   h: int, w: int, max_val: float, num_bins: int):
+        """Compute histogram using atomic operations. Supports 8-bit and 16-bit ranges."""
         for y, x in ti.ndrange(h, w):
-            val = ti.cast(tm.clamp(src[y, x], 0.0, 255.0), ti.i32)
-            ti.atomic_add(hist[val], 1)
+            val = tm.clamp(src[y, x], 0.0, max_val)
+            bin_idx = ti.min(ti.cast(val * float(num_bins) / max_val, ti.i32), num_bins - 1)
+            ti.atomic_add(hist[bin_idx], 1)
 
     # =========================================================================
     # Kernel 2: Parallel Binary Thresholding
@@ -137,21 +137,23 @@ if TAICHI_AVAILABLE:
 
 @ti_thread
 def otsu_threshold(src, dst=None, thresh_type=THRESH_BINARY, max_val=255.0,
-                    buffer_provider="pool"):
+                    num_bins=0, buffer_provider="pool"):
     """
     Otsu's automatic thresholding (GPU-accelerated).
     OpenCV-compatible: Similar to cv2.threshold(src, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
 
     Args:
-        src: Input grayscale image (H, W), uint8 or float32 [0, 255].
+        src: Input grayscale image (H, W), uint8 or float32.
+             Supports 8-bit [0,255] and 16-bit [0,65535] ranges.
         dst: Optional output buffer (H, W).
         thresh_type: THRESH_BINARY (0) or THRESH_BINARY_INV (1).
         max_val: Maximum value for thresholded output (default 255).
+        num_bins: Histogram bins. 0=auto (256 for <=255, 1024 for >255).
         buffer_provider: Buffer pool provider.
 
     Returns:
         Tuple of (threshold_value, thresholded_image).
-        - threshold_value: The optimal Otsu threshold (float).
+        - threshold_value: The optimal Otsu threshold in original range (float).
         - thresholded_image: Binary image with values in {0, max_val}.
     """
     if not TAICHI_AVAILABLE:
@@ -162,14 +164,27 @@ def otsu_threshold(src, dst=None, thresh_type=THRESH_BINARY, max_val=255.0,
                                                        buffer_provider=buffer_provider)
     h, w = src_gpu.shape[:2]
 
-    # Step 1: Compute histogram on GPU
-    hist_gpu = ti.ndarray(dtype=ti.i32, shape=(256,))
-    hist_gpu.fill(0)
-    _compute_histogram_kernel(src_gpu, hist_gpu, h, w)
+    # Auto-detect range and bins
+    src_max = float(src.max()) if is_numpy else 255.0
+    if src_max <= 255.0:
+        data_max = 255.0
+    else:
+        data_max = 65535.0
 
-    # Step 2: Download histogram and find optimal threshold (CPU-side, trivial)
+    if num_bins <= 0:
+        num_bins = 256 if data_max <= 255.0 else 1024
+
+    # Step 1: Compute histogram on GPU
+    hist_gpu = ti.ndarray(dtype=ti.i32, shape=(num_bins,))
+    hist_gpu.fill(0)
+    _compute_histogram_kernel(src_gpu, hist_gpu, h, w, data_max, num_bins)
+
+    # Step 2: Download histogram and find optimal threshold (CPU-side)
     hist_np = hist_gpu.to_numpy()
-    threshold_val = _otsu_threshold_cpu(hist_np)
+    bin_idx = _otsu_threshold_cpu(hist_np, num_bins)
+
+    # Convert bin index back to original range
+    threshold_val = float(bin_idx) * data_max / float(num_bins - 1)
 
     # Step 3: Apply threshold on GPU
     if dst is not None:
@@ -178,7 +193,7 @@ def otsu_threshold(src, dst=None, thresh_type=THRESH_BINARY, max_val=255.0,
     else:
         dst_gpu = common.get_temp_buffer((h, w), ti.f32, buffer_provider)
 
-    _threshold_kernel(src_gpu, dst_gpu, float(threshold_val), float(max_val),
+    _threshold_kernel(src_gpu, dst_gpu, threshold_val, float(max_val),
                        thresh_type, h, w)
 
     if src_is_temp:

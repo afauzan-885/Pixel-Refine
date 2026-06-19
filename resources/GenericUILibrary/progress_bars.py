@@ -271,7 +271,7 @@ class ProgressBar(QWidget, RealtimeMixin):
             qml += f"{tab}    height: 100\n"
             qml += f"{tab}}}"
             return qml
-        color = self._get_variant_color().name()
+        _theme_color = f"genericTheme.{self.variant}" if self.variant in ("primary", "success", "danger", "warning", "info") else "genericTheme.primary"
         qml = f"{tab}Column {{\n"
         qml += f"{tab}    width: parent.width\n"
         qml += f"{tab}    spacing: 5\n"
@@ -288,11 +288,11 @@ class ProgressBar(QWidget, RealtimeMixin):
         qml += f"{tab}            width: (parent.width - 2) * {self._value / self._max_value}\n"
         qml += f"{tab}            height: parent.height - 2\n"
         qml += f"{tab}            radius: parent.radius - 1\n"
-        qml += f"{tab}            color: '{color}'\n"
+        qml += f"{tab}            color: {_theme_color}\n"
         qml += f"{tab}        }}\n"
         qml += f"{tab}    }}\n"
         if self.show_label:
-            qml += f"{tab}    Text {{ text: '{self._value}%'; font.bold: true; color: '#666'; horizontalAlignment: Text.AlignHCenter; width: parent.width }}\n"
+            qml += f"{tab}    Text {{ text: '{self._value}%'; font.bold: true; color: genericTheme.textSecondary; horizontalAlignment: Text.AlignHCenter; width: parent.width }}\n"
         qml += f"{tab}}}"
         return qml
 
@@ -392,8 +392,7 @@ class CustomProgressBar(QWidget):
 
     def to_qml(self, indent=0):
         tab = "    " * indent
-        # style:
-        color = self._get_variant_color().name()
+        _theme_color = f"genericTheme.{self.variant}" if self.variant in ("primary", "success", "danger", "warning", "info") else "genericTheme.primary"
         qml = f"{tab}Rectangle {{\n"
         qml += f"{tab}    width: parent.width\n"
         qml += f"{tab}    height: 20\n"
@@ -403,7 +402,7 @@ class CustomProgressBar(QWidget):
         qml += f"{tab}        width: parent.width * {self._value / 100.0}\n"
         qml += f"{tab}        height: parent.height\n"
         qml += f"{tab}        radius: 10\n"
-        qml += f"{tab}        color: '{color}'\n"
+        qml += f"{tab}        color: {_theme_color}\n"
         qml += f"{tab}    }}\n"
         qml += f"{tab}}}"
         return qml

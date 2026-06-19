@@ -1,24 +1,26 @@
-from kivy.uix.screenmanager import ScreenManager
-from pixel_refine_mobile.ui.screens.welcome_screen import WelcomeScreen
-from pixel_refine_mobile.ui.screens.home_screen import HomeScreen
-from pixel_refine_mobile.ui.screens.project_screen import ProjectScreen
-from pixel_refine_mobile.ui.screens.denoising_screen import DenoisingScreen
+"""
+app_state.py
+------------
+Screen router — maps tool names to page builder functions.
+"""
+
+from typing import Dict, Callable, Optional
+
 
 class AppState:
-    """
-    Core state manager setara dengan 'app_manager' di Desktop.
-    Mengelola ScreenManager dan transisi antar halaman.
-    """
-    def __init__(self):
-        self.screen_manager = ScreenManager()
-        self._init_screens()
+    """Manages screen navigation by mapping tool names to page builders."""
 
-    def _init_screens(self):
-        # Register all application screens
-        self.screen_manager.add_widget(WelcomeScreen(name='welcome'))
-        self.screen_manager.add_widget(HomeScreen(name='home'))
-        self.screen_manager.add_widget(ProjectScreen(name='project'))
-        self.screen_manager.add_widget(DenoisingScreen(name='denoising'))
-        
-    def get_root_widget(self):
-        return self.screen_manager
+    def __init__(self, bridge):
+        self._bridge = bridge
+        self._pages: Dict[str, Callable] = {}
+        self._current_tool: Optional[str] = None
+
+    def register_page(self, tool_name: str, builder_func: Callable):
+        self._pages[tool_name] = builder_func
+
+    def navigate_to(self, tool_name: str):
+        if tool_name in self._pages:
+            self._current_tool = tool_name
+
+    def get_current_tool(self) -> Optional[str]:
+        return self._current_tool

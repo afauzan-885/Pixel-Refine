@@ -74,6 +74,7 @@ Berikut adalah daftar modul Ahead-of-Time (.tcm) terkompilasi yang dikelola oleh
 | `ransac` | Geometri | RANSAC Flow Cleanup, MAGSAC++ GPU Homography Solver (Tukey's Biweight scoring & Weighted Least Squares refinement) |
 | `compute_flow` | Registrasi | Alinyemen ubin hierarkis (3-skala) dengan pembagian ubin adaptif (Multi-size BMA) menggunakan metrik SAD/SSD standar |
 | `template_flow` | Registrasi / Template | Kerangka kerja generik untuk pengembangan variasi algoritma optical flow AOT kustom |
+| `farneback_flow` | Registrasi / Optical Flow | Farneback Optical Flow GPU dengan pencocokan polinomial least-squares 5x5 dan filter Gaussian separable |
 
 
 ### Aturan Kompilasi TCM Baru:
@@ -172,6 +173,119 @@ Untuk menjaga paritas kode dan arsitektur tetap bersih, pengembang wajib mematuh
 - **Environment Variable Urutan Pertama**: Selalu setel `os.environ["QT_QUICK_CONTROLS_STYLE"] = "Basic"` sebelum meng-import modul PySide6 apa pun pada file pengujian QML atau aplikasi mobile.
 - **Parenting Konteks QML**: Jangan menggunakan `.setParent(quick_widget.engine())` karena engine internal Qt Quick dapat merekonstruksi instansnya sewaktu-waktu dan memicu *garbage collection* dini. Gunakan `.setParent(quick_widget)` (pada `QQuickWidget` / `QQuickView`) atau simpan referensi kuat sebagai atribut *parent widget/window* utama.
 
+### 5.4 Aturan Kesederhanaan Kode (Code Simplicity Rules)
+
+> **Prinsip utama**: Tulis kode sesederhana mungkin, hindari boilerplate dan sintaks tidak perlu.
+
+#### 5.4.1 Hindari Lambda untuk Koneksi Signal
+**Salah:**
+```python
+window.bridge.tool_requested.connect(
+    lambda name: state.navigate_to(name)
+)
+```
+
+**Benar:**
+```python
+window.bridge.tool_requested.connect(state.navigate_to)
+```
+
+#### 5.4.2 Hindari Lambda untuk Function Reference
+**Salah:**
+```python
+state.register_page("MFDenoiser", lambda b: build_workspace_page(b, "MFDenoiser"))
+```
+
+**Benar:**
+```python
+state.register_page("MFDenoiser", build_workspace_page)
+```
+
+#### 5.4.3 Gunakan Fungsi Terpisah untuk Callback
+**Salah:**
+```python
+window.bridge.tool_requested.connect(
+    lambda name: print(f"[Mobile] Tool selected: {name}")
+)
+```
+
+**Benar:**
+```python
+def on_tool_selected(tool_name):
+    print(f"[Mobile] Tool selected: {tool_name}")
+
+window.bridge.tool_requested.connect(on_tool_selected)
+```
+
+#### 5.4.4 Hindari Komentar Berlebihan
+**Salah:**
+```python
+# Register pages
+state.register_page("Home", build_home_page)
+
+# Connect navigation
+window.bridge.tool_requested.connect(state.navigate_to)
+```
+
+**Benar:**
+```python
+state.register_page("Home", build_home_page)
+window.bridge.tool_requested.connect(state.navigate_to)
+```
+
+#### 5.4.5 Hindari Docstring Berlebihan
+**Salah:**
+```python
+def build_workspace_page(bridge, tool_type: str = "MFDenoiser") -> Container:
+    """
+    Build the Workspace Page layout.
+
+    Args:
+        bridge: AppBridge instance
+        tool_type: Current tool type
+
+    Returns:
+        Container with all workspace components
+    """
+```
+
+**Benar:**
+```python
+def build_workspace_page(bridge) -> Container:
+    """Build the Workspace Page layout."""
+```
+
+#### 5.4.6 Hindari Duplikasi Code
+**Salah:**
+```python
+# File memiliki dua blok kode yang sama
+import sys
+from PySide6.QtWidgets import QApplication
+...
+import sys
+from PySide6.QtWidgets import QApplication
+```
+
+**Benar:**
+```python
+# Hanya satu blok import
+import sys
+from PySide6.QtWidgets import QApplication
+```
+
+#### 5.4.7 Simpulkan Variabel yang Sering Dipakai
+**Salah:**
+```python
+title_card = Card(title="Settings")
+title_card.set_body_content("App preferences and configuration")
+layout.add_widget(title_card)
+```
+
+**Benar:**
+```python
+layout.add_widget(Card(title="Settings"))
+```
+
 ---
 
 ## 6. Parallel Runtime & Anti-Crash Auto-Cleanup Engine (Session 3)
@@ -193,9 +307,135 @@ Untuk mencegah "Zombie VRAM" atau driver Vulkan membeku (yang menyebabkan Window
 3. **Layer 3 (Watchdog Thread)**: Thread daemon latar belakang memantau thread utama setiap 2 detik. Jika thread utama mati/freeze, watchdog langsung memicu pembersihan darurat dan memanggil `os._exit(1)`.
    * **Stateful Smart VRAM Reclamation**: Ketika aplikasi terdeteksi idle (tidak ada aktivitas GPU >10 detik), watchdog tidak mematikan aplikasi, melainkan hanya melakukan pembersihan VRAM pintar (mengosongkan buffer pool, staging buffers, dan memicu garbage collection). Proses pembersihan ini hanya dijalankan **sekali saja** per sesi idle (guarded by `_vram_reclaimed = True`) untuk menghindari looping pembersihan berulang yang tidak efisien. Bendera `_vram_reclaimed` otomatis di-reset menjadi `False` begitu ada aktivitas GPU baru terdeteksi.
 
-### 6.3 Vulkan Device Lock Bypass
-Untuk menghindari instansiasi proses pembantu `vulkaninfo.exe` secara berulang yang dapat mengunci memori driver video, deteksi GPU dinamis dilewati secara permanen dengan mengunci ID device utama ke `0` melalui environment variable:
-```python
-os.environ["PIXEL_REFINE_AOT_DEVICE"] = "0"  # Bypass scan, langsung pakai GPU 0
-os.environ["VK_LOADER_DEBUG"] = "error"      # Bungkam loader warnings
+### 6.3 Vulkan Device Lock Bypass & Staging Eviction
+* **Vulkan Device Bypass**: Untuk menghindari instansiasi proses pembantu `vulkaninfo.exe` secara berulang yang dapat mengunci memori driver video, deteksi GPU dinamis dilewati secara permanen dengan mengunci ID device utama ke `0` melalui environment variable:
+  ```python
+  os.environ["PIXEL_REFINE_AOT_DEVICE"] = "0"  # Bypass scan, langsung pakai GPU 0
+  os.environ["VK_LOADER_DEBUG"] = "error"      # Bungkam loader warnings
+  ```
+* **Staging Buffer Eviction Strategy**: Guna mencegah akumulasi buffer pinned memory yang tidak digunakan di VRAM, pool staging dibatasi maksimal `_MAX_STAGING_POOL_ENTRIES = 8`. Begitu terlampaui, alokasi staging tertua dibersihkan dari memori secara otomatis menggunakan `_evict_staging_pool()` saat pelepasan buffer sewaan.
+* **Context Staging Manager**: Gunakan `with engine.staging_buffer(shape, dtype) as buf:` untuk penulisan kode asinkron yang otomatis mengembalikan sewaan buffer staging secara aman saat keluar dari blok konteks.
+
+---
+
+## 7. MFDenoiser: Spatial Fusion & Backend Selection (Session 5)
+
+MFDenoiser adalah orchestrator utama untuk multi-frame denoising yang mendukung berbagai backend alignment dan merging melalui parameter konfigurasi.
+
+### 7.1 Arsitektur Pipeline
+
 ```
+┌─────────────────────────────────────────────────────────────┐
+│  UI Settings (similarity_parameter_settings.py)             │
+│  └─ load_similarity_config() → JSON config                  │
+└─────────────────────────┬───────────────────────────────────┘
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│  MFDenoiserAlgorithm._load_params()  ← SINGLE TRUTH        │
+│  └─ Simpan ke ctx.params (dict)                             │
+└─────────────────────────┬───────────────────────────────────┘
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│  run_pipeline() → ctx.params ke setiap stage                │
+│                                                             │
+│  stage_align(ctx):                                          │
+│    ├─ alignment_backend → "taichi_gpu" / "none" / callable │
+│    └─ optical_flow_type → "alignment_tile" / "horn_schunck" │
+│         / "farneback_aot" / "farneback_jit" / "block_align" │
+│                                                             │
+│  stage_merge(ctx):                                          │
+│    ├─ merging_mode="spatial_fusion" → SpatialFusionProcessor│
+│    ├─ merging_mode="average" → AverageDenoiseProcessor     │
+│    ├─ merging_mode="smart" → SmartDenoiseProcessor (AI)    │
+│    ├─ merging_mode="super_resolution" → SRProcessor        │
+│    └─ merging_mode="spatial" → SpatialDenoiseProcessor     │
+│                                                             │
+│  stage_postprocess(ctx):                                    │
+│    ├─ postprocessor="adaptive_box" → HF Denoise            │
+│    ├─ postprocessor="none" → Skip                          │
+│    └─ postprocessor=callable → Custom function             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 7.2 Parameter Mapping
+
+| Parameter | Config Key | Default | Digunakan di |
+|-----------|-----------|---------|--------------|
+| `merging_mode` | `merging_mode` | `"spatial_fusion"` | `stage_merge()` |
+| `optical_flow_type` | `optical_flow_type` | `"alignment_tile"` | `_align_taichi_gpu()` |
+| `tile_size` | `similarity_spatial_tile_size` | `16` | `_align_taichi_gpu()`, `_run_tiled_merge()` |
+| `overlap` | `similarity_spatial_overlap_percent` | `0.30` | `_run_tiled_merge()` |
+| `motion_sensitivity` | `similarity_spatial_motion_sensitivity` | `150.0` | `SpatialFusionProcessor` |
+| `noise_offset_factor` | `similarity_spatial_noise_mad_offset_factor` | `0.15` | `SpatialFusionProcessor` |
+| `early_exit_threshold` | `early_exit_threshold` | `0.05` | `SpatialFusionProcessor` |
+
+### 7.3 Cara Penggunaan
+
+**Via UI Settings (JSON config)**:
+```json
+{
+    "merging_mode": "spatial_fusion",
+    "optical_flow_type": "alignment_tile",
+    "similarity_spatial_tile_size": 16,
+    "similarity_spatial_motion_sensitivity": 150.0,
+    "similarity_spatial_noise_mad_offset_factor": 0.15,
+    "similarity_spatial_overlap_percent": 0.30
+}
+```
+
+**Via Code Override**:
+```python
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import MFDenoiserAlgorithm
+
+processor = MFDenoiserAlgorithm(db_path)
+output_path = processor.run_pipeline(
+    single_process=True,
+    merging_mode="spatial_fusion",  # Override backend
+)
+```
+
+### 7.4 Spatial Fusion Processor API
+
+```python
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.spatial_fusion_processor import SpatialFusionProcessor
+
+processor = SpatialFusionProcessor(
+    motion_sensitivity=150.0,
+    noise_offset_factor=0.15,
+    early_exit_threshold=0.05,
+    equalize_brightness=False,
+)
+
+frame_count, sum_img, sum_weight, ref_noise_sigma = processor.process(
+    images=images_list,
+    reference_image_float=ref_float,
+    ref_h=h, ref_w=w,
+    ref_dtype=np.uint16,
+    work_res_h=work_h, work_res_w=work_w,
+    update_progress=callback,
+    stop_requested=stop_check,
+)
+```
+
+**Error Handling**: Jika GPU AOT engine tidak tersedia, `SpatialFusionProcessor.process()` akan raise `RuntimeError` dengan pesan yang jelas.
+
+### 7.5 Optical Flow Backend Selection
+
+| Backend | TCM File | Deskripsi | Kapan Gunakan |
+|---------|----------|-----------|---------------|
+| `alignment_tile` | `compute_flow_vulkan.tcm` | BMA (Block Matching Alignment) dengan SAD/SSD | Default, cepat, akurat untuk translasi kecil |
+| `horn_schunck` | `template_flow_vulkan.tcm` | Horn-Schunck dengan Jacobi solver | Gerakan halus, rotasi lambat |
+| `farneback_aot` | `farneback_flow_vulkan.tcm` | Farneback GPU AOT | Gerakan kompleks, polynomial expansion |
+| `farneback_jit` | N/A | Farneback JIT (requires `AOT_MODE=0`) | Development/testing |
+| `block_align` | `block_align_vulkan.tcm` | Block alignment variant | Experimental |
+
+### 7.6 Key Files
+
+| File | Deskripsi |
+|------|-----------|
+| [`MFDenoiser.py`](file:///E:/APP%20Developer/Pixel%20Refine/pixel_refine_desktop/enhance_stack/core/algorithm/denoising/MFDenoiser.py) | Orchestrator utama (single truth source) |
+| [`Similarity.py`](file:///E:/APP%20Developer/Pixel%20Refine/pixel_refine_desktop/enhance_stack/core/algorithm/denoising/Similarity.py) | Legacy orchestrator (backup) |
+| [`spatial_fusion_processor.py`](file:///E:/APP%20Developer/Pixel%20Refine/pixel_refine_desktop/enhance_stack/core/algorithm/denoising/spatial_core/spatial_fusion_processor.py) | Spatial Fusion GPU AOT processor |
+| [`compute_spatial.py`](file:///E:/APP%20Developer/Pixel%20Refine/pixel_refine_desktop/enhance_stack/core/algorithm/denoising/spatial_core/similarity_taichi/compute_spatial.py) | Taichi AOT kernels untuk ghost rejection |
+| [`similarity_parameter_settings.py`](file:///E:/APP%20Developer/Pixel%20Refine/pixel_refine_desktop/enhance_stack/components/batch_page_v2/parameter_denoising/similarity_parameter_settings.py) | UI settings & config loader |
+

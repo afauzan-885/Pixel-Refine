@@ -349,7 +349,8 @@ class Toast(QWidget):
     def to_qml(self, indent=0):
         tab = "    " * indent
         msg = self.message_label.text().replace("'", "\\'")
-        color = self._get_color(self._variant) if hasattr(self, '_variant') else '#3498db'
+        _variant = self._variant if hasattr(self, '_variant') else 'info'
+        _theme_color = f"genericTheme.{_variant}" if _variant in ("primary", "success", "danger", "warning", "info") else "genericTheme.info"
         qml = f"{tab}Popup {{\n"
         qml += f"{tab}    width: 300\n"
         qml += f"{tab}    height: 50\n"
@@ -357,7 +358,7 @@ class Toast(QWidget):
         qml += f"{tab}    Rectangle {{\n"
         qml += f"{tab}        anchors.fill: parent\n"
         qml += f"{tab}        radius: genericTheme.radiusMd\n"
-        qml += f"{tab}        color: '{color}'\n"
+        qml += f"{tab}        color: {_theme_color}\n"
         qml += f"{tab}        Text {{ text: '{msg}'; color: 'white'; font.bold: true; anchors.centerIn: parent }}\n"
         qml += f"{tab}    }}\n"
         qml += f"{tab}    Timer {{ interval: 3000; running: true; onTriggered: parent.close() }}\n"
