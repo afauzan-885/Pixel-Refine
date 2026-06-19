@@ -10,6 +10,12 @@ ChangeLog.txt
 main.build/
 main.dist/
 auto_pyd/
+agent-docs/
+artifact_implementation_plan/
+.qoder/
+.kunsdd/
+.agent/
+scratch/
 save_align_image/
 nuitka-crash-report.xml
 check_db_order_v2.py

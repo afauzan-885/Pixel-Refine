@@ -1,52 +1,61 @@
-# Pixel Refine - Agen Knowledge Base
+# Pixel Refine Documentation Index
 
-Dokumentasi universal untuk kolaborasi antar agen AI. Dikonsolidasi dari seluruh sumber pengetahuan:
-- `.qoder/memories/` (86 file Qoder memory)
-- `.agents/memories/` (86 file Agent memory)  
-- `.kun/data/` (Kun app config & thread history)
-- `.qoder/plans/` (Rencana implementasi)
-- `.qoder/commands/` (Commands & preferences)
-- `.codex/skills/` (15 Codex curated skills)
+> Folder ini berisi dokumentasi terorganisir untuk proyek Pixel Refine.
+> Semua memori, pengalaman, rules, dan pengetahuan teknis diekstrak ke sini.
 
-## Struktur Dokumentasi
+## Daftar Isi
 
-```
-agen-docs/
-├── README.md                    # File ini
-├── global/
-│   └── language-preference.md   # Preferensi bahasa Indonesia
-├── architecture/
-│   ├── project-overview.md      # Ikhtisar proyek & kemampuan
-│   ├── tech-stack.md            # Technology stack lengkap
-│   ├── mfdenoiser.md            # Arsitektur MFDenoiser & denoising
-│   ├── genericui-mobile.md      # GenericUILibrary & arsitektur mobile
-│   ├── optical-flow-aot.md      # Optical flow & Taichi AOT modules
-│   └── mfdenoiser-resolution.md # Resolution handling
-├── decisions/
-│   └── architecture-decisions.md # Keputusan arsitektur penting
-├── pitfalls/
-│   └── common-pitfalls.md       # Jebakan yang sering terjadi
-├── tech-stack/
-│   └── full-stack.md            # Tech stack lengkap dengan detail
-├── build-config/
-│   ├── project-structure.md     # Struktur & environment proyek
-│   └── aot-compilation.md       # AOT compilation & TCM
-├── plans/
-│   └── template-flow-refactor.md # Rencana refactor template_flow.py
-└── kun-config/
-    └── kun-settings.md          # Konfigurasi Kun app
+| File | Deskripsi |
+|------|-----------|
+| [`01_project_overview.md`](./01_project_overview.md) | Status proyek, kapabilitas utama, performance benchmarks |
+| [`02_tech_stack.md`](./02_tech_stack.md) | Taichi AOT architecture, engine.py, TCM modules, VRAM protection |
+| [`03_mfdenoiser_architecture.md`](./03_mfdenoiser_architecture.md) | MFDenoiser pipeline, single truth source, backend selection, spatial fusion |
+| [`04_optical_flow.md`](./04_optical_flow.md) | BMA, Horn-Schunck, Farneback AOT/JIT, compilation, test results |
+| [`05_development_practices.md`](./05_development_practices.md) | Code simplicity rules, Taichi rules, UI rules, QML rules |
+| [`06_pitfalls_and_fixes.md`](./06_pitfalls_and_fixes.md) | Critical bugs, common pitfalls, QML issues, debugging tips |
+| [`07_build_and_compile.md`](./07_build_and_compile.md) | AOT compilation scripts, rules, testing |
+| [`08_environment_config.md`](./08_environment_config.md) | Project structure, environment variables, configuration files |
+
+## Quick Reference
+
+### Single Source of Truth
+- **File**: `engine.py`
+- **Rule**: DILAR dimodifikasi tanpa persetujuan eksplisit
+
+### Default Backend Selection
+```json
+{
+    "merging_mode": "spatial_fusion",
+    "optical_flow_type": "alignment_tile",
+    "alignment_backend": "taichi_gpu"
+}
 ```
 
-## Sumber Data
+### Key Entry Points
+- `MFDenoiser.py` — Main orchestrator
+- `Similarity.py` — Legacy orchestrator (backup)
+- `main_desktop.py` — Application entry point
 
-| Sumber | Lokasi | Jumlah File | Status |
-|--------|--------|-------------|--------|
-| Qoder memories | `.qoder/memories/` | 86 | ✅ Dibaca semua |
-| Agent memories | `.agents/memories/` | 86 | ✅ Dibaca semua (mirror) |
-| Kun config | `.kun/data/config.json` | 1 | ✅ Dibaca |
-| Kun MCP | `.kun/mcp.json` | 1 | ✅ Dibaca |
-| Qoder commands | `.qoder/commands/` | 1 | ✅ Dibaca |
-| Qoder plans | `.qoder/plans/` | 1 | ✅ Dibaca |
-| Kun attachments | `.kun/data/attachments/` | 7 | ✅ Metadata tercatat |
-| Kun threads | `.kun/data/threads/` | 2 | ✅ Metadata tercatat |
-| Codex skills | `.codex/vendor_imports/skills/` | 15 skills | ✅ Terdaftar |
+### TCM Modules Location
+- `taichi_library/taichi_algorithm/aot_tcm/` — Algorithm modules
+- `ui/data/aot_assets/` — UI-related modules
+
+### Compile Command Pattern
+```bash
+$env:AOT_MODE="0"
+python -m taichi_library.taichi_algorithm.aot_py.compile_<module>_tcm
+```
+
+## Update Policy
+
+> **Penting**: Untuk kedepannya, semua memori, pengalaman, rules, dan pengetahuan baru **wajib** ditambahkan ke folder `agen_docs/` ini.
+> 
+> Jika ada informasi yang sama tetapi belum up-to-date, integrasikan bagian yang baru ke file yang sesuai.
+
+## Related Files
+
+| File | Lokasi | Deskripsi |
+|------|--------|-----------|
+| `agen.md` | Root project | Main knowledge base (legacy, akan dimigrate ke agen_docs) |
+| `skill.md` | Root project | Technical skill guide (legacy, akan dimigrate ke agen_docs) |
+| `.agents` | Root project | Agent configuration |
