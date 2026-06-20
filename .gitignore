@@ -10,15 +10,58 @@ ChangeLog.txt
 main.build/
 main.dist/
 auto_pyd/
-agent-docs/
-artifact_implementation_plan/
-.qoder/
-.kunsdd/
-.agent/
+
+# Ignore agent docs
+agen-docs/
 scratch/
+.qoder/
+.agent/
+artifact_implementation_plan/
+.kunsdd/
+save_align_image/
+
+# Ignore specific files
+nuitka-crash-report.xml
+check_db_order_v2.py
+inspect_model.py
+view_images_list.py
+upx_compression.py
+nuitka_build.py
+
+# Ignore virtual environment directories
+venv/
+database/
+# Ignore Python cache
+__pycache__/
+*.pyc
+*.pyo
+# Ignore distribution and build directories
+dist/
+build/
+test_algorithm/
+pixel_refine_database.db
+build_instalasi.txt
+syarat.txt
+mingw64/
+ChangeLog.txt
+main.build/
+main.dist/
+auto_pyd/
+# ignore agent docs
+agen-docs/
+scratch/
+.qoder/
+.agent/
+.vscode
+artifact_implementation_plan/
+
+.kunsdd/
+scratch/
+
 save_align_image/
 nuitka-crash-report.xml
 check_db_order_v2.py
+inspect_model.py
 view_images_list.py
 upx_compression.py
 nuitka_build.py
