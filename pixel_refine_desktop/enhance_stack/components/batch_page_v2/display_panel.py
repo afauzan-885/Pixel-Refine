@@ -327,6 +327,7 @@ class DisplayPanel(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._setup_ui()
         self._setup_sidebar()  # New Sidebar Integration
+        self._setup_param_overlay()
 
         # Connect Thumbnail Progress
         self.logic.get_thumbnail_processor().progress_updated.connect(
@@ -493,7 +494,8 @@ class DisplayPanel(QWidget):
         self.preview_process_btn.setVisible(False)
         self.right_header_layout.addWidget(self.preview_process_btn)
 
-        # 3. Import Images Button
+
+        # 3.5. Import Images Button
         self.import_button = Button(language_config.TOPBAR_BATCH_IMPORT_BUTTON_TEXT, object_name="ImportImageBtn")
         self.import_button.setFixedWidth(120)
         self.import_button.clicked.connect(self.import_manager.import_images)
@@ -595,15 +597,15 @@ class DisplayPanel(QWidget):
         self.controls_bar.setObjectName("ControlsBar")
         self.controls_bar.setStyleSheet("""
             #ControlsBar {
-                background-color: rgba(255, 255, 255, 220);
-                border: 1px solid rgba(0, 0, 0, 40);
-                border-radius: 8px;
+                background-color: transparent;
+                border: none;
             }
         """)
         
         self.controls_bar_layout = QHBoxLayout(self.controls_bar)
         self.controls_bar_layout.setContentsMargins(8, 4, 8, 4)
         self.controls_bar_layout.setSpacing(8)
+        self.controls_bar_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         # SizePolicy: Shrink to fit content dynamically
         from PySide6.QtWidgets import QSizePolicy as _SP
         self.controls_bar.setSizePolicy(_SP.Policy.Minimum, _SP.Policy.Minimum)
@@ -625,6 +627,7 @@ class DisplayPanel(QWidget):
                 border-radius: 6px;
             }
         """)
+        self.prev_frame_btn.setFixedSize(36, 36)
         self.prev_frame_btn.clicked.connect(self._show_prev_frame)
 
         self.play_btn = QPushButton("▶")
@@ -641,6 +644,7 @@ class DisplayPanel(QWidget):
                 border-radius: 6px;
             }
         """)
+        self.play_btn.setFixedSize(36, 36)
         self.play_btn.clicked.connect(self._toggle_playback)
 
         self.next_frame_btn = QPushButton("⏭")
@@ -657,24 +661,46 @@ class DisplayPanel(QWidget):
                 border-radius: 6px;
             }
         """)
+        self.next_frame_btn.setFixedSize(36, 36)
         self.next_frame_btn.clicked.connect(self._show_next_frame)
 
-        # Center layout for playback buttons
-        playback_layout = QHBoxLayout()
+        # Center layout for playback buttons (wrapped in container to collapse properly when hidden)
+        self.playback_container = QWidget()
+        self.playback_container.setStyleSheet("background: transparent;")
+        playback_layout = QHBoxLayout(self.playback_container)
+        playback_layout.setContentsMargins(0, 0, 0, 0)
         playback_layout.setSpacing(4)
         playback_layout.addWidget(self.prev_frame_btn)
         playback_layout.addWidget(self.play_btn)
         playback_layout.addWidget(self.next_frame_btn)
 
-        self.controls_bar_layout.addLayout(playback_layout)
+        self.controls_bar_layout.addWidget(self.playback_container)
         
         self.save_btn_ref = Button("Save", variant="secondary")
-        # No fixed width — button auto-sizes to text/font dynamically
+        self.save_btn_ref.setFixedSize(80, 32)
         self.save_btn_ref.clicked.connect(self._on_save_clicked)
+        
+        self.start_btn_ref = Button("▶ Start", variant="primary")
+        from resources.GenericUILibrary.theme import get_theme, create_button_style
+        theme = get_theme()
+        self.start_btn_ref.setStyleSheet(
+            create_button_style(self.start_btn_ref.variant, theme)
+            + """
+            QPushButton {
+                padding: 5px;
+                font-size: 10pt;
+            }
+        """
+        )
+        self.start_btn_ref.setFixedSize(110, 32)
+        self.start_btn_ref.setVisible(False)
+        self.is_start_button_mode = False
+        
+        self.controls_bar_layout.addWidget(self.start_btn_ref)
         self.controls_bar_layout.addWidget(self.save_btn_ref)
 
         self.controls_overlay = OverlayContainer(
-            parent=preview_wrapper,
+            parent=self,
             position=OverlayPosition.BOTTOM_CENTER,
             margin=15,
             shadow_enabled=True,
@@ -778,6 +804,50 @@ class DisplayPanel(QWidget):
 
         self.settings_overlay.set_content(self.settings_view)
         self.settings_overlay.hide()
+
+    def _setup_param_overlay(self):
+        """Setup independent overlay for Switchable Parameter Panel."""
+        from .switchable_parameter_panel import SwitchableParameterPanel
+        self.param_overlay = OverlayContainer(
+            parent=self.display_container,
+            position=OverlayPosition.BOTTOM_RIGHT,
+            margin=(10, 20),
+            smart_positioning=False,
+            close_on_click_outside=False,
+            dim_background=False,
+            blur_background=False,
+            shadow_enabled=True,
+            shadow_blur_radius=20,
+            shadow_offset=QPoint(0, 4),
+            shadow_color=QColor(0, 0, 0, 80),
+        )
+        self.param_overlay.setStyleSheet("""
+            #OverlayContainer {
+                background: transparent;
+                background-color: transparent;
+                border: none;
+            }
+            #OverlayContentWrapper {
+                background: transparent;
+                background-color: transparent;
+                border: none;
+            }
+        """)
+        self.param_panel = SwitchableParameterPanel(parent=self, store=self.right_panel._store if self.right_panel else None)
+        self.param_overlay.set_content(self.param_panel)
+        self.param_overlay.hide()
+
+    def toggle_param_overlay(self):
+        if self.param_overlay.isVisible():
+            self.param_overlay.hide()
+        else:
+            # Sync settings from right panel before showing
+            if self.right_panel:
+                current_settings = self.right_panel.get_current_settings()
+                self.param_panel.update_settings_state(current_settings)
+            
+            self.param_overlay.show()
+            self.param_overlay.raise_()
 
     def _handle_sidebar_navigation(self, index: int):
         """
@@ -925,6 +995,14 @@ class DisplayPanel(QWidget):
         # Update Header Title (Setelah state dibersihkan, agar count akurat)
         self._update_header_title(count=self.total_image_count)
 
+        # Show param overlay based on setting state (collapsed by default)
+        if self.right_panel:
+            current_settings = self.right_panel.get_current_settings()
+            self.param_panel.active_tab = None
+            self.param_panel.set_expanded(False)
+            self.param_panel._update_styles("transparent")
+            self.param_panel.update_settings_state(current_settings)
+
         # Check if batch is empty (visually)
         if not visual_images:
             # Show empty state but keep import button visible in header
@@ -992,6 +1070,8 @@ class DisplayPanel(QWidget):
 
         # Hide import button saat no batch selected
         self.import_button.setVisible(False)
+        if hasattr(self, "param_overlay"):
+            self.param_overlay.hide()
 
         # Show "No batch selected" state with folder link callback
         self.ui_state_manager.show_no_batch_state(self._create_new_batch, self._import_images_to_new_batch)
@@ -1252,14 +1332,7 @@ class DisplayPanel(QWidget):
 
     def _enter_preview_mode(self):
         """Masuk ke Preview Mode: tampilkan tombol playback, sembunyikan tombol Save."""
-        if hasattr(self, "prev_frame_btn"):
-            self.prev_frame_btn.setVisible(True)
-        if hasattr(self, "play_btn"):
-            self.play_btn.setVisible(True)
-        if hasattr(self, "next_frame_btn"):
-            self.next_frame_btn.setVisible(True)
-        if hasattr(self, "save_btn_ref"):
-            self.save_btn_ref.setVisible(False)
+        self.update_controls_visibility_and_states()
 
     def _enter_result_mode(self):
         """Masuk ke Result Mode: tampilkan tombol Save, sembunyikan tombol playback."""
@@ -1269,14 +1342,7 @@ class DisplayPanel(QWidget):
             self.is_playing = False
             if hasattr(self, "play_btn"):
                 self.play_btn.setText("▶")
-        if hasattr(self, "prev_frame_btn"):
-            self.prev_frame_btn.setVisible(False)
-        if hasattr(self, "play_btn"):
-            self.play_btn.setVisible(False)
-        if hasattr(self, "next_frame_btn"):
-            self.next_frame_btn.setVisible(False)
-        if hasattr(self, "save_btn_ref"):
-            self.save_btn_ref.setVisible(True)
+        self.update_controls_visibility_and_states()
 
     def _display_image_preview(self, image_path):
         """
@@ -1363,14 +1429,14 @@ class DisplayPanel(QWidget):
         # Update Header buttons
         self.back_btn.setVisible(False)
         self.result_selector.setVisible(False)  # Hide dropdown
-        if hasattr(self, "controls_overlay"):
-            self.controls_overlay.hide()  # Hide controls overlay on grid
         self.check_result_availability()  # Update preview button visibility
 
         if self.current_batch_id:
             self.import_button.setVisible(True)
         else:
             self.import_button.setVisible(False)
+            
+        self.update_controls_visibility_and_states()
 
     def show_preview(self, show_dropdown=True):
         """Switch ke Preview View."""
@@ -1379,9 +1445,7 @@ class DisplayPanel(QWidget):
         self.result_selector.setVisible(show_dropdown)  # Only show if requested
         self.import_button.setVisible(False)
         self.preview_process_btn.setVisible(False)
-        if hasattr(self, "controls_overlay"):
-            self.controls_overlay.show()
-            self.controls_overlay.raise_()
+        self.update_controls_visibility_and_states()
 
     def remove_selected_images(self):
         """Remove currently selected images dari grid via Logic."""
@@ -1487,11 +1551,60 @@ class DisplayPanel(QWidget):
     # === 5. DRAG & DROP SUPPORT ===
     # =========================================================================
 
+    def _get_bulk_mode_btn_stylesheet(self, is_bulk, font_size):
+        from resources.GenericUILibrary.theme import get_theme
+        theme = get_theme()
+        if is_bulk:
+            return f"""
+                QPushButton#BulkModeBtn {{
+                    background-color: {theme.primary}2D;
+                    color: {theme.primary};
+                    border: 1px solid {theme.primary};
+                    border-radius: 15px;
+                    padding: 5px 15px;
+                    font-size: {font_size:.1f}pt;
+                    font-weight: 600;
+                }}
+                QPushButton#BulkModeBtn:hover {{
+                    background-color: {theme.primary}4D;
+                }}
+                QPushButton#BulkModeBtn:pressed {{
+                    background-color: {theme.primary}6D;
+                }}
+            """
+        else:
+            return f"""
+                QPushButton#BulkModeBtn {{
+                    background-color: {theme.bg_secondary};
+                    color: {theme.text_secondary};
+                    border: 1px solid {theme.border_color};
+                    border-radius: 15px;
+                    padding: 5px 15px;
+                    font-size: {font_size:.1f}pt;
+                    font-weight: 600;
+                }}
+                QPushButton#BulkModeBtn:hover {{
+                    background-color: {theme.hover_overlay};
+                }}
+                QPushButton#BulkModeBtn:pressed {{
+                    background-color: {theme.active_overlay};
+                }}
+            """
+
     # Overide resizeEvent untuk memastikan overlay selalu menutupi area display
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if hasattr(self, "drop_overlay"):
             self.drop_overlay.resize(self.size())
+            
+        if hasattr(self, "bulk_mode_btn") and self.bulk_mode_btn:
+            w = self.width()
+            f = max(0.0, min(1.0, (w - 600) / 800.0))
+            font_size = 10.5 + f * 4.5
+            self.bulk_mode_btn.setStyleSheet(self._get_bulk_mode_btn_stylesheet(self.is_bulk_mode, font_size))
+            
+        if hasattr(self, "param_panel"):
+            self.param_panel.refresh_responsive_layout()
 
     def dragEnterEvent(self, event):
         """Delegate to DragDropHandler."""
@@ -1564,48 +1677,11 @@ class DisplayPanel(QWidget):
         # 1. Tentukan teks target
         target_text = language_config.LBL_BATCH_MODE if is_bulk else language_config.LBL_BULK_MODE
         
-        from resources.GenericUILibrary.theme import get_theme
-        theme = get_theme()
-
-        # 2. Tentukan stylesheet matching UI, subtle, tidak mencolok
-        if is_bulk:
-            # Soft Teal style
-            style_sheet = f"""
-                QPushButton#BulkModeBtn {{
-                    background-color: {theme.primary}2D;
-                    color: {theme.primary};
-                    border: 1px solid {theme.primary};
-                    border-radius: 15px;
-                    padding: 5px 15px;
-                    font-size: 10.5pt;
-                    font-weight: 600;
-                }}
-                QPushButton#BulkModeBtn:hover {{
-                    background-color: {theme.primary}4D;
-                }}
-                QPushButton#BulkModeBtn:pressed {{
-                    background-color: {theme.primary}6D;
-                }}
-            """
-        else:
-            # Subtle Slate/Gray style
-            style_sheet = f"""
-                QPushButton#BulkModeBtn {{
-                    background-color: {theme.bg_secondary};
-                    color: {theme.text_secondary};
-                    border: 1px solid {theme.border_color};
-                    border-radius: 15px;
-                    padding: 5px 15px;
-                    font-size: 10.5pt;
-                    font-weight: 600;
-                }}
-                QPushButton#BulkModeBtn:hover {{
-                    background-color: {theme.hover_overlay};
-                }}
-                QPushButton#BulkModeBtn:pressed {{
-                    background-color: {theme.active_overlay};
-                }}
-            """
+        # Calculate dynamic font size based on current width
+        w = self.width()
+        f = max(0.0, min(1.0, (w - 600) / 800.0))
+        font_size = 10.5 + f * 4.5
+        style_sheet = self._get_bulk_mode_btn_stylesheet(is_bulk, font_size)
             
         # 3. Setup opacity effect jika belum ada
         effect = self.bulk_mode_btn.graphicsEffect()
@@ -1718,6 +1794,7 @@ class DisplayPanel(QWidget):
             self.playback_timer.start()
             self.play_btn.setText("⏸")
             self.is_playing = True
+        self.update_controls_visibility_and_states()
 
     def _get_current_image_index(self):
         """Get the index of the currently shown preview image in the batch list."""
@@ -1787,17 +1864,51 @@ class DisplayPanel(QWidget):
         # Burst/frame preview selalu masuk Preview Mode
         self._enter_preview_mode()
 
+    def set_start_button_mode(self, active: bool):
+        self.is_start_button_mode = active
+        self.update_controls_visibility_and_states()
+
     def update_save_button_state(self):
-        """Update Save button styling based on whether processed results are available.
-        
-        Dipanggil saat:
-        - Batch dimuat (grid view) → tombol save disembunyikan via mode logic
-        - Algoritma selesai + hasil tersedia → _enter_result_mode() dipanggil dari luar,
-          lalu update_save_button_state() memperbarui style-nya
-        """
-        if not hasattr(self, "save_btn_ref"):
+        self.update_controls_visibility_and_states()
+
+    def update_controls_visibility_and_states(self):
+        if not hasattr(self, "start_btn_ref"):
             return
 
+        is_grid = (self.display_stack.currentIndex() == 0)
+
+        # Dynamic styling for controls_bar based on whether we are in preview or grid/thumbnail mode
+        if hasattr(self, "controls_bar"):
+            if is_grid:
+                self.controls_bar.setStyleSheet("""
+                    #ControlsBar {
+                        background-color: transparent;
+                        border: none;
+                    }
+                """)
+            else:
+                self.controls_bar.setStyleSheet("""
+                    #ControlsBar {
+                        background-color: rgba(255, 255, 255, 220);
+                        border: 1px solid rgba(0, 0, 0, 40);
+                        border-radius: 8px;
+                    }
+                """)
+
+        # 1. Start button visibility and enabled state
+        if self.is_start_button_mode:
+            self.start_btn_ref.setVisible(True)
+            is_playing = hasattr(self, "is_playing") and self.is_playing
+            self.start_btn_ref.setEnabled(not is_playing)
+        else:
+            self.start_btn_ref.setVisible(False)
+
+        # 2. Play buttons visibility (⏮, ▶, ⏭) (controlled via container for proper collapse)
+        show_playback = not is_grid
+        if hasattr(self, "playback_container"):
+            self.playback_container.setVisible(show_playback)
+
+        # 3. Save button visibility and state
         has_results = False
         if self.logic.current_images:
             first_img_path = self.logic.current_images[0].path
@@ -1805,9 +1916,6 @@ class DisplayPanel(QWidget):
             if results:
                 has_results = True
 
-        # Jika has_results (ada hasil), pastikan save button terlihat & aktif
-        # (hanya berlaku jika kita sedang dalam Result Mode, tapi styling harus
-        # mencerminkan kondisi aktual sehingga tombol terlihat benar ketika muncul)
         if has_results:
             self.save_btn_ref.setEnabled(True)
             self.save_btn_ref.setStyleSheet("""
@@ -1817,7 +1925,7 @@ class DisplayPanel(QWidget):
                     border: 1px solid #333333;
                     border-radius: 4px;
                     font-weight: bold;
-                    padding: 6px 12px;
+                    padding: 5px;
                 }
                 QPushButton:hover {
                     background-color: #666666;
@@ -1826,10 +1934,10 @@ class DisplayPanel(QWidget):
                     background-color: #444444;
                 }
             """)
-            # Jika kita sedang di preview view dan has_results, switch ke result mode
-            # (misalnya saat algoritma selesai saat user sedang di preview)
-            if self.display_stack.currentIndex() == 1:
-                self._enter_result_mode()
+            self.save_btn_ref.setVisible(not is_grid)
+            if not is_grid and self.display_stack.currentIndex() == 1:
+                # If we are in preview view and has_results, ensure we trigger result mode internally
+                pass
         else:
             self.save_btn_ref.setEnabled(False)
             self.save_btn_ref.setStyleSheet("""
@@ -1838,9 +1946,18 @@ class DisplayPanel(QWidget):
                     color: #888888;
                     border: 1px solid #C0C0C0;
                     border-radius: 4px;
-                    padding: 6px 12px;
+                    padding: 5px;
                 }
             """)
+            self.save_btn_ref.setVisible(False)
 
-
-
+        # 4. Overall overlay visibility
+        if hasattr(self, "controls_overlay"):
+            if self.is_start_button_mode or not is_grid:
+                self.controls_overlay.show()
+                self.controls_bar.adjustSize()
+                self.controls_overlay.adjustSize()
+                self.controls_overlay._update_position()
+                self.controls_overlay.raise_()
+            else:
+                self.controls_overlay.hide()

@@ -138,6 +138,61 @@ class BatchPageView(QWidget):
                 pass
         self.update_theme()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_adaptive_font_sizes()
+
+    def update_adaptive_font_sizes(self):
+        window_width = self.window().width() if self.window() else 1000
+        f = max(0.0, min(1.0, (window_width - 1000) / 920.0))
+
+        # Update process_all_btn
+        if hasattr(self, "process_all_btn") and self.process_all_btn:
+            btn_h = 22 + int(f * 10)
+            self.process_all_btn.setFixedHeight(btn_h)
+            font_size = 8.0 + f * 3.0
+            
+            from resources.GenericUILibrary.theme import get_theme, create_button_style
+            theme = get_theme()
+            base_style = create_button_style("primary", theme)
+            self.process_all_btn.setStyleSheet(base_style + f" QPushButton {{ padding: 4px 8px; font-size: {font_size:.1f}pt; }}")
+
+        # Update bulk_mode_btn
+        if hasattr(self, "bulk_mode_btn") and self.bulk_mode_btn:
+            font_size_bulk = 10.5 + f * 4.5
+            from resources.GenericUILibrary.theme import get_theme
+            theme = get_theme()
+            if theme.bg_card == "#1E272C": # Dark Theme
+                self.bulk_mode_btn.setStyleSheet(f"""
+                    QPushButton#BulkModeBtn {{
+                        background-color: {theme.btn_success_bg};
+                        color: {theme.btn_success_text};
+                        border: {theme.btn_success_border};
+                        border-radius: 15px;
+                        padding: 5px 15px;
+                        font-size: {font_size_bulk:.1f}pt;
+                        font-weight: 600;
+                    }}
+                    QPushButton#BulkModeBtn:hover {{
+                        background-color: {theme.get_variant_hover_color("success")};
+                    }}
+                """)
+            else: # Light Theme
+                self.bulk_mode_btn.setStyleSheet(f"""
+                    QPushButton#BulkModeBtn {{
+                        background-color: #E6F4EA;
+                        color: #137333;
+                        border: 1px solid #A3E2B8;
+                        border-radius: 15px;
+                        padding: 5px 15px;
+                        font-size: {font_size_bulk:.1f}pt;
+                        font-weight: 600;
+                    }}
+                    QPushButton#BulkModeBtn:hover {{
+                        background-color: #D2EBD9;
+                    }}
+                """)
+
     def update_theme(self):
         """Update stylesheets of bulk header elements dynamically on theme changes."""
         from resources.GenericUILibrary.theme import get_theme
@@ -146,42 +201,8 @@ class BatchPageView(QWidget):
         # Update header container background
         self.legacy_header.setStyleSheet(f"#LegacyHeader {{ background-color: {theme.bg_card}; border-radius: 4px; }}")
 
-        # Soft Teal or Success style for Bulk/Batch Mode transition button
-        if theme.bg_card == "#1E272C": # Dark Theme
-            self.bulk_mode_btn.setStyleSheet(f"""
-                QPushButton#BulkModeBtn {{
-                    background-color: {theme.btn_success_bg};
-                    color: {theme.btn_success_text};
-                    border: {theme.btn_success_border};
-                    border-radius: 15px;
-                    padding: 5px 15px;
-                    font-size: 10.5pt;
-                    font-weight: 600;
-                }}
-                QPushButton#BulkModeBtn:hover {{
-                    background-color: {theme.get_variant_hover_color("success")};
-                }}
-            """)
-        else: # Light Theme
-            self.bulk_mode_btn.setStyleSheet("""
-                QPushButton#BulkModeBtn {
-                    background-color: #E6F4EA;
-                    color: #137333;
-                    border: 1px solid #A3E2B8;
-                    border-radius: 15px;
-                    padding: 5px 15px;
-                    font-size: 10.5pt;
-                    font-weight: 600;
-                }
-                QPushButton#BulkModeBtn:hover {
-                    background-color: #D2EBD9;
-                }
-            """)
-
-        # Process All Button styling
-        if hasattr(self, "process_all_btn"):
-            from resources.GenericUILibrary.theme import create_button_style
-            self.process_all_btn.setStyleSheet(create_button_style("primary", theme) + " QPushButton { padding: 4px 8px; font-size: 8pt; }")
+        # Apply scaling and styling for buttons
+        self.update_adaptive_font_sizes()
 
 
 

@@ -158,6 +158,11 @@ def setup_main_layout(layout_instance: Any, database_manager: DatabaseManager):
         layout_instance.workspace_panel.clear_display
     )
 
+    # Saat setting algoritma berubah -> update state di panel parameter overlay
+    layout_instance.batch_panel.algorithm_settings_changed.connect(
+        layout_instance.workspace_panel.display_panel.param_panel.update_settings_state
+    )
+
     # Setup Layout
     # Workspace (LeftPanel logic) di KIRI (Stretch 4)
     layout_instance.single_page_layout.addWidget(layout_instance.workspace_panel, 4)

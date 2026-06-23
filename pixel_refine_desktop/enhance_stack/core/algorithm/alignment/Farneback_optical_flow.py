@@ -38,11 +38,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 # --- Taichi GPU Acceleration (opsional, fallback ke CPU jika tidak tersedia) ---
 TAICHI_AVAILABLE = False
+ta_aot = None
 try:
-    from taichi_algorithm.bilateral_grid import bilateral_grid_filter
-    from taichi_algorithm.median_filter import median_filter as ta_median_filter
-    from taichi_algorithm.gaussian import gaussian_blur as ta_gaussian_blur
-    from taichi_algorithm.remap import remap_with_flow as ta_remap_with_flow
+    import taichi_library.taichi_aot as ta_aot
+    from taichi_algorithm.smoothing.bilateral_grid import bilateral_grid_filter
+    from taichi_algorithm.smoothing.median_filter import median_filter as ta_median_filter
+    from taichi_algorithm.smoothing.gaussian import gaussian_blur as ta_gaussian_blur
     TAICHI_AVAILABLE = True
 except Exception:
     pass
@@ -330,20 +331,23 @@ class FarnebackAlgorithm:
             h, w = base_gray_8bit.shape
             flow_full = None
 
-            # --- Taichi GPU V2 Path: Multi-scale Farneback with fused kernels ---
-            if TAICHI_AVAILABLE and flow_full is None:
+            # --- Taichi AOT Farneback Flow (primary GPU path) ---
+            if TAICHI_AVAILABLE and ta_aot is not None and flow_full is None:
                 try:
-                    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_tile.farneback_flow import FarnebackFlowV2
-                    # Initialize V2 GPU Farneback engine (lazy singleton)
-                    if not hasattr(self, '_fb_v2_engine') or self._fb_v2_engine is None:
-                        self._fb_v2_engine = FarnebackFlowV2()
-                    # Compute flow using GPU V2 (multi-scale, fused kernels)
-                    base_f32 = base_gray_8bit.astype(np.float32) / 255.0
-                    target_f32 = target_gray_8bit.astype(np.float32) / 255.0
-                    flow_full = self._fb_v2_engine.compute_flow(base_f32, target_f32)
-                    print(f"[Taichi GPU V2] Flow computed successfully ({w}x{h})")
+                    base_f32 = base_gray_8bit.astype(np.float32)
+                    target_f32 = target_gray_8bit.astype(np.float32)
+                    flow_full = ta_aot.farneback_flow(
+                        base_f32, target_f32,
+                        pyr_scale=fb_config["pyr_scale"],
+                        num_levels=fb_config["levels"],
+                        win_size=fb_config["winsize"],
+                        num_iters=fb_config["iterations"],
+                        poly_n=fb_config["poly_n"],
+                        poly_sigma=fb_config["poly_sigma"],
+                    )
+                    print(f"[Taichi AOT Farneback] Flow computed successfully ({w}x{h})")
                 except Exception as e:
-                    print(f"[Taichi GPU V2] Failed: {e}, falling back to OpenCL/CPU")
+                    print(f"[Taichi AOT Farneback] Failed: {e}, falling back to OpenCV")
                     flow_full = None
 
             if use_gpu:

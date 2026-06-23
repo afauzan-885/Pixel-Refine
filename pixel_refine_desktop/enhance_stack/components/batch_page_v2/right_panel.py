@@ -66,6 +66,7 @@ class RightPanel(QWidget, SyncMixin):
         self._is_collapsed = True  # Track state for resize logic
         self.current_batch_id = None  # Track active batch for JSON persistence
         self._is_syncing = False  # Flag to avoid recursion during sync
+        self._last_emitted_settings = None
 
         # Debounce timer for rapid selection changes (Breathing Room)
         self._selection_timer = QTimer(self)
@@ -262,6 +263,19 @@ class RightPanel(QWidget, SyncMixin):
         self.scroll_content_layout.addWidget(self.denoise_card)
         self.add_binding("denoising_algo", self.denoise_card, fallback="No Denoising")
 
+        self.sr_card.combo.setStyleSheet(self.sr_card.combo.styleSheet() + """
+            QComboBox {
+                padding: 3px 6px;
+                font-size: 9pt;
+            }
+        """)
+        self.denoise_card.combo.setStyleSheet(self.denoise_card.combo.styleSheet() + """
+            QComboBox {
+                padding: 3px 6px;
+                font-size: 9pt;
+            }
+        """)
+
         self.scroll_content_layout.addStretch()
         self.scroll_area.setWidget(self.scroll_content)
 
@@ -295,6 +309,20 @@ class RightPanel(QWidget, SyncMixin):
     def resizeEvent(self, event):
         """Handle resize to adjust splitter ratio based on screen state context."""
         super().resizeEvent(event)
+
+        # Dynamic scaling of process_all_btn height and font size
+        if hasattr(self, "process_all_btn") and self.process_all_btn:
+            window_width = self.window().width() if self.window() else 1000
+            f = max(0.0, min(1.0, (window_width - 1000) / 920.0))
+            
+            btn_h = 22 + int(f * 10)  # scale from 22px to 32px
+            self.process_all_btn.setFixedHeight(btn_h)
+            
+            font_size = 8.0 + f * 3.0  # scale from 8pt to 11pt
+            from resources.GenericUILibrary.theme import get_theme, create_button_style
+            theme = get_theme()
+            base_style = create_button_style("primary", theme)
+            self.process_all_btn.setStyleSheet(base_style + f" QPushButton {{ padding: 2px 4px; font-size: {font_size:.1f}pt; }}")
 
         # If collapsed, force top widget to 100%
         if self._is_collapsed:
@@ -346,6 +374,11 @@ class RightPanel(QWidget, SyncMixin):
             "super_resolution": self.sr_card.get_value() or "",
             "denoising": self.denoise_card.get_value() or "",
         }
+
+        if settings == self._last_emitted_settings:
+            return
+
+        self._last_emitted_settings = settings.copy()
 
         # 1. Emit realtime signal for UI adaptation
         self.algorithm_settings_changed.emit(settings)

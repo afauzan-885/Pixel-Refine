@@ -35,6 +35,14 @@ from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE
 
+# Taichi AOT for GPU preprocessing
+try:
+    import taichi_library.taichi_aot as ta_aot
+    TAICHI_AOT_AVAILABLE = True
+except Exception:
+    ta_aot = None
+    TAICHI_AOT_AVAILABLE = False
+
 
 class ORBAlgorithm:
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
@@ -283,15 +291,39 @@ class ORBAlgorithm:
                             min_sigma,
                             max_sigma,
                         )
-                        filtered_image = cv2.bilateralFilter(
-                            enhanced_gray, d, sigma_color, sigma_space
-                        )
+                        # Taichi AOT bilateral filter (GPU)
+                        if TAICHI_AOT_AVAILABLE and ta_aot is not None:
+                            try:
+                                enhanced_f32 = enhanced_gray.astype(np.float32)
+                                denoised_f32 = ta_aot.bilateral_grid_filter(
+                                    enhanced_f32, preset="medium"
+                                )
+                                filtered_image = np.clip(denoised_f32, 0, 255).astype(np.uint8)
+                            except Exception:
+                                filtered_image = cv2.bilateralFilter(
+                                    enhanced_gray, d, sigma_color, sigma_space
+                                )
+                        else:
+                            filtered_image = cv2.bilateralFilter(
+                                enhanced_gray, d, sigma_color, sigma_space
+                            )
                     else:
                         filtered_image = enhanced_gray
 
-                    # 4. Terapkan CLAHE setelah filtering
-                    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
-                    final_image = clahe.apply(filtered_image)
+                    # 4. Terapkan CLAHE setelah filtering (Taichi AOT atau OpenCV)
+                    if TAICHI_AOT_AVAILABLE and ta_aot is not None:
+                        try:
+                            filtered_f32 = filtered_image.astype(np.float32) / 255.0
+                            clahe_result = ta_aot.clahe_aot(
+                                filtered_f32, clip_limit=2.0, tile_grid_size=(4, 4)
+                            )
+                            final_image = np.clip(clahe_result * 255, 0, 255).astype(np.uint8)
+                        except Exception:
+                            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+                            final_image = clahe.apply(filtered_image)
+                    else:
+                        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+                        final_image = clahe.apply(filtered_image)
 
                     result_q.put((image_type, final_image))
 

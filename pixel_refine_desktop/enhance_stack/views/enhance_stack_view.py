@@ -1,57 +1,30 @@
 """
 Enhanced Stack Page View (MVC Refactored).
 Main container for single and batch page views with controller integration.
+Subclass of WorkspaceView from workplace framework.
 """
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QStackedWidget
 from PySide6.QtCore import Signal
-from .top_bar import TopBar
+from pixel_refine_desktop.workplace.workspace_view import WorkspaceView
 from .single_page_view import SinglePageView
 from .batch_page_view import BatchPageView
-from resources.animations.animation_manager import (
-    SlideDirection,
-    StackedWidgetAnimator,
-)
-from resources.animations.slide import slide
 from resources.animations.fade import fade_in
-from resources.animations.toast.toast_manager import (
-    ToastManager,
-)
 
 
-class EnhanceStackView(QWidget):
+class EnhanceStackView(WorkspaceView):
     """
     Main view for enhance stack feature (MVC Architecture).
-    Manages single and batch page views with controllers.
+    Subclass of WorkspaceView - implementasi spesifik enhance_stack.
     """
 
     page_changed = Signal(int)  # Forward global navigation
 
     def __init__(self, db_path: str, parent=None):
-        super().__init__(parent)
-        self.db_path = db_path
+        # WorkspaceView.__init__ akan memanggil _create_pages() dan _connect_page_signals()
+        super().__init__(db_path, parent)
 
-        self.setup_ui()
-        self.connect_signals()
-
-    def setup_ui(self):
-        """Setup the UI layout."""
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        # Animation and toast managers
-        self.animator = StackedWidgetAnimator(self)
-        self.toast_manager = ToastManager(self)
-
-        # Top bar with switch buttons
-        # self.top_bar = TopBar()
-        # layout.addWidget(self.top_bar)
-
-        # Stacked widget for single/batch pages
-        self.stacked_widget = QStackedWidget()
-        layout.addWidget(self.stacked_widget, 1)
-
+    def _create_pages(self):
+        """Buat halaman-halaman enhance_stack dan tambahkan ke stacked_widget."""
         # Create single page view (hybrid MVC)
         self.single_page_view = SinglePageView(self.db_path, self)
         self.stacked_widget.addWidget(self.single_page_view)
@@ -60,17 +33,15 @@ class EnhanceStackView(QWidget):
         self.batch_page_view = BatchPageView(self.db_path, self)
         self.stacked_widget.addWidget(self.batch_page_view)
 
+    def _set_initial_page(self):
+        """Set halaman awal ke single page view."""
+        self.stacked_widget.setCurrentWidget(self.single_page_view)
+
+    def _connect_page_signals(self):
+        """Connect page signals and toast notifications."""
         # Connect Navigation
         self.batch_page_view.page_changed.connect(self.page_changed)
         self.single_page_view.page_changed.connect(self.page_changed)
-
-        # Set initial page
-        self.stacked_widget.setCurrentWidget(self.single_page_view)
-        # self.top_bar.left_stack.setCurrentIndex(0)
-        # self.top_bar.right_stack.setCurrentIndex(0)
-
-    def connect_signals(self):
-        """Connect top bar signals and toast notifications."""
         # Connect Bulk Mode toggles between V2 (SinglePageView) and V1 (BatchPageView)
         if hasattr(self.single_page_view, "workspace_panel") and self.single_page_view.workspace_panel:
             dp = self.single_page_view.workspace_panel.display_panel

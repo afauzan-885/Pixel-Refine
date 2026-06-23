@@ -11,6 +11,14 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
+# Taichi AOT for GPU Farneback
+try:
+    import taichi_library.taichi_aot as ta_aot
+    TAICHI_AOT_AVAILABLE = True
+except Exception:
+    ta_aot = None
+    TAICHI_AOT_AVAILABLE = False
+
 # Importers moved into functions to avoid circular dependencies
 
 
@@ -753,7 +761,7 @@ def perform_alignment_gpu(
                     if flow_backend in ("farneback_jit", "farneback_aot"):
                         # Farneback AOT: multi-step pipeline using pre-compiled TCM graphs
                         # 1. Pre-compute Gaussian constants for polynomial expansion
-                        from taichi_library.taichi_algorithm.farneback_flow import (
+                        from taichi_library.taichi_algorithm.optical_flow.farneback_flow import (
                             prepare_gaussian_constants,
                             compute_smoothing_weights,
                         )
@@ -1388,21 +1396,34 @@ def perform_image_alignment(
 
                 # Initial flow can be None in Python, but some stubs prefer a dummy or no argument.
                 # We'll use a more explicit approach to satisfy linting.
-                flow_init = np.empty(
-                    (ref_gray_8u.shape[0], ref_gray_8u.shape[1], 2), dtype=np.float32
-                )
-                flow = cv2.calcOpticalFlowFarneback(
-                    ref_gray_8u,
-                    current_gray_8u,
-                    flow_init,
-                    0.5,
-                    3,
-                    15,
-                    3,
-                    5,
-                    1.2,
-                    0,
-                )
+                flow = None
+
+                # Taichi AOT Farneback (primary GPU path)
+                if TAICHI_AOT_AVAILABLE and ta_aot is not None:
+                    try:
+                        ref_f32 = ref_gray_8u.astype(np.float32)
+                        curr_f32 = current_gray_8u.astype(np.float32)
+                        flow = ta_aot.farneback_flow(
+                            ref_f32, curr_f32,
+                            pyr_scale=0.5, num_levels=3,
+                            win_size=15, num_iters=3,
+                            poly_n=5, poly_sigma=1.2,
+                        )
+                    except Exception as e:
+                        print(f"[Taichi AOT Farneback] Failed: {e}, falling back to OpenCV")
+                        flow = None
+
+                # OpenCV fallback
+                if flow is None:
+                    flow_init = np.empty(
+                        (ref_gray_8u.shape[0], ref_gray_8u.shape[1], 2), dtype=np.float32
+                    )
+                    flow = cv2.calcOpticalFlowFarneback(
+                        ref_gray_8u,
+                        current_gray_8u,
+                        flow_init,
+                        0.5, 3, 15, 3, 5, 1.2, 0,
+                    )
 
                 aligned_img = warp_image_opencv(original_image, flow)
 

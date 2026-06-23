@@ -1,12 +1,13 @@
 import weakref
 import functools
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QWidget
 
 # Global list of weak references to registered QWidget instances and their configuration
 # Stored as tuples: (weakref_to_widget, method_name)
 _registered_widgets = []
 
-def live_update(arg=None, method_name="retranslate_ui"):
+def live_update(arg=None, method_name="retranslate_ui", on_resize=False):
     """
     A class decorator for QWidget-based classes.
     Registers widget instances to automatically receive setting/language updates.
@@ -21,25 +22,45 @@ def live_update(arg=None, method_name="retranslate_ui"):
         @live_update("update_settings")
         class MyWidget(QWidget):
             ...
+
+    3. With resize-driven updates:
+        @live_update("refresh_responsive_layout", on_resize=True)
+        class MyResponsiveWidget(QWidget):
+            ...
     """
-    # Case A: Decorator used without arguments: @live_update
-    if isinstance(arg, type):
-        cls = arg
-        orig_init = cls.__init__
+    def _install_resize_hook(cls, target_method):
+        if getattr(cls, "_live_update_resize_hooked", False):
+            return
 
-        @functools.wraps(orig_init)
-        def new_init(self, *args, **kwargs):
-            orig_init(self, *args, **kwargs)
-            ref = weakref.ref(self)
-            _registered_widgets.append((ref, "retranslate_ui"))
+        orig_resize_event = getattr(cls, "resizeEvent", None)
 
-        cls.__init__ = new_init
-        return cls
+        def resize_event(self, event):
+            if orig_resize_event:
+                orig_resize_event(self, event)
+            elif event:
+                super(cls, self).resizeEvent(event)
 
-    # Case B: Decorator used with arguments: @live_update("my_method")
-    target_method = arg if isinstance(arg, str) else method_name
+            if not hasattr(self, target_method):
+                return
+            if getattr(self, "_live_update_resize_pending", False):
+                return
 
-    def decorator(cls):
+            self._live_update_resize_pending = True
+
+            def flush():
+                try:
+                    self._live_update_resize_pending = False
+                    if hasattr(self, target_method):
+                        getattr(self, target_method)()
+                except RuntimeError:
+                    pass
+
+            QTimer.singleShot(0, flush)
+
+        cls.resizeEvent = resize_event
+        cls._live_update_resize_hooked = True
+
+    def _register_class(cls, target_method, resize_enabled):
         orig_init = cls.__init__
 
         @functools.wraps(orig_init)
@@ -49,7 +70,19 @@ def live_update(arg=None, method_name="retranslate_ui"):
             _registered_widgets.append((ref, target_method))
 
         cls.__init__ = new_init
+        if resize_enabled:
+            _install_resize_hook(cls, target_method)
         return cls
+
+    # Case A: Decorator used without arguments: @live_update
+    if isinstance(arg, type):
+        return _register_class(arg, "retranslate_ui", on_resize)
+
+    # Case B: Decorator used with arguments: @live_update("my_method")
+    target_method = arg if isinstance(arg, str) else method_name
+
+    def decorator(cls):
+        return _register_class(cls, target_method, on_resize)
 
     return decorator
 

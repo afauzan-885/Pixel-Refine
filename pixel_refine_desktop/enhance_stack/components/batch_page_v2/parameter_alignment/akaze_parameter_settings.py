@@ -1,3 +1,79 @@
+"""
+AKAZE Parameter Settings - Config Provider
+==========================================
+
+Backend value provider for AKAZE parameters.
+Only provides config load/save functions - UI is handled by MFDenoiser_parameter_settings.py.
+"""
+
+import os
+import json
+from config import CONFIG_DIR, ALGORITHM_PARAMETER_SETTINGS_FILE, GENERAL_SETTINGS_FILE
+
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.AKAZE import (
+    AKAZEAlgorithm,
+)
+
+
+def load_akaze_config():
+    """Load AKAZE config from JSON file."""
+    return AKAZEAlgorithm.load_akaze_config(ALGORITHM_PARAMETER_SETTINGS_FILE)
+
+
+def save_akaze_config(config):
+    """Save AKAZE config to JSON file."""
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    config_filename = ALGORITHM_PARAMETER_SETTINGS_FILE
+
+    all_params = {}
+    try:
+        if os.path.exists(config_filename):
+            with open(config_filename, "r") as f:
+                all_params = json.load(f)
+    except Exception as e:
+        print(
+            f"Warning: Could not read existing config file '{config_filename}' before saving AKAZE: {e}"
+        )
+
+    all_params["AKAZE"] = config
+
+    try:
+        with open(config_filename, "w") as f:
+            json.dump(all_params, f, indent=4)
+    except Exception as e:
+        print(f"Error saving AKAZE config to '{config_filename}': {e}")
+
+
+def _load_general_settings():
+    """Load general settings from app_setting.json."""
+    defaults = {"gpu_acceleration": False, "multi_core_cpu": True}
+    if not os.path.exists(GENERAL_SETTINGS_FILE):
+        return defaults
+    try:
+        with open(GENERAL_SETTINGS_FILE, "r") as f:
+            settings = json.load(f)
+        for key, value in defaults.items():
+            settings.setdefault(key, value)
+        return settings
+    except (json.JSONDecodeError, IOError, KeyError):
+        return defaults
+
+
+# Default values for UI reference
+AKAZE_DEFAULTS = {
+    "akaze_threshold": 0.001,
+    "akaze_nOctaves": 4,
+    "akaze_nOctaveLayers": 4,
+    "ratio_threshold": 0.75,
+    "ransacThreshold": 5.0,
+    "transformation": "homography",
+    "keep_edges": False,
+    "enable_cropping": False,
+    "save_align": False,
+    "command_save_to_hd5f": True,
+    "align_folder": "",
+    "use_multi_core": True,
+}
 import os
 import json
 from PySide6.QtWidgets import (

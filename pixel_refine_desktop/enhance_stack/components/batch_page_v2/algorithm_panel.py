@@ -241,6 +241,26 @@ class AlgorithmPanel(QWidget, SyncMixin):
         self._is_processing = True
         self._update_all_buttons(enabled=False, text="⏳ Waiting...")
 
+        # --- Show Loading Toast at Bottom Left ---
+        active_algos = []
+        if settings.get("alignment") and settings.get("alignment") != "No Alignment":
+            active_algos.append(f"Penyelarasan ({settings['alignment']})")
+        if settings.get("denoising") and settings.get("denoising") != "No Denoising":
+            active_algos.append(f"Denoising ({settings['denoising']})")
+        if settings.get("super_resolution") and settings.get("super_resolution") != "No Super Resolution":
+            active_algos.append(f"Super Resolusi ({settings['super_resolution']})")
+
+        msg = "Sedang memproses: " + ", ".join(active_algos) if active_algos else "Sedang memproses batch..."
+        
+        if hasattr(self, "display_panel") and self.display_panel and hasattr(self.display_panel, "toast"):
+            from resources.animations.toast.toast_manager import ToastPosition
+            self.display_panel.toast.show_progress(
+                message=msg + " (0%)",
+                category="process_loading",
+                position=ToastPosition.BOTTOM_LEFT,
+                priority="HIGH"
+            )
+
         # 2. Start Processing
         self.show_progress(0)
         self.processor_thread = AlgorithmProcessorThread(
@@ -271,6 +291,10 @@ class AlgorithmPanel(QWidget, SyncMixin):
             self.processor_thread.stop()
             # Button feedback
             self._update_all_buttons(enabled=False, text="🛑 Stopping...")
+            
+            # Hide loading toast
+            if hasattr(self, "display_panel") and self.display_panel and hasattr(self.display_panel, "toast"):
+                self.display_panel.toast.hide_category("process_loading")
             # We don't reset state here, wait for finished_processing signal
 
     def _update_all_buttons(
@@ -291,13 +315,15 @@ class AlgorithmPanel(QWidget, SyncMixin):
                     btn.setObjectName("deleteButton" if variant == "danger" else "processButton")
                     from resources.GenericUILibrary.theme import get_theme, create_button_style
                     theme = get_theme()
+                    is_display_start = hasattr(self, "display_panel") and self.display_panel and btn == self.display_panel.start_btn_ref
+                    padding_val = "5px" if is_display_start else "6px 12px"
                     btn.setStyleSheet(
                         create_button_style(btn.variant, theme)
-                        + """
-                        QPushButton {
-                            padding: 6px 12px;
+                        + f"""
+                        QPushButton {{
+                            padding: {padding_val};
                             font-size: 10pt;
-                        }
+                        }}
                         """
                     )
                     btn.style().unpolish(btn)
@@ -308,7 +334,78 @@ class AlgorithmPanel(QWidget, SyncMixin):
                 continue  # Widget might be deleted
 
     def _on_progress_update(self, percent, message):
-        self.show_progress(percent)
+        # Determine active category name based on settings
+        settings = self.logic.get_settings()
+        active_stages = []
+        if settings.get("alignment") and settings.get("alignment") != "No Alignment":
+            active_stages.append("alignment")
+        if settings.get("denoising") and settings.get("denoising") != "No Denoising":
+            active_stages.append("denoising")
+        if settings.get("super_resolution") and settings.get("super_resolution") != "No Super Resolution":
+            active_stages.append("super_resolution")
+            
+        total_stages = len(active_stages) if active_stages else 1
+
+        # We can track the current stage index
+        current_stage_idx = 0
+        display_msg = "Sedang memproses..."
+        stage_percent = percent
+
+        if "||" in message:
+            # Format: message||description
+            parts = message.split("||")
+            total_img_str = parts[0]
+            desc_text = parts[1] if len(parts) > 1 else ""
+            
+            # Since this is alignment:
+            current_stage_idx = active_stages.index("alignment") if "alignment" in active_stages else 0
+            
+            try:
+                total_imgs = int(total_img_str)
+                completed_imgs = percent
+                stage_percent = int((completed_imgs / total_imgs) * 100)
+                display_msg = f"Menyelaraskan gambar {completed_imgs}/{total_imgs}"
+            except Exception:
+                display_msg = desc_text if desc_text else "Menyelaraskan gambar"
+        else:
+            # Determine stage based on message text
+            if "super-resolution" in message.lower() or "super" in message.lower():
+                current_stage_idx = active_stages.index("super_resolution") if "super_resolution" in active_stages else 0
+                display_msg = "Super resolusi"
+            else:
+                current_stage_idx = active_stages.index("denoising") if "denoising" in active_stages else 0
+                display_msg = "Mengurangi noise gambar"
+
+            # Parse processed tiles from tile message if possible to show e.g. "Denoising 3/4"
+            # format: "Merging tile 73354/103788..." or "Processing super-resolution tile 5/10..."
+            import re
+            tile_match = re.search(r"(\d+)/(\d+)", message)
+            if tile_match:
+                # We show the progress of tiles
+                display_msg = f"{display_msg} (tile {tile_match.group(1)}/{tile_match.group(2)})"
+            else:
+                # Fallback to image counts
+                total_imgs = 0
+                if hasattr(self, "display_panel") and self.display_panel and hasattr(self.display_panel, "logic") and self.display_panel.logic.current_images:
+                    total_imgs = len(self.display_panel.logic.current_images)
+                if total_imgs > 0:
+                    display_msg = f"{display_msg} {total_imgs}/{total_imgs}"
+
+        # Global percentage calculation
+        stage_percent = max(0, min(100, stage_percent))
+        actual_percent = int((current_stage_idx * 100 + stage_percent) / total_stages)
+        actual_percent = max(0, min(100, actual_percent))
+
+        self.show_progress(actual_percent)
+        
+        if hasattr(self, "display_panel") and self.display_panel and hasattr(self.display_panel, "toast"):
+            from resources.animations.toast.toast_manager import ToastPosition
+            self.display_panel.toast.show_progress(
+                message=f"{display_msg} ({actual_percent}%)",
+                category="process_loading",
+                position=ToastPosition.BOTTOM_LEFT,
+                priority="HIGH"
+            )
 
     def _on_processing_finished(self):
         self._is_processing = False
@@ -317,6 +414,18 @@ class AlgorithmPanel(QWidget, SyncMixin):
         self._update_all_buttons(enabled=True, text="▶ Start", variant="primary")
 
         self.hide_progress()
+        
+        # Hide loading toast and show process finished message
+        if hasattr(self, "display_panel") and self.display_panel and hasattr(self.display_panel, "toast"):
+            from resources.animations.toast.toast_manager import ToastPosition
+            self.display_panel.toast.hide_category("process_loading")
+            self.display_panel.toast.show_message(
+                message="Proses selesai dengan sukses!",
+                duration=3000,
+                position=ToastPosition.BOTTOM_LEFT,
+                priority="NORMAL"
+            )
+
         completion_data = {
             "batch_id": self.current_batch_id,
             "settings": self.get_settings(),
@@ -407,6 +516,17 @@ class AlgorithmPanel(QWidget, SyncMixin):
         denoising = str(settings.get("denoising", "")).strip()
         super_res = str(settings.get("super_resolution", "")).strip()
 
+        # Relocate start button if denoising is Average, Median, or Similarity
+        # (These modes have no algorithm parameters to configure)
+        is_no_algo_panel = denoising in ["Average", "Median", "Similarity"]
+        for btn in self._all_process_buttons:
+            if hasattr(self, "display_panel") and self.display_panel and btn == self.display_panel.start_btn_ref:
+                continue
+            btn.setVisible(not is_no_algo_panel)
+            
+        if hasattr(self, "display_panel") and self.display_panel:
+            self.display_panel.set_start_button_mode(is_no_algo_panel)
+
         none_values = [
             "",
             "None",
@@ -415,7 +535,7 @@ class AlgorithmPanel(QWidget, SyncMixin):
             "No Super Resolution",
         ]
         is_align_active = alignment not in none_values
-        is_algo_active = (denoising not in none_values) or (
+        is_algo_active = (denoising not in none_values and denoising not in ["Average", "Median", "Similarity"]) or (
             super_res not in none_values
         )
 
@@ -470,7 +590,7 @@ class AlgorithmPanel(QWidget, SyncMixin):
                 duration=400,
             )
 
-        # Notify LeftPanel about overall visibility (expanded/collapsed)
+         # Notify LeftPanel about overall visibility (expanded/collapsed)
         self.visibility_state_changed.emit(target_idx != 3)
 
     def set_settings(self, settings):

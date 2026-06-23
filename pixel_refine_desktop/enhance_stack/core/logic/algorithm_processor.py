@@ -20,7 +20,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
     running_median,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
-    running_mf_denoiser as running_similarity,
+    running_similarity,
     running_mf_denoiser,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.WeightedSR import (
@@ -77,9 +77,13 @@ class AlgorithmProcessorThread(QThread):
         """Execute the selected algorithms."""
         try:
             # Progress callback to emit signal
-            def progress_callback(percent, message=""):
+            def progress_callback(percent, message="", *args, **kwargs):
                 if self._is_running:
-                    self.progress_update.emit(percent, message)
+                    if args:
+                        # Forward 3rd argument (like description text) formatted as message||description
+                        self.progress_update.emit(percent, f"{message}||{args[0]}")
+                    else:
+                        self.progress_update.emit(percent, str(message))
 
             # Define actions mapping
             def get_stop_cb():

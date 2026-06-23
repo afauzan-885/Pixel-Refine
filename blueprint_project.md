@@ -7069,7 +7069,7 @@ This document provides an exhaustive, directory-by-directory mapping of the enti
     *Calculate absolute difference between two images.*
     *OpenCV-compatible: Same as cv2.absdiff()*
 
-* **Function**: `generate_hanning_window_2d(shape, exclude_boundary, dtype)`
+* **Function**: `hanning(shape, exclude_boundary, dtype)`
     *Generate 2D Hanning window directly on GPU.*
     *exclude_boundary: If True, behaves like np.hanning(M + 2)[1:-1]*
 

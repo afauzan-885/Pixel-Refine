@@ -66,10 +66,12 @@ class ToastWidget(QFrame):
         priority: ToastPriority,
         category: str | None = None,
         parent: QWidget | None = None,
+        position=ToastPosition.BOTTOM_RIGHT,
     ):
         super().__init__(parent)
         self.priority = priority
         self.category = category
+        self.position = position
         self.timestamp = time.time()
         self.setObjectName("ToastWidgetWrapper")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -372,7 +374,7 @@ class ToastManager(QObject):
                     return
 
         # 1. Create Widget
-        toast = ToastWidget(message, priority, category, parent)
+        toast = ToastWidget(message, priority, category, parent, position)
         toast.adjustSize()
         toast.show()
 
@@ -439,18 +441,15 @@ class ToastManager(QObject):
             return
 
         parent_rect = parent.rect()
-        base_x = 0
-        current_y = 0
-
-        # Kita asumsikan Stack selalu di BOTTOM_RIGHT sesuai request user sebelumnya
-        # Tapi bisa diadaptasi. Defaulting to Bottom-Right stack logic.
-
-        # Base anchor point: Bottom Right with margin
         margin_x = 25
         margin_y = 25
 
-        bottom_y = parent_rect.height() - margin_y
+        # Track bottom offset for each position to stack them correctly
+        bottom_y_right = parent_rect.height() - margin_y
         right_x = parent_rect.width() - margin_x
+        
+        bottom_y_left = parent_rect.height() - margin_y
+        left_x = margin_x
 
         # Iterate sorted list (Index 0 = Bottom-most / Prime)
         for i, toast in enumerate(self._active_toasts):
@@ -460,11 +459,15 @@ class ToastManager(QObject):
             t_width = hint.width()
             t_height = hint.height()
 
-            target_x = right_x - t_width
-            target_y = bottom_y - t_height
-
-            # Update base for next item (stacking UP)
-            bottom_y = target_y - self.spacing
+            pos_enum = getattr(toast, "position", ToastPosition.BOTTOM_RIGHT)
+            if pos_enum == ToastPosition.BOTTOM_LEFT:
+                target_x = left_x
+                target_y = bottom_y_left - t_height
+                bottom_y_left = target_y - self.spacing
+            else:
+                target_x = right_x - t_width
+                target_y = bottom_y_right - t_height
+                bottom_y_right = target_y - self.spacing
 
             # Target geometry
             target_geo = QRect(int(target_x), int(target_y), t_width, t_height)

@@ -8,6 +8,7 @@ DEFAULTS = {
     "gpu_acceleration": False,
     "multi_core_cpu": True,
     "create_thumbnail": False,
+    "device_backend": "CPU (Universal)",
 }
 
 _general_store = None

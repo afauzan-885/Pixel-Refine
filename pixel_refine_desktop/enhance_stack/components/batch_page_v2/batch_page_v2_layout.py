@@ -512,7 +512,7 @@ class BatchPageV2Layout(QWidget):
                 running_median(self, single_process=True)
                 denoising_executed = True
             elif denoising_choice == "Similarity":
-                running_similarity(self, single_process=True)
+                running_similarity(self, single_process=True, merging_mode="similarity", output_suffix="similarity")
                 denoising_executed = True
             elif denoising_choice == "No Denoising":
                 pass

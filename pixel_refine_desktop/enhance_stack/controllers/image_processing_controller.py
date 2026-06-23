@@ -285,7 +285,7 @@ class ImageProcessingController(QObject):
             running_median,
         )
         from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
-            running_mf_denoiser as running_similarity,
+            running_similarity,
             running_mf_denoiser,
         )
 

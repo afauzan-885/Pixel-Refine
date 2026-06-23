@@ -313,6 +313,8 @@ class OverlayContainer(QWidget):
 
         # 2. Content Wrapper Resize Logic (Recentering)
         if obj == self.content_wrapper and event.type() == QEvent.Type.Resize:
+            if not self.is_modal:
+                self.resize(self.content_wrapper.size())
             # If content size changed (e.g. Accordion expanded), we need to update our position
             # to remain centered or correctly aligned.
             QTimer.singleShot(0, self._update_position)
@@ -365,20 +367,24 @@ class OverlayContainer(QWidget):
             self.raise_()
 
     def _calculate_coordinates(self, position_enum, p_rect, w, h):
-        m = self.margin
+        if isinstance(self.margin, (tuple, list)):
+            mx = int(self.margin[0]) if len(self.margin) > 0 else 0
+            my = int(self.margin[1]) if len(self.margin) > 1 else mx
+        else:
+            mx = my = int(self.margin)
         x, y = 0, 0
         if position_enum in [
             OverlayPosition.TOP_LEFT,
             OverlayPosition.BOTTOM_LEFT,
             OverlayPosition.LEFT_CENTER,
         ]:
-            x = m
+            x = mx
         elif position_enum in [
             OverlayPosition.TOP_RIGHT,
             OverlayPosition.BOTTOM_RIGHT,
             OverlayPosition.RIGHT_CENTER,
         ]:
-            x = p_rect.width() - w - m
+            x = p_rect.width() - w - mx
         else:
             x = (p_rect.width() - w) // 2
 
@@ -387,13 +393,13 @@ class OverlayContainer(QWidget):
             OverlayPosition.TOP_CENTER,
             OverlayPosition.TOP_RIGHT,
         ]:
-            y = m
+            y = my
         elif position_enum in [
             OverlayPosition.BOTTOM_LEFT,
             OverlayPosition.BOTTOM_CENTER,
             OverlayPosition.BOTTOM_RIGHT,
         ]:
-            y = p_rect.height() - h - m
+            y = p_rect.height() - h - my
         else:
             y = (p_rect.height() - h) // 2
         return QPoint(x, y)

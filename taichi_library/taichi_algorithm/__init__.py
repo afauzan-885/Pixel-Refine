@@ -15,58 +15,87 @@ if os.environ.get("AOT_MODE", "1") == "0":
 
 # --- Core Imports ---
 from . import common
-from .common import (
-    split,
-    merge,
-    extract_channel,
-    insert_channel,
-    copy,
-)
 
-# --- Underlying Implementations ---
-from .bilinear_interpolation import bilinear_resize, sample_at_bilinear
-from .nearest_interpolation import nearest_resize
-from .bicubic_interpolation import (
-    bicubic_resize,
-    sample_at_bicubic,
-    sample_at,
-    cubic_hermite,
-)
-from .box_filter import box_filter, box_filter_2d
-from .median_filter import median_filter
-from .gaussian import gaussian_blur as _gaussian_blur_impl
-from .gradients import sobel as _sobel_impl
-from .gradients import laplacian as _laplacian_impl
-from .ransac import ransac_flow_cleanup
-from .bilateral_grid import bilateral_grid_filter
-from .pyramid import build_image_pyramid, build_image_pyramid_gpu, upsample_flow
-from .phase_correlation import phase_correlation
-from .fft import fft2, ifft2
-from .ncc import zncc, match_template, global_translate_zncc
-from .remap import remap
-from .Hamilton_demosaice import hamilton_demosaic
-from .arm_demosaice import arm_demosaic
-from .mtb import align_mtb
-from .enhance_image import enhance_grayscale
-from .color_convert import (
-    cvtColor_extended,
-    COLOR_BGR2HSV,
-    COLOR_HSV2BGR,
-    COLOR_BGR2LAB,
-    COLOR_LAB2BGR,
-    COLOR_BGR2YCrCb,
-    COLOR_YCrCb2BGR,
-)
-from .otsu import otsu_threshold, THRESH_BINARY, THRESH_BINARY_INV, THRESH_OTSU
-from .guided_filter import guided_filter
-from .clahe import clahe
-from .canny import canny
-from .hough import hough_lines, hough_lines_with_canny
-from .nlm import non_local_means
-from .bm3d import hfcd_denoise, build_dct_matrix
-from .inpaint import inpaint, INPAINT_TELEA, INPAINT_NS
-from .seamless_clone import seamless_clone, NORMAL_CLONE, MIXED_CLONE, MONOCHROME_TRANSFER
-from .farneback_flow import farneback_flow
+if os.environ.get("AOT_MODE", "1") == "0":
+    from .common import (
+        split,
+        merge,
+        extract_channel,
+        insert_channel,
+        copy,
+    )
+
+    # --- Underlying Implementations ---
+    from .interpolation.bilinear_interpolation import bilinear_resize, sample_at_bilinear
+    from .interpolation.nearest_interpolation import nearest_resize
+    from .interpolation.bicubic_interpolation import (
+        bicubic_resize,
+        sample_at_bicubic,
+        sample_at,
+        cubic_hermite,
+    )
+    from .smoothing.box_filter import box_filter, box_filter_2d
+    from .smoothing.median_filter import median_filter
+    from .smoothing.gaussian import gaussian_blur as _gaussian_blur_impl
+    from .math_ops.gradients import sobel as _sobel_impl
+    from .math_ops.gradients import laplacian as _laplacian_impl
+    from .alignment.ransac import ransac_flow_cleanup
+    from .smoothing.bilateral_grid import bilateral_grid_filter
+    from .pyramid.pyramid import build_image_pyramid, build_image_pyramid_gpu, upsample_flow
+    from .alignment.phase_correlation import phase_correlation
+    from .pyramid.fft import fft2, ifft2
+    from .alignment.ncc import zncc, match_template, global_translate_zncc
+    from .interpolation.remap import remap
+    from .demosaicing.Hamilton_demosaice import hamilton_demosaic
+    from .demosaicing.arm_demosaice import arm_demosaic
+    from .demosaicing.mlri_admm_demosaice import (
+        mlri_admm_demosaic,
+        mlri_admm_demosaic_1channel,
+        mlri_admm_demosaic_half_res,
+        mlri_admm_demosaic_rgb_half_res,
+        mlri_admm_demosaic_3channel,
+    )
+    from .alignment.mtb import align_mtb
+    from .image_processing.enhance_image import enhance_grayscale
+    from .image_processing.color_convert import (
+        cvtColor_extended,
+        COLOR_BGR2HSV,
+        COLOR_HSV2BGR,
+        COLOR_BGR2LAB,
+        COLOR_LAB2BGR,
+        COLOR_BGR2YCrCb,
+        COLOR_YCrCb2BGR,
+    )
+    from .image_processing.otsu import otsu_threshold, THRESH_BINARY, THRESH_BINARY_INV, THRESH_OTSU
+    from .smoothing.guided_filter import guided_filter
+    from .image_processing.clahe import clahe
+    from .image_processing.canny import canny
+    from .image_processing.hough import hough_lines, hough_lines_with_canny
+    from .denoising.nlm import non_local_means
+    from .denoising.bm3d import hfcd_denoise, build_dct_matrix
+    from .image_processing.inpaint import inpaint, INPAINT_TELEA, INPAINT_NS
+    from .image_processing.seamless_clone import seamless_clone, NORMAL_CLONE, MIXED_CLONE, MONOCHROME_TRANSFER
+    from .optical_flow.farneback_flow import farneback_flow
+    from .morphology import dilate, erode
+    from .filter2d import filter2d
+    from .normalize import normalize, NORM_INF, NORM_L1, NORM_L2, NORM_MINMAX
+    from .copy_make_border import copy_make_border, BORDER_CONSTANT, BORDER_REFLECT_101, BORDER_REPLICATE
+    from .threshold import threshold, THRESH_BINARY, THRESH_BINARY_INV, THRESH_TRUNC, THRESH_TOZERO, THRESH_TOZERO_INV, THRESH_OTSU
+    from .ssim import ssim
+    from .histogram import histogram as gpu_histogram
+    from .compute_spatial import compute_spatial_weight, NoiseEstimator
+    from .hdr_fusion import hdr_fuse, hdr_fuse_simple
+    from .tone_mapping import reinhard_tone_map, srgb_gamma, local_tone_map, contrast_adjust, tone_map
+    from .alignment.ransac import vsac_fundamental
+    from .sfm.five_point_solver import solve_five_point
+    from .sfm.cheirality_check import check_cheirality_minimal, check_cheirality_full
+    from .sfm.triangulation import triangulate_adaptive
+    from .sfm.feature_matching import bfmatcher_l2, bfmatcher_hamming
+    from .sfm.bundle_adjustment import bundle_adjust_lm
+    from .sfm.plane_sweep import plane_sweep_stereo, multi_view_plane_sweep
+    from .sfm.point_cloud import statistical_outlier_removal, radius_outlier_removal, voxel_downsample, estimate_normals, preprocess_point_cloud
+    from .sfm.poisson_recon import poisson_reconstruct
+    from .common import svd_3x3_np, enforce_essential_np, hartley_normalize, denormalize_fundamental
 
 
 # --- Constants ---
@@ -382,6 +411,63 @@ __all__ = [
     "enhance_grayscale",
     "hamilton_demosaic",
     "arm_demosaic",
+    "mlri_admm_demosaic",
+    "mlri_admm_demosaic_1channel",
+    "mlri_admm_demosaic_half_res",
+    "mlri_admm_demosaic_rgb_half_res",
+    "mlri_admm_demosaic_3channel",
     "align_mtb",
     "farneback_flow",
+    "dilate",
+    "erode",
+    # New native GPU modules
+    "filter2d",
+    "normalize",
+    "NORM_INF",
+    "NORM_L1",
+    "NORM_L2",
+    "NORM_MINMAX",
+    "copy_make_border",
+    "BORDER_CONSTANT",
+    "BORDER_REFLECT_101",
+    "BORDER_REPLICATE",
+    "threshold",
+    "THRESH_BINARY",
+    "THRESH_BINARY_INV",
+    "THRESH_TRUNC",
+    "THRESH_TOZERO",
+    "THRESH_TOZERO_INV",
+    "THRESH_OTSU",
+    "ssim",
+    "gpu_histogram",
+    "compute_spatial_weight",
+    "NoiseEstimator",
+    "hdr_fuse",
+    "hdr_fuse_simple",
+    "reinhard_tone_map",
+    "srgb_gamma",
+    "local_tone_map",
+    "contrast_adjust",
+    "tone_map",
+    # SfM Pipeline
+    "vsac_fundamental",
+    "solve_five_point",
+    "check_cheirality_minimal",
+    "check_cheirality_full",
+    "triangulate_adaptive",
+    "bfmatcher_l2",
+    "bfmatcher_hamming",
+    "bundle_adjust_lm",
+    "plane_sweep_stereo",
+    "multi_view_plane_sweep",
+    "statistical_outlier_removal",
+    "radius_outlier_removal",
+    "voxel_downsample",
+    "estimate_normals",
+    "preprocess_point_cloud",
+    "poisson_reconstruct",
+    "svd_3x3_np",
+    "enforce_essential_np",
+    "hartley_normalize",
+    "denormalize_fundamental",
 ]

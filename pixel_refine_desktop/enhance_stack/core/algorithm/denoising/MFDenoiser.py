@@ -1,11 +1,7 @@
 """
-MFDenoiser.py — Modular Multi-Frame Denoiser Orchestrator
+MFDenoiser.py — Modular Multi-Frame Denoiser Orchestrator (Cleaned Version)
 
-Replaces the monolithic Similarity.py as the primary denoising orchestrator.
 Manages the pipeline: Load → Align → Merge → PostProcess → Save.
-Each stage is pluggable via ctx.params — swap algorithms without touching this file.
-
-Similarity.py is kept as backup.
 """
 
 import os
@@ -17,7 +13,6 @@ import sqlite3
 import h5py
 import numpy as np
 import cv2
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 from PySide6.QtCore import Qt
@@ -41,8 +36,6 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
     estimate_noise_in_python,
 )
 
-# language_config and load_similarity_config imported lazily inside methods to avoid circular imports
-
 
 def _lang():
     """Lazy import of language_config to break circular import chain."""
@@ -58,9 +51,9 @@ def _lang():
 class PipelineContext:
     db_path: str
     image_paths: list = field(default_factory=list)
-    data_source: object = None  # HDF5 path (str) or list of file paths
-    reference_image: np.ndarray = None  # Original dtype (uint8/uint16)
-    reference_float: np.ndarray = None  # Normalized float32 [0, 1]
+    data_source: object = None
+    reference_image: np.ndarray = None
+    reference_float: np.ndarray = None
     ref_h: int = 0
     ref_w: int = 0
     ref_dtype: object = None
@@ -78,79 +71,224 @@ class PipelineContext:
 
 
 # ---------------------------------------------------------------------------
-# Tile Processor Interface
+# Pluggable Alignment Backends
 # ---------------------------------------------------------------------------
-@dataclass
-class TileContext:
-    """Context passed to processor.process_tile() for each tile position."""
+class FarnebackAlignment:
+    """Taichi GPU AOT Farneback Optical Flow alignment backend."""
 
-    tile_y: int
-    tile_x: int
-    tile_h: int
-    tile_w: int
-    frame_tiles: np.ndarray  # (num_frames, tile_h, tile_w, C) float32
-    source_h: int
-    source_w: int
-    tile_idx: int
-    total_tiles: int
-    update_progress: object = None
-    stop_requested: object = None
+    def align_tile(self, ref_tile, comp_tile):
+        import numpy as np
+        from taichi_library import taichi_aot
+
+        # Conv to float32 [0..255] for farneback_flow input
+        if ref_tile.ndim == 3:
+            # RGB to Gray
+            ref_gray = (
+                0.299 * ref_tile[..., 0] + 
+                0.587 * ref_tile[..., 1] + 
+                0.114 * ref_tile[..., 2]
+            ).astype(np.float32) * 255.0
+        else:
+            ref_gray = ref_tile.astype(np.float32) * 255.0
+
+        if comp_tile.ndim == 3:
+            comp_gray = (
+                0.299 * comp_tile[..., 0] + 
+                0.587 * comp_tile[..., 1] + 
+                0.114 * comp_tile[..., 2]
+            ).astype(np.float32) * 255.0
+        else:
+            comp_gray = comp_tile.astype(np.float32) * 255.0
+
+        h, w = ref_tile.shape[:2]
+
+        # Hitung optical flow dengan Taichi AOT Farneback GPU (mengembalikan numpy array)
+        flow_np = taichi_aot.farneback_flow(
+            ref_gray,
+            comp_gray,
+            pyr_scale=0.5,
+            num_levels=3,
+            win_size=15,
+            num_iters=3,
+            poly_n=5,
+            poly_sigma=1.2,
+            flags=0,
+        )
+
+        # Lakukan warping (remap) di GPU secara langsung menggunakan flow_np
+        # return_gpu=True agar output warped tetap berada di VRAM
+        warped_gpu = taichi_aot.remap_with_flow(
+            comp_tile.astype(np.float32),
+            flow_np,
+            h,
+            w,
+            return_gpu=True,
+        )
+
+        return warped_gpu
 
 
-class TileProcessor(ABC):
-    """Interface for pluggable per-tile processors.
+# ---------------------------------------------------------------------------
+# Pluggable Merging Backends
+# ---------------------------------------------------------------------------
+class SimilarityMerge:
+    """Similarity merging backend using Taichi GPU (Vulkan) AOT merging loop."""
 
-    Implementors focus ONLY on: receive tile data -> run algorithm -> return result.
-    MFDenoiser handles all tiling infrastructure.
-    """
+    def merge_tiles(self, aligned_tiles):
+        import cv2
+        import numpy as np
+        from taichi_library import taichi_aot
+        from taichi_library.taichi_aot.engine import AOTEngine, TaichiGPUBuffer
+        from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import estimate_noise_in_python
+        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.similarity_taichi.compute_spatial import (
+            generate_spatial_weights_taichi,
+            accumulate_spatial_merging_taichi,
+        )
 
-    @abstractmethod
-    def setup(self, ctx: PipelineContext, shared_data: dict) -> None:
-        """One-time initialization before the tile loop.
+        ref_tile = aligned_tiles[0]
+        tile_h, tile_w = ref_tile.shape[:2]
+        channels = ref_tile.shape[2] if ref_tile.ndim == 3 else 1
 
-        Compute global data needed by all tiles (weight maps, shifts, etc.)
-        and store in shared_data dict.
-        """
-        pass
+        if ref_tile.ndim == 3:
+            ref_gray = taichi_aot.cvtColor((ref_tile * 255).astype(np.uint8), taichi_aot.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+        else:
+            ref_gray = ref_tile.copy()
 
-    @abstractmethod
-    def get_output_size(self, tile_h: int, tile_w: int) -> tuple:
-        """Return output tile dimensions for a given input tile size.
+        ref_noise_sigma = estimate_noise_in_python(ref_gray)
+        if ref_noise_sigma is None or ref_noise_sigma < 1e-5:
+            ref_noise_sigma = 0.01
 
-        Returns:
-            (out_h, out_w) — dimensions of the tile returned by process_tile.
-            Denoising: (tile_h, tile_w)       — 1:1
-            Super-Res: (tile_h*scale, tile_w*scale) — e.g. 2:1
-        """
-        pass
+        engine = AOTEngine()
 
-    @abstractmethod
-    def process_tile(self, tile_ctx: TileContext, shared_data: dict) -> tuple:
-        """Process a single tile and return the weighted result.
+        ref_gray_gpu = taichi_aot.upload(ref_gray)
+        sum_gpu = taichi_aot.upload(ref_tile.copy())
+        
+        weight_sum_full_gpu = taichi_aot.upload(np.ones((tile_h, tile_w), dtype=np.float32))
 
-        The returned tuple must be (weighted_sum, weight_map):
-          - weighted_sum: np.ndarray of shape (out_h, out_w) or (out_h, out_w, C), float32
-          - weight_map: np.ndarray of shape (out_h, out_w), float32 (per-frame weights)
+        # Setup tiling for weight generation (16x16 with 0.3 overlap)
+        tile_size_sub = 16
+        overlap_sub = 0.3
+        step_y = max(int(tile_size_sub * (1.0 - overlap_sub)), 1)
+        step_x = max(int(tile_size_sub * (1.0 - overlap_sub)), 1)
 
-        MFDenoiser multiplies both by the Hanning window and accumulates.
-        """
-        pass
+        row_starts = np.arange(0, tile_h - tile_size_sub + 1, step_y, dtype=np.int32)
+        if tile_h > tile_size_sub and (row_starts.size == 0 or row_starts[-1] != tile_h - tile_size_sub):
+            row_starts = np.append(row_starts, tile_h - tile_size_sub)
+        row_starts = np.ascontiguousarray(np.unique(row_starts).astype(np.int32))
 
-    def preprocess_batch(self, batch_float: list, shared_data: dict) -> None:
-        """Called after each batch is loaded, before the tile loop.
+        col_starts = np.arange(0, tile_w - tile_size_sub + 1, step_x, dtype=np.int32)
+        if tile_w > tile_size_sub and (col_starts.size == 0 or col_starts[-1] != tile_w - tile_size_sub):
+            col_starts = np.append(col_starts, tile_w - tile_size_sub)
+        col_starts = np.ascontiguousarray(np.unique(col_starts).astype(np.int32))
 
-        Override to compute batch-specific data (e.g. sub-pixel shifts, weight maps).
-        Default: no-op.
+        rows_gpu = taichi_aot.upload(row_starts)
+        rows_gpu.dtype = np.int32
+        cols_gpu = taichi_aot.upload(col_starts)
+        cols_gpu.dtype = np.int32
 
-        Args:
-            batch_float: List of normalized float32 images for this batch.
-            shared_data: Mutable dict shared across process_tile calls.
-        """
-        pass
+        base_window_gpu = taichi_aot.hanning((tile_size_sub, tile_size_sub), exclude_boundary=False)
+        weight_work_gpu = engine.allocate((tile_h, tile_w), dtype=np.float32, host_accessible=True)
 
-    def teardown(self) -> None:
-        """Cleanup after the tile loop completes. Default: no-op."""
-        pass
+        try:
+            for comp_tile in aligned_tiles[1:]:
+                # Check if already a TaichiGPUBuffer to avoid CPU-GPU upload overhead
+                if isinstance(comp_tile, TaichiGPUBuffer):
+                    comp_tile_gpu = comp_tile
+                    
+                    # Compute grayscale of GPU buffer for weight estimation
+                    # If it's a vector3, we convert it to grayscale on GPU
+                    if channels == 3:
+                        # Grab numpy array fallback or compute directly if possible
+                        # To keep it simple and robust, we download only the gray representation or cast
+                        comp_np = comp_tile.to_numpy()
+                        comp_gray = taichi_aot.cvtColor((comp_np * 255).astype(np.uint8), taichi_aot.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+                        comp_gray_gpu = taichi_aot.upload(comp_gray)
+                    else:
+                        comp_gray_gpu = comp_tile
+                else:
+                    if comp_tile.ndim == 3:
+                        comp_gray = taichi_aot.cvtColor((comp_tile * 255).astype(np.uint8), taichi_aot.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+                    else:
+                        comp_gray = comp_tile.copy()
+
+                    comp_gray_gpu = taichi_aot.upload(comp_gray)
+                    comp_tile_gpu = taichi_aot.upload(comp_tile)
+
+                generate_spatial_weights_taichi(
+                    current_image=comp_gray_gpu,
+                    reference_image=ref_gray_gpu,
+                    weight_map_sum=weight_work_gpu,
+                    base_window=base_window_gpu,
+                    stability_map=None,
+                    row_starts=rows_gpu,
+                    col_starts=cols_gpu,
+                    tile_h=tile_size_sub,
+                    tile_w=tile_size_sub,
+                    noise_sigma=ref_noise_sigma,
+                    motion_sensitivity=150.0,
+                    noise_offset_factor=0.15,
+                    equalize_brightness=False,
+                    buffer_provider="pool",
+                    search_radius=3,
+                    early_exit_threshold=0.05,
+                )
+
+                if not isinstance(comp_tile, TaichiGPUBuffer) or channels == 3:
+                    comp_gray_gpu.destroy()
+
+                accumulate_spatial_merging_taichi(
+                    current_image_full=comp_tile_gpu.view_as_vector(False),
+                    weight_map_work=weight_work_gpu,
+                    final_image_sum=sum_gpu.view_as_vector(False),
+                    weight_map_sum_full=weight_sum_full_gpu,
+                    row_starts=rows_gpu,
+                    col_starts=cols_gpu,
+                    tile_h=tile_size_sub,
+                    tile_w=tile_size_sub,
+                    h_full=tile_h,
+                    w_full=tile_w,
+                    h_work=tile_h,
+                    w_work=tile_w,
+                )
+
+                if not isinstance(comp_tile, TaichiGPUBuffer):
+                    comp_tile_gpu.destroy()
+
+            # Download and divide
+            sum_np = sum_gpu.to_numpy()
+            weight_sum_np = weight_sum_full_gpu.to_numpy()
+
+            valid_mask = weight_sum_np > 1e-6
+            merged_tile = np.zeros_like(sum_np)
+            if sum_np.ndim == 3:
+                np.divide(sum_np, weight_sum_np[..., np.newaxis], out=merged_tile, where=valid_mask[..., np.newaxis])
+                mask_3d = np.repeat(~valid_mask[..., np.newaxis], channels, axis=2)
+                merged_tile[mask_3d] = ref_tile[mask_3d]
+            else:
+                np.divide(sum_np, weight_sum_np, out=merged_tile, where=valid_mask)
+                merged_tile[~valid_mask] = ref_tile[~valid_mask]
+
+            weight_map = np.ones((tile_h, tile_w), dtype=np.float32)
+            return merged_tile, weight_map
+
+        finally:
+            for buf in [
+                sum_gpu,
+                weight_sum_full_gpu,
+                base_window_gpu,
+                rows_gpu,
+                cols_gpu,
+                weight_work_gpu,
+                ref_gray_gpu,
+            ]:
+                if buf:
+                    try:
+                        buf.destroy()
+                    except:
+                        pass
+            # Do not unload modules here to preserve runtime cache
+            pass
+
 
 
 # ---------------------------------------------------------------------------
@@ -159,8 +297,6 @@ class TileProcessor(ABC):
 class MFDenoiserAlgorithm:
     """
     Modular Multi-Frame Denoiser Orchestrator.
-    Coordinates data loading, alignment, merging, post-processing, and saving.
-    Each pipeline stage is pluggable via ctx.params.
     """
 
     def __init__(self, db_path):
@@ -170,9 +306,6 @@ class MFDenoiserAlgorithm:
         """Release resources and free memory."""
         gc.collect()
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
     def _get_image_paths(self, batch_id=None):
         """Fetch image paths from database."""
         if batch_id is None:
@@ -210,31 +343,43 @@ class MFDenoiserAlgorithm:
             # Tiling
             "similarity_spatial_tile_size": tile_val,
             "tile_size": (tile_val, tile_val),
-            "similarity_spatial_overlap_percent": sim_config.get("similarity_spatial_overlap_percent", 0.30),
+            "similarity_spatial_overlap_percent": sim_config.get(
+                "similarity_spatial_overlap_percent", 0.30
+            ),
             "overlap": sim_config.get("similarity_spatial_overlap_percent", 0.30),
-
             # Ghost Rejection
-            "similarity_spatial_motion_sensitivity": sim_config.get("similarity_spatial_motion_sensitivity", 150.0),
-            "motion_sensitivity": sim_config.get("similarity_spatial_motion_sensitivity", 150.0),
-            "similarity_spatial_noise_mad_offset_factor": sim_config.get("similarity_spatial_noise_mad_offset_factor", 0.15),
-            "noise_offset_factor": sim_config.get("similarity_spatial_noise_mad_offset_factor", 0.15),
-
+            "similarity_spatial_motion_sensitivity": sim_config.get(
+                "similarity_spatial_motion_sensitivity", 150.0
+            ),
+            "motion_sensitivity": sim_config.get(
+                "similarity_spatial_motion_sensitivity", 150.0
+            ),
+            "similarity_spatial_noise_mad_offset_factor": sim_config.get(
+                "similarity_spatial_noise_mad_offset_factor", 0.15
+            ),
+            "noise_offset_factor": sim_config.get(
+                "similarity_spatial_noise_mad_offset_factor", 0.15
+            ),
             # Workers
-            "similarity_spatial_num_workers": sim_config.get("similarity_spatial_num_workers", 1),
-
+            "similarity_spatial_num_workers": sim_config.get(
+                "similarity_spatial_num_workers", 1
+            ),
             # Smart Fusion (AI)
-            "similarity_smart_noise_alpha": sim_config.get("similarity_smart_noise_alpha", 1.0),
-            "similarity_smart_noise_aware_enable": sim_config.get("similarity_smart_noise_aware_enable", True),
-            "similarity_smart_noise_strength": sim_config.get("similarity_smart_noise_strength", 100.0),
-
+            "similarity_smart_noise_alpha": sim_config.get(
+                "similarity_smart_noise_alpha", 1.0
+            ),
+            "similarity_smart_noise_aware_enable": sim_config.get(
+                "similarity_smart_noise_aware_enable", True
+            ),
+            "similarity_smart_noise_strength": sim_config.get(
+                "similarity_smart_noise_strength", 100.0
+            ),
             # Backend selection
             "merging_mode": sim_config.get("merging_mode", "spatial_fusion"),
             "alignment_backend": sim_config.get("alignment_backend", "taichi_gpu"),
-            "optical_flow_type": sim_config.get("optical_flow_type", "alignment_tile"),
-
+            "optical_flow_type": sim_config.get("optical_flow_type", "farneback"),
             # Processing
             "use_multi_core": sim_config.get("use_multi_core", True),
-
             # Spatial Fusion specific
             "early_exit_threshold": sim_config.get("early_exit_threshold", 0.05),
             "equalize_brightness": sim_config.get("equalize_brightness", False),
@@ -251,219 +396,6 @@ class MFDenoiserAlgorithm:
 
         return params
 
-    # ------------------------------------------------------------------
-    # Tiling Helpers
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _compute_tile_starts(full_size, tile_size, overlap=0.3):
-        """Compute tile start positions for a dimension.
-
-        Ensures tiles always reach the edge with no gaps, deduplicated.
-        """
-        if tile_size >= full_size:
-            return np.array([0], dtype=np.int32)
-        step = max(int(tile_size * (1.0 - overlap)), 1)
-        starts = []
-        y = 0
-        while y + tile_size <= full_size:
-            starts.append(y)
-            if y + tile_size == full_size:
-                break
-            y = min(y + step, full_size - tile_size)
-        return np.array(starts, dtype=np.int32)
-
-    @staticmethod
-    def _make_hanning_window(h, w):
-        """Generate 2D Hanning window for tile stitching."""
-        win_y = np.hanning(h).astype(np.float32)
-        win_x = np.hanning(w).astype(np.float32)
-        return np.outer(win_y, win_x)
-
-    @staticmethod
-    def _compute_work_resolution(ref_h, ref_w, target_mp=12.5e6):
-        """Compute working resolution, downscaling if exceeding target megapixels."""
-        if (ref_h * ref_w) > target_mp:
-            scale = np.sqrt(target_mp / (ref_h * ref_w))
-            wh = int(ref_h * scale)
-            ww = int(ref_w * scale)
-        else:
-            wh, ww = ref_h, ref_w
-        return (wh // 2) * 2, (ww // 2) * 2
-
-    # ------------------------------------------------------------------
-    # Universal Tiled Merge
-    # ------------------------------------------------------------------
-    def _run_tiled_merge(self, processor, ctx, use_original_resolution=False):
-        """Universal tiled merge: processor.setup() + tile loop + Hanning stitching.
-
-        MFDenoiser owns the tile grid, extraction, Hanning window, accumulation,
-        and final stitching. The processor only implements process_tile().
-
-        Args:
-            processor: TileProcessor instance.
-            ctx: PipelineContext.
-            use_original_resolution: If True, skip work-resolution downscaling and
-                merge at the original image dimensions. Used by Average to preserve
-                full-quality output.
-
-        Returns: (sum_img, sum_weight, frame_count)
-        """
-        if use_original_resolution:
-            work_h, work_w = ctx.ref_h, ctx.ref_w
-        else:
-            work_h, work_w = self._compute_work_resolution(ctx.ref_h, ctx.ref_w)
-
-        print(
-            f"[TRACE] _run_tiled_merge: use_original_resolution={use_original_resolution}, ref=({ctx.ref_h}x{ctx.ref_w}), work=({work_h}x{work_w})"
-        )
-
-        tile_size = ctx.params.get("similarity_spatial_tile_size", 512)
-        tile_h = min(tile_size, work_h)
-        tile_w = min(tile_size, work_w)
-        overlap = ctx.params.get("similarity_spatial_overlap_percent", 0.3)
-
-        y_starts = self._compute_tile_starts(work_h, tile_h, overlap)
-        x_starts = self._compute_tile_starts(work_w, tile_w, overlap)
-        total_tiles = len(y_starts) * len(x_starts)
-
-        # Query processor for output dimensions
-        out_h, out_w = processor.get_output_size(tile_h, tile_w)
-        out_scale_y = out_h / tile_h
-        out_scale_x = out_w / tile_w
-
-        out_full_h = int(work_h * out_scale_y)
-        out_full_w = int(work_w * out_scale_x)
-        channels = ctx.reference_image.shape[2] if ctx.reference_image.ndim == 3 else 1
-
-        accumulator = np.zeros((out_full_h, out_full_w, channels), dtype=np.float32)
-        weight_accumulator = np.zeros((out_full_h, out_full_w), dtype=np.float32)
-        hanning_win = self._make_hanning_window(out_h, out_w)
-
-        # Processor setup
-        shared_data = {}
-        processor.setup(ctx, shared_data)
-
-        # Progress
-        merge_start = ctx.params.get("merge_progress_start", 0)
-        merge_end = ctx.params.get("merge_progress_end", 95)
-
-        frame_count = 0
-        try:
-            # Determine batch size
-            max_batch = 8
-            total = ctx.total_images
-
-            for batch_start in range(0, total, max_batch):
-                if ctx.stop_requested and ctx.stop_requested():
-                    break
-
-                batch_end = min(batch_start + max_batch, total)
-                batch_images = self._load_images(
-                    ctx.data_source,
-                    (batch_start, batch_end),
-                    ctx.stop_requested,
-                    linear_mode=ctx.is_linear_mode,
-                )
-                if not batch_images:
-                    continue
-
-                # Normalize batch to float32
-                batch_float = [
-                    normalize_image(img, ctx.ref_dtype) for img in batch_images
-                ]
-
-                # Let processor compute batch-specific data (shifts, weight maps, etc.)
-                processor.preprocess_batch(batch_float, shared_data)
-
-                processed_tiles = 0
-                for y_start in y_starts:
-                    for x_start in x_starts:
-                        if ctx.stop_requested and ctx.stop_requested():
-                            return None, None, 0
-
-                        # Extract tiles from all frames in batch
-                        frame_tiles = np.stack(
-                            [
-                                f[
-                                    y_start : y_start + tile_h,
-                                    x_start : x_start + tile_w,
-                                ]
-                                for f in batch_float
-                            ]
-                        )  # (batch_N, tile_h, tile_w, C)
-
-                        tile_ctx = TileContext(
-                            tile_y=y_start,
-                            tile_x=x_start,
-                            tile_h=tile_h,
-                            tile_w=tile_w,
-                            frame_tiles=frame_tiles,
-                            source_h=work_h,
-                            source_w=work_w,
-                            tile_idx=processed_tiles,
-                            total_tiles=total_tiles,
-                            update_progress=ctx.update_progress,
-                            stop_requested=ctx.stop_requested,
-                        )
-
-                        tile_result = processor.process_tile(tile_ctx, shared_data)
-                        if tile_result is None:
-                            processed_tiles += 1
-                            continue
-
-                        # Unpack (weighted_sum, weight_map)
-                        if isinstance(tile_result, tuple) and len(tile_result) == 2:
-                            tile_sum, tile_weight = tile_result
-                        else:
-                            tile_sum = tile_result
-                            tile_weight = np.ones((out_h, out_w), dtype=np.float32)
-
-                        # Ensure numpy float32
-                        if hasattr(tile_sum, "to_numpy"):
-                            tile_sum = tile_sum.to_numpy()
-                        tile_sum = np.asarray(tile_sum, dtype=np.float32)
-                        if hasattr(tile_weight, "to_numpy"):
-                            tile_weight = tile_weight.to_numpy()
-                        tile_weight = np.asarray(tile_weight, dtype=np.float32)
-
-                        # Map to output accumulator
-                        out_y = int(y_start * out_scale_y)
-                        out_x = int(x_start * out_scale_x)
-                        roi_y = slice(out_y, out_y + out_h)
-                        roi_x = slice(out_x, out_x + out_w)
-
-                        # Hanning-weighted accumulation
-                        if tile_sum.ndim == 3:
-                            win_3d = hanning_win[..., np.newaxis]
-                            accumulator[roi_y, roi_x] += tile_sum * win_3d
-                        else:
-                            accumulator[roi_y, roi_x] += (
-                                tile_sum[..., np.newaxis] * hanning_win[..., np.newaxis]
-                            )
-
-                        # Accumulate weight: per_frame_weight * hanning_window
-                        weight_accumulator[roi_y, roi_x] += tile_weight * hanning_win
-
-                        processed_tiles += 1
-                        if ctx.update_progress and total_tiles > 0:
-                            frac = (batch_start + processed_tiles) / total
-                            prog = int(merge_start + frac * (merge_end - merge_start))
-                            ctx.update_progress(
-                                prog, f"Merging tile {processed_tiles}/{total_tiles}..."
-                            )
-
-                frame_count += len(batch_images)
-                del batch_images, batch_float
-                gc.collect()
-
-        finally:
-            processor.teardown()
-
-        return accumulator, weight_accumulator, frame_count
-
-    # ------------------------------------------------------------------
-    # Stage 1: Load Data
-    # ------------------------------------------------------------------
     def stage_load_data(self, ctx):
         """Load images, detect linear mode, calculate proxy scale."""
         align_dir = os.path.join("database", "align")
@@ -493,19 +425,20 @@ class MFDenoiserAlgorithm:
             if not is_hdf5_cache_valid(ctx.hdf5_path, ref_image_path_current):
                 try:
                     os.remove(ctx.hdf5_path)
-                    print(
-                        f"[CacheValidation] HDF5 cache deleted (ref changed): {ctx.hdf5_path}"
-                    )
+                    print(f"[CacheValidation] HDF5 cache deleted: {ctx.hdf5_path}")
                 except Exception as e:
                     print(f"[CacheValidation] Failed to delete HDF5 cache: {e}")
 
-        ctx.data_source = (
-            ctx.hdf5_path if os.path.exists(ctx.hdf5_path) else ctx.image_paths
-        )
+        # Khusus untuk similarity merging mode (atau mode tiling langsung), bypass cache HDF5 agar memuat path gambar asli langsung dari disk
+        merging_mode = ctx.params.get("merging_mode", "average").lower()
+        if merging_mode in ("similarity", "spatial_fusion", "spatial"):
+            ctx.data_source = ctx.image_paths
+        else:
+            ctx.data_source = (
+                ctx.hdf5_path if os.path.exists(ctx.hdf5_path) else ctx.image_paths
+            )
 
-        # Count total images
         if isinstance(ctx.data_source, str) and ctx.data_source.endswith(".h5"):
-            print(_lang().PROCESSING_IMAGE_FROM_HDF5.format(ctx.data_source))
             try:
                 with h5py.File(ctx.data_source, "r") as f:
                     ctx.total_images = len(f.keys())
@@ -517,7 +450,6 @@ class MFDenoiserAlgorithm:
         if not ctx.total_images:
             return ctx
 
-        # Load reference image (first image)
         is_linear = ctx.params.get("enable_linear_mode", False)
         if ctx.image_paths:
             _, ext = os.path.splitext(ctx.image_paths[0])
@@ -546,7 +478,6 @@ class MFDenoiserAlgorithm:
         ctx.ref_dtype = reference_image.dtype
         ctx.ref_h, ctx.ref_w = reference_image.shape[:2]
 
-        # Auto-scale for Linear Mode
         if ctx.is_linear_mode:
             if ref_proxy_gt is not None:
                 ctx.proxy_scale = calculate_scale_from_gt_proxy(
@@ -558,187 +489,193 @@ class MFDenoiserAlgorithm:
                     target_mean=0.25,
                 )
 
-        # Normalize reference to float32
         ctx.reference_float = normalize_image(reference_image, reference_image.dtype)
-
-        # Generate unique session ID
         ctx.session_id = f"{ctx.output_name_base}_{time.strftime('%Y%m%d_%H%M%S')}"
 
         return ctx
 
-    # ------------------------------------------------------------------
-    # Stage 2: Align (pluggable)
-    # ------------------------------------------------------------------
-    def stage_align(self, ctx):
-        """Run alignment if images are not already aligned (no HDF5 cache)."""
-        is_hdf5 = isinstance(ctx.data_source, str) and ctx.data_source.endswith(".h5")
-        if is_hdf5:
-            ctx.params["enable_alignment"] = False
-            return ctx
-
-        backend = ctx.params.get("alignment_backend", "taichi_gpu")
-        if backend == "none":
-            return ctx
-        if callable(backend):
-            return backend(ctx)
-
-        # Default: Taichi GPU alignment
-        return self._align_taichi_gpu(ctx)
-
-    def _align_taichi_gpu(self, ctx):
-        """Run Taichi GPU alignment and write results to HDF5."""
+    def _process_linear_placeholder(self, ctx):
+        """Placeholder function for processing linear RAW mode."""
+        print("[LinearMode] Routing to linear mode placeholder (Not supported yet)...")
         if ctx.update_progress:
-            ctx.update_progress(0, "Running alignment (Taichi GPU) to create HDF5...")
+            ctx.update_progress(
+                100, "Linear RAW mode is not supported yet (placeholder)."
+            )
+        return None
 
-        os.makedirs(os.path.dirname(ctx.hdf5_path), exist_ok=True)
+    @staticmethod
+    def _compute_tile_starts(full_size, tile_size, overlap=0.3):
+        """Compute tile start positions for a dimension."""
+        if tile_size >= full_size:
+            return np.array([0], dtype=np.int32)
+        step = max(int(tile_size * (1.0 - overlap)), 1)
+        starts = []
+        y = 0
+        while y + tile_size <= full_size:
+            starts.append(y)
+            if y + tile_size == full_size:
+                break
+            y = min(y + step, full_size - tile_size)
+        return np.array(starts, dtype=np.int32)
 
-        # Load all images for alignment (Progress 0–25%)
-        images_for_align = self._load_images(
-            ctx.image_paths,
-            (0, len(ctx.image_paths)),
+    @staticmethod
+    def _make_hanning_window(h, w):
+        """Generate 2D Hanning window for tile stitching."""
+        win_y = np.hanning(h).astype(np.float32)
+        win_x = np.hanning(w).astype(np.float32)
+        return np.outer(win_y, win_x)
+
+    def _resolve_alignment_backend(self, ctx):
+        backend = ctx.params.get("alignment_backend", "farneback")
+        if isinstance(backend, str):
+            if backend.lower() == "farneback":
+                return FarnebackAlignment()
+        if callable(backend) or hasattr(backend, "align_tile"):
+            return backend
+        return FarnebackAlignment()  # Fallback
+
+    def _resolve_merge_backend(self, ctx):
+        backend = ctx.params.get("merging_mode", "average")
+        if isinstance(backend, str):
+            backend = backend.lower()
+            if backend == "average":
+                from .Average import AverageMerge
+                return AverageMerge()
+            elif backend == "median":
+                from .Median import MedianMerge
+                return MedianMerge()
+            elif backend in ("similarity", "spatial_fusion", "spatial"):
+                return SimilarityMerge()
+            else:
+                raise ValueError(f"Unsupported merging mode: {backend}")
+        if callable(backend) or hasattr(backend, "merge_tiles"):
+            return backend
+        raise ValueError("No valid merging backend could be resolved.")
+
+    def run_tile_align(self, ctx, ref_tile, comp_tiles_list):
+        """Align tiles using the resolved alignment backend."""
+        backend = self._resolve_alignment_backend(ctx)
+        aligned_tiles = []
+        for comp_tile in comp_tiles_list:
+            if hasattr(backend, "align_tile"):
+                warped = backend.align_tile(ref_tile, comp_tile)
+            else:
+                # If backend is a simple callable function
+                warped = backend(ref_tile, comp_tile)
+            aligned_tiles.append(warped)
+        return aligned_tiles
+
+    def run_tile_merge(self, ctx):
+        """Modular tile merging orchestrator working in continue_to_merge mode.
+
+        Performs tile-by-tile alignment and merging in-memory using pluggable backends.
+        """
+        channels = ctx.reference_image.shape[2] if ctx.reference_image.ndim == 3 else 1
+        accumulator = np.zeros((ctx.ref_h, ctx.ref_w, channels), dtype=np.float32)
+        weight_accumulator = np.zeros((ctx.ref_h, ctx.ref_w), dtype=np.float32)
+
+        tile_size = 512
+        overlap = 0.3
+        y_starts = self._compute_tile_starts(ctx.ref_h, tile_size, overlap)
+        x_starts = self._compute_tile_starts(ctx.ref_w, tile_size, overlap)
+        total_tiles = len(y_starts) * len(x_starts)
+
+        # Resolve the merge backend
+        merge_backend = self._resolve_merge_backend(ctx)
+
+        # Load all images ONCE to avoid repeated disk reads and demosaicing inside the loop
+        if ctx.update_progress:
+            ctx.update_progress(5, "Loading and preparing all frames...")
+        batch_images = self._load_images(
+            ctx.data_source,
+            (0, ctx.total_images),
             ctx.stop_requested,
             linear_mode=ctx.is_linear_mode,
-            alignment_mode=False,
-            update_progress=ctx.update_progress,
-            progress_start=0,
-            progress_end=25,
         )
+        frames = []
+        while batch_images:
+            img = batch_images.pop(0)
+            frames.append(normalize_image(img, ctx.ref_dtype))
+            del img
 
-        with h5py.File(ctx.hdf5_path, "w") as h5f:
-            from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
-                save_to_hdf5,
-                extract_exif,
-            )
+        processed_tiles = 0
 
-            # Store reference image path for cache validation
-            h5f.attrs["ref_image_path"] = ctx.image_paths[0] if ctx.image_paths else ""
-            save_to_hdf5(
-                h5f, "image_0", ctx.reference_image, extract_exif(ctx.image_paths[0])
-            )
+        for y_start in y_starts:
+            for x_start in x_starts:
+                if ctx.stop_requested and ctx.stop_requested():
+                    return None, None, 0
 
-            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.spatial_pipeline import (
-                process_in_gpu,
-            )
+                tile_h = min(tile_size, ctx.ref_h - y_start)
+                tile_w = min(tile_size, ctx.ref_w - x_start)
+                hanning_win = self._make_hanning_window(tile_h, tile_w)
 
-            process_in_gpu(
-                images=images_for_align,
-                reference_image_float=ctx.reference_float,
-                ref_image_h=ctx.ref_h,
-                ref_image_w=ctx.ref_w,
-                ref_dtype=ctx.ref_dtype,
-                work_res_h=ctx.ref_h,
-                work_res_w=ctx.ref_w,
-                tile_h=ctx.params.get("tile_size", (16, 16))[0],
-                tile_w=ctx.params.get("tile_size", (16, 16))[1],
-                update_progress=ctx.update_progress,
-                stop_requested=ctx.stop_requested,
-                p_align_start=25,
-                p_align_end=50,
-                is_linear_mode=ctx.is_linear_mode,
-                proxy_scale=ctx.proxy_scale,
-                h5_file_handle=h5f,
-                image_paths=ctx.image_paths,
-                reference_image=ctx.reference_image,
-                alignment_only=True,
-                optical_flow_type=ctx.params.get("optical_flow_type", "alignment_tile"),
-            )
+                # Extract tiles directly from in-memory frames
+                comp_tiles = [
+                    f[y_start : y_start + tile_h, x_start : x_start + tile_w]
+                    for f in frames
+                ]
+                ref_tile = comp_tiles[0]
 
-        del images_for_align
+                # Align comparison tiles against the reference tile
+                aligned_batch = self.run_tile_align(ctx, ref_tile, comp_tiles[1:])
+                aligned_tiles_all = [ref_tile] + aligned_batch
+
+                # Call the pluggable merge backend
+                if len(aligned_tiles_all) > 0:
+                    if hasattr(merge_backend, "merge_tiles"):
+                        merged_tile, tile_weight = merge_backend.merge_tiles(
+                            aligned_tiles_all
+                        )
+                    else:
+                        merged_tile, tile_weight = merge_backend(aligned_tiles_all)
+                else:
+                    merged_tile = ref_tile
+                    tile_weight = np.ones((tile_h, tile_w), dtype=np.float32)
+
+                # Release the GPU buffers allocated during tile alignment to prevent VRAM leak
+                from taichi_library.taichi_aot.engine import TaichiGPUBuffer
+                for item in aligned_batch:
+                    if isinstance(item, TaichiGPUBuffer):
+                        item.destroy()
+
+                # Stitch using Hanning window blending
+                roi_y = slice(y_start, y_start + tile_h)
+                roi_x = slice(x_start, x_start + tile_w)
+
+                if channels == 3 and merged_tile.ndim == 2:
+                    merged_tile = merged_tile[..., np.newaxis]
+
+                if channels == 3:
+                    accumulator[roi_y, roi_x] += (
+                        merged_tile * hanning_win[..., np.newaxis]
+                    )
+                else:
+                    accumulator[roi_y, roi_x] += merged_tile * hanning_win
+
+                weight_accumulator[roi_y, roi_x] += hanning_win
+
+                processed_tiles += 1
+                if ctx.update_progress and total_tiles > 0:
+                    prog = int(10 + (processed_tiles / total_tiles) * 80)
+                    ctx.update_progress(
+                        prog, f"Processing tile {processed_tiles}/{total_tiles}..."
+                    )
+
+        # Free loaded frames
+        del frames
         gc.collect()
 
-        # Re-check data source to load the newly created H5
-        ctx.data_source = (
-            ctx.hdf5_path if os.path.exists(ctx.hdf5_path) else ctx.image_paths
-        )
-        ctx.params["enable_alignment"] = False
-        ctx.params["merge_progress_start"] = 50
-        ctx.params["merge_progress_end"] = 95
-        return ctx
+        return accumulator, weight_accumulator, ctx.total_images
 
-    # ------------------------------------------------------------------
-    # Stage 3: Merge (pluggable via processor)
-    # ------------------------------------------------------------------
-    def stage_merge(self, ctx):
-        """Run the merge/denoise backend using the universal tiler.
-
-        Returns (sum_img, sum_weight, frame_count).
-        """
-        backend = ctx.params.get("merging_mode", "spatial")
-
-        if backend == "spatial_fusion":
-            # GPU AOT spatial fusion — uses compute_spatial Taichi AOT kernels
-            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.spatial_fusion_processor import (
-                SpatialFusionProcessor,
-            )
-
-            processor = SpatialFusionProcessor(
-                motion_sensitivity=ctx.params.get("motion_sensitivity", 150.0),
-                noise_offset_factor=ctx.params.get("noise_offset_factor", 0.15),
-                early_exit_threshold=ctx.params.get("early_exit_threshold", 0.05),
-            )
-            frame_count, sum_img, sum_weight, ref_noise_sigma = processor.process(
-                images=None,  # Will load from data_source
-                reference_image_float=ctx.reference_float,
-                ref_h=ctx.ref_h,
-                ref_w=ctx.ref_w,
-                ref_dtype=ctx.ref_dtype,
-                work_res_h=ctx.ref_h,
-                work_res_w=ctx.ref_w,
-                update_progress=ctx.update_progress,
-                stop_requested=ctx.stop_requested,
-                is_linear_mode=ctx.is_linear_mode,
-                proxy_scale=getattr(ctx, "proxy_scale", 1.0),
-                data_source=ctx.data_source,
-                image_paths=ctx.image_paths,
-            )
-            return sum_img, sum_weight, frame_count
-
-        elif backend == "average":
-            print(
-                "[TRACE] MFDenoiser.stage_merge: backend='average', using AverageDenoiseProcessor"
-            )
-            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.average_denoise_processor import (
-                AverageDenoiseProcessor,
-            )
-
-            processor = AverageDenoiseProcessor()
-            return self._run_tiled_merge(processor, ctx, use_original_resolution=True)
-        elif backend == "smart":
-            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.smart_fusion.smart_denoise_processor import (
-                SmartDenoiseProcessor,
-            )
-
-            processor = SmartDenoiseProcessor()
-        elif backend == "super_resolution":
-            from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.sr_processor import (
-                SuperResolutionProcessor,
-            )
-
-            processor = SuperResolutionProcessor(
-                scale=ctx.params.get("sr_scale", 2),
-                num_iterations=ctx.params.get("sr_iterations", 120),
-            )
-        else:
-            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.spatial_denoise_processor import (
-                SpatialDenoiseProcessor,
-            )
-
-            processor = SpatialDenoiseProcessor()
-
-        return self._run_tiled_merge(processor, ctx)
-
-    # ------------------------------------------------------------------
-    # Stage 4: Post-Process (pluggable)
-    # ------------------------------------------------------------------
-    def stage_postprocess(self, ctx, sum_img, sum_weight, frame_count):
-        """Normalize accumulated result and apply optional denoise."""
+    def normalize_result(self, ctx, sum_img, sum_weight, frame_count):
+        """Normalize accumulated result and scale back to original bit-depth."""
         if sum_img is None or frame_count <= 0:
             channels = (
                 ctx.reference_image.shape[2] if ctx.reference_image.ndim == 3 else 1
             )
             return np.zeros((ctx.ref_h, ctx.ref_w, channels), dtype=ctx.ref_dtype)
 
-        # Normalize: divide by weight
+        # Normalize: divide accumulated sum by the weight map
         valid_mask = sum_weight > 1e-6
         normalized = np.zeros_like(sum_img)
         np.divide(
@@ -748,28 +685,15 @@ class MFDenoiserAlgorithm:
             where=valid_mask[:, :, np.newaxis],
         )
 
-        # Fallback: fill invalid pixels with reference image (resize to work resolution if needed)
+        # Fallback: fill invalid/unmapped pixels with reference image float representation
         if not np.all(valid_mask):
-            work_h, work_w = sum_weight.shape[:2]
-            ref_h, ref_w = ctx.reference_float.shape[:2]
-            if (work_h, work_w) != (ref_h, ref_w):
-                ref_resized = cv2.resize(
-                    ctx.reference_float, (work_w, work_h), interpolation=cv2.INTER_AREA
-                )
-            else:
-                ref_resized = ctx.reference_float
-            normalized[~valid_mask] = ref_resized[~valid_mask]
+            normalized[~valid_mask] = ctx.reference_float[~valid_mask]
 
-        # Pluggable post-processor
-        postprocessor = ctx.params.get("postprocessor", "adaptive_box")
-        if callable(postprocessor):
-            normalized = postprocessor(ctx, normalized)
-        elif postprocessor == "adaptive_box":
-            normalized = self._postprocess_adaptive_box(ctx, normalized)
-        # else: "none" — skip post-processing
-
-        # Scale back to original bit-depth
-        max_val = np.iinfo(ctx.ref_dtype).max
+        # Scale back to original bit-depth (e.g. uint8/uint16) atau pertahankan float [0..1]
+        if np.issubdtype(ctx.ref_dtype, np.integer):
+            max_val = np.iinfo(ctx.ref_dtype).max
+        else:
+            max_val = 1.0
         channels = ctx.reference_image.shape[2] if ctx.reference_image.ndim == 3 else 1
         if channels == 1:
             final_out = np.mean(normalized * max_val, axis=2)
@@ -778,29 +702,6 @@ class MFDenoiserAlgorithm:
 
         return np.clip(final_out, 0, max_val).astype(ctx.ref_dtype)
 
-    def _postprocess_adaptive_box(self, ctx, normalized):
-        """Adaptive box-filter high-frequency denoise based on noise estimation."""
-        ref_gray = cv2.cvtColor(ctx.reference_float, cv2.COLOR_BGR2GRAY)
-        est_noise = estimate_noise_in_python(ref_gray)
-
-        if est_noise >= 0.20:
-            print(
-                f"[Denoise] Noise detected (sigma={est_noise:.4f}). Applying Adaptive HF Denoise..."
-            )
-            lf = cv2.boxFilter(
-                normalized, ddepth=-1, ksize=(3, 3), borderType=cv2.BORDER_REFLECT
-            )
-            hf = normalized - lf
-            alpha = np.clip(0.15 + (est_noise - 0.20) * 0.5, 0.15, 0.45)
-            hf_clean = hf * (1.0 - alpha)
-            normalized = lf + hf_clean
-            print(f"  [Denoise] Damped HF noise by {alpha*100:.1f}%")
-
-        return normalized
-
-    # ------------------------------------------------------------------
-    # Stage 5: Save
-    # ------------------------------------------------------------------
     def stage_save(self, ctx, result_image):
         """Save the final result to disk. Returns output path."""
         output_folder = "database/stack"
@@ -828,9 +729,6 @@ class MFDenoiserAlgorithm:
             )
         return output_path
 
-    # ------------------------------------------------------------------
-    # Orchestrator
-    # ------------------------------------------------------------------
     def run_pipeline(
         self,
         single_process=True,
@@ -850,45 +748,43 @@ class MFDenoiserAlgorithm:
         )
         ctx.params = self._load_params()
 
-        # Inject caller-provided overrides into params
         if merging_mode is not None:
             ctx.params["merging_mode"] = merging_mode
         if output_suffix is not None:
             ctx.params["output_suffix"] = output_suffix
 
-        # Stage 1: Load
+        # Stage 1: Load Data
         ctx = self.stage_load_data(ctx)
         if not ctx.total_images:
             if update_progress:
                 update_progress(100, _lang().NO_IMAGE_PATH_PROCESSED_IMAGE)
             return None
 
-        # Stage 2: Align
-        ctx = self.stage_align(ctx)
-        if ctx.stop_requested and ctx.stop_requested():
-            return None
+        # Check Linear RAW Mode
+        if ctx.is_linear_mode:
+            if ctx.params.get("enable_linear_mode", False):
+                return self._process_linear_placeholder(ctx)
+            else:
+                ctx.is_linear_mode = False
 
-        # Stage 3: Merge
+        # Stage 2: Merge (run_tile_merge handles both align and merge on-the-fly)
         if ctx.update_progress:
             merge_start = ctx.params.get("merge_progress_start", 0)
             ctx.update_progress(merge_start, "Merging frames...")
 
-        sum_img, sum_weight, frame_count = self.stage_merge(ctx)
+        sum_img, sum_weight, frame_count = self.run_tile_merge(ctx)
         if ctx.stop_requested and ctx.stop_requested():
             return None
 
-        # Stage 4: Post-Process
+        # Stage 4: Normalize Result
         if ctx.update_progress:
             ctx.update_progress(95, "Finalizing fusion...")
-        result = self.stage_postprocess(ctx, sum_img, sum_weight, frame_count)
+        result = self.normalize_result(ctx, sum_img, sum_weight, frame_count)
 
         # Stage 5: Save
         output_path = self.stage_save(ctx, result)
         return output_path
 
-    # ------------------------------------------------------------------
-    # Image Loading Utility
-    # ------------------------------------------------------------------
     @staticmethod
     def _load_images(
         data_source,
@@ -907,13 +803,19 @@ class MFDenoiserAlgorithm:
         ref_proxy = None
 
         if isinstance(data_source, str) and data_source.endswith(".h5"):
+            from taichi_library.taichi_aot import allocate_pinned_numpy
+
             with h5py.File(data_source, "r") as h5f:
-                keys = list(h5f.keys())[batch_start:batch_end]
-                batch_images = [
-                    np.array(h5f[key])
-                    for key in keys
-                    if not (stop_requested and stop_requested())
-                ]
+                # Sort keys numerically to ensure order like image_0, image_1, image_2... instead of alphabetical (e.g. image_10 before image_2)
+                sorted_keys = sorted(h5f.keys(), key=lambda x: int(x.split('_')[1]) if '_' in x and x.split('_')[1].isdigit() else x)
+                keys = sorted_keys[batch_start:batch_end]
+                for key in keys:
+                    if stop_requested and stop_requested():
+                        break
+                    ds = h5f[key]
+                    pinned_arr = allocate_pinned_numpy(ds.shape, ds.dtype)
+                    ds.read_direct(pinned_arr)
+                    batch_images.append(pinned_arr)
         elif isinstance(data_source, list):
             batch_paths = data_source[batch_start:batch_end]
             load_res = load_images_from_paths(
@@ -1002,7 +904,6 @@ def running_mf_denoiser(
 ):
     """UI Entry point for MF Denoiser."""
 
-    # === BATCH MODE (no GUI dialog) ===
     if batch_id is not None and progress_callback is not None:
         try:
             main(
@@ -1018,7 +919,6 @@ def running_mf_denoiser(
             raise e
         return
 
-    # === SINGLE MODE (with GUI dialog) ===
     process_finished = False
     dialog = QDialog(parent)
     dialog.setWindowTitle(_lang().WINDOW_TITLE_SIMILARITY)
@@ -1102,8 +1002,23 @@ def running_mf_denoiser(
     dialog.exec()
 
 
-# Backward-compatible alias — existing callers can still import running_similarity
-running_similarity = running_mf_denoiser
+def running_similarity(
+    parent=None,
+    single_process=None,
+    batch_id=None,
+    progress_callback=None,
+    stop_callback=None,
+):
+    return running_mf_denoiser(
+        parent=parent,
+        single_process=single_process,
+        batch_id=batch_id,
+        progress_callback=progress_callback,
+        stop_callback=stop_callback,
+        merging_mode="similarity",
+        output_suffix="similarity",
+    )
+
 
 
 if __name__ == "__main__":

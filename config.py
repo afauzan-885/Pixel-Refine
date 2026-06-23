@@ -1,5 +1,11 @@
 import os
 
+# AOT (Ahead-of-Time) Mode configuration
+# Default: "1" (AOT/Production mode), set to "0" for compile/JIT mode.
+AOT_MODE = os.environ.get("AOT_MODE", os.environ.get("PIXEL_REFINE_AOT_MODE", "1"))
+os.environ["AOT_MODE"] = AOT_MODE
+os.environ["PIXEL_REFINE_AOT_MODE"] = AOT_MODE
+
 APP_VERSION = "0.6.0"
 MODEL_CONFIG = {
     "refiner": "database/Learning_Model/mobilenet_refiner.pth",

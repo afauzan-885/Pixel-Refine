@@ -91,6 +91,7 @@ class SpatialFusionProcessor:
         # Validate GPU availability
         try:
             from taichi_library.taichi_aot.engine import AOTEngine
+
             _engine = AOTEngine()
         except Exception as e:
             raise RuntimeError(
@@ -109,8 +110,12 @@ class SpatialFusionProcessor:
         tile_w = kwargs.get("tile_w", 16)
 
         # Compute tile starts for internal tiling
-        row_starts = self._compute_tile_starts(work_res_h, tile_h, overlap=kwargs.get("overlap", 0.3))
-        col_starts = self._compute_tile_starts(work_res_w, tile_w, overlap=kwargs.get("overlap", 0.3))
+        row_starts = self._compute_tile_starts(
+            work_res_h, tile_h, overlap=kwargs.get("overlap", 0.3)
+        )
+        col_starts = self._compute_tile_starts(
+            work_res_w, tile_w, overlap=kwargs.get("overlap", 0.3)
+        )
 
         # Determine number of images
         data_source = kwargs.get("data_source", images)
@@ -118,6 +123,7 @@ class SpatialFusionProcessor:
 
         if isinstance(data_source, str) and data_source.endswith(".h5"):
             import h5py
+
             with h5py.File(data_source, "r") as f:
                 num_images = sum(1 for k in f.keys() if k.startswith("image_"))
         elif isinstance(data_source, list):
@@ -135,7 +141,9 @@ class SpatialFusionProcessor:
 
         print(f"[SpatialFusion] Processing {num_images} images with GPU AOT...")
         print(f"[SpatialFusion] Work resolution: {work_res_w}x{work_res_h}")
-        print(f"[SpatialFusion] Tile size: {tile_w}x{tile_h}, Rows: {len(row_starts)}, Cols: {len(col_starts)}")
+        print(
+            f"[SpatialFusion] Tile size: {tile_w}x{tile_h}, Rows: {len(row_starts)}, Cols: {len(col_starts)}"
+        )
 
         # Prepare reference on GPU
         ref_work_res_pass2_gpu, ref_noise_sigma = taichi_bridge.prepare_reference_aot(
@@ -145,21 +153,22 @@ class SpatialFusionProcessor:
         print(f"[SpatialFusion] Reference noise sigma: {ref_noise_sigma:.6f}")
 
         # Global accumulation buffers
-        channels = reference_image_float.shape[2] if reference_image_float.ndim == 3 else 1
-        final_image_sum_full_res = np.zeros(
-            (ref_h, ref_w, channels), dtype=np.float32
+        channels = (
+            reference_image_float.shape[2] if reference_image_float.ndim == 3 else 1
         )
+        final_image_sum_full_res = np.zeros((ref_h, ref_w, channels), dtype=np.float32)
         weight_map_sum_full_res = np.zeros((ref_h, ref_w), dtype=np.float32)
 
         processed_count = 0
 
         try:
             from taichi_library.taichi_aot.engine import AOTEngine
+
             engine = AOTEngine()
 
             _sum_gpu = taichi_aot.upload(final_image_sum_full_res)
             _weight_sum_full_gpu = taichi_aot.upload(weight_map_sum_full_res)
-            _base_window_gpu = taichi_aot.generate_hanning_window_2d(
+            _base_window_gpu = taichi_aot.hanning(
                 (tile_h, tile_w), exclude_boundary=False
             )
             _rows_gpu = taichi_aot.upload(row_starts)
@@ -180,17 +189,28 @@ class SpatialFusionProcessor:
 
                     # Load batch
                     chunk_images = []
-                    if data_source is not None and isinstance(data_source, str) and data_source.endswith(".h5"):
+                    if (
+                        data_source is not None
+                        and isinstance(data_source, str)
+                        and data_source.endswith(".h5")
+                    ):
                         import h5py
+
                         with h5py.File(data_source, "r") as h5f:
                             for idx in range(start_idx, end_idx):
                                 chunk_images.append(h5f[f"image_{idx}"][:])
                     else:
-                        source = images if images is not None and isinstance(images, list) else data_source
+                        source = (
+                            images
+                            if images is not None and isinstance(images, list)
+                            else data_source
+                        )
                         if isinstance(source, list):
                             chunk_images = source[start_idx:end_idx]
                         else:
-                            print(f"[SpatialFusion] Cannot load images from source: {type(source)}")
+                            print(
+                                f"[SpatialFusion] Cannot load images from source: {type(source)}"
+                            )
                             break
 
                     for chunk_i, img_orig in enumerate(chunk_images):
@@ -202,15 +222,17 @@ class SpatialFusionProcessor:
                             continue
 
                         # Preprocess frame on GPU
-                        curr_full_gpu, curr_work_gray_gpu = taichi_bridge.prepare_frame_aot(
-                            img_orig,
-                            ref_dtype,
-                            is_linear_mode,
-                            proxy_scale,
-                            work_res_h,
-                            work_res_w,
-                            ref_h,
-                            ref_w,
+                        curr_full_gpu, curr_work_gray_gpu = (
+                            taichi_bridge.prepare_frame_aot(
+                                img_orig,
+                                ref_dtype,
+                                is_linear_mode,
+                                proxy_scale,
+                                work_res_h,
+                                work_res_w,
+                                ref_h,
+                                ref_w,
+                            )
                         )
 
                         # Compute spatial weights (ghost rejection)
@@ -263,6 +285,7 @@ class SpatialFusionProcessor:
                     # Free chunk
                     del chunk_images
                     import gc
+
                     gc.collect()
 
                 # Finalize: mean division
@@ -294,8 +317,12 @@ class SpatialFusionProcessor:
 
             finally:
                 for buf in [
-                    _sum_gpu, _weight_sum_full_gpu, _base_window_gpu,
-                    _rows_gpu, _cols_gpu, _weight_work_gpu,
+                    _sum_gpu,
+                    _weight_sum_full_gpu,
+                    _base_window_gpu,
+                    _rows_gpu,
+                    _cols_gpu,
+                    _weight_work_gpu,
                 ]:
                     if buf is not None:
                         try:
@@ -313,7 +340,12 @@ class SpatialFusionProcessor:
                     pass
 
         print(f"[SpatialFusion] Done. Processed {processed_count}/{num_images} frames.")
-        return processed_count, final_image_sum_full_res, weight_map_sum_full_res, ref_noise_sigma
+        return (
+            processed_count,
+            final_image_sum_full_res,
+            weight_map_sum_full_res,
+            ref_noise_sigma,
+        )
 
     @staticmethod
     def _compute_tile_starts(full_size, tile_size, overlap=0.3):

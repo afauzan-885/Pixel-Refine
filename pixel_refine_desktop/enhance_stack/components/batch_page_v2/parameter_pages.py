@@ -4,18 +4,13 @@ from PySide6.QtCore import Qt
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.light_glue_parameter_settings import (
     get_light_glue_page,
 )
-from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.akaze_parameter_settings import (
-    get_akaze_page,
-)
 
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.farneback_parameter_settings import (
     get_farneback_optical_flow_page,
 )
-from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.orb_parameter_settings import (
-    get_orb_page,
-)
-from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.similarity_parameter_settings import (
-    get_similarity_settings_page,
+
+from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.MFDenoiser_parameter_settings import (
+    get_mfdenoiser_settings_page,
 )
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 
@@ -37,26 +32,18 @@ class ParameterPages:
         default_index = self.stacked_widget.addWidget(default_page)
         self.setting_pages_map["default"] = default_index
 
-        akaze_page = get_akaze_page()
-        index_akaze = self.stacked_widget.addWidget(akaze_page)
-        self.setting_pages_map["AKAZE"] = index_akaze
-
-        orb_page = get_orb_page()
-        index_orb = self.stacked_widget.addWidget(orb_page)
-        self.setting_pages_map["ORB"] = index_orb
-
         farneback_page = get_farneback_optical_flow_page()
         index_farneback = self.stacked_widget.addWidget(farneback_page)
         self.setting_pages_map["Farneback Optical Flow"] = index_farneback
 
-        # # Halaman untuk Average (dari Denoising Dropdown)
-        similarity_v1_page = get_similarity_settings_page()
-        index_similarity_v1 = self.stacked_widget.addWidget(similarity_v1_page)
-        self.setting_pages_map["Similarity"] = index_similarity_v1
-
         light_glue_page = get_light_glue_page()
-        index_similarity_v2 = self.stacked_widget.addWidget(light_glue_page)
-        self.setting_pages_map["Light Glue"] = index_similarity_v2
+        index_light_glue = self.stacked_widget.addWidget(light_glue_page)
+        self.setting_pages_map["Light Glue"] = index_light_glue
+
+        # MFDenoiser unified settings page (handles Similarity, AKAZE, ORB)
+        mfdenoiser_page = get_mfdenoiser_settings_page()
+        index_mfdenoiser = self.stacked_widget.addWidget(mfdenoiser_page)
+        self.setting_pages_map["MFDenoiser"] = index_mfdenoiser
 
     def wrap_in_scroll_area(self, widget):
         """

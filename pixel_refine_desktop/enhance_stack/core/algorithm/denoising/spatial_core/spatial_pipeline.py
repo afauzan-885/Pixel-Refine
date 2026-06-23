@@ -442,7 +442,9 @@ def process_in_gpu(
         # Resolve flow_backend / optical_flow_type
         # If alignment_variant is "block_align" or optical_flow_type is "block_align", use it.
         # Otherwise default to optical_flow_type parameter.
-        flow_backend = kwargs.get("optical_flow_type", kwargs.get("flow_backend", "alignment_tile"))
+        flow_backend = kwargs.get(
+            "optical_flow_type", kwargs.get("flow_backend", "alignment_tile")
+        )
         if alignment_variant == "block_align":
             flow_backend = "block_align"
 
@@ -495,7 +497,7 @@ def process_in_gpu(
         generate_spatial_weights_taichi,
         accumulate_spatial_merging_taichi,
     )
-    from taichi_library.taichi_algorithm.bilinear_interpolation import (
+    from taichi_library.taichi_algorithm.interpolation.bilinear_interpolation import (
         bilinear_resize,
     )
 
@@ -520,9 +522,7 @@ def process_in_gpu(
 
         _sum_gpu = taichi_aot.upload(final_image_sum_full_res)
         _weight_sum_full_gpu = taichi_aot.upload(weight_map_sum_full_res)
-        _base_window_gpu = taichi_aot.generate_hanning_window_2d(
-            (tile_h, tile_w), exclude_boundary=False
-        )
+        _base_window_gpu = taichi_aot.hanning((tile_h, tile_w), exclude_boundary=False)
 
         _rows_gpu = taichi_aot.upload(row_starts)
         _rows_gpu.dtype = np.int32

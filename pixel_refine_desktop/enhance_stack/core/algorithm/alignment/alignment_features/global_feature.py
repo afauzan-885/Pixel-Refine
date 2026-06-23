@@ -26,6 +26,14 @@ except ImportError:
 
 # Removed module-level language_config import to prevent circular dependencies
 
+# Taichi AOT for GPU operations
+try:
+    import taichi_library.taichi_aot as ta_aot
+    TAICHI_AOT_AVAILABLE = True
+except Exception:
+    ta_aot = None
+    TAICHI_AOT_AVAILABLE = False
+
 
 # =========================================================================
 # === 2. MANAJEMEN DATA & I/O (Database, File, Metadata)
@@ -1300,12 +1308,28 @@ def estimate_noise_variance(
     if gray_image is None or gray_image.size == 0:
         return 0.0  # Atau nilai default yang sesuai
 
-    # 1. Deteksi tepi untuk mengidentifikasi area non-datar
-    edges = cv2.Canny(gray_image, edge_threshold_low, edge_threshold_low * 2)
+    # 1. Deteksi tepi untuk mengidentifikasi area non-datar (Taichi AOT atau OpenCV)
+    if TAICHI_AOT_AVAILABLE and ta_aot is not None:
+        try:
+            gray_f32 = gray_image.astype(np.float32) / 255.0 if gray_image.dtype == np.uint8 else gray_image.astype(np.float32)
+            edges_f32 = ta_aot.canny_aot(gray_f32, low_threshold=edge_threshold_low / 255.0, high_threshold=(edge_threshold_low * 2) / 255.0)
+            edges = (edges_f32 > 0.5).astype(np.uint8) * 255
+        except Exception:
+            edges = cv2.Canny(gray_image, edge_threshold_low, edge_threshold_low * 2)
+    else:
+        edges = cv2.Canny(gray_image, edge_threshold_low, edge_threshold_low * 2)
 
-    # 2. Dilatasi tepi untuk sedikit memperluas area non-datar
+    # 2. Dilatasi tepi untuk sedikit memperluas area non-datar (Taichi AOT atau OpenCV)
     kernel = np.ones((dilate_kernel_size, dilate_kernel_size), np.uint8)
-    dilated_edges = cv2.dilate(edges, kernel, iterations=1)
+    if TAICHI_AOT_AVAILABLE and ta_aot is not None:
+        try:
+            edges_f32 = edges.astype(np.float32)
+            dilated_f32 = ta_aot.dilate(edges_f32, kernel=kernel.astype(np.int32), ksize=dilate_kernel_size)
+            dilated_edges = (dilated_f32 > 127).astype(np.uint8) * 255
+        except Exception:
+            dilated_edges = cv2.dilate(edges, kernel, iterations=1)
+    else:
+        dilated_edges = cv2.dilate(edges, kernel, iterations=1)
 
     # 3. Buat mask untuk area "datar" (piksel yang bukan bagian dari tepi yang diperluas)
     flat_mask = (dilated_edges == 0).astype(np.bool_)

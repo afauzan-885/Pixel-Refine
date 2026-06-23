@@ -94,6 +94,9 @@ class LeftPanel(QWidget):
         self.algorithm_panel = AlgorithmPanel(
             controller=self.controller, store=self.store
         )
+        self.algorithm_panel.display_panel = self.display_panel
+        self.algorithm_panel._all_process_buttons.append(self.display_panel.start_btn_ref)
+        self.display_panel.start_btn_ref.clicked.connect(self.algorithm_panel._on_process_clicked)
 
         # Empty widget sebagai default (untuk initial collapsed state)
         self.empty_algorithm_widget = QWidget()
@@ -116,7 +119,9 @@ class LeftPanel(QWidget):
 
         # Connect signals
         self.algorithm_panel.process_requested.connect(self._forward_process_requested)
+        self.algorithm_panel.process_requested.connect(self._on_process_started)
         self.algorithm_panel.processing_completed.connect(self._on_algorithm_completed)
+        self.algorithm_panel.processing_completed.connect(self._on_process_finished_or_cancelled)
         self.display_panel.images_to_import_selected.connect(self._on_images_imported)
         self.algorithm_panel.visibility_state_changed.connect(
             self._handle_algorithm_panel_visibility
@@ -330,12 +335,27 @@ class LeftPanel(QWidget):
             self.display_panel.display_processed_result(expected_path)
         else:
             print(f"[LeftPanel] Result file not found: {expected_path}")
+            # Fallback disabled for tracking debugging purposes.
+            # results = self.display_panel.logic.detect_processed_results(
+            #     first_image_path
+            # )
+            # if results:
+            #     print(f"[LeftPanel] Falling back to found result: {results[0]['path']}")
+            #     self.display_panel.display_processed_result(results[0]["path"])
 
-            # Additional fallback: Check if ANY result exists and show that instead
-            # This helps if naming conventions drift
-            results = self.display_panel.logic.detect_processed_results(
-                first_image_path
-            )
-            if results:
-                print(f"[LeftPanel] Falling back to found result: {results[0]['path']}")
-                self.display_panel.display_processed_result(results[0]["path"])
+    def _on_process_started(self, settings):
+        if hasattr(self.display_panel, "save_btn_ref") and self.display_panel.save_btn_ref:
+            self.display_panel.save_btn_ref.setEnabled(False)
+            self.display_panel.save_btn_ref.setStyleSheet("""
+                QPushButton {
+                    background-color: #D3D3D3;
+                    color: #888888;
+                    border: 1px solid #C0C0C0;
+                    border-radius: 4px;
+                    padding: 5px;
+                }
+            """)
+
+    def _on_process_finished_or_cancelled(self, data):
+        if hasattr(self.display_panel, "update_save_button_state"):
+            self.display_panel.update_save_button_state()
