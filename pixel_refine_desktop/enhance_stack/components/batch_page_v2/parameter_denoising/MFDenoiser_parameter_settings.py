@@ -249,11 +249,12 @@ class MFDenoiserParameterPage(QWidget):
         compact = available_width < 390
         margin = 8 if compact else 12
         spacing = 8 if compact else 12
+        margin_lr = margin // 2
 
         for page in self._tab_pages:
             page_layout = page.layout()
             if page_layout:
-                page_layout.setContentsMargins(margin, margin, margin, margin)
+                page_layout.setContentsMargins(margin_lr, margin, margin_lr, margin)
                 page_layout.setSpacing(spacing)
 
         for form_map in (

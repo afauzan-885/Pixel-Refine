@@ -12,7 +12,7 @@ if project_root not in sys.path:
 
 from taichi_library.taichi_aot.engine import AOTEngine
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import taichi_bridge
-import taichi_library.taichi_aot as taichi_aot
+from taichi_library import taichi_aot
 
 def put_text(img, text):
     res = img.copy()
@@ -34,7 +34,7 @@ def test_stress_hybrid_pipeline():
     print(f"Working with zoomed image: {w}x{h}")
     
     # Load AOT Modules
-    tcm_path = os.path.join(project_root, "pixel_refine_desktop", "ui", "data", "aot_assets", "compute_flow_vulkan.tcm")
+    tcm_path = os.path.join(project_root, "taichi_library", "taichi_algorithm", "aot_tcm", "optical_flow_vulkan.tcm")
     mod = engine.load(tcm_path)
     
     # Pergeseran 5 tahap

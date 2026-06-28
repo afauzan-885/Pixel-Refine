@@ -36,6 +36,10 @@ COLOR_ALIGNMENT_RED = "#E74C3C"      # Premium calm red
 COLOR_DENOISING_GREEN = "#2ECC71"    # Premium calm green
 COLOR_INACTIVE_TAB = "#BDC3C7"       # Muted gray for inactive state
 COLOR_BACKGROUND = "#FFFFFF"
+COLOR_ALIGNMENT_BG = "#FEF2F2"
+COLOR_ALIGNMENT_BORDER_SOFT = "#F3B4AD"
+COLOR_DENOISING_BG = "#F0FDF4"
+COLOR_DENOISING_BORDER_SOFT = "#A8E6BF"
 
 @live_update("refresh_responsive_layout", on_resize=True)
 class SwitchableParameterPanel(QWidget):
@@ -106,8 +110,16 @@ class SwitchableParameterPanel(QWidget):
 
         width_cap = max(240, available_w - 20)
         height_cap = max(240, available_h - 70)
-        width = max(240, min(520, int(available_w * 0.42), width_cap))
-        height = max(240, min(640, height_cap))
+        
+        if self.active_tab == "alignment":
+            preferred_width = max(260 + 58, int(available_w * 0.35))
+            width = max(290, min(750, preferred_width, width_cap))
+        else:
+            preferred_width = max(260 + 58, int(available_w * 0.24))
+            width = max(290, min(520, preferred_width, width_cap))
+
+        # Tinggi maksimal ditambah 30%: dari 0.52 menjadi 0.67 area layar
+        height = max(240, min(562, int(available_h * 0.67), height_cap))
         return width, height
 
     def _sync_overlay_geometry(self):
@@ -287,12 +299,13 @@ class SwitchableParameterPanel(QWidget):
         # Toggle visibility if same tab clicked
         if self.active_tab == tab_name and self.content_wrapper.isVisible():
             self.set_expanded(False)
+            self.active_tab = None
             self._update_styles("transparent")
             return
 
         # Show and switch
-        self.set_expanded(True)
         self.active_tab = tab_name
+        self.set_expanded(True)
         if tab_name == "alignment":
             self.content_stack.setCurrentWidget(self.align_page)
             border_color = COLOR_ALIGNMENT_RED
@@ -303,6 +316,28 @@ class SwitchableParameterPanel(QWidget):
         self._update_styles(border_color)
 
     def _update_styles(self, active_color):
+        is_expanded = self.content_wrapper.isVisible()
+        compact = self.width() < 380
+        panel_bg = COLOR_BACKGROUND
+        soft_border = "#DDE5EC"
+        selection_bg = "#EAF2F8"
+        selection_text = "#2C3E50"
+        if is_expanded and self.active_tab == "alignment":
+            panel_bg = COLOR_ALIGNMENT_BG
+            soft_border = COLOR_ALIGNMENT_BORDER_SOFT
+            selection_bg = "#FDE2E2"
+            selection_text = "#7A1F17"
+        elif is_expanded and self.active_tab == "denoising":
+            panel_bg = COLOR_DENOISING_BG
+            soft_border = COLOR_DENOISING_BORDER_SOFT
+            selection_bg = "#DCFCE7"
+            selection_text = "#166534"
+
+        combo_padding_y = 3 if compact else 4
+        combo_padding_x = 7 if compact else 8
+        combo_font_size = 9 if compact else 10
+        tooltip_font_size = 9 if compact else 10
+
         # Main container border styles matching active tab
         self.setStyleSheet(f"""
             #SwitchableParameterPanel {{
@@ -311,14 +346,84 @@ class SwitchableParameterPanel(QWidget):
                 border: none;
             }}
             QWidget#ParamContentWrapper {{
-                background-color: {COLOR_BACKGROUND};
+                background-color: {panel_bg};
                 border: 3px solid {active_color};
                 border-radius: 8px;
             }}
+            QWidget#ParamContentWrapper QWidget {{
+                background-color: {panel_bg};
+            }}
+            QWidget#ParamContentWrapper QComboBox,
+            QWidget#ParamContentWrapper QComboBox QAbstractItemView,
+            QWidget#ParamContentWrapper QLineEdit {{
+                background-color: #FFFFFF;
+                color: #2C3E50;
+            }}
             QComboBox {{
-                padding: 4px 8px;
-                border: 1px solid #BDC3C7;
+                background-color: #FFFFFF;
+                color: #2C3E50;
+                padding: {combo_padding_y}px {combo_padding_x}px;
+                border: 1px solid {active_color};
+                border-radius: 6px;
+                font-size: {combo_font_size}pt;
+            }}
+            QComboBox::drop-down {{
+                border: none;
+                background-color: transparent;
+                width: 24px;
+            }}
+            QComboBox::down-arrow {{
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #2C3E50;
+                width: 0;
+                height: 0;
+                margin-right: 8px;
+            }}
+            QComboBox:focus {{
+                border: 1px solid {active_color};
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: #FFFFFF;
+                color: #2C3E50;
+                border: 1px solid {active_color};
+                selection-background-color: {selection_bg};
+                selection-color: {selection_text};
+                outline: none;
+            }}
+            QToolTip {{
+                background-color: #FFFFFF;
+                color: #2C3E50;
+                border: 1px solid #DDE5EC;
                 border-radius: 4px;
+                padding: 6px 8px;
+                font-size: {tooltip_font_size}pt;
+            }}
+        """)
+
+        self.content_wrapper.setStyleSheet(f"""
+            #ParamContentWrapper {{
+                background-color: {panel_bg};
+                border: 3px solid {active_color};
+                border-radius: 8px;
+            }}
+            QWidget#ParamContentWrapper QWidget {{
+                background-color: {panel_bg};
+            }}
+            QWidget#ParamContentWrapper QComboBox,
+            QWidget#ParamContentWrapper QComboBox QAbstractItemView,
+            QWidget#ParamContentWrapper QLineEdit {{
+                background-color: #FFFFFF;
+                color: #2C3E50;
+            }}
+            QToolTip {{
+                background-color: #FFFFFF;
+                color: #2C3E50;
+                border: 1px solid #DDE5EC;
+                border-radius: 4px;
+                padding: 6px 8px;
+                font-size: {tooltip_font_size}pt;
             }}
         """)
 
@@ -340,6 +445,14 @@ class SwitchableParameterPanel(QWidget):
                 outline: none;
                 border: none;
             }}
+            QToolTip {{
+                background-color: #FFFFFF;
+                color: #2C3E50;
+                border: 1px solid #DDE5EC;
+                border-radius: 4px;
+                padding: 6px 8px;
+                font-size: 10pt;
+            }}
         """)
         self.btn_denoise_tab.setStyleSheet(f"""
             QPushButton {{
@@ -354,6 +467,14 @@ class SwitchableParameterPanel(QWidget):
             QPushButton:focus {{
                 outline: none;
                 border: none;
+            }}
+            QToolTip {{
+                background-color: #FFFFFF;
+                color: #2C3E50;
+                border: 1px solid #DDE5EC;
+                border-radius: 4px;
+                padding: 6px 8px;
+                font-size: 10pt;
             }}
         """)
 

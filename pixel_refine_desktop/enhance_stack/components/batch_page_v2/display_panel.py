@@ -1896,7 +1896,7 @@ class DisplayPanel(QWidget):
                 """)
 
         # 1. Start button visibility and enabled state
-        if self.is_start_button_mode:
+        if self.is_start_button_mode and self.current_batch_id is not None:
             self.start_btn_ref.setVisible(True)
             is_playing = hasattr(self, "is_playing") and self.is_playing
             self.start_btn_ref.setEnabled(not is_playing)
@@ -1953,7 +1953,7 @@ class DisplayPanel(QWidget):
 
         # 4. Overall overlay visibility
         if hasattr(self, "controls_overlay"):
-            if self.is_start_button_mode or not is_grid:
+            if (self.is_start_button_mode and self.current_batch_id is not None) or not is_grid:
                 self.controls_overlay.show()
                 self.controls_bar.adjustSize()
                 self.controls_overlay.adjustSize()

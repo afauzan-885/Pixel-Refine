@@ -17,11 +17,11 @@ def test_pure_aot_direct():
     engine = AOTEngine()
     
     # Path TCM
-    aot_dir = os.path.join(project_root, "pixel_refine_desktop", "ui", "data", "aot_assets")
-    io_mod = engine.load(os.path.join(aot_dir, "image_io.tcm"))
-    res_mod = engine.load(os.path.join(aot_dir, "bilinear.tcm"))
-    flow_mod = engine.load(os.path.join(aot_dir, "compute_flow_vulkan.tcm"))
-    warp_mod = engine.load(os.path.join(aot_dir, "warp_vulkan")) # Folder warp_vulkan
+    aot_dir = os.path.join(project_root, "taichi_library", "taichi_algorithm", "aot_tcm")
+    io_mod = engine.load(os.path.join(aot_dir, "common_vulkan.tcm"))
+    res_mod = engine.load(os.path.join(aot_dir, "interpolation_vulkan.tcm"))
+    flow_mod = engine.load(os.path.join(aot_dir, "optical_flow_vulkan.tcm"))
+    warp_mod = engine.load(os.path.join(aot_dir, "geometric_vulkan.tcm"))
     
     # 1. Load & Upload
     img_path = os.path.join(project_root, "test_algorithm", "IMG_20160202_015247.png")

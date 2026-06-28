@@ -11,8 +11,8 @@ import time
 # Suppress Vulkan loader registry warnings on Windows
 os.environ["VK_LOADER_DEBUG"] = "error"
 
-# Explicitly lock Vulkan device to device 0 to bypass dynamic scan (vulkaninfo)
-os.environ["PIXEL_REFINE_AOT_DEVICE"] = "0"
+# Let the AOT engine auto-select the Vulkan device unless the user overrides it.
+# Hard-locking device 0 can route kernels to a different GPU than test scripts.
 
 # --- Taichi Cache Configuration ---
 # Offline cache disabled per request.

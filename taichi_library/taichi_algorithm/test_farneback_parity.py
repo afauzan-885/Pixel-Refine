@@ -28,7 +28,7 @@ if project_root not in sys.path:
 import taichi as ti
 ti.init(arch=ti.vulkan, offline_cache=True)
 
-from taichi_library.taichi_algorithm.optical_flow.farneback_flow import (
+from taichi_library.taichi_algorithm.farneback_flow import (
     farneback_flow,
     prepare_gaussian_constants,
 )
@@ -244,7 +244,7 @@ def test_poly_expansion():
     xxg_gpu = ti.ndarray(dtype=ti.f32, shape=(poly_radius + 1,))
     xxg_gpu.from_numpy(xxg)
 
-    from taichi_library.taichi_algorithm.optical_flow.farneback_flow import (
+    from taichi_library.taichi_algorithm.farneback_flow import (
         _poly_exp_vertical_kernel,
         _poly_exp_horizontal_kernel,
     )

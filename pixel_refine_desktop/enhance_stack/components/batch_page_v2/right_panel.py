@@ -68,6 +68,12 @@ class RightPanel(QWidget, SyncMixin):
         self._is_syncing = False  # Flag to avoid recursion during sync
         self._last_emitted_settings = None
 
+        # Debounce timer for store sync (1 second delay to avoid rapid file writes)
+        self._sync_store_timer = QTimer(self)
+        self._sync_store_timer.setSingleShot(True)
+        self._sync_store_timer.setInterval(1000)
+        self._sync_store_timer.timeout.connect(self._save_batch_settings)
+
         # Debounce timer for rapid selection changes (Breathing Room)
         self._selection_timer = QTimer(self)
         self._selection_timer.setSingleShot(True)
@@ -388,9 +394,9 @@ class RightPanel(QWidget, SyncMixin):
         self.logic.set_settings(settings)  # type: ignore
         # Note: logic.set_settings returns bool, but we ignore it here
 
-        # 3. Save to Store if triggered by user interaction
+        # 3. Save to Store if triggered by user interaction (debounced 1s)
         if save_to_store and self.current_batch_id is not None:
-            self._save_batch_settings()
+            self._sync_store_timer.start()
 
     def get_current_settings(self):
         """Public accessor for settings."""
@@ -411,36 +417,19 @@ class RightPanel(QWidget, SyncMixin):
         if not self.controller:
             return
 
-        # 1. Load preferences from batch_parameter.json
-        all_params = batch_parameter_manager.load_json_state()
-        quick_create_enabled = all_params.get("quick_batch_creation", False)
+        from resources.GenericUILibrary.modals import modal_confirm
+        confirmed = modal_confirm.question(self, "Apakah Anda yakin ingin membuat batch baru?")
+        if not confirmed:
+            return
 
-        # 2. Generate default name (Robust check for uniqueness)
+        # Generate default name (Robust check for uniqueness)
         all_batches = self.controller.get_all_batches()
         existing_names = {b.name for b in all_batches}
 
         index = 1
         while f"Batch {index}" in existing_names:
             index += 1
-        default_name = f"Batch {index}"
-
-        name = default_name
-        should_save_preference = False
-
-        # 3. Decision: Show Dialog or Quick Create
-        if not quick_create_enabled:
-            dialog = QuickBatchDialog(default_name=default_name, parent=self)
-            if dialog.exec():
-                name, skip_next = dialog.get_data()
-                if not name:
-                    name = default_name
-
-                if skip_next:
-                    # Save preference to JSON
-                    all_params["quick_batch_creation"] = True
-                    batch_parameter_manager.save_json_state(data=all_params)
-            else:
-                return  # User cancelled
+        name = f"Batch {index}"
 
         # 4. Create Batch
         batch_id = self.controller.create_batch(name)

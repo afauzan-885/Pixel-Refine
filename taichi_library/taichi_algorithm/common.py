@@ -6,7 +6,6 @@ Shared functions for buffer management, type checking, and common operations.
 
 import numpy as np
 import threading
-import math
 
 import os
 import importlib
@@ -31,23 +30,19 @@ else:
 AOT_MODE = os.environ.get("AOT_MODE", "1") == "1"
 _AOT_ENGINE = None
 
-
 def _get_aot():
     global _AOT_ENGINE
     if _AOT_ENGINE is None:
         try:
             from . import taichi_aot
-
             _AOT_ENGINE = taichi_aot
         except (ImportError, ValueError):
             try:
                 import taichi_library.taichi_aot as taichi_aot
-
                 _AOT_ENGINE = taichi_aot
             except ImportError:
                 pass
     return _AOT_ENGINE
-
 
 if TAICHI_AVAILABLE:
 
@@ -73,11 +68,11 @@ if TAICHI_AVAILABLE:
         # t is assumed to be in [0, 1)
         w = ti.Vector([0.0, 0.0, 0.0, 0.0])
         a = -0.75
-
+        
         # d = distance to neighbor
         # Neighbors are at index: -1, 0, 1, 2
         # Distances: t+1, t, 1-t, 2-t
-
+        
         d = t
         # d0 = t+1 (range [1, 2])
         x = d + 1.0
@@ -91,7 +86,7 @@ if TAICHI_AVAILABLE:
         # d3 = 2-t (range [1, 2])
         x = 2.0 - d
         w[3] = a * x**3 - 5.0 * a * x**2 + 8.0 * a * x - 4.0 * a
-
+        
         # Explicit normalization to reach 1e-7+ precision
         # Even though mathematically they sum to 1, float precision can introduce tiny drifts.
         s = w[0] + w[1] + w[2] + w[3]
@@ -108,9 +103,7 @@ if TAICHI_AVAILABLE:
         return tm.clamp(res, 0, size - 1)
 
     @ti.func
-    def bilinear_at(
-        img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1
-    ) -> float:
+    def bilinear_at(img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1) -> float:
         """Bilinear interpolation with BORDER_REFLECT_101."""
         hh, ww = h, w
         if ti.static(isinstance(h, int) and h == -1):
@@ -135,9 +128,7 @@ if TAICHI_AVAILABLE:
         return top * (1.0 - fy) + bottom * fy
 
     @ti.func
-    def bilinear_at_vec3(
-        img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1
-    ) -> ti.types.vector(3, ti.f32):
+    def bilinear_at_vec3(img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1) -> ti.types.vector(3, ti.f32):
         """Bilinear interpolation for vector(3, f32) fields with BORDER_REFLECT_101."""
         hh, ww = h, w
         if ti.static(isinstance(h, int) and h == -1):
@@ -162,9 +153,7 @@ if TAICHI_AVAILABLE:
         return top * (1.0 - fy) + bottom * fy
 
     @ti.func
-    def bicubic_at(
-        img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1
-    ) -> float:
+    def bicubic_at(img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1) -> float:
         """Bicubic interpolation with BORDER_REFLECT_101 and a=-0.75."""
         hh, ww = h, w
         if ti.static(isinstance(h, int) and h == -1):
@@ -202,12 +191,7 @@ if TAICHI_AVAILABLE:
 
     @ti.func
     def bilinear_at_3ch(
-        img: ti.types.ndarray(),
-        x: float,
-        y: float,
-        h: int = -1,
-        w: int = -1,
-        c: int = 0,
+        img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1, c: int = 0
     ) -> float:
         """Bilinear interpolation for 3ch with BORDER_REFLECT_101."""
         hh, ww = h, w
@@ -234,12 +218,7 @@ if TAICHI_AVAILABLE:
 
     @ti.func
     def bicubic_at_channel(
-        img: ti.types.ndarray(),
-        x: float,
-        y: float,
-        h: int = -1,
-        w: int = -1,
-        c: int = 0,
+        img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1, c: int = 0
     ) -> float:
         """Bicubic interpolation for 3ch with BORDER_REFLECT_101 and a=-0.75."""
         hh, ww = h, w
@@ -298,9 +277,7 @@ if TAICHI_AVAILABLE:
             dst[i, j] = 0.299 * r + 0.587 * g + 0.114 * b
 
     @ti.kernel
-    def _cvt_color_rgb_to_gray_i32_kernel(
-        src: ti.types.ndarray(), dst: ti.types.ndarray()
-    ):
+    def _cvt_color_rgb_to_gray_i32_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray()):
         for i, j in dst:
             r = ti.cast(src[i, j][0], ti.i32)
             g = ti.cast(src[i, j][1], ti.i32)
@@ -327,39 +304,24 @@ if TAICHI_AVAILABLE:
             dst[i, j][2] = val
 
     @ti.kernel
-    def _generate_hanning_window_2d_kernel(
-        dst: ti.types.ndarray(), H: int, W: int, exclude_boundary: int
-    ):
+    def _generate_hanning_window_2d_kernel(dst: ti.types.ndarray(), H: int, W: int, exclude_boundary: int):
         for i, j in dst:
             wy = 1.0
             if H > 1:
                 if exclude_boundary == 1:
-                    wy = 0.5 - 0.5 * ti.cos(
-                        2.0 * 3.141592653589793 * float(i + 1) / float(H + 1)
-                    )
+                    wy = 0.5 - 0.5 * ti.cos(2.0 * 3.141592653589793 * float(i + 1) / float(H + 1))
                 else:
-                    wy = 0.5 - 0.5 * ti.cos(
-                        2.0 * 3.141592653589793 * float(i) / float(H - 1)
-                    )
+                    wy = 0.5 - 0.5 * ti.cos(2.0 * 3.141592653589793 * float(i) / float(H - 1))
             wx = 1.0
             if W > 1:
                 if exclude_boundary == 1:
-                    wx = 0.5 - 0.5 * ti.cos(
-                        2.0 * 3.141592653589793 * float(j + 1) / float(W + 1)
-                    )
+                    wx = 0.5 - 0.5 * ti.cos(2.0 * 3.141592653589793 * float(j + 1) / float(W + 1))
                 else:
-                    wx = 0.5 - 0.5 * ti.cos(
-                        2.0 * 3.141592653589793 * float(j) / float(W - 1)
-                    )
+                    wx = 0.5 - 0.5 * ti.cos(2.0 * 3.141592653589793 * float(j) / float(W - 1))
             dst[i, j] = wy * wx
 
     @ti.kernel
-    def _mean_division_kernel(
-        sum_img: ti.types.ndarray(),
-        sum_weight: ti.types.ndarray(),
-        ref_img: ti.types.ndarray(),
-        dst: ti.types.ndarray(),
-    ):
+    def _mean_division_kernel(sum_img: ti.types.ndarray(), sum_weight: ti.types.ndarray(), ref_img: ti.types.ndarray(), dst: ti.types.ndarray()):
         for i, j in sum_weight:
             w = sum_weight[i, j]
             if w > 1e-6:
@@ -367,222 +329,6 @@ if TAICHI_AVAILABLE:
             else:
                 dst[i, j] = ref_img[i, j]
 
-    # =========================================================================
-    # SfM MATH: Analytical 3x3 SVD, Essential Constraint, Hartley Normalization
-    # =========================================================================
-
-    @ti.func
-    def _sym3_eigenvalues(
-        S: ti.types.matrix(3, 3, ti.f32),
-    ) -> ti.types.vector(3, ti.f32):
-        """Analytical eigenvalues of 3x3 symmetric matrix (sorted descending)."""
-        p1 = S[0, 1] * S[0, 1] + S[0, 2] * S[0, 2] + S[1, 2] * S[1, 2]
-        e0 = S[0, 0]
-        e1 = S[1, 1]
-        e2 = S[2, 2]
-
-        if p1 < 1e-14:
-            ev0 = e0
-            ev1 = e1
-            ev2 = e2
-            if ev0 < ev1:
-                tmp = ev0
-                ev0 = ev1
-                ev1 = tmp
-            if ev0 < ev2:
-                tmp = ev0
-                ev0 = ev2
-                ev2 = tmp
-            if ev1 < ev2:
-                tmp = ev1
-                ev1 = ev2
-                ev2 = tmp
-            return ti.Vector([ev0, ev1, ev2])
-
-        q = (e0 + e1 + e2) / 3.0
-        p2 = (e0 - q) * (e0 - q) + (e1 - q) * (e1 - q) + (e2 - q) * (e2 - q) + 2.0 * p1
-        p = ti.sqrt(p2 / 6.0)
-
-        b00 = (e0 - q) / p
-        b11 = (e1 - q) / p
-        b22 = (e2 - q) / p
-        b01 = S[0, 1] / p
-        b02 = S[0, 2] / p
-        b12 = S[1, 2] / p
-
-        det_B = (
-            b00 * (b11 * b22 - b12 * b12)
-            - b01 * (b01 * b22 - b02 * b12)
-            + b02 * (b01 * b12 - b11 * b02)
-        )
-        r = det_B / 2.0
-        r = ti.max(-1.0, ti.min(1.0, r))
-
-        phi = ti.acos(r) / 3.0
-        PI = 3.14159265358979323846
-        eig0 = q + 2.0 * p * ti.cos(phi)
-        eig2 = q + 2.0 * p * ti.cos(phi + (2.0 * PI / 3.0))
-        eig1 = 3.0 * q - eig0 - eig2
-        return ti.Vector([eig0, eig1, eig2])
-
-    @ti.func
-    def _sym3_eigenvector(
-        S: ti.types.matrix(3, 3, ti.f32), eigenvalue: ti.f32
-    ) -> ti.types.vector(3, ti.f32):
-        """Compute eigenvector for given eigenvalue of 3x3 symmetric matrix via cross product."""
-        r0 = ti.Vector([S[0, 0] - eigenvalue, S[0, 1], S[0, 2]])
-        r1 = ti.Vector([S[0, 1], S[1, 1] - eigenvalue, S[1, 2]])
-        r2 = ti.Vector([S[0, 2], S[1, 2], S[2, 2] - eigenvalue])
-
-        c01 = r0.cross(r1)
-        c02 = r0.cross(r2)
-        c12 = r1.cross(r2)
-
-        l01 = c01.norm_sqr()
-        l02 = c02.norm_sqr()
-        l12 = c12.norm_sqr()
-
-        result = ti.Vector([0.0, 0.0, 1.0])
-        max_l = l01
-        if l02 > max_l:
-            max_l = l02
-        if l12 > max_l:
-            max_l = l12
-
-        if max_l > 1e-20:
-            if max_l == l01:
-                result = c01 / ti.sqrt(l01)
-            elif max_l == l02:
-                result = c02 / ti.sqrt(l02)
-            else:
-                result = c12 / ti.sqrt(l12)
-        return result
-
-    @ti.func
-    def svd_3x3(A: ti.types.matrix(3, 3, ti.f32)):
-        """
-        Analytical SVD for 3x3 matrix via eigenvalue decomposition of A^T*A.
-        Returns: (U, sigma, Vt) where A = U @ diag(sigma) @ Vt.
-        """
-        ATA = A.transpose() @ A
-
-        eigenvalues = _sym3_eigenvalues(ATA)
-        ev0 = ti.max(eigenvalues[0], 0.0)
-        ev1 = ti.max(eigenvalues[1], 0.0)
-        ev2 = ti.max(eigenvalues[2], 0.0)
-
-        sigma0 = ti.sqrt(ev0)
-        sigma1 = ti.sqrt(ev1)
-        sigma2 = ti.sqrt(ev2)
-
-        v0 = _sym3_eigenvector(ATA, eigenvalues[0])
-        v1 = _sym3_eigenvector(ATA, eigenvalues[1])
-        v2 = v0.cross(v1)
-        v2_len = v2.norm()
-        if v2_len > 1e-10:
-            v2 = v2 / v2_len
-        v1 = v2.cross(v0)
-        v1_len = v1.norm()
-        if v1_len > 1e-10:
-            v1 = v1 / v1_len
-
-        V = ti.Matrix.cols([v0, v1, v2])
-
-        u0 = ti.Vector([1.0, 0.0, 0.0])
-        u1 = ti.Vector([0.0, 1.0, 0.0])
-        u2 = ti.Vector([0.0, 0.0, 1.0])
-        if sigma0 > 1e-10:
-            u0 = A @ v0 / sigma0
-            u0_len = u0.norm()
-            if u0_len > 1e-10:
-                u0 = u0 / u0_len
-        if sigma1 > 1e-10:
-            u1 = A @ v1 / sigma1
-            u1_len = u1.norm()
-            if u1_len > 1e-10:
-                u1 = u1 / u1_len
-            u1 = u1 - (u0.dot(u1)) * u0
-            u1_len = u1.norm()
-            if u1_len > 1e-10:
-                u1 = u1 / u1_len
-        u2 = u0.cross(u1)
-        u2_len = u2.norm()
-        if u2_len > 1e-10:
-            u2 = u2 / u2_len
-
-        det_U = u0.dot(u1.cross(u2))
-        if det_U < 0.0:
-            u2 = -u2
-            sigma2 = -sigma2
-
-        U = ti.Matrix.cols([u0, u1, u2])
-        sigma = ti.Vector([sigma0, sigma1, sigma2])
-        Vt = V.transpose()
-        return U, sigma, Vt
-
-    @ti.func
-    def enforce_essential(
-        E: ti.types.matrix(3, 3, ti.f32),
-    ) -> ti.types.matrix(3, 3, ti.f32):
-        """Enforce essential matrix constraint: SVD -> force sigma = diag(1,1,0)."""
-        U, sigma, Vt = svd_3x3(E)
-        s_avg = (sigma[0] + sigma[1]) / 2.0
-        S_new = ti.Matrix([[s_avg, 0.0, 0.0], [0.0, s_avg, 0.0], [0.0, 0.0, 0.0]])
-        return U @ S_new @ Vt
-
-    @ti.kernel
-    def _hartley_normalize_kernel(
-        pts: ti.types.ndarray(ti.f32, ndim=2),
-        n_pts: int,
-        T_out: ti.types.ndarray(ti.f32, ndim=2),
-        pts_norm: ti.types.ndarray(ti.f32, ndim=2),
-    ):
-        """Hartley isotropic normalization: translate centroid to origin, scale avg distance to sqrt(2)."""
-        cx = 0.0
-        cy = 0.0
-        for i in range(n_pts):
-            cx += pts[i, 0]
-            cy += pts[i, 1]
-        cx /= float(n_pts)
-        cy /= float(n_pts)
-
-        avg_dist = 0.0
-        for i in range(n_pts):
-            dx = pts[i, 0] - cx
-            dy = pts[i, 1] - cy
-            avg_dist += ti.sqrt(dx * dx + dy * dy)
-        avg_dist /= float(n_pts)
-        s = 1.41421356 / (avg_dist + 1e-10)
-
-        T_out[0, 0] = s
-        T_out[0, 1] = 0.0
-        T_out[0, 2] = -s * cx
-        T_out[1, 0] = 0.0
-        T_out[1, 1] = s
-        T_out[1, 2] = -s * cy
-        T_out[2, 0] = 0.0
-        T_out[2, 1] = 0.0
-        T_out[2, 2] = 1.0
-
-        for i in range(n_pts):
-            pts_norm[i, 0] = s * (pts[i, 0] - cx)
-            pts_norm[i, 1] = s * (pts[i, 1] - cy)
-
-    @ti.kernel
-    def _denormalize_fundamental_kernel(
-        F_norm: ti.types.ndarray(ti.f32, ndim=2),
-        T1: ti.types.ndarray(ti.f32, ndim=2),
-        T2: ti.types.ndarray(ti.f32, ndim=2),
-        F_out: ti.types.ndarray(ti.f32, ndim=2),
-    ):
-        """Denormalize fundamental matrix: F = T2^T @ F_norm @ T1."""
-        for i in range(3):
-            for j in range(3):
-                val = 0.0
-                for k in ti.static(range(3)):
-                    for l in ti.static(range(3)):
-                        val += T2[k, i] * F_norm[k, l] * T1[l, j]
-                F_out[i, j] = val
 
 
 class BufferCache:
@@ -707,7 +453,7 @@ def ensure_taichi_field(arr, dtype=None, shape=None, buffer_provider=None):
             dst_field = get_temp_buffer(shape_dst, dtype, buffer_provider)
             # Use copy/cast kernel
             _copy_kernel(arr, dst_field)
-            return dst_field, True  # It's a temporary casted buffer
+            return dst_field, True # It's a temporary casted buffer
         return arr, False  # Already GPU and correct type (or no type requested)
 
     # Upload numpy to GPU
@@ -808,10 +554,9 @@ def split(img):
         aot = _get_aot()
         if aot:
             from taichi_library.taichi_aot.engine import TaichiGPUBuffer
-
             is_gpu = isinstance(img, TaichiGPUBuffer)
             img_v = img if is_gpu else aot.upload(img)
-
+            
             if len(img_v.shape) == 3 and img_v.shape[2] == 3:
                 res_list = aot.split_3ch(img_v)
             else:
@@ -819,9 +564,8 @@ def split(img):
                 res_list = []
                 for i in range(c):
                     res_list.append(aot.extract_channel(img_v, i))
-
-            if is_gpu:
-                return tuple(res_list)
+            
+            if is_gpu: return tuple(res_list)
             return tuple([r.to_numpy() for r in res_list])
 
     if not TAICHI_AVAILABLE:
@@ -877,7 +621,6 @@ def merge(channels):
         aot = _get_aot()
         if aot:
             from taichi_library.taichi_aot.engine import TaichiGPUBuffer
-
             is_gpu = isinstance(channels[0], TaichiGPUBuffer)
             h, w = channels[0].shape[0], channels[0].shape[1]
             c = len(channels)
@@ -888,15 +631,12 @@ def merge(channels):
                 dst_buf = aot.merge_3ch(c0, c1, c2)
             else:
                 # Fallback for other channel counts
-                dst_buf = aot.engine.allocate(
-                    (h, w, c), dtype=channels[0].dtype, is_vector=(c == 3)
-                )
+                dst_buf = aot.engine.allocate((h, w, c), dtype=channels[0].dtype, is_vector=(c==3))
                 for i, ch in enumerate(channels):
                     ch_v = ch if is_gpu else aot.upload(ch)
                     aot.insert_channel(ch_v, dst_buf, i)
-
-            if is_gpu:
-                return dst_buf
+            
+            if is_gpu: return dst_buf
             return dst_buf.to_numpy()
 
     if not TAICHI_AVAILABLE:
@@ -955,12 +695,10 @@ def extract_channel(img, ch):
         aot = _get_aot()
         if aot:
             from taichi_library.taichi_aot.engine import TaichiGPUBuffer
-
             is_gpu = isinstance(img, TaichiGPUBuffer)
             img_v = img if is_gpu else aot.upload(img)
             res_gpu = aot.extract_channel(img_v, ch)
-            if is_gpu:
-                return res_gpu
+            if is_gpu: return res_gpu
             res_np = res_gpu.to_numpy()
             return res_np
 
@@ -1072,18 +810,16 @@ def copy(img):
         aot = _get_aot()
         if aot:
             from taichi_library.taichi_aot.engine import TaichiGPUBuffer
-
             is_gpu = isinstance(img, TaichiGPUBuffer)
             img_v = img if is_gpu else aot.upload(img)
-
+            
             h, w = img_v.shape[0], img_v.shape[1]
             is_3d = len(img_v.shape) == 3
             dst_shape = (h, w, img_v.shape[2]) if is_3d else (h, w)
             dst_buf = aot.engine.allocate(dst_shape, dtype=img_v.dtype, is_vector=is_3d)
             aot.copy_field(img_v, dst_buf)
-
-            if is_gpu:
-                return dst_buf
+            
+            if is_gpu: return dst_buf
             res_np = dst_buf.to_numpy()
             return res_np
 
@@ -1120,12 +856,10 @@ def cvtColor(src, code, dst=None):
         aot = _get_aot()
         if aot and code in [COLOR_BGR2GRAY, COLOR_RGB2GRAY]:
             from taichi_library.taichi_aot.engine import TaichiGPUBuffer
-
             is_gpu = isinstance(src, TaichiGPUBuffer)
             src_v = src if is_gpu else aot.upload(src)
             res_gpu = aot.rgb2gray(src_v)
-            if is_gpu:
-                return res_gpu
+            if is_gpu: return res_gpu
             return res_gpu.to_numpy()
 
     if not TAICHI_AVAILABLE:
@@ -1209,7 +943,7 @@ def absdiff(src1, src2, dst=None):
 
 
 @ti_thread
-def hanning(shape, exclude_boundary=False, dtype=np.float32):
+def generate_hanning_window_2d(shape, exclude_boundary=False, dtype=np.float32):
     """
     Generate 2D Hanning window directly on GPU.
     exclude_boundary: If True, behaves like np.hanning(M + 2)[1:-1]
@@ -1217,7 +951,7 @@ def hanning(shape, exclude_boundary=False, dtype=np.float32):
     if AOT_MODE:
         aot = _get_aot()
         if aot:
-            return aot.hanning(shape, exclude_boundary, dtype)
+            return aot.generate_hanning_window_2d(shape, exclude_boundary, dtype)
 
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
@@ -1273,298 +1007,6 @@ def mean_division(sum_img, sum_weight, ref_img, dst=None):
 
 
 # NumPy-like aliases for JIT/AOT consistency
-hanning = hanning
+hanning = generate_hanning_window_2d
 divide = mean_division
 
-
-# =========================================================================
-# SfM Host Wrappers (NumPy fallbacks for algebraic solvers)
-# =========================================================================
-
-
-def svd_3x3_np(A):
-    """SVD 3x3 via NumPy (Float64 precision). Returns (U, sigma, Vt)."""
-    A64 = np.asarray(A, dtype=np.float64)
-    U, S, Vt = np.linalg.svd(A64)
-    return U.astype(np.float32), S.astype(np.float32), Vt.astype(np.float32)
-
-
-def enforce_essential_np(E):
-    """Enforce essential matrix constraint via NumPy SVD."""
-    E64 = np.asarray(E, dtype=np.float64)
-    U, S, Vt = np.linalg.svd(E64)
-    s_avg = (S[0] + S[1]) / 2.0
-    S_new = np.diag([s_avg, s_avg, 0.0])
-    return (U @ S_new @ Vt).astype(np.float64)
-
-
-def hartley_normalize(pts, n_pts=None):
-    """
-    Hartley isotropic normalization (NumPy).
-    Translate centroid to origin, scale avg distance to sqrt(2).
-    Returns: (T, pts_normalized) where T is the 3x3 transform matrix.
-    """
-    pts = np.ascontiguousarray(pts, dtype=np.float64)
-    if n_pts is None:
-        n_pts = len(pts)
-    centroid = pts[:n_pts].mean(axis=0)
-    diff = pts[:n_pts] - centroid
-    avg_dist = np.mean(np.sqrt(np.sum(diff**2, axis=1)))
-    s = math.sqrt(2.0) / (avg_dist + 1e-10)
-    T = np.array(
-        [
-            [s, 0.0, -s * centroid[0]],
-            [0.0, s, -s * centroid[1]],
-            [0.0, 0.0, 1.0],
-        ],
-        dtype=np.float64,
-    )
-    pts_h = np.hstack([pts[:n_pts], np.ones((n_pts, 1))])
-    pts_norm = (T @ pts_h.T).T[:, :2]
-    return T, np.ascontiguousarray(pts_norm, dtype=np.float64)
-
-
-def denormalize_fundamental(F_norm, T1, T2):
-    """Denormalize fundamental matrix: F = T2^T @ F_norm @ T1."""
-    return (T2.T @ F_norm @ T1).astype(np.float64)
-
-
-class SfMDataError(Exception):
-    """Custom exception for SfM data validation errors with user-friendly hints."""
-
-    def __init__(self, message, hint=None, field=None, repair_suggestion=None):
-        self.hint = hint
-        self.field = field
-        self.repair_suggestion = repair_suggestion
-        full_msg = f"[SfM Error] {message}"
-        if hint:
-            full_msg += f"\n  Hint: {hint}"
-        if field:
-            full_msg += f"\n  Field: {field}"
-        if repair_suggestion:
-            full_msg += f"\n  Suggestion: {repair_suggestion}"
-        super().__init__(full_msg)
-
-
-def ensure_contiguous_f32(data, name="data"):
-    """Auto-repair: ensure array is contiguous float32. Handles int8/16/32, uint8/16, float64."""
-    if data is None:
-        raise SfMDataError(
-            f"Input '{name}' is None",
-            hint="Provide a valid numpy array",
-            field=name,
-            repair_suggestion="Pass a non-empty numpy array",
-        )
-    if not isinstance(data, np.ndarray):
-        try:
-            data = np.asarray(data)
-        except Exception:
-            raise SfMDataError(
-                f"Cannot convert '{name}' to numpy array",
-                hint=f"Got type: {type(data).__name__}",
-                field=name,
-            )
-    if data.size == 0:
-        raise SfMDataError(
-            f"Input '{name}' is empty (size=0)",
-            hint="Provide at least 1 element",
-            field=name,
-        )
-    if np.any(np.isnan(data)):
-        data = np.nan_to_num(data, nan=0.0)
-    if np.any(np.isinf(data)):
-        data = np.clip(data, -1e6, 1e6)
-    data = np.ascontiguousarray(data, dtype=np.float32)
-    return data
-
-
-def ensure_contiguous_f64(data, name="data"):
-    """Auto-repair: ensure array is contiguous float64."""
-    if data is None:
-        raise SfMDataError(
-            f"Input '{name}' is None", hint="Provide a valid numpy array", field=name
-        )
-    if not isinstance(data, np.ndarray):
-        try:
-            data = np.asarray(data)
-        except Exception:
-            raise SfMDataError(
-                f"Cannot convert '{name}' to numpy array",
-                hint=f"Got type: {type(data).__name__}",
-                field=name,
-            )
-    if data.size == 0:
-        raise SfMDataError(f"Input '{name}' is empty (size=0)", field=name)
-    if np.any(np.isnan(data)):
-        data = np.nan_to_num(data, nan=0.0)
-    if np.any(np.isinf(data)):
-        data = np.clip(data, -1e10, 1e10)
-    data = np.ascontiguousarray(data, dtype=np.float64)
-    return data
-
-
-def validate_point_correspondences(pts1, pts2, min_points=8, name="points"):
-    """
-    Validate and auto-repair point correspondences.
-    Handles: wrong dtype, non-contiguous, 1D->2D reshape, mismatched lengths, NaN/Inf.
-    """
-    pts1 = ensure_contiguous_f32(pts1, f"{name}_1")
-    pts2 = ensure_contiguous_f32(pts2, f"{name}_2")
-
-    if pts1.ndim == 1:
-        n = len(pts1) // 2
-        if n >= min_points:
-            pts1 = pts1.reshape(n, 2)
-        else:
-            raise SfMDataError(
-                f"Cannot reshape {name}_1: 1D array with {len(pts1)} elements",
-                hint=f"Expected at least {min_points*2} elements for {min_points} points",
-                field=f"{name}_1",
-            )
-    if pts2.ndim == 1:
-        n = len(pts2) // 2
-        if n >= min_points:
-            pts2 = pts2.reshape(n, 2)
-        else:
-            raise SfMDataError(
-                f"Cannot reshape {name}_2: 1D array with {len(pts2)} elements",
-                field=f"{name}_2",
-            )
-
-    if pts1.ndim != 2 or pts1.shape[1] != 2:
-        raise SfMDataError(
-            f"{name}_1 must be (N, 2), got shape {pts1.shape}",
-            hint="Reshape to (N, 2) - each row is [x, y]",
-            field=f"{name}_1",
-        )
-    if pts2.ndim != 2 or pts2.shape[1] != 2:
-        raise SfMDataError(
-            f"{name}_2 must be (N, 2), got shape {pts2.shape}", field=f"{name}_2"
-        )
-
-    if len(pts1) != len(pts2):
-        min_len = min(len(pts1), len(pts2))
-        pts1 = pts1[:min_len]
-        pts2 = pts2[:min_len]
-
-    if len(pts1) < min_points:
-        raise SfMDataError(
-            f"Need at least {min_points} points, got {len(pts1)}",
-            hint=f"Provide more feature correspondences (current: {len(pts1)})",
-            field=name,
-            repair_suggestion=f"Need {min_points - len(pts1)} more points",
-        )
-
-    return pts1, pts2
-
-
-def validate_intrinsic_matrix(K, name="K"):
-    """Validate and auto-repair camera intrinsic matrix."""
-    K = ensure_contiguous_f64(K, name)
-    if K.shape == (9,):
-        K = K.reshape(3, 3)
-    if K.shape != (3, 3):
-        raise SfMDataError(
-            f"Camera intrinsic matrix must be 3x3, got {K.shape}",
-            hint="Expected: [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]",
-            field=name,
-        )
-    if K[2, 2] == 0:
-        raise SfMDataError(
-            f"K[2,2] is zero - invalid intrinsic matrix",
-            hint="K[2,2] should be 1.0 for standard cameras",
-            field=name,
-            repair_suggestion="Set K[2,2] = 1.0",
-        )
-    if K[0, 0] <= 0 or K[1, 1] <= 0:
-        raise SfMDataError(
-            f"Focal length must be positive: fx={K[0,0]}, fy={K[1,1]}",
-            hint="Check your camera calibration parameters",
-            field=name,
-        )
-    return K
-
-
-def validate_essential_matrix(E, name="E"):
-    """Validate and auto-repair essential matrix (enforce rank-2 constraint)."""
-    E = ensure_contiguous_f64(E, name)
-    if E.shape == (9,):
-        E = E.reshape(3, 3)
-    if E.shape != (3, 3):
-        raise SfMDataError(
-            f"Essential matrix must be 3x3, got {E.shape}",
-            hint="Expected a 3x3 fundamental/essential matrix",
-            field=name,
-        )
-    rank = np.linalg.matrix_rank(E, tol=1e-6)
-    if rank > 2:
-        E = enforce_essential_np(E)
-    norm = np.linalg.norm(E)
-    if norm < 1e-10:
-        raise SfMDataError(
-            f"Essential matrix is near-zero (norm={norm:.2e})",
-            hint="The point correspondences may be degenerate",
-            field=name,
-            repair_suggestion="Check that points span at least 2 dimensions",
-        )
-    return E
-
-
-def validate_rotation_matrix(R, name="R"):
-    """Validate and auto-repair rotation matrix (enforce SO(3))."""
-    R = ensure_contiguous_f64(R, name)
-    if R.shape != (3, 3):
-        raise SfMDataError(f"Rotation matrix must be 3x3, got {R.shape}", field=name)
-    det = np.linalg.det(R)
-    if abs(det) < 1e-6:
-        raise SfMDataError(
-            f"Rotation matrix is near-singular (det={det:.2e})",
-            hint="The decomposition may have failed",
-            field=name,
-        )
-    if det < 0:
-        R = -R
-    U, _, Vt = np.linalg.svd(R)
-    R = U @ Vt
-    if np.linalg.det(R) < 0:
-        R[:, -1] *= -1
-    return R
-
-
-def safe_sfm_call(func, *args, **kwargs):
-    """
-    Execute an SfM function with comprehensive error handling.
-    Catches all errors, auto-repairs where possible, provides user-friendly messages.
-    """
-    try:
-        return func(*args, **kwargs)
-    except SfMDataError:
-        raise
-    except ValueError as e:
-        msg = str(e)
-        if "shape" in msg.lower() or "dimension" in msg.lower():
-            raise SfMDataError(
-                f"Data shape mismatch: {msg}",
-                hint="Check that all input arrays have compatible shapes",
-                repair_suggestion="Use np.ascontiguousarray() and verify ndim",
-            ) from e
-        raise SfMDataError(
-            f"Value error: {msg}", hint="Check input data ranges and types"
-        ) from e
-    except np.linalg.LinAlgError as e:
-        raise SfMDataError(
-            f"Linear algebra failure: {e}",
-            hint="Matrix may be singular or ill-conditioned",
-            repair_suggestion="Add regularization or check for degenerate configurations",
-        ) from e
-    except MemoryError:
-        raise SfMDataError(
-            f"Out of memory",
-            hint="Reduce input size or use smaller image resolution",
-            repair_suggestion="Try downsampling images or reducing point count",
-        )
-    except Exception as e:
-        raise SfMDataError(
-            f"Unexpected error: {type(e).__name__}: {e}",
-            hint="Check input data validity and try again",
-        ) from e

@@ -87,10 +87,12 @@ def create_slider(
     value_label.setStyleSheet(SLIDER_VALUE_LABEL)
     value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-    layout = QHBoxLayout()
-    layout.addWidget(slider)
-    layout.addWidget(value_label)
-    return label, slider, layout, value_label
+    header_layout = QHBoxLayout()
+    header_layout.addWidget(label)
+    header_layout.addStretch()
+    header_layout.addWidget(value_label)
+
+    return header_layout, slider, value_label
 
 
 def get_farneback_optical_flow_page():
@@ -273,12 +275,12 @@ def get_farneback_optical_flow_page():
             initial_float_value = 1.1
 
         initial_slider_value = int(initial_float_value * mult)
-        lbl, sld, lay, val_lbl = create_slider(
+        header_lay, sld, val_lbl = create_slider(
             label_key, min_v, max_v, step, initial_slider_value, fmt, tip
         )
 
-        layout.addWidget(lbl)
-        layout.addLayout(lay)
+        layout.addLayout(header_lay)
+        layout.addWidget(sld)
 
         sliders[label_key] = sld
         value_labels[label_key] = val_lbl

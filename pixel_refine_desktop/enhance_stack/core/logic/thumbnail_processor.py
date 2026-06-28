@@ -12,6 +12,9 @@ Fitur:
 - Thread-safe dengan semaphore untuk membatasi thread aktif
 """
 
+from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
+    load_raw_as_8bit_rgb_half_res,
+)
 import os
 from PySide6.QtWidgets import QLabel, QStackedWidget
 from PySide6.QtGui import QPixmap, QImage
@@ -52,25 +55,27 @@ MAX_THUMBNAIL_WORKERS = 4
 # GLOBAL THUMBNAIL CACHE (L0) — RAM cache lintas batch, survive switch batch
 # ---------------------------------------------------------------------------
 
+
 class GlobalThumbnailCache:
     """
     Singleton RAM cache untuk thumbnail QImage.
-    
+
     Cache bersifat global dan persist selama aplikasi berjalan — tidak
     di-reset saat user pindah batch. Ini memungkinkan navigasi instan
     antar batch tanpa decode ulang.
-    
+
     Ukuran cache dibatasi (LRU-like eviction) untuk mengendalikan memori.
     Default: 500 gambar maks (~500 * 128x128 * 3 bytes ≈ 24 MB)
     """
+
     _instance = None
     MAX_SIZE = 500
 
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            cls._instance._cache: dict = {}   # path -> QImage
-            cls._instance._order: list = []   # insertion order untuk LRU eviction
+            cls._instance._cache: dict = {}  # path -> QImage
+            cls._instance._order: list = []  # insertion order untuk LRU eviction
         return cls._instance
 
     def get(self, path: str):
@@ -114,15 +119,17 @@ def get_global_cache() -> GlobalThumbnailCache:
 # ---------------------------------------------------------------------------
 import threading
 
+
 class RawDemosaicThrottle:
     """
     Singleton semaphore yang membatasi jumlah demosaic GPU/CPU yang berjalan
     paralel menjadi MAX_PARALLEL (default 2).
-    
+
     Tanpa throttle, saat user membuat banyak batch cepat (batch 4-5-6
     dengan drag-drop), seluruh thread pool akan diisi job demosaic berat
     sehingga UI lag dan tidak responsif.
     """
+
     _instance = None
     MAX_PARALLEL = 2
 
@@ -368,7 +375,7 @@ class ThumbnailBulkWorker(QRunnable):
 
 def process_thumbnail_logic(image_path, thumbnail_size):
     """Core logic to process a single thumbnail, used by both workers.
-    
+
     Untuk file RAW: menggunakan RawDemosaicThrottle agar maks 2 demosaic
     GPU/CPU berjalan paralel, mencegah overload saat pembuatan batch cepat.
     Hasil thumbnail langsung disimpan ke GlobalThumbnailCache (L0).
@@ -398,28 +405,33 @@ def process_thumbnail_logic(image_path, thumbnail_size):
         if ext in SUPPORTED_FORMATS.get("raw", []):
             throttle = get_demosaic_throttle()
             try:
-                from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import taichi_lock
-                from taichi_library import taichi_aot
+                from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
+                    taichi_lock,
+                )
 
                 # Gunakan throttle: maks 2 demosaic GPU paralel
                 with throttle:
-                    with taichi_lock:
-                        # Direct GPU demosaic half resolution (always consistent with full preview)
-                        rgb_f32 = taichi_aot.demosaic(image_path, method="hamilton-rgb-half-res")
+                    # Direct GPU demosaic half resolution (always consistent with full preview).
+                    # load_raw_as_8bit_rgb_half_res already returns RGB uint8.
+                    img_array = load_raw_as_8bit_rgb_half_res(image_path)
 
-                if rgb_f32 is not None:
-                    img_array = np.clip(rgb_f32 * 255.0, 0, 255).astype(np.uint8)
+                if img_array is not None:
                     pil_img = Image.fromarray(img_array, "RGB")
-                    return ImageOps.fit(pil_img, thumbnail_size, Image.Resampling.BILINEAR)
+                    return ImageOps.fit(
+                        pil_img, thumbnail_size, Image.Resampling.BILINEAR
+                    )
                 else:
                     raise RuntimeError("Hamilton demosaic returned None")
             except Exception as e_raw:
-                print(f"[ThumbnailProcessor] Hamilton RAW decoding failed for {image_path}: {e_raw}. Falling back to full demosaic.")
+                print(
+                    f"[ThumbnailProcessor] Hamilton RAW decoding failed for {image_path}: {e_raw}. Falling back to full demosaic."
+                )
 
             # Fallback 2: Full demosaic (Hamilton/Taichi) if fast method fails
             from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
                 load_raw_as_8bit_rgb,
             )
+
             # Full demosaic juga dibatasi oleh throttle
             throttle = get_demosaic_throttle()
             with throttle:
@@ -609,6 +621,7 @@ class ThumbnailBatchProcessor(QObject):
         # Config QThreadPool (Dynamic scaling based on CPU count)
         if max_concurrent is None:
             import os
+
             # Set to CPU logical core count, min 4 and max 12 to balance I/O and CPU
             max_concurrent = max(4, min(12, os.cpu_count() or 4))
         QThreadPool.globalInstance().setMaxThreadCount(max_concurrent)

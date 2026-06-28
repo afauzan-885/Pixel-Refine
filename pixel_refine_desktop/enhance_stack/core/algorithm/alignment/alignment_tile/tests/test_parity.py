@@ -34,7 +34,7 @@ def run_jit():
 
 def run_aot():
     os.environ["AOT_MODE"] = "1"
-    import taichi_library.taichi_aot as ta_aot
+    from taichi_library import taichi_aot
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_tile.compute_block_correlation import compute_block_correlation
     
     # Synthetic inputs
@@ -44,8 +44,8 @@ def run_aot():
     M = np.float32([[1, 0, 3.5], [0, 1, -2.2]])
     comp = cv2.warpAffine(ref, M, (256, 192), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
     
-    ref_gpu = ta_aot.upload(ref)
-    comp_gpu = ta_aot.upload(comp)
+    ref_gpu = taichi_aot.upload(ref)
+    comp_gpu = taichi_aot.upload(comp)
     
     grid_flow = compute_block_correlation(ref_gpu, comp_gpu, tile_h=16, tile_w=16, n_layers=2)
     flow_np = grid_flow.to_numpy()

@@ -308,6 +308,13 @@ class OverlayContainer(QWidget):
                 self.update()
                 self._resize_timer.start()
 
+            # Notify child content widget if it supports responsive layouts
+            if hasattr(self, "wrapper_layout") and self.wrapper_layout:
+                for i in range(self.wrapper_layout.count()):
+                    w = self.wrapper_layout.itemAt(i).widget()
+                    if w and hasattr(w, "refresh_responsive_layout"):
+                        w.refresh_responsive_layout()
+
             self._update_position()
             return False
 

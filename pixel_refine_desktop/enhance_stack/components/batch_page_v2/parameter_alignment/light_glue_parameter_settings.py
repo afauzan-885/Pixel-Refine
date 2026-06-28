@@ -107,11 +107,12 @@ def create_slider(label_text, min_val, max_val, step, initial_value, format_func
     value_label.setStyleSheet(SLIDER_VALUE_LABEL)
     value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-    layout = QHBoxLayout()
-    layout.addWidget(slider)
-    layout.addWidget(value_label)
+    header_layout = QHBoxLayout()
+    header_layout.addWidget(label)
+    header_layout.addStretch()
+    header_layout.addWidget(value_label)
 
-    return label, slider, layout, value_label
+    return header_layout, slider, value_label
 
 def get_light_glue_page():
     """
@@ -189,10 +190,11 @@ def get_light_glue_page():
     initial_float = light_glue_config.get("ransacThreshold", 5.0)
     initial_slider_val = int(initial_float * 10)
 
-    lbl, sld, lay, val_lbl = create_slider(
+    header_lay, sld, val_lbl = create_slider(
         ransac_label_text, 10, 100, 5, initial_slider_val, lambda v: f"{v/10.0:.1f}", ransac_tooltip
     )
-    layout.addWidget(lbl); layout.addLayout(lay)
+    layout.addLayout(header_lay)
+    layout.addWidget(sld)
     sliders["ransacThreshold"] = sld
     value_labels["ransacThreshold_label"] = val_lbl
     sld.valueChanged.connect(save_current_settings)

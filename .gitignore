@@ -27,6 +27,8 @@ inspect_model.py
 view_images_list.py
 upx_compression.py
 nuitka_build.py
+taichi_library copy.rar
+taichi_library_experimental_20260628_150822.zip
 
 # Ignore virtual environment directories
 venv/

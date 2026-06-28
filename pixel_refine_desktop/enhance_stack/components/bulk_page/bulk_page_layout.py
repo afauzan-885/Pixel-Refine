@@ -731,22 +731,10 @@ class BulkPageLayout(QWidget):
 
         title, message = language_config.BATCH_DELETE_LABEL
         message = message.format(batch_id)
-        msg_box = QMessageBox(self)
-        msg_box.setWindowTitle(title)
-        msg_box.setText(message)
-        msg_box.setIcon(QMessageBox.Icon.Question)
-        msg_box.setWindowFlags(
-            Qt.WindowType.Dialog
-            | Qt.WindowType.CustomizeWindowHint
-            | Qt.WindowType.WindowTitleHint
-        )
-        msg_box.setStandardButtons(
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        msg_box.setDefaultButton(QMessageBox.StandardButton.No)
-        reply = msg_box.exec()
+        from resources.GenericUILibrary import modal_confirm
+        reply = modal_confirm.question(self, message)
 
-        if reply == QMessageBox.StandardButton.Yes:
+        if reply:
             if batch_id in self.batch_states:
                 del self.batch_states[batch_id]
 
@@ -791,22 +779,10 @@ class BulkPageLayout(QWidget):
         message = language_config.CONFIRM_BATCH_ALL_DELETE_BUTTON.format(
             batch_defined_count
         )
-        msg_box = QMessageBox(self)
-        msg_box.setWindowTitle(title)
-        msg_box.setText(message)
-        msg_box.setIcon(QMessageBox.Icon.Question)
-        msg_box.setWindowFlags(
-            Qt.WindowType.Dialog
-            | Qt.WindowType.CustomizeWindowHint
-            | Qt.WindowType.WindowTitleHint
-        )
-        msg_box.setStandardButtons(
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        msg_box.setDefaultButton(QMessageBox.StandardButton.No)
-        reply = msg_box.exec()
+        from resources.GenericUILibrary import modal_confirm
+        reply = modal_confirm.question(self, message)
 
-        if reply == QMessageBox.StandardButton.Yes:
+        if reply:
             self.batch_states.clear()
             panels_to_animate = list(self.active_batch_panels.values())
             panel_refs = [weakref.ref(p) for p in panels_to_animate]

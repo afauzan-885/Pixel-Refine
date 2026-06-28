@@ -60,6 +60,7 @@ class ListGroup(QWidget, RealtimeMixin):
         self._last_move_start = -1
         self._last_move_target = -1
         self._list_widget = QListWidget()
+        self._list_widget.setAlternatingRowColors(True)
         self._list_widget.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
@@ -103,6 +104,9 @@ class ListGroup(QWidget, RealtimeMixin):
                 border-radius: {theme.radius_sm}px;
                 color: {theme.text_primary};
                 margin-bottom: 2px;
+            }}
+            QListWidget::item:alternate {{
+                background-color: {theme.bg_secondary};
             }}
             QListWidget::item:hover {{
                 background-color: {theme.bg_secondary};

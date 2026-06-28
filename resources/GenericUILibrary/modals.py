@@ -424,13 +424,15 @@ class modal_confirm(QDialog):
     """
     def __init__(self, message="Are you sure?", parent=None):
         super().__init__(parent)
+        self._drag_active = False
+        self._drag_position = None
         self.setModal(True)
         # Frameless and transparent window background
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         
-        # Set exact dialog size (matching standard confirm boxes)
-        self.setFixedSize(400, 150)
+        # Set exact dialog size (matching standard confirm boxes with extra room for shadow margins)
+        self.setFixedSize(440, 190)
         
         # Setup Fade-in Animation
         self.fade_anim = QPropertyAnimation(self, b"windowOpacity")
@@ -441,7 +443,7 @@ class modal_confirm(QDialog):
         
         # Main layout
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 10, 10, 10)  # margin for drop shadow
+        main_layout.setContentsMargins(20, 20, 20, 20)  # margin for drop shadow
         
         # Card container widget for border, shadow and background
         self.container = QWidget(self)
@@ -457,9 +459,9 @@ class modal_confirm(QDialog):
         # Drop shadow effect
         from PySide6.QtWidgets import QGraphicsDropShadowEffect
         shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(12)
-        shadow.setColor(QColor(0, 0, 0, 45))
-        shadow.setOffset(0, 4)
+        shadow.setBlurRadius(16)
+        shadow.setColor(QColor(0, 0, 0, 50))
+        shadow.setOffset(0, 5)
         self.container.setGraphicsEffect(shadow)
         
         # Container interior layout
@@ -523,14 +525,18 @@ class modal_confirm(QDialog):
         button_layout.setContentsMargins(18, 0, 18, 4)
         button_layout.setSpacing(8)
         button_layout.addStretch()
-        
+
+        from .theme import get_theme, create_button_style
+        theme = get_theme()
         from .buttons import Button
         self.yes_button = Button("Yes", variant="primary")
-        self.yes_button.setFixedWidth(64)
+        self.yes_button.setFixedWidth(32)
+        self.yes_button.setStyleSheet(create_button_style("primary", theme) + " QPushButton { border: 1px solid #A9DFBF; padding: 2px; font-size: 8pt; }")
         self.yes_button.clicked.connect(self.accept)
         
         self.no_button = Button("No", variant="secondary")
-        self.no_button.setFixedWidth(64)
+        self.no_button.setFixedWidth(32)
+        self.no_button.setStyleSheet(create_button_style("secondary", theme) + f" QPushButton {{ border: 1px solid {theme.border_color}; background-color: {theme.bg_secondary}; color: {theme.text_primary}; padding: 2px; font-size: 8pt; }}")
         self.no_button.clicked.connect(self.reject)
         
         button_layout.addWidget(self.yes_button)
@@ -539,6 +545,36 @@ class modal_confirm(QDialog):
         container_layout.addWidget(button_widget)
         
         main_layout.addWidget(self.container)
+        
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos_in_title = self.title_bar.mapFrom(self, event.position().toPoint())
+            if self.title_bar.rect().contains(pos_in_title):
+                self._drag_active = True
+                self._drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                event.accept()
+                return
+            
+            # Click outside to close (reject)
+            if not self.container.geometry().contains(event.position().toPoint()):
+                self.reject()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_active and event.buttons() == Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_position)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_active = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
         
     def showEvent(self, event):
         super().showEvent(event)

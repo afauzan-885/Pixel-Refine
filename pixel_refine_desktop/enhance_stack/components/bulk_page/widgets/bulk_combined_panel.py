@@ -139,6 +139,7 @@ class CombinedPanel(QWidget):
         sequential_batch_number=None,
     ):
         super().__init__(parent)
+        self.setObjectName("CombinedPanel")
         self.database_manager = database_manager
         self.sequential_batch_number = sequential_batch_number
         self.batch_id = batch_id
@@ -599,11 +600,11 @@ class CombinedPanel(QWidget):
         # Tombol Add
         self.add_btn = QPushButton()
         self.add_btn.setObjectName("addButton")
-        self.add_btn.setFixedSize(30, 30)
+        self.add_btn.setFixedSize(21, 21)
         self.add_btn.setIcon(
             QIcon("resources/assets/icons/add-image.png")
         )
-        self.add_btn.setIconSize(QSize(20, 20))
+        self.add_btn.setIconSize(QSize(14, 14))
         self.add_btn.setToolTip(language_config.ADD_IMAGE_BUTTON)
         self.add_btn.clicked.connect(
             lambda: handle_add_image_to_batch(
@@ -618,22 +619,22 @@ class CombinedPanel(QWidget):
         # Tombol Preview
         self.preview_btn = QPushButton()
         self.preview_btn.setObjectName("processButton")
-        self.preview_btn.setFixedSize(30, 30)
+        self.preview_btn.setFixedSize(21, 21)
         self.preview_btn.setIcon(
             QIcon("resources/assets/icons/play-preview.png")
         )
-        self.preview_btn.setIconSize(QSize(20, 20))
+        self.preview_btn.setIconSize(QSize(14, 14))
         self.preview_btn.setToolTip(language_config.PREVIEW_IMAGE_BUTTON)
         self.preview_btn.clicked.connect(self.process_and_preview)
 
         # Tombol Delete
         self.delete_btn = QPushButton()
         self.delete_btn.setObjectName("deleteButton")
-        self.delete_btn.setFixedSize(30, 30)
+        self.delete_btn.setFixedSize(21, 21)
         self.delete_btn.setIcon(
             QIcon("resources/assets/icons/delete-image.png")
         )
-        self.delete_btn.setIconSize(QSize(20, 20))
+        self.delete_btn.setIconSize(QSize(14, 14))
         self.delete_btn.setToolTip(language_config.DELETE_IMAGE_BUTTON)
         self.delete_btn.clicked.connect(
             lambda: self.parent_widget.handle_delete_individual_batch(self.batch_id)
@@ -662,12 +663,43 @@ class CombinedPanel(QWidget):
             QMessageBox.warning(self, "Caution", language_config.NOT_IMAGE_PREVIEW)
 
     def dropdown_box_control(self):
-        override_style = """
-                        QComboBox {
-                            background-color: white;
+        from resources.GenericUILibrary.theme import get_theme
+        theme = get_theme()
+        override_style = f"""
+                        QComboBox {{
+                            background-color: #FFFFFF;
+                            color: #2C3E50;
+                            border: 1px solid {theme.border_color};
+                            padding: 4px 6px;
+                            border-radius: 6px;
                             min-height: 10px;
                             min-width: 100px;
-                        }
+                        }}
+                        QComboBox::drop-down {{
+                            border: none;
+                            background-color: transparent;
+                            width: 20px;
+                        }}
+                        QComboBox::down-arrow {{
+                            image: none;
+                            border-left: 4px solid transparent;
+                            border-right: 4px solid transparent;
+                            border-top: 5px solid #2C3E50;
+                            width: 0;
+                            height: 0;
+                            margin-right: 4px;
+                        }}
+                        QComboBox:hover {{
+                            border-color: {theme.focus_color};
+                        }}
+                        QComboBox QAbstractItemView {{
+                            background-color: #FFFFFF;
+                            color: #2C3E50;
+                            border: 1px solid {theme.border_color};
+                            selection-background-color: {theme.get_variant_hover_color("primary")};
+                            selection-color: {theme.text_white};
+                            outline: none;
+                        }}
                         """
         # --- Alignment Dropdown ---
         alignment_options = get_algorithm_options("alignment")
