@@ -13,6 +13,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.op
     _restore_dtype,
     align_with_tiled_flow,
     iter_flow_tiles,
+    to_flow_gray_u8,
 )
 
 
@@ -391,16 +392,14 @@ class LucasKanadeGPU(LucasKanadeCPU):
         flow_gpu = None
 
         try:
-            ref_gpu = taichi_aot.upload(
-                ref_roi.astype(np.float32, copy=False),
-                is_vector=ref_roi.ndim == 3,
-            )
             target_gpu = taichi_aot.upload(
                 target_roi_original.astype(np.float32, copy=False),
                 is_vector=target_roi_original.ndim == 3,
             )
-            ref_gray_gpu = self._to_gpu_gray(taichi_aot, ref_gpu)
-            target_gray_gpu = self._to_gpu_gray(taichi_aot, target_gpu)
+            ref_gray_cpu = to_flow_gray_u8(ref_roi).astype(np.float32, copy=False)
+            target_gray_cpu = to_flow_gray_u8(target_roi_original).astype(np.float32, copy=False)
+            ref_gray_gpu = taichi_aot.upload(ref_gray_cpu, is_vector=False)
+            target_gray_gpu = taichi_aot.upload(target_gray_cpu, is_vector=False)
             flow_gpu = self._calculate_flow_gpu_buffer(
                 ref_gray_gpu,
                 target_gray_gpu,
@@ -428,24 +427,23 @@ class LucasKanadeGPU(LucasKanadeCPU):
 
         return warped_roi
 
-    @staticmethod
-    def _to_gpu_gray(taichi_aot, image_gpu):
-        from taichi_library.taichi_algorithm import ta
-
-        if len(image_gpu.shape) == 2:
-            return ta.clip(image_gpu, 0.0, 255.0)
-
-        gray_gpu = taichi_aot.rgb2gray(image_gpu)
-        try:
-            return ta.clip(gray_gpu, 0.0, 255.0)
-        finally:
-            if gray_gpu is not None and hasattr(gray_gpu, "release"):
-                gray_gpu.release()
 
     @staticmethod
     def _accumulate_tile_gpu(taichi_aot, accumulator, weights, tile, warped_gpu):
         rx0, ry0, _rx1, _ry1 = tile["roi"]
+        vx0, vy0, vx1, vy1 = tile["valid"]
         tile_h, tile_w = warped_gpu.shape[:2]
+
+        # Calculate offsets of the valid region within the ROI
+        oy0 = vy0 - ry0
+        ox0 = vx0 - rx0
+        oy1 = oy0 + (vy1 - vy0)
+        ox1 = ox0 + (vx1 - vx0)
+
+        # Create a mask that is 1.0 only inside the valid region, 0.0 elsewhere
+        mask = np.zeros((tile_h, tile_w), dtype=np.float32)
+        mask[oy0:oy1, ox0:ox1] = 1.0
+
         hanning_gpu = None
         tile_weight_gpu = None
 
@@ -455,7 +453,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
                 exclude_boundary=True,
             )
             tile_weight_gpu = taichi_aot.upload(
-                np.ones((tile_h, tile_w), dtype=np.float32),
+                mask,
                 is_vector=False,
             )
             taichi_aot.stitch_tile(

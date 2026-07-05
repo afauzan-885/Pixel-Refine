@@ -190,9 +190,46 @@ def mean_division(sum_img: TaichiGPUBuffer, sum_weight: TaichiGPUBuffer, ref_img
     return dst
 
 
+def stitch_tile(
+    tile: TaichiGPUBuffer,
+    tile_weight: TaichiGPUBuffer,
+    hanning: TaichiGPUBuffer,
+    accum: TaichiGPUBuffer,
+    weight_accum: TaichiGPUBuffer,
+    y0: int,
+    x0: int,
+) -> None:
+    """AOT Optimized tile stitching."""
+    h, w = tile.shape[:2]
+    is_vec = len(tile.shape) == 3 or getattr(tile, "is_vector", False)
+    graph = "stitch_tile_vec3" if is_vec else "stitch_tile_f32"
+
+    tile_v = tile
+    accum_v = accum
+    if is_vec:
+        if not getattr(tile, "is_vector", False):
+            tile_v = tile.view_as_vector(True)
+        if not getattr(accum, "is_vector", False):
+            accum_v = accum.view_as_vector(True)
+
+    _mod("common").run(
+        graph,
+        tile=tile_v,
+        tile_weight=tile_weight,
+        hanning=hanning,
+        accum=accum_v,
+        weight_accum=weight_accum,
+        y0=int(y0),
+        x0=int(x0),
+        h=int(h),
+        w=int(w),
+    )
+
+
 # NumPy-like aliases for JIT/AOT consistency
 hanning = generate_hanning_window_2d
 divide = mean_division
+
 
 
 
