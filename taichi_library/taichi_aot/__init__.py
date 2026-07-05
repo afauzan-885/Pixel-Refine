@@ -190,43 +190,6 @@ def mean_division(sum_img: TaichiGPUBuffer, sum_weight: TaichiGPUBuffer, ref_img
     return dst
 
 
-def stitch_tile(
-    tile: TaichiGPUBuffer,
-    tile_weight: TaichiGPUBuffer,
-    hanning: TaichiGPUBuffer,
-    accum: TaichiGPUBuffer,
-    weight_accum: TaichiGPUBuffer,
-    y0: int,
-    x0: int,
-):
-    """Accumulate one GPU tile into full-frame accumulators."""
-    tile_buf = tile
-    accum_buf = accum
-    is_vec = len(tile.shape) == 3 or getattr(tile, "is_vector", False)
-    graph = "stitch_tile_vec3" if is_vec else "stitch_tile_f32"
-
-    if is_vec:
-        if not getattr(tile_buf, "is_vector", False):
-            tile_buf = tile_buf.view_as_vector(True, 3)
-        if not getattr(accum_buf, "is_vector", False):
-            accum_buf = accum_buf.view_as_vector(True, 3)
-
-    h = int(tile.shape[0])
-    w = int(tile.shape[1])
-    _mod("common").run(
-        graph,
-        tile=tile_buf,
-        tile_weight=tile_weight,
-        hanning=hanning,
-        accum=accum_buf,
-        weight_accum=weight_accum,
-        y0=int(y0),
-        x0=int(x0),
-        h=h,
-        w=w,
-    )
-
-
 # NumPy-like aliases for JIT/AOT consistency
 hanning = generate_hanning_window_2d
 divide = mean_division
@@ -3541,10 +3504,16 @@ def guided_filter_aot(guide, src, radius=8, epsilon=1e-4, return_gpu=False):
 
 
 def non_local_means_aot(src, h_param=10.0, search_window=7, patch_size=5,
+                         refinement_strength=1.0, shrinkage_strength=1.0,
                          return_gpu=False):
     """AOT Non-Local Means Denoising (fixed-parameter variants)."""
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else engine.upload(src)
+    
+    # View as 3D scalar array if uploaded as 2D vector array
+    if getattr(src_buf, 'is_vector', False):
+        src_buf = src_buf.view_as_vector(False)
+        
     h, w = src_buf.shape[:2]
     is_3d = len(src_buf.shape) == 3
 
@@ -3557,13 +3526,19 @@ def non_local_means_aot(src, h_param=10.0, search_window=7, patch_size=5,
     sr, pr = best
 
     if is_3d:
-        dst = engine.allocate((h, w, 3), is_vector=True)
+        dst = engine.allocate((h, w, 3), is_vector=False)
+        yuv = engine.allocate((h, w, 3), is_vector=False)
         graph = f"nlm_3ch_s{sr}_p{pr}_f32"
+        _mod("nlm").run(graph, src=src_buf, yuv=yuv, dst=dst, h=h, w=w, h_param=float(h_param),
+                        refinement_strength=float(refinement_strength),
+                        shrinkage_strength=float(shrinkage_strength))
+        yuv.destroy()
     else:
         dst = engine.allocate((h, w))
         graph = f"nlm_1ch_s{sr}_p{pr}_f32"
-
-    _mod("nlm").run(graph, src=src_buf, dst=dst, h=h, w=w, h_param=float(h_param))
+        _mod("nlm").run(graph, src=src_buf, dst=dst, h=h, w=w, h_param=float(h_param),
+                        refinement_strength=float(refinement_strength),
+                        shrinkage_strength=float(shrinkage_strength))
     return dst if return_gpu else dst.to_numpy()
 
 

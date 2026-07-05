@@ -11,6 +11,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lu
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.optical_flow_utils.flow_blocking import (
     _restore_dtype,
+    align_with_tiled_flow,
     iter_flow_tiles,
 )
 
@@ -75,6 +76,8 @@ class LucasKanadeGPU(LucasKanadeCPU):
     NAME = "Lucas Kanade GPU Optical Flow"
     KIND = "alignment"
     DESCRIPTION = "Tile-based GPU AOT Lucas-Kanade optical flow alignment."
+    _gpu_remap_disabled = False
+    _reported_gpu_remap_disabled = False
 
     @staticmethod
     def load_config(batch_id=None, config_filename=None):
@@ -205,6 +208,22 @@ class LucasKanadeGPU(LucasKanadeCPU):
         if reference is None or target is None:
             return None
 
+        if LucasKanadeGPU._gpu_remap_disabled:
+            if not LucasKanadeGPU._reported_gpu_remap_disabled:
+                print(
+                    "[LucasKanadeGPU] GPU remap path disabled after previous failure; "
+                    "using CPU/OpenCV fallback."
+                )
+                LucasKanadeGPU._reported_gpu_remap_disabled = True
+            return self._align_frame_cpu_fallback(
+                reference,
+                target,
+                config=config,
+                stop_requested=stop_requested,
+                tile_executor=tile_executor,
+                point_executor=point_executor,
+            )
+
         try:
             return self._align_frame_gpu_flow_remap(
                 reference,
@@ -213,10 +232,11 @@ class LucasKanadeGPU(LucasKanadeCPU):
                 stop_requested=stop_requested,
             )
         except Exception as exc:
+            LucasKanadeGPU._gpu_remap_disabled = True
             print(
                 f"[LucasKanadeGPU] GPU remap path failed, falling back to CPU remap: {exc}"
             )
-            return super().align_frame(
+            return self._align_frame_cpu_fallback(
                 reference,
                 target,
                 config=config,
@@ -224,6 +244,62 @@ class LucasKanadeGPU(LucasKanadeCPU):
                 tile_executor=tile_executor,
                 point_executor=point_executor,
             )
+
+    def _align_frame_cpu_fallback(
+        self,
+        reference,
+        target,
+        config,
+        stop_requested=None,
+        tile_executor=None,
+        point_executor=None,
+    ):
+        fallback_config = dict(config)
+        fallback_config["use_multi_core"] = True
+        fallback_config["tile_cols"] = max(2, int(fallback_config.get("tile_cols", 1)))
+        fallback_config["tile_rows"] = max(2, int(fallback_config.get("tile_rows", 1)))
+        fallback_config["point_workers"] = max(
+            2,
+            int(fallback_config.get("point_workers", 2)),
+        )
+
+        def flow_func(reference_gray, target_gray):
+            return LucasKanadeCPU.calculate_flow(
+                self,
+                reference_gray,
+                target_gray,
+                fallback_config,
+                point_executor=point_executor,
+            )
+
+        return align_with_tiled_flow(
+            reference,
+            target,
+            flow_func,
+            cols=int(fallback_config.get("tile_cols", 3)),
+            rows=int(fallback_config.get("tile_rows", 2)),
+            overlap=float(fallback_config.get("tile_overlap", 0.20)),
+            use_multi_core=True,
+            stop_requested=stop_requested,
+            executor=tile_executor,
+        )
+
+    def build_flow_alignment(self, ctx, reference, target_dims, orchestrator, config):
+        fallback_config = dict(config)
+        fallback_config["use_multi_core"] = True
+        fallback_config["tile_cols"] = max(2, int(fallback_config.get("tile_cols", 1)))
+        fallback_config["tile_rows"] = max(2, int(fallback_config.get("tile_rows", 1)))
+        fallback_config["point_workers"] = max(
+            2,
+            int(fallback_config.get("point_workers", 2)),
+        )
+        return super().build_flow_alignment(
+            ctx,
+            reference,
+            target_dims,
+            orchestrator,
+            fallback_config,
+        )
 
     def _align_frame_gpu_flow_remap(
         self,

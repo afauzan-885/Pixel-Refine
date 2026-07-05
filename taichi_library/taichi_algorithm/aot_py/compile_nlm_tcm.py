@@ -55,22 +55,26 @@ def compile_nlm_aot(arch, save_path):
     h_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
     w_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
     h_param_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h_param", ti.f32)
+    refinement_strength_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "refinement_strength", ti.f32)
+    shrinkage_strength_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "shrinkage_strength", ti.f32)
 
     # Compile 1-channel variants
     for graph_name, kernel_func in NLM_KERNELS_1CH:
         g = ti.graph.GraphBuilder()
-        g.dispatch(kernel_func, src_2d, dst_2d, h_arg, w_arg, h_param_arg)
+        g.dispatch(kernel_func, src_2d, dst_2d, h_arg, w_arg, h_param_arg, refinement_strength_arg, shrinkage_strength_arg)
         module.add_graph(graph_name, g.compile())
         print(f"  Compiled: {graph_name}")
 
     # Common graph args for 3-channel kernels
     src_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=3)
+    yuv_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "yuv", ti.f32, ndim=3)
     dst_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
 
     # Compile 3-channel variants
     for graph_name, kernel_func in NLM_KERNELS_3CH:
         g = ti.graph.GraphBuilder()
-        g.dispatch(kernel_func, src_3d, dst_3d, h_arg, w_arg, h_param_arg)
+        g.dispatch(nlm_mod._precompute_yuv, src_3d, yuv_3d, h_arg, w_arg)
+        g.dispatch(kernel_func, src_3d, yuv_3d, dst_3d, h_arg, w_arg, h_param_arg, refinement_strength_arg, shrinkage_strength_arg)
         module.add_graph(graph_name, g.compile())
         print(f"  Compiled: {graph_name}")
 

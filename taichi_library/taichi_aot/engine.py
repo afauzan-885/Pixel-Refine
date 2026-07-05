@@ -1359,6 +1359,9 @@ class AOTEngine:
 
             # Map arch to arch_id
             arch_id = {"vulkan": 0, "cuda": 1, "cpu": 2}.get(arch.lower(), 0)
+            native_device_id = int(device_id)
+            if arch.lower() == "cpu" and native_device_id != 0:
+                native_device_id = 0
 
             # Wrap init_aot_engine in a thread with timeout to detect hung Vulkan driver.
             # ctypes releases the GIL during C calls, so this timeout mechanism works
@@ -1370,7 +1373,10 @@ class AOTEngine:
             def _do_init():
                 try:
                     with _suppress_native_stderr(arch.lower() == "vulkan"):
-                        _init_result[0] = _LIB.init_aot_engine(arch_id, device_id)
+                        _init_result[0] = _LIB.init_aot_engine(
+                            arch_id,
+                            native_device_id,
+                        )
                 except Exception as e:
                     _init_error[0] = e
 
