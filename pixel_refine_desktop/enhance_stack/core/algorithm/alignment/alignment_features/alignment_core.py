@@ -14,6 +14,7 @@ import onnxruntime as ort
 # Taichi AOT for GPU Farneback
 try:
     import taichi_library.taichi_aot as ta_aot
+
     TAICHI_AOT_AVAILABLE = True
 except Exception:
     ta_aot = None
@@ -566,7 +567,7 @@ def perform_alignment_gpu(
     if flow_backend == "horn_schunck":
         # Horn-Schunck: TCM ada di taichi_library/taichi_algorithm/aot_tcm/
         hs_iters = kwargs.get("hs_iters", 20)
-        flow_module_name = "template_flow_vulkan.tcm"
+        flow_module_name = f"horn_schunck_{active_arch}.tcm"
         flow_graph_name = f"hs_align_3layer_{hs_iters}"
         save_backend_name = "HORN_SCHUNCK"
     elif flow_backend == "block_align":
@@ -677,7 +678,9 @@ def perform_alignment_gpu(
             flow_temp_l1 = None
             flow_temp_l2 = None
             if flow_backend == "horn_schunck":
-                flow_temp_l0 = engine.allocate((h_w, w_w, 2), dtype=np.float32, is_vector=False)
+                flow_temp_l0 = engine.allocate(
+                    (h_w, w_w, 2), dtype=np.float32, is_vector=False
+                )
                 flow_temp_l1 = engine.allocate(
                     (h_w // 2, w_w // 2, 2), dtype=np.float32, is_vector=False
                 )
@@ -686,8 +689,12 @@ def perform_alignment_gpu(
                 )
 
             # Iterative Warping Grayscale Scratch Buffers
-            comp_l1_warped = engine.allocate((h_w // 2, w_w // 2), dtype=np.float32, is_vector=False)
-            comp_l0_warped = engine.allocate((h_w, w_w), dtype=np.float32, is_vector=False)
+            comp_l1_warped = engine.allocate(
+                (h_w // 2, w_w // 2), dtype=np.float32, is_vector=False
+            )
+            comp_l0_warped = engine.allocate(
+                (h_w, w_w), dtype=np.float32, is_vector=False
+            )
 
             full_h_ref, full_w_ref = images[0].shape[:2]
             smooth_flow_buf = engine.allocate((h_w, w_w, 2), dtype=np.float32)
@@ -765,18 +772,21 @@ def perform_alignment_gpu(
                             prepare_gaussian_constants,
                             compute_smoothing_weights,
                         )
+
                         poly_n = 5
                         poly_sigma = 1.2
                         win_size = 15
-                        g_w, xg_w, xxg_w, ig11, ig03, ig33, ig55 = prepare_gaussian_constants(poly_n, poly_sigma)
+                        g_w, xg_w, xxg_w, ig11, ig03, ig33, ig55 = (
+                            prepare_gaussian_constants(poly_n, poly_sigma)
+                        )
                         smooth_w, smooth_radius = compute_smoothing_weights(win_size)
                         poly_radius = poly_n // 2
 
                         # Upload constants to GPU
-                        g_gpu = engine.upload(g_w[:poly_radius + 1])
-                        xg_gpu = engine.upload(xg_w[:poly_radius + 1])
-                        xxg_gpu = engine.upload(xxg_w[:poly_radius + 1])
-                        smooth_gpu = engine.upload(smooth_w[:smooth_radius + 1])
+                        g_gpu = engine.upload(g_w[: poly_radius + 1])
+                        xg_gpu = engine.upload(xg_w[: poly_radius + 1])
+                        xxg_gpu = engine.upload(xxg_w[: poly_radius + 1])
+                        smooth_gpu = engine.upload(smooth_w[: smooth_radius + 1])
 
                         # Allocate temp buffers for each pyramid level
                         h0, w0 = work_res_h, work_res_w
@@ -807,16 +817,38 @@ def perform_alignment_gpu(
                             flow_lvl = engine.allocate((hl, wl, 2), dtype=np.float32)
 
                             # Polynomial expansion for ref and comp
-                            mod.run("poly_expansion_f32",
-                                    src=ref_lvl, vert=vert_buf, poly=R0,
-                                    h=hl, w=wl, g=g_gpu, xg=xg_gpu, xxg=xxg_gpu,
-                                    ig11=ig11, ig03=ig03, ig33=ig33, ig55=ig55,
-                                    poly_radius=poly_radius)
-                            mod.run("poly_expansion_f32",
-                                    src=comp_lvl, vert=vert_buf, poly=R1,
-                                    h=hl, w=wl, g=g_gpu, xg=xg_gpu, xxg=xxg_gpu,
-                                    ig11=ig11, ig03=ig03, ig33=ig33, ig55=ig55,
-                                    poly_radius=poly_radius)
+                            mod.run(
+                                "poly_expansion_f32",
+                                src=ref_lvl,
+                                vert=vert_buf,
+                                poly=R0,
+                                h=hl,
+                                w=wl,
+                                g=g_gpu,
+                                xg=xg_gpu,
+                                xxg=xxg_gpu,
+                                ig11=ig11,
+                                ig03=ig03,
+                                ig33=ig33,
+                                ig55=ig55,
+                                poly_radius=poly_radius,
+                            )
+                            mod.run(
+                                "poly_expansion_f32",
+                                src=comp_lvl,
+                                vert=vert_buf,
+                                poly=R1,
+                                h=hl,
+                                w=wl,
+                                g=g_gpu,
+                                xg=xg_gpu,
+                                xxg=xxg_gpu,
+                                ig11=ig11,
+                                ig03=ig03,
+                                ig33=ig33,
+                                ig55=ig55,
+                                poly_radius=poly_radius,
+                            )
 
                             # Initialize flow: upsample from coarser or clear
                             if lvl == 2:
@@ -825,13 +857,26 @@ def perform_alignment_gpu(
                                 # Upsample flow from coarser level
                                 flow_prev = flow_l1 if lvl == 1 else flow_l0
                                 scale_up = float(hl) / float(flow_prev.shape[0])
-                                mod.run("farneback_upsample_flow",
-                                        flow_coarse=flow_prev, flow_fine=flow_lvl, scale=scale_up)
+                                mod.run(
+                                    "farneback_upsample_flow",
+                                    flow_coarse=flow_prev,
+                                    flow_fine=flow_lvl,
+                                    scale=scale_up,
+                                )
 
                             # Run 3 iterations of Farneback
-                            mod.run("farneback_multi_3",
-                                    R0=R0, R1=R1, flow=flow_lvl, M=M_buf, M_smooth=M_smooth,
-                                    h=hl, w=wl, smooth_weights=smooth_gpu, smooth_radius=smooth_radius)
+                            mod.run(
+                                "farneback_multi_3",
+                                R0=R0,
+                                R1=R1,
+                                flow=flow_lvl,
+                                M=M_buf,
+                                M_smooth=M_smooth,
+                                h=hl,
+                                w=wl,
+                                smooth_weights=smooth_gpu,
+                                smooth_radius=smooth_radius,
+                            )
                             engine.sync()
 
                             # Copy flow to appropriate buffer for next level
@@ -1077,8 +1122,15 @@ def perform_alignment_gpu(
                 # 5. EXPLICIT RESOUCE DESTROY (Pembersihan VRAM Total)
                 for buf in ref_pyramid:
                     buf.destroy()
-                
-                for buf in [flow_l0, flow_l1, flow_l2, flow_temp_l0, flow_temp_l1, flow_temp_l2]:
+
+                for buf in [
+                    flow_l0,
+                    flow_l1,
+                    flow_l2,
+                    flow_temp_l0,
+                    flow_temp_l1,
+                    flow_temp_l2,
+                ]:
                     try:
                         if buf is not None:
                             buf.destroy()
@@ -1164,7 +1216,13 @@ def perform_image_alignment(
 
     # [GPU-AUTO] Redirect to Taichi AOT GPU if type is alignment_tile/block_align/horn_schunck/farneback_jit/farneback_aot
     # This ensures that high-level pipelines (SimilarityMNFR) automatically use GPU acceleration.
-    if optical_flow_type in ("alignment_tile", "block_align", "horn_schunck", "farneback_jit", "farneback_aot"):
+    if optical_flow_type in (
+        "alignment_tile",
+        "block_align",
+        "horn_schunck",
+        "farneback_jit",
+        "farneback_aot",
+    ):
         # print("[Alignment Core] Redirecting to GPU Alignment Pipeline (AOT)...")
         gpu_kwargs = dict(kwargs)
         gpu_kwargs["search_dist"] = kwargs.get("search_dist", 2)
@@ -1404,25 +1462,38 @@ def perform_image_alignment(
                         ref_f32 = ref_gray_8u.astype(np.float32)
                         curr_f32 = current_gray_8u.astype(np.float32)
                         flow = ta_aot.farneback_flow(
-                            ref_f32, curr_f32,
-                            pyr_scale=0.5, num_levels=3,
-                            win_size=15, num_iters=3,
-                            poly_n=5, poly_sigma=1.2,
+                            ref_f32,
+                            curr_f32,
+                            pyr_scale=0.5,
+                            num_levels=3,
+                            win_size=15,
+                            num_iters=3,
+                            poly_n=5,
+                            poly_sigma=1.2,
                         )
                     except Exception as e:
-                        print(f"[Taichi AOT Farneback] Failed: {e}, falling back to OpenCV")
+                        print(
+                            f"[Taichi AOT Farneback] Failed: {e}, falling back to OpenCV"
+                        )
                         flow = None
 
                 # OpenCV fallback
                 if flow is None:
                     flow_init = np.empty(
-                        (ref_gray_8u.shape[0], ref_gray_8u.shape[1], 2), dtype=np.float32
+                        (ref_gray_8u.shape[0], ref_gray_8u.shape[1], 2),
+                        dtype=np.float32,
                     )
                     flow = cv2.calcOpticalFlowFarneback(
                         ref_gray_8u,
                         current_gray_8u,
                         flow_init,
-                        0.5, 3, 15, 3, 5, 1.2, 0,
+                        0.5,
+                        3,
+                        15,
+                        3,
+                        5,
+                        1.2,
+                        0,
                     )
 
                 aligned_img = warp_image_opencv(original_image, flow)

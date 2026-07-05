@@ -1,6 +1,7 @@
 from PySide6.QtCore import QObject, Signal, QFileSystemWatcher, QTimer
 import json
 import os
+import time
 
 
 class DataStore(QObject):
@@ -20,6 +21,13 @@ class DataStore(QObject):
         self._file_path = None
         self._in_transaction = False
         self._pending_notifications = set()  # Track keys changed during transaction
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(500)
+        self._save_timer.timeout.connect(self.save_to_file)
+        self._save_immediately = False
+        self._ignore_next_file_change = False
+        self._last_save_time = 0.0
 
     def set(self, key, value, notify=True):
         """
@@ -47,7 +55,7 @@ class DataStore(QObject):
 
             # If we are backed by a file, save it (unless in transaction)
             if self._file_path and not self._in_transaction:
-                self.save_to_file()
+                self.schedule_save()
 
     def silent_set(self, key, value):
         """Set value without emitting signals or saving to file."""
@@ -107,7 +115,7 @@ class DataStore(QObject):
         else:
             self.changed.emit(None, self._data)  # Notify all listeners of major change
             if save and self._file_path:
-                self.save_to_file()
+                self.schedule_save()
 
     def transaction(self):
         """Context manager for batching multiple updates into a single notification."""
@@ -130,7 +138,7 @@ class DataStore(QObject):
                         self.store.changed.emit(key, val)
 
                     if self.store._file_path and self.store._pending_notifications:
-                        self.store.save_to_file()
+                        self.store.schedule_save()
 
                 self.store._pending_notifications.clear()
 
@@ -173,6 +181,8 @@ class DataStore(QObject):
             with open(self._file_path, "r") as f:
                 new_data = json.load(f)
                 if isinstance(new_data, dict):
+                    if new_data == self._data:
+                        return
                     # Direct assignment to reflect EXACT state from file (including deletions)
                     self._data = new_data
                     self.changed.emit(None, self._data)
@@ -187,18 +197,40 @@ class DataStore(QObject):
         if not self._file_path:
             return
 
+        self._save_timer.stop()
         try:
             os.makedirs(os.path.dirname(self._file_path), exist_ok=True)
             with open(self._file_path, "w") as f:
                 json.dump(self._data, f, indent=4)
+            self._ignore_next_file_change = True
+            self._last_save_time = time.monotonic()
         except IOError as e:
             print(f"DataStore: Error saving file {self._file_path}: {e}")
+
+    def schedule_save(self, delay_ms=None):
+        """Coalesce rapid realtime updates into a single disk write."""
+        if not self._file_path:
+            return
+
+        if self._save_immediately:
+            self.save_to_file()
+            return
+
+        if delay_ms is not None:
+            self._save_timer.setInterval(delay_ms)
+        self._save_timer.start()
 
     def _on_file_changed(self, path):
         """Handle external file changes with robust path re-registration."""
         # Use absolute target file path
         target = self._file_path
         if not target:
+            return
+
+        if self._ignore_next_file_change or time.monotonic() - self._last_save_time < 1.0:
+            self._ignore_next_file_change = False
+            if self._watcher and target not in self._watcher.files():
+                self._watcher.addPath(target)
             return
 
         # If file is temporarily missing (atomic save), retry

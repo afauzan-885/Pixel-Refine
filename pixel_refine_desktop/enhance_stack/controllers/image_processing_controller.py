@@ -5,13 +5,15 @@ Orchestrates image processing algorithms (alignment, denoising, super resolution
 
 from PySide6.QtCore import QObject, Signal
 from typing import Optional, Dict, Any
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.AKAZE import (
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.AKAZE import (
     running_akaze,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.Light_Glue import (
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.Light_Glue import (
     running_light_glue,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.ORB import running_orb
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.ORB import (
+    running_orb,
+)
 from pixel_refine_desktop.enhance_stack.models.algorithm_config_model import (
     AlgorithmConfig,
     AlgorithmType,
@@ -263,7 +265,7 @@ class ImageProcessingController(QObject):
         algorithm_map = {
             "ORB": running_orb,
             "AKAZE": running_akaze,
-            # "Farneback Optical Flow": running_farneback_optical_flow,
+            # "Farneback Optical Flow": running_farneback_flow,
             "Light Glue": running_light_glue,
         }
 

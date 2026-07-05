@@ -3,6 +3,7 @@
 #include <string>
 #include <taichi/cpp/taichi.hpp>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <mutex>
 #include <immintrin.h>
@@ -48,6 +49,8 @@ struct DynamicArg {
   uint64_t val_u64;
 };
 
+struct EngineContext;
+
 // -----------------------------------------------------------------------
 // Pipeline Structures (Global)
 // -----------------------------------------------------------------------
@@ -62,6 +65,7 @@ struct Pipeline {
   std::vector<GraphDispatch> steps;
 };
 
+// Fallback store for legacy calls that do not provide an EngineContext.
 static std::unordered_map<std::string, Pipeline> global_pipelines;
 static std::mutex pipelines_mutex;
 
@@ -69,10 +73,66 @@ static std::mutex pipelines_mutex;
 // Internal Cache for Graphics Objects
 // -----------------------------------------------------------------------
 struct ModuleContext {
+  EngineContext *owner;
   ti::AotModule *module;
   std::unordered_map<std::string, ti::ComputeGraph> graph_cache;
   std::mutex cache_mutex;
 };
+
+struct EngineContext {
+  ti::Runtime *runtime;
+  std::unordered_set<TiMemory> buffers;
+  std::unordered_set<TiMemory> mapped_buffers;
+  std::unordered_set<ModuleContext *> modules;
+  std::unordered_map<std::string, Pipeline> pipelines;
+  std::mutex mutex;
+  std::string last_error;
+  bool destroying;
+  uint64_t session_id;
+};
+
+static std::unordered_set<EngineContext *> engine_contexts;
+static std::mutex engine_contexts_mutex;
+static uint64_t next_session_id = 1;
+
+static EngineContext *as_engine(void *runtime) {
+  return (EngineContext *)runtime;
+}
+
+static ti::Runtime *engine_runtime(EngineContext *ctx) {
+  if (!ctx || ctx->destroying)
+    return nullptr;
+  return ctx->runtime;
+}
+
+static void set_engine_error(EngineContext *ctx, const std::string &message) {
+  if (!ctx)
+    return;
+  std::lock_guard<std::mutex> lock(ctx->mutex);
+  ctx->last_error = message;
+}
+
+static void clear_engine_error(EngineContext *ctx) {
+  if (!ctx)
+    return;
+  std::lock_guard<std::mutex> lock(ctx->mutex);
+  ctx->last_error.clear();
+}
+
+static std::string consume_ti_last_error() {
+  std::string last_error;
+  for (int attempt = 0; attempt < 16; ++attempt) {
+    uint64_t msg_size = 0;
+    ti_get_last_error(&msg_size, nullptr);
+    if (msg_size <= 1)
+      break;
+    std::vector<char> msg(msg_size);
+    ti_get_last_error(&msg_size, msg.data());
+    if (!msg.empty() && msg[0] != '\0')
+      last_error = std::string(msg.data());
+  }
+  return last_error;
+}
 
 // -----------------------------------------------------------------------
 // Runtime & Module Management
@@ -120,26 +180,75 @@ EXPORT void *init_aot_engine(int arch_id, int device_id) {
       arch = TI_ARCH_X64;
 
     // Use specified device_id
-    return (void *)(new ti::Runtime(arch, (uint32_t)device_id));
+    EngineContext *ctx = new EngineContext();
+    ctx->runtime = new ti::Runtime(arch, (uint32_t)device_id);
+    ctx->destroying = false;
+    ctx->session_id = next_session_id++;
+    {
+      std::lock_guard<std::mutex> lock(engine_contexts_mutex);
+      engine_contexts.insert(ctx);
+    }
+    return (void *)ctx;
   } catch (...) {
     // Fallback to CPU if GPU initialization fails
     try {
-      return (void *)(new ti::Runtime(TI_ARCH_X64, 0));
+      EngineContext *ctx = new EngineContext();
+      ctx->runtime = new ti::Runtime(TI_ARCH_X64, 0);
+      ctx->destroying = false;
+      ctx->session_id = next_session_id++;
+      {
+        std::lock_guard<std::mutex> lock(engine_contexts_mutex);
+        engine_contexts.insert(ctx);
+      }
+      return (void *)ctx;
     } catch (...) {
       return nullptr;
     }
   }
 }
 
+EXPORT const char *get_last_engine_error(void *runtime) {
+  EngineContext *ctx = as_engine(runtime);
+  if (!ctx)
+    return "";
+  std::lock_guard<std::mutex> lock(ctx->mutex);
+  return ctx->last_error.c_str();
+}
+
+EXPORT void clear_last_engine_error(void *runtime) {
+  clear_engine_error(as_engine(runtime));
+  consume_ti_last_error();
+}
+
 EXPORT void *load_aot_module(void *runtime, const char *tcm_path) {
-  ti::Runtime *rt = (ti::Runtime *)runtime;
+  EngineContext *engine = as_engine(runtime);
+  ti::Runtime *rt = engine_runtime(engine);
   if (!rt)
     return nullptr;
   try {
+    clear_engine_error(engine);
+    consume_ti_last_error();
     ModuleContext *ctx = new ModuleContext();
+    ctx->owner = engine;
     ctx->module = new ti::AotModule(rt->load_aot_module(tcm_path));
+    std::string load_error = consume_ti_last_error();
+    if (!load_error.empty()) {
+      if (ctx->module)
+        delete ctx->module;
+      delete ctx;
+      set_engine_error(engine, std::string("load_aot_module: ") + load_error);
+      return nullptr;
+    }
+    {
+      std::lock_guard<std::mutex> lock(engine->mutex);
+      engine->modules.insert(ctx);
+    }
     return (void *)ctx;
+  } catch (const std::exception &e) {
+    set_engine_error(engine, std::string("load_aot_module: ") + e.what());
+    return nullptr;
   } catch (...) {
+    set_engine_error(engine, "load_aot_module: unknown exception");
     return nullptr;
   }
 }
@@ -147,10 +256,78 @@ EXPORT void *load_aot_module(void *runtime, const char *tcm_path) {
 EXPORT void destroy_aot_module(void *module_ctx) {
   ModuleContext *ctx = (ModuleContext *)module_ctx;
   if (ctx) {
+    EngineContext *owner = ctx->owner;
+    if (owner) {
+      std::lock_guard<std::mutex> lock(owner->mutex);
+      owner->modules.erase(ctx);
+    }
     if (ctx->module)
       delete ctx->module;
     delete ctx;
   }
+}
+
+EXPORT void destroy_aot_engine(void *runtime) {
+  EngineContext *ctx = as_engine(runtime);
+  if (!ctx)
+    return;
+
+  {
+    std::lock_guard<std::mutex> lock(engine_contexts_mutex);
+    if (engine_contexts.find(ctx) == engine_contexts.end())
+      return;
+    engine_contexts.erase(ctx);
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(ctx->mutex);
+    ctx->destroying = true;
+  }
+
+  try {
+    if (ctx->runtime)
+      ctx->runtime->wait();
+  } catch (...) {
+  }
+
+  std::vector<ModuleContext *> modules;
+  std::vector<TiMemory> buffers;
+  {
+    std::lock_guard<std::mutex> lock(ctx->mutex);
+    for (auto *mod : ctx->modules)
+      modules.push_back(mod);
+    for (auto mem : ctx->buffers)
+      buffers.push_back(mem);
+    ctx->modules.clear();
+    ctx->buffers.clear();
+    ctx->mapped_buffers.clear();
+    ctx->pipelines.clear();
+  }
+
+  for (auto *mod : modules) {
+    try {
+      if (mod && mod->module)
+        delete mod->module;
+      delete mod;
+    } catch (...) {
+    }
+  }
+
+  for (auto mem : buffers) {
+    try {
+      if (ctx->runtime && mem)
+        ti_free_memory(ctx->runtime->runtime(), mem);
+    } catch (...) {
+    }
+  }
+
+  try {
+    if (ctx->runtime)
+      delete ctx->runtime;
+  } catch (...) {
+  }
+  ctx->runtime = nullptr;
+  delete ctx;
 }
 
 // -----------------------------------------------------------------------
@@ -158,7 +335,8 @@ EXPORT void destroy_aot_module(void *module_ctx) {
 // -----------------------------------------------------------------------
 EXPORT void *allocate_gpu_buffer(void *runtime, uint64_t size,
                                  int host_accessible) {
-  ti::Runtime *rt = (ti::Runtime *)runtime;
+  EngineContext *engine = as_engine(runtime);
+  ti::Runtime *rt = engine_runtime(engine);
   if (!rt)
     return nullptr;
   TiMemoryAllocateInfo allocate_info = {};
@@ -168,19 +346,31 @@ EXPORT void *allocate_gpu_buffer(void *runtime, uint64_t size,
     allocate_info.host_write = true;
     allocate_info.host_read = true;
   }
-  return (void *)ti_allocate_memory(rt->runtime(), &allocate_info);
+  TiMemory mem = ti_allocate_memory(rt->runtime(), &allocate_info);
+  if (mem) {
+    std::lock_guard<std::mutex> lock(engine->mutex);
+    engine->buffers.insert(mem);
+  }
+  return (void *)mem;
 }
 
 EXPORT void free_gpu_buffer(void *runtime, void *memory) {
-  ti::Runtime *rt = (ti::Runtime *)runtime;
+  EngineContext *engine = as_engine(runtime);
+  ti::Runtime *rt = engine_runtime(engine);
   if (rt && memory) {
+    {
+      std::lock_guard<std::mutex> lock(engine->mutex);
+      engine->mapped_buffers.erase((TiMemory)memory);
+      engine->buffers.erase((TiMemory)memory);
+    }
     ti_free_memory(rt->runtime(), (TiMemory)memory);
   }
 }
 
 EXPORT void write_to_gpu_buffer(void *runtime, void *memory, void *data,
                                 uint64_t size) {
-  ti::Runtime *rt = (ti::Runtime *)runtime;
+  EngineContext *engine = as_engine(runtime);
+  ti::Runtime *rt = engine_runtime(engine);
   if (!rt || !memory || !data)
     return;
   void *ptr = ti_map_memory(rt->runtime(), (TiMemory)memory);
@@ -192,7 +382,8 @@ EXPORT void write_to_gpu_buffer(void *runtime, void *memory, void *data,
 
 EXPORT void read_from_gpu_buffer(void *runtime, void *memory, void *data,
                                  uint64_t size) {
-  ti::Runtime *rt = (ti::Runtime *)runtime;
+  EngineContext *engine = as_engine(runtime);
+  ti::Runtime *rt = engine_runtime(engine);
   if (!rt || !memory || !data)
     return;
   rt->wait(); // Ensure all kernels are done before reading
@@ -204,22 +395,32 @@ EXPORT void read_from_gpu_buffer(void *runtime, void *memory, void *data,
 }
 
 EXPORT void *map_gpu_buffer(void *runtime, void *memory) {
-  ti::Runtime *rt = (ti::Runtime *)runtime;
+  EngineContext *engine = as_engine(runtime);
+  ti::Runtime *rt = engine_runtime(engine);
   if (!rt || !memory)
     return nullptr;
-  return ti_map_memory(rt->runtime(), (TiMemory)memory);
+  void *ptr = ti_map_memory(rt->runtime(), (TiMemory)memory);
+  if (ptr) {
+    std::lock_guard<std::mutex> lock(engine->mutex);
+    engine->mapped_buffers.insert((TiMemory)memory);
+  }
+  return ptr;
 }
 
 EXPORT void unmap_gpu_buffer(void *runtime, void *memory) {
-  ti::Runtime *rt = (ti::Runtime *)runtime;
+  EngineContext *engine = as_engine(runtime);
+  ti::Runtime *rt = engine_runtime(engine);
   if (rt && memory) {
     ti_unmap_memory(rt->runtime(), (TiMemory)memory);
+    std::lock_guard<std::mutex> lock(engine->mutex);
+    engine->mapped_buffers.erase((TiMemory)memory);
   }
 }
 
 EXPORT void copy_gpu_buffer(void *runtime, void *src, void *dst,
                             uint64_t size) {
-  ti::Runtime *rt = (ti::Runtime *)runtime;
+  EngineContext *engine = as_engine(runtime);
+  ti::Runtime *rt = engine_runtime(engine);
   if (!rt || !src || !dst)
     return;
 
@@ -238,7 +439,8 @@ EXPORT void copy_gpu_buffer(void *runtime, void *src, void *dst,
 }
 
 EXPORT void sync_runtime(void *runtime) {
-  ti::Runtime *rt = (ti::Runtime *)runtime;
+  EngineContext *engine = as_engine(runtime);
+  ti::Runtime *rt = engine_runtime(engine);
   if (rt)
     rt->wait();
 }
@@ -249,7 +451,8 @@ EXPORT void sync_runtime(void *runtime) {
 EXPORT void *ti_imread_to_gpu(void *runtime, const char *path, int *out_width,
                               int *out_height, int *out_channels,
                               int *out_bit_depth) {
-  ti::Runtime *rt = (ti::Runtime *)runtime;
+  EngineContext *engine = as_engine(runtime);
+  ti::Runtime *rt = engine_runtime(engine);
   if (!rt || !path)
     return nullptr;
 
@@ -325,6 +528,10 @@ EXPORT void *ti_imread_to_gpu(void *runtime, const char *path, int *out_width,
     decoder->Release();
     return nullptr;
   }
+  {
+    std::lock_guard<std::mutex> lock(engine->mutex);
+    engine->buffers.insert(gpu_mem);
+  }
 
   // Copy pixels directly to GPU (using mapped memory if possible, or
   // intermediate buffer)
@@ -359,7 +566,8 @@ EXPORT void *ti_imread_to_gpu(void *runtime, const char *path, int *out_width,
 EXPORT bool ti_imwrite_from_gpu(void *runtime, const char *path, void *gpu_mem,
                                 int width, int height, int channels,
                                 int bit_depth) {
-  ti::Runtime *rt = (ti::Runtime *)runtime;
+  EngineContext *engine = as_engine(runtime);
+  ti::Runtime *rt = engine_runtime(engine);
   if (!rt || !path || !gpu_mem)
     return false;
 
@@ -594,12 +802,14 @@ static void _fill_ti_arg(TiNamedArgument &arg, const DynamicArg &dyn_arg,
 EXPORT void run_aot_graph(void *runtime, void *module_ctx,
                           const char *graph_name, DynamicArg *args_array,
                           int num_args) {
-  ti::Runtime *rt = (ti::Runtime *)runtime;
+  EngineContext *engine = as_engine(runtime);
+  ti::Runtime *rt = engine_runtime(engine);
   ModuleContext *ctx = (ModuleContext *)module_ctx;
   if (!rt || !ctx || !ctx->module || !args_array)
     return;
 
   try {
+    clear_engine_error(engine);
     std::lock_guard<std::mutex> lock(ctx->cache_mutex);
     std::string gname(graph_name);
     auto it = ctx->graph_cache.find(gname);
@@ -648,14 +858,17 @@ EXPORT void run_aot_graph(void *runtime, void *module_ctx,
       std::vector<char> msg(msg_size);
       ti_get_last_error(&msg_size, msg.data());
       if (msg[0] != '\0') {
+        set_engine_error(engine, std::string("run_aot_graph: ") + msg.data());
         printf("[C++ Engine] ERROR in run_aot_graph launch: %s\n", msg.data());
       }
     }
     fflush(stdout);
   } catch (const std::exception &e) {
+    set_engine_error(engine, std::string("run_aot_graph exception: ") + e.what());
     printf("[C++ Engine] EXCEPTION in run_aot_graph: %s\n", e.what());
     fflush(stdout);
   } catch (...) {
+    set_engine_error(engine, "run_aot_graph unknown exception");
     printf("[C++ Engine] UNKNOWN EXCEPTION in run_aot_graph\n");
     fflush(stdout);
   }
@@ -666,14 +879,31 @@ EXPORT void run_aot_graph(void *runtime, void *module_ctx,
 // -----------------------------------------------------------------------
 
 EXPORT void clear_pipeline(void *module_ctx, const char *pipeline_name) {
-  std::lock_guard<std::mutex> lock(pipelines_mutex);
-  global_pipelines.erase(pipeline_name);
+  ModuleContext *mod = (ModuleContext *)module_ctx;
+  if (mod && mod->owner) {
+    std::lock_guard<std::mutex> lock(mod->owner->mutex);
+    mod->owner->pipelines.erase(pipeline_name);
+    return;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(pipelines_mutex);
+    global_pipelines.erase(pipeline_name);
+  }
+  std::lock_guard<std::mutex> lock(engine_contexts_mutex);
+  for (auto *ctx : engine_contexts) {
+    if (!ctx)
+      continue;
+    std::lock_guard<std::mutex> ctx_lock(ctx->mutex);
+    ctx->pipelines.erase(pipeline_name);
+  }
 }
 
 EXPORT void add_to_pipeline(void *module_ctx, const char *pipeline_name,
                             const char *graph_name, DynamicArg *args_array,
                             int num_args) {
-  if (!args_array)
+  ModuleContext *mod = (ModuleContext *)module_ctx;
+  if (!args_array || !mod)
     return;
 
   GraphDispatch dispatch;
@@ -690,27 +920,48 @@ EXPORT void add_to_pipeline(void *module_ctx, const char *pipeline_name,
     dispatch.args.push_back(arg);
   }
 
-  std::lock_guard<std::mutex> lock(pipelines_mutex);
-  global_pipelines[pipeline_name].steps.push_back(std::move(dispatch));
+  if (mod->owner) {
+    std::lock_guard<std::mutex> lock(mod->owner->mutex);
+    mod->owner->pipelines[pipeline_name].steps.push_back(std::move(dispatch));
+  } else {
+    std::lock_guard<std::mutex> lock(pipelines_mutex);
+    global_pipelines[pipeline_name].steps.push_back(std::move(dispatch));
+  }
 }
 
 EXPORT void run_pipeline(void *runtime, const char *pipeline_name,
                          uint64_t *old_handles, DynamicArg *new_args,
                          int num_overrides) {
-  ti::Runtime *rt = (ti::Runtime *)runtime;
+  EngineContext *engine = as_engine(runtime);
+  ti::Runtime *rt = engine_runtime(engine);
   if (!rt)
     return;
 
   Pipeline pipe;
   {
-    std::lock_guard<std::mutex> lock(pipelines_mutex);
-    auto it_pipe = global_pipelines.find(pipeline_name);
-    if (it_pipe == global_pipelines.end()) {
+    bool found = false;
+    if (engine) {
+      std::lock_guard<std::mutex> lock(engine->mutex);
+      auto it_pipe = engine->pipelines.find(pipeline_name);
+      if (it_pipe != engine->pipelines.end()) {
+        pipe = it_pipe->second;
+        found = true;
+      }
+    }
+    if (!found) {
+      std::lock_guard<std::mutex> lock(pipelines_mutex);
+      auto it_pipe = global_pipelines.find(pipeline_name);
+      if (it_pipe != global_pipelines.end()) {
+        pipe = it_pipe->second;
+        found = true;
+      }
+    }
+    if (!found) {
+      set_engine_error(engine, std::string("Pipeline not found: ") + pipeline_name);
       printf("[C++ Engine] ERROR: Pipeline '%s' not found!\n", pipeline_name);
       fflush(stdout);
       return;
     }
-    pipe = it_pipe->second;
   }
   if (pipe.steps.empty()) {
     printf("[C++ Engine] WARNING: Pipeline '%s' has 0 steps.\n", pipeline_name);
@@ -719,6 +970,7 @@ EXPORT void run_pipeline(void *runtime, const char *pipeline_name,
   }
 
   try {
+    clear_engine_error(engine);
     for (auto &step : pipe.steps) {
       ModuleContext *ctx = (ModuleContext *)step.module_ctx;
       if (!ctx)
@@ -774,15 +1026,18 @@ EXPORT void run_pipeline(void *runtime, const char *pipeline_name,
       std::vector<char> msg(msg_size);
       ti_get_last_error(&msg_size, msg.data());
       if (msg[0] != '\0') {
+        set_engine_error(engine, std::string("run_pipeline: ") + msg.data());
         printf("[C++ Engine] ERROR in pipeline '%s': %s\n", pipeline_name,
                msg.data());
       }
     }
     fflush(stdout);
   } catch (const std::exception &e) {
+    set_engine_error(engine, std::string("run_pipeline exception: ") + e.what());
     printf("[C++ Engine] EXCEPTION in run_pipeline: %s\n", e.what());
     fflush(stdout);
   } catch (...) {
+    set_engine_error(engine, "run_pipeline unknown exception");
     printf("[C++ Engine] UNKNOWN EXCEPTION in run_pipeline\n");
     fflush(stdout);
   }

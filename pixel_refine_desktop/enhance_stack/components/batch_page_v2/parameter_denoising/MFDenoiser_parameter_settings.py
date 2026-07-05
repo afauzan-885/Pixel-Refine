@@ -17,27 +17,65 @@ Binding utilities:
 
 import os
 from PySide6.QtWidgets import (
-    QLabel, QSlider, QLineEdit, QPushButton, QHBoxLayout,
-    QWidget, QVBoxLayout, QTabWidget, QScrollArea, QSizePolicy
+    QLabel,
+    QSlider,
+    QLineEdit,
+    QPushButton,
+    QHBoxLayout,
+    QWidget,
+    QVBoxLayout,
+    QTabWidget,
+    QScrollArea,
+    QSizePolicy,
 )
 from PySide6.QtGui import QFont, QDoubleValidator
 from PySide6.QtCore import Qt, QLocale
 
 from resources.GenericUILibrary import FormGroup, live_update
 from resources.styles.stylesheet import SLIDER_STYLE, APPLY_BUTTON, SCROLL_AREA
+from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 
 # Backend value providers
 from .similarity_parameter_settings import (
+    PARAMETER_SCHEMA as SIMILARITY_PARAMETER_SCHEMA,
     load_similarity_config,
+    save_similarity_config,
+    save_similarity_config_for_active_batch,
     save_similarity_v1_config,
 )
 from ..parameter_alignment.akaze_parameter_settings import (
+    PARAMETER_SCHEMA as AKAZE_PARAMETER_SCHEMA,
     load_akaze_config,
     save_akaze_config,
+    save_akaze_config_for_active_batch,
 )
 from ..parameter_alignment.orb_parameter_settings import (
+    PARAMETER_SCHEMA as ORB_PARAMETER_SCHEMA,
     load_orb_config,
     save_orb_config,
+    save_orb_config_for_active_batch,
+)
+from ..parameter_alignment.light_glue_parameter_settings import (
+    PARAMETER_SCHEMA as LIGHT_GLUE_PARAMETER_SCHEMA,
+    load_light_glue_config,
+    save_light_glue_config,
+    save_light_glue_config_for_active_batch,
+)
+from ..parameter_alignment.farneback_parameter_settings import (
+    PARAMETER_SCHEMA as FARNEBACK_PARAMETER_SCHEMA,
+    load_farneback_config,
+    save_farneback_config,
+    save_farneback_config_for_active_batch,
+)
+from ..parameter_alignment.lucas_kanade_parameter_settings import (
+    PARAMETER_SCHEMA as LUCAS_KANADE_PARAMETER_SCHEMA,
+    GPU_PARAMETER_SCHEMA as LUCAS_KANADE_GPU_PARAMETER_SCHEMA,
+    load_lucas_kanade_config,
+    load_lucas_kanade_gpu_config,
+    save_lucas_kanade_config,
+    save_lucas_kanade_gpu_config,
+    save_lucas_kanade_config_for_active_batch,
+    save_lucas_kanade_gpu_config_for_active_batch,
 )
 
 
@@ -48,7 +86,9 @@ def get_default_font(size=10, weight=QFont.Weight.Normal):
 class ResponsiveSliderRow(QWidget):
     """Slider row that reflows from horizontal to stacked on narrow panels."""
 
-    def __init__(self, label_text, min_val, max_val, default, format_func=None, tooltip=""):
+    def __init__(
+        self, label_text, min_val, max_val, default, format_func=None, tooltip=""
+    ):
         super().__init__()
         self.format_func = format_func
         self._is_compact = None
@@ -56,14 +96,28 @@ class ResponsiveSliderRow(QWidget):
         self.label = QLabel(label_text)
         self.label.setFont(get_default_font(10, QFont.Weight.Bold))
         self.label.setToolTip(tooltip)
+        self.label.setMinimumHeight(24)
 
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(min_val, max_val)
         self.slider.setStyleSheet(SLIDER_STYLE)
+        self.slider.setToolTip(tooltip)
 
         self.value_input = QLineEdit()
         self.value_input.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.value_input.setLocale(QLocale(QLocale.Language.C, QLocale.Country.AnyCountry))
+        self.value_input.setLocale(
+            QLocale(QLocale.Language.C, QLocale.Country.AnyCountry)
+        )
+        self.value_input.setMinimumHeight(24)
+        edit_hint = getattr(
+            language_config,
+            "PARAMETER_DIRECT_EDIT_TOOLTIP",
+            "Edit value directly, then press Enter or leave the field.",
+        )
+        self.value_input.setToolTip(
+            f"{tooltip}\n\n{edit_hint}" if tooltip else edit_hint
+        )
+        self.setToolTip(tooltip)
 
         self.header_layout = QHBoxLayout()
         self.header_layout.setContentsMargins(0, 0, 0, 0)
@@ -74,16 +128,34 @@ class ResponsiveSliderRow(QWidget):
 
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
-        self.main_layout.setSpacing(5)
+        self.main_layout.setSpacing(2)
         self.main_layout.addLayout(self.header_layout)
         self.main_layout.addWidget(self.slider)
 
         self.slider.valueChanged.connect(self._update_value_text)
         self.slider.setValue(default)
+        self._update_value_text(self.slider.value())
         self.apply_density(420)
 
     def _update_value_text(self, value):
-        self.value_input.setText(self.format_func(value) if self.format_func else str(value))
+        self.value_input.setText(
+            self.format_func(value) if self.format_func else str(value)
+        )
+
+    def set_slider_value_from_text(self, scale=1.0):
+        try:
+            value = float(self.value_input.text().strip())
+        except ValueError:
+            self._update_value_text(self.slider.value())
+            return False
+
+        slider_value = int(round(value / scale))
+        slider_value = max(
+            self.slider.minimum(), min(self.slider.maximum(), slider_value)
+        )
+        self.slider.setValue(slider_value)
+        self._update_value_text(slider_value)
+        return True
 
     def apply_density(self, available_width):
         compact = available_width < 390
@@ -92,9 +164,9 @@ class ResponsiveSliderRow(QWidget):
         self._is_compact = compact
 
         self.label.setMinimumWidth(0 if compact else 135)
-        self.value_input.setFixedWidth(46 if compact else 50)
+        self.value_input.setFixedWidth(66 if compact else 78)
         self.slider.setMinimumWidth(90 if compact else 120)
-        self.main_layout.setSpacing(4 if compact else 5)
+        self.main_layout.setSpacing(2 if compact else 3)
         self.setMinimumHeight(58 if compact else 38)
         self.setMaximumHeight(72 if compact else 44)
         self.label.setFont(get_default_font(9 if compact else 10, QFont.Weight.Bold))
@@ -104,16 +176,81 @@ class ResponsiveSliderRow(QWidget):
         self.apply_density(self.width())
 
 
+class ToggleButtonRow(QWidget):
+    """Reusable ON/OFF button row for boolean provider fields."""
+
+    def __init__(self, label_text, default=False, tooltip=""):
+        super().__init__()
+        self.label = QLabel(label_text)
+        self.label.setFont(get_default_font(10, QFont.Weight.Normal))
+        self.label.setToolTip(tooltip)
+
+        self.button = QPushButton()
+        self.button.setCheckable(True)
+        self.button.setFixedSize(64, 28)
+        self.button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.button.setToolTip(tooltip)
+        self.button.setChecked(bool(default))
+        self.button.toggled.connect(self._apply_state)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        layout.addWidget(self.label)
+        layout.addStretch()
+        layout.addWidget(self.button)
+
+        self.setMinimumHeight(34)
+        self.setMaximumHeight(40)
+        self._apply_state(self.button.isChecked())
+
+    def _apply_state(self, checked):
+        self.button.setText("ON" if checked else "OFF")
+        if checked:
+            self.button.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: #2ECC71;
+                    color: white;
+                    border: 1px solid #27AE60;
+                    border-radius: 6px;
+                    font-weight: 700;
+                    padding: 4px 10px;
+                }
+                QPushButton:hover { background-color: #27AE60; }
+                """
+            )
+        else:
+            self.button.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: #F4F6F7;
+                    color: #2C3E50;
+                    border: 1px solid #D5DBDB;
+                    border-radius: 6px;
+                    font-weight: 700;
+                    padding: 4px 10px;
+                }
+                QPushButton:hover { background-color: #EAECEE; }
+                """
+            )
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # GENERIC UI COMPONENT CREATORS
 # ═══════════════════════════════════════════════════════════════════════
+
 
 def slider(label_text, min_val, max_val, default, format_func=None, tooltip=""):
     """Create [slider] widget with label.
 
     Returns: (row_widget, slider, line_edit)
     """
-    row = ResponsiveSliderRow(label_text, min_val, max_val, default, format_func, tooltip)
+    row = ResponsiveSliderRow(
+        label_text, min_val, max_val, default, format_func, tooltip
+    )
+    row.slider.value_input = row.value_input
+    row.slider.row_widget = row
     return row, row.slider, row.value_input
 
 
@@ -131,26 +268,18 @@ def dropdown(label_text, options, default, tooltip=""):
     form.input.setMinimumWidth(120)
     form.input.setMaximumWidth(16777215)
     form.label.setToolTip(tooltip)
+    form.input.setToolTip(tooltip)
+    form.setToolTip(tooltip)
     return form
 
 
 def toggle(label_text, default=False, tooltip=""):
     """Create [toggle] widget with label.
 
-    Returns: (layout, button)
+    Returns: (row_widget, button)
     """
-    btn = QPushButton()
-    btn.setCheckable(True)
-    btn.setFixedSize(40, 20)
-    btn.setChecked(default)
-    btn.setToolTip(tooltip)
-
-    layout = QHBoxLayout()
-    layout.addWidget(QLabel(label_text))
-    layout.addStretch()
-    layout.addWidget(btn)
-
-    return layout, btn
+    row = ToggleButtonRow(label_text, default=default, tooltip=tooltip)
+    return row, row.button
 
 
 def text(label_text, default="", tooltip=""):
@@ -163,6 +292,8 @@ def text(label_text, default="", tooltip=""):
     form.input.setFixedWidth(80)
     form.input.setValidator(QDoubleValidator())
     form.label.setToolTip(tooltip)
+    form.input.setToolTip(tooltip)
+    form.setToolTip(tooltip)
     form.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
     form.setMinimumHeight(58)
     form.setMaximumHeight(64)
@@ -172,6 +303,7 @@ def text(label_text, default="", tooltip=""):
 # ═══════════════════════════════════════════════════════════════════════
 # GENERIC BINDING UTILITIES
 # ═══════════════════════════════════════════════════════════════════════
+
 
 def bind(config_dict, widget_map):
     """Bind backend config values to widgets.
@@ -183,11 +315,11 @@ def bind(config_dict, widget_map):
     for key, form in widget_map.items():
         if key in config_dict:
             value = config_dict[key]
-            if hasattr(form, 'set_value'):
+            if hasattr(form, "set_value"):
                 form.set_value(str(value))
-            elif hasattr(form, 'input') and hasattr(form.input, 'currentText'):
+            elif hasattr(form, "input") and hasattr(form.input, "currentText"):
                 form.input.setCurrentText(str(value))
-            elif hasattr(form, 'input') and hasattr(form.input, 'text'):
+            elif hasattr(form, "input") and hasattr(form.input, "text"):
                 form.input.setText(str(value))
 
 
@@ -202,27 +334,371 @@ def collect(widget_map):
     """
     result = {}
     for key, form in widget_map.items():
-        if hasattr(form, 'input'):
+        if hasattr(form, "input"):
             widget = form.input
-            if hasattr(widget, 'currentText'):
+            if hasattr(widget, "currentText"):
                 result[key] = widget.currentText()
-            elif hasattr(widget, 'text'):
+            elif hasattr(widget, "text"):
                 result[key] = widget.text()
-            elif hasattr(widget, 'isChecked'):
+            elif hasattr(widget, "isChecked"):
                 result[key] = widget.isChecked()
-            elif hasattr(widget, 'value'):
+            elif hasattr(widget, "value"):
                 result[key] = widget.value()
     return result
+
+
+ALIGNMENT_PARAMETER_PROVIDERS = {
+    "AKAZE": {
+        "schema": AKAZE_PARAMETER_SCHEMA,
+        "load": load_akaze_config,
+        "save": save_akaze_config,
+        "save_batch": save_akaze_config_for_active_batch,
+    },
+    "ORB": {
+        "schema": ORB_PARAMETER_SCHEMA,
+        "load": load_orb_config,
+        "save": save_orb_config,
+        "save_batch": save_orb_config_for_active_batch,
+    },
+    "Light Glue": {
+        "schema": LIGHT_GLUE_PARAMETER_SCHEMA,
+        "load": load_light_glue_config,
+        "save": save_light_glue_config,
+        "save_batch": save_light_glue_config_for_active_batch,
+    },
+    "Farneback Optical Flow": {
+        "schema": FARNEBACK_PARAMETER_SCHEMA,
+        "load": load_farneback_config,
+        "save": save_farneback_config,
+        "save_batch": save_farneback_config_for_active_batch,
+    },
+    "Lucas Kanade Optical Flow": {
+        "schema": LUCAS_KANADE_PARAMETER_SCHEMA,
+        "load": load_lucas_kanade_config,
+        "save": save_lucas_kanade_config,
+        "save_batch": save_lucas_kanade_config_for_active_batch,
+    },
+    "Lucas Kanade GPU Optical Flow": {
+        "schema": LUCAS_KANADE_GPU_PARAMETER_SCHEMA,
+        "load": load_lucas_kanade_gpu_config,
+        "save": save_lucas_kanade_gpu_config,
+        "save_batch": save_lucas_kanade_gpu_config_for_active_batch,
+    },
+}
+
+
+DENOISING_PARAMETER_PROVIDERS = {
+    "Similarity": {
+        "schema": SIMILARITY_PARAMETER_SCHEMA,
+        "load": load_similarity_config,
+        "save": save_similarity_config,
+        "save_batch": save_similarity_config_for_active_batch,
+    },
+}
+
+
+class AlignmentParameterPage(QWidget):
+    """Render an alignment algorithm's provider schema with generic controls."""
+
+    def __init__(self, algorithm_name, parent=None):
+        super().__init__(parent)
+        self.algorithm_name = algorithm_name
+        self.provider = ALIGNMENT_PARAMETER_PROVIDERS.get(algorithm_name)
+        self.controls = {}
+        self._loading = False
+        self._responsive_slider_rows = []
+        self._setup_ui()
+
+    def refresh_responsive_layout(self):
+        available_width = max(240, self.width() - 24)
+        for row in self._responsive_slider_rows:
+            row.apply_density(available_width)
+        for field, control in self.controls.values():
+            if field["type"] in ("dropdown", "text") and isinstance(control, FormGroup):
+                control.input.setMaximumWidth(16777215)
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(10)
+
+        if not self.provider:
+            label = QLabel(f"{self.algorithm_name} parameters are not available.")
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setStyleSheet("color: #7F8C8D; font-style: italic;")
+            layout.addWidget(label)
+            return
+
+        title = QLabel(f"{self.algorithm_name} Parameters")
+        title.setFont(get_default_font(10, QFont.Weight.Bold))
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setWordWrap(True)
+        title.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        title.setMinimumHeight(32)
+        title.setContentsMargins(0, 4, 0, 6)
+        layout.addWidget(title)
+
+        config = self.provider["load"]()
+        self._loading = True
+        for field in self.provider["schema"]:
+            key = field["key"]
+            value = config.get(key, field.get("default"))
+            widget = self._create_field(field, value)
+            if widget is not None:
+                (
+                    layout.addWidget(widget)
+                    if isinstance(widget, QWidget)
+                    else layout.addLayout(widget)
+                )
+        self._loading = False
+
+        reset_btn = QPushButton("Reset to Defaults")
+        reset_btn.setStyleSheet(APPLY_BUTTON)
+        reset_btn.setMinimumHeight(28)
+        reset_btn.clicked.connect(self._reset_to_defaults)
+        reset_layout = QHBoxLayout()
+        reset_layout.addWidget(reset_btn, 0, Qt.AlignmentFlag.AlignRight)
+        layout.addLayout(reset_layout)
+        layout.addStretch()
+
+
+class DenoisingParameterPage(AlignmentParameterPage):
+    """Render a denoising algorithm's provider schema with generic controls."""
+
+    def __init__(self, algorithm_name, parent=None):
+        QWidget.__init__(self, parent)
+        self.algorithm_name = algorithm_name
+        self.provider = DENOISING_PARAMETER_PROVIDERS.get(algorithm_name)
+        self.controls = {}
+        self._loading = False
+        self._responsive_slider_rows = []
+        self._setup_ui()
+
+    def _create_field(self, field, value):
+        field_type = field["type"]
+        key = field["key"]
+        label = field.get("label", key)
+        tooltip = self._resolve_tooltip(field)
+
+        if field_type == "dropdown":
+            form = dropdown(label, field.get("options", []), value, tooltip=tooltip)
+            form.input.currentIndexChanged.connect(
+                lambda *_: self._save_current_config()
+            )
+            self.controls[key] = (field, form)
+            return form
+
+        if field_type == "text":
+            form = text(label, value, tooltip=tooltip)
+            form.input.editingFinished.connect(self._save_current_config)
+            self.controls[key] = (field, form)
+            return form
+
+        if field_type == "toggle":
+            row_layout, button = toggle(label, bool(value), tooltip=tooltip)
+            button.setText("ON" if button.isChecked() else "OFF")
+            button.toggled.connect(
+                lambda checked, btn=button: btn.setText("ON" if checked else "OFF")
+            )
+            button.toggled.connect(lambda *_: self._save_current_config())
+            self.controls[key] = (field, button)
+            return row_layout
+
+        if field_type == "slider":
+            scale = float(field.get("scale", 1.0))
+            slider_value = int(round(float(value) / scale))
+            row, slider_widget, _ = slider(
+                label,
+                int(field.get("min", 0)),
+                int(field.get("max", 100)),
+                slider_value,
+                format_func=lambda v, s=scale, f=field: self._format_slider_value(
+                    v * s, f
+                ),
+                tooltip=tooltip,
+            )
+            slider_widget.sliderReleased.connect(
+                lambda sw=slider_widget, f=field: self._commit_slider_position(sw, f)
+            )
+            slider_widget.value_input.editingFinished.connect(
+                lambda sw=slider_widget, f=field: self._commit_slider_text(sw, f)
+            )
+            self.controls[key] = (field, slider_widget)
+            self._responsive_slider_rows.append(row)
+            return row
+
+        return None
+
+    def _resolve_tooltip(self, field):
+        tooltip_key = field.get("tooltip_key")
+        if tooltip_key:
+            return getattr(language_config, tooltip_key, field.get("tooltip", ""))
+        return field.get("tooltip", "")
+
+    def _collect_current_config(self):
+        config = self.provider["load"]()
+        for key, (field, control) in self.controls.items():
+            config[key] = self._coerce_value(field, self._read_value(field, control))
+        return config
+
+    def _read_value(self, field, control):
+        field_type = field["type"]
+        if field_type == "dropdown":
+            return control.input.currentText()
+        if field_type == "text":
+            return control.input.text()
+        if field_type == "toggle":
+            return control.isChecked()
+        if field_type == "slider":
+            return control.value() * float(field.get("scale", 1.0))
+        return field.get("default")
+
+    def _format_slider_value(self, value, field):
+        value_type = field.get("value_type", "float")
+        decimals = int(field.get("decimals", 2 if value_type == "float" else 0))
+        if value_type == "int" or decimals <= 0:
+            return str(int(round(value)))
+        return f"{float(value):.{decimals}f}"
+
+    def _snap_slider_value(self, slider_value, field):
+        step = int(field.get("step", 1))
+        if step <= 1:
+            return slider_value
+        min_value = int(field.get("min", slider_value))
+        return min_value + round((slider_value - min_value) / step) * step
+
+    def _commit_slider_position(self, slider_widget, field):
+        snapped = self._snap_slider_value(slider_widget.value(), field)
+        if snapped != slider_widget.value():
+            slider_widget.setValue(snapped)
+        self._save_current_config()
+
+    def _commit_slider_text(self, slider_widget, field):
+        scale = float(field.get("scale", 1.0))
+        row = getattr(slider_widget, "row_widget", None)
+        if row and row.set_slider_value_from_text(scale):
+            snapped = self._snap_slider_value(slider_widget.value(), field)
+            if snapped != slider_widget.value():
+                slider_widget.setValue(snapped)
+            self._save_current_config()
+
+    def _coerce_value(self, field, value):
+        value_type = field.get("value_type", "str")
+        try:
+            if value_type == "int":
+                coerced = int(float(value))
+                step = int(field.get("step", 1))
+                if step > 1:
+                    min_value = int(field.get("min", coerced))
+                    coerced = min_value + round((coerced - min_value) / step) * step
+                return coerced
+            if value_type == "float":
+                coerced = float(value)
+                step = float(field.get("step", 0))
+                if step > 0:
+                    min_value = float(field.get("min", coerced))
+                    scale = float(field.get("scale", 1.0))
+                    min_value *= scale
+                    step *= scale
+                    coerced = min_value + round((coerced - min_value) / step) * step
+                return coerced
+            if value_type == "bool":
+                return bool(value)
+        except (TypeError, ValueError):
+            return field.get("default")
+        return str(value)
+
+    def _save_current_config(self):
+        if self._loading or not self.provider:
+            return
+        config = self._collect_current_config()
+        self.provider["save"](config)
+        self.provider["save_batch"](config)
+
+    def _reset_to_defaults(self):
+        if not self.provider:
+            return
+        config = {}
+        for field in self.provider["schema"]:
+            config[field["key"]] = field.get("default")
+        self.provider["save"](config)
+        self.provider["save_batch"](config)
+        self._reload_values(config)
+
+    def _reload_values(self, config):
+        self._loading = True
+        for key, (field, control) in self.controls.items():
+            value = config.get(key, field.get("default"))
+            if field["type"] == "dropdown":
+                control.set_value(str(value))
+            elif field["type"] == "text":
+                control.input.setText(str(value))
+            elif field["type"] == "toggle":
+                control.setChecked(bool(value))
+                control.setText("ON" if control.isChecked() else "OFF")
+            elif field["type"] == "slider":
+                scale = float(field.get("scale", 1.0))
+                slider_value = int(round(float(value) / scale))
+                slider_value = max(
+                    control.minimum(), min(control.maximum(), slider_value)
+                )
+                control.setValue(slider_value)
+                row = getattr(control, "row_widget", None)
+                if row:
+                    row._update_value_text(control.value())
+        self._loading = False
+
+
+for _method_name in (
+    "_create_field",
+    "_resolve_tooltip",
+    "_collect_current_config",
+    "_read_value",
+    "_format_slider_value",
+    "_snap_slider_value",
+    "_commit_slider_position",
+    "_commit_slider_text",
+    "_coerce_value",
+    "_save_current_config",
+    "_reset_to_defaults",
+    "_reload_values",
+):
+    setattr(
+        AlignmentParameterPage,
+        _method_name,
+        getattr(DenoisingParameterPage, _method_name),
+    )
+
+
+def get_alignment_settings_page(algorithm_name):
+    page = AlignmentParameterPage(algorithm_name)
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    scroll.setWidget(page)
+    scroll.setStyleSheet(SCROLL_AREA)
+    return scroll
+
+
+def get_denoising_settings_page(algorithm_name):
+    page = DenoisingParameterPage(algorithm_name)
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    scroll.setWidget(page)
+    scroll.setStyleSheet(SCROLL_AREA)
+    return scroll
 
 
 # ═══════════════════════════════════════════════════════════════════════
 # MFDenoiser PARAMETER PAGE
 # ═══════════════════════════════════════════════════════════════════════
 
+
 @live_update("refresh_responsive_layout", on_resize=True)
 class MFDenoiserParameterPage(QWidget):
     """MFDenoiser parameter settings page.
-    
+
     Uses generic UI components to display and manage parameters.
     Saves to JSON in realtime when widgets change.
     """
@@ -230,7 +706,7 @@ class MFDenoiserParameterPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.c_locale = QLocale(QLocale.Language.C, QLocale.Country.AnyCountry)
-        
+
         # Widget maps for each backend
         self.similarity_widgets = {}
         self.akaze_widgets = {}
@@ -238,7 +714,7 @@ class MFDenoiserParameterPage(QWidget):
         self.tile_based_widgets = {}
         self._responsive_slider_rows = []
         self._tab_pages = []
-        
+
         self._setup_ui()
         self._load_configs()
         self._connect_signals()
@@ -276,17 +752,17 @@ class MFDenoiserParameterPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
-        
+
         # Title
         title = QLabel("MFDenoiser Parameters")
         title.setFont(get_default_font(12, QFont.Weight.Bold))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
-        
+
         # Tab widget
         self.tab_widget = QTabWidget()
         layout.addWidget(self.tab_widget)
-        
+
         # Create tabs
         self._create_similarity_tab()
         self._create_akaze_tab()
@@ -300,62 +776,77 @@ class MFDenoiserParameterPage(QWidget):
         layout = QVBoxLayout(page)
         layout.setSpacing(12)
         layout.setContentsMargins(12, 12, 12, 12)
-        
+
         # Tile Size
         self.similarity_widgets["similarity_spatial_tile_size"] = dropdown(
-            "Tile Size:", [8, 10, 12, 16, 20, 24, 32, 48, 64, 128, 256],
-            default=16, tooltip="Ukuran tile untuk pemrosesan spasial"
+            "Tile Size:",
+            [8, 10, 12, 16, 20, 24, 32, 48, 64, 128, 256],
+            default=16,
+            tooltip="Ukuran tile untuk pemrosesan spasial",
         )
         layout.addWidget(self.similarity_widgets["similarity_spatial_tile_size"])
-        
+
         # Processing Cores
         max_cores = os.cpu_count() or 4
         self.similarity_widgets["similarity_spatial_num_workers"] = dropdown(
-            "Processing Cores:", ["Auto"] + [str(i) for i in range(1, max_cores + 1)],
-            default="Auto", tooltip="Jumlah inti CPU untuk pemrosesan paralel"
+            "Processing Cores:",
+            ["Auto"] + [str(i) for i in range(1, max_cores + 1)],
+            default="Auto",
+            tooltip="Jumlah inti CPU untuk pemrosesan paralel",
         )
         layout.addWidget(self.similarity_widgets["similarity_spatial_num_workers"])
-        
+
         # Overlap
         overlap_layout, self._overlap_slider, _ = slider(
-            "Overlap %:", 0, 90, 30,
+            "Overlap %:",
+            0,
+            90,
+            30,
             format_func=lambda v: str(v),
-            tooltip="Persentase overlap antar tile"
+            tooltip="Persentase overlap antar tile",
         )
         self.similarity_widgets["similarity_spatial_overlap_percent"] = overlap_layout
         self._responsive_slider_rows.append(overlap_layout)
         layout.addWidget(overlap_layout)
-        
+
         # Motion Sensitivity
         motion_layout, self._motion_slider, _ = slider(
-            "Motion Sensitivity:", 10, 2000, 1500,
+            "Motion Sensitivity:",
+            10,
+            2000,
+            1500,
             format_func=lambda v: f"{v/10.0:.1f}",
-            tooltip="Sensitivitas terhadap gerakan"
+            tooltip="Sensitivitas terhadap gerakan",
         )
         self.similarity_widgets["similarity_spatial_motion_sensitivity"] = motion_layout
         self._responsive_slider_rows.append(motion_layout)
         layout.addWidget(motion_layout)
-        
+
         # Noise Offset Factor
         noise_layout, self._noise_slider, _ = slider(
-            "Noise Offset Factor:", 0, 100, 15,
+            "Noise Offset Factor:",
+            0,
+            100,
+            15,
             format_func=lambda v: f"{v/100.0:.2f}",
-            tooltip="Faktor offset noise untuk thresholding"
+            tooltip="Faktor offset noise untuk thresholding",
         )
-        self.similarity_widgets["similarity_spatial_noise_mad_offset_factor"] = noise_layout
+        self.similarity_widgets["similarity_spatial_noise_mad_offset_factor"] = (
+            noise_layout
+        )
         self._responsive_slider_rows.append(noise_layout)
         layout.addWidget(noise_layout)
-        
+
         # Reset Button
         reset_btn = QPushButton("Reset to Defaults")
         reset_btn.setStyleSheet(APPLY_BUTTON)
         reset_btn.setMinimumHeight(30)
         reset_btn.clicked.connect(self._reset_similarity)
-        
+
         reset_layout = QHBoxLayout()
         reset_layout.addWidget(reset_btn, 0, Qt.AlignmentFlag.AlignRight)
         layout.addLayout(reset_layout)
-        
+
         layout.addStretch()
         self.tab_widget.addTab(page, "Similarity")
 
@@ -366,47 +857,55 @@ class MFDenoiserParameterPage(QWidget):
         layout = QVBoxLayout(page)
         layout.setSpacing(15)
         layout.setContentsMargins(10, 10, 10, 10)
-        
+
         self.akaze_widgets["akaze_threshold"] = text(
-            "Threshold:", default=0.008,
-            tooltip="Threshold untuk deteksi keypoint AKAZE"
+            "Threshold:",
+            default=0.008,
+            tooltip="Threshold untuk deteksi keypoint AKAZE",
         )
         layout.addWidget(self.akaze_widgets["akaze_threshold"])
-        
+
         self.akaze_widgets["akaze_nOctaves"] = dropdown(
-            "Octaves:", [1, 2, 3, 4, 5, 6, 7, 8],
-            default=4, tooltip="Jumlah octave untuk scale space"
+            "Octaves:",
+            [1, 2, 3, 4, 5, 6, 7, 8],
+            default=4,
+            tooltip="Jumlah octave untuk scale space",
         )
         layout.addWidget(self.akaze_widgets["akaze_nOctaves"])
-        
+
         self.akaze_widgets["akaze_nOctaveLayers"] = dropdown(
-            "Octave Layers:", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-            default=4, tooltip="Jumlah layer per octave"
+            "Octave Layers:",
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            default=4,
+            tooltip="Jumlah layer per octave",
         )
         layout.addWidget(self.akaze_widgets["akaze_nOctaveLayers"])
-        
+
         self.akaze_widgets["ratio_threshold"] = text(
-            "Ratio Threshold:", default=0.75,
-            tooltip="Ratio threshold untuk Lowe's ratio test"
+            "Ratio Threshold:",
+            default=0.75,
+            tooltip="Ratio threshold untuk Lowe's ratio test",
         )
         layout.addWidget(self.akaze_widgets["ratio_threshold"])
-        
+
         self.akaze_widgets["transformation"] = dropdown(
-            "Transformation:", ["homography", "affine"],
-            default="homography", tooltip="Tipe transformasi geometris"
+            "Transformation:",
+            ["homography", "affine"],
+            default="homography",
+            tooltip="Tipe transformasi geometris",
         )
         layout.addWidget(self.akaze_widgets["transformation"])
-        
+
         # Reset Button
         reset_btn = QPushButton("Reset to Defaults")
         reset_btn.setStyleSheet(APPLY_BUTTON)
         reset_btn.setMinimumHeight(28)
         reset_btn.clicked.connect(self._reset_akaze)
-        
+
         reset_layout = QHBoxLayout()
         reset_layout.addWidget(reset_btn, 0, Qt.AlignmentFlag.AlignRight)
         layout.addLayout(reset_layout)
-        
+
         layout.addStretch()
         self.tab_widget.addTab(page, "AKAZE")
 
@@ -417,47 +916,52 @@ class MFDenoiserParameterPage(QWidget):
         layout = QVBoxLayout(page)
         layout.setSpacing(15)
         layout.setContentsMargins(10, 10, 10, 10)
-        
+
         self.orb_widgets["nfeatures"] = text(
-            "Max Features:", default=1500,
-            tooltip="Jumlah maksimum keypoint yang dideteksi"
+            "Max Features:",
+            default=1500,
+            tooltip="Jumlah maksimum keypoint yang dideteksi",
         )
         layout.addWidget(self.orb_widgets["nfeatures"])
-        
+
         self.orb_widgets["scaleFactor"] = text(
-            "Scale Factor:", default=1.1,
-            tooltip="Faktor skala untuk image pyramid"
+            "Scale Factor:", default=1.1, tooltip="Faktor skala untuk image pyramid"
         )
         layout.addWidget(self.orb_widgets["scaleFactor"])
-        
+
         self.orb_widgets["nlevels"] = dropdown(
-            "Levels:", [1, 2, 3, 4, 5, 6, 7, 8],
-            default=5, tooltip="Jumlah level untuk image pyramid"
+            "Levels:",
+            [1, 2, 3, 4, 5, 6, 7, 8],
+            default=5,
+            tooltip="Jumlah level untuk image pyramid",
         )
         layout.addWidget(self.orb_widgets["nlevels"])
-        
+
         self.orb_widgets["ransacThreshold"] = text(
-            "RANSAC Threshold:", default=5.0,
-            tooltip="Threshold untuk RANSAC inlier detection"
+            "RANSAC Threshold:",
+            default=5.0,
+            tooltip="Threshold untuk RANSAC inlier detection",
         )
         layout.addWidget(self.orb_widgets["ransacThreshold"])
-        
+
         self.orb_widgets["transformation"] = dropdown(
-            "Transformation:", ["homography", "affine"],
-            default="homography", tooltip="Tipe transformasi geometris"
+            "Transformation:",
+            ["homography", "affine"],
+            default="homography",
+            tooltip="Tipe transformasi geometris",
         )
         layout.addWidget(self.orb_widgets["transformation"])
-        
+
         # Reset Button
         reset_btn = QPushButton("Reset to Defaults")
         reset_btn.setStyleSheet(APPLY_BUTTON)
         reset_btn.setMinimumHeight(28)
         reset_btn.clicked.connect(self._reset_orb)
-        
+
         reset_layout = QHBoxLayout()
         reset_layout.addWidget(reset_btn, 0, Qt.AlignmentFlag.AlignRight)
         layout.addLayout(reset_layout)
-        
+
         layout.addStretch()
         self.tab_widget.addTab(page, "ORB")
 
@@ -468,61 +972,74 @@ class MFDenoiserParameterPage(QWidget):
         layout = QVBoxLayout(page)
         layout.setSpacing(12)
         layout.setContentsMargins(12, 12, 12, 12)
-        
+
         # Tile Size
         self.tile_based_widgets["tile_based_tile_size"] = dropdown(
-            "Tile Size:", [128, 192, 256, 320, 384, 512, 640, 768, 896, 1024],
-            default=256, tooltip="Ukuran tile untuk pemrosesan tile-based (pixels)"
+            "Tile Size:",
+            [128, 192, 256, 320, 384, 512, 640, 768, 896, 1024],
+            default=256,
+            tooltip="Ukuran tile untuk pemrosesan tile-based (pixels)",
         )
         layout.addWidget(self.tile_based_widgets["tile_based_tile_size"])
-        
+
         # Alignment Backend
         self.tile_based_widgets["tile_based_alignment_backend"] = dropdown(
-            "Alignment Backend:", ["farneback", "horn_schunck"],
-            default="farneback", tooltip="Algoritma optical flow untuk alignment"
+            "Alignment Backend:",
+            ["farneback", "lucas_kanade", "none"],
+            default="farneback",
+            tooltip="Algoritma optical flow untuk alignment",
         )
         layout.addWidget(self.tile_based_widgets["tile_based_alignment_backend"])
-        
+
         # Overlap
         overlap_layout, self._tb_overlap_slider, _ = slider(
-            "Overlap %:", 0, 50, 20,
+            "Overlap %:",
+            0,
+            50,
+            20,
             format_func=lambda v: str(v),
-            tooltip="Persentase overlap antar tile"
+            tooltip="Persentase overlap antar tile",
         )
         self.tile_based_widgets["tile_based_overlap_percent"] = overlap_layout
         self._responsive_slider_rows.append(overlap_layout)
         layout.addWidget(overlap_layout)
-        
+
         # Motion Sensitivity
         motion_layout, self._tb_motion_slider, _ = slider(
-            "Motion Sensitivity:", 10, 2000, 1500,
+            "Motion Sensitivity:",
+            10,
+            2000,
+            1500,
             format_func=lambda v: f"{v/10.0:.1f}",
-            tooltip="Sensitivitas terhadap gerakan (ghost rejection)"
+            tooltip="Sensitivitas terhadap gerakan (ghost rejection)",
         )
         self.tile_based_widgets["tile_based_motion_sensitivity"] = motion_layout
         self._responsive_slider_rows.append(motion_layout)
         layout.addWidget(motion_layout)
-        
+
         # Noise Offset Factor
         noise_layout, self._tb_noise_slider, _ = slider(
-            "Noise Offset Factor:", 0, 100, 15,
+            "Noise Offset Factor:",
+            0,
+            100,
+            15,
             format_func=lambda v: f"{v/100.0:.2f}",
-            tooltip="Faktor offset noise untuk thresholding"
+            tooltip="Faktor offset noise untuk thresholding",
         )
         self.tile_based_widgets["tile_based_noise_offset_factor"] = noise_layout
         self._responsive_slider_rows.append(noise_layout)
         layout.addWidget(noise_layout)
-        
+
         # Reset Button
         reset_btn = QPushButton("Reset to Defaults")
         reset_btn.setStyleSheet(APPLY_BUTTON)
         reset_btn.setMinimumHeight(28)
         reset_btn.clicked.connect(self._reset_tile_based)
-        
+
         reset_layout = QHBoxLayout()
         reset_layout.addWidget(reset_btn, 0, Qt.AlignmentFlag.AlignRight)
         layout.addLayout(reset_layout)
-        
+
         layout.addStretch()
         self.tab_widget.addTab(page, "Tile-Based")
 
@@ -540,15 +1057,19 @@ class MFDenoiserParameterPage(QWidget):
         """Load Similarity config from backend."""
         config = load_similarity_config()
         bind(config, self.similarity_widgets)
-        
+
         # Set slider values
         overlap_val = int(config.get("similarity_spatial_overlap_percent", 0.30) * 100)
         self._overlap_slider.setValue(overlap_val)
-        
-        motion_val = int(config.get("similarity_spatial_motion_sensitivity", 150.0) * 10)
+
+        motion_val = int(
+            config.get("similarity_spatial_motion_sensitivity", 150.0) * 10
+        )
         self._motion_slider.setValue(motion_val)
-        
-        noise_val = int(config.get("similarity_spatial_noise_mad_offset_factor", 0.15) * 100)
+
+        noise_val = int(
+            config.get("similarity_spatial_noise_mad_offset_factor", 0.15) * 100
+        )
         self._noise_slider.setValue(noise_val)
 
     def _load_akaze(self):
@@ -563,21 +1084,25 @@ class MFDenoiserParameterPage(QWidget):
 
     def _load_tile_based(self):
         """Load Tile-Based config from backend."""
-        config = load_similarity_config()  # Reuse similarity config for tile-based settings
+        config = (
+            load_similarity_config()
+        )  # Reuse similarity config for tile-based settings
         # Set dropdowns
         tile_size = config.get("tile_based_tile_size", 256)
         self.tile_based_widgets["tile_based_tile_size"].set_value(str(tile_size))
-        
+
         alignment_backend = config.get("tile_based_alignment_backend", "farneback")
-        self.tile_based_widgets["tile_based_alignment_backend"].set_value(alignment_backend)
-        
+        self.tile_based_widgets["tile_based_alignment_backend"].set_value(
+            alignment_backend
+        )
+
         # Set slider values
         overlap_val = int(config.get("tile_based_overlap_percent", 0.2) * 100)
         self._tb_overlap_slider.setValue(overlap_val)
-        
+
         motion_val = int(config.get("tile_based_motion_sensitivity", 150.0) * 10)
         self._tb_motion_slider.setValue(motion_val)
-        
+
         noise_val = int(config.get("tile_based_noise_offset_factor", 0.15) * 100)
         self._tb_noise_slider.setValue(noise_val)
 
@@ -587,29 +1112,51 @@ class MFDenoiserParameterPage(QWidget):
     def _connect_signals(self):
         """Connect widget signals to save functions."""
         # Similarity
-        self.similarity_widgets["similarity_spatial_tile_size"].input.currentIndexChanged.connect(self._save_similarity)
-        self.similarity_widgets["similarity_spatial_num_workers"].input.currentIndexChanged.connect(self._save_similarity)
+        self.similarity_widgets[
+            "similarity_spatial_tile_size"
+        ].input.currentIndexChanged.connect(self._save_similarity)
+        self.similarity_widgets[
+            "similarity_spatial_num_workers"
+        ].input.currentIndexChanged.connect(self._save_similarity)
         self._overlap_slider.sliderReleased.connect(self._save_similarity)
         self._motion_slider.sliderReleased.connect(self._save_similarity)
         self._noise_slider.sliderReleased.connect(self._save_similarity)
-        
+
         # AKAZE
-        self.akaze_widgets["akaze_threshold"].input.editingFinished.connect(self._save_akaze)
-        self.akaze_widgets["akaze_nOctaves"].input.currentIndexChanged.connect(self._save_akaze)
-        self.akaze_widgets["akaze_nOctaveLayers"].input.currentIndexChanged.connect(self._save_akaze)
-        self.akaze_widgets["ratio_threshold"].input.editingFinished.connect(self._save_akaze)
-        self.akaze_widgets["transformation"].input.currentIndexChanged.connect(self._save_akaze)
-        
+        self.akaze_widgets["akaze_threshold"].input.editingFinished.connect(
+            self._save_akaze
+        )
+        self.akaze_widgets["akaze_nOctaves"].input.currentIndexChanged.connect(
+            self._save_akaze
+        )
+        self.akaze_widgets["akaze_nOctaveLayers"].input.currentIndexChanged.connect(
+            self._save_akaze
+        )
+        self.akaze_widgets["ratio_threshold"].input.editingFinished.connect(
+            self._save_akaze
+        )
+        self.akaze_widgets["transformation"].input.currentIndexChanged.connect(
+            self._save_akaze
+        )
+
         # ORB
         self.orb_widgets["nfeatures"].input.editingFinished.connect(self._save_orb)
         self.orb_widgets["scaleFactor"].input.editingFinished.connect(self._save_orb)
         self.orb_widgets["nlevels"].input.currentIndexChanged.connect(self._save_orb)
-        self.orb_widgets["ransacThreshold"].input.editingFinished.connect(self._save_orb)
-        self.orb_widgets["transformation"].input.currentIndexChanged.connect(self._save_orb)
-        
+        self.orb_widgets["ransacThreshold"].input.editingFinished.connect(
+            self._save_orb
+        )
+        self.orb_widgets["transformation"].input.currentIndexChanged.connect(
+            self._save_orb
+        )
+
         # Tile-Based
-        self.tile_based_widgets["tile_based_tile_size"].input.currentIndexChanged.connect(self._save_tile_based)
-        self.tile_based_widgets["tile_based_alignment_backend"].input.currentIndexChanged.connect(self._save_tile_based)
+        self.tile_based_widgets[
+            "tile_based_tile_size"
+        ].input.currentIndexChanged.connect(self._save_tile_based)
+        self.tile_based_widgets[
+            "tile_based_alignment_backend"
+        ].input.currentIndexChanged.connect(self._save_tile_based)
         self._tb_overlap_slider.sliderReleased.connect(self._save_tile_based)
         self._tb_motion_slider.sliderReleased.connect(self._save_tile_based)
         self._tb_noise_slider.sliderReleased.connect(self._save_tile_based)
@@ -621,11 +1168,18 @@ class MFDenoiserParameterPage(QWidget):
         """Save Similarity config to backend (realtime)."""
         values = collect(self.similarity_widgets)
         config = {
-            "similarity_spatial_tile_size": int(values.get("similarity_spatial_tile_size", 16)),
-            "similarity_spatial_num_workers": -1 if values.get("similarity_spatial_num_workers") == "Auto" else int(values.get("similarity_spatial_num_workers", 1)),
+            "similarity_spatial_tile_size": int(
+                values.get("similarity_spatial_tile_size", 16)
+            ),
+            "similarity_spatial_num_workers": (
+                -1
+                if values.get("similarity_spatial_num_workers") == "Auto"
+                else int(values.get("similarity_spatial_num_workers", 1))
+            ),
             "similarity_spatial_overlap_percent": self._overlap_slider.value() / 100.0,
             "similarity_spatial_motion_sensitivity": self._motion_slider.value() / 10.0,
-            "similarity_spatial_noise_mad_offset_factor": self._noise_slider.value() / 100.0,
+            "similarity_spatial_noise_mad_offset_factor": self._noise_slider.value()
+            / 100.0,
         }
         save_similarity_v1_config(config)
 
@@ -667,9 +1221,11 @@ class MFDenoiserParameterPage(QWidget):
     def _save_tile_based(self):
         """Save Tile-Based config to backend (realtime)."""
         values = collect(self.tile_based_widgets)
+        alignment_backend = values.get("tile_based_alignment_backend", "farneback")
         config = {
             "tile_based_tile_size": int(values.get("tile_based_tile_size", 256)),
-            "tile_based_alignment_backend": values.get("tile_based_alignment_backend", "farneback"),
+            "tile_based_alignment_backend": alignment_backend,
+            "alignment_backend": alignment_backend,
             "tile_based_overlap_percent": self._tb_overlap_slider.value() / 100.0,
             "tile_based_motion_sensitivity": self._tb_motion_slider.value() / 10.0,
             "tile_based_noise_offset_factor": self._tb_noise_slider.value() / 100.0,

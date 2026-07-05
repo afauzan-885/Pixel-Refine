@@ -20,6 +20,12 @@ def slide(
     on_mid_transition: Optional[Callable] = None,
 ):  # Kurva bisa jadi parameter preset
     """Melakukan transisi SLIDE + FADE."""
+    try:
+        if stack_widget.currentWidget() is target:
+            return
+    except RuntimeError:
+        return
+
     anim_type = AnimationType.FADE  # Default
     if direction == SlideDirection.LEFT:
         anim_type = AnimationType.SLIDE_LEFT

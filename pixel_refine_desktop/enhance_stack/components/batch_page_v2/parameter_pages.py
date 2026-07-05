@@ -1,14 +1,6 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QScrollArea
 from PySide6.QtCore import Qt
 
-from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.light_glue_parameter_settings import (
-    get_light_glue_page,
-)
-
-from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.farneback_parameter_settings import (
-    get_farneback_optical_flow_page,
-)
-
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.MFDenoiser_parameter_settings import (
     get_mfdenoiser_settings_page,
 )
@@ -32,15 +24,7 @@ class ParameterPages:
         default_index = self.stacked_widget.addWidget(default_page)
         self.setting_pages_map["default"] = default_index
 
-        farneback_page = get_farneback_optical_flow_page()
-        index_farneback = self.stacked_widget.addWidget(farneback_page)
-        self.setting_pages_map["Farneback Optical Flow"] = index_farneback
-
-        light_glue_page = get_light_glue_page()
-        index_light_glue = self.stacked_widget.addWidget(light_glue_page)
-        self.setting_pages_map["Light Glue"] = index_light_glue
-
-        # MFDenoiser unified settings page (handles Similarity, AKAZE, ORB)
+        # MFDenoiser unified settings page (handles denoising and alignment config providers)
         mfdenoiser_page = get_mfdenoiser_settings_page()
         index_mfdenoiser = self.stacked_widget.addWidget(mfdenoiser_page)
         self.setting_pages_map["MFDenoiser"] = index_mfdenoiser

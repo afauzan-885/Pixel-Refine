@@ -7,11 +7,12 @@ import sys
 import importlib
 
 file_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
+project_root = os.path.abspath(os.path.join(file_dir, "../../.."))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
 common_mod = importlib.import_module("taichi_library.taichi_algorithm.common")
+common_mod = importlib.reload(common_mod)
 
 def compile_common_aot(arch=ti.vulkan, save_path="common_vulkan.tcm"):
     print(f"\n>>> Compiling COMMON UTILS AOT for: {arch}")
@@ -105,6 +106,33 @@ def compile_common_aot(arch=ti.vulkan, save_path="common_vulkan.tcm"):
     add_cvt("rgb2gray_i32", common_mod._cvt_color_rgb_to_gray_i32_kernel, ti.i32)
     add_cvt("bgr2gray_f32", common_mod._cvt_color_bgr_to_gray_kernel, ti.f32)
 
+    def add_gray_scaled_i32(name, kernel, is_vec=True):
+        builder = ti.graph.GraphBuilder()
+        if is_vec:
+            src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.types.vector(3, ti.i32), ndim=2)
+        else:
+            src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.i32, ndim=2)
+        dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
+        inv_scale = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "inv_scale", ti.f32)
+        builder.dispatch(kernel, src, dst, inv_scale)
+        module.add_graph(name, builder.compile())
+
+    add_gray_scaled_i32(
+        "rgb2gray_f32_scaled_i32",
+        common_mod._rgb_to_gray_f32_scaled_i32_kernel,
+        is_vec=True,
+    )
+    add_gray_scaled_i32(
+        "bgr2gray_f32_scaled_i32",
+        common_mod._bgr_to_gray_f32_scaled_i32_kernel,
+        is_vec=True,
+    )
+    add_gray_scaled_i32(
+        "gray_f32_scaled_i32",
+        common_mod._gray_f32_scaled_i32_kernel,
+        is_vec=False,
+    )
+
     # 4. Math Kernels
     def add_absdiff(name, dtype):
         builder = ti.graph.GraphBuilder()
@@ -137,6 +165,7 @@ def compile_common_aot(arch=ti.vulkan, save_path="common_vulkan.tcm"):
         builder.dispatch(common_mod._generate_hanning_window_2d_kernel, dst, h, w, exclude_boundary)
         module.add_graph(name, builder.compile())
 
+    add_hanning_window("hanning")
     add_hanning_window("generate_hanning_window_2d")
 
     # 6. Mean Division Kernels
@@ -156,6 +185,144 @@ def compile_common_aot(arch=ti.vulkan, save_path="common_vulkan.tcm"):
 
     add_mean_division("mean_division_f32", ti.f32, is_vec=False)
     add_mean_division("mean_division_vec3_f32", ti.f32, is_vec=True)
+
+    # 7. Scale Kernels
+    def add_scale(name, is_vec=False):
+        builder = ti.graph.GraphBuilder()
+        if is_vec:
+            src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.types.vector(3, ti.f32), ndim=2)
+            dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.types.vector(3, ti.f32), ndim=2)
+            builder.dispatch(common_mod._scale_f32_vec3_kernel, src, dst, ti.graph.Arg(ti.graph.ArgKind.SCALAR, "scale", ti.f32))
+        else:
+            src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=2)
+            dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
+            builder.dispatch(common_mod._scale_f32_2d_kernel, src, dst, ti.graph.Arg(ti.graph.ArgKind.SCALAR, "scale", ti.f32))
+        module.add_graph(name, builder.compile())
+
+    add_scale("scale_f32_2d")
+    add_scale("scale_vec3_f32", is_vec=True)
+
+    # 8. Tile Stitching Kernels
+    def add_stitch(name, is_vec=False):
+        builder = ti.graph.GraphBuilder()
+        if is_vec:
+            tile = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "tile", ti.types.vector(3, ti.f32), ndim=2)
+            accum = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "accum", ti.types.vector(3, ti.f32), ndim=2)
+            kernel = common_mod._stitch_tile_vec3_kernel
+        else:
+            tile = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "tile", ti.f32, ndim=2)
+            accum = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "accum", ti.f32, ndim=2)
+            kernel = common_mod._stitch_tile_f32_kernel
+        tile_weight = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "tile_weight", ti.f32, ndim=2)
+        hanning = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "hanning", ti.f32, ndim=2)
+        weight_accum = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "weight_accum", ti.f32, ndim=2)
+        y0 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "y0", ti.i32)
+        x0 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "x0", ti.i32)
+        h = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
+        w = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
+        builder.dispatch(kernel, tile, tile_weight, hanning, accum, weight_accum, y0, x0, h, w)
+        module.add_graph(name, builder.compile())
+
+    add_stitch("stitch_tile_f32")
+    add_stitch("stitch_tile_vec3", is_vec=True)
+
+    def add_stitch_batch(name, is_vec=False):
+        builder = ti.graph.GraphBuilder()
+        if is_vec:
+            tiles = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "tile", ti.f32, ndim=4)
+            accum = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "accum", ti.f32, ndim=3)
+            kernel = common_mod._stitch_tile_batch_vec3_kernel
+        else:
+            tiles = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "tile", ti.f32, ndim=3)
+            accum = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "accum", ti.f32, ndim=2)
+            kernel = common_mod._stitch_tile_batch_f32_kernel
+        tile_weight = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "tile_weight", ti.f32, ndim=2)
+        hanning = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "hanning", ti.f32, ndim=2)
+        weight_accum = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "weight_accum", ti.f32, ndim=2)
+        y0s = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "y0s", ti.i32, ndim=1)
+        x0s = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "x0s", ti.i32, ndim=1)
+        n_tiles = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "n_tiles", ti.i32)
+        h = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
+        w = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
+        builder.dispatch(
+            kernel,
+            tiles,
+            tile_weight,
+            hanning,
+            accum,
+            weight_accum,
+            y0s,
+            x0s,
+            n_tiles,
+            h,
+            w,
+        )
+        module.add_graph(name, builder.compile())
+
+    add_stitch_batch("stitch_tile_batch_f32")
+    add_stitch_batch("stitch_tile_batch_vec3", is_vec=True)
+
+    # 9. copyMakeBorder Kernels (Fusing copy_make_border into common.tcm)
+    border_mod = importlib.import_module("taichi_library.taichi_algorithm.copy_make_border")
+    
+    def add_border_2d(dtype_name, dtype):
+        # 2D Constant
+        builder = ti.graph.GraphBuilder()
+        src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", dtype, ndim=2)
+        dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", dtype, ndim=2)
+        top = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "top", ti.i32)
+        left = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "left", ti.i32)
+        val = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "value", ti.f32)
+        builder.dispatch(border_mod._pad_constant_kernel_2d, src, dst, top, left, val)
+        module.add_graph(f"pad_constant_2d_{dtype_name}", builder.compile())
+
+        # 2D Others (Reflect101, Reflect, Replicate, Wrap)
+        for mode, kernel in [
+            ("reflect101", border_mod._pad_reflect101_kernel_2d),
+            ("reflect", border_mod._pad_reflect_kernel_2d),
+            ("replicate", border_mod._pad_replicate_kernel_2d),
+            ("wrap", border_mod._pad_wrap_kernel_2d),
+        ]:
+            builder = ti.graph.GraphBuilder()
+            src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", dtype, ndim=2)
+            dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", dtype, ndim=2)
+            top = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "top", ti.i32)
+            left = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "left", ti.i32)
+            builder.dispatch(kernel, src, dst, top, left)
+            module.add_graph(f"pad_{mode}_2d_{dtype_name}", builder.compile())
+
+    def add_border_3d(dtype_name, dtype):
+        # 3D Constant (takes val_r, val_g, val_b)
+        builder = ti.graph.GraphBuilder()
+        src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.types.vector(3, dtype), ndim=2)
+        dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.types.vector(3, dtype), ndim=2)
+        top = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "top", ti.i32)
+        left = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "left", ti.i32)
+        val_r = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "val_r", ti.f32)
+        val_g = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "val_g", ti.f32)
+        val_b = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "val_b", ti.f32)
+        builder.dispatch(border_mod._pad_constant_kernel_3d_vector, src, dst, top, left, val_r, val_g, val_b)
+        module.add_graph(f"pad_constant_3d_{dtype_name}", builder.compile())
+
+        # 3D Others
+        for mode, kernel in [
+            ("reflect101", border_mod._pad_reflect101_kernel_3d_vector),
+            ("reflect", border_mod._pad_reflect_kernel_3d_vector),
+            ("replicate", border_mod._pad_replicate_kernel_3d_vector),
+            ("wrap", border_mod._pad_wrap_kernel_3d_vector),
+        ]:
+            builder = ti.graph.GraphBuilder()
+            src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.types.vector(3, dtype), ndim=2)
+            dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.types.vector(3, dtype), ndim=2)
+            top = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "top", ti.i32)
+            left = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "left", ti.i32)
+            builder.dispatch(kernel, src, dst, top, left)
+            module.add_graph(f"pad_{mode}_3d_{dtype_name}", builder.compile())
+
+    # Compile for f32, i32 types
+    for dtype_name, dtype in [("f32", ti.f32), ("i32", ti.i32)]:
+        add_border_2d(dtype_name, dtype)
+        add_border_3d(dtype_name, dtype)
 
     module.archive(save_path)
     print(f"Successfully compiled and archived to: {save_path}")

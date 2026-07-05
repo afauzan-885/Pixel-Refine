@@ -66,7 +66,7 @@ class TileBasedSpatialFusionProcessor(TileProcessor):
         motion_sensitivity: Higher = more aggressive ghost rejection (default 150.0).
         noise_offset_factor: Noise floor offset for weight calculation (default 0.15).
         early_exit_threshold: Skip tiles below this confidence (default 0.05).
-        alignment_backend: "farneback" or "horn_schunck" (default "farneback").
+        alignment_backend: "farneback" or "lucas_kanade" (default "farneback").
     """
 
     def __init__(
@@ -217,17 +217,15 @@ class TileBasedSpatialFusionProcessor(TileProcessor):
                 poly_sigma=1.2,
                 flags=0
             )
-        elif self.alignment_backend == "horn_schunck":
-            # Horn-Schunck optical flow (using OpenCV)
-            flow = cv2.calcOpticalFlowFarneback(
-                ref_u8, comp_u8, None,
-                pyr_scale=0.5,
-                levels=3,
-                winsize=15,
-                iterations=3,
-                poly_n=5,
-                poly_sigma=1.2,
-                flags=cv2.OPTFLOW_FARNEBACK_GAUSSIAN
+        elif self.alignment_backend == "lucas_kanade":
+            from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade_cpu import (
+                LucasKanadeCPU,
+            )
+
+            flow = LucasKanadeCPU().calculate_flow(
+                ref_u8,
+                comp_u8,
+                LucasKanadeCPU.load_config(),
             )
         else:
             # Fallback: zero flow

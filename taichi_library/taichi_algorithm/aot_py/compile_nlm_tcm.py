@@ -24,7 +24,7 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 # Import algorithm module (JIT mode)
-nlm_mod = importlib.import_module("taichi_library.taichi_algorithm.nlm")
+nlm_mod = importlib.import_module("taichi_library.taichi_algorithm.denoising.nlm")
 
 ASSETS_DIR = os.path.join(file_dir, "../aot_tcm")
 

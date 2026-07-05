@@ -7,12 +7,60 @@ This module initializes and runs the Pixel Refine application.
 import sys
 import os
 import time
+import atexit
+import signal
+import threading
+import json
 
 # Suppress Vulkan loader registry warnings on Windows
 os.environ["VK_LOADER_DEBUG"] = "error"
 
-# Let the AOT engine auto-select the Vulkan device unless the user overrides it.
-# Hard-locking device 0 can route kernels to a different GPU than test scripts.
+def _bootstrap_aot_backend_from_settings():
+    """Apply saved AOT backend before any module can import taichi_aot."""
+    if os.environ.get("PIXEL_REFINE_AOT_DEVICE") is not None:
+        return
+
+    settings_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "database",
+        "setting",
+        "app_setting.json",
+    )
+    try:
+        with open(settings_path, "r", encoding="utf-8") as fh:
+            settings = json.load(fh)
+    except Exception:
+        return
+
+    arch = str(settings.get("device_backend_arch") or "").strip().lower()
+    device_id = settings.get("device_backend_id", None)
+    if arch:
+        os.environ.setdefault("PIXEL_REFINE_AOT_ARCH", arch)
+    if device_id is None:
+        return
+
+    try:
+        device_id_int = int(device_id)
+    except (TypeError, ValueError):
+        return
+
+    os.environ["PIXEL_REFINE_AOT_DEVICE"] = str(device_id_int)
+    if arch == "vulkan" and device_id_int >= 0:
+        try:
+            cache_dir = os.path.join(os.environ.get("LOCALAPPDATA", ""), "PixelRefine")
+            if cache_dir:
+                os.makedirs(cache_dir, exist_ok=True)
+                with open(
+                    os.path.join(cache_dir, "aot_device_cache.txt"),
+                    "w",
+                    encoding="utf-8",
+                ) as fh:
+                    fh.write(str(device_id_int))
+        except Exception:
+            pass
+
+
+_bootstrap_aot_backend_from_settings()
 
 # --- Taichi Cache Configuration ---
 # Offline cache disabled per request.
@@ -65,12 +113,80 @@ import config
 # ============================================================================
 
 
+_SHUTDOWN_LOCK = threading.Lock()
+_SHUTDOWN_DONE = False
+
+
+def _cleanup_aot_backend(reason="app-shutdown"):
+    """Best-effort GPU/AOT cleanup for app close, crash, and signal exits."""
+    global _SHUTDOWN_DONE
+    with _SHUTDOWN_LOCK:
+        if _SHUTDOWN_DONE:
+            return
+        _SHUTDOWN_DONE = True
+
+    try:
+        print(f"[PixelRefine Shutdown] AOT cleanup start reason={reason}", flush=True)
+    except Exception:
+        pass
+
+    try:
+        import gc
+        import taichi_library.taichi_aot as taichi_aot
+
+        try:
+            taichi_aot.unload_all_modules()
+        except Exception:
+            pass
+        try:
+            taichi_aot.engine.destroy()
+        except Exception:
+            pass
+        try:
+            gc.collect()
+        except Exception:
+            pass
+    except Exception as exc:
+        try:
+            print(f"[PixelRefine Shutdown] AOT cleanup skipped: {exc}", flush=True)
+        except Exception:
+            pass
+
+
+def _install_shutdown_guards():
+    """Install process-level hooks that release GPU resources before exit."""
+    atexit.register(_cleanup_aot_backend, "atexit")
+
+    def _handle_exception(exc_type, exc, tb):
+        _cleanup_aot_backend("unhandled-exception")
+        sys.__excepthook__(exc_type, exc, tb)
+
+    sys.excepthook = _handle_exception
+
+    def _handle_signal(signum, frame):
+        _cleanup_aot_backend(f"signal-{signum}")
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    for sig_name in ("SIGTERM", "SIGINT"):
+        if hasattr(signal, sig_name):
+            try:
+                signal.signal(getattr(signal, sig_name), _handle_signal)
+            except (OSError, ValueError):
+                pass
+    if hasattr(signal, "SIGBREAK"):
+        try:
+            signal.signal(signal.SIGBREAK, _handle_signal)
+        except (OSError, ValueError):
+            pass
+
+
 class CustomStyle(QProxyStyle):
-    """Custom style to set tooltip delay to 200ms."""
+    """Custom style to set tooltip delay to 100ms."""
 
     def styleHint(self, hint, option=None, widget=None, returnData=None):
         if hint == QStyle.StyleHint.SH_ToolTip_WakeUpDelay:
-            return 200  # 200ms delay before tooltip appears
+            return 100  # 100ms delay before tooltip appears
         return super().styleHint(hint, option, widget, returnData)
 
 
@@ -270,6 +386,7 @@ class PixelRefineMain(QMainWindow):
         """Handle application close event."""
         if self.app_manager:
             self.app_manager.cleanup_folders()
+        _cleanup_aot_backend("window-close")
         event.accept()
 
     def switch_page(self, index):
@@ -308,6 +425,8 @@ class PixelRefineMain(QMainWindow):
 
 def main():
     """Main application entry point."""
+    _install_shutdown_guards()
+
     # Suppress native Vulkan loader registry warnings by wrapping stderr
     class VulkanWarningFilter:
         def __init__(self, target):
@@ -322,6 +441,7 @@ def main():
 
     # Create application
     app = QApplication(sys.argv)
+    app.aboutToQuit.connect(lambda: _cleanup_aot_backend("about-to-quit"))
 
     # Load and apply theme from settings on startup
     try:
@@ -392,7 +512,12 @@ def main():
     splash.finish(window)
 
     # Run application
-    sys.exit(app.exec())
+    exit_code = 0
+    try:
+        exit_code = app.exec()
+    finally:
+        _cleanup_aot_backend("event-loop-exit")
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

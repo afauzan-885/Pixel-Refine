@@ -16,8 +16,10 @@ import time
 import ctypes
 import numpy as np
 
+from taichi_library.config import AOT_MODE
+
 # Check if we are running in AOT mode (default: yes)
-_IS_AOT_MODE = any("aot" in arg.lower() or "compiler" in arg.lower() for arg in sys.argv) or os.environ.get("AOT_MODE", "1") == "1"
+_IS_AOT_MODE = any("aot" in arg.lower() or "compiler" in arg.lower() for arg in sys.argv) or AOT_MODE == "1"
 
 if not _IS_AOT_MODE:
     # Force stable CUDA context settings globally before any Taichi import
@@ -25,7 +27,7 @@ if not _IS_AOT_MODE:
 
 TAICHI_AVAILABLE = False
 ti = None
-if os.environ.get("AOT_MODE", "1") == "0":
+if AOT_MODE == "0":
     try:
         import importlib
         ti = importlib.import_module("taichi")

@@ -701,9 +701,8 @@ def generate_spatial_weights_taichi(
     """
     Calculates the weight map for a single frame relative to the reference using Taichi AOT.
     """
-    from taichi_library.taichi_aot.engine import AOTEngine
     import taichi_library.taichi_aot as taichi_aot
-    engine = AOTEngine()
+    engine = taichi_aot.engine
 
     # Load Module
     file_dir = os.path.dirname(os.path.abspath(__file__))
@@ -972,8 +971,8 @@ def accumulate_spatial_merging_taichi(
     """
     Accumulates a frame into the global sum using its processed weight map using Taichi AOT.
     """
-    from taichi_library.taichi_aot.engine import AOTEngine
-    engine = AOTEngine()
+    import taichi_library.taichi_aot as taichi_aot
+    engine = taichi_aot.engine
 
     # Load Module
     file_dir = os.path.dirname(os.path.abspath(__file__))

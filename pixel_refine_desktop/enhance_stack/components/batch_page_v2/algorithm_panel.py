@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QStackedWidget,
+    QSizePolicy,
 )
 from PySide6.QtCore import QThread, Qt, Signal, QTimer
 
@@ -155,6 +156,9 @@ class AlgorithmPanel(QWidget, SyncMixin):
         """Create column for alignment parameters."""
         widget = QWidget()
         widget.setObjectName("paramAlignWidget")
+        widget.setVisible(False)
+        widget.setMaximumHeight(0)
+        widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(10)
@@ -590,8 +594,10 @@ class AlgorithmPanel(QWidget, SyncMixin):
                 duration=400,
             )
 
-         # Notify LeftPanel about overall visibility (expanded/collapsed)
-        self.visibility_state_changed.emit(target_idx != 3)
+        # The visible parameter surface has moved to SwitchableParameterPanel.
+        # Keep this legacy AlgorithmPanel collapsed so it never pushes the
+        # DisplayPanel upward when settings are saved or refreshed.
+        self.visibility_state_changed.emit(False)
 
     def set_settings(self, settings):
         self.logic.set_settings(settings)

@@ -15,6 +15,7 @@ if project_root not in sys.path:
 
 # Import the Generic AOT Engine and Buffer Pool
 from .engine import AOTEngine, TaichiGPUBuffer, InputArray, OutputArray
+from .engine import enable_experiment_mode, is_experiment_mode
 from .engine import INTER_CUBIC, INTER_LINEAR, INTER_NEAREST, INTER_AREA
 from .engine import COLOR_BGR2GRAY, COLOR_RGB2GRAY, COLOR_GRAY2BGR
 from taichi_library.taichi_algorithm.taichi_worker import ti_thread
@@ -34,16 +35,23 @@ _module_cache = {}  # name -> AOTModuleWrapper (loaded on demand)
 
 def _mod(name: str):
     """Lazy-load and cache a TCM module by name. Thread-safe via GIL."""
+    cached = _module_cache.get(name)
+    if cached is not None and (
+        getattr(cached, "module_ptr", None)
+        and getattr(cached, "engine_generation", None)
+        == getattr(engine, "_generation", 0)
+    ):
+        return cached
+    if name in _module_cache:
+        _module_cache.pop(name, None)
+
     if name not in _module_cache:
         path_dir = os.path.join(_tcm_dir, name)
         if os.path.isdir(path_dir):
             _module_cache[name] = engine.load(path_dir)
         else:
             path_file = os.path.join(_tcm_dir, f"{name}.tcm")
-            try:
-                _module_cache[name] = engine.load(path_file)
-            except Exception:
-                _module_cache[name] = None
+            _module_cache[name] = engine.load(path_file)
     return _module_cache[name]
 
 
@@ -180,6 +188,43 @@ def mean_division(sum_img: TaichiGPUBuffer, sum_weight: TaichiGPUBuffer, ref_img
 
     _mod("common").run(graph, sum_img=sum_img_v, sum_weight=sum_weight, ref_img=ref_img_v, dst=dst_v)
     return dst
+
+
+def stitch_tile(
+    tile: TaichiGPUBuffer,
+    tile_weight: TaichiGPUBuffer,
+    hanning: TaichiGPUBuffer,
+    accum: TaichiGPUBuffer,
+    weight_accum: TaichiGPUBuffer,
+    y0: int,
+    x0: int,
+):
+    """Accumulate one GPU tile into full-frame accumulators."""
+    tile_buf = tile
+    accum_buf = accum
+    is_vec = len(tile.shape) == 3 or getattr(tile, "is_vector", False)
+    graph = "stitch_tile_vec3" if is_vec else "stitch_tile_f32"
+
+    if is_vec:
+        if not getattr(tile_buf, "is_vector", False):
+            tile_buf = tile_buf.view_as_vector(True, 3)
+        if not getattr(accum_buf, "is_vector", False):
+            accum_buf = accum_buf.view_as_vector(True, 3)
+
+    h = int(tile.shape[0])
+    w = int(tile.shape[1])
+    _mod("common").run(
+        graph,
+        tile=tile_buf,
+        tile_weight=tile_weight,
+        hanning=hanning,
+        accum=accum_buf,
+        weight_accum=weight_accum,
+        y0=int(y0),
+        x0=int(x0),
+        h=h,
+        w=w,
+    )
 
 
 # NumPy-like aliases for JIT/AOT consistency

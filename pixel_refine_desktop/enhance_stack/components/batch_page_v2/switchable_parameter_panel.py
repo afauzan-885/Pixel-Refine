@@ -1,5 +1,6 @@
 import os
 from PySide6.QtWidgets import (
+    QApplication,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -11,24 +12,40 @@ from PySide6.QtWidgets import (
     QSizePolicy,
 )
 from PySide6.QtGui import QColor, QFont
-from PySide6.QtCore import Qt, Signal, Slot, QTimer
+from PySide6.QtCore import Qt, Signal, Slot, QTimer, QEvent
 from resources.GenericUILibrary import live_update
 
 # Import parameter pages
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.light_glue_parameter_settings import (
-    get_light_glue_page
+    load_light_glue_config,
+    save_light_glue_config_for_active_batch,
 )
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.farneback_parameter_settings import (
-    get_farneback_optical_flow_page
+    load_farneback_config,
+    save_farneback_config_for_active_batch,
+)
+from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.lucas_kanade_parameter_settings import (
+    load_lucas_kanade_config,
+    load_lucas_kanade_gpu_config,
+    save_lucas_kanade_config_for_active_batch,
+    save_lucas_kanade_gpu_config_for_active_batch,
 )
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.akaze_parameter_settings import (
-    get_akaze_page
+    load_akaze_config,
+    save_akaze_config_for_active_batch,
 )
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.orb_parameter_settings import (
-    get_orb_page
+    load_orb_config,
+    save_orb_config_for_active_batch,
 )
+from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.MFDenoiser_parameter_settings import (
-    get_mfdenoiser_settings_page
+    get_alignment_settings_page,
+    get_denoising_settings_page,
+    get_mfdenoiser_settings_page,
+)
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
+    get_algorithm_names as get_mfdenoiser_algorithm_names,
 )
 
 # Colors
@@ -66,6 +83,81 @@ class SwitchableParameterPanel(QWidget):
         self.set_expanded(False)
         self._update_styles("transparent")
 
+    def _persist_alignment_selection(self):
+        selected_text = self.align_dropdown.currentText()
+        right_panel = getattr(self.parent(), "right_panel", None)
+        if right_panel and hasattr(right_panel, "align_form"):
+            right_panel.align_form.set_value(selected_text)
+            if hasattr(right_panel, "_on_settings_changed"):
+                right_panel._on_settings_changed(save_to_store=True)
+
+        if selected_text == "ORB":
+            save_orb_config_for_active_batch(load_orb_config())
+        elif selected_text == "AKAZE":
+            save_akaze_config_for_active_batch(load_akaze_config())
+        elif selected_text == "Light Glue":
+            save_light_glue_config_for_active_batch(load_light_glue_config())
+        elif selected_text == "Farneback Optical Flow":
+            save_farneback_config_for_active_batch(load_farneback_config())
+        elif selected_text == "Lucas Kanade Optical Flow":
+            save_lucas_kanade_config_for_active_batch(load_lucas_kanade_config())
+        elif selected_text == "Lucas Kanade GPU Optical Flow":
+            save_lucas_kanade_gpu_config_for_active_batch(load_lucas_kanade_gpu_config())
+
+        print(
+            f"[SwitchableParameterPanel] persisted alignment='{selected_text}' "
+            f"batch_id={getattr(right_panel, 'current_batch_id', None)}"
+        )
+
+    def _save_alignment_params_for_active_batch(self, algorithm_name, params_key, params):
+        right_panel = getattr(self.parent(), "right_panel", None)
+        if not right_panel or not getattr(right_panel, "current_batch_id", None):
+            return
+
+        batch_id = right_panel.current_batch_id
+        str_id = str(batch_id)
+        denoising_algo = (
+            right_panel.denoise_card.get_value()
+            if hasattr(right_panel, "denoise_card")
+            else "Average"
+        )
+        super_resolution_algo = (
+            right_panel.sr_card.get_value()
+            if hasattr(right_panel, "sr_card")
+            else "No Super Resolution"
+        )
+        bulk_data = {
+            f"{str_id}.alignment_algo": algorithm_name,
+            f"{str_id}.super_resolution_algo": super_resolution_algo or "No Super Resolution",
+            f"{str_id}.denoising_algo": denoising_algo or "No Denoising",
+            f"{str_id}.checkbox_align_images": algorithm_name not in ("", "None", "No Alignment"),
+            f"{str_id}.checkbox_super_resolution": bool(getattr(right_panel.sr_card, "is_checked", False))
+            if hasattr(right_panel, "sr_card")
+            else False,
+            f"{str_id}.checkbox_denoising": bool(getattr(right_panel.denoise_card, "is_checked", False))
+            if hasattr(right_panel, "denoise_card")
+            else denoising_algo not in ("", "None", "No Denoising"),
+            f"{str_id}.{params_key}": params,
+        }
+        if hasattr(right_panel, "_store") and right_panel._store:
+            right_panel._store.update_bulk(bulk_data, save=True)
+        else:
+            data = batch_parameter_manager.load_json_state()
+            entry = data.setdefault(str_id, {})
+            for key, value in bulk_data.items():
+                entry[key.split(".", 1)[1]] = value
+            batch_parameter_manager.save_json_state(data=data)
+
+        if hasattr(right_panel, "logic"):
+            right_panel.logic.set_settings(
+                {
+                    "alignment": algorithm_name,
+                    "super_resolution": super_resolution_algo,
+                    "denoising": denoising_algo,
+                }
+            )
+        print(f"[{algorithm_name}Settings] Saved params for batch_id={batch_id}")
+
     def set_expanded(self, expanded):
         if self.content_wrapper.isVisible() == expanded:
             return
@@ -75,11 +167,17 @@ class SwitchableParameterPanel(QWidget):
             width, height = self._expanded_size()
             self.setMinimumSize(width, height)
             self.setMaximumSize(width, height)
+            window = self.window()
+            if window:
+                window.installEventFilter(self)
         else:
             # Keep the collapsed tab rail deterministic so OverlayContainer does
             # not reuse a stale expanded geometry during rapid setting changes.
             self.setMinimumSize(50, self._collapsed_height())
             self.setMaximumSize(50, self._collapsed_height())
+            window = self.window()
+            if window:
+                window.removeEventFilter(self)
         
         self.updateGeometry()
         self.adjustSize()
@@ -89,6 +187,23 @@ class SwitchableParameterPanel(QWidget):
         overlay = self.get_overlay_container()
         if overlay:
             QTimer.singleShot(0, self._sync_overlay_geometry)
+
+    def collapse_panel(self):
+        self.active_tab = None
+        self.set_expanded(False)
+        self._update_styles("transparent")
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.MouseButtonPress and self.content_wrapper.isVisible():
+            global_pos = (
+                event.globalPosition().toPoint()
+                if hasattr(event, "globalPosition")
+                else event.globalPos()
+            )
+            clicked_widget = QApplication.widgetAt(global_pos)
+            if clicked_widget and clicked_widget != self and not self.isAncestorOf(clicked_widget):
+                self.collapse_panel()
+        return super().eventFilter(obj, event)
 
     def _collapsed_height(self):
         visible_buttons = sum(
@@ -229,13 +344,8 @@ class SwitchableParameterPanel(QWidget):
         self.align_dropdown_label = QLabel("Alignment Algorithm:")
         self.align_dropdown_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         self.align_dropdown = QComboBox()
-        self.align_dropdown.addItems([
-            "No Alignment",
-            "Farneback Optical Flow",
-            "Light Glue",
-            "AKAZE",
-            "ORB"
-        ])
+        self.alignment_algorithm_names = get_mfdenoiser_algorithm_names("alignment")
+        self.align_dropdown.addItems(self.alignment_algorithm_names)
         self.align_dropdown.currentIndexChanged.connect(self._on_alignment_algo_changed)
 
         align_layout.addWidget(self.align_dropdown_label)
@@ -245,48 +355,17 @@ class SwitchableParameterPanel(QWidget):
         self.align_param_stack = QStackedWidget()
 
         # Build individual parameter pages
-        # Index 0: No Alignment (placeholder)
-        self.none_align_page = QLabel("No alignment parameters to configure.")
-        self.none_align_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.none_align_page.setStyleSheet("color: #7F8C8D; font-style: italic;")
-        self.align_param_stack.addWidget(self.none_align_page)
-
-        # Index 1: Farneback
-        self.farneback_page = get_farneback_optical_flow_page()
-        self.align_param_stack.addWidget(self.farneback_page)
-
-        # Index 2: Light Glue
-        self.light_glue_page = get_light_glue_page()
-        self.align_param_stack.addWidget(self.light_glue_page)
-
-        # Index 3: AKAZE
-        self.akaze_page = get_akaze_page()
-        self.align_param_stack.addWidget(self.akaze_page)
-
-        # Index 4: ORB
-        self.orb_page = get_orb_page()
-        self.align_param_stack.addWidget(self.orb_page)
+        self.alignment_pages = {}
+        for name in self.alignment_algorithm_names:
+            page = get_alignment_settings_page(name)
+            self.alignment_pages[name] = page
+            self.align_param_stack.addWidget(page)
 
         align_layout.addWidget(self.align_param_stack, 1)
         self.content_stack.addWidget(self.align_page)
 
     def _setup_denoising_page(self):
-        # We reuse the get_mfdenoiser_settings_page but hide the tab widget tab bar
-        # so that it specifically displays only the Similarity parameters.
-        self.denoise_page_container = get_mfdenoiser_settings_page()
-        
-        # Retrieve the inner page and hide tab bar
-        inner_scroll = self.denoise_page_container
-        if isinstance(inner_scroll, QScrollArea) and inner_scroll.widget():
-            inner_page = inner_scroll.widget()
-            if hasattr(inner_page, "tab_widget"):
-                # Hide the tab widget tab bar! This keeps only the Similarity page active/visible
-                inner_page.tab_widget.tabBar().setVisible(False)
-                # Hide the title label "MFDenoiser Parameters" to look cleaner
-                for child in inner_page.findChildren(QLabel):
-                    if child.text() == "MFDenoiser Parameters":
-                        child.setVisible(False)
-
+        self.denoise_page_container = get_denoising_settings_page("Similarity")
         self.content_stack.addWidget(self.denoise_page_container)
 
     def set_active_tab(self, tab_name):
@@ -309,6 +388,7 @@ class SwitchableParameterPanel(QWidget):
         if tab_name == "alignment":
             self.content_stack.setCurrentWidget(self.align_page)
             border_color = COLOR_ALIGNMENT_RED
+            self._persist_alignment_selection()
         else:
             self.content_stack.setCurrentWidget(self.denoise_page_container)
             border_color = COLOR_DENOISING_GREEN
@@ -484,10 +564,7 @@ class SwitchableParameterPanel(QWidget):
         self.align_param_stack.setCurrentIndex(index)
         
         # Save choice to settings / store
-        selected_text = self.align_dropdown.currentText()
-        if hasattr(self.parent(), "right_panel") and self.parent().right_panel:
-            if hasattr(self.parent().right_panel, "align_form"):
-                self.parent().right_panel.align_form.set_value(selected_text)
+        self._persist_alignment_selection()
 
     def get_overlay_container(self):
         p = self.parent()
@@ -532,6 +609,7 @@ class SwitchableParameterPanel(QWidget):
 
         if denoising_algo in ["No Denoising", "None", ""]:
             # Hide the entire overlay panel
+            self.collapse_panel()
             if overlay:
                 overlay.hide()
         else:
@@ -551,6 +629,9 @@ class SwitchableParameterPanel(QWidget):
                 self.btn_align_tab.setVisible(True)
                 self.btn_denoise_tab.setVisible(True)
                 self.btn_denoise_tab.setEnabled(True)
-                
+
             self._update_styles("transparent" if self.active_tab is None else (COLOR_ALIGNMENT_RED if self.active_tab == "alignment" else COLOR_DENOISING_GREEN))
+            if not self.content_wrapper.isVisible():
+                self.setMinimumSize(50, self._collapsed_height())
+                self.setMaximumSize(50, self._collapsed_height())
             self._sync_overlay_geometry()

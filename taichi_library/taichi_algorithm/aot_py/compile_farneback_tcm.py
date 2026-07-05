@@ -24,13 +24,13 @@ import sys
 
 # Add project root to sys.path
 file_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.abspath(os.path.join(file_dir, "../../../../"))
+project_root = os.path.abspath(os.path.join(file_dir, "../../../"))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
 import importlib
-fb = importlib.import_module('taichi_library.taichi_algorithm.farneback_flow')
-pyr = importlib.import_module('taichi_library.taichi_algorithm.pyramid')
+fb = importlib.import_module('taichi_library.taichi_algorithm.optical_flow.farneback_flow')
+pyr = importlib.import_module('taichi_library.taichi_algorithm.pyramid.pyramid')
 
 
 def _package_tcm(module, out_dir, tcm_name):
@@ -139,6 +139,18 @@ def compile_farneback_flow(arch=ti.vulkan, out_dir=None):
     module.add_graph("farneback_clear_flow", g_clear.compile())
     print("  [OK] farneback_clear_flow")
 
+    # ----- 6. Median Filter Flow -----
+    g_median = ti.graph.GraphBuilder()
+    g_median.dispatch(fb._median_filter_flow_kernel, sym_flow_src, sym_flow_dst, sym_h, sym_w)
+    module.add_graph("farneback_median_filter", g_median.compile())
+    print("  [OK] farneback_median_filter")
+
+    # ----- 7. Copy Flow -----
+    g_copy = ti.graph.GraphBuilder()
+    g_copy.dispatch(fb._copy_flow_kernel, sym_flow_src, sym_flow_dst, sym_h, sym_w)
+    module.add_graph("farneback_copy_flow", g_copy.compile())
+    print("  [OK] farneback_copy_flow")
+
     # ----- Save -----
     if out_dir is None:
         out_dir = os.path.join(file_dir, "..", "aot_tcm")
@@ -154,5 +166,13 @@ def compile_farneback_flow(arch=ti.vulkan, out_dir=None):
 
 
 if __name__ == "__main__":
-    # Default: compile for Vulkan
-    compile_farneback_flow(arch=ti.vulkan)
+    archs = [
+        (ti.vulkan, "vulkan"),
+        (ti.cuda, "cuda"),
+        (ti.cpu, "cpu"),
+    ]
+    for arch, suffix in archs:
+        try:
+            compile_farneback_flow(arch=arch)
+        except Exception as e:
+            print(f"Skipping {suffix} due to error: {e}")

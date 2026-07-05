@@ -6,14 +6,16 @@ Handles background execution of image processing algorithms with progress tracki
 from PySide6.QtCore import QThread, Signal
 
 # Import algorithm functions
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.Farneback_optical_flow import (
-    running_farneback_optical_flow,
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow_cpu import (
+    running_farneback_flow,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.AKAZE import (
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.AKAZE import (
     running_akaze,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.ORB import running_orb
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.Light_Glue import (
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.ORB import (
+    running_orb,
+)
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.Light_Glue import (
     running_light_glue,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
@@ -28,9 +30,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.Weighted
 )
 
 
-
 class AlgorithmProcessorThread(QThread):
-
     """
     Background thread to execute selected algorithms for a batch.
 
@@ -89,9 +89,21 @@ class AlgorithmProcessorThread(QThread):
             def get_stop_cb():
                 return self._is_cancelled
 
+            alignment_choice = self.settings.get("alignment", "No Alignment")
+            denoising_choice = self.settings.get("denoising", "No Denoising")
+            denoising_active = denoising_choice not in (
+                "",
+                "None",
+                "No Denoising",
+            )
+            print(
+                f"[AlgorithmProcessorThread] settings={self.settings} "
+                f"alignment_choice={alignment_choice} denoising_choice={denoising_choice}"
+            )
+
             actions = {
                 "alignment": {
-                    "Farneback Optical Flow": lambda: running_farneback_optical_flow(
+                    "Farneback Optical Flow": lambda: running_farneback_flow(
                         self.parent_panel,
                         single_process=self.single_process,
                         batch_id=self.batch_id,
@@ -133,8 +145,6 @@ class AlgorithmProcessorThread(QThread):
                     "No Super Resolution": lambda: None,
                     "None": lambda: None,
                 },
-
-
                 "denoising": {
                     "Average": lambda: running_mf_denoiser(
                         self.parent_panel,
@@ -144,6 +154,7 @@ class AlgorithmProcessorThread(QThread):
                         stop_callback=get_stop_cb,
                         merging_mode="average",
                         output_suffix="average",
+                        alignment_backend=alignment_choice,
                     ),
                     "Median": lambda: running_median(
                         self.parent_panel,
@@ -158,6 +169,7 @@ class AlgorithmProcessorThread(QThread):
                         batch_id=self.batch_id,
                         progress_callback=progress_callback,
                         stop_callback=get_stop_cb,
+                        alignment_backend=alignment_choice,
                     ),
                     "No Denoising": lambda: None,
                     "None": lambda: None,
@@ -169,6 +181,13 @@ class AlgorithmProcessorThread(QThread):
             for category, selected_algo_name in self.settings.items():
                 if not self._is_running:
                     break
+
+                if category == "alignment" and denoising_active:
+                    print(
+                        f"[AlgorithmProcessorThread] Deferring alignment "
+                        f"'{selected_algo_name}' to MFDenoiser."
+                    )
+                    continue
 
                 if not selected_algo_name or selected_algo_name in [
                     "None",

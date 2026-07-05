@@ -571,6 +571,11 @@ class WorkspaceDisplayPanel(QWidget):
 
     def animate_mode_change(self, is_bulk):
         """Animasi perubahan teks bulk mode button."""
+        self.set_mode_button_state(is_bulk)
+        return
+
+    def set_mode_button_state(self, is_bulk):
+        """Update teks/style bulk mode button tanpa opacity animation."""
         target_text = "Batch Mode" if is_bulk else "Bulk Mode"
 
         w = self.width()
@@ -578,27 +583,8 @@ class WorkspaceDisplayPanel(QWidget):
         font_size = 10.5 + f * 4.5
         style_sheet = self._get_bulk_mode_btn_stylesheet(is_bulk, font_size)
 
-        effect = self.bulk_mode_btn.graphicsEffect()
-        if not effect or not isinstance(effect, QGraphicsOpacityEffect):
-            effect = QGraphicsOpacityEffect(self.bulk_mode_btn)
-            self.bulk_mode_btn.setGraphicsEffect(effect)
-
-        self._mode_fade_anim = QPropertyAnimation(effect, b"opacity", self)
-        self._mode_fade_anim.setDuration(120)
-        self._mode_fade_anim.setStartValue(1.0)
-        self._mode_fade_anim.setEndValue(0.0)
-
-        def swap_content():
-            self.bulk_mode_btn.setText(target_text)
-            self.bulk_mode_btn.setStyleSheet(style_sheet)
-            self._mode_fade_in = QPropertyAnimation(effect, b"opacity", self)
-            self._mode_fade_in.setDuration(120)
-            self._mode_fade_in.setStartValue(0.0)
-            self._mode_fade_in.setEndValue(1.0)
-            self._mode_fade_in.start()
-
-        self._mode_fade_anim.finished.connect(swap_content)
-        self._mode_fade_anim.start()
+        self.bulk_mode_btn.setText(target_text)
+        self.bulk_mode_btn.setStyleSheet(style_sheet)
 
     def _get_bulk_mode_btn_stylesheet(self, is_bulk, font_size):
         """Generate stylesheet untuk bulk mode button."""

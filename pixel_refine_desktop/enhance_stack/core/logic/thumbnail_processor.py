@@ -326,6 +326,21 @@ class ThumbnailBulkWorker(QRunnable):
                         self._safe_emit(q_img_to_emit, path)
                     continue
 
+                # 0.5. Cek L2 Disk Cache (JPG di database/cache/thumbnails)
+                repo = get_thumbnail_repo()
+                cached_l2 = repo.get_thumbnail(path)
+                if cached_l2 is not None and not cached_l2.isNull():
+                    q_img_to_emit = cached_l2
+                    # Simpan ke L0 & L1
+                    global_cache.put(path, q_img_to_emit)
+                    processor = self.processor_ref()
+                    if processor:
+                        processor.ram_cache[path] = q_img_to_emit
+                    
+                    if not self._should_abort():
+                        self._safe_emit(q_img_to_emit, path)
+                    continue
+
                 # 1. Decode gambar (process_batch sudah filter cache miss sebelumnya)
                 pil_thumb = process_thumbnail_logic(path, self.thumbnail_size)
 
@@ -657,18 +672,8 @@ class ThumbnailBatchProcessor(QObject):
                 callback(self.ram_cache[image_path], image_path)
             return
 
-        # 2. CEK DISK CACHE (L2 - SQLite)
+        # 2. CEK DISK CACHE (L2) - Dihandle secara asinkron oleh worker di background thread!
         if callback:
-            repo = get_thumbnail_repo()
-            cached_image = repo.get_thumbnail(image_path)
-
-            if not cached_image.isNull():
-                # Masukkan ke L1 dan L0 agar akses berikutnya instan
-                self.ram_cache[image_path] = cached_image
-                global_cache.put(image_path, cached_image)
-                callback(cached_image, image_path)
-                return
-
             # Cek apakah sudah sedang diproses (in-flight)
             if image_path in self._in_flight:
                 self.callbacks[image_path] = callback
@@ -773,100 +778,36 @@ class ThumbnailBatchProcessor(QObject):
 
         remaining_paths = still_remaining
 
-        if not remaining_paths:
-            self._emit_progress()
-            return
-
-        # 2. BULK LOAD DARI Disk Cache (L2) - JPG di database/cache/thumbnails
-        repo = get_thumbnail_repo()
-
-        # Emit initial check progress (0%)
-        self.check_progress.emit(self.current_batch_id, 0)
-
-        # Split remaining into hits and misses with incremental progress emission
-        batch_size = 50  # Process in small chunks for progress feedback
-        cached_thumbnails = {}
-
-        for i in range(0, len(remaining_paths), batch_size):
-            chunk = remaining_paths[i : i + batch_size]
-            hits = repo.get_thumbnails_bulk(chunk)
-            cached_thumbnails.update(hits)
-
-            # Emit progress percentage
-            pct = int(((i + len(chunk)) / len(remaining_paths)) * 100)
-            self.check_progress.emit(self.current_batch_id, pct)
-
-        final_to_process = []
-        for path in remaining_paths:
-            if path in cached_thumbnails:
-                img = cached_thumbnails[path]
-                self.ram_cache[path] = img  # Simpan ke L1
-                global_cache.put(path, img)  # Simpan ke L0 untuk instan lintas batch
+        # 2. BULK LOAD DARI Disk Cache (L2) & Spawn Bulk Generator - Fully Asynchronous!
+        if remaining_paths:
+            final_to_process = []
+            for path in remaining_paths:
                 if callback:
-                    callback(img, path)
-
-                # Update progress for L2 hits (Avoid double counting)
-                if path not in self._processed_paths:
-                    self._processed_paths.add(path)
-                    self.decoded_count += 1
-
-                if path not in self._persisted_paths:
-                    self._persisted_paths.add(path)
-                    self.saved_count += 1
-
-            else:
-                # Cek apakah sedang dalam antrean (in-flight)
+                    self.callbacks[path] = callback
                 if path not in self._in_flight:
                     final_to_process.append(path)
-                    if callback:
-                        self.callbacks[path] = callback
-                else:
-                    # Jika in-flight, cukup tambahkan callback jika ada
-                    if callback:
-                        self.callbacks[path] = callback
+                    self._in_flight.add(path)
 
-        # Final check progress (100%)
-        self.check_progress.emit(self.current_batch_id, 100)
+            if final_to_process:
+                chunk_size = 20
+                for i in range(0, len(final_to_process), chunk_size):
+                    chunk = final_to_process[i : i + chunk_size]
+                    bulk_worker = ThumbnailBulkWorker(
+                        chunk, self, self.current_batch_id, self.thumbnail_size
+                    )
+                    # Connect common signal
+                    bulk_worker.signals.thumbnail_ready.connect(
+                        lambda img, path: self._on_thumbnail_ready(img, path)
+                    )
+                    # Proteksi GC: Simpan referensi worker (Fix "Loading 2%")
+                    self._active_workers.add(bulk_worker)
+                    # Gunakan wrapper untuk disconnect/discard saat batch ini selesai diproses oleh worker ini
+                    bulk_worker.signals.all_thumbnails_processed.connect(
+                        lambda: self._active_workers.discard(bulk_worker)
+                    )
+                    QThreadPool.globalInstance().start(bulk_worker)
 
-        # Emit progress after cache checks
         self._emit_progress()
-
-        # 3. SPAWN BULK GENERATOR (Chunked processing for high performance)
-        if final_to_process:
-            chunk_size = 20
-            # print(
-            #     f"[ThumbnailProcessor] L1 hits, L2 hits: {len(image_paths)-len(final_to_process)}, "
-            #     f"Decoding {len(final_to_process)} in chunks of {chunk_size}"
-            # )
-
-            for i in range(0, len(final_to_process), chunk_size):
-                chunk = final_to_process[i : i + chunk_size]
-
-                # Mark as in-flight
-                for p in chunk:
-                    self._in_flight.add(p)
-
-                bulk_worker = ThumbnailBulkWorker(
-                    chunk, self, self.current_batch_id, self.thumbnail_size
-                )
-
-                # Connect common signal
-                bulk_worker.signals.thumbnail_ready.connect(
-                    lambda img, path: self._on_thumbnail_ready(img, path)
-                )
-
-                # Proteksi GC: Simpan referensi worker (Fix "Loading 2%")
-                self._active_workers.add(bulk_worker)
-
-                # Gunakan wrapper untuk disconnect/discard saat batch ini selesai diproses oleh worker ini
-                # Kita tidak bisa pakai satu sinyal untuk hapus, karena bulk emit banyak.
-                # Namun QRunnable di pool akan hancur setelah run() selesai.
-                # Idealnya ada sinyal 'finished'. Karena tidak ada, kita bisa buat di signals.
-                bulk_worker.signals.all_thumbnails_processed.connect(
-                    lambda: self._active_workers.discard(bulk_worker)
-                )
-
-                QThreadPool.globalInstance().start(bulk_worker)
 
     def _on_thumbnail_ready(self, q_image, image_path):
         """Internal callback saat dekoding gambar selesai."""

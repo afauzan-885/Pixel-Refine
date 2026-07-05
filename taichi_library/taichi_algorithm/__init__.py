@@ -5,9 +5,10 @@
 import numpy as np
 import os
 import importlib
+from taichi_library.config import AOT_MODE
 
 ti = None
-if os.environ.get("AOT_MODE", "1") == "0":
+if AOT_MODE == "0":
     try:
         ti = importlib.import_module("taichi")
     except ImportError:
@@ -15,58 +16,144 @@ if os.environ.get("AOT_MODE", "1") == "0":
 
 # --- Core Imports ---
 from . import common
-from .common import (
-    split,
-    merge,
-    extract_channel,
-    insert_channel,
-    copy,
-)
+from . import aot_wrapper
 
-# --- Underlying Implementations ---
-from .bilinear_interpolation import bilinear_resize, sample_at_bilinear
-from .nearest_interpolation import nearest_resize
-from .bicubic_interpolation import (
-    bicubic_resize,
-    sample_at_bicubic,
-    sample_at,
-    cubic_hermite,
-)
-from .box_filter import box_filter, box_filter_2d
-from .median_filter import median_filter
-from .gaussian import gaussian_blur as _gaussian_blur_impl
-from .gradients import sobel as _sobel_impl
-from .gradients import laplacian as _laplacian_impl
-from .ransac import ransac_flow_cleanup
-from .bilateral_grid import bilateral_grid_filter
-from .pyramid import build_image_pyramid, build_image_pyramid_gpu, upsample_flow
-from .phase_correlation import phase_correlation
-from .fft import fft2, ifft2
-from .ncc import zncc, match_template, global_translate_zncc
-from .remap import remap
-from .Hamilton_demosaice import hamilton_demosaic
-from .arm_demosaice import arm_demosaic
-from .mtb import align_mtb
-from .enhance_image import enhance_grayscale
-from .color_convert import (
-    cvtColor_extended,
-    COLOR_BGR2HSV,
-    COLOR_HSV2BGR,
-    COLOR_BGR2LAB,
-    COLOR_LAB2BGR,
-    COLOR_BGR2YCrCb,
-    COLOR_YCrCb2BGR,
-)
-from .otsu import otsu_threshold, THRESH_BINARY, THRESH_BINARY_INV, THRESH_OTSU
-from .guided_filter import guided_filter
-from .clahe import clahe
-from .canny import canny
-from .hough import hough_lines, hough_lines_with_canny
-from .nlm import non_local_means
-from .bm3d import hfcd_denoise, build_dct_matrix
-from .inpaint import inpaint, INPAINT_TELEA, INPAINT_NS
-from .seamless_clone import seamless_clone, NORMAL_CLONE, MIXED_CLONE, MONOCHROME_TRANSFER
-from .farneback_flow import farneback_flow
+if AOT_MODE == "1":
+    from .aot_wrapper import *
+else:
+    from .common import (
+        split,
+        merge,
+        extract_channel,
+        insert_channel,
+        copy,
+    )
+
+    # --- Underlying Implementations ---
+    from .interpolation.bilinear_interpolation import (
+        bilinear_resize,
+        sample_at_bilinear,
+    )
+    from .interpolation.nearest_interpolation import nearest_resize
+    from .interpolation.bicubic_interpolation import (
+        bicubic_resize,
+        sample_at_bicubic,
+        sample_at,
+        cubic_hermite,
+    )
+    from .smoothing.box_filter import box_filter, box_filter_2d
+    from .smoothing.median_filter import median_filter
+    from .smoothing.gaussian import gaussian_blur as _gaussian_blur_impl
+    from .math_ops.gradients import sobel as _sobel_impl
+    from .math_ops.gradients import laplacian as _laplacian_impl
+    from .alignment.ransac import ransac_flow_cleanup
+    from .smoothing.bilateral_grid import bilateral_grid_filter
+    from .pyramid.pyramid import (
+        build_image_pyramid,
+        build_image_pyramid_gpu,
+        upsample_flow,
+    )
+    from .alignment.phase_correlation import phase_correlation
+    from .pyramid.fft import fft2, ifft2
+    from .alignment.ncc import zncc, match_template, global_translate_zncc
+    from .interpolation.remap import remap
+    from .demosaicing.Hamilton_demosaice import hamilton_demosaic
+    from .demosaicing.arm_demosaice import arm_demosaic
+    from .demosaicing.mlri_admm_demosaice import (
+        mlri_admm_demosaic,
+        mlri_admm_demosaic_1channel,
+        mlri_admm_demosaic_half_res,
+        mlri_admm_demosaic_rgb_half_res,
+        mlri_admm_demosaic_3channel,
+    )
+    from .alignment.mtb import align_mtb
+    from .image_processing.enhance_image import enhance_grayscale
+    from .image_processing.color_convert import (
+        cvtColor_extended,
+        COLOR_BGR2HSV,
+        COLOR_HSV2BGR,
+        COLOR_BGR2LAB,
+        COLOR_LAB2BGR,
+        COLOR_BGR2YCrCb,
+        COLOR_YCrCb2BGR,
+    )
+    from .image_processing.otsu import (
+        otsu_threshold,
+        THRESH_BINARY,
+        THRESH_BINARY_INV,
+        THRESH_OTSU,
+    )
+    from .smoothing.guided_filter import guided_filter
+    from .image_processing.clahe import clahe
+    from .image_processing.canny import canny
+    from .image_processing.hough import hough_lines, hough_lines_with_canny
+    from .denoising.nlm import non_local_means
+    from .denoising.bm3d import hfcd_denoise, build_dct_matrix
+    from .image_processing.inpaint import inpaint, INPAINT_TELEA, INPAINT_NS
+    from .image_processing.seamless_clone import (
+        seamless_clone,
+        NORMAL_CLONE,
+        MIXED_CLONE,
+        MONOCHROME_TRANSFER,
+    )
+    from .optical_flow.farneback_flow import farneback_flow
+    from .optical_flow.lucas_kanade import calcOpticalFlowPyrLK as lucas_kanade_flow
+    from .image_processing.morphology import dilate, erode
+    from .image_processing.filter2d import filter2d
+    from .image_processing.normalize import (
+        normalize,
+        NORM_INF,
+        NORM_L1,
+        NORM_L2,
+        NORM_MINMAX,
+    )
+    from .image_processing.copy_make_border import (
+        copy_make_border,
+        BORDER_CONSTANT,
+        BORDER_REFLECT_101,
+        BORDER_REPLICATE,
+    )
+    from .image_processing.threshold import (
+        threshold,
+        THRESH_BINARY,
+        THRESH_BINARY_INV,
+        THRESH_TRUNC,
+        THRESH_TOZERO,
+        THRESH_TOZERO_INV,
+        THRESH_OTSU,
+    )
+    from .math_ops.ssim import ssim
+    from .image_processing.histogram import histogram as gpu_histogram
+    from .denoising.compute_spatial import compute_spatial_weight, NoiseEstimator
+    from .image_processing.hdr_fusion import hdr_fuse, hdr_fuse_simple
+    from .image_processing.tone_mapping import (
+        reinhard_tone_map,
+        srgb_gamma,
+        local_tone_map,
+        contrast_adjust,
+        tone_map,
+    )
+    from .alignment.ransac import vsac_fundamental
+    from .sfm.five_point_solver import solve_five_point
+    from .sfm.cheirality_check import check_cheirality_minimal, check_cheirality_full
+    from .sfm.triangulation import triangulate_adaptive
+    from .sfm.feature_matching import bfmatcher_l2, bfmatcher_hamming
+    from .sfm.bundle_adjustment import bundle_adjust_lm
+    from .sfm.plane_sweep import plane_sweep_stereo, multi_view_plane_sweep
+    from .sfm.point_cloud import (
+        statistical_outlier_removal,
+        radius_outlier_removal,
+        voxel_downsample,
+        estimate_normals,
+        preprocess_point_cloud,
+    )
+    from .sfm.poisson_recon import poisson_reconstruct
+    from .common import (
+        svd_3x3_np,
+        enforce_essential_np,
+        hartley_normalize,
+        denormalize_fundamental,
+    )
 
 
 # --- Constants ---
@@ -292,6 +379,113 @@ def ransac(flow, threshold=3.0):
     return ransac_flow_cleanup(flow, threshold=threshold)
 
 
+OPTFLOW_USE_INITIAL_FLOW = 4
+OPTFLOW_FARNEBACK_GAUSSIAN = 256
+
+
+def calcOpticalFlowFarneback(
+    prev,
+    next,
+    flow=None,
+    pyr_scale=0.5,
+    levels=3,
+    winsize=15,
+    iterations=3,
+    poly_n=5,
+    poly_sigma=1.2,
+    flags=0,
+    preset="opencv",
+    return_diagnostics=False,
+):
+    """OpenCV-style dense Farneback optical flow backed by taichi_aot."""
+    from taichi_library import taichi_aot
+
+    return taichi_aot.calcOpticalFlowFarneback(
+        prev,
+        next,
+        flow,
+        pyr_scale,
+        levels,
+        winsize,
+        iterations,
+        poly_n,
+        poly_sigma,
+        flags,
+        preset=preset,
+        return_diagnostics=return_diagnostics,
+    )
+
+
+def calcOpticalFlowPyrLK(
+    prev,
+    next,
+    prevPts=None,
+    nextPts=None,
+    winSize=(13, 13),
+    maxLevel=2,
+    criteria=None,
+    flags=0,
+    minEigThreshold=1e-4,
+    grid_step=48,
+    border_margin=8,
+    overlap=0.35,
+    adaptive=False,
+    adaptive_threshold=1,
+    motion_mode="fast",
+    dense_mode="smooth",
+    max_flow_px=0.0,
+    return_gpu=False,
+    return_diagnostics=False,
+):
+    """OpenCV-style Lucas-Kanade entrypoint with internal grid dense flow."""
+    return aot_wrapper.calcOpticalFlowPyrLK(
+        prev,
+        next,
+        prevPts=prevPts,
+        nextPts=nextPts,
+        winSize=winSize,
+        maxLevel=maxLevel,
+        criteria=criteria,
+        flags=flags,
+        minEigThreshold=minEigThreshold,
+        grid_step=grid_step,
+        border_margin=border_margin,
+        overlap=overlap,
+        adaptive=adaptive,
+        adaptive_threshold=adaptive_threshold,
+        motion_mode=motion_mode,
+        dense_mode=dense_mode,
+        max_flow_px=max_flow_px,
+        return_gpu=return_gpu,
+        return_diagnostics=return_diagnostics,
+    )
+
+
+def calcOpticalFlowPyrLKGrid(
+    prev,
+    next,
+    winSize=(17, 17),
+    maxLevel=2,
+    criteria=None,
+    grid_step=16,
+    border_margin=8,
+    motion_mode="fast",
+    return_diagnostics=False,
+):
+    """Lucas-Kanade compact grid flow entrypoint for CPU-like densification."""
+    return aot_wrapper.calcOpticalFlowPyrLKGrid(
+        prev,
+        next,
+        winSize=winSize,
+        maxLevel=maxLevel,
+        criteria=criteria,
+        grid_step=grid_step,
+        border_margin=border_margin,
+        motion_mode=motion_mode,
+        return_diagnostics=return_diagnostics,
+    )
+
+
 # --- Core Utilities ---
 cvtColor = common.cvtColor
 absdiff = common.absdiff
@@ -303,6 +497,53 @@ def ncc(image, template):
     Plug-and-play template matching using Spatial backend.
     """
     return zncc(image, template)
+
+
+# --- AOT Math Ops ---
+# Keep these API names aligned with the experimental wrapper while preserving
+# the existing taichi_algorithm import surface in both AOT and JIT modes.
+ta = aot_wrapper.ta
+array = aot_wrapper.array
+gpu_abs = aot_wrapper.gpu_abs
+gpu_sqrt = aot_wrapper.gpu_sqrt
+gpu_log = aot_wrapper.gpu_log
+gpu_exp = aot_wrapper.gpu_exp
+gpu_square = aot_wrapper.gpu_square
+gpu_power = aot_wrapper.gpu_power
+gpu_clip = aot_wrapper.gpu_clip
+gpu_where = aot_wrapper.gpu_where
+gpu_sum = aot_wrapper.gpu_sum
+gpu_max = aot_wrapper.gpu_max
+gpu_min = aot_wrapper.gpu_min
+gpu_mean = aot_wrapper.gpu_mean
+gpu_std = aot_wrapper.gpu_std
+gpu_matmul = aot_wrapper.gpu_matmul
+gpu_mat3_inv = aot_wrapper.gpu_mat3_inv
+gpu_mat3_det = aot_wrapper.gpu_mat3_det
+gpu_sort = aot_wrapper.gpu_sort
+gpu_argsort = aot_wrapper.gpu_argsort
+gpu_unique = aot_wrapper.gpu_unique
+gpu_meshgrid = aot_wrapper.gpu_meshgrid
+abs = aot_wrapper.gpu_abs
+sqrt = aot_wrapper.gpu_sqrt
+log = aot_wrapper.gpu_log
+exp = aot_wrapper.gpu_exp
+square = aot_wrapper.gpu_square
+power = aot_wrapper.gpu_power
+clip = aot_wrapper.gpu_clip
+where = aot_wrapper.gpu_where
+sum = aot_wrapper.gpu_sum
+max = aot_wrapper.gpu_max
+min = aot_wrapper.gpu_min
+mean = aot_wrapper.gpu_mean
+std = aot_wrapper.gpu_std
+matmul = aot_wrapper.matmul
+mat3_inv = aot_wrapper.gpu_mat3_inv
+mat3_det = aot_wrapper.gpu_mat3_det
+sort = aot_wrapper.gpu_sort
+argsort = aot_wrapper.gpu_argsort
+unique = aot_wrapper.gpu_unique
+meshgrid = aot_wrapper.gpu_meshgrid
 
 
 __all__ = [
@@ -382,6 +623,113 @@ __all__ = [
     "enhance_grayscale",
     "hamilton_demosaic",
     "arm_demosaic",
+    "mlri_admm_demosaic",
+    "mlri_admm_demosaic_1channel",
+    "mlri_admm_demosaic_half_res",
+    "mlri_admm_demosaic_rgb_half_res",
+    "mlri_admm_demosaic_3channel",
     "align_mtb",
     "farneback_flow",
+    "calcOpticalFlowFarneback",
+    "calcOpticalFlowPyrLK",
+    "calcOpticalFlowPyrLKGrid",
+    "OPTFLOW_USE_INITIAL_FLOW",
+    "OPTFLOW_FARNEBACK_GAUSSIAN",
+    "dilate",
+    "erode",
+    # New native GPU modules
+    "filter2d",
+    "normalize",
+    "NORM_INF",
+    "NORM_L1",
+    "NORM_L2",
+    "NORM_MINMAX",
+    "copy_make_border",
+    "BORDER_CONSTANT",
+    "BORDER_REFLECT_101",
+    "BORDER_REPLICATE",
+    "threshold",
+    "THRESH_BINARY",
+    "THRESH_BINARY_INV",
+    "THRESH_TRUNC",
+    "THRESH_TOZERO",
+    "THRESH_TOZERO_INV",
+    "THRESH_OTSU",
+    "ssim",
+    "gpu_histogram",
+    "compute_spatial_weight",
+    "NoiseEstimator",
+    "hdr_fuse",
+    "hdr_fuse_simple",
+    "reinhard_tone_map",
+    "srgb_gamma",
+    "local_tone_map",
+    "contrast_adjust",
+    "tone_map",
+    # SfM Pipeline
+    "vsac_fundamental",
+    "solve_five_point",
+    "check_cheirality_minimal",
+    "check_cheirality_full",
+    "triangulate_adaptive",
+    "bfmatcher_l2",
+    "bfmatcher_hamming",
+    "bundle_adjust_lm",
+    "plane_sweep_stereo",
+    "multi_view_plane_sweep",
+    "statistical_outlier_removal",
+    "radius_outlier_removal",
+    "voxel_downsample",
+    "estimate_normals",
+    "preprocess_point_cloud",
+    "poisson_reconstruct",
+    "svd_3x3_np",
+    "enforce_essential_np",
+    "hartley_normalize",
+    "denormalize_fundamental",
+    "aot_wrapper",
+    "ta",
+    "array",
+    # Math Ops GPU
+    "gpu_abs",
+    "gpu_sqrt",
+    "gpu_log",
+    "gpu_exp",
+    "gpu_square",
+    "gpu_power",
+    "gpu_clip",
+    "gpu_where",
+    "gpu_sum",
+    "gpu_max",
+    "gpu_min",
+    "gpu_mean",
+    "gpu_std",
+    "gpu_matmul",
+    "gpu_mat3_inv",
+    "gpu_mat3_det",
+    "gpu_sort",
+    "gpu_argsort",
+    "gpu_unique",
+    "gpu_meshgrid",
+    # NumPy-like Math Ops aliases
+    "abs",
+    "sqrt",
+    "log",
+    "exp",
+    "square",
+    "power",
+    "clip",
+    "where",
+    "sum",
+    "max",
+    "min",
+    "mean",
+    "std",
+    "matmul",
+    "mat3_inv",
+    "mat3_det",
+    "sort",
+    "argsort",
+    "unique",
+    "meshgrid",
 ]

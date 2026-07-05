@@ -1469,7 +1469,7 @@ This document provides an exhaustive, directory-by-directory mapping of the enti
 
 * **Function**: `main(db_path, update_progress, stop_requested, single_process, batch_id)`
 
-* **Function**: `running_farneback_optical_flow(parent, single_process, batch_id, progress_callback, stop_callback)`
+* **Function**: `running_farneback_flow(parent, single_process, batch_id, progress_callback, stop_callback)`
     *----------------------------------------*
 
 --------------------

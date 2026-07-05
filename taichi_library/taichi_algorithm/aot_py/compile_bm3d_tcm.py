@@ -31,7 +31,7 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 # Import algorithm module (JIT mode)
-bm3d_mod = importlib.import_module("taichi_library.taichi_algorithm.bm3d")
+bm3d_mod = importlib.import_module("taichi_library.taichi_algorithm.denoising.bm3d")
 
 ASSETS_DIR = os.path.join(file_dir, "../aot_tcm")
 

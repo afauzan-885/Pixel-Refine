@@ -1,0 +1,25 @@
+TIER 0 (Foundation)
+  compile_common.py ──────────────────┐
+  compile_math_ops.py ────────────────┤
+  compile_interpolation.py ───────────┤
+  compile_gradients.py ───────────────┤
+  compile_color.py ───────────────────┘
+         │
+TIER 1 (Intermediate)                 │
+  compile_smoothing.py ────────────┐  │
+  compile_pyramid.py ──────────────┤  │
+         │                         │  │
+TIER 2 (Domain)                    │  │
+  compile_image_processing.py ◄────┼──┤ (re-implements gradients + smoothing)
+  compile_denoising.py ◄───────────┼──┤
+  compile_alignment.py ◄───────────┼──┤ (uses reductions, FFT concepts)
+  compile_geometric.py ◄───────────┼──┤ (re-implements interpolation)
+  compile_features.py ◄────────────┤  │
+  compile_hdr.py ◄─────────────────┼──┤ (re-implements pyramid)
+  compile_optical_flow.py ◄────────┼──┤ (re-implements smoothing + gradients + pyramid)
+  compile_demosaic.py ◄────────────┘  │ (self-contained)
+         │
+TIER 3 (Complex Pipelines)             │
+  compile_sfm.py ◄─────────────────────┘
+  compile_mlri_admm.py
+  compile_mlri_admm_tcm.py

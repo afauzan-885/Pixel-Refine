@@ -9,6 +9,8 @@ DEFAULTS = {
     "multi_core_cpu": True,
     "create_thumbnail": False,
     "device_backend": "CPU (Universal)",
+    "device_backend_arch": "cpu",
+    "device_backend_id": -1,
 }
 
 _general_store = None

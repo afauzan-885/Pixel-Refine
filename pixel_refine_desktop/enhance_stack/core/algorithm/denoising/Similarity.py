@@ -25,9 +25,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.base_worker import (
 )
 from resources.styles.stylesheet import PROGRESS_BAR
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
-    extract_all_metadata,
     normalize_image,
-    preprocess_in_python,
     save_image,
     setup_balanced_batching,
     calculate_auto_scale,

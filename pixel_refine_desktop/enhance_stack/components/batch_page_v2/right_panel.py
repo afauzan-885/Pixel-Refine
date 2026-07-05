@@ -500,7 +500,7 @@ class RightPanel(QWidget, SyncMixin):
     def _on_selection_changed(self, selected_values):
         """Buffer selection change to prevent UI lag during rapid clicking."""
         self._pending_selection = selected_values
-        self._selection_timer.start(150)  # 200ms breathing room
+        self._selection_timer.start(50)  # 50ms breathing room
 
     def set_collapsed_state(self, collapsed):
         """Update internal collapsed state and animate height."""

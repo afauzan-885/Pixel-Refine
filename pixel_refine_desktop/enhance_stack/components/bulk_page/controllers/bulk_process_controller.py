@@ -58,6 +58,8 @@ class MassAlgorithmEditDialog(QDialog):
             "alignment": [
                 language_config.UI_NO_CHANGE,
                 "Farneback Optical Flow",
+                "Lucas Kanade Optical Flow",
+                "Lucas Kanade GPU Optical Flow",
                 "AKAZE",
                 "ORB",
                 "Light Glue",

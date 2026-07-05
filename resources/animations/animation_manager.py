@@ -55,8 +55,8 @@ class StackedWidgetAnimator(QObject):
     DEFAULT_CURVE_OUT = QEasingCurve.Type.OutQuad
     DEFAULT_CURVE_IN = QEasingCurve.Type.InQuad
 
-    DEFAULT_CURVE_IN = QEasingCurve.Type.InQuad
-    MAX_CONCURRENT_ANIMATIONS = 50
+    RAPID_TRANSITION_WINDOW_SEC = 0.15
+    MAX_CONCURRENT_ANIMATIONS = 12
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -384,13 +384,17 @@ class StackedWidgetAnimator(QObject):
         last_time = self._last_transition_time.get(stack_widget, 0.0)
         self._last_transition_time[stack_widget] = now
 
-        # Throttling rapid changes (< 500ms) or overlapping animations: transition instantly to save CPU & avoid painter collisions
-        if self._is_animating(stack_widget) or (now - last_time) < 0.50:
+        # Throttling rapid changes or overlapping animations: transition
+        # instantly to save CPU and avoid painter collisions.
+        if self._is_animating(stack_widget) or (now - last_time) < self.RAPID_TRANSITION_WINDOW_SEC:
             if self._is_animating(stack_widget):
                 self._interrupt_transition(stack_widget)
             new_widget, new_index = self._validate_target(stack_widget, target)
             if new_widget:
                 old_widget = stack_widget.currentWidget()
+                if old_widget is new_widget:
+                    self._reset_widget_state(new_widget, visible=True)
+                    return
                 if on_mid_transition:
                     on_mid_transition()
                 stack_widget.setCurrentIndex(new_index)
@@ -406,6 +410,9 @@ class StackedWidgetAnimator(QObject):
         new_widget, new_index = self._validate_target(stack_widget, target)
 
         if not new_widget:
+            return
+        if old_widget is new_widget:
+            self._reset_widget_state(new_widget, visible=True)
             return
 
         # Skip animation if not visible (startup)

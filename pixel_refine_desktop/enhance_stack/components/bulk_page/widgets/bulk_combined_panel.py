@@ -1,3 +1,6 @@
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow_cpu import (
+    running_farneback_flow,
+)
 from resources.GenericUILibrary.skeleton import SkeletonLoader
 from resources.styles.stylesheet import CHECKBOX_SWITCH_STYLE
 from resources.styles.stylesheet import DROPDOWN_BOX
@@ -27,16 +30,15 @@ from PySide6.QtCore import (
 import weakref
 from PySide6.QtCore import Signal, Qt, QSize, QTimer
 from PySide6.QtGui import QIcon, QFont
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.AKAZE import (
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.AKAZE import (
     running_akaze,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.Farneback_optical_flow import (
-    running_farneback_optical_flow,
-)
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.Light_Glue import (
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.Light_Glue import (
     running_light_glue,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.ORB import running_orb
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.ORB import (
+    running_orb,
+)
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
     running_median,
 )
@@ -601,9 +603,7 @@ class CombinedPanel(QWidget):
         self.add_btn = QPushButton()
         self.add_btn.setObjectName("addButton")
         self.add_btn.setFixedSize(21, 21)
-        self.add_btn.setIcon(
-            QIcon("resources/assets/icons/add-image.png")
-        )
+        self.add_btn.setIcon(QIcon("resources/assets/icons/add-image.png"))
         self.add_btn.setIconSize(QSize(14, 14))
         self.add_btn.setToolTip(language_config.ADD_IMAGE_BUTTON)
         self.add_btn.clicked.connect(
@@ -620,9 +620,7 @@ class CombinedPanel(QWidget):
         self.preview_btn = QPushButton()
         self.preview_btn.setObjectName("processButton")
         self.preview_btn.setFixedSize(21, 21)
-        self.preview_btn.setIcon(
-            QIcon("resources/assets/icons/play-preview.png")
-        )
+        self.preview_btn.setIcon(QIcon("resources/assets/icons/play-preview.png"))
         self.preview_btn.setIconSize(QSize(14, 14))
         self.preview_btn.setToolTip(language_config.PREVIEW_IMAGE_BUTTON)
         self.preview_btn.clicked.connect(self.process_and_preview)
@@ -631,9 +629,7 @@ class CombinedPanel(QWidget):
         self.delete_btn = QPushButton()
         self.delete_btn.setObjectName("deleteButton")
         self.delete_btn.setFixedSize(21, 21)
-        self.delete_btn.setIcon(
-            QIcon("resources/assets/icons/delete-image.png")
-        )
+        self.delete_btn.setIcon(QIcon("resources/assets/icons/delete-image.png"))
         self.delete_btn.setIconSize(QSize(14, 14))
         self.delete_btn.setToolTip(language_config.DELETE_IMAGE_BUTTON)
         self.delete_btn.clicked.connect(
@@ -664,6 +660,7 @@ class CombinedPanel(QWidget):
 
     def dropdown_box_control(self):
         from resources.GenericUILibrary.theme import get_theme
+
         theme = get_theme()
         override_style = f"""
                         QComboBox {{
@@ -974,7 +971,7 @@ class CombinedPanel(QWidget):
         # --- Langkah 3: Definisikan Aksi Algoritma ---
         actions = {
             "alignment": {
-                "Farneback Optical Flow": lambda: running_farneback_optical_flow(
+                "Farneback Optical Flow": lambda: running_farneback_flow(
                     self,
                     single_process=False,
                     batch_id=self.batch_id,
@@ -1214,9 +1211,14 @@ class CombinedPanel(QWidget):
 
     def update_theme(self):
         """Update stylesheets dynamically when theme changes."""
-        from resources.styles.stylesheet import CHECKBOX_SWITCH_STYLE, DROPDOWN_BOX, SCROLL_AREA
+        from resources.styles.stylesheet import (
+            CHECKBOX_SWITCH_STYLE,
+            DROPDOWN_BOX,
+            SCROLL_AREA,
+        )
         from PySide6.QtWidgets import QCheckBox, QComboBox, QScrollArea, QPushButton
         from resources.GenericUILibrary.theme import get_theme, create_button_style
+
         theme = get_theme()
 
         # Update QCheckBox styles
@@ -1233,13 +1235,18 @@ class CombinedPanel(QWidget):
 
         # Update buttons
         for btn in self.findChildren(QPushButton):
-            if btn.objectName() in ["addButton", "deleteButton", "processButton", "importButton"]:
+            if btn.objectName() in [
+                "addButton",
+                "deleteButton",
+                "processButton",
+                "importButton",
+            ]:
                 # Map to variant name: addButton -> success, processButton -> primary, deleteButton -> danger, importButton -> info
                 variant_map = {
                     "addButton": "success",
                     "processButton": "primary",
                     "deleteButton": "danger",
-                    "importButton": "info"
+                    "importButton": "info",
                 }
                 variant = variant_map.get(btn.objectName(), "secondary")
                 btn.setStyleSheet(create_button_style(variant, theme))
@@ -1247,7 +1254,11 @@ class CombinedPanel(QWidget):
     def retranslate_ui(self):
         """Translate all UI texts inside this batch panel dynamically."""
         # Update batch info label text
-        if hasattr(self, "batch_info_label") and self.batch_info_label and self.sequential_batch_number is not None:
+        if (
+            hasattr(self, "batch_info_label")
+            and self.batch_info_label
+            and self.sequential_batch_number is not None
+        ):
             batch_label_text = language_config.BATCH_LABEL_FORMAT.format(
                 self.sequential_batch_number, self.image_count_in_batch
             )
@@ -1275,10 +1286,10 @@ class CombinedPanel(QWidget):
                 language_config.PARAMETER_BATCH_CROP_EDGE: "checkbox_crop_edges",
                 language_config.PARAMETER_BATCH_KEEP_EDGE: "checkbox_keep_edges",
             }
-            
+
             # Map old translation string -> new translation string based on JSON keys
             reverse_old_map = {val: key for key, val in self.label_to_key_map.items()}
-            
+
             new_checkboxes = {}
             for new_text, json_key in new_label_to_key_map.items():
                 # Find old text for this json_key
@@ -1296,8 +1307,8 @@ class CombinedPanel(QWidget):
                             widget = item.widget()
                             if isinstance(widget, ClickableLabel):
                                 widget.setText(new_text)
-            
+
             self.checkboxes = new_checkboxes
             self.label_to_key_map = new_label_to_key_map
-            
+
         self.update_theme()

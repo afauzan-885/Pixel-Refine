@@ -4,11 +4,11 @@ Main container for single and batch page views with controller integration.
 Subclass of WorkspaceView from workplace framework.
 """
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QTimer, Signal
+from PySide6.QtWidgets import QWidget
 from pixel_refine_desktop.workplace.workspace_view import WorkspaceView
 from .single_page_view import SinglePageView
 from .batch_page_view import BatchPageView
-from resources.animations.fade import fade_in
 
 
 class EnhanceStackView(WorkspaceView):
@@ -21,7 +21,11 @@ class EnhanceStackView(WorkspaceView):
 
     def __init__(self, db_path: str, parent=None):
         # WorkspaceView.__init__ akan memanggil _create_pages() dan _connect_page_signals()
+        self.batch_page_view = None
+        self._batch_placeholder = None
+        self._batch_signals_connected = False
         super().__init__(db_path, parent)
+        QTimer.singleShot(750, self.preload_batch_page)
 
     def _create_pages(self):
         """Buat halaman-halaman enhance_stack dan tambahkan ke stacked_widget."""
@@ -29,9 +33,10 @@ class EnhanceStackView(WorkspaceView):
         self.single_page_view = SinglePageView(self.db_path, self)
         self.stacked_widget.addWidget(self.single_page_view)
 
-        # Create batch page view (hybrid MVC)
-        self.batch_page_view = BatchPageView(self.db_path, self)
-        self.stacked_widget.addWidget(self.batch_page_view)
+        # Bulk/legacy batch page is heavier than the default page, so startup
+        # only reserves its stack slot and loads it after the window is usable.
+        self._batch_placeholder = QWidget(self)
+        self.stacked_widget.addWidget(self._batch_placeholder)
 
     def _set_initial_page(self):
         """Set halaman awal ke single page view."""
@@ -40,7 +45,6 @@ class EnhanceStackView(WorkspaceView):
     def _connect_page_signals(self):
         """Connect page signals and toast notifications."""
         # Connect Navigation
-        self.batch_page_view.page_changed.connect(self.page_changed)
         self.single_page_view.page_changed.connect(self.page_changed)
         # Connect Bulk Mode toggles between V2 (SinglePageView) and V1 (BatchPageView)
         if hasattr(self.single_page_view, "workspace_panel") and self.single_page_view.workspace_panel:
@@ -48,30 +52,68 @@ class EnhanceStackView(WorkspaceView):
             if hasattr(dp, "bulk_mode_btn"):
                 dp.bulk_mode_btn.clicked.connect(self._on_v2_bulk_clicked)
 
+        self._connect_batch_page_signals()
+
+    def preload_batch_page(self):
+        """Warm up the legacy bulk page after the main window becomes usable."""
+        self._ensure_batch_page()
+
+    def _ensure_batch_page(self):
+        """Create the legacy bulk page once and replace the reserved placeholder."""
+        if self.batch_page_view is not None:
+            return self.batch_page_view
+
+        self.batch_page_view = BatchPageView(self.db_path, self)
+        placeholder_index = self.stacked_widget.indexOf(self._batch_placeholder)
+        if placeholder_index >= 0:
+            self.stacked_widget.insertWidget(placeholder_index, self.batch_page_view)
+            self.stacked_widget.removeWidget(self._batch_placeholder)
+            self._batch_placeholder.deleteLater()
+            self._batch_placeholder = None
+        else:
+            self.stacked_widget.addWidget(self.batch_page_view)
+
+        self._connect_batch_page_signals()
+        return self.batch_page_view
+
+    def _connect_batch_page_signals(self):
+        if self._batch_signals_connected or self.batch_page_view is None:
+            return
+
+        self.batch_page_view.page_changed.connect(self.page_changed)
         self.batch_page_view.bulk_mode_toggled.connect(self._on_legacy_bulk_toggled)
+        if hasattr(self.batch_page_view, "batch_layout"):
+            if hasattr(self.batch_page_view.batch_layout, "show_toast_requested"):
+                self.batch_page_view.batch_layout.show_toast_requested.connect(
+                    self._handle_legacy_toast
+                )
+        self._batch_signals_connected = True
 
     def _on_v2_bulk_clicked(self):
         if hasattr(self.single_page_view, "workspace_panel") and self.single_page_view.workspace_panel:
             dp = self.single_page_view.workspace_panel.display_panel
             dp.is_bulk_mode = not dp.is_bulk_mode
-            dp.animate_mode_change(dp.is_bulk_mode)
+            dp.set_mode_button_state(dp.is_bulk_mode)
             self._on_v2_bulk_toggled(dp.is_bulk_mode)
 
     def _on_v2_bulk_toggled(self, checked):
         if checked:
-            # Switch to Legacy V1 Batch Page with fade transition
-            fade_in(self.animator, self.batch_page_view, self.stacked_widget, duration=300)
+            batch_page = self._ensure_batch_page()
+            # Direct switch avoids QPainter conflicts while the thumbnail/grid
+            # pages are still repainting.
+            self.animator.stop_all()
+            self.stacked_widget.setCurrentWidget(batch_page)
             # Synchronize batches: refresh V1
-            if hasattr(self.batch_page_view, "batch_layout"):
-                self.batch_page_view.batch_layout.data_changed.emit()
+            if hasattr(batch_page, "batch_layout"):
+                batch_page.batch_layout.data_changed.emit()
 
     def _on_legacy_bulk_toggled(self, checked):
         if not checked:
-            # Switch back to V2 Layout with fade transition
-            fade_in(self.animator, self.single_page_view, self.stacked_widget, duration=300)
+            self.animator.stop_all()
+            self.stacked_widget.setCurrentWidget(self.single_page_view)
             
             # Defer/stop V1 thumbnail generation and reset lazy load limit immediately (Task 4)
-            if hasattr(self.batch_page_view, "batch_layout"):
+            if self.batch_page_view is not None and hasattr(self.batch_page_view, "batch_layout"):
                 self.batch_page_view.batch_layout.stop_thumbnail()
                 self.batch_page_view.batch_layout.limit = 10
                 
@@ -82,7 +124,7 @@ class EnhanceStackView(WorkspaceView):
             if hasattr(self.single_page_view, "workspace_panel") and self.single_page_view.workspace_panel:
                 dp = self.single_page_view.workspace_panel.display_panel
                 dp.is_bulk_mode = False
-                dp.animate_mode_change(False)
+                dp.set_mode_button_state(False)
 
         # Single page buttons
         # self.top_bar.single_page_import_button.clicked.connect(
@@ -102,13 +144,6 @@ class EnhanceStackView(WorkspaceView):
         # self.top_bar.start_process_batch.clicked.connect(
         #     self.batch_page_view.process_all_batches
         # )
-
-        # Connect batch layout toast to main toast manager
-        if hasattr(self.batch_page_view, "batch_layout"):
-            if hasattr(self.batch_page_view.batch_layout, "show_toast_requested"):
-                self.batch_page_view.batch_layout.show_toast_requested.connect(
-                    self._handle_legacy_toast
-                )
 
     def _handle_legacy_toast(self, message, duration_or_category, is_progress):
         """Handle legacy toast notifications from BatchPageLayout V1."""

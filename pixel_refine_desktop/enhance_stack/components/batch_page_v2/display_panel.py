@@ -82,7 +82,9 @@ from pixel_refine_desktop.enhance_stack.core.logic.grid_manager import GridManag
 from pixel_refine_desktop.enhance_stack.core.logic.ui_state_manager import (
     UIStateManager,
 )
-from pixel_refine_desktop.enhance_stack.core.logic.database_manager import DatabaseManager
+from pixel_refine_desktop.enhance_stack.core.logic.database_manager import (
+    DatabaseManager,
+)
 from pixel_refine_desktop.enhance_stack.core.logic.drag_drop_handler import (
     DragDropHandler,
 )
@@ -115,66 +117,231 @@ from .multiple_batch_delete_widget import MultipleBatchDeleteWidget
 from resources.GenericUILibrary import live_update
 import numpy as np
 
+
 class BurstCacheWorker(QThread):
+    """
+    Background worker yang men-decode seluruh gambar dalam burst sequence
+    secara paralel dan mengirimnya ke playback_cache satu per satu.
+
+    Strategi decoding:
+    - JPEG / PNG / TIFF : ThreadPoolExecutor (full CPU paralel, bebas lock)
+    - RAW / DNG         : serial + GPU pipeline — GPU (taichi_lock) hanya menahan
+                          satu frame sekaligus, tapi I/O rawpy read frame
+                          berikutnya bisa overlap di thread lain (dibatasi maks 2
+                          via RawDemosaicThrottle agar tidak menghantam VRAM).
+
+    Semua hasil yang sudah siap di-emit satu per satu via image_cached signal
+    sehingga UI (playback_cache) langsung terisi secara streaming tanpa harus
+    menunggu seluruh batch selesai.
+    """
+
     image_cached = Signal(str, QImage)  # (path, q_image)
-    
+
+    # Jumlah thread CPU paralel untuk format non-RAW
+    _CPU_WORKERS = max(2, min(6, (os.cpu_count() or 4)))
+
     def __init__(self, paths, parent=None):
         super().__init__(parent)
         self.paths = paths
         self._is_cancelled = False
-        
+        self._lock = __import__("threading").Lock()
+
+    # ------------------------------------------------------------------
+    # Internal helpers (called from worker threads, must be thread-safe)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _decode_non_raw(path: str):
+        """Decode JPEG/PNG/TIFF → RGB uint8 numpy array (CPU only, fully parallel)."""
+        from PIL import Image, ImageOps
+        import cv2 as _cv2
+
+        ext = os.path.splitext(path)[1].lower()
+        with Image.open(path) as img:
+            img = ImageOps.exif_transpose(img)
+            if img.mode not in ("RGB",):
+                img = img.convert("RGB")
+            arr = np.array(img)
+        h, w = arr.shape[:2]
+        # half-res for consistency with RAW preview quality
+        arr = _cv2.resize(arr, (w // 2, h // 2), interpolation=_cv2.INTER_AREA)
+        return arr  # RGB uint8
+
+    @staticmethod
+    def _decode_raw(path: str):
+        """Decode RAW/DNG → RGB uint8 numpy array using Taichi GPU (serial, locked)."""
+        from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
+            load_raw_as_8bit_rgb_half_res,
+        )
+
+        return load_raw_as_8bit_rgb_half_res(path)  # RGB uint8
+
+    @staticmethod
+    def _arr_to_qimage(rgb_arr: np.ndarray) -> QImage:
+        """Convert RGB uint8 numpy array → QImage (safe copy)."""
+        h, w = rgb_arr.shape[:2]
+        bpl = 3 * w
+        return QImage(
+            rgb_arr.data.tobytes(), w, h, bpl, QImage.Format.Format_RGB888
+        ).copy()
+
+    # ------------------------------------------------------------------
+    # QThread entry point
+    # ------------------------------------------------------------------
+
     def run(self):
-        for path in self.paths:
-            if self._is_cancelled:
-                break
+        if not self.paths:
+            return
+
+        from config import SUPPORTED_FORMATS
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import rawpy
+
+        raw_exts = set(SUPPORTED_FORMATS.get("raw", []))
+        cpu_exts = (
+            set(SUPPORTED_FORMATS.get("jpg", []))
+            | set(SUPPORTED_FORMATS.get("png", []))
+            | set(SUPPORTED_FORMATS.get("tiff", []))
+        )
+
+        raw_paths = [
+            p for p in self.paths if os.path.splitext(p)[1].lower() in raw_exts
+        ]
+        cpu_paths = [
+            p for p in self.paths if os.path.splitext(p)[1].lower() in cpu_exts
+        ]
+
+        # ── Phase 1: CPU-parallel decode for JPEG/PNG/TIFF & Parallel Disk I/O for RAW ──
+        # Kita menggunakan ThreadPoolExecutor untuk membaca disk secara bersamaan di awal.
+        # Untuk RAW, kita hanya membaca (rawpy.imread) tanpa demosaic di thread pool.
+        loaded_raws = {}
+
+        def _load_raw_io(path):
             try:
-                # Load array using half_res helper logic
-                ext = os.path.splitext(path)[1].lower()
-                image_array = None
-                
-                # Check format
-                if ext in SUPPORTED_FORMATS.get("jpg", []) + SUPPORTED_FORMATS.get("png", []) + SUPPORTED_FORMATS.get("tiff", []):
-                    # Load with PIL
-                    from PIL import Image, ImageOps
-                    import cv2
-                    with Image.open(path) as img:
-                        img = ImageOps.exif_transpose(img)
-                        if img.mode in ("RGBA", "LA", "P"):
-                            img = img.convert("RGB")
-                        elif img.mode == "L":
-                            img = img.convert("RGB")
-                        image_array = np.array(img)
-                        # Resize to half resolution
-                        h, w = image_array.shape[:2]
-                        image_array = cv2.resize(image_array, (w // 2, h // 2), interpolation=cv2.INTER_AREA)
-                        # Convert to BGR for uniform channel format
-                        image_array = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
-                        
-                elif ext in SUPPORTED_FORMATS.get("raw", []):
-                    from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import load_raw_as_8bit_rgb_half_res
-                    import cv2
-                    img_rgb = load_raw_as_8bit_rgb_half_res(path)
-                    image_array = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-                
-                if image_array is not None:
-                    # Convert to QImage
-                    height, width = image_array.shape[:2]
-                    # Ensure we convert BGR to RGB for QImage
-                    image_array = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
-                    bytes_per_line = 3 * width
-                    # Use QImage copy to duplicate bytes safely
-                    q_image = QImage(
-                        image_array.data.tobytes(),
-                        width,
-                        height,
-                        bytes_per_line,
-                        QImage.Format.Format_RGB888
-                    ).copy()
-                    
-                    self.image_cached.emit(path, q_image)
+                # Membaca file RAW ke memori RAM (Disk I/O 100% paralel di awal)
+                return path, rawpy.imread(path)
             except Exception as e:
-                print(f"Error pre-caching {path}: {e}")
-                
+                print(f"[BurstCacheWorker] RAW I/O read error {path}: {e}")
+                return path, None
+
+        with ThreadPoolExecutor(max_workers=self._CPU_WORKERS) as pool:
+            # Submit job loading non-raw dan RAW read
+            cpu_futures = {pool.submit(self._decode_non_raw, p): p for p in cpu_paths}
+            raw_futures = {pool.submit(_load_raw_io, p): p for p in raw_paths}
+
+            # Ambil hasil non-raw (JPEG/PNG) secara asinkron
+            for fut in as_completed(cpu_futures):
+                if self._is_cancelled:
+                    break
+                path = cpu_futures[fut]
+                try:
+                    arr = fut.result()
+                    if arr is not None:
+                        self.image_cached.emit(path, self._arr_to_qimage(arr))
+                except Exception as e:
+                    print(f"[BurstCacheWorker] CPU decode error {path}: {e}")
+
+            # Ambil hasil RAW read (rawpy objek di RAM)
+            for fut in as_completed(raw_futures):
+                if self._is_cancelled:
+                    break
+                path, raw_obj = fut.result()
+                if raw_obj is not None:
+                    loaded_raws[path] = raw_obj
+
+        # ── Phase 2: High-speed GPU Feed from RAM with Parallel 2-Workers ────
+        # Sekarang objek rawpy sudah menumpuk di RAM. Kita umpan ke GPU Taichi
+        # secara paralel (maksimal 2 paralel agar tidak overload VRAM).
+        # Kita memanfaatkan dynamic reuse buffer: GC/clear VRAM pool hanya dipicu
+        # jika terdeteksi perbedaan ukuran gambar (size mismatch) pada gambar berikutnya.
+        from taichi_library import taichi_aot
+        from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
+            taichi_lock,
+        )
+        import gc
+
+        # Thread-safe tracker untuk melacak resolusi gambar terakhir yang sukses diproses
+        last_image_shape = None
+        shape_lock = __import__("threading").Lock()
+
+        def _process_single_raw(path, raw_obj):
+            nonlocal last_image_shape
+            try:
+                # Dapatkan metadata ukuran gambar secara cepat tanpa demosaic penuh
+                h, w = raw_obj.sizes.raw_height, raw_obj.sizes.raw_width
+                current_shape = (h, w)
+
+                # Cek apakah ada perubahan ukuran (size mismatch) dibanding gambar sebelumnya
+                trigger_cleanup = False
+                with shape_lock:
+                    if (
+                        last_image_shape is not None
+                        and last_image_shape != current_shape
+                    ):
+                        trigger_cleanup = True
+                    last_image_shape = current_shape
+
+                engine = getattr(taichi_aot, "engine", None)
+
+                # Jika ukuran berubah, bersihkan buffer lama di VRAM terlebih dahulu
+                if (
+                    trigger_cleanup
+                    and engine
+                    and hasattr(engine, "buffer_pool")
+                    and engine.buffer_pool
+                ):
+                    try:
+                        engine.buffer_pool.clear()
+                    except Exception:
+                        pass
+                    gc.collect()
+
+                with raw_obj:
+                    with taichi_lock:
+                        rgb_f32 = taichi_aot.demosaic(
+                            raw_obj, method="hamilton-rgb-half-res"
+                        )
+
+                    if rgb_f32 is not None:
+                        arr = np.clip(rgb_f32 * 255.0, 0, 255).astype(np.uint8)
+                        q_img = self._arr_to_qimage(arr)
+                        self.image_cached.emit(path, q_img)
+                    else:
+                        print(
+                            f"[BurstCacheWorker] Taichi demosaic returned None for {path}"
+                        )
+            except Exception as e:
+                print(f"[BurstCacheWorker] GPU demosaic error {path}: {e}")
+
+        if raw_paths:
+            # Gunakan ThreadPoolExecutor kedua khusus untuk GPU dengan 2 workers
+            with ThreadPoolExecutor(max_workers=2) as gpu_pool:
+                gpu_futures = []
+                for path in raw_paths:
+                    if self._is_cancelled:
+                        break
+                    raw_obj = loaded_raws.get(path)
+                    if raw_obj is not None:
+                        gpu_futures.append(
+                            gpu_pool.submit(_process_single_raw, path, raw_obj)
+                        )
+
+                # Tunggu semua GPU task selesai
+                for fut in as_completed(gpu_futures):
+                    if self._is_cancelled:
+                        break
+                    fut.result()
+
+            # ── Final VRAM Cleanup di Akhir Batch ──
+            # Setelah seluruh batch RAW selesai, lepaskan semua cached buffer kembali ke sistem
+            try:
+                engine = getattr(taichi_aot, "engine", None)
+                if engine and hasattr(engine, "buffer_pool") and engine.buffer_pool:
+                    engine.buffer_pool.clear()
+            except Exception:
+                pass
+            gc.collect()
+
     def cancel(self):
         self._is_cancelled = True
 
@@ -191,6 +358,7 @@ class BackgroundBatchPreloader(QThread):
     Throttle RAW: memanfaatkan RawDemosaicThrottle (maks 2 paralel) secara otomatis
     melalui process_thumbnail_logic.
     """
+
     thumbnail_preloaded = Signal(str, str)  # (batch_id, image_path)
 
     def __init__(self, batch_id, image_paths, parent=None):
@@ -250,7 +418,6 @@ class BackgroundBatchPreloader(QThread):
             except Exception as e:
                 if not self._is_cancelled:
                     print(f"[BackgroundBatchPreloader] Error pre-loading {path}: {e}")
-
 
 
 @live_update
@@ -322,7 +489,6 @@ class DisplayPanel(QWidget):
         self.placeholder_widget = None
         # Track active background preloaders (satu per batch_id)
         self._bg_preloaders: dict = {}  # batch_id (str) -> BackgroundBatchPreloader
-        
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._setup_ui()
@@ -384,7 +550,9 @@ class DisplayPanel(QWidget):
         self.left_header_layout = QHBoxLayout()
         self.left_header_layout.setContentsMargins(0, 0, 0, 0)
         self.left_header_layout.setSpacing(10)
-        self.left_header_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.left_header_layout.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
 
         # 0. Sidebar Toggle Button (New)
         self.toggle_btn = Button("☰", object_name="SidebarToggleBtn")
@@ -396,21 +564,23 @@ class DisplayPanel(QWidget):
         self.header_title = QLabel("")
         self.header_title.setObjectName("DisplayHeaderTitle")
         self.left_header_layout.addWidget(self.header_title)
-        
+
         # Center Column Layout (Bulk Mode Dynamic Button centered)
         self.center_header_layout = QHBoxLayout()
         self.center_header_layout.setContentsMargins(0, 0, 0, 0)
         self.center_header_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
+
         # Bulk Mode Dynamic Button
         from PySide6.QtWidgets import QPushButton
+
         self.is_bulk_mode = False
-        
+
         self.bulk_mode_btn = QPushButton(language_config.LBL_BATCH_MODE, self)
         self.bulk_mode_btn.setObjectName("BulkModeBtn")
-        
+
         # Initial Slate/Gray style (Batch mode)
-        self.bulk_mode_btn.setStyleSheet("""
+        self.bulk_mode_btn.setStyleSheet(
+            """
             QPushButton#BulkModeBtn {
                 background-color: #F1F3F4;
                 color: #5F6368;
@@ -426,18 +596,21 @@ class DisplayPanel(QWidget):
             QPushButton#BulkModeBtn:pressed {
                 background-color: #D2D4D7;
             }
-        """)
-        
+        """
+        )
+
         # Add opacity effect for text fading transition
         opacity_effect = QGraphicsOpacityEffect(self.bulk_mode_btn)
         self.bulk_mode_btn.setGraphicsEffect(opacity_effect)
         self.center_header_layout.addWidget(self.bulk_mode_btn)
-        
+
         # Right Column Layout (Tools and Actions aligned to the right)
         self.right_header_layout = QHBoxLayout()
         self.right_header_layout.setContentsMargins(0, 0, 0, 0)
         self.right_header_layout.setSpacing(10)
-        self.right_header_layout.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.right_header_layout.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
 
         # Tools/Actions Area
 
@@ -494,21 +667,30 @@ class DisplayPanel(QWidget):
         self.preview_process_btn.setVisible(False)
         self.right_header_layout.addWidget(self.preview_process_btn)
 
-
         # 3.5. Import Images Button
-        self.import_button = Button(language_config.TOPBAR_BATCH_IMPORT_BUTTON_TEXT, object_name="ImportImageBtn")
+        self.import_button = Button(
+            language_config.TOPBAR_BATCH_IMPORT_BUTTON_TEXT,
+            object_name="ImportImageBtn",
+        )
         self.import_button.setFixedWidth(120)
         self.import_button.clicked.connect(self.import_manager.import_images)
         self.import_button.setVisible(False)
         self.right_header_layout.addWidget(self.import_button)
 
         # 4. New Batch button (shown ONLY when no batches exist / right panel is hidden)
-        self.new_batch_header_btn = Button(language_config.BTN_NEW_BATCH, variant="primary")
+        self.new_batch_header_btn = Button(
+            language_config.BTN_NEW_BATCH, variant="primary"
+        )
         self.new_batch_header_btn.setFixedWidth(110)
         self.new_batch_header_btn.setFixedHeight(25)
-        self.new_batch_header_btn.setStyleSheet(self.new_batch_header_btn.styleSheet() + " QPushButton { padding: 4px 8px; font-size: 8pt; }")
+        self.new_batch_header_btn.setStyleSheet(
+            self.new_batch_header_btn.styleSheet()
+            + " QPushButton { padding: 4px 8px; font-size: 8pt; }"
+        )
         self.new_batch_header_btn.clicked.connect(self._create_new_batch)
-        self.new_batch_header_btn.setVisible(False)  # Hidden by default; shown from page_layout
+        self.new_batch_header_btn.setVisible(
+            False
+        )  # Hidden by default; shown from page_layout
         self.right_header_layout.addWidget(self.new_batch_header_btn)
 
         # Assemble the header columns with equal stretch factors (1, 1, 1) to force center centering
@@ -595,27 +777,31 @@ class DisplayPanel(QWidget):
         # Playback controls container (Floating over preview_wrapper)
         self.controls_bar = QWidget()
         self.controls_bar.setObjectName("ControlsBar")
-        self.controls_bar.setStyleSheet("""
+        self.controls_bar.setStyleSheet(
+            """
             #ControlsBar {
                 background-color: transparent;
                 border: none;
             }
-        """)
-        
+        """
+        )
+
         self.controls_bar_layout = QHBoxLayout(self.controls_bar)
         self.controls_bar_layout.setContentsMargins(8, 4, 8, 4)
         self.controls_bar_layout.setSpacing(8)
         self.controls_bar_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         # SizePolicy: Shrink to fit content dynamically
         from PySide6.QtWidgets import QSizePolicy as _SP
+
         self.controls_bar.setSizePolicy(_SP.Policy.Minimum, _SP.Policy.Minimum)
 
         # Initialize playback buttons (using emojis as requested, wrapping tightly with size 36x36)
         from PySide6.QtWidgets import QPushButton
-        
+
         self.prev_frame_btn = QPushButton("⏮")
         # No fixed size — button auto-sizes to emoji font via CSS padding
-        self.prev_frame_btn.setStyleSheet("""
+        self.prev_frame_btn.setStyleSheet(
+            """
             QPushButton {
                 background: transparent;
                 border: none;
@@ -626,13 +812,15 @@ class DisplayPanel(QWidget):
                 background-color: rgba(0, 0, 0, 15);
                 border-radius: 6px;
             }
-        """)
+        """
+        )
         self.prev_frame_btn.setFixedSize(36, 36)
         self.prev_frame_btn.clicked.connect(self._show_prev_frame)
 
         self.play_btn = QPushButton("▶")
         # No fixed size — button auto-sizes to emoji font
-        self.play_btn.setStyleSheet("""
+        self.play_btn.setStyleSheet(
+            """
             QPushButton {
                 background: transparent;
                 border: none;
@@ -643,13 +831,15 @@ class DisplayPanel(QWidget):
                 background-color: rgba(0, 0, 0, 15);
                 border-radius: 6px;
             }
-        """)
+        """
+        )
         self.play_btn.setFixedSize(36, 36)
         self.play_btn.clicked.connect(self._toggle_playback)
 
         self.next_frame_btn = QPushButton("⏭")
         # No fixed size — button auto-sizes to emoji font
-        self.next_frame_btn.setStyleSheet("""
+        self.next_frame_btn.setStyleSheet(
+            """
             QPushButton {
                 background: transparent;
                 border: none;
@@ -660,7 +850,8 @@ class DisplayPanel(QWidget):
                 background-color: rgba(0, 0, 0, 15);
                 border-radius: 6px;
             }
-        """)
+        """
+        )
         self.next_frame_btn.setFixedSize(36, 36)
         self.next_frame_btn.clicked.connect(self._show_next_frame)
 
@@ -675,13 +866,14 @@ class DisplayPanel(QWidget):
         playback_layout.addWidget(self.next_frame_btn)
 
         self.controls_bar_layout.addWidget(self.playback_container)
-        
+
         self.save_btn_ref = Button("Save", variant="secondary")
         self.save_btn_ref.setFixedSize(80, 32)
         self.save_btn_ref.clicked.connect(self._on_save_clicked)
-        
+
         self.start_btn_ref = Button("▶ Start", variant="primary")
         from resources.GenericUILibrary.theme import get_theme, create_button_style
+
         theme = get_theme()
         self.start_btn_ref.setStyleSheet(
             create_button_style(self.start_btn_ref.variant, theme)
@@ -695,7 +887,7 @@ class DisplayPanel(QWidget):
         self.start_btn_ref.setFixedSize(110, 32)
         self.start_btn_ref.setVisible(False)
         self.is_start_button_mode = False
-        
+
         self.controls_bar_layout.addWidget(self.start_btn_ref)
         self.controls_bar_layout.addWidget(self.save_btn_ref)
 
@@ -808,6 +1000,7 @@ class DisplayPanel(QWidget):
     def _setup_param_overlay(self):
         """Setup independent overlay for Switchable Parameter Panel."""
         from .switchable_parameter_panel import SwitchableParameterPanel
+
         self.param_overlay = OverlayContainer(
             parent=self.display_container,
             position=OverlayPosition.BOTTOM_RIGHT,
@@ -821,7 +1014,8 @@ class DisplayPanel(QWidget):
             shadow_offset=QPoint(0, 4),
             shadow_color=QColor(0, 0, 0, 80),
         )
-        self.param_overlay.setStyleSheet("""
+        self.param_overlay.setStyleSheet(
+            """
             #OverlayContainer {
                 background: transparent;
                 background-color: transparent;
@@ -832,8 +1026,11 @@ class DisplayPanel(QWidget):
                 background-color: transparent;
                 border: none;
             }
-        """)
-        self.param_panel = SwitchableParameterPanel(parent=self, store=self.right_panel._store if self.right_panel else None)
+        """
+        )
+        self.param_panel = SwitchableParameterPanel(
+            parent=self, store=self.right_panel._store if self.right_panel else None
+        )
         self.param_overlay.set_content(self.param_panel)
         self.param_overlay.hide()
 
@@ -845,7 +1042,7 @@ class DisplayPanel(QWidget):
             if self.right_panel:
                 current_settings = self.right_panel.get_current_settings()
                 self.param_panel.update_settings_state(current_settings)
-            
+
             self.param_overlay.show()
             self.param_overlay.raise_()
 
@@ -1030,22 +1227,13 @@ class DisplayPanel(QWidget):
 
         # Aktifkan watchdog recovery untuk retry thumbnail yang tertinggal
         self.grid_manager.start_recovery_timer()
-        
-        # Start preloading burst sequence images in background
-        if hasattr(self, "cache_worker") and self.cache_worker is not None:
-            try:
-                self.cache_worker.cancel()
-                self.cache_worker.wait()
-            except Exception:
-                pass
-        
+
         self.playback_cache.clear()
-        
-        paths = [img.path for img in images if hasattr(img, "path") and img.path]
-        if paths:
-            self.cache_worker = BurstCacheWorker(paths, self)
-            self.cache_worker.image_cached.connect(self._on_image_pre_cached)
-            self.cache_worker.start()
+
+        # NOTE: BurstCacheWorker is no longer started eagerly on every batch load.
+        # Preview demosaic (load_raw_as_8bit_rgb_half_res) is triggered lazily
+        # only when the user actually opens preview mode (double-click).
+        # See _trigger_preview_preload() for the on-demand loader.
 
         self.update_save_button_state()
 
@@ -1074,7 +1262,9 @@ class DisplayPanel(QWidget):
             self.param_overlay.hide()
 
         # Show "No batch selected" state with folder link callback
-        self.ui_state_manager.show_no_batch_state(self._create_new_batch, self._import_images_to_new_batch)
+        self.ui_state_manager.show_no_batch_state(
+            self._create_new_batch, self._import_images_to_new_batch
+        )
 
         if self.preview_scene:
             self.preview_scene.clear()
@@ -1117,7 +1307,7 @@ class DisplayPanel(QWidget):
                 controller=self.controller,
                 database_manager=db_mgr,
                 file_paths=paths,
-                batch_id=batch_id
+                batch_id=batch_id,
             )
 
     def _reset_population_state(self):
@@ -1354,6 +1544,10 @@ class DisplayPanel(QWidget):
         if not self.logic.prepare_preview(image_path):
             return
 
+        # Lazy preload: trigger demosaic only NOW that user is entering preview mode.
+        # Preloads clicked image + 2 neighbors for smooth prev/next navigation.
+        self._trigger_preview_preload(image_path)
+
         # Explicitly HIDE result selector for single image preview (as requested)
         self.result_selector.setVisible(False)
 
@@ -1435,7 +1629,7 @@ class DisplayPanel(QWidget):
             self.import_button.setVisible(True)
         else:
             self.import_button.setVisible(False)
-            
+
         self.update_controls_visibility_and_states()
 
     def show_preview(self, show_dropdown=True):
@@ -1498,11 +1692,17 @@ class DisplayPanel(QWidget):
                     shutil.copy2(self.current_preview_path, save_path)
 
                     QMessageBox.information(
-                        self, language_config.MSG_SUCCESS_TITLE, f"{language_config.MSG_SUCCESS_SAVE}\n{save_path}"
+                        self,
+                        language_config.MSG_SUCCESS_TITLE,
+                        f"{language_config.MSG_SUCCESS_SAVE}\n{save_path}",
                     )
                 except Exception as e:
 
-                    QMessageBox.critical(self, language_config.MSG_ERROR_TITLE, f"{language_config.MSG_FAILED_SAVE_IMAGE} {e}")
+                    QMessageBox.critical(
+                        self,
+                        language_config.MSG_ERROR_TITLE,
+                        f"{language_config.MSG_FAILED_SAVE_IMAGE} {e}",
+                    )
 
     def _setup_delete_confirmation_widget(self):
         """Create and configure the delete confirmation widget."""
@@ -1553,6 +1753,7 @@ class DisplayPanel(QWidget):
 
     def _get_bulk_mode_btn_stylesheet(self, is_bulk, font_size):
         from resources.GenericUILibrary.theme import get_theme
+
         theme = get_theme()
         if is_bulk:
             return f"""
@@ -1596,13 +1797,15 @@ class DisplayPanel(QWidget):
         super().resizeEvent(event)
         if hasattr(self, "drop_overlay"):
             self.drop_overlay.resize(self.size())
-            
+
         if hasattr(self, "bulk_mode_btn") and self.bulk_mode_btn:
             w = self.width()
             f = max(0.0, min(1.0, (w - 600) / 800.0))
             font_size = 10.5 + f * 4.5
-            self.bulk_mode_btn.setStyleSheet(self._get_bulk_mode_btn_stylesheet(self.is_bulk_mode, font_size))
-            
+            self.bulk_mode_btn.setStyleSheet(
+                self._get_bulk_mode_btn_stylesheet(self.is_bulk_mode, font_size)
+            )
+
         if hasattr(self, "param_panel"):
             self.param_panel.refresh_responsive_layout()
 
@@ -1615,7 +1818,9 @@ class DisplayPanel(QWidget):
         if should_accept:
             event.acceptProposedAction()
             # Show overlay and update text
-            self.drop_overlay.setText(f"{language_config.LBL_DRAG_DROP_HERE} ({file_count})")
+            self.drop_overlay.setText(
+                f"{language_config.LBL_DRAG_DROP_HERE} ({file_count})"
+            )
             self.drop_overlay.show()
             self.drop_overlay.raise_()
         else:
@@ -1644,17 +1849,21 @@ class DisplayPanel(QWidget):
         """Update all text dynamically when language changes."""
         # 1. Update Bulk Mode Button
         if hasattr(self, "bulk_mode_btn"):
-            target_text = language_config.LBL_BATCH_MODE if self.is_bulk_mode else language_config.LBL_BULK_MODE
+            target_text = (
+                language_config.LBL_BATCH_MODE
+                if self.is_bulk_mode
+                else language_config.LBL_BULK_MODE
+            )
             self.bulk_mode_btn.setText(target_text)
-            
+
         # 2. Update Header Title
         if hasattr(self, "ui_state_manager"):
             self.ui_state_manager.update_header_title(
                 batch_id=self.current_batch_id,
                 batch_name=self.current_batch_name,
-                count=self.total_image_count
+                count=self.total_image_count,
             )
-            
+
         # 3. Update Action Buttons
         if hasattr(self, "import_button"):
             self.import_button.setText(language_config.TOPBAR_BATCH_IMPORT_BUTTON_TEXT)
@@ -1662,7 +1871,7 @@ class DisplayPanel(QWidget):
             self.back_btn.setText(language_config.BTN_BACK_TO_GRID)
         if hasattr(self, "new_batch_header_btn"):
             self.new_batch_header_btn.setText(language_config.BTN_NEW_BATCH)
-            
+
         # 4. If placeholder is currently active, recreate it to update its HTML text
         if hasattr(self, "placeholder_widget") and self.placeholder_widget is not None:
             if not self.current_batch_id:
@@ -1675,26 +1884,28 @@ class DisplayPanel(QWidget):
     def animate_mode_change(self, is_bulk):
         """Animasi perubahan teks tombol mode secara elegan dengan efek fade."""
         # 1. Tentukan teks target
-        target_text = language_config.LBL_BATCH_MODE if is_bulk else language_config.LBL_BULK_MODE
-        
+        target_text = (
+            language_config.LBL_BATCH_MODE if is_bulk else language_config.LBL_BULK_MODE
+        )
+
         # Calculate dynamic font size based on current width
         w = self.width()
         f = max(0.0, min(1.0, (w - 600) / 800.0))
         font_size = 10.5 + f * 4.5
         style_sheet = self._get_bulk_mode_btn_stylesheet(is_bulk, font_size)
-            
+
         # 3. Setup opacity effect jika belum ada
         effect = self.bulk_mode_btn.graphicsEffect()
         if not effect or not isinstance(effect, QGraphicsOpacityEffect):
             effect = QGraphicsOpacityEffect(self.bulk_mode_btn)
             self.bulk_mode_btn.setGraphicsEffect(effect)
-            
+
         # 4. Jalankan animasi fade-out
         self._mode_fade_anim = QPropertyAnimation(effect, b"opacity", self)
         self._mode_fade_anim.setDuration(120)
         self._mode_fade_anim.setStartValue(1.0)
         self._mode_fade_anim.setEndValue(0.0)
-        
+
         def swap_content():
             self.bulk_mode_btn.setText(target_text)
             self.bulk_mode_btn.setStyleSheet(style_sheet)
@@ -1704,9 +1915,31 @@ class DisplayPanel(QWidget):
             self._mode_fade_in.setStartValue(0.0)
             self._mode_fade_in.setEndValue(1.0)
             self._mode_fade_in.start()
-            
+
         self._mode_fade_anim.finished.connect(swap_content)
         self._mode_fade_anim.start()
+
+    def set_mode_button_state(self, is_bulk):
+        """Synchronize the bulk/batch mode button state without changing pages."""
+        self.is_bulk_mode = bool(is_bulk)
+        if not hasattr(self, "bulk_mode_btn") or self.bulk_mode_btn is None:
+            return
+
+        target_text = (
+            language_config.LBL_BATCH_MODE
+            if self.is_bulk_mode
+            else language_config.LBL_BULK_MODE
+        )
+        w = self.width()
+        f = max(0.0, min(1.0, (w - 600) / 800.0))
+        font_size = 10.5 + f * 4.5
+        self.bulk_mode_btn.setText(target_text)
+        self.bulk_mode_btn.setStyleSheet(
+            self._get_bulk_mode_btn_stylesheet(self.is_bulk_mode, font_size)
+        )
+        effect = self.bulk_mode_btn.graphicsEffect()
+        if isinstance(effect, QGraphicsOpacityEffect):
+            effect.setOpacity(1.0)
 
     def _on_image_pre_cached(self, path, q_image):
         """Callback when an image is successfully pre-loaded and decoded in the background."""
@@ -1738,7 +1971,9 @@ class DisplayPanel(QWidget):
             try:
                 if hasattr(self, "controller") and self.controller:
                     images = self.controller.get_images(batch_id)
-                    paths = [img.path for img in images if hasattr(img, "path") and img.path]
+                    paths = [
+                        img.path for img in images if hasattr(img, "path") and img.path
+                    ]
             except Exception:
                 pass
 
@@ -1753,7 +1988,9 @@ class DisplayPanel(QWidget):
             )
             self._bg_preloaders[batch_id_str] = preloader
             preloader.start()
-            print(f"[BackgroundPreloader] Started for batch {batch_id_str} ({len(paths)} images)")
+            print(
+                f"[BackgroundPreloader] Started for batch {batch_id_str} ({len(paths)} images)"
+            )
         except Exception as e:
             print(f"[BackgroundPreloader] Error starting for batch {batch_id}: {e}")
 
@@ -1770,7 +2007,10 @@ class DisplayPanel(QWidget):
             try:
                 if hasattr(card, "_image_path") and card._image_path == image_path:
                     if not card.has_thumbnail():
-                        from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_processor import get_global_cache
+                        from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_processor import (
+                            get_global_cache,
+                        )
+
                         q_img = get_global_cache().get(image_path)
                         if q_img and not q_img.isNull():
                             card.set_thumbnail(QPixmap.fromImage(q_img))
@@ -1798,11 +2038,17 @@ class DisplayPanel(QWidget):
 
     def _get_current_image_index(self):
         """Get the index of the currently shown preview image in the batch list."""
-        if not self.logic.current_images or not hasattr(self, "current_preview_path") or not self.current_preview_path:
+        if (
+            not self.logic.current_images
+            or not hasattr(self, "current_preview_path")
+            or not self.current_preview_path
+        ):
             return 0
-        
+
         for i, img in enumerate(self.logic.current_images):
-            if os.path.normpath(img.path) == os.path.normpath(self.current_preview_path):
+            if os.path.normpath(img.path) == os.path.normpath(
+                self.current_preview_path
+            ):
                 return i
         return 0
 
@@ -1824,42 +2070,129 @@ class DisplayPanel(QWidget):
         prev_path = self.logic.current_images[prev_idx].path
         self._display_fast_preview(prev_path)
 
+    def _trigger_preview_preload(self, center_path):
+        """
+        Lazy on-demand preloader: segera setelah user membuka preview mode,
+        decode SELURUH gambar dalam batch menggunakan BurstCacheWorker.
+
+        Urutan decode diprioritaskan:
+          1. Gambar yang diklik (center) → paling pertama agar langsung tampil
+          2. Gambar-gambar lain dalam urutan melingkar dari center ke luar
+             (center±1, center±2, dst) agar navigasi prev/next terasa instan.
+          3. Gambar yang sudah ada di playback_cache di-skip.
+
+        BurstCacheWorker menangani:
+          - JPEG/PNG/TIFF : ThreadPoolExecutor (full CPU paralel)
+          - RAW           : GPU-pipeline serial (taichi_lock)
+        """
+        if not self.logic.current_images:
+            return
+
+        all_paths = [
+            img.path
+            for img in self.logic.current_images
+            if hasattr(img, "path") and img.path
+        ]
+        if not all_paths:
+            return
+
+        n = len(all_paths)
+        norm_center = os.path.normpath(center_path)
+        try:
+            center_idx = next(
+                i for i, p in enumerate(all_paths) if os.path.normpath(p) == norm_center
+            )
+        except StopIteration:
+            center_idx = 0
+
+        # Build priority order: center first, then ring-buffer outward
+        # e.g. [0, +1, -1, +2, -2, +3, -3, ...]
+        ordered_indices = [center_idx]
+        for offset in range(1, n):
+            ordered_indices.append((center_idx + offset) % n)
+            ordered_indices.append((center_idx - offset) % n)
+
+        # Deduplicate while preserving order, skip already cached
+        seen = set()
+        paths_to_load = []
+        for i in ordered_indices:
+            p = all_paths[i]
+            if p not in seen and p not in self.playback_cache:
+                seen.add(p)
+                paths_to_load.append(p)
+
+        if not paths_to_load:
+            return  # Entire batch already cached
+
+        # Check if we are already preloading the current batch to avoid interrupting the worker
+        if (
+            hasattr(self, "cache_worker")
+            and self.cache_worker is not None
+            and self.cache_worker.isRunning()
+        ):
+            if getattr(self, "_preloading_batch_id", None) == self.current_batch_id:
+                return
+
+        # Cancel previous worker to avoid overlap
+        if hasattr(self, "cache_worker") and self.cache_worker is not None:
+            try:
+                self.cache_worker.cancel()
+                self.cache_worker.wait()
+            except Exception:
+                pass
+            self.cache_worker = None
+
+        self._preloading_batch_id = self.current_batch_id
+        self.cache_worker = BurstCacheWorker(paths_to_load, self)
+        self.cache_worker.image_cached.connect(self._on_image_pre_cached)
+        self.cache_worker.start()
+
     def _display_fast_preview(self, image_path):
         """High-efficiency loader specifically for burst previews using preloaded cache or Hamilton Adams half-res demosaicing."""
         if not self.logic.prepare_preview(image_path):
             return
-            
+
         self.current_preview_path = image_path
-        
+
+        # Lazy preload neighbors so next/prev navigation is snappy
+        self._trigger_preview_preload(image_path)
+
         # Stop previous loader thread
-        if self.logic.image_loader_thread and self.logic.image_loader_thread.isRunning():
+        if (
+            self.logic.image_loader_thread
+            and self.logic.image_loader_thread.isRunning()
+        ):
             self.logic.image_loader_thread.quit()
             self.logic.image_loader_thread.wait()
-            
+
         # Check if we have preloaded cache for zero-flicker instant rendering
         if image_path in self.playback_cache:
             pixmap = self.playback_cache[image_path]
             self.preview_scene.clear()
-            
+
             # Create and add pixmap item
             pixmap_item = QGraphicsPixmapItem(pixmap)
             pixmap_item.setShapeMode(QGraphicsPixmapItem.ShapeMode.BoundingRectShape)
             self.preview_scene.addItem(pixmap_item)
-            
+
             # Set scene rect
             self.preview_scene.setSceneRect(pixmap_item.boundingRect())
-            
+
             # Fit in view
             self.zoomable_preview.fitInView(
-                self.preview_scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio
+                self.preview_scene.itemsBoundingRect(),
+                Qt.AspectRatioMode.KeepAspectRatio,
             )
         else:
             # Fallback loader
-            from pixel_refine_desktop.enhance_stack.core.logic.image_display_helper import display_image_in_zoomable
+            from pixel_refine_desktop.enhance_stack.core.logic.image_display_helper import (
+                display_image_in_zoomable,
+            )
+
             self.logic.image_loader_thread = display_image_in_zoomable(
                 self.zoomable_preview, image_path, half_res=True
             )
-            
+
         self.show_preview(show_dropdown=False)
         # Burst/frame preview selalu masuk Preview Mode
         self._enter_preview_mode()
@@ -1875,25 +2208,29 @@ class DisplayPanel(QWidget):
         if not hasattr(self, "start_btn_ref"):
             return
 
-        is_grid = (self.display_stack.currentIndex() == 0)
+        is_grid = self.display_stack.currentIndex() == 0
 
         # Dynamic styling for controls_bar based on whether we are in preview or grid/thumbnail mode
         if hasattr(self, "controls_bar"):
             if is_grid:
-                self.controls_bar.setStyleSheet("""
+                self.controls_bar.setStyleSheet(
+                    """
                     #ControlsBar {
                         background-color: transparent;
                         border: none;
                     }
-                """)
+                """
+                )
             else:
-                self.controls_bar.setStyleSheet("""
+                self.controls_bar.setStyleSheet(
+                    """
                     #ControlsBar {
                         background-color: rgba(255, 255, 255, 220);
                         border: 1px solid rgba(0, 0, 0, 40);
                         border-radius: 8px;
                     }
-                """)
+                """
+                )
 
         # 1. Start button visibility and enabled state
         if self.is_start_button_mode and self.current_batch_id is not None:
@@ -1918,7 +2255,8 @@ class DisplayPanel(QWidget):
 
         if has_results:
             self.save_btn_ref.setEnabled(True)
-            self.save_btn_ref.setStyleSheet("""
+            self.save_btn_ref.setStyleSheet(
+                """
                 QPushButton {
                     background-color: #555555;
                     color: #FFFFFF;
@@ -1933,14 +2271,16 @@ class DisplayPanel(QWidget):
                 QPushButton:pressed {
                     background-color: #444444;
                 }
-            """)
+            """
+            )
             self.save_btn_ref.setVisible(not is_grid)
             if not is_grid and self.display_stack.currentIndex() == 1:
                 # If we are in preview view and has_results, ensure we trigger result mode internally
                 pass
         else:
             self.save_btn_ref.setEnabled(False)
-            self.save_btn_ref.setStyleSheet("""
+            self.save_btn_ref.setStyleSheet(
+                """
                 QPushButton {
                     background-color: #D3D3D3;
                     color: #888888;
@@ -1948,12 +2288,15 @@ class DisplayPanel(QWidget):
                     border-radius: 4px;
                     padding: 5px;
                 }
-            """)
+            """
+            )
             self.save_btn_ref.setVisible(False)
 
         # 4. Overall overlay visibility
         if hasattr(self, "controls_overlay"):
-            if (self.is_start_button_mode and self.current_batch_id is not None) or not is_grid:
+            if (
+                self.is_start_button_mode and self.current_batch_id is not None
+            ) or not is_grid:
                 self.controls_overlay.show()
                 self.controls_bar.adjustSize()
                 self.controls_overlay.adjustSize()

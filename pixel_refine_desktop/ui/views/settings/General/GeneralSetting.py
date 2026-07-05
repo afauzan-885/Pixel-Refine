@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import QWidget, QMessageBox, QComboBox
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QObject, QThread, Signal
 
 from resources.GenericUILibrary import (
     Container,
@@ -14,6 +14,61 @@ from resources.GenericUILibrary import (
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from .general_store import get_general_store
 from .helpers import restart_application, sync_algorithm_settings
+
+
+class HardwareBackendTestWorker(QObject):
+    finished = Signal(dict)
+
+    def __init__(self, options, python_bin):
+        super().__init__()
+        self.options = options
+        self.python_bin = python_bin
+
+    def run(self):
+        import subprocess
+
+        test_results = {}
+        for option in self.options:
+            text = option.get("text", "")
+            backend = option.get("backend", "cpu")
+            device_id = option.get("device_id", -1)
+            success = False
+
+            if backend == "cpu":
+                success = True
+            elif backend == "opengl":
+                success = False
+            else:
+                test_script = f"""
+import sys
+try:
+    from taichi_library.taichi_aot.engine import AOTEngine
+    import numpy as np
+    test_inst = AOTEngine(arch='{backend}', device_id={device_id})
+    buf = test_inst.allocate((1,), dtype=np.int32)
+    buf.destroy()
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+"""
+                try:
+                    res = subprocess.run(
+                        [self.python_bin, "-c", test_script],
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                    )
+                    success = res.returncode == 0
+                    if not success:
+                        print(
+                            f"[Test Subprocess Backend] {text} failed with stdout: {res.stdout}, stderr: {res.stderr}"
+                        )
+                except Exception as e:
+                    print(f"[Test Backend] {text} worker exception: {e}")
+
+            test_results[text] = "support" if success else "disable"
+
+        self.finished.emit(test_results)
 
 
 class GeneralSettingsPage(Container, SyncMixin):
@@ -64,40 +119,18 @@ class GeneralSettingsPage(Container, SyncMixin):
         self.theme_group.bind_store(self.store, "theme")
         form.add_row(self.theme_group)
 
-        # Dynamic Hardware Scan for Dropdown
-        hardware_backends = ["CPU (Universal)"]
-        try:
-            from taichi_library.taichi_aot.engine import AOTEngine
-            engine = AOTEngine()
-            scanned = engine.backend.scan_devices()
-            if scanned:
-                devices = [d.strip() for d in scanned.split(";")]
-                for dev in devices:
-                    if not dev:
-                        continue
-                    # Parse device backend capabilities
-                    if "nvidia" in dev.lower() or "geforce" in dev.lower():
-                        # Dedicate GPU: Vulkan & D3D12/OpenGL/CUDA
-                        hardware_backends.append(f"{dev} (CUDA)")
-                        hardware_backends.append(f"{dev} (Vulkan)")
-                        hardware_backends.append(f"{dev} (OpenGL)")
-                    elif "intel" in dev.lower():
-                        # Integrated GPU: Vulkan & D3D12/OpenGL
-                        hardware_backends.append(f"{dev} (Vulkan)")
-                        hardware_backends.append(f"{dev} (OpenGL)")
-                    else:
-                        hardware_backends.append(f"{dev} (Vulkan)")
-        except Exception as e:
-            print(f"[Hardware Scan] Failed to scan hardware: {e}")
+        hardware_backends = self._scan_hardware_backend_options()
 
         # Device Selection Dropdown
         device_label = getattr(language_config, "DEVICE_ACCELERATION_LABEL", "Accelerated Hardware Backend:")
         self.device_group = FormGroup(label=device_label, input_type="select", auto_sync=False)
         if isinstance(self.device_group.input, QComboBox):
-            self.device_group.input.addItems(hardware_backends)
+            for option in hardware_backends:
+                self.device_group.input.addItem(option["text"], option)
             self.device_group.input.currentTextChanged.connect(self.update_device_dropdown_style)
         self.device_group.bind_store(self.store, "device_backend")
         form.add_row(self.device_group)
+        self._apply_selected_backend_to_process()
 
         # Uji Backend Hardware Button
         self.test_btn = Button("Uji Backend Hardware", variant="secondary")
@@ -200,6 +233,91 @@ class GeneralSettingsPage(Container, SyncMixin):
             self.test_btn.setStyleSheet(create_button_style("secondary"))
         self.update_device_dropdown_style()
 
+    def _preferred_backend_for_device(self, device_name):
+        # The app's AOT assets and default AOTEngine() path are Vulkan-oriented.
+        # Keep scan/test/runtime on the same backend unless another backend is
+        # explicitly wired through the pipeline.
+        return "vulkan"
+
+    def _scan_hardware_backend_options(self):
+        options = [{"text": "CPU (Universal)", "backend": "cpu", "device_id": -1}]
+        try:
+            import importlib
+
+            aot_engine = importlib.import_module("taichi_library.taichi_aot.engine")
+            aot_engine._init_aot_bridge()
+            with aot_engine._suppress_native_stderr():
+                scanned = aot_engine._LIB.scan_vulkan_devices().decode("utf-8")
+            if scanned:
+                devices = [d.strip() for d in scanned.split(";")]
+                seen = set()
+                for idx, dev in enumerate(devices):
+                    if not dev:
+                        continue
+                    label = dev
+                    suffix = 2
+                    while label.lower() in seen:
+                        label = f"{dev} #{suffix}"
+                        suffix += 1
+                    seen.add(label.lower())
+                    options.append(
+                        {
+                            "text": label,
+                            "backend": self._preferred_backend_for_device(dev),
+                            "device_id": idx,
+                            "raw_name": dev,
+                        }
+                    )
+        except Exception as e:
+            print(f"[Hardware Scan] Failed to scan hardware: {e}")
+
+        return options
+
+    def _get_selected_backend_option(self):
+        if not hasattr(self, "device_group") or not isinstance(self.device_group.input, QComboBox):
+            return None
+        idx = self.device_group.input.currentIndex()
+        data = self.device_group.input.itemData(idx)
+        if isinstance(data, dict):
+            return data
+        text = self.device_group.input.currentText()
+        return {"text": text, "backend": "cpu" if text == "CPU (Universal)" else "vulkan", "device_id": idx - 1}
+
+    def _apply_selected_backend_to_process(self):
+        option = self._get_selected_backend_option()
+        if not option:
+            return
+
+        import os
+
+        backend = option.get("backend", "cpu")
+        device_id = int(option.get("device_id", -1))
+        self.store.set("device_backend", option.get("text", "CPU (Universal)"))
+        self.store.set("device_backend_arch", backend)
+        self.store.set("device_backend_id", device_id)
+
+        os.environ["PIXEL_REFINE_AOT_ARCH"] = backend
+        os.environ["PIXEL_REFINE_AOT_DEVICE"] = str(device_id)
+
+    def _get_backend_test_options(self):
+        if not hasattr(self, "device_group") or not isinstance(self.device_group.input, QComboBox):
+            return []
+        options = []
+        for i in range(self.device_group.input.count()):
+            data = self.device_group.input.itemData(i)
+            if isinstance(data, dict):
+                options.append(data)
+            else:
+                text = self.device_group.input.itemText(i)
+                options.append(
+                    {
+                        "text": text,
+                        "backend": "cpu" if text == "CPU (Universal)" else "vulkan",
+                        "device_id": i - 1,
+                    }
+                )
+        return options
+
     def _on_apply_clicked(self):
         """
         Final apply logic:
@@ -222,8 +340,7 @@ class GeneralSettingsPage(Container, SyncMixin):
 
             # Apply Device Selection on Apply Settings Click
             if isinstance(self.device_group.input, QComboBox):
-                new_device = self.device_group.input.currentText()
-                self.store.set("device_backend", new_device)
+                self._apply_selected_backend_to_process()
 
             # Explicitly force save general store to disk
             if hasattr(self.store, "save_to_file"):
@@ -342,84 +459,35 @@ class GeneralSettingsPage(Container, SyncMixin):
         """Test all available backend options using isolated subprocesses to prevent driver state corruption."""
         if not hasattr(self, "device_group") or not isinstance(self.device_group.input, QComboBox):
             return
-            
+
         self.test_btn.setEnabled(False)
         self.test_btn.setText("Testing..." if getattr(language_config, "LANGUAGE", "english").lower() != "indonesian" else "Menguji...")
-        
-        from PySide6.QtWidgets import QApplication
-        QApplication.processEvents()
-        
-        test_results = {}
-        count = self.device_group.input.count()
-        options = [self.device_group.input.itemText(i) for i in range(count)]
-        
-        import subprocess
+
         import sys
         import os
         from config import PYTHON_INTERPRETER
-        
+
         python_bin = PYTHON_INTERPRETER if os.path.exists(PYTHON_INTERPRETER) else sys.executable
-        
-        for option in options:
-            success = False
-            if option == "CPU (Universal)":
-                success = True
-            elif "(opengl)" in option.lower():
-                success = False
-            else:
-                try:
-                    from taichi_library.taichi_aot.engine import AOTEngine
-                    engine = AOTEngine()
-                    scanned = engine.backend.scan_devices()
-                    devices = [d.strip() for d in scanned.split(";")]
-                    
-                    device_idx = -1
-                    for idx, dev in enumerate(devices):
-                        if dev and dev.lower() in option.lower():
-                            device_idx = idx
-                            break
-                    
-                    if device_idx != -1:
-                        arch = "vulkan"
-                        if "(cuda)" in option.lower():
-                            arch = "cuda"
-                        
-                        # Run testing logic in an isolated python subprocess
-                        test_script = f"""
-import sys
-try:
-    from taichi_library.taichi_aot.engine import AOTEngine
-    import numpy as np
-    test_inst = AOTEngine(arch='{arch}', device_id={device_idx})
-    buf = test_inst.allocate((1,), dtype=np.int32)
-    buf.destroy()
-    sys.exit(0)
-except Exception as e:
-    sys.exit(1)
-"""
-                        # Execute python process
-                        res = subprocess.run(
-                            [python_bin, "-c", test_script],
-                            capture_output=True,
-                            text=True,
-                            timeout=15
-                        )
-                        if res.returncode == 0:
-                            success = True
-                        else:
-                            print(f"[Test Subprocess Backend] {option} failed with stdout: {res.stdout}, stderr: {res.stderr}")
-                except Exception as e:
-                    print(f"[Test Backend] {option} main thread exception: {e}")
-                    success = False
-            
-            test_results[option] = "support" if success else "disable"
-            
+        options = self._get_backend_test_options()
+
+        self._backend_test_thread = QThread(self)
+        self._backend_test_worker = HardwareBackendTestWorker(options, python_bin)
+        self._backend_test_worker.moveToThread(self._backend_test_thread)
+        self._backend_test_thread.started.connect(self._backend_test_worker.run)
+        self._backend_test_worker.finished.connect(self._on_backend_test_finished)
+        self._backend_test_worker.finished.connect(self._backend_test_thread.quit)
+        self._backend_test_worker.finished.connect(self._backend_test_worker.deleteLater)
+        self._backend_test_thread.finished.connect(self._cleanup_backend_test_worker)
+        self._backend_test_thread.finished.connect(self._backend_test_thread.deleteLater)
+        self._backend_test_thread.start()
+
+    def _on_backend_test_finished(self, test_results):
         self.store.set("backend_test_results", test_results)
         if hasattr(self.store, "save_to_file"):
             self.store.save_to_file()
-            
+
         self.update_device_dropdown_style()
-        
+
         # Restore button text
         lang_str = getattr(language_config, "LANGUAGE", "english").lower()
         if lang_str == "indonesian":
@@ -433,7 +501,7 @@ except Exception as e:
             
         self.test_btn.setEnabled(True)
         self.test_btn.setText(test_text)
-        
+
         # Toast result
         from resources.GenericUILibrary import Toast
         toast_msg = "Pengujian backend selesai! Hasil disimpan." if lang_str == "indonesian" else "Backend testing finished! Results saved."
@@ -443,6 +511,10 @@ except Exception as e:
             parent=self.window()
         )
         toast.show_toast(duration=3000)
+
+    def _cleanup_backend_test_worker(self):
+        self._backend_test_worker = None
+        self._backend_test_thread = None
 
 
 def general_page():

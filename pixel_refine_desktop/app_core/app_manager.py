@@ -81,7 +81,6 @@ class ApplicationManager:
             StackedWidgetAnimator instance
         """
         self.animator = StackedWidgetAnimator(self.main_window)
-        self.animator = StackedWidgetAnimator(self.main_window)
         return self.animator
 
     def load_algorithms(self) -> dict:

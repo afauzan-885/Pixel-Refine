@@ -514,11 +514,7 @@ def process_in_gpu(
     processed_frames_spatial = [0]
 
     def _run_gpu_merging_loop():
-        from taichi_library.taichi_aot.engine import (
-            AOTEngine,
-        )
-
-        engine = AOTEngine()
+        engine = taichi_aot.engine
 
         _sum_gpu = taichi_aot.upload(final_image_sum_full_res)
         _weight_sum_full_gpu = taichi_aot.upload(weight_map_sum_full_res)
@@ -685,8 +681,9 @@ def process_in_gpu(
                         buf.destroy()
                     except:
                         pass
-            taichi_aot.unload_all_modules()
-            engine.buffer_pool.clear()
+            if os.environ.get("PIXEL_REFINE_AOT_CLEAR_AFTER_OP", "0") == "1":
+                taichi_aot.unload_all_modules()
+                engine.buffer_pool.clear()
 
     try:
         is_aot = os.environ.get("AOT_MODE", "1") == "1"

@@ -12,6 +12,8 @@ if project_root not in sys.path:
 # Impor kernel homography solver dari ransac
 from taichi_library.taichi_algorithm.ransac import (
     ransac_homography_kernel,
+    find_best_candidate_kernel,
+    refine_homography_iterative_kernel,
     generate_inlier_mask_kernel,
     refine_homography_kernel,
 )
@@ -35,6 +37,15 @@ def compile_ransac_tcm(arch=ti.vulkan, save_path="ransac_vulkan.tcm"):
     g_ransac.dispatch(ransac_homography_kernel, rpts1_arg, rpts2_arg, rnpts_arg, rnhyp_arg, rrthresh_arg, rHcand_arg, ricnt_arg, rseed_arg)
     module.add_graph("ransac_homography", g_ransac.compile())
 
+    # 1.5 Find Best Candidate Graph
+    g_best = ti.graph.GraphBuilder()
+    bcand_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "H_candidates", ti.f32, ndim=2)
+    bcnt_arg  = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "inlier_counts", ti.i32, ndim=1)
+    bnhyp_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR,  "n_hypotheses",  ti.i32)
+    bbest_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "H_best_out",    ti.f32, ndim=1)
+    g_best.dispatch(find_best_candidate_kernel, bcand_arg, bcnt_arg, bnhyp_arg, bbest_arg)
+    module.add_graph("find_best_candidate", g_best.compile())
+
     # 2. Generate Inlier Mask Graph
     g_mask = ti.graph.GraphBuilder()
     mpts1_arg   = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pts1",           ti.f32, ndim=2)
@@ -57,6 +68,29 @@ def compile_ransac_tcm(arch=ti.vulkan, save_path="ransac_vulkan.tcm"):
     rfATb_arg  = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ATb_out",ti.f32, ndim=1)
     g_refine.dispatch(refine_homography_kernel, rfpts1_arg, rfpts2_arg, rfmask_arg, rfnpts_arg, rfthresh_arg, rfATA_arg, rfATb_arg)
     module.add_graph("refine_homography", g_refine.compile())
+
+    # 4. Full GPU Pipeline Graph
+    g_pipeline = ti.graph.GraphBuilder()
+    apts1 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pts1", ti.f32, ndim=2)
+    apts2 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pts2", ti.f32, ndim=2)
+    anpts = ti.graph.Arg(ti.graph.ArgKind.SCALAR,  "n_pts", ti.i32)
+    anhyp = ti.graph.Arg(ti.graph.ArgKind.SCALAR,  "n_hypotheses", ti.i32)
+    arthresh = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "reproj_threshold", ti.f32)
+    aseed = ti.graph.Arg(ti.graph.ArgKind.SCALAR,  "seed_offset", ti.i32)
+    ahcand = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "H_candidates", ti.f32, ndim=2)
+    aicnt = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "inlier_counts", ti.i32, ndim=1)
+    ahbest = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "H_best", ti.f32, ndim=1)
+    amask = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mask", ti.i32, ndim=1)
+    
+    amax_ref_iters = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "max_ref_iters", ti.i32)
+    aearly_stop = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "early_stop_thresh", ti.f32)
+    ahrefined = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "H_refined", ti.f32, ndim=1)
+
+    g_pipeline.dispatch(ransac_homography_kernel, apts1, apts2, anpts, anhyp, arthresh, ahcand, aicnt, aseed)
+    g_pipeline.dispatch(find_best_candidate_kernel, ahcand, aicnt, anhyp, ahbest)
+    g_pipeline.dispatch(refine_homography_iterative_kernel, apts1, apts2, ahbest, anpts, arthresh, amax_ref_iters, aearly_stop, ahrefined)
+    g_pipeline.dispatch(generate_inlier_mask_kernel, apts1, apts2, ahrefined, anpts, arthresh, amask)
+    module.add_graph("ransac_homography_pipeline", g_pipeline.compile())
 
     module.archive(save_path)
     print(f"Successfully compiled RANSAC/MAGSAC++ AOT and archived to: {save_path}")

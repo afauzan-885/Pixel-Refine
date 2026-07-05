@@ -49,12 +49,11 @@ if TAICHI_AVAILABLE:
     # --- Interpolation Utilities ---
     @ti.func
     def reflect_idx(idx: int, size: int) -> int:
-        """OpenCV BORDER_REFLECT_101 implementation."""
-        res = idx
-        if res < 0:
-            res = -res
-        if res >= size:
-            res = 2 * (size - 1) - res
+        """OpenCV BORDER_REFLECT_101 implementation (branchless)."""
+        val = ti.abs(idx)
+        diff = val - (size - 1)
+        clamp_diff = ti.max(0, diff)
+        res = val - 2 * clamp_diff
         return tm.clamp(res, 0, size - 1)
 
     @ti.func
@@ -64,43 +63,37 @@ if TAICHI_AVAILABLE:
 
     @ti.func
     def cubic_hermite_weights(t: float) -> ti.types.vector(4, ti.f32):
-        """OpenCV-compatible Bicubic Weights (Catmull-Rom with a=-0.75 for f32)."""
-        # t is assumed to be in [0, 1)
+        """OpenCV-compatible Bicubic Weights using Horner's method (a=-0.75)."""
         w = ti.Vector([0.0, 0.0, 0.0, 0.0])
         a = -0.75
-        
-        # d = distance to neighbor
-        # Neighbors are at index: -1, 0, 1, 2
-        # Distances: t+1, t, 1-t, 2-t
-        
         d = t
+
         # d0 = t+1 (range [1, 2])
         x = d + 1.0
-        w[0] = a * x**3 - 5.0 * a * x**2 + 8.0 * a * x - 4.0 * a
+        w[0] = x * (x * (a * x - 5.0 * a) + 8.0 * a) - 4.0 * a
+
         # d1 = t (range [0, 1])
         x = d
-        w[1] = (a + 2.0) * x**3 - (a + 3.0) * x**2 + 1.0
+        w[1] = x * (x * ((a + 2.0) * x - (a + 3.0))) + 1.0
+
         # d2 = 1-t (range [0, 1])
         x = 1.0 - d
-        w[2] = (a + 2.0) * x**3 - (a + 3.0) * x**2 + 1.0
+        w[2] = x * (x * ((a + 2.0) * x - (a + 3.0))) + 1.0
+
         # d3 = 2-t (range [1, 2])
         x = 2.0 - d
-        w[3] = a * x**3 - 5.0 * a * x**2 + 8.0 * a * x - 4.0 * a
-        
-        # Explicit normalization to reach 1e-7+ precision
-        # Even though mathematically they sum to 1, float precision can introduce tiny drifts.
+        w[3] = x * (x * (a * x - 5.0 * a) + 8.0 * a) - 4.0 * a
+
         s = w[0] + w[1] + w[2] + w[3]
         return w / s
 
     @ti.func
     def reflect_idx_raw(idx: int, size: int) -> int:
-        """OpenCV BORDER_REFLECT implementation (fedcba|abcdefgh|hgfedcb)."""
-        res = idx
-        if res < 0:
-            res = -res - 1
-        if res >= size:
-            res = 2 * size - 1 - res
-        return tm.clamp(res, 0, size - 1)
+        """OpenCV BORDER_REFLECT implementation (branchless)."""
+        val = idx
+        val = ti.select(val < 0, -val - 1, val)
+        val = ti.select(val >= size, 2 * size - 1 - val, val)
+        return tm.clamp(val, 0, size - 1)
 
     @ti.func
     def bilinear_at(img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1) -> float:
@@ -304,6 +297,33 @@ if TAICHI_AVAILABLE:
             dst[i, j][2] = val
 
     @ti.kernel
+    def _rgb_to_gray_f32_scaled_i32_kernel(
+        src: ti.types.ndarray(), dst: ti.types.ndarray(), inv_scale: float
+    ):
+        for i, j in dst:
+            r = ti.cast(src[i, j][0], ti.f32)
+            g = ti.cast(src[i, j][1], ti.f32)
+            b = ti.cast(src[i, j][2], ti.f32)
+            dst[i, j] = (0.299 * r + 0.587 * g + 0.114 * b) * inv_scale
+
+    @ti.kernel
+    def _bgr_to_gray_f32_scaled_i32_kernel(
+        src: ti.types.ndarray(), dst: ti.types.ndarray(), inv_scale: float
+    ):
+        for i, j in dst:
+            b = ti.cast(src[i, j][0], ti.f32)
+            g = ti.cast(src[i, j][1], ti.f32)
+            r = ti.cast(src[i, j][2], ti.f32)
+            dst[i, j] = (0.299 * r + 0.587 * g + 0.114 * b) * inv_scale
+
+    @ti.kernel
+    def _gray_f32_scaled_i32_kernel(
+        src: ti.types.ndarray(), dst: ti.types.ndarray(), inv_scale: float
+    ):
+        for i, j in dst:
+            dst[i, j] = ti.cast(src[i, j], ti.f32) * inv_scale
+
+    @ti.kernel
     def _generate_hanning_window_2d_kernel(dst: ti.types.ndarray(), H: int, W: int, exclude_boundary: int):
         for i, j in dst:
             wy = 1.0
@@ -329,6 +349,90 @@ if TAICHI_AVAILABLE:
             else:
                 dst[i, j] = ref_img[i, j]
 
+    @ti.kernel
+    def _scale_f32_2d_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray(), scale: float):
+        for i, j in dst:
+            dst[i, j] = src[i, j] * scale
+
+    @ti.kernel
+    def _scale_f32_vec3_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray(), scale: float):
+        for i, j in dst:
+            dst[i, j] = src[i, j] * scale
+
+    @ti.kernel
+    def _stitch_tile_f32_kernel(
+        tile: ti.types.ndarray(),
+        tile_weight: ti.types.ndarray(),
+        hanning: ti.types.ndarray(),
+        accum: ti.types.ndarray(),
+        weight_accum: ti.types.ndarray(),
+        y0: ti.i32, x0: ti.i32, h: ti.i32, w: ti.i32
+    ):
+        for ty, tx in ti.ndrange(h, w):
+            y = y0 + ty
+            x = x0 + tx
+            w_val = hanning[ty, tx] * tile_weight[ty, tx]
+            accum[y, x] += tile[ty, tx] * w_val
+            weight_accum[y, x] += w_val
+
+    @ti.kernel
+    def _stitch_tile_vec3_kernel(
+        tile: ti.types.ndarray(),
+        tile_weight: ti.types.ndarray(),
+        hanning: ti.types.ndarray(),
+        accum: ti.types.ndarray(),
+        weight_accum: ti.types.ndarray(),
+        y0: ti.i32, x0: ti.i32, h: ti.i32, w: ti.i32
+    ):
+        for ty, tx in ti.ndrange(h, w):
+            y = y0 + ty
+            x = x0 + tx
+            w_val = hanning[ty, tx] * tile_weight[ty, tx]
+            accum[y, x] += tile[ty, tx] * w_val
+            weight_accum[y, x] += w_val
+
+    @ti.kernel
+    def _stitch_tile_batch_f32_kernel(
+        tiles: ti.types.ndarray(),
+        tile_weight: ti.types.ndarray(),
+        hanning: ti.types.ndarray(),
+        accum: ti.types.ndarray(),
+        weight_accum: ti.types.ndarray(),
+        y0s: ti.types.ndarray(),
+        x0s: ti.types.ndarray(),
+        n_tiles: ti.i32, h: ti.i32, w: ti.i32
+    ):
+        for t_idx in range(n_tiles):
+            y0 = y0s[t_idx]
+            x0 = x0s[t_idx]
+            for ty, tx in ti.ndrange(h, w):
+                y = y0 + ty
+                x = x0 + tx
+                w_val = hanning[ty, tx] * tile_weight[ty, tx]
+                accum[y, x] += tiles[t_idx, ty, tx] * w_val
+                weight_accum[y, x] += w_val
+
+    @ti.kernel
+    def _stitch_tile_batch_vec3_kernel(
+        tiles: ti.types.ndarray(),
+        tile_weight: ti.types.ndarray(),
+        hanning: ti.types.ndarray(),
+        accum: ti.types.ndarray(),
+        weight_accum: ti.types.ndarray(),
+        y0s: ti.types.ndarray(),
+        x0s: ti.types.ndarray(),
+        n_tiles: ti.i32, h: ti.i32, w: ti.i32
+    ):
+        for t_idx in range(n_tiles):
+            y0 = y0s[t_idx]
+            x0 = x0s[t_idx]
+            for ty, tx in ti.ndrange(h, w):
+                y = y0 + ty
+                x = x0 + tx
+                w_val = hanning[ty, tx] * tile_weight[ty, tx]
+                for c in ti.static(range(3)):
+                    accum[y, x, c] += tiles[t_idx, ty, tx, c] * w_val
+                weight_accum[y, x] += w_val
 
 
 class BufferCache:
@@ -1009,4 +1113,294 @@ def mean_division(sum_img, sum_weight, ref_img, dst=None):
 # NumPy-like aliases for JIT/AOT consistency
 hanning = generate_hanning_window_2d
 divide = mean_division
+
+
+import math
+
+def svd_3x3_np(A):
+    """SVD 3x3 via NumPy (Float64 precision). Returns (U, sigma, Vt)."""
+    A64 = np.asarray(A, dtype=np.float64)
+    U, S, Vt = np.linalg.svd(A64)
+    return U.astype(np.float32), S.astype(np.float32), Vt.astype(np.float32)
+
+
+def enforce_essential_np(E):
+    """Enforce essential matrix constraint via NumPy SVD."""
+    E64 = np.asarray(E, dtype=np.float64)
+    U, S, Vt = np.linalg.svd(E64)
+    s_avg = (S[0] + S[1]) / 2.0
+    S_new = np.diag([s_avg, s_avg, 0.0])
+    return (U @ S_new @ Vt).astype(np.float64)
+
+
+def hartley_normalize(pts, n_pts=None):
+    """
+    Hartley isotropic normalization (NumPy).
+    Translate centroid to origin, scale avg distance to sqrt(2).
+    Returns: (T, pts_normalized) where T is the 3x3 transform matrix.
+    """
+    pts = np.ascontiguousarray(pts, dtype=np.float64)
+    if n_pts is None:
+        n_pts = len(pts)
+    centroid = pts[:n_pts].mean(axis=0)
+    diff = pts[:n_pts] - centroid
+    avg_dist = np.mean(np.sqrt(np.sum(diff**2, axis=1)))
+    s = math.sqrt(2.0) / (avg_dist + 1e-10)
+    T = np.array(
+        [
+            [s, 0.0, -s * centroid[0]],
+            [0.0, s, -s * centroid[1]],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    pts_h = np.hstack([pts[:n_pts], np.ones((n_pts, 1))])
+    pts_norm = (T @ pts_h.T).T[:, :2]
+    return T, np.ascontiguousarray(pts_norm, dtype=np.float64)
+
+
+def denormalize_fundamental(F_norm, T1, T2):
+    """Denormalize fundamental matrix: F = T2^T @ F_norm @ T1."""
+    return (T2.T @ F_norm @ T1).astype(np.float64)
+
+
+class SfMDataError(Exception):
+    """Custom exception for SfM data validation errors with user-friendly hints."""
+
+    def __init__(self, message, hint=None, field=None, repair_suggestion=None):
+        self.hint = hint
+        self.field = field
+        self.repair_suggestion = repair_suggestion
+        full_msg = f"[SfM Error] {message}"
+        if hint:
+            full_msg += f"\n  Hint: {hint}"
+        if field:
+            full_msg += f"\n  Field: {field}"
+        if repair_suggestion:
+            full_msg += f"\n  Suggestion: {repair_suggestion}"
+        super().__init__(full_msg)
+
+
+def ensure_contiguous_f32(data, name="data"):
+    """Auto-repair: ensure array is contiguous float32. Handles int8/16/32, uint8/16, float64."""
+    if data is None:
+        raise SfMDataError(
+            f"Input '{name}' is None",
+            hint="Provide a valid numpy array",
+            field=name,
+            repair_suggestion="Pass a non-empty numpy array",
+        )
+    if not isinstance(data, np.ndarray):
+        try:
+            data = np.asarray(data)
+        except Exception:
+            raise SfMDataError(
+                f"Cannot convert '{name}' to numpy array",
+                hint=f"Got type: {type(data).__name__}",
+                field=name,
+            )
+    if data.size == 0:
+        raise SfMDataError(
+            f"Input '{name}' is empty (size=0)",
+            hint="Provide at least 1 element",
+            field=name,
+        )
+    if np.any(np.isnan(data)):
+        data = np.nan_to_num(data, nan=0.0)
+    if np.any(np.isinf(data)):
+        data = np.clip(data, -1e6, 1e6)
+    data = np.ascontiguousarray(data, dtype=np.float32)
+    return data
+
+
+def ensure_contiguous_f64(data, name="data"):
+    """Auto-repair: ensure array is contiguous float64."""
+    if data is None:
+        raise SfMDataError(
+            f"Input '{name}' is None", hint="Provide a valid numpy array", field=name
+        )
+    if not isinstance(data, np.ndarray):
+        try:
+            data = np.asarray(data)
+        except Exception:
+            raise SfMDataError(
+                f"Cannot convert '{name}' to numpy array",
+                hint=f"Got type: {type(data).__name__}",
+                field=name,
+            )
+    if data.size == 0:
+        raise SfMDataError(f"Input '{name}' is empty (size=0)", field=name)
+    if np.any(np.isnan(data)):
+        data = np.nan_to_num(data, nan=0.0)
+    if np.any(np.isinf(data)):
+        data = np.clip(data, -1e10, 1e10)
+    data = np.ascontiguousarray(data, dtype=np.float64)
+    return data
+
+
+def validate_point_correspondences(pts1, pts2, min_points=8, name="points"):
+    """
+    Validate and auto-repair point correspondences.
+    Handles: wrong dtype, non-contiguous, 1D->2D reshape, mismatched lengths, NaN/Inf.
+    """
+    pts1 = ensure_contiguous_f32(pts1, f"{name}_1")
+    pts2 = ensure_contiguous_f32(pts2, f"{name}_2")
+
+    if pts1.ndim == 1:
+        n = len(pts1) // 2
+        if n >= min_points:
+            pts1 = pts1.reshape(n, 2)
+        else:
+            raise SfMDataError(
+                f"Cannot reshape {name}_1: 1D array with {len(pts1)} elements",
+                hint=f"Expected at least {min_points*2} elements for {min_points} points",
+                field=f"{name}_1",
+            )
+    if pts2.ndim == 1:
+        n = len(pts2) // 2
+        if n >= min_points:
+            pts2 = pts2.reshape(n, 2)
+        else:
+            raise SfMDataError(
+                f"Cannot reshape {name}_2: 1D array with {len(pts2)} elements",
+                field=f"{name}_2",
+            )
+
+    if pts1.ndim != 2 or pts1.shape[1] != 2:
+        raise SfMDataError(
+            f"{name}_1 must be (N, 2), got shape {pts1.shape}",
+            hint="Reshape to (N, 2) - each row is [x, y]",
+            field=f"{name}_1",
+        )
+    if pts2.ndim != 2 or pts2.shape[1] != 2:
+        raise SfMDataError(
+            f"{name}_2 must be (N, 2), got shape {pts2.shape}", field=f"{name}_2"
+        )
+
+    if len(pts1) != len(pts2):
+        min_len = min(len(pts1), len(pts2))
+        pts1 = pts1[:min_len]
+        pts2 = pts2[:min_len]
+
+    if len(pts1) < min_points:
+        raise SfMDataError(
+            f"Need at least {min_points} points, got {len(pts1)}",
+            hint=f"Provide more feature correspondences (current: {len(pts1)})",
+            field=name,
+            repair_suggestion=f"Need {min_points - len(pts1)} more points",
+        )
+
+    return pts1, pts2
+
+
+def validate_intrinsic_matrix(K, name="K"):
+    """Validate and auto-repair camera intrinsic matrix."""
+    K = ensure_contiguous_f64(K, name)
+    if K.shape == (9,):
+        K = K.reshape(3, 3)
+    if K.shape != (3, 3):
+        raise SfMDataError(
+            f"Camera intrinsic matrix must be 3x3, got {K.shape}",
+            hint="Expected: [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]",
+            field=name,
+        )
+    if K[2, 2] == 0:
+        raise SfMDataError(
+            f"K[2,2] is zero - invalid intrinsic matrix",
+            hint="K[2,2] should be 1.0 for standard cameras",
+            field=name,
+            repair_suggestion="Set K[2,2] = 1.0",
+        )
+    if K[0, 0] <= 0 or K[1, 1] <= 0:
+        raise SfMDataError(
+            f"Focal length must be positive: fx={K[0,0]}, fy={K[1,1]}",
+            hint="Check your camera calibration parameters",
+            field=name,
+        )
+    return K
+
+
+def validate_essential_matrix(E, name="E"):
+    """Validate and auto-repair essential matrix (enforce rank-2 constraint)."""
+    E = ensure_contiguous_f64(E, name)
+    if E.shape == (9,):
+        E = E.reshape(3, 3)
+    if E.shape != (3, 3):
+        raise SfMDataError(
+            f"Essential matrix must be 3x3, got {E.shape}",
+            hint="Expected a 3x3 fundamental/essential matrix",
+            field=name,
+        )
+    rank = np.linalg.matrix_rank(E, tol=1e-6)
+    if rank > 2:
+        E = enforce_essential_np(E)
+    norm = np.linalg.norm(E)
+    if norm < 1e-10:
+        raise SfMDataError(
+            f"Essential matrix is near-zero (norm={norm:.2e})",
+            hint="The point correspondences may be degenerate",
+            field=name,
+            repair_suggestion="Check that points span at least 2 dimensions",
+        )
+    return E
+
+
+def validate_rotation_matrix(R, name="R"):
+    """Validate and auto-repair rotation matrix (enforce SO(3))."""
+    R = ensure_contiguous_f64(R, name)
+    if R.shape != (3, 3):
+        raise SfMDataError(f"Rotation matrix must be 3x3, got {R.shape}", field=name)
+    det = np.linalg.det(R)
+    if abs(det) < 1e-6:
+        raise SfMDataError(
+            f"Rotation matrix is near-singular (det={det:.2e})",
+            hint="The decomposition may have failed",
+            field=name,
+        )
+    if det < 0:
+        R = -R
+    U, _, Vt = np.linalg.svd(R)
+    R = U @ Vt
+    if np.linalg.det(R) < 0:
+        R[:, -1] *= -1
+    return R
+
+
+def safe_sfm_call(func, *args, **kwargs):
+    """
+    Execute an SfM function with comprehensive error handling.
+    Catches all errors, auto-repairs where possible, provides user-friendly messages.
+    """
+    try:
+        return func(*args, **kwargs)
+    except SfMDataError:
+        raise
+    except ValueError as e:
+        msg = str(e)
+        if "shape" in msg.lower() or "dimension" in msg.lower():
+            raise SfMDataError(
+                f"Data shape mismatch: {msg}",
+                hint="Check that all input arrays have compatible shapes",
+                repair_suggestion="Use np.ascontiguousarray() and verify ndim",
+            ) from e
+        raise SfMDataError(
+            f"Value error: {msg}", hint="Check input data ranges and types"
+        ) from e
+    except np.linalg.LinAlgError as e:
+        raise SfMDataError(
+            f"Linear algebra failure: {e}",
+            hint="Matrix may be singular or ill-conditioned",
+            repair_suggestion="Add regularization or check for degenerate configurations",
+        ) from e
+    except MemoryError:
+        raise SfMDataError(
+            f"Out of memory",
+            hint="Reduce input size or use smaller image resolution",
+            repair_suggestion="Try downsampling images or reducing point count",
+        )
+    except Exception as e:
+        raise SfMDataError(
+            f"Unexpected error: {type(e).__name__}: {e}",
+            hint="Check input data validity and try again",
+        )
 

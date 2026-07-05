@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import QGraphicsView, QGraphicsScene
 from PySide6.QtGui import QWheelEvent, QPainter, QMouseEvent
-from PySide6.QtCore import Qt, Signal, QPointF
+from PySide6.QtCore import Qt, Signal, QPointF, QTimer
 
 
 class Zoomable(QGraphicsView):
@@ -144,6 +144,13 @@ class Zoomable(QGraphicsView):
         # Reset transformasi matrix ke identitas
         self.resetTransform()
         self._zoom_level = 0
+
+    def fitInView(self, rect, aspect_ratio_mode=Qt.AspectRatioMode.KeepAspectRatio):
+        """Override fitInView to defer execution if the viewport has 0 dimensions (timing/layout safety)."""
+        if self.viewport().width() <= 0 or self.viewport().height() <= 0:
+            QTimer.singleShot(50, lambda: self.fitInView(rect, aspect_ratio_mode))
+            return
+        super().fitInView(rect, aspect_ratio_mode)
 
     def zoom_to_fit(self, rect=None):
         """Fit the given rect (or scene rect) into the view."""

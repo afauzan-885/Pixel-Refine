@@ -88,15 +88,11 @@ class SpatialFusionProcessor:
             accumulate_spatial_merging_taichi,
         )
 
-        # Validate GPU availability
-        try:
-            from taichi_library.taichi_aot.engine import AOTEngine
-
-            _engine = AOTEngine()
-        except Exception as e:
+        engine = taichi_aot.engine
+        if str(getattr(engine, "arch", "")).lower() == "cpu":
             raise RuntimeError(
-                f"[SpatialFusion] GPU AOT engine not available: {e}. "
-                "Spatial fusion requires a compatible GPU with Vulkan support."
+                "[SpatialFusion] GPU AOT engine is running on CPU fallback. "
+                "Spatial fusion requires the active taichi_aot Vulkan/CUDA engine."
             )
 
         # Defaults
@@ -162,10 +158,6 @@ class SpatialFusionProcessor:
         processed_count = 0
 
         try:
-            from taichi_library.taichi_aot.engine import AOTEngine
-
-            engine = AOTEngine()
-
             _sum_gpu = taichi_aot.upload(final_image_sum_full_res)
             _weight_sum_full_gpu = taichi_aot.upload(weight_map_sum_full_res)
             _base_window_gpu = taichi_aot.hanning(
@@ -329,8 +321,9 @@ class SpatialFusionProcessor:
                             buf.destroy()
                         except:
                             pass
-                taichi_aot.unload_all_modules()
-                engine.buffer_pool.clear()
+                if os.environ.get("PIXEL_REFINE_AOT_CLEAR_AFTER_OP", "0") == "1":
+                    taichi_aot.unload_all_modules()
+                    engine.buffer_pool.clear()
 
         finally:
             if ref_work_res_pass2_gpu is not None:

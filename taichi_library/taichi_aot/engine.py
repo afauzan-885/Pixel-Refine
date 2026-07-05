@@ -35,7 +35,187 @@ _ERROR_WINDOW_S = _env_float("PIXEL_REFINE_ERROR_WINDOW", 30.0)
 _ERROR_THRESHOLD = _env_int("PIXEL_REFINE_ERROR_THRESHOLD", 5)
 _AUTO_DESTROY_ENABLED = os.environ.get("PIXEL_REFINE_AUTO_DESTROY", "1") != "0"
 _INIT_TIMEOUT_S = _env_float("PIXEL_REFINE_INIT_TIMEOUT", 30.0)
-_CLEAN_ZOMBIES = os.environ.get("PIXEL_REFINE_CLEAN_ZOMBIES", "1") != "0"
+_CLEAN_ZOMBIES = os.environ.get("PIXEL_REFINE_CLEAN_ZOMBIES", "0") == "1"
+_EXPERIMENT_MODE = os.environ.get("PIXEL_REFINE_AOT_EXPERIMENT", "0") == "1"
+_SUPPRESS_VULKAN_LOADER_WARNINGS = (
+    os.environ.get("PIXEL_REFINE_SUPPRESS_VULKAN_LOADER_WARNINGS", "1") != "0"
+)
+_DEVICE_CACHE_PATH = os.path.join(
+    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+    "PixelRefine",
+    "aot_device_cache.txt",
+)
+_STDERR_REDIRECT_LOCK = threading.Lock()
+_PROCESS_JOB_HANDLE = None
+_PROCESS_JOB_ACTIVE = False
+
+
+def _read_cached_device_id():
+    try:
+        with open(_DEVICE_CACHE_PATH, "r", encoding="utf-8") as fh:
+            value = fh.read().strip()
+        return int(value) if value else None
+    except Exception:
+        return None
+
+
+def _write_cached_device_id(device_id):
+    try:
+        os.makedirs(os.path.dirname(_DEVICE_CACHE_PATH), exist_ok=True)
+        with open(_DEVICE_CACHE_PATH, "w", encoding="utf-8") as fh:
+            fh.write(str(int(device_id)))
+    except Exception:
+        pass
+
+
+def enable_experiment_mode(enabled=True):
+    """Enable fail-fast native-error handling for isolated AOT experiments."""
+    global _EXPERIMENT_MODE
+    _EXPERIMENT_MODE = bool(enabled)
+    os.environ["PIXEL_REFINE_AOT_EXPERIMENT"] = "1" if enabled else "0"
+
+
+def is_experiment_mode():
+    return bool(_EXPERIMENT_MODE)
+
+
+def _install_process_job_guard():
+    """Attach this Python process to a Windows Job Object.
+
+    Child processes spawned after this point inherit the job. If this Python
+    process is killed or its console is closed, Windows closes the last job
+    handle and terminates the whole process tree. This is intentionally
+    best-effort and silent: some IDEs already run Python inside a job.
+    """
+    global _PROCESS_JOB_HANDLE, _PROCESS_JOB_ACTIVE
+    if os.name != "nt" or _PROCESS_JOB_ACTIVE or _PROCESS_JOB_HANDLE:
+        return
+
+    try:
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong),
+            ]
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        ]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.GetCurrentProcess.argtypes = []
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return
+
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = 0x00002000  # KILL_ON_JOB_CLOSE
+        ok = kernel32.SetInformationJobObject(
+            job,
+            9,  # JobObjectExtendedLimitInformation
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        )
+        if not ok:
+            kernel32.CloseHandle(job)
+            return
+
+        ok = kernel32.AssignProcessToJobObject(job, kernel32.GetCurrentProcess())
+        if not ok:
+            kernel32.CloseHandle(job)
+            return
+
+        _PROCESS_JOB_HANDLE = job
+        _PROCESS_JOB_ACTIVE = True
+    except Exception:
+        _PROCESS_JOB_HANDLE = None
+        _PROCESS_JOB_ACTIVE = False
+
+
+_install_process_job_guard()
+
+
+class _suppress_native_stderr:
+    """Temporarily silence native stderr spam from Vulkan loader on Windows."""
+
+    def __init__(self, enabled=True):
+        self.enabled = bool(
+            enabled and _SUPPRESS_VULKAN_LOADER_WARNINGS and os.name == "nt"
+        )
+        self._saved_fd = None
+        self._null_fd = None
+
+    def __enter__(self):
+        if not self.enabled:
+            return self
+        _STDERR_REDIRECT_LOCK.acquire()
+        try:
+            sys.stderr.flush()
+        except Exception:
+            pass
+        self._saved_fd = os.dup(2)
+        self._null_fd = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(self._null_fd, 2)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if not self.enabled:
+            return False
+        try:
+            try:
+                sys.stderr.flush()
+            except Exception:
+                pass
+            if self._saved_fd is not None:
+                os.dup2(self._saved_fd, 2)
+        finally:
+            if self._null_fd is not None:
+                os.close(self._null_fd)
+            if self._saved_fd is not None:
+                os.close(self._saved_fd)
+            _STDERR_REDIRECT_LOCK.release()
+        return False
 
 
 def configure_auto_destroy(
@@ -85,7 +265,9 @@ _op_name = ""  # human-readable label for logging
 _lock_wait_start = 0.0  # when a thread started waiting for _lock
 _lock_wait_name = ""  # what operation is waiting for lock
 _error_timestamps = []  # rolling list of time.monotonic() for circuit breaker
-_vram_reclaimed = False  # Track if VRAM was already cleared during the current idle session
+_vram_reclaimed = (
+    False  # Track if VRAM was already cleared during the current idle session
+)
 
 
 def _heartbeat():
@@ -255,42 +437,49 @@ def _watchdog_run():
                     sys.stderr.flush()
                 except Exception:
                     pass
-                
+
                 # Smart VRAM reclamation logic:
                 try:
                     # Obtain the global engine instance if it exists and clear its pools
                     for key, inst in list(AOTEngine._instances.items()):
                         with inst._lock:
                             # 1. Clear cached staging buffers
-                            for entries in list(getattr(inst, '_staging_pool', {}).values()):
+                            for entries in list(
+                                getattr(inst, "_staging_pool", {}).values()
+                            ):
                                 for entry in entries:
-                                    buf = entry.get('buffer')
+                                    buf = entry.get("buffer")
                                     if buf and buf.handle is not None and buf.is_owner:
                                         try:
-                                            _LIB.free_gpu_buffer(inst.runtime, buf.handle)
+                                            _LIB.free_gpu_buffer(
+                                                inst.runtime, buf.handle
+                                            )
                                             buf.handle = None
                                             buf.is_owner = False
                                         except Exception:
                                             pass
                             inst._staging_pool = {}
-                            
+
                             # 2. Clear buffer pool
                             inst.buffer_pool.clear()
-                    
+
                     # 3. Trigger Python garbage collection to free unreferenced wrappers
                     import gc as _gc
+
                     _gc.collect()
                 except Exception as e:
                     try:
-                        sys.stderr.write(f"[AOTEngine Watchdog] Smart VRAM reclamation error: {e}\n")
+                        sys.stderr.write(
+                            f"[AOTEngine Watchdog] Smart VRAM reclamation error: {e}\n"
+                        )
                         sys.stderr.flush()
                     except Exception:
                         pass
-                
+
                 # Mark VRAM as reclaimed for the current idle session
                 with _heartbeat_lock:
                     _vram_reclaimed = True
-            
+
             # Reset heartbeat timer so we don't spin-poll the check
             with _heartbeat_lock:
                 _last_activity_time = now
@@ -503,6 +692,20 @@ def _init_aot_bridge():
     _LIB.init_aot_engine.argtypes = [ctypes.c_int, ctypes.c_int]
     _LIB.init_aot_engine.restype = ctypes.c_void_p
 
+    try:
+        _LIB.destroy_aot_engine.argtypes = [ctypes.c_void_p]
+        _LIB.destroy_aot_engine.restype = None
+    except AttributeError:
+        pass
+
+    try:
+        _LIB.get_last_engine_error.argtypes = [ctypes.c_void_p]
+        _LIB.get_last_engine_error.restype = ctypes.c_char_p
+        _LIB.clear_last_engine_error.argtypes = [ctypes.c_void_p]
+        _LIB.clear_last_engine_error.restype = None
+    except AttributeError:
+        pass
+
     _LIB.scan_vulkan_devices.argtypes = []
     _LIB.scan_vulkan_devices.restype = ctypes.c_char_p
 
@@ -652,6 +855,58 @@ def configure_taichi_backend(prefer: str = None, device_memory_GB: float = None)
         f"[engine.configure_taichi_backend] Initializing Taichi with arch={arch_choice}"
     )
     ti.init(arch=arch, **init_kwargs)
+
+
+def _get_native_engine_error(runtime):
+    if not _LIB or not runtime:
+        return ""
+    try:
+        getter = getattr(_LIB, "get_last_engine_error")
+    except AttributeError:
+        return ""
+    try:
+        raw = getter(runtime)
+        if not raw:
+            return ""
+        if isinstance(raw, bytes):
+            return raw.decode("utf-8", errors="replace")
+        return str(raw)
+    except Exception:
+        return ""
+
+
+def _clear_native_engine_error(runtime):
+    if not _LIB or not runtime:
+        return
+    try:
+        clearer = getattr(_LIB, "clear_last_engine_error")
+    except AttributeError:
+        return
+    try:
+        clearer(runtime)
+    except Exception:
+        pass
+
+
+def _raise_native_engine_error(runtime, context):
+    message = _get_native_engine_error(runtime)
+    if message:
+        _clear_native_engine_error(runtime)
+        _record_error()
+        if _EXPERIMENT_MODE:
+            try:
+                sys.stderr.write(
+                    f"[AOTEngine Experiment] Fatal native error in {context}: {message}\n"
+                )
+                sys.stderr.flush()
+            except Exception:
+                pass
+            try:
+                _global_cleanup("experiment-native-error", force=True)
+            except Exception:
+                pass
+            os._exit(86)
+        raise RuntimeError(f"[AOTEngine Native Error] {context}: {message}")
 
 
 # -------------------------------------------------------------------------
@@ -919,10 +1174,22 @@ class AOTModuleWrapper:
     def __init__(self, module_ptr, engine=None):
         self.module_ptr = module_ptr
         self.engine = engine
+        self.engine_generation = getattr(engine, "_generation", 0)
 
     def __del__(self):
-        if self.module_ptr:
-            _LIB.destroy_aot_module(self.module_ptr)
+        module_ptr = getattr(self, "module_ptr", None)
+        if not module_ptr:
+            return
+
+        try:
+            engine = getattr(self, "engine", None)
+            runtime = getattr(engine, "runtime", None) if engine is not None else _RUNTIME
+            if _LIB is not None and runtime and not getattr(engine, "_destroyed", False):
+                _LIB.destroy_aot_module(module_ptr)
+        except Exception:
+            pass
+        finally:
+            self.module_ptr = None
 
     def run(self, graph_name, **kwargs):
         """Menjalankan grafik Taichi AOT dengan validasi argumen yang informatif."""
@@ -994,6 +1261,9 @@ class AOTModuleWrapper:
                             args_array,
                             num_args,
                         )
+                        _raise_native_engine_error(
+                            engine.runtime, f"Kernel '{graph_name}'"
+                        )
                     except Exception as e:
                         _record_error()
                         raise RuntimeError(
@@ -1038,8 +1308,10 @@ class AOTEngine:
     _active_arch = "vulkan"
     _placeholder_id_counter = 0xFFFFFF00
 
-    def __new__(cls, arch="vulkan", device_id=None):
+    def __new__(cls, arch=None, device_id=None):
         _init_aot_bridge()
+        if arch is None:
+            arch = os.environ.get("PIXEL_REFINE_AOT_ARCH", "vulkan")
 
         # If device_id is not specified, auto-detect
         if device_id is None:
@@ -1047,19 +1319,40 @@ class AOTEngine:
             if env_device is not None:
                 device_id = int(env_device)
             else:
-                device_id = 0
-                try:
-                    devices_str = _LIB.scan_vulkan_devices().decode("utf-8")
-                    device_list = [d.strip().lower() for d in devices_str.split(";")]
-                    for idx, dev_name in enumerate(device_list):
-                        if "nvidia" in dev_name or "geforce" in dev_name:
-                            device_id = idx
-                            break
-                except Exception:
-                    pass
+                cached_device = _read_cached_device_id()
+                if cached_device is not None:
+                    device_id = cached_device
+                else:
+                    device_id = int(
+                        os.environ.get("PIXEL_REFINE_AOT_DEFAULT_DEVICE", 0)
+                    )
+                    autoscan = os.environ.get("PIXEL_REFINE_AOT_AUTOSCAN", "0") == "1"
+                    if autoscan:
+                        try:
+                            with _suppress_native_stderr():
+                                devices_str = _LIB.scan_vulkan_devices().decode("utf-8")
+                            device_list = [
+                                d.strip().lower() for d in devices_str.split(";")
+                            ]
+                            for idx, dev_name in enumerate(device_list):
+                                if "nvidia" in dev_name or "geforce" in dev_name:
+                                    device_id = idx
+                                    break
+                            _write_cached_device_id(device_id)
+                        except Exception:
+                            pass
+            os.environ.setdefault("PIXEL_REFINE_AOT_DEVICE", str(int(device_id)))
 
         key = (arch.lower(), device_id)
-        if key not in cls._instances:
+        existing = cls._instances.get(key)
+        if existing is not None and (
+            getattr(existing, "_destroyed", False)
+            or getattr(existing, "runtime", None) is None
+        ):
+            cls._instances.pop(key, None)
+            existing = None
+
+        if existing is None:
             instance = super(AOTEngine, cls).__new__(cls)
             instance.arch = arch
             instance.device_id = device_id
@@ -1076,7 +1369,8 @@ class AOTEngine:
 
             def _do_init():
                 try:
-                    _init_result[0] = _LIB.init_aot_engine(arch_id, device_id)
+                    with _suppress_native_stderr(arch.lower() == "vulkan"):
+                        _init_result[0] = _LIB.init_aot_engine(arch_id, device_id)
                 except Exception as e:
                     _init_error[0] = e
 
@@ -1119,6 +1413,8 @@ class AOTEngine:
             instance.recorded_pipelines = set()
             instance._executor = None
             instance._lock = threading.RLock()
+            instance._destroyed = False
+            instance._generation = 0
 
             cls._instances[key] = instance
         return cls._instances[key]
@@ -1192,6 +1488,7 @@ class AOTEngine:
             _op_begin(f"run_pipeline:{name}")
             try:
                 _LIB.run_pipeline(self.runtime, name.encode("utf-8"), handles, args, n)
+                _raise_native_engine_error(self.runtime, f"Pipeline '{name}'")
             except Exception:
                 _record_error()
                 raise
@@ -1430,11 +1727,19 @@ class AOTEngine:
             )
             if p in self.modules:
                 return self.modules[p]
-            ptr = _LIB.load_aot_module(self.runtime, p.encode("utf-8"))
+            with _suppress_native_stderr(self.arch.lower() == "vulkan"):
+                ptr = _LIB.load_aot_module(self.runtime, p.encode("utf-8"))
             if not ptr:
+                native_error = _get_native_engine_error(self.runtime)
+                detail = f"\n  NATIVE: {native_error}" if native_error else ""
+                try:
+                    self.reinit(self.device_id)
+                except Exception:
+                    pass
                 raise RuntimeError(
                     f"\n[AOTEngine Load Error] Failed to load TCM module at: {p}\n"
                     f"  HINT: Ensure the .tcm file exists and is compatible with the active GPU backend ({self.arch.upper()})."
+                    f"{detail}"
                 )
             print(f"[AOTEngine] Loaded TCM module: {os.path.basename(p)}")
             self.modules[p] = AOTModuleWrapper(ptr, self)
@@ -1510,13 +1815,42 @@ class AOTEngine:
             finally:
                 _op_end()
 
+    def last_error(self):
+        return _get_native_engine_error(self.runtime)
+
+    def clear_last_error(self):
+        _clear_native_engine_error(self.runtime)
+
     def reinit(self, device_id=0):
         with self._lock:
-            self.runtime = _LIB.init_aot_engine(
-                {"vulkan": 0, "cuda": 1, "cpu": 2}.get(self.arch.lower(), 0), device_id
-            )
-            self.device_id = device_id
+            old_runtime = self.runtime
+            for mod in list(self.modules.values()):
+                mod.module_ptr = None
             self.modules = {}
+            self.recorded_pipelines.clear()
+            self._pipeline_intermediates = {}
+            self._staging_pool = {}
+            try:
+                self.buffer_pool.clear()
+            except Exception:
+                pass
+            try:
+                destroy_engine = getattr(_LIB, "destroy_aot_engine")
+            except AttributeError:
+                destroy_engine = None
+            if old_runtime and destroy_engine is not None:
+                try:
+                    destroy_engine(old_runtime)
+                except Exception:
+                    pass
+            with _suppress_native_stderr(self.arch.lower() == "vulkan"):
+                self.runtime = _LIB.init_aot_engine(
+                    {"vulkan": 0, "cuda": 1, "cpu": 2}.get(self.arch.lower(), 0),
+                    device_id,
+                )
+            self.device_id = device_id
+            self._destroyed = False
+            self._generation = getattr(self, "_generation", 0) + 1
 
     def destroy(self):
         """Full GPU context teardown: free all buffers, clear pipelines, shutdown executor.
@@ -1581,13 +1915,26 @@ class AOTEngine:
                         pass
                 self.modules = {}
 
-                # 6. Sync and signal runtime is gone
+                # 6. Sync and destroy the native runtime context
+                runtime_to_destroy = self.runtime
                 try:
-                    if self.runtime:
-                        _LIB.sync_runtime(self.runtime)
+                    if runtime_to_destroy:
+                        _LIB.sync_runtime(runtime_to_destroy)
                 except Exception:
                     pass
+                try:
+                    destroy_engine = getattr(_LIB, "destroy_aot_engine")
+                except AttributeError:
+                    destroy_engine = None
+                if runtime_to_destroy and destroy_engine is not None:
+                    try:
+                        destroy_engine(runtime_to_destroy)
+                    except Exception:
+                        pass
                 self.runtime = None
+                for key, inst in list(AOTEngine._instances.items()):
+                    if inst is self:
+                        AOTEngine._instances.pop(key, None)
 
                 # 7. Kill tracked child processes (vulkaninfo, etc.)
                 _kill_tracked_children()
