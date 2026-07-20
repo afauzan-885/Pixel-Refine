@@ -30,6 +30,14 @@ from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_align
     save_lucas_kanade_config_for_active_batch,
     save_lucas_kanade_gpu_config_for_active_batch,
 )
+from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.block_matching_parameter_settings import (
+    load_block_matching_gpu_config,
+    save_block_matching_gpu_config_for_active_batch,
+)
+from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.raft_parameter_settings import (
+    load_raft_config,
+    save_raft_config_for_active_batch,
+)
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.akaze_parameter_settings import (
     load_akaze_config,
     save_akaze_config_for_active_batch,
@@ -82,6 +90,61 @@ class SwitchableParameterPanel(QWidget):
         self._setup_ui()
         self.set_expanded(False)
         self._update_styles("transparent")
+        # React when device backend changes (e.g., user switches GPU↔CPU in Settings)
+        try:
+            from pixel_refine_desktop.ui.views.settings.General.general_store import get_general_store
+            get_general_store().changed.connect(self._on_general_settings_changed)
+        except Exception:
+            pass
+
+    def _on_general_settings_changed(self, key=None, *args):
+        """React to device backend arch changes to show/hide Block Matching GPU."""
+        if key is None or key in ("device_backend_arch", "device_backend_id"):
+            self._filter_alignment_for_backend()
+
+    # Items to exclude from alignment combo in CPU mode
+    _CPU_HIDDEN_ALIGNMENT = {"Block Matching GPU", "RAFT"}
+
+    def _repopulate_alignment_combo(self):
+        """Rebuild the alignment combo items based on current backend arch.
+
+        Completely removes hidden items (e.g. Block Matching GPU on CPU mode)
+        so they never appear in the dropdown. The page stack is untouched so
+        we can re-add items if the user switches to GPU mode later.
+        """
+        from pixel_refine_desktop.enhance_stack.components.batch_page_v2.backend_arch_helper import is_cpu_backend
+        if not hasattr(self, "align_dropdown"):
+            return
+
+        cpu_mode = is_cpu_backend()
+        combo = self.align_dropdown
+
+        # Remember current selection
+        current_text = combo.currentText()
+
+        # Rebuild item list
+        combo.blockSignals(True)
+        combo.clear()
+        for name in self.alignment_algorithm_names:
+            if cpu_mode and name in self._CPU_HIDDEN_ALIGNMENT:
+                continue  # Completely hide on CPU mode
+            combo.addItem(name)
+
+        # Restore selection if still available, else fall back to No Alignment
+        idx = combo.findText(current_text)
+        if idx < 0:
+            idx = combo.findText("No Alignment")
+        combo.setCurrentIndex(max(0, idx))
+        combo.blockSignals(False)
+
+        # Sync the page stack to the new selection
+        selected = combo.currentText()
+        if hasattr(self, "alignment_pages") and selected in self.alignment_pages:
+            self.align_param_stack.setCurrentWidget(self.alignment_pages[selected])
+
+    def _filter_alignment_for_backend(self):
+        """Wrapper kept for backward compatibility (called by general_store listener)."""
+        self._repopulate_alignment_combo()
 
     def _persist_alignment_selection(self):
         selected_text = self.align_dropdown.currentText()
@@ -91,18 +154,21 @@ class SwitchableParameterPanel(QWidget):
             if hasattr(right_panel, "_on_settings_changed"):
                 right_panel._on_settings_changed(save_to_store=True)
 
-        if selected_text == "ORB":
+        if selected_text == "Farneback":
+            save_farneback_config_for_active_batch(load_farneback_config())
+        elif selected_text == "ORB":
             save_orb_config_for_active_batch(load_orb_config())
         elif selected_text == "AKAZE":
             save_akaze_config_for_active_batch(load_akaze_config())
         elif selected_text == "Light Glue":
             save_light_glue_config_for_active_batch(load_light_glue_config())
-        elif selected_text == "Farneback Optical Flow":
-            save_farneback_config_for_active_batch(load_farneback_config())
-        elif selected_text == "Lucas Kanade Optical Flow":
+        elif selected_text == "Lucas Kanade":
             save_lucas_kanade_config_for_active_batch(load_lucas_kanade_config())
-        elif selected_text == "Lucas Kanade GPU Optical Flow":
             save_lucas_kanade_gpu_config_for_active_batch(load_lucas_kanade_gpu_config())
+        elif selected_text == "Block Matching GPU":
+            save_block_matching_gpu_config_for_active_batch(load_block_matching_gpu_config())
+        elif selected_text == "RAFT":
+            save_raft_config_for_active_batch(load_raft_config())
 
         print(
             f"[SwitchableParameterPanel] persisted alignment='{selected_text}' "
@@ -336,6 +402,138 @@ class SwitchableParameterPanel(QWidget):
 
     def _setup_alignment_page(self):
         self.align_page = QWidget()
+
+    def _collapsed_height(self):
+        visible_buttons = sum(
+            1
+            for button in (self.btn_align_tab, self.btn_denoise_tab)
+            if button.isVisible()
+        )
+        return max(60, (visible_buttons * 50) + 20)
+
+    def _expanded_size(self):
+        parent = self.get_overlay_container()
+        if parent:
+            parent_widget = parent.parent()
+        else:
+            parent_widget = self.parent()
+
+        available_w = parent_widget.width() if parent_widget else 1200
+        available_h = parent_widget.height() if parent_widget else 800
+
+        width_cap = max(240, available_w - 20)
+        height_cap = max(240, available_h - 70)
+        
+        if self.active_tab == "alignment":
+            preferred_width = max(260 + 58, int(available_w * 0.35))
+            width = max(290, min(750, preferred_width, width_cap))
+        else:
+            preferred_width = max(260 + 58, int(available_w * 0.24))
+            width = max(290, min(520, preferred_width, width_cap))
+
+        # Tinggi maksimal ditambah 30%: dari 0.52 menjadi 0.67 area layar
+        height = max(240, min(562, int(available_h * 0.67), height_cap))
+        return width, height
+
+    def _sync_overlay_geometry(self):
+        overlay = self.get_overlay_container()
+        if overlay:
+            if self.content_wrapper.isVisible():
+                width, height = self._expanded_size()
+                self.setMinimumSize(width, height)
+                self.setMaximumSize(width, height)
+            self.adjustSize()
+            overlay.content_wrapper.adjustSize()
+            overlay.adjustSize()
+            overlay._update_position()
+
+    def _setup_ui(self):
+        # Main layout is horizontal: Content area (left) + Tabs (right)
+        self.main_layout = QHBoxLayout(self)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
+
+        # Main widget background transparent
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+        # 1. Content Wrapper (Left)
+        self.content_wrapper = QWidget()
+        self.content_wrapper.setObjectName("ParamContentWrapper")
+        self.content_layout = QVBoxLayout(self.content_wrapper)
+        self.content_layout.setContentsMargins(14, 14, 14, 14)
+        self.content_layout.setSpacing(8)
+
+        # Content stacked widget
+        self.content_stack = QStackedWidget()
+        
+        # Build pages
+        self._setup_alignment_page()
+        self._setup_denoising_page()
+
+        self.content_layout.addWidget(self.content_stack)
+        self.main_layout.addWidget(self.content_wrapper, 1)
+
+        # 2. Tabs Sidebar (Right)
+        self.tabs_sidebar = QWidget()
+        self.tabs_sidebar.setFixedWidth(50)
+        # Transparent background for the sidebar
+        self.tabs_sidebar.setStyleSheet("background: transparent; border: none;")
+        self.tabs_layout = QVBoxLayout(self.tabs_sidebar)
+        self.tabs_layout.setContentsMargins(0, 10, 0, 10)
+        self.tabs_layout.setSpacing(10)
+        self.tabs_layout.setAlignment(Qt.AlignmentFlag.AlignBottom)
+
+        # Alignment Tab Button (Red)
+        self.btn_align_tab = QPushButton("A")
+        self.btn_align_tab.setToolTip("Alignment Parameters")
+        self.btn_align_tab.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_align_tab.setFixedSize(40, 40)
+        self.btn_align_tab.clicked.connect(lambda: self.set_active_tab("alignment"))
+        self.tabs_layout.addWidget(self.btn_align_tab)
+
+        # Denoising Tab Button (Green)
+        self.btn_denoise_tab = QPushButton("D")
+        self.btn_denoise_tab.setToolTip("Denoising Parameters")
+        self.btn_denoise_tab.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_denoise_tab.setFixedSize(40, 40)
+        self.btn_denoise_tab.clicked.connect(lambda: self.set_active_tab("denoising"))
+        self.tabs_layout.addWidget(self.btn_denoise_tab)
+
+        self.main_layout.addWidget(self.tabs_sidebar)
+
+        # Minimum Panel Size
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.setMinimumSize(50, 100)
+
+    def refresh_responsive_layout(self):
+        if not self.content_wrapper.isVisible():
+            self._sync_overlay_geometry()
+            return
+        self._apply_adaptive_density()
+        if not self._resize_sync_pending:
+            self._resize_sync_pending = True
+            QTimer.singleShot(0, self._flush_resize_sync)
+
+    def _flush_resize_sync(self):
+        self._resize_sync_pending = False
+        self._sync_overlay_geometry()
+
+    def _apply_adaptive_density(self):
+        width = self.width()
+        compact = width < 380
+        margin = 10 if compact else 14
+        spacing = 6 if compact else 8
+        self.content_layout.setContentsMargins(margin, margin, margin, margin)
+        self.content_layout.setSpacing(spacing)
+        self.align_dropdown_label.setFont(
+            QFont("Arial", 9 if compact else 10, QFont.Weight.Bold)
+        )
+        denoise_page = self.denoise_page_container.widget() if isinstance(self.denoise_page_container, QScrollArea) else None
+        if denoise_page and hasattr(denoise_page, "refresh_responsive_layout"):
+            denoise_page.refresh_responsive_layout()
+
+    def _setup_alignment_page(self):
+        self.align_page = QWidget()
         align_layout = QVBoxLayout(self.align_page)
         align_layout.setContentsMargins(0, 0, 0, 0)
         align_layout.setSpacing(10)
@@ -344,23 +542,24 @@ class SwitchableParameterPanel(QWidget):
         self.align_dropdown_label = QLabel("Alignment Algorithm:")
         self.align_dropdown_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         self.align_dropdown = QComboBox()
+
+        # Keep ALL algorithm names so pages are always built (needed if user switches to GPU later)
         self.alignment_algorithm_names = get_mfdenoiser_algorithm_names("alignment")
-        self.align_dropdown.addItems(self.alignment_algorithm_names)
-        self.align_dropdown.currentIndexChanged.connect(self._on_alignment_algo_changed)
 
-        align_layout.addWidget(self.align_dropdown_label)
-        align_layout.addWidget(self.align_dropdown)
-
-        # Stacked widget for alignment parameter settings pages
-        self.align_param_stack = QStackedWidget()
-
-        # Build individual parameter pages
+        # Build ALL parameter pages into the stack keyed by name (name-based lookup in _on_alignment_algo_changed)
         self.alignment_pages = {}
+        self.align_param_stack = QStackedWidget()
         for name in self.alignment_algorithm_names:
             page = get_alignment_settings_page(name)
             self.alignment_pages[name] = page
             self.align_param_stack.addWidget(page)
 
+        # Populate combo filtered by backend (apply now before connecting signal)
+        self._repopulate_alignment_combo()
+        self.align_dropdown.currentIndexChanged.connect(self._on_alignment_algo_changed)
+
+        align_layout.addWidget(self.align_dropdown_label)
+        align_layout.addWidget(self.align_dropdown)
         align_layout.addWidget(self.align_param_stack, 1)
         self.content_stack.addWidget(self.align_page)
 
@@ -559,10 +758,11 @@ class SwitchableParameterPanel(QWidget):
         """)
 
     def _on_alignment_algo_changed(self, index):
-        # Map selected dropdown to align param stack
-        # Combobox options: No Alignment, Farneback Optical Flow, Light Glue, AKAZE, ORB
-        self.align_param_stack.setCurrentIndex(index)
-        
+        # Use name-based lookup so the page stack index is independent of combo order
+        selected = self.align_dropdown.currentText()
+        if selected in self.alignment_pages:
+            self.align_param_stack.setCurrentWidget(self.alignment_pages[selected])
+
         # Save choice to settings / store
         self._persist_alignment_selection()
 
@@ -585,7 +785,7 @@ class SwitchableParameterPanel(QWidget):
         self._last_settings_snapshot = snapshot
 
         # 1. Update alignment selection dropdown
-        alignment_algo = settings.get("alignment", "No Alignment")
+        alignment_algo = self._normalize_alignment_name(settings.get("alignment", "No Alignment"))
         idx = self.align_dropdown.findText(alignment_algo)
         if idx >= 0:
             self.align_dropdown.blockSignals(True)
@@ -598,7 +798,10 @@ class SwitchableParameterPanel(QWidget):
         
         # If denoising algo changed, collapse panel and reset active tab
         if denoising_algo != self.current_denoising_algo:
-            if self.active_tab == "denoising" or denoising_algo in ["Average", "Median"]:
+            if self.active_tab == "denoising" or denoising_algo in [
+                "Average",
+                "Median",
+            ]:
                 self.active_tab = None
                 self.set_expanded(False)
                 self._update_styles("transparent")
@@ -625,7 +828,7 @@ class SwitchableParameterPanel(QWidget):
                 if self.content_wrapper.isVisible() and self.active_tab != "alignment":
                     self.active_tab = None
                     self.set_expanded(False)
-            elif denoising_algo == "Similarity":
+            elif denoising_algo in ["Similarity", "Similarity Fusion"]:
                 self.btn_align_tab.setVisible(True)
                 self.btn_denoise_tab.setVisible(True)
                 self.btn_denoise_tab.setEnabled(True)
@@ -635,3 +838,13 @@ class SwitchableParameterPanel(QWidget):
                 self.setMinimumSize(50, self._collapsed_height())
                 self.setMaximumSize(50, self._collapsed_height())
             self._sync_overlay_geometry()
+
+    def _normalize_alignment_name(self, value):
+        mapping = {
+            "Farneback Optical Flow": "Farneback",
+            "Lucas Kanade Optical Flow": "Lucas Kanade",
+            "Lucas Kanade GPU Optical Flow": "Lucas Kanade",
+            "Block Matching GPU Optical Flow": "Block Matching GPU",
+            "RAFT Optical Flow": "RAFT",
+        }
+        return mapping.get(str(value or "").strip(), str(value or "No Alignment"))

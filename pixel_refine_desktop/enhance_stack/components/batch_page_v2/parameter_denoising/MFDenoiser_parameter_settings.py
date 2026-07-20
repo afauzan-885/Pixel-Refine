@@ -27,6 +27,9 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QScrollArea,
     QSizePolicy,
+    QButtonGroup,
+    QComboBox,
+    QStackedWidget,
 )
 from PySide6.QtGui import QFont, QDoubleValidator
 from PySide6.QtCore import Qt, QLocale
@@ -76,6 +79,21 @@ from ..parameter_alignment.lucas_kanade_parameter_settings import (
     save_lucas_kanade_gpu_config,
     save_lucas_kanade_config_for_active_batch,
     save_lucas_kanade_gpu_config_for_active_batch,
+)
+from ..parameter_alignment.block_matching_parameter_settings import (
+    GPU_PARAMETER_SCHEMA as BLOCK_MATCHING_GPU_PARAMETER_SCHEMA,
+    load_block_matching_gpu_config,
+    save_block_matching_gpu_config,
+    save_block_matching_gpu_config_for_active_batch,
+)
+from ..parameter_alignment.raft_parameter_settings import (
+    PARAMETER_SCHEMA as RAFT_PARAMETER_SCHEMA,
+    load_raft_config,
+    save_raft_config,
+    save_raft_config_for_active_batch,
+)
+from ..parameter_alignment.alignment_config_provider import (
+    save_alignment_config_for_active_batch,
 )
 
 
@@ -138,9 +156,15 @@ class ResponsiveSliderRow(QWidget):
         self.apply_density(420)
 
     def _update_value_text(self, value):
-        self.value_input.setText(
-            self.format_func(value) if self.format_func else str(value)
-        )
+        if self.label.text() == "Batch Size (AI)" and int(value) == 16:
+            text = "Full Frame"
+        else:
+            text = self.format_func(value) if self.format_func else str(value)
+        self.value_input.setText(text)
+        if text in ("Full Frame", "16"):
+            self.value_input.setEnabled(False)
+        else:
+            self.value_input.setEnabled(True)
 
     def set_slider_value_from_text(self, scale=1.0):
         try:
@@ -366,23 +390,23 @@ ALIGNMENT_PARAMETER_PROVIDERS = {
         "save": save_light_glue_config,
         "save_batch": save_light_glue_config_for_active_batch,
     },
-    "Farneback Optical Flow": {
+    "Farneback": {
         "schema": FARNEBACK_PARAMETER_SCHEMA,
         "load": load_farneback_config,
         "save": save_farneback_config,
         "save_batch": save_farneback_config_for_active_batch,
     },
-    "Lucas Kanade Optical Flow": {
-        "schema": LUCAS_KANADE_PARAMETER_SCHEMA,
-        "load": load_lucas_kanade_config,
-        "save": save_lucas_kanade_config,
-        "save_batch": save_lucas_kanade_config_for_active_batch,
+    "Block Matching GPU": {
+        "schema": BLOCK_MATCHING_GPU_PARAMETER_SCHEMA,
+        "load": load_block_matching_gpu_config,
+        "save": save_block_matching_gpu_config,
+        "save_batch": save_block_matching_gpu_config_for_active_batch,
     },
-    "Lucas Kanade GPU Optical Flow": {
-        "schema": LUCAS_KANADE_GPU_PARAMETER_SCHEMA,
-        "load": load_lucas_kanade_gpu_config,
-        "save": save_lucas_kanade_gpu_config,
-        "save_batch": save_lucas_kanade_gpu_config_for_active_batch,
+    "RAFT": {
+        "schema": RAFT_PARAMETER_SCHEMA,
+        "load": load_raft_config,
+        "save": save_raft_config,
+        "save_batch": save_raft_config_for_active_batch,
     },
 }
 
@@ -429,7 +453,7 @@ class AlignmentParameterPage(QWidget):
             layout.addWidget(label)
             return
 
-        title = QLabel(f"{self.algorithm_name} Parameters")
+        title = QLabel(self.algorithm_name)
         title.setFont(get_default_font(10, QFont.Weight.Bold))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setWordWrap(True)
@@ -460,6 +484,316 @@ class AlignmentParameterPage(QWidget):
         reset_layout.addWidget(reset_btn, 0, Qt.AlignmentFlag.AlignRight)
         layout.addLayout(reset_layout)
         layout.addStretch()
+
+
+@live_update("refresh_responsive_layout", on_resize=True)
+class LucasKanadeParameterPage(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._loading = False
+        self.cpu_controls = {}
+        self.gpu_controls = {}
+        self._cpu_rows = []
+        self._gpu_rows = []
+        self._setup_ui()
+        self._load_configs()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(10)
+
+        title = QLabel("Lucas Kanade")
+        title.setFont(get_default_font(10, QFont.Weight.Bold))
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setMinimumHeight(32)
+        layout.addWidget(title)
+
+        mode_label = QLabel("Backend")
+        mode_label.setFont(get_default_font(9, QFont.Weight.Bold))
+        mode_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(mode_label)
+
+        toggle_row = QHBoxLayout()
+        toggle_row.addStretch()
+        self.backend_buttons = QButtonGroup(self)
+        self.cpu_btn = QPushButton("CPU")
+        self.gpu_btn = QPushButton("GPU")
+        for btn in (self.cpu_btn, self.gpu_btn):
+            btn.setCheckable(True)
+            btn.setFixedHeight(30)
+            btn.setMinimumWidth(78)
+            self.backend_buttons.addButton(btn)
+            toggle_row.addWidget(btn)
+        toggle_row.addStretch()
+        layout.addLayout(toggle_row)
+
+        self.backend_stack = QStackedWidget()
+        self.cpu_page = self._build_page(
+            LUCAS_KANADE_PARAMETER_SCHEMA,
+            self.cpu_controls,
+            self._cpu_rows,
+        )
+        self.gpu_page = self._build_page(
+            LUCAS_KANADE_GPU_PARAMETER_SCHEMA,
+            self.gpu_controls,
+            self._gpu_rows,
+        )
+        self.backend_stack.addWidget(self.cpu_page)
+        self.backend_stack.addWidget(self.gpu_page)
+        layout.addWidget(self.backend_stack, 1)
+
+        reset_btn = QPushButton("Reset to Defaults")
+        reset_btn.setStyleSheet(APPLY_BUTTON)
+        reset_btn.setMinimumHeight(28)
+        reset_btn.clicked.connect(self._reset_to_defaults)
+        reset_layout = QHBoxLayout()
+        reset_layout.addWidget(reset_btn, 0, Qt.AlignmentFlag.AlignRight)
+        layout.addLayout(reset_layout)
+        layout.addStretch()
+
+        self.cpu_btn.clicked.connect(lambda: self._set_backend("cpu"))
+        self.gpu_btn.clicked.connect(lambda: self._set_backend("gpu"))
+        self.refresh_responsive_layout()
+
+        # Lock to CPU if app backend is CPU (Taichi C-API does not support cpu arch)
+        from pixel_refine_desktop.enhance_stack.components.batch_page_v2.backend_arch_helper import (
+            is_cpu_backend,
+        )
+
+        if is_cpu_backend():
+            self.gpu_btn.setVisible(False)
+            self._set_backend("cpu", save=False)
+
+    def _build_page(self, schema, target_controls, target_rows):
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        for field in schema:
+            widget = self._create_field(field, target_controls, target_rows)
+            if widget is not None:
+                page_layout.addWidget(widget)
+
+        page_layout.addStretch()
+        return page
+
+    def _create_field(self, field, target_controls, target_rows):
+        field_type = field["type"]
+        key = field["key"]
+        label = field.get("label", key)
+        tooltip = self._resolve_tooltip(field)
+        default = field.get("default")
+
+        if field_type == "dropdown":
+            form = dropdown(label, field.get("options", []), default, tooltip=tooltip)
+            form.input.currentIndexChanged.connect(self._save_current_config)
+            target_controls[key] = (field, form)
+            return form
+
+        if field_type == "toggle":
+            row_layout, button = toggle(label, bool(default), tooltip=tooltip)
+            button.toggled.connect(
+                lambda checked, btn=button: btn.setText("ON" if checked else "OFF")
+            )
+            button.toggled.connect(self._save_current_config)
+            target_controls[key] = (field, button)
+            return row_layout
+
+        if field_type == "slider":
+            scale = float(field.get("scale", 1.0))
+            slider_value = int(round(float(default) / scale))
+            row, slider_widget, _ = slider(
+                label,
+                int(field.get("min", 0)),
+                int(field.get("max", 100)),
+                slider_value,
+                format_func=lambda v, s=scale, f=field: self._format_slider_value(
+                    v * s, f
+                ),
+                tooltip=tooltip,
+            )
+            slider_widget.sliderReleased.connect(
+                lambda sw=slider_widget, f=field: self._commit_slider_position(sw, f)
+            )
+            slider_widget.value_input.editingFinished.connect(
+                lambda sw=slider_widget, f=field: self._commit_slider_text(sw, f)
+            )
+            target_controls[key] = (field, slider_widget)
+            target_rows.append(row)
+            return row
+
+        return None
+
+    def _resolve_tooltip(self, field):
+        tooltip_key = field.get("tooltip_key")
+        if tooltip_key:
+            return getattr(language_config, tooltip_key, field.get("tooltip", ""))
+        return field.get("tooltip", "")
+
+    def _read_value(self, field, control):
+        if field["type"] == "dropdown":
+            return control.input.currentText()
+        if field["type"] == "toggle":
+            return control.isChecked()
+        if field["type"] == "slider":
+            return control.value() * float(field.get("scale", 1.0))
+        return field.get("default")
+
+    def _coerce_value(self, field, value):
+        value_type = field.get("value_type", "str")
+        if value_type == "int":
+            return int(round(float(value)))
+        if value_type == "float":
+            return float(value)
+        if value_type == "bool":
+            return bool(value)
+        return value
+
+    def _format_slider_value(self, value, field):
+        if field.get("key") == "ai_batch_size" and int(round(value)) == 16:
+            return "Full Frame"
+        value_type = field.get("value_type", "float")
+        decimals = int(field.get("decimals", 2 if value_type == "float" else 0))
+        if value_type == "int" or decimals <= 0:
+            return str(int(round(value)))
+        return f"{float(value):.{decimals}f}"
+
+    def _commit_slider_position(self, slider_widget, field):
+        self._save_current_config()
+
+    def _commit_slider_text(self, slider_widget, field):
+        scale = float(field.get("scale", 1.0))
+        row = getattr(slider_widget, "row_widget", None)
+        if row:
+            row.set_slider_value_from_text(scale)
+        self._save_current_config()
+
+    def _collect_controls(self, controls, loader):
+        config = loader()
+        for key, (field, control) in controls.items():
+            config[key] = self._coerce_value(field, self._read_value(field, control))
+        return config
+
+    def _apply_toggle_styles(self):
+        active_style = """
+            QPushButton {
+                background-color: #E6F4EA;
+                color: #137333;
+                border: 1px solid #A3E2B8;
+                border-radius: 15px;
+                padding: 5px 15px;
+                font-size: 9pt;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #D2EBD9;
+            }
+        """
+        inactive_style = """
+            QPushButton {
+                background-color: #F4F6F7;
+                color: #52606D;
+                border: 1px solid #D9E2EC;
+                border-radius: 15px;
+                padding: 5px 15px;
+                font-size: 9pt;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #EAECEE;
+            }
+        """
+        self.cpu_btn.setStyleSheet(
+            active_style if self.cpu_btn.isChecked() else inactive_style
+        )
+        self.gpu_btn.setStyleSheet(
+            active_style if self.gpu_btn.isChecked() else inactive_style
+        )
+
+    def _set_backend(self, backend, save=True):
+        if backend == "gpu":
+            self.gpu_btn.setChecked(True)
+            self.cpu_btn.setChecked(False)
+            self.backend_stack.setCurrentWidget(self.gpu_page)
+        else:
+            self.cpu_btn.setChecked(True)
+            self.gpu_btn.setChecked(False)
+            self.backend_stack.setCurrentWidget(self.cpu_page)
+        self._apply_toggle_styles()
+        if save and not self._loading:
+            self._save_current_config()
+
+    def _load_configs(self):
+        self._loading = True
+        cpu_config = load_lucas_kanade_config()
+        gpu_config = load_lucas_kanade_gpu_config()
+
+        for key, (field, control) in self.cpu_controls.items():
+            value = cpu_config.get(key, field.get("default"))
+            if field["type"] == "dropdown":
+                control.set_value(str(value))
+            elif field["type"] == "toggle":
+                control.setChecked(bool(value))
+                control.setText("ON" if control.isChecked() else "OFF")
+            elif field["type"] == "slider":
+                scale = float(field.get("scale", 1.0))
+                control.setValue(int(round(float(value) / scale)))
+                row = getattr(control, "row_widget", None)
+                if row:
+                    row._update_value_text(control.value())
+
+        for key, (field, control) in self.gpu_controls.items():
+            value = gpu_config.get(key, field.get("default"))
+            if field["type"] == "dropdown":
+                control.set_value(str(value))
+
+        self._set_backend(
+            str(cpu_config.get("backend", "cpu")).strip().lower(), save=False
+        )
+        self._loading = False
+
+    def _save_current_config(self):
+        if self._loading:
+            return
+        backend = "gpu" if self.gpu_btn.isChecked() else "cpu"
+        cpu_config = self._collect_controls(self.cpu_controls, load_lucas_kanade_config)
+        cpu_config["backend"] = backend
+        gpu_config = self._collect_controls(
+            self.gpu_controls, load_lucas_kanade_gpu_config
+        )
+
+        save_lucas_kanade_config(cpu_config)
+        save_lucas_kanade_gpu_config(gpu_config)
+        save_alignment_config_for_active_batch(
+            "Lucas Kanade", "lucas_kanade_params", cpu_config
+        )
+        save_alignment_config_for_active_batch(
+            "Lucas Kanade", "lucas_kanade_gpu_params", gpu_config
+        )
+
+    def _reset_to_defaults(self):
+        self._loading = True
+        cpu_defaults = {}
+        gpu_defaults = {}
+        for field in LUCAS_KANADE_PARAMETER_SCHEMA:
+            cpu_defaults[field["key"]] = field.get("default")
+        for field in LUCAS_KANADE_GPU_PARAMETER_SCHEMA:
+            gpu_defaults[field["key"]] = field.get("default")
+        cpu_defaults["backend"] = "cpu"
+        save_lucas_kanade_config(cpu_defaults)
+        save_lucas_kanade_gpu_config(gpu_defaults)
+        self._loading = False
+        self._load_configs()
+        self._save_current_config()
+
+    def refresh_responsive_layout(self):
+        available_width = max(240, self.width() - 24)
+        for row in self._cpu_rows:
+            row.apply_density(available_width)
+        for row in self._gpu_rows:
+            row.apply_density(available_width)
 
 
 class DenoisingParameterPage(AlignmentParameterPage):
@@ -670,7 +1004,300 @@ for _method_name in (
     )
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# SIMILARITY PARAMETER PAGE (CPU/GPU toggle)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@live_update("refresh_responsive_layout", on_resize=True)
+class SimilarityParameterPage(QWidget):
+    """Similarity denoising parameter page with CPU/GPU backend toggle.
+
+    Both backends use the same SIMILARITY_PARAMETER_SCHEMA sliders.
+    The toggle only changes `similarity_backend` in the saved config.
+    When device_backend_arch=cpu, the GPU button is hidden/locked.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._loading = False
+        self.controls = {}
+        self._rows = []
+        self.widgets_by_key = {}
+        self._setup_ui()
+        self._load_config()
+
+    def _setup_ui(self):
+        from pixel_refine_desktop.enhance_stack.components.batch_page_v2.backend_arch_helper import (
+            is_cpu_backend,
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(10)
+
+        title = QLabel("Similarity")
+        title.setFont(get_default_font(10, QFont.Weight.Bold))
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setMinimumHeight(32)
+        layout.addWidget(title)
+
+        mode_label = QLabel("Backend")
+        mode_label.setFont(get_default_font(9, QFont.Weight.Bold))
+        mode_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(mode_label)
+
+        toggle_row = QHBoxLayout()
+        toggle_row.addStretch()
+        self.backend_buttons = QButtonGroup(self)
+        self.cpu_btn = QPushButton("CPU")
+        self.gpu_btn = QPushButton("GPU")
+        self.ai_btn = QPushButton("AI")
+        for btn in (self.cpu_btn, self.gpu_btn, self.ai_btn):
+            btn.setCheckable(True)
+            btn.setFixedHeight(26)
+            btn.setMinimumWidth(60)
+            self.backend_buttons.addButton(btn)
+            toggle_row.addWidget(btn)
+        toggle_row.addStretch()
+        layout.addLayout(toggle_row)
+
+        # Build parameter controls (same schema for CPU and GPU)
+        for field in SIMILARITY_PARAMETER_SCHEMA:
+            key = field["key"]
+            label_text = field.get("label", key)
+            tooltip_key = field.get("tooltip_key")
+            tooltip = (
+                getattr(language_config, tooltip_key, field.get("tooltip", ""))
+                if tooltip_key
+                else field.get("tooltip", "")
+            )
+            field_type = field["type"]
+            default = field.get("default")
+
+            if field_type == "dropdown":
+                form = dropdown(
+                    label_text, field.get("options", []), default, tooltip=tooltip
+                )
+                form.input.currentIndexChanged.connect(self._save_config)
+                self.controls[key] = (field, form)
+                self.widgets_by_key[key] = form
+                layout.addWidget(form)
+
+            elif field_type == "toggle":
+                row_widget, button = toggle(label_text, bool(default), tooltip=tooltip)
+                button.setText("ON" if button.isChecked() else "OFF")
+                button.toggled.connect(
+                    lambda checked, btn=button: btn.setText("ON" if checked else "OFF")
+                )
+                button.toggled.connect(self._save_config)
+                self.controls[key] = (field, button)
+                self.widgets_by_key[key] = row_widget
+                layout.addWidget(row_widget)
+
+            elif field_type == "slider":
+                scale = float(field.get("scale", 1.0))
+                slider_value = int(round(float(default) / scale))
+                row, slider_widget, _ = slider(
+                    label_text,
+                    int(field.get("min", 0)),
+                    int(field.get("max", 100)),
+                    slider_value,
+                    format_func=lambda v, s=scale, f=field: self._fmt(v * s, f),
+                    tooltip=tooltip,
+                )
+                slider_widget.sliderReleased.connect(self._save_config)
+                slider_widget.value_input.editingFinished.connect(
+                    lambda sw=slider_widget, f=field: self._commit_text(sw, f)
+                )
+                self.controls[key] = (field, slider_widget)
+                self.widgets_by_key[key] = row
+                self._rows.append(row)
+                layout.addWidget(row)
+
+        reset_btn = QPushButton("Reset to Defaults")
+        reset_btn.setStyleSheet(APPLY_BUTTON)
+        reset_btn.setMinimumHeight(28)
+        reset_btn.clicked.connect(self._reset_to_defaults)
+        reset_layout = QHBoxLayout()
+        reset_layout.addWidget(reset_btn, 0, Qt.AlignmentFlag.AlignRight)
+        layout.addLayout(reset_layout)
+        layout.addStretch()
+
+        self.cpu_btn.clicked.connect(lambda: self._set_backend("cpu"))
+        self.gpu_btn.clicked.connect(lambda: self._set_backend("gpu"))
+        self.ai_btn.clicked.connect(lambda: self._set_backend("ai"))
+
+        # Lock to CPU if app backend arch is cpu (excluding AI backend which runs fine on CPU)
+        self._cpu_only = is_cpu_backend()
+        if self._cpu_only:
+            self.gpu_btn.setVisible(False)
+            mode_label.setText("Backend")
+
+        self.refresh_responsive_layout()
+
+    def _fmt(self, value, field):
+        value_type = field.get("value_type", "float")
+        decimals = int(field.get("decimals", 2 if value_type == "float" else 0))
+        if value_type == "int" or decimals <= 0:
+            return str(int(round(value)))
+        return f"{float(value):.{decimals}f}"
+
+    def _commit_text(self, slider_widget, field):
+        scale = float(field.get("scale", 1.0))
+        row = getattr(slider_widget, "row_widget", None)
+        if row:
+            row.set_slider_value_from_text(scale)
+        self._save_config()
+
+    def _apply_toggle_styles(self):
+        active_style = """
+            QPushButton {
+                background-color: #E6F4EA;
+                color: #137333;
+                border: 1px solid #A3E2B8;
+                border-radius: 13px;
+                padding: 2px 8px;
+                font-size: 9pt;
+                font-weight: 600;
+            }
+            QPushButton:hover { background-color: #D2EBD9; }
+        """
+        inactive_style = """
+            QPushButton {
+                background-color: #F4F6F7;
+                color: #52606D;
+                border: 1px solid #D9E2EC;
+                border-radius: 13px;
+                padding: 2px 8px;
+                font-size: 9pt;
+                font-weight: 600;
+            }
+            QPushButton:hover { background-color: #EAECEE; }
+        """
+        self.cpu_btn.setStyleSheet(
+            active_style if self.cpu_btn.isChecked() else inactive_style
+        )
+        self.gpu_btn.setStyleSheet(
+            active_style if self.gpu_btn.isChecked() else inactive_style
+        )
+        self.ai_btn.setStyleSheet(
+            active_style if self.ai_btn.isChecked() else inactive_style
+        )
+
+    def _set_backend(self, backend, save=True):
+        if backend == "ai":
+            self.ai_btn.setChecked(True)
+            self.cpu_btn.setChecked(False)
+            self.gpu_btn.setChecked(False)
+        elif backend == "gpu" and not getattr(self, "_cpu_only", False):
+            self.gpu_btn.setChecked(True)
+            self.cpu_btn.setChecked(False)
+            self.ai_btn.setChecked(False)
+        else:
+            self.cpu_btn.setChecked(True)
+            self.gpu_btn.setChecked(False)
+            self.ai_btn.setChecked(False)
+        self._apply_toggle_styles()
+
+        # Dynamically show/hide parameters based on backend
+        is_ai = (backend == "ai")
+        ai_keys = {"work_resolution_scale", "ai_tile_size", "ai_overlap_percent", "ai_batch_size", "ai_model_type"}
+        for key, widget in self.widgets_by_key.items():
+            if is_ai:
+                widget.setVisible(key in ai_keys)
+            else:
+                widget.setVisible(key not in ai_keys)
+
+        if save and not self._loading:
+            self._save_config()
+
+    def _load_config(self):
+        self._loading = True
+        config = load_similarity_config()
+        for key, (field, control) in self.controls.items():
+            value = config.get(key, field.get("default"))
+            if field["type"] == "dropdown":
+                control.set_value(str(value))
+            elif field["type"] == "toggle":
+                control.setChecked(bool(value))
+                control.setText("ON" if control.isChecked() else "OFF")
+            elif field["type"] == "slider":
+                scale = float(field.get("scale", 1.0))
+                control.setValue(int(round(float(value) / scale)))
+                row = getattr(control, "row_widget", None)
+                if row:
+                    row._update_value_text(control.value())
+
+        backend = str(config.get("similarity_backend", "gpu")).strip().lower()
+        if getattr(self, "_cpu_only", False) and backend != "ai":
+            backend = "cpu"
+        self._set_backend(backend, save=False)
+        self._loading = False
+
+    def _collect_config(self):
+        config = load_similarity_config()
+        for key, (field, control) in self.controls.items():
+            ft = field["type"]
+            if ft == "dropdown":
+                config[key] = control.input.currentText()
+                try:
+                    vt = field.get("value_type", "str")
+                    if vt == "int":
+                        config[key] = int(float(config[key]))
+                    elif vt == "float":
+                        config[key] = float(config[key])
+                except (ValueError, TypeError):
+                    pass
+            elif ft == "toggle":
+                config[key] = control.isChecked()
+            elif ft == "slider":
+                config[key] = control.value() * float(field.get("scale", 1.0))
+        if self.ai_btn.isChecked():
+            config["similarity_backend"] = "ai"
+        elif self.gpu_btn.isChecked():
+            config["similarity_backend"] = "gpu"
+        else:
+            config["similarity_backend"] = "cpu"
+        return config
+
+    def _save_config(self):
+        if self._loading:
+            return
+        config = self._collect_config()
+        save_similarity_config(config)
+        save_similarity_config_for_active_batch(config)
+
+    def _reset_to_defaults(self):
+        self._loading = True
+        config = {k: v for k, v in SIMILARITY_PARAMETER_SCHEMA[0].items()}
+        defaults = {}
+        for field in SIMILARITY_PARAMETER_SCHEMA:
+            defaults[field["key"]] = field.get("default")
+        defaults["similarity_backend"] = (
+            "cpu" if getattr(self, "_cpu_only", False) else "gpu"
+        )
+        save_similarity_config(defaults)
+        self._loading = False
+        self._load_config()
+        self._save_config()
+
+    def refresh_responsive_layout(self):
+        available_width = max(240, self.width() - 24)
+        for row in self._rows:
+            row.apply_density(available_width)
+
+
 def get_alignment_settings_page(algorithm_name):
+    if algorithm_name == "Lucas Kanade":
+        page = LucasKanadeParameterPage()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(page)
+        scroll.setStyleSheet(SCROLL_AREA)
+        return scroll
+
     page = AlignmentParameterPage(algorithm_name)
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
@@ -681,6 +1308,15 @@ def get_alignment_settings_page(algorithm_name):
 
 
 def get_denoising_settings_page(algorithm_name):
+    if algorithm_name == "Similarity":
+        page = SimilarityParameterPage()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(page)
+        scroll.setStyleSheet(SCROLL_AREA)
+        return scroll
+
     page = DenoisingParameterPage(algorithm_name)
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)

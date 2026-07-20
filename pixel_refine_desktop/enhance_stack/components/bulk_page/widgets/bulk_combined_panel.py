@@ -43,8 +43,11 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
     running_median,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
-    running_similarity,
+    running_similarity as running_mf_similarity,
     running_mf_denoiser,
+)
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Similarity import (
+    running_similarity_fusion,
 )
 
 # from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Similarity_V2 import (
@@ -283,6 +286,16 @@ class CombinedPanel(QWidget):
             QTimer.singleShot(50, self.delay_thumbnails)
         elif self.batch_id is not None:
             self.load_text_labels()
+
+    def _normalize_alignment_ui_name(self, value):
+        mapping = {
+            "Farneback Optical Flow": "Farneback",
+            "Lucas Kanade Optical Flow": "Lucas Kanade",
+            "Lucas Kanade GPU Optical Flow": "Lucas Kanade",
+            "Block Matching GPU Optical Flow": "Block Matching GPU",
+            "RAFT Optical Flow": "RAFT",
+        }
+        return mapping.get(str(value or "").strip(), value)
 
     @Slot(dict)
     def refresh_ui_from_broadcast(self, all_new_states):
@@ -603,7 +616,7 @@ class CombinedPanel(QWidget):
         self.add_btn = QPushButton()
         self.add_btn.setObjectName("addButton")
         self.add_btn.setFixedSize(21, 21)
-        self.add_btn.setIcon(QIcon("resources/assets/icons/add-image.png"))
+        self.add_btn.setIcon(QIcon("resources/assets/icons/add-image_black.png"))
         self.add_btn.setIconSize(QSize(14, 14))
         self.add_btn.setToolTip(language_config.ADD_IMAGE_BUTTON)
         self.add_btn.clicked.connect(
@@ -620,7 +633,7 @@ class CombinedPanel(QWidget):
         self.preview_btn = QPushButton()
         self.preview_btn.setObjectName("processButton")
         self.preview_btn.setFixedSize(21, 21)
-        self.preview_btn.setIcon(QIcon("resources/assets/icons/play-preview.png"))
+        self.preview_btn.setIcon(QIcon("resources/assets/icons/play-preview_black.png"))
         self.preview_btn.setIconSize(QSize(14, 14))
         self.preview_btn.setToolTip(language_config.PREVIEW_IMAGE_BUTTON)
         self.preview_btn.clicked.connect(self.process_and_preview)
@@ -629,7 +642,7 @@ class CombinedPanel(QWidget):
         self.delete_btn = QPushButton()
         self.delete_btn.setObjectName("deleteButton")
         self.delete_btn.setFixedSize(21, 21)
-        self.delete_btn.setIcon(QIcon("resources/assets/icons/delete-image.png"))
+        self.delete_btn.setIcon(QIcon("resources/assets/icons/delete-image_black.png"))
         self.delete_btn.setIconSize(QSize(14, 14))
         self.delete_btn.setToolTip(language_config.DELETE_IMAGE_BUTTON)
         self.delete_btn.clicked.connect(
@@ -728,7 +741,7 @@ class CombinedPanel(QWidget):
         self.comboboxes["denoising"] = denoising_combox
 
         algorithm_alignment.setCurrentText(
-            self.initial_state.get("alignment_algo", "None")
+            self._normalize_alignment_ui_name(self.initial_state.get("alignment_algo", "None"))
         )
         super_res_combo.setCurrentText(
             self.initial_state.get("super_resolution_algo", "None")
@@ -971,11 +984,26 @@ class CombinedPanel(QWidget):
         # --- Langkah 3: Definisikan Aksi Algoritma ---
         actions = {
             "alignment": {
+                "Farneback": lambda: running_farneback_flow(
+                    self,
+                    single_process=False,
+                    batch_id=self.batch_id,
+                    progress_callback=progress_callback,
+                ),
                 "Farneback Optical Flow": lambda: running_farneback_flow(
                     self,
                     single_process=False,
                     batch_id=self.batch_id,
                     progress_callback=progress_callback,
+                ),
+                "Lucas Kanade": lambda: print(
+                    "[INFO] Alignment: 'Lucas Kanade' selected. Execution is handled by the newer MFDenoiser alignment pipeline."
+                ),
+                "Block Matching GPU": lambda: print(
+                    "[INFO] Alignment: 'Block Matching GPU' selected. Execution is handled by the newer MFDenoiser alignment pipeline."
+                ),
+                "RAFT": lambda: print(
+                    "[INFO] Alignment: 'RAFT' selected. Execution is handled by the newer MFDenoiser alignment pipeline."
                 ),
                 "AKAZE": lambda: running_akaze(
                     self,
@@ -1024,7 +1052,13 @@ class CombinedPanel(QWidget):
                     batch_id=self.batch_id,
                     progress_callback=progress_callback,
                 ),
-                "Similarity": lambda: running_similarity(
+                "Similarity": lambda: running_mf_similarity(
+                    self,
+                    single_process=False,
+                    batch_id=self.batch_id,
+                    progress_callback=progress_callback,
+                ),
+                "Similarity Fusion": lambda: running_similarity_fusion(
                     self,
                     single_process=False,
                     batch_id=self.batch_id,

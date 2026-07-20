@@ -254,7 +254,7 @@ class AlgorithmPanel(QWidget, SyncMixin):
         if settings.get("super_resolution") and settings.get("super_resolution") != "No Super Resolution":
             active_algos.append(f"Super Resolusi ({settings['super_resolution']})")
 
-        msg = "Sedang memproses: " + ", ".join(active_algos) if active_algos else "Sedang memproses batch..."
+        msg = ", ".join(active_algos) if active_algos else "Memproses batch"
         
         if hasattr(self, "display_panel") and self.display_panel and hasattr(self.display_panel, "toast"):
             from resources.animations.toast.toast_manager import ToastPosition
@@ -352,7 +352,7 @@ class AlgorithmPanel(QWidget, SyncMixin):
 
         # We can track the current stage index
         current_stage_idx = 0
-        display_msg = "Sedang memproses..."
+        display_msg = "Memproses"
         stage_percent = percent
 
         if "||" in message:
@@ -522,7 +522,12 @@ class AlgorithmPanel(QWidget, SyncMixin):
 
         # Relocate start button if denoising is Average, Median, or Similarity
         # (These modes have no algorithm parameters to configure)
-        is_no_algo_panel = denoising in ["Average", "Median", "Similarity"]
+        is_no_algo_panel = denoising in [
+            "Average",
+            "Median",
+            "Similarity",
+            "Similarity Fusion",
+        ]
         for btn in self._all_process_buttons:
             if hasattr(self, "display_panel") and self.display_panel and btn == self.display_panel.start_btn_ref:
                 continue
@@ -539,7 +544,11 @@ class AlgorithmPanel(QWidget, SyncMixin):
             "No Super Resolution",
         ]
         is_align_active = alignment not in none_values
-        is_algo_active = (denoising not in none_values and denoising not in ["Average", "Median", "Similarity"]) or (
+        is_algo_active = (
+            denoising not in none_values
+            and denoising
+            not in ["Average", "Median", "Similarity", "Similarity Fusion"]
+        ) or (
             super_res not in none_values
         )
 

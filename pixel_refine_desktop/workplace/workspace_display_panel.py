@@ -166,7 +166,8 @@ class WorkspaceDisplayPanel(QWidget):
         self.drop_overlay.setObjectName("DropOverlay")
         self.drop_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.drop_overlay.setHidden(True)
-        self.drop_overlay.setStyleSheet("""
+        self.drop_overlay.setStyleSheet(
+            """
             #DropOverlay {
                 background-color: rgba(46, 204, 113, 180);
                 color: white;
@@ -175,7 +176,8 @@ class WorkspaceDisplayPanel(QWidget):
                 border-radius: 10px;
                 margin: 20px;
             }
-        """)
+        """
+        )
 
         # === SHARED HEADER ===
         self._setup_header()
@@ -232,7 +234,8 @@ class WorkspaceDisplayPanel(QWidget):
 
         self.bulk_mode_btn = QPushButton("Batch Mode", self)
         self.bulk_mode_btn.setObjectName("BulkModeBtn")
-        self.bulk_mode_btn.setStyleSheet("""
+        self.bulk_mode_btn.setStyleSheet(
+            """
             QPushButton#BulkModeBtn {
                 background-color: #F1F3F4;
                 color: #5F6368;
@@ -248,7 +251,8 @@ class WorkspaceDisplayPanel(QWidget):
             QPushButton#BulkModeBtn:pressed {
                 background-color: #D2D4D7;
             }
-        """)
+        """
+        )
         opacity_effect = QGraphicsOpacityEffect(self.bulk_mode_btn)
         self.bulk_mode_btn.setGraphicsEffect(opacity_effect)
         self.center_header_layout.addWidget(self.bulk_mode_btn)
@@ -264,7 +268,8 @@ class WorkspaceDisplayPanel(QWidget):
         # Result Dropdown
         self.result_selector = QComboBox()
         self.result_selector.setFixedWidth(100)
-        self.result_selector.setStyleSheet("""
+        self.result_selector.setStyleSheet(
+            """
             QComboBox {
                 background-color: #F8F9FA;
                 border: 1px solid #E0E0E0;
@@ -283,7 +288,8 @@ class WorkspaceDisplayPanel(QWidget):
                 background-color: #FFFFFF; color: #333333;
                 selection-background-color: #E0E0E0; selection-color: #000000;
             }
-        """)
+        """
+        )
         self.result_selector.setVisible(False)
         self.right_header_layout.addWidget(self.result_selector)
 
@@ -296,7 +302,7 @@ class WorkspaceDisplayPanel(QWidget):
 
         # Preview Process Button
         self.preview_process_btn = IconButton(
-            icon_path="resources/assets/icons/play-preview.png",
+            icon_path="resources/assets/icons/play-preview_black.png",
             variant="primary",
         )
         self.preview_process_btn.setToolTip("Image Process")
@@ -347,8 +353,10 @@ class WorkspaceDisplayPanel(QWidget):
 
         # GridContainer responsive
         self.grid_container = GridContainer(
-            item_width=110, spacing=10,
-            wrap_mode="vertical", column_mode="responsive",
+            item_width=110,
+            spacing=10,
+            wrap_mode="vertical",
+            column_mode="responsive",
         )
         self.grid_container.setStyleSheet("QScrollArea { border: none; }")
 
@@ -371,12 +379,14 @@ class WorkspaceDisplayPanel(QWidget):
         # Playback Controls Bar (floating)
         self.controls_bar = QWidget()
         self.controls_bar.setObjectName("ControlsBar")
-        self.controls_bar.setStyleSheet("""
+        self.controls_bar.setStyleSheet(
+            """
             #ControlsBar {
                 background-color: transparent;
                 border: none;
             }
-        """)
+        """
+        )
         self.controls_bar_layout = QHBoxLayout(self.controls_bar)
         self.controls_bar_layout.setContentsMargins(8, 4, 8, 4)
         self.controls_bar_layout.setSpacing(8)
@@ -387,24 +397,30 @@ class WorkspaceDisplayPanel(QWidget):
 
         # Playback buttons
         self.prev_frame_btn = QPushButton("⏮")
-        self.prev_frame_btn.setStyleSheet("""
+        self.prev_frame_btn.setStyleSheet(
+            """
             QPushButton { background: transparent; border: none; font-size: 18px; padding: 4px 6px; }
             QPushButton:hover { background-color: rgba(0, 0, 0, 15); border-radius: 6px; }
-        """)
+        """
+        )
         self.prev_frame_btn.setFixedSize(36, 36)
 
         self.play_btn = QPushButton("▶")
-        self.play_btn.setStyleSheet("""
+        self.play_btn.setStyleSheet(
+            """
             QPushButton { background: transparent; border: none; font-size: 18px; padding: 4px 6px; }
             QPushButton:hover { background-color: rgba(0, 0, 0, 15); border-radius: 6px; }
-        """)
+        """
+        )
         self.play_btn.setFixedSize(36, 36)
 
         self.next_frame_btn = QPushButton("⏭")
-        self.next_frame_btn.setStyleSheet("""
+        self.next_frame_btn.setStyleSheet(
+            """
             QPushButton { background: transparent; border: none; font-size: 18px; padding: 4px 6px; }
             QPushButton:hover { background-color: rgba(0, 0, 0, 15); border-radius: 6px; }
-        """)
+        """
+        )
         self.next_frame_btn.setFixedSize(36, 36)
 
         # Playback container
@@ -492,7 +508,11 @@ class WorkspaceDisplayPanel(QWidget):
 
     def show_grid(self):
         """Switch ke Grid View."""
-        if hasattr(self, "playback_timer") and self.playback_timer and self.playback_timer.isActive():
+        if (
+            hasattr(self, "playback_timer")
+            and self.playback_timer
+            and self.playback_timer.isActive()
+        ):
             self.playback_timer.stop()
             self.is_playing = False
             self.play_btn.setText("▶")
@@ -589,6 +609,7 @@ class WorkspaceDisplayPanel(QWidget):
     def _get_bulk_mode_btn_stylesheet(self, is_bulk, font_size):
         """Generate stylesheet untuk bulk mode button."""
         from resources.GenericUILibrary.theme import get_theme
+
         theme = get_theme()
         if is_bulk:
             return f"""
@@ -626,21 +647,25 @@ class WorkspaceDisplayPanel(QWidget):
         if not hasattr(self, "start_btn_ref"):
             return
 
-        is_grid = (self.display_stack.currentIndex() == 0)
+        is_grid = self.display_stack.currentIndex() == 0
 
         if hasattr(self, "controls_bar"):
             if is_grid:
-                self.controls_bar.setStyleSheet("""
+                self.controls_bar.setStyleSheet(
+                    """
                     #ControlsBar { background-color: transparent; border: none; }
-                """)
+                """
+                )
             else:
-                self.controls_bar.setStyleSheet("""
+                self.controls_bar.setStyleSheet(
+                    """
                     #ControlsBar {
                         background-color: rgba(255, 255, 255, 220);
                         border: 1px solid rgba(0, 0, 0, 40);
                         border-radius: 8px;
                     }
-                """)
+                """
+                )
 
         if self.is_start_button_mode:
             self.start_btn_ref.setVisible(True)

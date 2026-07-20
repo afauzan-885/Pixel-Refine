@@ -43,29 +43,40 @@ from pixel_refine_desktop.enhance_stack.core.logic.batch_processor import (
 
 class MassAlgorithmEditDialog(QDialog):
     algorithms_updated = Signal()
+class MassAlgorithmEditDialog(QDialog):
+    algorithms_updated = Signal()
 
     def __init__(self, batches, parent=None):
         super().__init__(parent)
         self.batches = batches
         # Create mapping: index -> batch_id for range selection
         self.seq_to_batch_id = {i + 1: batch.id for i, batch in enumerate(self.batches)}
+        from pixel_refine_desktop.enhance_stack.components.batch_page_v2.backend_arch_helper import is_cpu_backend
+        _alignment_choices = [
+            language_config.UI_NO_CHANGE,
+            "ORB",
+            "AKAZE",
+            "Light Glue",
+            "Farneback",
+            "Lucas Kanade",
+            "Block Matching GPU",
+            "RAFT",
+            "No Alignment",
+        ]
+        if is_cpu_backend():
+            _alignment_choices = [
+                c for c in _alignment_choices if c not in ("Block Matching GPU", "RAFT")
+            ]
+
         self.algorithms = {
-            "alignment": [
-                language_config.UI_NO_CHANGE,
-                "Farneback Optical Flow",
-                "Lucas Kanade Optical Flow",
-                "Lucas Kanade GPU Optical Flow",
-                "AKAZE",
-                "ORB",
-                "Light Glue",
-                "No Alignment",
-            ],
+            "alignment": _alignment_choices,
             "super_resolution": [language_config.UI_NO_CHANGE, "No Super Resolution"],
             "denoising": [
                 language_config.UI_NO_CHANGE,
                 "Average",
                 "Median",
                 "Similarity",
+                "Similarity Fusion",
                 "No Denoising",
             ],
         }

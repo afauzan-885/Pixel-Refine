@@ -190,6 +190,34 @@ def mean_division(sum_img: TaichiGPUBuffer, sum_weight: TaichiGPUBuffer, ref_img
     return dst
 
 
+def normalize_accumulator(sum_img: TaichiGPUBuffer, sum_weight: TaichiGPUBuffer, dst: TaichiGPUBuffer = None) -> TaichiGPUBuffer:
+    """Fast normalize for fully-covered tiled accumulators."""
+    if dst is None:
+        dst = engine.allocate(
+            sum_img.shape,
+            dtype=sum_img.dtype,
+            is_vector=getattr(sum_img, "is_vector", False),
+            vector_dim=getattr(sum_img, "vector_dim", 1),
+        )
+
+    is_vec = len(sum_img.shape) == 3 or getattr(sum_img, "is_vector", False)
+    graph = "normalize_accum_vec3_f32" if is_vec else "normalize_accum_f32"
+
+    sum_img_v = sum_img
+    dst_v = dst
+    if is_vec:
+        if not getattr(sum_img, "is_vector", False):
+            sum_img_v = sum_img.view_as_vector(True)
+        if not getattr(dst, "is_vector", False):
+            dst_v = dst.view_as_vector(True)
+
+    try:
+        _mod("common").run(graph, sum_img=sum_img_v, sum_weight=sum_weight, dst=dst_v)
+    except Exception:
+        return mean_division(sum_img, sum_weight, sum_img, dst=dst)
+    return dst
+
+
 def stitch_tile(
     tile: TaichiGPUBuffer,
     tile_weight: TaichiGPUBuffer,
@@ -203,6 +231,42 @@ def stitch_tile(
     h, w = tile.shape[:2]
     is_vec = len(tile.shape) == 3 or getattr(tile, "is_vector", False)
     graph = "stitch_tile_vec3" if is_vec else "stitch_tile_f32"
+
+    tile_v = tile
+    accum_v = accum
+    if is_vec:
+        if not getattr(tile, "is_vector", False):
+            tile_v = tile.view_as_vector(True)
+        if not getattr(accum, "is_vector", False):
+            accum_v = accum.view_as_vector(True)
+
+    _mod("common").run(
+        graph,
+        tile=tile_v,
+        tile_weight=tile_weight,
+        hanning=hanning,
+        accum=accum_v,
+        weight_accum=weight_accum,
+        y0=int(y0),
+        x0=int(x0),
+        h=int(h),
+        w=int(w),
+    )
+
+
+def stitch_tile_normalized(
+    tile: TaichiGPUBuffer,
+    tile_weight: TaichiGPUBuffer,
+    hanning: TaichiGPUBuffer,
+    accum: TaichiGPUBuffer,
+    weight_accum: TaichiGPUBuffer,
+    y0: int,
+    x0: int,
+) -> None:
+    """Tile stitching with running weighted-average normalization."""
+    h, w = tile.shape[:2]
+    is_vec = len(tile.shape) == 3 or getattr(tile, "is_vector", False)
+    graph = "stitch_tile_normalized_vec3" if is_vec else "stitch_tile_normalized_f32"
 
     tile_v = tile
     accum_v = accum
@@ -460,7 +524,7 @@ def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False, dst=None):
     is_vec = getattr(src_buf, "is_vector", False)
     is_2d = (len(src_buf.shape) == 2) and not is_vec
 
-    from taichi_library.taichi_algorithm.gaussian import (
+    from taichi_library.taichi_algorithm.smoothing.gaussian import (
         compute_gaussian_weights,
     )
 
@@ -1435,7 +1499,7 @@ def smooth_flow_gpu(flow, sigma=1.0, kernel_size=5, dst=None):
     Returns:
         TaichiGPUBuffer (H, W, 2) — smoothed flow. Caller must destroy when done.
     """
-    from taichi_library.taichi_algorithm.gaussian import (
+    from taichi_library.taichi_algorithm.smoothing.gaussian import (
         compute_gaussian_weights,
     )
 
@@ -4043,3 +4107,15 @@ def bm3d(src, sigma, block_size=8, search_radius=15,
     elif orig_dtype == np.uint16:
         return np.clip(result * 65535.0, 0, 65535).astype(np.uint16)
     return result
+
+
+def lucasKanade(prev, next, **kwargs):
+    """Dense grid Lucas-Kanade optical flow."""
+    from taichi_library.taichi_algorithm import calcOpticalFlowPyrLK
+    return calcOpticalFlowPyrLK(prev, next, **kwargs)
+
+
+def blockMatching(prev, next, **kwargs):
+    """Dense block matching optical flow with parabolic fit."""
+    from taichi_library.taichi_algorithm import calcOpticalFlowBlockMatching
+    return calcOpticalFlowBlockMatching(prev, next, **kwargs)

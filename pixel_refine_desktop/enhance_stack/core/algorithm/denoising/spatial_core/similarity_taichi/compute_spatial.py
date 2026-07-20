@@ -226,6 +226,8 @@ def phase2_fine_analysis_kernel(
                     for y, x in ti.ndrange(curr_h, curr_w):
                         wy = 0.5 * (1.0 - ti.cos(2.0 * 3.1415926535 * float(y) / float(tile_h - 1))) if tile_h > 1 else 1.0
                         wx = 0.5 * (1.0 - ti.cos(2.0 * 3.1415926535 * float(x) / float(tile_w - 1))) if tile_w > 1 else 1.0
+                        wy = ti.max(wy, 1e-4)
+                        wx = ti.max(wx, 1e-4)
                         w_val = wy * wx
                         
                         weight_map_sum[r + y, c + x] += w_val * final_conf

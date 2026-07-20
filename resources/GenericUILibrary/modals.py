@@ -422,7 +422,7 @@ class modal_confirm(QDialog):
     a blue query icon next to the confirmation message, action buttons at the bottom right,
     and a smooth fade-in animation.
     """
-    def __init__(self, message="Are you sure?", parent=None):
+    def __init__(self, message="Are you sure?", parent=None, title="Confirm Delete", show_checkbox=False, checkbox_text="jangan tampilkan lagi"):
         super().__init__(parent)
         self._drag_active = False
         self._drag_position = None
@@ -485,7 +485,7 @@ class modal_confirm(QDialog):
         title_layout.setContentsMargins(12, 0, 12, 0)
         
         # Title bar text (Logo Qt dihapus, hanya label tulisan)
-        self.title_text = QLabel("Confirm Delete")
+        self.title_text = QLabel(title)
         self.title_text.setStyleSheet("font-family: 'Segoe UI', Arial; font-size: 12px; color: #1E293B; font-weight: 500; background-color: transparent;")
         title_layout.addWidget(self.title_text)
         title_layout.addStretch()
@@ -524,6 +524,20 @@ class modal_confirm(QDialog):
         button_layout = QHBoxLayout(button_widget)
         button_layout.setContentsMargins(18, 0, 18, 4)
         button_layout.setSpacing(8)
+        
+        self.checkbox = None
+        if show_checkbox:
+            from PySide6.QtWidgets import QCheckBox
+            self.checkbox = QCheckBox(checkbox_text)
+            self.checkbox.setStyleSheet("""
+                QCheckBox {
+                    font-family: 'Segoe UI', Arial, sans-serif;
+                    font-size: 12px;
+                    color: #475569;
+                }
+            """)
+            button_layout.addWidget(self.checkbox)
+            
         button_layout.addStretch()
 
         from .theme import get_theme, create_button_style

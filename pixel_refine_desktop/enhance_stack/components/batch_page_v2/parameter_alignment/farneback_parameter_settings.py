@@ -45,7 +45,7 @@ def save_farneback_config(config):
 
 def save_farneback_config_for_active_batch(config):
     save_alignment_config_for_active_batch(
-        "Farneback Optical Flow",
+        "Farneback",
         "farneback_params",
         config,
     )

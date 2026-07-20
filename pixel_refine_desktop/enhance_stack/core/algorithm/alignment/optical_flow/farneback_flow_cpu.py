@@ -66,7 +66,7 @@ class FarnebackFlowCPU:
             flags=int(config.get("flags", 0)),
         )
 
-    def align_frame(self, reference, target, config=None, stop_requested=None):
+    def align_frame(self, reference, target, config=None, stop_requested=None, target_for_warping=None):
         config = config or self.load_config()
 
         def flow_func(reference_gray, target_gray):
@@ -81,6 +81,7 @@ class FarnebackFlowCPU:
             overlap=float(config.get("tile_overlap", 0.20)),
             use_multi_core=bool(config.get("use_multi_core", True)),
             stop_requested=stop_requested,
+            target_for_warping=target_for_warping,
         )
 
     def build_flow_alignment(self, ctx, reference, target_dims, orchestrator, config):
@@ -93,13 +94,20 @@ class FarnebackFlowCPU:
         from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
             extract_exif,
             save_to_hdf5,
+            write_alignment_cache_attrs,
         )
 
         saved_count = 0
         with h5py.File(ctx.hdf5_path, "w") as h5f:
-            h5f.attrs["ref_image_path"] = ctx.image_paths[0]
-            h5f.attrs["alignment_algorithm"] = self.NAME
-            h5f.attrs["alignment_process"] = "tile_optical_flow"
+            write_alignment_cache_attrs(
+                h5f,
+                ref_image_path=ctx.image_paths[0],
+                alignment_selection=getattr(ctx, "alignment_selection_name", self.NAME),
+                alignment_algorithm=getattr(ctx, "alignment_effective_name", self.NAME),
+                alignment_process="tile_optical_flow",
+                cache_key=getattr(ctx, "alignment_cache_key", ""),
+                cache_payload=getattr(ctx, "alignment_cache_payload", ""),
+            )
 
             for index, path in enumerate(ctx.image_paths):
                 if ctx.stop_requested and ctx.stop_requested():

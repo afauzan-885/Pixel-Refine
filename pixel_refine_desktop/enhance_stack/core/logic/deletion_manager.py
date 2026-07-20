@@ -252,7 +252,7 @@ class DeletionManager(QObject):
 
                 self.panel.toast.show_progress(
                     f"Menghapus gambar {0}%",
-                    position=ToastPosition.BOTTOM_RIGHT,
+                    position=ToastPosition.BOTTOM_LEFT,
                     category="deletion_progress",
                 )
                 self.start_deletion_process(paths_to_remove)
@@ -311,7 +311,7 @@ class DeletionManager(QObject):
             if pct < 100:
                 self.panel.toast.show_progress(
                     f"Menghapus gambar {pct}%",
-                    position=ToastPosition.BOTTOM_RIGHT,
+                    position=ToastPosition.BOTTOM_LEFT,
                     category="deletion_progress",
                 )
 
@@ -326,7 +326,7 @@ class DeletionManager(QObject):
             self.panel.toast.show_message(
                 f"Berhasil menghapus {count} gambar.",
                 duration=3000,
-                position=ToastPosition.BOTTOM_RIGHT,
+                position=ToastPosition.BOTTOM_LEFT,
                 priority="HIGH",
             )
         else:
@@ -337,7 +337,7 @@ class DeletionManager(QObject):
         self.panel.toast.show_message(
             f"Gagal menghapus gambar: {message}",
             duration=4000,
-            position=ToastPosition.BOTTOM_RIGHT,
+            position=ToastPosition.BOTTOM_LEFT,
             priority="URGENT",
         )
 

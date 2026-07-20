@@ -124,9 +124,23 @@ class RightPanel(QWidget, SyncMixin):
         # Trigger immediate refresh for all bindings in this scope
         # (SyncMixin.on_store_changed(None, ...) handles this)
         self.on_store_changed(None, self.get_data())
+        self._normalize_alignment_form_value()
 
         # Emit signal for adaptive UI (AlgorithmPanel)
         self._on_settings_changed(save_to_store=False)
+
+    def _normalize_alignment_form_value(self):
+        raw_value = self.align_form.get_value()
+        mapping = {
+            "Farneback Optical Flow": "Farneback",
+            "Lucas Kanade Optical Flow": "Lucas Kanade",
+            "Lucas Kanade GPU Optical Flow": "Lucas Kanade",
+            "Block Matching GPU Optical Flow": "Block Matching GPU",
+            "RAFT Optical Flow": "RAFT",
+        }
+        normalized = mapping.get(str(raw_value or "").strip())
+        if normalized:
+            self.align_form.set_value(normalized)
 
     def _save_batch_settings(self):
         """Save current UI values to store under the current batch scope."""
@@ -417,10 +431,30 @@ class RightPanel(QWidget, SyncMixin):
         if not self.controller:
             return
 
-        from resources.GenericUILibrary.modals import modal_confirm
-        confirmed = modal_confirm.question(self, "Apakah Anda yakin ingin membuat batch baru?")
-        if not confirmed:
-            return
+        from pixel_refine_desktop.ui.views.settings.General.general_store import get_general_store
+        store = get_general_store()
+        show_confirm = store.get("show_new_batch_confirm")
+        if show_confirm is None:
+            show_confirm = True
+
+        if show_confirm:
+            from resources.GenericUILibrary.modals import modal_confirm
+            from PySide6.QtWidgets import QDialog
+            dialog = modal_confirm(
+                message="Apakah Anda yakin ingin membuat batch baru?",
+                parent=self,
+                title="Create New Batch",
+                show_checkbox=True,
+                checkbox_text="Jangan tampilkan lagi"
+            )
+            # Connect checkbox toggled to saving setting in real-time
+            dialog.checkbox.toggled.connect(
+                lambda checked: store.set("show_new_batch_confirm", not checked)
+            )
+            
+            result = dialog.exec()
+            if result != QDialog.DialogCode.Accepted:
+                return
 
         # Generate default name (Robust check for uniqueness)
         all_batches = self.controller.get_all_batches()

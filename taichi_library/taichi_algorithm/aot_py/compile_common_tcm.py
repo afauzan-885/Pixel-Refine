@@ -186,6 +186,23 @@ def compile_common_aot(arch=ti.vulkan, save_path="common_vulkan.tcm"):
     add_mean_division("mean_division_f32", ti.f32, is_vec=False)
     add_mean_division("mean_division_vec3_f32", ti.f32, is_vec=True)
 
+    def add_normalize_accum(name, is_vec=False):
+        builder = ti.graph.GraphBuilder()
+        if is_vec:
+            sum_img = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "sum_img", ti.types.vector(3, ti.f32), ndim=2)
+            dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.types.vector(3, ti.f32), ndim=2)
+            kernel = common_mod._normalize_accum_vec3_kernel
+        else:
+            sum_img = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "sum_img", ti.f32, ndim=2)
+            dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
+            kernel = common_mod._normalize_accum_kernel
+        sum_weight = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "sum_weight", ti.f32, ndim=2)
+        builder.dispatch(kernel, sum_img, sum_weight, dst)
+        module.add_graph(name, builder.compile())
+
+    add_normalize_accum("normalize_accum_f32")
+    add_normalize_accum("normalize_accum_vec3_f32", is_vec=True)
+
     # 7. Scale Kernels
     def add_scale(name, is_vec=False):
         builder = ti.graph.GraphBuilder()
@@ -226,6 +243,29 @@ def compile_common_aot(arch=ti.vulkan, save_path="common_vulkan.tcm"):
     add_stitch("stitch_tile_f32")
     add_stitch("stitch_tile_vec3", is_vec=True)
 
+    def add_stitch_normalized(name, is_vec=False):
+        builder = ti.graph.GraphBuilder()
+        if is_vec:
+            tile = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "tile", ti.types.vector(3, ti.f32), ndim=2)
+            accum = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "accum", ti.types.vector(3, ti.f32), ndim=2)
+            kernel = common_mod._stitch_tile_normalized_vec3_kernel
+        else:
+            tile = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "tile", ti.f32, ndim=2)
+            accum = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "accum", ti.f32, ndim=2)
+            kernel = common_mod._stitch_tile_normalized_f32_kernel
+        tile_weight = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "tile_weight", ti.f32, ndim=2)
+        hanning = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "hanning", ti.f32, ndim=2)
+        weight_accum = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "weight_accum", ti.f32, ndim=2)
+        y0 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "y0", ti.i32)
+        x0 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "x0", ti.i32)
+        h = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
+        w = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
+        builder.dispatch(kernel, tile, tile_weight, hanning, accum, weight_accum, y0, x0, h, w)
+        module.add_graph(name, builder.compile())
+
+    add_stitch_normalized("stitch_tile_normalized_f32")
+    add_stitch_normalized("stitch_tile_normalized_vec3", is_vec=True)
+
     def add_stitch_batch(name, is_vec=False):
         builder = ti.graph.GraphBuilder()
         if is_vec:
@@ -263,7 +303,7 @@ def compile_common_aot(arch=ti.vulkan, save_path="common_vulkan.tcm"):
     add_stitch_batch("stitch_tile_batch_vec3", is_vec=True)
 
     # 9. copyMakeBorder Kernels (Fusing copy_make_border into common.tcm)
-    border_mod = importlib.import_module("taichi_library.taichi_algorithm.copy_make_border")
+    border_mod = importlib.import_module("taichi_library.taichi_algorithm.image_processing.copy_make_border")
     
     def add_border_2d(dtype_name, dtype):
         # 2D Constant

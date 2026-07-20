@@ -445,33 +445,38 @@ def process_in_gpu(
         flow_backend = kwargs.get(
             "optical_flow_type", kwargs.get("flow_backend", "alignment_tile")
         )
+        flow_backend = str(flow_backend or "alignment_tile").strip().lower()
         if alignment_variant == "block_align":
             flow_backend = "block_align"
 
-        # Pop keys from kwargs to prevent multiple values for keyword argument error
-        align_kwargs = dict(kwargs)
-        align_kwargs.pop("optical_flow_type", None)
-        align_kwargs.pop("flow_backend", None)
+        if flow_backend in ("none", "off", "disabled", "no_alignment"):
+            success = True
+            print("[GPU Alignment] Alignment bypassed by backend setting.")
+        else:
+            # Pop keys from kwargs to prevent multiple values for keyword argument error
+            align_kwargs = dict(kwargs)
+            align_kwargs.pop("optical_flow_type", None)
+            align_kwargs.pop("flow_backend", None)
 
-        success = perform_alignment_gpu(
-            images,
-            ref_align_input,
-            work_res_h,
-            work_res_w,
-            alignment_tile_size if alignment_tile_size is not None else tile_h,
-            alignment_tile_size if alignment_tile_size is not None else tile_w,
-            ref_dtype,
-            update_progress,
-            stop_requested,
-            progress_start=p_align_start,
-            progress_end=p_align_end,
-            is_linear_mode=is_linear_mode,
-            proxy_scale=proxy_scale,
-            index_offset=images_processed_so_far,
-            return_format=align_return_format,
-            optical_flow_type=flow_backend,
-            **align_kwargs,
-        )
+            success = perform_alignment_gpu(
+                images,
+                ref_align_input,
+                work_res_h,
+                work_res_w,
+                alignment_tile_size if alignment_tile_size is not None else tile_h,
+                alignment_tile_size if alignment_tile_size is not None else tile_w,
+                ref_dtype,
+                update_progress,
+                stop_requested,
+                progress_start=p_align_start,
+                progress_end=p_align_end,
+                is_linear_mode=is_linear_mode,
+                proxy_scale=proxy_scale,
+                index_offset=images_processed_so_far,
+                return_format=align_return_format,
+                optical_flow_type=flow_backend,
+                **align_kwargs,
+            )
         if kwargs.get("alignment_only", False):
             return success
         if not success:
@@ -530,24 +535,44 @@ def process_in_gpu(
             (work_res_h, work_res_w), dtype=np.float32, host_accessible=True
         )
 
-        batch_size = 8
+        batch_size = 4
         use_overall_progress = total_overall_images and total_overall_images > 0
+
+        def _load_chunk(start, end):
+            chunk = []
+            if data_source is not None:
+                import h5py
+
+                with h5py.File(data_source, "r") as h5f:
+                    for idx in range(start, end):
+                        chunk.append(h5f[f"image_{idx}"][:])
+            else:
+                chunk = images[start:end]
+            return chunk
+
+        from concurrent.futures import ThreadPoolExecutor
+
         try:
-            for start_idx in range(0, num_images, batch_size):
-                if stop_requested and stop_requested():
-                    break
-                end_idx = min(start_idx + batch_size, num_images)
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future_chunk = executor.submit(
+                    _load_chunk, 0, min(batch_size, num_images)
+                )
 
-                # Load current chunk of 8 images from HDF5 or RAM
-                chunk_images = []
-                if data_source is not None:
-                    import h5py
+                for start_idx in range(0, num_images, batch_size):
+                    if stop_requested and stop_requested():
+                        break
 
-                    with h5py.File(data_source, "r") as h5f:
-                        for idx in range(start_idx, end_idx):
-                            chunk_images.append(h5f[f"image_{idx}"][:])
-                else:
-                    chunk_images = images[start_idx:end_idx]
+                    chunk_images = future_chunk.result()
+                    end_idx = min(start_idx + batch_size, num_images)
+
+                    next_start = start_idx + batch_size
+                    if next_start < num_images:
+                        next_end = min(next_start + batch_size, num_images)
+                        future_chunk = executor.submit(
+                            _load_chunk, next_start, next_end
+                        )
+                    else:
+                        future_chunk = None
 
                 for chunk_i, img_orig in enumerate(chunk_images):
                     i = start_idx + chunk_i

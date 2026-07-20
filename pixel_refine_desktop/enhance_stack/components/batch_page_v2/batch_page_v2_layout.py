@@ -49,7 +49,10 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
     running_mf_denoiser,
-    running_mf_denoiser as running_similarity,
+    running_similarity as running_mf_similarity,
+)
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Similarity import (
+    running_similarity_fusion,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
     running_median,
@@ -459,15 +462,24 @@ class BatchPageV2Layout(QWidget):
                 return
 
             denoising_active = denoising_choice not in ("No Denoising", "None", "")
+            denoising_owns_alignment = denoising_choice in (
+                "Average",
+                "Similarity",
+                "Similarity Fusion",
+            )
 
-            # Proses untuk Alignment. If denoising is active, MFDenoiser owns
-            # alignment orchestration and receives this dropdown choice.
+            # Proses untuk Alignment. Some denoising pipelines own alignment
+            # internally and receive the selected alignment backend.
             alignment_valid = True
-            if denoising_active:
-                pass
+            if denoising_owns_alignment:
+                if alignment_choice not in ("", "None", "No Alignment"):
+                    print(
+                        f"[batch_page_v2_layout] Alignment '{alignment_choice}' "
+                        f"will be executed inside denoising pipeline '{denoising_choice}'."
+                    )
             elif alignment_choice == "ORB":
                 running_orb(self, single_process=True)
-            elif alignment_choice == "Farneback Optical Flow":
+            elif alignment_choice in ("Farneback", "Farneback Optical Flow"):
                 running_farneback_flow(self, single_process=True)
             elif alignment_choice == "AKAZE":
                 running_akaze(self, single_process=True)
@@ -502,22 +514,6 @@ class BatchPageV2Layout(QWidget):
                         )
                     return
 
-            super_resolution_executed = False
-            if super_resolution_choice == "Interpolation":
-                running_interpolation(self, single_process=True)
-            elif super_resolution_choice == "No Super Resolution":
-                pass
-
-            if super_resolution_executed and not batch_mode:
-                latest_image_path = get_last_image("database/stack")
-                if latest_image_path:
-                    dialog = ImageViewer(latest_image_path, self)
-                    dialog.exec()
-                else:
-                    QMessageBox.warning(
-                        self, "Caution", language_config.NOT_IMAGE_PREVIEW
-                    )
-
             # Proses untuk Denoising
             denoising_executed = False
             if denoising_choice == "Average":
@@ -536,11 +532,16 @@ class BatchPageV2Layout(QWidget):
                 running_median(self, single_process=True)
                 denoising_executed = True
             elif denoising_choice == "Similarity":
-                running_similarity(
+                running_mf_similarity(
                     self,
                     single_process=True,
-                    merging_mode="similarity",
-                    output_suffix="similarity",
+                    alignment_backend=alignment_choice,
+                )
+                denoising_executed = True
+            elif denoising_choice == "Similarity Fusion":
+                running_similarity_fusion(
+                    self,
+                    single_process=True,
                     alignment_backend=alignment_choice,
                 )
                 denoising_executed = True
@@ -555,6 +556,23 @@ class BatchPageV2Layout(QWidget):
                 else:
                     QMessageBox.warning(
                         self, "Warning", language_config.NOT_IMAGE_PREVIEW
+                    )
+
+            super_resolution_executed = False
+            if super_resolution_choice == "Interpolation":
+                running_interpolation(self, single_process=True)
+                super_resolution_executed = True
+            elif super_resolution_choice == "No Super Resolution":
+                pass
+
+            if super_resolution_executed and not batch_mode:
+                latest_image_path = get_last_image("database/stack")
+                if latest_image_path:
+                    dialog = ImageViewer(latest_image_path, self)
+                    dialog.exec()
+                else:
+                    QMessageBox.warning(
+                        self, "Caution", language_config.NOT_IMAGE_PREVIEW
                     )
         except Exception as e:
             QMessageBox.critical(

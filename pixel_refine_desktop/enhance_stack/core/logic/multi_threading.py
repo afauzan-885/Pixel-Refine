@@ -159,6 +159,13 @@ def load_raw_as_8bit_rgb_half_res(image_path: str) -> np.ndarray:
             f"[Fallback] Taichi Hamilton half res demosaic failed ({e_ta}), falling back to rawpy half-res."
         )
         try:
+            from taichi_library import taichi_aot
+
+            taichi_aot.engine.buffer_pool.clear()
+        except Exception:
+            # Best-effort cleanup only; fallback should still proceed if cleanup fails.
+            pass
+        try:
             with rawpy.imread(image_path) as raw:
                 gamma_setting = (2.222, 4.5)
                 img_array = raw.postprocess(

@@ -12,17 +12,50 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.op
 
 
 DEFAULT_LUCAS_KANADE_CONFIG = {
-    "grid_step": 16,
-    "border_margin": 8,
-    "point_workers": 2,
-    "win_size": 17,
-    "max_level": 2,
-    "iterations": 18,
-    "epsilon": 0.015,
-    "use_multi_core": True,
-    "tile_cols": 2,
-    "tile_rows": 2,
-    "tile_overlap": 0.20,
+    "backend": "cpu",
+    "mode": "fast",
+}
+
+LUCAS_KANADE_CPU_PRESETS = {
+    "fast": {
+        "grid_step": 24,
+        "border_margin": 8,
+        "point_workers": 2,
+        "win_size": 15,
+        "max_level": 2,
+        "iterations": 12,
+        "epsilon": 0.02,
+        "use_multi_core": True,
+        "tile_cols": 2,
+        "tile_rows": 2,
+        "tile_overlap": 0.20,
+    },
+    "medium": {
+        "grid_step": 16,
+        "border_margin": 8,
+        "point_workers": 2,
+        "win_size": 17,
+        "max_level": 2,
+        "iterations": 18,
+        "epsilon": 0.015,
+        "use_multi_core": True,
+        "tile_cols": 3,
+        "tile_rows": 2,
+        "tile_overlap": 0.20,
+    },
+    "high": {
+        "grid_step": 12,
+        "border_margin": 8,
+        "point_workers": 3,
+        "win_size": 21,
+        "max_level": 3,
+        "iterations": 24,
+        "epsilon": 0.01,
+        "use_multi_core": True,
+        "tile_cols": 3,
+        "tile_rows": 2,
+        "tile_overlap": 0.25,
+    },
 }
 
 
@@ -30,6 +63,23 @@ class LucasKanadeCPU:
     NAME = "Lucas Kanade Optical Flow"
     KIND = "alignment"
     DESCRIPTION = "Tile-based CPU Lucas-Kanade optical flow alignment."
+
+    @staticmethod
+    def _normalize_mode(mode):
+        value = str(mode or "fast").strip().lower()
+        if value in ("balanced", "balance", "normal"):
+            return "medium"
+        if value not in LUCAS_KANADE_CPU_PRESETS:
+            return "fast"
+        return value
+
+    @staticmethod
+    def _resolve_mode_config(config):
+        mode = LucasKanadeCPU._normalize_mode(config.get("mode", "fast"))
+        resolved = LUCAS_KANADE_CPU_PRESETS[mode].copy()
+        resolved["mode"] = mode
+        resolved["backend"] = str(config.get("backend", "cpu") or "cpu")
+        return resolved
 
     @staticmethod
     def load_config(batch_id=None, config_filename=None):
@@ -43,7 +93,21 @@ class LucasKanadeCPU:
                 config.update(params.get("LucasKanade_BATCH", {}))
         except Exception as exc:
             print(f"[LucasKanadeCPU] Failed to load config: {exc}")
-        return config
+        if batch_id is not None:
+            try:
+                from pixel_refine_desktop.enhance_stack.core.logic import (
+                    batch_parameter_manager,
+                )
+
+                batch_params = batch_parameter_manager.load_json_state().get(
+                    str(batch_id), {}
+                )
+                section = batch_params.get("lucas_kanade_params", {})
+                if isinstance(section, dict):
+                    config.update(section)
+            except Exception as exc:
+                print(f"[LucasKanadeCPU] Failed to load batch config: {exc}")
+        return LucasKanadeCPU._resolve_mode_config(config)
 
     @staticmethod
     def load_lucas_kanade_config(config_filename=None):
@@ -187,6 +251,7 @@ class LucasKanadeCPU:
         stop_requested=None,
         tile_executor=None,
         point_executor=None,
+        target_for_warping=None,
     ):
         config = config or self.load_config()
 
@@ -208,6 +273,7 @@ class LucasKanadeCPU:
             use_multi_core=bool(config.get("use_multi_core", True)),
             stop_requested=stop_requested,
             executor=tile_executor,
+            target_for_warping=target_for_warping,
         )
 
     def build_flow_alignment(self, ctx, reference, target_dims, orchestrator, config):
@@ -220,6 +286,7 @@ class LucasKanadeCPU:
         from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
             extract_exif,
             save_to_hdf5,
+            write_alignment_cache_attrs,
         )
 
         tile_workers = max(
@@ -229,7 +296,9 @@ class LucasKanadeCPU:
                 os.cpu_count() or 4,
             ),
         )
-        point_workers = max(1, min(int(config.get("point_workers", 2)), os.cpu_count() or 4))
+        point_workers = max(
+            1, min(int(config.get("point_workers", 2)), os.cpu_count() or 4)
+        )
 
         def compute_aligned(index, path, tile_executor, point_executor):
             if ctx.stop_requested and ctx.stop_requested():
@@ -237,9 +306,7 @@ class LucasKanadeCPU:
             if index == 0:
                 return index, path, np.array(reference, copy=True)
 
-            frame = orchestrator._load_single_frame(
-                ctx, path, target_dims=target_dims
-            )
+            frame = orchestrator._load_single_frame(ctx, path, target_dims=target_dims)
             if frame is None:
                 return index, path, None
             try:
@@ -257,75 +324,103 @@ class LucasKanadeCPU:
 
         saved_count = 0
         with h5py.File(ctx.hdf5_path, "w") as h5f:
-            h5f.attrs["ref_image_path"] = ctx.image_paths[0]
-            h5f.attrs["alignment_algorithm"] = self.NAME
-            h5f.attrs["alignment_process"] = "tile_optical_flow"
+            write_alignment_cache_attrs(
+                h5f,
+                ref_image_path=ctx.image_paths[0],
+                alignment_selection=getattr(ctx, "alignment_selection_name", self.NAME),
+                alignment_algorithm=getattr(ctx, "alignment_effective_name", self.NAME),
+                alignment_process="tile_optical_flow",
+                cache_key=getattr(ctx, "alignment_cache_key", ""),
+                cache_payload=getattr(ctx, "alignment_cache_payload", ""),
+            )
 
             paths = list(ctx.image_paths)
             with ThreadPoolExecutor(max_workers=1) as frame_executor:
-                with ThreadPoolExecutor(max_workers=tile_workers) as tile_executor:
-                    with ThreadPoolExecutor(max_workers=point_workers) as point_executor:
-                        future = None
-                        for index, path in enumerate(paths):
-                            if future is None:
-                                future = frame_executor.submit(
-                                    compute_aligned,
-                                    index,
-                                    path,
-                                    tile_executor,
-                                    point_executor,
+                with ThreadPoolExecutor(max_workers=1) as writer_executor:
+                    with ThreadPoolExecutor(max_workers=tile_workers) as tile_executor:
+                        with ThreadPoolExecutor(
+                            max_workers=point_workers
+                        ) as point_executor:
+
+                            def write_job(idx, r_path, img):
+                                save_to_hdf5(
+                                    h5f,
+                                    f"image_{idx}",
+                                    img,
+                                    extract_exif(r_path),
                                 )
-
-                            result_index, result_path, aligned = future.result()
-                            next_index = index + 1
-                            if next_index < len(paths) and not (
-                                ctx.stop_requested and ctx.stop_requested()
-                            ):
-                                future = frame_executor.submit(
-                                    compute_aligned,
-                                    next_index,
-                                    paths[next_index],
-                                    tile_executor,
-                                    point_executor,
+                                h5f.flush()
+                                print(
+                                    f"[LucasKanadeCPU] saved image_{idx} shape={img.shape} dtype={img.dtype}"
                                 )
-                            else:
-                                future = None
+                                del img
 
-                            if ctx.stop_requested and ctx.stop_requested():
-                                break
-                            if aligned is None:
-                                continue
+                            future = None
+                            for index, path in enumerate(paths):
+                                if future is None:
+                                    future = frame_executor.submit(
+                                        compute_aligned,
+                                        index,
+                                        path,
+                                        tile_executor,
+                                        point_executor,
+                                    )
 
-                            save_to_hdf5(
-                                h5f,
-                                f"image_{result_index}",
-                                aligned,
-                                extract_exif(result_path),
-                            )
-                            h5f.flush()
-                            saved_count += 1
-                            print(
-                                f"[LucasKanadeCPU] saved image_{result_index} shape={aligned.shape} dtype={aligned.dtype}"
-                            )
-                            del aligned
+                                result_index, result_path, aligned = future.result()
+                                next_index = index + 1
+                                if next_index < len(paths) and not (
+                                    ctx.stop_requested and ctx.stop_requested()
+                                ):
+                                    future = frame_executor.submit(
+                                        compute_aligned,
+                                        next_index,
+                                        paths[next_index],
+                                        tile_executor,
+                                        point_executor,
+                                    )
+                                else:
+                                    future = None
 
-                            if saved_count % 4 == 0:
-                                gc.collect()
+                                if ctx.stop_requested and ctx.stop_requested():
+                                    break
+                                if aligned is None:
+                                    continue
 
-                            if ctx.update_progress:
-                                progress = 25 + int(
-                                    ((result_index + 1) / max(1, ctx.total_images))
-                                    * 65
+                                writer_executor.submit(
+                                    write_job,
+                                    result_index,
+                                    result_path,
+                                    aligned,
                                 )
-                                ctx.update_progress(
-                                    progress,
-                                    f"Lucas-Kanade flow {result_index + 1}/{ctx.total_images}",
-                                )
+                                saved_count += 1
+
+                                if saved_count % 4 == 0:
+                                    gc.collect()
+
+                                if ctx.update_progress:
+                                    progress = 25 + int(
+                                        ((result_index + 1) / max(1, ctx.total_images))
+                                        * 65
+                                    )
+                                    from pixel_refine_desktop.ui.views.settings.General.Language import language_config
+                                    msg = getattr(language_config, "PROGRESS_ALIGN", "Align: {}/{}").format(
+                                        result_index + 1, ctx.total_images
+                                    )
+                                    ctx.update_progress(progress, msg)
 
         ctx.aligned_frames = []
         ctx.frames = []
         ctx.data_source = ctx.hdf5_path
         ctx.needs_alignment = False
+
+        # Clear Vulkan buffer pool at the end of the batch process
+        try:
+            from taichi_library import taichi_aot
+            if hasattr(taichi_aot, "engine") and hasattr(taichi_aot.engine, "buffer_pool") and taichi_aot.engine.buffer_pool:
+                taichi_aot.engine.buffer_pool.clear()
+        except Exception:
+            pass
+
         print(
             f"[LucasKanadeCPU] finished saved={saved_count} hdf5_path={ctx.hdf5_path}"
         )

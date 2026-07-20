@@ -66,8 +66,9 @@ class ONNXSessionManager:
     selalu dilepaskan dengan benar, bahkan jika terjadi error.
     """
 
-    def __init__(self, model_path):
+    def __init__(self, model_path, provider_preference=None):
         self.model_path = model_path
+        self.provider_preference = provider_preference
         self.session = None
         # print("ONNXSessionManager: Inisialisasi.") # Pesan ini bisa dihapus agar tidak terlalu ramai
 
@@ -107,9 +108,9 @@ class ONNXSessionManager:
             # print(f"Mencoba memuat model ONNX RAFT dari: {model_path}")
             available_providers = ort.get_available_providers()
 
-            preferred_providers = [
-                ("DmlExecutionProvider", {"device_id": 1}),
-                ("CUDAExecutionProvider", {"device_id": 1}),
+            preferred_providers = self.provider_preference or [
+                "CUDAExecutionProvider",
+                "DmlExecutionProvider",
                 "CPUExecutionProvider",
             ]
 
@@ -150,7 +151,7 @@ class ONNXSessionManager:
 
 # --- Global variable untuk menyimpan session ONNX agar tidak di-load berulang kali ---
 MODEL_SESSION = None
-FLOW_MODEL_PATH = "database/Learning_Model/optical_flow_estimation_raft_2023aug_int8bq.onnx"  # Ganti dengan path model ONNX Anda
+FLOW_MODEL_PATH = "database/Learning_Model/optical_flow_estimation_raft_2023aug.onnx"
 
 
 # ==============================================================================
@@ -183,17 +184,23 @@ def process_single_tile_resized(args, stop_requested=None):
 
 def create_blending_weights(tile_h, tile_w, overlap_h, overlap_w):
     """
-    Membuat peta bobot blending 2D (smooth window) agar transisi antar tile halus.
+    Membuat peta bobot blending 2D berbasis Hanning agar transisi antar tile halus.
     """
-    y_ramp_up = np.linspace(0.0, 1.0, overlap_h, dtype=np.float32)
-    y_ramp_down = np.linspace(1.0, 0.0, overlap_h, dtype=np.float32)
-    y_flat = np.ones(tile_h - 2 * overlap_h, dtype=np.float32)
-    y_weights = np.concatenate([y_ramp_up, y_flat, y_ramp_down])
+    def axis_weights(length, overlap):
+        length = int(length)
+        overlap = max(0, min(int(overlap), max(0, length // 2)))
+        weights = np.ones(length, dtype=np.float32)
+        if overlap <= 0 or length <= 1:
+            return weights
+        edge = np.hanning(overlap * 2).astype(np.float32)
+        ramp_up = edge[:overlap]
+        ramp_down = edge[-overlap:]
+        weights[:overlap] = np.maximum(ramp_up, 1e-4)
+        weights[-overlap:] = np.maximum(ramp_down, 1e-4)
+        return weights
 
-    x_ramp_up = np.linspace(0.0, 1.0, overlap_w, dtype=np.float32)
-    x_ramp_down = np.linspace(1.0, 0.0, overlap_w, dtype=np.float32)
-    x_flat = np.ones(tile_w - 2 * overlap_w, dtype=np.float32)
-    x_weights = np.concatenate([x_ramp_up, x_flat, x_ramp_down])
+    y_weights = axis_weights(tile_h, overlap_h)
+    x_weights = axis_weights(tile_w, overlap_w)
 
     weights_2d = y_weights[:, None] * x_weights[None, :]
     return weights_2d[:, :, None]
@@ -253,6 +260,7 @@ def compute_flow_raft(
     # --- Penampung hasil sementara ---
     final_flow = np.zeros((full_h, full_w, 2), dtype=np.float32)
     weight_acc = np.zeros((full_h, full_w, 1), dtype=np.float32)
+    successful_tiles = 0
 
     # --- Proses tile satu per satu ---
     for tile_idx, (y_start, x_start, y_end, x_end) in enumerate(coords, 1):
@@ -300,6 +308,7 @@ def compute_flow_raft(
 
             final_flow[y_start:y_end, x_start:x_end] += flow_orig * blending
             weight_acc[y_start:y_end, x_start:x_end] += blending
+            successful_tiles += 1
 
             # Laporkan progress per tile ke callback
             if progress_callback is not None:
@@ -307,6 +316,10 @@ def compute_flow_raft(
 
         except Exception as e:
             print(f"❌ Error tile {tile_idx}/{total_tiles}: {e}")
+
+    if successful_tiles == 0:
+        print("⚠️ RAFT gagal pada seluruh tile; flow tidak digunakan.")
+        return None
 
     # --- Normalisasi hasil gabungan ---
     final_flow /= weight_acc + 1e-8
@@ -349,9 +362,15 @@ def compute_flow_with_raft(ref_img, current_img, session):
         ort_inputs = {input_names[0]: ref_tensor, input_names[1]: current_tensor}
         ort_outs = session.run(None, ort_inputs)
 
-        # 4. Proses output
-        # Output flow biasanya (1, 2, H, W). Kita ubah ke (H, W, 2)
-        flow = ort_outs[0][0]  # Ambil hasil pertama, buang batch dimension
+        # 4. Proses output. Model OpenCV RAFT ini mengeluarkan flow coarse
+        # dan flow full-res; pilih output yang paling dekat dengan input.
+        target_hw = ref_img.shape[:2]
+        selected = ort_outs[-1]
+        for candidate in ort_outs:
+            if candidate.ndim == 4 and tuple(candidate.shape[-2:]) == target_hw:
+                selected = candidate
+                break
+        flow = selected[0]  # Ambil hasil pertama, buang batch dimension
         flow = np.transpose(flow, (1, 2, 0))  # Ubah 2,H,W -> H,W,2
         return flow
 
@@ -579,6 +598,10 @@ def perform_alignment_gpu(
         flow_module_name = "farneback_flow_vulkan.tcm"
         flow_graph_name = "farneback_multi_3"  # 3 iterations per pyramid level
         save_backend_name = "FARNEBACK_AOT"
+    elif flow_backend == "alignment_tile":
+        flow_module_name = "compute_flow_vulkan.tcm"
+        flow_graph_name = "align_end_to_end_3layer"
+        save_backend_name = "GPU_AOT"
     else:
         flow_module_name = "compute_flow_vulkan.tcm"
         flow_graph_name = "align_end_to_end_3layer"

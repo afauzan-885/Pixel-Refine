@@ -179,14 +179,43 @@ def get_all_image_paths_for_batch_process(db_path, batch_id):
 
 
 def _prepare_image_array_from_raw_backup(
-    original_path, linear_mode=False, generate_ref_proxy=False, alignment_mode=False
+    original_path, linear_mode=False, generate_ref_proxy=False, alignment_tonemapping_linear=False
 ):
-    """CPU Backup implementation using rawpy postprocessing."""
+    """CPU Backup implementation using rawpy postprocessing.
+
+    NOTE — Hamilton-Adams GPU Tone Mapping Recipe (for future CPU parity use):
+    When alignment_tonemapping_linear=True is needed with GPU-matching output,
+    replace the block below with:
+
+        with rawpy.imread(original_path) as raw:
+            rgb_linear = raw.postprocess(
+                demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,
+                use_camera_wb=True, no_auto_bright=True,
+                gamma=(1, 1), output_bps=16,
+                output_color=rawpy.ColorSpace.raw, user_flip=0,
+            )
+            img_f32 = rgb_linear.astype(np.float32) / 65535.0
+            cmatrix = raw.color_matrix[:, :3].astype(np.float32)
+            sRGB = np.matmul(img_f32, cmatrix.T)
+            # Sigmoid contrast roll-off (same as GPU AOT Hamilton)
+            sRGB = sRGB / np.sqrt(1.0 + sRGB * sRGB)
+            sRGB = np.clip(sRGB, 0.0, 1.0)
+            # Fast gamma approximation (same coefficients as GPU AOT Hamilton)
+            t = np.sqrt(sRGB)
+            gamma_rgb = t * (1.30547177 + t * (-0.78947190 + t * (0.79064221 - 0.30664208 * t)))
+            gamma_rgb = np.clip(gamma_rgb, 0.0, 1.0)
+            bgr = (gamma_rgb * 65535.0).astype(np.uint16)
+            # Swap R<->B channels for OpenCV BGR ordering
+            b = bgr[:, :, 0].copy(); bgr[:, :, 0] = bgr[:, :, 2]; bgr[:, :, 2] = b
+            bgr_f32 = bgr.astype(np.float32) / 65535.0
+            return cv2.cvtColor(bgr_f32, cv2.COLOR_BGR2GRAY)
+    """
     try:
         if not RAWPY_AVAILABLE:
             return None
         with rawpy.imread(original_path) as raw:
-            if alignment_mode:
+            if alignment_tonemapping_linear:
+                # Standard rawpy sRGB for alignment grayscale (original rawpy path)
                 rgb = raw.postprocess(
                     use_camera_wb=True,
                     output_bps=16,
@@ -265,7 +294,7 @@ def _prepare_image_array_from_raw_backup(
 
 
 def _prepare_image_array_from_raw(
-    original_path, linear_mode=False, generate_ref_proxy=False, alignment_mode=False
+    original_path, linear_mode=False, generate_ref_proxy=False, alignment_tonemapping_linear=False
 ):
     """GPU-Accelerated RAW Demosaicing utilizing C++ AOT Hamilton-Adams pipeline."""
     try:
@@ -277,7 +306,7 @@ def _prepare_image_array_from_raw(
         # Call GPU-accelerated Demosaicing (Auto-extracts all metadata and runs on GPU)
         os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
 
-        if alignment_mode:
+        if alignment_tonemapping_linear:
             gray_full = ta_aot.demosaic(
                 original_path, method="hamilton-1channel", return_gpu=False
             )
@@ -300,7 +329,7 @@ def _prepare_image_array_from_raw(
         )
         # Robust fallback to CPU backup to guarantee no application crashes
         return _prepare_image_array_from_raw_backup(
-            original_path, linear_mode, generate_ref_proxy, alignment_mode
+            original_path, linear_mode, generate_ref_proxy, alignment_tonemapping_linear
         )
 
 
@@ -309,7 +338,7 @@ def load_images_from_paths(
     stop_requested=None,
     linear_mode=False,
     capture_ref_proxy=False,
-    alignment_mode=False,
+    alignment_tonemapping_linear=False,
     update_progress=None,
     progress_start=0,
     progress_end=100,
@@ -379,12 +408,12 @@ def load_images_from_paths(
                         path,
                         linear_mode,
                         generate_ref_proxy=generate_proxy,
-                        alignment_mode=alignment_mode,
+                        alignment_tonemapping_linear=alignment_tonemapping_linear,
                     )
                     raw_futures.append(future)
             else:
                 if os.path.exists(path):
-                    if alignment_mode:
+                    if alignment_tonemapping_linear:
                         future = executor.submit(
                             _load_and_process_standard_alignment, path
                         )
@@ -2193,17 +2222,25 @@ def cleanup_old_hdf5_files(current_hdf5_path: str):
         print(f"[Cleanup] Error saat membersihkan HDF5: {e}")
 
 
-def is_hdf5_cache_valid(hdf5_path: str, ref_image_path: str) -> bool:
+def is_hdf5_cache_valid(
+    hdf5_path: str,
+    ref_image_path: str,
+    expected_alignment_name: str = None,
+    expected_cache_key: str = None,
+) -> bool:
     """
     Memvalidasi apakah cache HDF5 masih relevan dengan gambar referensi saat ini.
 
     HDF5 menyimpan atribut 'ref_image_path' saat dibuat. Fungsi ini
     membandingkan nama file (basename) dari path yang tersimpan dengan
     path referensi saat ini. Jika berbeda, cache dianggap tidak valid.
+    Opsional: validasi juga alignment_name dan cache_key.
 
     Args:
         hdf5_path: Path ke file HDF5 yang akan divalidasi.
         ref_image_path: Path lengkap dari gambar referensi saat ini.
+        expected_alignment_name: Nama algoritma alignment yang diharapkan (opsional).
+        expected_cache_key: Cache key config hash yang diharapkan (opsional).
 
     Returns:
         True jika cache valid (referensi sama), False jika tidak valid.
@@ -2220,16 +2257,96 @@ def is_hdf5_cache_valid(hdf5_path: str, ref_image_path: str) -> bool:
             current_basename = os.path.basename(ref_image_path)
             is_valid = stored_basename == current_basename
 
-            if is_valid:
-                print(
-                    f"[CacheValidation] Cache HDF5 valid. Referensi cocok: {current_basename}"
-                )
-            else:
+            if not is_valid:
                 print(
                     f"[CacheValidation] Cache HDF5 tidak valid. "
                     f"Tersimpan: '{stored_basename}', Sekarang: '{current_basename}'"
                 )
-            return is_valid
+                return False
+
+            # Optional: validate alignment algorithm name
+            if expected_alignment_name is not None:
+                stored_align = f.attrs.get("alignment_selection", "")
+                if stored_align and stored_align != expected_alignment_name:
+                    print(
+                        f"[CacheValidation] Alignment mismatch: stored='{stored_align}' "
+                        f"expected='{expected_alignment_name}'"
+                    )
+                    return False
+
+            # Optional: validate config cache key
+            if expected_cache_key is not None:
+                stored_key = f.attrs.get("alignment_cache_key", "")
+                if stored_key and stored_key != expected_cache_key:
+                    print(
+                        f"[CacheValidation] Cache key mismatch: stored='{stored_key}' "
+                        f"expected='{expected_cache_key}'"
+                    )
+                    return False
+
+            print(
+                f"[CacheValidation] Cache HDF5 valid. Referensi cocok: {current_basename}"
+            )
+            return True
     except Exception as e:
         print(f"[CacheValidation] Gagal membaca atribut HDF5: {e}")
         return False
+
+
+def build_alignment_cache_key(alignment_name: str, config: dict):
+    """Membangun cache key dari nama alignment dan config parameter.
+
+    Args:
+        alignment_name: Nama algoritma alignment (misalnya 'AKAZE', 'ORB', dll).
+        config: Dictionary parameter konfigurasi algoritma.
+
+    Returns:
+        Tuple (cache_key_str, cache_payload_dict):
+            - cache_key_str: String hash SHA-256 pendek (16 karakter) dari alignment_name + config.
+            - cache_payload_dict: Dictionary mentah yang digunakan untuk membuat hash.
+    """
+    import hashlib
+    import json as _json
+
+    # Bersihkan config dari nilai None dan sort agar deterministic
+    clean_config = {
+        k: v for k, v in sorted((config or {}).items()) if v is not None
+    }
+    payload = {"alignment": alignment_name, "config": clean_config}
+    payload_str = _json.dumps(payload, sort_keys=True)
+    cache_key = hashlib.sha256(payload_str.encode("utf-8")).hexdigest()[:16]
+    return cache_key, payload
+
+
+def write_alignment_cache_attrs(
+    h5f,
+    ref_image_path: str,
+    alignment_selection: str,
+    alignment_algorithm: str,
+    alignment_process: str,
+    cache_key: str,
+    cache_payload: dict,
+):
+    """Menulis metadata alignment ke atribut HDF5 untuk validasi cache di masa depan.
+
+    Args:
+        h5f: Handle file HDF5 yang sudah dibuka (mode tulis).
+        ref_image_path: Path lengkap gambar referensi.
+        alignment_selection: Nama pilihan alignment yang dipilih pengguna.
+        alignment_algorithm: Nama algoritma alignment yang benar-benar dijalankan.
+        alignment_process: Tipe proses ('feature_matching', 'optical_flow', dll).
+        cache_key: String hash config dari build_alignment_cache_key.
+        cache_payload: Dictionary payload mentah dari build_alignment_cache_key.
+    """
+    import json as _json
+
+    h5f.attrs["ref_image_path"] = str(ref_image_path)
+    h5f.attrs["alignment_selection"] = str(alignment_selection)
+    h5f.attrs["alignment_algorithm"] = str(alignment_algorithm)
+    h5f.attrs["alignment_process"] = str(alignment_process)
+    h5f.attrs["alignment_cache_key"] = str(cache_key)
+    try:
+        h5f.attrs["alignment_cache_payload"] = _json.dumps(cache_payload)
+    except Exception:
+        pass
+

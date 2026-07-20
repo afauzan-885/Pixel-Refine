@@ -10,6 +10,8 @@ import json
 import os
 import gc
 import sqlite3
+import difflib
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -21,6 +23,7 @@ from PySide6.QtWidgets import QDialog, QLabel, QMessageBox, QProgressBar, QVBoxL
 from config import GENERAL_SETTINGS_FILE
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
     cleanup_old_hdf5_files,
+    build_alignment_cache_key,
     extract_exif,
     get_all_image_paths_for_single_process,
     is_hdf5_cache_valid,
@@ -31,6 +34,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
     save_linear_dng,
     save_to_hdf5,
     setup_balanced_batching,
+    write_alignment_cache_attrs,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.feature_matching_utils.feature_matching_post_process import (
     apply_global_crop,
@@ -69,9 +73,13 @@ class NoAlignmentAlgorithm:
     DESCRIPTION = "Skip alignment."
 
     def run(self, ctx, frames, batch_plan=None):
-        print(f"[MFDenoiser][Alignment:No Alignment] Passing through {len(frames)} frame(s).")
+        print(
+            f"[MFDenoiser][Alignment:No Alignment] Passing through {len(frames)} frame(s)."
+        )
         for idx, frame in enumerate(frames):
-            print(f"[MFDenoiser][Alignment:No Alignment] frame_{idx}: {_frame_info(frame)}")
+            print(
+                f"[MFDenoiser][Alignment:No Alignment] frame_{idx}: {_frame_info(frame)}"
+            )
         return list(frames)
 
 
@@ -81,11 +89,102 @@ class NoDenoisingAlgorithm:
     DESCRIPTION = "Return the reference/aligned first frame unchanged."
 
     def run(self, ctx, frames, batch_plan=None):
-        print(f"[MFDenoiser][Denoising:No Denoising] Received {len(frames)} frame(s). Returning frame_0.")
+        print(
+            f"[MFDenoiser][Denoising:No Denoising] Received {len(frames)} frame(s). Returning frame_0."
+        )
         if not frames:
             return None
         print(f"[MFDenoiser][Denoising:No Denoising] frame_0: {_frame_info(frames[0])}")
         return np.array(frames[0], copy=True)
+
+
+class SimilarityFusionDenoisingAlgorithm:
+    NAME = "Similarity Fusion"
+    KIND = "denoising"
+    DESCRIPTION = "Run the isolated Similarity.py fusion pipeline."
+
+    def run(self, ctx, frames, batch_plan=None):
+        raise RuntimeError(
+            "Similarity Fusion must be launched through Similarity.py::running_similarity_fusion."
+        )
+
+
+class FarnebackAliasAlgorithm:
+    NAME = "Farneback"
+    KIND = "alignment"
+    DESCRIPTION = "Dense Farneback optical flow alignment."
+
+    def run(self, ctx, frames, batch_plan=None):
+        return get_alignment_registry()["Farneback Optical Flow"].run(
+            ctx, frames, batch_plan=batch_plan
+        )
+
+
+class BlockMatchingGPUAliasAlgorithm:
+    NAME = "Block Matching GPU"
+    KIND = "alignment"
+    DESCRIPTION = "Tile-based GPU block matching optical flow alignment."
+
+    def run(self, ctx, frames, batch_plan=None):
+        return get_alignment_registry()["Block Matching GPU Optical Flow"].run(
+            ctx, frames, batch_plan=batch_plan
+        )
+
+
+class RAFTAliasAlgorithm:
+    NAME = "RAFT"
+    KIND = "alignment"
+    DESCRIPTION = "ONNX RAFT optical flow alignment."
+
+    def run(self, ctx, frames, batch_plan=None):
+        return get_alignment_registry()["RAFT Optical Flow"].run(
+            ctx, frames, batch_plan=batch_plan
+        )
+
+
+class LucasKanadeAliasAlgorithm:
+    NAME = "Lucas Kanade"
+    KIND = "alignment"
+    DESCRIPTION = "Lucas Kanade optical flow alignment with switchable CPU/GPU backend."
+
+    def _resolve_delegate(self, batch_id=None):
+        try:
+            config = get_alignment_registry()["Lucas Kanade Optical Flow"].load_config(
+                batch_id=batch_id
+            )
+            backend = str(config.get("backend", "cpu")).strip().lower()
+        except Exception as exc:
+            print(f"[LucasKanadeAlias] Failed to load backend config: {exc}")
+            backend = "cpu"
+
+        registry = get_alignment_registry()
+        if backend == "gpu":
+            return registry["Lucas Kanade GPU Optical Flow"]
+        return registry["Lucas Kanade Optical Flow"]
+
+    NAME = "Lucas Kanade"
+    KIND = "alignment"
+    DESCRIPTION = "Lucas Kanade optical flow alignment with switchable CPU/GPU backend."
+
+    def _resolve_delegate(self, batch_id=None):
+        try:
+            config = get_alignment_registry()["Lucas Kanade Optical Flow"].load_config(
+                batch_id=batch_id
+            )
+            backend = str(config.get("backend", "cpu")).strip().lower()
+        except Exception as exc:
+            print(f"[LucasKanadeAlias] Failed to load backend config: {exc}")
+            backend = "cpu"
+
+        registry = get_alignment_registry()
+        if backend == "gpu":
+            return registry["Lucas Kanade GPU Optical Flow"]
+        return registry["Lucas Kanade Optical Flow"]
+
+    def run(self, ctx, frames, batch_plan=None):
+        return self._resolve_delegate(batch_id=getattr(ctx, "batch_id", None)).run(
+            ctx, frames, batch_plan=batch_plan
+        )
 
 
 def get_alignment_registry():
@@ -107,6 +206,12 @@ def get_alignment_registry():
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade_gpu import (
         LucasKanadeGPU,
     )
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.block_matching_gpu import (
+        BlockMatchingGPU,
+    )
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.raft_flow import (
+        RAFTFlow,
+    )
 
     algorithms = [
         NoAlignmentAlgorithm(),
@@ -116,6 +221,12 @@ def get_alignment_registry():
         FarnebackFlowCPU(),
         LucasKanadeCPU(),
         LucasKanadeGPU(),
+        BlockMatchingGPU(),
+        RAFTFlow(),
+        FarnebackAliasAlgorithm(),
+        LucasKanadeAliasAlgorithm(),
+        BlockMatchingGPUAliasAlgorithm(),
+        RAFTAliasAlgorithm(),
     ]
     return {algo.NAME: algo for algo in algorithms}
 
@@ -123,6 +234,8 @@ def get_alignment_registry():
 def get_denoising_registry():
     from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Average import (
         AverageDenoisingAlgorithm,
+        merge_average_from_hdf5,
+        merge_average_from_paths,
     )
     from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_fusion import (
         SpatialFusionDenoisingAlgorithm,
@@ -132,6 +245,7 @@ def get_denoising_registry():
         NoDenoisingAlgorithm(),
         AverageDenoisingAlgorithm(),
         SpatialFusionDenoisingAlgorithm(),
+        SimilarityFusionDenoisingAlgorithm(),
     ]
     return {algo.NAME: algo for algo in algorithms}
 
@@ -145,6 +259,23 @@ def get_available_algorithms(category):
 
 
 def get_algorithm_options(category):
+    if category == "alignment":
+        descriptions = {
+            name: getattr(algo, "DESCRIPTION", name)
+            for name, algo in get_available_algorithms(category).items()
+        }
+        ordered_names = [
+            "No Alignment",
+            "ORB",
+            "AKAZE",
+            "Light Glue",
+            "Farneback",
+            "Lucas Kanade",
+            "Block Matching GPU",
+            "RAFT",
+        ]
+        return [(name, descriptions.get(name, name)) for name in ordered_names]
+
     return [
         (name, getattr(algo, "DESCRIPTION", name))
         for name, algo in get_available_algorithms(category).items()
@@ -152,11 +283,78 @@ def get_algorithm_options(category):
 
 
 def get_algorithm_names(category):
+    if category == "alignment":
+        return [
+            "No Alignment",
+            "ORB",
+            "AKAZE",
+            "Light Glue",
+            "Farneback",
+            "Lucas Kanade",
+            "Block Matching GPU",
+            "RAFT",
+        ]
     return list(get_available_algorithms(category).keys())
 
 
 def _normalize_algorithm_name(name):
     return str(name or "").strip().casefold()
+
+
+def _canonical_algorithm_key(name):
+    value = _normalize_algorithm_name(name)
+    value = value.replace("_", " ").replace("-", " ")
+    value = re.sub(r"\s+", " ", value).strip()
+    replacements = {
+        "optical flow": "",
+        "gpu optical flow": "gpu",
+        "cpu optical flow": "cpu",
+        "block matching gpu": "block matching gpu",
+        "lightglue": "light glue",
+        "light glue": "light glue",
+        "lucaskanade": "lucas kanade",
+        "lucas kanade gpu": "lucas kanade gpu",
+        "lucas kanade cpu": "lucas kanade cpu",
+        "noalignment": "no alignment",
+    }
+    for src, dst in replacements.items():
+        value = value.replace(src, dst)
+    value = re.sub(r"\s+", " ", value).strip()
+    value = value.replace("balance mode", "medium")
+    value = value.replace("balanced", "medium")
+    return value
+
+
+def _build_algorithm_alias_map(registry):
+    alias_map = {}
+    explicit_aliases = {
+        "farneback optical flow": "Farneback Optical Flow",
+        "farneback": "Farneback",
+        "lucas kanade optical flow": "Lucas Kanade Optical Flow",
+        "lucas kanade gpu optical flow": "Lucas Kanade GPU Optical Flow",
+        "lucas kanade": "Lucas Kanade",
+        "lucas kanade gpu": "Lucas Kanade GPU Optical Flow",
+        "lucas kanade cpu": "Lucas Kanade Optical Flow",
+        "block matching gpu optical flow": "Block Matching GPU Optical Flow",
+        "block matching gpu": "Block Matching GPU",
+        "blockmatchinggpu": "Block Matching GPU",
+        "raft optical flow": "RAFT Optical Flow",
+        "raft": "RAFT",
+        "lightglue": "Light Glue",
+        "light glue": "Light Glue",
+        "akaze": "AKAZE",
+        "orb": "ORB",
+        "no alignment": "No Alignment",
+        "noalignment": "No Alignment",
+    }
+    for alias, target in explicit_aliases.items():
+        if target in registry:
+            alias_map[_canonical_algorithm_key(alias)] = target
+
+    for name in registry.keys():
+        alias_map[_canonical_algorithm_key(name)] = name
+        alias_map[_normalize_algorithm_name(name)] = name
+    return alias_map
 
 
 def _resolve_algorithm(registry, requested_name, fallback_name):
@@ -167,6 +365,28 @@ def _resolve_algorithm(registry, requested_name, fallback_name):
     for name, algorithm in registry.items():
         if _normalize_algorithm_name(name) == normalized:
             return algorithm
+
+    alias_map = _build_algorithm_alias_map(registry)
+    canonical_requested = _canonical_algorithm_key(requested_name)
+    alias_target = alias_map.get(canonical_requested)
+    if alias_target and alias_target in registry:
+        print(
+            f"[MFDenoiser][Registry] Alias-resolved '{requested_name}' -> '{alias_target}'"
+        )
+        return registry[alias_target]
+
+    choices = list(alias_map.keys())
+    fuzzy_match = difflib.get_close_matches(
+        canonical_requested, choices, n=1, cutoff=0.72
+    )
+    if fuzzy_match:
+        alias_target = alias_map.get(fuzzy_match[0])
+        if alias_target and alias_target in registry:
+            print(
+                f"[MFDenoiser][Registry] Fuzzy-resolved '{requested_name}' -> "
+                f"'{alias_target}' via '{fuzzy_match[0]}'"
+            )
+            return registry[alias_target]
 
     fallback = registry[fallback_name]
     print(
@@ -201,6 +421,11 @@ class PipelineContext:
     single_process: bool = True
     batch_id: object = None
     clear_raw: bool = True
+    alignment_cache_key: str = ""
+    alignment_cache_payload: str = ""
+    alignment_selection_name: str = "No Alignment"
+    alignment_effective_name: str = "No Alignment"
+    alignment_runtime_snapshot: dict = field(default_factory=dict)
 
 
 class MFDenoiserAlgorithm:
@@ -208,6 +433,134 @@ class MFDenoiserAlgorithm:
 
     def __init__(self, db_path="pixel_refine_database.db"):
         self.db_path = db_path
+
+    def _build_fallback_alignment_snapshot(self, ctx):
+        requested_name = str(
+            ctx.params.get("alignment_plan", "No Alignment") or "No Alignment"
+        )
+        return {
+            "batch_id": ctx.batch_id,
+            "alignment_algo": requested_name,
+            "alignment_active": requested_name not in ("", "None", "No Alignment"),
+            "reference_path": "",
+            "params_key": "",
+            "params": {},
+            "raw_batch_entry": {},
+        }
+
+    def _build_alignment_cache_metadata(self, ctx):
+        from pixel_refine_desktop.enhance_stack.core.logic import (
+            batch_parameter_manager,
+        )
+
+        snapshot = batch_parameter_manager.get_batch_alignment_runtime_snapshot(
+            ctx.batch_id
+        )
+        runtime_requested_name = str(
+            ctx.params.get("alignment_plan", "No Alignment") or "No Alignment"
+        )
+        runtime_alignment_active = runtime_requested_name not in (
+            "",
+            "None",
+            "No Alignment",
+        )
+
+        if not snapshot:
+            snapshot = self._build_fallback_alignment_snapshot(ctx)
+        elif runtime_alignment_active and str(
+            snapshot.get("alignment_algo", "No Alignment")
+        ) in (
+            "",
+            "None",
+            "No Alignment",
+        ):
+            print(
+                f"[MFDenoiser][CacheMeta] Batch snapshot reported "
+                f"'{snapshot.get('alignment_algo')}', overriding with runtime "
+                f"alignment '{runtime_requested_name}'."
+            )
+            snapshot = {
+                **snapshot,
+                **self._build_fallback_alignment_snapshot(ctx),
+                "raw_batch_entry": snapshot.get("raw_batch_entry", {}),
+                "reference_path": snapshot.get("reference_path", ""),
+            }
+        ctx.alignment_runtime_snapshot = snapshot
+
+        requested_name = str(
+            runtime_requested_name
+            if runtime_alignment_active
+            else (
+                snapshot.get("alignment_algo")
+                or ctx.params.get("alignment_plan", "No Alignment")
+            )
+            or "No Alignment"
+        )
+        registry = get_alignment_registry()
+        effective_name = requested_name
+        config = {}
+
+        if requested_name == "Lucas Kanade":
+            cpu_algorithm = registry["Lucas Kanade Optical Flow"]
+            snapshot_params = dict(snapshot.get("params", {}) or {})
+            gpu_snapshot_params = dict(snapshot_params.pop("gpu_params", {}) or {})
+            cpu_config = dict(cpu_algorithm.load_config(batch_id=ctx.batch_id))
+            cpu_config.update(snapshot_params)
+            backend = str(cpu_config.get("backend", "cpu")).strip().lower()
+            if backend == "gpu":
+                effective_algorithm = registry["Lucas Kanade GPU Optical Flow"]
+                config = effective_algorithm.load_config(batch_id=ctx.batch_id)
+                config = dict(config)
+                config["backend"] = "gpu"
+                config.update(gpu_snapshot_params)
+            else:
+                effective_algorithm = registry["Lucas Kanade Optical Flow"]
+                config = effective_algorithm.load_config(batch_id=ctx.batch_id)
+                config = dict(config)
+                config["backend"] = "cpu"
+            effective_name = effective_algorithm.NAME
+            config.update(snapshot_params)
+        elif requested_name == "Farneback":
+            effective_algorithm = registry["Farneback Optical Flow"]
+            effective_name = effective_algorithm.NAME
+            config = effective_algorithm.load_config(batch_id=ctx.batch_id)
+            config = dict(config)
+            config.update(snapshot.get("params", {}))
+        elif requested_name == "Block Matching GPU":
+            effective_algorithm = registry["Block Matching GPU Optical Flow"]
+            effective_name = effective_algorithm.NAME
+            config = effective_algorithm.load_config(batch_id=ctx.batch_id)
+            config = dict(config)
+            config.update(snapshot.get("params", {}))
+        elif requested_name == "RAFT":
+            effective_algorithm = registry["RAFT Optical Flow"]
+            effective_name = effective_algorithm.NAME
+            config = effective_algorithm.load_config(batch_id=ctx.batch_id)
+            config = dict(config)
+            config.update(snapshot.get("params", {}))
+        else:
+            effective_algorithm = _resolve_algorithm(
+                registry, requested_name, "No Alignment"
+            )
+            effective_name = effective_algorithm.NAME
+            if hasattr(effective_algorithm, "load_config"):
+                try:
+                    config = effective_algorithm.load_config(batch_id=ctx.batch_id)
+                except TypeError:
+                    config = effective_algorithm.load_config()
+                config = dict(config or {})
+                config.update(snapshot.get("params", {}))
+
+        cache_key, cache_payload = build_alignment_cache_key(requested_name, config)
+        ctx.alignment_selection_name = requested_name
+        ctx.alignment_effective_name = effective_name
+        ctx.alignment_cache_key = cache_key
+        ctx.alignment_cache_payload = cache_payload
+        print(
+            f"[MFDenoiser][CacheMeta] selection={requested_name} "
+            f"effective={effective_name} key={cache_key} batch_id={ctx.batch_id}"
+        )
+        return ctx
 
     def _get_image_paths(self, batch_id=None):
         if batch_id is None:
@@ -246,7 +599,9 @@ class MFDenoiserAlgorithm:
             "alignment_plan": config.get("mfdenoiser_alignment_plan", "No Alignment"),
             "merge_plan": config.get("mfdenoiser_merge_plan", "No Denoising"),
             "batch_size": int(config.get("mfdenoiser_batch_size", 15)),
-            "use_alignment_cache": bool(config.get("mfdenoiser_use_alignment_cache", False)),
+            "use_alignment_cache": bool(
+                config.get("mfdenoiser_use_alignment_cache", False)
+            ),
             "clear_raw": bool(config.get("mfdenoiser_clear_raw", True)),
             "output_suffix": "mf_denoiser",
         }
@@ -264,7 +619,8 @@ class MFDenoiserAlgorithm:
 
     def load_process(self, ctx):
         """Load input frames and initialize shared pipeline metadata."""
-        self.prepare_input_paths(ctx)
+        if not ctx.image_paths:
+            self.prepare_input_paths(ctx)
         if not ctx.image_paths:
             return ctx
 
@@ -332,7 +688,7 @@ class MFDenoiserAlgorithm:
 
     def build_batch_plan(self, ctx):
         """Create batch ranges. The plan is owned by run_pipeline orchestration."""
-        batch_size = max(1, int(ctx.params.get("batch_size", 15)))
+        batch_size = max(1, int(ctx.params.get("batch_size", 8)))
         ctx.batch_plan = setup_balanced_batching(
             ctx.total_images,
             _lang(),
@@ -343,11 +699,24 @@ class MFDenoiserAlgorithm:
 
     def _can_stream_load_for_merge(self, ctx, alignment_algorithm):
         """Return True when images can stay as paths until the merge stage."""
-        merge_name = _normalize_algorithm_name(ctx.params.get("merge_plan", "No Denoising"))
+        merge_name = _normalize_algorithm_name(
+            ctx.params.get("merge_plan", "No Denoising")
+        )
         alignment_name = _normalize_algorithm_name(
-            getattr(alignment_algorithm, "NAME", ctx.params.get("alignment_plan", "No Alignment"))
+            getattr(
+                alignment_algorithm,
+                "NAME",
+                ctx.params.get("alignment_plan", "No Alignment"),
+            )
         )
         return merge_name == "average" and alignment_name == "no alignment"
+
+    def _is_no_alignment_requested(self, ctx):
+        """Return True when the batch explicitly disables alignment."""
+        alignment_name = str(
+            ctx.params.get("alignment_plan", "No Alignment") or "No Alignment"
+        ).strip()
+        return alignment_name.casefold() == "no alignment"
 
     def prepare_alignment_cache_policy(self, ctx):
         """Resolve HDF5 cache path and decide whether alignment is needed."""
@@ -360,14 +729,30 @@ class MFDenoiserAlgorithm:
         )
         ctx.use_hdf5_cache = bool(ctx.params.get("use_alignment_cache", False))
 
+        if self._is_no_alignment_requested(ctx):
+            ctx.use_hdf5_cache = False
+            ctx.cache_is_valid = False
+            ctx.needs_alignment = False
+            print(
+                "[MFDenoiser][Cache] alignment disabled by batch parameter; "
+                "bypassing HDF5 alignment cache."
+            )
+            return ctx
+
         cleanup_old_hdf5_files(ctx.hdf5_path)
 
         ref_path = ctx.image_paths[0] if ctx.image_paths else ""
+        ctx = self._build_alignment_cache_metadata(ctx)
         ctx.cache_is_valid = (
             ctx.use_hdf5_cache
             and bool(ref_path)
             and os.path.exists(ctx.hdf5_path)
-            and is_hdf5_cache_valid(ctx.hdf5_path, ref_path)
+            and is_hdf5_cache_valid(
+                ctx.hdf5_path,
+                ref_path,
+                expected_alignment_name=ctx.alignment_selection_name,
+                expected_cache_key=ctx.alignment_cache_key,
+            )
         )
         ctx.needs_alignment = not ctx.cache_is_valid
         print(
@@ -377,10 +762,57 @@ class MFDenoiserAlgorithm:
         if ctx.cache_is_valid:
             print(f"[MFDenoiser] Alignment cache valid: {ctx.hdf5_path}")
         elif ctx.use_hdf5_cache:
-            print(f"[MFDenoiser] Alignment cache will be rebuilt later: {ctx.hdf5_path}")
+            print(
+                f"[MFDenoiser] Alignment cache will be rebuilt later: {ctx.hdf5_path}"
+            )
         return ctx
 
+    def _load_single_frame_tonemapped(self, ctx, path, target_dims=None):
+        import rawpy
+
+        try:
+            with rawpy.imread(path) as raw:
+                rgb_linear = raw.postprocess(
+                    demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,
+                    use_camera_wb=True,
+                    no_auto_bright=True,
+                    gamma=(1, 1),
+                    output_bps=16,
+                    output_color=rawpy.ColorSpace.raw,
+                    user_flip=0,
+                )
+                img_f32 = rgb_linear.astype(np.float32) / 65535.0
+                cmatrix = raw.color_matrix[:, :3].astype(np.float32)
+                sRGB = np.matmul(img_f32, cmatrix.T)
+                sRGB = sRGB / np.sqrt(1.0 + sRGB * sRGB)
+                sRGB = np.clip(sRGB, 0.0, 1.0)
+                t = np.sqrt(sRGB)
+                gamma_rgb = t * (
+                    1.30547177 + t * (-0.78947190 + t * (0.79064221 - 0.30664208 * t))
+                )
+                gamma_rgb = np.clip(gamma_rgb, 0.0, 1.0)
+                rgb = (gamma_rgb * 65535.0).astype(np.uint16)
+                bgr = rgb
+                if bgr.flags["WRITEABLE"]:
+                    b_channel = bgr[:, :, 0].copy()
+                    bgr[:, :, 0] = bgr[:, :, 2]
+                    bgr[:, :, 2] = b_channel
+                frame = bgr
+        except Exception as e:
+            print(
+                f"[MFDenoiser] Custom tone mapping failed for {path}: {e}. Falling back to default loader."
+            )
+            frame = self._load_single_frame(ctx, path, target_dims=None)
+
+        if target_dims is not None and frame.shape[:2] != tuple(target_dims):
+            frame = resize_with_padding(frame, target_dims)
+        return frame
+
     def _load_single_frame(self, ctx, path, target_dims=None):
+        if getattr(ctx, "use_tonemapped_loading", False):
+            return self._load_single_frame_tonemapped(
+                ctx, path, target_dims=target_dims
+            )
         load_res = load_images_from_paths(
             [path],
             ctx.stop_requested,
@@ -433,7 +865,9 @@ class MFDenoiserAlgorithm:
         if not ctx.image_paths:
             return ctx
         if ctx.cache_is_valid:
-            print(f"[MFDenoiser][FeatureMatching] using valid HDF5 cache: {ctx.hdf5_path}")
+            print(
+                f"[MFDenoiser][FeatureMatching] using valid HDF5 cache: {ctx.hdf5_path}"
+            )
             ctx.aligned_frames = []
             ctx.frames = []
             ctx.data_source = ctx.hdf5_path
@@ -470,14 +904,25 @@ class MFDenoiserAlgorithm:
         ctx.ref_h, ctx.ref_w = reference.shape[:2]
         target_dims = (ctx.ref_h, ctx.ref_w)
 
-        _progress(ctx.update_progress, 25, f"Planning feature matching: {algorithm.NAME}")
-        motion_plan = algorithm.build_motion_plan(
-            ctx,
-            reference,
-            target_dims,
-            self,
-            config,
+        # Load reference tone-mapped for keypoint detection calculations
+        reference_tonemapped = self._load_single_frame_tonemapped(
+            ctx, ctx.image_paths[0], target_dims=target_dims
         )
+
+        _progress(
+            ctx.update_progress, 25, f"Planning feature matching: {algorithm.NAME}"
+        )
+        ctx.use_tonemapped_loading = True
+        try:
+            motion_plan = algorithm.build_motion_plan(
+                ctx,
+                reference_tonemapped,
+                target_dims,
+                self,
+                config,
+            )
+        finally:
+            ctx.use_tonemapped_loading = False
         ctx.motion_plan = motion_plan
         motion_by_index = {item["index"]: item for item in motion_plan}
 
@@ -493,7 +938,9 @@ class MFDenoiserAlgorithm:
                 config,
             )
             if crop_bounds is None:
-                print("[MFDenoiser][FeatureMatching] global crop unavailable, using non-crop.")
+                print(
+                    "[MFDenoiser][FeatureMatching] global crop unavailable, using non-crop."
+                )
                 global_crop = False
 
         os.makedirs(os.path.dirname(ctx.hdf5_path), exist_ok=True)
@@ -502,9 +949,15 @@ class MFDenoiserAlgorithm:
 
         saved_count = 0
         with h5py.File(ctx.hdf5_path, "w") as h5f:
-            h5f.attrs["ref_image_path"] = ctx.image_paths[0]
-            h5f.attrs["alignment_algorithm"] = algorithm.NAME
-            h5f.attrs["alignment_process"] = "feature_matching"
+            write_alignment_cache_attrs(
+                h5f,
+                ref_image_path=ctx.image_paths[0],
+                alignment_selection=ctx.alignment_selection_name,
+                alignment_algorithm=ctx.alignment_effective_name or algorithm.NAME,
+                alignment_process="feature_matching",
+                cache_key=ctx.alignment_cache_key,
+                cache_payload=ctx.alignment_cache_payload,
+            )
             h5f.attrs["global_crop"] = bool(global_crop)
 
             for index, path in enumerate(ctx.image_paths):
@@ -521,7 +974,9 @@ class MFDenoiserAlgorithm:
                 else:
                     frame = self._load_single_frame(ctx, path, target_dims=target_dims)
                     if frame is None:
-                        print(f"[MFDenoiser][FeatureMatching] failed to load image_{index}: {path}")
+                        print(
+                            f"[MFDenoiser][FeatureMatching] failed to load image_{index}: {path}"
+                        )
                         continue
                     motion_item = motion_by_index.get(index)
                     aligned = (
@@ -532,7 +987,9 @@ class MFDenoiserAlgorithm:
                     del frame
 
                 if aligned is None:
-                    print(f"[MFDenoiser][FeatureMatching] skipped image_{index}: no aligned output")
+                    print(
+                        f"[MFDenoiser][FeatureMatching] skipped image_{index}: no aligned output"
+                    )
                     continue
 
                 save_to_hdf5(h5f, f"image_{index}", aligned, extract_exif(path))
@@ -575,16 +1032,35 @@ class MFDenoiserAlgorithm:
         For now this stage deliberately performs no alignment.
         """
         alignment_name = ctx.params.get("alignment_plan", "No Alignment")
+        effective_alignment_name = (
+            getattr(ctx, "alignment_effective_name", "") or alignment_name
+        )
         registry = get_alignment_registry()
-        algorithm = _resolve_algorithm(registry, alignment_name, "No Alignment")
+        algorithm = _resolve_algorithm(
+            registry, effective_alignment_name, "No Alignment"
+        )
         print(
-            f"[MFDenoiser][Align] selected={alignment_name} resolved={algorithm.NAME} "
+            f"[MFDenoiser][Align] selected={alignment_name} "
+            f"effective={effective_alignment_name} resolved={algorithm.NAME} "
             f"input_frames={len(ctx.frames)} batch_plan={batch_plan}"
         )
         _progress(ctx.update_progress, 25, f"Running alignment: {algorithm.NAME}")
+        if self._is_no_alignment_requested(ctx):
+            ctx.aligned_frames = list(ctx.frames)
+            ctx.data_source = "frames"
+            ctx.needs_alignment = False
+            print(
+                "[MFDenoiser][Align] No Alignment requested; using loaded frames "
+                "directly without HDF5."
+            )
+            return ctx
         if ctx.cache_is_valid:
-            # Cache loading will be wired here when real alignment persistence exists.
-            print("[MFDenoiser] Cache is valid, but cache loading is still a placeholder.")
+            print(f"[MFDenoiser][Align] using valid HDF5 cache: {ctx.hdf5_path}")
+            ctx.aligned_frames = []
+            ctx.frames = []
+            ctx.data_source = ctx.hdf5_path
+            ctx.needs_alignment = False
+            return ctx
         if hasattr(algorithm, "build_flow_alignment"):
             reference = self._load_single_frame(ctx, ctx.image_paths[0])
             if reference is None:
@@ -622,7 +1098,9 @@ class MFDenoiserAlgorithm:
                 result_ctx.aligned_frames = []
                 gc.collect()
             return result_ctx
-        feature_result = self.feature_matching_process(ctx, algorithm, batch_plan=batch_plan)
+        feature_result = self.feature_matching_process(
+            ctx, algorithm, batch_plan=batch_plan
+        )
         if feature_result is not None:
             return feature_result
         ctx.aligned_frames = algorithm.run(ctx, ctx.frames, batch_plan=batch_plan)
@@ -631,79 +1109,6 @@ class MFDenoiserAlgorithm:
             print(f"[MFDenoiser][Align] aligned_frame_{idx}: {_frame_info(frame)}")
         ctx.needs_alignment = False
         return ctx
-
-    def _merge_average_from_hdf5(self, ctx):
-        alignment_name = _normalize_algorithm_name(ctx.params.get("alignment_plan", "No Alignment"))
-        if alignment_name == "no alignment":
-            return False
-        if not ctx.hdf5_path or not os.path.exists(ctx.hdf5_path):
-            return False
-        print(f"[MFDenoiser][Merge] Average streaming aligned HDF5: {ctx.hdf5_path}")
-        sum_image = None
-        count = 0
-        with h5py.File(ctx.hdf5_path, "r") as h5f:
-            image_keys = sorted(
-                [key for key in h5f.keys() if key.startswith("image_")],
-                key=lambda item: int(item.split("_", 1)[1]),
-            )
-            for idx, key in enumerate(image_keys):
-                if ctx.stop_requested and ctx.stop_requested():
-                    break
-                frame = h5f[key][...]
-                print(f"[MFDenoiser][Merge] hdf5_{key}: {_frame_info(frame)}")
-                sum_image, count = self._average_accumulate(sum_image, count, frame)
-                del frame
-                gc.collect()
-                _progress(
-                    ctx.update_progress,
-                    60 + int(((idx + 1) / max(1, len(image_keys))) * 30),
-                    f"Merging aligned frame {idx + 1}/{len(image_keys)}",
-                )
-        ctx.result_image = self._average_finalize(ctx, sum_image, count)
-        print(f"[MFDenoiser][Merge] Average HDF5 count={count} result={_frame_info(ctx.result_image)}")
-        del sum_image
-        gc.collect()
-        return True
-
-    def _merge_average_from_paths(self, ctx, batch_plan=None):
-        alignment_name = _normalize_algorithm_name(ctx.params.get("alignment_plan", "No Alignment"))
-        if alignment_name != "no alignment":
-            return False
-        if not ctx.image_paths:
-            return False
-        print(
-            f"[MFDenoiser][Merge] Average streaming paths: "
-            f"frames={len(ctx.image_paths)} batch_plan={batch_plan}"
-        )
-        sum_image = None
-        count = 0
-        target_dims = None
-        for idx, path in enumerate(ctx.image_paths):
-            if ctx.stop_requested and ctx.stop_requested():
-                break
-            frame = self._load_single_frame(ctx, path, target_dims=target_dims)
-            if frame is None:
-                continue
-            if target_dims is None:
-                target_dims = frame.shape[:2]
-                ctx.reference_image = frame
-                ctx.ref_dtype = frame.dtype
-                ctx.ref_h, ctx.ref_w = frame.shape[:2]
-            print(f"[MFDenoiser][Merge] average_path_{idx}: {_frame_info(frame)}")
-            sum_image, count = self._average_accumulate(sum_image, count, frame)
-            if idx > 0 or ctx.reference_image is not frame:
-                del frame
-            gc.collect()
-            _progress(
-                ctx.update_progress,
-                60 + int(((idx + 1) / max(1, len(ctx.image_paths))) * 30),
-                f"Merging frame {idx + 1}/{len(ctx.image_paths)}",
-            )
-        ctx.result_image = self._average_finalize(ctx, sum_image, count)
-        print(f"[MFDenoiser][Merge] Average path count={count} result={_frame_info(ctx.result_image)}")
-        del sum_image
-        gc.collect()
-        return True
 
     def merge_process(self, ctx, batch_plan=None):
         """Merge stage placeholder.
@@ -723,9 +1128,21 @@ class MFDenoiserAlgorithm:
             f"input_frames={len(ctx.aligned_frames or ctx.frames)} batch_plan={batch_plan}"
         )
         _progress(ctx.update_progress, 60, f"Running denoising: {algorithm.NAME}")
-        if algorithm.NAME == "Average" and self._merge_average_from_hdf5(ctx):
+        if algorithm.NAME == "Average":
+            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Average import (
+                merge_average_from_hdf5,
+                merge_average_from_paths,
+            )
+        if algorithm.NAME == "Average" and merge_average_from_hdf5(
+            ctx, progress_callback=ctx.update_progress
+        ):
             return ctx
-        if algorithm.NAME == "Average" and self._merge_average_from_paths(ctx, batch_plan=batch_plan):
+        if algorithm.NAME == "Average" and merge_average_from_paths(
+            ctx,
+            load_single_frame=self._load_single_frame,
+            progress_callback=ctx.update_progress,
+            batch_plan=batch_plan,
+        ):
             return ctx
         frames = ctx.aligned_frames or ctx.frames
         ctx.result_image = algorithm.run(ctx, frames, batch_plan=batch_plan)
@@ -748,7 +1165,9 @@ class MFDenoiserAlgorithm:
         )
         output_suffix = ctx.params.get("output_suffix", "mf_denoiser")
         output_path = os.path.join(output_folder, f"{safe_name}_{output_suffix}.tif")
-        print(f"[MFDenoiser][Save] output_path={output_path} result={_frame_info(ctx.result_image)}")
+        print(
+            f"[MFDenoiser][Save] output_path={output_path} result={_frame_info(ctx.result_image)}"
+        )
 
         if ctx.is_linear_mode:
             return save_linear_dng(
@@ -808,19 +1227,7 @@ class MFDenoiserAlgorithm:
             f"output_suffix={ctx.params.get('output_suffix')}"
         )
 
-        alignment_name_for_load = ctx.params.get("alignment_plan", "No Alignment")
-        alignment_algo_for_load = _resolve_algorithm(
-            get_alignment_registry(),
-            alignment_name_for_load,
-            "No Alignment",
-        )
-        if (
-            hasattr(alignment_algo_for_load, "build_motion_plan")
-            or self._can_stream_load_for_merge(ctx, alignment_algo_for_load)
-        ):
-            ctx = self.prepare_input_paths(ctx)
-        else:
-            ctx = self.load_process(ctx)
+        ctx = self.prepare_input_paths(ctx)
         if not ctx.total_images:
             _progress(
                 update_progress,
@@ -834,6 +1241,31 @@ class MFDenoiserAlgorithm:
             return None
 
         ctx = self.prepare_alignment_cache_policy(ctx)
+        alignment_name_for_load = getattr(
+            ctx, "alignment_effective_name", ""
+        ) or ctx.params.get("alignment_plan", "No Alignment")
+        alignment_algo_for_load = _resolve_algorithm(
+            get_alignment_registry(),
+            alignment_name_for_load,
+            "No Alignment",
+        )
+        if not ctx.cache_is_valid and not (
+            hasattr(alignment_algo_for_load, "build_motion_plan")
+            or hasattr(alignment_algo_for_load, "build_flow_alignment")
+            or self._can_stream_load_for_merge(ctx, alignment_algo_for_load)
+        ):
+            ctx = self.load_process(ctx)
+            if not ctx.total_images:
+                _progress(
+                    update_progress,
+                    100,
+                    getattr(
+                        _lang(), "NO_IMAGE_PATH_PROCESSED_IMAGE", "No image to process."
+                    ),
+                )
+                return None
+            if stop_requested and stop_requested():
+                return None
         batch_plan = self.build_batch_plan(ctx)
 
         # run_pipeline owns the high-level policy. Later, cache/HDF5 can be

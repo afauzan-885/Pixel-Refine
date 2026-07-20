@@ -658,7 +658,7 @@ class DisplayPanel(QWidget):
 
         # 2. Preview Process Button (Shortcut from Grid)
         self.preview_process_btn = IconButton(
-            icon_path="resources/assets/icons/play-preview.png",
+            icon_path="resources/assets/icons/play-preview_black.png",
             variant="primary",
         )
         self.preview_process_btn.setToolTip("Image Process")
@@ -1385,7 +1385,7 @@ class DisplayPanel(QWidget):
                 self.toast.show_message(
                     "Semua thumbnail berhasil diproses.",
                     duration=3000,
-                    position=ToastPosition.BOTTOM_RIGHT,
+                    position=ToastPosition.BOTTOM_LEFT,
                     priority="NORMAL",
                     single_mode=True,  # Clear previous process status
                 )
@@ -1397,7 +1397,7 @@ class DisplayPanel(QWidget):
             message = f"Membuat {decode_pct}% - Menyimpan {save_pct}%"
             self.toast.show_progress(
                 message,
-                position=ToastPosition.BOTTOM_RIGHT,
+                position=ToastPosition.BOTTOM_LEFT,
                 priority="NORMAL",
                 category="thumbnail_process",
                 single_mode=True,  # FORCE SINGLE MODE to prevent chaining/stacking!

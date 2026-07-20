@@ -66,7 +66,7 @@ class TileBasedSpatialFusionProcessor(TileProcessor):
         motion_sensitivity: Higher = more aggressive ghost rejection (default 150.0).
         noise_offset_factor: Noise floor offset for weight calculation (default 0.15).
         early_exit_threshold: Skip tiles below this confidence (default 0.05).
-        alignment_backend: "farneback" or "lucas_kanade" (default "farneback").
+        alignment_backend: "farneback" or "lucas_kanade".
     """
 
     def __init__(
@@ -96,7 +96,6 @@ class TileBasedSpatialFusionProcessor(TileProcessor):
                 f"[TileBasedSpatialFusion] GPU AOT engine not available: {e}. "
                 "Tile-based spatial fusion requires a compatible GPU with Vulkan support."
             )
-        
         # Store reference tile gray for alignment
         if ctx.reference_float is not None:
             if ctx.reference_float.ndim == 3:

@@ -157,7 +157,9 @@ if TAICHI_AVAILABLE:
         return ti.max(lo, ti.min(v, hi))
 
     @ti.func
-    def _lk_sample(img: ti.types.ndarray(), y: ti.f32, x: ti.f32, h: ti.i32, w: ti.i32) -> ti.f32:
+    def _lk_sample(
+        img: ti.types.ndarray(), y: ti.f32, x: ti.f32, h: ti.i32, w: ti.i32
+    ) -> ti.f32:
         x0 = _lk_clamp(ti.cast(ti.floor(x), ti.i32), 0, w - 1)
         y0 = _lk_clamp(ti.cast(ti.floor(y), ti.i32), 0, h - 1)
         x1 = _lk_clamp(x0 + 1, 0, w - 1)
@@ -168,10 +170,14 @@ if TAICHI_AVAILABLE:
         v01 = img[y0, x1]
         v10 = img[y1, x0]
         v11 = img[y1, x1]
-        return (1.0 - fy) * ((1.0 - fx) * v00 + fx * v01) + fy * ((1.0 - fx) * v10 + fx * v11)
+        return (1.0 - fy) * ((1.0 - fx) * v00 + fx * v01) + fy * (
+            (1.0 - fx) * v10 + fx * v11
+        )
 
     @ti.func
-    def _lk_read_i32(img: ti.types.ndarray(), y: ti.i32, x: ti.i32, h: ti.i32, w: ti.i32) -> ti.f32:
+    def _lk_read_i32(
+        img: ti.types.ndarray(), y: ti.i32, x: ti.i32, h: ti.i32, w: ti.i32
+    ) -> ti.f32:
         yy = _lk_clamp(y, 0, h - 1)
         xx = _lk_clamp(x, 0, w - 1)
         return img[yy, xx]
@@ -195,7 +201,9 @@ if TAICHI_AVAILABLE:
         v01 = flow[y0, x1, ch]
         v10 = flow[y1, x0, ch]
         v11 = flow[y1, x1, ch]
-        return (1.0 - fy) * ((1.0 - fx) * v00 + fx * v01) + fy * ((1.0 - fx) * v10 + fx * v11)
+        return (1.0 - fy) * ((1.0 - fx) * v00 + fx * v01) + fy * (
+            (1.0 - fx) * v10 + fx * v11
+        )
 
     @ti.kernel
     def _lk_zero_flow_kernel(flow: ti.types.ndarray()):
@@ -241,7 +249,9 @@ if TAICHI_AVAILABLE:
             grid_meta[gy, gx, 1] = 0.0
             grid_meta[gy, gx, 2] = 2.0
             grid_meta[gy, gx, 3] = 0.0
-            if px < ti.cast(w - border_margin, ti.f32) and py < ti.cast(h - border_margin, ti.f32):
+            if px < ti.cast(w - border_margin, ti.f32) and py < ti.cast(
+                h - border_margin, ti.f32
+            ):
                 dx = _lk_sample_flow(init_flow, py, px, h, w, 0)
                 dy = _lk_sample_flow(init_flow, py, px, h, w, 1)
                 valid = 1
@@ -258,16 +268,26 @@ if TAICHI_AVAILABLE:
                         by = 0.0
                         err_abs = 0.0
 
-                        for oy, ox in ti.ndrange((-win_radius, win_radius + 1), (-win_radius, win_radius + 1)):
+                        for oy, ox in ti.ndrange(
+                            (-win_radius, win_radius + 1), (-win_radius, win_radius + 1)
+                        ):
                             yy_i = border_margin + gy * grid_step + oy
                             xx_i = border_margin + gx * grid_step + ox
                             yy = ti.cast(yy_i, ti.f32)
                             xx = ti.cast(xx_i, ti.f32)
                             nx = xx + dx
                             ny = yy + dy
-                            ix = (_lk_read_i32(prev, yy_i, xx_i + 1, h, w) - _lk_read_i32(prev, yy_i, xx_i - 1, h, w)) * 0.5
-                            iy = (_lk_read_i32(prev, yy_i + 1, xx_i, h, w) - _lk_read_i32(prev, yy_i - 1, xx_i, h, w)) * 0.5
-                            err = _lk_sample(next, ny, nx, h, w) - _lk_read_i32(prev, yy_i, xx_i, h, w)
+                            ix = (
+                                _lk_read_i32(prev, yy_i, xx_i + 1, h, w)
+                                - _lk_read_i32(prev, yy_i, xx_i - 1, h, w)
+                            ) * 0.5
+                            iy = (
+                                _lk_read_i32(prev, yy_i + 1, xx_i, h, w)
+                                - _lk_read_i32(prev, yy_i - 1, xx_i, h, w)
+                            ) * 0.5
+                            err = _lk_sample(next, ny, nx, h, w) - _lk_read_i32(
+                                prev, yy_i, xx_i, h, w
+                            )
                             gxx += ix * ix
                             gxy += ix * iy
                             gyy += iy * iy
@@ -277,7 +297,9 @@ if TAICHI_AVAILABLE:
 
                         det = gxx * gyy - gxy * gxy
                         det_last = ti.abs(det)
-                        patch_area = ti.cast((win_radius * 2 + 1) * (win_radius * 2 + 1), ti.f32)
+                        patch_area = ti.cast(
+                            (win_radius * 2 + 1) * (win_radius * 2 + 1), ti.f32
+                        )
                         residual = err_abs / patch_area
                         if ti.abs(det) < 1e-4:
                             valid = 0
@@ -351,16 +373,26 @@ if TAICHI_AVAILABLE:
                         by = 0.0
                         err_abs = 0.0
 
-                        for oy, ox in ti.ndrange((-win_radius, win_radius + 1), (-win_radius, win_radius + 1)):
+                        for oy, ox in ti.ndrange(
+                            (-win_radius, win_radius + 1), (-win_radius, win_radius + 1)
+                        ):
                             yy_i = border_margin + gy * grid_step + oy
                             xx_i = border_margin + gx * grid_step + ox
                             yy = ti.cast(yy_i, ti.f32)
                             xx = ti.cast(xx_i, ti.f32)
                             nx = xx + dx
                             ny = yy + dy
-                            ix = (_lk_read_i32(prev, yy_i, xx_i + 1, h, w) - _lk_read_i32(prev, yy_i, xx_i - 1, h, w)) * 0.5
-                            iy = (_lk_read_i32(prev, yy_i + 1, xx_i, h, w) - _lk_read_i32(prev, yy_i - 1, xx_i, h, w)) * 0.5
-                            err = _lk_sample(next, ny, nx, h, w) - _lk_read_i32(prev, yy_i, xx_i, h, w)
+                            ix = (
+                                _lk_read_i32(prev, yy_i, xx_i + 1, h, w)
+                                - _lk_read_i32(prev, yy_i, xx_i - 1, h, w)
+                            ) * 0.5
+                            iy = (
+                                _lk_read_i32(prev, yy_i + 1, xx_i, h, w)
+                                - _lk_read_i32(prev, yy_i - 1, xx_i, h, w)
+                            ) * 0.5
+                            err = _lk_sample(next, ny, nx, h, w) - _lk_read_i32(
+                                prev, yy_i, xx_i, h, w
+                            )
                             gxx += ix * ix
                             gxy += ix * iy
                             gyy += iy * iy
@@ -370,7 +402,9 @@ if TAICHI_AVAILABLE:
 
                         det = gxx * gyy - gxy * gxy
                         det_last = ti.abs(det)
-                        patch_area = ti.cast((win_radius * 2 + 1) * (win_radius * 2 + 1), ti.f32)
+                        patch_area = ti.cast(
+                            (win_radius * 2 + 1) * (win_radius * 2 + 1), ti.f32
+                        )
                         residual = err_abs / patch_area
                         if ti.abs(det) < 1e-4:
                             valid = 0
@@ -614,8 +648,12 @@ def calcOpticalFlowPyrLK(
         iterations = int(criteria[1])
         epsilon = float(criteria[2])
 
-    prev_gpu, prev_temp = common.ensure_taichi_field(prev_np, dtype=ti.f32, buffer_provider=buffer_provider)
-    next_gpu, next_temp = common.ensure_taichi_field(next_np, dtype=ti.f32, buffer_provider=buffer_provider)
+    prev_gpu, prev_temp = common.ensure_taichi_field(
+        prev_np, dtype=ti.f32, buffer_provider=buffer_provider
+    )
+    next_gpu, next_temp = common.ensure_taichi_field(
+        next_np, dtype=ti.f32, buffer_provider=buffer_provider
+    )
     grid_step_i = max(4, int(grid_step))
     margin_i = max(0, int(border_margin))
     grid_w = max(1, (w - 2 * margin_i + grid_step_i - 1) // grid_step_i)
@@ -651,7 +689,9 @@ def calcOpticalFlowPyrLK(
             float(epsilon),
             max(1, int(adaptive_threshold)),
         )
-    _lk_dense_interpolate_kernel(grid_flow, flow_out, grid_step_i, margin_i, float(overlap))
+    _lk_dense_interpolate_kernel(
+        grid_flow, flow_out, grid_step_i, margin_i, float(overlap)
+    )
     ti.sync()
     result = flow_out.to_numpy()
 

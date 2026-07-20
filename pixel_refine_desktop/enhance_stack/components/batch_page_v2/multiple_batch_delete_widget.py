@@ -110,7 +110,7 @@ class MultipleBatchDeleteWidget(QWidget):
         # Title/header for selected batches
         header_text = f"{language_config.UI_BATCH_HEADER} [{count}]"
         # Question for delete
-        question_text = language_config.MSG_CONFIRM_DELETE_BATCH
+        question_text = language_config.MSG_CONFIRM_DELETE_BATCH_COUNT.format(count)
         
         message = (
             f"<div style='text-align: center; font-family: \"Segoe UI\", Arial, sans-serif;'>"

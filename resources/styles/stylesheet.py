@@ -630,9 +630,6 @@ def stylesheet_global_page(theme=None):
                 background-color: {theme.bg_secondary};
                 border-color: {theme.border_dark};
             }}
-            .QPushButton:pressed {{
-                background-color: {theme.border_color};
-            }}
             .QPushButton#addButton, .QPushButton#processButton, .QPushButton#ApplySettingsBtn {{
                 background-color: {theme.btn_success_bg};
                 color: {theme.btn_success_text};

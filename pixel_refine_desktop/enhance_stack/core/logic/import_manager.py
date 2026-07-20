@@ -89,7 +89,7 @@ class ImportManager(QObject):
             self.panel.toast.show_progress(
                 message,
                 category="import_progress",
-                position=ToastPosition.BOTTOM_RIGHT,
+                position=ToastPosition.BOTTOM_LEFT,
                 single_mode=True,
             )
             return
@@ -142,7 +142,7 @@ class ImportManager(QObject):
         self.panel.toast.show_progress(
             "Mengimpor...",
             category="import_progress",
-            position=ToastPosition.BOTTOM_RIGHT,
+            position=ToastPosition.BOTTOM_LEFT,
         )
 
         # Emit signal
@@ -162,7 +162,7 @@ class ImportManager(QObject):
             self.panel.toast.show_message(
                 "Proses import selesai.",
                 duration=3000,
-                position=ToastPosition.BOTTOM_RIGHT,
+                position=ToastPosition.BOTTOM_LEFT,
                 single_mode=True,
             )
 
@@ -207,7 +207,7 @@ class ImportManager(QObject):
                 self.panel.toast.show_progress(
                     f"Mengimpor... ({progress_percent}%) - {items_left} tersisa",
                     category="import_progress",
-                    position=ToastPosition.BOTTOM_RIGHT,
+                    position=ToastPosition.BOTTOM_LEFT,
                 )
 
             import_worker.completion_signal.connect(local_on_finished)

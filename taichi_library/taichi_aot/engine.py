@@ -10,6 +10,96 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
 
+def get_vulkan_device_name(device_id):
+    try:
+        import ctypes
+        vk = ctypes.CDLL("vulkan-1.dll")
+        
+        class VkApplicationInfo(ctypes.Structure):
+            _fields_ = [
+                ("sType", ctypes.c_int),
+                ("pNext", ctypes.c_void_p),
+                ("pApplicationName", ctypes.c_char_p),
+                ("applicationVersion", ctypes.c_uint32),
+                ("pEngineName", ctypes.c_char_p),
+                ("engineVersion", ctypes.c_uint32),
+                ("apiVersion", ctypes.c_uint32),
+            ]
+
+        class VkInstanceCreateInfo(ctypes.Structure):
+            _fields_ = [
+                ("sType", ctypes.c_int),
+                ("pNext", ctypes.c_void_p),
+                ("flags", ctypes.c_uint32),
+                ("pApplicationInfo", ctypes.POINTER(VkApplicationInfo)),
+                ("enabledLayerCount", ctypes.c_uint32),
+                ("ppEnabledLayerNames", ctypes.c_void_p),
+                ("enabledExtensionCount", ctypes.c_uint32),
+                ("ppEnabledExtensionNames", ctypes.c_void_p),
+            ]
+
+        vk.vkCreateInstance.argtypes = [ctypes.POINTER(VkInstanceCreateInfo), ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+        vk.vkCreateInstance.restype = ctypes.c_int
+        
+        vk.vkDestroyInstance.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        vk.vkDestroyInstance.restype = None
+        
+        vk.vkEnumeratePhysicalDevices.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_void_p)]
+        vk.vkEnumeratePhysicalDevices.restype = ctypes.c_int
+        
+        vk.vkGetPhysicalDeviceProperties.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        vk.vkGetPhysicalDeviceProperties.restype = None
+
+        app_info = VkApplicationInfo(
+            sType=9,
+            pNext=None,
+            pApplicationName=b"Query",
+            applicationVersion=1,
+            pEngineName=b"Query",
+            engineVersion=1,
+            apiVersion=0x00400000,
+        )
+        create_info = VkInstanceCreateInfo(
+            sType=10,
+            pNext=None,
+            flags=0,
+            pApplicationInfo=ctypes.pointer(app_info),
+            enabledLayerCount=0,
+            ppEnabledLayerNames=None,
+            enabledExtensionCount=0,
+            ppEnabledExtensionNames=None,
+        )
+        
+        instance = ctypes.c_void_p()
+        res = vk.vkCreateInstance(ctypes.pointer(create_info), None, ctypes.pointer(instance))
+        if res != 0:
+            return None
+
+        count = ctypes.c_uint32(0)
+        vk.vkEnumeratePhysicalDevices(instance, ctypes.pointer(count), None)
+        if count.value == 0 or device_id >= count.value:
+            vk.vkDestroyInstance(instance, None)
+            return None
+
+        devices = (ctypes.c_void_p * count.value)()
+        vk.vkEnumeratePhysicalDevices(instance, ctypes.pointer(count), devices)
+
+        dev = devices[device_id]
+        buf = (ctypes.c_byte * 1024)()
+        vk.vkGetPhysicalDeviceProperties(dev, buf)
+        
+        name_bytes = bytes(buf[20:276])
+        null_idx = name_bytes.find(b'\x00')
+        if null_idx != -1:
+            name_bytes = name_bytes[:null_idx]
+        name = name_bytes.decode("utf-8", errors="ignore")
+
+        vk.vkDestroyInstance(instance, None)
+        return name
+    except Exception:
+        return None
+
+
 
 # -------------------------------------------------------------------------
 # Auto-Destruction Configuration
@@ -1036,10 +1126,16 @@ class TaichiGPUBuffer:
     def nbytes(self):
         return self.size_bytes
 
-    def to_numpy(self):
+    def to_numpy(self, out=None):
         """Read GPU data. Automatically handles staging for VRAM-only buffers."""
         _heartbeat()
-        out = np.zeros(self.shape, dtype=self.dtype)
+        if out is None:
+            out = np.empty(self.shape, dtype=self.dtype)
+        elif out.shape != self.shape or out.dtype != self.dtype:
+            raise ValueError(
+                f"Output array must have shape={self.shape} dtype={self.dtype}, "
+                f"got shape={out.shape} dtype={out.dtype}"
+            )
         runtime = self.engine.runtime if self.engine else _RUNTIME
         engine = self.engine
         if engine and hasattr(engine, "_lock"):
@@ -1407,9 +1503,15 @@ class AOTEngine:
                     f"Failed to initialize {arch.upper()} AOT Runtime on device {device_id}."
                 )
 
-            print(
-                f"[AOTEngine] Runtime initialized on '{arch.upper()}' (Device {device_id})"
-            )
+            gpu_name = get_vulkan_device_name(device_id) if arch.lower() == "vulkan" else None
+            if gpu_name:
+                print(
+                    f"[AOTEngine] Runtime initialized on '{arch.upper()}' ({gpu_name})"
+                )
+            else:
+                print(
+                    f"[AOTEngine] Runtime initialized on '{arch.upper()}' (Device {device_id})"
+                )
 
             instance.modules = {}
             instance.buffer_pool = BufferPool(instance)

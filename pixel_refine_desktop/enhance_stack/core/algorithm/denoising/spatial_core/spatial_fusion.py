@@ -104,9 +104,12 @@ class SpatialFusionProcessor:
 
         work_res_h, work_res_w = (work_res_h // 2) * 2, (work_res_w // 2) * 2
 
-        # Tiling
-        win_y = np.hanning(tile_h).astype(np.float32)
-        win_x = np.hanning(tile_w).astype(np.float32)
+        # Tiling. A standard Hanning window is exactly zero at tile edges; when
+        # the first/last tile touches the image border, that creates black
+        # borders in the final normalization. Keep the feathered shape but clamp
+        # it to a small positive floor so every frame edge remains covered.
+        win_y = np.maximum(np.hanning(tile_h).astype(np.float32), 1e-4)
+        win_x = np.maximum(np.hanning(tile_w).astype(np.float32), 1e-4)
         base_window = np.outer(win_y, win_x).astype(np.float32)
         step_y, step_x = max(int(tile_h * (1 - overlap)), 1), max(
             int(tile_w * (1 - overlap)), 1

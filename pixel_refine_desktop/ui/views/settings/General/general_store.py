@@ -11,6 +11,7 @@ DEFAULTS = {
     "device_backend": "CPU (Universal)",
     "device_backend_arch": "cpu",
     "device_backend_id": -1,
+    "allowed_backend_ids": [],
 }
 
 _general_store = None

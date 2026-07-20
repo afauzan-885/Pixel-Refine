@@ -13,6 +13,7 @@ Algorithm (per frame):
 """
 
 import os
+import gc
 import numpy as np
 
 
@@ -171,7 +172,22 @@ class SpatialFusionProcessor:
                 (work_res_h, work_res_w), dtype=np.float32, host_accessible=True
             )
 
-            batch_size = 8
+            try:
+                batch_size = int(os.environ.get("PIXEL_REFINE_SPATIAL_BATCH_SIZE", "2"))
+            except (TypeError, ValueError):
+                batch_size = 2
+            batch_size = max(1, min(batch_size, 8))
+
+            def cleanup_idle_vram(reason):
+                try:
+                    if hasattr(taichi_aot.engine, "sync"):
+                        taichi_aot.engine.sync()
+                    if hasattr(engine, "buffer_pool") and engine.buffer_pool:
+                        engine.buffer_pool.clear()
+                except Exception as exc:
+                    print(f"[SpatialFusion] VRAM cleanup skipped ({reason}): {exc}")
+                gc.collect()
+
             try:
                 for start_idx in range(0, num_images, batch_size):
                     if stop_requested and stop_requested():
@@ -276,9 +292,7 @@ class SpatialFusionProcessor:
 
                     # Free chunk
                     del chunk_images
-                    import gc
-
-                    gc.collect()
+                    cleanup_idle_vram(f"chunk {start_idx}-{end_idx}")
 
                 # Finalize: mean division
                 if processed_count > 0:
@@ -321,6 +335,7 @@ class SpatialFusionProcessor:
                             buf.destroy()
                         except:
                             pass
+                cleanup_idle_vram("final")
                 if os.environ.get("PIXEL_REFINE_AOT_CLEAR_AFTER_OP", "0") == "1":
                     taichi_aot.unload_all_modules()
                     engine.buffer_pool.clear()

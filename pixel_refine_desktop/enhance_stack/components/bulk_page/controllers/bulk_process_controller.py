@@ -57,12 +57,13 @@ class MassAlgorithmEditDialog(QDialog):
         self.algorithms = {
             "alignment": [
                 language_config.UI_NO_CHANGE,
-                "Farneback Optical Flow",
-                "Lucas Kanade Optical Flow",
-                "Lucas Kanade GPU Optical Flow",
-                "AKAZE",
                 "ORB",
+                "AKAZE",
                 "Light Glue",
+                "Farneback",
+                "Lucas Kanade",
+                "Block Matching GPU",
+                "RAFT",
                 "No Alignment",
             ],
             "super_resolution": [language_config.UI_NO_CHANGE, "No Super Resolution"],
@@ -71,6 +72,7 @@ class MassAlgorithmEditDialog(QDialog):
                 "Average",
                 "Median",
                 "Similarity",
+                "Similarity Fusion",
                 "No Denoising",
             ],
         }

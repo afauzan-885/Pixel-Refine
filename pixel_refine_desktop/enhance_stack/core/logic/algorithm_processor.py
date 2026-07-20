@@ -22,8 +22,11 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
     running_median,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
-    running_similarity,
+    running_similarity as running_mf_similarity,
     running_mf_denoiser,
+)
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Similarity import (
+    running_similarity_fusion,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.WeightedSR import (
     running_weighted_sr,
@@ -90,19 +93,36 @@ class AlgorithmProcessorThread(QThread):
                 return self._is_cancelled
 
             alignment_choice = self.settings.get("alignment", "No Alignment")
+            super_resolution_choice = self.settings.get(
+                "super_resolution", "No Super Resolution"
+            )
             denoising_choice = self.settings.get("denoising", "No Denoising")
             denoising_active = denoising_choice not in (
                 "",
                 "None",
                 "No Denoising",
             )
+            denoising_owns_alignment = denoising_choice in (
+                "Average",
+                "Similarity",
+                "Similarity Fusion",
+            )
             print(
                 f"[AlgorithmProcessorThread] settings={self.settings} "
-                f"alignment_choice={alignment_choice} denoising_choice={denoising_choice}"
+                f"alignment_choice={alignment_choice} "
+                f"super_resolution_choice={super_resolution_choice} "
+                f"denoising_choice={denoising_choice}"
             )
 
             actions = {
                 "alignment": {
+                    "Farneback": lambda: running_farneback_flow(
+                        self.parent_panel,
+                        single_process=self.single_process,
+                        batch_id=self.batch_id,
+                        progress_callback=progress_callback,
+                        stop_callback=get_stop_cb,
+                    ),
                     "Farneback Optical Flow": lambda: running_farneback_flow(
                         self.parent_panel,
                         single_process=self.single_process,
@@ -163,7 +183,15 @@ class AlgorithmProcessorThread(QThread):
                         progress_callback=progress_callback,
                         stop_callback=get_stop_cb,
                     ),
-                    "Similarity": lambda: running_similarity(
+                    "Similarity": lambda: running_mf_similarity(
+                        self.parent_panel,
+                        single_process=self.single_process,
+                        batch_id=self.batch_id,
+                        progress_callback=progress_callback,
+                        stop_callback=get_stop_cb,
+                        alignment_backend=alignment_choice,
+                    ),
+                    "Similarity Fusion": lambda: running_similarity_fusion(
                         self.parent_panel,
                         single_process=self.single_process,
                         batch_id=self.batch_id,
@@ -176,27 +204,19 @@ class AlgorithmProcessorThread(QThread):
                 },
             }
 
-            # Execute selected algorithms
             any_algorithm_executed = False
-            for category, selected_algo_name in self.settings.items():
+
+            def execute(category, selected_algo_name):
+                nonlocal any_algorithm_executed
                 if not self._is_running:
-                    break
-
-                if category == "alignment" and denoising_active:
-                    print(
-                        f"[AlgorithmProcessorThread] Deferring alignment "
-                        f"'{selected_algo_name}' to MFDenoiser."
-                    )
-                    continue
-
+                    return
                 if not selected_algo_name or selected_algo_name in [
                     "None",
                     "No Alignment",
                     "No Super Resolution",
                     "No Denoising",
                 ]:
-                    continue
-
+                    return
                 if category in actions and selected_algo_name in actions[category]:
                     print(
                         f"[INFO] Executing '{selected_algo_name}' for batch_id: {self.batch_id}"
@@ -212,6 +232,19 @@ class AlgorithmProcessorThread(QThread):
                     print(
                         f"[WARN] Algorithm '{selected_algo_name}' for category '{category}' not found in actions."
                     )
+
+            if denoising_owns_alignment:
+                if alignment_choice not in ("", "None", "No Alignment"):
+                    print(
+                        f"[AlgorithmProcessorThread] Alignment '{alignment_choice}' "
+                        f"will be executed inside denoising pipeline '{denoising_choice}'."
+                    )
+                execute("denoising", denoising_choice)
+                execute("super_resolution", super_resolution_choice)
+            else:
+                execute("alignment", alignment_choice)
+                execute("denoising", denoising_choice)
+                execute("super_resolution", super_resolution_choice)
 
             if not any_algorithm_executed:
                 print(

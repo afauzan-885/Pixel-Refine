@@ -45,7 +45,7 @@ def _to_float32_tile(tile):
 def _restore_dtype(image, dtype):
     if np.issubdtype(dtype, np.integer):
         info = np.iinfo(dtype)
-        image = np.clip(image, info.min, info.max)
+        np.clip(image, info.min, info.max, out=image)
     return image.astype(dtype, copy=False)
 
 
@@ -105,6 +105,7 @@ def align_with_tiled_flow(
     use_multi_core=True,
     stop_requested=None,
     executor=None,
+    target_for_warping=None,
 ):
     reference_gray = to_flow_gray_u8(reference)
     target_gray = to_flow_gray_u8(target)
@@ -120,7 +121,8 @@ def align_with_tiled_flow(
     def run_tile(tile):
         if stop_requested and stop_requested():
             return None
-        return _compute_and_warp_tile(reference_gray, target_gray, target, tile, flow_func)
+        tgt_warp = target_for_warping if target_for_warping is not None else target
+        return _compute_and_warp_tile(reference_gray, target_gray, tgt_warp, tile, flow_func)
 
     if use_multi_core and len(tiles) > 1:
         if executor is not None:

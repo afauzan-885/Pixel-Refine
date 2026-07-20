@@ -12,12 +12,14 @@ from resources.GenericUILibrary import (
     SyncMixin,
 )
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
+from resources.GenericUILibrary.modals import modal_confirm
 from .general_store import get_general_store
 from .helpers import restart_application, sync_algorithm_settings
 
 
 class HardwareBackendTestWorker(QObject):
     finished = Signal(dict)
+    progress = Signal(int)
 
     def __init__(self, options, python_bin):
         super().__init__()
@@ -28,7 +30,8 @@ class HardwareBackendTestWorker(QObject):
         import subprocess
 
         test_results = {}
-        for option in self.options:
+        total = max(len(self.options), 1)
+        for index, option in enumerate(self.options, start=1):
             text = option.get("text", "")
             backend = option.get("backend", "cpu")
             device_id = option.get("device_id", -1)
@@ -67,6 +70,7 @@ except Exception:
                     print(f"[Test Backend] {text} worker exception: {e}")
 
             test_results[text] = "support" if success else "disable"
+            self.progress.emit(int(index * 100 / total))
 
         self.finished.emit(test_results)
 
@@ -90,6 +94,7 @@ class GeneralSettingsPage(Container, SyncMixin):
         # Track initial values for restart check
         self._initial_language = self.store.get("language", "English")
         self._initial_thumbnail = self.store.get("create_thumbnail", False)
+        self._initial_device_backend = self.store.get("device_backend", "CPU (Universal)")
 
         self._setup_ui()
 
@@ -111,13 +116,13 @@ class GeneralSettingsPage(Container, SyncMixin):
         self.language_group.bind_store(self.store, "language")
         form.add_row(self.language_group)
 
-        # Themes Selection
-        theme_label = "Theme:"
-        self.theme_group = FormGroup(label=theme_label, input_type="select")
-        if isinstance(self.theme_group.input, QComboBox):
-            self.theme_group.input.addItems(["Light Theme", "Dark Theme"])
-        self.theme_group.bind_store(self.store, "theme")
-        form.add_row(self.theme_group)
+        # Themes Selection temporarily disabled.
+        # theme_label = "Theme:"
+        # self.theme_group = FormGroup(label=theme_label, input_type="select")
+        # if isinstance(self.theme_group.input, QComboBox):
+        #     self.theme_group.input.addItems(["Light Theme", "Dark Theme"])
+        # self.theme_group.bind_store(self.store, "theme")
+        # form.add_row(self.theme_group)
 
         hardware_backends = self._scan_hardware_backend_options()
 
@@ -241,6 +246,9 @@ class GeneralSettingsPage(Container, SyncMixin):
 
     def _scan_hardware_backend_options(self):
         options = [{"text": "CPU (Universal)", "backend": "cpu", "device_id": -1}]
+        allowed_ids = self.store.get("allowed_backend_ids", [])
+        seen = {"cpu (universal)"} # Track seen labels to prevent duplicates
+        
         try:
             import importlib
 
@@ -250,10 +258,19 @@ class GeneralSettingsPage(Container, SyncMixin):
                 scanned = aot_engine._LIB.scan_vulkan_devices().decode("utf-8")
             if scanned:
                 devices = [d.strip() for d in scanned.split(";")]
-                seen = set()
                 for idx, dev in enumerate(devices):
                     if not dev:
                         continue
+                    
+                    # Filter by allowed device IDs if the list is not empty
+                    if allowed_ids and idx not in allowed_ids:
+                        continue
+                        
+                    # Explicitly skip Direct3D12 compatibility layers and Basic Render Drivers
+                    dev_lower = dev.lower()
+                    if "direct3d12" in dev_lower or "basic render driver" in dev_lower:
+                        continue
+                        
                     label = dev
                     suffix = 2
                     while label.lower() in seen:
@@ -324,71 +341,64 @@ class GeneralSettingsPage(Container, SyncMixin):
         1. Save language from FormGroup to store.
         2. Apply changes immediately in real-time.
         """
-        if isinstance(self.language_group.input, QComboBox):
-            new_lang = self.language_group.input.currentText()
-            self.store.set("language", new_lang)
-            
-            # Apply Theme
-            if isinstance(self.theme_group.input, QComboBox):
-                new_theme_str = self.theme_group.input.currentText()
-                self.store.set("theme", new_theme_str)
-                from resources.GenericUILibrary.theme import set_theme, DarkTheme, LightTheme
-                if new_theme_str == "Dark Theme":
-                    set_theme(DarkTheme())
-                else:
-                    set_theme(LightTheme())
+        new_lang = self.language_group.input.currentText() if isinstance(self.language_group.input, QComboBox) else self.store.get("language", "English")
+        selected_backend_text = self.device_group.input.currentText() if isinstance(self.device_group.input, QComboBox) else self.store.get("device_backend", "CPU (Universal)")
+        backend_changed = selected_backend_text != self._initial_device_backend
 
-            # Apply Device Selection on Apply Settings Click
-            if isinstance(self.device_group.input, QComboBox):
-                self._apply_selected_backend_to_process()
+        self.store.set("language", new_lang)
 
-            # Explicitly force save general store to disk
-            if hasattr(self.store, "save_to_file"):
-                self.store.save_to_file()
+        if isinstance(self.device_group.input, QComboBox):
+            self._apply_selected_backend_to_process()
 
-            # Dynamically reload language config and translate this view
-            language_config.reload_language(new_lang)
-            self.retranslate_ui()
-            
-            # Broadcast translation to the entire application hierarchy
-            main_win = self.window()
-            if main_win:
-                # Re-apply global stylesheet with new theme colors
-                from resources.styles.stylesheet import stylesheet_global_page
-                main_win.setStyleSheet(stylesheet_global_page())
+        if hasattr(self.store, "save_to_file"):
+            self.store.save_to_file()
 
-                # Recursively call retranslate_ui on all child widgets
-                def broadcast_retranslate(widget):
-                    for child in widget.findChildren(QWidget):
-                        if hasattr(child, "retranslate_ui") and child != self:
-                            try:
-                                child.retranslate_ui()
-                            except Exception as e:
-                                print(f"Error retranslating {child}: {e}")
-                broadcast_retranslate(main_win)
-            
-            # Trigger dedicated live decorator updates
-            from resources.GenericUILibrary import trigger_live_update
-            trigger_live_update()
-            trigger_live_update("update_theme")
-            
-            self._initial_language = new_lang
-            
-            from resources.GenericUILibrary import Toast
-            toast = Toast(
-                getattr(language_config, "SETTINGS_SAVED", "Settings saved successfully!"),
-                variant="success",
-                parent=self.window()
+        language_config.reload_language(new_lang)
+        self.retranslate_ui()
+
+        main_win = self.window()
+        if main_win:
+            def broadcast_retranslate(widget):
+                for child in widget.findChildren(QWidget):
+                    if hasattr(child, "retranslate_ui") and child != self:
+                        try:
+                            child.retranslate_ui()
+                        except Exception as e:
+                            print(f"Error retranslating {child}: {e}")
+            broadcast_retranslate(main_win)
+
+        from resources.GenericUILibrary import Toast, trigger_live_update
+        trigger_live_update()
+
+        self._initial_language = new_lang
+        self._initial_device_backend = selected_backend_text
+
+        toast = Toast(
+            getattr(language_config, "SETTINGS_SAVED", "Settings saved successfully!"),
+            variant="success",
+            parent=self.window()
+        )
+        toast.show_toast(duration=3000)
+
+        if backend_changed:
+            confirm_message = (
+                "Perubahan Accelerated Hardware Backend memerlukan restart aplikasi.\n\n"
+                "Restart sekarang?"
             )
-            toast.show_toast(duration=3000)
-        else:
-            from resources.GenericUILibrary import Toast
-            toast = Toast(
-                getattr(language_config, "SETTINGS_SAVED", "Settings saved successfully!"),
-                variant="success",
-                parent=self.window()
-            )
-            toast.show_toast(duration=3000)
+            if getattr(language_config, "LANGUAGE", "english").lower() != "indonesian":
+                confirm_message = (
+                    "Changes to Accelerated Hardware Backend require an application restart.\n\n"
+                    "Restart now?"
+                )
+
+            dialog = modal_confirm(confirm_message, self.window())
+            dialog.title_text.setText("Restart Required")
+            dialog.yes_button.setText("Yes")
+            dialog.no_button.setText("No")
+            dialog._refresh_button_sizes()
+
+            if dialog.exec() == dialog.DialogCode.Accepted:
+                restart_application()
 
     def update_device_dropdown_style(self):
         """Update dropdown select style based on test support status."""
@@ -474,12 +484,18 @@ class GeneralSettingsPage(Container, SyncMixin):
         self._backend_test_worker = HardwareBackendTestWorker(options, python_bin)
         self._backend_test_worker.moveToThread(self._backend_test_thread)
         self._backend_test_thread.started.connect(self._backend_test_worker.run)
+        self._backend_test_worker.progress.connect(self._on_backend_test_progress)
         self._backend_test_worker.finished.connect(self._on_backend_test_finished)
         self._backend_test_worker.finished.connect(self._backend_test_thread.quit)
         self._backend_test_worker.finished.connect(self._backend_test_worker.deleteLater)
         self._backend_test_thread.finished.connect(self._cleanup_backend_test_worker)
         self._backend_test_thread.finished.connect(self._backend_test_thread.deleteLater)
         self._backend_test_thread.start()
+
+    def _on_backend_test_progress(self, progress):
+        lang_str = getattr(language_config, "LANGUAGE", "english").lower()
+        prefix = "Menguji" if lang_str == "indonesian" else "Testing"
+        self.test_btn.setText(f"{prefix}... {progress}%")
 
     def _on_backend_test_finished(self, test_results):
         self.store.set("backend_test_results", test_results)

@@ -769,7 +769,7 @@ def main(
         gc.collect()
 
 
-def running_similarity(
+def running_similarity_fusion(
     parent=None,
     single_process=None,
     batch_id=None,

@@ -338,7 +338,7 @@ if TAICHI_AVAILABLE:
                     wx = 0.5 - 0.5 * ti.cos(2.0 * 3.141592653589793 * float(j + 1) / float(W + 1))
                 else:
                     wx = 0.5 - 0.5 * ti.cos(2.0 * 3.141592653589793 * float(j) / float(W - 1))
-            dst[i, j] = wy * wx
+            dst[i, j] = ti.max(wy, 1e-4) * ti.max(wx, 1e-4)
 
     @ti.kernel
     def _mean_division_kernel(sum_img: ti.types.ndarray(), sum_weight: ti.types.ndarray(), ref_img: ti.types.ndarray(), dst: ti.types.ndarray()):
@@ -348,6 +348,19 @@ if TAICHI_AVAILABLE:
                 dst[i, j] = sum_img[i, j] / w
             else:
                 dst[i, j] = ref_img[i, j]
+
+    @ti.kernel
+    def _normalize_accum_kernel(sum_img: ti.types.ndarray(), sum_weight: ti.types.ndarray(), dst: ti.types.ndarray()):
+        for i, j in sum_weight:
+            w = ti.max(sum_weight[i, j], 1e-6)
+            dst[i, j] = sum_img[i, j] / w
+
+    @ti.kernel
+    def _normalize_accum_vec3_kernel(sum_img: ti.types.ndarray(), sum_weight: ti.types.ndarray(), dst: ti.types.ndarray()):
+        for i, j in sum_weight:
+            w = ti.max(sum_weight[i, j], 1e-6)
+            inv_w = 1.0 / w
+            dst[i, j] = sum_img[i, j] * inv_w
 
     @ti.kernel
     def _scale_f32_2d_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray(), scale: float):
@@ -390,6 +403,45 @@ if TAICHI_AVAILABLE:
             w_val = hanning[ty, tx] * tile_weight[ty, tx]
             accum[y, x] += tile[ty, tx] * w_val
             weight_accum[y, x] += w_val
+
+    @ti.kernel
+    def _stitch_tile_normalized_f32_kernel(
+        tile: ti.types.ndarray(),
+        tile_weight: ti.types.ndarray(),
+        hanning: ti.types.ndarray(),
+        accum: ti.types.ndarray(),
+        weight_accum: ti.types.ndarray(),
+        y0: ti.i32, x0: ti.i32, h: ti.i32, w: ti.i32
+    ):
+        for ty, tx in ti.ndrange(h, w):
+            y = y0 + ty
+            x = x0 + tx
+            add_w = hanning[ty, tx] * tile_weight[ty, tx]
+            old_w = weight_accum[y, x]
+            new_w = old_w + add_w
+            if new_w > 1e-6:
+                accum[y, x] = (accum[y, x] * old_w + tile[ty, tx] * add_w) / new_w
+                weight_accum[y, x] = new_w
+
+    @ti.kernel
+    def _stitch_tile_normalized_vec3_kernel(
+        tile: ti.types.ndarray(),
+        tile_weight: ti.types.ndarray(),
+        hanning: ti.types.ndarray(),
+        accum: ti.types.ndarray(),
+        weight_accum: ti.types.ndarray(),
+        y0: ti.i32, x0: ti.i32, h: ti.i32, w: ti.i32
+    ):
+        for ty, tx in ti.ndrange(h, w):
+            y = y0 + ty
+            x = x0 + tx
+            add_w = hanning[ty, tx] * tile_weight[ty, tx]
+            old_w = weight_accum[y, x]
+            new_w = old_w + add_w
+            if new_w > 1e-6:
+                blend = add_w / new_w
+                accum[y, x] = accum[y, x] * (1.0 - blend) + tile[ty, tx] * blend
+                weight_accum[y, x] = new_w
 
     @ti.kernel
     def _stitch_tile_batch_f32_kernel(

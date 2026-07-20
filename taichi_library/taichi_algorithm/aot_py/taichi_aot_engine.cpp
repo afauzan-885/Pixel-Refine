@@ -31,6 +31,20 @@ static void init_wic() {
 }
 #endif
 
+
+static bool is_debug_logging_enabled() {
+    static bool checked = false;
+    static bool enabled = false;
+    if (!checked) {
+        const char *env = std::getenv("AOT_ENGINE_ENABLE_DEBUG");
+        if (env && std::string(env) == "1") {
+            enabled = true;
+        }
+        checked = true;
+    }
+    return enabled;
+}
+
 extern "C" {
 
 // -----------------------------------------------------------------------
@@ -755,7 +769,7 @@ static void _fill_ti_arg(TiNamedArgument &arg, const DynamicArg &dyn_arg,
       converter.u = dyn_arg.val_u64;
       arg.argument.value.f32 = converter.f;
 
-      FILE *f = fopen("engine_debug.log", "a");
+      FILE *f = is_debug_logging_enabled() ? fopen("engine_debug.log", "a") : nullptr;
       if (f) {
         fprintf(f, "  [Arg %d] Scalar F32: %f (raw 0x%llx)\n", i, converter.f,
                 (unsigned long long)dyn_arg.val_u64);
@@ -765,7 +779,7 @@ static void _fill_ti_arg(TiNamedArgument &arg, const DynamicArg &dyn_arg,
       arg.argument.type = TI_ARGUMENT_TYPE_I32;
       arg.argument.value.i32 = (int32_t)dyn_arg.val_u64;
 
-      FILE *f = fopen("engine_debug.log", "a");
+      FILE *f = is_debug_logging_enabled() ? fopen("engine_debug.log", "a") : nullptr;
       if (f) {
         fprintf(f, "  [Arg %d] Scalar I32: %d (raw 0x%llx)\n", i,
                 arg.argument.value.i32, (unsigned long long)dyn_arg.val_u64);
@@ -832,7 +846,7 @@ EXPORT void run_aot_graph(void *runtime, void *module_ctx,
     ti_get_last_error(&junk_size, nullptr);
 
     {
-      FILE *f = fopen("engine_debug.log", "a");
+      FILE *f = is_debug_logging_enabled() ? fopen("engine_debug.log", "a") : nullptr;
       if (f) {
         fprintf(f, "[C++ Engine] Launching graph '%s' with %d args...\n",
                 graph_name, num_args);
@@ -843,7 +857,7 @@ EXPORT void run_aot_graph(void *runtime, void *module_ctx,
     graph.launch(ti_args);
 
     {
-      FILE *f = fopen("engine_debug.log", "a");
+      FILE *f = is_debug_logging_enabled() ? fopen("engine_debug.log", "a") : nullptr;
       if (f) {
         fprintf(f, "[C++ Engine] Graph '%s' launched successfully.\n",
                 graph_name);

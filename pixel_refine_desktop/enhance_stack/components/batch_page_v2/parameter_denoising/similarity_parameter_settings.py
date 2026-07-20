@@ -12,6 +12,7 @@ from config import CONFIG_DIR, ALGORITHM_PARAMETER_SETTINGS_FILE
 
 
 SIMILARITY_DEFAULTS = {
+    "similarity_backend": "gpu",  # "cpu" or "gpu"
     "use_multi_core": True,
     "similarity_spatial_tile_size": 24,
     "similarity_spatial_motion_sensitivity": 150.0,
@@ -24,6 +25,10 @@ SIMILARITY_DEFAULTS = {
     "equalize_brightness": False,
     "early_exit_threshold": 0.05,
     "work_resolution_scale": 1.0,
+    "ai_tile_size": 1024,
+    "ai_overlap_percent": 0.10,
+    "ai_batch_size": 4,
+    "ai_model_type": "nano fusion v1",
 }
 
 
@@ -98,6 +103,42 @@ PARAMETER_SCHEMA = [
         "default": True,
         "value_type": "bool",
     },
+    {
+        "key": "ai_tile_size",
+        "label": "Block Size (AI)",
+        "type": "dropdown",
+        "default": 1024,
+        "options": [512, 1024, 2048],
+        "value_type": "int",
+    },
+    {
+        "key": "ai_overlap_percent",
+        "label": "Block Overlap (AI)",
+        "type": "slider",
+        "default": 0.10,
+        "min": 0,
+        "max": 50,
+        "scale": 0.01,
+        "value_type": "float",
+    },
+    {
+        "key": "ai_batch_size",
+        "label": "Batch Size (AI)",
+        "type": "slider",
+        "default": 4,
+        "min": 1,
+        "max": 16,
+        "scale": 1.0,
+        "value_type": "int",
+    },
+    {
+        "key": "ai_model_type",
+        "label": "Model Type (AI)",
+        "type": "dropdown",
+        "default": "nano fusion v1",
+        "options": ["nano fusion v1", "fusion v1"],
+        "value_type": "str",
+    },
 ]
 
 
@@ -143,26 +184,33 @@ def save_similarity_v1_config(config_to_save):
                 all_params_file = json.load(f)
     except Exception:
         pass
-    if "Similarity" not in all_params_file or not isinstance(
-        all_params_file.get("Similarity"), dict
-    ):
-        all_params_file["Similarity"] = {}
-    similarity_section_to_save = {
-        "use_multi_core": config_to_save.get("use_multi_core", True),
-        "spatial_params": {},
-    }
+    existing_similarity = all_params_file.get("Similarity")
+    if not isinstance(existing_similarity, dict):
+        existing_similarity = {}
+    
+    similarity_section_to_save = existing_similarity.copy()
+    similarity_section_to_save["use_multi_core"] = config_to_save.get("use_multi_core", True)
+    if "spatial_params" not in similarity_section_to_save or not isinstance(similarity_section_to_save["spatial_params"], dict):
+        similarity_section_to_save["spatial_params"] = {}
+
     spatial_keys = [
+        "similarity_backend",
         "similarity_spatial_tile_size",
         "similarity_spatial_motion_sensitivity",
         "similarity_spatial_noise_mad_offset_factor",
         "similarity_spatial_overlap_percent",
         "similarity_spatial_num_workers",
+        "tile_based_alignment_backend",
         "similarity_smart_noise_alpha",
         "similarity_smart_noise_aware_enable",
         "similarity_smart_noise_strength",
         "equalize_brightness",
         "early_exit_threshold",
         "work_resolution_scale",
+        "ai_tile_size",
+        "ai_overlap_percent",
+        "ai_batch_size",
+        "ai_model_type",
     ]
 
     for key in spatial_keys:
