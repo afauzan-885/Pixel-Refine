@@ -13,7 +13,7 @@ if project_root not in sys.path:
 
 # Set AOT Mode for the algorithm imports
 
-import taichi_library.taichi_algorithm.bilinear_interpolation as bilinear
+import taichi_library.taichi_algorithm.interpolation.bilinear_interpolation as bilinear
 
 def compile_bilinear_tcm(arch=ti.vulkan, save_path="bilinear_vulkan.tcm"):
     print(f"\n>>> Compiling Bilinear AOT for: {arch}")
@@ -40,6 +40,15 @@ def compile_bilinear_tcm(arch=ti.vulkan, save_path="bilinear_vulkan.tcm"):
     
     g_resize_3d.dispatch(bilinear._bilinear_resize_kernel_vec3, src_3d, dst_3d, h_src, w_src, h_dst, w_dst)
     module.add_graph("bilinear_resize_f32_3d", g_resize_3d.compile())
+
+    offset_y = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "offset_y", ti.i32)
+    offset_x = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "offset_x", ti.i32)
+    g_tile_2d = ti.graph.GraphBuilder()
+    g_tile_2d.dispatch(bilinear._bilinear_resize_offset_kernel, src_2d, dst_2d, h_src, w_src, h_dst, w_dst, offset_y, offset_x)
+    module.add_graph("bilinear_resize_offset_f32_2d", g_tile_2d.compile())
+    g_tile_3d = ti.graph.GraphBuilder()
+    g_tile_3d.dispatch(bilinear._bilinear_resize_offset_kernel_vec3, src_3d, dst_3d, h_src, w_src, h_dst, w_dst, offset_y, offset_x)
+    module.add_graph("bilinear_resize_offset_f32_3d", g_tile_3d.compile())
 
     # Archive the module
     module.archive(save_path)

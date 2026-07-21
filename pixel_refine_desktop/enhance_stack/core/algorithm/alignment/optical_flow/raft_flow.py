@@ -289,20 +289,15 @@ class RAFTFlow(LucasKanadeGPU):
         try:
             from taichi_library import taichi_aot
 
-            target_gpu = taichi_aot.upload(
-                target.astype(np.float32, copy=False),
-                is_vector=target.ndim == 3,
-            )
             full_h, full_w = target.shape[:2]
-            warped_gpu = taichi_aot.remap_with_flow(
-                target_gpu,
-                flow,
-                full_h,
-                full_w,
-                return_gpu=True,
-            )
-            taichi_aot.engine.sync()
-            warped = warped_gpu.to_numpy()
+            with taichi_aot.engine.reserve_device_execution("raft_remap"):
+                warped = taichi_aot.remap_with_flow(
+                    target.astype(np.float32, copy=False),
+                    flow,
+                    full_h,
+                    full_w,
+                    return_gpu=False,
+                )
             return self._restore_output_dtype(warped, target.dtype)
         except Exception as exc:
             print(f"[RAFTFlow] GPU remap failed, falling back to CPU remap: {exc}")

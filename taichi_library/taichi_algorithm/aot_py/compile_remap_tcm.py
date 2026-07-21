@@ -14,7 +14,7 @@ if project_root not in sys.path:
 
 # Set AOT Mode for the algorithm imports
 
-from taichi_library.taichi_algorithm.remap import (
+from taichi_library.taichi_algorithm.interpolation.remap import (
     _remap_kernel,
     _remap_kernel_vec3,
     _build_flow_maps_kernel,
@@ -23,12 +23,16 @@ from taichi_library.taichi_algorithm.remap import (
     _smooth_flow_y_kernel,
     _remap_with_flow_kernel,
     _remap_with_flow_kernel_vec3,
+    _remap_with_flow_offset_kernel,
+    _remap_with_flow_offset_kernel_vec3,
     _remap_with_flow_batch_kernel,
     _remap_with_flow_batch_kernel_vec3,
     _warp_perspective_kernel,
     _warp_perspective_kernel_vec3,
+    _warp_perspective_offset_kernel,
+    _warp_perspective_offset_kernel_vec3,
 )
-from taichi_library.taichi_algorithm.enhance_image import (
+from taichi_library.taichi_algorithm.image_processing.enhance_image import (
     _enhance_grayscale_kernel,
 )
 
@@ -352,6 +356,44 @@ def compile_remap_tcm(arch=ti.vulkan, save_path="remap_vulkan.tcm"):
         w_dst_w,
     )
     module.add_graph("warp_perspective_f32_3d", g_warp_3d.compile())
+
+    # 9. Output-tile variants. Inputs remain in global coordinates while dst is local.
+    offset_y = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "offset_y", ti.i32)
+    offset_x = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "offset_x", ti.i32)
+
+    g_rwf_tile_2d = ti.graph.GraphBuilder()
+    g_rwf_tile_2d.dispatch(
+        _remap_with_flow_offset_kernel,
+        src_f32_2d, flow_arg, dst_f32_2d,
+        h_src_f, w_src_f, h_dst_f, w_dst_f,
+        h_flow_f, w_flow_f, sc_x, sc_y, offset_y, offset_x,
+    )
+    module.add_graph("remap_with_flow_offset_f32_2d", g_rwf_tile_2d.compile())
+
+    g_rwf_tile_3d = ti.graph.GraphBuilder()
+    g_rwf_tile_3d.dispatch(
+        _remap_with_flow_offset_kernel_vec3,
+        src_f32_3d, flow_arg, dst_f32_3d,
+        h_src_f, w_src_f, h_dst_f, w_dst_f,
+        h_flow_f, w_flow_f, sc_x, sc_y, offset_y, offset_x,
+    )
+    module.add_graph("remap_with_flow_offset_f32_3d", g_rwf_tile_3d.compile())
+
+    g_warp_tile_2d = ti.graph.GraphBuilder()
+    g_warp_tile_2d.dispatch(
+        _warp_perspective_offset_kernel,
+        src_w_2d, minv_arg, dst_w_2d,
+        h_src_w, w_src_w, offset_y, offset_x,
+    )
+    module.add_graph("warp_perspective_offset_f32_2d", g_warp_tile_2d.compile())
+
+    g_warp_tile_3d = ti.graph.GraphBuilder()
+    g_warp_tile_3d.dispatch(
+        _warp_perspective_offset_kernel_vec3,
+        src_w_3d, minv_arg, dst_w_3d,
+        h_src_w, w_src_w, offset_y, offset_x,
+    )
+    module.add_graph("warp_perspective_offset_f32_3d", g_warp_tile_3d.compile())
 
     # Archive the module
     module.archive(save_path)

@@ -116,6 +116,39 @@ if TAICHI_AVAILABLE:
             r2 = tm.mix(q10, q11, wx)
             dst[r, c] = tm.mix(r1, r2, wy)
 
+    @ti.kernel
+    def _bilinear_resize_offset_kernel(
+        src: ti.types.ndarray(), dst: ti.types.ndarray(),
+        h_src: int, w_src: int, h_dst: int, w_dst: int,
+        offset_y: int, offset_x: int,
+    ):
+        for r, c in ti.ndrange(dst.shape[0], dst.shape[1]):
+            gr, gc = r + offset_y, c + offset_x
+            y = (float(gr) + 0.5) * (float(h_src) / float(h_dst)) - 0.5
+            x = (float(gc) + 0.5) * (float(w_src) / float(w_dst)) - 0.5
+            y0, x0 = int(ti.floor(y)), int(ti.floor(x))
+            fy, fx = y - float(y0), x - float(x0)
+            ya, yb = tm.clamp(y0, 0, h_src - 1), tm.clamp(y0 + 1, 0, h_src - 1)
+            xa, xb = tm.clamp(x0, 0, w_src - 1), tm.clamp(x0 + 1, 0, w_src - 1)
+            dst[r, c] = tm.mix(tm.mix(float(src[ya, xa]), float(src[ya, xb]), fx), tm.mix(float(src[yb, xa]), float(src[yb, xb]), fx), fy)
+
+    @ti.kernel
+    def _bilinear_resize_offset_kernel_vec3(
+        src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        h_src: int, w_src: int, h_dst: int, w_dst: int,
+        offset_y: int, offset_x: int,
+    ):
+        for r, c in ti.ndrange(dst.shape[0], dst.shape[1]):
+            gr, gc = r + offset_y, c + offset_x
+            y = (float(gr) + 0.5) * (float(h_src) / float(h_dst)) - 0.5
+            x = (float(gc) + 0.5) * (float(w_src) / float(w_dst)) - 0.5
+            y0, x0 = int(ti.floor(y)), int(ti.floor(x))
+            fy, fx = y - float(y0), x - float(x0)
+            ya, yb = tm.clamp(y0, 0, h_src - 1), tm.clamp(y0 + 1, 0, h_src - 1)
+            xa, xb = tm.clamp(x0, 0, w_src - 1), tm.clamp(x0 + 1, 0, w_src - 1)
+            dst[r, c] = tm.mix(tm.mix(src[ya, xa], src[ya, xb], fx), tm.mix(src[yb, xa], src[yb, xb], fx), fy)
+
 
 def bilinear_resize(src, target_h: int, target_w: int, dst=None, buffer_provider="pool"):
     """

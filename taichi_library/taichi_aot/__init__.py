@@ -18,6 +18,7 @@ from .engine import AOTEngine, TaichiGPUBuffer, InputArray, OutputArray
 from .engine import enable_experiment_mode, is_experiment_mode
 from .engine import INTER_CUBIC, INTER_LINEAR, INTER_NEAREST, INTER_AREA
 from .engine import COLOR_BGR2GRAY, COLOR_RGB2GRAY, COLOR_GRAY2BGR
+from .block import BlockGrid, BlockRecord, BlockState, checksum
 from taichi_library.taichi_algorithm.taichi_worker import ti_thread
 
 # Bridge to specialized AOT functions
@@ -31,6 +32,49 @@ engine = AOTEngine()
 # Saves ~200MB of idle VRAM compared to eager loading all 15 modules.
 _tcm_dir = os.path.abspath(os.path.join(file_dir, "../taichi_algorithm/aot_tcm"))
 _module_cache = {}  # name -> AOTModuleWrapper (loaded on demand)
+
+
+def set_block_mode(
+    enabled=True,
+    size=512,
+    threshold_bytes=512 * 1024 * 1024,
+    cache_entries=64,
+    cache_bytes=None,
+    adaptive_memory=True,
+    device_cache_enabled=True,
+    device_cache_bytes=128 * 1024 * 1024,
+):
+    """Configure block execution with automatic RAM and native VRAM caching."""
+    return engine.configure_blocks(
+        enabled=enabled,
+        size=size,
+        threshold_bytes=threshold_bytes,
+        cache_entries=cache_entries,
+        cache_bytes=cache_bytes,
+        adaptive_memory=adaptive_memory,
+        device_cache_enabled=device_cache_enabled,
+        device_cache_bytes=device_cache_bytes,
+    )
+
+
+def get_block_config():
+    """Return the active block runtime policy."""
+    return engine.get_block_config()
+
+
+def get_block_cache_stats():
+    """Return cache hit, admission, eviction, and byte-usage counters."""
+    return engine.get_block_cache_stats()
+
+
+def get_memory_status(force=False):
+    """Return the current realtime RAM pressure and cache-admission policy."""
+    return engine.get_memory_status(force=force)
+
+
+def configure_block_reservation(operation, soft_bytes=0, hard_bytes=None, weight=1.0):
+    """Set an elastic reservation for one algorithm's future VRAM-resident blocks."""
+    return engine.configure_block_reservation(operation, soft_bytes, hard_bytes, weight)
 
 
 def _mod(name: str):
@@ -107,8 +151,338 @@ def copy_field(src, dst):
     _mod("common").run(graph, src=src_v, dst=dst_v)
 
 
+def _copy_tile(tile):
+    """Run the existing native common-copy graph for one contiguous tile."""
+    src_tile = upload(tile)
+    dst_tile = engine.allocate(
+        tile.shape,
+        dtype=tile.dtype,
+        is_vector=tile.ndim == 3,
+    )
+    try:
+        copy_field(src_tile, dst_tile)
+        return dst_tile.to_numpy()
+    finally:
+        src_tile.destroy()
+        dst_tile.destroy()
+
+
+def _cached_block_record(block_id, source_checksum):
+    """Resolve RAM first, then the native VRAM tier with integrity checks."""
+    cache = engine.get_block_cache()
+    record = cache.get(block_id)
+    if record is not None:
+        valid = (
+            record.is_valid()
+            and record.source_checksum == source_checksum
+            and (
+                all(checksum(data) == expected for data, expected in zip(record.data, record.checksum))
+                if isinstance(record.data, tuple)
+                else checksum(record.data) == record.checksum
+            )
+        )
+        if valid:
+            return record
+        cache.invalidate(block_id)
+
+    record = engine.restore_resident_block(block_id, source_checksum)
+    if record is not None:
+        engine.put_block_record(record)
+    return record
+
+
+def _run_blockwise(
+    operation,
+    arrays,
+    output_shape,
+    output_dtype,
+    run_tile,
+    *,
+    halo=0,
+    params=None,
+    validate_output=None,
+):
+    """Run a local operation per tile with retry and checksum-backed caching."""
+    if not arrays or any(array.shape[:2] != arrays[0].shape[:2] for array in arrays):
+        raise ValueError("blockwise inputs must share their first two dimensions")
+
+    total_nbytes = sum(array.nbytes for array in arrays)
+    grid = engine.plan_blocks(operation, arrays[0].shape, total_nbytes, halo=halo)
+    if grid is None:
+        return None
+
+    result = np.empty(output_shape, dtype=output_dtype)
+    cache = engine.get_block_cache()
+    source_id = "|".join(str(id(array)) for array in arrays)
+    params = {"shape": tuple(output_shape), "dtype": np.dtype(output_dtype).str, **(params or {})}
+
+    blocks = list(grid)
+    blocks.sort(key=lambda block: (
+        cache.peek(block.make_id(source_id, operation, params)) is None,
+        block.index,
+    ))
+    for block in blocks:
+        tiles = tuple(np.ascontiguousarray(array[block.read_slice]) for array in arrays)
+        source_checksum = tuple(checksum(tile) for tile in tiles)
+        block_id = block.make_id(source_id, operation, params)
+        cached = _cached_block_record(block_id, source_checksum)
+        if cached is not None:
+            result[block.write_slice] = cached.data[block.core_slice]
+            continue
+
+        last_error = None
+        for _ in range(2):
+            try:
+                copied = np.ascontiguousarray(run_tile(*tiles))
+                if copied.shape[:2] != block.read_shape:
+                    raise RuntimeError("block operation returned an unexpected tile shape")
+                if validate_output is not None and not validate_output(copied, tiles):
+                    raise RuntimeError(f"{operation} tile validation failed")
+                engine.put_block_record(
+                    BlockRecord(
+                        block_id,
+                        state=BlockState.READY,
+                        data=copied,
+                        checksum=checksum(copied),
+                        source_checksum=source_checksum,
+                        owner=operation,
+                    )
+                )
+                result[block.write_slice] = copied[block.core_slice]
+                break
+            except Exception as exc:
+                last_error = exc
+        else:
+            raise RuntimeError(
+                f"Unable to recover {operation} block {block.index} after retry"
+            ) from last_error
+
+    return result
+
+
+def _get_cached_output_tile(operation, block, source_checksum, params):
+    cache = engine.get_block_cache()
+    block_id = block.make_id(str(source_checksum), operation, params)
+    record = _cached_block_record(block_id, source_checksum)
+    if record is not None:
+        return record.data
+    return None
+
+
+def _put_cached_output_tile(operation, block, source_checksum, params, data):
+    copied = np.ascontiguousarray(data)
+    block_id = block.make_id(str(source_checksum), operation, params)
+    engine.put_block_record(BlockRecord(
+        block_id,
+        state=BlockState.READY,
+        data=copied,
+        checksum=checksum(copied),
+        source_checksum=source_checksum,
+        owner=operation,
+    ))
+
+
+def _ordered_cached_output_blocks(operation, grid, source_checksum, params):
+    """Visit resident output tiles before cold tiles to prevent scan thrashing."""
+    cache = engine.get_block_cache()
+    blocks = list(grid)
+    blocks.sort(key=lambda block: (
+        cache.peek(block.make_id(str(source_checksum), operation, params)) is None,
+        block.index,
+    ))
+    return blocks
+
+
+def _run_blockwise_pair(
+    operation,
+    array,
+    run_tile,
+    *,
+    halo=0,
+    params=None,
+):
+    """Run a local operation that produces two same-sized output tiles."""
+    grid = engine.plan_blocks(operation, array.shape, array.nbytes, halo=halo)
+    if grid is None:
+        return None
+
+    first_result = np.empty(array.shape[:2], dtype=np.float32)
+    second_result = np.empty(array.shape[:2], dtype=np.float32)
+    cache = engine.get_block_cache()
+    source_id = str(id(array))
+    params = {"shape": tuple(array.shape), "dtype": array.dtype.str, **(params or {})}
+
+    blocks = list(grid)
+    blocks.sort(key=lambda block: (
+        cache.peek(block.make_id(source_id, operation, params)) is None,
+        block.index,
+    ))
+    for block in blocks:
+        tile = np.ascontiguousarray(array[block.read_slice])
+        source_checksum = checksum(tile)
+        block_id = block.make_id(source_id, operation, params)
+        cached = _cached_block_record(block_id, source_checksum)
+        if cached is not None and isinstance(cached.data, tuple) and len(cached.data) == 2:
+            first_result[block.write_slice] = cached.data[0][block.core_slice]
+            second_result[block.write_slice] = cached.data[1][block.core_slice]
+            continue
+
+        last_error = None
+        for _ in range(2):
+            try:
+                outputs = tuple(np.ascontiguousarray(output) for output in run_tile(tile))
+                if len(outputs) != 2 or any(output.shape[:2] != block.read_shape for output in outputs):
+                    raise RuntimeError("block operation returned unexpected output tiles")
+                engine.put_block_record(
+                    BlockRecord(
+                        block_id,
+                        state=BlockState.READY,
+                        data=outputs,
+                        checksum=tuple(checksum(output) for output in outputs),
+                        source_checksum=source_checksum,
+                        owner=operation,
+                    )
+                )
+                first_result[block.write_slice] = outputs[0][block.core_slice]
+                second_result[block.write_slice] = outputs[1][block.core_slice]
+                break
+            except Exception as exc:
+                last_error = exc
+        else:
+            raise RuntimeError(
+                f"Unable to recover {operation} block {block.index} after retry"
+            ) from last_error
+
+    return first_result, second_result
+
+
+def _run_blockwise_triplet(operation, array, run_tile, *, params=None):
+    """Run a local operation that produces three same-sized output tiles."""
+    grid = engine.plan_blocks(operation, array.shape, array.nbytes)
+    if grid is None:
+        return None
+
+    results = tuple(np.empty(array.shape[:2], dtype=array.dtype) for _ in range(3))
+    cache = engine.get_block_cache()
+    source_id = str(id(array))
+    params = {"shape": tuple(array.shape), "dtype": array.dtype.str, **(params or {})}
+
+    blocks = list(grid)
+    blocks.sort(key=lambda block: (
+        cache.peek(block.make_id(source_id, operation, params)) is None,
+        block.index,
+    ))
+    for block in blocks:
+        tile = np.ascontiguousarray(array[block.read_slice])
+        source_checksum = checksum(tile)
+        block_id = block.make_id(source_id, operation, params)
+        cached = _cached_block_record(block_id, source_checksum)
+        if cached is not None and isinstance(cached.data, tuple) and len(cached.data) == 3:
+            for result, output in zip(results, cached.data):
+                result[block.write_slice] = output[block.core_slice]
+            continue
+
+        last_error = None
+        for _ in range(2):
+            try:
+                outputs = tuple(np.ascontiguousarray(output) for output in run_tile(tile))
+                if len(outputs) != 3 or any(output.shape[:2] != block.read_shape for output in outputs):
+                    raise RuntimeError("block operation returned unexpected output tiles")
+                engine.put_block_record(BlockRecord(
+                    block_id,
+                    state=BlockState.READY,
+                    data=outputs,
+                    checksum=tuple(checksum(output) for output in outputs),
+                    source_checksum=source_checksum,
+                    owner=operation,
+                ))
+                for result, output in zip(results, outputs):
+                    result[block.write_slice] = output[block.core_slice]
+                break
+            except Exception as exc:
+                last_error = exc
+        else:
+            raise RuntimeError(
+                f"Unable to recover {operation} block {block.index} after retry"
+            ) from last_error
+
+    return results
+
+
+def copy(src, return_gpu=False):
+    """Copy an array, dispatching large NumPy inputs through AOT tiles."""
+    if isinstance(src, TaichiGPUBuffer):
+        dst = engine.allocate(
+            src.shape,
+            dtype=src.dtype,
+            is_vector=getattr(src, "is_vector", False),
+            vector_dim=getattr(src, "vector_dim", None),
+        )
+        copy_field(src, dst)
+        return dst
+
+    array = np.ascontiguousarray(src)
+    grid = engine.plan_blocks("copy", array.shape, array.nbytes)
+    if grid is None:
+        src_buf = upload(array)
+        dst = engine.allocate(
+            array.shape,
+            dtype=array.dtype,
+            is_vector=array.ndim == 3,
+        )
+        copy_field(src_buf, dst)
+        if return_gpu:
+            return dst
+        try:
+            return dst.to_numpy()
+        finally:
+            src_buf.destroy()
+            dst.destroy()
+
+    result = _run_blockwise(
+        "copy",
+        (array,),
+        array.shape,
+        array.dtype,
+        _copy_tile,
+        validate_output=lambda copied, tiles: checksum(copied) == checksum(tiles[0]),
+    )
+
+    return upload(result) if return_gpu else result
+
+
+def _extract_channel_tile(tile, ch):
+    src_tile = upload(tile)
+    try:
+        dst_tile = extract_channel(src_tile, ch)
+        try:
+            return dst_tile.to_numpy()
+        finally:
+            dst_tile.destroy()
+    finally:
+        src_tile.destroy()
+
+
 def extract_channel(src, ch):
     """AOT Optimized channel extraction."""
+    if not isinstance(src, TaichiGPUBuffer):
+        array = np.ascontiguousarray(src)
+        if array.ndim != 3 or array.shape[2] != 3:
+            raise ValueError("extract_channel expects an HxWx3 array")
+        if not 0 <= int(ch) < 3:
+            raise ValueError("channel index must be in [0, 2]")
+        result = _run_blockwise(
+            "extract_channel", (array,), array.shape[:2], array.dtype,
+            lambda tile: _extract_channel_tile(tile, ch), params={"ch": int(ch)},
+        )
+        if result is not None:
+            return result
+        src_buf = upload(array)
+        try:
+            return extract_channel(src_buf, ch).to_numpy()
+        finally:
+            src_buf.destroy()
+
     h, w = src.shape[0], src.shape[1]
     dst = engine.allocate((h, w), dtype=src.dtype)
     src_v = src
@@ -120,8 +494,39 @@ def extract_channel(src, ch):
     return dst
 
 
+def _split_3ch_tile(tile):
+    src_tile = upload(tile)
+    try:
+        channels = split_3ch(src_tile)
+        try:
+            return tuple(channel.to_numpy() for channel in channels)
+        finally:
+            for channel in channels:
+                channel.destroy()
+    finally:
+        src_tile.destroy()
+
+
 def split_3ch(src):
     """Fused 3-channel split."""
+    if not isinstance(src, TaichiGPUBuffer):
+        array = np.ascontiguousarray(src)
+        if array.ndim != 3 or array.shape[2] != 3:
+            raise ValueError("split_3ch expects an HxWx3 array")
+        result = _run_blockwise_triplet("split_3ch", array, _split_3ch_tile)
+        if result is not None:
+            return list(result)
+        src_buf = upload(array)
+        try:
+            channels = split_3ch(src_buf)
+            try:
+                return [channel.to_numpy() for channel in channels]
+            finally:
+                for channel in channels:
+                    channel.destroy()
+        finally:
+            src_buf.destroy()
+
     h, w = src.shape[0], src.shape[1]
     dst_dtype = src.dtype
     c0 = engine.allocate((h, w), dtype=dst_dtype)
@@ -136,19 +541,99 @@ def split_3ch(src):
     return [c0, c1, c2]
 
 
+def _merge_3ch_tile(c0_tile, c1_tile, c2_tile):
+    channels = [upload(tile) for tile in (c0_tile, c1_tile, c2_tile)]
+    try:
+        dst_tile = merge_3ch(*channels)
+        try:
+            return dst_tile.to_numpy()
+        finally:
+            dst_tile.destroy()
+    finally:
+        for channel in channels:
+            channel.destroy()
+
+
 def merge_3ch(c0, c1, c2):
     """Fused 3-channel merge."""
+    if not isinstance(c0, TaichiGPUBuffer):
+        channels = tuple(np.ascontiguousarray(channel) for channel in (c0, c1, c2))
+        if any(channel.ndim != 2 for channel in channels):
+            raise ValueError("merge_3ch expects three 2D arrays")
+        if any(channel.shape != channels[0].shape or channel.dtype != channels[0].dtype for channel in channels[1:]):
+            raise ValueError("merge_3ch channels must have matching shape and dtype")
+        result = _run_blockwise(
+            "merge_3ch", channels, (*channels[0].shape, 3), channels[0].dtype,
+            _merge_3ch_tile,
+        )
+        if result is not None:
+            return result
+        buffers = [upload(channel) for channel in channels]
+        try:
+            return merge_3ch(*buffers).to_numpy()
+        finally:
+            for buffer in buffers:
+                buffer.destroy()
+
     h, w = c0.shape[0], c0.shape[1]
     dst_dtype = c0.dtype
-    dst = engine.allocate((h, w), dtype=dst_dtype, is_vector=True, vector_dim=3)
+    dst = engine.allocate((h, w, 3), dtype=dst_dtype, is_vector=True, vector_dim=3)
 
     graph = "merge_3ch_f32" if dst_dtype == np.float32 else "merge_3ch_i32"
     _mod("common").run(graph, c0=c0, c1=c1, c2=c2, dst=dst.view_as_vector(True, 3))
     return dst
 
 
+def _rgb2gray_tile(tile):
+    src_tile = upload(tile)
+    dst_tile = engine.allocate(tile.shape[:2], dtype=tile.dtype)
+    try:
+        src_vector = src_tile.view_as_vector(True, 3)
+        graph = "rgb2gray_f32" if tile.dtype == np.float32 else "rgb2gray_i32"
+        _mod("common").run(graph, src=src_vector, dst=dst_tile)
+        return dst_tile.to_numpy()
+    finally:
+        src_tile.destroy()
+        dst_tile.destroy()
+
+
+def _insert_channel_tile(src_tile, dst_tile, ch):
+    src_buf, dst_buf = upload(src_tile), upload(dst_tile)
+    try:
+        insert_channel(src_buf, dst_buf, ch)
+        return dst_buf.to_numpy()
+    finally:
+        src_buf.destroy()
+        dst_buf.destroy()
+
+
 def insert_channel(src, dst, ch):
     """AOT Optimized channel insertion (in-place on GPU)."""
+    if not isinstance(src, TaichiGPUBuffer):
+        source = np.ascontiguousarray(src)
+        if not isinstance(dst, np.ndarray) or dst.ndim != 3 or dst.shape[2] != 3:
+            raise ValueError("insert_channel destination must be an HxWx3 NumPy array")
+        if source.shape != dst.shape[:2] or source.dtype != dst.dtype:
+            raise ValueError("insert_channel source must match destination size and dtype")
+        if not 0 <= int(ch) < 3:
+            raise ValueError("channel index must be in [0, 2]")
+        destination = np.ascontiguousarray(dst)
+        result = _run_blockwise(
+            "insert_channel", (source, destination), destination.shape, destination.dtype,
+            lambda source_tile, destination_tile: _insert_channel_tile(source_tile, destination_tile, ch),
+            params={"ch": int(ch)},
+        )
+        if result is None:
+            src_buf, dst_buf = upload(source), upload(destination)
+            try:
+                insert_channel(src_buf, dst_buf, ch)
+                result = dst_buf.to_numpy()
+            finally:
+                src_buf.destroy()
+                dst_buf.destroy()
+        dst[...] = result
+        return dst
+
     src_v = src
     dst_v = dst
     if len(dst.shape) == 3 and not getattr(dst, "is_vector", False):
@@ -299,6 +784,29 @@ divide = mean_division
 
 def rgb2gray(src, dst=None):
     """AOT Optimized RGB to Gray conversion."""
+    if not isinstance(src, TaichiGPUBuffer):
+        array = np.ascontiguousarray(src)
+        if array.ndim != 3 or array.shape[2] != 3:
+            raise ValueError("rgb2gray requires an HxWx3 array")
+        result = _run_blockwise(
+            "rgb2gray",
+            (array,),
+            array.shape[:2],
+            array.dtype,
+            _rgb2gray_tile,
+        )
+        if result is not None:
+            return result
+
+        src_buffer = upload(array)
+        output = rgb2gray(src_buffer, dst=dst)
+        try:
+            return output.to_numpy()
+        finally:
+            src_buffer.destroy()
+            if dst is None:
+                output.destroy()
+
     h, w = src.shape[0], src.shape[1]
     if dst is None:
         dst = engine.allocate((h, w), dtype=src.dtype)
@@ -311,8 +819,50 @@ def rgb2gray(src, dst=None):
     return dst
 
 
+def _absdiff_tile(first, second):
+    first_tile = upload(first)
+    second_tile = upload(second)
+    try:
+        output = absdiff(first_tile, second_tile)
+        try:
+            return output.to_numpy()
+        finally:
+            output.destroy()
+    finally:
+        first_tile.destroy()
+        second_tile.destroy()
+
+
 def absdiff(src1, src2):
     """AOT Optimized absolute difference."""
+    inputs_are_gpu = isinstance(src1, TaichiGPUBuffer) and isinstance(src2, TaichiGPUBuffer)
+    if not inputs_are_gpu:
+        if isinstance(src1, TaichiGPUBuffer) or isinstance(src2, TaichiGPUBuffer):
+            raise TypeError("absdiff inputs must both be NumPy arrays or GPU buffers")
+        first = np.ascontiguousarray(src1)
+        second = np.ascontiguousarray(src2)
+        if first.shape != second.shape or first.dtype != second.dtype:
+            raise ValueError("absdiff inputs must have matching shape and dtype")
+        result = _run_blockwise(
+            "absdiff",
+            (first, second),
+            first.shape,
+            first.dtype,
+            _absdiff_tile,
+        )
+        if result is not None:
+            return result
+
+        first_buffer = upload(first)
+        second_buffer = upload(second)
+        output = absdiff(first_buffer, second_buffer)
+        try:
+            return output.to_numpy()
+        finally:
+            first_buffer.destroy()
+            second_buffer.destroy()
+            output.destroy()
+
     is_3d = len(src1.shape) == 3
     dst = engine.allocate(src1.shape, dtype=src1.dtype, is_vector=is_3d)
 
@@ -383,6 +933,66 @@ def to_gamma_proxy(
 def resize(src, dsize, interpolation=INTER_CUBIC, return_gpu=False, dst=None):
     """Taichi AOT Resize (OpenCV Parity API)"""
     target_w, target_h = dsize
+    if (
+        isinstance(src, np.ndarray)
+        and dst is None
+        and interpolation in (INTER_LINEAR, INTER_CUBIC, INTER_AREA)
+    ):
+        source = np.ascontiguousarray(src)
+        output_nbytes = target_h * target_w * (source.shape[2] if source.ndim == 3 else 1) * np.dtype(np.float32).itemsize
+        grid = engine.plan_blocks("resize", (target_h, target_w), source.nbytes + output_nbytes)
+        if grid is not None:
+            source_f32 = np.ascontiguousarray(source, dtype=np.float32)
+            src_buf = upload(source_f32)
+            output_shape = (target_h, target_w, source.shape[2]) if source.ndim == 3 else (target_h, target_w)
+            result = np.empty(output_shape, dtype=np.float32)
+            if interpolation == INTER_AREA:
+                module = "area"
+                graph = "inter_area_offset_vec3_f32" if source.ndim == 3 else "inter_area_offset_f32"
+            else:
+                module = "bicubic" if interpolation == INTER_CUBIC else "bilinear"
+                prefix = "bicubic" if interpolation == INTER_CUBIC else "bilinear"
+                graph = f"{prefix}_resize_offset_f32_{'3d' if source.ndim == 3 else '2d'}"
+            src_view = src_buf.view_as_vector(True, 3) if source.ndim == 3 else src_buf
+            source_crc = checksum(source_f32)
+            cache_params = {"dsize": dsize, "interpolation": interpolation, "dtype": source.dtype.str}
+            try:
+                for block in _ordered_cached_output_blocks("resize", grid, source_crc, cache_params):
+                    cached = _get_cached_output_tile("resize", block, source_crc, cache_params)
+                    if cached is not None:
+                        result[block.write_slice] = cached
+                        continue
+                    tile_shape = (*block.shape, source.shape[2]) if source.ndim == 3 else block.shape
+                    tile_buf = engine.allocate(tile_shape, dtype=np.float32, is_vector=source.ndim == 3)
+                    tile_view = tile_buf.view_as_vector(True, 3) if source.ndim == 3 else tile_buf
+                    try:
+                        if interpolation == INTER_AREA:
+                            _mod(module).run(
+                                graph, src=src_view, dst=tile_view,
+                                sh=source.shape[0], sw=source.shape[1],
+                                dh=target_h, dw=target_w,
+                                offset_y=block.y0, offset_x=block.x0,
+                            )
+                        else:
+                            _mod(module).run(
+                                graph, src=src_view, dst=tile_view,
+                                h_src=source.shape[0], w_src=source.shape[1],
+                                h_dst=target_h, w_dst=target_w,
+                                offset_y=block.y0, offset_x=block.x0,
+                            )
+                        tile_result = tile_buf.to_numpy()
+                        result[block.write_slice] = tile_result
+                        _put_cached_output_tile("resize", block, source_crc, cache_params, tile_result)
+                    finally:
+                        tile_buf.destroy()
+            finally:
+                src_buf.destroy()
+            if source.dtype != np.float32:
+                if np.issubdtype(source.dtype, np.integer):
+                    result = np.clip(result, np.iinfo(source.dtype).min, np.iinfo(source.dtype).max)
+                result = result.astype(source.dtype)
+            return upload(result) if return_gpu else result
+
     src_buf = InputArray(src)
 
     if isinstance(src, TaichiGPUBuffer) and len(src_buf.shape) == 3:
@@ -457,8 +1067,49 @@ def resize(src, dsize, interpolation=INTER_CUBIC, return_gpu=False, dst=None):
     return dst_buf if return_gpu else dst_buf.to_numpy()
 
 
+def _box_filter_tile(tile, kernel_size):
+    src_tile = upload(tile)
+    try:
+        output = box_filter(src_tile, kernel_size=kernel_size, return_gpu=True)
+        try:
+            return output.to_numpy()
+        finally:
+            output.destroy()
+    finally:
+        src_tile.destroy()
+
+
 def box_filter(src, kernel_size=3, return_gpu=False, dst=None):
     """AOT Implementation of Box Filter."""
+    if kernel_size < 1 or kernel_size % 2 == 0:
+        raise ValueError("kernel_size must be a positive odd integer")
+    if not isinstance(src, TaichiGPUBuffer):
+        if dst is not None:
+            raise ValueError("blockwise box filter does not support a destination buffer")
+        array = np.ascontiguousarray(src)
+        result = _run_blockwise(
+            "box_filter",
+            (array,),
+            array.shape,
+            array.dtype,
+            lambda tile: _box_filter_tile(tile, kernel_size),
+            halo=kernel_size // 2,
+            params={"kernel_size": kernel_size},
+        )
+        if result is not None:
+            return upload(result) if return_gpu else result
+
+        src_buffer = upload(array)
+        output = box_filter(src_buffer, kernel_size=kernel_size, return_gpu=True)
+        if return_gpu:
+            src_buffer.destroy()
+            return output
+        try:
+            return output.to_numpy()
+        finally:
+            src_buffer.destroy()
+            output.destroy()
+
     src_buf = InputArray(src)
     h, w = src_buf.shape[:2]
     radius = kernel_size // 2
@@ -498,6 +1149,23 @@ def box_filter(src, kernel_size=3, return_gpu=False, dst=None):
 
 
 
+def _gaussian_blur_tile(tile, sigma, kernel_size):
+    src_tile = upload(tile)
+    try:
+        output = gaussian_blur(
+            src_tile,
+            sigma=sigma,
+            kernel_size=kernel_size,
+            return_gpu=True,
+        )
+        try:
+            return output.to_numpy()
+        finally:
+            output.destroy()
+    finally:
+        src_tile.destroy()
+
+
 def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False, dst=None):
     """AOT Implementation of Gaussian Blur.
 
@@ -515,11 +1183,43 @@ def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False, dst=None):
                      When provided, output is written directly into this buffer
                      and the same buffer is returned, saving a VRAM allocation.
     """
-    src_buf = InputArray(src)
-
     if kernel_size is None or kernel_size <= 0:
         kernel_size = int(np.ceil(3 * sigma)) * 2 + 1
     radius = kernel_size // 2
+
+    if not isinstance(src, TaichiGPUBuffer):
+        if dst is not None:
+            raise ValueError("blockwise Gaussian blur does not support a destination buffer")
+        array = np.ascontiguousarray(src)
+        result = _run_blockwise(
+            "gaussian_blur",
+            (array,),
+            array.shape,
+            array.dtype,
+            lambda tile: _gaussian_blur_tile(tile, sigma, kernel_size),
+            halo=radius,
+            params={"sigma": float(sigma), "kernel_size": kernel_size},
+        )
+        if result is not None:
+            return upload(result) if return_gpu else result
+
+        src_buffer = upload(array)
+        output = gaussian_blur(
+            src_buffer,
+            sigma=sigma,
+            kernel_size=kernel_size,
+            return_gpu=True,
+        )
+        if return_gpu:
+            src_buffer.destroy()
+            return output
+        try:
+            return output.to_numpy()
+        finally:
+            src_buffer.destroy()
+            output.destroy()
+
+    src_buf = src
     h, w = src_buf.shape[:2]
     is_vec = getattr(src_buf, "is_vector", False)
     is_2d = (len(src_buf.shape) == 2) and not is_vec
@@ -570,6 +1270,50 @@ def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False, dst=None):
 
 def image_pyramid(src, levels=4, return_gpu=False):
     """AOT Implementation of Image Pyramid (Downsampling)"""
+    if isinstance(src, np.ndarray):
+        current = np.ascontiguousarray(src, dtype=np.float32)
+        first_grid = engine.plan_blocks("image_pyramid", current.shape, current.nbytes)
+        if first_grid is not None:
+            for _ in range(levels):
+                next_h, next_w = current.shape[0] // 2, current.shape[1] // 2
+                if next_h < 1 or next_w < 1:
+                    break
+                grid = BlockGrid(
+                    (next_h, next_w),
+                    size=engine.get_block_config().normalized_size(),
+                )
+                output_shape = (next_h, next_w, current.shape[2]) if current.ndim == 3 else (next_h, next_w)
+                next_level = np.empty(output_shape, dtype=np.float32)
+                src_buf = upload(current)
+                src_view = src_buf.view_as_vector(False) if current.ndim == 3 else src_buf
+                graph = "downsample_2x_offset_3ch_f32" if current.ndim == 3 else "downsample_2x_offset_f32"
+                source_crc = checksum(current)
+                cache_params = {"shape": output_shape, "graph": graph}
+                try:
+                    for block in _ordered_cached_output_blocks(
+                        "image_pyramid", grid, source_crc, cache_params
+                    ):
+                        cached = _get_cached_output_tile("image_pyramid", block, source_crc, cache_params)
+                        if cached is not None:
+                            next_level[block.write_slice] = cached
+                            continue
+                        tile_shape = (*block.shape, current.shape[2]) if current.ndim == 3 else block.shape
+                        tile_buf = engine.allocate(tile_shape, dtype=np.float32)
+                        try:
+                            _mod("pyramid").run(
+                                graph, src=src_view, dst=tile_buf,
+                                offset_y=block.y0, offset_x=block.x0,
+                            )
+                            tile_result = tile_buf.to_numpy()
+                            next_level[block.write_slice] = tile_result
+                            _put_cached_output_tile("image_pyramid", block, source_crc, cache_params, tile_result)
+                        finally:
+                            tile_buf.destroy()
+                finally:
+                    src_buf.destroy()
+                current = next_level
+            return upload(current) if return_gpu else current
+
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else engine.upload(src)
     is_3d = len(src_buf.shape) == 3
@@ -585,7 +1329,8 @@ def image_pyramid(src, levels=4, return_gpu=False):
 
         dst_shape = (next_h, next_w, src_buf.shape[2]) if is_3d else (next_h, next_w)
         dst_buf = engine.allocate(dst_shape, dtype=src_buf.dtype)
-        _mod("pyramid").run(graph, src=curr_buf, dst=dst_buf)
+        curr_view = curr_buf.view_as_vector(False) if is_3d and getattr(curr_buf, "is_vector", False) else curr_buf
+        _mod("pyramid").run(graph, src=curr_view, dst=dst_buf)
 
         if curr_buf is not src_buf:
             del curr_buf
@@ -596,8 +1341,45 @@ def image_pyramid(src, levels=4, return_gpu=False):
 
 
 
+def _median_filter_tile(tile):
+    src_tile = upload(tile)
+    try:
+        output = median_filter(src_tile, return_gpu=True)
+        try:
+            return output.to_numpy()
+        finally:
+            output.destroy()
+    finally:
+        src_tile.destroy()
+
+
 def median_filter(src, return_gpu=False, **kwargs):
     """AOT Median Filter 3x3."""
+    if not isinstance(src, TaichiGPUBuffer):
+        array = np.ascontiguousarray(src)
+        result = _run_blockwise(
+            "median_filter",
+            (array,),
+            array.shape,
+            array.dtype,
+            _median_filter_tile,
+            halo=1,
+            params={"kernel_size": 3},
+        )
+        if result is not None:
+            return upload(result) if return_gpu else result
+
+        src_buffer = upload(array)
+        output = median_filter(src_buffer, return_gpu=True, **kwargs)
+        if return_gpu:
+            src_buffer.destroy()
+            return output
+        try:
+            return output.to_numpy()
+        finally:
+            src_buffer.destroy()
+            output.destroy()
+
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else engine.upload(src)
     h, w = src_buf.shape[:2]
@@ -728,8 +1510,39 @@ def ifft2(complex_buf, target_shape=None):
     return dst_buf
 
 
+def _sobel_tile(tile):
+    src_tile = upload(tile)
+    try:
+        dx, dy = sobel(src_tile, return_gpu=True)
+        try:
+            return dx.to_numpy(), dy.to_numpy()
+        finally:
+            dx.destroy()
+            dy.destroy()
+    finally:
+        src_tile.destroy()
+
+
 def sobel(src, return_gpu=False):
     """AOT Sobel."""
+    if not isinstance(src, TaichiGPUBuffer):
+        array = np.ascontiguousarray(src, dtype=np.float32)
+        result = _run_blockwise_pair("sobel", array, _sobel_tile, halo=1)
+        if result is not None:
+            return (upload(result[0]), upload(result[1])) if return_gpu else result
+
+        src_buffer = upload(array)
+        outputs = sobel(src_buffer, return_gpu=True)
+        if return_gpu:
+            src_buffer.destroy()
+            return outputs
+        try:
+            return outputs[0].to_numpy(), outputs[1].to_numpy()
+        finally:
+            src_buffer.destroy()
+            outputs[0].destroy()
+            outputs[1].destroy()
+
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else engine.upload(src)
     h, w = src_buf.shape[:2]
@@ -747,8 +1560,44 @@ def sobel(src, return_gpu=False):
     return (dx, dy) if return_gpu else (dx.to_numpy(), dy.to_numpy())
 
 
+def _laplacian_tile(tile):
+    src_tile = upload(tile)
+    try:
+        output = laplacian(src_tile, return_gpu=True)
+        try:
+            return output.to_numpy()
+        finally:
+            output.destroy()
+    finally:
+        src_tile.destroy()
+
+
 def laplacian(src, return_gpu=False):
     """AOT Laplacian."""
+    if not isinstance(src, TaichiGPUBuffer):
+        array = np.ascontiguousarray(src)
+        result = _run_blockwise(
+            "laplacian",
+            (array,),
+            array.shape,
+            np.float32,
+            _laplacian_tile,
+            halo=1,
+        )
+        if result is not None:
+            return upload(result) if return_gpu else result
+
+        src_buffer = upload(array)
+        output = laplacian(src_buffer, return_gpu=True)
+        if return_gpu:
+            src_buffer.destroy()
+            return output
+        try:
+            return output.to_numpy()
+        finally:
+            src_buffer.destroy()
+            output.destroy()
+
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else engine.upload(src)
     h, w = src_buf.shape[:2]
@@ -898,6 +1747,35 @@ def _prepare_guide_aot(guide_raw):
         return engine.upload(arr.astype(_np.float32)), True
 
 
+def _prepare_guide_array(guide_raw):
+    """Match the AOT guide normalization path without allocating a full GPU buffer."""
+    guide = np.asarray(guide_raw, dtype=np.float32)
+    if guide.ndim == 3:
+        guide = 0.299 * guide[:, :, 2] + 0.587 * guide[:, :, 1] + 0.114 * guide[:, :, 0]
+    if guide.ndim != 2:
+        raise ValueError("joint bilateral guide must be a 2D or 3-channel image")
+    peak = float(np.max(guide)) if guide.size else 0.0
+    if peak > 1.0:
+        guide = guide / (255.0 if peak <= 255.0 else 65535.0)
+    return np.ascontiguousarray(guide)
+
+
+def _joint_bilateral_tile(tile, guide_tile, preset, radius):
+    src_tile = upload(tile)
+    guide_buffer = upload(guide_tile)
+    try:
+        output = joint_bilateral_filter(
+            src_tile, guide_buffer, preset=preset, radius=radius, return_gpu=True
+        )
+        try:
+            return output.to_numpy()
+        finally:
+            output.destroy()
+    finally:
+        src_tile.destroy()
+        guide_buffer.destroy()
+
+
 def joint_bilateral_filter(src, guide, preset="medium", radius=2, return_gpu=False):
     """
     AOT Joint Bilateral Filter — General post-processor.
@@ -915,6 +1793,46 @@ def joint_bilateral_filter(src, guide, preset="medium", radius=2, return_gpu=Fal
         # Refine flow field
         smooth_flow = taichi_aot.joint_bilateral_filter(flow_gpu, ref_gray, preset="low")
     """
+    if not isinstance(src, TaichiGPUBuffer) and not isinstance(guide, TaichiGPUBuffer):
+        source = np.ascontiguousarray(src, dtype=np.float32)
+        guide_array = _prepare_guide_array(guide)
+        if source.shape[:2] != guide_array.shape:
+            raise ValueError("joint bilateral source and guide must have matching dimensions")
+        effective_radius = radius if radius in (1, 2, 3) else 2
+        result = _run_blockwise(
+            "joint_bilateral_filter",
+            (source, guide_array),
+            source.shape,
+            np.float32,
+            lambda tile, guide_tile: _joint_bilateral_tile(
+                tile, guide_tile, preset, effective_radius
+            ),
+            halo=effective_radius,
+            params={"preset": preset, "radius": effective_radius},
+        )
+        if result is not None:
+            return upload(result) if return_gpu else result
+
+        src_buffer = upload(source)
+        guide_buffer = upload(guide_array)
+        output = joint_bilateral_filter(
+            src_buffer,
+            guide_buffer,
+            preset=preset,
+            radius=effective_radius,
+            return_gpu=True,
+        )
+        if return_gpu:
+            src_buffer.destroy()
+            guide_buffer.destroy()
+            return output
+        try:
+            return output.to_numpy()
+        finally:
+            src_buffer.destroy()
+            guide_buffer.destroy()
+            output.destroy()
+
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else engine.upload(src)
     guide_buf, guide_is_temp = _prepare_guide_aot(guide)
@@ -1297,6 +2215,68 @@ def phase_correlation(ref, comp, use_hanning=True):
 
 def remap(src, map_x, map_y, return_gpu=False):
     """Taichi AOT Remap (OpenCV Parity API)"""
+    if (
+        isinstance(src, np.ndarray)
+        and isinstance(map_x, np.ndarray)
+        and isinstance(map_y, np.ndarray)
+    ):
+        source = np.ascontiguousarray(src)
+        map_x_array = np.ascontiguousarray(map_x, dtype=np.float32)
+        map_y_array = np.ascontiguousarray(map_y, dtype=np.float32)
+        if map_x_array.shape != map_y_array.shape or map_x_array.ndim != 2:
+            raise ValueError("map_x and map_y must be matching 2D arrays")
+        output_nbytes = map_x_array.size * (source.shape[2] if source.ndim == 3 else 1) * np.dtype(np.float32).itemsize
+        grid = engine.plan_blocks(
+            "remap",
+            map_x_array.shape,
+            source.nbytes + map_x_array.nbytes + map_y_array.nbytes + output_nbytes,
+        )
+        if grid is not None:
+            # The source stays global on GPU; map and destination are tiled.
+            # This preserves map coordinates exactly at tile boundaries.
+            source_f32 = np.ascontiguousarray(source, dtype=np.float32)
+            source_buffer = upload(source_f32)
+            output_shape = (*map_x_array.shape, source.shape[2]) if source.ndim == 3 else map_x_array.shape
+            result = np.empty(output_shape, dtype=np.float32)
+            source_crc = checksum(source_f32)
+            cache_params = {"shape": output_shape, "dtype": source.dtype.str}
+            cache = engine.get_block_cache()
+            scheduled = []
+            for block in grid:
+                map_x_tile = np.ascontiguousarray(map_x_array[block.write_slice])
+                map_y_tile = np.ascontiguousarray(map_y_array[block.write_slice])
+                block_source_crc = (source_crc, checksum(map_x_tile), checksum(map_y_tile))
+                block_id = block.make_id(str(block_source_crc), "remap", cache_params)
+                scheduled.append((
+                    cache.peek(block_id) is None, block.index, block,
+                    block_source_crc, map_x_tile, map_y_tile,
+                ))
+            scheduled.sort(key=lambda item: (item[0], item[1]))
+            try:
+                for _cold, _index, block, block_source_crc, map_x_tile, map_y_tile in scheduled:
+                    cached = _get_cached_output_tile(
+                        "remap", block, block_source_crc, cache_params
+                    )
+                    if cached is not None:
+                        result[block.write_slice] = cached
+                        continue
+                    tile = remap(
+                        source_buffer,
+                        map_x_tile,
+                        map_y_tile,
+                    )
+                    result[block.write_slice] = tile
+                    _put_cached_output_tile(
+                        "remap", block, block_source_crc, cache_params, tile
+                    )
+            finally:
+                source_buffer.destroy()
+            if src.dtype != np.float32:
+                if np.issubdtype(src.dtype, np.integer):
+                    result = np.clip(result, np.iinfo(src.dtype).min, np.iinfo(src.dtype).max)
+                result = result.astype(src.dtype)
+            return upload(result) if return_gpu else result
+
     orig_dtype = None
     if isinstance(src, np.ndarray) and src.dtype != np.float32:
         orig_dtype = src.dtype
@@ -1372,6 +2352,61 @@ def remap_with_flow(src, flow, full_h, full_w, return_gpu=False, dst=None):
     Fused remap with flow: bilinear interpolate flow on-the-fly + warp src image.
     Eliminates need for map_x, map_y full-res buffers (~91.6 MB VRAM saved).
     """
+    if isinstance(src, np.ndarray) and isinstance(flow, np.ndarray) and dst is None:
+        source = np.ascontiguousarray(src)
+        flow_array = np.ascontiguousarray(flow, dtype=np.float32)
+        output_nbytes = full_h * full_w * (source.shape[2] if source.ndim == 3 else 1) * np.dtype(np.float32).itemsize
+        grid = engine.plan_blocks(
+            "remap_with_flow", (full_h, full_w),
+            source.nbytes + flow_array.nbytes + output_nbytes,
+        )
+        if grid is not None:
+            source_f32 = np.ascontiguousarray(source, dtype=np.float32)
+            src_buf = upload(source_f32)
+            flow_buf = engine.allocate(flow_array.shape, dtype=np.float32, is_vector=False, host_accessible=True)
+            from taichi_library.taichi_aot.engine import _LIB, _RUNTIME
+            _LIB.write_to_gpu_buffer(_RUNTIME, flow_buf.handle, flow_array.ctypes.data, flow_buf.nbytes)
+            output_shape = (full_h, full_w, source.shape[2]) if source.ndim == 3 else (full_h, full_w)
+            result = np.empty(output_shape, dtype=np.float32)
+            h_src, w_src = source.shape[:2]
+            h_flow, w_flow = flow_array.shape[:2]
+            graph = "remap_with_flow_offset_f32_3d" if source.ndim == 3 else "remap_with_flow_offset_f32_2d"
+            src_view = src_buf.view_as_vector(True, 3) if source.ndim == 3 else src_buf
+            source_crc = (checksum(source_f32), checksum(flow_array))
+            cache_params = {"shape": output_shape, "scale": (full_h, full_w)}
+            try:
+                for block in _ordered_cached_output_blocks(
+                    "remap_with_flow", grid, source_crc, cache_params
+                ):
+                    cached = _get_cached_output_tile("remap_with_flow", block, source_crc, cache_params)
+                    if cached is not None:
+                        result[block.write_slice] = cached
+                        continue
+                    tile_shape = (*block.shape, source.shape[2]) if source.ndim == 3 else block.shape
+                    tile_buf = engine.allocate(tile_shape, dtype=np.float32, is_vector=source.ndim == 3)
+                    tile_view = tile_buf.view_as_vector(True, 3) if source.ndim == 3 else tile_buf
+                    try:
+                        _mod("remap").run(
+                            graph, src=src_view, flow=flow_buf, dst=tile_view,
+                            h_src=h_src, w_src=w_src, h_dst=full_h, w_dst=full_w,
+                            h_flow=h_flow, w_flow=w_flow,
+                            scale_x=float(full_w) / w_flow, scale_y=float(full_h) / h_flow,
+                            offset_y=block.y0, offset_x=block.x0,
+                        )
+                        tile_result = tile_buf.to_numpy()
+                        result[block.write_slice] = tile_result
+                        _put_cached_output_tile("remap_with_flow", block, source_crc, cache_params, tile_result)
+                    finally:
+                        tile_buf.destroy()
+            finally:
+                src_buf.destroy()
+                flow_buf.destroy()
+            if source.dtype != np.float32:
+                if np.issubdtype(source.dtype, np.integer):
+                    result = np.clip(result, np.iinfo(source.dtype).min, np.iinfo(source.dtype).max)
+                result = result.astype(source.dtype)
+            return upload(result) if return_gpu else result
+
     # Cast src to float32 on CPU if it is not float32 (matches legacy remap behavior)
     orig_dtype = None
     if isinstance(src, np.ndarray) and src.dtype != np.float32:
@@ -1482,6 +2517,18 @@ def remap_with_flow(src, flow, full_h, full_w, return_gpu=False, dst=None):
 
 
 
+def _smooth_flow_tile(tile, sigma, kernel_size):
+    flow_tile = upload(tile)
+    try:
+        output = smooth_flow_gpu(flow_tile, sigma=sigma, kernel_size=kernel_size)
+        try:
+            return output.to_numpy()
+        finally:
+            output.destroy()
+    finally:
+        flow_tile.destroy()
+
+
 def smooth_flow_gpu(flow, sigma=1.0, kernel_size=5, dst=None):
     """Gaussian blur a 2-channel flow field (H, W, 2) entirely on GPU.
 
@@ -1507,6 +2554,32 @@ def smooth_flow_gpu(flow, sigma=1.0, kernel_size=5, dst=None):
         kernel_size = int(np.ceil(3 * sigma)) * 2 + 1
     radius = kernel_size // 2
 
+    if not isinstance(flow, TaichiGPUBuffer):
+        if dst is not None:
+            raise ValueError("blockwise flow smoothing does not support a destination buffer")
+        flow_array = np.ascontiguousarray(flow, dtype=np.float32)
+        if flow_array.ndim != 3 or flow_array.shape[2] != 2:
+            raise ValueError("flow must have shape (H, W, 2)")
+        result = _run_blockwise(
+            "smooth_flow",
+            (flow_array,),
+            flow_array.shape,
+            np.float32,
+            lambda tile: _smooth_flow_tile(tile, sigma, kernel_size),
+            halo=radius,
+            params={"sigma": float(sigma), "kernel_size": kernel_size},
+        )
+        if result is not None:
+            return result
+
+        flow_buffer = upload(flow_array)
+        output = smooth_flow_gpu(flow_buffer, sigma=sigma, kernel_size=kernel_size)
+        try:
+            return output.to_numpy()
+        finally:
+            flow_buffer.destroy()
+            output.destroy()
+
     weights_np = compute_gaussian_weights(sigma, radius).astype(np.float32)
     weights_buf = InputArray(weights_np)
 
@@ -1521,9 +2594,12 @@ def smooth_flow_gpu(flow, sigma=1.0, kernel_size=5, dst=None):
     else:
         out_buf = engine.allocate((h, w, 2), dtype=np.float32)
 
+    # smooth_flow graphs were compiled as plain ndim=3 arrays, not vec2 fields.
+    flow_src = flow.view_as_vector(False) if getattr(flow, "is_vector", False) else flow
+
     _mod("remap").run(
         "smooth_flow_x",
-        src=flow, dst=tmp_buf,
+        src=flow_src, dst=tmp_buf,
         h=h, w=w, weights=weights_buf, radius=radius,
     )
     _mod("remap").run(
@@ -1626,8 +2702,59 @@ def build_flow_maps(flow_or_dx, flow_or_dy_or_h, full_h_or_w=None, full_w=None,
     return map_x_buf, map_y_buf
 
 
-def enhance_grayscale(src, blur, lut, micro_contrast=2.93, clarity=0.0, return_gpu=False, dst=None):
+def _enhance_grayscale_tile(src_tile, blur_tile, lut, micro_contrast, clarity, noise_coring):
+    src_buf, blur_buf, lut_buf = upload(src_tile), upload(blur_tile), upload(lut)
+    dst_buf = engine.allocate(src_tile.shape, dtype=np.float32)
+    try:
+        h, w = src_tile.shape
+        _mod("remap").run(
+            "enhance_grayscale",
+            src=src_buf,
+            blur=blur_buf,
+            lut=lut_buf,
+            dst=dst_buf,
+            micro_contrast=float(micro_contrast),
+            clarity=float(clarity),
+            noise_coring=float(noise_coring),
+            h=h,
+            w=w,
+        )
+        return dst_buf.to_numpy()
+    finally:
+        src_buf.destroy()
+        blur_buf.destroy()
+        lut_buf.destroy()
+        dst_buf.destroy()
+
+
+def enhance_grayscale(src, blur, lut, micro_contrast=2.93, clarity=0.0, noise_coring=0.0, return_gpu=False, dst=None):
     """Taichi AOT Grayscale Image Enhancement (1D LUT & Micro-Contrast) API"""
+    if not isinstance(src, TaichiGPUBuffer) and not isinstance(blur, TaichiGPUBuffer):
+        if dst is not None:
+            raise ValueError("blockwise enhance_grayscale does not support a destination buffer")
+        source = np.ascontiguousarray(src, dtype=np.float32)
+        blurred = np.ascontiguousarray(blur, dtype=np.float32)
+        table = np.ascontiguousarray(lut, dtype=np.float32)
+        if source.ndim != 2 or blurred.shape != source.shape:
+            raise ValueError("src and blur must be matching 2D arrays")
+        result = _run_blockwise(
+            "enhance_grayscale",
+            (source, blurred),
+            source.shape,
+            np.float32,
+            lambda src_tile, blur_tile: _enhance_grayscale_tile(
+                src_tile, blur_tile, table, micro_contrast, clarity, noise_coring
+            ),
+            params={
+                "lut_checksum": checksum(table),
+                "micro_contrast": float(micro_contrast),
+                "clarity": float(clarity),
+                "noise_coring": float(noise_coring),
+            },
+        )
+        if result is not None:
+            return upload(result) if return_gpu else result
+
     src_buf = InputArray(src)
     blur_buf = InputArray(blur)
     lut_buf = InputArray(lut)
@@ -1647,6 +2774,7 @@ def enhance_grayscale(src, blur, lut, micro_contrast=2.93, clarity=0.0, return_g
         dst=dst_buf,
         micro_contrast=float(micro_contrast),
         clarity=float(clarity),
+        noise_coring=float(noise_coring),
         h=h,
         w=w,
     )
@@ -1654,8 +2782,118 @@ def enhance_grayscale(src, blur, lut, micro_contrast=2.93, clarity=0.0, return_g
     return dst_buf if return_gpu else dst_buf.to_numpy()
 
 
+def _demosaic_blockwise(operation, bayer, run_tile, params, channels=3, halo=8):
+    """Dispatch a Bayer-phase-safe local demosaic over cached halo tiles."""
+    if not isinstance(bayer, np.ndarray) or bayer.ndim != 2:
+        return None
+    block_h, block_w = engine.get_block_config().normalized_size()
+    if block_h % 2 or block_w % 2:
+        return None
+    source = np.ascontiguousarray(bayer)
+    return _run_blockwise(
+        operation,
+        (source,),
+        source.shape if channels == 1 else (*source.shape, channels),
+        np.float32,
+        run_tile,
+        halo=halo,
+        params=params,
+        validate_output=lambda output, _tiles: (
+            output.ndim == (2 if channels == 1 else 3)
+            and (channels == 1 or output.shape[2] == channels)
+            and np.isfinite(output).all()
+        ),
+    )
+
+
+def _demosaic_half_blockwise(operation, bayer, run_tile, params, channels=1):
+    """Evaluate a fused Bayer 2x2-to-one output graph per cached output tile."""
+    if not isinstance(bayer, np.ndarray) or bayer.ndim != 2:
+        return None
+    source = np.ascontiguousarray(bayer)
+    out_h, out_w = source.shape[0] // 2, source.shape[1] // 2
+    grid = engine.plan_blocks(operation, (out_h, out_w), source.nbytes)
+    if grid is None:
+        return None
+    output_shape = (out_h, out_w) if channels == 1 else (out_h, out_w, channels)
+    result = np.empty(output_shape, dtype=np.float32)
+    params = {"shape": output_shape, **params}
+    cache = engine.get_block_cache()
+    scheduled = []
+    for block in grid:
+        raw_slice = (
+            slice(block.y0 * 2, block.y1 * 2),
+            slice(block.x0 * 2, block.x1 * 2),
+        )
+        source_crc = checksum(np.ascontiguousarray(source[raw_slice]))
+        block_id = block.make_id(str(source_crc), operation, params)
+        scheduled.append((cache.peek(block_id) is None, block.index, block, raw_slice, source_crc))
+    scheduled.sort(key=lambda item: (item[0], item[1]))
+    for _cold, _index, block, raw_slice, source_crc in scheduled:
+        raw_tile = np.ascontiguousarray(source[raw_slice])
+        cached = _get_cached_output_tile(operation, block, source_crc, params)
+        if cached is not None:
+            result[block.write_slice] = cached
+            continue
+        last_error = None
+        for _ in range(2):
+            try:
+                tile_result = np.ascontiguousarray(run_tile(raw_tile))
+                expected_shape = block.shape if channels == 1 else (*block.shape, channels)
+                if tile_result.shape != expected_shape or not np.isfinite(tile_result).all():
+                    raise RuntimeError(f"{operation} returned an invalid half-resolution tile")
+                result[block.write_slice] = tile_result
+                _put_cached_output_tile(operation, block, source_crc, params, tile_result)
+                break
+            except Exception as exc:
+                last_error = exc
+        else:
+            raise RuntimeError(f"Unable to recover {operation} block {block.index}") from last_error
+    return result
+
+
+def _demosaic_params(wb, levels, cfa, cmatrix=None):
+    params = {
+        "wb": tuple(float(value) for value in wb),
+        "levels": tuple(float(value) for value in levels),
+        "cfa": tuple(int(value) for value in cfa),
+    }
+    if cmatrix is not None:
+        params["cmatrix"] = checksum(np.ascontiguousarray(cmatrix))
+    return params
+
+
 @ti_thread
 def hamilton_demosaic(
+    bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
+    if not return_gpu and dst is None:
+        params = {
+            "wb": (float(wb_r), float(wb_g1), float(wb_b), float(wb_g2)),
+            "levels": (float(black_level), float(white_level)),
+            "cfa": (int(c00), int(c01), int(c10), int(c11)),
+            "cmatrix": checksum(np.ascontiguousarray(cmatrix)),
+        }
+        result = _demosaic_blockwise(
+            "hamilton_demosaic", bayer,
+            lambda tile: _hamilton_demosaic_full(
+                tile, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+                black_level, white_level, c00, c01, c10, c11,
+            ),
+            params,
+        )
+        if result is not None:
+            return result
+    return _hamilton_demosaic_full(
+        bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+        black_level, white_level, c00, c01, c10, c11,
+        return_gpu=return_gpu, dst=dst,
+    )
+
+
+def _hamilton_demosaic_full(
     bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
     black_level, white_level, c00, c01, c10, c11,
     return_gpu=False, dst=None
@@ -1731,6 +2969,30 @@ def hamilton_demosaic_1channel(
     black_level, white_level, c00, c01, c10, c11,
     return_gpu=False, dst=None
 ):
+    if not return_gpu and dst is None:
+        result = _demosaic_blockwise(
+            "hamilton_demosaic_1channel", bayer,
+            lambda tile: _hamilton_demosaic_1channel_full(
+                tile, wb_r, wb_g1, wb_b, wb_g2, black_level, white_level,
+                c00, c01, c10, c11,
+            ),
+            _demosaic_params((wb_r, wb_g1, wb_b, wb_g2),
+                             (black_level, white_level), (c00, c01, c10, c11)),
+            channels=1, halo=4,
+        )
+        if result is not None:
+            return result
+    return _hamilton_demosaic_1channel_full(
+        bayer, wb_r, wb_g1, wb_b, wb_g2, black_level, white_level,
+        c00, c01, c10, c11, return_gpu=return_gpu, dst=dst,
+    )
+
+
+def _hamilton_demosaic_1channel_full(
+    bayer, wb_r, wb_g1, wb_b, wb_g2,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
     """Fast Green-Only Demosaic to Grayscale 1-channel (Fused Single-Pass)."""
     bayer_buf = InputArray(bayer)
     h, w = bayer_buf.shape[:2]
@@ -1773,6 +3035,29 @@ def hamilton_demosaic_half_res(
     black_level, white_level, c00, c01, c10, c11,
     return_gpu=False, dst=None
 ):
+    if not return_gpu and dst is None:
+        result = _demosaic_half_blockwise(
+            "hamilton_demosaic_half_res", bayer,
+            lambda tile: _hamilton_demosaic_half_res_full(
+                tile, wb_r, wb_g1, wb_b, wb_g2, black_level, white_level,
+                c00, c01, c10, c11,
+            ),
+            _demosaic_params((wb_r, wb_g1, wb_b, wb_g2),
+                             (black_level, white_level), (c00, c01, c10, c11)),
+        )
+        if result is not None:
+            return result
+    return _hamilton_demosaic_half_res_full(
+        bayer, wb_r, wb_g1, wb_b, wb_g2, black_level, white_level,
+        c00, c01, c10, c11, return_gpu=return_gpu, dst=dst,
+    )
+
+
+def _hamilton_demosaic_half_res_full(
+    bayer, wb_r, wb_g1, wb_b, wb_g2,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
     """Bypass Demosaicing: Extract Green Sub-Sampling to 1/2 size (half_res) grayscale (Fused Single-Pass)."""
     bayer_buf = InputArray(bayer)
     h, w = bayer_buf.shape[:2]
@@ -1810,6 +3095,30 @@ def hamilton_demosaic_half_res(
 
 @ti_thread
 def hamilton_demosaic_rgb_half_res(
+    bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
+    if not return_gpu and dst is None:
+        result = _demosaic_half_blockwise(
+            "hamilton_demosaic_rgb_half_res", bayer,
+            lambda tile: _hamilton_demosaic_rgb_half_res_full(
+                tile, wb_r, wb_g1, wb_b, wb_g2, cmatrix, black_level,
+                white_level, c00, c01, c10, c11,
+            ),
+            _demosaic_params((wb_r, wb_g1, wb_b, wb_g2),
+                             (black_level, white_level), (c00, c01, c10, c11), cmatrix),
+            channels=3,
+        )
+        if result is not None:
+            return result
+    return _hamilton_demosaic_rgb_half_res_full(
+        bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix, black_level, white_level,
+        c00, c01, c10, c11, return_gpu=return_gpu, dst=dst,
+    )
+
+
+def _hamilton_demosaic_rgb_half_res_full(
     bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
     black_level, white_level, c00, c01, c10, c11,
     return_gpu=False, dst=None
@@ -1857,6 +3166,30 @@ def hamilton_demosaic_rgb_half_res(
 
 @ti_thread
 def hamilton_demosaic_3channel(
+    bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
+    if not return_gpu and dst is None:
+        result = _demosaic_blockwise(
+            "hamilton_demosaic_3channel", bayer,
+            lambda tile: _hamilton_demosaic_3channel_full(
+                tile, wb_r, wb_g1, wb_b, wb_g2, cmatrix, black_level,
+                white_level, c00, c01, c10, c11,
+            ),
+            _demosaic_params((wb_r, wb_g1, wb_b, wb_g2),
+                             (black_level, white_level), (c00, c01, c10, c11), cmatrix),
+            channels=1, halo=4,
+        )
+        if result is not None:
+            return result
+    return _hamilton_demosaic_3channel_full(
+        bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix, black_level, white_level,
+        c00, c01, c10, c11, return_gpu=return_gpu, dst=dst,
+    )
+
+
+def _hamilton_demosaic_3channel_full(
     bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
     black_level, white_level, c00, c01, c10, c11,
     return_gpu=False, dst=None
@@ -1911,6 +3244,35 @@ def hamilton_demosaic_3channel(
 
 @ti_thread
 def arm_demosaic(
+    bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
+    if not return_gpu and dst is None:
+        params = {
+            "wb": (float(wb_r), float(wb_g1), float(wb_b), float(wb_g2)),
+            "levels": (float(black_level), float(white_level)),
+            "cfa": (int(c00), int(c01), int(c10), int(c11)),
+            "cmatrix": checksum(np.ascontiguousarray(cmatrix)),
+        }
+        result = _demosaic_blockwise(
+            "arm_demosaic", bayer,
+            lambda tile: _arm_demosaic_full(
+                tile, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+                black_level, white_level, c00, c01, c10, c11,
+            ),
+            params,
+        )
+        if result is not None:
+            return result
+    return _arm_demosaic_full(
+        bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+        black_level, white_level, c00, c01, c10, c11,
+        return_gpu=return_gpu, dst=dst,
+    )
+
+
+def _arm_demosaic_full(
     bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
     black_level, white_level, c00, c01, c10, c11,
     return_gpu=False, dst=None
@@ -1987,6 +3349,30 @@ def arm_demosaic_1channel(
     black_level, white_level, c00, c01, c10, c11,
     return_gpu=False, dst=None
 ):
+    if not return_gpu and dst is None:
+        result = _demosaic_blockwise(
+            "arm_demosaic_1channel", bayer,
+            lambda tile: _arm_demosaic_1channel_full(
+                tile, wb_r, wb_g1, wb_b, wb_g2, black_level, white_level,
+                c00, c01, c10, c11,
+            ),
+            _demosaic_params((wb_r, wb_g1, wb_b, wb_g2),
+                             (black_level, white_level), (c00, c01, c10, c11)),
+            channels=1, halo=4,
+        )
+        if result is not None:
+            return result
+    return _arm_demosaic_1channel_full(
+        bayer, wb_r, wb_g1, wb_b, wb_g2, black_level, white_level,
+        c00, c01, c10, c11, return_gpu=return_gpu, dst=dst,
+    )
+
+
+def _arm_demosaic_1channel_full(
+    bayer, wb_r, wb_g1, wb_b, wb_g2,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
     """Fast Green-Only ARM Demosaic to Grayscale 1-channel."""
     bayer_buf = InputArray(bayer)
     h, w = bayer_buf.shape[:2]
@@ -2029,6 +3415,29 @@ def arm_demosaic_half_res(
     black_level, white_level, c00, c01, c10, c11,
     return_gpu=False, dst=None
 ):
+    if not return_gpu and dst is None:
+        result = _demosaic_half_blockwise(
+            "arm_demosaic_half_res", bayer,
+            lambda tile: _arm_demosaic_half_res_full(
+                tile, wb_r, wb_g1, wb_b, wb_g2, black_level, white_level,
+                c00, c01, c10, c11,
+            ),
+            _demosaic_params((wb_r, wb_g1, wb_b, wb_g2),
+                             (black_level, white_level), (c00, c01, c10, c11)),
+        )
+        if result is not None:
+            return result
+    return _arm_demosaic_half_res_full(
+        bayer, wb_r, wb_g1, wb_b, wb_g2, black_level, white_level,
+        c00, c01, c10, c11, return_gpu=return_gpu, dst=dst,
+    )
+
+
+def _arm_demosaic_half_res_full(
+    bayer, wb_r, wb_g1, wb_b, wb_g2,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
     """Bypass Demosaicing: Extract Green Sub-Sampling to 1/2 size (half_res) grayscale (ARM)."""
     bayer_buf = InputArray(bayer)
     h, w = bayer_buf.shape[:2]
@@ -2066,6 +3475,30 @@ def arm_demosaic_half_res(
 
 @ti_thread
 def arm_demosaic_rgb_half_res(
+    bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
+    black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
+    if not return_gpu and dst is None:
+        result = _demosaic_half_blockwise(
+            "arm_demosaic_rgb_half_res", bayer,
+            lambda tile: _arm_demosaic_rgb_half_res_full(
+                tile, wb_r, wb_g1, wb_b, wb_g2, cmatrix, black_level,
+                white_level, c00, c01, c10, c11,
+            ),
+            _demosaic_params((wb_r, wb_g1, wb_b, wb_g2),
+                             (black_level, white_level), (c00, c01, c10, c11), cmatrix),
+            channels=3,
+        )
+        if result is not None:
+            return result
+    return _arm_demosaic_rgb_half_res_full(
+        bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix, black_level, white_level,
+        c00, c01, c10, c11, return_gpu=return_gpu, dst=dst,
+    )
+
+
+def _arm_demosaic_rgb_half_res_full(
     bayer, wb_r, wb_g1, wb_b, wb_g2, cmatrix,
     black_level, white_level, c00, c01, c10, c11,
     return_gpu=False, dst=None
@@ -2113,6 +3546,27 @@ def arm_demosaic_rgb_half_res(
 
 @ti_thread
 def pure_arm_demosaic(
+    bayer, black_level, white_level, c00, c01, c10, c11,
+    return_gpu=False, dst=None
+):
+    if not return_gpu and dst is None:
+        result = _demosaic_blockwise(
+            "pure_arm_demosaic", bayer,
+            lambda tile: _pure_arm_demosaic_full(
+                tile, black_level, white_level, c00, c01, c10, c11,
+            ),
+            _demosaic_params((), (black_level, white_level), (c00, c01, c10, c11)),
+            channels=3, halo=4,
+        )
+        if result is not None:
+            return result
+    return _pure_arm_demosaic_full(
+        bayer, black_level, white_level, c00, c01, c10, c11,
+        return_gpu=return_gpu, dst=dst,
+    )
+
+
+def _pure_arm_demosaic_full(
     bayer, black_level, white_level, c00, c01, c10, c11,
     return_gpu=False, dst=None
 ):
@@ -2935,6 +4389,52 @@ def warp_perspective(src, M, dsize, return_gpu=False, dst=None):
     GPU-accelerated Warp Perspective menggunakan Taichi AOT.
     API menyerupai cv2.warpPerspective(src, M, dsize).
     """
+    if isinstance(src, np.ndarray) and dst is None:
+        source = np.ascontiguousarray(src, dtype=np.float32)
+        w_dst, h_dst = dsize
+        output_nbytes = h_dst * w_dst * (source.shape[2] if source.ndim == 3 else 1) * np.dtype(np.float32).itemsize
+        grid = engine.plan_blocks(
+            "warp_perspective", (h_dst, w_dst), source.nbytes + output_nbytes
+        )
+        if grid is not None:
+            try:
+                inverse = np.linalg.inv(np.asarray(M, dtype=np.float32)).astype(np.float32)
+            except np.linalg.LinAlgError:
+                inverse = np.eye(3, dtype=np.float32)
+            src_buf, matrix_buf = upload(source), upload(inverse)
+            output_shape = (h_dst, w_dst, source.shape[2]) if source.ndim == 3 else (h_dst, w_dst)
+            result = np.empty(output_shape, dtype=np.float32)
+            graph = "warp_perspective_offset_f32_3d" if source.ndim == 3 else "warp_perspective_offset_f32_2d"
+            src_view = src_buf.view_as_vector(True, 3) if source.ndim == 3 else src_buf
+            source_crc = checksum(source)
+            cache_params = {"dsize": dsize, "matrix": tuple(inverse.ravel())}
+            try:
+                for block in _ordered_cached_output_blocks(
+                    "warp_perspective", grid, source_crc, cache_params
+                ):
+                    cached = _get_cached_output_tile("warp_perspective", block, source_crc, cache_params)
+                    if cached is not None:
+                        result[block.write_slice] = cached
+                        continue
+                    tile_shape = (*block.shape, source.shape[2]) if source.ndim == 3 else block.shape
+                    tile_buf = engine.allocate(tile_shape, dtype=np.float32, is_vector=source.ndim == 3)
+                    tile_view = tile_buf.view_as_vector(True, 3) if source.ndim == 3 else tile_buf
+                    try:
+                        _mod("remap").run(
+                            graph, src=src_view, M_inv=matrix_buf, dst=tile_view,
+                            h_src=source.shape[0], w_src=source.shape[1],
+                            offset_y=block.y0, offset_x=block.x0,
+                        )
+                        tile_result = tile_buf.to_numpy()
+                        result[block.write_slice] = tile_result
+                        _put_cached_output_tile("warp_perspective", block, source_crc, cache_params, tile_result)
+                    finally:
+                        tile_buf.destroy()
+            finally:
+                src_buf.destroy()
+                matrix_buf.destroy()
+            return upload(result) if return_gpu else result
+
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else upload(src)
 
@@ -2970,7 +4470,7 @@ def warp_perspective(src, M, dsize, return_gpu=False, dst=None):
         if not getattr(dst_buf, "is_vector", False):
             dst_v = dst_buf.view_as_vector(True)
 
-    graph = "warp_perspective_f32_3d" if is_3d else "warp_perspective_f32_2d"
+    graph = "warp_perspective_offset_f32_3d" if is_3d else "warp_perspective_offset_f32_2d"
 
     _mod("remap").run(
         graph,
@@ -2979,8 +4479,8 @@ def warp_perspective(src, M, dsize, return_gpu=False, dst=None):
         dst=dst_v,
         h_src=h_src,
         w_src=w_src,
-        h_dst=h_dst,
-        w_dst=w_dst
+        offset_y=0,
+        offset_x=0,
     )
 
     M_inv_gpu.release()
@@ -2993,8 +4493,51 @@ def warp_perspective(src, M, dsize, return_gpu=False, dst=None):
 # ===========================================================================
 # AOT Dispatch: Non-Local Means Denoising
 # ===========================================================================
-def non_local_means(src, h_param=10.0, search_window=7, patch_size=5,
-                     return_gpu=False):
+def _nlm_variant(search_window, patch_size):
+    """Map requested NLM parameters to a compiled AOT variant."""
+    variants = ((3, 1), (5, 2), (7, 3))
+    return min(
+        variants,
+        key=lambda variant: abs(variant[0] - search_window) + abs(variant[1] - patch_size),
+    )
+
+
+def _non_local_means_tile(
+    tile,
+    h_param,
+    search_radius,
+    patch_radius,
+    refinement_strength,
+    shrinkage_strength,
+):
+    src_tile = upload(tile)
+    try:
+        output = non_local_means_aot(
+            src_tile,
+            h_param=h_param,
+            search_window=search_radius,
+            patch_size=patch_radius,
+            refinement_strength=refinement_strength,
+            shrinkage_strength=shrinkage_strength,
+            return_gpu=True,
+        )
+        try:
+            return output.to_numpy()
+        finally:
+            output.destroy()
+    finally:
+        src_tile.destroy()
+
+
+def non_local_means(
+    src,
+    h_param=10.0,
+    search_window=7,
+    patch_size=5,
+    refinement_strength=1.0,
+    shrinkage_strength=1.0,
+    return_gpu=False,
+):
     """
     Taichi AOT Non-Local Means Denoising.
     Dispatches to pre-compiled fixed-parameter kernel variants.
@@ -3003,63 +4546,61 @@ def non_local_means(src, h_param=10.0, search_window=7, patch_size=5,
     processed, then cast back to original dtype.
     """
     is_numpy = isinstance(src, np.ndarray)
-    is_3d = len(src.shape) == 3 and src.shape[2] == 3
+    if not is_numpy:
+        return non_local_means_aot(
+            src,
+            h_param=h_param,
+            search_window=search_window,
+            patch_size=patch_size,
+            refinement_strength=refinement_strength,
+            shrinkage_strength=shrinkage_strength,
+            return_gpu=return_gpu,
+        )
 
     # --- Auto-cast: normalize integer types to float32 [0,1] ---
-    orig_dtype = src.dtype if isinstance(src, np.ndarray) else np.float32
-    if isinstance(src, np.ndarray) and src.dtype == np.uint8:
+    orig_dtype = src.dtype
+    if src.dtype == np.uint8:
         src = src.astype(np.float32) / 255.0
-    elif isinstance(src, np.ndarray) and src.dtype == np.uint16:
+    elif src.dtype == np.uint16:
         src = src.astype(np.float32) / 65535.0
 
-    # Round to nearest supported variant
-    sr = min(search_window, 7)
-    if sr <= 3:
-        sr = 3
-    elif sr <= 5:
-        sr = 5
-    else:
-        sr = 7
-
-    pr = min(patch_size, 3)
-    if pr <= 1:
-        pr = 1
-    elif pr <= 2:
-        pr = 2
-    else:
-        pr = 3
-
-    h, w = src.shape[:2]
-
     src_np = np.ascontiguousarray(src, dtype=np.float32)
-    h, w = src_np.shape[:2]
-
-    if is_3d:
-        # Bypass engine.upload auto-vectorization (it forces is_vector=True for 3ch)
-        # The AOT graph was compiled with ndim=3 raw ndarray, not vector.
-        from taichi_library.taichi_aot.engine import _LIB, _RUNTIME
-        src_buf = engine.allocate((h, w, 3), dtype=np.float32, is_vector=False, host_accessible=True)
-        dst_buf = engine.allocate((h, w, 3), dtype=np.float32, is_vector=False)
-        _LIB.write_to_gpu_buffer(_RUNTIME, src_buf.handle, src_np.ctypes.data, src_buf.nbytes)
-        graph_name = f"nlm_3ch_s{sr}_p{pr}_f32"
-    else:
-        src_buf = InputArray(src_np)
-        dst_buf = OutputArray((h, w), dtype=np.float32)
-        graph_name = f"nlm_1ch_s{sr}_p{pr}_f32"
-
-    _mod("nlm").run(
-        graph_name,
-        src=src_buf,
-        dst=dst_buf,
-        h=h,
-        w=w,
-        h_param=float(h_param),
+    search_radius, patch_radius = _nlm_variant(search_window, patch_size)
+    result = _run_blockwise(
+        "non_local_means",
+        (src_np,),
+        src_np.shape,
+        np.float32,
+        lambda tile: _non_local_means_tile(
+            tile,
+            h_param,
+            search_radius,
+            patch_radius,
+            refinement_strength,
+            shrinkage_strength,
+        ),
+        halo=search_radius + patch_radius,
+        params={
+            "h_param": float(h_param),
+            "search_radius": search_radius,
+            "patch_radius": patch_radius,
+            "refinement_strength": float(refinement_strength),
+            "shrinkage_strength": float(shrinkage_strength),
+        },
     )
+    if result is None:
+        result = non_local_means_aot(
+            src_np,
+            h_param=h_param,
+            search_window=search_radius,
+            patch_size=patch_radius,
+            refinement_strength=refinement_strength,
+            shrinkage_strength=shrinkage_strength,
+            return_gpu=False,
+        )
 
     if return_gpu:
-        return dst_buf
-
-    result = dst_buf.to_numpy()
+        return upload(result)
 
     # --- Auto-cast back to original dtype ---
     if orig_dtype == np.uint8:
@@ -3528,10 +5069,61 @@ def hough_lines_aot(edge_image, rho_resolution=1.0, theta_resolution=1.0,
     return lines
 
 
+def _guided_filter_tile(guide_tile, src_tile, radius, epsilon):
+    guide_buffer = upload(guide_tile)
+    src_buffer = upload(src_tile)
+    try:
+        output = guided_filter_aot(
+            guide_buffer, src_buffer, radius=radius, epsilon=epsilon, return_gpu=True
+        )
+        try:
+            return output.to_numpy()
+        finally:
+            output.destroy()
+    finally:
+        guide_buffer.destroy()
+        src_buffer.destroy()
+
+
 def guided_filter_aot(guide, src, radius=8, epsilon=1e-4, return_gpu=False):
     """AOT Guided Filter (edge-preserving smoothing).
     Uses box_filter module for box averaging and guided_filter module for element-wise ops.
     """
+    if not isinstance(guide, TaichiGPUBuffer) and not isinstance(src, TaichiGPUBuffer):
+        guide_array = np.ascontiguousarray(guide, dtype=np.float32)
+        source = np.ascontiguousarray(src, dtype=np.float32)
+        if guide_array.ndim != 2 or source.ndim != 2 or guide_array.shape != source.shape:
+            raise ValueError("guided_filter_aot requires matching 2D guide and source arrays")
+        result = _run_blockwise(
+            "guided_filter",
+            (guide_array, source),
+            source.shape,
+            np.float32,
+            lambda guide_tile, src_tile: _guided_filter_tile(
+                guide_tile, src_tile, radius, epsilon
+            ),
+            halo=2 * int(radius),
+            params={"radius": int(radius), "epsilon": float(epsilon)},
+        )
+        if result is not None:
+            return upload(result) if return_gpu else result
+
+        guide_buffer = upload(guide_array)
+        src_buffer = upload(source)
+        output = guided_filter_aot(
+            guide_buffer, src_buffer, radius=radius, epsilon=epsilon, return_gpu=True
+        )
+        if return_gpu:
+            guide_buffer.destroy()
+            src_buffer.destroy()
+            return output
+        try:
+            return output.to_numpy()
+        finally:
+            guide_buffer.destroy()
+            src_buffer.destroy()
+            output.destroy()
+
     is_gpu_src = isinstance(src, TaichiGPUBuffer)
     is_gpu_guide = isinstance(guide, TaichiGPUBuffer)
     src_buf = src if is_gpu_src else engine.upload(src)
@@ -3790,6 +5382,57 @@ def farneback_flow(
     flow_init=None,
     return_gpu=False,
 ):
+    if (
+        not return_gpu
+        and flow_init is None
+        and isinstance(ref_gray, np.ndarray)
+        and isinstance(comp_gray, np.ndarray)
+    ):
+        scale = max(1.0, 1.0 / max(float(pyr_scale), 1e-6))
+        local_radius = poly_n // 2 + win_size // 2 * max(1, int(num_iters)) + 4
+        halo = int(np.ceil(local_radius * scale ** max(0, int(num_levels) - 1)))
+        result = _run_blockwise(
+            "farneback_flow",
+            (np.ascontiguousarray(ref_gray), np.ascontiguousarray(comp_gray)),
+            (*ref_gray.shape[:2], 2),
+            np.float32,
+            lambda ref_tile, comp_tile: _farneback_flow_full(
+                ref_tile, comp_tile, pyr_scale, num_levels, win_size,
+                num_iters, poly_n, poly_sigma, flags,
+            ),
+            halo=halo,
+            params={
+                "pyr_scale": float(pyr_scale), "levels": int(num_levels),
+                "win_size": int(win_size), "iters": int(num_iters),
+                "poly_n": int(poly_n), "poly_sigma": float(poly_sigma),
+                "flags": int(flags),
+            },
+            validate_output=lambda output, _tiles: (
+                output.ndim == 3 and output.shape[2] == 2
+                and np.isfinite(output).all()
+            ),
+        )
+        if result is not None:
+            return result
+    return _farneback_flow_full(
+        ref_gray, comp_gray, pyr_scale, num_levels, win_size, num_iters,
+        poly_n, poly_sigma, flags, flow_init, return_gpu,
+    )
+
+
+def _farneback_flow_full(
+    ref_gray,
+    comp_gray,
+    pyr_scale=0.5,
+    num_levels=3,
+    win_size=15,
+    num_iters=3,
+    poly_n=5,
+    poly_sigma=1.2,
+    flags=0,
+    flow_init=None,
+    return_gpu=False,
+):
     """
     AOT Farneback Dense Optical Flow (OpenCV-compatible).
 
@@ -3813,11 +5456,10 @@ def farneback_flow(
     -------
     flow : (H, W, 2) float32 – flow field where flow[:,:,0]=dx, flow[:,:,1]=dy.
     """
-    from taichi_library.taichi_algorithm.farneback_flow import (
+    from taichi_library.taichi_algorithm.optical_flow.farneback_flow import (
         prepare_gaussian_constants,
         compute_smoothing_weights,
     )
-    from taichi_library.taichi_algorithm.pyramid import build_image_pyramid_gpu
 
     # Upload images
     ref_buf = InputArray(ref_gray)
@@ -3826,14 +5468,23 @@ def farneback_flow(
 
     # Build pyramids
     downscale_factor = 1.0 / pyr_scale
-    ref_pyr = build_image_pyramid_gpu(
-        ref_buf, n_levels=num_levels, min_size=32,
-        downscale_factor=downscale_factor,
-    )
-    comp_pyr = build_image_pyramid_gpu(
-        comp_buf, n_levels=num_levels, min_size=32,
-        downscale_factor=downscale_factor,
-    )
+    if not np.isclose(downscale_factor, 2.0):
+        raise ValueError("AOT Farneback currently requires pyr_scale=0.5")
+
+    def _build_flow_pyramid(source):
+        pyramid = [source]
+        for _ in range(max(0, int(num_levels) - 1)):
+            h_prev, w_prev = pyramid[-1].shape[:2]
+            h_next, w_next = h_prev // 2, w_prev // 2
+            if h_next < 32 or w_next < 32:
+                break
+            level = engine.allocate((h_next, w_next), dtype=np.float32)
+            _mod("pyramid").run("downsample_2x_f32", src=pyramid[-1], dst=level)
+            pyramid.append(level)
+        return pyramid
+
+    ref_pyr = _build_flow_pyramid(ref_buf)
+    comp_pyr = _build_flow_pyramid(comp_buf)
     actual_levels = len(ref_pyr)
 
     # Pre-compute constants on CPU, upload to GPU
@@ -3875,10 +5526,14 @@ def farneback_flow(
         # poly_expansion_f32 graph: src -> vert (vertical) -> poly (horizontal)
         mod.run("poly_expansion_f32",
                 src=ref_lvl, vert=vert_buf, poly=R0,
-                h=hl, w=wl, g=g_gpu, xg=xg_gpu, xxg=xxg_gpu, poly_radius=poly_radius)
+                h=hl, w=wl, g=g_gpu, xg=xg_gpu, xxg=xxg_gpu,
+                ig11=float(ig11), ig03=float(ig03), ig33=float(ig33),
+                ig55=float(ig55), poly_radius=poly_radius)
         mod.run("poly_expansion_f32",
                 src=comp_lvl, vert=vert_buf, poly=R1,
-                h=hl, w=wl, g=g_gpu, xg=xg_gpu, xxg=xxg_gpu, poly_radius=poly_radius)
+                h=hl, w=wl, g=g_gpu, xg=xg_gpu, xxg=xxg_gpu,
+                ig11=float(ig11), ig03=float(ig03), ig33=float(ig33),
+                ig55=float(ig55), poly_radius=poly_radius)
 
         vert_buf.destroy()
 
@@ -4109,13 +5764,62 @@ def bm3d(src, sigma, block_size=8, search_radius=15,
     return result
 
 
+def _dense_flow_blockwise(operation, prev, next, run_tile, halo, params):
+    if not isinstance(prev, np.ndarray) or not isinstance(next, np.ndarray):
+        return None
+    if prev.shape[:2] != next.shape[:2]:
+        raise ValueError("optical-flow frames must have matching dimensions")
+    return _run_blockwise(
+        operation,
+        (np.ascontiguousarray(prev), np.ascontiguousarray(next)),
+        (*prev.shape[:2], 2),
+        np.float32,
+        run_tile,
+        halo=halo,
+        params=params,
+        validate_output=lambda output, _tiles: (
+            output.ndim == 3 and output.shape[2] == 2
+            and np.isfinite(output).all()
+        ),
+    )
+
+
 def lucasKanade(prev, next, **kwargs):
     """Dense grid Lucas-Kanade optical flow."""
     from taichi_library.taichi_algorithm import calcOpticalFlowPyrLK
+    if kwargs.get("prevPts") is None and not kwargs.get("return_diagnostics", False):
+        step = max(4, int(kwargs.get("grid_step", 16)))
+        block_h, block_w = engine.get_block_config().normalized_size()
+        if block_h % step == 0 and block_w % step == 0:
+            win = kwargs.get("winSize", (13, 13))
+            win = win[0] if isinstance(win, tuple) else int(win)
+            levels = max(0, int(kwargs.get("maxLevel", 2)))
+            radius = int(np.ceil((win // 2 + step * 2) * (2 ** levels) / step) * step)
+            result = _dense_flow_blockwise(
+                "lucas_kanade", prev, next,
+                lambda p, n: calcOpticalFlowPyrLK(p, n, **kwargs),
+                radius, {"kwargs": repr(sorted(kwargs.items()))},
+            )
+            if result is not None:
+                return result
     return calcOpticalFlowPyrLK(prev, next, **kwargs)
 
 
 def blockMatching(prev, next, **kwargs):
     """Dense block matching optical flow with parabolic fit."""
     from taichi_library.taichi_algorithm import calcOpticalFlowBlockMatching
+    step = max(4, int(kwargs.get("grid_step", 16)))
+    block_h, block_w = engine.get_block_config().normalized_size()
+    if block_h % step == 0 and block_w % step == 0:
+        win = kwargs.get("winSize", (17, 17))
+        win = win[0] if isinstance(win, tuple) else int(win)
+        levels = max(0, int(kwargs.get("maxLevel", 2)))
+        radius = int(np.ceil((win // 2 + step * 3) * (2 ** levels) / step) * step)
+        result = _dense_flow_blockwise(
+            "block_matching", prev, next,
+            lambda p, n: calcOpticalFlowBlockMatching(p, n, **kwargs),
+            radius, {"kwargs": repr(sorted(kwargs.items()))},
+        )
+        if result is not None:
+            return result
     return calcOpticalFlowBlockMatching(prev, next, **kwargs)

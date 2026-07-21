@@ -7,7 +7,7 @@ import numpy as np
 
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.optical_flow_utils.flow_blocking import (
-    align_with_tiled_flow,
+    align_with_block_flow,
 )
 
 
@@ -26,8 +26,6 @@ LUCAS_KANADE_CPU_PRESETS = {
         "iterations": 12,
         "epsilon": 0.02,
         "use_multi_core": True,
-        "tile_cols": 2,
-        "tile_rows": 2,
         "tile_overlap": 0.20,
     },
     "medium": {
@@ -39,8 +37,6 @@ LUCAS_KANADE_CPU_PRESETS = {
         "iterations": 18,
         "epsilon": 0.015,
         "use_multi_core": True,
-        "tile_cols": 3,
-        "tile_rows": 2,
         "tile_overlap": 0.20,
     },
     "high": {
@@ -52,8 +48,6 @@ LUCAS_KANADE_CPU_PRESETS = {
         "iterations": 24,
         "epsilon": 0.01,
         "use_multi_core": True,
-        "tile_cols": 3,
-        "tile_rows": 2,
         "tile_overlap": 0.25,
     },
 }
@@ -263,13 +257,14 @@ class LucasKanadeCPU:
                 point_executor=point_executor,
             )
 
-        return align_with_tiled_flow(
+        halo = int(config.get("win_size", 15)) * (
+            2 ** max(0, int(config.get("max_level", 2)) - 1)
+        )
+        return align_with_block_flow(
             reference,
             target,
             flow_func,
-            cols=int(config.get("tile_cols", 3)),
-            rows=int(config.get("tile_rows", 2)),
-            overlap=float(config.get("tile_overlap", 0.20)),
+            halo=halo,
             use_multi_core=bool(config.get("use_multi_core", True)),
             stop_requested=stop_requested,
             executor=tile_executor,
@@ -289,13 +284,9 @@ class LucasKanadeCPU:
             write_alignment_cache_attrs,
         )
 
-        tile_workers = max(
-            1,
-            min(
-                int(config.get("tile_cols", 3)) * int(config.get("tile_rows", 2)),
-                os.cpu_count() or 4,
-            ),
-        )
+        tile_workers = 1
+        if bool(config.get("use_multi_core", True)):
+            tile_workers = max(1, min(4, os.cpu_count() or 4))
         point_workers = max(
             1, min(int(config.get("point_workers", 2)), os.cpu_count() or 4)
         )

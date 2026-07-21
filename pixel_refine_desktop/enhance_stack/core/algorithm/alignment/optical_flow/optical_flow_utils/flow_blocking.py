@@ -5,6 +5,27 @@ import cv2
 import numpy as np
 
 
+def _bounded_map(executor, function, items, max_in_flight):
+    """Yield completed work while keeping only a small number of blocks live."""
+    iterator = iter(items)
+    pending = set()
+    for _ in range(max(1, int(max_in_flight))):
+        try:
+            pending.add(executor.submit(function, next(iterator)))
+        except StopIteration:
+            break
+    while pending:
+        done, pending = concurrent.futures.wait(
+            pending, return_when=concurrent.futures.FIRST_COMPLETED
+        )
+        for future in done:
+            yield future.result()
+            try:
+                pending.add(executor.submit(function, next(iterator)))
+            except StopIteration:
+                pass
+
+
 def to_flow_gray_u8(image):
     if image is None:
         return None
@@ -36,6 +57,19 @@ def iter_flow_tiles(width, height, cols=4, rows=3, overlap=0.20):
                 "valid": (x0, y0, x1, y1),
                 "roi": (rx0, ry0, rx1, ry1),
             }
+
+
+def iter_runtime_flow_blocks(width, height, halo=0):
+    """Yield flow regions from the shared compute-block runtime."""
+    from taichi_library import taichi_aot
+    from taichi_library.taichi_aot.block import BlockGrid
+
+    size = taichi_aot.get_block_config().normalized_size()
+    for block in BlockGrid((height, width), size=size, halo=max(0, int(halo))):
+        yield {
+            "valid": (block.x0, block.y0, block.x1, block.y1),
+            "roi": (block.read_x0, block.read_y0, block.read_x1, block.read_y1),
+        }
 
 
 def _to_float32_tile(tile):
@@ -152,6 +186,81 @@ def align_with_tiled_flow(
         accumulator[valid] = accumulator[valid] / weights[valid, None]
     else:
         accumulator[valid] = accumulator[valid] / weights[valid]
+    if not np.all(valid):
+        accumulator[~valid] = target.astype(np.float32, copy=False)[~valid]
+    return _restore_dtype(accumulator, target.dtype)
+
+
+def align_with_block_flow(
+    reference,
+    target,
+    flow_func,
+    *,
+    halo=0,
+    use_multi_core=True,
+    stop_requested=None,
+    executor=None,
+    target_for_warping=None,
+):
+    """Run the legacy CPU flow compositor on runtime-owned BlockGrid regions."""
+    reference_gray = to_flow_gray_u8(reference)
+    target_gray = to_flow_gray_u8(target)
+    if reference_gray is None or target_gray is None:
+        return None
+
+    height, width = reference_gray.shape[:2]
+    blocks = list(iter_runtime_flow_blocks(width, height, halo=halo))
+    output_shape = target.shape
+    accumulator = np.zeros(output_shape, dtype=np.float32)
+    weights = np.zeros((height, width), dtype=np.float32)
+
+    def run_block(block):
+        if stop_requested and stop_requested():
+            return None
+        source = target_for_warping if target_for_warping is not None else target
+        return _compute_and_warp_tile(
+            reference_gray, target_gray, source, block, flow_func
+        )
+
+    max_workers = max(1, min(len(blocks), os.cpu_count() or 4))
+    pool = None
+    if use_multi_core and len(blocks) > 1:
+        if executor is not None:
+            results = _bounded_map(
+                executor,
+                run_block,
+                blocks,
+                max(1, int(getattr(executor, "_max_workers", max_workers))),
+            )
+        else:
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+            results = _bounded_map(pool, run_block, blocks, max_workers)
+    else:
+        results = map(run_block, blocks)
+
+    try:
+        for item in results:
+            if item is None:
+                continue
+            x, y, warped, weight = item
+            h_block, w_block = warped.shape[:2]
+            weighted = _to_float32_tile(warped)
+            if target.ndim == 3:
+                accumulator[y:y + h_block, x:x + w_block] += weighted * weight[..., None]
+            else:
+                accumulator[y:y + h_block, x:x + w_block] += weighted * weight
+            weights[y:y + h_block, x:x + w_block] += weight
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True)
+
+    valid = weights > 0
+    if not np.any(valid):
+        return None
+    if target.ndim == 3:
+        accumulator[valid] /= weights[valid, None]
+    else:
+        accumulator[valid] /= weights[valid]
     if not np.all(valid):
         accumulator[~valid] = target.astype(np.float32, copy=False)[~valid]
     return _restore_dtype(accumulator, target.dtype)

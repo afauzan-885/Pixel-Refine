@@ -12,8 +12,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lu
     LucasKanadeCPU,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.optical_flow_utils.flow_blocking import (
-    align_with_tiled_flow,
-    iter_flow_tiles,
+    align_with_block_flow,
     to_flow_gray_u8,
 )
 
@@ -35,8 +34,6 @@ LUCAS_KANADE_GPU_PRESETS = {
         "adaptive": False,
         "adaptive_threshold": 1,
         "use_multi_core": False,
-        "tile_cols": 1,
-        "tile_rows": 1,
         "tile_overlap": 0.20,
         "max_flow_px": 48.0,
     },
@@ -51,8 +48,6 @@ LUCAS_KANADE_GPU_PRESETS = {
         "adaptive": False,
         "adaptive_threshold": 1,
         "use_multi_core": False,
-        "tile_cols": 1,
-        "tile_rows": 1,
         "tile_overlap": 0.25,
         "max_flow_px": 64.0,
     },
@@ -67,8 +62,6 @@ LUCAS_KANADE_GPU_PRESETS = {
         "adaptive": False,
         "adaptive_threshold": 1,
         "use_multi_core": False,
-        "tile_cols": 1,
-        "tile_rows": 1,
         "tile_overlap": 0.20,
         "max_flow_px": 96.0,
     },
@@ -90,6 +83,8 @@ class LucasKanadeGPU(LucasKanadeCPU):
     NAME = "Lucas Kanade GPU Optical Flow"
     KIND = "alignment"
     DESCRIPTION = "Tile-based GPU AOT Lucas-Kanade optical flow alignment."
+    GPU_MODULES = ("common", "lucas_kanade", "pyramid", "remap")
+    DEVICE_RESERVATION = "lucas_kanade_frame"
     _gpu_remap_disabled = False
     _reported_gpu_remap_disabled = False
 
@@ -109,18 +104,36 @@ class LucasKanadeGPU(LucasKanadeCPU):
         if self._tile_buffers:
             for idx, bufs in self._tile_buffers.items():
                 for name, buf in bufs.items():
-                    if buf is not None and hasattr(buf, "destroy"):
-                        try:
-                            buf.destroy()
-                        except Exception:
-                            pass
-                    elif buf is not None and hasattr(buf, "release"):
+                    if buf is not None and hasattr(buf, "release"):
                         try:
                             buf.release()
                         except Exception:
                             pass
+                    elif buf is not None and hasattr(buf, "destroy"):
+                        try:
+                            buf.destroy()
+                        except Exception:
+                            pass
             self._tile_buffers = None
         self._current_ref_id = None
+
+    def _cleanup_tile_buffer(self, tile_idx):
+        if not self._tile_buffers:
+            return
+        bufs = self._tile_buffers.pop(tile_idx, None)
+        if not bufs:
+            return
+        for buf in bufs.values():
+            if buf is not None and hasattr(buf, "release"):
+                try:
+                    buf.release()
+                except Exception:
+                    pass
+            elif buf is not None and hasattr(buf, "destroy"):
+                try:
+                    buf.destroy()
+                except Exception:
+                    pass
 
     @staticmethod
     def _vram_cleanup(reason=""):
@@ -138,73 +151,56 @@ class LucasKanadeGPU(LucasKanadeCPU):
         gc.collect()
 
     def _init_tile_buffers(self, reference, tiles, config):
+        return {
+            idx: self._init_tile_buffer(reference, tile)
+            for idx, tile in enumerate(tiles)
+        }
+
+    def _init_tile_buffer(self, reference, tile):
         from taichi_library import taichi_aot
         from taichi_library.taichi_aot.engine import AOTEngine
 
         engine = AOTEngine()
-
-        tile_buffers = {}
-        for idx, tile in enumerate(tiles):
-            rx0, ry0, rx1, ry1 = tile["roi"]
-            roi_h = ry1 - ry0
-            roi_w = rx1 - rx0
-
-            # Static reference gray tile - upload ONCE for the entire batch
-            ref_roi = reference[ry0:ry1, rx0:rx1]
-            ref_gray_cpu = to_flow_gray_u8(ref_roi).astype(np.float32, copy=False)
-            ref_gray_gpu = taichi_aot.upload(ref_gray_cpu, is_vector=False)
-
-            # Pre-allocate reusable target color and gray buffers
-            is_color = reference.ndim == 3
-            target_gpu = engine.allocate(
-                (roi_h, roi_w, 3) if is_color else (roi_h, roi_w),
-                dtype=np.float32,
-                is_vector=is_color,
-                vector_dim=3 if is_color else 1,
-                host_accessible=True,
-            )
-            target_gray_gpu = engine.allocate(
-                (roi_h, roi_w), dtype=np.float32, is_vector=False, host_accessible=True
-            )
-            target_host = np.empty(
-                (roi_h, roi_w, 3) if is_color else (roi_h, roi_w),
-                dtype=np.float32,
-            )
-            target_gray_host = np.empty((roi_h, roi_w), dtype=np.float32)
-
-            # Pre-allocate hanning and tile mask buffers for stitching
-            hanning_cpu = taichi_aot.generate_hanning_window_2d(
+        rx0, ry0, rx1, ry1 = tile["roi"]
+        roi_h, roi_w = ry1 - ry0, rx1 - rx0
+        ref_roi = reference[ry0:ry1, rx0:rx1]
+        ref_gray_cpu = to_flow_gray_u8(ref_roi).astype(np.float32, copy=False)
+        ref_gray_gpu = taichi_aot.upload(ref_gray_cpu, is_vector=False)
+        is_color = reference.ndim == 3
+        shape = (roi_h, roi_w, 3) if is_color else (roi_h, roi_w)
+        target_gpu = engine.allocate(
+            shape, dtype=np.float32, is_vector=is_color,
+            vector_dim=3 if is_color else 1, host_accessible=True,
+        )
+        target_gray_gpu = engine.allocate(
+            (roi_h, roi_w), dtype=np.float32, is_vector=False,
+            host_accessible=True,
+        )
+        hanning_gpu = taichi_aot.upload(
+            taichi_aot.generate_hanning_window_2d(
                 (roi_h, roi_w), exclude_boundary=True
-            )
-            hanning_gpu = taichi_aot.upload(hanning_cpu, is_vector=False)
-
-            # Mask buffer (1.0 inside valid, 0.0 outside)
-            vx0, vy0, vx1, vy1 = tile["valid"]
-            oy0, ox0 = vy0 - ry0, vx0 - rx0
-            oy1, ox1 = vy1 - ry0, vx1 - rx0
-            mask_cpu = np.zeros((roi_h, roi_w), dtype=np.float32)
-            mask_cpu[oy0:oy1, ox0:ox1] = 1.0
-            mask_gpu = taichi_aot.upload(mask_cpu, is_vector=False)
-
-            # Pre-allocate warped_gpu
-            warped_gpu = engine.allocate(
-                (roi_h, roi_w, 3) if is_color else (roi_h, roi_w),
-                dtype=np.float32,
-                is_vector=is_color,
+            ),
+            is_vector=False,
+        )
+        vx0, vy0, vx1, vy1 = tile["valid"]
+        oy0, ox0 = vy0 - ry0, vx0 - rx0
+        oy1, ox1 = vy1 - ry0, vx1 - rx0
+        mask_cpu = np.zeros((roi_h, roi_w), dtype=np.float32)
+        mask_cpu[oy0:oy1, ox0:ox1] = 1.0
+        buffers = {
+            "ref_gray_gpu": ref_gray_gpu,
+            "target_gpu": target_gpu,
+            "target_gray_gpu": target_gray_gpu,
+            "target_host": np.empty(shape, dtype=np.float32),
+            "target_gray_host": np.empty((roi_h, roi_w), dtype=np.float32),
+            "hanning_gpu": hanning_gpu,
+            "mask_gpu": taichi_aot.upload(mask_cpu, is_vector=False),
+            "warped_gpu": engine.allocate(
+                shape, dtype=np.float32, is_vector=is_color,
                 vector_dim=3 if is_color else 1,
-            )
-
-            tile_buffers[idx] = {
-                "ref_gray_gpu": ref_gray_gpu,
-                "target_gpu": target_gpu,
-                "target_gray_gpu": target_gray_gpu,
-                "target_host": target_host,
-                "target_gray_host": target_gray_host,
-                "hanning_gpu": hanning_gpu,
-                "mask_gpu": mask_gpu,
-                "warped_gpu": warped_gpu,
-            }
-        return tile_buffers
+            ),
+        }
+        return buffers
 
     @staticmethod
     def load_config(batch_id=None, config_filename=None):
@@ -357,12 +353,20 @@ class LucasKanadeGPU(LucasKanadeCPU):
             )
 
         try:
-            res = self._align_frame_gpu_flow_remap(
-                reference,
-                target,
-                config,
-                stop_requested=stop_requested,
-            )
+            from taichi_library import taichi_aot
+
+            with taichi_aot.engine.reserve_device_execution(self.DEVICE_RESERVATION):
+                # Load graph modules before image buffers claim the device budget.
+                for module_name in self.GPU_MODULES:
+                    taichi_aot._mod(module_name)
+                taichi_aot.engine.sync()
+                taichi_aot.engine.buffer_pool.clear()
+                res = self._align_frame_gpu_flow_remap(
+                    reference,
+                    target,
+                    config,
+                    stop_requested=stop_requested,
+                )
             if bool(config.get("conservative_vram", True)):
                 self._cleanup_tile_buffers()
             self._vram_cleanup("frame-complete")
@@ -395,8 +399,6 @@ class LucasKanadeGPU(LucasKanadeCPU):
     ):
         fallback_config = dict(config)
         fallback_config["use_multi_core"] = True
-        fallback_config["tile_cols"] = max(2, int(fallback_config.get("tile_cols", 1)))
-        fallback_config["tile_rows"] = max(2, int(fallback_config.get("tile_rows", 1)))
         fallback_config["point_workers"] = max(
             2,
             int(fallback_config.get("point_workers", 2)),
@@ -411,13 +413,14 @@ class LucasKanadeGPU(LucasKanadeCPU):
                 point_executor=point_executor,
             )
 
-        return align_with_tiled_flow(
+        halo = int(fallback_config.get("win_size", 15)) + int(
+            fallback_config.get("max_flow_px", 64.0)
+        )
+        return align_with_block_flow(
             reference,
             target,
             flow_func,
-            cols=int(fallback_config.get("tile_cols", 3)),
-            rows=int(fallback_config.get("tile_rows", 2)),
-            overlap=float(fallback_config.get("tile_overlap", 0.20)),
+            halo=halo,
             use_multi_core=True,
             stop_requested=stop_requested,
             executor=tile_executor,
@@ -425,9 +428,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
 
     def build_flow_alignment(self, ctx, reference, target_dims, orchestrator, config):
         fallback_config = dict(config)
-        fallback_config["use_multi_core"] = True
-        fallback_config["tile_cols"] = max(2, int(fallback_config.get("tile_cols", 1)))
-        fallback_config["tile_rows"] = max(2, int(fallback_config.get("tile_rows", 1)))
+        fallback_config["use_multi_core"] = False
         fallback_config["point_workers"] = max(
             2,
             int(fallback_config.get("point_workers", 2)),
@@ -470,7 +471,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
             f"mode={config.get('mode')} grid_step={config.get('grid_step')} "
             f"max_level={config.get('max_level')} iterations={config.get('iterations')} "
             f"win_size={config.get('win_size')} motion_mode={config.get('motion_mode')} "
-            f"tiles={config.get('tile_cols')}x{config.get('tile_rows')}"
+            f"block_runtime=native"
         )
 
         height, width = reference.shape[:2]
@@ -480,12 +481,17 @@ class LucasKanadeGPU(LucasKanadeCPU):
             and tiles[0]["roi"] == (0, 0, width, height)
             and tiles[0]["valid"] == (0, 0, width, height)
         )
+        conservative_vram = bool(config.get("conservative_vram", True))
 
         # Initialize/re-initialize tile buffers once per batch/reference change
         ref_id = id(reference)
         if self._tile_buffers is None or self._current_ref_id != ref_id:
             self._cleanup_tile_buffers()
-            self._tile_buffers = self._init_tile_buffers(reference, tiles, config)
+            # Keep only the active tile resident on low-VRAM devices.
+            self._tile_buffers = (
+                {} if conservative_vram
+                else self._init_tile_buffers(reference, tiles, config)
+            )
             self._current_ref_id = ref_id
 
         t_prepare = time.perf_counter()
@@ -498,10 +504,31 @@ class LucasKanadeGPU(LucasKanadeCPU):
             accumulator, weights = self._create_gpu_accumulators(target)
             buffers = [accumulator, weights]
 
+        pending_stitch = []
+        pending_stitch_bytes = 0
+        device_budget = taichi_aot.engine.get_device_block_cache().max_bytes
+        stitch_batch_budget = max(1, device_budget // 2)
+
+        def flush_stitch_batch():
+            nonlocal pending_stitch_bytes
+            if not pending_stitch:
+                return
+            fence_start = time.perf_counter()
+            taichi_aot.engine.sync()
+            profile["stitch"] += time.perf_counter() - fence_start
+            for pending_idx in pending_stitch:
+                self._cleanup_tile_buffer(pending_idx)
+            pending_stitch.clear()
+            pending_stitch_bytes = 0
+
         try:
             for idx, tile in enumerate(tiles):
                 if stop_requested and stop_requested():
                     return None
+
+                if idx not in self._tile_buffers:
+                    self._tile_buffers[idx] = self._init_tile_buffer(reference, tile)
+
 
                 warped_gpu = self._warp_tile_gpu(
                     tile,
@@ -548,6 +575,16 @@ class LucasKanadeGPU(LucasKanadeCPU):
                     self._tile_buffers[idx]["mask_gpu"],
                 )
                 profile["stitch"] += time.perf_counter() - t_stitch
+                if conservative_vram:
+                    pending_stitch.append(idx)
+                    pending_stitch_bytes += sum(
+                        int(getattr(value, "size_bytes", 0))
+                        for value in self._tile_buffers[idx].values()
+                    )
+                    if pending_stitch_bytes >= stitch_batch_budget:
+                        flush_stitch_batch()
+
+            flush_stitch_batch()
 
             result = self._download_restore_dtype(
                 accumulator,
@@ -572,21 +609,33 @@ class LucasKanadeGPU(LucasKanadeCPU):
             )
             return result
         finally:
+            taichi_aot.engine.sync()
+            for pending_idx in list(pending_stitch):
+                self._cleanup_tile_buffer(pending_idx)
             for buffer in buffers:
                 if buffer is not None and hasattr(buffer, "release"):
                     buffer.release()
 
     @staticmethod
     def _build_tiles(width, height, config):
-        return list(
-            iter_flow_tiles(
-                width,
-                height,
-                cols=int(config.get("tile_cols", 2)),
-                rows=int(config.get("tile_rows", 2)),
-                overlap=float(config.get("tile_overlap", 0.20)),
-            )
-        )
+        from taichi_library import taichi_aot
+        from taichi_library.taichi_aot.block import BlockGrid
+
+        block_size = taichi_aot.get_block_config().normalized_size()
+        win_radius = max(2, int(config.get("win_size", 15)) // 2)
+        motion_halo = int(np.ceil(float(config.get("max_flow_px", 64.0))))
+        overlap_halo = int(max(block_size) * float(config.get("tile_overlap", 0.20)))
+        halo = max(win_radius + motion_halo, overlap_halo)
+        grid = BlockGrid((height, width), size=block_size, halo=halo)
+        blocks = [
+            {
+                "roi": (block.read_x0, block.read_y0, block.read_x1, block.read_y1),
+                "valid": (block.x0, block.y0, block.x1, block.y1),
+                "block_index": block.index,
+            }
+            for block in grid
+        ]
+        return blocks
 
     @staticmethod
     def _create_gpu_accumulators(target):
@@ -708,6 +757,9 @@ class LucasKanadeGPU(LucasKanadeCPU):
                 config,
             )
             taichi_aot.engine.sync()
+            if bool(config.get("conservative_vram", True)):
+                # Pyramid intermediates are no longer live after the flow fence.
+                taichi_aot.engine.buffer_pool.clear()
             if profile is not None:
                 profile["flow_calc"] += time.perf_counter() - t0
 

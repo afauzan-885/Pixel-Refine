@@ -11,7 +11,7 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from taichi_library.taichi_algorithm import area_interpolation as area
+from taichi_library.taichi_algorithm.interpolation import area_interpolation as area
 
 def compile_area_aot(arch, save_path):
     print(f"\n>>> Compiling INTER_AREA AOT for: {arch}")
@@ -37,6 +37,15 @@ def compile_area_aot(arch, save_path):
     dst_3ch = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.types.vector(3, ti.f32), ndim=2)
     g_3ch.dispatch(area._inter_area_vec3_kernel, src_3ch, dst_3ch, sh, sw, dh, dw)
     module.add_graph("inter_area_vec3_f32", g_3ch.compile())
+
+    offset_y = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "offset_y", ti.i32)
+    offset_x = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "offset_x", ti.i32)
+    g_offset_1ch = ti.graph.GraphBuilder()
+    g_offset_1ch.dispatch(area._inter_area_offset_1ch_kernel, src_1ch, dst_1ch, sh, sw, dh, dw, offset_y, offset_x)
+    module.add_graph("inter_area_offset_f32", g_offset_1ch.compile())
+    g_offset_3ch = ti.graph.GraphBuilder()
+    g_offset_3ch.dispatch(area._inter_area_offset_vec3_kernel, src_3ch, dst_3ch, sh, sw, dh, dw, offset_y, offset_x)
+    module.add_graph("inter_area_offset_vec3_f32", g_offset_3ch.compile())
 
     module.archive(save_path)
     print(f"Archive saved to: {save_path}")

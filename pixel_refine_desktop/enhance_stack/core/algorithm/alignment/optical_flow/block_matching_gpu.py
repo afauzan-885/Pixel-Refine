@@ -22,8 +22,6 @@ BLOCK_MATCHING_GPU_PRESETS = {
         "adaptive": False,
         "adaptive_threshold": 1,
         "use_multi_core": False,
-        "tile_cols": 1,
-        "tile_rows": 1,
         "tile_overlap": 0.20,
         "max_flow_px": 48.0,
     },
@@ -38,8 +36,6 @@ BLOCK_MATCHING_GPU_PRESETS = {
         "adaptive": False,
         "adaptive_threshold": 1,
         "use_multi_core": False,
-        "tile_cols": 2,
-        "tile_rows": 2,
         "tile_overlap": 0.20,
         "max_flow_px": 64.0,
     },
@@ -54,8 +50,6 @@ BLOCK_MATCHING_GPU_PRESETS = {
         "adaptive": False,
         "adaptive_threshold": 1,
         "use_multi_core": False,
-        "tile_cols": 3,
-        "tile_rows": 2,
         "tile_overlap": 0.20,
         "max_flow_px": 96.0,
     },
@@ -66,6 +60,8 @@ class BlockMatchingGPU(LucasKanadeGPU):
     NAME = "Block Matching GPU Optical Flow"
     KIND = "alignment"
     DESCRIPTION = "Tile-based GPU AOT Block Matching + Parabolic Fit optical flow alignment."
+    GPU_MODULES = ("common", "block_matching", "pyramid", "remap")
+    DEVICE_RESERVATION = "block_matching_frame"
 
     @staticmethod
     def load_config(batch_id=None, config_filename=None):

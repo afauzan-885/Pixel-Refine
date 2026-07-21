@@ -13,9 +13,7 @@ if project_root not in sys.path:
 
 # Set AOT Mode globally before importing taichi_worker or related scripts
 
-from taichi_library.taichi_algorithm import (
-    bicubic_interpolation as bicubic,
-)
+from taichi_library.taichi_algorithm.interpolation import bicubic_interpolation as bicubic
 
 
 def compile_bicubic_aot(arch=ti.vulkan, save_path="bicubic_interpolation_vulkan.tcm"):
@@ -99,6 +97,15 @@ def compile_bicubic_aot(arch=ti.vulkan, save_path="bicubic_interpolation_vulkan.
         w_src,
     )
     module.add_graph("bicubic_sample_f32_3d", g_sample_3d.compile())
+
+    offset_y = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "offset_y", ti.i32)
+    offset_x = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "offset_x", ti.i32)
+    g_tile_2d = ti.graph.GraphBuilder()
+    g_tile_2d.dispatch(bicubic._bicubic_resize_offset_kernel_2d, src_2d, dst_2d, h_src, w_src, h_dst, w_dst, offset_y, offset_x)
+    module.add_graph("bicubic_resize_offset_f32_2d", g_tile_2d.compile())
+    g_tile_3d = ti.graph.GraphBuilder()
+    g_tile_3d.dispatch(bicubic._bicubic_resize_offset_kernel_vec3, src_3d, dst_3d, h_src, w_src, h_dst, w_dst, offset_y, offset_x)
+    module.add_graph("bicubic_resize_offset_f32_3d", g_tile_3d.compile())
 
     # Archive the module
     module.archive(save_path)

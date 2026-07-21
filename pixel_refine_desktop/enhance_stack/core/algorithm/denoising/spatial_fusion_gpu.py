@@ -125,37 +125,38 @@ class SpatialFusionDenoisingAlgorithm:
             )
 
         processor = SpatialFusionProcessor()
-        result, _weight, processed_count = processor.process(
-            images=images_input,
-            data_source=data_source,
-            ref_image_h=ref_h,
-            ref_image_w=ref_w,
-            ref_channels_buffer=3,
-            ref_dtype=ref_dtype,
-            reference_image_float=reference_float,
-            tile_size=(tile_size, tile_size),
-            overlap=overlap,
-            motion_sensitivity=float(
-                config.get("similarity_spatial_motion_sensitivity", 150.0)
-            ),
-            noise_offset_factor=float(
-                config.get("similarity_spatial_noise_mad_offset_factor", 0.15)
-            ),
-            update_progress=getattr(ctx, "update_progress", None),
-            stop_requested=getattr(ctx, "stop_requested", None),
-            total_overall_images=total_images,
-            images_processed_so_far=0,
-            enable_alignment=False,
-            return_raw=False,
-            is_linear_mode=bool(getattr(ctx, "is_linear_mode", False)),
-            proxy_scale=float(config.get("proxy_scale", 1.0)),
-            process_in="gpu",
-            merging_backend="taichi",
-            merge_progress_start=60,
-            merge_progress_end=95,
-            similarity_search_radius=int(config.get("similarity_search_radius", 3)),
-            early_exit_threshold=float(config.get("early_exit_threshold", 0.05)),
-        )
+        with engine.reserve_device_execution("spatial_fusion"):
+            result, _weight, processed_count = processor.process(
+                images=images_input,
+                data_source=data_source,
+                ref_image_h=ref_h,
+                ref_image_w=ref_w,
+                ref_channels_buffer=3,
+                ref_dtype=ref_dtype,
+                reference_image_float=reference_float,
+                tile_size=(tile_size, tile_size),
+                overlap=overlap,
+                motion_sensitivity=float(
+                    config.get("similarity_spatial_motion_sensitivity", 150.0)
+                ),
+                noise_offset_factor=float(
+                    config.get("similarity_spatial_noise_mad_offset_factor", 0.15)
+                ),
+                update_progress=getattr(ctx, "update_progress", None),
+                stop_requested=getattr(ctx, "stop_requested", None),
+                total_overall_images=total_images,
+                images_processed_so_far=0,
+                enable_alignment=False,
+                return_raw=False,
+                is_linear_mode=bool(getattr(ctx, "is_linear_mode", False)),
+                proxy_scale=float(config.get("proxy_scale", 1.0)),
+                process_in="gpu",
+                merging_backend="taichi",
+                merge_progress_start=60,
+                merge_progress_end=95,
+                similarity_search_radius=int(config.get("similarity_search_radius", 3)),
+                early_exit_threshold=float(config.get("early_exit_threshold", 0.05)),
+            )
 
         if result is None or processed_count <= 0:
             return None

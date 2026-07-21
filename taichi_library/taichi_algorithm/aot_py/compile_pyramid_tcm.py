@@ -13,7 +13,7 @@ if project_root not in sys.path:
 
 # Set AOT Mode globally before importing taichi_worker or related scripts
 
-from taichi_library.taichi_algorithm import pyramid
+from taichi_library.taichi_algorithm.pyramid import pyramid
 
 def compile_pyramid_aot(arch=ti.vulkan, save_path="pyramid_vulkan.tcm"):
     print(f"\n>>> Compiling PYRAMID AOT for: {arch}")
@@ -36,6 +36,15 @@ def compile_pyramid_aot(arch=ti.vulkan, save_path="pyramid_vulkan.tcm"):
     dst_3ch = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
     g_down_3ch.dispatch(pyramid._downsample_2x_kernel_3ch, src_3ch, dst_3ch)
     module.add_graph("downsample_2x_3ch_f32", g_down_3ch.compile())
+
+    offset_y = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "offset_y", ti.i32)
+    offset_x = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "offset_x", ti.i32)
+    g_down_offset = ti.graph.GraphBuilder()
+    g_down_offset.dispatch(pyramid._downsample_2x_offset_kernel, src_d, dst_d, offset_y, offset_x)
+    module.add_graph("downsample_2x_offset_f32", g_down_offset.compile())
+    g_down_offset_3ch = ti.graph.GraphBuilder()
+    g_down_offset_3ch.dispatch(pyramid._downsample_2x_offset_kernel_3ch, src_3ch, dst_3ch, offset_y, offset_x)
+    module.add_graph("downsample_2x_offset_3ch_f32", g_down_offset_3ch.compile())
 
     # 2. Graph: Upsample Flow (3D array, HxWx2 usually but declared as 3D)
     g_up = ti.graph.GraphBuilder()

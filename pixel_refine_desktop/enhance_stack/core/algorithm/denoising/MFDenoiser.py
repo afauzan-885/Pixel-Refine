@@ -426,6 +426,7 @@ class PipelineContext:
     alignment_selection_name: str = "No Alignment"
     alignment_effective_name: str = "No Alignment"
     alignment_runtime_snapshot: dict = field(default_factory=dict)
+    compute_runtime: dict = field(default_factory=dict)
 
 
 class MFDenoiserAlgorithm:
@@ -433,6 +434,77 @@ class MFDenoiserAlgorithm:
 
     def __init__(self, db_path="pixel_refine_database.db"):
         self.db_path = db_path
+
+    @staticmethod
+    def _configure_compute_runtime(ctx):
+        """Connect this pipeline to the shared adaptive block/VRAM runtime."""
+        mode = str(ctx.params.get("processing_mode", "auto") or "auto").strip().lower()
+        block_enabled = mode not in {"full", "full_frame", "full-frame", "legacy"}
+        requested_size = int(ctx.params.get("tile_size", 256) or 256)
+        block_size = max(64, min(1024, requested_size))
+        block_size = max(64, (block_size // 16) * 16)
+
+        try:
+            from taichi_library import taichi_aot
+
+            current = taichi_aot.get_block_config()
+            host_cache_limit = (
+                current.cache_bytes
+                if current.cache_bytes is not None
+                else 512 * 1024 * 1024
+            )
+            config = taichi_aot.set_block_mode(
+                enabled=block_enabled,
+                size=block_size,
+                threshold_bytes=0 if block_enabled else current.threshold_bytes,
+                cache_entries=max(2048, current.cache_entries),
+                cache_bytes=host_cache_limit,
+                adaptive_memory=True,
+                device_cache_enabled=block_enabled,
+                device_cache_bytes=current.device_cache_bytes,
+            )
+            memory = taichi_aot.get_memory_status(force=True)
+            ctx.compute_runtime = {
+                "available": True,
+                "block_enabled": config.enabled,
+                "block_size": config.normalized_size(),
+                "host_cache_bytes": memory["host_cache_budget"],
+                "device_cache_bytes": (
+                    config.device_cache_bytes if config.device_cache_enabled else 0
+                ),
+                "pressure": memory["pressure"],
+            }
+            print(f"[MFDenoiser][Compute] native runtime={ctx.compute_runtime}")
+        except Exception as exc:
+            ctx.compute_runtime = {
+                "available": False,
+                "block_enabled": False,
+                "reason": str(exc),
+            }
+            print(
+                "[MFDenoiser][Compute] Native block runtime unavailable; "
+                f"continuing with legacy execution: {exc}"
+            )
+        return ctx.compute_runtime
+
+    @staticmethod
+    def _report_compute_runtime(ctx):
+        if not ctx.compute_runtime.get("available"):
+            return
+        try:
+            from taichi_library import taichi_aot
+
+            stats = taichi_aot.get_block_cache_stats()
+            device = stats.get("device", {})
+            print(
+                "[MFDenoiser][Compute] cache "
+                f"ram_hits={stats.get('hits', 0)} "
+                f"vram_hits={device.get('hits', 0)} "
+                f"vram_entries={device.get('entries', 0)} "
+                f"vram_bytes={device.get('size_bytes', 0)}"
+            )
+        except Exception as exc:
+            print(f"[MFDenoiser][Compute] telemetry unavailable: {exc}")
 
     def _build_fallback_alignment_snapshot(self, ctx):
         requested_name = str(
@@ -1062,6 +1134,16 @@ class MFDenoiserAlgorithm:
             ctx.needs_alignment = False
             return ctx
         if hasattr(algorithm, "build_flow_alignment"):
+            # Dense flow owns large pyramids and accumulators. Drop reusable
+            # output tiles from earlier stages so they cannot compete for VRAM.
+            try:
+                from taichi_library import taichi_aot
+
+                taichi_aot.engine.sync()
+                taichi_aot.engine.get_device_block_cache().clear()
+                print("[MFDenoiser][Align] released prior VRAM cache for dense flow")
+            except Exception as exc:
+                print(f"[MFDenoiser][Align] VRAM cache release skipped: {exc}")
             reference = self._load_single_frame(ctx, ctx.image_paths[0])
             if reference is None:
                 ctx.aligned_frames = []
@@ -1221,6 +1303,7 @@ class MFDenoiserAlgorithm:
         if clear_raw is not None:
             ctx.params["clear_raw"] = bool(clear_raw)
         ctx.clear_raw = bool(ctx.params.get("clear_raw", True))
+        self._configure_compute_runtime(ctx)
         print(
             f"[MFDenoiser][Pipeline] start single_process={single_process} batch_id={batch_id} "
             f"alignment={ctx.params.get('alignment_plan')} denoising={ctx.params.get('merge_plan')} "
@@ -1280,6 +1363,7 @@ class MFDenoiserAlgorithm:
 
         _progress(update_progress, 95, "Saving MFDenoiser result...")
         output_path = self.save_process(ctx)
+        self._report_compute_runtime(ctx)
         print(f"[MFDenoiser][Pipeline] finished output_path={output_path}")
         _progress(update_progress, 100, "MFDenoiser pipeline skeleton finished.")
         return output_path

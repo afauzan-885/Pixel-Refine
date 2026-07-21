@@ -8,7 +8,17 @@ import numpy as np
 import typing
 import threading
 import time
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, Future
+
+from .block import (
+    BlockCache, BlockConfig, BlockGrid, BlockRecord, BlockState, checksum,
+    should_use_blocks,
+)
+from .memory import CacheTelemetry, MemoryGovernor
+from .residency import DeviceResidencyCache
+
+_UNSET = object()
 
 def get_vulkan_device_name(device_id):
     try:
@@ -1523,6 +1533,18 @@ class AOTEngine:
             instance._lock = threading.RLock()
             instance._destroyed = False
             instance._generation = 0
+            instance._block_config = BlockConfig()
+            instance._cache_telemetry = CacheTelemetry()
+            instance._memory_governor = MemoryGovernor(
+                configured_max_bytes=instance._block_config.cache_bytes
+            )
+            initial_memory = instance._memory_governor.refresh(force=True)
+            instance._block_cache = BlockCache(
+                instance._block_config.cache_entries,
+                max_bytes=initial_memory.host_cache_budget,
+                telemetry=instance._cache_telemetry,
+            )
+            instance._device_block_cache = DeviceResidencyCache(0)
 
             cls._instances[key] = instance
         return cls._instances[key]
@@ -1679,6 +1701,238 @@ class AOTEngine:
             for name in list(self._pipeline_intermediates.keys()):
                 self.clear_pipeline_by_name(name)
             self.recorded_pipelines.clear()
+
+    def configure_blocks(
+        self,
+        enabled=None,
+        size=None,
+        threshold_bytes=None,
+        cache_entries=None,
+        cache_bytes=_UNSET,
+        adaptive_memory=None,
+        device_cache_enabled=None,
+        device_cache_bytes=None,
+    ):
+        """Update the opt-in block execution policy for this engine."""
+        with self._lock:
+            self._ensure_memory_cache_runtime()
+            current = self._block_config
+            config = BlockConfig(
+                enabled=current.enabled if enabled is None else bool(enabled),
+                size=current.size if size is None else size,
+                threshold_bytes=(
+                    current.threshold_bytes
+                    if threshold_bytes is None
+                    else int(threshold_bytes)
+                ),
+                cache_entries=(
+                    current.cache_entries if cache_entries is None else int(cache_entries)
+                ),
+                cache_bytes=(
+                    current.cache_bytes
+                    if cache_bytes is _UNSET
+                    else (None if cache_bytes is None else int(cache_bytes))
+                ),
+                adaptive_memory=(
+                    current.adaptive_memory if adaptive_memory is None else bool(adaptive_memory)
+                ),
+                device_cache_enabled=(
+                    current.device_cache_enabled
+                    if device_cache_enabled is None else bool(device_cache_enabled)
+                ),
+                device_cache_bytes=(
+                    current.device_cache_bytes
+                    if device_cache_bytes is None else int(device_cache_bytes)
+                ),
+            )
+            self._block_config = config
+            self._memory_governor.configure(config.cache_bytes)
+            self._refresh_memory_policy(force=True)
+            return config
+
+    def _ensure_memory_cache_runtime(self):
+        """Lazily initialize policy components for lightweight/test engine instances."""
+        if not hasattr(self, "_cache_telemetry"):
+            self._cache_telemetry = CacheTelemetry()
+        if not hasattr(self, "_memory_governor"):
+            self._memory_governor = MemoryGovernor(
+                configured_max_bytes=self._block_config.cache_bytes
+            )
+        if not hasattr(self, "_block_cache"):
+            self._block_cache = BlockCache(
+                self._block_config.cache_entries,
+                telemetry=self._cache_telemetry,
+            )
+        elif self._block_cache._telemetry is None:
+            self._block_cache._telemetry = self._cache_telemetry
+        if not hasattr(self, "_device_block_cache"):
+            self._device_block_cache = DeviceResidencyCache(0)
+
+    def get_block_config(self):
+        """Return the active block execution policy."""
+        return self._block_config
+
+    def get_block_cache(self):
+        """Return the engine-owned block cache for block-aware algorithms."""
+        self._refresh_memory_policy()
+        return self._block_cache
+
+    def _refresh_memory_policy(self, force=False):
+        self._ensure_memory_cache_runtime()
+        if not self._block_config.adaptive_memory:
+            self._block_cache.set_limits(
+                self._block_config.cache_entries,
+                self._block_config.cache_bytes,
+            )
+            device_budget = (
+                self._block_config.device_cache_bytes
+                if self._block_config.device_cache_enabled else 0
+            )
+            self._device_block_cache.set_budget(device_budget)
+            return None
+        decision = self._memory_governor.refresh(force=force)
+        self._block_cache.set_limits(
+            self._block_config.cache_entries,
+            decision.host_cache_budget,
+        )
+        device_budget = (
+            self._block_config.device_cache_bytes
+            if self._block_config.device_cache_enabled and decision.allow_cache else 0
+        )
+        self._device_block_cache.set_budget(device_budget)
+        return decision
+
+    def put_block_record(self, record):
+        """Admit a block result only while the realtime memory policy allows it."""
+        self._refresh_memory_policy()
+        admitted = self._block_cache.put(record)
+        if self._block_config.device_cache_enabled:
+            self._promote_block_record(record)
+        return admitted
+
+    @staticmethod
+    def _resident_buffers_nbytes(buffers):
+        if isinstance(buffers, tuple):
+            return sum(AOTEngine._resident_buffers_nbytes(item) for item in buffers)
+        return int(buffers.size_bytes)
+
+    @staticmethod
+    def _destroy_resident_buffers(buffers):
+        items = buffers if isinstance(buffers, tuple) else (buffers,)
+        for item in items:
+            item.destroy()
+
+    def _upload_resident_data(self, data):
+        if isinstance(data, tuple):
+            uploaded = []
+            try:
+                for item in data:
+                    uploaded.append(self.upload(np.ascontiguousarray(item), is_vector=item.ndim == 3))
+                return tuple(uploaded)
+            except Exception:
+                self._destroy_resident_buffers(tuple(uploaded))
+                raise
+        array = np.ascontiguousarray(data)
+        return self.upload(array, is_vector=array.ndim == 3)
+
+    @staticmethod
+    def _download_resident_data(buffers):
+        if isinstance(buffers, tuple):
+            return tuple(np.ascontiguousarray(item.to_numpy()) for item in buffers)
+        return np.ascontiguousarray(buffers.to_numpy())
+
+    def _promote_block_record(self, record):
+        """Keep a native copy of a validated host tile under the VRAM budget."""
+        cache = self._device_block_cache
+        if cache.max_bytes <= 0 or record.data is None:
+            return None
+        existing = cache.peek(record.block_id)
+        if (
+            existing is not None
+            and existing.checksum == record.checksum
+            and existing.source_checksum == record.source_checksum
+        ):
+            return existing
+        try:
+            buffers = self._upload_resident_data(record.data)
+        except Exception:
+            return None
+        entry = cache.put(
+            record.block_id,
+            record.owner,
+            buffers,
+            self._resident_buffers_nbytes(buffers),
+            dispose=self._destroy_resident_buffers,
+            checksum=record.checksum,
+            source_checksum=record.source_checksum,
+        )
+        if entry is None:
+            self._destroy_resident_buffers(buffers)
+        return entry
+
+    def restore_resident_block(self, block_id, source_checksum):
+        """Download a leased native tile, rejecting stale or corrupted data."""
+        self._refresh_memory_policy()
+        with self._device_block_cache.lease(block_id) as entry:
+            if entry is None or entry.source_checksum != source_checksum:
+                return None
+            try:
+                data = self._download_resident_data(entry.buffer)
+                actual = (
+                    tuple(checksum(item) for item in data)
+                    if isinstance(data, tuple) else checksum(data)
+                )
+                if actual != entry.checksum:
+                    raise RuntimeError("resident block checksum mismatch")
+                return BlockRecord(
+                    str(block_id), state=BlockState.READY, data=data,
+                    checksum=entry.checksum, source_checksum=entry.source_checksum,
+                    owner=entry.owner,
+                )
+            except Exception:
+                pass
+        self._device_block_cache.invalidate(block_id)
+        return None
+
+    def get_memory_status(self, force=False):
+        """Return the current adaptive host-memory decision as plain data."""
+        self._refresh_memory_policy(force=force)
+        return self._memory_governor.snapshot()
+
+    def get_block_cache_stats(self):
+        self._ensure_memory_cache_runtime()
+        stats = self._cache_telemetry.snapshot()
+        stats.update({
+            "entries": len(self._block_cache),
+            "size_bytes": self._block_cache.size_bytes,
+            "max_entries": self._block_cache.max_entries,
+            "max_bytes": self._block_cache.max_bytes,
+            "owner_bytes": self._block_cache.owner_bytes,
+            "owner_targets": self._block_cache.owner_targets(),
+            "device": self._device_block_cache.stats(),
+        })
+        return stats
+
+    def configure_block_reservation(self, operation, soft_bytes=0, hard_bytes=None, weight=1.0):
+        """Configure an elastic owner quota for the feature-gated VRAM cache."""
+        self._ensure_memory_cache_runtime()
+        self._device_block_cache.configure_owner(operation, soft_bytes, hard_bytes, weight)
+
+    def get_device_block_cache(self):
+        self._refresh_memory_policy()
+        return self._device_block_cache
+
+    def clear_block_cache(self):
+        """Drop cached block results without changing the active policy."""
+        with self._lock:
+            self._block_cache.clear()
+            self._device_block_cache.clear()
+
+    def plan_blocks(self, operation, shape, nbytes, halo=0):
+        """Return a block grid only when the operation is safe and opted in."""
+        if not should_use_blocks(operation, nbytes, self._block_config):
+            return None
+        return BlockGrid(shape, size=self._block_config.normalized_size(), halo=halo)
 
     def get_staging_buffer(self, shape, dtype):
         """Deprecated: use acquire_staging_buffer instead for thread safety."""
@@ -1922,6 +2176,19 @@ class AOTEngine:
                 raise
             finally:
                 _op_end()
+
+    @contextmanager
+    def reserve_device_execution(self, owner="operation"):
+        """Lease the Vulkan queue across a dependent multi-graph operation."""
+        name = str(owner)
+        _lock_wait_begin(f"device-reservation:{name}")
+        with self._lock:
+            _lock_wait_end()
+            self.sync()
+            try:
+                yield self
+            finally:
+                self.sync()
 
     def last_error(self):
         return _get_native_engine_error(self.runtime)

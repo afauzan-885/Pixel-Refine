@@ -223,6 +223,44 @@ if TAICHI_AVAILABLE:
             dst[r, c] = bilinear_at_vec3(src, src_x, src_y, h_src, w_src)
 
     @ti.kernel
+    def _remap_with_flow_offset_kernel(
+        src: ti.types.ndarray(), flow: ti.types.ndarray(), dst: ti.types.ndarray(),
+        h_src: int, w_src: int, h_dst: int, w_dst: int,
+        h_flow: int, w_flow: int, scale_x: float, scale_y: float,
+        offset_y: int, offset_x: int,
+    ):
+        for r, c in ti.ndrange(dst.shape[0], dst.shape[1]):
+            gr, gc = r + offset_y, c + offset_x
+            fx = float(gc) * float(w_flow - 1) / float(w_dst - 1)
+            fy = float(gr) * float(h_flow - 1) / float(h_dst - 1)
+            dx = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 0)
+            dy = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 1)
+            dst[r, c] = bilinear_at(
+                src, float(gc) + dx * scale_x, float(gr) + dy * scale_y,
+                h_src, w_src,
+            )
+
+    @ti.kernel
+    def _remap_with_flow_offset_kernel_vec3(
+        src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        flow: ti.types.ndarray(),
+        dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        h_src: int, w_src: int, h_dst: int, w_dst: int,
+        h_flow: int, w_flow: int, scale_x: float, scale_y: float,
+        offset_y: int, offset_x: int,
+    ):
+        for r, c in ti.ndrange(dst.shape[0], dst.shape[1]):
+            gr, gc = r + offset_y, c + offset_x
+            fx = float(gc) * float(w_flow - 1) / float(w_dst - 1)
+            fy = float(gr) * float(h_flow - 1) / float(h_dst - 1)
+            dx = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 0)
+            dy = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 1)
+            dst[r, c] = bilinear_at_vec3(
+                src, float(gc) + dx * scale_x, float(gr) + dy * scale_y,
+                h_src, w_src,
+            )
+
+    @ti.kernel
     def _remap_with_flow_batch_kernel(
         src: ti.types.ndarray(dtype=ti.f32, ndim=3),
         flow: ti.types.ndarray(dtype=ti.f32, ndim=4),
@@ -397,6 +435,32 @@ if TAICHI_AVAILABLE:
             src_y = v / (w + 1e-9)
 
             dst[r, c] = bilinear_at_vec3(src, src_x, src_y, h_src, w_src)
+
+    @ti.kernel
+    def _warp_perspective_offset_kernel(
+        src: ti.types.ndarray(), M_inv: ti.types.ndarray(), dst: ti.types.ndarray(),
+        h_src: int, w_src: int, offset_y: int, offset_x: int,
+    ):
+        for r, c in ti.ndrange(dst.shape[0], dst.shape[1]):
+            gr, gc = r + offset_y, c + offset_x
+            u = M_inv[0, 0] * float(gc) + M_inv[0, 1] * float(gr) + M_inv[0, 2]
+            v = M_inv[1, 0] * float(gc) + M_inv[1, 1] * float(gr) + M_inv[1, 2]
+            z = M_inv[2, 0] * float(gc) + M_inv[2, 1] * float(gr) + M_inv[2, 2]
+            dst[r, c] = bilinear_at(src, u / (z + 1e-9), v / (z + 1e-9), h_src, w_src)
+
+    @ti.kernel
+    def _warp_perspective_offset_kernel_vec3(
+        src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        M_inv: ti.types.ndarray(),
+        dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        h_src: int, w_src: int, offset_y: int, offset_x: int,
+    ):
+        for r, c in ti.ndrange(dst.shape[0], dst.shape[1]):
+            gr, gc = r + offset_y, c + offset_x
+            u = M_inv[0, 0] * float(gc) + M_inv[0, 1] * float(gr) + M_inv[0, 2]
+            v = M_inv[1, 0] * float(gc) + M_inv[1, 1] * float(gr) + M_inv[1, 2]
+            z = M_inv[2, 0] * float(gc) + M_inv[2, 1] * float(gr) + M_inv[2, 2]
+            dst[r, c] = bilinear_at_vec3(src, u / (z + 1e-9), v / (z + 1e-9), h_src, w_src)
 
 
 def remap(src, map_x, map_y, dst=None, buffer_provider="pool"):

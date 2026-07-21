@@ -6,7 +6,7 @@ import numpy as np
 
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.optical_flow_utils.flow_blocking import (
-    align_with_tiled_flow,
+    align_with_block_flow,
 )
 
 
@@ -19,8 +19,6 @@ DEFAULT_FARNEBACK_CONFIG = {
     "poly_sigma": 1.2,
     "flags": 0,
     "use_multi_core": True,
-    "tile_cols": 4,
-    "tile_rows": 3,
     "tile_overlap": 0.20,
 }
 
@@ -72,13 +70,15 @@ class FarnebackFlowCPU:
         def flow_func(reference_gray, target_gray):
             return self.calculate_flow(reference_gray, target_gray, config)
 
-        return align_with_tiled_flow(
+        halo = max(
+            int(config.get("winsize", 15)),
+            int(config.get("poly_n", 5)) * (2 ** max(0, int(config.get("levels", 3)) - 1)),
+        )
+        return align_with_block_flow(
             reference,
             target,
             flow_func,
-            cols=int(config.get("tile_cols", 4)),
-            rows=int(config.get("tile_rows", 3)),
-            overlap=float(config.get("tile_overlap", 0.20)),
+            halo=halo,
             use_multi_core=bool(config.get("use_multi_core", True)),
             stop_requested=stop_requested,
             target_for_warping=target_for_warping,

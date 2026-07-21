@@ -152,6 +152,48 @@ if TAICHI_AVAILABLE:
             dst[r, c] = val
 
     @ti.kernel
+    def _bicubic_resize_offset_kernel_2d(
+        src: ti.types.ndarray(), dst: ti.types.ndarray(), h_src: int, w_src: int,
+        h_dst: int, w_dst: int, offset_y: int, offset_x: int,
+    ):
+        for r, c in ti.ndrange(dst.shape[0], dst.shape[1]):
+            gr, gc = r + offset_y, c + offset_x
+            y = (float(gr) + 0.5) * (float(h_src) / float(h_dst)) - 0.5
+            x = (float(gc) + 0.5) * (float(w_src) / float(w_dst)) - 0.5
+            xi, yi = int(ti.floor(x)), int(ti.floor(y))
+            wx, wy = cubic_hermite_weights(x - xi), cubic_hermite_weights(y - yi)
+            val = 0.0
+            for j in ti.static(range(-1, 3)):
+                row = 0.0
+                yy = tm.clamp(yi + j, 0, h_src - 1)
+                for i in ti.static(range(-1, 3)):
+                    row += src[yy, tm.clamp(xi + i, 0, w_src - 1)] * wx[i + 1]
+                val += row * wy[j + 1]
+            dst[r, c] = val
+
+    @ti.kernel
+    def _bicubic_resize_offset_kernel_vec3(
+        src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        h_src: int, w_src: int, h_dst: int, w_dst: int,
+        offset_y: int, offset_x: int,
+    ):
+        for r, c in ti.ndrange(dst.shape[0], dst.shape[1]):
+            gr, gc = r + offset_y, c + offset_x
+            y = (float(gr) + 0.5) * (float(h_src) / float(h_dst)) - 0.5
+            x = (float(gc) + 0.5) * (float(w_src) / float(w_dst)) - 0.5
+            xi, yi = int(ti.floor(x)), int(ti.floor(y))
+            wx, wy = cubic_hermite_weights(x - xi), cubic_hermite_weights(y - yi)
+            val = ti.Vector([0.0, 0.0, 0.0])
+            for j in ti.static(range(-1, 3)):
+                row = ti.Vector([0.0, 0.0, 0.0])
+                yy = tm.clamp(yi + j, 0, h_src - 1)
+                for i in ti.static(range(-1, 3)):
+                    row += src[yy, tm.clamp(xi + i, 0, w_src - 1)] * wx[i + 1]
+                val += row * wy[j + 1]
+            dst[r, c] = val
+
+    @ti.kernel
     def _bicubic_sample_kernel_2d(
         src: ti.types.ndarray(),
         coords: ti.types.ndarray(),

@@ -967,17 +967,7 @@ def copy(img):
         if aot:
             from taichi_library.taichi_aot.engine import TaichiGPUBuffer
             is_gpu = isinstance(img, TaichiGPUBuffer)
-            img_v = img if is_gpu else aot.upload(img)
-            
-            h, w = img_v.shape[0], img_v.shape[1]
-            is_3d = len(img_v.shape) == 3
-            dst_shape = (h, w, img_v.shape[2]) if is_3d else (h, w)
-            dst_buf = aot.engine.allocate(dst_shape, dtype=img_v.dtype, is_vector=is_3d)
-            aot.copy_field(img_v, dst_buf)
-            
-            if is_gpu: return dst_buf
-            res_np = dst_buf.to_numpy()
-            return res_np
+            return aot.copy(img, return_gpu=is_gpu)
 
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
