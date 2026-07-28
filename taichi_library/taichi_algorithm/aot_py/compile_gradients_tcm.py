@@ -11,8 +11,13 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 
-import taichi_library.taichi_algorithm.gradients
-gradients = sys.modules["taichi_library.taichi_algorithm.gradients"]
+import taichi_library.taichi_algorithm.math_ops.gradients
+gradients = sys.modules["taichi_library.taichi_algorithm.math_ops.gradients"]
+
+try:
+    from .aot_artifact import archive_module
+except ImportError:
+    from aot_artifact import archive_module
 
 def compile_gradients_aot(arch=ti.vulkan, save_path="gradients_vulkan.tcm"):
     print(f"\n>>> Compiling GRADIENTS AOT for: {arch}")
@@ -45,7 +50,7 @@ def compile_gradients_aot(arch=ti.vulkan, save_path="gradients_vulkan.tcm"):
     g_laplacian.dispatch(gradients._laplacian_kernel, src, dst, h_arg, w_arg)
     module.add_graph("laplacian_f32", g_laplacian.compile())
 
-    module.archive(save_path)
+    archive_module(module, save_path)
     print(f"Successfully compiled and archived to: {save_path}")
     ti.reset()
 

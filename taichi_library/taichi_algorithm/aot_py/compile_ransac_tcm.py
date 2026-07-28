@@ -10,12 +10,16 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 # Impor kernel homography solver dari ransac
-from taichi_library.taichi_algorithm.ransac import (
+from taichi_library.taichi_algorithm.alignment.ransac import (
     ransac_homography_kernel,
     find_best_candidate_kernel,
     refine_homography_iterative_kernel,
     generate_inlier_mask_kernel,
     refine_homography_kernel,
+    _compute_mean_flow_kernel,
+    _count_inliers_kernel,
+    _compute_inlier_mean_kernel,
+    _apply_ransac_result_kernel,
 )
 
 def compile_ransac_tcm(arch=ti.vulkan, save_path="ransac_vulkan.tcm"):
@@ -23,6 +27,31 @@ def compile_ransac_tcm(arch=ti.vulkan, save_path="ransac_vulkan.tcm"):
     ti.init(arch=arch, offline_cache=False)
 
     module = ti.aot.Module(arch)
+
+    if arch == ti.cpu:
+        # CPU consumers currently use only the flow-cleanup entry point.
+        # Avoid compiling the large homography suite here: it is unrelated to
+        # the public CPU graph and made regeneration unnecessarily fragile.
+        g_flow = ti.graph.GraphBuilder()
+        fflow = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "flow", ti.types.vector(2, ti.f32), ndim=2)
+        fmask = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "inlier_mask", ti.i32, ndim=2)
+        fmodel = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "model", ti.f32, ndim=1)
+        foutput = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.types.vector(2, ti.f32), ndim=2)
+        fh = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
+        fw = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
+        fthreshold = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "threshold", ti.f32)
+        fstride_refine = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "stride_refine", ti.i32)
+        fstride_final = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "stride_final", ti.i32)
+        g_flow.dispatch(_compute_mean_flow_kernel, fflow, fmodel, fh, fw, fstride_refine)
+        g_flow.dispatch(_count_inliers_kernel, fflow, fmodel, fthreshold, fmask, fh, fw, fstride_refine)
+        g_flow.dispatch(_compute_inlier_mean_kernel, fflow, fmask, fmodel, fh, fw, fstride_refine)
+        g_flow.dispatch(_count_inliers_kernel, fflow, fmodel, fthreshold, fmask, fh, fw, fstride_final)
+        g_flow.dispatch(_apply_ransac_result_kernel, fflow, fmask, fmodel, foutput, fh, fw)
+        module.add_graph("ransac_flow_cleanup_f32", g_flow.compile())
+        module.archive(save_path)
+        print(f"Successfully compiled CPU RANSAC flow AOT and archived to: {save_path}")
+        ti.reset()
+        return
 
     # 1. RANSAC Homography Graph
     g_ransac = ti.graph.GraphBuilder()
@@ -91,6 +120,26 @@ def compile_ransac_tcm(arch=ti.vulkan, save_path="ransac_vulkan.tcm"):
     g_pipeline.dispatch(refine_homography_iterative_kernel, apts1, apts2, ahbest, anpts, arthresh, amax_ref_iters, aearly_stop, ahrefined)
     g_pipeline.dispatch(generate_inlier_mask_kernel, apts1, apts2, ahrefined, anpts, arthresh, amask)
     module.add_graph("ransac_homography_pipeline", g_pipeline.compile())
+
+    # Flow cleanup graph used by the public AOT API.  Keep the reduction
+    # buffers explicit; this avoids relying on a missing monolithic graph and
+    # works identically for CPU and Vulkan AOT.
+    g_flow = ti.graph.GraphBuilder()
+    fflow = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "flow", ti.types.vector(2, ti.f32), ndim=2)
+    fmask = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "inlier_mask", ti.i32, ndim=2)
+    fmodel = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "model", ti.f32, ndim=1)
+    foutput = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.types.vector(2, ti.f32), ndim=2)
+    fh = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
+    fw = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
+    fthreshold = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "threshold", ti.f32)
+    fstride_refine = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "stride_refine", ti.i32)
+    fstride_final = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "stride_final", ti.i32)
+    g_flow.dispatch(_compute_mean_flow_kernel, fflow, fmodel, fh, fw, fstride_refine)
+    g_flow.dispatch(_count_inliers_kernel, fflow, fmodel, fthreshold, fmask, fh, fw, fstride_refine)
+    g_flow.dispatch(_compute_inlier_mean_kernel, fflow, fmask, fmodel, fh, fw, fstride_refine)
+    g_flow.dispatch(_count_inliers_kernel, fflow, fmodel, fthreshold, fmask, fh, fw, fstride_final)
+    g_flow.dispatch(_apply_ransac_result_kernel, fflow, fmask, fmodel, foutput, fh, fw)
+    module.add_graph("ransac_flow_cleanup_f32", g_flow.compile())
 
     module.archive(save_path)
     print(f"Successfully compiled RANSAC/MAGSAC++ AOT and archived to: {save_path}")

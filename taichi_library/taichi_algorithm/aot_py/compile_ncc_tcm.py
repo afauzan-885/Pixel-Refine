@@ -11,7 +11,7 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from taichi_library.taichi_algorithm.ncc import NCC
+from taichi_library.taichi_algorithm.alignment.ncc import NCC
 
 def compile_ncc_aot(arch, save_path):
     print(f"\n>>> Compiling NCC AOT for: {arch}")

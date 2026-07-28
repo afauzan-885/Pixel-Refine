@@ -9,6 +9,11 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
+try:
+    from .aot_artifact import archive_module
+except ImportError:
+    from aot_artifact import archive_module
+
 @ti.func
 def _fast_gamma(x: ti.f32) -> ti.f32:
     t = ti.math.sqrt(x)
@@ -563,7 +568,7 @@ def compile_bilinear_demosaice_tcm(arch=ti.vulkan, save_path="bilinear_demosaice
     )
     module.add_graph("rgb_to_bgr_i32", g_conv.compile())
 
-    module.archive(save_path)
+    archive_module(module, save_path)
     print(f"Successfully compiled and archived to: {save_path}")
     ti.reset()
 

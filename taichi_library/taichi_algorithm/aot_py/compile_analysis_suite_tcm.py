@@ -22,12 +22,12 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 # Import algorithm modules (JIT mode)
-color_mod = importlib.import_module("taichi_library.taichi_algorithm.color_convert")
-otsu_mod = importlib.import_module("taichi_library.taichi_algorithm.otsu")
-clahe_mod = importlib.import_module("taichi_library.taichi_algorithm.clahe")
-canny_mod = importlib.import_module("taichi_library.taichi_algorithm.canny")
-hough_mod = importlib.import_module("taichi_library.taichi_algorithm.hough")
-gf_mod = importlib.import_module("taichi_library.taichi_algorithm.guided_filter")
+color_mod = importlib.import_module("taichi_library.taichi_algorithm.image_processing.color_convert")
+otsu_mod = importlib.import_module("taichi_library.taichi_algorithm.image_processing.otsu")
+clahe_mod = importlib.import_module("taichi_library.taichi_algorithm.image_processing.clahe")
+canny_mod = importlib.import_module("taichi_library.taichi_algorithm.image_processing.canny")
+hough_mod = importlib.import_module("taichi_library.taichi_algorithm.image_processing.hough")
+gf_mod = importlib.import_module("taichi_library.taichi_algorithm.smoothing.guided_filter")
 
 ASSETS_DIR = os.path.join(file_dir, "../aot_tcm")
 
@@ -160,10 +160,15 @@ def compile_canny(arch, save_path):
     dst_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
     changed_1d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "changed", ti.i32, ndim=1)
 
-    # Mag + NMS
+    # Keep magnitude and NMS as separate dispatches. NMS depends on complete
+    # neighbouring magnitudes and cannot safely share a GPU kernel with them.
     g = ti.graph.GraphBuilder()
-    g.dispatch(canny_mod._canny_mag_nms_kernel, gx_2d, gy_2d, mag_2d, nms_2d, h_arg, w_arg)
-    module.add_graph("canny_mag_nms_f32", g.compile())
+    g.dispatch(canny_mod._canny_magnitude_kernel, gx_2d, gy_2d, mag_2d, h_arg, w_arg)
+    module.add_graph("canny_magnitude_f32", g.compile())
+
+    g = ti.graph.GraphBuilder()
+    g.dispatch(canny_mod._canny_nms_kernel, gx_2d, gy_2d, mag_2d, nms_2d, h_arg, w_arg)
+    module.add_graph("canny_nms_f32", g.compile())
 
     # Threshold
     g = ti.graph.GraphBuilder()
@@ -326,6 +331,8 @@ if __name__ == "__main__":
     arch_str = os.environ.get("PIXEL_REFINE_AOT_ARCH", "all").lower()
     if arch_str == "vulkan":
         archs = [(ti.vulkan, "vulkan")]
+    elif arch_str == "opengl":
+        archs = [(ti.opengl, "opengl")]
     elif arch_str == "cuda":
         archs = [(ti.cuda, "cuda")]
     elif arch_str == "cpu":

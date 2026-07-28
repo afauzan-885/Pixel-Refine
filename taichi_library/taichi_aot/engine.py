@@ -1,9 +1,14 @@
 import ctypes
+import hashlib
 import os
 import sys
 import atexit
 import signal
+import shutil
+import struct
+import tempfile
 import weakref
+import zipfile
 import numpy as np
 import typing
 import threading
@@ -17,8 +22,64 @@ from .block import (
 )
 from .memory import CacheTelemetry, MemoryGovernor
 from .residency import DeviceResidencyCache
+from .capabilities import classify_device
+from .artifact_cache import artifact_key, get_status, set_status
+from .backend_manager import BackendManager
 
 _UNSET = object()
+_CPU_AOT_EXTRACTION_LOCK = threading.RLock()
+
+
+def _materialize_cpu_aot_directory(artifact_path):
+    """Return a safe directory form of a packed CPU AOT artifact.
+
+    Taichi 1.7.4's LLVM C runtime loads CPU AOT from a directory, while the
+    graphics C runtime accepts the packed ``.tcm`` form.  Keep the package
+    format uniform for callers and materialize the CPU-only directory in a
+    private cache keyed by the artifact content.
+    """
+    artifact_path = os.path.abspath(artifact_path)
+    digest = hashlib.sha256()
+    with open(artifact_path, "rb") as artifact:
+        for chunk in iter(lambda: artifact.read(1024 * 1024), b""):
+            digest.update(chunk)
+
+    cache_root = os.path.join(os.path.dirname(artifact_path), ".cpu_aot_cache")
+    target = os.path.join(cache_root, digest.hexdigest())
+    ready_marker = os.path.join(target, "__content__")
+    with _CPU_AOT_EXTRACTION_LOCK:
+        if os.path.isfile(ready_marker):
+            return target
+
+        os.makedirs(cache_root, exist_ok=True)
+        staging = tempfile.mkdtemp(prefix="extract-", dir=cache_root)
+        try:
+            staging_root = os.path.abspath(staging)
+            with zipfile.ZipFile(artifact_path) as archive:
+                for member in archive.infolist():
+                    destination = os.path.abspath(
+                        os.path.join(staging_root, member.filename)
+                    )
+                    if os.path.commonpath((staging_root, destination)) != staging_root:
+                        raise RuntimeError(
+                            f"Unsafe member in CPU AOT artifact: {member.filename!r}"
+                        )
+                    if member.is_dir():
+                        os.makedirs(destination, exist_ok=True)
+                        continue
+                    os.makedirs(os.path.dirname(destination), exist_ok=True)
+                    with archive.open(member) as source, open(destination, "wb") as output:
+                        shutil.copyfileobj(source, output)
+
+            if not os.path.isfile(os.path.join(staging_root, "__content__")):
+                raise RuntimeError("CPU AOT artifact does not contain __content__")
+            if not os.path.exists(target):
+                os.rename(staging_root, target)
+                staging = None
+            return target
+        finally:
+            if staging and os.path.isdir(staging):
+                shutil.rmtree(staging, ignore_errors=True)
 
 def get_vulkan_device_name(device_id):
     try:
@@ -660,10 +721,11 @@ def _populate_dynamic_arg(arg: DynamicArg, name_bytes, value, context_name="Unkn
     elif isinstance(value, (float, np.floating)):
         arg.arg_type = 1
         arg.dtype = 0  # f32
-        arg.val_u64 = ctypes.cast(
-            ctypes.pointer(ctypes.c_float(float(value))),
-            ctypes.POINTER(ctypes.c_uint64),
-        ).contents.value
+        # DynamicArg stores scalars in a 64-bit transport slot, while the C++
+        # bridge consumes the low 32 bits for TI_ARGUMENT_TYPE_F32. Reading a
+        # uint64 through a pointer to c_float used to overread four bytes of
+        # unrelated memory, causing nondeterministic scalar AOT dispatches.
+        arg.val_u64 = struct.unpack("<I", struct.pack("<f", float(value)))[0]
     elif isinstance(value, (TaichiGPUBuffer, TaichiPlaceholder)):
         arg.arg_type = 0
 
@@ -736,7 +798,7 @@ _LIB = None
 _RUNTIME = None
 
 
-def _init_aot_bridge():
+def _init_aot_bridge(backend=None):
     global _LIB, _RUNTIME
     if _LIB is not None:
         return
@@ -755,9 +817,22 @@ def _init_aot_bridge():
     aot_dll_dir = os.path.abspath(
         os.path.join(script_dir, "../taichi_algorithm/aot_py/aot_dll")
     )
-    engine_dll_path = os.path.join(aot_dll_dir, "taichi_aot_engine.dll")
+    backend = (backend or os.environ.get("PIXEL_REFINE_AOT_ARCH", "vulkan")).lower()
+    backend_dir = os.path.join(aot_dll_dir, backend)
+    engine_dll_path = os.environ.get(
+        "PIXEL_REFINE_AOT_ENGINE_DLL",
+        os.path.join(backend_dir, "taichi_aot_engine.dll")
+        if os.path.exists(os.path.join(backend_dir, "taichi_aot_engine.dll"))
+        else os.path.join(aot_dll_dir, "taichi_aot_engine.dll"),
+    )
+    engine_dll_path = os.path.abspath(engine_dll_path)
 
     if os.name == "nt" and os.path.exists(aot_dll_dir):
+        if os.path.exists(backend_dir):
+            # Backend-specific runtime must precede the shared directory:
+            # Vulkan bridge builds are ABI-coupled to their matching
+            # taichi_c_api.dll (a stale global DLL can corrupt the stack).
+            os.add_dll_directory(backend_dir)
         os.add_dll_directory(aot_dll_dir)
 
         # Add Taichi runtime bin for DLL resolution without importing it (avoid printing banner/startup JIT check)
@@ -781,7 +856,7 @@ def _init_aot_bridge():
     try:
         _LIB = ctypes.CDLL(engine_dll_path)
         print(
-            f"[AOTEngine] Successfully loaded backend bridge: {os.path.basename(engine_dll_path)}"
+            f"[AOTEngine] Successfully loaded backend bridge: {engine_dll_path}"
         )
     except Exception as e:
         raise RuntimeError(
@@ -915,6 +990,19 @@ def _init_aot_bridge():
     _LIB.ti_cast_buffer.restype = ctypes.c_bool
 
 
+def select_backend(prefer=None, device_id=None):
+    """Select a safe backend when the caller requests automatic mode."""
+    explicit = os.environ.get("PIXEL_REFINE_AOT_ARCH")
+    if explicit and explicit.lower() not in ("", "auto"):
+        return explicit.lower()
+    requested = (prefer or os.environ.get("PIXEL_REFINE_BACKEND") or "auto").lower()
+    if requested not in ("", "auto"):
+        return requested
+    probe_id = int(device_id if device_id is not None else os.environ.get("PIXEL_REFINE_AOT_DEFAULT_DEVICE", 0))
+    name = get_vulkan_device_name(probe_id) or "unknown"
+    return BackendManager(name).decide("auto").selected
+
+
 def configure_taichi_backend(prefer: str = None, device_memory_GB: float = None):
     """
     Helper to initialize Taichi runtime consistently across the project.
@@ -931,12 +1019,23 @@ def configure_taichi_backend(prefer: str = None, device_memory_GB: float = None)
         raise RuntimeError("Taichi is not installed or cannot be imported.")
 
     env_pref = os.environ.get("PIXEL_REFINE_TAICHI_ARCH")
-    arch_choice = prefer or env_pref or "vulkan"
+    arch_choice = prefer or env_pref or select_backend()
     arch_choice = arch_choice.lower()
+    # Keep direct Taichi initialization consistent with AOTEngine: explicit
+    # Vulkan requests must not reach an Intel Vulkan driver on this release
+    # line. The device name query is side-effect free and happens before ti.init.
+    if arch_choice == "vulkan":
+        _device_name = get_vulkan_device_name(
+            int(os.environ.get("PIXEL_REFINE_AOT_DEVICE", 0))
+        ) or ""
+        if "intel" in _device_name.lower():
+            print("[engine.configure_taichi_backend] Intel Vulkan quarantined; using opengl")
+            arch_choice = "opengl"
 
     # Map string to taichi arch constant
     arch_map = {
         "vulkan": getattr(ti, "vulkan", getattr(ti, "gpu", None)),
+        "opengl": getattr(ti, "opengl", None),
         "cuda": getattr(ti, "cuda", None),
         "gpu": getattr(ti, "gpu", None),
         "cpu": getattr(ti, "cpu", None),
@@ -1339,6 +1438,32 @@ class AOTModuleWrapper:
                                 engine.current_pipeline
                             ].append(arg_val)
 
+                # Intel OpenGL drivers can report GL_INVALID_OPERATION (or
+                # terminate the process) when a very large mixed pipeline is
+                # replayed after intermediate buffers have been recycled.
+                # Keep the opt-in native pipeline deterministic by rejecting
+                # oversized recordings before they reach the driver.  Small
+                # native pipelines remain fully supported; applications that
+                # have validated a larger GPU may raise the limit explicitly.
+                if engine.arch.lower() == "opengl":
+                    try:
+                        limit = int(os.environ.get(
+                            "PIXEL_REFINE_AOT_MAX_PIPELINE_BYTES",
+                            str(256 * 1024 * 1024)))
+                    except ValueError:
+                        limit = 256 * 1024 * 1024
+                    resident = sum(
+                        getattr(buf, "nbytes", 0)
+                        for buf in engine._pipeline_intermediates.get(
+                            engine.current_pipeline, []))
+                    if resident > limit and os.environ.get(
+                            "PIXEL_REFINE_AOT_ALLOW_LARGE_PIPELINE") != "1":
+                        raise RuntimeError(
+                            "OpenGL native pipeline exceeds the validated "
+                            f"resident-memory limit ({resident} > {limit} bytes); "
+                            "use smaller blocks or explicitly set "
+                            "PIXEL_REFINE_AOT_ALLOW_LARGE_PIPELINE=1 after validation.")
+
                 _op_begin(f"add_to_pipeline:{graph_name}")
                 try:
                     _LIB.add_to_pipeline(
@@ -1358,6 +1483,17 @@ class AOTModuleWrapper:
             try:
                 with engine._lock:
                     _lock_wait_end()
+                    if (
+                        engine.arch.lower() == "vulkan"
+                        and os.environ.get("PIXEL_REFINE_AOT_INTEL_UNSAFE") == "1"
+                        and os.environ.get("PIXEL_REFINE_AOT_ALLOW_UNSAFE_INTEL") != "1"
+                    ):
+                        msg = (
+                            f"Intel native Vulkan AOT graph '{graph_name}' quarantined: "
+                            "Taichi 1.7.4 ABI triggers STATUS_STACK_BUFFER_OVERRUN."
+                        )
+                        _record_error()
+                        raise RuntimeError(msg)
                     _op_begin(f"run_aot_graph:{graph_name}")
                     try:
                         _LIB.run_aot_graph(
@@ -1415,9 +1551,9 @@ class AOTEngine:
     _placeholder_id_counter = 0xFFFFFF00
 
     def __new__(cls, arch=None, device_id=None):
-        _init_aot_bridge()
         if arch is None:
-            arch = os.environ.get("PIXEL_REFINE_AOT_ARCH", "vulkan")
+            arch = select_backend(device_id=device_id)
+        _init_aot_bridge(arch)
 
         # If device_id is not specified, auto-detect
         if device_id is None:
@@ -1432,7 +1568,13 @@ class AOTEngine:
                     device_id = int(
                         os.environ.get("PIXEL_REFINE_AOT_DEFAULT_DEVICE", 0)
                     )
-                    autoscan = os.environ.get("PIXEL_REFINE_AOT_AUTOSCAN", "0") == "1"
+                    # Prefer a usable discrete Vulkan adapter automatically.  A
+                    # number of Windows systems expose an integrated adapter
+                    # first, but its Vulkan heap/pipeline support may be
+                    # insufficient for AOT workloads.  Users can still force a
+                    # specific adapter with PIXEL_REFINE_AOT_DEVICE or disable
+                    # scanning with PIXEL_REFINE_AOT_AUTOSCAN=0.
+                    autoscan = os.environ.get("PIXEL_REFINE_AOT_AUTOSCAN", "1") == "1"
                     if autoscan:
                         try:
                             with _suppress_native_stderr():
@@ -1441,13 +1583,40 @@ class AOTEngine:
                                 d.strip().lower() for d in devices_str.split(";")
                             ]
                             for idx, dev_name in enumerate(device_list):
+                                if os.environ.get("PIXEL_REFINE_AOT_SKIP_DOZEN", "0") == "1":
+                                    if "dozen" in dev_name or "direct3d12" in dev_name:
+                                        continue
                                 if "nvidia" in dev_name or "geforce" in dev_name:
+                                    device_id = idx
+                                    break
+                                if (
+                                    os.environ.get("PIXEL_REFINE_AOT_NATIVE_VULKAN_ONLY", "0") == "1"
+                                    and "intel" in dev_name
+                                    and "microsoft" not in dev_name
+                                ):
                                     device_id = idx
                                     break
                             _write_cached_device_id(device_id)
                         except Exception:
                             pass
             os.environ.setdefault("PIXEL_REFINE_AOT_DEVICE", str(int(device_id)))
+
+        # Release policy: Intel Vulkan is quarantined at the engine boundary,
+        # including callers that explicitly request ``arch='vulkan'``. Route
+        # it to the validated OpenGL path before creating native resources.
+        if arch.lower() == "vulkan":
+            _intel_name = get_vulkan_device_name(int(device_id)) or ""
+            if "intel" in _intel_name.lower():
+                print("[AOTEngine] Intel Vulkan quarantined; selecting OPENGL")
+                arch = "opengl"
+                device_id = 0
+
+        # CPU and OpenGL expose one logical device through this bridge.
+        # Normalize before the singleton key is formed so instances cannot
+        # alias the same native runtime under arbitrary Vulkan device IDs.
+        if arch.lower() in ("cpu", "opengl"):
+            device_id = 0
+            os.environ["PIXEL_REFINE_AOT_DEVICE"] = "0"
 
         key = (arch.lower(), device_id)
         existing = cls._instances.get(key)
@@ -1464,9 +1633,14 @@ class AOTEngine:
             instance.device_id = device_id
 
             # Map arch to arch_id
-            arch_id = {"vulkan": 0, "cuda": 1, "cpu": 2}.get(arch.lower(), 0)
+            arch_id = {
+                "vulkan": 0,
+                "cuda": 1,
+                "cpu": 2,
+                "opengl": 3,
+            }.get(arch.lower(), 0)
             native_device_id = int(device_id)
-            if arch.lower() == "cpu" and native_device_id != 0:
+            if arch.lower() in ("cpu", "opengl") and native_device_id != 0:
                 native_device_id = 0
 
             # Wrap init_aot_engine in a thread with timeout to detect hung Vulkan driver.
@@ -1486,12 +1660,20 @@ class AOTEngine:
                 except Exception as e:
                     _init_error[0] = e
 
-            _init_thread = threading.Thread(target=_do_init, daemon=True)
-            _init_thread.start()
-            _init_thread.join(timeout=_INIT_TIMEOUT_S)
+            _init_thread = None
+            if arch.lower() == "opengl":
+                # An OpenGL context is current only on the thread that created
+                # it. All subsequent AOT load/launch calls happen on this
+                # caller thread, so initializing through the Vulkan watchdog
+                # thread makes even the first GL buffer operation invalid.
+                _do_init()
+            else:
+                _init_thread = threading.Thread(target=_do_init, daemon=True)
+                _init_thread.start()
+                _init_thread.join(timeout=_INIT_TIMEOUT_S)
             _op_end()
 
-            if _init_thread.is_alive():
+            if _init_thread is not None and _init_thread.is_alive():
                 # init_aot_engine hung beyond timeout — Vulkan driver is likely broken
                 sys.stderr.write(
                     f"[AOTEngine] CRITICAL: init_aot_engine() hung for >{_INIT_TIMEOUT_S}s. "
@@ -1518,6 +1700,15 @@ class AOTEngine:
                 print(
                     f"[AOTEngine] Runtime initialized on '{arch.upper()}' ({gpu_name})"
                 )
+                # Intel's legacy native Vulkan allocator (not Dozen) can assert
+                # during Taichi context teardown when AOT memory blocks are
+                # still tracked internally.  Keep the process alive by letting
+                # the OS reclaim the context instead of calling the faulty
+                # destructor; this is scoped to Intel and never affects NVIDIA.
+                if arch.lower() == "vulkan" and "intel" in gpu_name.lower() and "microsoft" not in gpu_name.lower():
+                    os.environ.setdefault("PIXEL_REFINE_AOT_SAFE_TEARDOWN", "1")
+                    os.environ.setdefault("PIXEL_REFINE_AOT_INTEL_UNSAFE", "1")
+                    os.environ.setdefault("PIXEL_REFINE_VULKAN_SERIALIZE_SUBMIT", "1")
             else:
                 print(
                     f"[AOTEngine] Runtime initialized on '{arch.upper()}' (Device {device_id})"
@@ -1567,6 +1758,14 @@ class AOTEngine:
         return p
 
     def rec_pipeline(self, name):
+        # Pipeline selection is automatic.  OpenGL recording is allowed by
+        # default; per-stage capability checks and the resident-memory guard
+        # below decide whether a graph can remain native.  The historical
+        # PIXEL_REFINE_AOT_NATIVE_PIPELINE switch remains a compatibility
+        # override, but is no longer required for normal developer usage.
+        auto_pipeline = self.arch.lower() == "opengl" and os.environ.get(
+            "PIXEL_REFINE_AOT_NATIVE_PIPELINE") != "1"
+
         class Recorder:
             def __init__(self, engine, name):
                 self.engine, self.name = engine, name
@@ -1582,6 +1781,7 @@ class AOTEngine:
                 )
                 self.engine.current_pipeline = self.name
                 self.engine.recorded_pipelines.add(self.name)
+                self.engine._auto_pipeline_active = auto_pipeline
 
                 # Clear previous intermediates for this pipeline
                 if self.name in self.engine._pipeline_intermediates:
@@ -2087,10 +2287,32 @@ class AOTEngine:
                 if os.path.exists(f"{base}_{self.arch.lower()}{ext}")
                 else path
             )
+            # LLVM/CPU AOT in Taichi 1.7.4 consumes the unpacked module
+            # directory. Graphics runtimes consume .tcm directly. Prefer a
+            # checked-in CPU directory when present, otherwise safely
+            # materialize a content-addressed cache from the packed artifact.
+            if self.arch.lower() == "cpu" and p.lower().endswith(".tcm"):
+                cpu_directory = os.path.splitext(p)[0]
+                p = (
+                    cpu_directory
+                    if os.path.isdir(cpu_directory)
+                    else _materialize_cpu_aot_directory(p)
+                )
             if p in self.modules:
                 return self.modules[p]
-            with _suppress_native_stderr(self.arch.lower() == "vulkan"):
-                ptr = _LIB.load_aot_module(self.runtime, p.encode("utf-8"))
+            device_name = get_vulkan_device_name(self.device_id) if self.arch.lower() == "vulkan" else "logical-device"
+            cache_key = artifact_key(p, self.arch, self.device_id, device_name)
+            cached = get_status(cache_key)
+            if cached and cached.get("status") == "quarantined":
+                raise RuntimeError(
+                    f"AOT artifact quarantined for {self.arch.upper()} device {device_name}: {os.path.basename(p)}"
+                )
+            try:
+                with _suppress_native_stderr(self.arch.lower() == "vulkan"):
+                    ptr = _LIB.load_aot_module(self.runtime, p.encode("utf-8"))
+            except Exception as exc:
+                set_status(cache_key, "quarantined", error=str(exc))
+                raise
             if not ptr:
                 native_error = _get_native_engine_error(self.runtime)
                 detail = f"\n  NATIVE: {native_error}" if native_error else ""
@@ -2098,12 +2320,14 @@ class AOTEngine:
                     self.reinit(self.device_id)
                 except Exception:
                     pass
+                set_status(cache_key, "quarantined", error=native_error or "load returned null")
                 raise RuntimeError(
                     f"\n[AOTEngine Load Error] Failed to load TCM module at: {p}\n"
                     f"  HINT: Ensure the .tcm file exists and is compatible with the active GPU backend ({self.arch.upper()})."
                     f"{detail}"
                 )
             print(f"[AOTEngine] Loaded TCM module: {os.path.basename(p)}")
+            set_status(cache_key, "valid", backend=self.arch, device=device_name)
             self.modules[p] = AOTModuleWrapper(ptr, self)
             return self.modules[p]
 
@@ -2198,6 +2422,13 @@ class AOTEngine:
 
     def reinit(self, device_id=0):
         with self._lock:
+            active_arch = self.arch.lower()
+            # Taichi's x64 C runtime only accepts device index 0. Keep the
+            # public reinit API uniform while preventing a CPU recovery from
+            # accidentally requesting a GPU device index.
+            requested_device = (
+                0 if active_arch in ("cpu", "opengl") else int(device_id)
+            )
             old_runtime = self.runtime
             for mod in list(self.modules.values()):
                 mod.module_ptr = None
@@ -2220,10 +2451,19 @@ class AOTEngine:
                     pass
             with _suppress_native_stderr(self.arch.lower() == "vulkan"):
                 self.runtime = _LIB.init_aot_engine(
-                    {"vulkan": 0, "cuda": 1, "cpu": 2}.get(self.arch.lower(), 0),
-                    device_id,
+                    {
+                        "vulkan": 0,
+                        "cuda": 1,
+                        "cpu": 2,
+                        "opengl": 3,
+                    }.get(active_arch, 0),
+                    requested_device,
                 )
-            self.device_id = device_id
+            if not self.runtime:
+                raise RuntimeError(
+                    f"Failed to reinitialize Taichi AOT runtime for {active_arch}"
+                )
+            self.device_id = requested_device
             self._destroyed = False
             self._generation = getattr(self, "_generation", 0) + 1
 
@@ -2301,11 +2541,17 @@ class AOTEngine:
                     destroy_engine = getattr(_LIB, "destroy_aot_engine")
                 except AttributeError:
                     destroy_engine = None
-                if runtime_to_destroy and destroy_engine is not None:
+                skip_native_destroy = (
+                    os.environ.get("PIXEL_REFINE_AOT_SAFE_TEARDOWN", "0") == "1"
+                    and self.arch.lower() == "vulkan"
+                )
+                if runtime_to_destroy and destroy_engine is not None and not skip_native_destroy:
                     try:
                         destroy_engine(runtime_to_destroy)
                     except Exception:
                         pass
+                elif skip_native_destroy:
+                    print("[AOTEngine] Intel native Vulkan safe teardown: native context destructor skipped")
                 self.runtime = None
                 for key, inst in list(AOTEngine._instances.items()):
                     if inst is self:

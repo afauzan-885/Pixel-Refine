@@ -12,8 +12,13 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 
-import taichi_library.taichi_algorithm.fft
-fft_module = sys.modules["taichi_library.taichi_algorithm.fft"]
+import taichi_library.taichi_algorithm.pyramid.fft
+fft_module = sys.modules["taichi_library.taichi_algorithm.pyramid.fft"]
+
+try:
+    from .aot_artifact import archive_module
+except ImportError:
+    from aot_artifact import archive_module
 
 def compile_fft_aot(arch=ti.vulkan, save_path="fft_vulkan.tcm"):
     print(f"\n>>> Compiling FFT AOT for: {arch}")
@@ -87,7 +92,7 @@ def compile_fft_aot(arch=ti.vulkan, save_path="fft_vulkan.tcm"):
     g_chwin.dispatch(fft_module._complex_hanning_kernel, data_vec, h_arg, w_arg)
     module.add_graph("fft_complex_hanning_f32", g_chwin.compile())
 
-    module.archive(save_path)
+    archive_module(module, save_path)
     print(f"Successfully compiled and archived to: {save_path}")
     ti.reset()
 

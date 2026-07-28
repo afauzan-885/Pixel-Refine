@@ -1,5 +1,7 @@
 #include <cstring>
+#include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <taichi/cpp/taichi.hpp>
 #include <unordered_map>
@@ -44,8 +46,6 @@ static bool is_debug_logging_enabled() {
     }
     return enabled;
 }
-
-extern "C" {
 
 // -----------------------------------------------------------------------
 // Dynamic Argument Structure
@@ -94,6 +94,7 @@ struct ModuleContext {
 };
 
 struct EngineContext {
+  TiArch arch;
   ti::Runtime *runtime;
   std::unordered_set<TiMemory> buffers;
   std::unordered_set<TiMemory> mapped_buffers;
@@ -151,6 +152,8 @@ static std::string consume_ti_last_error() {
 // -----------------------------------------------------------------------
 // Runtime & Module Management
 // -----------------------------------------------------------------------
+extern "C" {
+
 EXPORT const char *scan_vulkan_devices() {
   static std::string device_list;
   device_list = "";
@@ -186,35 +189,45 @@ EXPORT const char *scan_vulkan_devices() {
 }
 
 EXPORT void *init_aot_engine(int arch_id, int device_id) {
+  TiArch arch = TI_ARCH_VULKAN;
+  if (arch_id == 1)
+    arch = TI_ARCH_CUDA;
+  else if (arch_id == 2)
+    arch = TI_ARCH_X64;
+  else if (arch_id == 3)
+    arch = TI_ARCH_OPENGL;
   try {
-    TiArch arch = TI_ARCH_VULKAN;
-    if (arch_id == 1)
-      arch = TI_ARCH_CUDA;
-    else if (arch_id == 2)
-      arch = TI_ARCH_X64;
-
     // Use specified device_id
-    EngineContext *ctx = new EngineContext();
+    auto ctx = std::make_unique<EngineContext>();
+    ctx->arch = arch;
     ctx->runtime = new ti::Runtime(arch, (uint32_t)device_id);
     ctx->destroying = false;
     ctx->session_id = next_session_id++;
     {
       std::lock_guard<std::mutex> lock(engine_contexts_mutex);
-      engine_contexts.insert(ctx);
+      engine_contexts.insert(ctx.get());
     }
-    return (void *)ctx;
+    return (void *)ctx.release();
   } catch (...) {
-    // Fallback to CPU if GPU initialization fails
+    // Never disguise a failed GPU initialization as the requested backend:
+    // doing so makes CPU/Vulkan parity tests compare CPU against itself. Keep
+    // the historical fallback available only as an explicit opt-in for legacy
+    // callers that deliberately accept it.
+    const char *allow_fallback =
+        std::getenv("PIXEL_REFINE_AOT_ALLOW_CPU_FALLBACK");
+    if (arch == TI_ARCH_X64 || !allow_fallback ||
+        std::string(allow_fallback) != "1")
+      return nullptr;
     try {
-      EngineContext *ctx = new EngineContext();
+      auto ctx = std::make_unique<EngineContext>();
       ctx->runtime = new ti::Runtime(TI_ARCH_X64, 0);
       ctx->destroying = false;
       ctx->session_id = next_session_id++;
       {
         std::lock_guard<std::mutex> lock(engine_contexts_mutex);
-        engine_contexts.insert(ctx);
+        engine_contexts.insert(ctx.get());
       }
-      return (void *)ctx;
+      return (void *)ctx.release();
     } catch (...) {
       return nullptr;
     }
@@ -237,20 +250,78 @@ EXPORT void clear_last_engine_error(void *runtime) {
 EXPORT void *load_aot_module(void *runtime, const char *tcm_path) {
   EngineContext *engine = as_engine(runtime);
   ti::Runtime *rt = engine_runtime(engine);
-  if (!rt)
+  if (is_debug_logging_enabled()) {
+    FILE *log = fopen("engine_debug.log", "a");
+    if (log) { fprintf(log, "[C++ Engine] ENTER load_aot_module path=%s runtime=%p\\n", tcm_path ? tcm_path : "<null>", (void *)rt); fclose(log); }
+  }
+  if (!rt || !tcm_path || tcm_path[0] == '\0') {
+    if (engine)
+      set_engine_error(engine, "load_aot_module: empty module path");
     return nullptr;
+  }
   try {
     clear_engine_error(engine);
     consume_ti_last_error();
     ModuleContext *ctx = new ModuleContext();
     ctx->owner = engine;
-    ctx->module = new ti::AotModule(rt->load_aot_module(tcm_path));
+
+    // ti_load_aot_module() accepts the legacy directory representation.
+    // Pixel Refine distributes packed .tcm artifacts, which must instead be
+    // deserialized with ti_create_aot_module(). Passing a .tcm path to the
+    // directory loader can surface as an access violation rather than a
+    // normal Taichi error, so select the API before entering Taichi.
+    const std::string module_path(tcm_path);
+    if (module_path.ends_with(".tcm")) {
+      std::ifstream input(module_path, std::ios::binary | std::ios::ate);
+      if (!input) {
+        delete ctx;
+        set_engine_error(engine,
+                         std::string("load_aot_module: cannot open ") +
+                             module_path);
+        return nullptr;
+      }
+
+      const std::streamsize size = input.tellg();
+      if (size <= 0) {
+        delete ctx;
+        set_engine_error(engine,
+                         std::string("load_aot_module: empty .tcm artifact: ") +
+                             module_path);
+        return nullptr;
+      }
+      input.seekg(0, std::ios::beg);
+      std::vector<uint8_t> tcm(static_cast<size_t>(size));
+      if (!input.read(reinterpret_cast<char *>(tcm.data()), size)) {
+        delete ctx;
+        set_engine_error(engine,
+                         std::string("load_aot_module: failed to read ") +
+                             module_path);
+        return nullptr;
+      }
+      if (is_debug_logging_enabled()) {
+        FILE *log = fopen("engine_debug.log", "a");
+        if (log) { fprintf(log, "[C++ Engine] CREATE_AOT bytes=%lld\\n", (long long)size); fclose(log); }
+      }
+      // Intel's native Vulkan driver is sensitive to outstanding async
+      // submissions while the AOT module creates its pipelines. Drain the
+      // runtime queue before deserialization to avoid fence/semaphore reuse.
+      if (engine->arch == TI_ARCH_VULKAN) {
+        rt->flush();
+        rt->wait();
+      }
+      ctx->module = new ti::AotModule(rt->create_aot_module(tcm));
+    } else {
+      ctx->module = new ti::AotModule(rt->load_aot_module(module_path));
+    }
     std::string load_error = consume_ti_last_error();
-    if (!load_error.empty()) {
+    if (!ctx->module || !ctx->module->is_valid() || !load_error.empty()) {
       if (ctx->module)
         delete ctx->module;
       delete ctx;
-      set_engine_error(engine, std::string("load_aot_module: ") + load_error);
+      set_engine_error(engine, std::string("load_aot_module: ") +
+                                   (load_error.empty()
+                                        ? "Taichi returned an invalid module"
+                                        : load_error));
       return nullptr;
     }
     {
@@ -358,7 +429,10 @@ EXPORT void *allocate_gpu_buffer(void *runtime, uint64_t size,
   allocate_info.usage = TI_MEMORY_USAGE_STORAGE_BIT;
   if (host_accessible) {
     allocate_info.host_write = true;
-    allocate_info.host_read = true;
+    // Upload buffers only need host-write visibility. Requesting both
+    // directions can make Vulkan reject the allocation on discrete/Dozen
+    // drivers even when a host-visible storage heap is available.
+    allocate_info.host_read = false;
   }
   TiMemory mem = ti_allocate_memory(rt->runtime(), &allocate_info);
   if (mem) {
@@ -823,11 +897,23 @@ EXPORT void run_aot_graph(void *runtime, void *module_ctx,
     return;
 
   try {
+    FILE *entry_log = is_debug_logging_enabled() ? fopen("engine_debug.log", "a") : nullptr;
+    if (entry_log) {
+      fprintf(entry_log, "[C++ Engine] ENTER run_aot_graph graph=%s args=%d runtime=%p module=%p\\n",
+              graph_name ? graph_name : "<null>", num_args, (void *)rt,
+              (void *)ctx->module);
+      fclose(entry_log);
+    }
     clear_engine_error(engine);
     std::lock_guard<std::mutex> lock(ctx->cache_mutex);
     std::string gname(graph_name);
     auto it = ctx->graph_cache.find(gname);
     if (it == ctx->graph_cache.end()) {
+      FILE *lookup_log = is_debug_logging_enabled() ? fopen("engine_debug.log", "a") : nullptr;
+      if (lookup_log) {
+        fprintf(lookup_log, "[C++ Engine] GET_GRAPH %s\\n", graph_name);
+        fclose(lookup_log);
+      }
       ti::ComputeGraph g = ctx->module->get_compute_graph(graph_name);
       it = ctx->graph_cache.emplace(std::move(gname), std::move(g)).first;
     }

@@ -11,6 +11,11 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
+try:
+    from .aot_artifact import archive_module
+except ImportError:
+    from aot_artifact import archive_module
+
 # Set AOT Mode for the algorithm imports
 
 import taichi_library.taichi_algorithm.interpolation.bilinear_interpolation as bilinear
@@ -51,7 +56,7 @@ def compile_bilinear_tcm(arch=ti.vulkan, save_path="bilinear_vulkan.tcm"):
     module.add_graph("bilinear_resize_offset_f32_3d", g_tile_3d.compile())
 
     # Archive the module
-    module.archive(save_path)
+    archive_module(module, save_path)
     print(f"Successfully compiled and archived to: {save_path}")
     ti.reset()
 

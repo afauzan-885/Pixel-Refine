@@ -156,7 +156,7 @@ def compile_farneback_flow(arch=ti.vulkan, out_dir=None):
         out_dir = os.path.join(file_dir, "..", "aot_tcm")
     os.makedirs(out_dir, exist_ok=True)
 
-    arch_name = {ti.vulkan: "vulkan", ti.cuda: "cuda", ti.cpu: "cpu"}.get(arch, str(arch))
+    arch_name = {ti.vulkan: "vulkan", ti.cuda: "cuda", ti.cpu: "cpu", ti.opengl: "opengl"}.get(arch, str(arch))
     tcm_name = f"farneback_flow_{arch_name}.tcm"
     tcm_path = _package_tcm(module, out_dir, tcm_name)
 

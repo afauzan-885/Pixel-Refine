@@ -102,6 +102,27 @@ class SpatialFusionProcessor:
         if work_res_w is None:
             work_res_w = ref_w
 
+        # Reserve a bounded resident working set for the repeated frame loop.
+        # The runtime may reclaim it under pressure; callers never need to
+        # manage block ownership manually.
+        channels = (
+            reference_image_float.shape[2] if reference_image_float.ndim == 3 else 1
+        )
+        frame_bytes = int(ref_h) * int(ref_w) * max(channels, 1) * np.dtype(np.float32).itemsize
+        block_config = taichi_aot.get_block_config()
+        cache_budget = int(
+            (block_config.get("device_cache_bytes", 0) if isinstance(block_config, dict)
+             else getattr(block_config, "device_cache_bytes", 0))
+            or 0
+        )
+        soft_reservation = min(max(frame_bytes // 4, 8 * 1024 * 1024), max(cache_budget // 2, 8 * 1024 * 1024))
+        taichi_aot.configure_block_reservation(
+            "spatial_fusion",
+            soft_bytes=soft_reservation,
+            hard_bytes=max(soft_reservation, min(frame_bytes, cache_budget)),
+            weight=2.0,
+        )
+
         # Tile configuration for internal tiling
         tile_h = kwargs.get("tile_h", 16)
         tile_w = kwargs.get("tile_w", 16)
@@ -150,9 +171,6 @@ class SpatialFusionProcessor:
         print(f"[SpatialFusion] Reference noise sigma: {ref_noise_sigma:.6f}")
 
         # Global accumulation buffers
-        channels = (
-            reference_image_float.shape[2] if reference_image_float.ndim == 3 else 1
-        )
         final_image_sum_full_res = np.zeros((ref_h, ref_w, channels), dtype=np.float32)
         weight_map_sum_full_res = np.zeros((ref_h, ref_w), dtype=np.float32)
 
@@ -182,7 +200,12 @@ class SpatialFusionProcessor:
                 try:
                     if hasattr(taichi_aot.engine, "sync"):
                         taichi_aot.engine.sync()
-                    if hasattr(engine, "buffer_pool") and engine.buffer_pool:
+                    memory = taichi_aot.get_memory_status(force=True)
+                    if (
+                        memory.get("pressure") in ("high", "critical")
+                        and hasattr(engine, "buffer_pool")
+                        and engine.buffer_pool
+                    ):
                         engine.buffer_pool.clear()
                 except Exception as exc:
                     print(f"[SpatialFusion] VRAM cleanup skipped ({reason}): {exc}")

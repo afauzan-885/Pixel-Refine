@@ -48,7 +48,7 @@ def compile_math_ops(arch=ti.vulkan, out_dir=None):
         out_dir = os.path.join(file_dir, "..", "aot_tcm")
     os.makedirs(out_dir, exist_ok=True)
 
-    arch_name = {ti.vulkan: "vulkan", ti.cuda: "cuda", ti.cpu: "cpu"}.get(arch, str(arch))
+    arch_name = {ti.vulkan: "vulkan", ti.cuda: "cuda", ti.cpu: "cpu", ti.opengl: "opengl"}.get(arch, str(arch))
     save_path = os.path.abspath(os.path.join(out_dir, f"math_ops_{arch_name}.tcm"))
     module.archive(save_path)
 

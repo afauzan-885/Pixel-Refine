@@ -26,10 +26,10 @@ No need for InputArray/OutputArray wrappers or explicit h, w parameters.
 import os
 import numpy as np
 
-try:
-    import cv2
-except ImportError:
-    cv2 = None
+# Numeric compatibility constants.  The AOT wrapper deliberately has no
+# OpenCV runtime dependency; callers may still use the familiar values.
+NORM_HAMMING = 6
+TM_CCOEFF_NORMED = 5
 
 # ── Environment setup ──────────────────────────────────────────────────
 from taichi_library.config import AOT_MODE
@@ -104,6 +104,15 @@ def _get_gaussian_weights(ks, sigma):
 def _get_engine():
     global _engine
     if _engine is None:
+        # Select the backend before importing taichi_aot's singleton engine.
+        # Importing the package constructs its native context immediately;
+        # doing the preflight first keeps all buffers/graphs in one context
+        # and prevents an unsafe mid-graph backend switch.
+        if os.environ.get("PIXEL_REFINE_AOT_ARCH", "").lower() in ("", "auto"):
+            from taichi_library.taichi_aot.engine import select_backend
+
+            chosen = select_backend()
+            os.environ["PIXEL_REFINE_AOT_ARCH"] = chosen
         from taichi_library.taichi_aot import engine
 
         _engine = engine
@@ -118,18 +127,30 @@ def _is_gpu_buffer(value):
     )
 
 
-# Import for direct graph execution (bypass AutoBatcher)
-from taichi_library.taichi_aot.engine import DynamicArg, _populate_dynamic_arg
+# Import for direct graph execution (bypass AutoBatcher).  AOT compiler
+# workers only need the kernel definitions; importing the bridge here would
+# create an OpenGL context before Taichi's compiler and force a CPU fallback.
+if os.environ.get("PIXEL_REFINE_AOT_COMPILE_ONLY", "0") == "1":
+    DynamicArg = None
+    _populate_dynamic_arg = None
+else:
+    from taichi_library.taichi_aot.engine import DynamicArg, _populate_dynamic_arg
 
 
 def _get_module(name):
-    """Load a TCM module by name (lazy loading)."""
-    if name not in _modules:
-        engine = _get_engine()
+    """Load a backend-specific TCM module without changing the public API."""
+    engine = _get_engine()
+    cache_key = (engine.arch.lower(), getattr(engine, "_generation", 0), name)
+    if cache_key not in _modules:
         file_dir = os.path.dirname(os.path.abspath(__file__))
-        tcm_path = os.path.join(file_dir, "aot_tcm", f"{name}_vulkan.tcm")
-        _modules[name] = engine.load(tcm_path)
-    return _modules[name]
+        # AOTEngine.load() resolves ``name_<active-backend>.tcm`` first and
+        # only falls back to the unsuffixed artifact for legacy deployments.
+        # Passing an unsuffixed basename is essential for CPU AOT: passing a
+        # Vulkan-suffixed path would otherwise make it try
+        # ``name_vulkan_cpu.tcm`` before loading a Vulkan artifact on CPU.
+        tcm_path = os.path.join(file_dir, "aot_tcm", f"{name}.tcm")
+        _modules[cache_key] = engine.load(tcm_path)
+    return _modules[cache_key]
 
 
 # ── Helper functions ───────────────────────────────────────────────────
@@ -205,6 +226,9 @@ def array(src, dtype=np.float32):
 
 
 def copy(src):
+    from taichi_library import taichi_aot
+    return taichi_aot.copy(src)
+
     """Copy array (same as numpy.copy) — persistent buffer."""
     mod = _get_module("common")
     inp = _InputArray(src)
@@ -216,6 +240,9 @@ def copy(src):
 
 
 def copy_3ch(src):
+    from taichi_library import taichi_aot
+    return taichi_aot.copy(src)
+
     """Copy 3-channel array (same as numpy.copy for 3D arrays) — persistent buffer."""
     mod = _get_module("common")
     inp = _InputArray(src, force_vector=False)
@@ -227,6 +254,9 @@ def copy_3ch(src):
 
 
 def split_channels(src):
+    from taichi_library import taichi_aot
+    return taichi_aot.split_3ch(src)
+
     """Split 3-channel array into 3 single-channel arrays (same as cv2.split)."""
     mod = _get_module("common")
     h, w = src.shape[:2]
@@ -272,6 +302,9 @@ def merge(channels):
 
 
 def absdiff(src1, src2):
+    from taichi_library import taichi_aot
+    return taichi_aot.absdiff(src1, src2)
+
     """Absolute difference between two arrays (same as cv2.absdiff) — persistent buffer."""
     mod = _get_module("common")
     i1 = _InputArray(src1)
@@ -293,6 +326,8 @@ def mean_division(num, den, eps=1e-6):
 
 
 def hanning(n):
+    return np.hanning(int(n)).astype(np.float32)
+
     """Create 1D Hanning window (same as numpy.hanning)."""
     mod = _get_module("common")
     out = _OutputArray((n,), np.float32)
@@ -301,6 +336,14 @@ def hanning(n):
 
 
 def normalize(src, min_val=0.0, max_val=1.0):
+    array = src.to_numpy() if _is_gpu_buffer(src) else np.asarray(src)
+    lo = float(np.min(array))
+    hi = float(np.max(array))
+    if hi <= lo:
+        return np.full_like(array, float(min_val), dtype=np.float32)
+    scaled = (array.astype(np.float32) - lo) / (hi - lo)
+    return scaled * (float(max_val) - float(min_val)) + float(min_val)
+
     """Normalize array to [min_val, max_val] range (same as cv2.normalize NORM_MINMAX) — persistent buffer."""
     mod = _get_module("common")
     inp = _InputArray(src)
@@ -310,6 +353,8 @@ def normalize(src, min_val=0.0, max_val=1.0):
 
 
 def zero(shape, dtype=np.float32):
+    return np.zeros(shape, dtype=dtype)
+
     """Create zero-filled array (same as numpy.zeros) — persistent buffer."""
     mod = _get_module("common")
     out = _get_buf("zero_dst", shape, dtype)
@@ -318,6 +363,8 @@ def zero(shape, dtype=np.float32):
 
 
 def full(shape, val, dtype=np.float32):
+    return np.full(shape, val, dtype=dtype)
+
     """Create constant-filled array (same as numpy.full) — persistent buffer."""
     mod = _get_module("common")
     out = _get_buf("full_dst", shape, dtype)
@@ -331,12 +378,15 @@ def copyMakeBorder(src, top, bottom, left, right, borderType=4, dst=None, value=
     Pads image borders natively on the GPU supporting multiple datatypes
     and both 2D and 3D (multi-channel) arrays.
     """
-    from taichi_library import taichi_aot
-
-    res = taichi_aot.copyMakeBorder(
-        src, top, bottom, left, right, borderType, dst, value
-    )
-    return res.to_numpy() if hasattr(res, "to_numpy") else res
+    array = src.to_numpy() if _is_gpu_buffer(src) else np.asarray(src)
+    # OpenCV REFLECT includes the edge (NumPy ``symmetric``); REFLECT_101
+    # excludes it (NumPy ``reflect``).
+    mode = {1: "edge", 2: "symmetric", 4: "reflect"}.get(int(borderType), "constant")
+    pad_width = ((int(top), int(bottom)), (int(left), int(right)))
+    if array.ndim == 3:
+        pad_width += ((0, 0),)
+    kwargs = {"constant_values": value} if mode == "constant" else {}
+    return np.pad(array, pad_width, mode=mode, **kwargs)
 
 
 # Backward-compatible alias
@@ -396,13 +446,20 @@ COLOR_YCrCb2BGR = 37
 
 
 def cvtColor(src, code):
+    # Keep this compatibility wrapper on the canonical AOT graph contracts;
+    # legacy ``cmn_gray``/``color`` names are not shipped anymore.
+    from taichi_library import taichi_aot
+    return taichi_aot.cvtColor(src, code)
+
     """Convert image color space (same as cv2.cvtColor) — persistent buffer."""
     h, w = src.shape[:2]
 
     # Grayscale conversions
     if code in (COLOR_BGR2GRAY, COLOR_RGB2GRAY):
         mod = _get_module("common")
-        inp = _InputArray(src, force_vector=False)
+        # Keep RGB arrays as Taichi vector fields (ndim=2, vector_dim=3),
+        # matching the bilinear AOT graph contract.
+        inp = _InputArray(src, is_vector=True, force_vector=True)
         out = _get_buf("gray_dst", (h, w), src.dtype)
         mod.run("cmn_gray", src=inp, dst=out, h=h, w=w)
         return out
@@ -439,6 +496,10 @@ def cvtColor(src, code):
 
 
 def Sobel(src, dx, dy, ksize=3):
+    from taichi_library import taichi_aot
+    gx, gy = taichi_aot.sobel(src, return_gpu=_is_gpu_buffer(src))
+    return gx if dx >= 1 and dy == 0 else gy
+
     """Apply Sobel operator (same as cv2.Sobel).
 
     Args:
@@ -465,6 +526,9 @@ def Sobel(src, dx, dy, ksize=3):
 
 
 def Laplacian(src, ksize=1):
+    from taichi_library import taichi_aot
+    return taichi_aot.laplacian(src, return_gpu=_is_gpu_buffer(src))
+
     """Apply Laplacian operator (same as cv2.Laplacian)."""
     mod = _get_module("gradients")
     h, w = src.shape[:2]
@@ -493,11 +557,21 @@ def resize(src, dsize, interpolation=INTER_LINEAR):
     Returns:
         Resized image.
     """
+    # Keep the legacy convenience wrapper on the canonical AOT implementation
+    # so graph names, vector views, dtype normalization, and tiled/full-frame
+    # policy remain identical across all backends.
+    from taichi_library import taichi_aot
+
+    return taichi_aot.resize(src, dsize, interpolation=interpolation)
+
     target_w, target_h = dsize
     src_h, src_w = src.shape[:2]
     is_3ch = len(src.shape) == 3
 
-    mod = _get_module("interpolation")
+    # The published artifacts are split by operation.  ``interpolation.tcm``
+    # was a legacy name and is not shipped; use the graph contracts emitted by
+    # compile_bilinear_tcm/compile_nearest_tcm instead.
+    mod = _get_module("nearest" if interpolation == INTER_NEAREST else "bilinear")
 
     if is_3ch:
         inp = _InputArray(src, force_vector=False)
@@ -505,24 +579,19 @@ def resize(src, dsize, interpolation=INTER_LINEAR):
             f"resize_3ch_{target_h}x{target_w}", (target_h, target_w, 3), src.dtype
         )
         if interpolation == INTER_NEAREST:
-            mod.run(
-                "intr_nearest_3ch",
-                src=inp,
-                dst=out,
-                src_h=src_h,
-                src_w=src_w,
-                dst_h=target_h,
-                dst_w=target_w,
+            raise NotImplementedError(
+                "AOT nearest-neighbor currently has a scalar graph only; "
+                "use INTER_LINEAR for 3-channel input."
             )
         else:  # INTER_LINEAR
             mod.run(
-                "intr_bilinear_3ch",
+                "bilinear_resize_f32_3d",
                 src=inp,
                 dst=out,
-                src_h=src_h,
-                src_w=src_w,
-                dst_h=target_h,
-                dst_w=target_w,
+                h_src=src_h,
+                w_src=src_w,
+                h_dst=target_h,
+                w_dst=target_w,
             )
     else:
         inp = _InputArray(src)
@@ -531,29 +600,32 @@ def resize(src, dsize, interpolation=INTER_LINEAR):
         )
         if interpolation == INTER_NEAREST:
             mod.run(
-                "intr_nearest_2d",
+                "nearest_resize_f32",
                 src=inp,
                 dst=out,
-                src_h=src_h,
-                src_w=src_w,
-                dst_h=target_h,
-                dst_w=target_w,
+                h_src=src_h,
+                w_src=src_w,
+                h_dst=target_h,
+                w_dst=target_w,
             )
         else:
             mod.run(
-                "intr_bilinear_2d",
+                "bilinear_resize_f32_2d",
                 src=inp,
                 dst=out,
-                src_h=src_h,
-                src_w=src_w,
-                dst_h=target_h,
-                dst_w=target_w,
+                h_src=src_h,
+                w_src=src_w,
+                h_dst=target_h,
+                w_dst=target_w,
             )
 
     return out.to_numpy()
 
 
 def remap(src, map1, map2, interpolation=INTER_LINEAR):
+    from taichi_library import taichi_aot
+    return taichi_aot.remap(src, map1, map2)
+
     """Remap image (same as cv2.remap).
 
     Args:
@@ -590,6 +662,11 @@ def remap(src, map1, map2, interpolation=INTER_LINEAR):
 
 
 def gaussianBlur(src, ksize, sigmaX=0, sigmaY=0):
+    from taichi_library import taichi_aot
+    kernel = int(ksize[0] if isinstance(ksize, (tuple, list)) else ksize)
+    sigma = float(sigmaX or sigmaY or 1.0)
+    return taichi_aot.gaussian_blur(src, sigma=sigma, kernel_size=kernel)
+
     """Apply Gaussian Blur (same as cv2.GaussianBlur).
 
     Args:
@@ -669,6 +746,9 @@ def blur(src, ksize):
 
 
 def medianBlur(src, ksize):
+    from taichi_library import taichi_aot
+    return taichi_aot.median_filter(src)
+
     """Apply Median filter (same as cv2.medianBlur).
 
     Args:
@@ -750,6 +830,9 @@ MORPH_ELLIPSE = 2
 
 
 def Canny(src, threshold1, threshold2, apertureSize=3):
+    from taichi_library import taichi_aot
+    return taichi_aot.canny_aot(src, low_threshold=threshold1, high_threshold=threshold2)
+
     """Apply Canny edge detection (same as cv2.Canny).
 
     Args:
@@ -1948,7 +2031,7 @@ class ORB:
         return keypoints, descriptors
 
 
-def BFMatcher(normType=cv2.NORM_HAMMING, crossCheck=False):
+def BFMatcher(normType=NORM_HAMMING, crossCheck=False):
     """Brute-Force matcher (simplified same as cv2.BFMatcher).
 
     Returns:
@@ -1971,7 +2054,7 @@ def BFMatcher(normType=cv2.NORM_HAMMING, crossCheck=False):
             n1, d1 = desc1.shape
             n2, d2 = desc2.shape
 
-            if self.norm == cv2.NORM_HAMMING:
+            if self.norm == NORM_HAMMING:
                 # Use OFB hamming matcher
                 feat_mod = _get_module("features")
                 d1_buf = _InputArray(desc1.astype(np.int32))
@@ -2031,7 +2114,7 @@ def BFMatcher(normType=cv2.NORM_HAMMING, crossCheck=False):
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def matchTemplate(image, templ, method=cv2.TM_CCOEFF_NORMED):
+def matchTemplate(image, templ, method=TM_CCOEFF_NORMED):
     """Match template using NCC (simplified same as cv2.matchTemplate).
 
     Args:

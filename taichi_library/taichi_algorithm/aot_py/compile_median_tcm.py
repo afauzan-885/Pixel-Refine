@@ -12,11 +12,15 @@ if project_root not in sys.path:
 
 
 import importlib
-med_mod = importlib.import_module("taichi_library.taichi_algorithm.median_filter")
+med_mod = importlib.import_module("taichi_library.taichi_algorithm.smoothing.median_filter")
 
 def compile_median_aot(arch, save_path):
     print(f"\n>>> Compiling MEDIAN AOT for: {arch}")
     ti.init(arch=arch, offline_cache=False)
+    actual_arch = ti.lang.impl.current_cfg().arch
+    if actual_arch != arch:
+        ti.reset()
+        raise RuntimeError(f"requested {arch}, but Taichi initialized {actual_arch}")
 
     module = ti.aot.Module(arch)
 
@@ -30,6 +34,26 @@ def compile_median_aot(arch, save_path):
     g_med_3x3.dispatch(med_mod._median_filter_3x3_kernel, src, dst, h_arg, w_arg)
     print("Compiling median_3x3_f32...")
     module.add_graph("median_3x3_f32", g_med_3x3.compile())
+
+    # Intel OpenGL's compiler is sensitive to the vector/confidence variants;
+    # keep the exact grayscale 3x3 kernel available even when those optional
+    # graphs cannot be lowered. The normal Vulkan/CPU build remains unchanged.
+    if arch == ti.opengl and os.environ.get("PIXEL_REFINE_AOT_OPENGL_MINIMAL", "0") == "1":
+        module.archive(save_path)
+        print(f"Successfully compiled minimal OpenGL median artifact: {save_path}")
+        ti.reset()
+        return
+
+    if arch == ti.opengl and os.environ.get("PIXEL_REFINE_AOT_OPENGL_RGB_ONLY", "0") == "1":
+        g_med_rgb_3x3 = ti.graph.GraphBuilder()
+        src_rgb = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=3)
+        dst_rgb = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
+        g_med_rgb_3x3.dispatch(med_mod._median_filter_rgb_3x3_kernel, src_rgb, dst_rgb, h_arg, w_arg)
+        module.add_graph("median_3ch_3x3_f32", g_med_rgb_3x3.compile())
+        module.archive(save_path)
+        print(f"Successfully compiled RGB-only OpenGL median candidate: {save_path}")
+        ti.reset()
+        return
 
     # 2. Median Filter Flow 3x3 (Vec2)
     g_med_flow_3x3 = ti.graph.GraphBuilder()

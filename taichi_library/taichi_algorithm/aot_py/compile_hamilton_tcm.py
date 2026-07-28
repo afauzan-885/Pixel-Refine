@@ -1,4 +1,6 @@
 import os
+import os
+
 os.environ["AOT_MODE"] = "0"
 
 import taichi as ti
@@ -7,9 +9,14 @@ import sys
 
 # Setup path to find taichi_algorithm
 file_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
+project_root = os.path.abspath(os.path.join(file_dir, "../../.."))
 if project_root not in sys.path:
-    sys.path.append(project_root)
+    sys.path.insert(0, project_root)
+
+try:
+    from .aot_artifact import normalize_tcm
+except ImportError:  # Direct script execution.
+    from aot_artifact import normalize_tcm
 
 # Set AOT Mode
 
@@ -247,19 +254,23 @@ def _ha_red_blue_interpolation_kernel_opt(
         max_raw = ti.max(R_raw, ti.max(G_raw, B_raw))
         min_raw = ti.min(R_raw, ti.min(G_raw, B_raw))
 
-        factor = ti.math.clamp((max_raw - 0.55) / 0.43, 0.0, 1.0)
+        # LibRaw-style highlight reconstruction principle: once a sensor
+        # channel approaches clipping, its chroma ratio is no longer trusted.
+        # Neutralize that unreliable chroma before the camera matrix (whose
+        # negative coefficients otherwise turn it into magenta fringes).
+        factor = ti.math.clamp((max_raw - 0.45) / 0.35, 0.0, 1.0)
         factor = factor * factor * (3.0 - 2.0 * factor)
 
         ratio = min_raw / ti.max(1e-5, max_raw)
-        neutrality = ti.math.clamp((ratio - 0.40) / 0.45, 0.0, 1.0)
-        neutrality = neutrality * neutrality * (3.0 - 2.0 * neutrality)
+        chroma_damage = ti.math.clamp((0.82 - ratio) / 0.52, 0.0, 1.0)
+        chroma_damage = chroma_damage * chroma_damage * (3.0 - 2.0 * chroma_damage)
 
-        final_factor = factor * neutrality
+        final_factor = factor * chroma_damage
 
-        L = ti.max(R, ti.max(G, B))
-        R = R * (1.0 - final_factor) + L * final_factor
-        G = G * (1.0 - final_factor) + L * final_factor
-        B = B * (1.0 - final_factor) + L * final_factor
+        neutral = (R + G + B) / 3.0
+        R = R * (1.0 - final_factor) + neutral * final_factor
+        G = G * (1.0 - final_factor) + neutral * final_factor
+        B = B * (1.0 - final_factor) + neutral * final_factor
 
         # sRGB conversion & Gamma curve
         sR = cmatrix[0, 0] * R + cmatrix[0, 1] * G + cmatrix[0, 2] * B
@@ -404,7 +415,7 @@ def _ha_reconstruct_and_postprocess_kernel(
     h: ti.i32,
     w: ti.i32,
 ):
-    """Pass 3: Final RGB Reconstruction from filtered differences and Color/Gamma transformations"""
+    """Pass 3: Bayer reconstruction, white balance, and highlight recovery."""
     inv_wb_r = 1.0 / ti.max(0.1, wb_r)
     inv_wb_g = 1.0 / ti.max(0.1, (wb_g1 + wb_g2) * 0.5)
     inv_wb_b = 1.0 / ti.max(0.1, wb_b)
@@ -436,18 +447,21 @@ def _ha_reconstruct_and_postprocess_kernel(
         G = G * (1.0 - final_factor) + L * final_factor
         B = B * (1.0 - final_factor) + L * final_factor
 
-        # sRGB conversion & Gamma curve
-        sR = cmatrix[0, 0] * R + cmatrix[0, 1] * G + cmatrix[0, 2] * B
-        sG = cmatrix[1, 0] * R + cmatrix[1, 1] * G + cmatrix[1, 2] * B
-        sB = cmatrix[2, 0] * R + cmatrix[2, 1] * G + cmatrix[2, 2] * B
+        # Camera RGB is the demosaic contract. Color matrix and display
+        # rendering are deliberately outside this kernel.
+        dst[r, c, 0] = ti.max(R, 0.0)
+        dst[r, c, 1] = ti.max(G, 0.0)
+        dst[r, c, 2] = ti.max(B, 0.0)
 
-        sR = sR / ti.math.sqrt(1.0 + sR * sR)
-        sG = sG / ti.math.sqrt(1.0 + sG * sG)
-        sB = sB / ti.math.sqrt(1.0 + sB * sB)
 
-        dst[r, c, 0] = _fast_gamma(ti.math.clamp(sR, 0.0, 1.0))
-        dst[r, c, 1] = _fast_gamma(ti.math.clamp(sG, 0.0, 1.0))
-        dst[r, c, 2] = _fast_gamma(ti.math.clamp(sB, 0.0, 1.0))
+@ti.kernel
+def _display_tone_transform_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray(), h: ti.i32, w: ti.i32):
+    """Apply the extracted display roll-off and sRGB gamma to RGB."""
+    for r, c in ti.ndrange(h, w):
+        for k in ti.static(range(3)):
+            value = ti.max(src[r, c, k], 0.0)
+            value = value / ti.math.sqrt(1.0 + value * value)
+            dst[r, c, k] = _fast_gamma(ti.math.clamp(value, 0.0, 1.0))
 
 
 
@@ -918,6 +932,14 @@ def compile_hamilton_tcm(arch=ti.vulkan, save_path="hamilton_vulkan.tcm"):
 
     module.add_graph("hamilton_demosaic", g_hamilton.compile())
 
+    g_display = ti.graph.GraphBuilder()
+    src_display_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=3)
+    g_display.dispatch(_display_tone_transform_kernel, src_display_arg, dst_arg, h_arg, w_arg)
+    display_graph = g_display.compile()
+    module.add_graph("natural_tonemapping", display_graph)
+    # Kept for existing callers until they migrate to naturalTonemapping().
+    module.add_graph("display_tone_transform", display_graph)
+
     # 2. Define 1-Channel (Green-only) Grayscale graph builder (Fused Single-Pass!)
     g_gray_1ch = ti.graph.GraphBuilder()
     dst_gray_1ch_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
@@ -1047,6 +1069,7 @@ def compile_hamilton_tcm(arch=ti.vulkan, save_path="hamilton_vulkan.tcm"):
     module.add_graph("rgb_to_bgr_i32", g_conv.compile())
 
     module.archive(save_path)
+    normalize_tcm(save_path)
     print(f"Successfully compiled and archived to: {save_path}")
     ti.reset()
 
@@ -1056,9 +1079,12 @@ if __name__ == "__main__":
     assets_dir = os.path.abspath(os.path.join(script_dir, "../aot_tcm"))
     os.makedirs(assets_dir, exist_ok=True)
 
-    archs = [(ti.vulkan, "vulkan"), (ti.cuda, "cuda"), (ti.cpu, "cpu")]
+    arch_str = os.environ.get("PIXEL_REFINE_AOT_ARCH", "all").lower()
+    arches = {"vulkan": ti.vulkan, "cuda": ti.cuda, "cpu": ti.cpu}
+    requested = [arch_str] if arch_str in arches else ["vulkan", "cuda", "cpu"]
 
-    for arch, suffix in archs:
+    for suffix in requested:
+        arch = arches[suffix]
         save_path = os.path.abspath(os.path.join(assets_dir, f"hamilton_{suffix}.tcm"))
         try:
             compile_hamilton_tcm(arch=arch, save_path=save_path)

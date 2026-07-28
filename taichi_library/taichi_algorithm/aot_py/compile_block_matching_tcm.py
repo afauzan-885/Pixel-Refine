@@ -3,6 +3,7 @@ compile_block_matching_tcm.py - AOT Compilation for Block Matching (BM) Flow
 =============================================================================
 """
 
+import argparse
 import os
 import sys
 import taichi as ti
@@ -16,6 +17,11 @@ if project_root not in sys.path:
 
 import importlib
 bm = importlib.import_module("taichi_library.taichi_algorithm.optical_flow.block_matching")
+
+try:
+    from .aot_artifact import normalize_tcm
+except ImportError:  # Direct script execution.
+    from aot_artifact import normalize_tcm
 
 
 def _package_tcm(module, out_dir, tcm_name):
@@ -34,6 +40,12 @@ def _package_tcm(module, out_dir, tcm_name):
                 path = os.path.join(root, name)
                 zf.write(path, os.path.relpath(path, tmp_dir))
     shutil.rmtree(tmp_dir)
+    normalize_tcm(tcm_path)
+    # Historical callers used this module name before it was renamed to the
+    # algorithm-specific block_matching name. The graph contract is identical.
+    if tcm_name.startswith("block_matching_"):
+        legacy_path = os.path.join(out_dir, tcm_name.replace("block_matching_", "lucas_kanade_bm_", 1))
+        shutil.copy2(tcm_path, legacy_path)
     print(f"  -> {tcm_path}")
     return tcm_path
 
@@ -148,7 +160,7 @@ def compile_block_matching_flow(arch=ti.vulkan, out_dir=None):
         out_dir = os.path.join(file_dir, "..", "aot_tcm")
     os.makedirs(out_dir, exist_ok=True)
 
-    arch_name = {ti.vulkan: "vulkan", ti.cuda: "cuda", ti.cpu: "cpu"}.get(arch, str(arch))
+    arch_name = {ti.vulkan: "vulkan", ti.cuda: "cuda", ti.cpu: "cpu", ti.opengl: "opengl"}.get(arch, str(arch))
     tcm_path = _package_tcm(module, out_dir, f"block_matching_{arch_name}.tcm")
 
     ti.reset()
@@ -157,4 +169,13 @@ def compile_block_matching_flow(arch=ti.vulkan, out_dir=None):
 
 
 if __name__ == "__main__":
-    compile_block_matching_flow(arch=ti.vulkan)
+    parser = argparse.ArgumentParser(description="Compile Block Matching flow AOT module")
+    parser.add_argument(
+        "--backend",
+        action="append",
+        choices=("cpu", "vulkan", "cuda"),
+        help="Backend to compile; may be supplied more than once (default: vulkan)",
+    )
+    arches = {"cpu": ti.cpu, "vulkan": ti.vulkan, "cuda": ti.cuda}
+    for backend in parser.parse_args().backend or ["vulkan"]:
+        compile_block_matching_flow(arch=arches[backend])

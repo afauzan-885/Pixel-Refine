@@ -21,6 +21,7 @@ Usage:
     python compile_template_flow_tcm.py
 """
 
+import argparse
 import os
 
 os.environ["AOT_MODE"] = "0"
@@ -35,7 +36,12 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../../"))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from taichi_library.taichi_algorithm import horn_schunck as tf
+from taichi_library.taichi_algorithm.optical_flow import horn_schunck as tf
+
+try:
+    from .aot_artifact import normalize_tcm
+except ImportError:  # Direct script execution.
+    from aot_artifact import normalize_tcm
 
 
 def _package_tcm(module, out_dir, tcm_name):
@@ -56,6 +62,12 @@ def _package_tcm(module, out_dir, tcm_name):
                     os.path.relpath(os.path.join(root, f), tmp_dir),
                 )
     shutil.rmtree(tmp_dir)
+    normalize_tcm(tcm_path)
+    # template_flow was the original deployment name. It has exactly the same
+    # graph interface as horn_schunck and remains an API-compatible alias.
+    if tcm_name.startswith("horn_schunck_"):
+        legacy_path = os.path.join(out_dir, tcm_name.replace("horn_schunck_", "template_flow_", 1))
+        shutil.copy2(tcm_path, legacy_path)
     print(f"  -> {tcm_path}")
     return tcm_path
 
@@ -216,7 +228,7 @@ def compile_horn_schunck_flow(arch=ti.vulkan, out_dir=None):
         out_dir = os.path.join(file_dir, "..", "aot_tcm")
     os.makedirs(out_dir, exist_ok=True)
 
-    arch_name = {ti.vulkan: "vulkan", ti.cuda: "cuda", ti.cpu: "cpu"}.get(arch, str(arch))
+    arch_name = {ti.vulkan: "vulkan", ti.cuda: "cuda", ti.cpu: "cpu", ti.opengl: "opengl"}.get(arch, str(arch))
     tcm_name = f"horn_schunck_{arch_name}.tcm"
     tcm_path = _package_tcm(module, out_dir, tcm_name)
 
@@ -226,13 +238,16 @@ def compile_horn_schunck_flow(arch=ti.vulkan, out_dir=None):
 
 
 if __name__ == "__main__":
-    archs = [
-        (ti.vulkan, "vulkan"),
-        (ti.cuda, "cuda"),
-        (ti.cpu, "cpu"),
-    ]
-    for arch, suffix in archs:
+    parser = argparse.ArgumentParser(description="Compile Horn-Schunck flow AOT modules")
+    parser.add_argument(
+        "--backend",
+        action="append",
+        choices=("cpu", "vulkan", "cuda"),
+        help="Backend to compile; may be supplied more than once (default: all)",
+    )
+    arches = {"cpu": ti.cpu, "vulkan": ti.vulkan, "cuda": ti.cuda}
+    for suffix in parser.parse_args().backend or ["vulkan", "cuda", "cpu"]:
         try:
-            compile_horn_schunck_flow(arch=arch)
+            compile_horn_schunck_flow(arch=arches[suffix])
         except Exception as e:
             print(f"Skipping {suffix} due to error: {e}")

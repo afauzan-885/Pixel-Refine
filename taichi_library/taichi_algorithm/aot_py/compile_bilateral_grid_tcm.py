@@ -1,3 +1,4 @@
+import argparse
 import os
 os.environ["AOT_MODE"] = "0"
 
@@ -7,12 +8,18 @@ import sys
 
 # Path injection for project root
 file_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
+# aot_py -> taichi_algorithm -> taichi_library -> project root
+project_root = os.path.abspath(os.path.join(file_dir, "../../.."))
 if project_root not in sys.path:
-    sys.path.append(project_root)
+    sys.path.insert(0, project_root)
 
 
-import taichi_library.taichi_algorithm.bilateral_grid as bg
+import taichi_library.taichi_algorithm.smoothing.bilateral_grid as bg
+
+try:
+    from .aot_artifact import archive_module
+except ImportError:  # Direct script execution.
+    from aot_artifact import archive_module
 
 def compile_bg_aot(arch, save_path):
     print(f"\n>>> Compiling Bilateral Grid AOT for: {arch}")
@@ -32,7 +39,7 @@ def compile_bg_aot(arch, save_path):
 
     # 1. Clear Grid Graph
     g_clear = ti.graph.GraphBuilder()
-    grid_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "grid", ti.types.vector(2, ti.f32), ndim=3)
+    grid_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "grid", ti.f32, ndim=4)
     g_clear.dispatch(bg._bg_clear_grid, grid_arg, gn_arg, gm_arg, gl_arg)
     module.add_graph("bg_clear", g_clear.compile())
 
@@ -44,7 +51,7 @@ def compile_bg_aot(arch, save_path):
 
     # 3. Blur Graphs (X, Y, Z)
     g_blur_x = ti.graph.GraphBuilder()
-    dst_grid_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst_grid", ti.types.vector(2, ti.f32), ndim=3)
+    dst_grid_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst_grid", ti.f32, ndim=4)
     g_blur_x.dispatch(bg._bg_blur_x, grid_arg, dst_grid_arg, rad_arg, sig_arg, gn_arg, gm_arg, gl_arg)
     module.add_graph("bg_blur_x", g_blur_x.compile())
 
@@ -62,12 +69,21 @@ def compile_bg_aot(arch, save_path):
     g_slice.dispatch(bg._bg_slice, src_arg, grid_arg, dst_arg, s_s_arg, s_r_arg, h_arg, w_arg, gn_arg, gm_arg, gl_arg)
     module.add_graph("bg_slice", g_slice.compile())
 
-    module.archive(save_path)
+    archive_module(module, save_path)
     print(f"Archive saved to: {save_path}")
     ti.reset()
 
 if __name__ == "__main__":
-    tcm_dir = "../aot_tcm"
+    parser = argparse.ArgumentParser(description="Compile Bilateral Grid AOT modules")
+    parser.add_argument(
+        "--backend",
+        action="append",
+        choices=("cpu", "vulkan", "cuda"),
+        help="Backend to compile; may be supplied more than once (default: all)",
+    )
+    requested = parser.parse_args().backend or ["cpu", "vulkan", "cuda"]
+    tcm_dir = os.path.abspath(os.path.join(file_dir, "..", "aot_tcm"))
     os.makedirs(tcm_dir, exist_ok=True)
-    compile_bg_aot(ti.vulkan, os.path.join(tcm_dir, "bilateral_grid_vulkan.tcm"))
-    compile_bg_aot(ti.cuda, os.path.join(tcm_dir, "bilateral_grid_cuda.tcm"))
+    arches = {"cpu": ti.cpu, "vulkan": ti.vulkan, "cuda": ti.cuda}
+    for backend in requested:
+        compile_bg_aot(arches[backend], os.path.join(tcm_dir, f"bilateral_grid_{backend}.tcm"))

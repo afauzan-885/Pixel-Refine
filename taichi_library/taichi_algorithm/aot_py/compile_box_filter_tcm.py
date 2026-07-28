@@ -11,7 +11,14 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-box_filter_mod = importlib.import_module("taichi_library.taichi_algorithm.box_filter")
+box_filter_mod = importlib.import_module(
+    "taichi_library.taichi_algorithm.smoothing.box_filter"
+)
+
+try:
+    from .aot_artifact import archive_module
+except ImportError:
+    from aot_artifact import archive_module
 
 def compile_box_filter_aot(arch=ti.vulkan, save_path="box_filter_vulkan.tcm"):
     print(f"\n>>> Compiling BOX FILTER (Fused 3x3 Restoration) AOT for: {arch}")
@@ -65,7 +72,7 @@ def compile_box_filter_aot(arch=ti.vulkan, save_path="box_filter_vulkan.tcm"):
     g_sep_1ch.dispatch(box_filter_mod._box_blur_v_generic_1ch_kernel, tmp_1d, dst_1d, h_arg, w_arg, radius_arg)
     module.add_graph("box_filter_separable_generic_1ch_f32", g_sep_1ch.compile())
     
-    module.archive(save_path)
+    archive_module(module, save_path)
     print(f"Successfully compiled and archived to: {save_path}")
     ti.reset()
 

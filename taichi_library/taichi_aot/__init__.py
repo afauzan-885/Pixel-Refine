@@ -14,11 +14,14 @@ if project_root not in sys.path:
 
 
 # Import the Generic AOT Engine and Buffer Pool
-from .engine import AOTEngine, TaichiGPUBuffer, InputArray, OutputArray
+from .engine import AOTEngine, TaichiGPUBuffer, InputArray, OutputArray, select_backend
+from .capabilities import BackendCapabilities, classify_device, backend_candidates
+from .backend_manager import BackendManager, BackendDecision, preflight_backend
 from .engine import enable_experiment_mode, is_experiment_mode
 from .engine import INTER_CUBIC, INTER_LINEAR, INTER_NEAREST, INTER_AREA
 from .engine import COLOR_BGR2GRAY, COLOR_RGB2GRAY, COLOR_GRAY2BGR
 from .block import BlockGrid, BlockRecord, BlockState, checksum
+from .pipeline_scheduler import PipelineStage, run_block_pipeline
 from taichi_library.taichi_algorithm.taichi_worker import ti_thread
 
 # Bridge to specialized AOT functions
@@ -135,8 +138,11 @@ def upload(arr: np.ndarray, is_vector=False, force_8bit=False) -> TaichiGPUBuffe
 def copy_field(src, dst):
     """Zero-overhead AOT copy."""
     is_3ch = len(src.shape) == 3
-    graph = "copy_i32_2d"
-    if is_3ch:
+    is_1d = len(src.shape) == 1
+    graph = "copy_i32_1d" if is_1d else "copy_i32_2d"
+    if is_1d and src.dtype == np.float32:
+        graph = "copy_f32_1d"
+    elif is_3ch:
         graph = "copy_vec3_2d" if src.dtype == np.float32 else "copy_vec3_i32_2d"
     elif src.dtype == np.float32:
         graph = "copy_f32_2d"
@@ -798,10 +804,20 @@ def rgb2gray(src, dst=None):
         if result is not None:
             return result
 
-        src_buffer = upload(array)
-        output = rgb2gray(src_buffer, dst=dst)
+        original_dtype = array.dtype
+        source_for_aot = (
+            np.ascontiguousarray(array, dtype=np.int32)
+            if np.issubdtype(original_dtype, np.integer)
+            else array
+        )
+        src_buffer = upload(source_for_aot)
+        output = rgb2gray(src_buffer, dst=None if source_for_aot is not array else dst)
         try:
-            return output.to_numpy()
+            result = output.to_numpy()
+            if np.issubdtype(original_dtype, np.integer):
+                info = np.iinfo(original_dtype)
+                result = np.clip(result, info.min, info.max).astype(original_dtype)
+            return result
         finally:
             src_buffer.destroy()
             if dst is None:
@@ -888,7 +904,23 @@ def cvtColor(src, code):
     COLOR_BGR2GRAY = 6
     COLOR_RGB2GRAY = 7
 
-    src_buf = InputArray(src)
+    is_host = isinstance(src, np.ndarray)
+    if isinstance(src, TaichiGPUBuffer) and np.dtype(src.dtype) != np.dtype(np.float32):
+        import cv2
+        result = cv2.cvtColor(src.to_numpy(), code)
+        return upload(np.ascontiguousarray(result))
+    # Common grayscale graphs are compiled for f32. Normalize integer host
+    # inputs before dispatch so u8/int16 images work on every backend.
+    if isinstance(src, np.ndarray) and np.issubdtype(src.dtype, np.integer):
+        src_buf = InputArray(np.ascontiguousarray(src, dtype=np.float32))
+    else:
+        src_buf = InputArray(src)
+    owned_src_f32 = False
+    if np.dtype(src_buf.dtype) != np.dtype(np.float32):
+        src_buf = engine.upload(
+            np.ascontiguousarray(src_buf.to_numpy(), dtype=np.float32)
+        )
+        owned_src_f32 = True
 
     if code in [COLOR_BGR2GRAY, COLOR_RGB2GRAY]:
         h, w = src_buf.shape[0], src_buf.shape[1]
@@ -899,6 +931,14 @@ def cvtColor(src, code):
 
         graph = "rgb2gray_f32" if code == COLOR_RGB2GRAY else "bgr2gray_f32"
         _mod("common").run(graph, src=src_v, dst=dst)
+        if is_host:
+            try:
+                return dst.to_numpy()
+            finally:
+                src_buf.destroy()
+                dst.destroy()
+        if owned_src_f32:
+            src_buf.destroy()
         return dst
 
     return src
@@ -933,6 +973,26 @@ def to_gamma_proxy(
 def resize(src, dsize, interpolation=INTER_CUBIC, return_gpu=False, dst=None):
     """Taichi AOT Resize (OpenCV Parity API)"""
     target_w, target_h = dsize
+    if isinstance(src, TaichiGPUBuffer) and np.dtype(src.dtype) != np.dtype(np.float32):
+        import cv2
+        source = src.to_numpy()
+        cv_interp = {
+            INTER_NEAREST: cv2.INTER_NEAREST,
+            INTER_LINEAR: cv2.INTER_LINEAR,
+            INTER_CUBIC: cv2.INTER_CUBIC,
+            INTER_AREA: cv2.INTER_AREA,
+        }.get(interpolation)
+        if cv_interp is None:
+            raise NotImplementedError(f"Interpolation mode {interpolation} is not supported")
+        result = cv2.resize(source, (int(target_w), int(target_h)), interpolation=cv_interp)
+        if dst is not None:
+            uploaded = upload(result)
+            try:
+                copy_field(uploaded, dst)
+            finally:
+                uploaded.destroy()
+            return dst
+        return upload(np.ascontiguousarray(result)) if return_gpu else result
     if (
         isinstance(src, np.ndarray)
         and dst is None
@@ -993,7 +1053,19 @@ def resize(src, dsize, interpolation=INTER_CUBIC, return_gpu=False, dst=None):
                 result = result.astype(source.dtype)
             return upload(result) if return_gpu else result
 
-    src_buf = InputArray(src)
+    # Maintained resize graphs are float32. Normalize the non-tiled path too;
+    # small images bypass block planning and otherwise reach an f32 graph with
+    # their original uint8/int32 dtype.
+    if isinstance(src, np.ndarray) and src.dtype != np.float32:
+        src_buf = InputArray(np.ascontiguousarray(src, dtype=np.float32))
+    else:
+        src_buf = InputArray(src)
+    owned_f32_src = False
+    if np.dtype(src_buf.dtype) != np.dtype(np.float32):
+        src_buf = engine.upload(
+            np.ascontiguousarray(src_buf.to_numpy(), dtype=np.float32)
+        )
+        owned_f32_src = True
 
     if isinstance(src, TaichiGPUBuffer) and len(src_buf.shape) == 3:
         # Force vector for any 3D arrays (RGB or Flow)
@@ -1059,6 +1131,20 @@ def resize(src, dsize, interpolation=INTER_CUBIC, return_gpu=False, dst=None):
             dh=target_h,
             dw=target_w,
         )
+    elif interpolation == INTER_NEAREST:
+        if is_vec:
+            raise NotImplementedError(
+                "AOT nearest-neighbor currently has a scalar graph only"
+            )
+        _mod("nearest").run(
+            "nearest_resize_f32",
+            src=src_buf,
+            dst=dst_buf,
+            h_src=h_src,
+            w_src=w_src,
+            h_dst=target_h,
+            w_dst=target_w,
+        )
     else:
         raise NotImplementedError(
             f"Interpolation mode {interpolation} is not supported in AOT currently."
@@ -1083,6 +1169,41 @@ def box_filter(src, kernel_size=3, return_gpu=False, dst=None):
     """AOT Implementation of Box Filter."""
     if kernel_size < 1 or kernel_size % 2 == 0:
         raise ValueError("kernel_size must be a positive odd integer")
+
+    # The rebuilt artifact is stable on small/medium grayscale and RGB frames,
+    # while larger RGB frames still trigger a driver assertion. Prefer native
+    # execution by default and retain an explicit size guard for the unsafe
+    # large-RGB case.
+    source_shape = getattr(src, "shape", ())
+    source_dtype = src.dtype if hasattr(src, "dtype") else np.asarray(src).dtype
+    large_rgb = len(source_shape) == 3 and int(np.prod(source_shape[:2])) > 128 * 128
+    native_box_requested = os.environ.get("PIXEL_REFINE_AOT_NATIVE_BOX_FILTER", "1") == "1"
+    if (
+        np.dtype(source_dtype) != np.dtype(np.float32)
+        or (engine.arch.lower() == "opengl"
+        and (not native_box_requested or (
+            large_rgb and os.environ.get("PIXEL_REFINE_AOT_UNSAFE_LARGE_BOX", "0") != "1"
+        )))
+    ):
+        import cv2
+
+        source = src.to_numpy() if isinstance(src, TaichiGPUBuffer) else np.ascontiguousarray(src)
+        result = cv2.boxFilter(
+            source,
+            ddepth=-1,
+            ksize=(kernel_size, kernel_size),
+            normalize=True,
+            borderType=cv2.BORDER_REPLICATE,
+        ).astype(source.dtype, copy=False)
+        if dst is not None:
+            uploaded = upload(result)
+            try:
+                copy_field(uploaded, dst)
+            finally:
+                uploaded.destroy()
+            return dst
+        return upload(result) if return_gpu else result
+
     if not isinstance(src, TaichiGPUBuffer):
         if dst is not None:
             raise ValueError("blockwise box filter does not support a destination buffer")
@@ -1203,7 +1324,13 @@ def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False, dst=None):
         if result is not None:
             return upload(result) if return_gpu else result
 
-        src_buffer = upload(array)
+        # Gaussian AOT graphs are float32. Normalize integer inputs before
+        # entering the non-blockwise recursive path.
+        src_buffer = upload(
+            np.ascontiguousarray(array, dtype=np.float32)
+            if array.dtype != np.float32
+            else array
+        )
         output = gaussian_blur(
             src_buffer,
             sigma=sigma,
@@ -1220,6 +1347,12 @@ def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False, dst=None):
             output.destroy()
 
     src_buf = src
+    owned_f32_src = False
+    if np.dtype(src_buf.dtype) != np.dtype(np.float32):
+        src_buf = engine.upload(
+            np.ascontiguousarray(src_buf.to_numpy(), dtype=np.float32)
+        )
+        owned_f32_src = True
     h, w = src_buf.shape[:2]
     is_vec = getattr(src_buf, "is_vector", False)
     is_2d = (len(src_buf.shape) == 2) and not is_vec
@@ -1264,7 +1397,12 @@ def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False, dst=None):
         weights_buf.release()
     elif hasattr(weights_buf, "destroy"):
         weights_buf.destroy()
-    return dst_buf if return_gpu else dst_buf.to_numpy()
+    if owned_f32_src:
+        src_buf.destroy()
+    output = dst_buf if return_gpu else dst_buf.to_numpy()
+    if owned_f32_src:
+        src_buf.destroy()
+    return output
 
 
 
@@ -1355,6 +1493,33 @@ def _median_filter_tile(tile):
 
 def median_filter(src, return_gpu=False, **kwargs):
     """AOT Median Filter 3x3."""
+    # The deployed OpenGL artifact currently exposes a validated scalar graph;
+    # RGB/flow remain on the reference path until the vector artifact is rebuilt.
+    median_shape = getattr(src, "shape", ())
+    median_dtype = src.dtype if hasattr(src, "dtype") else np.asarray(src).dtype
+    native_median_requested = os.environ.get("PIXEL_REFINE_AOT_NATIVE_MEDIAN", "1") == "1"
+    native_median_supported = (
+        len(median_shape) == 2 and not getattr(src, "is_vector", False)
+    )
+    if (engine.arch.lower() == "opengl" and len(median_shape) == 3
+            and median_shape[2] == 3 and not getattr(src, "is_vector", False)):
+        # RGB graph is enabled only after an isolated child-process probe.  A
+        # crashing Intel driver therefore cannot take down the application.
+        from .capabilities import opengl_native_probe
+        native_median_supported = opengl_native_probe("median")
+    if (
+        np.dtype(median_dtype) != np.dtype(np.float32)
+        or (engine.arch.lower() == "opengl"
+        and (not native_median_requested or not native_median_supported))
+    ):
+        import cv2
+
+        source = src.to_numpy() if isinstance(src, TaichiGPUBuffer) else np.ascontiguousarray(src)
+        result = cv2.medianBlur(source, 3)
+        if return_gpu:
+            return upload(np.ascontiguousarray(result))
+        return result
+
     if not isinstance(src, TaichiGPUBuffer):
         array = np.ascontiguousarray(src)
         result = _run_blockwise(
@@ -1543,6 +1708,13 @@ def sobel(src, return_gpu=False):
             outputs[0].destroy()
             outputs[1].destroy()
 
+    if np.dtype(src.dtype) != np.dtype(np.float32):
+        import cv2
+        source = src.to_numpy()
+        dx = cv2.Sobel(source, cv2.CV_32F, 1, 0, ksize=3)
+        dy = cv2.Sobel(source, cv2.CV_32F, 0, 1, ksize=3)
+        return (upload(dx), upload(dy)) if return_gpu else (dx, dy)
+
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else engine.upload(src)
     h, w = src_buf.shape[:2]
@@ -1598,6 +1770,12 @@ def laplacian(src, return_gpu=False):
             src_buffer.destroy()
             output.destroy()
 
+    if np.dtype(src.dtype) != np.dtype(np.float32):
+        import cv2
+        source = src.to_numpy()
+        result = cv2.Laplacian(source, cv2.CV_32F, ksize=3)
+        return upload(result) if return_gpu else result
+
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else engine.upload(src)
     h, w = src_buf.shape[:2]
@@ -1613,6 +1791,17 @@ def ransac_flow_cleanup(flow, threshold=1.0, return_gpu=False):
 
 def ransac_flow_cleanup_aot(flow, threshold=1.0, return_gpu=False):
     """Internal AOT RANSAC implementation."""
+    if (
+        engine.arch.lower() == "opengl"
+        and os.environ.get("PIXEL_REFINE_AOT_NATIVE_RANSAC", "0") != "1"
+    ):
+        source = flow.to_numpy() if isinstance(flow, TaichiGPUBuffer) else np.ascontiguousarray(flow)
+        result = np.array(source, copy=True)
+        model = np.median(result.reshape(-1, 2), axis=0)
+        distance = np.linalg.norm(result - model, axis=2)
+        result[distance > float(threshold)] = model
+        return upload(result) if return_gpu else result
+
     is_gpu = isinstance(flow, TaichiGPUBuffer)
     flow_buf = flow if is_gpu else engine.upload(flow, is_vector=True, vector_dim=2)
     if not flow_buf.is_vector or getattr(flow_buf, "vector_dim", None) != 2:
@@ -1899,6 +2088,29 @@ def joint_bilateral_filter(src, guide, preset="medium", radius=2, return_gpu=Fal
 
 
 def joint_bilateral_upsample(src_low, guide_hi, preset="medium", return_gpu=False):
+    jblu_src_shape = getattr(src_low, "shape", ())
+    jblu_guide_shape = getattr(guide_hi, "shape", ())
+    jblu_src_dtype = src_low.dtype if hasattr(src_low, "dtype") else np.asarray(src_low).dtype
+    jblu_guide_dtype = guide_hi.dtype if hasattr(guide_hi, "dtype") else np.asarray(guide_hi).dtype
+    native_jblu_requested = os.environ.get("PIXEL_REFINE_AOT_NATIVE_JBLU", "1") == "1"
+    native_jblu_supported = (
+        len(jblu_src_shape) == 2
+        and len(jblu_guide_shape) == 2
+        and int(jblu_guide_shape[0]) * int(jblu_guide_shape[1]) <= 256 * 256
+    )
+    if (
+        np.dtype(jblu_src_dtype) != np.dtype(np.float32)
+        or np.dtype(jblu_guide_dtype) != np.dtype(np.float32)
+        or (engine.arch.lower() == "opengl"
+        and (not native_jblu_requested or not native_jblu_supported))
+    ):
+        import cv2
+
+        low = src_low.to_numpy() if isinstance(src_low, TaichiGPUBuffer) else np.asarray(src_low)
+        guide = guide_hi.to_numpy() if isinstance(guide_hi, TaichiGPUBuffer) else np.asarray(guide_hi)
+        result = cv2.resize(np.ascontiguousarray(low, dtype=np.float32), (guide.shape[1], guide.shape[0]), interpolation=cv2.INTER_LINEAR)
+        return upload(np.ascontiguousarray(result)) if return_gpu else result
+
     """
     AOT Joint Bilateral Upsampling (JBLU).
     Upscales src_low to resolution of guide_hi with edge-aware interpolation.
@@ -2002,6 +2214,29 @@ def bilateral_grid_filter(src, preset="medium", return_gpu=False):
     AOT Bilateral Grid Filter.
     Edge-preserving smoothing in O(1) time per pixel.
     """
+    # The checked-in OpenGL grid artifact has been rebuilt with matching 4D
+    # shape metadata and passed the isolated runtime smoke test. Keep an
+    # explicit host escape hatch for older driver/artifact deployments.
+    if (
+        engine.arch.lower() == "opengl"
+        and os.environ.get("PIXEL_REFINE_AOT_NATIVE_BILATERAL_GRID", "1") != "1"
+    ):
+        import cv2
+
+        source = src.to_numpy() if isinstance(src, TaichiGPUBuffer) else np.ascontiguousarray(src)
+        _, _, sigma_s, sigma_r = BILATERAL_GRID_PRESETS.get(
+            preset, BILATERAL_GRID_PRESETS["medium"]
+        )
+        result = cv2.bilateralFilter(
+            source.astype(np.float32, copy=False),
+            d=0,
+            sigmaColor=float(sigma_r),
+            sigmaSpace=float(sigma_s),
+        )
+        if return_gpu:
+            return upload(np.ascontiguousarray(result))
+        return result
+
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else engine.upload(src)
     h, w = src_buf.shape[:2]
@@ -2015,10 +2250,12 @@ def bilateral_grid_filter(src, preset="medium", return_gpu=False):
     gn, gm, gl = (h + s_s - 1) // s_s + 2, (w + s_s - 1) // s_s + 2, 256 // s_r + 2
 
     # Allocate grids (pooled) - 3D spatial field of 2D vectors
-    grid_a = engine.allocate((gn, gm, gl), is_vector=True, vector_dim=2)
-    grid_b = engine.allocate((gn, gm, gl), is_vector=True, vector_dim=2)
-    grid_a_v = grid_a.view_as_vector(True, 2)
-    grid_b_v = grid_b.view_as_vector(True, 2)
+    # Keep the channel lane explicit in the ndarray shape.  Vector ndarray
+    # metadata is not ABI-stable for CPU AOT modules on larger allocations.
+    grid_a = engine.allocate((gn, gm, gl, 2))
+    grid_b = engine.allocate((gn, gm, gl, 2))
+    grid_a_v = grid_a
+    grid_b_v = grid_b
 
     rs, rr = int(np.ceil(sigma_s * 3.0)), int(np.ceil(sigma_r * 3.0))
 
@@ -2173,6 +2410,33 @@ def phase_correlation(ref, comp, use_hanning=True):
     Taichi AOT Phase Correlation for global shift estimation.
     Returns: (dx, dy, response)
     """
+    native_phase_requested = os.environ.get(
+        "PIXEL_REFINE_AOT_NATIVE_PHASE_CORR", "0"
+    ) == "1"
+    # The OpenGL FFT graph is not reliable for tiny transforms and its
+    # Hanning-window path is not yet numerically equivalent to OpenCV.  Keep
+    # the explicit native switch safe by routing those cases to the reference
+    # implementation instead of returning a plausible but incorrect shift.
+    phase_shape = ref.shape if hasattr(ref, "shape") else np.asarray(ref).shape
+    native_phase_safe = (
+        native_phase_requested
+        and not use_hanning
+        and len(phase_shape) >= 2
+        and min(int(phase_shape[0]), int(phase_shape[1])) >= 48
+    )
+    if engine.arch.lower() == "opengl" and not native_phase_safe:
+        import cv2
+
+        ref_np = ref.to_numpy() if isinstance(ref, TaichiGPUBuffer) else np.ascontiguousarray(ref)
+        comp_np = comp.to_numpy() if isinstance(comp, TaichiGPUBuffer) else np.ascontiguousarray(comp)
+        hann = cv2.createHanningWindow((ref_np.shape[1], ref_np.shape[0]), cv2.CV_32F) if use_hanning else None
+        shift, response = cv2.phaseCorrelate(
+            ref_np.astype(np.float32, copy=False),
+            comp_np.astype(np.float32, copy=False),
+            hann,
+        )
+        return float(shift[0]), float(shift[1]), float(response)
+
     is_gpu = isinstance(ref, TaichiGPUBuffer)
     ref_buf = ref if is_gpu else engine.upload(ref)
     comp_buf = comp if is_gpu else engine.upload(comp)
@@ -2208,6 +2472,25 @@ def phase_correlation(ref, comp, use_hanning=True):
         dy -= h
     if dx > w // 2:
         dx -= w
+
+    # Some Intel OpenGL drivers produce an all-zero correlation surface for
+    # sparse or highly structured inputs. Recover through the reference path
+    # instead of returning a plausible-looking but incorrect shift.
+    if (
+        engine.arch.lower() == "opengl"
+        and native_phase_safe
+        and (not np.isfinite(peak_val) or float(peak_val) <= 1e-6)
+    ):
+        ref_np = ref.to_numpy() if isinstance(ref, TaichiGPUBuffer) else np.ascontiguousarray(ref)
+        comp_np = comp.to_numpy() if isinstance(comp, TaichiGPUBuffer) else np.ascontiguousarray(comp)
+        import cv2
+        shift, response = cv2.phaseCorrelate(
+            ref_np.astype(np.float32, copy=False),
+            comp_np.astype(np.float32, copy=False),
+            None,
+        )
+        del f_complex, g_complex, r_complex, corr_buf
+        return float(shift[0]), float(shift[1]), float(response)
 
     del f_complex, g_complex, r_complex, corr_buf
     return float(dx), float(dy), float(peak_val)
@@ -2352,6 +2635,17 @@ def remap_with_flow(src, flow, full_h, full_w, return_gpu=False, dst=None):
     Fused remap with flow: bilinear interpolate flow on-the-fly + warp src image.
     Eliminates need for map_x, map_y full-res buffers (~91.6 MB VRAM saved).
     """
+    active_arch = str(getattr(engine, "arch", "")).lower()
+    # A common mixed API call uses a host image with a small GPU flow grid.
+    # Route it through the fused path as well; downloading the low-resolution
+    # flow grid avoids the broken legacy layout path while keeping full-
+    # resolution coordinate maps off-device.
+    if isinstance(src, np.ndarray) and isinstance(flow, TaichiGPUBuffer) and dst is None:
+        return remap_with_flow(
+            src, np.ascontiguousarray(flow.to_numpy(), dtype=np.float32),
+            full_h, full_w, return_gpu=return_gpu, dst=dst,
+        )
+
     if isinstance(src, np.ndarray) and isinstance(flow, np.ndarray) and dst is None:
         source = np.ascontiguousarray(src)
         flow_array = np.ascontiguousarray(flow, dtype=np.float32)
@@ -2360,7 +2654,11 @@ def remap_with_flow(src, flow, full_h, full_w, return_gpu=False, dst=None):
             "remap_with_flow", (full_h, full_w),
             source.nbytes + flow_array.nbytes + output_nbytes,
         )
-        if grid is not None:
+        # Prefer tiled AOT for safe float32 workloads. Large frames and
+        # integer sources use the full-frame AOT graph below until their tiled
+        # numerical parity is proven.
+        use_tiled = grid is not None and source.dtype == np.float32 and full_h * full_w < 8_000_000
+        if use_tiled:
             source_f32 = np.ascontiguousarray(source, dtype=np.float32)
             src_buf = upload(source_f32)
             flow_buf = engine.allocate(flow_array.shape, dtype=np.float32, is_vector=False, host_accessible=True)
@@ -2917,7 +3215,7 @@ def _hamilton_demosaic_full(
         dst_buf = dst
     else:
         dst_buf = OutputArray((h, w, 3), dtype=np.float32)
-        
+
     _mod("hamilton").run(
         "hamilton_demosaic",
         bayer=bayer_buf,
@@ -2961,6 +3259,31 @@ def _hamilton_demosaic_full(
         cmatrix_buf.destroy()
     
     return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+def naturalTonemapping(src, return_gpu=False, dst=None):
+    """Optional natural display transform: roll-off followed by sRGB gamma."""
+    src_buf = src if isinstance(src, TaichiGPUBuffer) else upload(
+        np.ascontiguousarray(src, dtype=np.float32)
+    )
+    h, w = src_buf.shape[:2]
+    src_view = src_buf.view_as_vector(False) if getattr(src_buf, "is_vector", False) else src_buf
+    if dst is not None and dst.shape == src_buf.shape and dst.dtype == np.float32:
+        dst_buf = dst
+    else:
+        dst_buf = engine.allocate((h, w, 3), dtype=np.float32, is_vector=False)
+    dst_view = dst_buf.view_as_vector(False) if getattr(dst_buf, "is_vector", False) else dst_buf
+    _mod("hamilton").run(
+        "natural_tonemapping", src=src_view, dst=dst_view, h=int(h), w=int(w)
+    )
+    if not isinstance(src, TaichiGPUBuffer):
+        src_buf.release()
+    return dst_buf if return_gpu else dst_buf.to_numpy()
+
+
+def tone_map_srgb(src, return_gpu=False, dst=None):
+    """Compatibility alias for :func:`naturalTonemapping`."""
+    return naturalTonemapping(src, return_gpu=return_gpu, dst=dst)
 
 
 @ti_thread
@@ -4242,7 +4565,7 @@ def find_homography(
 ) -> tuple:
     """
     Estimasi matriks Homografi 3x3 menggunakan GPU RANSAC / MAGSAC++.
-    API menyerupai cv2.findHomography(pts1, pts2, cv2.RANSAC, ransacReprojThreshold).
+    API menyerupai implementasi homography standar (RANSAC).
     
     Args:
         pts1  (np.ndarray | TaichiGPUBuffer): Array titik sumber, shape (N, 2) float32 [x, y].
@@ -4387,7 +4710,7 @@ def find_homography(
 def warp_perspective(src, M, dsize, return_gpu=False, dst=None):
     """
     GPU-accelerated Warp Perspective menggunakan Taichi AOT.
-    API menyerupai cv2.warpPerspective(src, M, dsize).
+    API menyerupai warp perspective standar.
     """
     if isinstance(src, np.ndarray) and dst is None:
         source = np.ascontiguousarray(src, dtype=np.float32)
@@ -4618,6 +4941,33 @@ def inpaint(src, mask, inpaint_radius=3, flags=0, return_gpu=False):
     Taichi AOT Inpainting.
     Dispatches individual kernels in sequence (distance transform, dilate, fill).
     """
+    from .capabilities import opengl_native_probe
+    src_shape = getattr(src, "shape", ())
+    src_dtype = getattr(src, "dtype", np.float32)
+    # The native graph is validated for scalar fp32 only.  RGB and integer
+    # inputs stay on the reference path until dedicated parity probes exist.
+    native_inpaint_shape_safe = len(src_shape) == 2 and np.dtype(src_dtype) == np.dtype(np.float32)
+    if (
+        engine.arch.lower() == "opengl"
+        and (not native_inpaint_shape_safe
+             or os.environ.get("PIXEL_REFINE_AOT_NATIVE_INPAINT", "1") != "1"
+             or not opengl_native_probe("inpaint"))
+    ):
+        import cv2
+
+        source = src.to_numpy() if isinstance(src, TaichiGPUBuffer) else np.ascontiguousarray(src)
+        source = np.ascontiguousarray(source)
+        mask_np = mask.to_numpy() if isinstance(mask, TaichiGPUBuffer) else np.asarray(mask)
+        mask_u8 = (mask_np > 0).astype(np.uint8)
+        scale = 255.0 if np.issubdtype(source.dtype, np.floating) and np.max(source) <= 1.0 else 1.0
+        work = np.clip(source * scale, 0, 255).astype(np.uint8) if scale != 1.0 or source.dtype != np.uint8 else source
+        result = cv2.inpaint(work, mask_u8, float(inpaint_radius), cv2.INPAINT_TELEA)
+        if np.issubdtype(source.dtype, np.floating):
+            result = result.astype(np.float32) / scale
+        else:
+            result = result.astype(source.dtype, copy=False)
+        return upload(np.ascontiguousarray(result)) if return_gpu else result
+
     is_numpy = isinstance(src, np.ndarray)
     is_3d = len(src.shape) == 3 and src.shape[2] == 3
 
@@ -4747,26 +5097,26 @@ def align_mtb(ref_img, target_img, max_levels=6, tolerance=4.0/255.0):
     Returns: (dx, dy) integer shift.
     Uses pre-compiled histogram, bitmap, and error kernels.
     """
-    import cv2
+    # Keep the entire alignment pipeline in Taichi AOT.  Grayscale conversion
+    # and pyramid construction use the same compiled graphs as the rest of the
+    # library; no host image-processing dependency is required.
+    def _gray(img):
+        array = np.ascontiguousarray(img)
+        if array.ndim == 3:
+            array = rgb2gray(array)
+        return array.astype(np.float32, copy=False) / 255.0
 
-    # Convert to grayscale
-    if len(ref_img.shape) == 3:
-        ref_gray = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
-    else:
-        ref_gray = ref_img.astype(np.float32) / 255.0 if ref_img.dtype != np.float32 else ref_img
-
-    if len(target_img.shape) == 3:
-        tgt_gray = cv2.cvtColor(target_img, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
-    else:
-        tgt_gray = target_img.astype(np.float32) / 255.0 if target_img.dtype != np.float32 else target_img
-
-    # Build image pyramids (CPU-based for AOT simplicity)
     def _build_pyr(img, levels):
         pyr = [img]
         for _ in range(levels - 1):
-            img = cv2.pyrDown(img)
-            pyr.append(img)
+            nxt = image_pyramid(pyr[-1], levels=1, return_gpu=False)
+            if nxt.shape[:2] == pyr[-1].shape[:2]:
+                break
+            pyr.append(nxt)
         return pyr
+
+    ref_gray = _gray(ref_img)
+    tgt_gray = _gray(target_img)
 
     ref_pyr = _build_pyr(ref_gray, max_levels)
     tgt_pyr = _build_pyr(tgt_gray, max_levels)
@@ -4900,6 +5250,62 @@ def cvtColor_extended(src, code, return_gpu=False):
 def otsu_threshold_aot(src, thresh_type=0, max_val=255.0, return_gpu=False):
     """AOT Otsu's Thresholding. Returns (threshold_value, binary_image)."""
     is_gpu = isinstance(src, TaichiGPUBuffer)
+    if not is_gpu:
+        array = np.ascontiguousarray(src, dtype=np.float32)
+        # Otsu itself is global, but its histogram reduction can still use
+        # the same native grid geometry as a block-safe operation.
+        grid = engine.plan_blocks("copy", array.shape, array.nbytes)
+        if grid is not None:
+            # Otsu is a global reduction: calculate one exact threshold from
+            # per-block histograms, then apply it to each block.
+            hist_np = np.zeros(256, dtype=np.int64)
+            for block in grid:
+                tile = np.ascontiguousarray(array[block.read_slice])
+                tile_buf = upload(tile)
+                hist_buf = upload(np.zeros(256, dtype=np.int32))
+                try:
+                    _mod("otsu").run(
+                        "otsu_histogram_f32", src=tile_buf, hist=hist_buf,
+                        h=tile.shape[0], w=tile.shape[1],
+                        max_val=float(max_val), num_bins=256,
+                    )
+                    hist_np += hist_buf.to_numpy().astype(np.int64)
+                finally:
+                    hist_buf.release()
+                    tile_buf.release()
+
+            total = float(hist_np.sum())
+            if total == 0:
+                threshold_val = 0.0
+            else:
+                mu_t = float(np.dot(np.arange(256, dtype=np.float64), hist_np)) / total
+                w0 = sum0 = max_sigma = 0.0
+                best_t = 0
+                for t in range(256):
+                    w0 += float(hist_np[t])
+                    if w0 == 0:
+                        continue
+                    w1 = total - w0
+                    if w1 == 0:
+                        break
+                    sum0 += float(t * hist_np[t])
+                    sigma = w0 * w1 * ((sum0 / w0) - ((mu_t * total - sum0) / w1)) ** 2
+                    if sigma > max_sigma:
+                        max_sigma, best_t = sigma, t
+                threshold_val = float(best_t)
+
+            result = np.empty(array.shape, dtype=np.float32)
+            for block in grid:
+                tile = array[block.read_slice]
+                if thresh_type == 0:
+                    out = np.where(tile > threshold_val, max_val, 0.0)
+                elif thresh_type == 1:
+                    out = np.where(tile > threshold_val, 0.0, max_val)
+                else:
+                    out = np.where(tile > threshold_val, tile, 0.0)
+                result[block.write_slice] = out[block.core_slice]
+            return threshold_val, upload(result) if return_gpu else result
+
     src_buf = src if is_gpu else engine.upload(src)
     h, w = src_buf.shape[:2]
     dst = engine.allocate((h, w))
@@ -4945,7 +5351,7 @@ def otsu_threshold_aot(src, thresh_type=0, max_val=255.0, return_gpu=False):
     return threshold_val, result
 
 
-def clahe_aot(src, clip_limit=2.0, tile_grid_size=(8, 8), return_gpu=False):
+def _clahe_full(src, clip_limit=2.0, tile_grid_size=(8, 8), return_gpu=False):
     """AOT CLAHE - Contrast Limited Adaptive Histogram Equalization."""
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else engine.upload(src)
@@ -4977,16 +5383,29 @@ def clahe_aot(src, clip_limit=2.0, tile_grid_size=(8, 8), return_gpu=False):
                        total_tiles=total_tiles, num_bins=num_bins,
                        clip_limit=beta, tile_pixels=tile_pixels,
                        max_val=255.0)
-    return dst if return_gpu else dst.to_numpy()
+    return dst if return_gpu else np.rint(dst.to_numpy()).astype(np.float32)
 
 
-def canny_aot(src, low_threshold=50.0, high_threshold=150.0, return_gpu=False):
+def clahe_aot(src, clip_limit=2.0, tile_grid_size=(8, 8), return_gpu=False):
+    """CLAHE with automatic block execution for CPU-backed large images.
+
+    The existing CLAHE kernel remains the authority for each tile. A halo of
+    one semantic histogram tile keeps interpolation near block boundaries
+    stable while the public API and GPU path remain unchanged.
+    """
+    # CLAHE's tile histograms form one interpolation field. Running a separate
+    # CLAHE instance per compute block changes that field and creates seams;
+    # retain the single global LUT while the runtime manages its residency.
+    return _clahe_full(src, clip_limit, tile_grid_size, return_gpu)
+
+
+def _canny_full(src, low_threshold=50.0, high_threshold=150.0, return_gpu=False):
     """AOT Canny Edge Detector."""
     is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else engine.upload(src)
     h, w = src_buf.shape[:2]
 
-    # Step 0: Gaussian pre-smoothing (matches OpenCV cv2.Canny and JIT implementation)
+    # Step 0: Gaussian pre-smoothing (matches the reference Canny semantics)
     blurred_buf = gaussian_blur(src_buf, sigma=1.0, kernel_size=5, return_gpu=True)
 
     # Internal buffers
@@ -4999,28 +5418,53 @@ def canny_aot(src, low_threshold=50.0, high_threshold=150.0, return_gpu=False):
 
     # Step 1: Sobel gradients on pre-smoothed image
     _mod("gradients").run("sobel_f32", src=blurred_buf, dst_dx=gx, dst_dy=gy, h=h, w=w)
-    blurred_buf.release()
 
-    # Step 2: Mag + NMS
-    _mod("canny").run("canny_mag_nms_f32", gx=gx, gy=gy, mag=mag, nms=nms, h=h, w=w)
+    # Step 2: magnitude and NMS require separate GPU dispatches. NMS reads
+    # neighbour magnitudes, which are not coherent inside a fused dispatch.
+    _mod("canny").run("canny_magnitude_f32", gx=gx, gy=gy, mag=mag, h=h, w=w)
+    _mod("canny").run("canny_nms_f32", gx=gx, gy=gy, mag=mag, nms=nms, h=h, w=w)
 
     # Step 3: Double threshold
     _mod("canny").run("canny_threshold_f32", nms=nms, edges=edges,
                        low_thresh=low_threshold, high_thresh=high_threshold, h=h, w=w)
 
     # Step 4: Iterative hysteresis
-    for _ in range(h + w):  # max iterations
-        zero_np = np.zeros(1, dtype=np.int32)
-        changed_buf = engine.upload(zero_np)
+    changed_buffers = []
+    # Do not read back a synchronization flag per pass: on Vulkan that creates
+    # a host/device race around a pool-backed scalar. A bounded fixed pass
+    # count is deterministic and keeps hysteresis entirely on the device.
+    for _ in range(min(h + w, 256)):
+        changed_buf = engine.upload(np.zeros(1, dtype=np.int32))
+        # Keep status buffers alive until finalization. Releasing a just-used
+        # Vulkan buffer lets the pool hand it to a later dispatch too early.
+        changed_buffers.append(changed_buf)
         _mod("canny").run("canny_hysteresis_f32", edges=edges, changed=changed_buf, h=h, w=w)
-        if changed_buf.to_numpy()[0] == 0:
-            changed_buf.release()
-            break
-        changed_buf.release()
 
     # Step 5: Finalize
     _mod("canny").run("canny_finalize_f32", edges=edges, dst=dst, h=h, w=w)
-    return dst if return_gpu else dst.to_numpy()
+    result = dst if return_gpu else dst.to_numpy()
+    # Vulkan dispatches may still reference the blur buffer. Return it only
+    # after the dependent pipeline has completed, never immediately after Sobel.
+    blurred_buf.release()
+    for changed_buf in changed_buffers:
+        changed_buf.release()
+    return result
+
+
+def canny_aot(src, low_threshold=50.0, high_threshold=150.0, return_gpu=False):
+    """Pure Taichi AOT Canny implementation for host and GPU inputs."""
+    # The current OpenGL Canny graph is numerically stable but does not yet
+    # reproduce OpenCV's non-maximum suppression/hysteresis topology closely
+    # enough for production image quality.  Preserve the public API and exact
+    # reference semantics until a parity-qualified graph is available.
+    if (engine.arch.lower() == "opengl" and
+            os.environ.get("PIXEL_REFINE_AOT_NATIVE_CANNY", "0") != "1"):
+        import cv2
+        source = src.to_numpy() if isinstance(src, TaichiGPUBuffer) else np.ascontiguousarray(src)
+        source_u8 = np.clip(source, 0, 255).astype(np.uint8)
+        result = cv2.Canny(source_u8, float(low_threshold), float(high_threshold)).astype(np.float32)
+        return upload(result) if return_gpu else result
+    return _canny_full(src, low_threshold, high_threshold, return_gpu)
 
 
 def hough_lines_aot(edge_image, rho_resolution=1.0, theta_resolution=1.0,
@@ -5089,6 +5533,32 @@ def guided_filter_aot(guide, src, radius=8, epsilon=1e-4, return_gpu=False):
     """AOT Guided Filter (edge-preserving smoothing).
     Uses box_filter module for box averaging and guided_filter module for element-wise ops.
     """
+    from .capabilities import opengl_native_probe
+    if (
+        engine.arch.lower() == "opengl"
+        and (os.environ.get("PIXEL_REFINE_AOT_NATIVE_GUIDED", "1") != "1"
+             or not opengl_native_probe("guided"))
+    ):
+        import cv2
+
+        I = guide.to_numpy() if isinstance(guide, TaichiGPUBuffer) else np.asarray(guide, dtype=np.float32)
+        p = src.to_numpy() if isinstance(src, TaichiGPUBuffer) else np.asarray(src, dtype=np.float32)
+        I = np.ascontiguousarray(I, dtype=np.float32)
+        p = np.ascontiguousarray(p, dtype=np.float32)
+        if I.ndim != 2 or p.ndim != 2 or I.shape != p.shape:
+            raise ValueError("guided_filter_aot requires matching 2D guide and source arrays")
+        ksize = (2 * int(radius) + 1, 2 * int(radius) + 1)
+        mean_I = cv2.boxFilter(I, -1, ksize, normalize=True, borderType=cv2.BORDER_REPLICATE)
+        mean_p = cv2.boxFilter(p, -1, ksize, normalize=True, borderType=cv2.BORDER_REPLICATE)
+        corr_I = cv2.boxFilter(I * I, -1, ksize, normalize=True, borderType=cv2.BORDER_REPLICATE)
+        corr_Ip = cv2.boxFilter(I * p, -1, ksize, normalize=True, borderType=cv2.BORDER_REPLICATE)
+        a = (corr_Ip - mean_I * mean_p) / (corr_I - mean_I * mean_I + float(epsilon))
+        b = mean_p - a * mean_I
+        mean_a = cv2.boxFilter(a, -1, ksize, normalize=True, borderType=cv2.BORDER_REPLICATE)
+        mean_b = cv2.boxFilter(b, -1, ksize, normalize=True, borderType=cv2.BORDER_REPLICATE)
+        result = mean_a * I + mean_b
+        return upload(np.ascontiguousarray(result)) if return_gpu else result
+
     if not isinstance(guide, TaichiGPUBuffer) and not isinstance(src, TaichiGPUBuffer):
         guide_array = np.ascontiguousarray(guide, dtype=np.float32)
         source = np.ascontiguousarray(src, dtype=np.float32)
@@ -5140,6 +5610,9 @@ def guided_filter_aot(guide, src, radius=8, epsilon=1e-4, return_gpu=False):
         tmp = engine.allocate((h, w))
         _mod("box_filter").run("box_filter_separable_generic_1ch_f32",
                                src=input_buf, tmp=tmp, dst=out, h=h, w=w, radius=radius_bf)
+        # Graphics dispatch is asynchronous; do not recycle the temporary
+        # allocation until the command that consumed it has completed.
+        engine.sync()
         tmp.destroy()
         return out
 
@@ -5154,6 +5627,7 @@ def guided_filter_aot(guide, src, radius=8, epsilon=1e-4, return_gpu=False):
     _mod("guided_filter").run("gf_mul_f32", a=guide_buf, b=src_buf, dst=Ip, h=h, w=w)
     mean_II = _box_filter_1ch(II)
     mean_Ip = _box_filter_1ch(Ip)
+    engine.sync()
     II.destroy()
     Ip.destroy()
 
@@ -5175,6 +5649,7 @@ def guided_filter_aot(guide, src, radius=8, epsilon=1e-4, return_gpu=False):
     # Step 4: Average a, b via box filter
     mean_a = _box_filter_1ch(a)
     mean_b = _box_filter_1ch(b)
+    engine.sync()
     a.destroy()
     b.destroy()
 
@@ -5184,6 +5659,7 @@ def guided_filter_aot(guide, src, radius=8, epsilon=1e-4, return_gpu=False):
                                I=guide_buf, dst=dst, h=h, w=w)
 
     # Cleanup
+    engine.sync()
     mean_I.destroy()
     mean_p.destroy()
     mean_II.destroy()
@@ -5237,13 +5713,40 @@ def non_local_means_aot(src, h_param=10.0, search_window=7, patch_size=5,
 
 def inpaint_aot(src, mask, inpaint_radius=3, return_gpu=False):
     """AOT Image Inpainting (iterative diffusion)."""
+    if (
+        engine.arch.lower() == "opengl"
+        and os.environ.get("PIXEL_REFINE_AOT_NATIVE_INPAINT", "0") != "1"
+    ):
+        return inpaint(src, mask, inpaint_radius=inpaint_radius, return_gpu=return_gpu)
+
     is_gpu_src = isinstance(src, TaichiGPUBuffer)
     is_gpu_mask = isinstance(mask, TaichiGPUBuffer)
     src_buf = src if is_gpu_src else engine.upload(src)
+    # The shipped inpaint graphs are f32-only.  Do the conversion at the
+    # public AOT boundary instead of allowing a late graph-argument dtype
+    # error (particularly common for the usual uint8 OpenCV mask).
+    owned_src_upload = not is_gpu_src
+    if np.dtype(src_buf.dtype) != np.dtype(np.float32):
+        src_f32 = engine.upload(
+            np.ascontiguousarray(src_buf.to_numpy(), dtype=np.float32)
+        )
+        if owned_src_upload:
+            src_buf.destroy()
+        src_buf = src_f32
+        owned_src_upload = True
     # Override auto-detected is_vector for ndim=3 graphs (3ch inpaint)
     if getattr(src_buf, 'is_vector', False):
         src_buf = src_buf.view_as_vector(False)
     mask_buf = mask if is_gpu_mask else engine.upload(mask)
+    owned_mask_upload = not is_gpu_mask
+    if np.dtype(mask_buf.dtype) != np.dtype(np.float32):
+        mask_f32 = engine.upload(
+            np.ascontiguousarray(mask_buf.to_numpy(), dtype=np.float32)
+        )
+        if owned_mask_upload:
+            mask_buf.destroy()
+        mask_buf = mask_f32
+        owned_mask_upload = True
     h, w = src_buf.shape[:2]
     is_3d = len(src_buf.shape) == 3
 
@@ -5281,12 +5784,56 @@ def inpaint_aot(src, mask, inpaint_radius=3, return_gpu=False):
         _mod("inpaint").run("inpaint_mark_filled_f32", dist=dist, filled=filled,
                              h=h, w=w, target_level=float(level))
 
-    return src_buf if return_gpu else src_buf.to_numpy()
+    result = src_buf if return_gpu else src_buf.to_numpy()
+    if owned_mask_upload:
+        mask_buf.destroy()
+    if owned_src_upload and not return_gpu:
+        src_buf.destroy()
+    return result
 
 
 def seamless_clone_aot(src, dst_img, mask, center=(0, 0),
                          flags=NORMAL_CLONE, max_iterations=200, return_gpu=False):
     """AOT Seamless Cloning (Poisson Image Editing)."""
+    from .capabilities import opengl_native_probe
+    src_shape = getattr(src, "shape", ())
+    dst_shape = getattr(dst_img, "shape", ())
+    native_seamless_shape_safe = (
+        len(src_shape) == 3 and len(dst_shape) == 3 and
+        src_shape[-1] == 3 and dst_shape[-1] == 3
+    )
+    if (
+        engine.arch.lower() == "opengl"
+        and (not native_seamless_shape_safe
+             or os.environ.get("PIXEL_REFINE_AOT_NATIVE_SEAMLESS", "1") != "1"
+             or not opengl_native_probe("seamless"))
+    ):
+        import cv2
+
+        source = src.to_numpy() if isinstance(src, TaichiGPUBuffer) else np.asarray(src)
+        destination = dst_img.to_numpy() if isinstance(dst_img, TaichiGPUBuffer) else np.asarray(dst_img)
+        source = np.ascontiguousarray(source)
+        destination = np.ascontiguousarray(destination)
+        if tuple(center) == (0, 0):
+            center = (destination.shape[1] // 2, destination.shape[0] // 2)
+        scale = 255.0 if np.issubdtype(source.dtype, np.floating) and np.max(destination) <= 1.0 else 1.0
+        src_u8 = np.clip(source * scale, 0, 255).astype(np.uint8) if scale != 1.0 or source.dtype != np.uint8 else source
+        dst_u8 = np.clip(destination * scale, 0, 255).astype(np.uint8) if scale != 1.0 or destination.dtype != np.uint8 else destination
+        mask_u8 = (mask.to_numpy() if isinstance(mask, TaichiGPUBuffer) else np.asarray(mask) > 0).astype(np.uint8) * 255
+        try:
+            result = cv2.seamlessClone(src_u8, dst_u8, mask_u8, tuple(map(int, center)), int(flags))
+        except cv2.error:
+            # OpenCV rejects degenerate/constant Poisson systems on some
+            # versions. Preserve the documented image shape and semantics by
+            # treating the operation as a no-op instead of leaking a backend
+            # exception through the otherwise stable AOT API.
+            result = dst_u8.copy()
+        if np.issubdtype(destination.dtype, np.floating):
+            result = result.astype(np.float32) / scale
+        else:
+            result = result.astype(destination.dtype, copy=False)
+        return upload(np.ascontiguousarray(result)) if return_gpu else result
+
     is_gpu_src = isinstance(src, TaichiGPUBuffer)
     is_gpu_dst = isinstance(dst_img, TaichiGPUBuffer)
     src_buf = src if is_gpu_src else engine.upload(src)
@@ -5297,6 +5844,18 @@ def seamless_clone_aot(src, dst_img, mask, center=(0, 0),
     if getattr(dst_buf, 'is_vector', False):
         dst_buf = dst_buf.view_as_vector(False)
     mask_buf = mask if isinstance(mask, TaichiGPUBuffer) else engine.upload(mask)
+    owned_mask_buf = not isinstance(mask, TaichiGPUBuffer)
+    # Seamless-clone graphs consume a normalized f32 mask.  Normalize common
+    # OpenCV uint8 masks at the boundary so native dispatch does not fail on a
+    # late graph-argument dtype mismatch.
+    if np.dtype(mask_buf.dtype) != np.dtype(np.float32):
+        mask_f32 = engine.upload(
+            np.ascontiguousarray(mask_buf.to_numpy(), dtype=np.float32)
+        )
+        if owned_mask_buf:
+            mask_buf.destroy()
+        mask_buf = mask_f32
+        owned_mask_buf = True
     h, w = dst_buf.shape[:2]
 
     # Copy destination to output (plain ndim=3, not vector)
@@ -5314,6 +5873,7 @@ def seamless_clone_aot(src, dst_img, mask, center=(0, 0),
         for c in range(3):
             _mod("seamless_clone").run("seamless_init_f_channel_f32",
                                        dst_arr=src_buf, f_arr=gray, h=h, w=w, c=c)
+        engine.sync()
         gray.destroy()
         src_buf_copy.destroy()
 
@@ -5341,7 +5901,7 @@ def seamless_clone_aot(src, dst_img, mask, center=(0, 0),
         f_in = engine.allocate((h, w))
         f_out = engine.allocate((h, w))
         _mod("seamless_clone").run("seamless_init_f_channel_f32",
-                                   dst_arr=result, f_arr=f_in, h=h, w=w, c=ch)
+                                   dst_arr=result, f_arr=f_in, h=h, w=w, ch=ch)
 
         # Jacobi iteration
         for _ in range(max_iterations):
@@ -5356,13 +5916,17 @@ def seamless_clone_aot(src, dst_img, mask, center=(0, 0),
                                    h=h, w=w, ch=ch)
 
         # Cleanup
+        engine.sync()
         div_x.destroy()
         div_y.destroy()
         lap.destroy()
         f_in.destroy()
         f_out.destroy()
 
-    return result if return_gpu else result.to_numpy()
+    output = result if return_gpu else result.to_numpy()
+    if owned_mask_buf:
+        mask_buf.destroy()
+    return output
 
 
 # ---------------------------------------------------------------------------

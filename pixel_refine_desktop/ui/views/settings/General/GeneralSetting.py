@@ -39,8 +39,6 @@ class HardwareBackendTestWorker(QObject):
 
             if backend == "cpu":
                 success = True
-            elif backend == "opengl":
-                success = False
             else:
                 test_script = f"""
 import sys
@@ -239,10 +237,18 @@ class GeneralSettingsPage(Container, SyncMixin):
         self.update_device_dropdown_style()
 
     def _preferred_backend_for_device(self, device_name):
-        # The app's AOT assets and default AOTEngine() path are Vulkan-oriented.
-        # Keep scan/test/runtime on the same backend unless another backend is
-        # explicitly wired through the pipeline.
-        return "vulkan"
+        """Choose the safe default without exposing low-level backend details."""
+        name = (device_name or "").lower()
+        # All Intel Vulkan paths are quarantined, including devices exposed
+        # through Microsoft Direct3D12/Dozen. The AOT engine enforces the same
+        # policy at runtime; keep the UI selection consistent with it.
+        if "intel" in name:
+            return "opengl"
+        if "nvidia" in name or "geforce" in name:
+            return "vulkan"
+        if "amd" in name or "radeon" in name:
+            return "vulkan"
+        return "opengl"
 
     def _scan_hardware_backend_options(self):
         options = [{"text": "CPU (Universal)", "backend": "cpu", "device_id": -1}]
@@ -266,9 +272,15 @@ class GeneralSettingsPage(Container, SyncMixin):
                     if allowed_ids and idx not in allowed_ids:
                         continue
                         
-                    # Explicitly skip Direct3D12 compatibility layers and Basic Render Drivers
+                    # Native Vulkan only: Dozen is Vulkan-on-D3D12 and has a
+                    # different descriptor/pipeline ABI from native Intel
+                    # Vulkan.  Keep native Intel and NVIDIA ICDs visible.
                     dev_lower = dev.lower()
-                    if "direct3d12" in dev_lower or "basic render driver" in dev_lower:
+                    if (
+                        "direct3d12" in dev_lower
+                        or "dozen" in dev_lower
+                        or "basic render driver" in dev_lower
+                    ):
                         continue
                         
                     label = dev
@@ -309,12 +321,25 @@ class GeneralSettingsPage(Container, SyncMixin):
 
         backend = option.get("backend", "cpu")
         device_id = int(option.get("device_id", -1))
+        # Native Intel Vulkan AOT is known to fail during module creation on
+        # older Windows ICDs, while the same GPU executes our OpenGL AOT
+        # artifacts successfully. Transparently select the native OpenGL
+        # bridge for Intel instead of falling back to CPU or Dozen/D3D12.
+        option_text = str(option.get("text", "")).lower()
+        if backend == "vulkan" and "intel" in option_text:
+            backend = "opengl"
+            device_id = 0
         self.store.set("device_backend", option.get("text", "CPU (Universal)"))
         self.store.set("device_backend_arch", backend)
         self.store.set("device_backend_id", device_id)
 
         os.environ["PIXEL_REFINE_AOT_ARCH"] = backend
         os.environ["PIXEL_REFINE_AOT_DEVICE"] = str(device_id)
+        # This is a selection policy for the Vulkan loader/runtime; it does
+        # not uninstall or modify any Windows display driver.  The native ICD
+        # remains selectable while Dozen/D3D12 devices are excluded above.
+        os.environ["PIXEL_REFINE_AOT_NATIVE_VULKAN_ONLY"] = "1"
+        os.environ["PIXEL_REFINE_AOT_SKIP_DOZEN"] = "1"
 
     def _get_backend_test_options(self):
         if not hasattr(self, "device_group") or not isinstance(self.device_group.input, QComboBox):

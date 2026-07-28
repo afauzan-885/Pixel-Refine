@@ -9,7 +9,7 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../../"))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from taichi_library.taichi_algorithm.akaze import (
+from taichi_library.taichi_algorithm.feature_matching.akaze import (
     compute_conductivity_map,
     fed_diffusion_step,
     compute_hessian_determinant,
@@ -18,6 +18,11 @@ from taichi_library.taichi_algorithm.akaze import (
     hamming_matcher_kernel,
     pack_matches_kernel,
 )
+
+try:
+    from .aot_artifact import archive_module
+except ImportError:
+    from aot_artifact import archive_module
 
 
 def compile_akaze_tcm(arch=ti.vulkan, save_path="akaze_vulkan.tcm"):
@@ -101,7 +106,7 @@ def compile_akaze_tcm(arch=ti.vulkan, save_path="akaze_vulkan.tcm"):
     presults_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "results", ti.f32, ndim=2)
     g_pack.dispatch(pack_matches_kernel, pkps1_arg, pkps2_arg, pmatches_arg, pcounter1_arg, pcounter2_arg, presults_arg)
     module.add_graph("pack_matches", g_pack.compile())
-    module.archive(save_path)
+    archive_module(module, save_path)
     print(f"Successfully compiled A-KAZE AOT and archived to: {save_path}")
     ti.reset()
 

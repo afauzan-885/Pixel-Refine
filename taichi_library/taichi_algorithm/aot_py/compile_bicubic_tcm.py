@@ -11,6 +11,11 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
+try:
+    from .aot_artifact import archive_module
+except ImportError:
+    from aot_artifact import archive_module
+
 # Set AOT Mode globally before importing taichi_worker or related scripts
 
 from taichi_library.taichi_algorithm.interpolation import bicubic_interpolation as bicubic
@@ -108,7 +113,7 @@ def compile_bicubic_aot(arch=ti.vulkan, save_path="bicubic_interpolation_vulkan.
     module.add_graph("bicubic_resize_offset_f32_3d", g_tile_3d.compile())
 
     # Archive the module
-    module.archive(save_path)
+    archive_module(module, save_path)
     print(f"Successfully compiled and archived to: {save_path}")
     ti.reset()
 

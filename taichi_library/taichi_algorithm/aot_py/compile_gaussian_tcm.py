@@ -7,29 +7,37 @@ import sys
 import importlib
 
 file_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
+project_root = os.path.abspath(os.path.join(file_dir, "../../.."))
 if project_root not in sys.path:
-    sys.path.append(project_root)
+    sys.path.insert(0, project_root)
 
-gaussian_mod = importlib.import_module("taichi_library.taichi_algorithm.gaussian")
+gaussian_mod = importlib.import_module("taichi_library.taichi_algorithm.smoothing.gaussian")
+
+try:
+    from .aot_artifact import normalize_tcm
+except ImportError:  # Direct script execution.
+    from aot_artifact import normalize_tcm
 
 def compile_gaussian_tcm():
     arch_str = os.environ.get("PIXEL_REFINE_AOT_ARCH", "vulkan").lower()
     arch = ti.vulkan
     if arch_str == "cuda": arch = ti.cuda
     elif arch_str == "cpu": arch = ti.x64
+    elif arch_str == "opengl": arch = ti.opengl
     
     print(f"\n>>> Compiling GAUSSIAN BLUR AOT for: {arch}")
-    ti.init(arch=arch)
+    ti.init(arch=arch, offline_cache=False)
     
     save_dir = os.path.join(os.path.dirname(__file__), "../aot_tcm")
     os.makedirs(save_dir, exist_ok=True)
     suffix = "vulkan"
     if arch == ti.cuda: suffix = "cuda"
     elif arch == ti.x64: suffix = "cpu"
+    elif arch == ti.opengl: suffix = "opengl"
     save_path = os.path.join(save_dir, f"gaussian_{suffix}.tcm")
 
-    module = ti.aot.Module(arch)
+    module_caps = ["spirv_has_float64"] if arch in (ti.vulkan, ti.opengl) else []
+    module = ti.aot.Module(arch, caps=module_caps)
 
     h_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
     w_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
@@ -85,6 +93,7 @@ def compile_gaussian_tcm():
     module.add_graph("gaussian_blur_y_3ch_i32", g_y_3ch_i32.compile())
 
     module.archive(save_path)
+    normalize_tcm(save_path)
     print(f"Successfully compiled and archived to: {save_path}")
 
 if __name__ == "__main__":

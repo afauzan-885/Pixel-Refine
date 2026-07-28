@@ -5,6 +5,10 @@ import taichi as ti
 import os
 import sys
 import importlib
+try:
+    from .aot_artifact import normalize_tcm
+except ImportError:  # Direct ``python compile_common_tcm.py`` invocation.
+    from aot_artifact import normalize_tcm
 
 file_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(file_dir, "../../.."))
@@ -17,7 +21,10 @@ common_mod = importlib.reload(common_mod)
 def compile_common_aot(arch=ti.vulkan, save_path="common_vulkan.tcm"):
     print(f"\n>>> Compiling COMMON UTILS AOT for: {arch}")
     ti.init(arch=arch, offline_cache=False)
-    module = ti.aot.Module(arch)
+    # Advertise Float64 only for the precision-sensitive common kernels. The
+    # target Vulkan device must expose shaderFloat64 at runtime.
+    module_caps = ["spirv_has_float64"] if arch in (ti.vulkan, ti.opengl) else []
+    module = ti.aot.Module(arch, caps=module_caps)
 
     # 1. Copy Kernels
     def add_copy(name, dtype, is_vec=False):
@@ -28,13 +35,27 @@ def compile_common_aot(arch=ti.vulkan, save_path="common_vulkan.tcm"):
         else:
             src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", dtype, ndim=2)
             dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", dtype, ndim=2)
-        builder.dispatch(common_mod._copy_kernel, src, dst)
+        copy_kernel = (common_mod._copy_f32_2d_kernel
+                       if name == "copy_f32_2d" else common_mod._copy_kernel)
+        builder.dispatch(copy_kernel, src, dst)
         module.add_graph(name, builder.compile())
 
     add_copy("copy_f32_2d", ti.f32)
     add_copy("copy_i32_2d", ti.i32)
     add_copy("copy_vec3_2d", ti.f32, is_vec=True)
     add_copy("copy_vec3_i32_2d", ti.i32, is_vec=True)
+
+    @ti.kernel
+    def copy_1d_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray()):
+        for i in src:
+            dst[i] = src[i]
+
+    for name, dtype in (("copy_f32_1d", ti.f32), ("copy_i32_1d", ti.i32)):
+        builder = ti.graph.GraphBuilder()
+        src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", dtype, ndim=1)
+        dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", dtype, ndim=1)
+        builder.dispatch(copy_1d_kernel, src, dst)
+        module.add_graph(name, builder.compile())
 
     # 2. Channel Kernels
     def add_extract(name, dtype):
@@ -365,6 +386,7 @@ def compile_common_aot(arch=ti.vulkan, save_path="common_vulkan.tcm"):
         add_border_3d(dtype_name, dtype)
 
     module.archive(save_path)
+    normalize_tcm(save_path)
     print(f"Successfully compiled and archived to: {save_path}")
     ti.reset()
 

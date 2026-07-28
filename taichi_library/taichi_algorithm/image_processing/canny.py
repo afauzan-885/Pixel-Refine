@@ -48,12 +48,22 @@ _WEAK = 128.0
 if TAICHI_AVAILABLE:
 
     # =========================================================================
-    # Stage 3: Magnitude + Direction + NMS (fused)
+    # Stage 3: Magnitude then NMS. These must remain separate dispatches:
+    # NMS reads neighbouring magnitudes, so fusing them races on GPU.
     # =========================================================================
     @ti.kernel
-    def _canny_mag_nms_kernel(gx: ti.types.ndarray(), gy: ti.types.ndarray(),
-                                mag: ti.types.ndarray(), nms: ti.types.ndarray(),
-                                h: int, w: int):
+    def _canny_magnitude_kernel(gx: ti.types.ndarray(), gy: ti.types.ndarray(),
+                                 mag: ti.types.ndarray(),
+                                 h: int, w: int):
+        for y, x in ti.ndrange(h, w):
+            dx = gx[y, x]
+            dy = gy[y, x]
+            mag[y, x] = ti.sqrt(dx * dx + dy * dy)
+
+    @ti.kernel
+    def _canny_nms_kernel(gx: ti.types.ndarray(), gy: ti.types.ndarray(),
+                          mag: ti.types.ndarray(), nms: ti.types.ndarray(),
+                          h: int, w: int):
         """
         Compute gradient magnitude and apply Non-Maximum Suppression.
         NMS quantizes gradient direction to 4 angles (0, 45, 90, 135 degrees)
@@ -63,8 +73,6 @@ if TAICHI_AVAILABLE:
             dx = gx[y, x]
             dy = gy[y, x]
             m = ti.sqrt(dx * dx + dy * dy)
-            mag[y, x] = m
-
             if m < 1e-6:
                 nms[y, x] = 0.0
                 continue

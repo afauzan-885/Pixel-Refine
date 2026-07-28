@@ -132,7 +132,7 @@ if TAICHI_AVAILABLE:
     @ti.kernel
     def _gaussian_blur_x_1ch_f32_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray(), h: int, w: int, weights: ti.types.ndarray(), radius: int):
         for y, x in ti.ndrange(h, w):
-            acc, total_w = 0.0, 0.0
+            acc, total_w = ti.cast(0.0, ti.f64), ti.cast(0.0, ti.f64)
             w0 = weights[0]
             acc += src[y, x] * w0
             total_w += w0
@@ -141,7 +141,7 @@ if TAICHI_AVAILABLE:
                     wk = weights[k]
                     acc += (src[y, common.reflect_idx(x-k, w)] + src[y, common.reflect_idx(x+k, w)]) * wk
                     total_w += 2.0 * wk
-            dst[y, x] = acc / total_w
+            dst[y, x] = ti.cast(acc / total_w, ti.f32)
 
     @ti.kernel
     def _gaussian_blur_y_1ch_f32_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray(), h: int, w: int, weights: ti.types.ndarray(), radius: int):

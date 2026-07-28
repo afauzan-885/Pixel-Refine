@@ -9,6 +9,11 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../../../../../"))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
+try:
+    from .aot_artifact import archive_module
+except ImportError:
+    from aot_artifact import archive_module
+
 @ti.func
 def _fast_gamma(x: ti.f32) -> ti.f32:
     t = ti.math.sqrt(x)
@@ -206,7 +211,7 @@ def _arm_reconstruct_and_postprocess_kernel(
     h: ti.i32,
     w: ti.i32,
 ):
-    """Pass 3: Reconstruct final sRGB output using ARM processed channels and Gamma mapping"""
+    """Pass 3: Reconstruct camera RGB and recover highlights."""
     inv_wb_r = 1.0 / ti.max(0.1, wb_r)
     inv_wb_g = 1.0 / ti.max(0.1, (wb_g1 + wb_g2) * 0.5)
     inv_wb_b = 1.0 / ti.max(0.1, wb_b)
@@ -224,32 +229,27 @@ def _arm_reconstruct_and_postprocess_kernel(
         max_raw = ti.max(R_raw, ti.max(G_raw, B_raw))
         min_raw = ti.min(R_raw, ti.min(G_raw, B_raw))
 
-        factor = ti.math.clamp((max_raw - 0.55) / 0.43, 0.0, 1.0)
+        # Sensor-channel ratios near clipping are unreliable. Neutralize them
+        # before the camera matrix to prevent magenta highlight fringes.
+        factor = ti.math.clamp((max_raw - 0.45) / 0.35, 0.0, 1.0)
         factor = factor * factor * (3.0 - 2.0 * factor)
 
         ratio = min_raw / ti.max(1e-5, max_raw)
-        neutrality = ti.math.clamp((ratio - 0.40) / 0.45, 0.0, 1.0)
-        neutrality = neutrality * neutrality * (3.0 - 2.0 * neutrality)
+        chroma_damage = ti.math.clamp((0.82 - ratio) / 0.52, 0.0, 1.0)
+        chroma_damage = chroma_damage * chroma_damage * (3.0 - 2.0 * chroma_damage)
 
-        final_factor = factor * neutrality
+        final_factor = factor * chroma_damage
 
-        L = ti.max(R, ti.max(G, B))
-        R = R * (1.0 - final_factor) + L * final_factor
-        G = G * (1.0 - final_factor) + L * final_factor
-        B = B * (1.0 - final_factor) + L * final_factor
+        neutral = (R + G + B) / 3.0
+        R = R * (1.0 - final_factor) + neutral * final_factor
+        G = G * (1.0 - final_factor) + neutral * final_factor
+        B = B * (1.0 - final_factor) + neutral * final_factor
 
-        # sRGB Matrix
-        sR = cmatrix[0, 0] * R + cmatrix[0, 1] * G + cmatrix[0, 2] * B
-        sG = cmatrix[1, 0] * R + cmatrix[1, 1] * G + cmatrix[1, 2] * B
-        sB = cmatrix[2, 0] * R + cmatrix[2, 1] * G + cmatrix[2, 2] * B
-
-        sR = sR / ti.math.sqrt(1.0 + sR * sR)
-        sG = sG / ti.math.sqrt(1.0 + sG * sG)
-        sB = sB / ti.math.sqrt(1.0 + sB * sB)
-
-        dst[r, c, 0] = _fast_gamma(ti.math.clamp(sR, 0.0, 1.0))
-        dst[r, c, 1] = _fast_gamma(ti.math.clamp(sG, 0.0, 1.0))
-        dst[r, c, 2] = _fast_gamma(ti.math.clamp(sB, 0.0, 1.0))
+        # Return white-balanced camera RGB. Color conversion and display tone
+        # mapping are separate downstream modules.
+        dst[r, c, 0] = ti.max(R, 0.0)
+        dst[r, c, 1] = ti.max(G, 0.0)
+        dst[r, c, 2] = ti.max(B, 0.0)
 
 @ti.kernel
 def _pure_arm_demosaic_kernel(
@@ -627,7 +627,7 @@ def compile_arm_tcm(arch=ti.vulkan, save_path="arm_vulkan.tcm"):
     )
     module.add_graph("rgb_to_bgr_i32", g_conv.compile())
 
-    module.archive(save_path)
+    archive_module(module, save_path)
     print(f"Successfully compiled ARM and archived to: {save_path}")
     ti.reset()
 

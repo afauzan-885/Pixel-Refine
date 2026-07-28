@@ -26,6 +26,11 @@ if project_root not in sys.path:
 # Import algorithm module (JIT mode)
 nlm_mod = importlib.import_module("taichi_library.taichi_algorithm.denoising.nlm")
 
+try:
+    from .aot_artifact import normalize_tcm
+except ImportError:  # Direct script execution.
+    from aot_artifact import normalize_tcm
+
 ASSETS_DIR = os.path.join(file_dir, "../aot_tcm")
 
 
@@ -79,6 +84,7 @@ def compile_nlm_aot(arch, save_path):
         print(f"  Compiled: {graph_name}")
 
     module.archive(save_path)
+    normalize_tcm(save_path)
     print(f"  Saved: {save_path}")
     ti.reset()
 

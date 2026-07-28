@@ -71,4 +71,7 @@ nuitka_build.py
 venv/
 database/
 
+# Runtime expansion of packed CPU AOT archives (content-addressed cache)
+taichi_library/taichi_algorithm/aot_tcm/.cpu_aot_cache/
+
 __pycache__/

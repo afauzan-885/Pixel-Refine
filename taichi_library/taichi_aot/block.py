@@ -423,6 +423,11 @@ OPERATION_PATHS = {
     "farneback_flow": BlockPath.BLOCK_BORDER,
     "lucas_kanade": BlockPath.BLOCK_BORDER,
     "block_matching": BlockPath.BLOCK_BORDER,
+    "tone_map_srgb": BlockPath.BLOCK,
+    "canny_aot": BlockPath.BLOCK_BORDER,
+    "clahe_aot": BlockPath.BLOCK_BORDER,
+    "otsu_threshold": BlockPath.GLOBAL,
+    "joint_bilateral_upsample": BlockPath.GLOBAL,
     "fft": BlockPath.GLOBAL,
     "histogram": BlockPath.GLOBAL,
 }

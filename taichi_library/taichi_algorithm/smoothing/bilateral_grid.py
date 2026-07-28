@@ -50,16 +50,16 @@ if TAICHI_AVAILABLE:
         
         # We use nested mix for trilinear
         # Level 0 (k_int)
-        v000 = grid[tm.clamp(i_int, 0, gn-1), tm.clamp(j_int, 0, gm-1), tm.clamp(k_int, 0, gl-1)]
-        v100 = grid[tm.clamp(i_int+1, 0, gn-1), tm.clamp(j_int, 0, gm-1), tm.clamp(k_int, 0, gl-1)]
-        v010 = grid[tm.clamp(i_int, 0, gn-1), tm.clamp(j_int+1, 0, gm-1), tm.clamp(k_int, 0, gl-1)]
-        v110 = grid[tm.clamp(i_int+1, 0, gn-1), tm.clamp(j_int+1, 0, gm-1), tm.clamp(k_int, 0, gl-1)]
+        v000 = ti.Vector([grid[tm.clamp(i_int, 0, gn-1), tm.clamp(j_int, 0, gm-1), tm.clamp(k_int, 0, gl-1), 0], grid[tm.clamp(i_int, 0, gn-1), tm.clamp(j_int, 0, gm-1), tm.clamp(k_int, 0, gl-1), 1]])
+        v100 = ti.Vector([grid[tm.clamp(i_int+1, 0, gn-1), tm.clamp(j_int, 0, gm-1), tm.clamp(k_int, 0, gl-1), 0], grid[tm.clamp(i_int+1, 0, gn-1), tm.clamp(j_int, 0, gm-1), tm.clamp(k_int, 0, gl-1), 1]])
+        v010 = ti.Vector([grid[tm.clamp(i_int, 0, gn-1), tm.clamp(j_int+1, 0, gm-1), tm.clamp(k_int, 0, gl-1), 0], grid[tm.clamp(i_int, 0, gn-1), tm.clamp(j_int+1, 0, gm-1), tm.clamp(k_int, 0, gl-1), 1]])
+        v110 = ti.Vector([grid[tm.clamp(i_int+1, 0, gn-1), tm.clamp(j_int+1, 0, gm-1), tm.clamp(k_int, 0, gl-1), 0], grid[tm.clamp(i_int+1, 0, gn-1), tm.clamp(j_int+1, 0, gm-1), tm.clamp(k_int, 0, gl-1), 1]])
         
         # Level 1 (k_int + 1)
-        v001 = grid[tm.clamp(i_int, 0, gn-1), tm.clamp(j_int, 0, gm-1), tm.clamp(k_int+1, 0, gl-1)]
-        v101 = grid[tm.clamp(i_int+1, 0, gn-1), tm.clamp(j_int, 0, gm-1), tm.clamp(k_int+1, 0, gl-1)]
-        v011 = grid[tm.clamp(i_int, 0, gn-1), tm.clamp(j_int+1, 0, gm-1), tm.clamp(k_int+1, 0, gl-1)]
-        v111 = grid[tm.clamp(i_int+1, 0, gn-1), tm.clamp(j_int+1, 0, gm-1), tm.clamp(k_int+1, 0, gl-1)]
+        v001 = ti.Vector([grid[tm.clamp(i_int, 0, gn-1), tm.clamp(j_int, 0, gm-1), tm.clamp(k_int+1, 0, gl-1), 0], grid[tm.clamp(i_int, 0, gn-1), tm.clamp(j_int, 0, gm-1), tm.clamp(k_int+1, 0, gl-1), 1]])
+        v101 = ti.Vector([grid[tm.clamp(i_int+1, 0, gn-1), tm.clamp(j_int, 0, gm-1), tm.clamp(k_int+1, 0, gl-1), 0], grid[tm.clamp(i_int+1, 0, gn-1), tm.clamp(j_int, 0, gm-1), tm.clamp(k_int+1, 0, gl-1), 1]])
+        v011 = ti.Vector([grid[tm.clamp(i_int, 0, gn-1), tm.clamp(j_int+1, 0, gm-1), tm.clamp(k_int+1, 0, gl-1), 0], grid[tm.clamp(i_int, 0, gn-1), tm.clamp(j_int+1, 0, gm-1), tm.clamp(k_int+1, 0, gl-1), 1]])
+        v111 = ti.Vector([grid[tm.clamp(i_int+1, 0, gn-1), tm.clamp(j_int+1, 0, gm-1), tm.clamp(k_int+1, 0, gl-1), 0], grid[tm.clamp(i_int+1, 0, gn-1), tm.clamp(j_int+1, 0, gm-1), tm.clamp(k_int+1, 0, gl-1), 1]])
         
         # Interpolate
         # X direction
@@ -80,7 +80,8 @@ if TAICHI_AVAILABLE:
     @ti.kernel
     def _bg_clear_grid(grid: ti.types.ndarray(), gn: int, gm: int, gl: int):
         for i, j, k in ti.ndrange(gn, gm, gl):
-            grid[i, j, k] = ti.Vector([0.0, 0.0])
+            grid[i, j, k, 0] = 0.0
+            grid[i, j, k, 1] = 0.0
 
     @ti.kernel
     def _bg_splat(src: ti.types.ndarray(), grid: ti.types.ndarray(), 
@@ -98,8 +99,11 @@ if TAICHI_AVAILABLE:
             iy = tm.clamp(gy, 0, gm-1)
             iz = tm.clamp(gz, 0, gl-1)
             
-            # Note: ti.atomic_add is supported on Vector elements
-            ti.atomic_add(grid[ix, iy, iz], ti.Vector([val, 1.0]))
+            # Update vector lanes independently.  Atomic add on the whole
+            # vector is not lowered safely by the LLVM CPU AOT backend for
+            # larger grids and can corrupt the allocation under contention.
+            ti.atomic_add(grid[ix, iy, iz, 0], val)
+            ti.atomic_add(grid[ix, iy, iz, 1], 1.0)
 
     @ti.kernel
     def _bg_blur_x(src_grid: ti.types.ndarray(), dst_grid: ti.types.ndarray(), 
@@ -111,9 +115,10 @@ if TAICHI_AVAILABLE:
             for di in range(-radius, radius + 1):
                 ni = tm.clamp(i + di, 0, gn - 1)
                 wt = ti.exp(-float(di * di) * inv_2s2)
-                acc += src_grid[ni, j, k] * wt
+                acc += ti.Vector([src_grid[ni, j, k, 0], src_grid[ni, j, k, 1]]) * wt
                 total_w += wt
-            dst_grid[i, j, k] = acc / total_w
+            dst_grid[i, j, k, 0] = acc[0] / total_w
+            dst_grid[i, j, k, 1] = acc[1] / total_w
 
     @ti.kernel
     def _bg_blur_y(src_grid: ti.types.ndarray(), dst_grid: ti.types.ndarray(), 
@@ -125,9 +130,10 @@ if TAICHI_AVAILABLE:
             for dj in range(-radius, radius + 1):
                 nj = tm.clamp(j + dj, 0, gm - 1)
                 wt = ti.exp(-float(dj * dj) * inv_2s2)
-                acc += src_grid[i, nj, k] * wt
+                acc += ti.Vector([src_grid[i, nj, k, 0], src_grid[i, nj, k, 1]]) * wt
                 total_w += wt
-            dst_grid[i, j, k] = acc / total_w
+            dst_grid[i, j, k, 0] = acc[0] / total_w
+            dst_grid[i, j, k, 1] = acc[1] / total_w
 
     @ti.kernel
     def _bg_blur_z(src_grid: ti.types.ndarray(), dst_grid: ti.types.ndarray(), 
@@ -139,9 +145,10 @@ if TAICHI_AVAILABLE:
             for dk in range(-radius, radius + 1):
                 nk = tm.clamp(k + dk, 0, gl - 1)
                 wt = ti.exp(-float(dk * dk) * inv_2s2)
-                acc += src_grid[i, j, nk] * wt
+                acc += ti.Vector([src_grid[i, j, nk, 0], src_grid[i, j, nk, 1]]) * wt
                 total_w += wt
-            dst_grid[i, j, k] = acc / total_w
+            dst_grid[i, j, k, 0] = acc[0] / total_w
+            dst_grid[i, j, k, 1] = acc[1] / total_w
 
     @ti.kernel
     def _bg_slice(src: ti.types.ndarray(), grid: ti.types.ndarray(), dst: ti.types.ndarray(), 

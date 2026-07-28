@@ -13,6 +13,11 @@ if project_root not in sys.path:
 
 from taichi_library.taichi_algorithm.interpolation import area_interpolation as area
 
+try:
+    from .aot_artifact import archive_module
+except ImportError:
+    from aot_artifact import archive_module
+
 def compile_area_aot(arch, save_path):
     print(f"\n>>> Compiling INTER_AREA AOT for: {arch}")
     ti.init(arch=arch)
@@ -47,7 +52,7 @@ def compile_area_aot(arch, save_path):
     g_offset_3ch.dispatch(area._inter_area_offset_vec3_kernel, src_3ch, dst_3ch, sh, sw, dh, dw, offset_y, offset_x)
     module.add_graph("inter_area_offset_vec3_f32", g_offset_3ch.compile())
 
-    module.archive(save_path)
+    archive_module(module, save_path)
     print(f"Archive saved to: {save_path}")
     ti.reset()
 
